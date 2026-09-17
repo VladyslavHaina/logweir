@@ -32,7 +32,7 @@ use weirkeeper::backup_execution::{
 };
 use weirkeeper::conditions::apply_merge_patch;
 use weirkeeper::controllers::backup_schedule::{
-    decide, reconcile_schedule, refine_against_last_fire, scheduled_backup, status_patch,
+    decide, reconcile_schedule, refine_against_status, scheduled_backup, status_patch,
     ScheduleOutcome, SlotDecision, MISSED_SLOT_HORIZON, REASON_CONCURRENCY_BLOCKED,
     REASON_SCHEDULED, REASON_SLOT_MISSED, REASON_SUSPENDED, REQUEUE_SECS, SCHEDULE_LABEL,
     SLOT_LABEL, TRIGGERED_BY_SCHEDULE,
@@ -159,15 +159,27 @@ fn utc(y: i32, m: u32, d: u32, h: u32, min: u32) -> DateTime<Utc> {
         .expect("the fixture instant exists")
 }
 
-/// The body a successful `POST …/backups` is answered with. The API server
-/// echoes the created object; nothing in the reconciler reads it, and it is
-/// present because a 201 with no body is not a shape the client expects.
+/// The body a successful `POST …/backups` is answered with — the API server
+/// echoing the created object.
+///
+/// IT CARRIES `spec.trigger` AND `spec.scheduleRef.uid`, AND THE RECONCILER
+/// READS THEM. D1 §4.9's CRD-before-controller guard checks its own write
+/// responses: the API server silently PRUNES a field an older CRD does not
+/// declare, so a created `Backup` that comes back without its identity fields
+/// means the CRD is behind the controller, and the schedule stops admitting
+/// rather than creating runs that execute under an ambiguous identity. An echo
+/// that dropped them would therefore be indistinguishable from that outage.
 fn created_backup_body(name: &str) -> String {
+    let slot = name
+        .get(name.len().saturating_sub(15)..)
+        .unwrap_or_default();
     format!(
         r#"{{"apiVersion":"logweir.dev/v1alpha1","kind":"Backup",
   "metadata":{{"name":"{name}","namespace":"{NS}","uid":"aaaaaaaa-0000-4000-8000-00000000000b"}},
   "spec":{{"sourceRef":{{"name":"prod"}},"topics":["orders"],
     "archive":{{"url":"s3://kafka-backups/logweir"}},"triggeredBy":"schedule",
+    "scheduleRef":{{"name":"nightly","uid":"{UID}"}},"slot":"{slot}",
+    "trigger":{{"kind":"Scheduled","attempt":0}},
     "deadlineSeconds":3600}}}}"#
     )
 }
@@ -206,12 +218,34 @@ const DAILY: &str = "0 0 * * *";
 /// spells out: a reconcile that DECLINED to create proves more than one that
 /// could not.
 fn daily_routes(name: &str, post_status: u16) -> Vec<Route> {
+    daily_routes_phase(name, post_status, "Succeeded")
+}
+
+/// [`daily_routes`], with the phase the slot's existing `Backup` reports.
+///
+/// THE PHASE IS PART OF THE FIXTURE NOW BECAUSE THE RECONCILER READS IT. D1
+/// §4.5 step 6 asks the slot's deterministic object what happened to it —
+/// running, succeeded, failed retryably — and decides from the answer, so a
+/// table that did not say which was a table describing no particular cluster.
+fn daily_routes_phase(name: &str, post_status: u16, phase: &str) -> Vec<Route> {
+    // THE FIXTURE HAS TO BE INTERNALLY CONSISTENT NOW, and it was not before.
+    // D1 §4.5 step 6 discovers the attempt chain by `GET`ting the slot's
+    // deterministic name, so a table that answers that `GET` with a Running
+    // object AND expects a 201 from the `POST` describes a cluster in which the
+    // run both does and does not exist. `post_status` picks which world this is:
+    // 201 means "the slot has not run", 409 means "it has".
+    let fired = post_status != 201;
+    let existing = backup_value(name, UID, Some(phase), Some(name));
     vec![
         Route {
             method: "GET",
             path_suffix: "/namespaces/logweir-t18/backups",
             status: 200,
-            body: backup_list_body(vec![backup_value(name, UID, Some("Running"), Some(name))]),
+            body: backup_list_body(if fired {
+                vec![existing.clone()]
+            } else {
+                vec![]
+            }),
         },
         Route {
             method: "POST",
@@ -226,16 +260,94 @@ fn daily_routes(name: &str, post_status: u16) -> Vec<Route> {
         Route {
             method: "GET",
             path_suffix: Box::leak(format!("/backups/{name}").into_boxed_str()),
-            status: 200,
-            body: backup_value(name, UID, Some("Running"), Some(name)).to_string(),
+            status: if fired { 200 } else { 404 },
+            body: if fired {
+                existing.to_string()
+            } else {
+                not_found_body(name)
+            },
         },
         Route {
             method: "PATCH",
             path_suffix: "/backupschedules/nightly/status",
             status: 200,
-            body: schedule_json("nightly", UID, DAILY, false),
+            body: reservation_echo(
+                &schedule_json("nightly", UID, DAILY, false),
+                name,
+                name.get(name.len().saturating_sub(15)..)
+                    .unwrap_or_default(),
+                0,
+            ),
         },
     ]
+}
+
+/// The body the API server answers a reservation `PATCH` with: the object, plus
+/// the reservation it has just accepted.
+///
+/// D1 §4.9's CRD-BEFORE-CONTROLLER GUARD READS THIS BACK. The API server
+/// silently PRUNES a field the installed CRD does not declare, so the
+/// controller checks its own write response for `status.pendingRun` and admits
+/// nothing when it is missing — a `Backup` created without its identity fields
+/// would have neither `scheduleRef.uid` nor an ownerReference and would be
+/// refused `ScheduledIdentityMismatch` before it ever ran. A double that echoed
+/// the PRE-patch object therefore looks exactly like an outdated CRD, which is
+/// the guard working, and is why this helper exists.
+fn reservation_echo(schedule_body: &str, name: &str, slot: &str, attempt: i32) -> String {
+    let mut v: serde_json::Value =
+        serde_json::from_str(schedule_body).expect("a schedule fixture is JSON");
+    let generation = v["metadata"]["generation"].clone();
+    v["status"]["pendingRun"] = serde_json::json!({
+        "name": name,
+        "slot": slot,
+        "attempt": attempt,
+        "kind": if attempt == 0 { "Scheduled" } else { "Retry" },
+        "generation": generation,
+    });
+    v.to_string()
+}
+
+/// The `Backup` name of the slot due at `now`, for the one-minute schedules
+/// this file's concurrency tests use.
+fn due_name(now: DateTime<Utc>) -> String {
+    scheduled_backup_name("nightly", &slot_name(now)).expect("the fixture name fits")
+}
+
+/// A 404 `Status` body, in the shape the API server sends.
+fn not_found_body(name: &str) -> String {
+    format!(
+        r#"{{"kind":"Status","apiVersion":"v1","status":"Failure",
+  "message":"backups.logweir.dev \"{name}\" not found",
+  "reason":"NotFound","code":404}}"#
+    )
+}
+
+/// The `GET` that answers "this attempt does not exist".
+///
+/// D1 §4.5 STEP 6 DISCOVERS THE ATTEMPT CHAIN BY NAME, not by listing: it
+/// `GET`s `name(S, 0)`, `name(S, 1)`, … and stops at the first 404. A 404 is a
+/// real API-server answer and has to be recorded as one — the double PANICS on
+/// a request it has no route for, precisely so that "the reconciler asked for
+/// exactly these objects" stays a property a test can see.
+fn absent_backup(name: &str) -> Route {
+    Route {
+        method: "GET",
+        path_suffix: Box::leak(format!("/backups/{name}").into_boxed_str()),
+        status: 404,
+        body: not_found_body(name),
+    }
+}
+
+/// The owned-`Backup` LIST that D1 §4.5 step 1 makes when `status.activeRuns`
+/// has never been written — the bootstrap branch PLAT-05.2's inventory
+/// replaces.
+fn no_backups() -> Route {
+    Route {
+        method: "GET",
+        path_suffix: "/namespaces/logweir-t18/backups",
+        status: 200,
+        body: backup_list_body(vec![]),
+    }
 }
 
 /// Every `POST` the double was asked for, in order.
@@ -445,11 +557,19 @@ fn fn_body(src: &str, needle: &str) -> String {
 #[tokio::test]
 async fn a_crash_between_create_and_status_write_yields_exactly_one_backup() {
     let schedule = schedule("nightly", UID, "17 3 * * 1", false);
-    let slot = slot_name(utc(2026, 9, 7, 3, 17));
+    let due = utc(2026, 9, 7, 3, 17);
+    let slot = slot_name(due);
     let expected = scheduled_backup_name("nightly", &slot).expect("the fixture name fits");
 
-    // FIRST RECONCILE: the create succeeds, the status write does not.
+    // ---- ARM 1: the RESERVATION is refused -----------------------------
+    //
+    // The admission is a resourceVersion-conditional status PATCH that happens
+    // BEFORE the create, so a status write that does not land is a run that was
+    // never created. This arm is stronger than the one it replaces: it is no
+    // longer "the fire was recorded late", it is "nothing exists to record".
     let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+        no_backups(),
+        absent_backup(&expected),
         Route {
             method: "POST",
             path_suffix: "/namespaces/logweir-t18/backups",
@@ -463,13 +583,32 @@ async fn a_crash_between_create_and_status_write_yields_exactly_one_backup() {
             body: SERVER_ERROR_BODY.to_string(),
         },
     ]);
-    let first = reconcile_schedule(&schedule, &client, utc(2026, 9, 7, 3, 17)).await;
+    let refused = reconcile_schedule(&schedule, &client, due).await;
     assert!(
-        first.is_err(),
-        "the status write was answered 500, so this reconcile must report a failure and be \
-         requeued — swallowing it would lose the record of the fire. Got: {first:?}"
+        refused.is_err(),
+        "a reservation answered 500 must be reported and requeued, never swallowed: {refused:?}"
     );
-    let first_posts: Vec<String> = posts(&bodies.lock().expect("the body recorder is readable"))
+    assert!(
+        posts(&bodies.lock().expect("readable")).is_empty(),
+        "NOTHING is created when the reservation could not be recorded — a POST route is \
+         present and was not used, so this is a choice and not an inability"
+    );
+
+    // ---- ARM 2: the create succeeds, the FINALIZATION is lost -----------
+    //
+    // The controller dies after the POST. Its next reconcile reads the same
+    // pre-crash object (no `lastFireTime`, the reservation still outstanding)
+    // and finds the slot's run by GETTING THE NAME IT WOULD HAVE MINTED. It
+    // POSTs nothing, and reports the run it found.
+    let (client, _calls, bodies) = mock_client_recording_bodies(admitting_routes(
+        Box::leak(expected.clone().into_boxed_str()),
+        201,
+        serde_json::to_string(&schedule).expect("the fixture serialises"),
+    ));
+    let first = reconcile_schedule(&schedule, &client, due)
+        .await
+        .expect("the slot fires");
+    let first_posts: Vec<String> = posts(&bodies.lock().expect("readable"))
         .iter()
         .map(|b| body_name(b))
         .collect();
@@ -478,15 +617,26 @@ async fn a_crash_between_create_and_status_write_yields_exactly_one_backup() {
         vec![expected.clone()],
         "the first reconcile POSTs exactly one Backup, named from the trigger"
     );
+    assert_eq!(first.created, Some(expected.clone()));
 
-    // SECOND RECONCILE, at a LATER instant inside the same slot: the create
-    // collides.
-    let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+    let mut crashed = schedule.clone();
+    crashed.status = Some(BackupScheduleStatus {
+        pending_backup_ref: Some(LocalRef {
+            name: expected.clone(),
+        }),
+        ..BackupScheduleStatus::default()
+    });
+    let (client, calls, bodies) = mock_client_recording_bodies(vec![
         Route {
-            method: "POST",
+            method: "GET",
             path_suffix: "/namespaces/logweir-t18/backups",
-            status: 409,
-            body: already_exists_body(&expected),
+            status: 200,
+            body: backup_list_body(vec![backup_value(
+                &expected,
+                UID,
+                Some("Running"),
+                Some(&expected),
+            )]),
         },
         Route {
             method: "GET",
@@ -495,67 +645,115 @@ async fn a_crash_between_create_and_status_write_yields_exactly_one_backup() {
             body: backup_value(&expected, UID, Some("Running"), Some(&expected)).to_string(),
         },
         Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 409,
+            body: already_exists_body(&expected),
+        },
+        Route {
             method: "PATCH",
             path_suffix: "/backupschedules/nightly/status",
             status: 200,
             body: patched_schedule_body(),
         },
     ]);
-    let second = reconcile_schedule(&schedule, &client, utc(2026, 9, 7, 3, 44))
+    let resumed = reconcile_schedule(&crashed, &client, due + chrono::Duration::minutes(27))
+        .await
+        .expect("a resumed reconcile is not an error");
+    let seen = calls.lock().expect("readable").clone();
+    assert!(
+        posts(&bodies.lock().expect("readable")).is_empty(),
+        "the resumed reconcile creates NOTHING: the reservation names an object that exists, \
+         so it is cleared rather than acted on. A POST route was available. Calls: {seen:?}"
+    );
+    assert_eq!(
+        resumed.created,
+        Some(expected.clone()),
+        "and it reports the run this slot has, so the fire is recorded exactly once"
+    );
+    assert!(resumed.already_existed);
+    assert_eq!(resumed.decision.reason(), REASON_SCHEDULED);
+    let resumed_status = patched_status(&bodies.lock().expect("readable"));
+    assert_eq!(
+        resumed_status["pendingBackupRef"],
+        serde_json::Value::Null,
+        "the reservation is released once its child is observed: {resumed_status}"
+    );
+    assert_eq!(resumed_status["pendingRun"], serde_json::Value::Null);
+
+    // ---- ARM 3: the LIST is stale, so the 409 is the idempotence key -----
+    //
+    // The reservation is outstanding and the namespace listing has not caught
+    // up with the object the crashed process created, so the resume path does
+    // what it is for and POSTs the reserved name. That is the one case where a
+    // second POST is still made, and it is the case the whole design turns on:
+    // BOTH POSTs carry the identical `metadata.name`, so the API server answers
+    // 409 and exactly one object exists. Two different names is a name derived
+    // from a reconcile-time clock or from `status.lastFireTime`, and it produces
+    // two partial archives under colliding backup_ids.
+    let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+        no_backups(),
+        Route {
+            method: "GET",
+            path_suffix: Box::leak(format!("/backups/{expected}").into_boxed_str()),
+            status: 200,
+            body: backup_value(&expected, UID, Some("Running"), Some(&expected)).to_string(),
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 409,
+            body: already_exists_body(&expected),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: patched_schedule_body(),
+        },
+    ]);
+    let stale = reconcile_schedule(&crashed, &client, due + chrono::Duration::minutes(31))
         .await
         .expect(
-            "409 AlreadyExists IS the idempotence key, so the second reconcile must return Ok. \
-             An Err here means a duplicate reconcile is reported as a failure and the schedule \
-             never records its fire.",
+            "409 AlreadyExists IS the idempotence key, so a stale read must return Ok. An Err \
+             here means a duplicate reconcile is reported as a failure and the schedule never \
+             records its fire.",
         );
-    let second_posts: Vec<String> = posts(&bodies.lock().expect("the body recorder is readable"))
+    let stale_posts: Vec<String> = posts(&bodies.lock().expect("readable"))
         .iter()
         .map(|b| body_name(b))
         .collect();
+    assert_eq!(stale_posts, vec![expected.clone()]);
     assert_eq!(
-        second_posts,
-        vec![expected.clone()],
-        "the second reconcile POSTs exactly one Backup"
+        stale,
+        ScheduleOutcome {
+            decision: SlotDecision::Due {
+                due,
+                slot: slot.clone(),
+                name: expected.clone(),
+                next_fire_time: Some(utc(2026, 9, 14, 3, 17)),
+            },
+            created: Some(expected.clone()),
+            already_existed: true,
+        },
+        "the collision is reported as `already_existed`, not as an error, and the decision \
+         still names the slot and the object it resumed"
     );
 
-    // THE PROPERTY. Two POSTs across the two reconciles, both carrying the
-    // identical metadata.name.
-    let all: Vec<String> = first_posts.into_iter().chain(second_posts).collect();
-    assert_eq!(
-        all.len(),
-        2,
-        "exactly two POST …/backups requests were made across the two reconciles; got {all:?}"
-    );
+    // THE PROPERTY. Both POSTs, made in two different reconciles at two
+    // different instants inside one slot, carry the identical name.
+    let all: Vec<String> = first_posts.into_iter().chain(stale_posts).collect();
+    assert_eq!(all.len(), 2, "two POSTs across the two reconciles: {all:?}");
     assert_eq!(
         all[0], all[1],
         "BOTH POSTs must carry the identical metadata.name — that identity is what makes the \
-         second one a 409 and therefore what makes exactly one object exist. Two different \
-         names is a name derived from a reconcile-time clock or from status.lastFireTime, and \
-         it produces TWO partial archives under colliding backup_ids."
+         second one a 409 and therefore what makes exactly one object exist."
     );
     assert_eq!(
         all[0], expected,
         "the name is `logweir-backup-<schedule>-<slot>` computed from the fired slot"
     );
-    assert_eq!(
-        second,
-        ScheduleOutcome {
-            decision: SlotDecision::Due {
-                due: utc(2026, 9, 7, 3, 17),
-                slot: slot.clone(),
-                name: expected.clone(),
-                next_fire_time: Some(utc(2026, 9, 14, 3, 17)),
-            },
-            created: Some(expected),
-            already_existed: true,
-        },
-        "the second reconcile reports the collision as `already_existed`, not as an error"
-    );
 }
-
-// ---------------------------------------------------------------------------
-// The name
-// ---------------------------------------------------------------------------
 
 /// The object name is a DNS-1123 subdomain, asserted on the string that
 /// actually becomes an object name.
@@ -711,12 +909,17 @@ fn the_name_never_reads_a_reconcile_clock_or_a_status() {
         slot_at < name_at,
         "the slot is computed from `due` BEFORE the name is minted from it"
     );
+    // THE DUE SLOT COMES FROM THE CADENCE ENGINE, WHICH IS ALSO CLOCK-FREE.
+    // PLAT-04.2 moved the walk behind `Cadence`, so that a zoned expression and
+    // a UTC one answer the same question in the same place; the ORDER is what
+    // this assertion is about and it is unchanged — the instant, then the slot
+    // string, then the name.
     let due_at = decide_body
-        .find("last_fire_at_or_before(now)")
-        .expect("`decide` must take the due slot from `last_fire_at_or_before`");
+        .find("latest_due_slot(now)")
+        .expect("`decide` must take the due slot from `Cadence::latest_due_slot`");
     assert!(
         due_at < slot_at,
-        "the due slot comes from `last_fire_at_or_before`, then the slot string, then the name"
+        "the due slot comes from `latest_due_slot`, then the slot string, then the name"
     );
     for forbidden in ["Utc::now()", "lastFireTime", "last_fire_time", ".status"] {
         assert!(
@@ -751,24 +954,63 @@ fn the_name_never_reads_a_reconcile_clock_or_a_status() {
          reconcile begins. A clock read between `decide` and the POST is the mutant G-SLOT \
          kills."
     );
+    // THE ORDERING NOW SPANS THREE FUNCTIONS, AND THE PROPERTY IS THE SAME
+    // ONE. D1 §4.5's algorithm has ten exits, so the create and the final
+    // status write are named helpers rather than inline code — `admit` reserves
+    // and then creates, `create_run` is the only `POST`, and `finish` is the
+    // only final `/status` write. The assertions follow them there, because a
+    // property asserted over a body the code no longer has is not asserted at
+    // all.
     let decide_call = reconcile_body
         .find("decide(&name, &schedule.spec, now)")
-        .expect("`reconcile_schedule` must call `decide` with the instant it was handed");
-    let post = reconcile_body
-        .find(".create(&PostParams::default(), &backup)")
-        .expect("`reconcile_schedule` must POST the Backup with `Api::create`");
+        .expect(
+            "`reconcile_schedule_with_archive` must call `decide` with the instant it was \
+                 handed",
+        );
+    let first_admission = reconcile_body
+        .find("admit(")
+        .or_else(|| reconcile_body.find("create_run("))
+        .expect("the reconcile must admit or resume a run somewhere");
     assert!(
-        decide_call < post,
-        "the decision — and therefore the name — precedes the POST"
+        decide_call < first_admission,
+        "the decision — and therefore the name — precedes every admission"
     );
-    let status_write = reconcile_body
-        .find("patch_status(")
-        .expect("`reconcile_schedule` must patch /status");
+
+    let create_body = fn_body(&src, "async fn create_run(");
     assert!(
-        post < status_write,
-        "the status write happens AFTER the create. That ordering is what makes the crash \
-         window harmless: a crash between the two recomputes the same name and collides, \
-         where a status-first order would record a fire that never happened."
+        create_body.contains(".create(&PostParams::default(), &backup)"),
+        "`create_run` is the ONE place a Backup is POSTed: a second `Api::create` anywhere in \
+         this file is a second way for a slot to be named. Got:\n{create_body}"
+    );
+    assert!(
+        !create_body.contains("patch_status("),
+        "`create_run` writes no status: the status write happens AFTER the create, in `finish`"
+    );
+
+    let admit_body = fn_body(&src, "async fn admit(");
+    let reserve_at = admit_body
+        .find("patch_status(")
+        .expect("`admit` reserves the slot with a status PATCH before creating anything");
+    let create_at = admit_body
+        .find("create_run(")
+        .expect("`admit` creates the run after reserving it");
+    assert!(
+        reserve_at < create_at,
+        "THE RESERVATION COMES FIRST, for every trigger kind and both concurrency policies. It \
+         carries `metadata.resourceVersion`, so an edit that lands in the window answers 409 \
+         and nothing is created under a policy the schedule no longer has."
+    );
+
+    let finish_body = fn_body(&src, "async fn finish(");
+    assert!(
+        finish_body.contains("patch_status("),
+        "`finish` is the final status write, and every exit of the algorithm goes through it"
+    );
+    assert!(
+        !finish_body.contains(".create(&PostParams::default()"),
+        "the status write happens AFTER the create and never instead of it. That ordering is \
+         what makes the crash window harmless: a crash between the two recomputes the same \
+         name and collides, where a status-first order would record a fire that never happened."
     );
 
     // The one clock read in the whole file is in the `kube::runtime` wrapper,
@@ -793,14 +1035,17 @@ fn the_name_never_reads_a_reconcile_clock_or_a_status() {
         "async fn reconcile(\n    schedule: Arc<BackupSchedule>,",
     );
     assert!(
-        wrapper.contains(
-            "reconcile_schedule_with_archive(&schedule, &ctx.client, ctx.archive.as_ref(), \
-             Utc::now())"
-        ),
-        "the one clock read is the wrapper's, and it is handed straight to \
+        wrapper.contains("let now = Utc::now();")
+            && wrapper.contains(
+                "reconcile_schedule_with_archive(&schedule, &ctx.client, ctx.archive.as_ref(), \
+                 now)"
+            ),
+        "the one clock read is the wrapper's, it is bound ONCE, and it is handed straight to \
          `reconcile_schedule_with_archive` as an argument — beside the archive handle Task 19 \
-         threads through, which is a value on the context and not a second clock. Got:\n\
-         {wrapper}"
+         threads through, which is a value on the context and not a second clock. The binding \
+         matters now that the requeue interval is also computed from it (D1 §4.5 step 8): two \
+         `Utc::now()` calls in one reconcile would let the decision and the requeue disagree \
+         about what time it is. Got:\n{wrapper}"
     );
 
     // AND `slot.rs` READS NO CLOCK AT ALL (review finding LOW-2). Both the
@@ -829,29 +1074,38 @@ fn the_name_never_reads_a_reconcile_clock_or_a_status() {
     // status while the NAME cannot, and that separation is only real if it
     // never touches the name: it must not call `scheduled_backup_name`, must
     // not call `slot_name`, and must not construct `SlotDecision::Due`.
-    let refine_body = fn_body(&src, "pub fn refine_against_last_fire(");
+    let refine_body = fn_body(&src, "pub fn refine_against_status(");
     for forbidden in [
         "scheduled_backup_name",
-        "slot_name",
+        "slot_name(",
         "SlotDecision::Due",
         "Utc::now()",
     ] {
         assert!(
             !refine_body.contains(forbidden),
-            "`refine_against_last_fire` must not name {forbidden:?}: it refines a REASON \
-             against `status.lastFireTime`, and a name that read the status would produce \
-             two objects when the controller crashes between the create and the status write"
+            "`refine_against_status` must not name {forbidden:?}: it refines a REASON \
+             against `status.lastFireTime` and `status.policy.effectiveSince`, and a name that \
+             read the status would produce two objects when the controller crashes between the \
+             create and the status write. It CARRIES a name `decide` already minted; it never \
+             mints one."
         );
     }
     assert!(
         refine_body.contains("SlotDecision::AlreadyFired"),
-        "the one variant it produces is `AlreadyFired`, out of `Missed`"
+        "the variants it produces are `AlreadyFired` (rows 14 and 19's first half) and \
+         `Missed` with reason `BeforeRevision` (row 19), both out of a decision that already \
+         holds its name"
+    );
+    assert!(
+        refine_body.contains("MissedReason::BeforeRevision"),
+        "and the catch-up half of the refinement is here, not in `decide`: `effectiveSince` is \
+         a status field"
     );
     let decide_at = src
         .find("pub fn decide(")
         .expect("`decide` is in this file");
     let refine_at = src
-        .find("pub fn refine_against_last_fire(")
+        .find("pub fn refine_against_status(")
         .expect("asserted above");
     assert!(
         decide_at < refine_at,
@@ -1165,6 +1419,8 @@ async fn a_missed_slot_older_than_the_horizon_creates_nothing_and_says_so() {
     let slot = slot_name(utc(2026, 9, 7, 3, 17));
 
     let (client, calls, bodies) = mock_client_recording_bodies(vec![
+        no_backups(),
+        absent_backup(&scheduled_backup_name("nightly", &slot).expect("the fixture name fits")),
         // A POST ROUTE IS PRESENT ON PURPOSE, even though this test asserts that
         // ZERO POSTs are made. Without it the double would PANIC on the
         // unrouted request (see `src/testing.rs`), which fails the test for the
@@ -1214,11 +1470,12 @@ async fn a_missed_slot_older_than_the_horizon_creates_nothing_and_says_so() {
     assert_eq!(
         condition["message"],
         serde_json::json!(format!(
-            "slot {slot} is older than the one-hour missed-slot horizon and was not fired; the \
-             next firing is 2026-09-14T03:17:00Z"
+            "slot {slot} is past its starting deadline and was not fired; catchUpPolicy is \
+             None, so it is counted in status.missedSlots and the next firing is \
+             2026-09-14T03:17:00Z"
         )),
-        "the message names the slot, the horizon, the fact it was NOT fired, and when the \
-         schedule resumes. Got: {condition}"
+        "the message names the slot, the field that set the deadline, the fact it was NOT \
+         fired, where the skip is counted, and when the schedule resumes. Got: {condition}"
     );
     assert_eq!(
         MISSED_SLOT_HORIZON, 3600,
@@ -1254,9 +1511,10 @@ async fn a_missed_slot_older_than_the_horizon_creates_nothing_and_says_so() {
         last_fire_time: Some(utc(2026, 8, 31, 3, 17)),
         ..BackupScheduleStatus::default()
     });
-    let decision = refine_against_last_fire(
+    let decision = refine_against_status(
         decide("nightly", &stale.spec, now),
         stale.status.as_ref().and_then(|s| s.last_fire_time),
+        None,
     );
     assert!(
         matches!(decision, SlotDecision::Missed { .. }),
@@ -1313,20 +1571,38 @@ async fn two_reconciles_with_no_change_do_not_move_last_transition_time() {
         );
     //
     // `expected_patches` IS TASK 16b's ADDITION, and it is the sharper form of
-    // this test's own property. At the 30 s requeue the decision is still
-    // `Due` over the same slot, so every key the pass computes — the message
-    // included — equals what the object already carries, and the reconcile now
-    // sends NO patch at all (plan erratum E11(d)). At +12 h the decision has
-    // become `AlreadyFired`, whose MESSAGE differs while `status` and `reason`
-    // do not, so one patch is sent and `lastTransitionTime` must still be the
-    // original instant — which is the MED-1 assertion, unchanged.
-    for (label, now, expected_patches) in [
-        ("the 30 s requeue", requeue, 0),
-        ("+12 h, a different message", utc(2026, 9, 10, 12, 0), 1),
+    // this test's own property, now measured over the three states a slot
+    // really passes through. At the 30 s requeue the run created at midnight is
+    // RUNNING, which is a different message from "is due" — so one patch. At
+    // +60 s nothing at all has moved, and the reconcile sends NOTHING (plan
+    // erratum E11(d)). At +12 h the run has Succeeded, whose message differs
+    // again while `status` and `reason` do not, so one patch is sent and
+    // `lastTransitionTime` must still be the original instant — which is the
+    // MED-1 assertion, unchanged.
+    //
+    // THE ZERO-PATCH ARM IS THE ONE THAT MATTERS, and it is the middle one:
+    // this reconciler wakes every 30 s forever, so "the state did not move" has
+    // to cost nothing. Its `stored` is the arm before it, threaded through.
+    let mut carried = stored.clone();
+    for (label, now, phase, expected_patches) in [
+        ("the 30 s requeue", requeue, "Running", 1),
+        (
+            "+60 s, nothing moved",
+            requeue + chrono::Duration::seconds(30),
+            "Running",
+            0,
+        ),
+        (
+            "+12 h, a different message",
+            utc(2026, 9, 10, 12, 0),
+            "Succeeded",
+            1,
+        ),
     ] {
         let mut again = schedule("nightly", UID, DAILY, false);
-        again.status = Some(stored.clone());
-        let (client, _calls, bodies) = mock_client_recording_bodies(daily_routes(&name, 409));
+        again.status = Some(carried.clone());
+        let (client, _calls, bodies) =
+            mock_client_recording_bodies(daily_routes_phase(&name, 409, phase));
         reconcile_schedule(&again, &client, now)
             .await
             .unwrap_or_else(|e| panic!("{label}: {e}"));
@@ -1337,8 +1613,15 @@ async fn two_reconciles_with_no_change_do_not_move_last_transition_time() {
             "{label}: a reconcile that changes nothing writes nothing (plan erratum E11(d)); a \
              reconcile that changes the message writes once"
         );
+        if let Some(patched) = patched_status_opt(&recorded) {
+            carried = serde_json::from_value(
+                serde_json::to_value(stored_after(Some(&carried), &patched))
+                    .expect("the merged status serialises"),
+            )
+            .expect("the merged status is a BackupScheduleStatus");
+        }
         let status = patched_status_opt(&recorded).unwrap_or_else(|| {
-            serde_json::to_value(&stored).expect("the stored status serialises")
+            serde_json::to_value(&carried).expect("the stored status serialises")
         });
         let condition = status["conditions"][0].clone();
         assert_eq!(
@@ -1438,15 +1721,21 @@ async fn a_healthy_schedule_is_not_reported_as_missing_the_slot_it_fired() {
     // +23 h 59 min the decision has become `AlreadyFired`, whose message
     // differs, so one patch IS sent.
     for (label, now, expected_posts, expected_patches) in [
-        ("+5 min", utc(2026, 9, 10, 0, 5), 1, 0),
+        ("+5 min", utc(2026, 9, 10, 0, 5), 0, 1),
         ("+12 h", utc(2026, 9, 10, 12, 0), 0, 1),
         ("+23 h 59 min", utc(2026, 9, 10, 23, 59), 0, 1),
     ] {
         let mut later = schedule("nightly", UID, DAILY, false);
         later.status = Some(stored.clone());
         // 409, because the midnight Backup EXISTS. A POST route is present in
-        // every arm, including the two that make none: a reconcile that
+        // every arm, including all three that make none: a reconcile that
         // declined to create proves more than one that could not.
+        //
+        // ZERO POSTs IN EVERY ARM, WHICH IS STRICTER THAN BEFORE. D1 §4.5 step
+        // 6 asks the slot's deterministic object what happened to it before
+        // deciding anything, so a slot whose run already succeeded is answered
+        // without a `POST` at all — the 409 that used to be the idempotence key
+        // is now a fallback for the race, not the steady state.
         let (client, calls, bodies) = mock_client_recording_bodies(daily_routes(&name, 409));
         let outcome = reconcile_schedule(&later, &client, now)
             .await
@@ -1456,8 +1745,8 @@ async fn a_healthy_schedule_is_not_reported_as_missing_the_slot_it_fired() {
         assert_eq!(
             seen.iter().filter(|c| c.method == "POST").count(),
             expected_posts,
-            "{label}: the slot was already fired, so the only POST is the one still inside \
-             the horizon (whose 409 is the idempotence key). Calls: {seen:?}"
+            "{label}: the slot's attempt chain already shows a Succeeded run, so nothing is \
+             admitted and no POST is made at all. Calls: {seen:?}"
         );
         assert_eq!(
             outcome.decision.reason(),
@@ -1519,7 +1808,7 @@ async fn a_healthy_schedule_is_not_reported_as_missing_the_slot_it_fired() {
         Some(utc(2027, 1, 1, 0, 0)),
     ] {
         assert_eq!(
-            refine_against_last_fire(due.clone(), last),
+            refine_against_status(due.clone(), last, None),
             due,
             "the refinement touches the reason of a MISSED slot and nothing else; a `Due` \
              decision — the only one carrying a name — is returned verbatim (last = {last:?})"
@@ -1533,6 +1822,7 @@ async fn suspend_creates_nothing() {
     let schedule = schedule("nightly", UID, "17 3 * * 1", true);
 
     let (client, calls, bodies) = mock_client_recording_bodies(vec![
+        no_backups(),
         // A POST ROUTE IS PRESENT ON PURPOSE, even though this test asserts that
         // ZERO POSTs are made. Without it the double would PANIC on the
         // unrouted request (see `src/testing.rs`), which fails the test for the
@@ -2162,10 +2452,14 @@ async fn the_reconciler_patches_only_status_and_never_deletes() {
     let slot = slot_name(utc(2026, 9, 7, 3, 17));
     let name = scheduled_backup_name("nightly", &slot).unwrap();
 
-    // The route table has no bare-object route and no DELETE route, so the
-    // double PANICS on either — see `src/testing.rs` for why a panic and not a
-    // 404.
+    // The route table has NO DELETE route and no route for any object this
+    // reconciler does not name, so the double PANICS on either — see
+    // `src/testing.rs` for why a panic and not a 404. The two reads it does
+    // make are the bootstrap listing and the slot's own attempt-0 GET, and both
+    // are reads.
     let (client, calls) = mock_client_recording(vec![
+        no_backups(),
+        absent_backup(&name),
         Route {
             method: "POST",
             path_suffix: "/namespaces/logweir-t18/backups",
@@ -2176,7 +2470,7 @@ async fn the_reconciler_patches_only_status_and_never_deletes() {
             method: "PATCH",
             path_suffix: "/backupschedules/nightly/status",
             status: 200,
-            body: patched_schedule_body(),
+            body: reservation_echo(&patched_schedule_body(), &name, &slot, 0),
         },
     ]);
     reconcile_schedule(&schedule, &client, utc(2026, 9, 7, 3, 17))
@@ -2196,6 +2490,19 @@ async fn the_reconciler_patches_only_status_and_never_deletes() {
     assert_eq!(
         pairs,
         vec![
+            (
+                "GET".to_string(),
+                "/apis/logweir.dev/v1alpha1/namespaces/logweir-t18/backups".to_string()
+            ),
+            (
+                "GET".to_string(),
+                format!("/apis/logweir.dev/v1alpha1/namespaces/logweir-t18/backups/{name}")
+            ),
+            (
+                "PATCH".to_string(),
+                "/apis/logweir.dev/v1alpha1/namespaces/logweir-t18/backupschedules/nightly/status"
+                    .to_string()
+            ),
             (
                 "POST".to_string(),
                 "/apis/logweir.dev/v1alpha1/namespaces/logweir-t18/backups".to_string()
@@ -2217,6 +2524,7 @@ async fn the_reconciler_patches_only_status_and_never_deletes() {
 async fn an_unparseable_schedule_creates_nothing_and_names_the_field() {
     let schedule = schedule("nightly", UID, "L * * * *", false);
     let (client, calls, bodies) = mock_client_recording_bodies(vec![
+        no_backups(),
         // A POST ROUTE IS PRESENT ON PURPOSE, even though this test asserts that
         // ZERO POSTs are made. Without it the double would PANIC on the
         // unrouted request (see `src/testing.rs`), which fails the test for the
@@ -2270,6 +2578,7 @@ async fn a_name_that_does_not_fit_is_reported_rather_than_dropped() {
     let schedule: BackupSchedule = serde_json::from_str(&json).expect("the fixture parses");
 
     let (client, calls, bodies) = mock_client_recording_bodies(vec![
+        no_backups(),
         // A POST ROUTE IS PRESENT ON PURPOSE, even though this test asserts that
         // ZERO POSTs are made. Without it the double would PANIC on the
         // unrouted request (see `src/testing.rs`), which fails the test for the
@@ -2550,6 +2859,7 @@ async fn a_long_running_previous_slot_blocks_the_next_slot_under_forbid() {
                 Some(&previous),
             )]),
         },
+        absent_backup(&due_name(now)),
         Route {
             method: "PATCH",
             path_suffix: "/backupschedules/nightly/status",
@@ -2601,6 +2911,7 @@ async fn a_deleted_job_keeps_its_nonterminal_backup_conservatively_active() {
                 Some("deleted-job"),
             )]),
         },
+        absent_backup(&due_name(now)),
         Route {
             method: "PATCH",
             path_suffix: "/backupschedules/nightly/status",
@@ -2641,6 +2952,7 @@ async fn a_terminal_backup_clears_the_old_ref_and_admits_the_new_slot() {
                 Some(&previous),
             )]),
         },
+        absent_backup(&current),
         Route {
             // W0: THE RESERVATION IS A `PATCH` — see `is_reservation`. This
             // route and the finalization one below answer the same method and
@@ -2648,7 +2960,12 @@ async fn a_terminal_backup_clears_the_old_ref_and_admits_the_new_slot() {
             method: "PATCH",
             path_suffix: "/backupschedules/nightly/status",
             status: 200,
-            body: serde_json::to_string(&schedule).unwrap(),
+            body: reservation_echo(
+                &serde_json::to_string(&schedule).unwrap(),
+                &current,
+                &slot_name(now),
+                0,
+            ),
         },
         Route {
             method: "POST",
@@ -2671,7 +2988,12 @@ async fn a_terminal_backup_clears_the_old_ref_and_admits_the_new_slot() {
         .iter()
         .map(|call| call.method.clone())
         .collect();
-    assert_eq!(methods, ["GET", "PATCH", "POST", "PATCH"]);
+    assert_eq!(
+        methods,
+        ["GET", "GET", "PATCH", "POST", "PATCH"],
+        "the bootstrap LIST, the slot's own attempt-0 GET (D1 §4.5 step 6), the reservation, \
+         the create and the finalization — in that order and nothing else"
+    );
     let status = patched_status(&bodies.lock().unwrap());
     assert_eq!(status["activeBackupRef"]["name"], current);
     assert!(status["pendingBackupRef"].is_null());
@@ -2695,6 +3017,7 @@ async fn a_stale_active_reference_is_cleared_before_the_new_slot_is_admitted() {
             status: 200,
             body: backup_list_body(vec![]),
         },
+        absent_backup(&current),
         Route {
             // W0: THE RESERVATION IS A `PATCH` — see `is_reservation`. This
             // route and the finalization one below answer the same method and
@@ -2702,7 +3025,12 @@ async fn a_stale_active_reference_is_cleared_before_the_new_slot_is_admitted() {
             method: "PATCH",
             path_suffix: "/backupschedules/nightly/status",
             status: 200,
-            body: serde_json::to_string(&schedule).unwrap(),
+            body: reservation_echo(
+                &serde_json::to_string(&schedule).unwrap(),
+                &current,
+                &slot_name(now),
+                0,
+            ),
         },
         Route {
             method: "POST",
@@ -2756,6 +3084,12 @@ async fn restart_after_child_creation_adopts_the_owned_child_and_clears_the_rese
             body: backup_list_body(vec![backup_value(&current, UID, None, None)]),
         },
         Route {
+            method: "GET",
+            path_suffix: Box::leak(format!("/backups/{current}").into_boxed_str()),
+            status: 200,
+            body: backup_value(&current, UID, None, None).to_string(),
+        },
+        Route {
             method: "PATCH",
             path_suffix: "/backupschedules/nightly/status",
             status: 200,
@@ -2791,6 +3125,13 @@ async fn allow_explicitly_permits_a_new_slot_without_active_run_admission() {
     });
     assert_eq!(schedule.spec.concurrency_policy, ConcurrencyPolicy::Allow);
     let (client, calls) = mock_client_recording(vec![
+        // `Allow` RESERVES TOO NOW (D1 §4.5 ADMIT). The reservation used to be
+        // `Forbid`-only, which left `Allow` runs unrecorded between the create
+        // and the status write and gave the two policies different crash
+        // semantics. It is uniform, so `status.activeRuns` is complete by
+        // construction for both.
+        no_backups(),
+        absent_backup(&current),
         Route {
             method: "POST",
             path_suffix: "/namespaces/logweir-t18/backups",
@@ -2801,7 +3142,12 @@ async fn allow_explicitly_permits_a_new_slot_without_active_run_admission() {
             method: "PATCH",
             path_suffix: "/backupschedules/nightly/status",
             status: 200,
-            body: serde_json::to_string(&schedule).unwrap(),
+            body: reservation_echo(
+                &serde_json::to_string(&schedule).unwrap(),
+                &current,
+                &slot_name(now),
+                0,
+            ),
         },
     ]);
     reconcile_schedule(&schedule, &client, now).await.unwrap();
@@ -2811,7 +3157,13 @@ async fn allow_explicitly_permits_a_new_slot_without_active_run_admission() {
         .iter()
         .map(|call| call.method.clone())
         .collect();
-    assert_eq!(methods, ["POST", "PATCH"]);
+    assert_eq!(
+        methods,
+        ["GET", "GET", "PATCH", "POST", "PATCH"],
+        "the bootstrap LIST, the slot's attempt-0 GET, the reservation, the create and the \
+         finalization: `Allow` takes exactly the same path as `Forbid`, and admits where \
+         `Forbid` would have been blocked"
+    );
 }
 
 #[tokio::test]
@@ -2826,6 +3178,7 @@ async fn an_unknown_previous_run_state_blocks_conservatively_under_forbid() {
             status: 200,
             body: backup_list_body(vec![backup_value(&previous, UID, None, None)]),
         },
+        absent_backup(&due_name(now)),
         Route {
             method: "PATCH",
             path_suffix: "/backupschedules/nightly/status",
@@ -2871,6 +3224,12 @@ async fn allow_still_clears_a_completed_singular_active_reference_between_slots(
             )]),
         },
         Route {
+            method: "GET",
+            path_suffix: Box::leak(format!("/backups/{previous}").into_boxed_str()),
+            status: 200,
+            body: backup_value(&previous, UID, Some("Succeeded"), Some(&previous)).to_string(),
+        },
+        Route {
             method: "PATCH",
             path_suffix: "/backupschedules/nightly/status",
             status: 200,
@@ -2888,24 +3247,64 @@ async fn a_wrong_owner_uid_at_the_deterministic_name_is_not_adopted() {
     let now = utc(2026, 9, 10, 12, 1);
     let current = scheduled_backup_name("nightly", &slot_name(now)).unwrap();
     let schedule = forbid_schedule("nightly", UID, "* * * * *", false);
-    let (client, calls) = mock_client_recording(vec![Route {
-        method: "GET",
-        path_suffix: "/namespaces/logweir-t18/backups",
-        status: 200,
-        body: backup_list_body(vec![backup_value(
-            &current,
-            OTHER_UID,
-            Some("Running"),
-            None,
-        )]),
-    }]);
-    let error = reconcile_schedule(&schedule, &client, now)
-        .await
-        .unwrap_err();
-    assert!(error
-        .to_string()
-        .contains("complete current BackupSchedule controller identity"));
-    assert_eq!(calls.lock().unwrap().len(), 1);
+    let foreign = backup_value(&current, OTHER_UID, Some("Running"), None);
+    let (client, calls, bodies) = mock_client_recording_bodies(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 200,
+            body: backup_list_body(vec![foreign.clone()]),
+        },
+        Route {
+            method: "GET",
+            path_suffix: Box::leak(format!("/backups/{current}").into_boxed_str()),
+            status: 200,
+            body: foreign.to_string(),
+        },
+        // PRESENT AND NOT USED, so the zero-POST assertion below is a choice
+        // rather than an inability.
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body(&current),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).unwrap(),
+        },
+    ]);
+    let outcome = reconcile_schedule(&schedule, &client, now).await.unwrap();
+    // D1 §4.7 ROW 6, AND IT IS A REPORT RATHER THAN AN ERROR NOW. A same-named
+    // schedule recreated under a new UID leaves the old schedule's objects
+    // sitting on the deterministic names of the new one's slots; treating that
+    // as a reconcile failure would requeue forever and say nothing an operator
+    // can act on. The slot is skipped, RECORDED, and never re-run under a
+    // different name — the identity of a scheduled run is its name.
+    assert_eq!(outcome.decision.reason(), "SlotNameUnavailable");
+    assert_eq!(outcome.created, None);
+    assert!(
+        posts(&bodies.lock().unwrap()).is_empty(),
+        "a foreign object at the deterministic name is never overwritten or worked around"
+    );
+    let status = patched_status(&bodies.lock().unwrap());
+    assert_eq!(
+        status["lastMissedSlot"],
+        slot_name(now),
+        "the skip is recorded, so a correct implementation is distinguishable from a schedule \
+         that is simply not firing: {status}"
+    );
+    assert_eq!(
+        status["lastSlot"]["disposition"],
+        serde_json::json!("NameUnavailable")
+    );
+    assert!(status["conditions"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains("held by an object this schedule does not own"));
+    assert_eq!(calls.lock().unwrap().len(), 3);
 }
 
 #[tokio::test]
@@ -2937,6 +3336,7 @@ async fn a_child_create_failure_leaves_the_atomic_reservation_for_restart() {
             status: 200,
             body: backup_list_body(vec![]),
         },
+        absent_backup(&current),
         Route {
             // W0: THE RESERVATION IS A `PATCH` — see `is_reservation`. This
             // route and the finalization one below answer the same method and
@@ -2944,7 +3344,12 @@ async fn a_child_create_failure_leaves_the_atomic_reservation_for_restart() {
             method: "PATCH",
             path_suffix: "/backupschedules/nightly/status",
             status: 200,
-            body: serde_json::to_string(&schedule).unwrap(),
+            body: reservation_echo(
+                &serde_json::to_string(&schedule).unwrap(),
+                &current,
+                &slot_name(now),
+                0,
+            ),
         },
         Route {
             method: "POST",
@@ -2960,7 +3365,7 @@ async fn a_child_create_failure_leaves_the_atomic_reservation_for_restart() {
         .iter()
         .map(|call| call.method.clone())
         .collect();
-    assert_eq!(methods, ["GET", "PATCH", "POST"]);
+    assert_eq!(methods, ["GET", "GET", "PATCH", "POST"]);
     let reservation = reserved_status(&bodies.lock().unwrap());
     assert_eq!(reservation["pendingBackupRef"]["name"], current);
 }
@@ -3092,12 +3497,28 @@ async fn a_newer_due_slot_cannot_overtake_an_accepted_previous_reservation() {
         },
     ]);
     let outcome = reconcile_schedule(&schedule, &client, now).await.unwrap();
+    // THE ACCEPTED RESERVATION IS RESUMED AND THE NEWER SLOT IS NOT CONSIDERED
+    // AT ALL. D1 §4.5 step 2 goes straight to the status write after creating a
+    // reserved child, which is what makes the boundary atomic: one admission
+    // per reconcile, and the newer slot is decided on the next pass — where the
+    // run just created is exactly what blocks it under `Forbid`.
     assert_eq!(outcome.created.as_deref(), Some(accepted.as_str()));
-    assert_eq!(outcome.decision.reason(), REASON_CONCURRENCY_BLOCKED);
+    assert_eq!(outcome.decision.reason(), REASON_SCHEDULED);
+    assert_eq!(
+        posts(&bodies.lock().unwrap())
+            .iter()
+            .map(|b| body_name(b))
+            .collect::<Vec<_>>(),
+        vec![accepted.clone()],
+        "exactly one POST, and it is the RESERVED name and not the newer slot's"
+    );
     let status = patched_status(&bodies.lock().unwrap());
     assert_eq!(status["lastFireTime"], serde_json::json!(accepted_due));
-    assert_eq!(status["lastMissedSlot"], slot_name(now));
     assert_eq!(status["activeBackupRef"]["name"], accepted);
+    assert!(
+        status["pendingBackupRef"].is_null() && status["pendingRun"].is_null(),
+        "and the reservation is released now that its child exists: {status}"
+    );
 }
 
 #[tokio::test]
@@ -3146,6 +3567,14 @@ async fn two_controller_replicas_cannot_admit_different_slots_from_the_same_reso
                     // Both replicas are allowed to observe the same empty list;
                     // the status resourceVersion is the actual admission CAS.
                     (200, backup_list_body(vec![]))
+                } else if method == "GET" && path.contains("/backups/") {
+                    // AND THE SAME 404 FOR THE ATTEMPT CHAIN. Both replicas ask
+                    // the slot's deterministic name whether it has a run, and
+                    // both are told it does not — which is the whole premise of
+                    // this race: two replicas that agree about the world and
+                    // disagree only about who gets to act on it.
+                    let name = path.rsplit('/').next().unwrap_or_default().to_string();
+                    (404, not_found_body(&name))
                 } else if method == "PATCH" && path.ends_with("/backupschedules/nightly/status") {
                     // THE API SERVER'S OWN RULE, MODELLED AND NOT ASSERTED.
                     // A merge patch is applied to the CURRENT object, so a body
@@ -3267,12 +3696,18 @@ async fn failed_and_refused_children_each_release_forbid_admission() {
                     Some(&previous),
                 )]),
             },
+            absent_backup(&current),
             Route {
                 // W0: the reservation is a `PATCH`; see `is_reservation`.
                 method: "PATCH",
                 path_suffix: "/backupschedules/nightly/status",
                 status: 200,
-                body: serde_json::to_string(&schedule).unwrap(),
+                body: reservation_echo(
+                    &serde_json::to_string(&schedule).unwrap(),
+                    &current,
+                    &slot_name(now),
+                    0,
+                ),
             },
             Route {
                 method: "POST",
@@ -3298,7 +3733,12 @@ async fn failed_and_refused_children_each_release_forbid_admission() {
             .iter()
             .map(|call| call.method.clone())
             .collect();
-        assert_eq!(methods, ["GET", "PATCH", "POST", "PATCH"], "{phase}");
+        assert_eq!(
+            methods,
+            ["GET", "GET", "PATCH", "POST", "PATCH"],
+            "{phase}: the bootstrap listing, the slot's own attempt-0 GET, the reservation, the \
+             create and the finalization"
+        );
     }
 }
 
@@ -3368,7 +3808,7 @@ async fn allow_rejects_foreign_ownerless_and_old_generation_409_winners() {
         .unwrap()
         .remove("ownerReferences");
 
-    for (case, winner) in [
+    for (case, holder) in [
         (
             "old UID",
             backup_value(&current, OTHER_UID, Some("Running"), None),
@@ -3377,28 +3817,46 @@ async fn allow_rejects_foreign_ownerless_and_old_generation_409_winners() {
         ("wrong controller name", wrong_name),
     ] {
         let schedule = schedule("nightly", UID, "* * * * *", false);
-        let (client, calls) = mock_client_recording(vec![
-            Route {
-                method: "POST",
-                path_suffix: "/namespaces/logweir-t18/backups",
-                status: 409,
-                body: already_exists_body(&current),
-            },
+        let (client, calls, bodies) = mock_client_recording_bodies(vec![
+            no_backups(),
             Route {
                 method: "GET",
                 path_suffix: "/backups/logweir-backup-nightly-20260910-120100",
                 status: 200,
-                body: winner.to_string(),
+                body: holder.to_string(),
+            },
+            // PRESENT AND NEVER USED in any of the three cases.
+            Route {
+                method: "POST",
+                path_suffix: "/namespaces/logweir-t18/backups",
+                status: 201,
+                body: created_backup_body(&current),
+            },
+            Route {
+                method: "PATCH",
+                path_suffix: "/backupschedules/nightly/status",
+                status: 200,
+                body: serde_json::to_string(&schedule).unwrap(),
             },
         ]);
-        let error = reconcile_schedule(&schedule, &client, now)
+        // MEMBERSHIP IS CHECKED WHERE THE OBJECT IS FIRST SEEN, WHICH IS NOW
+        // THE ATTEMPT-CHAIN GET RATHER THAN THE 409 WINNER. The three ways to
+        // fail it are unchanged — a different schedule UID, no controller
+        // ownerReference at all, and a controller reference naming another
+        // schedule — and none of them is adopted, overwritten or worked around.
+        let outcome = reconcile_schedule(&schedule, &client, now)
             .await
-            .expect_err("a foreign 409 winner is not owned success");
+            .unwrap_or_else(|e| panic!("{case}: a held name is a decision, not an error: {e}"));
+        assert_eq!(
+            outcome.decision.reason(),
+            "SlotNameUnavailable",
+            "{case}: {:?}",
+            outcome.decision
+        );
+        assert_eq!(outcome.created, None, "{case}");
         assert!(
-            error
-                .to_string()
-                .contains("complete current BackupSchedule controller identity"),
-            "{case}: {error}"
+            posts(&bodies.lock().unwrap()).is_empty(),
+            "{case}: a POST route was available and was not used"
         );
         let methods: Vec<String> = calls
             .lock()
@@ -3406,7 +3864,7 @@ async fn allow_rejects_foreign_ownerless_and_old_generation_409_winners() {
             .iter()
             .map(|call| call.method.clone())
             .collect();
-        assert_eq!(methods, ["POST", "GET"], "{case}");
+        assert_eq!(methods, ["GET", "GET", "PATCH"], "{case}");
     }
 }
 
@@ -3416,17 +3874,20 @@ async fn allow_accepts_only_the_owned_409_winner_and_observes_its_terminal_state
     let current = scheduled_backup_name("nightly", &slot_name(now)).unwrap();
     let schedule = schedule("nightly", UID, "* * * * *", false);
     let (client, calls, bodies) = mock_client_recording_bodies(vec![
-        Route {
-            method: "POST",
-            path_suffix: "/namespaces/logweir-t18/backups",
-            status: 409,
-            body: already_exists_body(&current),
-        },
+        no_backups(),
         Route {
             method: "GET",
             path_suffix: "/backups/logweir-backup-nightly-20260910-120100",
             status: 200,
             body: backup_value(&current, UID, Some("Failed"), None).to_string(),
+        },
+        // PRESENT AND UNUSED: the slot's own object answers the question the
+        // POST used to.
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 409,
+            body: already_exists_body(&current),
         },
         Route {
             method: "PATCH",
@@ -3436,17 +3897,38 @@ async fn allow_accepts_only_the_owned_409_winner_and_observes_its_terminal_state
         },
     ]);
 
+    // THE OWNED OBJECT IS OBSERVED, NOT ADOPTED THROUGH A COLLISION. D1 §4.5
+    // step 6 asks the slot's deterministic name what happened to it before
+    // deciding anything, so the terminal state of an owned run reaches the
+    // status without a `POST` having to fail first. The `Failed` run has no
+    // exit code and no terminal condition, so it is not retryable — a failure
+    // nobody classified is never re-run.
     let outcome = reconcile_schedule(&schedule, &client, now).await.unwrap();
     assert!(outcome.already_existed);
     assert_eq!(outcome.created.as_deref(), Some(current.as_str()));
-    assert!(patched_status(&bodies.lock().unwrap())["activeBackupRef"].is_null());
+    assert!(
+        posts(&bodies.lock().unwrap()).is_empty(),
+        "a POST route was available and was not used"
+    );
+    let status = patched_status(&bodies.lock().unwrap());
+    assert!(
+        status["activeBackupRef"].is_null(),
+        "a terminal run is not active: {status}"
+    );
+    assert_eq!(
+        status["activeRuns"],
+        serde_json::json!([]),
+        "and the typed list says so explicitly, which is what turns the next reconcile into \
+         the O(active) branch instead of a namespace LIST: {status}"
+    );
+    assert_eq!(outcome.decision.reason(), "RunFailed");
     let methods: Vec<String> = calls
         .lock()
         .unwrap()
         .iter()
         .map(|call| call.method.clone())
         .collect();
-    assert_eq!(methods, ["POST", "GET", "PATCH"]);
+    assert_eq!(methods, ["GET", "GET", "PATCH"]);
 }
 
 #[tokio::test]
@@ -3456,20 +3938,37 @@ async fn allow_409_followed_by_get_404_is_transient_not_owned_success() {
     let schedule = schedule("nightly", UID, "* * * * *", false);
     let not_found = r#"{"kind":"Status","apiVersion":"v1","status":"Failure","reason":"NotFound","message":"the winner is not observable yet","code":404}"#;
     let (client, calls) = mock_client_recording(vec![
-        Route {
-            method: "POST",
-            path_suffix: "/namespaces/logweir-t18/backups",
-            status: 409,
-            body: already_exists_body(&current),
-        },
+        no_backups(),
         Route {
             method: "GET",
             path_suffix: "/backups/logweir-backup-nightly-20260910-120100",
             status: 404,
             body: not_found.to_string(),
         },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: reservation_echo(
+                &serde_json::to_string(&schedule).unwrap(),
+                &current,
+                &slot_name(now),
+                0,
+            ),
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 409,
+            body: already_exists_body(&current),
+        },
     ]);
 
+    // THE READ THAT HAS NOT CAUGHT UP. The attempt-chain GET says the slot has
+    // no run, so the slot is admitted and the create collides — and the GET
+    // that follows the 409 still says 404. That is a transient disagreement
+    // between two reads, not ownership: the reconcile requeues rather than
+    // writing a success status for an object it has never seen.
     let error = reconcile_schedule(&schedule, &client, now)
         .await
         .expect_err("a 404 after 409 must requeue rather than claim ownership");
@@ -3480,7 +3979,7 @@ async fn allow_409_followed_by_get_404_is_transient_not_owned_success() {
         .iter()
         .map(|call| call.method.clone())
         .collect();
-    assert_eq!(methods, ["POST", "GET"]);
+    assert_eq!(methods, ["GET", "GET", "PATCH", "POST", "GET"]);
 }
 
 #[tokio::test]
@@ -3578,12 +4077,18 @@ async fn safe_replacement_drains_an_old_omitted_policy_schedule_and_retains_its_
                 Some(&old_run),
             )]),
         },
+        absent_backup(&replacement_name),
         Route {
             // W0: the reservation is a `PATCH`; see `is_reservation`.
             method: "PATCH",
             path_suffix: "/backupschedules/nightly-v2/status",
             status: 200,
-            body: serde_json::to_string(&replacement).unwrap(),
+            body: reservation_echo(
+                &serde_json::to_string(&replacement).unwrap(),
+                &replacement_name,
+                &slot_name(utc(2026, 9, 10, 12, 3)),
+                0,
+            ),
         },
         Route {
             method: "POST",
@@ -3613,7 +4118,7 @@ async fn safe_replacement_drains_an_old_omitted_policy_schedule_and_retains_its_
 
     let docs = workspace_source("docs/kubernetes.md");
     let replacement_guidance = docs
-        .split("Until PLAT-05 decouples retained history")
+        .split("Until PLAT-05.2 decouples retained history")
         .nth(1)
         .expect("the migration procedure is documented");
     for required in [
@@ -3622,7 +4127,7 @@ async fn safe_replacement_drains_an_old_omitted_policy_schedule_and_retains_its_
         "Retain the old, suspended `BackupSchedule`",
         "replacement under a **different name**",
         "Do not delete and recreate a schedule under the same name",
-        "field is omitted already behaves as\n`Forbid`",
+        "`concurrencyPolicy` field is omitted already behaves as\n`Forbid`",
     ] {
         assert!(
             replacement_guidance.contains(required),
@@ -3712,6 +4217,17 @@ async fn an_old_finalizer_cannot_clear_a_newer_reservation_and_that_reservation_
                             200,
                             backup_list_body(state.backups.values().cloned().collect()),
                         )
+                    } else if method == "GET" && path.contains("/backups/") {
+                        // D1 §4.5 STEP 6 ASKS FOR A SLOT'S ATTEMPT BY NAME.
+                        // Answering it out of the same map the POSTs write
+                        // keeps this fake API server internally consistent —
+                        // the chain and the listing cannot disagree about what
+                        // exists.
+                        let name = path.rsplit('/').next().unwrap_or_default().to_string();
+                        match state.backups.get(&name) {
+                            Some(existing) => (200, existing.to_string()),
+                            None => (404, not_found_body(&name)),
+                        }
                     } else if method == "POST" && path.ends_with("/backups") {
                         let posted: serde_json::Value = serde_json::from_slice(&body).unwrap();
                         let posted_name = posted["metadata"]["name"].as_str().unwrap().to_string();
@@ -3924,17 +4440,18 @@ fn admitting_routes(name: &'static str, post_status: u16, schedule_body: String)
                 already_exists_body(name)
             },
         },
-        Route {
-            method: "GET",
-            path_suffix: Box::leak(format!("/backups/{name}").into_boxed_str()),
-            status: 200,
-            body: backup_value(name, UID, Some("Running"), Some(name)).to_string(),
-        },
+        absent_backup(name),
         Route {
             method: "PATCH",
             path_suffix: "/backupschedules/nightly/status",
             status: 200,
-            body: schedule_body,
+            body: reservation_echo(
+                &schedule_body,
+                name,
+                name.get(name.len().saturating_sub(15)..)
+                    .unwrap_or_default(),
+                0,
+            ),
         },
     ]
 }
@@ -4164,7 +4681,11 @@ async fn an_edit_between_the_read_and_the_reservation_gets_409_and_creates_nothi
     );
     let schedule = schedule_with(UID, 7, "17", EDITABLE_SPEC);
 
-    let mut routes = admitting_routes(name, 201, String::new());
+    let mut routes = admitting_routes(
+        name,
+        201,
+        serde_json::to_string(&schedule).expect("the fixture serialises"),
+    );
     routes.retain(|r| r.method != "PATCH");
     routes.push(Route {
         method: "PATCH",
@@ -4307,6 +4828,7 @@ async fn editing_a_schedule_never_writes_to_a_running_backup() {
                 Some(running),
             )]),
         },
+        absent_backup(&due_name(fire)),
         Route {
             method: "PATCH",
             path_suffix: "/backupschedules/nightly/status",
@@ -4638,4 +5160,994 @@ async fn an_old_style_reservation_without_pending_run_is_resumed() {
     let status = patched_status(&bodies);
     assert_eq!(status["pendingBackupRef"], serde_json::Value::Null);
     assert_eq!(status["pendingRun"], serde_json::Value::Null);
+}
+
+// ===========================================================================
+// D1 §12 — PLAT-04.2: zones, deadlines, catch-up, retries and the truth table
+// ===========================================================================
+
+/// A `Backup` that reached a terminal phase, with the terminal condition the
+/// retry delay is measured from.
+///
+/// THE CONDITION IS NOT DECORATION. D1 §4.6 measures `delaySeconds` from
+/// `finishedAt(k)` — the `Failed` condition's `lastTransitionTime`, written
+/// once by the terminal patch — so a fixture without one describes a run whose
+/// retry could not be scheduled at any particular instant, and the controller
+/// treats it as not retryable for exactly that reason.
+fn terminal_backup(
+    name: &str,
+    phase: &str,
+    exit_code: Option<i32>,
+    exit_reason: Option<&str>,
+    finished_at: DateTime<Utc>,
+) -> serde_json::Value {
+    let mut value = backup_value(name, UID, Some(phase), Some(name));
+    let status = value["status"].as_object_mut().expect("a status object");
+    if let Some(code) = exit_code {
+        status.insert("exitCode".to_string(), serde_json::json!(code));
+    }
+    if let Some(reason) = exit_reason {
+        status.insert("exitReason".to_string(), serde_json::json!(reason));
+    }
+    status.insert(
+        "conditions".to_string(),
+        serde_json::json!([{
+            "type": if phase == "Succeeded" { "Complete" } else { "Failed" },
+            "status": "True",
+            "lastTransitionTime": finished_at,
+            "reason": "Operational",
+        }]),
+    );
+    value
+}
+
+/// A one-minute `Forbid` schedule with an arbitrary extra policy block.
+fn cadence_schedule(extra: &str) -> BackupSchedule {
+    cadence_schedule_cron("* * * * *", extra)
+}
+
+/// [`cadence_schedule`] on an arbitrary expression.
+///
+/// THE DEADLINE TESTS NEED SLOTS FURTHER APART THAN THE DEADLINE. With
+/// one-minute slots and a 60-second starting deadline a slot is never past its
+/// deadline while it is still the latest one — the next slot arrives at the
+/// same instant the deadline expires — so "past the deadline" is not a state a
+/// `* * * * *` schedule can be observed in. `*/5` with a 60-second deadline can.
+fn cadence_schedule_cron(cron: &str, extra: &str) -> BackupSchedule {
+    schedule_with(
+        UID,
+        3,
+        "17",
+        &format!(
+            r#"{{
+    "schedule": "{cron}",
+    "sourceRef": {{ "name": "prod" }},
+    "topics": ["orders"],
+    "archive": {{ "url": "s3://kafka-backups/logweir" }},
+    "concurrencyPolicy": "Forbid",
+    "suspend": false{extra}
+  }}"#
+        ),
+    )
+}
+
+/// D1 §4.3 through the controller: a zoned schedule fires at the UTC instant
+/// its local expression names, and the run records the zone it was computed in.
+///
+/// `Europe/Berlin`, `30 2 * * *`, 2026-10-25 — the night the local hour 02:00
+/// happens twice. The decision names the FIRST occurrence's UTC instant
+/// (00:30Z), the object is named from that instant, and `spec.trigger.timeZone`
+/// carries `Europe/Berlin` so a history row keeps its local time after somebody
+/// edits the schedule's zone. The second occurrence (01:30Z) is a slot of its
+/// own and appears in the previews.
+#[tokio::test]
+async fn a_time_zone_schedule_fires_at_the_utc_slot_and_records_the_zone() {
+    let first = utc(2026, 10, 25, 0, 30);
+    let second = utc(2026, 10, 25, 1, 30);
+    let schedule = schedule_with(
+        UID,
+        3,
+        "17",
+        r#"{
+    "schedule": "30 2 * * *",
+    "timeZone": "Europe/Berlin",
+    "sourceRef": { "name": "prod" },
+    "topics": ["orders"],
+    "archive": { "url": "s3://kafka-backups/logweir" },
+    "concurrencyPolicy": "Forbid",
+    "suspend": false
+  }"#,
+    );
+    let name: &'static str = Box::leak(
+        scheduled_backup_name("nightly", &slot_name(first))
+            .expect("fits")
+            .into_boxed_str(),
+    );
+    assert_eq!(
+        name, "logweir-backup-nightly-20261025-003000",
+        "the slot identity is the UTC instant, whatever the zone: names stay unique, monotonic \
+         and DNS-1123"
+    );
+
+    let (client, _calls, bodies) = mock_client_recording_bodies(admitting_routes(
+        name,
+        201,
+        serde_json::to_string(&schedule).expect("serialises"),
+    ));
+    reconcile_schedule(&schedule, &client, first + chrono::Duration::seconds(10))
+        .await
+        .expect("the zoned slot fires");
+
+    let bodies = bodies.lock().expect("readable").clone();
+    let spec = posted_spec(&bodies);
+    assert_eq!(spec["slot"], serde_json::json!(slot_name(first)));
+    assert_eq!(
+        spec["trigger"]["timeZone"],
+        serde_json::json!("Europe/Berlin"),
+        "the zone the slot was computed in travels with the run, so a history row keeps its \
+         local time after an edit: {spec}"
+    );
+
+    let status = patched_status(&bodies);
+    assert_eq!(
+        status["policy"]["timeZone"],
+        serde_json::json!("Europe/Berlin")
+    );
+    // THE REPEATED HOUR FIRES TWICE, AND THE PREVIEWS SAY SO. Both occurrences
+    // of local 02:30 are real instants whose local wall time matches, so each is
+    // its own slot; the markers are what make that predictable instead of
+    // surprising.
+    let previews = status["nextRuns"].as_array().expect("nextRuns is a list");
+    assert_eq!(
+        previews[0]["at"],
+        serde_json::json!(second),
+        "the second occurrence of the repeated local hour is the next firing: {status}"
+    );
+    assert_eq!(
+        previews[0]["adjustment"],
+        serde_json::json!("RepeatedLocalTimeSecond")
+    );
+    assert!(previews[0]["localTime"]
+        .as_str()
+        .expect("a rendered local time")
+        .ends_with("+01:00"));
+}
+
+/// D1 §4.3: a zone this build's database does not have is `Ready=False` and
+/// admits nothing. **Never silently UTC.**
+#[tokio::test]
+async fn an_unknown_timezone_is_ready_false_and_creates_nothing() {
+    let schedule = cadence_schedule(r#", "timeZone": "Mars/Olympus""#);
+    let now = utc(2026, 9, 10, 12, 1);
+    let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+        no_backups(),
+        // PRESENT AND UNUSED.
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body(&due_name(now)),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).expect("serialises"),
+        },
+    ]);
+    let outcome = reconcile_schedule(&schedule, &client, now)
+        .await
+        .expect("an unknown zone is a decision, not an error");
+    assert_eq!(outcome.decision.reason(), "UnknownTimeZone");
+    let bodies = bodies.lock().expect("readable").clone();
+    assert!(posts(&bodies).is_empty());
+    let status = patched_status(&bodies);
+    assert_eq!(
+        status["conditions"][0]["status"],
+        serde_json::json!("False")
+    );
+    assert_eq!(
+        status["nextRuns"],
+        serde_json::json!([]),
+        "a schedule that cannot compute a slot advertises no firings: {status}"
+    );
+    assert_eq!(status["nextFireTime"], serde_json::Value::Null);
+    assert!(status["conditions"][0]["message"]
+        .as_str()
+        .expect("a message")
+        .contains("is never read as UTC"));
+}
+
+/// D1 §4.7 rows 18 and 22: a week of downtime with `catchUpPolicy: None` runs
+/// nothing and counts what it skipped.
+#[tokio::test]
+async fn downtime_with_catch_up_none_records_missed_and_creates_nothing() {
+    // The controller was last here at 12:00 and comes back at 12:30: thirty
+    // one-minute slots came due while it was away, and the latest of them is
+    // itself past a 60-second starting deadline.
+    let away_since = utc(2026, 9, 10, 12, 0);
+    let back = utc(2026, 9, 10, 12, 30);
+    let mut schedule = cadence_schedule_cron("*/5 * * * *", r#", "startingDeadlineSeconds": 60"#);
+    schedule.status = Some(BackupScheduleStatus {
+        missed_slots: Some(weirkeeper::crds::backup_schedule::MissedSlots {
+            count: 0,
+            count_capped: false,
+            last_evaluated_slot: Some(slot_name(away_since)),
+            recent: None,
+        }),
+        active_runs: Some(Vec::new()),
+        ..BackupScheduleStatus::default()
+    });
+    let latest = utc(2026, 9, 10, 12, 30);
+    let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+        absent_backup(&due_name(latest)),
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body(&due_name(latest)),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).expect("serialises"),
+        },
+    ]);
+    let outcome = reconcile_schedule(&schedule, &client, back + chrono::Duration::seconds(90))
+        .await
+        .expect("a missed slot is a decision");
+    assert_eq!(outcome.decision.reason(), REASON_SLOT_MISSED);
+    let bodies = bodies.lock().expect("readable").clone();
+    assert!(
+        posts(&bodies).is_empty(),
+        "NOTHING is fired for a backlog nobody is waiting for: {bodies:?}"
+    );
+    let status = patched_status(&bodies);
+    assert_eq!(
+        status["missedSlots"]["count"],
+        serde_json::json!(6),
+        "five slots strictly between the last evaluated one and this one, plus this one: \
+         {status}"
+    );
+    assert_eq!(
+        status["missedSlots"]["lastEvaluatedSlot"],
+        serde_json::json!(slot_name(latest)),
+        "and the marker advances, so the next reconcile does not count the same gap again"
+    );
+    assert_eq!(
+        status["missedSlots"]["recent"][0]["reason"],
+        serde_json::json!("PastStartingDeadline")
+    );
+    assert_eq!(
+        status["lastSlot"]["disposition"],
+        serde_json::json!("Missed")
+    );
+    // NO STEADY-STATE DOUBLE COUNTING. A second reconcile a minute later has a
+    // newer latest slot, so it counts that one and not the thirty already
+    // accounted for.
+    let mut second = schedule.clone();
+    second.status = Some(
+        serde_json::from_value(status.clone()).expect("the patched status is a schedule status"),
+    );
+    let next = latest + chrono::Duration::minutes(5);
+    let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+        absent_backup(&due_name(next)),
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&second).expect("serialises"),
+        },
+    ]);
+    reconcile_schedule(&second, &client, next + chrono::Duration::seconds(90))
+        .await
+        .expect("the next missed slot is a decision");
+    assert_eq!(
+        patched_status(&bodies.lock().expect("readable"))["missedSlots"]["count"],
+        serde_json::json!(7),
+        "one more, not six more: the interval is bounded by the marker the previous pass \
+         advanced"
+    );
+}
+
+/// D1 §4.7 row 21: the same downtime with `catchUpPolicy: Latest` runs
+/// **exactly one** `CatchUp`, for the most recent slot only.
+#[tokio::test]
+async fn downtime_with_catch_up_latest_creates_exactly_one_catch_up() {
+    let away_since = utc(2026, 9, 10, 12, 0);
+    let latest = utc(2026, 9, 10, 12, 30);
+    let mut schedule = cadence_schedule_cron(
+        "*/5 * * * *",
+        r#", "startingDeadlineSeconds": 60, "catchUpPolicy": "Latest""#,
+    );
+    schedule.status = Some(BackupScheduleStatus {
+        missed_slots: Some(weirkeeper::crds::backup_schedule::MissedSlots {
+            count: 0,
+            count_capped: false,
+            last_evaluated_slot: Some(slot_name(away_since)),
+            recent: None,
+        }),
+        active_runs: Some(Vec::new()),
+        policy: Some(weirkeeper::crds::backup_schedule::PolicyStatus {
+            generation: 3,
+            run_policy_sha256: weirkeeper::controllers::backup_schedule::run_policy_digest(
+                &schedule.spec,
+            ),
+            time_zone: "UTC".to_string(),
+            tzdb: weirkeeper::cadence::TZDB_SOURCE.to_string(),
+            // OBSERVED BEFORE THE DOWNTIME, so the catch-up slot is inside this
+            // revision and row 19 does not refuse it.
+            effective_since: away_since - chrono::Duration::hours(1),
+            evaluated_at: away_since,
+        }),
+        ..BackupScheduleStatus::default()
+    });
+    let name: &'static str = Box::leak(due_name(latest).into_boxed_str());
+    let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+        absent_backup(name),
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body(name),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: reservation_echo(
+                &serde_json::to_string(&schedule).expect("serialises"),
+                name,
+                &slot_name(latest),
+                0,
+            ),
+        },
+    ]);
+    let outcome = reconcile_schedule(&schedule, &client, latest + chrono::Duration::seconds(90))
+        .await
+        .expect("a catch-up is a decision");
+    assert_eq!(outcome.decision.reason(), "CaughtUp");
+    let bodies = bodies.lock().expect("readable").clone();
+    let spec = posted_spec(&bodies);
+    assert_eq!(
+        spec["trigger"]["kind"],
+        serde_json::json!("CatchUp"),
+        "the run says what it is, so a history row does not claim to have fired on time: {spec}"
+    );
+    assert_eq!(
+        spec["trigger"]["attempt"],
+        serde_json::json!(0),
+        "a catch-up IS slot S, started late — not a retry of it"
+    );
+    assert_eq!(
+        spec["slot"],
+        serde_json::json!(slot_name(latest)),
+        "and only the LATEST slot is caught up; the five before it are counted, not run"
+    );
+    assert_eq!(body_name(posts(&bodies)[0]), name);
+    let status = patched_status(&bodies);
+    assert_eq!(
+        status["lastSlot"]["disposition"],
+        serde_json::json!("CaughtUp")
+    );
+    assert_eq!(
+        status["missedSlots"]["count"],
+        serde_json::json!(5),
+        "the five slots the catch-up did not cover are still counted: {status}"
+    );
+}
+
+/// D1 §4.7 row 19: a catch-up never runs a slot older than the revision in
+/// force.
+///
+/// Editing a schedule at noon must not retroactively back up the morning under
+/// the new policy — the run would carry the new topic list and the new archive
+/// and claim to be a backup of a window that policy never covered.
+#[tokio::test]
+async fn catch_up_never_runs_a_slot_before_the_observed_revision() {
+    let latest = utc(2026, 9, 10, 12, 30);
+    let mut schedule = cadence_schedule_cron(
+        "*/5 * * * *",
+        r#", "startingDeadlineSeconds": 60, "catchUpPolicy": "Latest""#,
+    );
+    schedule.status = Some(BackupScheduleStatus {
+        active_runs: Some(Vec::new()),
+        policy: Some(weirkeeper::crds::backup_schedule::PolicyStatus {
+            generation: 3,
+            run_policy_sha256: weirkeeper::controllers::backup_schedule::run_policy_digest(
+                &schedule.spec,
+            ),
+            time_zone: "UTC".to_string(),
+            tzdb: weirkeeper::cadence::TZDB_SOURCE.to_string(),
+            // THE EDIT LANDED AFTER THE SLOT CAME DUE.
+            effective_since: latest + chrono::Duration::seconds(1),
+            evaluated_at: latest + chrono::Duration::seconds(1),
+        }),
+        ..BackupScheduleStatus::default()
+    });
+    let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+        absent_backup(&due_name(latest)),
+        // PRESENT AND UNUSED.
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body(&due_name(latest)),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).expect("serialises"),
+        },
+    ]);
+    let outcome = reconcile_schedule(&schedule, &client, latest + chrono::Duration::seconds(90))
+        .await
+        .expect("a skipped catch-up is a decision");
+    assert_eq!(outcome.decision.reason(), REASON_SLOT_MISSED);
+    let bodies = bodies.lock().expect("readable").clone();
+    assert!(posts(&bodies).is_empty());
+    let status = patched_status(&bodies);
+    assert_eq!(
+        status["missedSlots"]["recent"][0]["reason"],
+        serde_json::json!("BeforeRevision"),
+        "the reason distinguishes `I chose not to` from `I was not running`: {status}"
+    );
+}
+
+/// D1 §4.7 row 13: a **retryable** failure is retried once its delay has
+/// elapsed, under a new name, a new execution id and the CURRENT generation.
+#[tokio::test]
+async fn a_retryable_failure_creates_r1_after_the_delay() {
+    let slot = utc(2026, 9, 10, 12, 30);
+    let failed_at = slot + chrono::Duration::seconds(30);
+    let schedule = cadence_schedule_cron(
+        "*/30 * * * *",
+        r#", "retry": { "maxRetries": 2, "delaySeconds": 60 }"#,
+    );
+    let attempt0: &'static str = Box::leak(due_name(slot).into_boxed_str());
+    let attempt1: &'static str = Box::leak(
+        weirkeeper::slot::scheduled_backup_name_for_attempt("nightly", &slot_name(slot), 1)
+            .expect("fits")
+            .into_boxed_str(),
+    );
+    assert_eq!(
+        attempt1,
+        format!("{attempt0}-r1"),
+        "a retry's name is attempt 0's plus `-r<k>`, so the chain is discoverable by GET"
+    );
+
+    let routes = vec![
+        no_backups(),
+        Route {
+            method: "GET",
+            path_suffix: Box::leak(format!("/backups/{attempt0}").into_boxed_str()),
+            status: 200,
+            // exit 1 — `operational`, no artifact. THE one exit code D1 §4.6
+            // retries by number.
+            body: terminal_backup(attempt0, "Failed", Some(1), Some("operational"), failed_at)
+                .to_string(),
+        },
+        absent_backup(attempt1),
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body(attempt1),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: reservation_echo(
+                &serde_json::to_string(&schedule).expect("serialises"),
+                attempt1,
+                &slot_name(slot),
+                1,
+            ),
+        },
+    ];
+
+    // BEFORE THE DELAY ELAPSES: nothing, and the status says when.
+    let (client, _calls, bodies) = mock_client_recording_bodies(routes.clone());
+    let early = reconcile_schedule(
+        &schedule,
+        &client,
+        failed_at + chrono::Duration::seconds(30),
+    )
+    .await
+    .expect("a pending retry is a decision");
+    assert_eq!(early.decision.reason(), "RetryPending");
+    assert!(
+        posts(&bodies.lock().expect("readable")).is_empty(),
+        "a retry route was available 30 seconds into a 60-second delay and was not used"
+    );
+    assert_eq!(
+        early
+            .decision
+            .requeue_after(failed_at + chrono::Duration::seconds(30)),
+        std::time::Duration::from_secs(30),
+        "and the reconcile asks to be woken when the delay expires, not merely at the next \
+         poll: D1 §4.5 step 8's min(30 s, next retry due)"
+    );
+
+    // AFTER IT: exactly one retry, named and numbered.
+    let (client, _calls, bodies) = mock_client_recording_bodies(routes);
+    let outcome = reconcile_schedule(
+        &schedule,
+        &client,
+        failed_at + chrono::Duration::seconds(61),
+    )
+    .await
+    .expect("the retry is admitted");
+    assert_eq!(outcome.decision.reason(), "RetryScheduled");
+    let bodies = bodies.lock().expect("readable").clone();
+    let spec = posted_spec(&bodies);
+    assert_eq!(body_name(posts(&bodies)[0]), attempt1);
+    assert_eq!(spec["trigger"]["kind"], serde_json::json!("Retry"));
+    assert_eq!(spec["trigger"]["attempt"], serde_json::json!(1));
+    assert_eq!(
+        spec["trigger"]["retryOf"]["name"],
+        serde_json::json!(attempt0),
+        "the retry names the attempt it retries, and `identity::run_identity` checks it rather \
+         than trusting it: {spec}"
+    );
+    assert_eq!(
+        spec["slot"],
+        serde_json::json!(slot_name(slot)),
+        "a retry is the SAME slot: the window it covers did not move"
+    );
+    // A NEW EXECUTION ID, NEVER A SECOND WRITE UNDER THE OLD ONE. A failed
+    // attempt may have written part of an archive, and reusing its `backup_id`
+    // would append into that partial prefix.
+    assert_eq!(
+        weirkeeper::slot::backup_id_for_attempt(UID, &slot_name(slot), 1),
+        format!(
+            "{}-r1",
+            weirkeeper::slot::backup_id_for_attempt(UID, &slot_name(slot), 0)
+        )
+    );
+    let status = patched_status(&bodies);
+    assert_eq!(
+        status["lastSlot"]["disposition"],
+        serde_json::json!("Retried")
+    );
+    assert_eq!(status["lastSlot"]["attempt"], serde_json::json!(1));
+    assert_eq!(status["activeRuns"][0]["kind"], serde_json::json!("Retry"));
+}
+
+/// D1 §4.6 and §4.7 row 9: a **decision** is never retried.
+///
+/// A guard refusal, a drill that did not pass and a signing failure are all
+/// answers the product already gave. Re-running them asks the same question of
+/// the same cluster and gets the same answer, at the cost of another broker
+/// read — and, worse, tells an operator watching the schedule that something
+/// might still change.
+#[tokio::test]
+async fn a_guard_refusal_is_never_retried() {
+    let slot = utc(2026, 9, 10, 12, 30);
+    let failed_at = slot + chrono::Duration::seconds(30);
+    let schedule = cadence_schedule_cron(
+        "*/30 * * * *",
+        r#", "retry": { "maxRetries": 3, "delaySeconds": 60 }"#,
+    );
+    let attempt0: &'static str = Box::leak(due_name(slot).into_boxed_str());
+
+    for (label, exit_code, exit_reason) in [
+        ("a guard refusal", Some(3), Some("guard-refused")),
+        ("a drill that did not pass", Some(2), Some("drill-not-pass")),
+        ("a signing failure", Some(4), Some("SigningOrLock")),
+        (
+            "a terminal state nobody has classified",
+            None,
+            Some("SomethingNewAndUnclassified"),
+        ),
+    ] {
+        let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+            no_backups(),
+            Route {
+                method: "GET",
+                path_suffix: Box::leak(format!("/backups/{attempt0}").into_boxed_str()),
+                status: 200,
+                body: terminal_backup(attempt0, "Failed", exit_code, exit_reason, failed_at)
+                    .to_string(),
+            },
+            absent_backup(&format!("{attempt0}-r1")),
+            // PRESENT AND UNUSED IN EVERY ARM.
+            Route {
+                method: "POST",
+                path_suffix: "/namespaces/logweir-t18/backups",
+                status: 201,
+                body: created_backup_body(&format!("{attempt0}-r1")),
+            },
+            Route {
+                method: "PATCH",
+                path_suffix: "/backupschedules/nightly/status",
+                status: 200,
+                body: serde_json::to_string(&schedule).expect("serialises"),
+            },
+        ]);
+        // TWENTY MINUTES PAST A SIXTY-SECOND DELAY, AND STILL INSIDE SLOT
+        // 12:30's window (the next `*/30` slot is 13:00). The delay is not what
+        // is stopping the retry here; the classification is.
+        let outcome = reconcile_schedule(
+            &schedule,
+            &client,
+            failed_at + chrono::Duration::minutes(20),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_eq!(
+            outcome.decision.reason(),
+            "RunFailed",
+            "{label} is a decision, not a blip: {:?}",
+            outcome.decision
+        );
+        let bodies = bodies.lock().expect("readable").clone();
+        assert!(
+            posts(&bodies).is_empty(),
+            "{label}: twenty minutes past a 60-second delay, with a POST route available: \
+             {bodies:?}"
+        );
+        assert_eq!(
+            patched_status(&bodies)["lastSlot"]["disposition"],
+            serde_json::json!("Failed"),
+            "{label}"
+        );
+    }
+}
+
+/// D1 §4.7 row 10: the chain stops at `maxRetries` and says so, and a
+/// `maxRetries` LOWERED by an edit still sees the attempts that exist.
+#[tokio::test]
+async fn retries_stop_at_max_retries_and_report_exhausted() {
+    let slot = utc(2026, 9, 10, 12, 30);
+    let failed_at = slot + chrono::Duration::seconds(30);
+    let attempt0: &'static str = Box::leak(due_name(slot).into_boxed_str());
+    let attempt1: &'static str = Box::leak(format!("{attempt0}-r1").into_boxed_str());
+
+    // THE THIRD ARM IS THE ONE D1 §4.7 ROW 10 CALLS OUT. `RetryExhausted` on a
+    // schedule that never configured retries reads as "your retries ran out" to
+    // an operator who asked for none, so an ABSENT `spec.retry` reports
+    // `RunFailed` instead. `maxRetries: 0` is different: the operator DID
+    // consider retries and chose zero, and the ceiling really was reached.
+    for (label, retry, expected_reason) in [
+        (
+            "the ceiling is reached",
+            r#", "retry": { "maxRetries": 1, "delaySeconds": 60 }"#,
+            "RetryExhausted",
+        ),
+        (
+            "the ceiling was LOWERED to zero by an edit",
+            r#", "retry": { "maxRetries": 0, "delaySeconds": 60 }"#,
+            "RetryExhausted",
+        ),
+        ("the retry block was REMOVED by an edit", "", "RunFailed"),
+    ] {
+        let mut schedule = cadence_schedule_cron("*/30 * * * *", retry);
+        // THE STORED `lastSlot` IS WHAT KEEPS AN EXISTING CHAIN VISIBLE AFTER
+        // THE POLICY THAT CREATED IT IS REMOVED. The attempt-chain walk stops
+        // at attempt 0 on a schedule that has no retry policy and no record of
+        // one — this controller is the only writer of `-r<k>` names, so walking
+        // further could not find anything — and `status.lastSlot.attempt`, plus
+        // any `-r<k>` in `status.activeRuns`, is how a schedule whose retry
+        // block was just deleted still sees the attempts it already made. That
+        // is D1 §3.1 rule 7's "a lowered maxRetries still sees existing
+        // attempts", bounded so the steady-state reconcile costs one GET.
+        schedule.status = Some(BackupScheduleStatus {
+            last_slot: Some(weirkeeper::crds::backup_schedule::LastSlot {
+                slot: slot_name(slot),
+                due_at: slot,
+                attempt: 1,
+                disposition: "Retried".to_string(),
+                backup_ref: Some(LocalRef {
+                    name: attempt1.to_string(),
+                }),
+                reason: "RetryScheduled".to_string(),
+                decided_at: failed_at,
+            }),
+            ..BackupScheduleStatus::default()
+        });
+        let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+            no_backups(),
+            Route {
+                method: "GET",
+                path_suffix: Box::leak(format!("/backups/{attempt0}").into_boxed_str()),
+                status: 200,
+                body: terminal_backup(attempt0, "Failed", Some(1), Some("operational"), failed_at)
+                    .to_string(),
+            },
+            Route {
+                method: "GET",
+                path_suffix: Box::leak(format!("/backups/{attempt1}").into_boxed_str()),
+                status: 200,
+                body: terminal_backup(
+                    attempt1,
+                    "Failed",
+                    Some(1),
+                    Some("operational"),
+                    failed_at + chrono::Duration::minutes(2),
+                )
+                .to_string(),
+            },
+            absent_backup(&format!("{attempt0}-r2")),
+            // PRESENT AND UNUSED.
+            Route {
+                method: "POST",
+                path_suffix: "/namespaces/logweir-t18/backups",
+                status: 201,
+                body: created_backup_body(&format!("{attempt0}-r2")),
+            },
+            Route {
+                method: "PATCH",
+                path_suffix: "/backupschedules/nightly/status",
+                status: 200,
+                body: serde_json::to_string(&schedule).expect("serialises"),
+            },
+        ]);
+        // TWENTY MINUTES PAST A SIXTY-SECOND DELAY, AND STILL INSIDE SLOT
+        // 12:30's window (the next `*/30` slot is 13:00). The delay is not what
+        // is stopping the retry here; the classification is.
+        let outcome = reconcile_schedule(
+            &schedule,
+            &client,
+            failed_at + chrono::Duration::minutes(20),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_eq!(
+            outcome.decision.reason(),
+            expected_reason,
+            "{label}: {:?}",
+            outcome.decision
+        );
+        let bodies = bodies.lock().expect("readable").clone();
+        assert!(
+            posts(&bodies).is_empty(),
+            "{label}: no `-r2` is ever created: {bodies:?}"
+        );
+        let status = patched_status(&bodies);
+        assert_eq!(
+            status["lastSlot"]["disposition"],
+            serde_json::json!("Exhausted"),
+            "{label}: the slot is done either way; only the REASON differs, because a chain \
+             that was never configured to retry exhausted nothing: {status}"
+        );
+        assert_eq!(
+            status["lastSlot"]["attempt"],
+            serde_json::json!(1),
+            "{label}"
+        );
+    }
+}
+
+/// D1 §4.7 row 12: a retry that is due waits for concurrency like any other
+/// admission, and the slot stays admissible while it waits.
+#[tokio::test]
+async fn a_retry_is_blocked_by_an_active_forbid_run() {
+    let slot = utc(2026, 9, 10, 12, 30);
+    let failed_at = slot + chrono::Duration::seconds(30);
+    let schedule = cadence_schedule_cron(
+        "*/30 * * * *",
+        r#", "retry": { "maxRetries": 2, "delaySeconds": 60 }"#,
+    );
+    let attempt0: &'static str = Box::leak(due_name(slot).into_boxed_str());
+    let other = "logweir-backup-nightly-20260910-120000";
+
+    let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 200,
+            body: backup_list_body(vec![backup_value(other, UID, Some("Running"), Some(other))]),
+        },
+        Route {
+            method: "GET",
+            path_suffix: Box::leak(format!("/backups/{attempt0}").into_boxed_str()),
+            status: 200,
+            body: terminal_backup(attempt0, "Failed", Some(1), Some("operational"), failed_at)
+                .to_string(),
+        },
+        absent_backup(&format!("{attempt0}-r1")),
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body(&format!("{attempt0}-r1")),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).expect("serialises"),
+        },
+    ]);
+    let outcome = reconcile_schedule(&schedule, &client, failed_at + chrono::Duration::minutes(5))
+        .await
+        .expect("a blocked retry is a decision");
+    assert_eq!(outcome.decision.reason(), "RetryBlocked");
+    let bodies = bodies.lock().expect("readable").clone();
+    assert!(posts(&bodies).is_empty());
+    assert!(patched_status(&bodies)["conditions"][0]["message"]
+        .as_str()
+        .expect("a message")
+        .contains("is still unfinished"));
+}
+
+/// D1 §4.7 row 7: a succeeded attempt ends the slot, whatever the retry policy
+/// says.
+#[tokio::test]
+async fn a_succeeded_attempt_is_never_retried() {
+    let slot = utc(2026, 9, 10, 12, 30);
+    let schedule = cadence_schedule_cron(
+        "*/30 * * * *",
+        r#", "retry": { "maxRetries": 3, "delaySeconds": 60 }"#,
+    );
+    let attempt0: &'static str = Box::leak(due_name(slot).into_boxed_str());
+    let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+        no_backups(),
+        Route {
+            method: "GET",
+            path_suffix: Box::leak(format!("/backups/{attempt0}").into_boxed_str()),
+            status: 200,
+            body: terminal_backup(attempt0, "Succeeded", Some(0), Some("ok"), slot).to_string(),
+        },
+        absent_backup(&format!("{attempt0}-r1")),
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body(&format!("{attempt0}-r1")),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).expect("serialises"),
+        },
+    ]);
+    let outcome = reconcile_schedule(&schedule, &client, slot + chrono::Duration::minutes(20))
+        .await
+        .expect("a finished slot is a decision");
+    assert_eq!(outcome.decision.reason(), REASON_SCHEDULED);
+    assert!(posts(&bodies.lock().expect("readable")).is_empty());
+}
+
+/// D1 §4.7's "blocked" definition for `Allow`: ten concurrent schedule-created
+/// runs is the ceiling, and reaching it is reported rather than silently
+/// obeyed.
+#[tokio::test]
+async fn the_active_run_limit_caps_allow_at_ten() {
+    let now = utc(2026, 9, 10, 12, 10);
+    let running: Vec<serde_json::Value> = (0..10)
+        .map(|minute| {
+            let name = due_name(utc(2026, 9, 10, 12, minute));
+            backup_value(&name, UID, Some("Running"), Some(&name))
+        })
+        .collect();
+    let schedule = schedule("nightly", UID, "* * * * *", false);
+    assert_eq!(schedule.spec.concurrency_policy, ConcurrencyPolicy::Allow);
+    let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 200,
+            body: backup_list_body(running),
+        },
+        absent_backup(&due_name(now)),
+        // PRESENT AND UNUSED: the cap is a decision, not an inability.
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body(&due_name(now)),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).expect("serialises"),
+        },
+    ]);
+    let outcome = reconcile_schedule(&schedule, &client, now)
+        .await
+        .expect("the cap is a decision");
+    assert_eq!(outcome.decision.reason(), "ActiveRunLimit");
+    let bodies = bodies.lock().expect("readable").clone();
+    assert!(posts(&bodies).is_empty());
+    let status = patched_status(&bodies);
+    assert_eq!(
+        status["activeRuns"].as_array().map(Vec::len),
+        Some(10),
+        "and the ten are reported, so an operator can see what they are: {status}"
+    );
+    assert_eq!(status["lastMissedSlot"], slot_name(now));
+}
+
+/// D1 §4.9's CRD-before-controller guard: a reservation the API server pruned
+/// stops admission instead of creating a run without an identity.
+#[tokio::test]
+async fn a_pruned_reservation_response_stops_admission_as_crd_outdated() {
+    let now = utc(2026, 9, 10, 12, 1);
+    let schedule = cadence_schedule("");
+    let name: &'static str = Box::leak(due_name(now).into_boxed_str());
+    let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+        no_backups(),
+        absent_backup(name),
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body(name),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            // AN OLDER CRD PRUNES WHAT IT DOES NOT DECLARE, SILENTLY. The echo
+            // comes back without `status.pendingRun`, which is exactly what a
+            // 1.29 API server does with a field the installed schema has never
+            // heard of — no error, no warning, just an absent key.
+            body: serde_json::to_string(&schedule).expect("serialises"),
+        },
+    ]);
+    let error = reconcile_schedule(&schedule, &client, now)
+        .await
+        .expect_err("a pruned reservation is an error, not a silent admission");
+    assert!(
+        error.to_string().contains("older than this controller"),
+        "the error says what to do about it: {error}"
+    );
+    assert!(
+        posts(&bodies.lock().expect("readable")).is_empty(),
+        "and NOTHING is created: a Backup written without `spec.trigger` or \
+         `spec.scheduleRef.uid` has no identity, and the Backup controller would refuse it \
+         terminally with ScheduledIdentityMismatch"
+    );
+}
+
+/// D1 §3.1 rule 6: a retry policy whose names cannot fit is an INVALID POLICY,
+/// not a schedule that silently never retries.
+#[test]
+fn a_retry_policy_that_cannot_be_named_is_refused_as_a_policy() {
+    let thirty = "n".repeat(30);
+    let spec = serde_json::from_str::<BackupSchedule>(&format!(
+        r#"{{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "BackupSchedule",
+  "metadata": {{ "name": "{thirty}", "namespace": "{NS}", "uid": "{UID}", "generation": 1,
+    "resourceVersion": "1" }},
+  "spec": {{
+    "schedule": "* * * * *",
+    "sourceRef": {{ "name": "prod" }},
+    "topics": ["orders"],
+    "archive": {{ "url": "s3://kafka-backups/logweir" }},
+    "retry": {{ "maxRetries": 1 }},
+    "suspend": false
+  }}
+}}"#
+    ))
+    .expect("the fixture parses");
+
+    let decision = decide(&thirty, &spec.spec, utc(2026, 9, 10, 12, 1));
+    assert_eq!(decision.reason(), "NameTooLong");
+    assert!(!decision.ready());
+    assert!(
+        decision.message().contains("silently never retries"),
+        "the message says why this is refused rather than degraded: {}",
+        decision.message()
+    );
+
+    // AND `maxRetries: 0` ON THE SAME NAME IS FINE, because no `-r<N>` name is
+    // ever composed. That is the exemption the CRD's root rule R3 carries too.
+    let mut zero = spec.spec.clone();
+    zero.retry = Some(weirkeeper::crds::backup_schedule::RetrySpec {
+        max_retries: 0,
+        delay_seconds: None,
+    });
+    assert_eq!(
+        decide(&thirty, &zero, utc(2026, 9, 10, 12, 1)).reason(),
+        REASON_SCHEDULED
+    );
 }

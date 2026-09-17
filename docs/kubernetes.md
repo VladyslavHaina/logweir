@@ -1207,6 +1207,40 @@ spec resumes the schedule within one reconcile. There is no last-known-good
 fallback — silently continuing an old policy after an edit would contradict
 what the operator sees.
 
+### Replacing or deleting a schedule still needs the drain
+
+Editing covers every field but one. Protecting a **different `KafkaCluster`**
+means a different schedule, and deleting a schedule is still deleting a
+schedule — and until PLAT-05.2 decouples retained history from schedule
+ownership, every `Backup` a schedule created carries a controller
+ownerReference to it, so deleting the schedule lets Kubernetes garbage
+collection delete that history.
+
+Until PLAT-05.2 decouples retained history from schedule ownership, replace or
+retire a schedule with this drain-and-retain procedure:
+
+1. Set `spec.suspend: true` on the old schedule so it admits no new slots.
+2. List every `Backup` whose **controller owner reference UID** equals the old
+   schedule UID, and wait until all of them are terminal (`Succeeded`, `Failed`,
+   or legacy `Refused`). Do not use the singular `activeBackupRef` as proof that
+   the drain is complete; `status.activeRuns` is the complete list.
+3. Retain the old, suspended `BackupSchedule`. Its controller owner references
+   still anchor the old `Backup` history; deleting it can let Kubernetes garbage
+   collection delete that history.
+4. Create the replacement under a **different name**, only after the drain.
+   The replacement has a different UID and therefore cannot see an old active
+   child as its own; starting it before the drain can overlap generations.
+
+Do not delete and recreate a schedule under the same name. That is not a safe
+migration: deletion can remove history, while the recreated object's new UID
+neither adopts nor excludes work owned by the old generation — and an old run
+sitting on a new slot's deterministic name is reported as
+`Ready=True reason=SlotNameUnavailable` with the slot recorded in
+`status.lastMissedSlot`, never re-run under a different name. A schedule whose
+`concurrencyPolicy` field is omitted already behaves as
+`Forbid`; that field is now editable in place, so it is no longer a reason to
+replace an object.
+
 ### Upgrading to, and rolling back from, the editable schedule
 
 **Apply the CRD before rolling the controller**, in that order, and never
@@ -1240,28 +1274,121 @@ was added behaves as `Forbid` without an object rewrite. Since PLAT-05.1 the
 field is editable in place, so moving an old omitted-field schedule to `Allow`
 is a one-field patch and no longer needs a replacement object.
 
-Under `Forbid`, the controller lists Backups in the schedule's namespace and
-accepts only children whose controller owner UID is the schedule's current UID.
-An absent phase, an unknown phase, and a nonterminal Backup whose Job is missing
-all remain active conservatively; the Backup controller may still create or
-recreate that Job. Terminal `Succeeded`, `Failed`, or legacy `Refused` Backups
-do not block. Completed and missing `activeBackupRef` values are cleared.
+Under `Forbid`, **no** nonterminal schedule-created run of this schedule may
+overlap a new admission. Under `Allow`, up to **ten** may; the eleventh is
+refused with `Ready=True reason=ActiveRunLimit` and the ten are named in
+`status.activeRuns`, so a schedule whose runs outlast its period is visible
+rather than silently unbounded. An absent phase, an unknown phase, and a
+nonterminal Backup whose Job is missing all remain active conservatively; the
+Backup controller may still create or recreate that Job. Terminal `Succeeded`,
+`Failed` and legacy `Refused` runs do not block. **Manual runs never block and
+are never blocked** — they are not schedule-created.
 
-Admission of a new slot is a resource-version-checked status reservation, so
-two controller replicas cannot admit different slots from the same schedule
-state. `status.pendingBackupRef` identifies accepted work between reservation
-and child creation; a restart resumes that deterministic child. Once the child
-is observed or created, the controller clears the reservation and reports it
-through `status.activeBackupRef`. This uses no separate Kubernetes Lease.
+Admission is a resource-version-checked status reservation **for every trigger
+kind and both policies**, so two controller replicas cannot admit different
+slots from the same schedule state and every run has the same crash semantics.
+`status.pendingRun {name, slot, attempt, kind, generation}` identifies accepted
+work between the reservation and the child's creation, and
+`status.pendingBackupRef` mirrors its name for readers written before it
+existed; a restart resumes that deterministic child. Once the child is observed
+or created, the controller clears both spellings and reports the run in
+`status.activeRuns` (with `status.activeBackupRef` mirroring the first entry).
+This uses no separate Kubernetes Lease.
 
-| Policy and observed state | Due-slot result | Schedule status |
-|---|---|---|
-| omitted or `Forbid`; no owned unfinished Backup | Atomically reserve, then create the deterministic slot child | `Scheduled`; pending ref becomes active ref |
-| `Forbid`; owned Backup is nonterminal or unknown, including a missing Job | Do not create the new slot | `ConcurrencyBlocked`; slot recorded in `lastMissedSlot` with the blocking Backup named |
-| `Forbid`; referenced Backup is terminal | Clear the completed active ref and admit the due slot | New child becomes active |
-| `Forbid`; `activeBackupRef` names no owned Backup | Clear the stale ref and admit the due slot | New child becomes active |
-| `Forbid`; `pendingBackupRef` has no child after restart | Resume the already accepted deterministic child | Pending ref becomes active ref; no second admission |
-| explicit `Allow` | Create the deterministic due-slot child regardless of earlier slots; after a 409, fetch the winner and require the current schedule's complete controller identity | The owned winner is reported; foreign, ownerless, old-UID, or transiently missing winners are errors and are not adopted |
+### Cadence: zones, deadlines, catch-up and retries
+
+`spec.schedule` is the single source of truth for cadence — there is no stored
+preset — and its five fields are read in `spec.timeZone`.
+
+- **Absent `timeZone` means UTC**, and reproduces the slots an older controller
+  computed instant for instant. A **slot is always the UTC instant**, spelled
+  `yyyymmdd-hhmmss`, so object names stay unique, monotonic and DNS-1123
+  whatever the zone. The run records the zone it was computed in
+  (`spec.trigger.timeZone`), so a history row keeps its local time after
+  somebody edits the schedule.
+- **DST:** every real instant whose local wall time matches fires once; a
+  matching local time that does NOT exist (a spring-forward gap) fires once at
+  the end of the gap. A fixed local time inside a repeated autumn hour therefore
+  fires at **both** occurrences — `status.nextRuns` marks them
+  `RepeatedLocalTimeFirst` / `RepeatedLocalTimeSecond`, and a shifted gap match
+  `NonexistentLocalTimeShifted`, so the outcome is previewed rather than
+  surprising. An interval schedule (`*/15 * * * *`) keeps its UTC cadence
+  through both transitions with no burst and no hole.
+- **A zone this build's database does not have** is `Ready=False` with reason
+  `UnknownTimeZone` and admits nothing. It is never read as UTC.
+  `status.policy.tzdb` names the database that resolved it.
+- `status.nextRuns` carries the next **five** firings, computed by the
+  controller. The browser never evaluates cron.
+
+**Only the latest due slot is ever eligible.** Older ones are counted in
+`status.missedSlots {count, countCapped, lastEvaluatedSlot, recent}` — the
+enumeration is capped at 1000 slots per evaluation, and `countCapped` says when
+a count is a floor. `lastEvaluatedSlot` advances only when the current slot
+reaches a disposition it cannot come back from, so a slot that waits for
+concurrency and is then superseded is counted exactly once.
+
+**Retries** are opt-in (`spec.retry {maxRetries 0..3, delaySeconds}`), only for
+**retryable** failures, only for the latest due slot, and only until the next
+slot comes due. A retry is a new `Backup` named `…-<slot>-r<k>` with a new
+execution id — a failed attempt may have written part of an archive, and
+reusing its `backup_id` would append into that partial prefix. The attempt chain
+is discovered by GETTING those deterministic names, never by listing.
+
+| Terminal record | Retried? |
+|---|---|
+| `exitCode: 1` (`operational`, no artifact) | **yes** |
+| an exit code outside `0..=4` — 137/143 after the Job deadline, OOM | **yes** |
+| no exit code: `DisruptedMidDrill`, `PodUnschedulable`, `NoExitCode`, `DiscoveryFailed` | **yes** |
+| `exitCode: 2` (not a pass), `3` (refused by a guard), `4` (signing or lock) | no |
+| any controller refusal made before the POST | no |
+| anything else, including a terminal state this build does not know | no |
+
+The classification is an **allowlist**: a state nobody has classified falls to
+"not retried", because a decision the product already made is not a blip. A
+terminal run with no terminal condition has no instant to measure a delay from
+and is likewise never retried.
+
+### The policy truth table
+
+Evaluation is top to bottom; the first matching row decides. "Blocked" means
+`Forbid` with any nonterminal schedule-created run, or `Allow` with ten.
+
+| # | Observed state | Creates | `Ready` reason / `lastSlot.disposition` |
+|---|---|---|---|
+| 1 | Accepted reservation, child absent, run policy valid | the reserved name, under the generation the controller can read now | `Scheduled`/`CaughtUp`/`RetryScheduled` |
+| 2 | Accepted reservation, child absent, run policy invalid | nothing; the reservation is released | `InvalidRunPolicy` / `Released` |
+| 3 | `suspend: true` | nothing; `nextRuns` empty | `Suspended` (False) |
+| 4 | Cron, zone, selection or run policy invalid | nothing; running work continues | `UnparseableSchedule` / `UnknownTimeZone` / `InvalidTopicSelection` / `InvalidRunPolicy` (all False) |
+| 5 | No due slot inside the walk bound | nothing | `NoDueSlot` (False) |
+| 6 | The slot's deterministic name is held by another schedule's object | nothing | `SlotNameUnavailable` / `NameUnavailable` |
+| 7 | Some attempt of S succeeded | nothing | `Scheduled` / `Admitted` |
+| 8 | The highest attempt of S is nonterminal | nothing | `Scheduled` |
+| 9 | The highest attempt failed, not retryable | nothing | `RunFailed` / `Failed` |
+| 10 | Failed retryably, attempt ≥ `maxRetries` | nothing | `RetryExhausted` / `Exhausted` (`RunFailed` when `spec.retry` is absent) |
+| 11 | Failed retryably, the delay has not elapsed | nothing | `RetryPending` |
+| 12 | Failed retryably, delay elapsed, blocked | nothing | `RetryBlocked` |
+| 13 | Failed retryably, delay elapsed, not blocked | `…-r<k+1>`, kind `Retry` | `RetryScheduled` / `Retried` |
+| 14 | No attempt, `S ≤ status.lastFireTime` (history pruned) | nothing | `Scheduled` |
+| 15 | No attempt, the name would not fit | nothing | `NameTooLong` (False) |
+| 16 | No attempt, inside `startingDeadlineSeconds`, blocked | nothing | `ConcurrencyBlocked` / `Blocked` (or `ActiveRunLimit` under `Allow`) |
+| 17 | No attempt, inside the deadline, not blocked | `name(S,0)`, kind `Scheduled` | `Scheduled` / `Admitted` |
+| 18 | No attempt, past the deadline, `catchUpPolicy: None` | nothing; counted in `missedSlots` | `SlotMissed` / `Missed` |
+| 19 | No attempt, past the deadline, `Latest`, `S` older than `status.policy.effectiveSince` | nothing | `SlotMissed`, missed reason `BeforeRevision` |
+| 20 | No attempt, past the deadline, `Latest`, blocked | nothing | `CatchUpBlocked` / `Blocked` |
+| 21 | No attempt, past the deadline, `Latest`, not blocked | `name(S,0)`, kind `CatchUp` | `CaughtUp` / `CaughtUp` |
+| 22 | A newer slot comes due while 11, 12, 16 or 20 wait | per the new slot | per the new slot; the old one is counted once |
+
+What an operator can predict from it: a controller down for a week with
+`catchUpPolicy: None` runs **nothing** until the next slot and records the
+skipped count; with `Latest` it runs **exactly one** `CatchUp`, for the most
+recent slot only. Per schedule there is at most one admission per reconcile,
+only for the latest due slot, at most `1 + maxRetries ≤ 4` runs per slot, at
+most one nonterminal schedule-created run under `Forbid` and ten under `Allow`.
+
+Bounded(N) catch-up was rejected: `logweir backup run` captures what the broker
+retains **when it runs**, so N catch-up runs executed back to back produce
+near-identical archives at N times the broker and storage load, with no
+recovery-point benefit.
 
 Apply the regenerated CRD before starting the new controller. For a strict
 no-overlap upgrade, suspend schedules or stop the old controller before the
@@ -1270,33 +1397,40 @@ reservation protocol. No schedule rewrite is needed, and existing Backup
 children remain the run-state authority.
 
 After the updated CRD is installed, an older controller ignores the additive
-fields but does not enforce cross-slot `Forbid`. Suspend schedules and drain or
-stop the new controller before rollback if overlap prevention must remain
-guaranteed; remove neither accepted Backup children nor their pending
-reservation during that handoff.
+fields — it fires in UTC, never catches up and never retries — and does not
+enforce cross-slot `Forbid` against runs it cannot see. It also clears a
+`-r<k>` reservation as unparseable, which is safe: no retry is created. Suspend
+schedules that set `timeZone`, `retry`, `catchUpPolicy` or the deadline fields
+before rolling back, and remove neither accepted Backup children nor their
+pending reservation during the handoff.
 
-### A slot older than one hour is skipped, and the skip is recorded
+### A slot past its starting deadline is skipped, and the skip is recorded
 
 The controller has no timer and no leader lease: it re-examines every schedule
-every 30 seconds, works out which slot is due, and uses the status reservation
-above only when admitting `Forbid` work. A slot that came due more
-than **one hour** before the controller looked is **skipped** — a controller
-restarted after a week must not fire six days of backlog, because a `Backup`
-for a window nobody is waiting for costs the same broker read as one somebody
-is.
+every 30 seconds (sooner when a retry delay expires first), works out which slot
+is due, and reserves before it creates. A slot that came due more than
+`spec.startingDeadlineSeconds` — **absent means 3600, the one-hour horizon an
+older controller hard-coded** — before the controller looked is **skipped**,
+unless `catchUpPolicy: Latest` lets the most recent one still run. A controller
+restarted after a week must not fire six days of backlog, because a `Backup` for
+a window nobody is waiting for costs the same broker read as one somebody is.
 
-A skip is a fact, not a silence. It lands in
-`status.lastMissedSlot` with a `Ready` condition whose reason is `SlotMissed`,
-and the field is never cleared afterwards — it is the audit trail of the skip:
+A skip is a fact, not a silence. It lands in `status.missedSlots` with a `Ready`
+condition whose reason is `SlotMissed`, and in the older single-valued
+`status.lastMissedSlot`, which is never cleared — it is the audit trail of the
+skip:
 
 ```bash
+kubectl --context docker-desktop get backupschedule nightly \
+  -o jsonpath='{.status.missedSlots}'
 kubectl --context docker-desktop get backupschedule nightly \
   -o jsonpath='{.status.lastMissedSlot}'
 ```
 
-`kubectl explain backupschedule.status.lastMissedSlot` states the same
-one-hour horizon, so the number is discoverable from the cluster and not only
-from this page.
+`kubectl explain backupschedule.spec.startingDeadlineSeconds` states the
+default, and `kubectl explain backupschedule.status.lastMissedSlot` states the
+one-hour horizon it reproduces, so both are discoverable from the cluster and
+not only from this page.
 
 ### Retention **reports**. It never deletes
 
