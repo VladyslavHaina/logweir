@@ -217,8 +217,13 @@ test("console_mode_lists_through_api_v1_and_projects_onto_the_resource_the_page_
     assert.equal(first.status.reachable, true);
     assert.equal(collection.items[1].status.reachable, undefined,
       "an unknown reachability is ABSENT, not false: the page's own badge says `unknown` for it");
-    assert.deepEqual(first.__contract.absent, ["status.conditions"],
-      "what the projection cannot supply is named on the object, not quietly defaulted");
+    assert.deepEqual(
+      first.__contract.absent,
+      ["status.conditions", "spec.auth.secretRef.passwordKey", "spec.auth.tlsCa"],
+      "what the projection cannot supply is named on the object, not quietly defaulted -- and " +
+        "since PLAT-07.2 that includes connection contract v1's two references, which the " +
+        "product API's ConnectionAuthView does not carry",
+    );
   } finally {
     wire.restore();
   }

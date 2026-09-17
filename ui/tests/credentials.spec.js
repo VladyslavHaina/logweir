@@ -59,14 +59,14 @@ test("changing target refreshes auth and plan hash, without carrying the previou
   const before = await wizard.preparePlan(state);
   const source = state.clusters.items.find((c) => c.spec.role === "source");
   source.spec.auth = { mode: "plaintext" };
-  wizard.selectTarget(state, source.metadata.name);
+  wizard.selectTarget(state, source.metadata.uid, source.metadata.name);
   assert.equal(state.fields.target.auth, undefined);
   assert.deepEqual(state.fields.target.bootstrapServers, source.spec.bootstrapServers);
   const after = await wizard.preparePlan(state);
   assert.notEqual(after.hash, before.hash);
   assert.doesNotMatch(after.bytes, /  auth:|restore-user/);
   source.spec.auth = { mode: "scramSha512", username: "second-user", tls: false };
-  wizard.selectTarget(state, source.metadata.name);
+  wizard.selectTarget(state, source.metadata.uid, source.metadata.name);
   const third = await wizard.preparePlan(state);
   assert.notEqual(third.hash, after.hash);
   assert.match(third.bytes, /username: "second-user"\n    tls: false/);

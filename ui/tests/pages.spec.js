@@ -99,9 +99,11 @@ import {
   renderRestoreWizard,
   renderTargetStep,
   resolvePoint,
+  resolveTarget,
   restorePointRoute,
   restoreRouteParams,
   restoreSelectorRoute,
+  selectTarget,
   stepStates,
   WINDOW_REFUSAL_SENTENCE,
   submitRestore,
@@ -1562,9 +1564,27 @@ test("the_target_step_lists_every_cluster_and_lets_the_runner_decide", async () 
       "is the value that was EMPTY before Task 28a, and an empty list is what threw",
   );
   const step4 = renderTargetStep(only);
+  // SINCE PLAT-07.2 the option's VALUE is the UID and the caption carries the
+  // role and the connection probe. Both halves are asserted: the identity is
+  // what is submitted, the caption is what a person reads.
+  const demoUid = fixture("wizard-clusters-source-only.json").items[0].metadata.uid;
   assert.ok(
-    step4.includes("<option value=\"demo\" selected>demo (role: source)</option>"),
-    "step 4 offers it, marks it selected, and prints its role beside the name: " + step4,
+    step4.includes("<option value=\"" + demoUid + "\" selected"),
+    "step 4 offers it and marks it selected BY UID: " + step4,
+  );
+  assert.ok(
+    step4.includes("data-name=\"demo\""),
+    "with the name beside the identity, for the refusal path: " + step4,
+  );
+  assert.ok(
+    step4.includes("demo (role: source) -- connection probe: "),
+    "and prints the role and the probe beside the name: " + step4,
+  );
+  assert.doesNotMatch(
+    step4,
+    /\bready\b/i,
+    "and never the WORD ready (matched bare, so `already` is not a false positive): a probe " +
+      "is not a readiness verdict (D2 section 9)",
   );
   assert.ok(
     step4.includes(TARGET_ROLE_SENTENCE),
@@ -1593,14 +1613,18 @@ test("the_target_step_lists_every_cluster_and_lets_the_runner_decide", async () 
     newestPoint(fixture("wizard-backups.json")),
   );
   assert.equal(both.targetClusterName, "orders-recovery", "a `role: target` cluster still wins");
+  const items = fixture("wizard-clusters.json").items;
+  const prodUid = items.find((c) => c.metadata.name === "orders-prod").metadata.uid;
+  const recoveryUid = items.find((c) => c.metadata.name === "orders-recovery").metadata.uid;
+  assert.equal(both.targetClusterUid, recoveryUid, "and the state is bound to its UID");
   const step4both = renderTargetStep(both);
   assert.ok(
-    step4both.includes("<option value=\"orders-prod\">orders-prod (role: source)</option>"),
+    step4both.includes("<option value=\"" + prodUid + "\" data-name=\"orders-prod\""),
     "the source cluster is offered too — the runner accepts it for `newTopic`: " + step4both,
   );
   assert.ok(
     step4both.includes(
-      "<option value=\"orders-recovery\" selected>orders-recovery (role: target)</option>",
+      "<option value=\"" + recoveryUid + "\" selected data-name=\"orders-recovery\"",
     ),
     "and the labelled one is the selected option: " + step4both,
   );
@@ -1619,8 +1643,12 @@ test("the_target_step_lists_every_cluster_and_lets_the_runner_decide", async () 
     fixture("wizard-backups.json"),
     newestPoint(fixture("wizard-backups.json")),
   );
-  chosen.targetClusterName = "orders-prod";
-  chosen.fields.target.bootstrapServers = ["kafka-0.orders.svc:9093"];
+  selectTarget(chosen, prodUid, "orders-prod");
+  assert.deepEqual(
+    chosen.fields.target.bootstrapServers,
+    ["kafka-0.orders.svc:9093"],
+    "selecting by uid carries that object's own addresses into the plan",
+  );
   const api = recordingApi();
   await submitRestore(chosen, api);
   assert.equal(
@@ -1643,8 +1671,8 @@ test("the_target_step_lists_every_cluster_and_lets_the_runner_decide", async () 
   const warned = renderTargetStep(scratch);
   assert.ok(warned.includes(SCRATCH_MARKER_WARNING), "the warning is printed: " + warned);
   assert.ok(
-    warned.includes("<option value=\"demo\" selected>"),
-    "…and the cluster is still offered: a warning is not a refusal",
+    warned.includes("<option value=\"" + demoUid + "\" selected"),
+    "and the cluster is still offered: a warning is not a refusal",
   );
   const stillRenders = await renderRestoreWizard(scratch);
   assert.ok(stillRenders.includes("id=\"plan-bytes\""), "the plan still renders in scratch mode");

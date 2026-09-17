@@ -167,7 +167,11 @@ test("a stale form callback cannot submit into its former namespace", async () =
         mode: { value: "plaintext" },
         username: { value: "" },
         secret: { value: "" },
+        passwordKey: { value: "" },
         tls: { checked: false },
+        tlsCaKind: { value: "none" },
+        tlsCaName: { value: "" },
+        tlsCaKey: { value: "" },
       },
       addEventListener(type, handler) {
         if (type === "submit") {
@@ -177,6 +181,11 @@ test("a stale form callback cannot submit into its former namespace", async () =
     };
     const target = node();
     target.querySelector = (selector) => selector === "#cluster-form" ? form : null;
+    // The clusters page wires one Test connection control per rendered row.
+    // This fake renders no rows, so the lookup answers with none -- and
+    // answering at all is what keeps the page's own error path out of this
+    // test's way.
+    target.querySelectorAll = () => [];
     const routes = createRouteLifecycle();
     const oldView = routes.begin();
     await mountClusters(target, "old-ns", (html) => [{ html: html }], oldView);

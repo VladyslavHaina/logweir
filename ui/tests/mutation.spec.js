@@ -35,7 +35,12 @@ import {
   readDraft,
 } from "../lifecycle.js";
 import { PRIVATE_KEY_REFUSAL } from "../render.js";
-import { CLUSTER_DRAFT_FIELDS, CLUSTER_FORM, mountClusters } from "../pages/clusters.js";
+import {
+  CLUSTER_DRAFT_FIELDS,
+  CLUSTER_FORM,
+  FORBIDDEN_CLUSTER_FIELDS,
+  mountClusters,
+} from "../pages/clusters.js";
 import { SCHEDULE_FORM, mountSchedules, renderSuspendStatus } from "../pages/schedules.js";
 import {
   WIZARD_DRAFT_FIELDS,
@@ -397,8 +402,23 @@ test("a_draft_keeps_only_declared_fields_and_never_private_key_text", () => {
   assert.equal(Object.getPrototypeOf(readDraft(key)), null, "and neither does a copy of one");
   assert.equal(readDraft(key).constructor, undefined, "a field nobody declared reads undefined");
   assert.equal(readDraft(formKey("other-ns", "any-form")), null, "a draft belongs to its namespace");
-  assert.ok(!CLUSTER_DRAFT_FIELDS.some((f) => /pass|secretValue|token/i.test(f)),
-    "the cluster form declares no credential field; its Secret field is a NAME");
+  // THE FORBIDDEN LIST IS DATA, NOT A REGEX. `passwordKey` is connection
+  // contract v1's NAME OF A DATA KEY -- which entry of the Secret the
+  // controller projects -- and a pattern like /pass/i cannot tell that from a
+  // field a password could be typed into. So the page holds the exact names
+  // that are forbidden and this asserts against those.
+  for (const forbidden of FORBIDDEN_CLUSTER_FIELDS) {
+    assert.equal(
+      CLUSTER_DRAFT_FIELDS.indexOf(forbidden),
+      -1,
+      "the cluster form declares no credential field; its Secret field is a NAME and its " +
+        "passwordKey field is a KEY's name: " + forbidden,
+    );
+  }
+  assert.ok(
+    CLUSTER_DRAFT_FIELDS.indexOf("passwordKey") !== -1,
+    "and contract v1's data key IS kept, because a reference is not a credential",
+  );
 });
 
 test("a_reload_starts_from_an_empty_draft_and_nothing_touches_browser_storage", async () => {
