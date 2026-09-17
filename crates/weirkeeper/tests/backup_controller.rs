@@ -9653,3 +9653,562 @@ async fn a_log_window_carrying_no_phase_line_does_not_blank_the_stored_phase() {
         "…which is the consequence: `readback` is one of D3 §2.5's three backup verifying steps"
     );
 }
+// ===========================================================================
+// D2 W10 — destination-backed execution (PLAT-08.1)
+//
+// The rows here are about ONE question: what does a run that names a saved
+// `BackupDestination` address, and what does the controller's own process
+// contribute to it. `tests/plan_addressing.rs` holds the two rows that need a
+// mutated PROCESS ENVIRONMENT (a separate binary, for its own reason); these
+// are the rows that do not.
+// ===========================================================================
+
+use weirkeeper::check::policy::{IdentityLocation, Policy};
+use weirkeeper::controllers::backup::{
+    admit_destination, desired_execution_inputs_for_destination, destination_hold_budget,
+    destination_hold_expired, engine_custom_ca_allowed, engine_custom_ca_refusal,
+    DestinationAdmission, DESTINATION_HOLD_MAX_SECONDS,
+};
+use weirkeeper::crds::backup_destination::BackupDestination;
+use weirkeeper::destination::{
+    resolve, DestinationRole, ResolvedDestination, ResolvedGrant, ARCHIVE_CA_PLAN_KEY,
+    ARCHIVE_CREDENTIALS_ENV, AWS_ALLOW_HTTP_ENV, AWS_ENDPOINT_URL_ENV, AWS_METADATA_ENDPOINT_ENV,
+    AWS_REGION_ENV, AWS_VIRTUAL_HOSTED_ENV, STORE_CONTRACT_VERSION, STORE_CONTRACT_VERSION_ARG,
+    STORE_CONTRACT_VERSION_ENV,
+};
+
+/// A minimal, PARSEABLE PEM: `30 06 aa 01 02 03 04 05 06`, a DER SEQUENCE of
+/// length six. `check_ca_bundle` refuses anything that is not a real PEM
+/// bundle, and a fixture that only LOOKS like one would have this row passing
+/// for the wrong reason.
+const CA_PEM: &str = "-----BEGIN CERTIFICATE-----\nMAaqAQIDBAUG\n-----END CERTIFICATE-----\n";
+/// A DIFFERENT bundle, for the digest bind.
+const OTHER_CA_PEM: &str = "-----BEGIN CERTIFICATE-----\nMAa7AQIDBAUG\n-----END CERTIFICATE-----\n";
+
+const DEST_A_UID: &str = "d0000000-0000-4000-8000-00000000000a";
+const DEST_B_UID: &str = "d0000000-0000-4000-8000-00000000000b";
+
+/// `dest-a`: MinIO over TLS, path-style, a region, a separate read grant, and
+/// NO CA bundle — the U1 gate (`ENGINE_CUSTOM_CA_VERIFIED`) refuses a bundle
+/// for engine-driven runs by default, and these rows are about addressing
+/// rather than about that gate. `a_ca_bundle_is_refused_for_an_engine_driven_run`
+/// is the row that carries one.
+fn dest_a_value() -> Value {
+    serde_json::json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupDestination",
+        "metadata": {
+            "name": "dest-a", "namespace": NS, "uid": DEST_A_UID,
+            "generation": 3, "resourceVersion": "1001"
+        },
+        "spec": {
+            "storage": {
+                "provider": "S3", "bucket": "lw-a", "prefix": "team-a/prod",
+                "region": "us-east-1", "endpoint": "https://minio-a.storage.svc:9000",
+                "addressing": "PathStyle"
+            },
+            "transport": {"security": "TLS"},
+            "access": {
+                "archiveWrite": {"mode": "SecretKeys", "secret": {
+                    "name": "lw-a-writer",
+                    "accessKeyIdKey": "access-key-id",
+                    "secretAccessKeyKey": "secret-access-key"
+                }},
+                "archiveRead": {"mode": "SecretKeys", "secret": {
+                    "name": "lw-a-reader",
+                    "accessKeyIdKey": "access-key-id",
+                    "secretAccessKeyKey": "secret-access-key"
+                }},
+                "evidenceRead": {"mode": "ArchiveReadGrant"}
+            }
+        },
+        "status": {
+            "observedGeneration": 3,
+            "conditions": [{
+                "type": "Valid", "status": "True", "reason": "Valid",
+                "observedGeneration": 3
+            }]
+        }
+    })
+}
+
+/// `dest-b`: a DIFFERENT bucket on a DIFFERENT endpoint over EXPLICIT plaintext
+/// HTTP, with a different credential and a session token. The second half of
+/// the two-destination contract (D2 §3.13).
+fn dest_b_value() -> Value {
+    serde_json::json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupDestination",
+        "metadata": {
+            "name": "dest-b", "namespace": NS, "uid": DEST_B_UID,
+            "generation": 1, "resourceVersion": "2002"
+        },
+        "spec": {
+            "storage": {
+                "provider": "S3", "bucket": "lw-b", "prefix": "",
+                "endpoint": "http://minio-b.storage.svc:9000", "addressing": "PathStyle"
+            },
+            "transport": {"security": "InsecureHTTP"},
+            "access": {
+                "archiveWrite": {"mode": "SecretKeys", "secret": {
+                    "name": "lw-b-writer",
+                    "accessKeyIdKey": "id",
+                    "secretAccessKeyKey": "key",
+                    "sessionTokenKey": "token"
+                }}
+            }
+        },
+        "status": {
+            "observedGeneration": 1,
+            "conditions": [{
+                "type": "Valid", "status": "True", "reason": "Valid",
+                "observedGeneration": 1
+            }]
+        }
+    })
+}
+
+fn destination(value: Value) -> BackupDestination {
+    serde_json::from_value(value).expect("the fixture is a BackupDestination")
+}
+
+fn resolved(value: Value, role: DestinationRole) -> ResolvedDestination {
+    resolve(&destination(value), role, &Policy::defaults()).expect("the fixture resolves")
+}
+
+/// [`backup`], re-pointed at a saved destination: the sentinel `archive.url`
+/// the CEL rule requires, no `secretRef`, and the ref itself.
+fn destination_backed_backup(name: &str) -> Backup {
+    let mut value: Value = serde_json::from_str(&backup_json()).expect("the fixture is JSON");
+    // THE HOLD IS MEASURED FROM `creationTimestamp`, the one timestamp a
+    // `Backup` carries that no controller wrote. A fixture without one is not
+    // a fixture of anything an API server ever serves.
+    value["metadata"]["creationTimestamp"] = serde_json::json!("2026-11-09T03:00:00Z");
+    value["spec"]["archive"] = serde_json::json!({
+        "url": format!("logweir-destination://{name}")
+    });
+    value["spec"]["destinationRef"] = serde_json::json!({ "name": name });
+    serde_json::from_value(value).expect("the mutated fixture is a Backup")
+}
+
+/// **THE FROZEN SNAPSHOT IS WHAT THE JOB IS RENDERED FROM, AND A LATER EDIT TO
+/// THE DESTINATION CANNOT REACH A RUN THAT ALREADY EXISTS.**
+///
+/// # The defect this closes
+///
+/// D2 §3.7. A runner Job is created once and may be RE-created: garbage
+/// collected, a node lost, a controller restarted mid-run. If the second Job
+/// were rendered from the destination as it reads NOW, an access-key rotation
+/// or a re-pointed endpoint between the freeze and the re-creation would change
+/// what an approved, half-written run addresses — silently, with the plan
+/// document still saying the old thing.
+///
+/// KILLS: rendering `runner_job_spec_from_inputs`' destination environment from
+/// a freshly resolved `ResolvedDestination` instead of from
+/// `inputs.destination`. The mutant passes every row that freezes and renders
+/// in one pass; this one freezes against `dest-a` and renders against a
+/// snapshot while `dest-b` is what the cluster now holds.
+#[test]
+fn the_job_is_rendered_from_the_frozen_destination_and_not_from_the_object() {
+    let backed = destination_backed_backup("dest-a");
+    let a = resolved(dest_a_value(), DestinationRole::ArchiveWrite);
+    let frozen = desired_execution_inputs_for_destination(
+        &backed,
+        &prod_cluster(),
+        &weirkeeper::backup_execution::ResolvedSelection::named(&backed.spec),
+        Some(&a),
+    )
+    .expect("the destination-backed inputs resolve");
+
+    let snapshot = frozen
+        .inputs
+        .destination
+        .as_ref()
+        .expect("a destination-backed run freezes its destination");
+    assert_eq!(snapshot.uid, DEST_A_UID, "the UID is frozen, not the name");
+    assert_eq!(snapshot.generation, 3);
+    assert_eq!(
+        snapshot.location_digest, a.location_digest,
+        "the digest a recovery point is indexed by comes from the resolution"
+    );
+
+    // ONE RENDERER, TWO CALLERS. The snapshot's environment is the live
+    // resolution's environment, variable for variable — that equality is what
+    // makes "rendered from the snapshot" safe rather than a second answer.
+    assert_eq!(
+        snapshot.job_env().literals,
+        a.job_env().literals,
+        "the frozen block renders the same environment the live object does"
+    );
+    assert_eq!(snapshot.job_env().from_secret, a.job_env().from_secret);
+
+    // AND IT IS `dest-a`'s ENVIRONMENT, not `dest-b`'s, even though the two
+    // differ on every setting that matters.
+    let b = resolved(dest_b_value(), DestinationRole::ArchiveWrite);
+    let env = snapshot.job_env();
+    assert_eq!(
+        env.literal(AWS_ALLOW_HTTP_ENV),
+        Some("false"),
+        "dest-a declares TLS; dest-b declares InsecureHTTP, and a run frozen against the first \
+         must never take the second's transport"
+    );
+    assert_eq!(b.job_env().literal(AWS_ALLOW_HTTP_ENV), Some("true"));
+    assert_eq!(env.literal(AWS_REGION_ENV), Some("us-east-1"));
+    assert_eq!(
+        env.literal(AWS_VIRTUAL_HOSTED_ENV),
+        Some("false"),
+        "PathStyle, from the addressing field alone"
+    );
+    assert_eq!(
+        env.literal(AWS_METADATA_ENDPOINT_ENV),
+        Some(logweir_store::DEAD_METADATA_ENDPOINT),
+        "G16: a missing workload identity is a refusal and never the node's instance role"
+    );
+    assert_eq!(
+        env.literal(STORE_CONTRACT_VERSION_ENV),
+        Some(STORE_CONTRACT_VERSION)
+    );
+    assert_eq!(env.literal(ARCHIVE_CREDENTIALS_ENV), Some("static"));
+    assert_eq!(
+        env.literal(AWS_ENDPOINT_URL_ENV),
+        None,
+        "ABSENT BY CONSTRUCTION: the endpoint travels inside the plan's own storage block, where \
+         the runner reads it explicitly. A variable `AmazonS3Builder::from_env()` would sweep up \
+         is a second, silent answer to `where is the bucket`"
+    );
+
+    // THE PLAN'S STORAGE BLOCK IS THE DESTINATION'S LOCATION, and the frozen
+    // addressing environment is EMPTY — the controller's process contributes
+    // nothing at all to a destination-backed run.
+    assert_eq!(frozen.inputs.archive.storage, a.plan_storage());
+    assert!(
+        frozen.inputs.archive.addressing_env.is_empty(),
+        "SEC-ENVHTTP: a destination-backed run freezes no forwarded addressing. Got {:?}",
+        frozen.inputs.archive.addressing_env
+    );
+
+    // THE HANDSHAKE IS ON THE ARGV.
+    let argv = frozen.inputs.runner.args.clone();
+    let at = argv
+        .iter()
+        .position(|a| a == STORE_CONTRACT_VERSION_ARG)
+        .unwrap_or_else(|| panic!("the argv carries the store-contract flag: {argv:?}"));
+    assert_eq!(
+        argv.get(at + 1).map(String::as_str),
+        Some(STORE_CONTRACT_VERSION)
+    );
+
+    // AND A LEGACY RUN CARRIES NEITHER.
+    let legacy = desired_for(&backup());
+    assert!(legacy.inputs.destination.is_none());
+    assert!(
+        !legacy
+            .inputs
+            .runner
+            .args
+            .iter()
+            .any(|a| a == STORE_CONTRACT_VERSION_ARG),
+        "the flag is the promise that every store setting arrives explicitly; on the legacy path \
+         it does not, so the flag is absent and an older runner still runs the argv"
+    );
+}
+
+/// **TWO DESTINATIONS IN ONE NAMESPACE SHARE NO BUCKET, NO CREDENTIAL AND NO
+/// EVIDENCE LOCATION** — D2 §3.13's acceptance contract, at the unit layer.
+///
+/// W14 proves it live; this row proves the CONTROLLER never mixes them, which
+/// is the half a live test cannot isolate from a MinIO policy being wrong.
+///
+/// KILLS: any `job_env` that reads a setting from a source other than the
+/// resolution it was called on — the mutant "take `allow_http` from the
+/// addressing style" (defect UI-HTTPDOWNGRADE's server-side twin) makes
+/// `dest-a` and `dest-b` agree, and this row separates them.
+#[test]
+fn two_destinations_share_no_bucket_credential_or_evidence_location() {
+    let a = resolved(dest_a_value(), DestinationRole::ArchiveWrite);
+    let b = resolved(dest_b_value(), DestinationRole::ArchiveWrite);
+
+    assert_ne!(a.plan_storage(), b.plan_storage());
+    assert_ne!(a.evidence_storage(), b.evidence_storage());
+    assert_ne!(a.location_digest, b.location_digest);
+
+    let (ea, eb) = (a.job_env(), b.job_env());
+    let secrets = |env: &weirkeeper::destination::DestinationEnv| {
+        env.from_secret
+            .iter()
+            .map(|e| e.secret_name.clone())
+            .collect::<std::collections::BTreeSet<_>>()
+    };
+    assert!(
+        secrets(&ea).is_disjoint(&secrets(&eb)),
+        "neither destination's Job may reference the other's Secret: {:?} vs {:?}",
+        secrets(&ea),
+        secrets(&eb)
+    );
+    assert_eq!(ea.literal(AWS_ALLOW_HTTP_ENV), Some("false"));
+    assert_eq!(
+        eb.literal(AWS_ALLOW_HTTP_ENV),
+        Some("true"),
+        "dest-b declares InsecureHTTP EXPLICITLY, which is the only thing that may produce this"
+    );
+
+    // AND NO CREDENTIAL VALUE IS ANYWHERE IN EITHER RESOLUTION. A resolution is
+    // serialised into a frozen plan `ConfigMap`, which has no encryption at
+    // rest and a much wider read surface than a Secret.
+    for resolved in [&a, &b] {
+        let text = serde_json::to_string(&resolved.snapshot()).expect("the snapshot serialises");
+        for forbidden in ["AKIA", "secret-access-key-value", "password"] {
+            assert!(
+                !text.contains(forbidden),
+                "the frozen snapshot names references and never values: {text}"
+            );
+        }
+    }
+}
+
+/// **AN ABSENT DESTINATION HOLDS, AND THE HOLD ENDS.**
+///
+/// D2 §3.6 step 1. The ref and the object are two `kubectl apply`s in one
+/// directory and the order is the server's, so a first-pass refusal would fail
+/// a correct manifest set on a race the operator cannot influence — and
+/// `Backup.spec` is CEL-immutable, so that refusal could never be repaired in
+/// place. It ends because a hold that never ends is an object at `Pending` for
+/// the life of the cluster with nothing watching it.
+///
+/// KILLS: `is_hold()` widened to every refusal (a `DestinationRoleNotConfigured`
+/// would then requeue forever), and the expiry dropped (the hold would never
+/// become terminal).
+#[tokio::test]
+async fn an_absent_destination_holds_within_its_budget_and_then_fails() {
+    let backup = destination_backed_backup("dest-a");
+    let created = backup
+        .metadata
+        .creation_timestamp
+        .clone()
+        .map(|t| t.0)
+        .unwrap_or_else(|| utc(2026, 11, 9, 3, 0));
+
+    assert_eq!(
+        destination_hold_budget(&backup),
+        DESTINATION_HOLD_MAX_SECONDS,
+        "`deadlineSeconds: 3600` is capped at the ten-minute ceiling"
+    );
+    let mut short = backup.clone();
+    short.spec.deadline_seconds = 60;
+    assert_eq!(
+        destination_hold_budget(&short),
+        60,
+        "a run allowed sixty seconds does not spend ten minutes waiting to start one"
+    );
+
+    let routes = vec![Route {
+        method: "GET",
+        path_suffix: "/backupdestinations/dest-a",
+        status: 404,
+        body: serde_json::json!({
+            "kind": "Status", "apiVersion": "v1", "status": "Failure",
+            "reason": "NotFound", "code": 404,
+            "message": "backupdestinations.logweir.dev \"dest-a\" not found"
+        })
+        .to_string(),
+    }];
+    let (client, _r, _b) = mock_client_recording_bodies(routes.clone());
+    match admit_destination(&backup, &client, NS, created + chrono::Duration::seconds(5))
+        .await
+        .expect("the read succeeds")
+    {
+        DestinationAdmission::Holding { reason, message } => {
+            assert_eq!(reason, "DestinationNotFound");
+            assert!(
+                message.contains("dest-a") && message.contains("namespace-local"),
+                "the hold names the object and why the ref is not resolved elsewhere: {message}"
+            );
+        }
+        other => panic!("an absent destination holds within its budget; got {other:?}"),
+    }
+
+    let (client, _r, _b) = mock_client_recording_bodies(routes);
+    let expired = created + chrono::Duration::seconds(DESTINATION_HOLD_MAX_SECONDS + 1);
+    assert!(destination_hold_expired(&backup, expired));
+    match admit_destination(&backup, &client, NS, expired).await {
+        Err(e) => assert!(
+            e.to_string().contains("DestinationNotFound"),
+            "the terminal refusal carries the SAME reason the hold carried, so an operator reads \
+             one fault and not two: {e}"
+        ),
+        Ok(other) => panic!("the hold ends; got {other:?}"),
+    }
+}
+
+/// **A DESTINATION THAT DECLARES A CA BUNDLE IS REFUSED FOR AN ENGINE-DRIVEN
+/// RUN UNTIL SOMEBODY MEASURES THE ENGINE.**
+///
+/// D2 §3.5's `[UNVERIFIED — U1]`. The claim is that the engine honours
+/// `SSL_CERT_FILE`; it is plausible and undemonstrated, and if it is wrong the
+/// observable failure is a TLS handshake inside the engine child reported as
+/// an opaque operational error with no mention of certificates.
+///
+/// KILLS: `ENGINE_CUSTOM_CA_VERIFIED = true` flipped without the measurement,
+/// and the gate dropped from `admit_destination`.
+#[tokio::test]
+async fn a_ca_bundle_is_refused_for_an_engine_driven_run() {
+    let mut value = dest_a_value();
+    value["spec"]["transport"] = serde_json::json!({
+        "security": "TLS",
+        "caBundle": {"configMapName": "minio-a-ca", "key": "ca.crt"}
+    });
+    let backup = destination_backed_backup("dest-a");
+    let (client, _r, _b) = mock_client_recording_bodies(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/backupdestinations/dest-a",
+            status: 200,
+            body: value.to_string(),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/configmaps/minio-a-ca",
+            status: 200,
+            body: serde_json::json!({
+                "apiVersion": "v1", "kind": "ConfigMap",
+                "metadata": {"name": "minio-a-ca", "namespace": NS},
+                "data": {"ca.crt": CA_PEM}
+            })
+            .to_string(),
+        },
+    ]);
+    let err = admit_destination(&backup, &client, NS, utc(2026, 11, 9, 3, 17))
+        .await
+        .expect_err("an unmeasured engine CA is refused");
+    assert!(
+        err.to_string().contains("CaBundleUnsupportedByEngine"),
+        "the refusal names the check code so the Backup and the destination agree: {err}"
+    );
+
+    // THE POLICY KEY IS THE ADMINISTRATOR'S ESCAPE HATCH, and it is the only
+    // one: a namespace operator cannot set it.
+    assert!(!engine_custom_ca_allowed(&Policy::defaults()));
+    let mut opted_in = Policy::defaults();
+    opted_in.engine.allow_unverified_custom_ca = true;
+    assert!(engine_custom_ca_allowed(&opted_in));
+    assert!(
+        engine_custom_ca_refusal(NS, "dest-a").contains("engine.allowUnverifiedCustomCa"),
+        "the message says which key an administrator sets"
+    );
+}
+
+/// **`evidenceRead` ABSENT IS A DEFINED ANSWER AND NOT A SILENCE.**
+///
+/// D2 §3.9 step 2. A destination with no reader gets `NotAttempted` naming the
+/// field to add and the command that verifies the receipt without a
+/// controller-held credential — never a green badge, and never `Invalid`,
+/// which would be a claim about a document nobody fetched.
+///
+/// KILLS: falling back to the controller's global handle when the grant is
+/// `NotConfigured` — the mutant reads a DIFFERENT bucket with a DIFFERENT
+/// principal and reports whatever it finds there.
+#[test]
+fn an_unconfigured_evidence_read_is_not_configured_and_not_a_wider_grant() {
+    // `dest-b` declares `archiveWrite` and nothing else.
+    let b = resolved(dest_b_value(), DestinationRole::EvidenceRead);
+    assert_eq!(
+        b.grant,
+        ResolvedGrant::NotConfigured,
+        "an absent evidenceRead is a defined answer and NEVER a fall-back to the write grant"
+    );
+
+    // `dest-a` asks for the explicit read grant, which is rule R9: a write
+    // grant is never reused to read evidence back.
+    let a = resolved(dest_a_value(), DestinationRole::EvidenceRead);
+    match a.grant {
+        ResolvedGrant::SecretKeys { ref secret, .. } => assert_eq!(secret, "lw-a-reader"),
+        ref other => panic!("ArchiveReadGrant resolves to the READ secret; got {other:?}"),
+    }
+
+    // AND `ControllerIdentity` IS ALLOWLISTED BY THE INSTALLATION AND NOT BY
+    // THE NAMESPACE. A destination that asks for it at a location the chart
+    // did not list is refused, so an operator cannot point the controller's
+    // own principal anywhere they can name.
+    let mut value = dest_b_value();
+    value["spec"]["access"]["evidenceRead"] = serde_json::json!({"mode": "ControllerIdentity"});
+    let refused = resolve(
+        &destination(value.clone()),
+        DestinationRole::EvidenceRead,
+        &Policy::defaults(),
+    )
+    .expect_err("an unlisted location is refused");
+    assert_eq!(refused.code.as_str(), "ControllerIdentityNotAllowlisted");
+
+    let mut policy = Policy::defaults();
+    policy.evidence.controller_identity_locations = vec![IdentityLocation {
+        bucket: "lw-b".to_string(),
+        endpoint: "http://minio-b.storage.svc:9000".to_string(),
+        region: String::new(),
+    }];
+    let allowed = resolve(&destination(value), DestinationRole::EvidenceRead, &policy)
+        .expect("the listed location resolves");
+    assert_eq!(allowed.grant, ResolvedGrant::ControllerIdentity);
+}
+
+/// **THE CA BYTES AND THE DIGEST THAT NAMES THEM TRAVEL TOGETHER, OR NOTHING
+/// IS FROZEN.**
+///
+/// D2 §3.7: the bundle is copied into the same immutable plan `ConfigMap` and
+/// its digest is part of the canonical snapshot. A plan whose bytes are not the
+/// bytes its own snapshot commits to would let a rotated root be swapped into a
+/// run that already exists.
+///
+/// KILLS: `freeze_with_ca` accepting any bytes, and the fourth `ConfigMap` key
+/// being written without the digest bind.
+#[test]
+fn a_frozen_ca_bundle_is_bound_to_the_digest_in_its_own_snapshot() {
+    use weirkeeper::backup_execution::FrozenInputs;
+    let backed = destination_backed_backup("dest-a");
+    let mut value = dest_a_value();
+    value["spec"]["transport"] = serde_json::json!({
+        "security": "TLS",
+        "caBundle": {"configMapName": "minio-a-ca", "key": "ca.crt"}
+    });
+    let pem = CA_PEM;
+    let with_ca = resolve(
+        &destination(value),
+        DestinationRole::ArchiveWrite,
+        &Policy::defaults(),
+    )
+    .expect("the fixture resolves")
+    .with_ca(&weirkeeper::destination::CaObservation::Present(
+        pem.as_bytes().to_vec(),
+    ))
+    .expect("the bundle is usable");
+
+    let frozen = desired_execution_inputs_for_destination(
+        &backed,
+        &prod_cluster(),
+        &weirkeeper::backup_execution::ResolvedSelection::named(&backed.spec),
+        Some(&with_ca),
+    )
+    .expect("the inputs resolve");
+    let documents = frozen.documents().expect("the documents render");
+    assert_eq!(
+        documents.get(ARCHIVE_CA_PLAN_KEY).map(String::as_str),
+        Some(pem),
+        "the bundle is a FOURTH key beside the plan, in the run's own immutable object"
+    );
+
+    // THE BIND, IN BOTH DIRECTIONS.
+    let swapped =
+        FrozenInputs::freeze_with_ca(frozen.inputs.clone(), Some(OTHER_CA_PEM.to_string()))
+            .expect_err("bytes the snapshot does not name are refused");
+    assert!(swapped.to_string().contains("digest"), "got {swapped}");
+    let missing = FrozenInputs::freeze_with_ca(frozen.inputs.clone(), None)
+        .expect_err("a snapshot naming a CA with no bundle beside it is refused");
+    assert!(
+        missing.to_string().contains(ARCHIVE_CA_PLAN_KEY),
+        "got {missing}"
+    );
+    let unexpected =
+        FrozenInputs::freeze_with_ca(desired_for(&backup()).inputs, Some(pem.to_string()))
+            .expect_err("a bundle nothing in the document commits to is refused");
+    assert!(
+        unexpected.to_string().contains("commit"),
+        "got {unexpected}"
+    );
+}

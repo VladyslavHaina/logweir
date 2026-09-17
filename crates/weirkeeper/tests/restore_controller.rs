@@ -5656,3 +5656,436 @@ fn no_terminal_restore_builder_deletes_the_condition_that_says_why_the_run_faile
         );
     }
 }
+// ===========================================================================
+// D2 W10 — destination-backed restore (PLAT-08.1, D2 §3.6 checks 5-9)
+// ===========================================================================
+
+use weirkeeper::check::policy::Policy as InstallationPolicy;
+use weirkeeper::controllers::restore::{
+    admit_restore_destinations, plan_config_map_with_destinations,
+    runner_job_spec_with_destinations, RestoreDestinationAdmission, RestoreDestinations,
+};
+use weirkeeper::crds::backup_destination::BackupDestination;
+use weirkeeper::destination::{
+    resolve, DestinationRole, EVIDENCE_CA_PLAN_KEY, EVIDENCE_CREDENTIALS_ENV,
+    STORE_CONTRACT_VERSION_ARG, STORE_CONTRACT_VERSION_ENV,
+};
+
+const SOURCE_UID: &str = "d0000000-0000-4000-8000-0000000000a1";
+const EVIDENCE_UID: &str = "d0000000-0000-4000-8000-0000000000b1";
+
+/// A `BackupDestination` whose location is EXACTLY what `PLAN_BYTES`' `source`
+/// block names — bucket, prefix, region, endpoint, path-style and allow_http,
+/// all six. Check 7 compares on every one of them.
+fn source_destination_value() -> Value {
+    serde_json::json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupDestination",
+        "metadata": {
+            "name": "src", "namespace": NS, "uid": SOURCE_UID,
+            "generation": 1, "resourceVersion": "11"
+        },
+        "spec": {
+            "storage": {
+                "provider": "S3", "bucket": "kafka-backups", "prefix": "drill-demo",
+                "region": "us-east-1", "endpoint": "http://minio.logweir-t20:9000",
+                "addressing": "PathStyle"
+            },
+            "transport": {"security": "InsecureHTTP"},
+            "access": {
+                "archiveWrite": {"mode": "SecretKeys", "secret": {
+                    "name": "src-writer",
+                    "accessKeyIdKey": "access-key-id",
+                    "secretAccessKeyKey": "secret-access-key"
+                }},
+                "archiveRead": {"mode": "SecretKeys", "secret": {
+                    "name": "src-reader",
+                    "accessKeyIdKey": "access-key-id",
+                    "secretAccessKeyKey": "secret-access-key"
+                }}
+            }
+        },
+        "status": {
+            "observedGeneration": 1,
+            "conditions": [{"type": "Valid", "status": "True", "reason": "Valid",
+                            "observedGeneration": 1}]
+        }
+    })
+}
+
+/// A SECOND destination — a different bucket and a different credential —
+/// whose evidence root is what `PLAN_BYTES`' `evidence` block names. The
+/// two-destination shape D2 §3.13 is about.
+fn evidence_destination_value() -> Value {
+    serde_json::json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupDestination",
+        "metadata": {
+            "name": "ev", "namespace": NS, "uid": EVIDENCE_UID,
+            "generation": 1, "resourceVersion": "22"
+        },
+        "spec": {
+            "storage": {
+                "provider": "S3", "bucket": "logweir-evidence", "prefix": "",
+                "region": "us-east-1", "endpoint": "http://minio.logweir-t20:9000",
+                "addressing": "PathStyle"
+            },
+            "transport": {"security": "InsecureHTTP"},
+            "access": {
+                "archiveWrite": {"mode": "SecretKeys", "secret": {
+                    "name": "ev-writer",
+                    "accessKeyIdKey": "access-key-id",
+                    "secretAccessKeyKey": "secret-access-key"
+                }}
+            }
+        },
+        "status": {
+            "observedGeneration": 1,
+            "conditions": [{"type": "Valid", "status": "True", "reason": "Valid",
+                            "observedGeneration": 1}]
+        }
+    })
+}
+
+fn built(value: Value) -> BackupDestination {
+    serde_json::from_value(value).expect("the fixture is a BackupDestination")
+}
+
+fn destinations() -> RestoreDestinations {
+    RestoreDestinations {
+        source: resolve(
+            &built(source_destination_value()),
+            DestinationRole::ArchiveRead,
+            &InstallationPolicy::defaults(),
+        )
+        .expect("the source resolves"),
+        evidence: resolve(
+            &built(evidence_destination_value()),
+            DestinationRole::EvidenceWrite,
+            &InstallationPolicy::defaults(),
+        )
+        .expect("the evidence destination resolves"),
+    }
+}
+
+/// [`restore`], re-pointed at the two saved destinations.
+fn destination_backed_restore() -> Restore {
+    let mut value: Value = serde_json::from_str(&restore_json(PLAN_BYTES, APPROVAL, NAME))
+        .expect("the fixture is JSON");
+    value["spec"]["sourceArchive"] = serde_json::json!({"url": "logweir-destination://src"});
+    value["spec"]["sourceDestinationRef"] = serde_json::json!({"name": "src"});
+    value["spec"]["evidenceDestinationRef"] = serde_json::json!({"name": "ev"});
+    serde_json::from_value(value).expect("the mutated fixture is a Restore")
+}
+
+fn destination_routes(source: Value, evidence: Value) -> Vec<Route> {
+    vec![
+        Route {
+            method: "GET",
+            path_suffix: "/backupdestinations/src",
+            status: 200,
+            body: source.to_string(),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/backupdestinations/ev",
+            status: 200,
+            body: evidence.to_string(),
+        },
+    ]
+}
+
+/// **THE APPROVED PLAN AND THE NAMED DESTINATION MUST BE THE SAME LOCATION, ON
+/// EVERY FIELD.**
+///
+/// # Why this check exists at all
+///
+/// D2 §3.6 checks 7 and 8. The RUNNER reads its location out of the PLAN, not
+/// out of the destination — the plan bytes are what an approver signed. So a
+/// destination whose location differs contributes only its CREDENTIALS, and the
+/// run then presents that credential at a location nobody approved. Without
+/// these two checks a saved destination on this path is a credential holder
+/// with no location semantics at all.
+///
+/// KILLS: dropping check 7 (a re-pointed `src` is admitted and its reader key
+/// is presented at the plan's bucket), dropping check 8 (the scorecard is
+/// written under a credential for a bucket the plan does not name), and
+/// comparing only the bucket instead of all six fields (`allow_http` flipped
+/// between the plan and the destination is then invisible).
+#[tokio::test]
+async fn the_approved_plan_and_the_named_destinations_must_be_one_location() {
+    let now = utc(2026, 9, 7, 14, 30);
+    let restore = destination_backed_restore();
+
+    // ---- both agree: admitted ------------------------------------------
+    let (client, _r, _b) = mock_client_recording_bodies(destination_routes(
+        source_destination_value(),
+        evidence_destination_value(),
+    ));
+    match admit_restore_destinations(&restore, &client, NS, now)
+        .await
+        .expect("the reads succeed")
+    {
+        RestoreDestinationAdmission::Resolved(pair) => {
+            assert_eq!(pair.source.uid, SOURCE_UID);
+            assert_eq!(pair.evidence.uid, EVIDENCE_UID);
+        }
+        other => panic!("matching locations are admitted; got {other:?}"),
+    }
+
+    // ---- the SOURCE moved: PlanDestinationMismatch, terminal -------------
+    let mut moved = source_destination_value();
+    moved["spec"]["storage"]["bucket"] = serde_json::json!("somewhere-else");
+    let (client, _r, _b) =
+        mock_client_recording_bodies(destination_routes(moved, evidence_destination_value()));
+    let error = admit_restore_destinations(&restore, &client, NS, now)
+        .await
+        .expect_err("a destination that is not the plan's location is refused");
+    assert!(
+        error.to_string().contains("PlanDestinationMismatch"),
+        "got {error}"
+    );
+    assert!(
+        error.to_string().contains("kafka-backups") && error.to_string().contains("somewhere-else"),
+        "the message names BOTH locations, because the operator's job is to compare them: {error}"
+    );
+    assert!(
+        !error.to_string().contains("src-reader"),
+        "and it names no credential: {error}"
+    );
+
+    // ---- ONE FIELD is enough: `allow_http` flipped -----------------------
+    let mut tls = source_destination_value();
+    tls["spec"]["transport"] = serde_json::json!({"security": "TLS"});
+    tls["spec"]["storage"]["endpoint"] = serde_json::json!("https://minio.logweir-t20:9000");
+    let (client, _r, _b) =
+        mock_client_recording_bodies(destination_routes(tls, evidence_destination_value()));
+    let error = admit_restore_destinations(&restore, &client, NS, now)
+        .await
+        .expect_err("a transport the plan does not name is refused");
+    assert!(
+        error.to_string().contains("PlanDestinationMismatch"),
+        "the comparison is exact on all six fields, not on the bucket: {error}"
+    );
+
+    // ---- the EVIDENCE destination moved ----------------------------------
+    let mut elsewhere = evidence_destination_value();
+    elsewhere["spec"]["storage"]["bucket"] = serde_json::json!("another-evidence-bucket");
+    let (client, _r, _b) =
+        mock_client_recording_bodies(destination_routes(source_destination_value(), elsewhere));
+    let error = admit_restore_destinations(&restore, &client, NS, now)
+        .await
+        .expect_err("an evidence destination that is not the plan's is refused");
+    assert!(
+        error
+            .to_string()
+            .contains("PlanEvidenceDestinationMismatch"),
+        "got {error}"
+    );
+}
+
+/// **HALF A DESTINATION-BACKED RESTORE IS REFUSED, AND AN ABSENT DESTINATION
+/// HOLDS.**
+///
+/// D2 §3.6 check 5, and the CEL pair rule re-evaluated. The pair rule is
+/// re-checked here for the reason every re-validated rule in this crate exists:
+/// an object admitted by an OLDER CRD revision reaches this controller
+/// unchecked, and half a destination-backed restore reads from a saved
+/// destination while writing its scorecard wherever the inline block says.
+///
+/// KILLS: trusting the CEL pair rule (the `(Some, None)` arm removed), and
+/// making an absent destination terminal instead of a hold.
+#[tokio::test]
+async fn half_a_destination_backed_restore_is_refused_and_an_absent_one_holds() {
+    let now = utc(2026, 9, 7, 14, 30);
+
+    let mut half: Value = serde_json::from_str(&restore_json(PLAN_BYTES, APPROVAL, NAME))
+        .expect("the fixture is JSON");
+    half["spec"]["sourceDestinationRef"] = serde_json::json!({"name": "src"});
+    let half: Restore = serde_json::from_value(half).expect("the mutated fixture is a Restore");
+    let (client, _r, _b) = mock_client_recording_bodies(Vec::new());
+    let error = admit_restore_destinations(&half, &client, NS, now)
+        .await
+        .expect_err("one ref without its partner is refused");
+    assert!(
+        error.to_string().contains("evidenceDestinationRef")
+            || error.to_string().contains("sourceDestinationRef"),
+        "the refusal names the field: {error}"
+    );
+
+    let (client, _r, _b) = mock_client_recording_bodies(vec![Route {
+        method: "GET",
+        path_suffix: "/backupdestinations/src",
+        status: 404,
+        body: serde_json::json!({
+            "kind": "Status", "apiVersion": "v1", "status": "Failure",
+            "reason": "NotFound", "code": 404,
+            "message": "backupdestinations.logweir.dev \"src\" not found"
+        })
+        .to_string(),
+    }]);
+    match admit_restore_destinations(&destination_backed_restore(), &client, NS, now)
+        .await
+        .expect("the read succeeds")
+    {
+        RestoreDestinationAdmission::Holding { reason, .. } => {
+            assert_eq!(
+                reason, "DestinationNotFound",
+                "D2 §3.6 puts this with ApprovalNotVerified: an operator still creating the \
+                 destination is in the position of an approver who has not signed yet, and the \
+                 Restore spec is CEL-immutable so a terminal refusal could never be repaired"
+            );
+        }
+        other => panic!("an absent destination holds; got {other:?}"),
+    }
+}
+
+/// **A DESTINATION-BACKED RESTORE PROJECTS TWO CREDENTIALS THAT CANNOT SHADOW
+/// EACH OTHER, AND FORWARDS NOTHING FROM THE CONTROLLER.**
+///
+/// D2 §3.5's Restore paragraph. The engine reads the archive through `AWS_*`;
+/// the scorecard is written through `LOGWEIR_EVIDENCE_AWS_*`, separately named
+/// because one `AWS_ACCESS_KEY_ID` in a pod is one credential and a restore
+/// with two destinations legitimately needs two.
+///
+/// KILLS: projecting the evidence grant under `AWS_*` (the archive's read key
+/// then loses to the evidence key, or the reverse, depending on ordering);
+/// forwarding `archive_addressing_env` on this path; and dropping the
+/// store-contract handshake from the argv.
+#[test]
+fn a_destination_backed_restore_projects_two_unshadowed_credentials() {
+    let restore = destination_backed_restore();
+    let pair = destinations();
+    let spec = runner_job_spec_with_destinations(
+        &restore,
+        &cluster(true),
+        &[KEY_ID_LIVE.to_string()],
+        &approval(true),
+        &legacy_trust(),
+        now(),
+        Some(&pair),
+    )
+    .expect("the destination-backed Job renders");
+
+    let env: std::collections::BTreeMap<String, String> =
+        spec.env_literal.iter().cloned().collect();
+    assert_eq!(
+        env.get("AWS_ENDPOINT_URL"),
+        None,
+        "SEC-ENVHTTP: the controller's process contributes nothing to this Job. Got {env:?}"
+    );
+    assert_eq!(
+        env.get(STORE_CONTRACT_VERSION_ENV).map(String::as_str),
+        Some("1")
+    );
+    assert_eq!(
+        env.get(EVIDENCE_CREDENTIALS_ENV).map(String::as_str),
+        Some("static"),
+        "the evidence grant is a DIFFERENT Secret from the archive's, so it is projected \
+         separately rather than reusing the archive credential: {env:?}"
+    );
+
+    let projected: std::collections::BTreeMap<String, String> = spec
+        .env_from_secret
+        .iter()
+        .map(|e| (e.name.clone(), e.secret_name.clone()))
+        .collect();
+    assert_eq!(
+        projected.get("AWS_ACCESS_KEY_ID").map(String::as_str),
+        Some("src-reader"),
+        "the engine reads the archive with the SOURCE destination's read grant: {projected:?}"
+    );
+    assert_eq!(
+        projected
+            .get("LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID")
+            .map(String::as_str),
+        Some("ev-writer"),
+        "and the scorecard is written with the EVIDENCE destination's, under a name that cannot \
+         shadow the archive's: {projected:?}"
+    );
+
+    assert!(
+        spec.args.iter().any(|a| a == STORE_CONTRACT_VERSION_ARG),
+        "the handshake is on the argv, so an old runner image exits before it dispatches: {:?}",
+        spec.args
+    );
+
+    // ---- AND THE LEGACY PATH IS UNCHANGED --------------------------------
+    let legacy = weirkeeper::controllers::restore::runner_job_spec(
+        &restore_with_destination_free_spec(),
+        &cluster(true),
+        &[KEY_ID_LIVE.to_string()],
+        &approval(true),
+        &legacy_trust(),
+        now(),
+    )
+    .expect("the legacy Job renders");
+    assert!(
+        !legacy.args.iter().any(|a| a == STORE_CONTRACT_VERSION_ARG),
+        "the flag promises that every store setting arrives explicitly; on the legacy path it \
+         does not: {:?}",
+        legacy.args
+    );
+    assert!(
+        !legacy
+            .env_literal
+            .iter()
+            .any(|(n, _)| n == STORE_CONTRACT_VERSION_ENV),
+        "and neither does the environment: {:?}",
+        legacy.env_literal
+    );
+}
+
+/// The unmodified inline-`sourceArchive` fixture, named so the row above reads
+/// as the comparison it is.
+fn restore_with_destination_free_spec() -> Restore {
+    restore()
+}
+
+/// **THE TWO CA BUNDLES ARE FROZEN INTO THE RUN'S OWN PLAN, NOT MOUNTED FROM
+/// THE DESTINATION'S.**
+///
+/// D2 §3.5's "CA files". Mounting the destination's own `ConfigMap` would mean
+/// a root rotated while a restore runs changes what that run trusts, mid-run,
+/// with an approved plan that says nothing about it.
+///
+/// KILLS: pointing `LOGWEIR_EVIDENCE_CA_FILE` at the destination's `ConfigMap`
+/// rather than at the run's plan, and re-serialising `planBytes` while adding
+/// the keys.
+#[test]
+fn the_ca_bundles_are_copied_into_the_runs_own_immutable_plan() {
+    let restore = destination_backed_restore();
+    let mut evidence = evidence_destination_value();
+    evidence["spec"]["transport"] = serde_json::json!({
+        "security": "TLS",
+        "caBundle": {"configMapName": "ev-ca", "key": "ca.crt"}
+    });
+    evidence["spec"]["storage"]["endpoint"] = serde_json::json!("https://minio.logweir-t20:9000");
+    let pem = "-----BEGIN CERTIFICATE-----\nMAaqAQIDBAUG\n-----END CERTIFICATE-----\n";
+    let pair = RestoreDestinations {
+        source: destinations().source,
+        evidence: resolve(
+            &built(evidence),
+            DestinationRole::EvidenceWrite,
+            &InstallationPolicy::defaults(),
+        )
+        .expect("it resolves")
+        .with_ca(&weirkeeper::destination::CaObservation::Present(
+            pem.as_bytes().to_vec(),
+        ))
+        .expect("the bundle is usable"),
+    };
+
+    let cm = plan_config_map_with_destinations(&restore, Some(&pair)).expect("the plan renders");
+    let data = cm.data.expect("the plan carries data");
+    assert_eq!(
+        data.get(EVIDENCE_CA_PLAN_KEY).map(String::as_str),
+        Some(pem),
+        "the bytes are in the run's OWN immutable object: {data:?}"
+    );
+    assert_eq!(
+        data.get(weirkeeper::controllers::restore::PLAN_SPEC_KEY)
+            .map(String::as_str),
+        Some(restore.spec.plan_bytes.as_str()),
+        "and `restore.yaml` is still spec.planBytes VERBATIM — they are the bytes an approver \
+         signed, and a re-serialisation would change the hash the runner pins"
+    );
+}

@@ -7173,3 +7173,198 @@ async fn the_reservation_message_names_the_policy_that_admitted_the_slot() {
         );
     }
 }
+
+/// **THE DESTINATION-BACKED `Backup` ARGV IS ONE `logweir backup run` ACCEPTS,
+/// AND THE HANDSHAKE IT CARRIES IS ENFORCED AT BOTH ENDS** — erratum **E20**,
+/// applied to D2 §3.5's store contract.
+///
+/// # Why this is end-to-end and not a literal compared against a literal
+///
+/// `weirkeeper::destination::STORE_CONTRACT_VERSION_ARG` and
+/// `logweir::backup::store_contract::VERSION_ARG` are two declarations of one
+/// string, in two crates that deliberately do not depend on each other (the
+/// `logweir` binary ships without a Kubernetes client). Every assertion that
+/// compared them would compare two literals in the same repository — which is
+/// exactly how E20 shipped a `Backup` argv the CLI refused and three green
+/// reviews missed it. An argv a controller emits is an interface with another
+/// binary, and it is tested only when it is handed to that binary's real
+/// parser.
+///
+/// KILLS: renaming either constant on one side; and dropping the version check
+/// in `store_contract::admit`, which the negative arm below catches by handing
+/// the real parser a version this build does not implement.
+#[test]
+fn the_destination_backed_argv_is_one_the_cli_accepts_and_the_version_is_enforced() {
+    let dir = scratch_dir("d2w10-store-contract-argv");
+    let spec = logweir_core::spec::BackupSpec {
+        source: logweir_core::spec::BackupSourceSpec {
+            bootstrap_servers: vec!["broker-0.prod:9093".to_string()],
+            auth: logweir_core::spec::AuthSpec::ScramSha512 {
+                username: "logweir".to_string(),
+                tls: true,
+            },
+            topics: vec!["orders".to_string()],
+        },
+        storage: logweir_core::engine::StorageUrl::S3 {
+            bucket: "lw-a".to_string(),
+            prefix: "team-a/prod".to_string(),
+            region: Some("us-east-1".to_string()),
+            endpoint: Some("https://minio-a.storage.svc:9000".to_string()),
+            path_style: true,
+            allow_http: false,
+        },
+        backup_id: "b1".to_string(),
+        backup: logweir_core::spec::BackupSettings::default(),
+    };
+    std::fs::write(
+        dir.join("backup.yaml"),
+        serde_yaml::to_string(&spec).expect("the stub spec serialises"),
+    )
+    .expect("the scratch spec is writable");
+    std::fs::write(
+        dir.join("allowed-clusters.json"),
+        serde_json::to_string(&logweir_core::spec::AllowedClusters {
+            allowed_cluster_ids: Vec::new(),
+            source_cluster_id: None,
+        })
+        .expect("the stub allowlist serialises"),
+    )
+    .expect("the scratch allowlist is writable");
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../e2e/fixtures/signed/signing.pem"),
+        dir.join("key.pem"),
+    )
+    .expect("a valid PKCS#8 signer is copied into the scratch mount path");
+
+    let emitted = weirkeeper::backup_execution::runner_argv_with_store_contract(
+        ExecutionTrigger::Schedule,
+        "b1",
+    );
+    let argv = argv_against(&dir, &emitted);
+    let root = dir.display().to_string();
+    let unmapped: Vec<&String> = argv
+        .iter()
+        .filter(|a| a.starts_with('/') && !a.starts_with(&root))
+        .collect();
+    assert!(
+        unmapped.is_empty(),
+        "every IN-POD path in the emitted argv is accounted for: {unmapped:?}"
+    );
+
+    // ---- THE POSITIVE ARM: the flag AND the variable, both `1` ----------
+    let out = std::process::Command::new(runner_binary())
+        .args(&argv)
+        .env(
+            weirkeeper::destination::STORE_CONTRACT_VERSION_ENV,
+            weirkeeper::destination::STORE_CONTRACT_VERSION,
+        )
+        .env("LOGWEIR_ARCHIVE_CREDENTIALS", "static")
+        .env_remove("LOGWEIR_SOURCE_PASSWORD")
+        .output()
+        .expect("the runner binary runs");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(
+        !stderr.contains("unexpected argument"),
+        "THE E20 FAILURE CLASS: the runner refused a flag this crate emits. argv {argv:?}\n\
+         stderr: {stderr}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(1),
+        "the run passes the store contract and gets as far as the credential projection, which \
+         is the first point a real broker would be needed. stderr: {stderr}"
+    );
+    assert!(
+        stderr
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .contains("$LOGWEIR_SOURCE_PASSWORD is unset"),
+        "…and THAT is where it stops. stderr: {stderr}"
+    );
+
+    // ---- NEGATIVE ARM 1: a version this build does not implement --------
+    let mut wrong: Vec<String> = argv.clone();
+    let at = wrong
+        .iter()
+        .position(|a| a == weirkeeper::destination::STORE_CONTRACT_VERSION_ARG)
+        .expect("the flag is on the argv");
+    wrong[at + 1] = "2".to_string();
+    let out = std::process::Command::new(runner_binary())
+        .args(&wrong)
+        .env(weirkeeper::destination::STORE_CONTRACT_VERSION_ENV, "2")
+        .env_remove("LOGWEIR_SOURCE_PASSWORD")
+        .output()
+        .expect("the runner binary runs");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "a contract this build does not implement is REFUSED, not approximated: a runner \
+         improvising its store configuration is how an approved plan reaches a different bucket. \
+         stderr: {stderr}"
+    );
+
+    // ---- NEGATIVE ARM 2: the flag and the variable disagree -------------
+    let out = std::process::Command::new(runner_binary())
+        .args(&argv)
+        .env(weirkeeper::destination::STORE_CONTRACT_VERSION_ENV, "7")
+        .env_remove("LOGWEIR_SOURCE_PASSWORD")
+        .output()
+        .expect("the runner binary runs");
+    assert_eq!(
+        out.status.code(),
+        Some(3),
+        "two answers to which store contract is in force is no contract: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// **A RETENTION REPORT IS NEVER ABOUT ANOTHER DESTINATION'S CATALOGUE** —
+/// defect RET-WRONGBUCKET, grounding G14.
+///
+/// The reconciler LISTS through the controller's one global handle and RENDERS
+/// `aws s3 rm` commands naming the SCHEDULE's own URL. On two buckets that is a
+/// report about bucket A printed as if it described bucket B, with commands
+/// naming keys in B that were listed in A.
+///
+/// KILLS: `retention_scope` returning `GlobalHandleApplies` unconditionally,
+/// and the `destination_backed` arm dropped (a destination-backed schedule then
+/// gets a report computed from a handle that cannot see its bucket).
+#[test]
+fn a_retention_report_is_withheld_when_it_would_describe_another_bucket() {
+    use weirkeeper::destination::{retention_scope, RetentionScope};
+
+    assert!(
+        retention_scope("s3://kb/team-a", Some("s3://kb"), false).reports(),
+        "two prefixes of ONE bucket are both describable by a handle on that bucket — the \
+         listing is prefix-scoped by the report itself"
+    );
+    match retention_scope("s3://team-b-bucket/x", Some("s3://kb"), false) {
+        RetentionScope::WrongBucket {
+            schedule_bucket,
+            handle_bucket,
+        } => {
+            assert_eq!(schedule_bucket, "team-b-bucket");
+            assert_eq!(handle_bucket, "kb");
+        }
+        other => panic!("a different bucket withholds the report; got {other:?}"),
+    }
+    assert!(
+        !retention_scope("s3://kb/team-a", Some("s3://kb"), true).reports(),
+        "a destination-backed schedule gets NO report until PLAT-16.1's per-destination \
+         archive-inventory check: the global handle is for objects without a destinationRef"
+    );
+    assert!(
+        !retention_scope("s3://kb/team-a", None, false).reports(),
+        "and a controller with no handle reports nothing at all"
+    );
+    assert!(
+        !retention_scope("logweir-destination://dest-a", Some("s3://kb"), true).reports(),
+        "the sentinel URL is not a bucket, and an unreadable URL is never the same bucket as \
+         anything — the safe direction"
+    );
+}
