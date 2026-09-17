@@ -47,14 +47,22 @@ pub const CLIENT_ID: &str = "logweir-console";
 pub const REDIRECT_URI: &str = "https://console.test/auth/callback";
 pub const NS_A: &str = "team-a";
 pub const NS_B: &str = "team-b";
-pub const PLURALS: [&str; 5] = [
+pub const PLURALS: [&str; 8] = [
     "kafkaclusters",
     "backupschedules",
     "backups",
     "restores",
     "approvals",
+    "backupdestinations",
+    "topicdiscoveries",
+    "preflights",
 ];
 const PREFIX: &str = "/apis/logweir.dev/v1alpha1/namespaces/";
+/// The core group's namespaced path. TWO OBJECTS ONLY, each with ONE verb:
+/// `configmaps` GET (a check's own stored result) and `secrets` POST (a
+/// write-only credential). Anything else under it is `unexpected`.
+const CORE_PREFIX: &str = "/api/v1/namespaces/";
+pub const CORE_PLURALS: [&str; 2] = ["configmaps", "secrets"];
 
 /// One request the fake received.
 #[derive(Clone, Debug)]
@@ -130,6 +138,11 @@ fn kind_of(plural: &str) -> &'static str {
         "backups" => "Backup",
         "restores" => "Restore",
         "approvals" => "Approval",
+        "backupdestinations" => "BackupDestination",
+        "topicdiscoveries" => "TopicDiscovery",
+        "preflights" => "Preflight",
+        "configmaps" => "ConfigMap",
+        "secrets" => "Secret",
         _ => "Unknown",
     }
 }
@@ -226,7 +239,11 @@ impl FakeKube {
         meta.insert("resourceVersion".into(), json!(s.next_rv.to_string()));
         meta.entry("creationTimestamp")
             .or_insert(json!("2026-09-15T10:00:00Z"));
-        object["apiVersion"] = json!("logweir.dev/v1alpha1");
+        object["apiVersion"] = json!(if CORE_PLURALS.contains(&plural) {
+            "v1"
+        } else {
+            "logweir.dev/v1alpha1"
+        });
         object["kind"] = json!(kind_of(plural));
         s.objects.insert(
             (plural.to_string(), namespace.to_string(), name),
@@ -302,6 +319,115 @@ impl FakeKube {
     }
 }
 
+/// The kinds whose spec this fake will accept a merge patch for.
+pub const PATCHABLE: [&str; 4] = [
+    "backupschedules",
+    "backupdestinations",
+    "topicdiscoveries",
+    "preflights",
+];
+
+/// The core group: `configmaps` GET and `secrets` POST, and nothing else.
+///
+/// THE SECRET ECHO IS REAL. A create answers with `data` echoed exactly as the
+/// API server does, so the write-only guarantee is exercised rather than
+/// assumed: if the adapter's type could deserialize `data`, the value would be
+/// in the process and a projection could leak it.
+fn core_answer(s: &mut State, recorded: &Recorded, rest: &str) -> (Option<Duration>, u16, String) {
+    let parts: Vec<&str> = rest.split('/').collect();
+    let (namespace, plural, name) = match parts.as_slice() {
+        [ns, plural] => (ns.to_string(), plural.to_string(), None),
+        [ns, plural, name] => (ns.to_string(), plural.to_string(), Some(name.to_string())),
+        _ => {
+            s.unexpected
+                .push(format!("{} {}", recorded.method, recorded.path));
+            return (
+                None,
+                500,
+                status_body(500, "InternalError", "not allowed by the fake"),
+            );
+        }
+    };
+    if !CORE_PLURALS.contains(&plural.as_str()) {
+        s.unexpected
+            .push(format!("{} {}", recorded.method, recorded.path));
+        return (
+            None,
+            500,
+            status_body(500, "InternalError", "not allowed by the fake"),
+        );
+    }
+    match (recorded.method.as_str(), plural.as_str(), name) {
+        ("GET", "configmaps", Some(name)) => {
+            match s
+                .objects
+                .get(&("configmaps".to_string(), namespace.clone(), name.clone()))
+            {
+                Some(v) => (None, 200, v.to_string()),
+                None => (
+                    None,
+                    404,
+                    status_body(404, "NotFound", &format!("configmaps \"{name}\" not found")),
+                ),
+            }
+        }
+        ("POST", "secrets", None) => {
+            let Ok(mut object) = serde_json::from_str::<Value>(&recorded.body) else {
+                return (
+                    None,
+                    400,
+                    status_body(400, "BadRequest", "body is not JSON"),
+                );
+            };
+            let Some(name) = object
+                .pointer("/metadata/name")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+            else {
+                return (
+                    None,
+                    422,
+                    status_body(422, "Invalid", "metadata.name: Required value"),
+                );
+            };
+            let key = ("secrets".to_string(), namespace.clone(), name.clone());
+            if s.objects.contains_key(&key) {
+                return (
+                    None,
+                    409,
+                    status_body(
+                        409,
+                        "AlreadyExists",
+                        &format!("secrets \"{name}\" already exists"),
+                    ),
+                );
+            }
+            s.next_rv += 1;
+            s.next_uid += 1;
+            let uid = format!("00000000-0000-4000-9000-{:012}", s.next_uid);
+            let rv = s.next_rv.to_string();
+            let meta = object["metadata"].as_object_mut().unwrap();
+            meta.insert("namespace".into(), json!(namespace));
+            meta.insert("uid".into(), json!(uid));
+            meta.insert("resourceVersion".into(), json!(rv));
+            meta.insert("creationTimestamp".into(), json!("2026-09-15T12:00:00Z"));
+            object["apiVersion"] = json!("v1");
+            object["kind"] = json!("Secret");
+            s.objects.insert(key, object.clone());
+            (None, 201, object.to_string())
+        }
+        _ => {
+            s.unexpected
+                .push(format!("{} {}", recorded.method, recorded.path));
+            (
+                None,
+                500,
+                status_body(500, "InternalError", "not allowed by the fake"),
+            )
+        }
+    }
+}
+
 fn answer(state: &Arc<Mutex<State>>, recorded: Recorded) -> (Option<Duration>, u16, String) {
     // Taken BEFORE the answer and applied AFTER it, so the work really happens
     // and only the response is late. The lock is released before `answer_inner`
@@ -346,6 +472,9 @@ fn answer_inner(state: &Arc<Mutex<State>>, recorded: Recorded) -> (Option<Durati
         return (None, 200, json!({"major": "1", "minor": "29", "gitVersion": "v1.29.0", "platform": "linux/amd64"}).to_string());
     }
 
+    if let Some(rest) = recorded.path.strip_prefix(CORE_PREFIX) {
+        return core_answer(&mut s, &recorded, rest);
+    }
     let Some(rest) = recorded.path.strip_prefix(PREFIX) else {
         s.unexpected
             .push(format!("{} {}", recorded.method, recorded.path));
@@ -487,7 +616,7 @@ fn answer_inner(state: &Arc<Mutex<State>>, recorded: Recorded) -> (Option<Durati
             s.objects.insert(key, object.clone());
             (None, 201, object.to_string())
         }
-        ("PATCH", Some(name)) if plural == "backupschedules" => {
+        ("PATCH", Some(name)) if PATCHABLE.contains(&plural.as_str()) => {
             let content_type = recorded
                 .headers
                 .iter()
@@ -510,8 +639,16 @@ fn answer_inner(state: &Arc<Mutex<State>>, recorded: Recorded) -> (Option<Durati
                     status_body(400, "BadRequest", "body is not JSON"),
                 );
             };
-            // The allowed patch surface: metadata.resourceVersion and
-            // spec.suspend, nothing else.
+            // THE ALLOWED PATCH SURFACE, PER KIND. `metadata` may carry only
+            // `resourceVersion`; `spec` may carry only the fields that kind's
+            // CEL leaves mutable. A patch outside it is `unexpected`, so a
+            // route that learned to write something else fails every test.
+            let allowed_spec: &[&str] = match plural.as_str() {
+                "backupschedules" => &["suspend"],
+                "backupdestinations" => &["access", "transport"],
+                "topicdiscoveries" | "preflights" => &["cancelRequested"],
+                _ => &[],
+            };
             let allowed = patch.as_object().is_some_and(|o| {
                 o.keys().all(|k| k == "metadata" || k == "spec")
                     && o.get("metadata").is_none_or(|m| {
@@ -520,16 +657,25 @@ fn answer_inner(state: &Arc<Mutex<State>>, recorded: Recorded) -> (Option<Durati
                     })
                     && o.get("spec").is_none_or(|sp| {
                         sp.as_object()
-                            .is_some_and(|sp| sp.keys().all(|k| k == "suspend"))
+                            .is_some_and(|sp| sp.keys().all(|k| allowed_spec.contains(&k.as_str())))
                     })
             });
-            if !allowed {
-                s.unexpected
-                    .push(format!("PATCH outside spec.suspend: {}", recorded.body));
+            // A `transport` patch may name `caBundle` and nothing else:
+            // `security` is immutable, and a fake that accepted it would let a
+            // transport downgrade pass every test in this crate.
+            let transport_ok = patch.pointer("/spec/transport").is_none_or(|v| {
+                v.as_object()
+                    .is_some_and(|o| o.keys().all(|k| k == "caBundle"))
+            });
+            if !allowed || !transport_ok {
+                s.unexpected.push(format!(
+                    "PATCH outside the mutable surface: {}",
+                    recorded.body
+                ));
                 return (
                     None,
                     422,
-                    status_body(422, "Invalid", "only spec.suspend is mutable"),
+                    status_body(422, "Invalid", "only the declared fields are mutable"),
                 );
             }
             let key = (plural.clone(), namespace.clone(), name.clone());
@@ -555,9 +701,14 @@ fn answer_inner(state: &Arc<Mutex<State>>, recorded: Recorded) -> (Option<Durati
             let mut updated = current;
             let mut body = patch.clone();
             body.as_object_mut().unwrap().remove("metadata");
+            let spec_changed = body.get("spec").is_some();
             merge(&mut updated, &body);
             s.next_rv += 1;
             updated["metadata"]["resourceVersion"] = json!(s.next_rv.to_string());
+            if spec_changed {
+                let generation = updated["metadata"]["generation"].as_i64().unwrap_or(1);
+                updated["metadata"]["generation"] = json!(generation + 1);
+            }
             s.objects.insert(key, updated.clone());
             (None, 200, updated.to_string())
         }
@@ -660,6 +811,11 @@ impl TestResponse {
                 String::from_utf8_lossy(&self.body)
             )
         })
+    }
+
+    /// The whole body as text, for the leak assertions.
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.body).into_owned()
     }
 
     pub fn code(&self) -> String {
@@ -840,6 +996,298 @@ pub fn fixture(name: &str) -> Value {
         &std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display())),
     )
     .expect("fixtures are JSON")
+}
+
+// ------------------------------------------------- D2 W12 fixtures and seeds
+
+/// The local administrator's stable actor id, which is what the ownership
+/// annotation on a check created through `TestApp` carries.
+pub const LOCAL_ADMIN_ACTOR: &str = "urn:logweir:local-admin#admin";
+
+/// The idempotency annotation naming the actor that created an object.
+pub const ACTOR_ANNOTATION: &str = "api.logweir.dev/actor";
+
+/// A credential value that must never appear in a response, a log or a stored
+/// projection. Distinctive on purpose: every leak assertion greps for it.
+pub const SECRET_ACCESS_KEY: &str = "sEcReT-aCcEsS-kEy-D2W12-NEVER-ECHOED";
+/// The access key id entered beside it.
+pub const ACCESS_KEY_ID: &str = "AKIAD2W12NEVERECHOED";
+
+/// A `CreateDestinationRequest` naming an EXISTING Secret.
+pub fn destination_body(name: &str) -> Value {
+    json!({
+        "name": name,
+        "description": "Production archive (MinIO, private CA)",
+        "storage": {
+            "provider": "s3",
+            "bucket": "kafka-backups",
+            "prefix": "team-a/prod",
+            "region": "us-east-1",
+            "endpoint": "https://minio.storage.svc:9000",
+            "addressing": "pathStyle"
+        },
+        "transport": {"security": "tls", "caBundle": {"configMapName": "minio-ca", "key": "ca.crt"}},
+        "access": {
+            "archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "logweir-s3"}}},
+            "archiveRead": {"mode": "secretKeys", "secret": {"existing": {"name": "archive-reader"}}},
+            "evidenceRead": {"mode": "archiveReadGrant"}
+        },
+        "readiness": {"writeProbe": "createOnlyMarker"}
+    })
+}
+
+/// The same request, with the archive-read grant entered as a VALUE.
+pub fn destination_body_with_new_credential(name: &str) -> Value {
+    let mut body = destination_body(name);
+    body["access"]["archiveRead"] = json!({
+        "mode": "secretKeys",
+        "secret": {"new": {"accessKeyId": ACCESS_KEY_ID, "secretAccessKey": SECRET_ACCESS_KEY}}
+    });
+    body
+}
+
+/// A stored `BackupDestination`, as the controller would leave it.
+pub fn seed_destination(fake: &FakeKube, namespace: &str, name: &str) -> Value {
+    fake.seed(
+        "backupdestinations",
+        namespace,
+        json!({
+            "metadata": {"name": name, "generation": 3},
+            "spec": {
+                "description": "seeded",
+                "storage": {
+                    "provider": "S3",
+                    "bucket": "kafka-backups",
+                    "prefix": "team-a/prod",
+                    "region": "us-east-1",
+                    "endpoint": "https://minio.storage.svc:9000",
+                    "addressing": "PathStyle"
+                },
+                "transport": {"security": "TLS", "caBundle": {"configMapName": "minio-ca", "key": "ca.crt"}},
+                "access": {
+                    "archiveWrite": {"mode": "SecretKeys", "secret": {"name": "logweir-s3", "accessKeyIdKey": "access-key-id", "secretAccessKeyKey": "secret-access-key"}},
+                    "archiveRead": {"mode": "SecretKeys", "secret": {"name": "archive-reader", "accessKeyIdKey": "access-key-id", "secretAccessKeyKey": "secret-access-key"}},
+                    "evidenceRead": {"mode": "ArchiveReadGrant"}
+                },
+                "readiness": {"writeProbe": "CreateOnlyMarker"}
+            },
+            "status": {
+                "observedGeneration": 3,
+                "reason": "Valid",
+                "canonicalUrl": "s3://kafka-backups/team-a/prod",
+                "locationDigest": "sha256:0000000000000000000000000000000000000000000000000000000000000000",
+                "caBundleSha256": "sha256:1111111111111111111111111111111111111111111111111111111111111111",
+                "conditions": [{"type": "Valid", "status": "True", "reason": "Valid"}]
+            }
+        }),
+    )
+}
+
+/// One canonical TSV line.
+pub fn topic_line(name: &str, partitions: u32, flags: &str) -> String {
+    format!("{name}\t{partitions}\t{flags}\n")
+}
+
+/// A stored discovery with `chunks` chunks of stored TSV, and the immutable
+/// owned `ConfigMap`s that hold them.
+pub fn seed_discovery(
+    fake: &FakeKube,
+    namespace: &str,
+    name: &str,
+    connection: &str,
+    actor: Option<&str>,
+    chunks: &[Vec<String>],
+) -> Value {
+    let uid = format!("uid-{name}");
+    let all: String = chunks.iter().flatten().cloned().collect();
+    let mut index = Vec::new();
+    for (i, lines) in chunks.iter().enumerate() {
+        let data: String = lines.concat();
+        let sha256 = logweir_core::ids::sha256_prefixed(data.as_bytes());
+        let chunk_name = format!("lwc-{name}-r{i:03}");
+        fake.seed(
+            "configmaps",
+            namespace,
+            json!({
+                "metadata": {
+                    "name": chunk_name,
+                    "annotations": {"logweir.dev/result-sha256": sha256, "logweir.dev/result-format": "logweir.dev/topic-inventory/v1"},
+                    "ownerReferences": [{"apiVersion": "logweir.dev/v1alpha1", "kind": "TopicDiscovery", "name": name, "uid": uid, "controller": true, "blockOwnerDeletion": true}]
+                },
+                "immutable": true,
+                "data": {"topics.tsv": data}
+            }),
+        );
+        let first = lines
+            .first()
+            .and_then(|l| l.split('\t').next())
+            .unwrap_or("")
+            .to_string();
+        let last = lines
+            .last()
+            .and_then(|l| l.split('\t').next())
+            .unwrap_or("")
+            .to_string();
+        index.push(json!({
+            "name": chunk_name,
+            "sha256": sha256,
+            "count": lines.len(),
+            "firstName": first,
+            "lastName": last
+        }));
+    }
+    let mut metadata =
+        json!({"name": name, "uid": uid, "labels": {"logweir.dev/connection": connection}});
+    if let Some(actor) = actor {
+        metadata["annotations"] = json!({ACTOR_ANNOTATION: actor});
+    }
+    fake.seed(
+        "topicdiscoveries",
+        namespace,
+        json!({
+            "metadata": metadata,
+            "spec": {"request": {"connectionRef": {"name": connection}, "includeInternal": false, "maxTopics": 20000, "timeoutSeconds": 60}, "cancelRequested": false},
+            "status": {
+                "phase": "Succeeded",
+                "reason": "Succeeded",
+                "binding": {"connectionName": connection, "connectionUid": "seed-connection-uid", "connectionGeneration": 1, "principal": "User:scram-user", "authMode": "scramSha512"},
+                "observedAt": "2026-09-15T11:55:00Z",
+                "freshUntil": "2026-09-15T12:10:00Z",
+                "result": {
+                    "format": "logweir.dev/topic-inventory/v1",
+                    "clusterId": "M29I2S7FQPyHBEX12Vx7XA",
+                    "brokerCount": 1,
+                    "counts": {"listed": all.lines().count() as i64, "returned": all.lines().count() as i64, "internalExcluded": 0, "errored": 0},
+                    "truncated": false,
+                    "visibility": {"state": "unknown", "basis": []},
+                    "topicsSha256": logweir_core::ids::sha256_prefixed(all.as_bytes()),
+                    "chunks": index
+                },
+                "conditions": [{"type": "Complete", "status": "True", "reason": "Succeeded"}]
+            }
+        }),
+    )
+}
+
+/// A discovery that is still running, so a cancel has something to write.
+pub fn seed_running_discovery(
+    fake: &FakeKube,
+    namespace: &str,
+    name: &str,
+    connection: &str,
+    actor: &str,
+) -> Value {
+    fake.seed(
+        "topicdiscoveries",
+        namespace,
+        json!({
+            "metadata": {
+                "name": name,
+                "uid": format!("uid-{name}"),
+                "labels": {"logweir.dev/connection": connection},
+                "annotations": {ACTOR_ANNOTATION: actor}
+            },
+            "spec": {"request": {"connectionRef": {"name": connection}, "includeInternal": false, "maxTopics": 20000, "timeoutSeconds": 60}, "cancelRequested": false},
+            "status": {"phase": "Running", "reason": "Running"}
+        }),
+    )
+}
+
+/// A completed preflight with one blocking check, one advisory warning, one
+/// execution-only note and a details document.
+pub fn seed_preflight(
+    fake: &FakeKube,
+    namespace: &str,
+    name: &str,
+    operation: &str,
+    plan_hash: Option<&str>,
+    actor: Option<&str>,
+) -> Value {
+    let uid = format!("uid-{name}");
+    let details = "{\"check\":\"target.mappedTopics\",\"topic\":\"restore-orders\"}\n{\"check\":\"archive.segments\",\"key\":\"missing-0\"}\n";
+    let sha256 = logweir_core::ids::sha256_prefixed(details.as_bytes());
+    let details_name = format!("lwc-{name}-details");
+    fake.seed(
+        "configmaps",
+        namespace,
+        json!({
+            "metadata": {
+                "name": details_name,
+                "annotations": {"logweir.dev/result-sha256": sha256, "logweir.dev/result-format": "logweir.dev/check-details/v1"},
+                "ownerReferences": [{"apiVersion": "logweir.dev/v1alpha1", "kind": "Preflight", "name": name, "uid": uid, "controller": true, "blockOwnerDeletion": true}]
+            },
+            "immutable": true,
+            "data": {"details.jsonl": details}
+        }),
+    );
+    let request = match operation {
+        "Restore" => json!({
+            "operation": "Restore",
+            "restore": {"planBytes": "plan", "planHash": plan_hash.unwrap_or("sha256:aaaa"), "targetRef": {"name": "target"}},
+            "timeoutSeconds": 120
+        }),
+        "DestinationAccess" => json!({
+            "operation": "DestinationAccess",
+            "destinationAccess": {"destinationRef": {"name": "primary"}, "roles": ["ArchiveWrite"]},
+            "timeoutSeconds": 120
+        }),
+        _ => json!({
+            "operation": "Backup",
+            "backup": {"sourceRef": {"name": "source"}, "destinationRef": {"name": "primary"}, "topics": ["orders"]},
+            "timeoutSeconds": 120
+        }),
+    };
+    let mut metadata =
+        json!({"name": name, "uid": uid, "labels": {"logweir.dev/destination": "primary"}});
+    if let Some(actor) = actor {
+        metadata["annotations"] = json!({ACTOR_ANNOTATION: actor});
+    }
+    fake.seed(
+        "preflights",
+        namespace,
+        json!({
+            "metadata": metadata,
+            "spec": {"request": request, "cancelRequested": false},
+            "status": {
+                "phase": "Completed",
+                "reason": "NotReady",
+                "binding": {
+                    "operation": operation,
+                    "planHash": plan_hash,
+                    "inputsDigest": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+                    "referents": [{"kind": "KafkaCluster", "name": "target", "uid": "uid-target", "generation": 1}]
+                },
+                "observedAt": "2026-09-15T11:59:00Z",
+                "result": {
+                    "state": "notReady",
+                    "expiresAt": "2026-09-15T12:14:00Z",
+                    "checks": [
+                        {"id": "target.mappedTopics", "category": "target", "state": "notReady", "gating": "blocking", "authority": "checkJob", "code": "MappedTopicExists", "message": "2 mapped target topics already exist", "remedy": "Choose another prefix.", "observedAt": "2026-09-15T11:59:00Z", "expiresAt": "2026-09-15T12:14:00Z"},
+                        {"id": "archive.retention", "category": "archive", "state": "notReady", "gating": "advisory", "authority": "controller", "code": "RetentionWindowShort"},
+                        {"id": "target.logAppendTime", "category": "target", "state": "unknown", "gating": "executionOnly", "authority": "checkJob", "code": "ExecutionOnly", "message": "Verified only when the run executes."}
+                    ],
+                    "detailsRef": {"name": details_name, "sha256": sha256}
+                },
+                "conditions": [{"type": "Complete", "status": "True", "reason": "Completed"}]
+            }
+        }),
+    )
+}
+
+/// A running preflight, so a cancel has something to write.
+pub fn seed_running_preflight(fake: &FakeKube, namespace: &str, name: &str, actor: &str) -> Value {
+    fake.seed(
+        "preflights",
+        namespace,
+        json!({
+            "metadata": {"name": name, "uid": format!("uid-{name}"), "annotations": {ACTOR_ANNOTATION: actor}},
+            "spec": {
+                "request": {"operation": "Backup", "backup": {"sourceRef": {"name": "source"}, "destinationRef": {"name": "primary"}, "topics": ["orders"]}, "timeoutSeconds": 120},
+                "cancelRequested": false
+            },
+            "status": {"phase": "Running", "reason": "Running"}
+        }),
+    )
 }
 
 // ------------------------------------------------------- shared-mode harness

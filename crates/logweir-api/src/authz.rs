@@ -57,13 +57,25 @@ pub enum Action {
     CreateConnection,
     /// Test a saved connection (PLAT-07.2). Not implemented.
     TestConnection,
-    /// Write a credential Secret (PLAT-07.1). Not implemented.
+    /// Write a credential Secret from a request body (PLAT-07.1/PLAT-08.1
+    /// write-only entry). The value is created and never read back.
     WriteCredential,
-    /// Start topic discovery (PLAT-09.1). Not implemented.
+    /// List/get `TopicDiscovery` projections and their stored topic pages.
+    ReadTopicDiscoveries,
+    /// Start topic discovery (PLAT-09.1).
     DiscoverTopics,
-    /// Start a preflight (PLAT-03). Not implemented.
+    /// Ask an unfinished discovery of one's own to stop.
+    CancelTopicDiscovery,
+    /// List/get `Preflight` projections and their detail pages.
+    ReadPreflights,
+    /// Start a preflight (PLAT-03).
     RunPreflight,
-    /// Manage saved destinations (PLAT-08). Not implemented.
+    /// Ask an unfinished preflight of one's own to stop.
+    CancelPreflight,
+    /// List/get `BackupDestination` projections (PLAT-08).
+    ReadDestinations,
+    /// Create a destination, rotate its access, test it, adopt a legacy
+    /// location (PLAT-08).
     ManageDestinations,
     /// List/get `BackupSchedule` projections.
     ReadSchedules,
@@ -105,8 +117,13 @@ impl Action {
             Action::CreateConnection => "connection.create",
             Action::TestConnection => "connection.test",
             Action::WriteCredential => "credential.write",
+            Action::ReadTopicDiscoveries => "topicDiscovery.read",
             Action::DiscoverTopics => "topicDiscovery.start",
+            Action::CancelTopicDiscovery => "topicDiscovery.cancel",
+            Action::ReadPreflights => "preflight.read",
             Action::RunPreflight => "preflight.start",
+            Action::CancelPreflight => "preflight.cancel",
+            Action::ReadDestinations => "destination.read",
             Action::ManageDestinations => "destination.manage",
             Action::ReadSchedules => "schedule.read",
             Action::CreateSchedule => "schedule.create",
@@ -130,10 +147,6 @@ impl Action {
         !matches!(
             self,
             Action::TestConnection
-                | Action::WriteCredential
-                | Action::DiscoverTopics
-                | Action::RunPreflight
-                | Action::ManageDestinations
                 | Action::CreateManualBackup
                 | Action::SubmitApproval
                 | Action::StreamOperationEvents
@@ -248,6 +261,9 @@ impl Role {
             Role::Viewer => matches!(
                 action,
                 Action::ReadConnections
+                    | Action::ReadDestinations
+                    | Action::ReadTopicDiscoveries
+                    | Action::ReadPreflights
                     | Action::ReadSchedules
                     | Action::ReadBackups
                     | Action::ReadRestores
@@ -261,9 +277,14 @@ impl Role {
                     | Action::CreateConnection
                     | Action::TestConnection
                     | Action::WriteCredential
-                    | Action::DiscoverTopics
-                    | Action::RunPreflight
+                    | Action::ReadDestinations
                     | Action::ManageDestinations
+                    | Action::ReadTopicDiscoveries
+                    | Action::DiscoverTopics
+                    | Action::CancelTopicDiscovery
+                    | Action::ReadPreflights
+                    | Action::RunPreflight
+                    | Action::CancelPreflight
                     | Action::ReadSchedules
                     | Action::CreateSchedule
                     | Action::SetScheduleSuspension
@@ -281,7 +302,14 @@ impl Role {
             // schedules, no discovery, no creates.
             Role::Approver => matches!(
                 action,
-                Action::ReadBackups
+                // READ ONLY WHEN NEEDED FOR THE PACKET. The role table opens
+                // `preflight.read`; `routes::preflights` then refuses any
+                // preflight that is not a Restore readiness result to an actor
+                // whose only binding here is Approver, so "what the approval
+                // packet needs" is enforced on the OBJECT and not merely
+                // promised in a comment.
+                Action::ReadPreflights
+                    | Action::ReadBackups
                     | Action::ReadRestores
                     | Action::ReadApprovals
                     | Action::ReadApprovalPacket
@@ -299,9 +327,14 @@ impl Role {
                     | Action::CreateConnection
                     | Action::TestConnection
                     | Action::WriteCredential
-                    | Action::DiscoverTopics
-                    | Action::RunPreflight
+                    | Action::ReadDestinations
                     | Action::ManageDestinations
+                    | Action::ReadTopicDiscoveries
+                    | Action::DiscoverTopics
+                    | Action::CancelTopicDiscovery
+                    | Action::ReadPreflights
+                    | Action::RunPreflight
+                    | Action::CancelPreflight
                     | Action::ReadSchedules
                     | Action::CreateSchedule
                     | Action::SetScheduleSuspension
@@ -642,13 +675,25 @@ pub struct Capabilities {
     pub connection_create: bool,
     /// Connection tests (PLAT-07.2): no route.
     pub connection_test: bool,
-    /// Write-only credential input (PLAT-07.1): no route.
+    /// Write-only credential input: `POST .../destinations` and
+    /// `:update-access` accept a credential value that is created once and
+    /// never read back.
     pub credential_write: bool,
-    /// Topic discovery (PLAT-09.1): no route.
+    /// The topic-discovery domain (PLAT-09.1) is served AND readable here.
+    ///
+    /// ONE FLAG PER DOMAIN, AND IT IS THE READ FLOOR. D2 §8 names exactly
+    /// three flags — `destinations`, `topicDiscovery`, `preflight` — so a
+    /// domain gets one bit, not a bit per verb, and the bit answers "is this
+    /// domain served and visible to me". Whether the actor may also START or
+    /// CANCEL is the role table above, which `/session` publishes per grant in
+    /// `roles`; a console reads `roles.includes("operator")` for the buttons
+    /// and this flag for the page. Splitting these into read/start pairs is a
+    /// contract change that must land together with `ui/contract.js`'s
+    /// `CAPABILITY_FLAGS`.
     pub topic_discovery: bool,
-    /// Preflight checks (PLAT-03): no route.
+    /// The preflight domain (PLAT-03) is served AND readable here.
     pub preflight: bool,
-    /// Saved destinations (PLAT-08): no route.
+    /// The saved-destination domain (PLAT-08) is served AND readable here.
     pub destinations: bool,
     /// `GET .../schedules[/{name}]`.
     pub schedules_read: bool,
@@ -687,9 +732,9 @@ impl Capabilities {
             connection_create: can(Action::CreateConnection),
             connection_test: can(Action::TestConnection),
             credential_write: can(Action::WriteCredential),
-            topic_discovery: can(Action::DiscoverTopics),
-            preflight: can(Action::RunPreflight),
-            destinations: can(Action::ManageDestinations),
+            topic_discovery: can(Action::ReadTopicDiscoveries),
+            preflight: can(Action::ReadPreflights),
+            destinations: can(Action::ReadDestinations),
             schedules_read: can(Action::ReadSchedules),
             schedule_create: can(Action::CreateSchedule),
             schedule_set_suspension: can(Action::SetScheduleSuspension),
@@ -783,8 +828,8 @@ mod tests {
         let z = LocalAdminAuthorizer::new(vec!["team-a".into()]);
         let c = Capabilities::for_namespace(&z, &actor(), "team-a");
         assert!(c.schedule_create && c.restore_create && c.connection_create);
+        assert!(c.topic_discovery && c.preflight && c.destinations && c.credential_write);
         assert!(!c.manual_backup_create);
-        assert!(!c.topic_discovery && !c.preflight && !c.destinations && !c.credential_write);
         assert!(!c.approval_submit && !c.operation_events && !c.connection_test);
         assert_eq!(
             Capabilities::for_namespace(&z, &actor(), "team-b"),

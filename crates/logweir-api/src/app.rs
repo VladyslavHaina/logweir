@@ -188,8 +188,8 @@ impl AppState {
 /// The complete router, middleware included.
 pub fn router(state: AppState) -> Router {
     use crate::routes::{
-        approvals, backups, connections, health, namespaces, operations, restores, schedules,
-        session,
+        approvals, backups, connections, destinations, health, namespaces, operations, preflights,
+        restores, schedules, session, topic_discoveries,
     };
 
     let api = Router::new()
@@ -202,6 +202,46 @@ pub fn router(state: AppState) -> Router {
         .route(
             "/api/v1/namespaces/{ns}/connections/{name}",
             get(connections::get_one),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/connections/{name}/topic-discoveries",
+            get(topic_discoveries::by_connection).post(topic_discoveries::create),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/destinations",
+            get(destinations::list).post(destinations::create),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/destinations:from-legacy",
+            axum::routing::post(destinations::from_legacy),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/destinations/{name}",
+            get(destinations::get_one).post(destinations::command),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/destinations/{name}/usage",
+            get(destinations::usage),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/topic-discoveries/{id}",
+            get(topic_discoveries::get_one).post(topic_discoveries::cancel),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/topic-discoveries/{id}/topics",
+            get(topic_discoveries::topics),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/preflights",
+            axum::routing::post(preflights::create),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/preflights/{id}",
+            get(preflights::get_one).post(preflights::cancel),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/preflights/{id}/details",
+            get(preflights::details),
         )
         .route(
             "/api/v1/namespaces/{ns}/schedules",

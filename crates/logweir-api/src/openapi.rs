@@ -79,6 +79,24 @@ const COMMAND: &[ProblemCode] = &[
     ProblemCode::NotFound,
 ];
 
+/// Problem codes a destination route can add.
+const DESTINATION: &[ProblemCode] = &[
+    ProblemCode::DestinationInvalid,
+    ProblemCode::DestinationLocationImmutable,
+    ProblemCode::TransportDowngradeForbidden,
+];
+
+/// Problem codes a transient-check route can add.
+const CHECK: &[ProblemCode] = &[ProblemCode::RateLimited, ProblemCode::NotFound];
+
+/// Problem codes a stored-result page can add.
+const RESULT_PAGE: &[ProblemCode] = &[
+    ProblemCode::ResultIntegrityFailed,
+    ProblemCode::CursorInvalid,
+    ProblemCode::CursorExpired,
+    ProblemCode::NotFound,
+];
+
 /// Problem codes reserved for later stages, with no producing route yet.
 const RESERVED: &[ProblemCode] = &[ProblemCode::ApprovalRequired, ProblemCode::PolicyMismatch];
 
@@ -130,6 +148,16 @@ fn name() -> Value {
         "name",
         "path",
         "The object name.",
+        json!({ "type": "string" }),
+        true,
+    )
+}
+
+fn id() -> Value {
+    param(
+        "id",
+        "path",
+        "The check's id, which is its object name.",
         json!({ "type": "string" }),
         true,
     )
@@ -452,24 +480,230 @@ fn paths() -> Value {
             )],
         ),
         (
+            "/api/v1/namespaces/{ns}/destinations",
+            vec![
+                list(
+                    "listDestinations",
+                    "Saved destinations. Credential REFERENCES only: a Secret name and the key names inside it, never a value.",
+                    "DestinationList",
+                ),
+                Op {
+                    method: "post",
+                    operation_id: "createDestination",
+                    summary: "Create a BackupDestination. The object's name is the `name` field, because every schedule, backup and restore references a destination by name. A grant may carry a credential VALUE once in access.*.secret.new; it becomes a Secret owned by the destination and is never read back or echoed.",
+                    parameters: vec![ns(), idempotency_key(), origin()],
+                    request: Some("CreateDestinationRequest"),
+                    success: vec![
+                        ("201", "Created.", "DestinationResponse"),
+                        ("200", "Replayed an identical earlier request; the same object.", "DestinationResponse"),
+                    ],
+                    problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, CREATE, DESTINATION]),
+                },
+            ],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/destinations:from-legacy",
+            vec![Op {
+                method: "post",
+                operation_id: "createDestinationFromLegacy",
+                summary: "Adopt the location of a legacy BackupSchedule or Backup as a BackupDestination, deriving the storage block from facts and refusing with legacy_location_unknown when the facts are not there. Existing objects are never mutated.",
+                parameters: vec![ns(), idempotency_key(), origin()],
+                request: Some("DestinationFromLegacyRequest"),
+                success: vec![
+                    ("201", "Created; addressingSource names what it was derived from.", "DestinationResponse"),
+                    ("200", "Replayed an identical earlier request.", "DestinationResponse"),
+                ],
+                problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, CREATE, DESTINATION, &[ProblemCode::LegacyLocationUnknown, ProblemCode::LegacyLocationMismatch, ProblemCode::NotFound]]),
+            }],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/destinations/{name}",
+            vec![
+                get_one("getDestination", "One destination, with the last explicit access test.", "DestinationResponse"),
+                Op {
+                    method: "post",
+                    operation_id: "destinationCommand",
+                    summary: "The command routes, addressed as `<name>:update-access` and `<name>:test`. `:update-access` rotates the four grants and the CA reference under an expectedGeneration precondition and refuses any change to the location or the transport; `:test` starts a DestinationAccess Preflight and answers 202 with it. Idempotency-Key is refused on `:update-access` and required on `:test`.",
+                    parameters: vec![ns(), name(), origin()],
+                    request: Some("UpdateDestinationAccessRequest"),
+                    success: vec![
+                        ("200", "The rotated destination (`:update-access`).", "DestinationResponse"),
+                        ("202", "The started test (`:test`).", "PreflightResponse"),
+                    ],
+                    problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, COMMAND, CREATE, DESTINATION]),
+                },
+            ],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/destinations/{name}/usage",
+            vec![Op {
+                method: "get",
+                operation_id: "getDestinationUsage",
+                summary: "Schedules and backups labelled for this destination, bounded to 100 each. `basis` states how the lists were built, so an empty answer is not read as \"nothing uses this\".",
+                parameters: vec![ns(), name()],
+                request: None,
+                success: vec![("200", "The bounded usage.", "DestinationUsageResponse")],
+                problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),
+            }],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/connections/{name}/topic-discoveries",
+            vec![
+                Op {
+                    method: "get",
+                    operation_id: "listConnectionTopicDiscoveries",
+                    summary: "Discoveries for one connection. With latest=true it answers the two slots instead of a page: a failed attempt never hides the last successful inventory, and a successful inventory never hides that the newest attempt failed.",
+                    parameters: {
+                        let mut p = list_params();
+                        p.insert(1, name());
+                        p.push(param("latest", "query", "true returns {latestAttempt, lastSuccessful} instead of a page.", json!({ "type": "boolean" }), false));
+                        p
+                    },
+                    request: None,
+                    success: vec![
+                        ("200", "One page, or the two slots with latest=true.", "TopicDiscoveryList"),
+                    ],
+                    problems: all_codes(&[COMMON, NAMESPACED, KUBE, LIST, GET]),
+                },
+                Op {
+                    method: "post",
+                    operation_id: "createTopicDiscovery",
+                    summary: "Start a bounded topic inventory. 202 with the new check, or 200 with reused=true when a fresh succeeded discovery with the same parameters and connection binding exists and reuseFresh is set. Rate limited per actor and namespace.",
+                    parameters: vec![ns(), name(), idempotency_key(), origin()],
+                    request: Some("CreateTopicDiscoveryRequest"),
+                    success: vec![
+                        ("202", "Accepted; the check has been created.", "TopicDiscoveryResponse"),
+                        ("200", "A replay, or a reused fresh result.", "TopicDiscoveryResponse"),
+                    ],
+                    problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, CREATE, CHECK]),
+                },
+            ],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/topic-discoveries/{id}",
+            vec![
+                Op {
+                    method: "get",
+                    operation_id: "getTopicDiscovery",
+                    summary: "One discovery. `visibility` is never better than unknown without an explicit attestation: a successful Kafka list alone says nothing about whether it was whole. `stale` is recomputed per read against the connection as it is now.",
+                    parameters: vec![ns(), id()],
+                    request: None,
+                    success: vec![("200", "The discovery.", "TopicDiscoveryResponse")],
+                    problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),
+                },
+                Op {
+                    method: "post",
+                    operation_id: "cancelTopicDiscovery",
+                    summary: "Ask an unfinished discovery of one's own to stop, addressed as `<id>:cancel`. Idempotent: repeating it is 200, and cancelling a finished check is 200 with alreadyTerminal. An operator may cancel only the checks it started. Nothing is deleted.",
+                    parameters: vec![ns(), id(), origin()],
+                    request: None,
+                    success: vec![("200", "The state after the request.", "CancelResponse")],
+                    problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, COMMAND, &[ProblemCode::StateConflict]]),
+                },
+            ],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/topic-discoveries/{id}/topics",
+            vec![Op {
+                method: "get",
+                operation_id: "listDiscoveredTopics",
+                summary: "One page of a stored inventory, read from the immutable result chunks the controller committed. Each chunk is verified by owner UID, immutability and digest before a row is served. At most eight chunks are read per request: a sparse q returns a short page with scan.complete=false and a cursor.",
+                parameters: vec![
+                    ns(),
+                    id(),
+                    param("limit", "query", "Page size, 1 to 200. Default 50.", json!({ "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }), false),
+                    param("cursor", "query", "The opaque nextCursor of the previous page, bound to the actor, the discovery UID, the inventory digest and the filters.", json!({ "type": "string" }), false),
+                    param("q", "query", "Case-insensitive substring of the topic name.", json!({ "type": "string" }), false),
+                    param("prefix", "query", "Name prefix. Whole chunks outside it are skipped without being read.", json!({ "type": "string" }), false),
+                    param("internal", "query", "include or exclude (default). Only meaningful when internal topics were stored.", json!({ "type": "string", "enum": ["include", "exclude"] }), false),
+                    param("errored", "query", "include (default), exclude or only.", json!({ "type": "string", "enum": ["include", "exclude", "only"] }), false),
+                ],
+                request: None,
+                success: vec![("200", "One page, in stored (bytewise name) order.", "TopicPageResponse")],
+                problems: all_codes(&[COMMON, NAMESPACED, KUBE, LIST, RESULT_PAGE]),
+            }],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/preflights",
+            vec![Op {
+                method: "post",
+                operation_id: "createPreflight",
+                summary: "Start a readiness check for a Backup, a Restore or a destination's grants. planBytes is opaque: planHash is checked against the SHA-256 of exactly those bytes and they are stored unchanged. The verdict is advisory and every execution-time guard still runs.",
+                parameters: vec![ns(), idempotency_key(), origin()],
+                request: Some("CreatePreflightRequest"),
+                success: vec![
+                    ("202", "Accepted; the check has been created.", "PreflightResponse"),
+                    ("200", "Replayed an identical earlier request.", "PreflightResponse"),
+                ],
+                problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, CREATE, CHECK]),
+            }],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/preflights/{id}",
+            vec![
+                Op {
+                    method: "get",
+                    operation_id: "getPreflight",
+                    summary: "One readiness result. `applicable` and `stale` are recomputed on every read against the planHash the caller sends, so an edited plan, a replaced referent or an expired result is never rendered as current readiness. An actor bound only as Approver reads Restore results and nothing else.",
+                    parameters: vec![
+                        ns(),
+                        id(),
+                        param("planHash", "query", "sha256:<64 lowercase hex> of the plan the caller is looking at now. A result bound to a different hash is stale.", json!({ "type": "string" }), false),
+                    ],
+                    request: None,
+                    success: vec![("200", "The result.", "PreflightResponse")],
+                    problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET, &[ProblemCode::ValidationFailed]]),
+                },
+                Op {
+                    method: "post",
+                    operation_id: "cancelPreflight",
+                    summary: "Ask an unfinished preflight of one's own to stop, addressed as `<id>:cancel`. Same rules as a discovery cancel.",
+                    parameters: vec![ns(), id(), origin()],
+                    request: None,
+                    success: vec![("200", "The state after the request.", "CancelResponse")],
+                    problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, COMMAND, &[ProblemCode::StateConflict]]),
+                },
+            ],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/preflights/{id}/details",
+            vec![Op {
+                method: "get",
+                operation_id: "listPreflightDetails",
+                summary: "One page of a preflight's detail document, verified by owner UID, immutability and digest before a row is served.",
+                parameters: vec![
+                    ns(),
+                    id(),
+                    param("check", "query", "Only entries the producer attributed to this check id.", json!({ "type": "string" }), false),
+                    param("limit", "query", "Page size, 1 to 200. Default 50.", json!({ "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }), false),
+                    param("cursor", "query", "The opaque nextCursor of the previous page.", json!({ "type": "string" }), false),
+                ],
+                request: None,
+                success: vec![("200", "One page, in stored order.", "DetailPageResponse")],
+                problems: all_codes(&[COMMON, NAMESPACED, KUBE, LIST, RESULT_PAGE]),
+            }],
+        ),
+        (
             "/api/v1/namespaces/{ns}/operations/{kind}/{name}",
             vec![Op {
                 method: "get",
                 operation_id: "getOperation",
-                summary: "The normalized status of one Backup or Restore. Result and evidence verification are separate; NotAttempted is never verified success.",
+                summary: "The normalized status of one Backup, Restore, TopicDiscovery or Preflight. For a backup or a restore the body is an OperationResponse: result and evidence verification are separate, and NotAttempted is never verified success. For a discovery or a preflight it is a CheckOperationResponse, which carries none of those fields because a transient check has none of those facts.",
                 parameters: vec![
                     ns(),
                     param(
                         "kind",
                         "path",
-                        "backup or restore.",
-                        json!({ "type": "string", "enum": ["backup", "restore"] }),
+                        "backup, restore, discovery or preflight.",
+                        json!({ "type": "string", "enum": ["backup", "restore", "discovery", "preflight"] }),
                         true,
                     ),
                     name(),
                 ],
                 request: None,
-                success: vec![("200", "The operation.", "OperationResponse")],
+                success: vec![
+                    ("200", "The normalized durable run (backup, restore), or the normalized transient check (discovery, preflight) — two shapes, because a check has no archive result, no signed evidence and no verification verdict.", "OperationResponse"),
+                ],
                 problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),
             }],
         ),
@@ -512,6 +746,23 @@ pub fn openapi_document() -> String {
     let _ = generator.subschema_for::<c::ApprovalResponse>();
     let _ = generator.subschema_for::<c::ApprovalPacketResponse>();
     let _ = generator.subschema_for::<c::OperationResponse>();
+    let _ = generator.subschema_for::<c::CreateDestinationRequest>();
+    let _ = generator.subschema_for::<c::UpdateDestinationAccessRequest>();
+    let _ = generator.subschema_for::<c::DestinationFromLegacyRequest>();
+    let _ = generator.subschema_for::<c::TestDestinationRequest>();
+    let _ = generator.subschema_for::<c::DestinationList>();
+    let _ = generator.subschema_for::<c::DestinationResponse>();
+    let _ = generator.subschema_for::<c::DestinationUsageResponse>();
+    let _ = generator.subschema_for::<c::CreateTopicDiscoveryRequest>();
+    let _ = generator.subschema_for::<c::TopicDiscoveryList>();
+    let _ = generator.subschema_for::<c::TopicDiscoveryResponse>();
+    let _ = generator.subschema_for::<c::TopicPageResponse>();
+    let _ = generator.subschema_for::<c::DiscoveryLatestResponse>();
+    let _ = generator.subschema_for::<c::CancelResponse>();
+    let _ = generator.subschema_for::<c::CreatePreflightRequest>();
+    let _ = generator.subschema_for::<c::PreflightResponse>();
+    let _ = generator.subschema_for::<c::DetailPageResponse>();
+    let _ = generator.subschema_for::<c::CheckOperationResponse>();
     let definitions = generator.take_definitions();
     let schemas: Map<String, Value> = definitions
         .into_iter()

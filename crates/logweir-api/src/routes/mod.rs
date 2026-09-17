@@ -4,12 +4,17 @@
 pub mod approvals;
 pub mod backups;
 pub mod connections;
+pub mod destinations;
 pub mod health;
 pub mod namespaces;
 pub mod operations;
+pub mod preflights;
 pub mod restores;
 pub mod schedules;
 pub mod session;
+pub mod topic_discoveries;
+
+use std::collections::BTreeMap;
 
 use axum::extract::FromRequestParts;
 use axum::response::{IntoResponse, Response};
@@ -108,6 +113,47 @@ pub fn authorize(
     match outcome {
         Ok(()) => Ok(()),
         Err(denial) => {
+            actor.audit.set_failure(denial.audit_code());
+            Err(denial.response(authorizer.hides_unbound_namespaces()))
+        }
+    }
+}
+
+/// A SECOND action the same request also needs, without replacing the audit
+/// record's primary action.
+///
+/// WHY NOT JUST CALL [`authorize`] TWICE. The audit record names one product
+/// action, and the LAST `authorize` wins; a route that checks
+/// `credential.write` after `destination.manage` would file the request under
+/// the wrong name and make "who created a destination last week" unanswerable.
+/// This decides the extra action with the same table, records it as a note,
+/// and leaves the route's own action in place.
+///
+/// # Errors
+///
+/// `namespace_forbidden` or `forbidden`, with the denial recorded.
+pub fn authorize_also(
+    state: &AppState,
+    actor: &Actor,
+    namespace: &str,
+    action: Action,
+) -> Result<(), ApiError> {
+    let authorizer = state.authorizer();
+    actor.audit.note("alsoRequired", action.name());
+    match authz::decide(authorizer, actor, namespace, action) {
+        Ok(()) => Ok(()),
+        Err(denial) => {
+            actor.audit.set_decision(
+                namespace,
+                action.name(),
+                &authorizer
+                    .roles(actor, namespace)
+                    .iter()
+                    .map(|role| role.as_str().to_string())
+                    .collect::<Vec<String>>(),
+                &authorizer.binding_revision(),
+                crate::audit::Decision::Deny,
+            );
             actor.audit.set_failure(denial.audit_code());
             Err(denial.response(authorizer.hides_unbound_namespaces()))
         }
@@ -334,13 +380,81 @@ where
     K: ProductResource,
     Req: Serialize,
 {
+    create_idempotent_inner(
+        state, actor, namespace, route, prefix, None, key, request_id, validated, build,
+    )
+    .await
+}
+
+/// Create an object under a name the CALLER chose, with the same replay rules.
+///
+/// FOR THE KINDS WHOSE NAME IS PART OF THE CONTRACT. A `BackupDestination` is
+/// referenced by name by every schedule, backup and restore that uses it, and
+/// an operator picks that name; a hashed name would make the reference
+/// unreadable and the object un-namable from `kubectl`. The idempotency scope
+/// is unchanged — it still binds issuer, subject, namespace, route and key —
+/// so a replay still returns the same object and a different request under the
+/// same key is still `idempotency_conflict`. What changes is the failure mode
+/// of a name COLLISION between two actors: the second gets `state_conflict`,
+/// because an object this scope did not create is never adopted.
+#[allow(clippy::too_many_arguments)]
+pub async fn create_named_idempotent<K, Req>(
+    state: &AppState,
+    actor: &Actor,
+    namespace: &str,
+    route: &str,
+    name: &str,
+    key: &IdempotencyKey,
+    request_id: &str,
+    validated: &Req,
+    build: impl Fn(String, std::collections::BTreeMap<String, String>) -> K,
+) -> Result<Created<K>, ApiError>
+where
+    K: ProductResource,
+    Req: Serialize,
+{
+    create_idempotent_inner(
+        state,
+        actor,
+        namespace,
+        route,
+        "",
+        Some(name),
+        key,
+        request_id,
+        validated,
+        build,
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn create_idempotent_inner<K, Req>(
+    state: &AppState,
+    actor: &Actor,
+    namespace: &str,
+    route: &str,
+    prefix: &str,
+    fixed_name: Option<&str>,
+    key: &IdempotencyKey,
+    request_id: &str,
+    validated: &Req,
+    build: impl Fn(String, std::collections::BTreeMap<String, String>) -> K,
+) -> Result<Created<K>, ApiError>
+where
+    K: ProductResource,
+    Req: Serialize,
+{
     let canonical = serde_json::to_vec(validated).map_err(|_| {
         ApiError::new(
             ProblemCode::InternalError,
             "The request could not be hashed.",
         )
     })?;
-    let identity = idempotency::identity(actor, namespace, route, prefix, key, &canonical);
+    let mut identity = idempotency::identity(actor, namespace, route, prefix, key, &canonical);
+    if let Some(name) = fixed_name {
+        identity.name = name.to_string();
+    }
     actor
         .audit
         .set_create_hashes(&identity.scope_hash, &identity.request_hash);
@@ -442,6 +556,181 @@ pub async fn get_object<K: ProductResource>(
     // not merely which name was asked for.
     note_object(actor, &object);
     Ok(object)
+}
+
+// ======================================================================
+// Transient checks: rate limit, cancellation, object-level authorization
+// ======================================================================
+
+/// D2 §8.2: at most this many discovery creates per actor, per namespace, per
+/// minute.
+pub const DISCOVERY_CREATES_PER_MINUTE: u32 = 6;
+/// D2 §8.3: at most this many preflight creates per actor, per namespace, per
+/// minute.
+pub const PREFLIGHT_CREATES_PER_MINUTE: u32 = 20;
+/// The window both limits use.
+pub const CHECK_RATE_WINDOW_SECONDS: i64 = 60;
+
+struct CheckWindow {
+    started: chrono::DateTime<chrono::Utc>,
+    count: u32,
+}
+
+/// The check-create windows, keyed by `(actor, namespace, route)`.
+///
+/// WHY A PROCESS GLOBAL AND NOT A FIELD. `AppState`'s `Settings` is built by
+/// `main.rs` and by the test harness, both outside this task's ownership, and
+/// widening that constructor to carry a limiter would change a signature two
+/// other stages depend on. The trade is stated rather than hidden: this map is
+/// per PROCESS, so two console replicas each permit the configured rate, and
+/// the limit is a politeness bound on how fast one operator can queue check
+/// Jobs — not a security control. The real ceiling on concurrent checks is the
+/// controller's `checks.maxActivePerNamespace`, which no API can talk past.
+/// The clock is [`AppState::now`], so a test advances it instead of sleeping.
+static CHECK_WINDOWS: std::sync::OnceLock<std::sync::Mutex<BTreeMap<String, CheckWindow>>> =
+    std::sync::OnceLock::new();
+
+/// The most keys tracked at once. Past this the map is cleared rather than
+/// grown without bound: a flood of actor/namespace pairs must not become a
+/// memory leak, and losing a window only forgives requests.
+pub const MAX_TRACKED_CHECK_KEYS: usize = 4096;
+
+/// Count one check create and decide.
+///
+/// # Errors
+///
+/// `rate_limited` with `Retry-After` when the window is full.
+pub fn check_create_rate(
+    state: &AppState,
+    actor: &Actor,
+    namespace: &str,
+    route: &str,
+    per_window: u32,
+) -> Result<(), ApiError> {
+    let now = state.now();
+    let key = format!("{}\n{namespace}\n{route}", actor.id());
+    let mut windows = CHECK_WINDOWS
+        .get_or_init(|| std::sync::Mutex::new(BTreeMap::new()))
+        .lock()
+        .expect("the check-window lock is never poisoned");
+    if windows.len() > MAX_TRACKED_CHECK_KEYS {
+        windows.clear();
+    }
+    let window = windows.entry(key).or_insert(CheckWindow {
+        started: now,
+        count: 0,
+    });
+    let elapsed = (now - window.started).num_seconds();
+    if !(0..CHECK_RATE_WINDOW_SECONDS).contains(&elapsed) {
+        window.started = now;
+        window.count = 0;
+    }
+    if window.count >= per_window {
+        let remaining = CHECK_RATE_WINDOW_SECONDS - (now - window.started).num_seconds();
+        let mut error = ApiError::new(
+            ProblemCode::RateLimited,
+            "Too many checks were started in this namespace; wait for the window to reset.",
+        );
+        error.retry_after_seconds = Some(remaining.clamp(1, CHECK_RATE_WINDOW_SECONDS) as u64);
+        return Err(error);
+    }
+    window.count += 1;
+    Ok(())
+}
+
+/// Forget every counted window. A test hook: the map is a process global, so
+/// one test's creates would otherwise be another's rate limit.
+#[doc(hidden)]
+pub fn reset_check_rate_limits() {
+    if let Some(lock) = CHECK_WINDOWS.get() {
+        lock.lock()
+            .expect("the check-window lock is never poisoned")
+            .clear();
+    }
+}
+
+/// Whether `actor` created the object, by the annotation the create recorded.
+///
+/// EXACT ACTOR, NOT A ROLE. D0 gives an operator "start/read/cancel OWN
+/// checks": two operators in one namespace are both operators, and the one who
+/// did not start a check may not stop it. The comparison is the stable
+/// `issuer#subject` id, never a display name.
+#[must_use]
+pub fn created_by<K: ProductResource>(object: &K, actor: &Actor) -> bool {
+    object
+        .meta()
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(idempotency::ANNOTATION_ACTOR))
+        .is_some_and(|recorded| recorded == &actor.id())
+}
+
+/// Ask one transient check to stop, after the caller has authorized it.
+///
+/// IDEMPOTENT IN BOTH DIRECTIONS. A check that has already finished is
+/// answered 200 `alreadyTerminal` with nothing written; a check whose
+/// `cancelRequested` is already true is answered 200 with nothing written; and
+/// a concurrent change between the read and the patch is retried once before
+/// it becomes a conflict.
+///
+/// # Errors
+///
+/// `forbidden` when the actor did not start the check, `state_conflict` when
+/// the object changed twice under the request, or the adapter's failure.
+pub async fn cancel_check<K>(
+    state: &AppState,
+    actor: &Actor,
+    namespace: &str,
+    name: &str,
+    terminal: impl Fn(&K) -> bool,
+    already_requested: impl Fn(&K) -> bool,
+) -> Result<(K, bool), ApiError>
+where
+    K: crate::kube::CancellableCheck,
+{
+    for _ in 0..2 {
+        let object = get_object::<K>(state, actor, namespace, name).await?;
+        if !created_by(&object, actor) {
+            // The AUDIT line already names the object and the actor; the
+            // response says what the rule is without saying who owns it.
+            actor.audit.set_failure("forbidden");
+            return Err(ApiError::new(
+                ProblemCode::Forbidden,
+                "This check was started by another actor. An operator may cancel only the \
+                 checks it started.",
+            ));
+        }
+        if terminal(&object) {
+            return Ok((object, true));
+        }
+        if already_requested(&object) {
+            return Ok((object, false));
+        }
+        let version = object.meta().resource_version.clone().unwrap_or_default();
+        match state
+            .kube()
+            .request_check_cancel::<K>(namespace, name, &version)
+            .await
+        {
+            Ok(updated) => {
+                tracing::info!(
+                    namespace,
+                    name,
+                    actor = %actor.id(),
+                    "cancel requested"
+                );
+                note_object(actor, &updated);
+                actor.audit.note("cancelRequested", "true");
+                return Ok((updated, false));
+            }
+            Err(KubeFailure::Conflict) => continue,
+            Err(other) => return Err(other.into_api_error()),
+        }
+    }
+    Err(ApiError::new(
+        ProblemCode::StateConflict,
+        "The check changed concurrently while the cancel was applied; read it again and retry.",
+    ))
 }
 
 #[cfg(test)]

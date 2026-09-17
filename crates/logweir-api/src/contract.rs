@@ -988,6 +988,1310 @@ pub struct ApprovalPacket {
 }
 
 // ======================================================================
+// Destinations (BackupDestination, PLAT-08)
+// ======================================================================
+
+/// The object-store provider a destination names.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum StorageProviderDto {
+    /// S3 and S3-compatible endpoints.
+    S3,
+}
+
+/// How a request names the bucket.
+///
+/// NEVER A TRANSPORT CHOICE, in either direction. Addressing says how the
+/// bucket appears in the URL; `transport.security` alone decides whether the
+/// connection is encrypted. This is defect G5 written into the contract.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum AddressingDto {
+    /// `https://endpoint/bucket/key`.
+    PathStyle,
+    /// `https://bucket.endpoint/key`.
+    VirtualHosted,
+}
+
+/// Transport security. Immutable once the destination exists.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum TransportSecurityDto {
+    /// TLS, with an `https://` endpoint or none.
+    Tls,
+    /// Plaintext HTTP, and only with an explicit `http://` endpoint.
+    InsecureHttp,
+}
+
+/// How one role's credential is obtained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum AccessModeDto {
+    /// Keys read from a Secret in this namespace, projected into the Job.
+    SecretKeys,
+    /// The pod's own ServiceAccount identity; no Secret is projected.
+    WorkloadIdentity,
+    /// The controller's own read-only object-store handle. `evidenceRead`
+    /// only.
+    ControllerIdentity,
+    /// The destination's explicit read-only `archiveRead` grant.
+    /// `evidenceRead` only.
+    ArchiveReadGrant,
+    /// RESPONSES ONLY: the grant is absent and `archiveWrite` is used. It is
+    /// never accepted in a request, because "absent" and "explicitly say the
+    /// thing absence means" would then be two spellings of one state.
+    InheritsArchiveWrite,
+    /// RESPONSES ONLY: `evidenceRead` is absent, so verification is
+    /// `NotAttempted` and this says so rather than leaving a blank field.
+    NotConfigured,
+}
+
+/// Which credential a destination test exercises.
+#[derive(
+    Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize, JsonSchema,
+)]
+#[serde(rename_all = "camelCase")]
+pub enum DestinationRoleDto {
+    /// The grant execution Jobs write the archive with.
+    ArchiveWrite,
+    /// The read-only archive grant.
+    ArchiveRead,
+    /// The grant that writes evidence under `logweir/`.
+    EvidenceWrite,
+    /// The grant that reads evidence back for verification.
+    EvidenceRead,
+}
+
+/// Whether an explicit readiness test may write a marker object.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum WriteProbeDto {
+    /// No object is ever written by a readiness test.
+    Disabled,
+    /// A destination test may create ONE marker object under the
+    /// destination's own prefix. It is never deleted.
+    CreateOnlyMarker,
+}
+
+/// Where the archive root is. Immutable once the destination exists.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct StorageRequest {
+    /// The object-store provider.
+    pub provider: StorageProviderDto,
+    /// The bucket.
+    pub bucket: String,
+    /// The key prefix inside the bucket, relative; absent is the bucket root.
+    /// Never `logweir` or anything under it.
+    #[serde(default)]
+    pub prefix: Option<String>,
+    /// The region, when the provider needs one.
+    #[serde(default)]
+    pub region: Option<String>,
+    /// An http(s) origin — scheme, host and optional port. Absent means AWS
+    /// S3.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+    /// How a request names the bucket.
+    pub addressing: AddressingDto,
+}
+
+/// A CA bundle in a `ConfigMap` in this namespace. A `ConfigMap` and never a
+/// Secret: a CA certificate is public material.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CaBundleRequest {
+    /// The `ConfigMap` name, in this namespace.
+    pub config_map_name: String,
+    /// The data key holding the PEM bundle. Absent means `ca.crt`.
+    #[serde(default)]
+    pub key: Option<String>,
+}
+
+/// Transport security and its trust material.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TransportRequest {
+    /// `tls` or `insecureHttp`. It must agree with the endpoint scheme, and
+    /// `addressing` never changes it.
+    pub security: TransportSecurityDto,
+    /// A private CA, for `tls` only.
+    #[serde(default)]
+    pub ca_bundle: Option<CaBundleRequest>,
+}
+
+/// A credential value typed once.
+///
+/// WRITE-ONLY. These bytes are turned into a Secret and are never echoed, in
+/// any response, log line, status, annotation or audit record. The Secret is
+/// created and never read back; the only thing that comes out of this field is
+/// a Secret NAME.
+#[derive(Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct NewCredentialRequest {
+    /// The access key id.
+    pub access_key_id: String,
+    /// The secret access key.
+    pub secret_access_key: String,
+    /// A session token, when the credential is temporary.
+    #[serde(default)]
+    pub session_token: Option<String>,
+}
+
+// `Debug` is HAND-WRITTEN so that a `dbg!`, a `tracing` field or a panic
+// message can never print a credential. The type has no `Display`.
+impl std::fmt::Debug for NewCredentialRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("NewCredentialRequest(<redacted>)")
+    }
+}
+
+/// An existing Secret in this namespace, and the keys inside it.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ExistingSecretRequest {
+    /// The Secret name.
+    pub name: String,
+    /// The data key holding the access key id. Absent means `access-key-id`.
+    #[serde(default)]
+    pub access_key_id_key: Option<String>,
+    /// The data key holding the secret access key. Absent means
+    /// `secret-access-key`.
+    #[serde(default)]
+    pub secret_access_key_key: Option<String>,
+    /// The data key holding a session token. No default.
+    #[serde(default)]
+    pub session_token_key: Option<String>,
+}
+
+/// Exactly one of an existing Secret reference or a new write-only value.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SecretSourceRequest {
+    /// Name an existing Secret.
+    #[serde(default)]
+    pub existing: Option<ExistingSecretRequest>,
+    /// Or type the credential once, here.
+    #[serde(default)]
+    pub new: Option<NewCredentialRequest>,
+}
+
+/// The ServiceAccount a workload-identity grant runs as.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct WorkloadIdentityRequest {
+    /// The ServiceAccount name. Absent means `logweir-runner`.
+    #[serde(default)]
+    pub service_account_name: Option<String>,
+}
+
+/// One role's grant.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AccessGrantRequest {
+    /// How the credential is obtained.
+    pub mode: AccessModeDto,
+    /// The Secret, for `secretKeys`.
+    #[serde(default)]
+    pub secret: Option<SecretSourceRequest>,
+    /// The ServiceAccount, for `workloadIdentity`.
+    #[serde(default)]
+    pub workload_identity: Option<WorkloadIdentityRequest>,
+}
+
+/// The four grants. Absent is a DEFINED answer and never a wider one:
+/// `archiveRead` and `evidenceWrite` absent mean "use `archiveWrite`", and
+/// `evidenceRead` absent means verification is not attempted and says so.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AccessRequest {
+    /// The grant execution Jobs write the archive with. Required.
+    pub archive_write: AccessGrantRequest,
+    /// The read-only archive grant.
+    #[serde(default)]
+    pub archive_read: Option<AccessGrantRequest>,
+    /// The grant that writes evidence under `logweir/`.
+    #[serde(default)]
+    pub evidence_write: Option<AccessGrantRequest>,
+    /// The grant that reads evidence back for verification.
+    #[serde(default)]
+    pub evidence_read: Option<AccessGrantRequest>,
+}
+
+/// Explicit readiness settings.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ReadinessRequest {
+    /// Whether a destination test may write a marker. Absent means
+    /// `createOnlyMarker` HERE, while the CRD's own default is `disabled`:
+    /// a form that discloses the choice may default to the useful answer, and
+    /// an object created by `kubectl` with no opinion may not.
+    #[serde(default)]
+    pub write_probe: Option<WriteProbeDto>,
+}
+
+/// `POST /api/v1/namespaces/{ns}/destinations`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CreateDestinationRequest {
+    /// The destination's name, which is also its Kubernetes object name: a
+    /// schedule, a backup and a restore all reference it by this name.
+    pub name: String,
+    /// What this destination is, for a human reading a list.
+    #[serde(default)]
+    pub description: Option<String>,
+    /// The location. Immutable once created.
+    pub storage: StorageRequest,
+    /// Transport security and its trust material.
+    pub transport: TransportRequest,
+    /// The four credential grants.
+    pub access: AccessRequest,
+    /// Readiness settings.
+    #[serde(default)]
+    pub readiness: Option<ReadinessRequest>,
+    /// Whether this becomes the namespace's default destination. At most one
+    /// destination per namespace may hold it, and a second request naming
+    /// another default is a conflict rather than a silent takeover.
+    #[serde(default)]
+    pub default: Option<bool>,
+}
+
+/// The transport half of an access rotation: the CA reference, and nothing
+/// else. `security` is absent from this type ON PURPOSE — it is immutable.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct UpdateTransportRequest {
+    /// The new CA reference, or `null` to clear it.
+    #[serde(default)]
+    pub ca_bundle: Option<CaBundleRequest>,
+}
+
+/// `POST .../destinations/{name}:update-access`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct UpdateDestinationAccessRequest {
+    /// The `metadata.generation` the client last read. A stale value is
+    /// `precondition_failed`: a rotation must not land on a destination that
+    /// changed under the operator's feet.
+    pub expected_generation: i64,
+    /// The complete four-grant object. A grant omitted here is REMOVED.
+    pub access: AccessRequest,
+    /// The CA reference. Absent leaves it alone; present with a `null`
+    /// `caBundle` clears it.
+    #[serde(default)]
+    pub transport: Option<UpdateTransportRequest>,
+}
+
+/// `POST .../destinations:from-legacy`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DestinationFromLegacyRequest {
+    /// The new destination's name.
+    pub name: String,
+    /// The legacy `BackupSchedule` to derive the location from.
+    #[serde(default)]
+    pub source_schedule: Option<String>,
+    /// Or the legacy `Backup`.
+    #[serde(default)]
+    pub source_backup: Option<String>,
+    /// The four credential grants for the derived location.
+    pub access: AccessRequest,
+    /// What this destination is.
+    #[serde(default)]
+    pub description: Option<String>,
+}
+
+/// `POST .../destinations/{name}:test`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TestDestinationRequest {
+    /// The roles to exercise, 1 to 4. Absent means every configured role.
+    #[serde(default)]
+    pub roles: Option<Vec<DestinationRoleDto>>,
+}
+
+/// A destination's location, as stored.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StorageView {
+    /// The provider.
+    pub provider: StorageProviderDto,
+    /// The bucket.
+    pub bucket: String,
+    /// The prefix, `""` for the bucket root.
+    pub prefix: String,
+    /// The region.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    /// The endpoint origin; absent means AWS S3.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// How a request names the bucket.
+    pub addressing: AddressingDto,
+}
+
+/// A CA bundle reference, with the digest the controller observed.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CaBundleView {
+    /// The `ConfigMap` name.
+    pub config_map_name: String,
+    /// The data key.
+    pub key: String,
+    /// `sha256:<hex>` over the CA bytes the controller read, so a rotation is
+    /// visible without reading the bundle again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sha256: Option<String>,
+}
+
+/// Transport security, as stored.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TransportView {
+    /// `tls` or `insecureHttp`.
+    pub security: TransportSecurityDto,
+    /// The CA reference.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ca_bundle: Option<CaBundleView>,
+}
+
+/// One role's grant, as stored. NEVER A CREDENTIAL VALUE: a Secret name and
+/// the key names inside it, both of which are public references.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessGrantView {
+    /// How the credential is obtained.
+    pub mode: AccessModeDto,
+    /// The Secret's NAME, for `secretKeys`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub secret_name: Option<String>,
+    /// The data KEY NAMES inside it, sorted.
+    pub keys: Vec<String>,
+    /// The ServiceAccount, for `workloadIdentity`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub service_account_name: Option<String>,
+}
+
+/// The four grants, as stored.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct AccessView {
+    /// The archive write grant.
+    pub archive_write: AccessGrantView,
+    /// The archive read grant, or `inheritsArchiveWrite`.
+    pub archive_read: AccessGrantView,
+    /// The evidence write grant, or `inheritsArchiveWrite`.
+    pub evidence_write: AccessGrantView,
+    /// The evidence read grant, or `notConfigured`.
+    pub evidence_read: AccessGrantView,
+}
+
+/// The controller's verdict on a destination.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DestinationStatusView {
+    /// Whether the `Valid` condition is `True`. `null` means the controller
+    /// has not reached a verdict yet — which is NOT the same as invalid.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub valid: Option<bool>,
+    /// The CamelCase reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// The bounded message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// The generation the verdict was computed from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
+    /// When the controller last reached it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<DateTime<Utc>>,
+}
+
+/// The most recent explicit access test.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct LastTestView {
+    /// The `Preflight` that ran it.
+    pub preflight_id: String,
+    /// Its aggregate state.
+    pub state: PreflightState,
+    /// When the check observed the destination.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<DateTime<Utc>>,
+    /// Whether the result has expired or its inputs changed. A stale test is
+    /// never rendered as health.
+    pub stale: bool,
+}
+
+/// A saved destination.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Destination {
+    /// The object name, which is how everything else references it.
+    pub name: String,
+    /// The namespace.
+    pub namespace: String,
+    /// The Kubernetes UID.
+    pub uid: String,
+    /// The resourceVersion this projection was read at.
+    pub resource_version: String,
+    /// The `metadata.generation`; send it back as `expectedGeneration`.
+    pub generation: i64,
+    /// When the object was created.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+    /// What this destination is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The location.
+    pub storage: StorageView,
+    /// Transport security.
+    pub transport: TransportView,
+    /// The four grants, references only.
+    pub access: AccessView,
+    /// Whether a test may write a marker.
+    pub write_probe: WriteProbeDto,
+    /// The archive root as one URL, so an operator and a plan never spell one
+    /// location two ways.
+    pub canonical_url: String,
+    /// `sha256:<hex>` over the canonical location, as the controller computed
+    /// it. Absent until the controller has observed the object.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub location_digest: Option<String>,
+    /// The controller's verdict.
+    pub status: DestinationStatusView,
+    /// Whether this is the namespace's default destination.
+    pub default: bool,
+    /// The most recent explicit access test.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_test: Option<LastTestView>,
+}
+
+/// A destination, as a list row.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DestinationSummary {
+    /// The object name.
+    pub name: String,
+    /// The Kubernetes UID.
+    pub uid: String,
+    /// The `metadata.generation`.
+    pub generation: i64,
+    /// What this destination is.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// The archive root as one URL.
+    pub canonical_url: String,
+    /// The endpoint origin; absent means AWS S3.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    /// `tls` or `insecureHttp`.
+    pub transport: TransportSecurityDto,
+    /// How a request names the bucket.
+    pub addressing: AddressingDto,
+    /// The controller's verdict.
+    pub status: DestinationStatusView,
+    /// Whether this is the namespace's default destination.
+    pub default: bool,
+}
+
+/// One object a destination is referenced by.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DestinationUseView {
+    /// `BackupSchedule` or `Backup`.
+    pub kind: String,
+    /// The object name.
+    pub name: String,
+    /// When it was created.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+}
+
+/// `GET .../destinations/{name}/usage`.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DestinationUsageResponse {
+    /// The request ID.
+    pub request_id: String,
+    /// The destination.
+    pub name: String,
+    /// Schedules that name it, at most 100.
+    pub schedules: Vec<DestinationUseView>,
+    /// Recent backups that name it, at most 100, newest name last.
+    pub backups: Vec<DestinationUseView>,
+    /// Whether either list was cut.
+    pub truncated: bool,
+    /// How the lists were built, stated so an empty answer is not read as
+    /// "nothing uses this".
+    pub basis: String,
+}
+
+/// `GET .../destinations` — one page of rows.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DestinationList {
+    /// The request ID.
+    pub request_id: String,
+    /// The rows on this page.
+    pub items: Vec<DestinationSummary>,
+    /// Paging.
+    pub page: Page,
+}
+
+/// One `Destination`.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DestinationResponse {
+    /// The request ID.
+    pub request_id: String,
+    /// On a durable create: whether this replays an earlier identical request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replayed: Option<bool>,
+    /// How the storage block was derived, on `:from-legacy` only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub addressing_source: Option<String>,
+    /// Advisory notes from `:from-legacy`, e.g. that a legacy `allowHttp` was
+    /// a no-op against an `https://` endpoint.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<String>,
+    /// The item.
+    pub item: Destination,
+}
+
+// ======================================================================
+// Topic discoveries (TopicDiscovery, PLAT-09.1)
+// ======================================================================
+
+/// The lifecycle of a transient check.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum CheckLifecycle {
+    /// Accepted; the controller has not observed it yet.
+    Pending,
+    /// Waiting for a check slot.
+    Queued,
+    /// The check Job exists and has not finished.
+    Running,
+    /// A result was produced.
+    Succeeded,
+    /// No result could be produced. Distinct from a result that says "no".
+    Failed,
+    /// Cancelled before a result.
+    Cancelled,
+    /// A phase this build does not recognise.
+    Unknown,
+}
+
+impl CheckLifecycle {
+    /// Whether the state can no longer change on its own.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            CheckLifecycle::Succeeded | CheckLifecycle::Failed | CheckLifecycle::Cancelled
+        )
+    }
+}
+
+/// How complete a topic inventory's own author believes it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum VisibilityState {
+    /// A successful Kafka list ALONE. It is never called complete: an ACL can
+    /// hide a topic from `DESCRIBE` with no error anywhere.
+    Unknown,
+    /// An authorization omission was observed.
+    Limited,
+    /// An administrator-governed attestation says the principal sees
+    /// everything.
+    AttestedComplete,
+}
+
+/// What a discovery could see, and why.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct VisibilityView {
+    /// The state.
+    pub state: VisibilityState,
+    /// The observations behind it.
+    pub basis: Vec<String>,
+    /// The attestation that justified `attestedComplete`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attestation: Option<String>,
+}
+
+/// The counts a discovery recorded.
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryCountsView {
+    /// Names the broker listed.
+    pub listed: i64,
+    /// Entries stored.
+    pub returned: i64,
+    /// Internal topics excluded.
+    pub internal_excluded: i64,
+    /// Entries whose metadata could not be read.
+    pub errored: i64,
+}
+
+/// What became of the expected topics.
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExpectedTopicsView {
+    /// How many were asked about.
+    pub requested: i64,
+    /// Visible in the listing.
+    pub visible: i64,
+    /// Refused by authorization.
+    pub not_authorized: i64,
+    /// Absent from the cluster.
+    pub not_found: i64,
+    /// Neither confirmed nor refuted.
+    pub unknown: i64,
+}
+
+/// The connection a discovery was bound to when it ran.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryConnectionView {
+    /// The connection name.
+    pub name: String,
+    /// Its UID when the check ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uid: Option<String>,
+    /// Its generation when the check ran.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<i64>,
+    /// The principal the check presented, e.g. `User:backup`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub principal: Option<String>,
+    /// The SASL mechanism, or `plaintext`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub auth_mode: Option<String>,
+}
+
+/// A bounded, redacted failure.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckErrorView {
+    /// The CamelCase code.
+    pub code: String,
+    /// The redacted message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+}
+
+/// A bounded topic inventory.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicDiscovery {
+    /// The object name, which is the id every other route uses.
+    pub id: String,
+    /// The namespace.
+    pub namespace: String,
+    /// The Kubernetes UID.
+    pub uid: String,
+    /// The resourceVersion this projection was read at.
+    pub resource_version: String,
+    /// When the object was created.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+    /// The connection it was bound to.
+    pub connection: DiscoveryConnectionView,
+    /// The lifecycle state.
+    pub state: CheckLifecycle,
+    /// The CamelCase reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Whether the state is final.
+    pub terminal: bool,
+    /// When the runner container finished, which is when the facts were true.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<DateTime<Utc>>,
+    /// Until when the result counts as fresh.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fresh_until: Option<DateTime<Utc>>,
+    /// Whether the result is past its freshness or its binding changed.
+    pub stale: bool,
+    /// Why, when it is.
+    pub stale_reasons: Vec<String>,
+    /// The cluster id the check read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cluster_id: Option<String>,
+    /// The counts.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub counts: Option<DiscoveryCountsView>,
+    /// Whether the inventory was cut.
+    pub truncated: bool,
+    /// Why it was cut.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub truncation_reason: Option<String>,
+    /// Completeness, never better than `unknown` without an attestation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<VisibilityView>,
+    /// What became of the expected topics.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expected: Option<ExpectedTopicsView>,
+    /// `sha256:<hex>` over the canonical TSV of the stored entries. The topics
+    /// page binds its cursor to it, so a page cannot straddle two results.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topics_sha256: Option<String>,
+    /// How many stored chunks the result has.
+    pub chunk_count: usize,
+    /// The failure, when there is one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error: Option<CheckErrorView>,
+    /// The status conditions, at most 16.
+    pub conditions: Vec<ConditionView>,
+}
+
+/// `POST .../connections/{name}/topic-discoveries`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CreateTopicDiscoveryRequest {
+    /// Whether `__`-prefixed topics are kept. Absent means false.
+    #[serde(default)]
+    pub include_internal: Option<bool>,
+    /// Names to ask about explicitly, at most 500.
+    #[serde(default)]
+    pub expected_topics: Option<Vec<String>>,
+    /// The ceiling on stored entries.
+    #[serde(default)]
+    pub max_topics: Option<i32>,
+    /// The in-Job Kafka budget in seconds.
+    #[serde(default)]
+    pub timeout_seconds: Option<i32>,
+    /// Whether a fresh, identical, succeeded discovery may be returned instead
+    /// of starting another. Absent means true.
+    #[serde(default)]
+    pub reuse_fresh: Option<bool>,
+}
+
+/// One row of a topic page.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicEntryView {
+    /// The topic name.
+    pub name: String,
+    /// Its partition count.
+    pub partitions: u32,
+    /// Whether it is a Kafka internal topic (`__`-prefixed, and only that).
+    pub internal: bool,
+    /// Whether it was one of the expected names.
+    pub expected: bool,
+    /// The CamelCase code, when its metadata could not be read.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub error_code: Option<String>,
+}
+
+/// How much of the stored result one page actually looked at.
+#[derive(Clone, Copy, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScanView {
+    /// Whether the scan reached the end of the result. A sparse `q` returns a
+    /// short page with `complete: false` and a cursor rather than reading
+    /// every chunk in one request.
+    pub complete: bool,
+    /// How many chunks this request read, at most 8.
+    pub chunks_scanned: u32,
+}
+
+/// `GET .../topic-discoveries/{id}/topics`.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicPageResponse {
+    /// The request ID.
+    pub request_id: String,
+    /// The rows on this page, in stored (bytewise name) order.
+    pub items: Vec<TopicEntryView>,
+    /// Paging. `snapshot` is `<uid>@<topicsSha256>`.
+    pub page: Page,
+    /// How much of the result was read.
+    pub scan: ScanView,
+}
+
+/// `GET .../connections/{name}/topic-discoveries?latest=true`.
+///
+/// TWO SLOTS, NOT ONE. A failed attempt never hides the last successful
+/// inventory, and a successful inventory never hides that the newest attempt
+/// failed.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DiscoveryLatestResponse {
+    /// The request ID.
+    pub request_id: String,
+    /// The newest discovery of any state.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub latest_attempt: Option<TopicDiscovery>,
+    /// The newest one that produced a result.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_successful: Option<TopicDiscovery>,
+}
+
+/// `GET .../connections/{name}/topic-discoveries` — one page.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicDiscoveryList {
+    /// The request ID.
+    pub request_id: String,
+    /// The discoveries on this page.
+    pub items: Vec<TopicDiscovery>,
+    /// Paging.
+    pub page: Page,
+}
+
+/// One `TopicDiscovery`.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TopicDiscoveryResponse {
+    /// The request ID.
+    pub request_id: String,
+    /// On a create: whether this replays an earlier identical request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replayed: Option<bool>,
+    /// On a create: whether a fresh identical result was returned instead of
+    /// starting another check.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reused: Option<bool>,
+    /// The item.
+    pub item: TopicDiscovery,
+}
+
+/// `POST .../topic-discoveries/{id}:cancel` and
+/// `POST .../preflights/{id}:cancel`.
+///
+/// CANCELLATION IS A WISH, RECORDED. It never deletes archive data, Kafka
+/// topics, durable runs or signed evidence; the controller verifies the exact
+/// owned Job and UID before stopping anything.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CancelResponse {
+    /// The request ID.
+    pub request_id: String,
+    /// The check's id.
+    pub id: String,
+    /// Its state after the request.
+    pub state: String,
+    /// True when the check had already finished, in which case nothing was
+    /// written. Repeating a cancel is 200 either way.
+    pub already_terminal: bool,
+}
+
+// ======================================================================
+// Preflights (Preflight, PLAT-03)
+// ======================================================================
+
+/// What a preflight is about.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum PreflightOperationDto {
+    /// "Back up now" and schedule readiness.
+    Backup,
+    /// Restore readiness, bound to an exact plan hash.
+    Restore,
+    /// An explicit destination access test.
+    DestinationAccess,
+}
+
+/// The aggregate a preflight reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum PreflightState {
+    /// Accepted; not observed yet.
+    Pending,
+    /// Waiting for a check slot.
+    Queued,
+    /// The check Job exists and has not finished.
+    Running,
+    /// Every blocking check passed.
+    Ready,
+    /// A blocking check said no.
+    NotReady,
+    /// A blocking check could not be decided, or was skipped.
+    Unknown,
+    /// No result could be produced at all.
+    Failed,
+    /// Cancelled before a result.
+    Cancelled,
+}
+
+/// One check's verdict.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum CheckVerdict {
+    /// The check passed.
+    Ready,
+    /// The check failed.
+    NotReady,
+    /// The check could not be decided.
+    Unknown,
+    /// The caller asked for it to be skipped. A skipped blocking check keeps
+    /// the aggregate `unknown`; it never counts as a pass.
+    Skipped,
+}
+
+/// Whether a check's verdict gates the operation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum CheckGating {
+    /// A `notReady` here makes the whole operation `notReady`.
+    Blocking,
+    /// Reported as a warning; never changes the aggregate.
+    Advisory,
+    /// Cannot be checked before execution; always `unknown` and always
+    /// excluded from the aggregate.
+    ExecutionOnly,
+}
+
+/// What a check looked at.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckScopeView {
+    /// The kind.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// The name.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// The UID.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uid: Option<String>,
+}
+
+/// One check entry.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckEntryView {
+    /// The stable check id, e.g. `target.mappedTopics`.
+    pub id: String,
+    /// Its category.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<String>,
+    /// What it looked at.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scope: Option<CheckScopeView>,
+    /// The verdict.
+    pub state: CheckVerdict,
+    /// Whether it gates.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub gating: Option<CheckGating>,
+    /// Who observed the fact.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub authority: Option<String>,
+    /// The CamelCase code.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub code: Option<String>,
+    /// The redacted message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// What to do about it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remedy: Option<String>,
+    /// When the fact was observed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<DateTime<Utc>>,
+    /// When it stops counting.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+}
+
+/// One object a preflight's binding names.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ReferentView {
+    /// The kind.
+    pub kind: String,
+    /// The name.
+    pub name: String,
+    /// The UID at the time of the check.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uid: Option<String>,
+    /// The generation at the time of the check.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<i64>,
+}
+
+/// Exactly what a result is a result ABOUT.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PreflightBindingView {
+    /// The plan hash the check was bound to.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plan_hash: Option<String>,
+    /// The digest over every input the verdict depended on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inputs_digest: Option<String>,
+    /// The objects it resolved, at most 16.
+    pub referents: Vec<ReferentView>,
+}
+
+/// A check that cannot be answered before the run.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ExecutionOnlyView {
+    /// The check id.
+    pub id: String,
+    /// Why it is only knowable at execution time.
+    pub note: String,
+}
+
+/// The backup half of a preflight request.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct BackupPreflightRequest {
+    /// The source connection, in this namespace.
+    pub source_connection: String,
+    /// The destination, in this namespace.
+    #[serde(default)]
+    pub destination: Option<String>,
+    /// Or a legacy inline archive.
+    #[serde(default)]
+    pub legacy_archive: Option<ArchiveRequest>,
+    /// Named topics, 1 to 1000.
+    pub topics: Vec<String>,
+    /// The schedule this readiness is about, for context.
+    #[serde(default)]
+    pub schedule: Option<String>,
+}
+
+/// The recovery point a restore preflight is about.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RecoveryPointRequest {
+    /// The `Backup` that produced it.
+    pub backup_name: String,
+    /// Its UID. A deleted and recreated point is a different point.
+    #[serde(default)]
+    pub backup_uid: Option<String>,
+}
+
+/// The restore half of a preflight request.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RestorePreflightRequest {
+    /// The exact draft plan bytes, at most 256 KiB. FORWARDED VERBATIM: the
+    /// service checks `planHash` against the SHA-256 of exactly these bytes
+    /// and stores them unchanged. It never parses or re-emits the plan.
+    #[serde(default)]
+    pub plan_bytes: Option<String>,
+    /// `sha256:<lowercase hex>` of `planBytes`.
+    #[serde(default)]
+    pub plan_hash: Option<String>,
+    /// Or an existing `Restore` to check.
+    #[serde(default)]
+    pub restore_name: Option<String>,
+    /// The target connection; required with `planBytes`.
+    #[serde(default)]
+    pub target: Option<String>,
+    /// The destination the archive is read from.
+    #[serde(default)]
+    pub source_destination: Option<String>,
+    /// The destination evidence is read from. Set together with
+    /// `sourceDestination`.
+    #[serde(default)]
+    pub evidence_destination: Option<String>,
+    /// Or a legacy inline source archive.
+    #[serde(default)]
+    pub legacy_source_archive: Option<ArchiveRequest>,
+    /// The recovery point.
+    #[serde(default)]
+    pub recovery_point: Option<RecoveryPointRequest>,
+}
+
+/// The destination-access half of a preflight request.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct DestinationAccessPreflightRequest {
+    /// The destination to exercise.
+    pub destination: String,
+    /// The roles to exercise, 1 to 4.
+    pub roles: Vec<DestinationRoleDto>,
+}
+
+/// `POST .../preflights`.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CreatePreflightRequest {
+    /// What this is about. Exactly the matching block below may be set.
+    pub operation: PreflightOperationDto,
+    /// The backup block.
+    #[serde(default)]
+    pub backup: Option<BackupPreflightRequest>,
+    /// The restore block.
+    #[serde(default)]
+    pub restore: Option<RestorePreflightRequest>,
+    /// The destination-access block.
+    #[serde(default)]
+    pub destination_access: Option<DestinationAccessPreflightRequest>,
+    /// Blocking checks to skip, at most 32. A skipped blocking check keeps the
+    /// aggregate `unknown`.
+    #[serde(default)]
+    pub skip_checks: Option<Vec<String>>,
+    /// The check budget in seconds, 30 to 600.
+    #[serde(default)]
+    pub timeout_seconds: Option<i32>,
+}
+
+/// An operation-readiness result.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct Preflight {
+    /// The object name, which is the id every other route uses.
+    pub id: String,
+    /// The namespace.
+    pub namespace: String,
+    /// The Kubernetes UID.
+    pub uid: String,
+    /// The resourceVersion this projection was read at.
+    pub resource_version: String,
+    /// When the object was created.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+    /// What it is about.
+    pub operation: PreflightOperationDto,
+    /// The lifecycle, and — once complete — the aggregate.
+    pub state: PreflightState,
+    /// The CamelCase reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    /// Whether the state is final.
+    pub terminal: bool,
+    /// Exactly what the result is about.
+    pub binding: PreflightBindingView,
+    /// Whether the result still describes the caller's current inputs.
+    ///
+    /// RECOMPUTED PER READ. A result is applicable only when it completed, has
+    /// not expired, and its binding still matches: edit the plan, the target,
+    /// the destination or the recovery point and this goes false.
+    pub applicable: bool,
+    /// Whether it is out of date.
+    pub stale: bool,
+    /// Why, when it is.
+    pub stale_reasons: Vec<String>,
+    /// When the facts were observed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<DateTime<Utc>>,
+    /// The minimum expiry over the non-skipped checks.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<DateTime<Utc>>,
+    /// The blocking checks.
+    pub checks: Vec<CheckEntryView>,
+    /// The advisory checks that said no.
+    pub warnings: Vec<CheckEntryView>,
+    /// The checks that can only be answered while the run executes. They never
+    /// affect the aggregate, and "ready" never means they passed.
+    pub execution_only: Vec<ExecutionOnlyView>,
+    /// Whether a details document exists for the details route.
+    pub details_available: bool,
+    /// The status conditions, at most 16.
+    pub conditions: Vec<ConditionView>,
+}
+
+/// One `Preflight`.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PreflightResponse {
+    /// The request ID.
+    pub request_id: String,
+    /// On a create: whether this replays an earlier identical request.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub replayed: Option<bool>,
+    /// The item.
+    pub item: Preflight,
+}
+
+/// One entry of a preflight's detail document.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DetailEntryView {
+    /// The check id the entry belongs to, when the producer named one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub check: Option<String>,
+    /// The entry, verbatim. The producer's own bounded, redacted JSON object.
+    pub entry: serde_json::Value,
+}
+
+/// `GET .../preflights/{id}/details`.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct DetailPageResponse {
+    /// The request ID.
+    pub request_id: String,
+    /// The entries on this page, in stored order.
+    pub items: Vec<DetailEntryView>,
+    /// Paging. `snapshot` is the details document's own digest.
+    pub page: Page,
+}
+
+// ======================================================================
+// Check operations (the normalized status of a transient check)
+// ======================================================================
+
+/// The two transient check kinds with a status route.
+///
+/// SEPARATE FROM [`OperationKind`] ON PURPOSE. A check has no archive result,
+/// no signed evidence and no verification verdict, so folding it into
+/// [`Operation`] would mean publishing three fields that are meaningless for
+/// it and inviting a console to render "verification: pending" for a topic
+/// list.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum CheckOperationKind {
+    /// A `TopicDiscovery`.
+    Discovery,
+    /// A `Preflight`.
+    Preflight,
+}
+
+/// The normalized status of one transient check.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckOperation {
+    /// `discovery` or `preflight`.
+    pub kind: CheckOperationKind,
+    /// The object name.
+    pub name: String,
+    /// The namespace.
+    pub namespace: String,
+    /// The Kubernetes UID.
+    pub uid: String,
+    /// The resourceVersion this status was read at.
+    pub resource_version: String,
+    /// When the object was created.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub created_at: Option<DateTime<Utc>>,
+    /// The lifecycle state.
+    pub state: CheckLifecycle,
+    /// The CamelCase reason.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub state_reason: Option<String>,
+    /// The bounded message.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Whether the state is final.
+    pub terminal: bool,
+    /// Whether this check may still be cancelled.
+    pub cancellable: bool,
+    /// When the facts were observed.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_at: Option<DateTime<Utc>>,
+    /// The status conditions, at most 16.
+    pub conditions: Vec<ConditionView>,
+}
+
+/// `GET .../operations/discovery/{name}` and `.../operations/preflight/{name}`.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckOperationResponse {
+    /// The request ID.
+    pub request_id: String,
+    /// The normalized check.
+    pub item: CheckOperation,
+}
+
+// ======================================================================
 // Envelopes
 // ======================================================================
 

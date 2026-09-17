@@ -2,12 +2,31 @@
 //!
 //! Every Kubernetes call this service makes is a method on [`KubeAdapter`],
 //! and every method is typed over the closed [`ProductResource`] set —
-//! `KafkaCluster`, `BackupSchedule`, `Backup`, `Restore` and `Approval`. There
-//! is no method that takes a group, a version, a plural or a path, so no
-//! request can name a Secret, a Pod, a log, an exec stream, a Job or a core
-//! Namespace; there is no delete; and the only update is
-//! [`KubeAdapter::set_schedule_suspension`], a merge patch whose body is built
-//! here from a boolean and a resourceVersion.
+//! `KafkaCluster`, `BackupSchedule`, `Backup`, `Restore`, `Approval`,
+//! `BackupDestination`, `TopicDiscovery` and `Preflight`. There is no method
+//! that takes a group, a version, a plural or a path, so no request can name a
+//! Pod, a log, an exec stream, a Job or a core Namespace; there is no delete.
+//!
+//! TWO CORE OBJECTS ARE REACHED, EACH THROUGH ONE VERB AND ONE HAND-WRITTEN
+//! TYPE. [`ResultDocument`] is a `configmaps` GET and nothing else: it is a
+//! read-only projection with no writable `data` path, used only for the chunk
+//! and detail documents a check owns, and every read is verified by owner UID,
+//! immutability and digest by the route that asked for it (D2 §5.6).
+//! [`WriteOnlyCredential`] is a `secrets` POST and nothing else: its `data`
+//! field is `skip_deserializing`, so the API server's create response CANNOT
+//! carry a credential value back into this process even in principle, and
+//! there is no method on this adapter that reads, lists, updates or deletes a
+//! Secret. `k8s_openapi`'s own `Secret` and `ConfigMap` types are deliberately
+//! NOT imported: a type that can hold a Secret's data is a type that can leak
+//! one.
+//!
+//! THE UPDATES ARE THREE MERGE PATCHES, EACH BUILT HERE FROM TYPED
+//! ARGUMENTS: [`KubeAdapter::set_schedule_suspension`],
+//! [`KubeAdapter::set_destination_access`] and
+//! [`KubeAdapter::request_check_cancel`]. Each carries
+//! `metadata.resourceVersion`, so each is a conditional write the API server
+//! refuses on a stale read, and none of them accepts a caller-supplied path or
+//! patch document.
 //!
 //! EVERY CALL HAS A 10-SECOND DEADLINE ([`KUBE_DEADLINE`]) enforced around the
 //! whole call, and the client's own connect/read/write timeouts are set to the
@@ -23,15 +42,19 @@
 use std::path::Path;
 use std::time::Duration;
 
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
 use k8s_openapi::NamespaceResourceScope;
 use kube::api::{Api, ListParams, ObjectList, Patch, PatchParams, PostParams};
 use serde::de::DeserializeOwned;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use weirkeeper::crds::approval::Approval;
 use weirkeeper::crds::backup::Backup;
+use weirkeeper::crds::backup_destination::BackupDestination;
 use weirkeeper::crds::backup_schedule::BackupSchedule;
 use weirkeeper::crds::kafka_cluster::KafkaCluster;
+use weirkeeper::crds::preflight::Preflight;
 use weirkeeper::crds::restore::Restore;
+use weirkeeper::crds::topic_discovery::TopicDiscovery;
 
 use crate::config::KubeSource;
 use crate::problem::{ApiError, ProblemCode};
@@ -49,10 +72,13 @@ mod sealed {
     impl Sealed for weirkeeper::crds::backup::Backup {}
     impl Sealed for weirkeeper::crds::restore::Restore {}
     impl Sealed for weirkeeper::crds::approval::Approval {}
+    impl Sealed for weirkeeper::crds::backup_destination::BackupDestination {}
+    impl Sealed for weirkeeper::crds::topic_discovery::TopicDiscovery {}
+    impl Sealed for weirkeeper::crds::preflight::Preflight {}
 }
 
-/// The closed set of resources this service may touch. Sealed: no other
-/// crate, and no other module, can add a sixth.
+/// The closed set of CUSTOM resources this service may touch. Sealed: no
+/// other crate, and no other module, can add a ninth.
 pub trait ProductResource:
     kube::Resource<DynamicType = (), Scope = NamespaceResourceScope>
     + Clone
@@ -71,6 +97,162 @@ impl ProductResource for BackupSchedule {}
 impl ProductResource for Backup {}
 impl ProductResource for Restore {}
 impl ProductResource for Approval {}
+impl ProductResource for BackupDestination {}
+impl ProductResource for TopicDiscovery {}
+impl ProductResource for Preflight {}
+
+/// The two kinds whose `spec.cancelRequested` may be raised.
+///
+/// A SECOND SEAL INSIDE THE FIRST. `Backup` and `Restore` have no cancel in
+/// v1 (D0: "external side effects and cleanup semantics are not yet
+/// defined"), and a generic "patch any product resource" method would have
+/// given them one by accident. Only a transient check — a discovery or a
+/// preflight, both of which own nothing but a Job — implements this.
+pub trait CancellableCheck: ProductResource {}
+
+impl CancellableCheck for TopicDiscovery {}
+impl CancellableCheck for Preflight {}
+
+// ======================================================================
+// The two core objects, each with one verb and no way to do more
+// ======================================================================
+
+/// A `ConfigMap` this service may GET, projected down to what a check result
+/// needs.
+///
+/// READ-ONLY BY CONSTRUCTION. There is no create, patch or delete method for
+/// it on [`KubeAdapter`], and `binary_data` is not a field here at all: a
+/// check result is UTF-8 TSV or JSON lines, and a document that put its bytes
+/// somewhere this type cannot see would fail its digest check rather than be
+/// served half-read.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ResultDocument {
+    /// Name, UID, annotations and owner references.
+    #[serde(default)]
+    pub metadata: ObjectMeta,
+    /// Whether the API server has sealed the object. A check result that is
+    /// not immutable is not a check result.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub immutable: Option<bool>,
+    /// The string data. One key for a chunk, one for a details document.
+    #[serde(default)]
+    pub data: std::collections::BTreeMap<String, String>,
+}
+
+impl kube::Resource for ResultDocument {
+    type DynamicType = ();
+    type Scope = NamespaceResourceScope;
+
+    fn kind(_: &()) -> std::borrow::Cow<'_, str> {
+        "ConfigMap".into()
+    }
+    fn group(_: &()) -> std::borrow::Cow<'_, str> {
+        "".into()
+    }
+    fn version(_: &()) -> std::borrow::Cow<'_, str> {
+        "v1".into()
+    }
+    fn plural(_: &()) -> std::borrow::Cow<'_, str> {
+        "configmaps".into()
+    }
+    fn meta(&self) -> &ObjectMeta {
+        &self.metadata
+    }
+    fn meta_mut(&mut self) -> &mut ObjectMeta {
+        &mut self.metadata
+    }
+}
+
+impl ResultDocument {
+    /// The UID of the controlling owner, when there is exactly one owner and
+    /// it is the controller.
+    #[must_use]
+    pub fn controller_owner_uid(&self) -> Option<&str> {
+        let owners = self.metadata.owner_references.as_deref()?;
+        let [owner] = owners else { return None };
+        (owner.controller == Some(true)).then_some(owner.uid.as_str())
+    }
+
+    /// One annotation's value.
+    #[must_use]
+    pub fn annotation(&self, key: &str) -> Option<&str> {
+        self.metadata
+            .annotations
+            .as_ref()?
+            .get(key)
+            .map(String::as_str)
+    }
+}
+
+/// A `Secret` this service may POST, and nothing else.
+///
+/// THE RESPONSE CANNOT CARRY THE VALUE BACK. `data` is
+/// `#[serde(skip_deserializing)]`, so the API server's create response — which
+/// echoes `data` — is parsed into a value whose `data` is empty. The bytes
+/// exist in this process only between the request DTO and the outgoing body,
+/// and [`CreatedCredential`] is all a route ever sees of the answer.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WriteOnlyCredential {
+    /// Name, namespace, labels, annotations and the owner reference.
+    #[serde(default)]
+    pub metadata: ObjectMeta,
+    /// The Secret `type`. A distinct type is what a ValidatingAdmissionPolicy
+    /// scoped to this ServiceAccount can require, so the create permission
+    /// cannot be spent on a ServiceAccount-token Secret (PLAT-07.1's rule).
+    #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
+    pub type_: Option<String>,
+    /// Base64 data keys. Written, never read.
+    #[serde(default, skip_deserializing)]
+    pub data: std::collections::BTreeMap<String, String>,
+}
+
+impl kube::Resource for WriteOnlyCredential {
+    type DynamicType = ();
+    type Scope = NamespaceResourceScope;
+
+    fn kind(_: &()) -> std::borrow::Cow<'_, str> {
+        "Secret".into()
+    }
+    fn group(_: &()) -> std::borrow::Cow<'_, str> {
+        "".into()
+    }
+    fn version(_: &()) -> std::borrow::Cow<'_, str> {
+        "v1".into()
+    }
+    fn plural(_: &()) -> std::borrow::Cow<'_, str> {
+        "secrets".into()
+    }
+    fn meta(&self) -> &ObjectMeta {
+        &self.metadata
+    }
+    fn meta_mut(&mut self) -> &mut ObjectMeta {
+        &mut self.metadata
+    }
+}
+
+/// The non-secret facts a route keeps from a credential create.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CreatedCredential {
+    /// `metadata.name` — the reference every response carries instead of a
+    /// value.
+    pub name: String,
+    /// `metadata.uid`.
+    pub uid: String,
+}
+
+/// An owner reference to an object this service created, for the Secrets a
+/// destination owns.
+#[must_use]
+pub fn owner_reference(api_version: &str, kind: &str, name: &str, uid: &str) -> OwnerReference {
+    OwnerReference {
+        api_version: api_version.to_string(),
+        kind: kind.to_string(),
+        name: name.to_string(),
+        uid: uid.to_string(),
+        controller: Some(true),
+        block_owner_deletion: Some(true),
+    }
+}
 
 /// Why a Kubernetes call did not return the object.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -277,6 +459,139 @@ impl KubeAdapter {
             api.patch(name, &params, &Patch::Merge(&patch)),
         )
         .await
+    }
+
+    /// Rotate a destination's credential references and CA bundle — the ONLY
+    /// mutable half of a `BackupDestination` (D2 §3.1).
+    ///
+    /// `access` is the complete four-grant object, built by the route from a
+    /// validated DTO, so a merge patch that omits a grant REMOVES it rather
+    /// than leaving a stale one behind. `ca_bundle` is `Some(value)` to set,
+    /// `Some(Value::Null)` to clear and `None` to leave alone. Nothing in the
+    /// patch can name `spec.storage` or `spec.transport.security`: this method
+    /// cannot build those keys, and the CRD's R1/R2 refuse them anyway.
+    ///
+    /// # Errors
+    ///
+    /// [`KubeFailure`], `Conflict` for a stale `resourceVersion`.
+    pub async fn set_destination_access(
+        &self,
+        namespace: &str,
+        name: &str,
+        access: &serde_json::Value,
+        ca_bundle: Option<serde_json::Value>,
+        expected_resource_version: &str,
+    ) -> Result<BackupDestination, KubeFailure> {
+        let api: Api<BackupDestination> = Api::namespaced(self.client.clone(), namespace);
+        let mut spec = serde_json::Map::new();
+        spec.insert("access".to_string(), access.clone());
+        if let Some(bundle) = ca_bundle {
+            spec.insert(
+                "transport".to_string(),
+                serde_json::json!({ "caBundle": bundle }),
+            );
+        }
+        let patch = serde_json::json!({
+            "metadata": { "resourceVersion": expected_resource_version },
+            "spec": serde_json::Value::Object(spec),
+        });
+        let params = PatchParams {
+            field_manager: Some(FIELD_MANAGER.to_string()),
+            ..PatchParams::default()
+        };
+        self.bounded(
+            "patch",
+            "backupdestinations",
+            api.patch(name, &params, &Patch::Merge(&patch)),
+        )
+        .await
+    }
+
+    /// Ask one transient check to stop: `spec.cancelRequested: false -> true`,
+    /// the single transition D0 permits, under a resourceVersion
+    /// precondition.
+    ///
+    /// THE CONTROLLER STOPS THE JOB, NOT THIS SERVICE. This writes a wish on
+    /// the object the caller already read and authorized; the controller
+    /// verifies the exact owned Job and UID before stopping anything, and no
+    /// archive byte, Kafka topic, durable run or signed evidence is touched
+    /// either way.
+    ///
+    /// # Errors
+    ///
+    /// [`KubeFailure`], `Conflict` for a stale `resourceVersion`.
+    pub async fn request_check_cancel<K: CancellableCheck>(
+        &self,
+        namespace: &str,
+        name: &str,
+        expected_resource_version: &str,
+    ) -> Result<K, KubeFailure> {
+        let api: Api<K> = Api::namespaced(self.client.clone(), namespace);
+        let patch = serde_json::json!({
+            "metadata": { "resourceVersion": expected_resource_version },
+            "spec": { "cancelRequested": true },
+        });
+        let params = PatchParams {
+            field_manager: Some(FIELD_MANAGER.to_string()),
+            ..PatchParams::default()
+        };
+        self.bounded(
+            "patch",
+            K::plural(&()).as_ref(),
+            api.patch(name, &params, &Patch::Merge(&patch)),
+        )
+        .await
+    }
+
+    /// Read one stored check result document by name.
+    ///
+    /// NAMED, NEVER LISTED. The name comes from `status.result.chunks[i].name`
+    /// or `status.result.detailsRef.name` of an object the caller already
+    /// authorized, so this can only reach documents a check wrote; D2 §5.6's
+    /// "never list all `ConfigMap`s" is a property of there being no list
+    /// method for this type at all.
+    ///
+    /// # Errors
+    ///
+    /// [`KubeFailure`], `NotFound` when the owner was collected.
+    pub async fn get_result_document(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<ResultDocument, KubeFailure> {
+        let api: Api<ResultDocument> = Api::namespaced(self.client.clone(), namespace);
+        self.bounded("get", "configmaps", api.get(name)).await
+    }
+
+    /// Create one write-only credential Secret and keep only its identity.
+    ///
+    /// THE ANSWER IS TWO STRINGS. The API server echoes `data` on a create;
+    /// [`WriteOnlyCredential`]'s `data` is `skip_deserializing`, so the echo is
+    /// dropped by the parser, and this method narrows what is left to a name
+    /// and a UID before any caller sees it.
+    ///
+    /// # Errors
+    ///
+    /// [`KubeFailure`], `AlreadyExists` when the name is taken — which is
+    /// never resolved by reading the existing Secret, because this service has
+    /// no verb that could.
+    pub async fn create_credential(
+        &self,
+        namespace: &str,
+        secret: &WriteOnlyCredential,
+    ) -> Result<CreatedCredential, KubeFailure> {
+        let api: Api<WriteOnlyCredential> = Api::namespaced(self.client.clone(), namespace);
+        let params = PostParams {
+            dry_run: false,
+            field_manager: Some(FIELD_MANAGER.to_string()),
+        };
+        let created = self
+            .bounded("create", "secrets", api.create(&params, secret))
+            .await?;
+        Ok(CreatedCredential {
+            name: created.metadata.name.unwrap_or_default(),
+            uid: created.metadata.uid.unwrap_or_default(),
+        })
     }
 
     /// Readiness: the API server answers and `kafkaclusters` can be listed in

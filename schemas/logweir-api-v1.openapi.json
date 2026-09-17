@@ -1466,10 +1466,1369 @@
         ]
       }
     },
+    "/api/v1/namespaces/{ns}/destinations": {
+      "get": {
+        "operationId": "listDestinations",
+        "summary": "Saved destinations. Credential REFERENCES only: a Secret name and the key names inside it, never a value.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size, 1 to 200. Default 50.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "labelSelector",
+            "in": "query",
+            "required": false,
+            "description": "Equality-only label selector, key=value terms separated by commas.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DestinationList"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "cursor_expired",
+          "cursor_invalid",
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      },
+      "post": {
+        "operationId": "createDestination",
+        "summary": "Create a BackupDestination. The object's name is the `name` field, because every schedule, backup and restore references a destination by name. A grant may carry a credential VALUE once in access.*.secret.new; it becomes a Secret owned by the destination and is never read back or echoed.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateDestinationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DestinationResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Replayed an identical earlier request; the same object.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DestinationResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "destination_invalid",
+          "destination_location_immutable",
+          "forbidden",
+          "header_not_allowed",
+          "idempotency_conflict",
+          "idempotency_key_invalid",
+          "idempotency_key_required",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "origin_mismatch",
+          "payload_too_large",
+          "rate_limited",
+          "session_expired",
+          "state_conflict",
+          "transport_downgrade_forbidden",
+          "unauthenticated",
+          "unsupported_media_type",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/destinations:from-legacy": {
+      "post": {
+        "operationId": "createDestinationFromLegacy",
+        "summary": "Adopt the location of a legacy BackupSchedule or Backup as a BackupDestination, deriving the storage block from facts and refusing with legacy_location_unknown when the facts are not there. Existing objects are never mutated.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/DestinationFromLegacyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created; addressingSource names what it was derived from.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DestinationResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Replayed an identical earlier request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DestinationResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "destination_invalid",
+          "destination_location_immutable",
+          "forbidden",
+          "header_not_allowed",
+          "idempotency_conflict",
+          "idempotency_key_invalid",
+          "idempotency_key_required",
+          "internal_error",
+          "kubernetes_unavailable",
+          "legacy_location_mismatch",
+          "legacy_location_unknown",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "origin_mismatch",
+          "payload_too_large",
+          "rate_limited",
+          "session_expired",
+          "state_conflict",
+          "transport_downgrade_forbidden",
+          "unauthenticated",
+          "unsupported_media_type",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/destinations/{name}": {
+      "get": {
+        "operationId": "getDestination",
+        "summary": "One destination, with the last explicit access test.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The object.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DestinationResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout"
+        ]
+      },
+      "post": {
+        "operationId": "destinationCommand",
+        "summary": "The command routes, addressed as `<name>:update-access` and `<name>:test`. `:update-access` rotates the four grants and the CA reference under an expectedGeneration precondition and refuses any change to the location or the transport; `:test` starts a DestinationAccess Preflight and answers 202 with it. Idempotency-Key is refused on `:update-access` and required on `:test`.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateDestinationAccessRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The rotated destination (`:update-access`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DestinationResponse"
+                }
+              }
+            }
+          },
+          "202": {
+            "description": "The started test (`:test`).",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreflightResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "destination_invalid",
+          "destination_location_immutable",
+          "forbidden",
+          "header_not_allowed",
+          "idempotency_conflict",
+          "idempotency_key_invalid",
+          "idempotency_key_required",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "origin_mismatch",
+          "payload_too_large",
+          "precondition_failed",
+          "rate_limited",
+          "session_expired",
+          "state_conflict",
+          "transport_downgrade_forbidden",
+          "unauthenticated",
+          "unsupported_media_type",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/destinations/{name}/usage": {
+      "get": {
+        "operationId": "getDestinationUsage",
+        "summary": "Schedules and backups labelled for this destination, bounded to 100 each. `basis` states how the lists were built, so an empty answer is not read as \"nothing uses this\".",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The bounded usage.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DestinationUsageResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/connections/{name}/topic-discoveries": {
+      "get": {
+        "operationId": "listConnectionTopicDiscoveries",
+        "summary": "Discoveries for one connection. With latest=true it answers the two slots instead of a page: a failed attempt never hides the last successful inventory, and a successful inventory never hides that the newest attempt failed.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size, 1 to 200. Default 50.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "labelSelector",
+            "in": "query",
+            "required": false,
+            "description": "Equality-only label selector, key=value terms separated by commas.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "latest",
+            "in": "query",
+            "required": false,
+            "description": "true returns {latestAttempt, lastSuccessful} instead of a page.",
+            "schema": {
+              "type": "boolean"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page, or the two slots with latest=true.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopicDiscoveryList"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "cursor_expired",
+          "cursor_invalid",
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      },
+      "post": {
+        "operationId": "createTopicDiscovery",
+        "summary": "Start a bounded topic inventory. 202 with the new check, or 200 with reused=true when a fresh succeeded discovery with the same parameters and connection binding exists and reuseFresh is set. Rate limited per actor and namespace.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTopicDiscoveryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted; the check has been created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopicDiscoveryResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "A replay, or a reused fresh result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopicDiscoveryResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "idempotency_conflict",
+          "idempotency_key_invalid",
+          "idempotency_key_required",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "origin_mismatch",
+          "payload_too_large",
+          "rate_limited",
+          "session_expired",
+          "state_conflict",
+          "unauthenticated",
+          "unsupported_media_type",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/topic-discoveries/{id}": {
+      "get": {
+        "operationId": "getTopicDiscovery",
+        "summary": "One discovery. `visibility` is never better than unknown without an explicit attestation: a successful Kafka list alone says nothing about whether it was whole. `stale` is recomputed per read against the connection as it is now.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The check's id, which is its object name.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The discovery.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopicDiscoveryResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout"
+        ]
+      },
+      "post": {
+        "operationId": "cancelTopicDiscovery",
+        "summary": "Ask an unfinished discovery of one's own to stop, addressed as `<id>:cancel`. Idempotent: repeating it is 200, and cancelling a finished check is 200 with alreadyTerminal. An operator may cancel only the checks it started. Nothing is deleted.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The check's id, which is its object name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The state after the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "idempotency_key_invalid",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "origin_mismatch",
+          "payload_too_large",
+          "precondition_failed",
+          "rate_limited",
+          "session_expired",
+          "state_conflict",
+          "unauthenticated",
+          "unsupported_media_type",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/topic-discoveries/{id}/topics": {
+      "get": {
+        "operationId": "listDiscoveredTopics",
+        "summary": "One page of a stored inventory, read from the immutable result chunks the controller committed. Each chunk is verified by owner UID, immutability and digest before a row is served. At most eight chunks are read per request: a sparse q returns a short page with scan.complete=false and a cursor.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The check's id, which is its object name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size, 1 to 200. Default 50.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "The opaque nextCursor of the previous page, bound to the actor, the discovery UID, the inventory digest and the filters.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "q",
+            "in": "query",
+            "required": false,
+            "description": "Case-insensitive substring of the topic name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "prefix",
+            "in": "query",
+            "required": false,
+            "description": "Name prefix. Whole chunks outside it are skipped without being read.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "internal",
+            "in": "query",
+            "required": false,
+            "description": "include or exclude (default). Only meaningful when internal topics were stored.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "include",
+                "exclude"
+              ]
+            }
+          },
+          {
+            "name": "errored",
+            "in": "query",
+            "required": false,
+            "description": "include (default), exclude or only.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "include",
+                "exclude",
+                "only"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page, in stored (bytewise name) order.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TopicPageResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "cursor_expired",
+          "cursor_invalid",
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "rate_limited",
+          "result_integrity_failed",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/preflights": {
+      "post": {
+        "operationId": "createPreflight",
+        "summary": "Start a readiness check for a Backup, a Restore or a destination's grants. planBytes is opaque: planHash is checked against the SHA-256 of exactly those bytes and they are stored unchanged. The verdict is advisory and every execution-time guard still runs.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreatePreflightRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "Accepted; the check has been created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreflightResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Replayed an identical earlier request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreflightResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "idempotency_conflict",
+          "idempotency_key_invalid",
+          "idempotency_key_required",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "origin_mismatch",
+          "payload_too_large",
+          "rate_limited",
+          "session_expired",
+          "state_conflict",
+          "unauthenticated",
+          "unsupported_media_type",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/preflights/{id}": {
+      "get": {
+        "operationId": "getPreflight",
+        "summary": "One readiness result. `applicable` and `stale` are recomputed on every read against the planHash the caller sends, so an edited plan, a replaced referent or an expired result is never rendered as current readiness. An actor bound only as Approver reads Restore results and nothing else.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The check's id, which is its object name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "planHash",
+            "in": "query",
+            "required": false,
+            "description": "sha256:<64 lowercase hex> of the plan the caller is looking at now. A result bound to a different hash is stale.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The result.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreflightResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      },
+      "post": {
+        "operationId": "cancelPreflight",
+        "summary": "Ask an unfinished preflight of one's own to stop, addressed as `<id>:cancel`. Same rules as a discovery cancel.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The check's id, which is its object name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The state after the request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CancelResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "idempotency_key_invalid",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "origin_mismatch",
+          "payload_too_large",
+          "precondition_failed",
+          "rate_limited",
+          "session_expired",
+          "state_conflict",
+          "unauthenticated",
+          "unsupported_media_type",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/preflights/{id}/details": {
+      "get": {
+        "operationId": "listPreflightDetails",
+        "summary": "One page of a preflight's detail document, verified by owner UID, immutability and digest before a row is served.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "description": "The check's id, which is its object name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "check",
+            "in": "query",
+            "required": false,
+            "description": "Only entries the producer attributed to this check id.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size, 1 to 200. Default 50.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "The opaque nextCursor of the previous page.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page, in stored order.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/DetailPageResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "cursor_expired",
+          "cursor_invalid",
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "rate_limited",
+          "result_integrity_failed",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
     "/api/v1/namespaces/{ns}/operations/{kind}/{name}": {
       "get": {
         "operationId": "getOperation",
-        "summary": "The normalized status of one Backup or Restore. Result and evidence verification are separate; NotAttempted is never verified success.",
+        "summary": "The normalized status of one Backup, Restore, TopicDiscovery or Preflight. For a backup or a restore the body is an OperationResponse: result and evidence verification are separate, and NotAttempted is never verified success. For a discovery or a preflight it is a CheckOperationResponse, which carries none of those fields because a transient check has none of those facts.",
         "parameters": [
           {
             "name": "ns",
@@ -1484,12 +2843,14 @@
             "name": "kind",
             "in": "path",
             "required": true,
-            "description": "backup or restore.",
+            "description": "backup, restore, discovery or preflight.",
             "schema": {
               "type": "string",
               "enum": [
                 "backup",
-                "restore"
+                "restore",
+                "discovery",
+                "preflight"
               ]
             }
           },
@@ -1505,7 +2866,7 @@
         ],
         "responses": {
           "200": {
-            "description": "The operation.",
+            "description": "The normalized durable run (backup, restore), or the normalized transient check (discovery, preflight) — two shapes, because a check has no archive result, no signed evidence and no verification verdict.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1545,6 +2906,170 @@
   },
   "components": {
     "schemas": {
+      "AccessGrantRequest": {
+        "description": "One role's grant.",
+        "type": "object",
+        "required": [
+          "mode"
+        ],
+        "properties": {
+          "mode": {
+            "description": "How the credential is obtained.",
+            "$ref": "#/components/schemas/AccessModeDto"
+          },
+          "secret": {
+            "description": "The Secret, for `secretKeys`.",
+            "default": null,
+            "$ref": "#/components/schemas/SecretSourceRequest",
+            "nullable": true
+          },
+          "workloadIdentity": {
+            "description": "The ServiceAccount, for `workloadIdentity`.",
+            "default": null,
+            "$ref": "#/components/schemas/WorkloadIdentityRequest",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "AccessGrantView": {
+        "description": "One role's grant, as stored. NEVER A CREDENTIAL VALUE: a Secret name and the key names inside it, both of which are public references.",
+        "type": "object",
+        "required": [
+          "keys",
+          "mode"
+        ],
+        "properties": {
+          "keys": {
+            "description": "The data KEY NAMES inside it, sorted.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "mode": {
+            "description": "How the credential is obtained.",
+            "$ref": "#/components/schemas/AccessModeDto"
+          },
+          "secretName": {
+            "description": "The Secret's NAME, for `secretKeys`.",
+            "type": "string",
+            "nullable": true
+          },
+          "serviceAccountName": {
+            "description": "The ServiceAccount, for `workloadIdentity`.",
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "AccessModeDto": {
+        "description": "How one role's credential is obtained.",
+        "oneOf": [
+          {
+            "description": "Keys read from a Secret in this namespace, projected into the Job.",
+            "type": "string",
+            "enum": [
+              "secretKeys"
+            ]
+          },
+          {
+            "description": "The pod's own ServiceAccount identity; no Secret is projected.",
+            "type": "string",
+            "enum": [
+              "workloadIdentity"
+            ]
+          },
+          {
+            "description": "The controller's own read-only object-store handle. `evidenceRead` only.",
+            "type": "string",
+            "enum": [
+              "controllerIdentity"
+            ]
+          },
+          {
+            "description": "The destination's explicit read-only `archiveRead` grant. `evidenceRead` only.",
+            "type": "string",
+            "enum": [
+              "archiveReadGrant"
+            ]
+          },
+          {
+            "description": "RESPONSES ONLY: the grant is absent and `archiveWrite` is used. It is never accepted in a request, because \"absent\" and \"explicitly say the thing absence means\" would then be two spellings of one state.",
+            "type": "string",
+            "enum": [
+              "inheritsArchiveWrite"
+            ]
+          },
+          {
+            "description": "RESPONSES ONLY: `evidenceRead` is absent, so verification is `NotAttempted` and this says so rather than leaving a blank field.",
+            "type": "string",
+            "enum": [
+              "notConfigured"
+            ]
+          }
+        ]
+      },
+      "AccessRequest": {
+        "description": "The four grants. Absent is a DEFINED answer and never a wider one: `archiveRead` and `evidenceWrite` absent mean \"use `archiveWrite`\", and `evidenceRead` absent means verification is not attempted and says so.",
+        "type": "object",
+        "required": [
+          "archiveWrite"
+        ],
+        "properties": {
+          "archiveRead": {
+            "description": "The read-only archive grant.",
+            "default": null,
+            "$ref": "#/components/schemas/AccessGrantRequest",
+            "nullable": true
+          },
+          "archiveWrite": {
+            "description": "The grant execution Jobs write the archive with. Required.",
+            "$ref": "#/components/schemas/AccessGrantRequest"
+          },
+          "evidenceRead": {
+            "description": "The grant that reads evidence back for verification.",
+            "default": null,
+            "$ref": "#/components/schemas/AccessGrantRequest",
+            "nullable": true
+          },
+          "evidenceWrite": {
+            "description": "The grant that writes evidence under `logweir/`.",
+            "default": null,
+            "$ref": "#/components/schemas/AccessGrantRequest",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "AccessView": {
+        "description": "The four grants, as stored.",
+        "type": "object",
+        "required": [
+          "archiveRead",
+          "archiveWrite",
+          "evidenceRead",
+          "evidenceWrite"
+        ],
+        "properties": {
+          "archiveRead": {
+            "description": "The archive read grant, or `inheritsArchiveWrite`.",
+            "$ref": "#/components/schemas/AccessGrantView"
+          },
+          "archiveWrite": {
+            "description": "The archive write grant.",
+            "$ref": "#/components/schemas/AccessGrantView"
+          },
+          "evidenceRead": {
+            "description": "The evidence read grant, or `notConfigured`.",
+            "$ref": "#/components/schemas/AccessGrantView"
+          },
+          "evidenceWrite": {
+            "description": "The evidence write grant, or `inheritsArchiveWrite`.",
+            "$ref": "#/components/schemas/AccessGrantView"
+          }
+        }
+      },
       "ActorView": {
         "description": "The authenticated actor.",
         "type": "object",
@@ -1572,6 +3097,25 @@
             "type": "string"
           }
         }
+      },
+      "AddressingDto": {
+        "description": "How a request names the bucket.\n\nNEVER A TRANSPORT CHOICE, in either direction. Addressing says how the bucket appears in the URL; `transport.security` alone decides whether the connection is encrypted. This is defect G5 written into the contract.",
+        "oneOf": [
+          {
+            "description": "`https://endpoint/bucket/key`.",
+            "type": "string",
+            "enum": [
+              "pathStyle"
+            ]
+          },
+          {
+            "description": "`https://bucket.endpoint/key`.",
+            "type": "string",
+            "enum": [
+              "virtualHosted"
+            ]
+          }
+        ]
       },
       "Approval": {
         "description": "Public approval metadata. The documents themselves are only on the packet route.",
@@ -1963,6 +3507,46 @@
           }
         }
       },
+      "BackupPreflightRequest": {
+        "description": "The backup half of a preflight request.",
+        "type": "object",
+        "required": [
+          "sourceConnection",
+          "topics"
+        ],
+        "properties": {
+          "destination": {
+            "description": "The destination, in this namespace.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          },
+          "legacyArchive": {
+            "description": "Or a legacy inline archive.",
+            "default": null,
+            "$ref": "#/components/schemas/ArchiveRequest",
+            "nullable": true
+          },
+          "schedule": {
+            "description": "The schedule this readiness is about, for context.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          },
+          "sourceConnection": {
+            "description": "The source connection, in this namespace.",
+            "type": "string"
+          },
+          "topics": {
+            "description": "Named topics, 1 to 1000.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
       "BackupResponse": {
         "type": "object",
         "required": [
@@ -1981,6 +3565,77 @@
           },
           "requestId": {
             "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "CaBundleRequest": {
+        "description": "A CA bundle in a `ConfigMap` in this namespace. A `ConfigMap` and never a Secret: a CA certificate is public material.",
+        "type": "object",
+        "required": [
+          "configMapName"
+        ],
+        "properties": {
+          "configMapName": {
+            "description": "The `ConfigMap` name, in this namespace.",
+            "type": "string"
+          },
+          "key": {
+            "description": "The data key holding the PEM bundle. Absent means `ca.crt`.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "CaBundleView": {
+        "description": "A CA bundle reference, with the digest the controller observed.",
+        "type": "object",
+        "required": [
+          "configMapName",
+          "key"
+        ],
+        "properties": {
+          "configMapName": {
+            "description": "The `ConfigMap` name.",
+            "type": "string"
+          },
+          "key": {
+            "description": "The data key.",
+            "type": "string"
+          },
+          "sha256": {
+            "description": "`sha256:<hex>` over the CA bytes the controller read, so a rotation is visible without reading the bundle again.",
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "CancelResponse": {
+        "description": "`POST .../topic-discoveries/{id}:cancel` and `POST .../preflights/{id}:cancel`.\n\nCANCELLATION IS A WISH, RECORDED. It never deletes archive data, Kafka topics, durable runs or signed evidence; the controller verifies the exact owned Job and UID before stopping anything.",
+        "type": "object",
+        "required": [
+          "alreadyTerminal",
+          "id",
+          "requestId",
+          "state"
+        ],
+        "properties": {
+          "alreadyTerminal": {
+            "description": "True when the check had already finished, in which case nothing was written. Repeating a cancel is 200 either way.",
+            "type": "boolean"
+          },
+          "id": {
+            "description": "The check's id.",
+            "type": "string"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          },
+          "state": {
+            "description": "Its state after the request.",
             "type": "string"
           }
         }
@@ -2039,11 +3694,11 @@
             "type": "boolean"
           },
           "credentialWrite": {
-            "description": "Write-only credential input (PLAT-07.1): no route.",
+            "description": "Write-only credential input: `POST .../destinations` and `:update-access` accept a credential value that is created once and never read back.",
             "type": "boolean"
           },
           "destinations": {
-            "description": "Saved destinations (PLAT-08): no route.",
+            "description": "The saved-destination domain (PLAT-08) is served AND readable here.",
             "type": "boolean"
           },
           "manualBackupCreate": {
@@ -2059,7 +3714,7 @@
             "type": "boolean"
           },
           "preflight": {
-            "description": "Preflight checks (PLAT-03): no route.",
+            "description": "The preflight domain (PLAT-03) is served AND readable here.",
             "type": "boolean"
           },
           "restoreCreate": {
@@ -2083,10 +3738,342 @@
             "type": "boolean"
           },
           "topicDiscovery": {
-            "description": "Topic discovery (PLAT-09.1): no route.",
+            "description": "The topic-discovery domain (PLAT-09.1) is served AND readable here.\n\nONE FLAG PER DOMAIN, AND IT IS THE READ FLOOR. D2 §8 names exactly three flags — `destinations`, `topicDiscovery`, `preflight` — so a domain gets one bit, not a bit per verb, and the bit answers \"is this domain served and visible to me\". Whether the actor may also START or CANCEL is the role table above, which `/session` publishes per grant in `roles`; a console reads `roles.includes(\"operator\")` for the buttons and this flag for the page. Splitting these into read/start pairs is a contract change that must land together with `ui/contract.js`'s `CAPABILITY_FLAGS`.",
             "type": "boolean"
           }
         }
+      },
+      "CheckEntryView": {
+        "description": "One check entry.",
+        "type": "object",
+        "required": [
+          "id",
+          "state"
+        ],
+        "properties": {
+          "authority": {
+            "description": "Who observed the fact.",
+            "type": "string",
+            "nullable": true
+          },
+          "category": {
+            "description": "Its category.",
+            "type": "string",
+            "nullable": true
+          },
+          "code": {
+            "description": "The CamelCase code.",
+            "type": "string",
+            "nullable": true
+          },
+          "expiresAt": {
+            "description": "When it stops counting.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "gating": {
+            "description": "Whether it gates.",
+            "$ref": "#/components/schemas/CheckGating",
+            "nullable": true
+          },
+          "id": {
+            "description": "The stable check id, e.g. `target.mappedTopics`.",
+            "type": "string"
+          },
+          "message": {
+            "description": "The redacted message.",
+            "type": "string",
+            "nullable": true
+          },
+          "observedAt": {
+            "description": "When the fact was observed.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "remedy": {
+            "description": "What to do about it.",
+            "type": "string",
+            "nullable": true
+          },
+          "scope": {
+            "description": "What it looked at.",
+            "$ref": "#/components/schemas/CheckScopeView",
+            "nullable": true
+          },
+          "state": {
+            "description": "The verdict.",
+            "$ref": "#/components/schemas/CheckVerdict"
+          }
+        }
+      },
+      "CheckErrorView": {
+        "description": "A bounded, redacted failure.",
+        "type": "object",
+        "required": [
+          "code"
+        ],
+        "properties": {
+          "code": {
+            "description": "The CamelCase code.",
+            "type": "string"
+          },
+          "message": {
+            "description": "The redacted message.",
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "CheckGating": {
+        "description": "Whether a check's verdict gates the operation.",
+        "oneOf": [
+          {
+            "description": "A `notReady` here makes the whole operation `notReady`.",
+            "type": "string",
+            "enum": [
+              "blocking"
+            ]
+          },
+          {
+            "description": "Reported as a warning; never changes the aggregate.",
+            "type": "string",
+            "enum": [
+              "advisory"
+            ]
+          },
+          {
+            "description": "Cannot be checked before execution; always `unknown` and always excluded from the aggregate.",
+            "type": "string",
+            "enum": [
+              "executionOnly"
+            ]
+          }
+        ]
+      },
+      "CheckLifecycle": {
+        "description": "The lifecycle of a transient check.",
+        "oneOf": [
+          {
+            "description": "Accepted; the controller has not observed it yet.",
+            "type": "string",
+            "enum": [
+              "pending"
+            ]
+          },
+          {
+            "description": "Waiting for a check slot.",
+            "type": "string",
+            "enum": [
+              "queued"
+            ]
+          },
+          {
+            "description": "The check Job exists and has not finished.",
+            "type": "string",
+            "enum": [
+              "running"
+            ]
+          },
+          {
+            "description": "A result was produced.",
+            "type": "string",
+            "enum": [
+              "succeeded"
+            ]
+          },
+          {
+            "description": "No result could be produced. Distinct from a result that says \"no\".",
+            "type": "string",
+            "enum": [
+              "failed"
+            ]
+          },
+          {
+            "description": "Cancelled before a result.",
+            "type": "string",
+            "enum": [
+              "cancelled"
+            ]
+          },
+          {
+            "description": "A phase this build does not recognise.",
+            "type": "string",
+            "enum": [
+              "unknown"
+            ]
+          }
+        ]
+      },
+      "CheckOperation": {
+        "description": "The normalized status of one transient check.",
+        "type": "object",
+        "required": [
+          "cancellable",
+          "conditions",
+          "kind",
+          "name",
+          "namespace",
+          "resourceVersion",
+          "state",
+          "terminal",
+          "uid"
+        ],
+        "properties": {
+          "cancellable": {
+            "description": "Whether this check may still be cancelled.",
+            "type": "boolean"
+          },
+          "conditions": {
+            "description": "The status conditions, at most 16.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConditionView"
+            }
+          },
+          "createdAt": {
+            "description": "When the object was created.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "kind": {
+            "description": "`discovery` or `preflight`.",
+            "$ref": "#/components/schemas/CheckOperationKind"
+          },
+          "message": {
+            "description": "The bounded message.",
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "description": "The object name.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "The namespace.",
+            "type": "string"
+          },
+          "observedAt": {
+            "description": "When the facts were observed.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "resourceVersion": {
+            "description": "The resourceVersion this status was read at.",
+            "type": "string"
+          },
+          "state": {
+            "description": "The lifecycle state.",
+            "$ref": "#/components/schemas/CheckLifecycle"
+          },
+          "stateReason": {
+            "description": "The CamelCase reason.",
+            "type": "string",
+            "nullable": true
+          },
+          "terminal": {
+            "description": "Whether the state is final.",
+            "type": "boolean"
+          },
+          "uid": {
+            "description": "The Kubernetes UID.",
+            "type": "string"
+          }
+        }
+      },
+      "CheckOperationKind": {
+        "description": "The two transient check kinds with a status route.\n\nSEPARATE FROM [`OperationKind`] ON PURPOSE. A check has no archive result, no signed evidence and no verification verdict, so folding it into [`Operation`] would mean publishing three fields that are meaningless for it and inviting a console to render \"verification: pending\" for a topic list.",
+        "oneOf": [
+          {
+            "description": "A `TopicDiscovery`.",
+            "type": "string",
+            "enum": [
+              "discovery"
+            ]
+          },
+          {
+            "description": "A `Preflight`.",
+            "type": "string",
+            "enum": [
+              "preflight"
+            ]
+          }
+        ]
+      },
+      "CheckOperationResponse": {
+        "description": "`GET .../operations/discovery/{name}` and `.../operations/preflight/{name}`.",
+        "type": "object",
+        "required": [
+          "item",
+          "requestId"
+        ],
+        "properties": {
+          "item": {
+            "description": "The normalized check.",
+            "$ref": "#/components/schemas/CheckOperation"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "CheckScopeView": {
+        "description": "What a check looked at.",
+        "type": "object",
+        "properties": {
+          "kind": {
+            "description": "The kind.",
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "description": "The name.",
+            "type": "string",
+            "nullable": true
+          },
+          "uid": {
+            "description": "The UID.",
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "CheckVerdict": {
+        "description": "One check's verdict.",
+        "oneOf": [
+          {
+            "description": "The check passed.",
+            "type": "string",
+            "enum": [
+              "ready"
+            ]
+          },
+          {
+            "description": "The check failed.",
+            "type": "string",
+            "enum": [
+              "notReady"
+            ]
+          },
+          {
+            "description": "The check could not be decided.",
+            "type": "string",
+            "enum": [
+              "unknown"
+            ]
+          },
+          {
+            "description": "The caller asked for it to be skipped. A skipped blocking check keeps the aggregate `unknown`; it never counts as a pass.",
+            "type": "string",
+            "enum": [
+              "skipped"
+            ]
+          }
+        ]
       },
       "ConcurrencyPolicy": {
         "description": "Whether a slot may start while an earlier run is unfinished.",
@@ -2380,6 +4367,101 @@
         },
         "additionalProperties": false
       },
+      "CreateDestinationRequest": {
+        "description": "`POST /api/v1/namespaces/{ns}/destinations`.",
+        "type": "object",
+        "required": [
+          "access",
+          "name",
+          "storage",
+          "transport"
+        ],
+        "properties": {
+          "access": {
+            "description": "The four credential grants.",
+            "$ref": "#/components/schemas/AccessRequest"
+          },
+          "default": {
+            "description": "Whether this becomes the namespace's default destination. At most one destination per namespace may hold it, and a second request naming another default is a conflict rather than a silent takeover.",
+            "default": null,
+            "type": "boolean",
+            "nullable": true
+          },
+          "description": {
+            "description": "What this destination is, for a human reading a list.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "description": "The destination's name, which is also its Kubernetes object name: a schedule, a backup and a restore all reference it by this name.",
+            "type": "string"
+          },
+          "readiness": {
+            "description": "Readiness settings.",
+            "default": null,
+            "$ref": "#/components/schemas/ReadinessRequest",
+            "nullable": true
+          },
+          "storage": {
+            "description": "The location. Immutable once created.",
+            "$ref": "#/components/schemas/StorageRequest"
+          },
+          "transport": {
+            "description": "Transport security and its trust material.",
+            "$ref": "#/components/schemas/TransportRequest"
+          }
+        },
+        "additionalProperties": false
+      },
+      "CreatePreflightRequest": {
+        "description": "`POST .../preflights`.",
+        "type": "object",
+        "required": [
+          "operation"
+        ],
+        "properties": {
+          "backup": {
+            "description": "The backup block.",
+            "default": null,
+            "$ref": "#/components/schemas/BackupPreflightRequest",
+            "nullable": true
+          },
+          "destinationAccess": {
+            "description": "The destination-access block.",
+            "default": null,
+            "$ref": "#/components/schemas/DestinationAccessPreflightRequest",
+            "nullable": true
+          },
+          "operation": {
+            "description": "What this is about. Exactly the matching block below may be set.",
+            "$ref": "#/components/schemas/PreflightOperationDto"
+          },
+          "restore": {
+            "description": "The restore block.",
+            "default": null,
+            "$ref": "#/components/schemas/RestorePreflightRequest",
+            "nullable": true
+          },
+          "skipChecks": {
+            "description": "Blocking checks to skip, at most 32. A skipped blocking check keeps the aggregate `unknown`.",
+            "default": null,
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          },
+          "timeoutSeconds": {
+            "description": "The check budget in seconds, 30 to 600.",
+            "default": null,
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
       "CreateRestoreRequest": {
         "description": "`POST /api/v1/namespaces/{ns}/restores`.\n\n`planBytes` is OPAQUE: the service checks `planHash` against the SHA-256 of exactly these bytes and stores them unchanged. It never parses or re-emits the plan document.",
         "type": "object",
@@ -2479,6 +4561,671 @@
         },
         "additionalProperties": false
       },
+      "CreateTopicDiscoveryRequest": {
+        "description": "`POST .../connections/{name}/topic-discoveries`.",
+        "type": "object",
+        "properties": {
+          "expectedTopics": {
+            "description": "Names to ask about explicitly, at most 500.",
+            "default": null,
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          },
+          "includeInternal": {
+            "description": "Whether `__`-prefixed topics are kept. Absent means false.",
+            "default": null,
+            "type": "boolean",
+            "nullable": true
+          },
+          "maxTopics": {
+            "description": "The ceiling on stored entries.",
+            "default": null,
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "reuseFresh": {
+            "description": "Whether a fresh, identical, succeeded discovery may be returned instead of starting another. Absent means true.",
+            "default": null,
+            "type": "boolean",
+            "nullable": true
+          },
+          "timeoutSeconds": {
+            "description": "The in-Job Kafka budget in seconds.",
+            "default": null,
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "Destination": {
+        "description": "A saved destination.",
+        "type": "object",
+        "required": [
+          "access",
+          "canonicalUrl",
+          "default",
+          "generation",
+          "name",
+          "namespace",
+          "resourceVersion",
+          "status",
+          "storage",
+          "transport",
+          "uid",
+          "writeProbe"
+        ],
+        "properties": {
+          "access": {
+            "description": "The four grants, references only.",
+            "$ref": "#/components/schemas/AccessView"
+          },
+          "canonicalUrl": {
+            "description": "The archive root as one URL, so an operator and a plan never spell one location two ways.",
+            "type": "string"
+          },
+          "createdAt": {
+            "description": "When the object was created.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "default": {
+            "description": "Whether this is the namespace's default destination.",
+            "type": "boolean"
+          },
+          "description": {
+            "description": "What this destination is.",
+            "type": "string",
+            "nullable": true
+          },
+          "generation": {
+            "description": "The `metadata.generation`; send it back as `expectedGeneration`.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "lastTest": {
+            "description": "The most recent explicit access test.",
+            "$ref": "#/components/schemas/LastTestView",
+            "nullable": true
+          },
+          "locationDigest": {
+            "description": "`sha256:<hex>` over the canonical location, as the controller computed it. Absent until the controller has observed the object.",
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "description": "The object name, which is how everything else references it.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "The namespace.",
+            "type": "string"
+          },
+          "resourceVersion": {
+            "description": "The resourceVersion this projection was read at.",
+            "type": "string"
+          },
+          "status": {
+            "description": "The controller's verdict.",
+            "$ref": "#/components/schemas/DestinationStatusView"
+          },
+          "storage": {
+            "description": "The location.",
+            "$ref": "#/components/schemas/StorageView"
+          },
+          "transport": {
+            "description": "Transport security.",
+            "$ref": "#/components/schemas/TransportView"
+          },
+          "uid": {
+            "description": "The Kubernetes UID.",
+            "type": "string"
+          },
+          "writeProbe": {
+            "description": "Whether a test may write a marker.",
+            "$ref": "#/components/schemas/WriteProbeDto"
+          }
+        }
+      },
+      "DestinationAccessPreflightRequest": {
+        "description": "The destination-access half of a preflight request.",
+        "type": "object",
+        "required": [
+          "destination",
+          "roles"
+        ],
+        "properties": {
+          "destination": {
+            "description": "The destination to exercise.",
+            "type": "string"
+          },
+          "roles": {
+            "description": "The roles to exercise, 1 to 4.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DestinationRoleDto"
+            }
+          }
+        },
+        "additionalProperties": false
+      },
+      "DestinationFromLegacyRequest": {
+        "description": "`POST .../destinations:from-legacy`.",
+        "type": "object",
+        "required": [
+          "access",
+          "name"
+        ],
+        "properties": {
+          "access": {
+            "description": "The four credential grants for the derived location.",
+            "$ref": "#/components/schemas/AccessRequest"
+          },
+          "description": {
+            "description": "What this destination is.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "description": "The new destination's name.",
+            "type": "string"
+          },
+          "sourceBackup": {
+            "description": "Or the legacy `Backup`.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          },
+          "sourceSchedule": {
+            "description": "The legacy `BackupSchedule` to derive the location from.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "DestinationList": {
+        "description": "`GET .../destinations` — one page of rows.",
+        "type": "object",
+        "required": [
+          "items",
+          "page",
+          "requestId"
+        ],
+        "properties": {
+          "items": {
+            "description": "The rows on this page.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DestinationSummary"
+            }
+          },
+          "page": {
+            "description": "Paging.",
+            "$ref": "#/components/schemas/Page"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "DestinationResponse": {
+        "description": "One `Destination`.",
+        "type": "object",
+        "required": [
+          "item",
+          "requestId"
+        ],
+        "properties": {
+          "addressingSource": {
+            "description": "How the storage block was derived, on `:from-legacy` only.",
+            "type": "string",
+            "nullable": true
+          },
+          "item": {
+            "description": "The item.",
+            "$ref": "#/components/schemas/Destination"
+          },
+          "notes": {
+            "description": "Advisory notes from `:from-legacy`, e.g. that a legacy `allowHttp` was a no-op against an `https://` endpoint.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "replayed": {
+            "description": "On a durable create: whether this replays an earlier identical request.",
+            "type": "boolean",
+            "nullable": true
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "DestinationRoleDto": {
+        "description": "Which credential a destination test exercises.",
+        "oneOf": [
+          {
+            "description": "The grant execution Jobs write the archive with.",
+            "type": "string",
+            "enum": [
+              "archiveWrite"
+            ]
+          },
+          {
+            "description": "The read-only archive grant.",
+            "type": "string",
+            "enum": [
+              "archiveRead"
+            ]
+          },
+          {
+            "description": "The grant that writes evidence under `logweir/`.",
+            "type": "string",
+            "enum": [
+              "evidenceWrite"
+            ]
+          },
+          {
+            "description": "The grant that reads evidence back for verification.",
+            "type": "string",
+            "enum": [
+              "evidenceRead"
+            ]
+          }
+        ]
+      },
+      "DestinationStatusView": {
+        "description": "The controller's verdict on a destination.",
+        "type": "object",
+        "properties": {
+          "message": {
+            "description": "The bounded message.",
+            "type": "string",
+            "nullable": true
+          },
+          "observedAt": {
+            "description": "When the controller last reached it.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "observedGeneration": {
+            "description": "The generation the verdict was computed from.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "reason": {
+            "description": "The CamelCase reason.",
+            "type": "string",
+            "nullable": true
+          },
+          "valid": {
+            "description": "Whether the `Valid` condition is `True`. `null` means the controller has not reached a verdict yet — which is NOT the same as invalid.",
+            "type": "boolean",
+            "nullable": true
+          }
+        }
+      },
+      "DestinationSummary": {
+        "description": "A destination, as a list row.",
+        "type": "object",
+        "required": [
+          "addressing",
+          "canonicalUrl",
+          "default",
+          "generation",
+          "name",
+          "status",
+          "transport",
+          "uid"
+        ],
+        "properties": {
+          "addressing": {
+            "description": "How a request names the bucket.",
+            "$ref": "#/components/schemas/AddressingDto"
+          },
+          "canonicalUrl": {
+            "description": "The archive root as one URL.",
+            "type": "string"
+          },
+          "default": {
+            "description": "Whether this is the namespace's default destination.",
+            "type": "boolean"
+          },
+          "description": {
+            "description": "What this destination is.",
+            "type": "string",
+            "nullable": true
+          },
+          "endpoint": {
+            "description": "The endpoint origin; absent means AWS S3.",
+            "type": "string",
+            "nullable": true
+          },
+          "generation": {
+            "description": "The `metadata.generation`.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "description": "The object name.",
+            "type": "string"
+          },
+          "status": {
+            "description": "The controller's verdict.",
+            "$ref": "#/components/schemas/DestinationStatusView"
+          },
+          "transport": {
+            "description": "`tls` or `insecureHttp`.",
+            "$ref": "#/components/schemas/TransportSecurityDto"
+          },
+          "uid": {
+            "description": "The Kubernetes UID.",
+            "type": "string"
+          }
+        }
+      },
+      "DestinationUsageResponse": {
+        "description": "`GET .../destinations/{name}/usage`.",
+        "type": "object",
+        "required": [
+          "backups",
+          "basis",
+          "name",
+          "requestId",
+          "schedules",
+          "truncated"
+        ],
+        "properties": {
+          "backups": {
+            "description": "Recent backups that name it, at most 100, newest name last.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DestinationUseView"
+            }
+          },
+          "basis": {
+            "description": "How the lists were built, stated so an empty answer is not read as \"nothing uses this\".",
+            "type": "string"
+          },
+          "name": {
+            "description": "The destination.",
+            "type": "string"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          },
+          "schedules": {
+            "description": "Schedules that name it, at most 100.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DestinationUseView"
+            }
+          },
+          "truncated": {
+            "description": "Whether either list was cut.",
+            "type": "boolean"
+          }
+        }
+      },
+      "DestinationUseView": {
+        "description": "One object a destination is referenced by.",
+        "type": "object",
+        "required": [
+          "kind",
+          "name"
+        ],
+        "properties": {
+          "createdAt": {
+            "description": "When it was created.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "kind": {
+            "description": "`BackupSchedule` or `Backup`.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The object name.",
+            "type": "string"
+          }
+        }
+      },
+      "DetailEntryView": {
+        "description": "One entry of a preflight's detail document.",
+        "type": "object",
+        "required": [
+          "entry"
+        ],
+        "properties": {
+          "check": {
+            "description": "The check id the entry belongs to, when the producer named one.",
+            "type": "string",
+            "nullable": true
+          },
+          "entry": {
+            "description": "The entry, verbatim. The producer's own bounded, redacted JSON object."
+          }
+        }
+      },
+      "DetailPageResponse": {
+        "description": "`GET .../preflights/{id}/details`.",
+        "type": "object",
+        "required": [
+          "items",
+          "page",
+          "requestId"
+        ],
+        "properties": {
+          "items": {
+            "description": "The entries on this page, in stored order.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DetailEntryView"
+            }
+          },
+          "page": {
+            "description": "Paging. `snapshot` is the details document's own digest.",
+            "$ref": "#/components/schemas/Page"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "DiscoveryConnectionView": {
+        "description": "The connection a discovery was bound to when it ran.",
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "authMode": {
+            "description": "The SASL mechanism, or `plaintext`.",
+            "type": "string",
+            "nullable": true
+          },
+          "generation": {
+            "description": "Its generation when the check ran.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "name": {
+            "description": "The connection name.",
+            "type": "string"
+          },
+          "principal": {
+            "description": "The principal the check presented, e.g. `User:backup`.",
+            "type": "string",
+            "nullable": true
+          },
+          "uid": {
+            "description": "Its UID when the check ran.",
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "DiscoveryCountsView": {
+        "description": "The counts a discovery recorded.",
+        "type": "object",
+        "required": [
+          "errored",
+          "internalExcluded",
+          "listed",
+          "returned"
+        ],
+        "properties": {
+          "errored": {
+            "description": "Entries whose metadata could not be read.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "internalExcluded": {
+            "description": "Internal topics excluded.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "listed": {
+            "description": "Names the broker listed.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "returned": {
+            "description": "Entries stored.",
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
+      "DiscoveryLatestResponse": {
+        "description": "`GET .../connections/{name}/topic-discoveries?latest=true`.\n\nTWO SLOTS, NOT ONE. A failed attempt never hides the last successful inventory, and a successful inventory never hides that the newest attempt failed.",
+        "type": "object",
+        "required": [
+          "requestId"
+        ],
+        "properties": {
+          "lastSuccessful": {
+            "description": "The newest one that produced a result.",
+            "$ref": "#/components/schemas/TopicDiscovery",
+            "nullable": true
+          },
+          "latestAttempt": {
+            "description": "The newest discovery of any state.",
+            "$ref": "#/components/schemas/TopicDiscovery",
+            "nullable": true
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "ExecutionOnlyView": {
+        "description": "A check that cannot be answered before the run.",
+        "type": "object",
+        "required": [
+          "id",
+          "note"
+        ],
+        "properties": {
+          "id": {
+            "description": "The check id.",
+            "type": "string"
+          },
+          "note": {
+            "description": "Why it is only knowable at execution time.",
+            "type": "string"
+          }
+        }
+      },
+      "ExistingSecretRequest": {
+        "description": "An existing Secret in this namespace, and the keys inside it.",
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "accessKeyIdKey": {
+            "description": "The data key holding the access key id. Absent means `access-key-id`.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "description": "The Secret name.",
+            "type": "string"
+          },
+          "secretAccessKeyKey": {
+            "description": "The data key holding the secret access key. Absent means `secret-access-key`.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          },
+          "sessionTokenKey": {
+            "description": "The data key holding a session token. No default.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "ExpectedTopicsView": {
+        "description": "What became of the expected topics.",
+        "type": "object",
+        "required": [
+          "notAuthorized",
+          "notFound",
+          "requested",
+          "unknown",
+          "visible"
+        ],
+        "properties": {
+          "notAuthorized": {
+            "description": "Refused by authorization.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "notFound": {
+            "description": "Absent from the cluster.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "requested": {
+            "description": "How many were asked about.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "unknown": {
+            "description": "Neither confirmed nor refuted.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "visible": {
+            "description": "Visible in the listing.",
+            "type": "integer",
+            "format": "int64"
+          }
+        }
+      },
       "FieldError": {
         "description": "One field-level validation failure.",
         "type": "object",
@@ -2512,6 +5259,35 @@
           "status": {
             "description": "`ok` (liveness), `ready` or `notReady`.",
             "type": "string"
+          }
+        }
+      },
+      "LastTestView": {
+        "description": "The most recent explicit access test.",
+        "type": "object",
+        "required": [
+          "preflightId",
+          "stale",
+          "state"
+        ],
+        "properties": {
+          "observedAt": {
+            "description": "When the check observed the destination.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "preflightId": {
+            "description": "The `Preflight` that ran it.",
+            "type": "string"
+          },
+          "stale": {
+            "description": "Whether the result has expired or its inputs changed. A stale test is never rendered as health.",
+            "type": "boolean"
+          },
+          "state": {
+            "description": "Its aggregate state.",
+            "$ref": "#/components/schemas/PreflightState"
           }
         }
       },
@@ -2575,6 +5351,31 @@
             "type": "string"
           }
         }
+      },
+      "NewCredentialRequest": {
+        "description": "A credential value typed once.\n\nWRITE-ONLY. These bytes are turned into a Secret and are never echoed, in any response, log line, status, annotation or audit record. The Secret is created and never read back; the only thing that comes out of this field is a Secret NAME.",
+        "type": "object",
+        "required": [
+          "accessKeyId",
+          "secretAccessKey"
+        ],
+        "properties": {
+          "accessKeyId": {
+            "description": "The access key id.",
+            "type": "string"
+          },
+          "secretAccessKey": {
+            "description": "The secret access key.",
+            "type": "string"
+          },
+          "sessionToken": {
+            "description": "A session token, when the credential is temporary.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
       },
       "ObservedAuthView": {
         "description": "The identity a run presented.",
@@ -2955,6 +5756,268 @@
           }
         }
       },
+      "Preflight": {
+        "description": "An operation-readiness result.",
+        "type": "object",
+        "required": [
+          "applicable",
+          "binding",
+          "checks",
+          "conditions",
+          "detailsAvailable",
+          "executionOnly",
+          "id",
+          "namespace",
+          "operation",
+          "resourceVersion",
+          "stale",
+          "staleReasons",
+          "state",
+          "terminal",
+          "uid",
+          "warnings"
+        ],
+        "properties": {
+          "applicable": {
+            "description": "Whether the result still describes the caller's current inputs.\n\nRECOMPUTED PER READ. A result is applicable only when it completed, has not expired, and its binding still matches: edit the plan, the target, the destination or the recovery point and this goes false.",
+            "type": "boolean"
+          },
+          "binding": {
+            "description": "Exactly what the result is about.",
+            "$ref": "#/components/schemas/PreflightBindingView"
+          },
+          "checks": {
+            "description": "The blocking checks.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CheckEntryView"
+            }
+          },
+          "conditions": {
+            "description": "The status conditions, at most 16.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConditionView"
+            }
+          },
+          "createdAt": {
+            "description": "When the object was created.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "detailsAvailable": {
+            "description": "Whether a details document exists for the details route.",
+            "type": "boolean"
+          },
+          "executionOnly": {
+            "description": "The checks that can only be answered while the run executes. They never affect the aggregate, and \"ready\" never means they passed.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ExecutionOnlyView"
+            }
+          },
+          "expiresAt": {
+            "description": "The minimum expiry over the non-skipped checks.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "id": {
+            "description": "The object name, which is the id every other route uses.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "The namespace.",
+            "type": "string"
+          },
+          "observedAt": {
+            "description": "When the facts were observed.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "operation": {
+            "description": "What it is about.",
+            "$ref": "#/components/schemas/PreflightOperationDto"
+          },
+          "reason": {
+            "description": "The CamelCase reason.",
+            "type": "string",
+            "nullable": true
+          },
+          "resourceVersion": {
+            "description": "The resourceVersion this projection was read at.",
+            "type": "string"
+          },
+          "stale": {
+            "description": "Whether it is out of date.",
+            "type": "boolean"
+          },
+          "staleReasons": {
+            "description": "Why, when it is.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "state": {
+            "description": "The lifecycle, and — once complete — the aggregate.",
+            "$ref": "#/components/schemas/PreflightState"
+          },
+          "terminal": {
+            "description": "Whether the state is final.",
+            "type": "boolean"
+          },
+          "uid": {
+            "description": "The Kubernetes UID.",
+            "type": "string"
+          },
+          "warnings": {
+            "description": "The advisory checks that said no.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CheckEntryView"
+            }
+          }
+        }
+      },
+      "PreflightBindingView": {
+        "description": "Exactly what a result is a result ABOUT.",
+        "type": "object",
+        "required": [
+          "referents"
+        ],
+        "properties": {
+          "inputsDigest": {
+            "description": "The digest over every input the verdict depended on.",
+            "type": "string",
+            "nullable": true
+          },
+          "planHash": {
+            "description": "The plan hash the check was bound to.",
+            "type": "string",
+            "nullable": true
+          },
+          "referents": {
+            "description": "The objects it resolved, at most 16.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ReferentView"
+            }
+          }
+        }
+      },
+      "PreflightOperationDto": {
+        "description": "What a preflight is about.",
+        "oneOf": [
+          {
+            "description": "\"Back up now\" and schedule readiness.",
+            "type": "string",
+            "enum": [
+              "backup"
+            ]
+          },
+          {
+            "description": "Restore readiness, bound to an exact plan hash.",
+            "type": "string",
+            "enum": [
+              "restore"
+            ]
+          },
+          {
+            "description": "An explicit destination access test.",
+            "type": "string",
+            "enum": [
+              "destinationAccess"
+            ]
+          }
+        ]
+      },
+      "PreflightResponse": {
+        "description": "One `Preflight`.",
+        "type": "object",
+        "required": [
+          "item",
+          "requestId"
+        ],
+        "properties": {
+          "item": {
+            "description": "The item.",
+            "$ref": "#/components/schemas/Preflight"
+          },
+          "replayed": {
+            "description": "On a create: whether this replays an earlier identical request.",
+            "type": "boolean",
+            "nullable": true
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "PreflightState": {
+        "description": "The aggregate a preflight reports.",
+        "oneOf": [
+          {
+            "description": "Accepted; not observed yet.",
+            "type": "string",
+            "enum": [
+              "pending"
+            ]
+          },
+          {
+            "description": "Waiting for a check slot.",
+            "type": "string",
+            "enum": [
+              "queued"
+            ]
+          },
+          {
+            "description": "The check Job exists and has not finished.",
+            "type": "string",
+            "enum": [
+              "running"
+            ]
+          },
+          {
+            "description": "Every blocking check passed.",
+            "type": "string",
+            "enum": [
+              "ready"
+            ]
+          },
+          {
+            "description": "A blocking check said no.",
+            "type": "string",
+            "enum": [
+              "notReady"
+            ]
+          },
+          {
+            "description": "A blocking check could not be decided, or was skipped.",
+            "type": "string",
+            "enum": [
+              "unknown"
+            ]
+          },
+          {
+            "description": "No result could be produced at all.",
+            "type": "string",
+            "enum": [
+              "failed"
+            ]
+          },
+          {
+            "description": "Cancelled before a result.",
+            "type": "string",
+            "enum": [
+              "cancelled"
+            ]
+          }
+        ]
+      },
       "Problem": {
         "description": "The rendered problem document.",
         "type": "object",
@@ -3088,6 +6151,13 @@
             ]
           },
           {
+            "description": "404 — a legacy object carries no frozen execution and the installation publishes no legacy addressing, so no destination can be derived from facts (D2 §3.12 step 2c).",
+            "type": "string",
+            "enum": [
+              "legacy_location_unknown"
+            ]
+          },
+          {
             "description": "405 — the route exists and does not accept this method.",
             "type": "string",
             "enum": [
@@ -3113,6 +6183,34 @@
             "type": "string",
             "enum": [
               "approval_required"
+            ]
+          },
+          {
+            "description": "409 — `:update-access` tried to move a destination's location; `spec.storage` is immutable (D2 R1).",
+            "type": "string",
+            "enum": [
+              "destination_location_immutable"
+            ]
+          },
+          {
+            "description": "409 — `:update-access` tried to change a destination's transport; `spec.transport.security` is immutable in BOTH directions (D2 R2).",
+            "type": "string",
+            "enum": [
+              "transport_downgrade_forbidden"
+            ]
+          },
+          {
+            "description": "409 — a legacy adoption named a destination whose `locationDigest` differs from the one derived from the legacy object (D2 §3.12).",
+            "type": "string",
+            "enum": [
+              "legacy_location_mismatch"
+            ]
+          },
+          {
+            "description": "409 — a stored result chunk failed its owner, immutability or digest check (D2 §5.6). The page is refused rather than served from bytes whose provenance did not hold.",
+            "type": "string",
+            "enum": [
+              "result_integrity_failed"
             ]
           },
           {
@@ -3162,6 +6260,13 @@
             "type": "string",
             "enum": [
               "validation_failed"
+            ]
+          },
+          {
+            "description": "422 — a destination request breaks one of D2 §3.2's rules. It carries the same field paths and rule ids the CRD's CEL and the controller use, so all three enforcement points name one mistake the same way.",
+            "type": "string",
+            "enum": [
+              "destination_invalid"
             ]
           },
           {
@@ -3246,6 +6351,68 @@
           "state": {
             "description": "The state.",
             "$ref": "#/components/schemas/ReachabilityState"
+          }
+        }
+      },
+      "ReadinessRequest": {
+        "description": "Explicit readiness settings.",
+        "type": "object",
+        "properties": {
+          "writeProbe": {
+            "description": "Whether a destination test may write a marker. Absent means `createOnlyMarker` HERE, while the CRD's own default is `disabled`: a form that discloses the choice may default to the useful answer, and an object created by `kubectl` with no opinion may not.",
+            "default": null,
+            "$ref": "#/components/schemas/WriteProbeDto",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "RecoveryPointRequest": {
+        "description": "The recovery point a restore preflight is about.",
+        "type": "object",
+        "required": [
+          "backupName"
+        ],
+        "properties": {
+          "backupName": {
+            "description": "The `Backup` that produced it.",
+            "type": "string"
+          },
+          "backupUid": {
+            "description": "Its UID. A deleted and recreated point is a different point.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "ReferentView": {
+        "description": "One object a preflight's binding names.",
+        "type": "object",
+        "required": [
+          "kind",
+          "name"
+        ],
+        "properties": {
+          "generation": {
+            "description": "The generation at the time of the check.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "kind": {
+            "description": "The kind.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The name.",
+            "type": "string"
+          },
+          "uid": {
+            "description": "The UID at the time of the check.",
+            "type": "string",
+            "nullable": true
           }
         }
       },
@@ -3424,6 +6591,61 @@
             ]
           }
         ]
+      },
+      "RestorePreflightRequest": {
+        "description": "The restore half of a preflight request.",
+        "type": "object",
+        "properties": {
+          "evidenceDestination": {
+            "description": "The destination evidence is read from. Set together with `sourceDestination`.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          },
+          "legacySourceArchive": {
+            "description": "Or a legacy inline source archive.",
+            "default": null,
+            "$ref": "#/components/schemas/ArchiveRequest",
+            "nullable": true
+          },
+          "planBytes": {
+            "description": "The exact draft plan bytes, at most 256 KiB. FORWARDED VERBATIM: the service checks `planHash` against the SHA-256 of exactly these bytes and stores them unchanged. It never parses or re-emits the plan.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          },
+          "planHash": {
+            "description": "`sha256:<lowercase hex>` of `planBytes`.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          },
+          "recoveryPoint": {
+            "description": "The recovery point.",
+            "default": null,
+            "$ref": "#/components/schemas/RecoveryPointRequest",
+            "nullable": true
+          },
+          "restoreName": {
+            "description": "Or an existing `Restore` to check.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          },
+          "sourceDestination": {
+            "description": "The destination the archive is read from.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          },
+          "target": {
+            "description": "The target connection; required with `planBytes`.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
       },
       "RestoreResponse": {
         "type": "object",
@@ -3688,6 +6910,26 @@
           }
         ]
       },
+      "ScanView": {
+        "description": "How much of the stored result one page actually looked at.",
+        "type": "object",
+        "required": [
+          "chunksScanned",
+          "complete"
+        ],
+        "properties": {
+          "chunksScanned": {
+            "description": "How many chunks this request read, at most 8.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          },
+          "complete": {
+            "description": "Whether the scan reached the end of the result. A sparse `q` returns a short page with `complete: false` and a cursor rather than reading every chunk in one request.",
+            "type": "boolean"
+          }
+        }
+      },
       "Schedule": {
         "description": "A saved schedule.",
         "type": "object",
@@ -3855,6 +7097,25 @@
           }
         }
       },
+      "SecretSourceRequest": {
+        "description": "Exactly one of an existing Secret reference or a new write-only value.",
+        "type": "object",
+        "properties": {
+          "existing": {
+            "description": "Name an existing Secret.",
+            "default": null,
+            "$ref": "#/components/schemas/ExistingSecretRequest",
+            "nullable": true
+          },
+          "new": {
+            "description": "Or type the credential once, here.",
+            "default": null,
+            "$ref": "#/components/schemas/NewCredentialRequest",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
       "SessionResponse": {
         "description": "`GET /api/v1/session`.",
         "type": "object",
@@ -3926,6 +7187,98 @@
         },
         "additionalProperties": false
       },
+      "StorageProviderDto": {
+        "description": "The object-store provider a destination names.",
+        "oneOf": [
+          {
+            "description": "S3 and S3-compatible endpoints.",
+            "type": "string",
+            "enum": [
+              "s3"
+            ]
+          }
+        ]
+      },
+      "StorageRequest": {
+        "description": "Where the archive root is. Immutable once the destination exists.",
+        "type": "object",
+        "required": [
+          "addressing",
+          "bucket",
+          "provider"
+        ],
+        "properties": {
+          "addressing": {
+            "description": "How a request names the bucket.",
+            "$ref": "#/components/schemas/AddressingDto"
+          },
+          "bucket": {
+            "description": "The bucket.",
+            "type": "string"
+          },
+          "endpoint": {
+            "description": "An http(s) origin — scheme, host and optional port. Absent means AWS S3.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          },
+          "prefix": {
+            "description": "The key prefix inside the bucket, relative; absent is the bucket root. Never `logweir` or anything under it.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          },
+          "provider": {
+            "description": "The object-store provider.",
+            "$ref": "#/components/schemas/StorageProviderDto"
+          },
+          "region": {
+            "description": "The region, when the provider needs one.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "StorageView": {
+        "description": "A destination's location, as stored.",
+        "type": "object",
+        "required": [
+          "addressing",
+          "bucket",
+          "prefix",
+          "provider"
+        ],
+        "properties": {
+          "addressing": {
+            "description": "How a request names the bucket.",
+            "$ref": "#/components/schemas/AddressingDto"
+          },
+          "bucket": {
+            "description": "The bucket.",
+            "type": "string"
+          },
+          "endpoint": {
+            "description": "The endpoint origin; absent means AWS S3.",
+            "type": "string",
+            "nullable": true
+          },
+          "prefix": {
+            "description": "The prefix, `\"\"` for the bucket root.",
+            "type": "string"
+          },
+          "provider": {
+            "description": "The provider.",
+            "$ref": "#/components/schemas/StorageProviderDto"
+          },
+          "region": {
+            "description": "The region.",
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
       "SubjectRefView": {
         "description": "What an approval is about.",
         "type": "object",
@@ -3944,6 +7297,245 @@
           }
         }
       },
+      "TestDestinationRequest": {
+        "description": "`POST .../destinations/{name}:test`.",
+        "type": "object",
+        "properties": {
+          "roles": {
+            "description": "The roles to exercise, 1 to 4. Absent means every configured role.",
+            "default": null,
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DestinationRoleDto"
+            },
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "TopicDiscovery": {
+        "description": "A bounded topic inventory.",
+        "type": "object",
+        "required": [
+          "chunkCount",
+          "conditions",
+          "connection",
+          "id",
+          "namespace",
+          "resourceVersion",
+          "stale",
+          "staleReasons",
+          "state",
+          "terminal",
+          "truncated",
+          "uid"
+        ],
+        "properties": {
+          "chunkCount": {
+            "description": "How many stored chunks the result has.",
+            "type": "integer",
+            "format": "uint",
+            "minimum": 0.0
+          },
+          "clusterId": {
+            "description": "The cluster id the check read.",
+            "type": "string",
+            "nullable": true
+          },
+          "conditions": {
+            "description": "The status conditions, at most 16.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConditionView"
+            }
+          },
+          "connection": {
+            "description": "The connection it was bound to.",
+            "$ref": "#/components/schemas/DiscoveryConnectionView"
+          },
+          "counts": {
+            "description": "The counts.",
+            "$ref": "#/components/schemas/DiscoveryCountsView",
+            "nullable": true
+          },
+          "createdAt": {
+            "description": "When the object was created.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "error": {
+            "description": "The failure, when there is one.",
+            "$ref": "#/components/schemas/CheckErrorView",
+            "nullable": true
+          },
+          "expected": {
+            "description": "What became of the expected topics.",
+            "$ref": "#/components/schemas/ExpectedTopicsView",
+            "nullable": true
+          },
+          "freshUntil": {
+            "description": "Until when the result counts as fresh.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "id": {
+            "description": "The object name, which is the id every other route uses.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "The namespace.",
+            "type": "string"
+          },
+          "observedAt": {
+            "description": "When the runner container finished, which is when the facts were true.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "reason": {
+            "description": "The CamelCase reason.",
+            "type": "string",
+            "nullable": true
+          },
+          "resourceVersion": {
+            "description": "The resourceVersion this projection was read at.",
+            "type": "string"
+          },
+          "stale": {
+            "description": "Whether the result is past its freshness or its binding changed.",
+            "type": "boolean"
+          },
+          "staleReasons": {
+            "description": "Why, when it is.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "state": {
+            "description": "The lifecycle state.",
+            "$ref": "#/components/schemas/CheckLifecycle"
+          },
+          "terminal": {
+            "description": "Whether the state is final.",
+            "type": "boolean"
+          },
+          "topicsSha256": {
+            "description": "`sha256:<hex>` over the canonical TSV of the stored entries. The topics page binds its cursor to it, so a page cannot straddle two results.",
+            "type": "string",
+            "nullable": true
+          },
+          "truncated": {
+            "description": "Whether the inventory was cut.",
+            "type": "boolean"
+          },
+          "truncationReason": {
+            "description": "Why it was cut.",
+            "type": "string",
+            "nullable": true
+          },
+          "uid": {
+            "description": "The Kubernetes UID.",
+            "type": "string"
+          },
+          "visibility": {
+            "description": "Completeness, never better than `unknown` without an attestation.",
+            "$ref": "#/components/schemas/VisibilityView",
+            "nullable": true
+          }
+        }
+      },
+      "TopicDiscoveryList": {
+        "description": "`GET .../connections/{name}/topic-discoveries` — one page.",
+        "type": "object",
+        "required": [
+          "items",
+          "page",
+          "requestId"
+        ],
+        "properties": {
+          "items": {
+            "description": "The discoveries on this page.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TopicDiscovery"
+            }
+          },
+          "page": {
+            "description": "Paging.",
+            "$ref": "#/components/schemas/Page"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "TopicDiscoveryResponse": {
+        "description": "One `TopicDiscovery`.",
+        "type": "object",
+        "required": [
+          "item",
+          "requestId"
+        ],
+        "properties": {
+          "item": {
+            "description": "The item.",
+            "$ref": "#/components/schemas/TopicDiscovery"
+          },
+          "replayed": {
+            "description": "On a create: whether this replays an earlier identical request.",
+            "type": "boolean",
+            "nullable": true
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          },
+          "reused": {
+            "description": "On a create: whether a fresh identical result was returned instead of starting another check.",
+            "type": "boolean",
+            "nullable": true
+          }
+        }
+      },
+      "TopicEntryView": {
+        "description": "One row of a topic page.",
+        "type": "object",
+        "required": [
+          "expected",
+          "internal",
+          "name",
+          "partitions"
+        ],
+        "properties": {
+          "errorCode": {
+            "description": "The CamelCase code, when its metadata could not be read.",
+            "type": "string",
+            "nullable": true
+          },
+          "expected": {
+            "description": "Whether it was one of the expected names.",
+            "type": "boolean"
+          },
+          "internal": {
+            "description": "Whether it is a Kafka internal topic (`__`-prefixed, and only that).",
+            "type": "boolean"
+          },
+          "name": {
+            "description": "The topic name.",
+            "type": "string"
+          },
+          "partitions": {
+            "description": "Its partition count.",
+            "type": "integer",
+            "format": "uint32",
+            "minimum": 0.0
+          }
+        }
+      },
       "TopicNamingRequest": {
         "description": "How restored topics are named.",
         "type": "object",
@@ -3954,6 +7546,133 @@
           "prefix": {
             "description": "Prepended to each source topic name.",
             "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
+      "TopicPageResponse": {
+        "description": "`GET .../topic-discoveries/{id}/topics`.",
+        "type": "object",
+        "required": [
+          "items",
+          "page",
+          "requestId",
+          "scan"
+        ],
+        "properties": {
+          "items": {
+            "description": "The rows on this page, in stored (bytewise name) order.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TopicEntryView"
+            }
+          },
+          "page": {
+            "description": "Paging. `snapshot` is `<uid>@<topicsSha256>`.",
+            "$ref": "#/components/schemas/Page"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          },
+          "scan": {
+            "description": "How much of the result was read.",
+            "$ref": "#/components/schemas/ScanView"
+          }
+        }
+      },
+      "TransportRequest": {
+        "description": "Transport security and its trust material.",
+        "type": "object",
+        "required": [
+          "security"
+        ],
+        "properties": {
+          "caBundle": {
+            "description": "A private CA, for `tls` only.",
+            "default": null,
+            "$ref": "#/components/schemas/CaBundleRequest",
+            "nullable": true
+          },
+          "security": {
+            "description": "`tls` or `insecureHttp`. It must agree with the endpoint scheme, and `addressing` never changes it.",
+            "$ref": "#/components/schemas/TransportSecurityDto"
+          }
+        },
+        "additionalProperties": false
+      },
+      "TransportSecurityDto": {
+        "description": "Transport security. Immutable once the destination exists.",
+        "oneOf": [
+          {
+            "description": "TLS, with an `https://` endpoint or none.",
+            "type": "string",
+            "enum": [
+              "tls"
+            ]
+          },
+          {
+            "description": "Plaintext HTTP, and only with an explicit `http://` endpoint.",
+            "type": "string",
+            "enum": [
+              "insecureHttp"
+            ]
+          }
+        ]
+      },
+      "TransportView": {
+        "description": "Transport security, as stored.",
+        "type": "object",
+        "required": [
+          "security"
+        ],
+        "properties": {
+          "caBundle": {
+            "description": "The CA reference.",
+            "$ref": "#/components/schemas/CaBundleView",
+            "nullable": true
+          },
+          "security": {
+            "description": "`tls` or `insecureHttp`.",
+            "$ref": "#/components/schemas/TransportSecurityDto"
+          }
+        }
+      },
+      "UpdateDestinationAccessRequest": {
+        "description": "`POST .../destinations/{name}:update-access`.",
+        "type": "object",
+        "required": [
+          "access",
+          "expectedGeneration"
+        ],
+        "properties": {
+          "access": {
+            "description": "The complete four-grant object. A grant omitted here is REMOVED.",
+            "$ref": "#/components/schemas/AccessRequest"
+          },
+          "expectedGeneration": {
+            "description": "The `metadata.generation` the client last read. A stale value is `precondition_failed`: a rotation must not land on a destination that changed under the operator's feet.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "transport": {
+            "description": "The CA reference. Absent leaves it alone; present with a `null` `caBundle` clears it.",
+            "default": null,
+            "$ref": "#/components/schemas/UpdateTransportRequest",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "UpdateTransportRequest": {
+        "description": "The transport half of an access rotation: the CA reference, and nothing else. `security` is absent from this type ON PURPOSE — it is immutable.",
+        "type": "object",
+        "properties": {
+          "caBundle": {
+            "description": "The new CA reference, or `null` to clear it.",
+            "default": null,
+            "$ref": "#/components/schemas/CaBundleRequest",
+            "nullable": true
           }
         },
         "additionalProperties": false
@@ -4033,6 +7752,58 @@
           }
         }
       },
+      "VisibilityState": {
+        "description": "How complete a topic inventory's own author believes it is.",
+        "oneOf": [
+          {
+            "description": "A successful Kafka list ALONE. It is never called complete: an ACL can hide a topic from `DESCRIBE` with no error anywhere.",
+            "type": "string",
+            "enum": [
+              "unknown"
+            ]
+          },
+          {
+            "description": "An authorization omission was observed.",
+            "type": "string",
+            "enum": [
+              "limited"
+            ]
+          },
+          {
+            "description": "An administrator-governed attestation says the principal sees everything.",
+            "type": "string",
+            "enum": [
+              "attestedComplete"
+            ]
+          }
+        ]
+      },
+      "VisibilityView": {
+        "description": "What a discovery could see, and why.",
+        "type": "object",
+        "required": [
+          "basis",
+          "state"
+        ],
+        "properties": {
+          "attestation": {
+            "description": "The attestation that justified `attestedComplete`.",
+            "type": "string",
+            "nullable": true
+          },
+          "basis": {
+            "description": "The observations behind it.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "state": {
+            "description": "The state.",
+            "$ref": "#/components/schemas/VisibilityState"
+          }
+        }
+      },
       "WindowCoveredView": {
         "description": "The covered window.",
         "type": "object",
@@ -4052,6 +7823,38 @@
             "format": "int64"
           }
         }
+      },
+      "WorkloadIdentityRequest": {
+        "description": "The ServiceAccount a workload-identity grant runs as.",
+        "type": "object",
+        "properties": {
+          "serviceAccountName": {
+            "description": "The ServiceAccount name. Absent means `logweir-runner`.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "WriteProbeDto": {
+        "description": "Whether an explicit readiness test may write a marker object.",
+        "oneOf": [
+          {
+            "description": "No object is ever written by a readiness test.",
+            "type": "string",
+            "enum": [
+              "disabled"
+            ]
+          },
+          {
+            "description": "A destination test may create ONE marker object under the destination's own prefix. It is never deleted.",
+            "type": "string",
+            "enum": [
+              "createOnlyMarker"
+            ]
+          }
+        ]
       }
     }
   },

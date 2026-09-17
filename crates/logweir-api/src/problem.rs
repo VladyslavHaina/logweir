@@ -54,6 +54,10 @@ pub enum ProblemCode {
     OriginMismatch,
     /// 404 — no such route or no such object.
     NotFound,
+    /// 404 — a legacy object carries no frozen execution and the installation
+    /// publishes no legacy addressing, so no destination can be derived from
+    /// facts (D2 §3.12 step 2c).
+    LegacyLocationUnknown,
     /// 405 — the route exists and does not accept this method.
     MethodNotAllowed,
     /// 409 — the idempotency key was already used with a different request.
@@ -63,6 +67,19 @@ pub enum ProblemCode {
     StateConflict,
     /// 409 — an approval is required first (PLAT-19.2).
     ApprovalRequired,
+    /// 409 — `:update-access` tried to move a destination's location;
+    /// `spec.storage` is immutable (D2 R1).
+    DestinationLocationImmutable,
+    /// 409 — `:update-access` tried to change a destination's transport;
+    /// `spec.transport.security` is immutable in BOTH directions (D2 R2).
+    TransportDowngradeForbidden,
+    /// 409 — a legacy adoption named a destination whose `locationDigest`
+    /// differs from the one derived from the legacy object (D2 §3.12).
+    LegacyLocationMismatch,
+    /// 409 — a stored result chunk failed its owner, immutability or digest
+    /// check (D2 §5.6). The page is refused rather than served from bytes
+    /// whose provenance did not hold.
+    ResultIntegrityFailed,
     /// 409 — the bound approval policy does not match (PLAT-19.2).
     PolicyMismatch,
     /// 410 — the list cursor expired or Kubernetes compacted its continue
@@ -79,6 +96,10 @@ pub enum ProblemCode {
     MisdirectedRequest,
     /// 422 — the request is well-formed JSON and fails validation.
     ValidationFailed,
+    /// 422 — a destination request breaks one of D2 §3.2's rules. It carries
+    /// the same field paths and rule ids the CRD's CEL and the controller use,
+    /// so all three enforcement points name one mistake the same way.
+    DestinationInvalid,
     /// 429 — Kubernetes throttled the request; see `Retry-After`.
     RateLimited,
     /// 500 — an invariant this service holds did not hold.
@@ -93,7 +114,7 @@ pub enum ProblemCode {
 impl ProblemCode {
     /// Every code, in declaration order. The OpenAPI document and the tests
     /// iterate this list, so a new code cannot be undocumented or untested.
-    pub const ALL: [ProblemCode; 26] = [
+    pub const ALL: [ProblemCode; 32] = [
         ProblemCode::MalformedRequest,
         ProblemCode::HeaderNotAllowed,
         ProblemCode::IdempotencyKeyRequired,
@@ -105,17 +126,23 @@ impl ProblemCode {
         ProblemCode::NamespaceForbidden,
         ProblemCode::OriginMismatch,
         ProblemCode::NotFound,
+        ProblemCode::LegacyLocationUnknown,
         ProblemCode::MethodNotAllowed,
         ProblemCode::IdempotencyConflict,
         ProblemCode::StateConflict,
         ProblemCode::ApprovalRequired,
         ProblemCode::PolicyMismatch,
+        ProblemCode::DestinationLocationImmutable,
+        ProblemCode::TransportDowngradeForbidden,
+        ProblemCode::LegacyLocationMismatch,
+        ProblemCode::ResultIntegrityFailed,
         ProblemCode::CursorExpired,
         ProblemCode::PreconditionFailed,
         ProblemCode::PayloadTooLarge,
         ProblemCode::UnsupportedMediaType,
         ProblemCode::MisdirectedRequest,
         ProblemCode::ValidationFailed,
+        ProblemCode::DestinationInvalid,
         ProblemCode::RateLimited,
         ProblemCode::InternalError,
         ProblemCode::KubernetesUnavailable,
@@ -137,17 +164,23 @@ impl ProblemCode {
             ProblemCode::NamespaceForbidden => "namespace_forbidden",
             ProblemCode::OriginMismatch => "origin_mismatch",
             ProblemCode::NotFound => "not_found",
+            ProblemCode::LegacyLocationUnknown => "legacy_location_unknown",
             ProblemCode::MethodNotAllowed => "method_not_allowed",
             ProblemCode::IdempotencyConflict => "idempotency_conflict",
             ProblemCode::StateConflict => "state_conflict",
             ProblemCode::ApprovalRequired => "approval_required",
             ProblemCode::PolicyMismatch => "policy_mismatch",
+            ProblemCode::DestinationLocationImmutable => "destination_location_immutable",
+            ProblemCode::TransportDowngradeForbidden => "transport_downgrade_forbidden",
+            ProblemCode::LegacyLocationMismatch => "legacy_location_mismatch",
+            ProblemCode::ResultIntegrityFailed => "result_integrity_failed",
             ProblemCode::CursorExpired => "cursor_expired",
             ProblemCode::PreconditionFailed => "precondition_failed",
             ProblemCode::PayloadTooLarge => "payload_too_large",
             ProblemCode::UnsupportedMediaType => "unsupported_media_type",
             ProblemCode::MisdirectedRequest => "misdirected_request",
             ProblemCode::ValidationFailed => "validation_failed",
+            ProblemCode::DestinationInvalid => "destination_invalid",
             ProblemCode::RateLimited => "rate_limited",
             ProblemCode::InternalError => "internal_error",
             ProblemCode::KubernetesUnavailable => "kubernetes_unavailable",
@@ -168,18 +201,24 @@ impl ProblemCode {
             ProblemCode::Forbidden
             | ProblemCode::NamespaceForbidden
             | ProblemCode::OriginMismatch => StatusCode::FORBIDDEN,
-            ProblemCode::NotFound => StatusCode::NOT_FOUND,
+            ProblemCode::NotFound | ProblemCode::LegacyLocationUnknown => StatusCode::NOT_FOUND,
             ProblemCode::MethodNotAllowed => StatusCode::METHOD_NOT_ALLOWED,
             ProblemCode::IdempotencyConflict
             | ProblemCode::StateConflict
             | ProblemCode::ApprovalRequired
-            | ProblemCode::PolicyMismatch => StatusCode::CONFLICT,
+            | ProblemCode::PolicyMismatch
+            | ProblemCode::DestinationLocationImmutable
+            | ProblemCode::TransportDowngradeForbidden
+            | ProblemCode::LegacyLocationMismatch
+            | ProblemCode::ResultIntegrityFailed => StatusCode::CONFLICT,
             ProblemCode::CursorExpired => StatusCode::GONE,
             ProblemCode::PreconditionFailed => StatusCode::PRECONDITION_FAILED,
             ProblemCode::PayloadTooLarge => StatusCode::PAYLOAD_TOO_LARGE,
             ProblemCode::UnsupportedMediaType => StatusCode::UNSUPPORTED_MEDIA_TYPE,
             ProblemCode::MisdirectedRequest => StatusCode::MISDIRECTED_REQUEST,
-            ProblemCode::ValidationFailed => StatusCode::UNPROCESSABLE_ENTITY,
+            ProblemCode::ValidationFailed | ProblemCode::DestinationInvalid => {
+                StatusCode::UNPROCESSABLE_ENTITY
+            }
             ProblemCode::RateLimited => StatusCode::TOO_MANY_REQUESTS,
             ProblemCode::InternalError => StatusCode::INTERNAL_SERVER_ERROR,
             ProblemCode::KubernetesUnavailable => StatusCode::SERVICE_UNAVAILABLE,
@@ -202,17 +241,23 @@ impl ProblemCode {
             ProblemCode::NamespaceForbidden => "Namespace not granted",
             ProblemCode::OriginMismatch => "Origin not allowed",
             ProblemCode::NotFound => "Not found",
+            ProblemCode::LegacyLocationUnknown => "Legacy location unknown",
             ProblemCode::MethodNotAllowed => "Method not allowed",
             ProblemCode::IdempotencyConflict => "Idempotency key conflict",
             ProblemCode::StateConflict => "State conflict",
             ProblemCode::ApprovalRequired => "Approval required",
             ProblemCode::PolicyMismatch => "Policy mismatch",
+            ProblemCode::DestinationLocationImmutable => "Destination location immutable",
+            ProblemCode::TransportDowngradeForbidden => "Transport change forbidden",
+            ProblemCode::LegacyLocationMismatch => "Legacy location mismatch",
+            ProblemCode::ResultIntegrityFailed => "Result integrity failed",
             ProblemCode::CursorExpired => "Cursor expired",
             ProblemCode::PreconditionFailed => "Precondition failed",
             ProblemCode::PayloadTooLarge => "Payload too large",
             ProblemCode::UnsupportedMediaType => "Unsupported media type",
             ProblemCode::MisdirectedRequest => "Misdirected request",
             ProblemCode::ValidationFailed => "Request validation failed",
+            ProblemCode::DestinationInvalid => "Destination invalid",
             ProblemCode::RateLimited => "Rate limited",
             ProblemCode::InternalError => "Internal error",
             ProblemCode::KubernetesUnavailable => "Kubernetes unavailable",
@@ -347,6 +392,24 @@ impl ApiError {
         Self {
             code: ProblemCode::ValidationFailed,
             detail: "One or more fields are invalid.".to_string(),
+            errors,
+            retry_after_seconds: None,
+        }
+    }
+
+    /// `destination_invalid` carrying the field errors D2 §3.2 names.
+    ///
+    /// SEPARATE FROM `validation_failed` ON PURPOSE. A destination's rules are
+    /// the CRD's own CEL rules, evaluated here so the operator sees them
+    /// before the object is POSTed; the distinct code lets a client tell "you
+    /// typed the wrong shape" from "this location and this transport cannot
+    /// both be true".
+    #[must_use]
+    pub fn destination_invalid(errors: Vec<FieldError>) -> Self {
+        Self {
+            code: ProblemCode::DestinationInvalid,
+            detail: "The destination is not valid. Each field below names the rule it breaks."
+                .to_string(),
             errors,
             retry_after_seconds: None,
         }
