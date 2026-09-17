@@ -30,13 +30,14 @@ use weirkeeper::controllers::trust_policy::{
     self, CONDITION_BOUND, CONDITION_EXPIRING_SOON, CONDITION_LOADED, CONDITION_SUPERSEDED,
     REASON_ALGORITHM_MISMATCH, REASON_BOUND, REASON_CONFLICT, REASON_DEFAULT_POLICY,
     REASON_EXPIRING_SOON, REASON_KEY_ID_MISMATCH, REASON_LOADED, REASON_NOT_BOUND,
-    REASON_NOT_EXPIRING, REASON_SUPERSEDED_BY_TRUST_POLICY, REASON_UNPARSEABLE_KEY,
+    REASON_NOT_EXPIRING, REASON_ROSTER_STILL_CONSULTED, REASON_SUPERSEDED_BY_TRUST_POLICY,
+    REASON_UNPARSEABLE_KEY,
 };
 use weirkeeper::crds::trust_policy::{
     KeyAlgorithm, KeyPrincipal, KeyState, RevocationReason, TrustPolicy, TrustPolicySpec,
     TrustPolicyStatus, TrustedKey,
 };
-use weirkeeper::crds::trust_roster::{KeyEntry, TrustRosterSpec};
+use weirkeeper::crds::trust_roster::{KeyEntry, TrustRoster as TrustRosterObject, TrustRosterSpec};
 use weirkeeper::testing::{mock_client_recording, Recorder, Route, SeenRequest};
 use weirkeeper::trust::{
     self, Resolution, TrustSource, DEFAULT_SENTINEL, LEGACY_NOT_BEFORE_RFC3339, LEGACY_POLICY_NAME,
@@ -113,6 +114,9 @@ fn policy(name: &str, namespaces: &[&str], default: bool, keys: Vec<TrustedKey>)
             name: Some(name.to_string()),
             uid: Some(format!("uid-{name}")),
             generation: Some(1),
+            // SEAM S7 (review finding F6): every status write carries it, so a
+            // fixture without one is a fixture the reconciler refuses.
+            resource_version: Some("17".to_string()),
             ..ObjectMeta::default()
         },
         spec: TrustPolicySpec {
@@ -916,11 +920,11 @@ fn the_status_carries_the_generation_it_was_computed_from() {
 // The reconciler, over a route table
 // ---------------------------------------------------------------------------
 
-/// The reconcile lists policies, patches its own status, and reports
-/// `Superseded` on the roster — and asks for nothing else.
+/// The reconcile lists policies, patches its own status, and writes the
+/// `Superseded` condition on the roster — and asks for nothing else.
 #[tokio::test]
-async fn the_reconcile_patches_its_status_and_supersedes_the_roster() {
-    let p = policy("org-default", &["team-a"], false, vec![evidence_key()]);
+async fn the_reconcile_patches_its_status_and_writes_the_roster_condition() {
+    let p = policy("org-default", &[], true, vec![evidence_key()]);
     let (client, recorder) = mock_client_recording(vec![
         Route {
             method: "GET",
@@ -962,7 +966,7 @@ async fn the_reconcile_patches_its_status_and_supersedes_the_roster() {
         requests
             .iter()
             .any(|(m, u)| m == "PATCH" && u.ends_with("/trustrosters/default/status")),
-        "D3 §7.5: once a matching policy exists the roster gets Superseded=True. {requests:?}"
+        "D3 §7.5: a matching (default) policy makes the roster Superseded=True. {requests:?}"
     );
     assert!(
         !requests.iter().any(|(m, _)| m == "DELETE" || m == "PUT"),
@@ -979,11 +983,145 @@ fn the_superseded_reason_is_the_one_the_decision_names() {
     assert_eq!(REASON_SUPERSEDED_BY_TRUST_POLICY, "SupersededByTrustPolicy");
 }
 
+/// A bare `TrustRoster` object with `conditions`, for the F2 tests.
+fn roster_object(conditions: Vec<weirkeeper::crds::Condition>) -> TrustRosterObject {
+    use weirkeeper::crds::trust_roster::TrustRosterStatus;
+    TrustRosterObject {
+        metadata: ObjectMeta {
+            name: Some("default".to_string()),
+            generation: Some(1),
+            resource_version: Some("41".to_string()),
+            ..ObjectMeta::default()
+        },
+        spec: roster(vec![entry(KEY_A_ID, KEY_A_PEM, None)], vec![]),
+        status: Some(TrustRosterStatus {
+            loaded: Some(true),
+            expired_key_ids: Some(vec![]),
+            conditions: Some(conditions),
+        }),
+    }
+}
+
+/// **F2, first half: only a MATCHING policy supersedes the roster.**
+///
+/// A policy governing `team-a` leaves every other namespace resolving to
+/// `legacy-roster-v1`, synthesised from this very roster. Marking it superseded
+/// invites an operator to stop maintaining or delete it, which silently
+/// un-trusts every unbound namespace. The only policy that displaces the roster
+/// for EVERY namespace is the cluster default.
+#[test]
+fn only_a_default_policy_supersedes_the_roster() {
+    let roster = roster_object(vec![]);
+    let cases: Vec<(&str, Vec<TrustPolicy>, &str, &str)> = vec![
+        (
+            "no policy at all",
+            vec![],
+            "False",
+            REASON_ROSTER_STILL_CONSULTED,
+        ),
+        (
+            "a policy naming only team-a",
+            vec![policy("team-a", &["team-a"], false, vec![evidence_key()])],
+            "False",
+            REASON_ROSTER_STILL_CONSULTED,
+        ),
+        (
+            "the cluster default",
+            vec![policy("org-default", &[], true, vec![evidence_key()])],
+            "True",
+            REASON_SUPERSEDED_BY_TRUST_POLICY,
+        ),
+        (
+            "two defaults, which contest each other",
+            vec![
+                policy("default-one", &[], true, vec![evidence_key()]),
+                policy("default-two", &[], true, vec![evidence_key()]),
+            ],
+            "False",
+            REASON_ROSTER_STILL_CONSULTED,
+        ),
+    ];
+    for (name, policies, status, reason) in cases {
+        let c = trust_policy::superseded_condition(&roster, &policies, now());
+        assert_eq!(c.status, status, "{name}");
+        assert_eq!(c.reason.as_deref(), Some(reason), "{name}");
+    }
+}
+
+/// **F2, second half: the condition CLEARS when the policy goes away.**
+///
+/// `reconcile_policy` runs only for a policy that exists, so deleting every
+/// policy would otherwise leave `Superseded=True` forever — rollback in place
+/// advertising the opposite of what is happening. The roster's own reconciler
+/// recomputes it from its 300 s requeue, which runs whether or not a policy
+/// exists.
+#[test]
+fn the_superseded_condition_clears_when_the_default_policy_goes_away() {
+    use weirkeeper::controllers::trust_roster;
+
+    let defaults = vec![policy("org-default", &[], true, vec![evidence_key()])];
+    let marked = trust_policy::superseded_condition(&roster_object(vec![]), &defaults, now());
+    assert_eq!(marked.status, "True");
+
+    // Every policy is gone. The ROSTER's reconciler is what notices.
+    let roster = roster_object(vec![marked]);
+    let verdict = trust_roster::evaluate(&roster.spec, now());
+    let status = trust_roster::status_for(&roster, &verdict, &[], now());
+    let conditions = status.conditions.expect("conditions");
+    let superseded = conditions
+        .iter()
+        .find(|c| c.r#type == CONDITION_SUPERSEDED)
+        .expect("the condition is recomputed, not dropped");
+    assert_eq!(superseded.status, "False");
+    assert_eq!(
+        superseded.reason.as_deref(),
+        Some(REASON_ROSTER_STILL_CONSULTED)
+    );
+    assert!(
+        conditions.iter().any(|c| c.r#type == CONDITION_LOADED),
+        "and the roster's own condition is still there"
+    );
+    assert_eq!(
+        conditions.len(),
+        2,
+        "exactly Loaded and Superseded — a duplicate would mean the carry and the recompute \
+         both ran"
+    );
+}
+
+/// **F6: both status writes carry seam S7's precondition.**
+#[test]
+fn a_status_patch_carries_the_resource_version_precondition() {
+    let patch = trust_policy::with_precondition(
+        &ObjectMeta {
+            name: Some("org-default".to_string()),
+            resource_version: Some("99".to_string()),
+            ..ObjectMeta::default()
+        },
+        "org-default",
+        serde_json::json!({ "status": { "loaded": true } }),
+    )
+    .expect("an object from the API server always carries one");
+    assert_eq!(patch["metadata"]["resourceVersion"], "99");
+    assert_eq!(patch["metadata"]["name"], "org-default");
+    assert_eq!(patch["status"]["loaded"], true);
+
+    assert!(
+        trust_policy::with_precondition(
+            &ObjectMeta::default(),
+            "org-default",
+            serde_json::json!({ "status": {} })
+        )
+        .is_err(),
+        "an object with no resourceVersion is named rather than patched without a precondition"
+    );
+}
+
 /// A cluster with no roster at all reconciles without an error — there is
 /// nothing to supersede.
 #[tokio::test]
 async fn a_cluster_with_no_roster_still_reconciles() {
-    let p = policy("org-default", &["team-a"], false, vec![evidence_key()]);
+    let p = policy("org-default", &[], true, vec![evidence_key()]);
     let (client, recorder) = mock_client_recording(vec![
         Route {
             method: "GET",
@@ -1017,13 +1155,15 @@ async fn a_cluster_with_no_roster_still_reconciles() {
 #[test]
 fn the_roster_reconciler_carries_conditions_it_does_not_own() {
     use weirkeeper::controllers::trust_roster;
-    use weirkeeper::crds::trust_roster::{TrustRoster, TrustRosterStatus};
+    use weirkeeper::crds::trust_roster::TrustRosterStatus;
 
+    let default_policy = policy("org-default", &[], true, vec![evidence_key()]);
     let spec = roster(vec![entry(KEY_A_ID, KEY_A_PEM, None)], vec![]);
-    let existing = TrustRoster {
+    let existing = TrustRosterObject {
         metadata: ObjectMeta {
             name: Some("default".to_string()),
             generation: Some(1),
+            resource_version: Some("41".to_string()),
             ..ObjectMeta::default()
         },
         spec,
@@ -1041,7 +1181,12 @@ fn the_roster_reconciler_carries_conditions_it_does_not_own() {
         }),
     };
     let verdict = trust_roster::evaluate(&existing.spec, now());
-    let status = trust_roster::status_for(&existing, &verdict, now());
+    let status = trust_roster::status_for(
+        &existing,
+        &verdict,
+        std::slice::from_ref(&default_policy),
+        now(),
+    );
     let types: Vec<&str> = status
         .conditions
         .as_ref()
@@ -1072,8 +1217,9 @@ fn policy_body() -> String {
     let pem = KEY_A_PEM.replace('\n', "\\n");
     format!(
         r#"{{"apiVersion":"logweir.dev/v1alpha1","kind":"TrustPolicy",
-             "metadata":{{"name":"org-default","uid":"uid-org-default","generation":1}},
-             "spec":{{"default":false,"namespaces":["team-a"],
+             "metadata":{{"name":"org-default","uid":"uid-org-default","generation":1,
+                          "resourceVersion":"17"}},
+             "spec":{{"default":true,
                       "allowedTargetClusterIds":["scratch-cluster-id"],
                       "keys":[{{"keyId":"{KEY_A_ID}","spkiPem":"{pem}","algorithm":"ed25519",
                                 "usages":["EvidenceSigning"],
@@ -1088,7 +1234,7 @@ fn roster_body() -> String {
     let pem = KEY_A_PEM.replace('\n', "\\n");
     format!(
         r#"{{"apiVersion":"logweir.dev/v1alpha1","kind":"TrustRoster",
-             "metadata":{{"name":"default","generation":1}},
+             "metadata":{{"name":"default","generation":1,"resourceVersion":"41"}},
              "spec":{{"approverKeys":[{{"keyId":"{KEY_A_ID}","spkiPem":"{pem}"}}],
                       "signingKeys":[],"allowedClusterIds":["scratch-cluster-id"]}}}}"#
     )

@@ -20,10 +20,10 @@
 use chrono::{DateTime, Duration, Utc};
 use logweir_core::rehearsal_scope::{RehearsalScope, MODE_SCRATCH};
 use logweir_core::trust::{
-    claimed_signing_time, decide, effective_state, may_sign_new, usable_for_new_signatures,
-    usable_for_verification, EffectiveState, EvidenceClaim, IndependentObservation, KeyState,
-    KeyUsage, RevocationReason, SigningRefusal, TrustBasis, TrustKeyState, TrustResult, TrustedKey,
-    UntrustReason, VerificationUse,
+    claimed_signing_time, decide, effective_state, may_sign_new, read_claimed_signing_time,
+    usable_for_new_signatures, usable_for_verification, ClaimAbsence, EffectiveState,
+    EvidenceClaim, IndependentObservation, KeyState, KeyUsage, RevocationReason, SigningRefusal,
+    TrustBasis, TrustKeyState, TrustResult, TrustedKey, UntrustReason, VerificationUse,
 };
 use serde_json::json;
 
@@ -68,6 +68,16 @@ fn retired() -> TrustedKey {
     TrustedKey {
         state: KeyState::Retired,
         retired_at: Some(at("2026-03-01T00:00:00Z")),
+        ..active()
+    }
+}
+
+/// The same key with a window that has not opened yet — the successor staged
+/// at §7.6 step 1, before the cutover.
+fn not_yet_valid() -> TrustedKey {
+    TrustedKey {
+        not_before: at("2027-01-01T00:00:00Z"),
+        not_after: at("2028-01-01T00:00:00Z"),
         ..active()
     }
 }
@@ -236,14 +246,38 @@ fn the_whole_table() {
             TrustBasis::None,
             Some(UntrustReason::KeyUsageMismatch),
         ),
+        // The two rows the W1 review added. Neither is in §7.4's printed
+        // table; both are the fail-closed reading of it, and both were
+        // FAIL-OPEN before review findings F3 and F4.
+        (
+            "NotYetValid, claiming a time inside the unopened window",
+            decide(
+                Some(&not_yet_valid()),
+                KeyUsage::EvidenceSigning,
+                &EvidenceClaim::at(at("2027-06-01T00:00:00Z")),
+                &IndependentObservation::none(),
+                now(),
+            ),
+            TrustResult::Untrusted,
+            TrustBasis::None,
+            Some(UntrustReason::SignedOutsideValidity),
+        ),
+        (
+            "Active, claiming a signing time in the future",
+            verdict_at(&active(), "2026-12-31T00:00:00Z"),
+            TrustResult::Untrusted,
+            TrustBasis::None,
+            Some(UntrustReason::SignedOutsideValidity),
+        ),
     ];
 
     assert_eq!(
         rows.len(),
-        12,
+        14,
         "D3 §7.4's table has twelve distinguishable rows once the two \
-         Revoked/KeyCompromise cases and the two Superseded directions are counted; a row \
-         removed here is a row nobody checks"
+         Revoked/KeyCompromise cases and the two Superseded directions are counted, plus the \
+         two fail-closed rows the W1 review added (F3, F4); a row removed here is a row nobody \
+         checks"
     );
     for (name, verdict, result, basis, reason) in rows {
         assert_eq!(verdict.result, result, "row `{name}`: result");
@@ -666,32 +700,66 @@ fn the_scorecard_claim_is_the_last_phase_not_the_first() {
 }
 
 /// Unknown type, missing field, empty phase list and a non-instant all produce
-/// `None` — which refuses.
+/// `None` — which refuses — and each one NAMES ITSELF (review finding F7).
 #[test]
-fn an_unreadable_claim_is_none_and_none_refuses() {
-    let unknown = claimed_signing_time("application/json", &json!({"finished_at": "x"}));
-    assert_eq!(unknown, None);
-    assert_eq!(
-        claimed_signing_time(
-            "application/vnd.logweir.backup-receipt+json;version=1.0.0",
-            &json!({})
+fn an_unreadable_claim_is_none_and_names_why() {
+    const RECEIPT: &str = "application/vnd.logweir.backup-receipt+json;version=1.0.0";
+    const CARD: &str = "application/vnd.logweir.drill-scorecard+json;version=1.0.0";
+    let cases: [(&str, serde_json::Value, ClaimAbsence); 4] = [
+        (
+            "application/json",
+            json!({"finished_at": "2026-05-01T01:00:00Z"}),
+            ClaimAbsence::UnknownPayloadType,
         ),
-        None
-    );
-    assert_eq!(
-        claimed_signing_time(
-            "application/vnd.logweir.drill-scorecard+json;version=1.0.0",
-            &json!({"phases": []})
+        (RECEIPT, json!({}), ClaimAbsence::FieldAbsent),
+        (CARD, json!({"phases": []}), ClaimAbsence::EmptyPhases),
+        (
+            RECEIPT,
+            json!({"finished_at": "not an instant"}),
+            ClaimAbsence::Unparseable,
         ),
-        None
-    );
+    ];
+    for (payload_type, document, absence) in cases {
+        assert_eq!(claimed_signing_time(payload_type, &document), None);
+        assert_eq!(
+            read_claimed_signing_time(payload_type, &document),
+            Err(absence),
+            "{payload_type} {document}"
+        );
+        let claim = EvidenceClaim::from_document(payload_type, &document);
+        assert_eq!(claim.signed_at, None);
+        assert_eq!(claim.absence, Some(absence));
+        // And it refuses, with a detail an operator can act on.
+        let v = decide(
+            Some(&active()),
+            KeyUsage::EvidenceSigning,
+            &claim,
+            &IndependentObservation::none(),
+            now(),
+        );
+        assert_eq!(v.reason, Some(UntrustReason::SignedOutsideValidity));
+        assert!(!absence.detail().is_empty());
+    }
     assert_eq!(
-        claimed_signing_time(
-            "application/vnd.logweir.backup-receipt+json;version=1.0.0",
-            &json!({"finished_at": "not an instant"})
-        ),
-        None
+        ClaimAbsence::EmptyPhases.detail(),
+        "this scorecard records no phase, so it carries no signing time and the key's validity \
+         window could not be checked",
+        "the named refusal exists so `SignedOutsideValidity` does not arrive as the answer to \
+         `why is my scorecard untrusted` — a scorecard with no phase is schema-valid, because \
+         the scorecard schema puts no minItems on `phases`"
     );
+}
+
+/// The production constructor names the reason; the test shorthand does not.
+#[test]
+fn from_document_always_names_an_absence() {
+    let claim = EvidenceClaim::from_document(
+        "application/vnd.logweir.drill-scorecard+json;version=1.0.0",
+        &json!({"phases": [{"at": "2026-05-01T00:00:00Z"}]}),
+    );
+    assert_eq!(claim.signed_at, Some(at("2026-05-01T00:00:00Z")));
+    assert_eq!(claim.absence, None);
+    assert_eq!(EvidenceClaim::unknown().absence, None);
 }
 
 // ---------------------------------------------------------------------------
@@ -753,6 +821,79 @@ fn a_scope_naming_another_mode_is_not_scratch_only() {
         ..base
     }
     .is_scratch_only());
+}
+
+/// **MUTANT 7 — a `NotYetValid` key verifying green** (review finding F3).
+///
+/// The planted mutation is dropping `decide`'s `NotYetValid` arm. The key
+/// below is the successor staged at §7.6 step 1: `notBefore` next January,
+/// `notAfter` the January after. A document claiming a time inside that
+/// unopened window then satisfies `notBefore <= signed_at < notAfter` and
+/// renders `Valid`/`Current`/GREEN — while `status.keys[]` reports
+/// `usableForVerification: None` for the SAME key at the SAME instant.
+///
+/// The oracle is `usable_for_verification`, deliberately: asserting against a
+/// literal would let the two surfaces drift apart again, and it is the
+/// disagreement between them that is the defect.
+#[test]
+fn mutant_a_key_whose_window_has_not_opened_verifies_nothing() {
+    let key = not_yet_valid();
+    assert_eq!(
+        effective_state(&key, now()),
+        EffectiveState::NotYetValid,
+        "the fixture only tests what it claims if the window really is closed"
+    );
+    assert_eq!(
+        usable_for_verification(&key, now()),
+        VerificationUse::None,
+        "the status surface says None ..."
+    );
+    let v = decide(
+        Some(&key),
+        KeyUsage::EvidenceSigning,
+        &EvidenceClaim::at(at("2027-06-01T00:00:00Z")),
+        &IndependentObservation::none(),
+        now(),
+    );
+    assert_eq!(
+        v.result,
+        TrustResult::Untrusted,
+        "... and the badge must agree with it"
+    );
+    assert_eq!(v.basis, TrustBasis::None);
+    assert_eq!(v.reason, Some(UntrustReason::SignedOutsideValidity));
+    assert!(!v.may_render_green());
+    assert_eq!(
+        may_sign_new(Some(&key), KeyUsage::EvidenceSigning, now()),
+        Err(SigningRefusal::KeyNotYetValid),
+        "and the third surface already agreed before the fix"
+    );
+}
+
+/// **A claim in the future is not a claim** (review finding F4).
+///
+/// `signed_at` is a field the DOCUMENT controls. Without the `signed_at <= now`
+/// bound a signer may name any instant up to `notAfter` and be trusted as
+/// `Current` today — a fail-open on attacker-influenced input, and the thing
+/// that made the `NotYetValid` hole above reachable.
+#[test]
+fn a_claim_after_now_is_outside_validity() {
+    let key = active();
+    assert!(
+        now() < key.not_after,
+        "the fixture needs a claim that is inside the window and still in the future"
+    );
+    let future = verdict_at(&key, "2026-12-31T00:00:00Z");
+    assert_eq!(future.reason, Some(UntrustReason::SignedOutsideValidity));
+    // The boundary: `now` itself is accepted.
+    let boundary = decide(
+        Some(&key),
+        KeyUsage::EvidenceSigning,
+        &EvidenceClaim::at(now()),
+        &IndependentObservation::none(),
+        now(),
+    );
+    assert_eq!(boundary.basis, TrustBasis::Current);
 }
 
 // ---------------------------------------------------------------------------

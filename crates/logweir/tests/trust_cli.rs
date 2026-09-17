@@ -30,7 +30,7 @@ use std::process::{Command, Stdio};
 
 use logweir::trust::{
     export, migrate_roster, refuse_private_material, ExportArgs, Input, MigrateArgs,
-    PRIVATE_PEM_MARKERS,
+    PRIVATE_PEM_MARKERS, PRIVATE_PEM_SUBSTRING,
 };
 
 /// An Ed25519 **public** key, SubjectPublicKeyInfo PEM.
@@ -218,11 +218,15 @@ fn migrate_roster_is_idempotent() {
     );
 }
 
-/// A key on **both** roster lists becomes ONE entry with BOTH usages —
-/// `spec.keys` is an associative list keyed by `keyId` and the API server
-/// refuses a duplicate.
+/// **A key on both roster lists is REFUSED, naming it.**
+///
+/// CRD rule G8 gives a policy key exactly one usage, `spec.keys` is keyed by
+/// `keyId` so it cannot be emitted twice, and emitting it once with both usages
+/// produces a document the API server rejects at `kubectl apply` time — after
+/// the operator has reviewed it. Refusing here is where they find out while
+/// still reading a migration plan.
 #[test]
-fn migrate_roster_merges_a_key_that_is_on_both_lists() {
+fn migrate_roster_refuses_a_key_that_is_on_both_lists() {
     let pem = KEY_A_PEM.replace('\n', "\\n");
     let roster = format!(
         r#"{{"kind":"TrustRoster","metadata":{{"name":"default"}},
@@ -231,23 +235,53 @@ fn migrate_roster_merges_a_key_that_is_on_both_lists() {
                       "allowedClusterIds":[]}}}}"#
     );
     let path = temp(&roster, "merged.json");
-    let out = migrate_roster(&MigrateArgs {
+    let err = migrate_roster(&MigrateArgs {
         name: "org-default".to_string(),
         default: false,
         namespaces: vec!["team-a".to_string()],
         input: Input::File(path),
     })
-    .expect("the roster translates");
-    let document = yaml_body(&out);
-    let keys = document["spec"]["keys"].as_sequence().expect("keys");
-    assert_eq!(keys.len(), 1);
-    let usages: Vec<&str> = keys[0]["usages"]
-        .as_sequence()
-        .expect("usages")
-        .iter()
-        .filter_map(serde_yaml::Value::as_str)
-        .collect();
-    assert_eq!(usages, vec!["GovernedApproval", "EvidenceSigning"]);
+    .expect_err("a key on both lists cannot be expressed as one policy key");
+    let message = err.to_string();
+    assert!(message.contains(KEY_A_ID), "it names the key id: {message}");
+    assert!(
+        message.contains("exactly one usage"),
+        "and says what the rule is: {message}"
+    );
+    assert!(
+        message.contains("Issue a separate keyId per usage"),
+        "and what to do about it: {message}"
+    );
+    assert!(
+        message.contains("untouched and keeps working"),
+        "and that nothing is broken in the meantime: {message}"
+    );
+}
+
+/// The refusal reaches the compiled binary, exits `Operational` and writes
+/// nothing.
+#[test]
+fn the_overlap_refusal_exits_operational_and_writes_no_document() {
+    let pem = KEY_A_PEM.replace('\n', "\\n");
+    let roster = format!(
+        r#"{{"kind":"TrustRoster","metadata":{{"name":"default"}},
+             "spec":{{"approverKeys":[{{"keyId":"{KEY_A_ID}","spkiPem":"{pem}"}}],
+                      "signingKeys":[{{"keyId":"{KEY_A_ID}","spkiPem":"{pem}"}}],
+                      "allowedClusterIds":[]}}}}"#
+    );
+    let (code, stdout, stderr) = run(
+        &[
+            "trust",
+            "migrate-roster",
+            "--stdin",
+            "--name",
+            "org-default",
+        ],
+        &roster,
+    );
+    assert_eq!(code, Some(1), "stderr: {stderr}");
+    assert!(stdout.is_empty(), "nothing is written: {stdout}");
+    assert!(stderr.contains(KEY_A_ID), "{stderr}");
 }
 
 /// The output carries a header a reviewer reads before applying it.
@@ -399,15 +433,50 @@ fn mutant_export_refuses_an_object_carrying_private_material() {
     assert!(refuse_private_material("-----BEGIN EC PRIVATE KEY-----").is_err());
 }
 
-/// Four spellings, because a check that knew only one would pass the others.
+/// **The SUBSTRING decides, not the list** (review finding F5).
+///
+/// The first version enumerated four PEM spellings, and
+/// `BEGIN OPENSSH PRIVATE KEY`, `BEGIN DSA PRIVATE KEY`,
+/// `BEGIN PGP PRIVATE KEY BLOCK` and `BEGIN SSH2 ENCRYPTED PRIVATE KEY` all
+/// walked past it. This asserts the PROPERTY — every one of them refuses,
+/// including a label nobody has written down — and then, separately, that the
+/// list only NAMES what was found.
 #[test]
-fn the_private_marker_list_covers_every_pem_spelling() {
-    assert_eq!(PRIVATE_PEM_MARKERS.len(), 4);
-    for marker in ["PRIVATE KEY", "RSA PRIVATE KEY", "EC PRIVATE KEY"] {
+fn every_private_pem_spelling_is_refused_including_ones_the_list_does_not_name() {
+    for label in [
+        "PRIVATE KEY",
+        "RSA PRIVATE KEY",
+        "EC PRIVATE KEY",
+        "DSA PRIVATE KEY",
+        "ENCRYPTED PRIVATE KEY",
+        "OPENSSH PRIVATE KEY",
+        "SSH2 ENCRYPTED PRIVATE KEY",
+        "PGP PRIVATE KEY BLOCK",
+        // A spelling nobody has invented yet. It must STILL refuse — that is
+        // the whole difference between a substring and an enumeration.
+        "SOME FUTURE FORMAT PRIVATE KEY",
+    ] {
+        let body = format!("-----BEGIN {label}-----\nQk9HVVM=\n-----END {label}-----\n");
+        let err = refuse_private_material(&body)
+            .expect_err("every PEM label that says `private key` is refused");
         assert!(
-            PRIVATE_PEM_MARKERS.iter().any(|m| m.contains(marker)),
-            "PKCS#8, PKCS#1, SEC1 and the encrypted form all say `private` differently; \
-             `{marker}` is not covered"
+            !err.to_string().contains("Qk9HVVM="),
+            "and never quotes the material"
+        );
+    }
+    assert!(refuse_private_material(KEY_A_PEM).is_ok());
+    assert!(refuse_private_material("nothing sensitive here").is_ok());
+
+    // The list is for the MESSAGE, and every entry contains the substring that
+    // actually decides — so an entry can only sharpen what the refusal says,
+    // never widen what it catches.
+    assert_eq!(PRIVATE_PEM_SUBSTRING, "PRIVATE KEY");
+    assert_eq!(PRIVATE_PEM_MARKERS.len(), 8);
+    for marker in PRIVATE_PEM_MARKERS {
+        assert!(
+            marker.contains(PRIVATE_PEM_SUBSTRING),
+            "`{marker}` does not contain the substring that decides, so the list would be \
+             carrying a check of its own"
         );
     }
 }
