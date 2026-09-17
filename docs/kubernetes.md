@@ -464,6 +464,67 @@ passed. A roster with one unparseable PEM is `Loaded=False` naming the `keyId`
 roster. Expiry is reported here so no consumer has to derive it from a clock it
 does not share with the controller.
 
+### Trust resolution: which keys govern a namespace
+
+`TrustRoster/default` is the **fallback**, not the only answer. A cluster may
+carry cluster-scoped `TrustPolicy` objects (PLAT-19.1), and each one names the
+namespaces it governs. A namespace still never names its own trust — for
+exactly the reason the roster's name is fixed: a roster whose name the subject
+supplies is a roster the subject can choose.
+
+Resolution, for one namespace, in this order:
+
+1. **An exact `spec.namespaces` match** on some `TrustPolicy` → that policy.
+2. **The one policy with `spec.default: true`** → that policy.
+3. **The synthesised `legacy-roster-v1`**, built in memory from
+   `TrustRoster/default`. Nothing writes it as an object.
+4. Neither a policy nor a roster → the same `RosterNotFound` refusal above.
+
+And one rule that is not an ordering:
+
+> **A namespace two policies both claim resolves to NOTHING.** Every approval
+> and every verification there is refused with `TrustPolicyConflict`.
+
+Picking one — the first listed, the newest, the alphabetically smallest — would
+be a trust decision made by a sort order, and two administrators who each
+believe they govern `team-a` disagree about which keys may authorise a restore
+there. The safe reading of a disagreement about authority is that there is
+none. The conflict is reported on **both** policies' `status.conflicts`, so it
+is visible in `kubectl get trustpolicy` and not only in a refusal message. Two
+policies setting `default: true` are the same fault one level up: every
+namespace that would have fallen to a default is refused instead, and both
+policies report it under the sentinel namespace `*`, which is not a DNS-1123
+label and so can never be a real namespace.
+
+`kubectl --context docker-desktop get trustpolicy` renders `DEFAULT`, `KEYS`,
+`LOADED` and `BOUND`, and those columns mean something because a reconciler
+writes them. Per key it reports `effectiveState`
+(`Active`/`NotYetValid`/`Expired`/`Retired`/`Revoked`/`Unparseable`),
+`usableForNewSignatures` and `usableForVerification`
+(`Full`/`Historical`/`None`), beside an `evaluatedAt` heartbeat that is
+refreshed at most every five minutes. That heartbeat is what lets a consumer
+tell "not evaluated" from "evaluated and valid" — the thing
+`TrustRoster.status.expiredKeyIds` could not say — and the console renders
+`unknown`, never `valid`, when the status is absent, when `observedGeneration`
+lags `metadata.generation`, or when `evaluatedAt` is more than fifteen minutes
+old.
+
+An unparseable `spkiPem` on a `TrustPolicy` is **one key** reported
+`Unparseable` and `Loaded=False`; the other keys keep working. That is
+deliberately different from the roster's all-or-nothing rule above, and the
+difference is the status shape: the roster has one `loaded` boolean and nowhere
+to record which entry failed, while the policy reports every key by id. An
+unparseable key verifies nothing, so excluding it widens no trust — whereas
+refusing a 64-key policy over one bad paste would stop every restore in every
+bound namespace.
+
+Once any `TrustPolicy` exists, `TrustRoster/default` is marked
+`Superseded=True/SupersededByTrustPolicy`. **Its spec is not touched and it is
+not deleted**, which is the rollback path: an older controller reads only the
+roster, still present and unchanged. See [`keys.md`](keys.md) for the rotation
+procedure, the migration command and the one thing rollback does not carry.
+
+
 ### The checks
 
 Each `Approval` event resolves the roster, fetches the referent named by

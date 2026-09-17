@@ -159,12 +159,152 @@ steps:
 
 Keep the retiring public key and its policy history for old archives. Routine
 retirement means no new signatures and does not invalidate old evidence;
-revocation is a distinct policy action that may do so. The current immutable,
-globally named `TrustRoster/default` cannot express an overlap update without
-an administrator-managed replacement window. PLAT-19.1 will introduce explicit
-trust-policy references and overlapping validity; until then, back up and
-restore the matching private Secret, public ConfigMap and roster together on
-rollback. Never delete the old public key merely because the new signer works.
+revocation is a distinct policy action that may do so. The immutable, globally
+named `TrustRoster/default` cannot express an overlap update without an
+administrator-managed replacement window — which is what `TrustPolicy` below
+replaces. On a roster-only cluster, back up and restore the matching private
+Secret, public ConfigMap and roster together on rollback. Never delete the old
+public key merely because the new signer works.
+
+## Rotation with a `TrustPolicy`, and old archives still verifying
+
+`TrustPolicy` (cluster-scoped, PLAT-19.1) is what makes a rotation an overlap
+instead of a replacement. A key on it carries a lifecycle — `notBefore`,
+`notAfter`, `state: Active | Retired | Revoked`, `retiredAt`, and for a
+revocation a `revocationReason` and a `revocationEffectiveFrom` — and the spec
+is deliberately **mutable and one-way**: keys are append-only, `notAfter` may
+only be brought forward, `state` moves `Active → Retired` and
+`Active | Retired → Revoked` and never backwards, and the revocation instants
+are write-once. Public material can never be edited out, because a receipt
+signed in March must still verify in December.
+
+`update` on `trustpolicies` is granted only by the `logweir-trust-admin`
+ClusterRole. An operator or approver has read only, and the controller itself
+holds `list`, `watch` and `patch` on the status subresource — it never edits a
+key's lifecycle.
+
+### The supported procedure
+
+1. **Add the new public key to the bound `TrustPolicy`** as `state: Active`,
+   `usages: [EvidenceSigning]`. The overlap begins here: both keys are valid,
+   both sign, both verify, and there is no window in which nothing is trusted.
+2. **Point the runner at the new private key.** A new retained Secret and the
+   controller value `identity.activeSigningSecretName`.
+   `logweir identity bootstrap` is unchanged and still refuses to replace an
+   established identity.
+3. **Wait for in-flight Jobs**, then set the old key `state: Retired` with
+   `retiredAt: <now>`.
+4. **Old archives keep verifying.** A retired key's evidence verifies with
+   `trust.basis: Historical`, which is not a downgrade of `Current`: it is the
+   honest answer for a key that was valid when it signed. The badge carries
+   "verified against retired key `<id>` (signed before retirement)".
+
+Nothing in step 3 invalidates anything. The rule the controller applies is one
+pure function of the key's declared history and the document's own claimed
+signing time:
+
+| key state | verdict for stored evidence |
+|---|---|
+| `Active`, signed inside validity | `Valid`, `trust.basis: Current` |
+| `Expired`/`Retired`, signed at or before `notAfter`/`retiredAt` | `Valid`, `trust.basis: Historical` |
+| `Expired`/`Retired`, claiming a later signing time | `Untrusted`, `SignedOutsideValidity` |
+| `Revoked` with `Superseded`/`Unspecified` | a retirement at `revocationEffectiveFrom` |
+| `Revoked` with `KeyCompromise`, controller observation before the revocation | `Untrusted`, `RecordedBeforeRevocation` — rendered with the recorded instant, never green |
+| `Revoked` with `KeyCompromise`, no such observation | `Untrusted`, `Revoked` |
+| key absent from the policy | `Untrusted`, `UntrustedSigner` |
+| usage mismatch | `Untrusted`, `KeyUsageMismatch` |
+
+Retirement and revocation are **different actions**. Retire a key you are
+finished with; revoke one whose private half may be in someone else's hands,
+and say which with `revocationReason`. A compromise revocation does not accept
+the document's own claim about when it was signed — that claim is exactly what
+an attacker holding the key can write — so the only evidence accepted is a
+`verifiedAt` this installation's own controller recorded on an earlier
+reconcile. **An imported archive with no such history and a compromise-revoked
+signer fails closed.** There is no trusted timestamping service in this
+release; that is future work, and until it exists the honest answer for
+evidence this installation never observed is a refusal.
+
+### Key usage separation
+
+A key declares what it may do, and the three uses are separate grants:
+
+| usage | who holds it | what it may do |
+|---|---|---|
+| `EvidenceSigning` | the runner's signing key (the installation identity) | verify receipts, scorecards, teardown attestations, catalog records |
+| `GovernedApproval` | human approvers, on their own machines | sign approval and standing-authorization documents |
+| `ConsoleConfirmation` | the API's confirmation key | attest the authenticated requester |
+
+A key presented for the wrong use is refused with `KeyUsageMismatch`, which is
+a different refusal from a bad signature and points at a different fix.
+
+### Migrating from the roster, and rolling back
+
+Until a `TrustPolicy` exists, a controller synthesises `legacy-roster-v1` from
+`TrustRoster/default` and behaves exactly as before: `approverKeys` become
+`GovernedApproval`, `signingKeys` become `EvidenceSigning`,
+`allowedClusterIds` becomes `allowedTargetClusterIds`, `notAfter` is carried
+verbatim, every key is `Active`, and a roster with one unparseable
+`approverKeys` entry still refuses every approval — a partially loaded roster
+is not a roster. No `ConsoleConfirmation` key is ever synthesised.
+
+Migration is explicit and reviewable. Nothing applies it for you:
+
+```bash
+kubectl --context <ctx> get trustroster default -o json \
+  | logweir trust migrate-roster --stdin --name org-default --default \
+  > trustpolicy.yaml
+# read it, then:
+kubectl --context <ctx> apply -f trustpolicy.yaml
+```
+
+The command reads no clock and generates no name, so re-running it over the
+same roster produces byte-identical output. It invents no `retiredAt` and no
+revocation: the roster records no lifecycle event, those fields are write-once
+on the CRD, and a migration that wrote one would assert something nobody
+recorded and could never take back.
+
+**The roster is not deleted.** Once a matching policy exists,
+`TrustRoster/default` is marked `Superseded=True/SupersededByTrustPolicy` and
+stops being consulted for bound namespaces — a status condition, with the spec
+untouched. That is the whole rollback story: an older controller reads only
+`TrustRoster/default`, which is still present and unchanged, so governed
+approvals and evidence verification keep working.
+
+The one thing rollback does not carry is keys added to the `TrustPolicy`
+*after* the migration, which an older controller has never heard of. So:
+
+> **Before rolling back, add every post-migration key to
+> `TrustRoster/default` as well** — or accept `NotAttempted` on evidence
+> signed by it. Nothing deletes public material in either direction.
+
+### Backing the policy up
+
+RBAC grants `delete` on `trustpolicies` to no Logweir role, but a
+cluster-admin is outside the threat boundary (`stability.md` O0), so the object
+needs a backup that is not the cluster:
+
+```bash
+kubectl --context <ctx> get trustpolicy org-default -o json \
+  | logweir trust export --policy org-default --stdin > trustpolicy.yaml
+```
+
+The output is **public key material only**, rebuilt field by field rather than
+filtered, with `status`, `managedFields`, `resourceVersion` and `uid` absent so
+it re-applies cleanly onto any cluster. Re-applying it never removes a key.
+An input carrying a private-key PEM is refused and nothing is written.
+
+### Which policy governs a namespace
+
+A namespace never names its own trust — a policy names the namespaces it
+governs, for the reason `kubernetes.md` §8 gives about the roster's fixed name.
+Resolution is: an exact `spec.namespaces` match, else the one policy with
+`default: true`, else the synthesised `legacy-roster-v1`. **A namespace two
+policies both claim resolves to nothing**, and every approval and verification
+there is refused with `TrustPolicyConflict` — picking one would be a trust
+decision made by a sort order. Two policies setting `default: true` are the
+same fault one level up, and every namespace that would have fallen to a
+default is refused the same way.
 
 An auditor who sees a `keyid` that does not match their pinned fingerprint is
 told, in `verify-a-scorecard.md`, to stop and resolve it with the publisher out
