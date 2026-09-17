@@ -3477,6 +3477,20 @@ async fn admit(
     Ok(())
 }
 
+/// The `retentionReport.note` a destination-backed schedule carries — D2 §3.10.
+///
+/// DISTINCT FROM `retention_plan::LEGACY_DESTINATION_MISMATCH_NOTE`, which is
+/// about a legacy schedule whose bucket is not the handle's. This one is about
+/// a schedule that named a saved `BackupDestination`, where the controller's
+/// global handle is not merely pointing elsewhere but is the WRONG MECHANISM:
+/// D2 §3.10 confines it to objects without a `destinationRef`. An operator told
+/// "the handle points at a different destination" would go looking for a
+/// misconfiguration that does not exist.
+pub const DESTINATION_BACKED_RETENTION_NOTE: &str =
+    "this schedule writes to a saved BackupDestination, and the controller's single archive \
+     handle only evaluates schedules that do not name one; retention for this destination is \
+     reported by a RetentionPolicy";
+
 /// D1 §4.5 step 8: the retention report, the final status write and the
 /// outcome.
 #[allow(clippy::too_many_arguments)]
@@ -3500,6 +3514,49 @@ async fn finish(
     // a runtime from within a runtime*.
     let retention_report = match archive {
         None => None,
+        // THE DESTINATION-BACKED ARM (D2 §3.10, guard G14). The arm below
+        // compares the controller's handle with `spec.archive.url`; on a
+        // destination-backed schedule that URL is the
+        // `logweir-destination://<name>` SENTINEL, which is not a location at
+        // all, so the comparison cannot be the thing that withholds the report.
+        // D2 §3.10 settles it from the spec instead: the controller's ONE
+        // global handle is for objects WITHOUT a `destinationRef`, and a
+        // destination-backed schedule gets no report from it until PLAT-16.1
+        // adds the per-destination archive-inventory check kind.
+        //
+        // The SHAPE is the arm below's — a note and EMPTY set lists — because
+        // "not evaluated here" and "nothing to remove" are different claims and
+        // the empty lists are what keep them apart. One shape for one
+        // situation, not two.
+        Some(_)
+            if matches!(
+                crate::destination::retention_scope(
+                    &schedule.spec.archive.url,
+                    work.controller_archive_url.as_deref(),
+                    schedule.spec.destination_ref.is_some(),
+                ),
+                crate::destination::RetentionScope::DestinationBacked
+            ) =>
+        {
+            info!(
+                schedule = %name,
+                namespace = %namespace,
+                "no retention report through the global handle: this schedule is \
+                 destination-backed, and that handle is for objects without a destinationRef \
+                 (D2 §3.10). PLAT-16.1's per-destination archive-inventory check reports these"
+            );
+            Some(RetentionReport {
+                evaluated_at: now,
+                keep_last: None,
+                keep_days: None,
+                sets_kept: Vec::new(),
+                sets_that_would_be_removed: Vec::new(),
+                aws_cli: Vec::new(),
+                mc_cli: Vec::new(),
+                skipped: Vec::new(),
+                note: Some(DESTINATION_BACKED_RETENTION_NOTE.to_string()),
+            })
+        }
         // THE WRONG-BUCKET ARM (D3 §6.3, defect RET-WRONGBUCKET). The handle
         // below is the controller's ONE read-only store, built from
         // `LOGWEIR_ARCHIVE_URL`; the commands this report renders name
