@@ -349,6 +349,33 @@ fn read_inputs(args: &BackupRunArgs) -> Result<Inputs, BackupError> {
 /// build without a backend, so an in-memory ARCHIVE fixture is seeded under
 /// that root too (see `crates/logweir/tests/backup_run.rs`'s
 /// `ARCHIVE_PREFIX`). Nothing in production reads or writes an archive there.
+/// D3 §2.4's five named backup steps, as a closed list.
+///
+/// `-1` and named steps rather than numbers because the backup path genuinely
+/// has no numbered phases after admission: inventing `0..4` here would put two
+/// unrelated numbering schemes on one channel, and a controller reading
+/// `progress-phase=2:` would have no way to know which runner it came from.
+pub const PROGRESS_STEP_ADMIT: &str = "admit";
+pub const PROGRESS_STEP_ENGINE: &str = "engine";
+pub const PROGRESS_STEP_READBACK: &str = "readback";
+pub const PROGRESS_STEP_SIGN: &str = "sign";
+pub const PROGRESS_STEP_UPLOAD: &str = "upload";
+/// Every step this command announces, in the order it announces them.
+pub const PROGRESS_STEPS: [&str; 5] = [
+    PROGRESS_STEP_ADMIT,
+    PROGRESS_STEP_ENGINE,
+    PROGRESS_STEP_READBACK,
+    PROGRESS_STEP_SIGN,
+    PROGRESS_STEP_UPLOAD,
+];
+
+/// One `progress-phase=-1:<step>` line, through the pure filter that decides
+/// whether it may be said at all — see `drill::print_progress_phase` for why
+/// the channel is a filter and not a formatter.
+pub fn print_progress_step(step: &str) {
+    crate::drill::print_progress_phase(-1, step);
+}
+
 pub fn execute_with(
     args: &BackupRunArgs,
     run_id: &str,
@@ -378,6 +405,19 @@ fn execute_with_signer(
     // `requested_at` were taken after the engine ran would understate the
     // elapsed time an auditor reads.
     let requested_at = chrono::Utc::now();
+    // **D3 §2.4's progress channel.** The backup path has no numbered phases
+    // after admission, so every line it emits is `progress-phase=-1:<step>`
+    // over the four named steps §2.4 fixes (`engine`, `readback`, `sign`,
+    // `upload`) plus this one. The channel version comes first, once: a Backup
+    // Job carries no execution-contract environment on this build, so the only
+    // true answer is the version this BINARY implements.
+    println!(
+        "{}",
+        logweir_core::execution_contract::progress_contract_line(
+            logweir_core::execution_contract::ContractVersion::V2
+        )
+    );
+    print_progress_step(PROGRESS_STEP_ADMIT);
     let inputs = read_inputs(args)?;
     // Phase −1. EVERY guard, before the engine and before any document is
     // written. The reader is already built by the time this function is

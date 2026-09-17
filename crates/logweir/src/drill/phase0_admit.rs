@@ -895,6 +895,7 @@ mod tests {
                 },
                 backup: "latestCompleted".into(),
                 topics: topics.iter().map(|t| t.to_string()).collect(),
+                point: None,
             },
             target: TargetSpec {
                 bootstrap_servers: vec!["localhost:9092".into()],

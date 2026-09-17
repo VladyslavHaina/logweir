@@ -358,6 +358,16 @@ pub enum IdentityCmd {
     },
 }
 
+/// `#[allow(clippy::large_enum_variant)]`, and the reason is clap.
+///
+/// `Run(RestoreRunArgs)` carries every flag `logweir restore run` takes —
+/// twelve of them since execution contract v2 added the three bundle members —
+/// while `Approve` carries a handful. Boxing the large variant is the lint's
+/// usual remedy and is not available: `#[command(flatten)]` needs the `Args`
+/// value by type, and a `Box` around it stops clap deriving the flattened
+/// surface at all. Two subcommands of a CLI enum are constructed once per
+/// process, so the size difference costs nothing measurable.
+#[allow(clippy::large_enum_variant)]
 #[derive(Subcommand)]
 pub enum DrillCmd {
     /// Mint the DSSE-signed approval `drill run --approval` requires. Runs no
@@ -557,6 +567,24 @@ pub struct RestoreRunArgs {
     /// offset on any cluster.
     #[arg(long)]
     pub offset_report_out: Option<PathBuf>,
+    /// **Execution contract v2** (decision D3 §4.3): the signed standing
+    /// rehearsal authorization's scope document, projected into the bundle.
+    ///
+    /// Omit it for every ordinary Restore — omitting it changes nothing. When
+    /// it IS given, its bytes must match `LOGWEIR_EXECUTION_SCOPE_SHA256` and
+    /// the rendered plan must fall inside the scope, or the run is refused
+    /// with exit 3 before any client is constructed.
+    #[arg(long)]
+    pub rehearsal_scope: Option<PathBuf>,
+    /// **Bundle contract v2**: the approval-policy snapshot (PLAT-19.2). This
+    /// build pins its digest and interprets nothing in it.
+    #[arg(long)]
+    pub policy_snapshot: Option<PathBuf>,
+    /// **Bundle contract v2**: the confirmation issuer's public key — the
+    /// second of the two public keys a v2 bundle carries (PLAT-19.2). This
+    /// build pins its digest and verifies no signature with it.
+    #[arg(long)]
+    pub confirmation_key: Option<PathBuf>,
 }
 
 impl From<RestoreRunArgs> for crate::drill::RunArgs {
@@ -575,6 +603,9 @@ impl From<RestoreRunArgs> for crate::drill::RunArgs {
             out: a.out,
             metrics_file: a.metrics_file,
             offset_report_out: a.offset_report_out,
+            rehearsal_scope: a.rehearsal_scope,
+            policy_snapshot: a.policy_snapshot,
+            confirmation_key: a.confirmation_key,
         }
     }
 }

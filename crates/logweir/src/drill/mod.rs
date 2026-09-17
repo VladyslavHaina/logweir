@@ -4,6 +4,10 @@
 //! ruling GR4 Part B defers its execution path to Task 24, so it is NOT wired
 //! here. The slot domain is `-1..=9`; the ten modules below are phases 0
 //! through 9.
+/// Execution contract **v2**'s two pre-data-plane bindings (D3 §4.3, §5.5).
+/// Not a phase: everything in it runs before phase 0, before `context`, and
+/// therefore before any broker client exists.
+pub mod binding;
 pub mod phase0_admit;
 pub mod phase1_approval;
 pub mod phase2_target;
@@ -163,6 +167,14 @@ pub fn record<T>(
     use logweir_core::engine::PhaseObserver;
     let mut obs = crate::metrics::PhaseLogger::new(&sc.run_id);
     obs.phase_started(phase, name);
+    // **D3 §2.4's progress channel, at the ONE place a phase begins.** The
+    // controller reads pod logs by key name out of a bounded tail and has no
+    // other way to know which phase a running restore is in: a `tracing` line
+    // is JSON on the same merged stream and is filtered by `RUST_LOG`, so it
+    // is not a contract anything can read. Emitted here rather than at the ten
+    // call sites for the same reason `phase_started` is — one producer, and a
+    // phase that cannot be recorded cannot be announced either.
+    print_progress_phase(phase, name);
     // Global Constraint 1: the clock is read HERE, in `crates/logweir`.
     let at = chrono::Utc::now();
     let t0 = std::time::Instant::now();
@@ -186,6 +198,24 @@ pub fn record<T>(
         sc.last_phase_completed = phase;
     }
     r
+}
+
+/// Print one `progress-phase=` line, or nothing (D3 §2.4).
+///
+/// **The ONLY `println!` of a progress line in this crate**, and it goes
+/// through `logweir_core::execution_contract::progress_phase_line`, which is a
+/// FILTER: a name outside `[a-z0-9-]`, an over-long name or a phase outside
+/// `-1..=9` renders nothing at all. So a caller that reached this function
+/// with a projected credential, a broker error or a string containing a
+/// newline cannot put any of it on the channel a controller reads — and D3
+/// §2.4 already says absence is not an error, so silence is a legal answer.
+///
+/// `crates/logweir/tests/progress_channel.rs` pins both halves: that the
+/// helper is the only producer, and that a hostile name yields no line.
+pub fn print_progress_phase(phase: i8, name: &str) {
+    if let Some(line) = logweir_core::execution_contract::progress_phase_line(phase, name) {
+        println!("{line}");
+    }
 }
 
 pub struct RunArgs {
@@ -219,12 +249,37 @@ pub struct RunArgs {
     /// in roster order), which is how the one source of truth reaches a pod
     /// that holds no cluster credential.
     pub approver_key_ids: Vec<String>,
+    /// `--rehearsal-scope`. The signed standing rehearsal authorization's
+    /// scope document (D3 §4.3), projected into the bundle beside the plan.
+    ///
+    /// **Optional, and absent is the only legal state for an ordinary
+    /// approval-authorized Restore.** Its bytes are pinned by
+    /// `LOGWEIR_EXECUTION_SCOPE_SHA256`, and the pairing is enforced in both
+    /// directions by [`validate_execution_contract`].
+    pub rehearsal_scope: Option<PathBuf>,
+    /// `--policy-snapshot`. PLAT-19.2's approval-policy snapshot. This build
+    /// pins its digest and carries it no further; the contract exists so the
+    /// worker who interprets it does not also have to change the bundle.
+    pub policy_snapshot: Option<PathBuf>,
+    /// `--confirmation-key`. The confirmation issuer's public key — the second
+    /// of D0's "both public keys". Digest-pinned here, verified by PLAT-19.2.
+    pub confirmation_key: Option<PathBuf>,
 }
 
 /// Controller-pinned identity and byte digests carried by a new Restore Job's
 /// immutable pod template.
+///
+/// The thirteen mandatory fields are v1's, unchanged. The `Option` fields
+/// below them are execution contract **v2**'s (decision D3 §8 Amendment I,
+/// D0's bundle contract v2): each is a BLOCK that is wholly present or wholly
+/// absent, and none of them may appear at all under
+/// [`logweir_core::execution_contract::ContractVersion::V1`].
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExecutionContract {
+    /// WHICH contract this invocation is running under, as the closed type and
+    /// not a string — so nothing downstream can compare a version against a
+    /// literal it spelled itself.
+    pub version: logweir_core::execution_contract::ContractVersion,
     pub subject_api_version: String,
     pub subject_kind: String,
     pub subject_name: String,
@@ -237,6 +292,20 @@ pub struct ExecutionContract {
     pub approval_sidecar_sha256: String,
     pub approver_key_sha256: String,
     pub allowed_clusters_sha256: String,
+    /// v2. Absent means [`AuthorizationKind::Approval`] — tag 1's shape.
+    pub authorization_kind: logweir_core::execution_contract::AuthorizationKind,
+    /// v2, and MANDATORY under `authorization_kind: Standing`: the digest of
+    /// the mounted rehearsal scope document (D3 §4.3).
+    pub scope_sha256: Option<String>,
+    /// v2, and mandatory under `Standing`: whose standing authorization this is.
+    pub rehearsal_schedule_uid: Option<String>,
+    /// v2, PLAT-19.2's half: the approval-policy snapshot digest. Absent means
+    /// the synthesized `legacy-governed-v1` policy, which is what D0 says an
+    /// installation with no binding gets.
+    pub policy_snapshot_sha256: Option<String>,
+    /// v2, PLAT-19.2's half: the second of D0's "both public keys" — the
+    /// confirmation issuer's. Absent means the legacy single-key bundle.
+    pub confirmation_key_sha256: Option<String>,
 }
 
 /// Parse the all-or-nothing execution contract without reading process-global
@@ -248,7 +317,12 @@ pub fn execution_contract_from(
 ) -> Result<Option<ExecutionContract>, DrillError> {
     use logweir_core::execution_contract as wire;
 
-    let values: BTreeMap<&str, Option<String>> = wire::ALL_ENV
+    // `ALL_ENV_ANY` and NOT `ALL_ENV`: a Job carrying only the v2 variables —
+    // a partially applied template, or a controller that set the new block and
+    // dropped the old one — must be diagnosed as an incomplete contract. Under
+    // `ALL_ENV` it would look like a standalone invocation with no contract at
+    // all and would run with every contract check switched off.
+    let values: BTreeMap<&str, Option<String>> = wire::ALL_ENV_ANY
         .into_iter()
         .map(|name| (name, get(name)))
         .collect();
@@ -268,16 +342,110 @@ pub fn execution_contract_from(
                 .into()
             })
     };
-    let version = required(wire::VERSION_ENV)?;
-    if version != wire::VERSION {
+    // A variable that is PRESENT AND BLANK is not a value. Kubernetes `env:`
+    // with an empty `value:` yields `Ok("")` from `std::env::var`, and the
+    // mandatory half already treats blank as missing — the optional half has
+    // to agree, or an empty `LOGWEIR_EXECUTION_SCOPE_SHA256` would turn a
+    // standing authorization into "no scope was pinned".
+    let optional = |name: &'static str| -> Option<String> {
+        values
+            .get(name)
+            .and_then(Clone::clone)
+            .filter(|value| !value.trim().is_empty())
+    };
+    let version_text = required(wire::VERSION_ENV)?;
+    let Some(version) = wire::ContractVersion::parse(&version_text) else {
         return Err(GuardRefusal(format!(
-            "unsupported Restore execution contract version {version:?}; expected {:?}; no \
+            "unsupported Restore execution contract version {version_text:?}; this build \
+             implements {:?} and still accepts {:?} for an already-created legacy Restore; no \
              data operation was started",
-            wire::VERSION
+            wire::VERSION_V2,
+            wire::VERSION_V1
+        ))
+        .into());
+    };
+
+    // The v2 block. Read first, refused under v1 second, so the refusal can
+    // name exactly WHICH piece of v2 material a v1 invocation carried.
+    let authorization_kind_text = optional(wire::AUTHORIZATION_KIND_ENV);
+    let scope_sha256 = optional(wire::SCOPE_SHA256_ENV);
+    let rehearsal_schedule_uid = optional(wire::REHEARSAL_SCHEDULE_UID_ENV);
+    let policy_snapshot_sha256 = optional(wire::POLICY_SNAPSHOT_SHA256_ENV);
+    let confirmation_key_sha256 = optional(wire::CONFIRMATION_KEY_SHA256_ENV);
+    for (present, what) in [
+        (
+            authorization_kind_text.as_deref() == Some(wire::AUTHORIZATION_KIND_STANDING),
+            "a standing rehearsal authorization",
+        ),
+        (scope_sha256.is_some(), "a signed rehearsal scope"),
+        (
+            rehearsal_schedule_uid.is_some(),
+            "a RehearsalSchedule subject",
+        ),
+        (
+            policy_snapshot_sha256.is_some(),
+            "an approval-policy snapshot",
+        ),
+        (
+            confirmation_key_sha256.is_some(),
+            "a confirmation-issuer public key",
+        ),
+    ] {
+        if present {
+            if let Some(refusal) = version.refuse_v2_material(what) {
+                return Err(GuardRefusal(refusal).into());
+            }
+        }
+    }
+
+    let authorization_kind = match authorization_kind_text.as_deref() {
+        // ABSENT MEANS `approval`, which is both the compatible reading and
+        // the fail-closed one: the standing path needs a scope to be admitted
+        // at all, so an environment that forgot to say `standing` takes the
+        // ordinary path and its unexpected scope file is refused below —
+        // rather than a scope check being quietly skipped.
+        None => wire::AuthorizationKind::Approval,
+        Some(text) => wire::AuthorizationKind::parse(text).ok_or_else(|| -> DrillError {
+            GuardRefusal(format!(
+                "unsupported Restore execution contract authorization kind {text:?}; expected \
+                 {:?} or {:?}; no data operation was started",
+                wire::AUTHORIZATION_KIND_APPROVAL,
+                wire::AUTHORIZATION_KIND_STANDING
+            ))
+            .into()
+        })?,
+    };
+    // Each v2 block is all-or-nothing, exactly as the mandatory core is. A
+    // standing authorization with no pinned scope digest is the shape in which
+    // "the scope check was skipped" would be indistinguishable from "there was
+    // nothing to check".
+    if authorization_kind == wire::AuthorizationKind::Standing {
+        for (value, name) in [
+            (&scope_sha256, wire::SCOPE_SHA256_ENV),
+            (&rehearsal_schedule_uid, wire::REHEARSAL_SCHEDULE_UID_ENV),
+        ] {
+            if value.is_none() {
+                return Err(GuardRefusal(format!(
+                    "incomplete standing rehearsal authorization: {name} is missing while {} is \
+                     {:?}; no data operation was started",
+                    wire::AUTHORIZATION_KIND_ENV,
+                    wire::AUTHORIZATION_KIND_STANDING
+                ))
+                .into());
+            }
+        }
+    } else if scope_sha256.is_some() || rehearsal_schedule_uid.is_some() {
+        return Err(GuardRefusal(format!(
+            "the Restore execution contract pins a rehearsal scope but names authorization kind \
+             {:?}; a scope is meaningful only under {:?}; no data operation was started",
+            authorization_kind.as_str(),
+            wire::AUTHORIZATION_KIND_STANDING
         ))
         .into());
     }
+
     Ok(Some(ExecutionContract {
+        version,
         subject_api_version: required(wire::SUBJECT_API_VERSION_ENV)?,
         subject_kind: required(wire::SUBJECT_KIND_ENV)?,
         subject_name: required(wire::SUBJECT_NAME_ENV)?,
@@ -290,6 +458,11 @@ pub fn execution_contract_from(
         approval_sidecar_sha256: required(wire::APPROVAL_SIDECAR_SHA256_ENV)?,
         approver_key_sha256: required(wire::APPROVER_KEY_SHA256_ENV)?,
         allowed_clusters_sha256: required(wire::ALLOWED_CLUSTERS_SHA256_ENV)?,
+        authorization_kind,
+        scope_sha256,
+        rehearsal_schedule_uid,
+        policy_snapshot_sha256,
+        confirmation_key_sha256,
     }))
 }
 
@@ -302,7 +475,7 @@ pub fn execution_contract_for_invocation(
 ) -> Result<Option<ExecutionContract>, DrillError> {
     use logweir_core::execution_contract as wire;
 
-    let values: BTreeMap<&str, Option<String>> = wire::ALL_ENV
+    let values: BTreeMap<&str, Option<String>> = wire::ALL_ENV_ANY
         .into_iter()
         .map(|name| (name, get(name)))
         .collect();
@@ -329,11 +502,17 @@ pub fn execution_contract_for_invocation(
     }
 
     let cli_version = cli_version.expect("the exhaustive match established a CLI version");
-    if cli_version != wire::VERSION {
+    // v1 is still a version this build IMPLEMENTS — the transition D0 and D3
+    // §8 document — so the argv check is "a version I can honour", not "the
+    // newest one". What v1 may not carry is checked in
+    // `execution_contract_from`, against the material actually present.
+    if wire::ContractVersion::parse(cli_version).is_none() {
         return Err(GuardRefusal(format!(
-            "unsupported Restore execution contract argv version {cli_version:?}; expected {:?}; \
-             no data operation was started",
-            wire::VERSION
+            "unsupported Restore execution contract argv version {cli_version:?}; this build \
+             implements {:?} and still accepts {:?} for an already-created legacy Restore; no \
+             data operation was started",
+            wire::VERSION_V2,
+            wire::VERSION_V1
         ))
         .into());
     }
@@ -356,13 +535,23 @@ pub fn execution_contract_for_invocation(
 }
 
 /// Exact projected bytes captured once at process startup.
-#[derive(Clone, Debug)]
+///
+/// The five mandatory members are v1's bundle. The three `Option`s are D0's
+/// **bundle contract v2** additions — the signed rehearsal scope (D3 §4.3),
+/// the approval-policy snapshot and the confirmation-issuer public key (the
+/// second of D0's "both public keys"). Each is `None` for a bundle that does
+/// not carry it, and each is pinned by its own digest in the environment
+/// contract exactly as the mandatory five are.
+#[derive(Clone, Debug, Default)]
 pub struct ApprovalBundleBytes {
     pub plan: Vec<u8>,
     pub approval: Vec<u8>,
     pub approval_sidecar: Vec<u8>,
     pub approver_key: Vec<u8>,
     pub allowed_clusters: Vec<u8>,
+    pub scope: Option<Vec<u8>>,
+    pub policy_snapshot: Option<Vec<u8>>,
+    pub confirmation_key: Option<Vec<u8>>,
 }
 
 /// Independently compare every mounted public input with the immutable Job
@@ -421,6 +610,63 @@ pub fn validate_execution_contract(
                  {expected}; no data operation was started"
             ))
             .into());
+        }
+    }
+    // **Bundle contract v2's three optional members, and BOTH directions.**
+    //
+    // A pinned digest with nothing mounted is a bundle that lost a member —
+    // PLAT-01.2's "lost bundle" case, which must fail before any client. A
+    // mounted member with no pinned digest is worse: it is material this run
+    // would act on that the controller never committed to, so it is refused
+    // rather than ignored. Ignoring it is exactly how a scope nobody signed
+    // would end up authorising a rehearsal.
+    /// One optional bundle-v2 member: its label, the digest the contract pins
+    /// for it, and the bytes that were mounted.
+    type OptionalMember<'a> = (&'a str, Option<&'a String>, Option<&'a Vec<u8>>);
+    let optional_members: [OptionalMember; 3] = [
+        (
+            "rehearsal scope",
+            contract.scope_sha256.as_ref(),
+            bundle.scope.as_ref(),
+        ),
+        (
+            "approval-policy snapshot",
+            contract.policy_snapshot_sha256.as_ref(),
+            bundle.policy_snapshot.as_ref(),
+        ),
+        (
+            "confirmation-issuer public key",
+            contract.confirmation_key_sha256.as_ref(),
+            bundle.confirmation_key.as_ref(),
+        ),
+    ];
+    for (label, expected, bytes) in optional_members {
+        match (expected, bytes) {
+            (None, None) => {}
+            (Some(expected), Some(bytes)) => {
+                let actual = logweir_core::ids::sha256_prefixed(bytes);
+                if &actual != expected {
+                    return Err(GuardRefusal(format!(
+                        "the mounted {label} bytes hash to {actual}, not the controller-pinned \
+                         {expected}; no data operation was started"
+                    ))
+                    .into());
+                }
+            }
+            (Some(expected), None) => {
+                return Err(GuardRefusal(format!(
+                    "the execution contract pins {label} {expected} but no such bundle member is \
+                     mounted; no data operation was started"
+                ))
+                .into())
+            }
+            (None, Some(_)) => {
+                return Err(GuardRefusal(format!(
+                    "a {label} is mounted but the execution contract pins no digest for it; \
+                     unpinned bundle material is never acted on; no data operation was started"
+                ))
+                .into())
+            }
         }
     }
     Ok(())
@@ -635,6 +881,16 @@ pub fn run_with(
     mut stderr: &mut dyn std::io::Write,
 ) -> ExitCode {
     let _ = print_deprecation_to(&mut stderr, invoked_as);
+    // D3 §2.4's channel version. This seam bypasses `execute_for_reporting`,
+    // where the contract-aware line is emitted, so it announces the version
+    // this BUILD implements — which is the only true answer for an invocation
+    // that was handed its handles instead of a controller's environment.
+    println!(
+        "{}",
+        logweir_core::execution_contract::progress_contract_line(
+            logweir_core::execution_contract::ContractVersion::V2
+        )
+    );
     let outcome = execute_with_outcome(args, run_id, c);
     report(args, run_id, None, outcome)
 }
@@ -773,6 +1029,7 @@ fn report_with(
         refusal_message.as_deref(),
         evidence,
         preflight,
+        sc,
     )
 }
 
@@ -818,6 +1075,7 @@ fn exiting(
     refusal_message: Option<&str>,
     evidence: Option<&EvidenceKeys>,
     topic_preflight: Option<&phase0_admit::TopicPreflight>,
+    scorecard: Option<&Scorecard>,
 ) -> ExitCode {
     let meaning = match code {
         ExitCode::Ok => "the drill passed",
@@ -876,6 +1134,29 @@ fn exiting(
             "{}{}",
             phase0_admit::TOPIC_PREFLIGHT_KEY_PREFIX,
             p.status_line_value()
+        );
+    }
+    // **D3 §2.4's `teardown-key=`, and it goes BEFORE interface I8's keys.**
+    //
+    // I8's contract is "`scorecard-key=`, `sidecar-key=`, `offset-report-key=`,
+    // as the FINAL stdout lines of a successful run with NOTHING AFTER THEM",
+    // and landed tests read it that way (`tests/restore_mode.rs` takes the last
+    // three lines). So the new line goes in front, exactly as PLAT-15.1's
+    // `catalog-key=` does on the backup path: every reader of these lines
+    // scans a bounded tail by PREFIX (erratum E4), so a line in front costs
+    // nothing and a line behind would break a published interface.
+    //
+    // **Conditional on phase 9 having ATTESTED**, which is the same rule
+    // `offset-report-key=` follows: a line naming a key nothing was written to
+    // is the worst possible output. It is NOT restricted to exit 0, and that
+    // is deliberate — a rehearsal that did not pass (exit 2) is precisely the
+    // run whose leftover topics block the next slot (D3 §4.4), and it prints no
+    // evidence keys at all. The note this reads is pushed after phase 8 signed,
+    // so nothing here can reach the signed document.
+    if let Some(key) = scorecard.and_then(phase9_teardown::attested_key) {
+        println!(
+            "{}{key}",
+            logweir_core::execution_contract::TEARDOWN_KEY_PREFIX
         );
     }
     if let (ExitCode::Ok, Some(e)) = (code, evidence) {
@@ -1324,6 +1605,10 @@ struct StartupInputs {
     spec_text: String,
     allowed_text: String,
     approved: phase1_approval::Approved,
+    /// The bytes of the signed rehearsal scope, when this run carries one.
+    /// Already digest-checked against the execution contract by the time this
+    /// exists.
+    scope: Option<Vec<u8>>,
 }
 
 fn read_startup_file(path: &std::path::Path, label: &str) -> Result<Vec<u8>, DrillError> {
@@ -1337,15 +1622,49 @@ fn load_startup_inputs(
     contract: Option<&ExecutionContract>,
 ) -> Result<StartupInputs, DrillError> {
     let sidecar_path = args.approval.with_extension("sig");
+    // The three v2 members are read the same way the five mandatory ones are —
+    // once, at startup, before anything is parsed — so the bytes the digest
+    // check covers are the bytes every later step uses. A member the operator
+    // named but that is not there is an operational failure with the path in
+    // the message, exactly as a missing approval is.
+    let optional_member =
+        |path: &Option<PathBuf>, label: &str| -> Result<Option<Vec<u8>>, DrillError> {
+            match path {
+                None => Ok(None),
+                Some(p) => read_startup_file(p, label).map(Some),
+            }
+        };
     let bundle = ApprovalBundleBytes {
         plan: read_startup_file(&args.spec, "restore plan")?,
         approval: read_startup_file(&args.approval, "approval")?,
         approval_sidecar: read_startup_file(&sidecar_path, "approval sidecar")?,
         approver_key: read_startup_file(&args.approver_key, "approver public key")?,
         allowed_clusters: read_startup_file(&args.allowed_clusters, "allowed-clusters")?,
+        scope: optional_member(&args.rehearsal_scope, "rehearsal scope")?,
+        policy_snapshot: optional_member(&args.policy_snapshot, "approval-policy snapshot")?,
+        confirmation_key: optional_member(
+            &args.confirmation_key,
+            "confirmation-issuer public key",
+        )?,
     };
     if let Some(contract) = contract {
         validate_execution_contract(contract, args.triggered_by.as_deref(), &bundle)?;
+    } else if bundle.scope.is_some()
+        || bundle.policy_snapshot.is_some()
+        || bundle.confirmation_key.is_some()
+    {
+        // A standalone invocation has no controller to pin anything, so there
+        // is nothing that could make bundle-v2 material trustworthy. Refusing
+        // is the only honest answer: silently ignoring a `--rehearsal-scope`
+        // would let an operator believe a scope was enforced when no digest,
+        // no signature and no controller ever bound it to this run.
+        return Err(GuardRefusal(
+            "bundle contract v2 material was supplied without a Restore execution contract; \
+             an unpinned scope, policy snapshot or confirmation key is never acted on; no data \
+             operation was started"
+                .to_string(),
+        )
+        .into());
     }
     phase1_approval::admit_pinned_approver_key_bytes(&bundle.approver_key, &args.approver_key_ids)?;
     let spec_text = String::from_utf8(bundle.plan.clone())
@@ -1364,6 +1683,7 @@ fn load_startup_inputs(
         spec_text,
         allowed_text,
         approved,
+        scope: bundle.scope,
     })
 }
 
@@ -1385,6 +1705,21 @@ fn execute_for_reporting(
         Ok(contract) => contract,
         Err(error) => return (Err(error), None),
     };
+    // **D3 §2.4's channel version, once, before the first phase line.** A
+    // reader that knows which grammar follows can parse the `progress-phase=`
+    // lines without guessing; a reader that sees no such line is talking to a
+    // runner that predates the channel, which §2.4 says is not an error. A
+    // standalone invocation announces the version this BUILD implements,
+    // because that is the only true answer when no controller stamped one.
+    println!(
+        "{}",
+        logweir_core::execution_contract::progress_contract_line(
+            contract
+                .as_ref()
+                .map_or(logweir_core::execution_contract::ContractVersion::V2, |c| c
+                    .version)
+        )
+    );
     // I11, and BEFORE `context`: no client of any kind is constructed on this
     // refusal path.
     if let Err(error) = check_projected_credentials() {
@@ -1433,11 +1768,81 @@ fn execute_for_reporting(
             )
         }
     };
+    // **Execution contract v2's two bindings, and they go HERE.**
+    //
+    // After `load_startup_inputs`, so the plan bytes they read are the bytes
+    // the contract digests and the approval signature already covered — a
+    // check over unauthenticated bytes proves nothing. Before `context`, so
+    // neither has a broker client in scope: `context` constructs the rdkafka
+    // reader, and construction alone opens bootstrap connections (the
+    // measurement is in `execute_for_reporting`'s own comment above). That is
+    // what makes "refused before any data-plane work" true at the socket
+    // layer, which is the claim D3 §4.3 and §5.5 both make.
+    if let Err(error) = check_v2_bindings(&startup, &authenticated_spec, contract.as_ref()) {
+        return (Err(error), Some(authenticated_spec));
+    }
     let outcome = match context(startup.spec_text, startup.allowed_text) {
         Ok(c) => execute_with_prevalidated(args, run_id, &c, &signer, startup.approved),
         Err(error) => Err(error),
     };
     (outcome, Some(authenticated_spec))
+}
+
+/// The standing-authorization scope check and the recovery-point binding
+/// check, in that order, over the authenticated plan.
+///
+/// **Scope first.** The scope decides whether this plan may run at all; the
+/// point binding decides whether the archive holds what it was approved
+/// against. Running the archive read first would touch a bucket on behalf of a
+/// plan the authorization does not cover, which is a small thing to get wrong
+/// and an easy one to get right.
+fn check_v2_bindings(
+    startup: &StartupInputs,
+    plan: &DrillSpec,
+    contract: Option<&ExecutionContract>,
+) -> Result<(), DrillError> {
+    use logweir_core::execution_contract::AuthorizationKind;
+
+    if let Some(scope_bytes) = startup.scope.as_deref() {
+        let allowed: AllowedClusters =
+            serde_json::from_str(&startup.allowed_text).map_err(|error| {
+                DrillError::Operational(format!("allowed-clusters does not parse: {error}"))
+            })?;
+        binding::verify_standing_scope(
+            plan,
+            &allowed,
+            scope_bytes,
+            contract.and_then(|c| c.rehearsal_schedule_uid.as_deref()),
+        )?;
+    } else if contract.is_some_and(|c| c.authorization_kind == AuthorizationKind::Standing) {
+        // Unreachable through `execution_contract_from`, which refuses a
+        // `Standing` contract with no pinned scope digest, and through
+        // `validate_execution_contract`, which refuses a pinned digest with no
+        // mounted member. Kept because the failure it would otherwise cause is
+        // silent: a rehearsal running with no scope check at all, which is the
+        // exact mutant D3 §4.3 exists to make impossible.
+        return Err(GuardRefusal(
+            "the execution contract names a standing rehearsal authorization but no scope \
+             document is mounted; the runner's half of the authorization cannot be performed; \
+             no data operation was started"
+                .to_string(),
+        )
+        .into());
+    }
+
+    if plan.source.point.is_some() {
+        // A READ-ONLY handle, built here and dropped here. `Store` is not
+        // `Clone` and `context` builds its own; a read-only handle cannot put
+        // at all (`put_create_only` refuses every key through it), so this
+        // read can never become the first write of a run that is about to be
+        // refused.
+        let archive = Store::read_only_from_url(&plan.source.storage)
+            .map_err(|error| DrillError::Operational(error.to_string()))?;
+        if let Some(point_id) = binding::verify_point_binding(plan, &archive)? {
+            tracing::info!(point_id = %point_id, "recovery point binding verified");
+        }
+    }
+    Ok(())
 }
 
 fn load_signer(path: &std::path::Path) -> Result<ValidatedSigner, DrillError> {
@@ -2022,16 +2427,29 @@ fn teardown(
                 "{msg}"
             );
         }
-        if let Err(e) = phase9_teardown::persist_with_signer(&a, signer, &c.store) {
-            tracing::warn!(error = %e, "teardown attestation not persisted");
-        }
-        Ok(a)
+        // **D3 §2.4's `teardown-key=` line is conditional on THIS succeeding.**
+        // The attestation is what the controller fetches, verifies with
+        // `PAYLOAD_TYPE_TEARDOWN` and copies into `status.teardown`; a key
+        // line printed after a failed put would send it after an object that
+        // is not there. So the answer is carried out of the closure rather
+        // than logged and forgotten.
+        let persisted = match phase9_teardown::persist_with_signer(&a, signer, &c.store) {
+            Ok(()) => true,
+            Err(e) => {
+                tracing::warn!(error = %e, "teardown attestation not persisted");
+                false
+            }
+        };
+        Ok((a, persisted))
     });
     // The notes go on AFTER `record` returns, because `record` pushes the
     // `PhaseRecord` only once the closure has finished — the same shape phase
     // 6's `RestoreNoOp` interception uses to annotate its own record.
-    if let Ok(att) = attested {
-        let notes = phase9_teardown::failure_notes(&att);
+    if let Ok((att, persisted)) = attested {
+        let mut notes = phase9_teardown::failure_notes(&att);
+        if persisted {
+            notes.push(phase9_teardown::attested_note(run_id));
+        }
         if !notes.is_empty() {
             if let Some(p) = sc.phases.iter_mut().find(|p| p.phase == 9) {
                 p.notes = notes;
@@ -2670,6 +3088,11 @@ mod tests {
             offset_report_out: None,
             // NOT PINNED, which is the default every existing caller gets.
             approver_key_ids: Vec::new(),
+            // Execution contract v2's optional bundle members; absent is
+            // every existing caller's shape (D3 §4.3, D0 bundle v2).
+            rehearsal_scope: None,
+            policy_snapshot: None,
+            confirmation_key: None,
         }
     }
 
@@ -3456,7 +3879,7 @@ mod tests {
         let mut seen: Vec<u8> = Vec::new();
         for c in codes {
             assert_eq!(
-                exiting("01TEST", c, None, None, None),
+                exiting("01TEST", c, None, None, None, None),
                 c,
                 "exiting must not alter the code"
             );

@@ -140,6 +140,51 @@ pub fn run(
 /// both move together; hand-write it at either site and they can drift.
 pub const TEARDOWN_FAILED_NOTE_PREFIX: &str = "teardown-failed: ";
 
+/// The note [`attested_note`] writes and [`attested_key`] parses, for the same
+/// reason [`TEARDOWN_FAILED_NOTE_PREFIX`] exists: one spelling, two readers.
+pub const TEARDOWN_ATTESTED_NOTE_PREFIX: &str = "teardown-attested: ";
+
+/// `logweir/drills/<run_id>.teardown.json` — the key [`persist_with_signer`]
+/// puts the attestation at, and the value of the `teardown-key=` stdout line.
+///
+/// One function, so the key that was WRITTEN and the key that is ANNOUNCED
+/// cannot be two `format!`s that drift. A line naming a key nothing was
+/// written to is the worst possible output, and this is how that is prevented
+/// structurally rather than by care.
+#[must_use]
+pub fn teardown_key(run_id: &str) -> String {
+    format!("logweir/drills/{run_id}.teardown.json")
+}
+
+/// The phase-9 note that says the attestation was persisted, carrying the key.
+#[must_use]
+pub fn attested_note(run_id: &str) -> String {
+    format!("{TEARDOWN_ATTESTED_NOTE_PREFIX}{}", teardown_key(run_id))
+}
+
+/// The teardown key a completed run announces, or `None` when phase 9 did not
+/// attest — because it did not run, or because the put failed.
+///
+/// # Why it travels on `PhaseRecord.notes` and not on a new field
+///
+/// Exactly [`failed_count`]'s three reasons, and one more that matters here:
+/// the note is pushed AFTER phase 8 froze and signed the bytes, so nothing
+/// this function reads can reach the signed scorecard, and `teardown-key=` can
+/// therefore be printed on the **exit-2** path as well as exit 0. That is the
+/// path that matters most for D3 §4.4: a rehearsal that did not pass is
+/// exactly the run whose leftover topics block the next slot, and it has no
+/// evidence key lines at all to hang the teardown key off.
+#[must_use]
+pub fn attested_key(sc: &logweir_core::scorecard::Scorecard) -> Option<String> {
+    sc.phases
+        .iter()
+        .find(|p| p.phase == 9)?
+        .notes
+        .iter()
+        .find_map(|n| n.strip_prefix(TEARDOWN_ATTESTED_NOTE_PREFIX))
+        .map(str::to_string)
+}
+
 /// The topic names the broker refused, in `topics_failed` order.
 ///
 /// Names ONLY, never the broker error strings, so a log line and a phase note
@@ -291,10 +336,7 @@ pub(crate) fn persist_with_signer(
         .map_err(sig)?;
     let sidecar_bytes = serde_json::to_vec(&sidecar).map_err(sig)?;
     store
-        .put_create_only(
-            &format!("logweir/drills/{}.teardown.json", att.run_id),
-            &bytes,
-        )
+        .put_create_only(&teardown_key(&att.run_id), &bytes)
         .map_err(sig)?;
     store
         .put_create_only(

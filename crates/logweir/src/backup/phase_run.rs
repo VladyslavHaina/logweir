@@ -65,6 +65,7 @@ pub fn run(
     obs: &mut dyn PhaseObserver,
 ) -> Result<Ran, BackupError> {
     obs.phase_started(-1, "backup");
+    crate::backup::print_progress_step(crate::backup::PROGRESS_STEP_ENGINE);
     let facts = engine.backup(plan, obs);
     obs.phase_finished(
         -1,
@@ -74,6 +75,9 @@ pub fn run(
         },
     );
     let facts = facts?;
+
+    // D3 §2.4: the engine is done and the archive is about to be read back.
+    crate::backup::print_progress_step(crate::backup::PROGRESS_STEP_READBACK);
 
     // The manifest this run's `backup_id` produced. Listed through the
     // read-only archive handle rather than reconstructed from the prefix and
@@ -359,6 +363,7 @@ pub(crate) fn persist_receipt(
     store: &Store,
 ) -> Result<Persisted, BackupError> {
     let sig = |e: String| BackupError::Signing(e);
+    crate::backup::print_progress_step(crate::backup::PROGRESS_STEP_SIGN);
     let receipt = build_receipt(outcome);
 
     // 1. Refuse to sign a self-contradicting document.
@@ -388,6 +393,7 @@ pub(crate) fn persist_receipt(
     //    (`StoreError::AlreadyExists`), never overwritten, so one run can
     //    never silently replace another's evidence.
     let mut keys = receipt_keys(&outcome.backup_id, &outcome.run_id);
+    crate::backup::print_progress_step(crate::backup::PROGRESS_STEP_UPLOAD);
     store
         .put_create_only(&keys.receipt_key, &bytes)
         .map_err(|e| sig(e.to_string()))?;
