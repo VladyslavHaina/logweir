@@ -109,10 +109,13 @@ anything not listed is `404`.
 | `GET /api/v1/namespaces` | The configured grants. It never lists core `Namespace` objects. |
 | `GET /api/v1/namespaces/{ns}/connections[/{name}]` | `KafkaCluster` projections: role, bootstrap addresses, auth mode, username, TLS, the credential Secret's **name**, and the controller's reachability observation. |
 | `POST /api/v1/namespaces/{ns}/connections` | Create a `KafkaCluster` that references an existing credential Secret by name. |
-| `GET /api/v1/namespaces/{ns}/schedules[/{name}]` | `BackupSchedule` projections. |
+| `GET /api/v1/cadence-previews` | What a cron expression — or a preset — will actually do in a time zone, before anything is saved. No namespace, no Kubernetes call. |
+| `GET /api/v1/namespaces/{ns}/schedules[/{name}]` | `BackupSchedule` projections, with the cadence policy, the revision and the controller's own next runs. |
 | `POST /api/v1/namespaces/{ns}/schedules` | Create a `BackupSchedule`. |
-| `POST /api/v1/namespaces/{ns}/schedules/{name}:set-suspension` | The one permitted update. |
-| `GET /api/v1/namespaces/{ns}/backups[/{name}]` | `Backup` projections. |
+| `PUT /api/v1/namespaces/{ns}/schedules/{name}` | Replace the schedule's **future** policy under `expectedGeneration`. It cannot name `spec.sourceRef` and it never reaches a run that already exists. |
+| `POST /api/v1/namespaces/{ns}/schedules/{name}:set-suspension` | Suspend or resume, under `expectedResourceVersion`. |
+| `GET /api/v1/namespaces/{ns}/backups[/{name}]` | `Backup` projections, with the trigger and the schedule revision the run copied. |
+| `POST /api/v1/namespaces/{ns}/backups` | "Back up now" from a schedule, or "Run first backup now" from a cluster. |
 | `GET /api/v1/namespaces/{ns}/restores[/{name}]` | `Restore` projections. |
 | `POST /api/v1/namespaces/{ns}/restores` | Create a `Restore`, preserving the plan bytes exactly. |
 | `GET /api/v1/namespaces/{ns}/approvals[/{name}]` | Approval metadata and status. |
@@ -168,6 +171,181 @@ and an administrator who could not stop a twenty-thousand-topic discovery an
 operator started before going home would have to wait out `timeoutSeconds` or
 reach for `kubectl`. The audit line records `cancelledAnotherActorsCheck` when
 that path is taken, so the two events are never confused.
+
+### Cadence, time zones and previews
+
+`spec.schedule` — five cron fields, the controller's own parser — stays the
+single source of truth. `spec.timeZone` is an IANA name and **absent means UTC
+and reproduces, instant for instant, the slots a controller without the field
+computed**. A slot's identity is always the UTC instant, so names stay unique,
+monotonic and DNS-1123 whatever the zone.
+
+`GET /api/v1/cadence-previews` answers what an expression will do, and the
+browser never evaluates cron: a second implementation is a second answer, and
+the one that matters is the controller's. This route calls the same
+`weirkeeper::cadence` module the scheduler calls.
+
+* `?schedule=<cron>` **or** `?preset=<kind>` with that preset's parameters —
+  exactly one. With a preset the answer carries the canonical expression it
+  compiled to, which is the string a form saves; with an expression it carries
+  the preset the expression **is**, or nothing at all for "Advanced cron".
+* `?timeZone=`, `?count=` (1 to 20, default 10) and `?after=` (RFC 3339,
+  default the server's now).
+* `200 {schedule, preset?, timeZone, tzdb, after, runs:[{at, localTime,
+  adjustment?}]}`. `timeZone` is the **effective** zone, so `UTC` comes back
+  when nothing was sent. `tzdb` names the compiled-in database, because two
+  releases can disagree about a slot after a tzdata update.
+* `422 validation_failed` with `schedule: schedule_invalid` or `timeZone:
+  timezone_unknown` — the field the person typed, not a single code for both.
+
+**`adjustment` is the part to render.** `NonexistentLocalTimeShifted` means the
+matched local time does not exist and the run was moved to the end of the gap;
+`RepeatedLocalTimeFirst` / `RepeatedLocalTimeSecond` mean the matched local time
+happens twice and **both instants fire**. A fixed-time schedule inside a
+repeated hour therefore runs twice that night — deliberately, because the rule
+never loses a real interval and never skips a fixed-time day, and the preview is
+where that becomes predictable. `localTime` carries its offset for exactly this
+reason: `02:30:00+02:00` and `02:30:00+01:00` are one clock face and two
+instants.
+
+A **shorter list than `count` is a real answer**, not a failure: `0 0 29 2 *`
+runs out of firings inside the engine's walk, and an empty list means "it does
+not fire again".
+
+A saved schedule's own previews are `status.nextRuns`, written by the controller
+from the same function and published in the same shape by
+`GET .../schedules/{name}`. **`status.nextRuns[0].at` in the past is the
+staleness signal**; `status.policy.evaluatedAt` is *when the status last moved*
+and not a liveness probe — the controller re-examines every schedule every 30 s
+and deliberately writes nothing when nothing changed, so comparing that instant
+with the requeue interval would report a healthy schedule as stale. An absent
+`status.activeRuns` means "not yet computed", never "none are running".
+
+### Editing a schedule's future policy
+
+Every `BackupSchedule.spec` field is editable **except `sourceRef`**: a
+schedule's identity is the cluster it protects, and one schedule's history must
+not mix two clusters.
+
+`PUT .../schedules/{name}` takes the **whole** policy — `expectedGeneration`,
+`schedule`, `timeZone?`, `topicSelection`, `archive` xor `destinationRef`,
+`concurrencyPolicy?`, `startingDeadlineSeconds?`, `catchUpPolicy?`, `retry?`,
+`activeDeadlineSeconds?`, `retention?`, `suspended` — and a field omitted is
+**removed**. That is what makes "absent means the documented default" reachable
+from a form: a schedule edited back to no retries really has no `spec.retry`,
+rather than a stale one nobody can see and the scheduler still obeys.
+
+* **It changes the future and nothing else.** A `Backup` that already exists
+  keeps its copied policy, its frozen execution inputs and its Job. The edit's
+  entire footprint is one merge patch on one `BackupSchedule`.
+* **`expectedGeneration`, not `expectedResourceVersion`.** `metadata.generation`
+  is what a person can see and reason about ("revision g7"), it moves only when
+  the spec changes, and it is what a manual run records. A different current
+  generation is `412 precondition_failed`. The write itself still carries the
+  `resourceVersion` of the read it was decided on, so an edit that lands *between*
+  the read and the write is refused by the API server and answered `412` as well
+  — the two preconditions are one promise: nobody's edit is silently overwritten.
+  *(D1 §5.6 specified `Api::replace` with `expectedResourceVersion`; a typed
+  merge patch was chosen instead. It keeps the Kubernetes verb at `patch`, which
+  the console ServiceAccount already holds for `:set-suspension`, so the edit
+  needs no new RBAC at all.)*
+* **`sourceRef` is refused before anything is read**, as `422
+  validation_failed` with `sourceRef: field_immutable` and the CRD's own
+  sentence. It is on the request DTO *only* so that the refusal is a field error:
+  a console that writes back everything it read sends `sourceRef`, and "unknown
+  field" would not tell the person that the answer is "create a new schedule".
+* **The CRD's own rules are not copied here.** `allUserTopics` together with a
+  non-empty `topics`, and retries on a schedule name longer than 29 characters,
+  are the API server's to refuse — a second copy of a CEL rule drifts from the
+  schema, and a stored object can break a rule this build has never heard of. The
+  refusal comes back as `422 validation_failed` carrying the CRD's published
+  message on `topicSelection: selection_invalid` or `retry.maxRetries:
+  schedule_invalid`.
+* **What *is* checked before the write** is what no rule can catch: an
+  unparseable expression, an unknown zone, an empty selection, a glob in a topic
+  name, a range. The cron parser and the zone table are the controller's own, so
+  an expression this route accepts cannot leave `Ready=False` on an object the
+  console said was fine.
+* **`Idempotency-Key` is refused.** An edit is not a durable create and cannot
+  replay: the same body sent twice under the same `expectedGeneration` is `412`
+  the second time, because the first one moved the generation. That *is* the
+  idempotence.
+* `destinationRef` is mutable. The sentinel `archive.url` the CRD requires
+  (`logweir-destination://<name>`, with no `secretRef`) is **built here and never
+  accepted from a body**: a client that could type that URL could also type it
+  without a `destinationRef`, which is the reserved-scheme case the rule exists
+  to refuse.
+
+**Who may edit.** D0's role matrix gives an operator "create and set suspension"
+on schedules and says nothing about editing, because PLAT-05.1 had not made a
+schedule editable when it was written. **This build's decision: editing a
+schedule's future policy is the same authority as creating one** — an operator
+(and an administrator) may do it in a bound namespace, a viewer and an approver
+may not. It reaches exactly the fields `POST .../schedules` already sets, it
+cannot reach `spec.sourceRef`, and it cannot touch a run that already exists, so
+it grants nothing a create did not. The audit record says `schedule.editPolicy`
+rather than `schedule.create`, and the capability flag a console reads for both
+buttons is `scheduleCreate`; `tests/role_matrix.rs` pins that the two actions
+have the same role row, so splitting the flag and splitting the authority have
+to happen together.
+
+### Back up now
+
+`POST .../backups` creates the canonical manual `Backup` — the same object
+`kubectl create -f config/samples/backup-manual.yaml` creates. `trigger.kind:
+Manual`, `triggeredBy: manual`, no slot, attempt 0, and an execution id that is
+the object's own UID, so it can never collide with a scheduled run's
+`<scheduleUID>-<slot>` and can never append into a partial archive.
+
+**Two bodies.**
+
+* **From a schedule** — `{scheduleRef: {name, expectedGeneration?},
+  readinessAcknowledgement?}`. The API reads the schedule and copies its current
+  revision with the *scheduler's own* policy builder, recording `scheduleRef
+  {name, uid, generation, runPolicySha256}`. A policy field sent beside
+  `scheduleRef` is `422`: "Back up now on this schedule" promises the run the
+  schedule describes, and a run whose receipt named the schedule and whose
+  contents were something else would be the wrong thing written down.
+* **Ad hoc** — `{sourceRef, topicSelection, legacyArchive xor destinationRef,
+  deadlineSeconds?, readinessAcknowledgement?}`, for a cluster with no schedule
+  yet. It reads nothing and records no `scheduleRef`.
+
+**Idempotence is the name.** `Idempotency-Key` is required; the object is named
+`logweir-manual-` plus 26 base32 characters of `sha256(issuer, subject,
+namespace, route, key)`. A double click, a lost `201` and an API restart all
+target the same name, so the API server's own `AlreadyExists` is what makes a
+second run impossible. Same key and same body is `200` with `replayed: true` and
+the same UID — **including after the schedule has been edited in between**,
+because the request hash covers the body as sent and the replay returns the run
+that was created rather than a fresh copy of today's policy. Same key and a
+different body is `409 idempotency_conflict`. A new key is a new, deliberate run.
+
+**The schedule's state never blocks the run** (and the response says so instead
+of hiding it). A suspended schedule stops future *slots*, not people: the run is
+created, `spec.suspend` is untouched, and `schedule.suspended` comes back `true`.
+A scheduled run already going under `concurrencyPolicy: Forbid` neither blocks
+the manual run nor counts it — `concurrencyPolicy` is about slots, and this is
+the CronJob "run now" precedent — and the active runs come back as a
+non-blocking notice. A schedule deleted between the request and the freeze still
+produces a run, because the controller does not read a `BackupSchedule` for a
+manual run at all.
+
+**`409 policy_changed`** is the one refusal that is about the schedule:
+`expectedGeneration` named a revision that has been superseded. The problem
+document carries a `policy` extension member — `{currentGeneration,
+currentRunPolicySha256?}` — so the console can show what changed; confirming
+starts a new idempotency intent, because running a policy the person did not see
+is not what the button promised.
+
+**Readiness is recorded and never obeyed.** This API does not call a preflight,
+does not wait for one and does not refuse on one; execution-time guards stay the
+authority and the direct `kubectl` path exists regardless. A
+`readinessAcknowledgement {preflight, state}` becomes the annotation
+`logweir.dev/readiness-ack` and nothing more. **A console must not render this
+route's acceptance as a readiness verdict**: if it wants a "Run anyway"
+confirmation it implements one against `POST .../preflights`, whose result is a
+real check — and a `ready` verdict still does not mean the execution-only checks
+passed. There is no preflight this route consults and none it can fake.
 
 ### Saved destinations
 
@@ -409,13 +587,30 @@ scoped to the console ServiceAccount can require one of those two values.
 route that uses it, and that is the single most important thing the RBAC stage
 owes.
 
-**There are three updates, and each is a merge patch built here from typed
-arguments**: `BackupSchedule.spec.suspend`, a destination's four grants and CA
-reference (`:update-access`), and a check's `spec.cancelRequested`
-(`:cancel`). Each carries `metadata.resourceVersion`, so each is a conditional
-write the API server refuses on a stale read, and none of them accepts a
-caller-supplied path or patch document. A destination's location and transport
-have no key in any of them.
+**There are four updates, and each is a merge patch built here from typed
+arguments**: `BackupSchedule.spec.suspend`, a `BackupSchedule`'s editable policy
+(`PUT .../schedules/{name}`), a destination's four grants and CA reference
+(`:update-access`), and a check's `spec.cancelRequested` (`:cancel`). Each
+carries `metadata.resourceVersion`, so each is a conditional write the API
+server refuses on a stale read, and none of them accepts a caller-supplied path
+or patch document. A destination's location and transport have no key in any of
+them, and **`spec.sourceRef` has no key in the schedule edit**: the policy patch
+is built from a struct whose fields *are* the mutable set, so the immutable one
+is unreachable rather than merely refused.
+
+**A merge patch merges nested objects key by key**, so every optional key inside
+one is spelled out — `null` included. A policy patch that sent `archive: {url}`
+alone would leave a `secretRef` from the previous archive in place: a credential
+reference nothing reads, on an object that then breaks the CRD's own sentinel
+rule. Absent is written as `null`, which the API server removes.
+
+**The two routes D1 W6 added ask for no new Kubernetes permission.** `create
+backups` and `patch backupschedules` are already in the console
+ServiceAccount's Role; the policy edit uses the same `patch` verb
+`:set-suspension` uses, and the manual run uses the same `create` the RBAC stage
+already owes for `backups`. `tests/linkage.rs` pins the whole `(verb, resource)`
+set from the adapter's source, so this claim fails a test rather than a review
+if it stops being true.
 
 Every call carries a **10-second deadline**, and the client's own connect, read
 and write timeouts are set to the same bound. A timeout is `504
