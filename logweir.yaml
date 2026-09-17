@@ -1994,7 +1994,9 @@ spec:
                           description: |-
                             Why the patch could not be applied. ONE CLOSED VOCABULARY, not a mix of HTTP digits and CamelCase — a `jq` or console reader has to be able to branch on it:
 
-                            * `ApiForbidden` — the API server answered `403`. Transient: fix the RBAC and the next inventory retries. * `ApiInvalid` — the API server answered `422`. Transient: a legacy object that fails a newer schema; fix it and the next inventory retries. * `NoScheduleReference` — **terminal**, and the one that is not the API server's doing. The run's `spec.scheduleRef` does not name this schedule, so detaching it would leave it a member of nothing ([`crate::identity::is_run_of_schedule`] rule 3), and `Backup.spec` is CEL-sealed so no operator can add the reference. It never clears. The remedies are `--cascade=orphan` or deleting the run. * `InventoryCapped` — **not about one object**: the inventory stopped at its page bound, so it cannot show that no run is still owned. Its `name` is the empty string. See [`ScheduleHistory::ownership_scan_complete`].
+                            * `ApiForbidden` — the API server answered `403`. Transient: fix the RBAC and the next inventory retries. * `ApiInvalid` — the API server answered `422`. Transient: a legacy object that fails a newer schema; fix it and the next inventory retries. * `NoScheduleReference` — **terminal**, and the one that is not the API server's doing. The run's `spec.scheduleRef` does not name this schedule, so detaching it would leave it a member of nothing ([`crate::identity::is_run_of_schedule`] rule 3), and `Backup.spec` is CEL-sealed so no operator can add the reference. It never clears. The remedies are `--cascade=orphan` or deleting the run.
+
+                            Every entry names a `Backup`. An inventory that did not finish is not about one object and is therefore NOT in this list — it is [`ScheduleHistory::ownership_scan_complete`], and the condition says so.
                           type: string
                       required:
                       - name

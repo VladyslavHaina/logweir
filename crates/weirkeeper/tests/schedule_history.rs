@@ -1898,8 +1898,13 @@ async fn a_capped_namespace_wide_walk_never_claims_retained_and_never_latches_th
     );
 }
 
-/// **M-1.** The migration window costs a bounded number of LISTs, not one full
-/// namespace-wide walk every thirty seconds until it finishes.
+/// **M-1.** A migration that fits in one budget finishes in one pass, and
+/// nothing re-arms after it — against one full namespace-wide walk every thirty
+/// seconds until it finished.
+///
+/// This row covers the single-pass case. The multi-pass cost, which is
+/// quadratic in the page count and which no route-table row can see, is
+/// `a_multi_page_migration_costs_a_quadratic_number_of_lists`.
 ///
 /// # What it cost when it was wrong
 ///
@@ -1908,9 +1913,9 @@ async fn a_capped_namespace_wide_walk_never_claims_retained_and_never_latches_th
 /// whole namespace and then patched at most two hundred objects, and the next
 /// pass thirty seconds later listed it all over again. Migrating 10 000 legacy
 /// runs was fifty passes × twenty pages × five hundred objects — about
-/// **500 000 object reads in twenty-five minutes**, the exact read cost D1 §6.7
-/// exists to remove, re-incurred at its maximum for the whole upgrade window,
-/// and satisfying L-05.2-6's "zero LIST requests except inventories at the
+/// **1 000 LISTs and 500 000 object reads**, the exact read cost D1 §6.7 exists
+/// to remove, re-incurred at its maximum for the whole upgrade window, and
+/// satisfying L-05.2-6's "zero LIST requests except inventories at the
 /// documented interval" only by calling every one of them an inventory.
 ///
 /// Patching inside the page loop means a pass migrates what it sees as it goes,
@@ -2054,8 +2059,11 @@ async fn a_pass_that_spends_its_detach_budget_stops_and_re_arms() {
         1,
         "and it did NOT page on to count objects it was not going to touch this pass"
     );
-    // The budget is one page's worth on purpose, so a migration reads each
-    // object about once in total rather than once per pass.
+    // The budget is one page's worth on purpose, so a pass detaches at most one
+    // page. What the WHOLE migration costs is a different question and is
+    // measured in `a_multi_page_migration_costs_a_quadratic_number_of_lists`:
+    // this row, like every other route-table row here, only ever exercises
+    // pass 1.
     assert_eq!(
         MAX_MIGRATIONS_PER_PASS, INVENTORY_PAGE_SIZE as usize,
         "the budget and the page size are one number; splitting them re-opens M-1 by degrees"
@@ -2254,4 +2262,304 @@ async fn the_blocked_sample_is_deterministic_across_passes() {
         "sorted by name: {:?}",
         samples[0]
     );
+}
+
+/// **R-1.** What a whole multi-pass migration actually costs, measured against
+/// a double that can tell one page from another.
+///
+/// # Why the rest of this file could not measure it
+///
+/// `weirkeeper::testing`'s route table matches on the request path with the
+/// query string stripped, so no route can answer page 0 and page 1 with
+/// different bodies. Every other row here therefore exercises **pass 1 only** —
+/// the one pass for which "a migrating pass reads one page" is true. It is not
+/// true of pass 2: the walk always restarts at page 0, and a page whose
+/// candidates have already been detached does not stop it, because the budget
+/// is spent only when a candidate is *skipped* and a candidate-free page skips
+/// nothing. So pass *k* reads *k* + 1 pages, and the published cost of a
+/// migration was about ten times too optimistic (review finding R-1).
+///
+/// This row uses a stateful double — one that pages on `continue=` and
+/// remembers the patches — so the number below is measured rather than derived,
+/// and `docs/kubernetes.md` §9 quotes the closed form this asserts.
+#[tokio::test]
+async fn a_multi_page_migration_costs_a_quadratic_number_of_lists() {
+    use std::sync::{Arc, Mutex};
+
+    const PAGES: usize = 3;
+    let page_size = INVENTORY_PAGE_SIZE as usize;
+    let now = utc(2026, 9, 12, 0, 0);
+
+    // Every object is a legacy-owned terminal run of `hist`.
+    let objects: Arc<Mutex<Vec<serde_json::Value>>> = Arc::new(Mutex::new(
+        (0..PAGES * page_size)
+            .map(|i| {
+                legacy_backup(
+                    &format!("logweir-backup-hist-{i:08}-000000"),
+                    "hist",
+                    UID,
+                    "Succeeded",
+                )
+            })
+            .collect(),
+    ));
+    let lists = Arc::new(Mutex::new(0usize));
+    let patches = Arc::new(Mutex::new(0usize));
+
+    let client = {
+        let objects = Arc::clone(&objects);
+        let lists = Arc::clone(&lists);
+        let patches = Arc::clone(&patches);
+        let service = tower::service_fn(move |req: http::Request<kube::client::Body>| {
+            let objects = Arc::clone(&objects);
+            let lists = Arc::clone(&lists);
+            let patches = Arc::clone(&patches);
+            async move {
+                let method = req.method().clone();
+                let uri = req.uri().to_string();
+                let body = {
+                    use http_body_util::BodyExt as _;
+                    req.into_body()
+                        .collect()
+                        .await
+                        .map(|c| String::from_utf8_lossy(&c.to_bytes()).into_owned())
+                        .unwrap_or_default()
+                };
+                let (path, query) = match uri.split_once('?') {
+                    Some((p, q)) => (p, q),
+                    None => (uri.as_str(), ""),
+                };
+                let reply = |value: serde_json::Value| {
+                    Ok::<_, std::convert::Infallible>(
+                        http::Response::builder()
+                            .status(200)
+                            .body(kube::client::Body::from(value.to_string().into_bytes()))
+                            .expect("a response builds"),
+                    )
+                };
+
+                if method == http::Method::GET && path.ends_with("/backups") {
+                    *lists.lock().expect("readable") += 1;
+                    // THE PAGE THE `continue` TOKEN NAMES. This is the whole
+                    // point of the stateful double: the route table cannot do
+                    // it, so the multi-pass shape was invisible.
+                    let page: usize = query
+                        .split('&')
+                        .find_map(|kv| kv.strip_prefix("continue="))
+                        .and_then(|token| token.parse().ok())
+                        .unwrap_or(0);
+                    assert!(
+                        query.contains(&format!("limit={INVENTORY_PAGE_SIZE}")),
+                        "every page still carries a `limit`: {query}"
+                    );
+                    let held = objects.lock().expect("readable");
+                    let start = page * page_size;
+                    let items: Vec<serde_json::Value> =
+                        held[start..(start + page_size).min(held.len())].to_vec();
+                    let mut metadata = serde_json::json!({ "resourceVersion": "41" });
+                    if start + page_size < held.len() {
+                        metadata["continue"] = serde_json::json!((page + 1).to_string());
+                    }
+                    return reply(serde_json::json!({
+                        "apiVersion": "logweir.dev/v1alpha1",
+                        "kind": "BackupList",
+                        "metadata": metadata,
+                        "items": items
+                    }));
+                }
+
+                if method == http::Method::PATCH && path.contains("/backups/") {
+                    *patches.lock().expect("readable") += 1;
+                    let name = path.rsplit('/').next().unwrap_or_default().to_string();
+                    let patch: serde_json::Value =
+                        serde_json::from_str(&body).expect("a patch body is JSON");
+                    let mut held = objects.lock().expect("readable");
+                    let object = held
+                        .iter_mut()
+                        .find(|o| o["metadata"]["name"] == serde_json::json!(name))
+                        .expect("the controller patched an object it listed");
+                    weirkeeper::conditions::apply_merge_patch(object, &patch);
+                    return reply(object.clone());
+                }
+
+                panic!("the stateful double was asked for {method} {path}");
+            }
+        });
+        kube::Client::new(service, NS)
+    };
+
+    let mut stored: Option<BackupScheduleStatus> = None;
+    let mut passes = 0usize;
+    loop {
+        let due = inventory_due(stored.as_ref(), now);
+        if !due {
+            break;
+        }
+        passes += 1;
+        assert!(passes <= 16, "the migration must terminate");
+        let observed = observe(&backups(&client), stored.as_ref(), "hist", UID, None, now)
+            .await
+            .expect("a migrating pass is a decision");
+        let condition = history_condition(&observed.history, None, Some(4), now);
+        stored = Some(
+            serde_json::from_value(serde_json::json!({
+                "activeRuns": [],
+                "history": serde_json::to_value(&observed.history).expect("serialises"),
+                "conditions": [serde_json::to_value(&condition).expect("serialises")],
+            }))
+            .expect("a status"),
+        );
+    }
+
+    let lists = *lists.lock().expect("readable");
+    let patches = *patches.lock().expect("readable");
+    assert_eq!(
+        patches,
+        PAGES * page_size,
+        "every object is detached exactly once over the whole migration"
+    );
+    assert_eq!(passes, PAGES, "one pass per page of candidates");
+
+    // THE CLOSED FORM, AND IT IS QUADRATIC. Pass k reads pages 0..k because the
+    // walk restarts at page 0 every time and an already-detached page does not
+    // stop it; the last pass reads every page and then runs out. So
+    //     LISTs = Σ(k=1..P-1)(k+1) + P = P(P+1)/2 + P − 1.
+    // `docs/kubernetes.md` §9 quotes this, and 10 000 pre-upgrade runs are
+    // P = 20 ⇒ 229 LIST requests and ≈ 114 500 objects read — NOT the 21 and
+    // 10 000 the table claimed before this row existed.
+    let p = PAGES;
+    assert_eq!(
+        lists,
+        p * (p + 1) / 2 + p - 1,
+        "measured LIST count must equal the closed form the documentation quotes"
+    );
+    assert_eq!(lists, 8, "and for three pages that is eight");
+
+    // It is still BOUNDED, which is what makes it a cost and not a hazard: no
+    // pass exceeds the page bound, whatever the namespace holds.
+    assert!(lists <= passes * MAX_INVENTORY_PAGES);
+
+    // And the migration really finished: the condition is True and the selector
+    // is unlocked, so the steady state is the cheap one.
+    let settled = stored.expect("the loop ran at least once");
+    let history = settled.history.clone().expect("a history block");
+    assert!(history.ownership_scan_complete);
+    assert_eq!(history.legacy_owned_runs, 0);
+    assert_eq!(history.run_count, (PAGES * page_size) as i64);
+    assert!(
+        may_use_label_selector(Some(&settled)),
+        "so every later inventory is O(this schedule) — §6.7's saving is not lost"
+    );
+}
+
+/// **R-3, the invariant the arm reordering must not break.**
+///
+/// An incomplete ownership scan can never produce `True`, whichever other facts
+/// the block carries. The reordering that restored D1 §6.2 step 5's
+/// `LegacyOwnerReferencesRemain` moved three `False` arms in front of the
+/// incomplete-scan arm; this asserts over the whole cross-product rather than
+/// over a reading of the code, because the reading is exactly what a later edit
+/// changes.
+#[test]
+fn an_incomplete_scan_is_never_reported_as_true() {
+    let now = utc(2026, 9, 12, 0, 0);
+    let blocked_sets = [
+        None,
+        Some(vec![MigrationBlocked {
+            name: "b".to_string(),
+            reason: "ApiForbidden".to_string(),
+        }]),
+        Some(vec![MigrationBlocked {
+            name: "b".to_string(),
+            reason: "NoScheduleReference".to_string(),
+        }]),
+    ];
+    for complete in [false, true] {
+        for capped in [false, true] {
+            for owned in [0i64, 3] {
+                for migratable in [0i64, 2] {
+                    for runs in [0i64, 9_000] {
+                        for blocked in &blocked_sets {
+                            let history = ScheduleHistory {
+                                run_count: runs,
+                                run_count_capped: capped,
+                                estimated_bytes: 4096,
+                                legacy_owned_runs: owned.max(migratable),
+                                legacy_migratable_runs: migratable,
+                                migration_blocked: blocked.clone(),
+                                ownership_scan_complete: complete,
+                                inventoried_at: now,
+                            };
+                            let condition = history_condition(&history, None, Some(4), now);
+                            if !complete {
+                                assert_eq!(
+                                    condition.status, "False",
+                                    "an incomplete scan may never claim the history is \
+                                     retained: {history:?}"
+                                );
+                                assert!(
+                                    condition
+                                        .message
+                                        .as_deref()
+                                        .is_some_and(|m| m.contains("did not finish")),
+                                    "and it must SAY the scan did not finish, whichever arm \
+                                     reported it: {history:?}"
+                                );
+                            }
+                            assert!(
+                                ["True", "False"].contains(&condition.status.as_str()),
+                                "no third status"
+                            );
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // AND THE ORDINARY MID-MIGRATION STATE IS `LegacyOwnerReferencesRemain`
+    // AGAIN (finding R-3). Before the reorder, any migration spanning more than
+    // one page reported `MigrationBlocked` — because a budget-spent pass sets
+    // `runCountCapped` — where D1 §6.2 step 5 assigns
+    // `LegacyOwnerReferencesRemain` to "terminal runs still being detached", so
+    // an operator watching a healthy upgrade saw a reason that reads like
+    // something is stuck.
+    let mid_migration = ScheduleHistory {
+        run_count: 1_500,
+        run_count_capped: true,
+        estimated_bytes: 4096,
+        legacy_owned_runs: 1_000,
+        legacy_migratable_runs: 1_000,
+        migration_blocked: None,
+        ownership_scan_complete: false,
+        inventoried_at: now,
+    };
+    let condition = history_condition(&mid_migration, None, Some(4), now);
+    assert_eq!(condition.status, "False");
+    assert_eq!(
+        condition.reason.as_deref(),
+        Some("LegacyOwnerReferencesRemain"),
+        "the reason D1 §6.2 step 5 names for exactly this state"
+    );
+    let message = condition.message.expect("a message");
+    assert!(
+        message.contains("did not finish"),
+        "and the unfinished scan is still reported, as a suffix rather than by replacing the \
+         reason: {message}"
+    );
+
+    // The incomplete-scan arm still owns the case nothing else explains: a
+    // namespace bigger than the walk's bound, with no migration under way.
+    let too_big = ScheduleHistory {
+        legacy_owned_runs: 0,
+        legacy_migratable_runs: 0,
+        ..mid_migration.clone()
+    };
+    let condition = history_condition(&too_big, None, Some(4), now);
+    assert_eq!(condition.status, "False");
+    assert_eq!(condition.reason.as_deref(), Some("MigrationBlocked"));
+    assert!(condition
+        .message
+        .expect("a message")
+        .contains("Prune terminal runs"));
 }

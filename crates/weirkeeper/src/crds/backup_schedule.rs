@@ -712,9 +712,10 @@ pub struct MigrationBlocked {
     ///   ([`crate::identity::is_run_of_schedule`] rule 3), and `Backup.spec` is
     ///   CEL-sealed so no operator can add the reference. It never clears. The
     ///   remedies are `--cascade=orphan` or deleting the run.
-    /// * `InventoryCapped` — **not about one object**: the inventory stopped at
-    ///   its page bound, so it cannot show that no run is still owned. Its
-    ///   `name` is the empty string. See [`ScheduleHistory::ownership_scan_complete`].
+    ///
+    /// Every entry names a `Backup`. An inventory that did not finish is not
+    /// about one object and is therefore NOT in this list — it is
+    /// [`ScheduleHistory::ownership_scan_complete`], and the condition says so.
     pub reason: String,
 }
 

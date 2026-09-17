@@ -1476,26 +1476,37 @@ kubectl --context docker-desktop get backupschedules -A \
 |---|---|---|
 | `True` | `Retained` | No run is owned by this schedule. Delete it however you like. |
 | `True` | `HistoryLarge` | The same, **and** the retained history is past the advisory below — prune. |
-| `False` | `LegacyOwnerReferencesRemain` | Terminal runs are still being detached; the next passes finish it. |
+| `False` | `LegacyOwnerReferencesRemain` | Terminal runs are still being detached; the next passes finish it. This is the ordinary state of a healthy upgrade, however many pages it spans. |
 | `False` | `ActiveLegacyRunsOwned` | The only owned runs left are still running. A pre-upgrade run keeps its ownerReference until it is terminal, because its scheduled identity derives from that UID. |
-| `False` | `MigrationBlocked` | Either the inventory **did not finish** (`status.history.ownershipScanComplete: false`), or one or more runs could not be detached. `status.history.migrationBlocked` names up to ten, sorted by name; the total is in `legacyOwnedRuns`. See the table below. |
+| `False` | `MigrationBlocked` | Either one or more runs could not be detached — `status.history.migrationBlocked` names up to ten, sorted by name, and the total is in `legacyOwnedRuns` — or the inventory **did not finish** and nothing above explains why. See the table below. |
 
 `kubectl --context docker-desktop delete backupschedule <name> --cascade=orphan`
 is always safe, before or after the migration, and it is what to use while the
 condition says `False`.
 
-**`MigrationBlocked` covers four different situations, and the message says
-which.** `status.history.migrationBlocked[].reason` is a closed vocabulary:
+**`MigrationBlocked` has two causes, and the message says which.** Either one or
+more runs could not be detached — then `status.history.migrationBlocked` names
+them, and its `reason` is one of three values — or the **inventory itself did
+not finish**, in which case `migrationBlocked` is empty and
+`status.history.ownershipScanComplete` is `false`.
+
+Every entry in `migrationBlocked` names a `Backup`, and its `reason` is a closed
+vocabulary:
 
 | `reason` | Clears itself? | What to do |
 |---|---|---|
 | `ApiForbidden` (the API server answered `403`) | yes | Fix the RoleBinding. The next hourly inventory sends the same patch. |
 | `ApiInvalid` (the API server answered `422`) | yes | A pre-upgrade object that fails a newer schema. Fix it; the next inventory retries. |
 | `NoScheduleReference` | **no, never** | The run's `spec.scheduleRef` does not name this schedule, so detaching it would leave it a member of nothing — and `Backup.spec` is sealed by CEL, so the reference cannot be added to an object that already exists. **This condition will not reach `True` while such a run exists.** Delete the schedule with `--cascade=orphan`, or record `status.backupId` and `status.evidence.*` and delete the run. |
-| `InventoryCapped` (the entry names no object) | when the history shrinks | The inventory stopped at its page bound, or with its per-pass detach budget spent, so it cannot show that nothing is still owned. A migration in progress clears this within a few reconciles; a schedule with more runs than the bound needs pruning (below). |
 
-**`status.history.ownershipScanComplete` is the machine-readable form of the
-last row, and it is the field to gate an upgrade script on** — more precisely
+A schedule can also have an unfinished inventory *while* one of the rows above
+is the reported reason — a migration spanning several pages sets it on every
+pass — and then the message carries "The inventory also did not finish" as a
+suffix rather than replacing the reason. The reason stays the one that describes
+what is happening; `ownershipScanComplete` stays the fact to act on.
+
+**`status.history.ownershipScanComplete` is the machine-readable form of that,
+and it is the field to gate an upgrade script on** — more precisely
 than the condition, because it is `false` exactly when the controller has not
 looked everywhere it would have to look. While it is `false` the schedule keeps
 listing namespace-wide and never narrows to the `logweir.dev/schedule-uid`
@@ -1614,19 +1625,34 @@ reservation — not the list — is what makes a duplicate reconcile impossible.
 schedule still has runs to detach it re-inventories on every reconcile (every
 30 s) rather than hourly, because waiting an hour between batches would stretch
 an upgrade over days. The detaching happens *inside* the paginated walk, and the
-walk **stops as soon as that pass has spent its detach budget of 500**, so:
+walk **stops as soon as that pass has spent its detach budget of 500** — so one
+pass detaches at most one page's worth and never reads more than the page bound.
+
+The walk restarts at page 0 each pass, though, and a page whose runs are already
+detached does not stop it, so pass *k* reads *k* pages of already-migrated runs
+before it reaches new work. **The whole migration is therefore quadratic in the
+number of pages**, not linear. With `P` = ⌈*n* / 500⌉ pages of pre-upgrade runs:
 
 | | LIST requests | objects read |
 |---|---|---|
-| a migrating pass | 1 | ≤ 500 |
-| the whole migration of *n* pre-upgrade runs | ≈ *n* / 500 + 1 | ≈ *n* |
+| one migrating pass | ≤ 20 (the page bound) | ≤ 10 000 |
+| the whole migration of *n* pre-upgrade runs | `P(P+1)/2 + P − 1` | ≈ 500 × that |
+| *n* = 500 (`P` = 1) | 1 | 500 |
+| *n* = 2 000 (`P` = 4) | 13 | ≈ 6 500 |
+| *n* = 10 000 (`P` = 20) | **229** | **≈ 114 500** |
 | steady state, per hour | 1 | ≤ 10 000 |
 | steady state, per 30 s reconcile | **0** | 0 |
 
-So 10 000 pre-upgrade runs cost about 21 paginated LISTs spread over ten
-minutes, not one full namespace-wide walk every 30 s for the duration. A
-namespace-wide walk is `limit`ed and page-bounded like every other: it never
-streams an unbounded response body.
+The closed form is measured, not estimated: `a_multi_page_migration_costs_a_
+quadratic_number_of_lists` drives a whole migration against a double that pages
+properly and asserts the count against that formula.
+
+For comparison, detaching after the whole walk — the shape this replaced — cost
+one full 20-page walk per 200 runs, so the same 10 000 runs were about 1 000
+LISTs and 500 000 objects read. Every walk, then and now, is `limit`ed and
+page-bounded: none of them streams an unbounded response body. If the quadratic
+term ever matters for your namespace, prune before upgrading (below) — halving
+the run count quarters the cost.
 
 ### Upgrading to, and rolling back from, retained history
 

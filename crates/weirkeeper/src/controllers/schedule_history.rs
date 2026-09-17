@@ -101,10 +101,25 @@ pub const MAX_INVENTORY_PAGES: usize = 20;
 /// IT EQUALS [`INVENTORY_PAGE_SIZE`] ON PURPOSE (finding M-1). The patches used
 /// to be sent after the whole walk, so a migrating pass paid for a FULL
 /// paginated namespace-wide list every thirty seconds and the migration window
-/// re-incurred exactly the read cost D1 §6.7 exists to remove — about 500 000
-/// object reads for 10 000 legacy runs. Migrating page by page and stopping the
-/// walk once the budget is spent makes a migrating pass cost ONE page, so the
-/// whole migration reads each object about once instead of about fifty times.
+/// re-incurred exactly the read cost D1 §6.7 exists to remove — about 1 000
+/// LISTs and 500 000 object reads for 10 000 legacy runs.
+///
+/// WHAT IT ACTUALLY COSTS NOW, which is not what this comment used to claim
+/// (review finding R-1). The walk restarts at page 0 every pass, and a page
+/// whose candidates are already detached does NOT stop it — the budget is spent
+/// only when a candidate is skipped, and a candidate-free page skips nothing.
+/// So pass `k` reads `k + 1` pages and the whole migration is
+/// `P(P+1)/2 + P − 1` LISTs for `P` pages of pre-upgrade runs: 229 LISTs and
+/// ≈ 114 500 object reads for 10 000 of them, a ≈ 4× improvement rather than
+/// the ≈ 50× "each object read once" this said before it was measured.
+/// `a_multi_page_migration_costs_a_quadratic_number_of_lists` measures it
+/// against a double that can tell one page from another; the route-table rows
+/// cannot, because that double strips the query string and so answers every
+/// page alike.
+///
+/// It is still bounded — no pass exceeds [`MAX_INVENTORY_PAGES`] — so this is a
+/// cost, not a hazard. Carrying the `continue` token across passes would make
+/// it linear again and is the obvious follow-up.
 pub const MAX_MIGRATIONS_PER_PASS: usize = INVENTORY_PAGE_SIZE as usize;
 
 /// D1 §6.6: above this many retained runs the condition is `HistoryLarge`.
@@ -298,10 +313,6 @@ pub const BLOCKED_API_FORBIDDEN: &str = "ApiForbidden";
 /// The `status.history.migrationBlocked[].reason` a `422` is recorded under.
 pub const BLOCKED_API_INVALID: &str = "ApiInvalid";
 
-/// The `status.history.migrationBlocked[].reason` a capped inventory is
-/// recorded under. Not about one object: its `name` is the empty string.
-pub const BLOCKED_INVENTORY_CAPPED: &str = "InventoryCapped";
-
 /// Why one `Backup` may not be migrated even though it carries the entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MigrationRefusal {
@@ -326,6 +337,15 @@ impl MigrationRefusal {
 
 /// The `status.history.migrationBlocked[].reason` for the one refusal that is
 /// this controller's own and that **never clears**.
+///
+/// THE VOCABULARY IS THESE THREE AND NOTHING ELSE. An `InventoryCapped` value
+/// was declared here in fix round 1 and nothing ever wrote it (review finding
+/// R-2): every entry in `migrationBlocked` names a `Backup`, and an unfinished
+/// walk is not about one object, so a synthetic entry would have had to carry
+/// an empty `name` that every consumer resolving that name would then have to
+/// special-case. The capped state is reported where it belongs — in the
+/// condition, and machine-readably in
+/// [`crate::crds::backup_schedule::ScheduleHistory::ownership_scan_complete`].
 pub const BLOCKED_NO_SCHEDULE_REFERENCE: &str = "NoScheduleReference";
 
 /// Whether a recorded block reason is one a later pass could clear by itself.
@@ -345,7 +365,7 @@ pub const BLOCKED_NO_SCHEDULE_REFERENCE: &str = "NoScheduleReference";
 pub fn blocked_reason_clears_itself(reason: &str) -> bool {
     match reason {
         BLOCKED_API_FORBIDDEN | BLOCKED_API_INVALID => true,
-        BLOCKED_NO_SCHEDULE_REFERENCE | BLOCKED_INVENTORY_CAPPED => false,
+        BLOCKED_NO_SCHEDULE_REFERENCE => false,
         // AN UNKNOWN REASON IS TREATED AS TERMINAL, which is the safe
         // direction: the message then tells the operator to use
         // `--cascade=orphan`, which is correct whatever the reason was.
@@ -469,29 +489,42 @@ pub fn history_condition(
     now: DateTime<Utc>,
 ) -> Condition {
     let blocked = history.migration_blocked.as_deref().unwrap_or_default();
-    let (status, reason, message) = if !history.ownership_scan_complete {
-        // H-1. THE FIRST ARM, BECAUSE IT IS THE ONE ABOUT WHAT WAS NOT SEEN.
-        // Every arm below is a statement about objects this controller HAS
-        // looked at; this one says it did not finish looking. `True` here would
-        // be the one lie that matters — D1 §6.9 tells an operator to wait for
-        // it before deleting a schedule with the default propagation, and on a
-        // walk that stopped at its bound the runs past the bound are exactly
-        // the ones that would then be collected.
-        (
-            "False",
-            REASON_MIGRATION_BLOCKED,
-            format!(
-                "The history inventory did not finish: it stopped after {} object(s) at its \
-                 page bound ({MAX_INVENTORY_PAGES} × {INVENTORY_PAGE_SIZE}), or with its \
-                 per-pass detach budget spent, so it cannot show that no run is still owned by \
-                 this schedule. `status.history.ownershipScanComplete` is false and every \
-                 count in `status.history` is a floor. A migration in progress clears this on \
-                 its own; a schedule with more runs than the bound needs pruning \
-                 (`docs/kubernetes.md` §9). Until then, delete only with `--cascade=orphan`.",
-                history.run_count
-            ),
+
+    // WHY THE INCOMPLETE-SCAN ARM IS FOURTH AND NOT FIRST (review finding R-3).
+    //
+    // It WAS first, which was safe and wrong. Safe, because every arm it
+    // shadowed is also `False` and because the label selector is gated on
+    // `ownership_scan_complete` itself rather than on this reason — so nothing
+    // about H-1 turned on the order. Wrong, because a migration of more than
+    // one page's worth of runs sets `run_count_capped` on every pass that
+    // spends its detach budget, so the ORDINARY mid-migration state reported
+    // `MigrationBlocked` where D1 §6.2 step 5 assigns
+    // `LegacyOwnerReferencesRemain`, and an operator watching a healthy upgrade
+    // saw a reason that reads like something is stuck.
+    //
+    // So an unfinished scan is now reported as a SUFFIX on whichever arm
+    // explains it — the migration in progress, the runs still active, the
+    // refusals — and gets an arm of its own only when nothing else does, which
+    // is the case the finding is really about: a namespace with more objects
+    // than the walk's bound and no migration under way.
+    //
+    // THE INVARIANT THIS ORDERING MUST NOT BREAK: an incomplete scan can never
+    // produce `True`. Arms one to three are all `False`, arm four catches
+    // everything else, and the two `True` arms are past it.
+    // `an_incomplete_scan_is_never_reported_as_true` asserts that over the whole
+    // cross-product rather than over this reading of the code.
+    let incomplete = if history.ownership_scan_complete {
+        String::new()
+    } else {
+        format!(
+            " The inventory also did not finish — it stopped at its page bound \
+             ({MAX_INVENTORY_PAGES} × {INVENTORY_PAGE_SIZE}) or with this pass's detach \
+             budget spent — so `status.history.ownershipScanComplete` is false and every \
+             count here is a floor."
         )
-    } else if !blocked.is_empty() {
+    };
+
+    let (status, reason, message) = if !blocked.is_empty() {
         let names = blocked
             .iter()
             .take(MIGRATION_BLOCKED_SAMPLE)
@@ -506,6 +539,7 @@ pub fn history_condition(
         // an operator told to "wait for True" would wait forever. The two get
         // different sentences, and the terminal one names the only two things
         // that work.
+        //
         // BOUNDED LIKE THE SAMPLE IT IS DRAWN FROM. A condition message is a
         // status field every watcher in the cluster receives; naming every
         // terminal run would put a schedule's whole history into it.
@@ -535,7 +569,8 @@ pub fn history_condition(
             "False",
             REASON_MIGRATION_BLOCKED,
             format!(
-                "{} run(s) of this schedule could not be detached from it: {names}. {remedy}",
+                "{} run(s) of this schedule could not be detached from it: {names}. \
+                 {remedy}{incomplete}",
                 blocked.len()
             ),
         )
@@ -546,7 +581,7 @@ pub fn history_condition(
             format!(
                 "{} of {} retained run(s) still carry this schedule's ownerReference and are \
                  being detached. Use `kubectl delete backupschedule <name> --cascade=orphan` \
-                 until this is `True`.",
+                 until this is `True`.{incomplete}",
                 history.legacy_migratable_runs, history.run_count
             ),
         )
@@ -557,15 +592,35 @@ pub fn history_condition(
             format!(
                 "{} run(s) created before this controller are still active and keep their \
                  ownerReference until they are terminal; their scheduled identity derives from \
-                 it.",
+                 it.{incomplete}",
                 history.legacy_owned_runs
+            ),
+        )
+    } else if !history.ownership_scan_complete {
+        // NOTHING ABOVE EXPLAINS IT, so the unfinished scan is the finding. This
+        // is the namespace with more objects than the walk's bound: no
+        // migration is under way, nothing is refused, nothing is active — and
+        // the controller still cannot say that no run is owned, because it did
+        // not get to the end.
+        (
+            "False",
+            REASON_MIGRATION_BLOCKED,
+            format!(
+                "The history inventory did not finish: it stopped after {} object(s) at its \
+                 page bound ({MAX_INVENTORY_PAGES} × {INVENTORY_PAGE_SIZE}), so it cannot show \
+                 that no run is still owned by this schedule. \
+                 `status.history.ownershipScanComplete` is false and every count in \
+                 `status.history` is a floor. Prune terminal runs until the namespace fits \
+                 inside the bound (`docs/kubernetes.md` §9); until then, delete only with \
+                 `--cascade=orphan`.",
+                history.run_count
             ),
         )
     } else if history.run_count > HISTORY_LARGE_RUNS
         || history.estimated_bytes > HISTORY_LARGE_BYTES
         // A CAPPED WALK IS LARGE BY CONSTRUCTION. Reaching here means the walk
-        // was LABEL-SELECTED — an unfinished namespace-wide one is the first
-        // arm — so every object past the bound carries this schedule's UID
+        // was LABEL-SELECTED — an unfinished namespace-wide one is the arm
+        // above — so every object past the bound carries this schedule's UID
         // label, which only a run this controller created can have. The count
         // is a floor and the history really is past the advisory.
         || history.run_count_capped
@@ -765,11 +820,18 @@ async fn inventory(
         // maximum for the duration of the upgrade.
         //
         // Migrating page by page and STOPPING THE WALK once the budget is spent
-        // makes a migrating pass cost one page instead of twenty. The budget is
-        // deliberately equal to [`INVENTORY_PAGE_SIZE`], so the steady state of
-        // a migration is exactly one LIST and at most one page of PATCHes per
-        // reconcile — every object read once over the whole migration rather
-        // than fifty times.
+        // bounds a pass at the page where it runs out of budget rather than at
+        // the page bound, and the budget is deliberately equal to
+        // [`INVENTORY_PAGE_SIZE`] so a pass detaches at most one page's worth.
+        //
+        // IT DOES NOT MAKE THE MIGRATION LINEAR, and this comment used to say
+        // it did (review finding R-1). The walk restarts at page 0 each pass,
+        // and a page whose candidates are already detached does not stop it, so
+        // pass `k` still reads `k + 1` pages: the whole migration is
+        // `P(P+1)/2 + P − 1` LISTs, which is 229 rather than 1 000 for 10 000
+        // legacy runs. A real improvement, about fourfold, and quadratic in the
+        // page count — see [`MAX_MIGRATIONS_PER_PASS`] for the follow-up that
+        // would make it linear.
         let mut page_candidates: Vec<&Backup> = Vec::new();
         for backup in &listed.items {
             let this = backup.name_any();
