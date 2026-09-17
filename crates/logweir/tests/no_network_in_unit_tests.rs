@@ -298,6 +298,31 @@ const ALLOWED: [(&str, &str); 27] = [
     ),
 ];
 
+/// Tokens that stay FORBIDDEN in a file even though the file is allow-listed.
+///
+/// An [`ALLOWED`] entry exempts a whole path, which is right for "this file
+/// dials by design" and wrong for "this file may dial, but only in one way".
+/// A reviewer's mutant (MR-A) showed the gap: swapping the EXPLICIT
+/// `Store::from_url_with(` for the environment-reading `Store::from_url(` in
+/// `crates/logweir/src/check/store.rs` is a D-SEAMS **S5** downgrade — the
+/// destination's approved endpoint, addressing and `allow_http` stop being
+/// what the handle is built with, and every unnamed `AWS_*` variable in the
+/// controller's environment reaches it instead — and the allow-list waved it
+/// through by path.
+///
+/// So an allow-listed path may also carry a NARROWER rule. The reason column
+/// says what the file is allowed to do, and the token column says what it is
+/// still not.
+const ALLOWED_BUT_FORBIDDEN: [(&str, &[&str], &str); 1] = [(
+    "crates/logweir/src/check/store.rs",
+    &["Store::from_url(", "Store::read_only_from_url("],
+    "D2 §4.2's check runner builds destination-backed handles, so it is allow-listed for the \
+     EXPLICIT constructors (D2 W2) — and only those. `from_url` / `read_only_from_url` evaluate \
+     every `AWS_*` variable in the process environment, so a check would take its endpoint, its \
+     addressing and its `allow_http` from whatever the Job inherited instead of from the \
+     approved destination (D-SEAMS S5, defect SEC-ENVHTTP)",
+)];
+
 /// A file whose first lines carry `#![cfg(feature = "e2e")]` is out of the
 /// default set entirely and may dial as much as it likes — that is what the
 /// `e2e` suite is for. Checked as an inner attribute anywhere in the file,
@@ -315,7 +340,14 @@ fn offences(rel_path: &str, contents: &str) -> Vec<&'static str> {
         return Vec::new();
     }
     if ALLOWED.iter().any(|(p, _)| *p == rel_path) {
-        return Vec::new();
+        // Allow-listed by PATH — but a narrower rule may still apply.
+        return ALLOWED_BUT_FORBIDDEN
+            .iter()
+            .filter(|(p, _, _)| *p == rel_path)
+            .flat_map(|(_, tokens, _)| tokens.iter())
+            .filter(|t| contents.contains(**t))
+            .copied()
+            .collect();
     }
     DIAL_TOKENS
         .iter()
@@ -459,6 +491,39 @@ fn a_synthetic_dialling_test_is_flagged() {
         allowed.is_empty(),
         "an allow-listed path must not be flagged"
     );
+}
+
+/// **The narrower rule has teeth.** An allow-listed path that names a
+/// FORBIDDEN token is still flagged.
+///
+/// Driven through the pure classifier with a fabricated body, for the reason
+/// `a_synthetic_dialling_test_is_flagged` records: a guard whose red side is
+/// never exercised is a guard that can stop working silently. This is the
+/// reviewer's mutant MR-A, as a test.
+#[test]
+fn an_allow_listed_path_is_still_flagged_for_a_forbidden_token() {
+    for (path, tokens, why) in ALLOWED_BUT_FORBIDDEN {
+        assert!(
+            ALLOWED.iter().any(|(p, _)| *p == path),
+            "{path} carries a narrower rule and is not allow-listed at all; the narrower rule \
+             would never be consulted"
+        );
+        let full = workspace_root().join(path);
+        let body = std::fs::read_to_string(&full)
+            .unwrap_or_else(|e| panic!("{} is readable: {e}", full.display()));
+        assert!(
+            offences(path, &body).is_empty(),
+            "{path} names a token its narrower rule forbids ({why})"
+        );
+        for token in tokens {
+            let planted = format!("{body}\nfn planted() {{ let _ = {token}); }}\n");
+            assert_eq!(
+                offences(path, &planted),
+                vec![*token],
+                "planting `{token}` in {path} must be flagged although the path is allow-listed"
+            );
+        }
+    }
 }
 
 /// Every allow-list entry must still MATCH something. An entry whose file has

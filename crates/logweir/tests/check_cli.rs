@@ -197,6 +197,10 @@ struct ObjectState {
     get_fault: Option<Fault>,
     list_fault: Option<Fault>,
     put_fault: Option<Fault>,
+    /// The backend answered `NotSupported`/`NotImplemented` to
+    /// `PutMode::Create` and `put_create_only` fell back to HEAD-then-PUT, so
+    /// the write happened WITHOUT the precondition (reviewer question Q1).
+    unconditional_put: bool,
     puts: Vec<(String, Vec<u8>)>,
     prefix: String,
 }
@@ -240,6 +244,13 @@ impl FakeObjects {
         self
     }
 
+    /// A backend with conditional put disabled: the object is written, and
+    /// `create_only_enforced` comes back `false`.
+    fn unconditional_put(self) -> Self {
+        self.state.lock().unwrap().unconditional_put = true;
+        self
+    }
+
     fn puts(&self) -> Vec<(String, Vec<u8>)> {
         self.state.lock().unwrap().puts.clone()
     }
@@ -280,9 +291,10 @@ impl ObjectAccess for FakeObjects {
         }
         s.objects.insert(key.to_string(), bytes.to_vec());
         s.puts.push((key.to_string(), bytes.to_vec()));
+        let create_only_enforced = !s.unconditional_put;
         Ok(PutOutcome {
             version_id: None,
-            create_only_enforced: true,
+            create_only_enforced,
         })
     }
 
@@ -871,16 +883,38 @@ fn the_refusal_key_is_the_controllers_key() {
     );
 }
 
-/// **M1, the structural half.** Steps 1-4 build nothing, and `run` reaches a
-/// kind only through a verified plan.
+/// **M1 and MR-B, the structural half.** Nothing D2 §4.2's startup order can
+/// reach builds a client.
 ///
-/// The scan is over the BODIES of `load` and `runner_bounds` — brace-counted,
-/// because "this function opens nothing" is a claim about a body and a
-/// line-based scan cannot tell which function a line is inside. It forbids the
-/// constructors AND this crate's own wrappers around them, which is the
-/// difference between a guard and a tripwire: the first version listed only
-/// `KafkaInventory::connect(` and a planted `kafka::dial(` walked straight
-/// past it.
+/// # Why this is a MODULE rule and not a two-function rule
+///
+/// The first version brace-counted the bodies of `load` and `runner_bounds`
+/// and forbade the constructors plus this crate's wrappers around them. The
+/// reviewer's mutant **MR-B** walked straight past it: a new helper
+/// `fn prewarm(bytes: &[u8])` in `check/mod.rs` that dials, called from `load`
+/// before `parse_and_verify`, is invisible to a scan of two bodies — and
+/// `check/mod.rs` is not a `no_network_in_unit_tests` construction site
+/// either, because it names `kafka::dial(` and not `KafkaInventory::connect(`.
+/// A plan `ConfigMap` swapped under a running Job would have reached a broker
+/// with the projected SASL password before the digest refused it, which is the
+/// one property the startup order exists for.
+///
+/// That was the same defect one level up as the one the M1 round already fixed
+/// once: a rule about NAMES where a rule about REACHABILITY was needed. So the
+/// rule is now about the module:
+///
+/// * **every function in `check/mod.rs` except [`EXECUTION_FUNCTIONS`] is
+///   forbidden to name a dialling or handle-building token** — so a helper
+///   cannot be added at all, wherever it is called from;
+/// * **`load` may call only functions on a named allowlist**, so a future
+///   helper is a deliberate, reviewable addition to that list rather than an
+///   edit nobody sees;
+/// * and `run` still calls `load` before `execute`, which still takes a
+///   `&Loaded` that only `load` produces.
+///
+/// The two execution functions are exempt because reaching a kind IS their job,
+/// and they are reachable only from a verified plan: `execute_with` takes a
+/// `&Loaded`, and the third clause is what keeps that true.
 #[test]
 fn the_startup_path_builds_no_client() {
     let src = std::fs::read_to_string(repo_root().join("crates/logweir/src/check/mod.rs"))
@@ -902,37 +936,40 @@ fn the_startup_path_builds_no_client() {
         );
     }
 
-    // (a) The two functions that ARE steps 1-4 open nothing, name no
-    //     constructor, and reach no wrapper around one.
+    // (a) NO FUNCTION IN THE MODULE dials or builds a handle, except the two
+    //     whose job is to run a kind from a verified plan.
     for (sig, body) in &bodies {
-        if !(sig.starts_with("pub fn load(") || sig.starts_with("pub fn runner_bounds(")) {
+        if EXECUTION_FUNCTIONS.iter().any(|f| sig.starts_with(f)) {
             continue;
         }
-        for token in [
-            "KafkaInventory::connect(",
-            "RdKafkaReader::connect(",
-            "Store::read_only_with(",
-            "Store::from_url_with(",
-            "AuthConfig::from_spec",
-            "kafka::dial(",
-            "store::open_read(",
-            "store::open_evidence_write(",
-            "kinds::Live",
-            "kinds::run_kind",
-            "run_kind_with(",
-            "execute_with(",
-            "Wiring",
-        ] {
+        for token in CLIENT_TOKENS {
             assert!(
                 !body.contains(token),
-                "`{sig}` holds D2 §4.2's startup order and names `{token}`; no client may be \
-                 built, and no kind may run, before the plan verifies"
+                "`{sig}` is in `check/mod.rs`, which holds D2 §4.2's startup order, and names \
+                 `{token}`. No client may be built and no kind may run outside {EXECUTION_FUNCTIONS:?} \
+                 — a helper that dials is reachable from `load` whatever it is called from \
+                 (reviewer mutant MR-B)"
             );
         }
     }
 
-    // (b) `run` reaches a kind only after `load` returned Ok, and it does so
-    //     through a `&Loaded` that only `load` produces.
+    // (b) `load` CALLS ONLY WHAT IT IS ALLOWED TO. Clause (a) stops a helper in
+    //     this module; this stops one imported from elsewhere in the crate.
+    let (_, load_body) = bodies
+        .iter()
+        .find(|(sig, _)| sig.starts_with("pub fn load("))
+        .unwrap();
+    for call in calls_in(load_body) {
+        assert!(
+            LOAD_MAY_CALL.contains(&call.as_str()),
+            "`load` calls `{call}`, which is not on the startup allowlist. Steps 1-4 open \
+             nothing, so a new callee there is a decision: add it to LOAD_MAY_CALL with a \
+             reason, or move the call after the plan verifies. Allowed: {LOAD_MAY_CALL:?}"
+        );
+    }
+
+    // (c) `run` reaches a kind only after `load` returned Ok, through a
+    //     `&Loaded` that only `load` produces.
     let (_, run_body) = bodies
         .iter()
         .find(|(sig, _)| sig.starts_with("pub fn run("))
@@ -947,6 +984,113 @@ fn the_startup_path_builds_no_client() {
         code.contains("pub fn execute_with<W: Write>(loaded: &Loaded"),
         "a kind must only be reachable from a `&Loaded`, which only `load` produces"
     );
+}
+
+/// The two functions in `check/mod.rs` whose job is to run a kind. Everything
+/// else in that module is startup, and startup opens nothing.
+const EXECUTION_FUNCTIONS: [&str; 2] = ["pub fn execute<", "pub fn execute_with<"];
+
+/// Every token that means "a client or a store handle is built or reached
+/// here" — the constructors AND this crate's own wrappers around them, because
+/// a wrapper is what mutant MR-B used.
+const CLIENT_TOKENS: [&str; 13] = [
+    "KafkaInventory::connect(",
+    "RdKafkaReader::connect(",
+    "Store::read_only_with(",
+    "Store::from_url_with(",
+    "Store::from_url(",
+    "Store::read_only_from_url(",
+    "AuthConfig::from_spec",
+    "kafka::dial(",
+    "store::open_read(",
+    "store::open_evidence_write(",
+    "kinds::Live",
+    "run_kind_with(",
+    "Wiring",
+];
+
+/// The functions `load` — D2 §4.2 steps 1 to 4 — may call.
+///
+/// A LIST, so a new callee there is a reviewable decision rather than an edit
+/// nobody sees. That is the half of the fix for reviewer mutant MR-B that
+/// clause (a) cannot make on its own: (a) stops a dialling helper being ADDED
+/// to `check/mod.rs`, and this stops one being IMPORTED into `load` from
+/// anywhere else in the crate.
+///
+/// Every entry either reads the plan bytes, hashes and parses them, or shapes
+/// a refusal. None of them can open anything. `format!` does not appear
+/// because a macro's `!` ends the identifier run, which is a property of the
+/// tokeniser and not an exemption.
+const LOAD_MAY_CALL: [&str; 16] = [
+    // Result and Option constructors and combinators — control flow, no I/O.
+    "Ok",
+    "Err",
+    "Some",
+    "map_err",
+    // The injected environment reader: a `&dyn Fn(&str) -> Option<String>`, so
+    // a test supplies a map and the shipped binary supplies `std::env::var`.
+    "env",
+    // A refusal value and the strings that shape its message.
+    "Refusal::new",
+    "to_string",
+    "trim",
+    "unwrap_or_default",
+    "is_empty",
+    // `Path::display`, for the unreadable-plan message.
+    "display",
+    // `io::Error::kind`, so the message names the KIND and never adopter bytes.
+    "kind",
+    // Step 3's SHAPE check on the pinned digest (pure, in `logweir-core`).
+    "logweir_core::check_contract::is_sha256_prefixed",
+    // Step 2: the bytes, once.
+    "std::fs::read",
+    // Steps 3 and 4, as ONE call so no caller can do them out of order.
+    "CheckPlan::parse_and_verify",
+    // This module's extra step-4 bounds (the evidence-stream rules).
+    "runner_bounds",
+];
+
+/// Every `name(` called in a function body, as a bare identifier path.
+///
+/// A TOKENISER, not a parser: it takes the identifier run immediately before
+/// each `(` that is not a definition, which is exactly what "which functions
+/// does this body call" needs and is why the allowlist above can be a list of
+/// names. Method calls arrive as their final segment (`foo.trim()` is `trim`),
+/// which is what makes the list readable.
+fn calls_in(body: &str) -> Vec<String> {
+    let bytes: Vec<char> = body.chars().collect();
+    let mut out: Vec<String> = Vec::new();
+    for (i, c) in bytes.iter().enumerate() {
+        if *c != '(' {
+            continue;
+        }
+        let mut j = i;
+        while j > 0 {
+            let p = bytes[j - 1];
+            if p.is_alphanumeric() || p == '_' || p == ':' {
+                j -= 1;
+            } else {
+                break;
+            }
+        }
+        if j == i {
+            continue;
+        }
+        let name: String = bytes[j..i].iter().collect();
+        let name = name.trim_start_matches(':').to_string();
+        if name.is_empty() || name.chars().next().is_some_and(char::is_numeric) {
+            continue;
+        }
+        // Keywords that take a parenthesised expression, and the macros that
+        // are not calls in the sense this asks about.
+        if matches!(name.as_str(), "if" | "match" | "while" | "for" | "return") {
+            continue;
+        }
+        if !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
 }
 
 /// The bodies of every `fn` in a source file, keyed by its signature line.
@@ -3028,12 +3172,17 @@ fn a_check_that_found_problems_still_exits_zero() {
         CheckState::Ready,
         "nothing listens on 127.0.0.1:1, so the archive cannot be listable: {row:?}"
     );
-    assert!(
-        matches!(
-            row.code,
-            CheckCode::EndpointUnreachable | CheckCode::Timeout | CheckCode::StoreErrorUnclassified
-        ),
-        "a closed port is a transport answer, not a permissions one: {row:?}"
+    assert_eq!(
+        row.code,
+        CheckCode::EndpointUnreachable,
+        "a closed port is EndpointUnreachable. It came back `Timeout` until the retry preamble \
+         was stripped (reviewer finding F3), and this row accepted three codes, so nothing \
+         noticed: {row:?}"
+    );
+    assert_eq!(
+        row.state,
+        CheckState::NotReady,
+        "a closed port BLOCKS; `Timeout` would have made it a non-blocking `unknown`"
     );
     assert!(
         !run.stdout.contains("not-a-real-secret"),
@@ -3610,6 +3759,478 @@ mod live {
         assert!(
             !run.everything().contains("minioadmin"),
             "the MinIO credential reached a frame"
+        );
+    }
+}
+
+// ===========================================================================
+// 14. Review fixes (2026-09-17)
+// ===========================================================================
+
+/// **F1 / reviewer probe R3.** TLS without SASL is REFUSED, not downgraded.
+///
+/// `AuthSpec::Plaintext` has no TLS field, so a mapping that answered it for
+/// `authMode: plaintext` would DISCARD `ConnectionPlan::tls` and dial a
+/// listener the operator believes is encrypted in the clear. `probe.rs` refuses
+/// exactly this shape ("this is the runner's half") and
+/// `weirkeeper::connection` refuses it before any Job exists; the check runner
+/// is the fifth dialling site and must refuse it too (D-SEAMS S5).
+#[test]
+fn plaintext_with_tls_is_refused_and_never_dialled_in_the_clear() {
+    let mut plan = connection();
+    plan.tls = Some(true);
+    let err = logweir::check::kafka::auth_spec(&plan)
+        .expect_err("TLS without SASL is refused, not downgraded");
+    assert_eq!(err.code, CheckCode::AuthenticationFailed);
+    assert!(
+        err.message.contains("tls: true") && err.message.contains("refused"),
+        "the refusal must name the shape it refused: {}",
+        err.message
+    );
+    // `auth_config` refuses at the same point, so no `AuthConfig` is ever
+    // built for the shape.
+    assert!(logweir::check::kafka::auth_config(&plan).is_err());
+
+    // And the WHOLE runner reports it as a connection row rather than dialling.
+    let mut inv = inventory_plan(100, 1 << 20);
+    if let CheckRequest::TopicInventory(r) = &mut inv.request {
+        r.connection = plan.clone();
+    }
+    let m = mount(&inv);
+    let probe = FakeProbe::new();
+    // A wiring whose broker WOULD succeed: the refusal has to come from the
+    // mapping, not from the fake.
+    let run = drive(&m, &FakeWiring::default().with_probe(probe));
+    assert_eq!(run.code, ExitCode::Ok);
+    // The fake `Wiring` does not call `auth_spec`, so this row asserts the
+    // SHIPPED wiring's own refusal instead.
+    let live_err = kinds::Live
+        .broker(&plan, std::time::Duration::from_secs(5))
+        .err()
+        .expect("the shipped wiring refuses the shape before it builds a client");
+    assert_eq!(live_err.code, CheckCode::AuthenticationFailed);
+
+    // The three legal shapes still map.
+    assert!(logweir::check::kafka::auth_spec(&connection()).is_ok());
+    let mut clear = connection();
+    clear.tls = None;
+    assert!(logweir::check::kafka::auth_spec(&clear).is_ok());
+    let scram = ConnectionPlan {
+        auth_mode: "scramSha512".to_string(),
+        username: Some("backup".to_string()),
+        tls: Some(true),
+        ..connection()
+    };
+    assert!(logweir::check::kafka::auth_spec(&scram).is_ok());
+}
+
+/// **F1, the other half.** The check client carries NO private rdkafka
+/// configuration: `security.protocol`, `sasl.*`, the hostname pin and the
+/// trust anchor all come from `RdKafkaReader::client_config`, the ONE
+/// implementation the drill reader and the check share.
+///
+/// Asserted over `logweir-kafka`'s source, because a private copy there would
+/// be invisible from this crate and is exactly how the two came to disagree
+/// once already (a check against a private-CA broker failing to verify the CA
+/// while a drill against the same broker succeeded).
+#[test]
+fn the_check_client_shares_the_readers_client_config() {
+    let src = std::fs::read_to_string(repo_root().join("crates/logweir-kafka/src/inventory.rs"))
+        .expect("the inventory module is readable");
+    assert!(
+        src.contains("crate::rdkafka_reader::RdKafkaReader::client_config("),
+        "`KafkaInventory` no longer derives its client configuration from the reader's; a \
+         second copy is a second place the hostname pin and the trust anchor can drift"
+    );
+    // The ONE thing overridden afterwards, and it is not a control.
+    assert!(src.contains("cfg.set(\"client.id\", CHECK_CLIENT_ID);"));
+    // ...and this crate builds no `ClientConfig` of its own.
+    for (path, code) in check_sources() {
+        assert!(
+            !code.contains("ClientConfig"),
+            "{path} builds an rdkafka configuration; the check client must go through \
+             `RdKafkaReader::client_config`"
+        );
+    }
+}
+
+/// **F2 / reviewer probes R1 and R2.** The `details` stream is redacted like
+/// every other stream.
+///
+/// The M4 row could not reach this: its restore case forces a
+/// `PlanHashMismatch`, so `archive_checks` and `target_checks` never run. These
+/// two cases reach `archive.segments` and `target.mappedTopics` with a planted
+/// key in a segment key and in a mapped topic name, and assert the DECODED
+/// details stream — which the controller writes verbatim into an immutable
+/// `<job>-details` ConfigMap — carries neither.
+#[test]
+fn the_details_stream_is_redacted_like_every_other_stream() {
+    // R1: a mapped target topic that exists, whose name carries the key.
+    let poisoned = format!("o-{PLANTED_KEY_ID}");
+    let yaml = restore_yaml(&ms_to_rfc3339(INSIDE_MS), &[poisoned.as_str()], "scratch");
+    let m = mount(&restore_plan(&yaml, None));
+    let mut manifest = manifest_json();
+    manifest["topics"][0]["name"] = serde_json::Value::String(poisoned.clone());
+    let probe = FakeProbe::new()
+        .with_presence("logweir.scratch", TopicPresence::Present { partitions: 1 })
+        .with_presence(
+            &format!("restore-{poisoned}"),
+            TopicPresence::Present { partitions: 6 },
+        );
+    let run = drive(&m, &restore_wiring(&yaml, &manifest, probe));
+    assert_eq!(
+        run.row(CheckId::TargetMappedTopics).code,
+        CheckCode::MappedTopicExists,
+        "the row this case exists to reach did not run"
+    );
+    let details = String::from_utf8(
+        run.relay
+            .as_ref()
+            .unwrap()
+            .stream(Stream::Details)
+            .expect("a details stream")
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        details.contains("mappedTopicExists"),
+        "the details line was not written at all: {details}"
+    );
+    assert!(
+        !run.everything().contains(PLANTED_KEY_ID),
+        "`{PLANTED_KEY_ID}` reached the details stream:\n{details}"
+    );
+
+    // R2: a MISSING segment whose key carries the key.
+    let yaml = restore_yaml(&ms_to_rfc3339(INSIDE_MS), &["orders"], "scratch");
+    let m = mount(&restore_plan(&yaml, None));
+    let mut manifest = manifest_json();
+    manifest["topics"][0]["partitions"][0]["segments"][1]["key"] = serde_json::Value::String(
+        format!("{BACKUP_ID}/topics/orders/partition=0/segment-{PLANTED_KEY_ID}.bin"),
+    );
+    let partial = FakeObjects::new()
+        .with_prefix("kafka-backups")
+        .with_object(MANIFEST_KEY, &serde_json::to_vec(&manifest).unwrap())
+        .with_object(
+            &format!("kafka-backups/{BACKUP_ID}/topics/orders/partition=0/segment-0.bin"),
+            b"segment",
+        );
+    let run = drive(
+        &m,
+        &FakeWiring::default()
+            .with_file(PLAN_FILE, yaml.as_bytes())
+            .with_probe(FakeProbe::new())
+            .with_role(DestinationRole::ArchiveRead, partial),
+    );
+    assert_eq!(
+        run.row(CheckId::ArchiveSegments).code,
+        CheckCode::SegmentMissing,
+        "the row this case exists to reach did not run"
+    );
+    let details = String::from_utf8(
+        run.relay
+            .as_ref()
+            .unwrap()
+            .stream(Stream::Details)
+            .expect("a details stream")
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(details.contains("missingSegment"), "{details}");
+    assert!(
+        !run.everything().contains(PLANTED_KEY_ID),
+        "`{PLANTED_KEY_ID}` reached the details stream:\n{details}"
+    );
+}
+
+/// The one verbatim field is still ONE. The code, `docs/stability.md` and the
+/// report all say so; this asserts it over every stream the runner writes.
+#[test]
+fn only_the_evidence_key_is_written_verbatim() {
+    let ordinary = [
+        ("logweir/backups/20260916/receipt.json", true),
+        ("restore-orders", false),
+    ];
+    for (value, _) in ordinary {
+        assert_eq!(
+            logweir_core::check_contract::redact(value),
+            value,
+            "`{value}` is not credential-shaped and must survive redaction"
+        );
+    }
+    // Every producer of a details line goes through the ONE assembly point.
+    let (_, restore) = check_sources()
+        .into_iter()
+        .find(|(p, _)| p.ends_with("kinds/restore.rs"))
+        .unwrap();
+    assert_eq!(
+        restore.matches("details_stream(").count(),
+        2,
+        "the details stream has exactly one assembly point and one call site"
+    );
+    let bytes = kinds::restore::details_stream(&[serde_json::json!({
+        "missingSegment": format!("k/{PLANTED_KEY_ID}")
+    })
+    .to_string()]);
+    assert!(!String::from_utf8_lossy(&bytes).contains(PLANTED_KEY_ID));
+}
+
+/// The path-aware redactor keeps every SHAPE rule and loses only the long-run
+/// one at a `/` boundary — the trade-off its header states.
+#[test]
+fn a_planted_key_in_a_key_path_is_still_redacted() {
+    let cases = [
+        format!("kafka-backups/{PLANTED_KEY_ID}/manifest.json"),
+        format!("kafka-backups/x/segment-{PLANTED_KEY_ID}.bin"),
+        format!("topics/{PLANTED_SECRET}"),
+        PLANTED_USERINFO.to_string(),
+    ];
+    for value in &cases {
+        let out = logweir::check::redact_path(value);
+        for secret in [
+            PLANTED_KEY_ID,
+            "hunter2",
+            "ZZfakefakefakefakefakefakefakefake01",
+        ] {
+            assert!(
+                !out.contains(secret),
+                "`{secret}` survived `redact_path` in `{value}` -> `{out}`"
+            );
+        }
+    }
+    // ...and an ORDINARY archive key survives whole, which is the point: the
+    // whole-string form eats it because `/`, `-`, `=` and the digits are all
+    // in the base64 alphabet.
+    let ordinary = "kafka-backups/20260915T030000Z/topics/orders/partition=0/segment-1.bin";
+    assert_eq!(logweir::check::redact_path(ordinary), ordinary);
+    assert!(
+        logweir_core::check_contract::redact(ordinary).starts_with("[redacted]"),
+        "if the whole-string form ever stops eating an ordinary archive key, `redact_path` has \
+         no reason to exist: {}",
+        logweir_core::check_contract::redact(ordinary)
+    );
+}
+
+/// `redact_path` splits exactly ONE rule out of the set, by name, and the name
+/// still matches exactly one rule.
+///
+/// A rename in `logweir-core` would otherwise silently make the per-segment
+/// clause apply nothing (every rule filtered into the "shape" half) — which
+/// would be SAFE but would restore the F7 destruction — or apply everything,
+/// which would restore the userinfo hole.
+#[test]
+fn the_long_run_rule_is_the_only_one_applied_per_segment() {
+    let named: Vec<&str> = logweir_core::check_contract::redaction_rules()
+        .iter()
+        .filter(|r| r.name == logweir::check::LONG_RUN_RULE)
+        .map(|r| r.name)
+        .collect();
+    assert_eq!(
+        named,
+        vec![logweir::check::LONG_RUN_RULE],
+        "`{}` no longer names exactly one redaction rule; the rules are {:?}",
+        logweir::check::LONG_RUN_RULE,
+        logweir_core::check_contract::redaction_rules()
+            .iter()
+            .map(|r| r.name)
+            .collect::<Vec<_>>()
+    );
+    // And the shape half really is every other rule.
+    assert_eq!(
+        logweir_core::check_contract::redaction_rules().len(),
+        6,
+        "a rule was added or removed; decide which half it belongs in"
+    );
+}
+
+/// **F3 / reviewer probe R5.** A closed port is `EndpointUnreachable`, not
+/// `Timeout`.
+///
+/// `options_for` sets `retry_timeout`, object_store renders it into the error
+/// text, and the shared classifier tests its TIMEOUT tokens before its
+/// UNREACHABLE ones — so every transport failure under a check classified as
+/// `Timeout`, which is `unknown` rather than blocking `notReady` and carries
+/// the remedy "raise the check timeout" instead of "check the URL and port".
+#[test]
+fn a_transport_failure_under_a_retrying_check_is_unreachable_not_a_timeout() {
+    // The EXACT text object_store produced in the reviewer's live probe.
+    let real = "Generic S3 error: Error performing GET https://minio.example:9000/lw-archive \
+                in 1.0s, after 2 retries, max_retries: 2, retry_timeout: 5s - HTTP error: error \
+                sending request for url (https://minio.example:9000/lw-archive)";
+    assert_eq!(
+        logweir::check::store::classify(&StoreError::Io(real.to_string())),
+        CheckCode::EndpointUnreachable,
+        "the retry preamble must not shadow the transport symptom"
+    );
+    // ...and the whole runner says so, with the blocking state and the remedy
+    // that sends an operator to the port rather than to the clock.
+    let m = mount(&access_plan(vec![DestinationRole::ArchiveRead], false));
+    let run = drive(
+        &m,
+        &FakeWiring::default().with_role(
+            DestinationRole::ArchiveRead,
+            FakeObjects::new().failing_list(Fault::Io(real.to_string())),
+        ),
+    );
+    let row = run.row(CheckId::DestinationArchiveListable);
+    assert_eq!(row.code, CheckCode::EndpointUnreachable);
+    assert_eq!(row.state, CheckState::NotReady, "a closed port blocks");
+    assert!(row.remedy.contains("egress"), "{}", row.remedy);
+}
+
+/// A GENUINE timeout survives the strip. The three patterns removed are
+/// object_store's retry bookkeeping and nothing else.
+#[test]
+fn a_genuine_timeout_survives_the_strip() {
+    for text in [
+        "Generic S3 error: after 2 retries, max_retries: 2, retry_timeout: 5s - operation timed \
+         out",
+        "Generic S3 error: request timed out after 2 retries, max_retries: 2",
+        "Generic S3 error: the deadline has elapsed, max_retries: 2, retry_timeout: 30s",
+    ] {
+        assert_eq!(
+            logweir::check::store::classify(&StoreError::Io(text.to_string())),
+            CheckCode::Timeout,
+            "a real timeout must survive: {text}"
+        );
+    }
+    // A sentence that merely begins "after " is left alone, and a message with
+    // no retry bookkeeping is unchanged.
+    let plain = "Generic S3 error: <Error><Code>AccessDenied</Code></Error> after 3 attempts";
+    assert_eq!(logweir::check::store::strip_retry_noise(plain), plain);
+    assert_eq!(
+        logweir::check::store::classify(&StoreError::Io(plain.to_string())),
+        CheckCode::AccessDenied
+    );
+}
+
+/// **F5 / reviewer probe R4.** An `evidenceFetch` object may name only an
+/// evidence stream.
+///
+/// An object claiming `result` or `details` had its bytes printed to that
+/// stream and then the runner's own document printed to it again; the decoder
+/// answered `DuplicatePart` and the controller reported `ResultUnreadable`
+/// with no way to say why — the outcome the duplicate-stream refusal was
+/// written to prevent, reached from the other side.
+#[test]
+fn an_evidence_object_may_not_name_a_stream_the_runner_writes() {
+    for stream in [Stream::Result, Stream::Details] {
+        let plan = plan_of(CheckRequest::EvidenceFetch(EvidenceFetchRequest {
+            destination: destination(),
+            objects: vec![EvidenceObjectRequest {
+                role: DestinationRole::EvidenceRead,
+                key: "logweir/backups/20260916/receipt.json".to_string(),
+                max_bytes: 1024,
+                stream,
+            }],
+        }));
+        let m = mount(&plan);
+        let env = good_env(&m.sha256);
+        let err = load_with(&m.bytes, &as_pairs(&env), 1).expect_err(
+            "an evidenceFetch object naming a stream the runner writes must be refused",
+        );
+        assert!(
+            err.detail.contains(stream.as_str()) && err.detail.contains("runner writes itself"),
+            "the refusal must name the stream and why: {}",
+            err.detail
+        );
+    }
+    // The two legal streams still pass.
+    for stream in [Stream::EvidencePayload, Stream::EvidenceSidecar] {
+        let plan = plan_of(CheckRequest::EvidenceFetch(EvidenceFetchRequest {
+            destination: destination(),
+            objects: vec![EvidenceObjectRequest {
+                role: DestinationRole::EvidenceRead,
+                key: "logweir/backups/20260916/receipt.json".to_string(),
+                max_bytes: 1024,
+                stream,
+            }],
+        }));
+        let m = mount(&plan);
+        let env = good_env(&m.sha256);
+        assert!(load_with(&m.bytes, &as_pairs(&env), 1).is_ok());
+    }
+}
+
+/// **Q1.** A marker put reports whether `PutMode::Create` was really enforced.
+///
+/// `put_create_only` falls back to HEAD-then-PUT when a backend answers
+/// `NotSupported` / `NotImplemented` to a conditional put — a real,
+/// non-conditional write with a TOCTOU window. The grant is proved either way,
+/// so the code is the same; the difference travels as a fact, because D2 §4.2
+/// spells the guarantee "create-only" and a row claiming it unqualified would
+/// be claiming a property the backend declined to provide.
+#[test]
+fn a_marker_row_says_whether_create_only_was_enforced() {
+    let m = mount(&access_plan(vec![DestinationRole::EvidenceWrite], true));
+
+    let run = drive(&m, &FakeWiring::default().with_writer(FakeObjects::new()));
+    let row = run.row(CheckId::DestinationEvidenceWritable);
+    assert_eq!(row.code, CheckCode::MarkerWritten);
+    assert_eq!(
+        row.facts.get("createOnlyEnforced").map(String::as_str),
+        Some("true")
+    );
+
+    let run = drive(
+        &m,
+        &FakeWiring::default().with_writer(FakeObjects::new().unconditional_put()),
+    );
+    let row = run.row(CheckId::DestinationEvidenceWritable);
+    assert_eq!(
+        row.code,
+        CheckCode::MarkerWritten,
+        "the grant is proved either way"
+    );
+    assert_eq!(
+        row.facts.get("createOnlyEnforced").map(String::as_str),
+        Some("false"),
+        "a best-effort write must not be reported as an unqualified create-only one"
+    );
+}
+
+/// **F7.** The two readiness-marker messages name the key FAMILY, which
+/// survives redaction, rather than the whole key, which does not.
+#[test]
+fn the_marker_messages_name_a_family_that_survives_redaction() {
+    let family = logweir::check::store::MARKER_PREFIX;
+    assert_eq!(
+        logweir_core::check_contract::redact(family),
+        family,
+        "the key family must survive redaction or the message says nothing"
+    );
+    // The whole key does NOT, which is the finding: `/`, `-` and a UUID's hex
+    // are all in the base64 alphabet, so the long-run rule eats it.
+    let whole = logweir::check::store::absent_probe_key(DEST_UID);
+    assert_ne!(logweir_core::check_contract::redact(&whole), whole);
+
+    let m = mount(&access_plan(
+        vec![
+            DestinationRole::EvidenceRead,
+            DestinationRole::EvidenceWrite,
+        ],
+        true,
+    ));
+    let run = drive(
+        &m,
+        &FakeWiring::default()
+            .with_role(
+                DestinationRole::EvidenceRead,
+                FakeObjects::new().failing_get(Fault::Io(
+                    "Generic S3 error: <Error><Code>AccessDenied</Code></Error>".to_string(),
+                )),
+            )
+            .with_writer(FakeObjects::new()),
+    );
+    for id in [
+        CheckId::DestinationEvidenceReadable,
+        CheckId::DestinationEvidenceWritable,
+    ] {
+        let row = run.row(id);
+        assert!(
+            row.message.contains(family) && !row.message.contains("[redacted]"),
+            "`{id}`'s message lost its diagnostic to redaction: {}",
+            row.message
         );
     }
 }
