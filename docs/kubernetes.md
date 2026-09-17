@@ -421,6 +421,137 @@ digest. Editing a destination afterwards — rotating a credential, rotating a C
 cannot change a run that already exists, and a destination deleted and recreated
 under the same name is a different input.
 
+### 7c. A `TopicDiscovery` is one observation, and `unknown` is its honest default
+
+**PARTLY IN THIS BUILD.** The reconciler described here exists and is tested: it
+resolves the connection, renders the plan, creates the check Job, stores the
+chunks and writes the status. What it needs at the other end — the runner's
+`logweir check run` subcommand, which prints the frames it reads — is a separate
+change that has not landed. Against a runner image without it, a discovery ends
+`Failed` with `RunnerContractUnsupported` or `ResultUnreadable`; nothing is
+stored and nothing is claimed. No end-to-end run against a real broker has been
+performed for this section.
+
+A `TopicDiscovery` is a **request**, not a cache. `spec.request` is immutable, so
+one object is one observation with one recorded instant, and refreshing means
+creating another object. That is deliberate: the previous result stays readable
+and correctly labelled while the new one runs, and nothing can be quietly
+rewritten under a reader who is paging through it.
+
+The observation runs as an isolated Job in the object's own namespace, with the
+same credential projection an execution pod gets and **no Kubernetes token**. The
+controller never dials a broker itself and never reads a Secret.
+
+**The phases.**
+
+| `status.phase` | What it means |
+|---|---|
+| *(absent)* / `Pending` | The controller has not looked at it yet. It writes no `Pending` of its own. |
+| `Queued` | Over an installation concurrency ceiling (`reason: ConcurrencyLimited`). Retried every ten seconds; nothing was created. |
+| `Running` | The check Job exists and has not finished. `reason` carries what the pod is waiting for. |
+| `Succeeded` | A verified relay was decoded and its chunks committed. |
+| `Failed` | Terminal, with a closed code in `reason` — `ConnectionNotFound`, `ConnectionInvalid`, `DeadlineExceeded`, `ResultUnreadable`, `CheckPlanConflict`, `ResultStorageConflict`, `Stalled`, or a pod-waiting code such as `CredentialSecretNotFound`. |
+| `Cancelled` | `spec.cancelRequested` reached a non-terminal object. The Job's deadline was collapsed and **no chunks were written**. |
+
+`ConnectionNotFound` and `ConnectionInvalid` are terminal rather than retried,
+because `spec.request` is immutable: the object can never name a different
+connection, so a later pass would ask the same question. Create the
+`KafkaCluster`, then create a new `TopicDiscovery`.
+
+**`unknown` is not a degraded answer, it is the true one.** An all-topics Kafka
+metadata request silently omits every topic the principal may not `DESCRIBE`, and
+the broker does not say that it did. A completely clean listing therefore proves
+nothing about completeness, and `status.result.visibility.state` says so:
+
+| State | What was observed |
+|---|---|
+| `unknown` | The listing succeeded and nothing contradicted it. **This is what a healthy run looks like.** |
+| `limited` | An authorization failure was *observed* — a listing entry carrying `TopicAuthorizationFailed`, or an expected topic the broker refused to describe. |
+| `attestedComplete` | An administrator attestation in the installation policy `ConfigMap` matched this namespace, this `KafkaCluster`, the cluster id the broker actually answered with and the principal Logweir presented, and had not expired, and the inventory was not truncated. |
+
+`visibility.basis` lists why, in a closed vocabulary, including the near misses:
+`attestationPrincipalMismatch` and `attestationClusterIdMismatch` are recorded
+rather than dropped, because an attestation drifting onto the wrong credential is
+exactly the failure that would make `attestedComplete` meaningless.
+
+**Logweir does not verify an attestation.** Only a principal who can write
+`weirkeeper-policy` in the release namespace can create one — a chart or cluster
+administrator, never a namespace operator — and what the status records is the
+attestation's id. Who made it, when, and the statement itself stay in the policy
+`ConfigMap`. Render it as "attested by *X* at *T*; not verified by Logweir".
+
+**Empty, failed, stale and permission-limited are four different things**, which
+is the point of the kind:
+
+* **empty** — `phase: Succeeded` with `result.counts.returned: 0` and an empty
+  `result.chunks`. A fact about what this principal can see, and not an error.
+* **failed** — `phase: Failed` plus `reason`.
+* **stale** — `status.freshUntil` is `observedAt` plus the policy's
+  `discovery.freshSeconds` (900 s by default). Past it, the inventory is old, not
+  wrong. Two further staleness rules — the connection binding changed, or a newer
+  success supersedes this one — are the API's, because both compare this object
+  against something that changes after it is written. `status.binding` records
+  the connection UID, generation, principal, auth mode and bootstrap digest the
+  observation was taken against, and is written once and never refreshed, so that
+  comparison has something to compare.
+* **permission-limited** — `visibility.state: limited`.
+
+**`observedAt` is the runner container's own `finishedAt`**, not the instant a
+reconcile noticed. That is the same rule the `KafkaCluster` probe uses, and it is
+what makes a re-read of the same Job produce a byte-identical status patch
+instead of a hot reconcile loop.
+
+**The topic names are not in the status.** An inventory is unbounded and a status
+is not a store. The names live in immutable `ConfigMap`s owned by the
+`TopicDiscovery`, at most 2,500 entries and 768 KiB each, one TSV line per topic
+(`name`, partitions, flags). `status.result.chunks` carries each chunk's name,
+digest, count and first and last topic name — enough to page and to skip whole
+chunks on a prefix search — and `status.result.topicsSha256` is the digest of the
+whole canonical inventory, computed by the controller over the frames it verified
+and never copied from the runner's own claim. A reader that fetches the chunks
+and hashes them gets the value the status published.
+
+Reading those chunks with `kubectl` needs `get` on `configmaps`, which no human
+Logweir role grants. `kubectl` users get the summary in the status; browsing the
+inventory is the console API's job.
+
+**Internal topics are excluded by default** and counted in
+`counts.internalExcluded`, so you can see that they exist without them filling the
+list. The rule is Kafka's own reserved-name convention — a name starting with
+`__` — and nothing else is guessed: `_schemas` and `_confluent-*` are
+configurable names, and a wrong "this is internal" would silently drop a user's
+data from a selection. `spec.request.includeInternal: true` returns them, flagged.
+
+**Cancel, TTL and cleanup.** `spec.cancelRequested` may move `false` → `true`
+and never back. Cancelling collapses the Job's `activeDeadlineSeconds` to 1 —
+the controller holds `delete` on nothing — after verifying that the Job's
+controller owner is this object, so a Job that merely shares the name is never
+touched. A finished Job gets `ttlSecondsAfterFinished: 600`, patched **only
+after** the status write returned 200: the relay lives on the pod, and the TTL
+controller removes a Job and its pods together. The plan and chunk `ConfigMap`s
+carry an owner reference with `blockOwnerDeletion`, so deleting the
+`TopicDiscovery` removes everything it owns by cascade.
+
+**Retention is not yet automatic.** D2 §5.8's 24-hour retention and keep-last-five
+per connection are implemented as a pure rule and are *not wired*: deleting the
+custom resource needs a `delete` verb the `weirkeeper` ClusterRole grants on
+nothing today. Until that grant lands, terminal `TopicDiscovery` objects
+accumulate and are deleted by an operator or by namespace cleanup.
+
+**RBAC.** This kind adds exactly two rules to the `weirkeeper` ClusterRole:
+`list`/`watch` on `topicdiscoveries` (the controller's watch) and `patch` on
+`topicdiscoveries/status`. No `get`: the reconciler never re-reads a discovery.
+No verb on `secrets`, and no `delete` on anything.
+
+**Upgrade and rollback.** The kind is additive: nothing existing references it,
+and an installation that never creates one behaves exactly as before. An older
+controller running against the newer CRDs simply does not reconcile
+`TopicDiscovery` objects, which then sit with no status — visibly pending rather
+than silently wrong. Rolling the CRD back deletes any `TopicDiscovery` objects
+and, by owner cascade, their result `ConfigMap`s and check Jobs; no `Backup`,
+`Restore` or archive is affected, because a discovery result is never an
+execution input.
+
 ## 8. The approval flow
 
 An `Approval` object that exists is **not** an approval. An `Approval` whose
