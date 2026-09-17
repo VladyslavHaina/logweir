@@ -1133,6 +1133,21 @@ fn the_discovery_job_is_the_check_job_shape_named_after_the_backup() {
         json!("sha256:abc")
     );
     assert_eq!(value["spec"]["activeDeadlineSeconds"], json!(300));
+
+    // AND THE CEILING BINDS WHERE IT ACTUALLY DIFFERS FROM THE FRAMEWORK'S OWN
+    // BUDGET-PLUS-MARGIN. For a `Backup` whose own deadline is under the
+    // ninety-second margin, `discovery_budget` floors the plan at one second
+    // and `min(300, spec.deadlineSeconds)` is 60 — while the framework would
+    // give the Job 1 + 90. D1 §7.2 R2 says 60, so the Job says 60.
+    let (short_job, short_plan) = sel::discovery_budget(60);
+    let mut short = spec.clone();
+    short.timeout_seconds = i64::from(short_plan);
+    let short = sel::build_discovery_job(&short, &discovery_job(UID), short_job, "sha256:abc");
+    assert_eq!(
+        serde_json::to_value(&short).expect("serialisable")["spec"]["activeDeadlineSeconds"],
+        json!(60),
+        "the run's ceiling binds, not the framework's plan-plus-margin"
+    );
     assert!(
         value["spec"]["ttlSecondsAfterFinished"].is_null(),
         "no TTL at creation: the relay lives on the pod"
