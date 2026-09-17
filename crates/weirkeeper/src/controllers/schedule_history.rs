@@ -88,7 +88,8 @@ pub const INVENTORY_PAGE_SIZE: u32 = 500;
 /// minute and times out.
 pub const MAX_INVENTORY_PAGES: usize = 20;
 
-/// How many migration PATCHes one pass sends.
+/// How many migration PATCHes one pass sends — **one page's worth, and the
+/// walk stops when they are spent**.
 ///
 /// A CAP PLUS A PROMPT RE-INVENTORY, not one unbounded burst. An upgrade over a
 /// schedule with 35 040 legacy runs (D1 §6.6's worst row) would otherwise send
@@ -96,7 +97,15 @@ pub const MAX_INVENTORY_PAGES: usize = 20;
 /// evaluation for minutes. [`inventory_due`] returns `true` while
 /// `legacyMigratableRuns` is positive, so the next pass — 30 s later, the
 /// scheduler's requeue — continues from where observation says it got to.
-pub const MAX_MIGRATIONS_PER_PASS: usize = 200;
+///
+/// IT EQUALS [`INVENTORY_PAGE_SIZE`] ON PURPOSE (finding M-1). The patches used
+/// to be sent after the whole walk, so a migrating pass paid for a FULL
+/// paginated namespace-wide list every thirty seconds and the migration window
+/// re-incurred exactly the read cost D1 §6.7 exists to remove — about 500 000
+/// object reads for 10 000 legacy runs. Migrating page by page and stopping the
+/// walk once the budget is spent makes a migrating pass cost ONE page, so the
+/// whole migration reads each object about once instead of about fifty times.
+pub const MAX_MIGRATIONS_PER_PASS: usize = INVENTORY_PAGE_SIZE as usize;
 
 /// D1 §6.6: above this many retained runs the condition is `HistoryLarge`.
 pub const HISTORY_LARGE_RUNS: i64 = 2_000;
@@ -205,13 +214,27 @@ pub fn inventory_due(stored: Option<&BackupScheduleStatus>, now: DateTime<Utc>) 
 /// the ones that do not — so until the condition has said `HistoryRetained=True`
 /// the list must be namespace-wide, and after it the label selector is what
 /// makes the read O(this schedule) instead of O(namespace).
+///
+/// # AND `True` ALONE IS NOT ENOUGH, BECAUSE IT LATCHES
+///
+/// Narrowing the search is irreversible in practice: a selector that excludes
+/// the objects the migration is looking for guarantees the next walk finds
+/// none, which keeps the condition `True`, which keeps the selector on. So the
+/// gate is not "the last pass concluded `True`" but "the last pass was ENTITLED
+/// to conclude it" — [`ScheduleHistory::ownership_scan_complete`], which a
+/// capped namespace-wide walk sets to `false`. Both halves are required:
+/// dropping either re-opens the hole (each has its own mutant).
 #[must_use]
 pub fn may_use_label_selector(stored: Option<&BackupScheduleStatus>) -> bool {
-    current_condition(
+    let retained = current_condition(
         stored.and_then(|s| s.conditions.as_ref()),
         CONDITION_HISTORY_RETAINED,
     )
-    .is_some_and(|c| c.status == "True")
+    .is_some_and(|c| c.status == "True");
+    let complete = stored
+        .and_then(|s| s.history.as_ref())
+        .is_some_and(|h| h.ownership_scan_complete);
+    retained && complete
 }
 
 /// D1 §6.6's per-run etcd estimate: the serialized object, the plan
@@ -242,9 +265,13 @@ pub fn estimated_bytes(backup: &Backup) -> i64 {
 /// THE WHOLE TRIPLE, NOT THE UID ALONE. `apiVersion`, `kind`, `name` and `uid`
 /// all have to match, because removing an entry on a UID match alone would
 /// strip an ownerReference some other operator wrote that happened to carry the
-/// same string — and because `is_owned_by_schedule` recognises membership by
-/// exactly this triple, so anything looser would detach an object that was
-/// never a member.
+/// same string; and because this is the same predicate
+/// [`crate::identity::is_run_of_schedule`] applies as its membership rule 2, so
+/// anything looser would detach an object that was never a member. It is now
+/// the ONE implementation of it in this crate: `backup_schedule.rs`'s
+/// `is_owned_by_schedule` was a second spelling with no callers left after the
+/// ownerReference came off new runs, and two spellings of one rule is how they
+/// come to disagree (review finding L-3).
 #[must_use]
 pub fn owner_entry_index(
     backup: &Backup,
@@ -265,6 +292,16 @@ pub fn owner_entry_index(
         })
 }
 
+/// The `status.history.migrationBlocked[].reason` a `403` is recorded under.
+pub const BLOCKED_API_FORBIDDEN: &str = "ApiForbidden";
+
+/// The `status.history.migrationBlocked[].reason` a `422` is recorded under.
+pub const BLOCKED_API_INVALID: &str = "ApiInvalid";
+
+/// The `status.history.migrationBlocked[].reason` a capped inventory is
+/// recorded under. Not about one object: its `name` is the empty string.
+pub const BLOCKED_INVENTORY_CAPPED: &str = "InventoryCapped";
+
 /// Why one `Backup` may not be migrated even though it carries the entry.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MigrationRefusal {
@@ -282,8 +319,37 @@ impl MigrationRefusal {
     pub fn as_str(self) -> &'static str {
         match self {
             Self::NotTerminal => "NotTerminal",
-            Self::NoScheduleReference => "NoScheduleReference",
+            Self::NoScheduleReference => BLOCKED_NO_SCHEDULE_REFERENCE,
         }
+    }
+}
+
+/// The `status.history.migrationBlocked[].reason` for the one refusal that is
+/// this controller's own and that **never clears**.
+pub const BLOCKED_NO_SCHEDULE_REFERENCE: &str = "NoScheduleReference";
+
+/// Whether a recorded block reason is one a later pass could clear by itself.
+///
+/// # Two shapes of "blocked", and conflating them stalls an upgrade
+///
+/// `ApiForbidden` and `ApiInvalid` are the API server saying *not now*: fix the
+/// RoleBinding, or fix the object a newer schema rejects, and the next hourly
+/// inventory lands the same patch. `NoScheduleReference` is this controller
+/// saying *not ever* — `Backup.spec` carries `self == oldSelf`, so the
+/// `scheduleRef` that would make the detach safe cannot be added to an existing
+/// object by anyone. D1 §6.9 tells an operator to wait for
+/// `HistoryRetained=True` before deleting a schedule without
+/// `--cascade=orphan`; on a schedule holding one such run that wait never ends,
+/// so the condition has to say so and name the two things that DO work.
+#[must_use]
+pub fn blocked_reason_clears_itself(reason: &str) -> bool {
+    match reason {
+        BLOCKED_API_FORBIDDEN | BLOCKED_API_INVALID => true,
+        BLOCKED_NO_SCHEDULE_REFERENCE | BLOCKED_INVENTORY_CAPPED => false,
+        // AN UNKNOWN REASON IS TREATED AS TERMINAL, which is the safe
+        // direction: the message then tells the operator to use
+        // `--cascade=orphan`, which is correct whatever the reason was.
+        _ => false,
     }
 }
 
@@ -403,19 +469,73 @@ pub fn history_condition(
     now: DateTime<Utc>,
 ) -> Condition {
     let blocked = history.migration_blocked.as_deref().unwrap_or_default();
-    let (status, reason, message) = if !blocked.is_empty() {
+    let (status, reason, message) = if !history.ownership_scan_complete {
+        // H-1. THE FIRST ARM, BECAUSE IT IS THE ONE ABOUT WHAT WAS NOT SEEN.
+        // Every arm below is a statement about objects this controller HAS
+        // looked at; this one says it did not finish looking. `True` here would
+        // be the one lie that matters — D1 §6.9 tells an operator to wait for
+        // it before deleting a schedule with the default propagation, and on a
+        // walk that stopped at its bound the runs past the bound are exactly
+        // the ones that would then be collected.
+        (
+            "False",
+            REASON_MIGRATION_BLOCKED,
+            format!(
+                "The history inventory did not finish: it stopped after {} object(s) at its \
+                 page bound ({MAX_INVENTORY_PAGES} × {INVENTORY_PAGE_SIZE}), or with its \
+                 per-pass detach budget spent, so it cannot show that no run is still owned by \
+                 this schedule. `status.history.ownershipScanComplete` is false and every \
+                 count in `status.history` is a floor. A migration in progress clears this on \
+                 its own; a schedule with more runs than the bound needs pruning \
+                 (`docs/kubernetes.md` §9). Until then, delete only with `--cascade=orphan`.",
+                history.run_count
+            ),
+        )
+    } else if !blocked.is_empty() {
         let names = blocked
             .iter()
             .take(MIGRATION_BLOCKED_SAMPLE)
             .map(|b| format!("{} ({})", b.name, b.reason))
             .collect::<Vec<_>>()
             .join(", ");
+        // M-2. A `403` or a `422` is the API server saying NOT NOW; the next
+        // hourly inventory lands the same patch once the RoleBinding or the
+        // object is fixed. `NoScheduleReference` is this controller saying NOT
+        // EVER: `Backup.spec` is CEL-sealed, so the reference that would make
+        // the detach safe cannot be added to an existing object by anybody, and
+        // an operator told to "wait for True" would wait forever. The two get
+        // different sentences, and the terminal one names the only two things
+        // that work.
+        // BOUNDED LIKE THE SAMPLE IT IS DRAWN FROM. A condition message is a
+        // status field every watcher in the cluster receives; naming every
+        // terminal run would put a schedule's whole history into it.
+        let terminal: Vec<&str> = blocked
+            .iter()
+            .filter(|b| !blocked_reason_clears_itself(&b.reason))
+            .map(|b| b.name.as_str())
+            .take(MIGRATION_BLOCKED_SAMPLE)
+            .collect();
+        let remedy = if terminal.is_empty() {
+            "Both refusals clear themselves: fix the RoleBinding or the object and the next \
+             inventory retries. Until then, delete only with `--cascade=orphan`."
+                .to_string()
+        } else {
+            format!(
+                "{} of them can NEVER be detached, because `Backup.spec` is immutable and the \
+                 `spec.scheduleRef` that would keep the run a member of this schedule cannot \
+                 be added to an existing object: {}. This condition will not reach `True` \
+                 while they exist. The only two remedies are `kubectl delete backupschedule \
+                 <name> --cascade=orphan`, which is always safe, or deleting those runs \
+                 yourself once their archives are recorded (`docs/kubernetes.md` §9).",
+                terminal.len(),
+                terminal.join(", ")
+            )
+        };
         (
             "False",
             REASON_MIGRATION_BLOCKED,
             format!(
-                "{} run(s) of this schedule could not be detached from it: {names}. Deleting \
-                 this schedule without `--cascade=orphan` would still collect them.",
+                "{} run(s) of this schedule could not be detached from it: {names}. {remedy}",
                 blocked.len()
             ),
         )
@@ -443,10 +563,11 @@ pub fn history_condition(
         )
     } else if history.run_count > HISTORY_LARGE_RUNS
         || history.estimated_bytes > HISTORY_LARGE_BYTES
-        // A CAPPED WALK IS LARGE BY CONSTRUCTION. The inventory stopped only
-        // because the API server was still handing it `continue` tokens after
-        // MAX_INVENTORY_PAGES × INVENTORY_PAGE_SIZE objects, so the real count
-        // is above the advisory whatever the floor below it says.
+        // A CAPPED WALK IS LARGE BY CONSTRUCTION. Reaching here means the walk
+        // was LABEL-SELECTED — an unfinished namespace-wide one is the first
+        // arm — so every object past the bound carries this schedule's UID
+        // label, which only a run this controller created can have. The count
+        // is a floor and the history really is past the advisory.
         || history.run_count_capped
     {
         (
@@ -602,9 +723,11 @@ async fn inventory(
     let mut run_count: i64 = 0;
     let mut estimated: i64 = 0;
     let mut owned_nonterminal: i64 = 0;
-    let mut migratable: Vec<Backup> = Vec::new();
+    let mut still_owned: i64 = 0;
+    let mut patched: usize = 0;
     let mut blocked: Vec<MigrationBlocked> = Vec::new();
     let mut capped = false;
+    let mut budget_spent = false;
     let mut token: Option<String> = None;
 
     for page in 0..MAX_INVENTORY_PAGES {
@@ -616,6 +739,25 @@ async fn inventory(
             params = params.continue_token(cursor);
         }
         let listed = api.list(&params).await?;
+
+        // ONE PAGE'S MIGRATION CANDIDATES, PATCHED BEFORE THE NEXT PAGE IS
+        // FETCHED — finding M-1.
+        //
+        // The patches used to happen after the WHOLE walk, under a per-pass
+        // budget, with `inventory_due` re-arming while work remained. That made
+        // the migration window cost one FULL namespace-wide walk every thirty
+        // seconds: 10 000 legacy runs meant fifty passes × twenty pages × five
+        // hundred objects ≈ 500 000 object reads in twenty-five minutes, which
+        // is the exact read cost D1 §6.7 exists to remove, re-incurred at its
+        // maximum for the duration of the upgrade.
+        //
+        // Migrating page by page and STOPPING THE WALK once the budget is spent
+        // makes a migrating pass cost one page instead of twenty. The budget is
+        // deliberately equal to [`INVENTORY_PAGE_SIZE`], so the steady state of
+        // a migration is exactly one LIST and at most one page of PATCHes per
+        // reconcile — every object read once over the whole migration rather
+        // than fifty times.
+        let mut page_candidates: Vec<&Backup> = Vec::new();
         for backup in &listed.items {
             let this = backup.name_any();
             // MEMBERSHIP IS ASKED OF EVERY OBJECT, LABEL SELECTOR OR NOT. The
@@ -629,7 +771,7 @@ async fn inventory(
             estimated = estimated.saturating_add(estimated_bytes(backup));
             if owner_entry_index(backup, schedule_name, schedule_uid).is_some() {
                 match migration_refusal(backup, schedule_name) {
-                    None => migratable.push(backup.clone()),
+                    None => page_candidates.push(backup),
                     // A run still going keeps its owner and is WAITED for, not
                     // reported: it is not blocked on anything a human can do.
                     Some(MigrationRefusal::NotTerminal) => owned_nonterminal += 1,
@@ -653,6 +795,26 @@ async fn inventory(
                 active.push(active_entry(backup));
             }
         }
+
+        for backup in page_candidates {
+            if patched >= MAX_MIGRATIONS_PER_PASS {
+                // Not attempted this pass, so still owned and still migratable
+                // — the next reconcile re-arms on `legacyMigratableRuns`.
+                still_owned += 1;
+                budget_spent = true;
+                continue;
+            }
+            patched += 1;
+            match migrate_one(api, backup, schedule_name, schedule_uid).await {
+                MigrationOutcome::Migrated => {}
+                MigrationOutcome::Retry => still_owned += 1,
+                MigrationOutcome::Blocked(reason) => blocked.push(MigrationBlocked {
+                    name: backup.name_any(),
+                    reason,
+                }),
+            }
+        }
+
         token = listed
             .metadata
             .continue_
@@ -661,51 +823,43 @@ async fn inventory(
         if token.is_none() {
             break;
         }
+        if budget_spent {
+            // THE COUNTS BECOME FLOORS THE MOMENT THE WALK STOPS EARLY, and
+            // `ownershipScanComplete` below becomes false with them: a pass
+            // that has not seen the rest of the namespace cannot say whether
+            // anything there is still owned.
+            capped = true;
+            debug!(
+                schedule = %schedule_name,
+                patched,
+                "the detach budget for this pass is spent; the walk stops here and the next \
+                 reconcile continues"
+            );
+            break;
+        }
         if page + 1 == MAX_INVENTORY_PAGES {
             capped = true;
             warn!(
                 schedule = %schedule_name,
                 pages = MAX_INVENTORY_PAGES,
                 page_size = INVENTORY_PAGE_SIZE,
-                "the history inventory stopped at its page cap; status.history.runCount is a \
-                 floor. Prune terminal runs — docs/kubernetes.md §9."
+                "the history inventory stopped at its page cap; every status.history count is \
+                 a floor and HistoryRetained cannot reach True. Prune terminal runs — \
+                 docs/kubernetes.md §9."
             );
         }
     }
 
-    // ---- the migration (D1 §6.2) ----------------------------------------
-    //
-    // AFTER the whole list and not inside it, so a patch that fails cannot
-    // truncate the inventory the counts are derived from, and so the cap below
-    // is a cap on WRITES rather than on what was observed.
-    let total_migratable = i64::try_from(migratable.len()).unwrap_or(i64::MAX);
-    let mut still_owned: i64 = 0;
-    for backup in migratable.iter().take(MAX_MIGRATIONS_PER_PASS) {
-        match migrate_one(api, backup, schedule_name, schedule_uid).await {
-            MigrationOutcome::Migrated => {}
-            MigrationOutcome::Retry => still_owned += 1,
-            MigrationOutcome::Blocked(reason) => blocked.push(MigrationBlocked {
-                name: backup.name_any(),
-                reason,
-            }),
-        }
-    }
-    // Everything PAST the cap is untouched and still owned — and never a
-    // negative number: `saturating_sub` on a signed integer happily returns
-    // one, which would have made `legacyOwnedRuns` read `-198` on a schedule
-    // with two legacy runs and turned `inventory_due`'s "> 0" into "never
-    // again".
-    still_owned = still_owned.saturating_add(
-        total_migratable
-            .saturating_sub(i64::try_from(MAX_MIGRATIONS_PER_PASS).unwrap_or(i64::MAX))
-            .max(0),
-    );
     // THE COUNT IS TAKEN BEFORE THE SAMPLE IS TRUNCATED. `migrationBlocked` is
     // a bounded SAMPLE (D1 §6.2 step 4 names up to ten); `legacyOwnedRuns` is a
     // TOTAL, and reading it off the truncated list would report ten owned runs
     // on a schedule with twenty-five — an undercount of exactly the thing an
     // operator checks before deleting.
     let blocked_count = i64::try_from(blocked.len()).unwrap_or(i64::MAX);
+    // SORTED BEFORE TRUNCATION (finding L-2), so two passes over the same
+    // namespace report the same ten rather than whichever ten the API server's
+    // paging happened to hand over first.
+    blocked.sort_by(|a, b| a.name.cmp(&b.name));
     blocked.truncate(MIGRATION_BLOCKED_SAMPLE);
 
     let history = ScheduleHistory {
@@ -720,6 +874,12 @@ async fn inventory(
         // schedule holding one object the API server will keep refusing.
         legacy_migratable_runs: still_owned,
         migration_blocked: (!blocked.is_empty()).then_some(blocked),
+        // H-1. A LABEL-SELECTED WALK IS COMPLETE BY CONSTRUCTION, whatever the
+        // page bound did: it only runs after a complete namespace-wide walk
+        // proved nothing was owned, and it is that earlier proof the claim
+        // rests on. A namespace-wide walk is complete only if it ran out of
+        // pages before the bounds ran out of it.
+        ownership_scan_complete: label_selected || !capped,
         inventoried_at: now,
     };
     debug!(
@@ -775,7 +935,18 @@ async fn migrate_one(
                 "the API server refused the history-detach patch; the run keeps its \
                  ownerReference and is named in HistoryRetained=False MigrationBlocked"
             );
-            MigrationOutcome::Blocked(e.code.to_string())
+            // ONE VOCABULARY (finding L-2). The status used to carry the bare
+            // digits `"403"` / `"422"` beside the CamelCase
+            // `"NoScheduleReference"`, so a console or `jq` reader had two
+            // incompatible shapes to branch on in one field.
+            MigrationOutcome::Blocked(
+                if e.code == 403 {
+                    BLOCKED_API_FORBIDDEN
+                } else {
+                    BLOCKED_API_INVALID
+                }
+                .to_string(),
+            )
         }
         Err(e) => {
             debug!(
@@ -799,6 +970,13 @@ fn empty_history(now: DateTime<Utc>) -> ScheduleHistory {
         legacy_owned_runs: 0,
         legacy_migratable_runs: 0,
         migration_blocked: None,
+        // `false`, AND NOT `true`. This block stands in for "nothing has ever
+        // been observed", and the one thing a schedule in that state must not
+        // do is claim that no run is owned by it. It is unreachable from the
+        // reconciler — step 1 always inventories when the block is absent — and
+        // reachable from the pure `status_patch` helpers, which must not invent
+        // the claim either.
+        ownership_scan_complete: false,
         inventoried_at: now,
     }
 }

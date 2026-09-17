@@ -697,9 +697,24 @@ pub struct ActiveRun {
 pub struct MigrationBlocked {
     /// The `Backup`'s name.
     pub name: String,
-    /// Why the patch could not be applied — an HTTP status the API server gave
-    /// (`403`, `422`), or a refusal this controller made for the object's own
-    /// safety.
+    /// Why the patch could not be applied. ONE CLOSED VOCABULARY, not a mix of
+    /// HTTP digits and CamelCase — a `jq` or console reader has to be able to
+    /// branch on it:
+    ///
+    /// * `ApiForbidden` — the API server answered `403`. Transient: fix the
+    ///   RBAC and the next inventory retries.
+    /// * `ApiInvalid` — the API server answered `422`. Transient: a legacy
+    ///   object that fails a newer schema; fix it and the next inventory
+    ///   retries.
+    /// * `NoScheduleReference` — **terminal**, and the one that is not the API
+    ///   server's doing. The run's `spec.scheduleRef` does not name this
+    ///   schedule, so detaching it would leave it a member of nothing
+    ///   ([`crate::identity::is_run_of_schedule`] rule 3), and `Backup.spec` is
+    ///   CEL-sealed so no operator can add the reference. It never clears. The
+    ///   remedies are `--cascade=orphan` or deleting the run.
+    /// * `InventoryCapped` — **not about one object**: the inventory stopped at
+    ///   its page bound, so it cannot show that no run is still owned. Its
+    ///   `name` is the empty string. See [`ScheduleHistory::ownership_scan_complete`].
     pub reason: String,
 }
 
@@ -715,9 +730,14 @@ pub struct MigrationBlocked {
 ///
 /// # Three fields D1 §4.8 did not name, each load-bearing
 ///
-/// * `runCountCapped` — the inventory follows a bounded number of pages, so
-///   `runCount` on a schedule with more history than that is a FLOOR. The same
-///   honesty [`MissedSlots::count_capped`] applies to the slot enumeration.
+/// * `runCountCapped` — the inventory follows a bounded number of pages, and a
+///   pass that is migrating stops as soon as it has spent its PATCH budget, so
+///   `runCount`, `estimatedBytes` and `legacyOwnedRuns` are FLOORS whenever it
+///   is set. The same honesty [`MissedSlots::count_capped`] applies to the slot
+///   enumeration.
+/// * `ownershipScanComplete` — see its own note. `runCountCapped` says the
+///   COUNTS are floors; this says whether the OWNERSHIP claim can be made at
+///   all, which is a different question and the one deletion turns on.
 /// * `legacyMigratableRuns` — how many of `legacyOwnedRuns` are terminal and
 ///   could therefore be patched now. It is what separates "there is migration
 ///   work left, come back on the next pass" from "the only owned runs left are
@@ -742,9 +762,37 @@ pub struct ScheduleHistory {
     /// How many of `legacy_owned_runs` are terminal, and therefore migratable
     /// on the next pass.
     pub legacy_migratable_runs: i64,
-    /// The runs whose migration PATCH was refused, newest first, at most ten.
+    /// The runs whose migration PATCH was refused: **an arbitrary bounded
+    /// sample of at most ten, sorted by name** so that two passes over the same
+    /// namespace report the same ten. It is a sample and not a list — the total
+    /// is inside `legacy_owned_runs`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub migration_blocked: Option<Vec<MigrationBlocked>>,
+    /// Whether the last walk that could have found a legacy ownerReference ran
+    /// to exhaustion (D1 §6.7, and the hole this field closes).
+    ///
+    /// # THE CLAIM `HistoryRetained=True` RESTS ON, AND WHY IT NEEDED A FIELD
+    ///
+    /// "No run is owned by this schedule" is a statement about runs the
+    /// controller did not see as much as about the ones it did. A **capped**
+    /// namespace-wide walk saw at most
+    /// `MAX_INVENTORY_PAGES × INVENTORY_PAGE_SIZE` objects and says so in
+    /// `run_count_capped`; what it cannot say is that the objects past the
+    /// bound carry no ownerReference. Before this field, such a walk reported
+    /// `runCountCapped: true`, which the `HistoryLarge` arm turned into
+    /// `HistoryRetained=True`, which unlocked the
+    /// `logweir.dev/schedule-uid` selector — a label no unmigrated legacy
+    /// object carries. Every later walk then looked only where the answer could
+    /// not be, the condition said `Retained` forever, and D1 §6.9's upgrade
+    /// gate passed on a schedule whose history a default-propagation delete
+    /// would still collect. Reached by D1 §6.6's own published worst row.
+    ///
+    /// `false` therefore forces `HistoryRetained=False` and keeps the next walk
+    /// namespace-wide. It is `true` when the walk ended on its own, and when
+    /// the walk was label-selected — a selected walk is only ever run *after* a
+    /// complete namespace-wide one proved there was nothing owned, and that
+    /// earlier proof is what the claim rests on.
+    pub ownership_scan_complete: bool,
     /// When the inventory last ran.
     pub inventoried_at: Time,
 }

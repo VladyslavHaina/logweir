@@ -330,7 +330,7 @@ spec:
                     format: int64
                     type: integer
                   migrationBlocked:
-                    description: The runs whose migration PATCH was refused, newest first, at most ten.
+                    description: 'The runs whose migration PATCH was refused: **an arbitrary bounded sample of at most ten, sorted by name** so that two passes over the same namespace report the same ten. It is a sample and not a list — the total is inside `legacy_owned_runs`.'
                     items:
                       description: |-
                         One `Backup` the §6.2 migration could not detach from its schedule, and why (D1 §6.2 step 4).
@@ -341,7 +341,10 @@ spec:
                           description: The `Backup`'s name.
                           type: string
                         reason:
-                          description: Why the patch could not be applied — an HTTP status the API server gave (`403`, `422`), or a refusal this controller made for the object's own safety.
+                          description: |-
+                            Why the patch could not be applied. ONE CLOSED VOCABULARY, not a mix of HTTP digits and CamelCase — a `jq` or console reader has to be able to branch on it:
+
+                            * `ApiForbidden` — the API server answered `403`. Transient: fix the RBAC and the next inventory retries. * `ApiInvalid` — the API server answered `422`. Transient: a legacy object that fails a newer schema; fix it and the next inventory retries. * `NoScheduleReference` — **terminal**, and the one that is not the API server's doing. The run's `spec.scheduleRef` does not name this schedule, so detaching it would leave it a member of nothing ([`crate::identity::is_run_of_schedule`] rule 3), and `Backup.spec` is CEL-sealed so no operator can add the reference. It never clears. The remedies are `--cascade=orphan` or deleting the run. * `InventoryCapped` — **not about one object**: the inventory stopped at its page bound, so it cannot show that no run is still owned. Its `name` is the empty string. See [`ScheduleHistory::ownership_scan_complete`].
                           type: string
                       required:
                       - name
@@ -349,6 +352,16 @@ spec:
                       type: object
                     nullable: true
                     type: array
+                  ownershipScanComplete:
+                    description: |-
+                      Whether the last walk that could have found a legacy ownerReference ran to exhaustion (D1 §6.7, and the hole this field closes).
+
+                      # THE CLAIM `HistoryRetained=True` RESTS ON, AND WHY IT NEEDED A FIELD
+
+                      "No run is owned by this schedule" is a statement about runs the controller did not see as much as about the ones it did. A **capped** namespace-wide walk saw at most `MAX_INVENTORY_PAGES × INVENTORY_PAGE_SIZE` objects and says so in `run_count_capped`; what it cannot say is that the objects past the bound carry no ownerReference. Before this field, such a walk reported `runCountCapped: true`, which the `HistoryLarge` arm turned into `HistoryRetained=True`, which unlocked the `logweir.dev/schedule-uid` selector — a label no unmigrated legacy object carries. Every later walk then looked only where the answer could not be, the condition said `Retained` forever, and D1 §6.9's upgrade gate passed on a schedule whose history a default-propagation delete would still collect. Reached by D1 §6.6's own published worst row.
+
+                      `false` therefore forces `HistoryRetained=False` and keeps the next walk namespace-wide. It is `true` when the walk ended on its own, and when the walk was label-selected — a selected walk is only ever run *after* a complete namespace-wide one proved there was nothing owned, and that earlier proof is what the claim rests on.
+                    type: boolean
                   runCount:
                     description: How many `Backup`s of this schedule UID the last inventory saw, terminal and active alike. A floor when `runCountCapped` is set.
                     format: int64
@@ -361,6 +374,7 @@ spec:
                 - inventoriedAt
                 - legacyMigratableRuns
                 - legacyOwnedRuns
+                - ownershipScanComplete
                 - runCount
                 - runCountCapped
                 type: object

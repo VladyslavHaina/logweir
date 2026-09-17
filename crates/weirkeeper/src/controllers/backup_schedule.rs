@@ -81,7 +81,7 @@ use futures::StreamExt as _;
 use kube::api::{ObjectMeta, Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
 use kube::runtime::{watcher, Controller};
-use kube::{Api, Resource, ResourceExt};
+use kube::{Api, ResourceExt};
 use serde_json::json;
 use tracing::{debug, info, warn};
 
@@ -1606,28 +1606,6 @@ pub fn scheduled_run(schedule: &BackupSchedule, schedule_uid: &str, plan: &RunPl
         },
         status: None,
     }
-}
-
-/// Whether `backup` has this complete `BackupSchedule` identity as controller.
-///
-/// Labels and `spec.scheduleRef` are hints. The controller reference must match
-/// API version, kind, name, UID, and `controller: true`; a schedule deleted and
-/// recreated under the same name must not adopt the previous object's work.
-#[must_use]
-pub fn is_owned_by_schedule(backup: &Backup, schedule_name: &str, schedule_uid: &str) -> bool {
-    backup
-        .metadata
-        .owner_references
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .any(|owner| {
-            owner.controller == Some(true)
-                && owner.name == schedule_name
-                && owner.uid == schedule_uid
-                && owner.kind == BackupSchedule::kind(&())
-                && owner.api_version == BackupSchedule::api_version(&())
-        })
 }
 
 /// Whether `backup` is a run of this schedule that **participates in
