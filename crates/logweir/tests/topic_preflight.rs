@@ -56,6 +56,7 @@ fn spec_with_window_end(window_end: chrono::DateTime<chrono::Utc>) -> DrillSpec 
             },
             backup: "latestCompleted".into(),
             topics: vec!["orders".into(), "payments".into()],
+            point: None,
         },
         target: TargetSpec {
             bootstrap_servers: vec!["localhost:9092".into()],

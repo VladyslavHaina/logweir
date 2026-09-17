@@ -1446,3 +1446,80 @@ fn the_signed_scorecards_sample_anchor_is_always_one_of_the_closed_set() {
         "sample.anchor `{anchor}` is not one of head|tail|random"
     );
 }
+
+// ===========================================================================
+// D3 §2.4 — the teardown attestation key, on the scorecard's phase-9 record
+// ===========================================================================
+
+/// The `teardown-key=` line is driven by a phase-9 NOTE, and the note is the
+/// only place a completed run remembers that the attestation was put.
+///
+/// It lives on `PhaseRecord.notes` for `failed_count`'s three reasons plus one
+/// that matters here: the note is pushed AFTER phase 8 froze and signed the
+/// scorecard bytes, so it can be read on the exit-2 path too — which is the
+/// path that matters for D3 §4.4, where a rehearsal that did not pass is
+/// exactly the run whose leftover topics block the next slot.
+#[test]
+fn the_teardown_key_is_read_off_the_phase_nine_record_and_only_when_it_is_there() {
+    use logweir::drill::phase9_teardown::{attested_key, attested_note, teardown_key};
+
+    let mut sc = fixtures::scorecard_pass();
+    sc.phases.clear();
+    assert_eq!(
+        attested_key(&sc),
+        None,
+        "a run with no phase-9 record has no attestation to name"
+    );
+
+    let ok: Result<(), DrillError> = record(&mut sc, 9, "teardown", || Ok(()));
+    ok.expect("phase 9 records");
+    assert_eq!(
+        attested_key(&sc),
+        None,
+        "phase 9 RAN and the put failed: there is still no key to name, which is the \
+         `teardown-key=` mutant — a line naming an object nothing was written to"
+    );
+
+    let run_id = sc.run_id.clone();
+    sc.phases
+        .iter_mut()
+        .find(|p| p.phase == 9)
+        .expect("the phase-9 record")
+        .notes = vec![attested_note(&run_id)];
+    assert_eq!(
+        attested_key(&sc).as_deref(),
+        Some(teardown_key(&run_id).as_str()),
+        "the announced key is the key `persist_with_signer` put at, from one function"
+    );
+    assert!(teardown_key(&run_id).ends_with(".teardown.json"));
+}
+
+/// The attested note must not disturb the failure notes beside it: both are
+/// read by prefix out of the same `Vec<String>`, and `failed_count` feeds the
+/// metric and the summary line.
+#[test]
+fn the_attested_note_does_not_disturb_the_teardown_failure_notes() {
+    use logweir::drill::phase9_teardown::{
+        attested_key, attested_note, failed_count, failed_topic_names_from_notes,
+    };
+
+    let mut sc = fixtures::scorecard_pass();
+    sc.phases.clear();
+    let ok: Result<(), DrillError> = record(&mut sc, 9, "teardown", || Ok(()));
+    ok.expect("phase 9 records");
+    let run_id = sc.run_id.clone();
+    sc.phases
+        .iter_mut()
+        .find(|p| p.phase == 9)
+        .expect("the phase-9 record")
+        .notes = vec![
+        "teardown-failed: drill-orders: BROKER SAID NO".to_string(),
+        attested_note(&run_id),
+    ];
+    assert_eq!(failed_count(&sc), 1, "the failed count still counts one");
+    assert_eq!(
+        failed_topic_names_from_notes(&sc),
+        vec!["drill-orders".to_string()]
+    );
+    assert!(attested_key(&sc).is_some());
+}

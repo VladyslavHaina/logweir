@@ -67,6 +67,7 @@ fn spec_in(mode: TargetMode, topic_naming: Option<TopicNaming>) -> DrillSpec {
             },
             backup: "latestCompleted".into(),
             topics: vec!["orders".into(), "payments".into()],
+            point: None,
         },
         target: TargetSpec {
             bootstrap_servers: vec!["localhost:9092".into()],

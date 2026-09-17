@@ -288,3 +288,271 @@ fn render_mismatch_is_operational_not_guard() {
         "GC11's 3 is a guard refusal BEFORE anything runs; phases 0-5 have run"
     );
 }
+
+// ===========================================================================
+// D3 §5.5 — the recovery point is re-verified BEFORE any restore phase runs
+// ===========================================================================
+//
+// `crates/logweir/src/drill/binding.rs` owns the check's own rows (every
+// refusal shape, over `Store::in_memory`). What belongs HERE is the ORDERING
+// claim, because this file is the one about the restore phases: a plan whose
+// bound point the archive does not hold must be refused before phase 0, with
+// no broker contacted and no phase begun.
+//
+// The witness is D3 §2.4's own progress channel: `progress-phase=0:admit` is
+// printed at the start of phase 0, so its ABSENCE on a refused run is direct
+// evidence that no phase ran. The mutant it kills is moving the binding check
+// after `context` — the run would then dial the bootstrap and announce phase 0
+// before discovering that the point is not there.
+
+mod binding_ordering {
+    use chrono::Utc;
+    use logweir_core::execution_contract as wire;
+    use logweir_core::ids::sha256_prefixed;
+    use logweir_core::spec::ApprovalDoc;
+    use logweir_evidence::keys::SigningKey;
+    use logweir_evidence::sign::sign_detached;
+    use std::process::Command;
+
+    /// A plan bound to one recovery point, over a filesystem archive.
+    fn plan(archive: &std::path::Path, evidence: &std::path::Path, point: &str) -> String {
+        format!(
+            r#"
+name: bound-restore
+source:
+  storage: {{backend: filesystem, path: {archive}}}
+  backup: nightly-7
+  topics: [orders]
+  point:
+{point}
+target:
+  bootstrap_servers: ["127.0.0.1:19098"]
+  mode: scratch
+  topic_mapping_prefix: "drill-"
+  marker_topic: logweir.scratch
+sample:
+  window_start: 2026-01-01T00:00:00Z
+  window_end: 2026-01-02T00:00:00Z
+  records_per_partition: 25
+objectives: {{rto_seconds: 1800, pass_rate: 1.0}}
+evidence: {{backend: filesystem, path: {evidence}}}
+"#,
+            archive = archive.display(),
+            evidence = evidence.display(),
+        )
+    }
+
+    struct Run {
+        code: i32,
+        transcript: String,
+    }
+
+    /// Mount a bundle for `plan_text`, stamp a complete v2 contract over it and
+    /// run the real binary.
+    fn run_bound_restore(plan_text: &str) -> Run {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let approver = SigningKey::generate_ed25519();
+        let signing = SigningKey::generate_ed25519();
+        let plan_bytes = plan_text.as_bytes().to_vec();
+        let doc = ApprovalDoc {
+            approver: "operator@example.com".into(),
+            ticket: "CHG-D3-W5".into(),
+            plan_hash: sha256_prefixed(&plan_bytes),
+            approved_at: Utc::now(),
+            subject_kind: "Restore".into(),
+        };
+        let approval = serde_json::to_vec(&doc).expect("approval serialises");
+        let sidecar = serde_json::to_vec(
+            &sign_detached(
+                &approver,
+                logweir::drill::phase1_approval::PAYLOAD_TYPE_APPROVAL,
+                &approval,
+            )
+            .expect("sign"),
+        )
+        .expect("sidecar serialises");
+        let approver_key = approver
+            .verifying_key()
+            .to_public_key_pem()
+            .expect("pem")
+            .into_bytes();
+        let allowed = br#"{"allowed_cluster_ids":["TARGET00000000000000000"]}"#.to_vec();
+
+        let plan_path = dir.path().join("restore.yaml");
+        let approval_path = dir.path().join("approval.json");
+        let approver_path = dir.path().join("approver.pub.pem");
+        let allowed_path = dir.path().join("allowed-clusters.json");
+        let signing_path = dir.path().join("signing.pem");
+        std::fs::write(&plan_path, &plan_bytes).unwrap();
+        std::fs::write(&approval_path, &approval).unwrap();
+        std::fs::write(approval_path.with_extension("sig"), &sidecar).unwrap();
+        std::fs::write(&approver_path, &approver_key).unwrap();
+        std::fs::write(&allowed_path, &allowed).unwrap();
+        std::fs::write(&signing_path, signing.to_pkcs8_pem().unwrap()).unwrap();
+
+        let mut command = Command::new(env!("CARGO_BIN_EXE_logweir"));
+        command
+            .args(["restore", "run", wire::VERSION_ARG, wire::VERSION, "--spec"])
+            .arg(&plan_path)
+            .arg("--approval")
+            .arg(&approval_path)
+            .arg("--approver-key")
+            .arg(&approver_path)
+            .arg("--allowed-clusters")
+            .arg(&allowed_path)
+            .arg("--signing-key")
+            .arg(&signing_path)
+            .args(["--triggered-by", "approval/approval-a"]);
+        for name in wire::ALL_ENV_ANY {
+            command.env_remove(name);
+        }
+        for (name, value) in [
+            (wire::VERSION_ENV, wire::VERSION.to_string()),
+            (wire::SUBJECT_API_VERSION_ENV, "logweir.dev/v1alpha1".into()),
+            (wire::SUBJECT_KIND_ENV, "Restore".into()),
+            (wire::SUBJECT_NAME_ENV, "restore-a".into()),
+            (wire::SUBJECT_NAMESPACE_ENV, "team-a".into()),
+            (wire::SUBJECT_UID_ENV, "restore-uid-a".into()),
+            (wire::APPROVAL_NAME_ENV, "approval-a".into()),
+            (wire::APPROVAL_UID_ENV, "approval-uid-a".into()),
+            (wire::PLAN_SHA256_ENV, sha256_prefixed(&plan_bytes)),
+            (wire::APPROVAL_SHA256_ENV, sha256_prefixed(&approval)),
+            (wire::APPROVAL_SIDECAR_SHA256_ENV, sha256_prefixed(&sidecar)),
+            (
+                wire::APPROVER_KEY_SHA256_ENV,
+                sha256_prefixed(&approver_key),
+            ),
+            (wire::ALLOWED_CLUSTERS_SHA256_ENV, sha256_prefixed(&allowed)),
+        ] {
+            command.env(name, value);
+        }
+        let output = command.output().expect("run the binary");
+        Run {
+            code: output.status.code().unwrap_or(-1),
+            transcript: format!(
+                "{}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            ),
+        }
+    }
+
+    /// An archive holding one receipt, and the binding that truthfully names it.
+    fn archive() -> (tempfile::TempDir, String, String) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let manifest = br#"{"topics":[]}"#.to_vec();
+        let manifest_sha256 = sha256_prefixed(&manifest);
+        let manifest_key = "logweir/backups/nightly-7/run-1.manifest.json";
+        let receipt = serde_json::json!({
+            "format_version": "1.0.0",
+            "run_id": "run-1",
+            "backup_id": "nightly-7",
+            "requested_at": "2026-01-01T00:00:00Z",
+            "started_at": "2026-01-01T00:00:00Z",
+            "finished_at": "2026-01-01T00:00:01Z",
+            "exit_code": 0,
+            "triggered_by": "manual",
+            "source": {
+                "cluster_id": "SOURCE00000000000000000",
+                "bootstrap_servers": ["source:9092"],
+                "auth": {"mode": "plaintext"},
+                "topics": ["orders"]
+            },
+            "engine": {"id": "oso", "version": "1", "digest": "sha256:ee"},
+            "archive": {
+                "manifest_key": manifest_key,
+                "manifest_sha256": manifest_sha256,
+                "prefix": "logweir/backups/nightly-7/"
+            },
+            "records": {"orders": 3},
+            "covered": {"from_ms": 1, "to_ms": 2}
+        });
+        let receipt_bytes = serde_json::to_vec(&receipt).expect("receipt serialises");
+        let receipt_key = "logweir/backups/nightly-7/run-1.receipt.json";
+        for (key, bytes) in [
+            (receipt_key, receipt_bytes.clone()),
+            (manifest_key, manifest),
+        ] {
+            let path = dir.path().join(key);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, bytes).unwrap();
+        }
+        let point_id = {
+            // `lwp1-` + 32 hex of sha256(receipt bytes), D3 §5.1.
+            let digest = sha256_prefixed(&receipt_bytes);
+            format!("lwp1-{}", &digest["sha256:".len()..][..32])
+        };
+        let truthful = format!(
+            "    point_id: {point_id}\n    receipt_key: {receipt_key}\n    \
+             receipt_sha256: {}\n    manifest_sha256: {manifest_sha256}\n",
+            sha256_prefixed(&receipt_bytes)
+        );
+        (dir, truthful, point_id)
+    }
+
+    /// **The ordering claim.** A bound point the archive does not hold is exit
+    /// 3, and NO phase has begun when it is refused.
+    #[test]
+    fn a_point_the_archive_does_not_hold_is_refused_before_phase_zero() {
+        let (archive_dir, truthful, _) = archive();
+        let evidence = tempfile::tempdir().expect("tempdir");
+        let tampered = truthful.replace(
+            &truthful
+                .lines()
+                .find(|l| l.trim_start().starts_with("receipt_sha256:"))
+                .expect("the digest line")
+                .to_string(),
+            &format!("    receipt_sha256: sha256:{}", "0".repeat(64)),
+        );
+        let run = run_bound_restore(&plan(archive_dir.path(), evidence.path(), &tampered));
+        assert_eq!(run.code, 3, "{}", run.transcript);
+        assert!(
+            run.transcript.contains("PointBindingMismatch"),
+            "{}",
+            run.transcript
+        );
+        assert!(
+            !run.transcript.contains("progress-phase=0:admit"),
+            "no restore phase may begin: the refusal is BEFORE phase 0:\n{}",
+            run.transcript
+        );
+        assert!(
+            !run.transcript.contains("BrokerTransportFailure")
+                && !run.transcript.contains("Connection refused")
+                && !run.transcript.contains("19098"),
+            "the plan's bootstrap must never be dialled:\n{}",
+            run.transcript
+        );
+    }
+
+    /// The control: the same plan with a truthful binding gets PAST the
+    /// binding and fails later, for a reason that is not the binding. Without
+    /// it, the row above would pass for a build that refused every bound plan.
+    #[test]
+    fn a_truthful_binding_gets_past_the_check_and_fails_later() {
+        let (archive_dir, truthful, point_id) = archive();
+        let evidence = tempfile::tempdir().expect("tempdir");
+        // An evidence location that does not exist, so `drill::context` fails
+        // FAST once the binding has been proven. Without it this row waits out
+        // librdkafka's metadata timeout against a closed port to learn nothing
+        // it does not already know: what is being asserted is that the run got
+        // PAST the binding, not what it died of afterwards.
+        let run = run_bound_restore(&plan(
+            archive_dir.path(),
+            &evidence.path().join("no-such-evidence-location"),
+            &truthful,
+        ));
+        assert!(
+            !run.transcript.contains("PointBindingMismatch"),
+            "the binding is truthful; the run must fail for a LATER reason (exit {}):\n{}",
+            run.code,
+            run.transcript
+        );
+        assert!(
+            run.transcript.contains(&point_id),
+            "a verified binding names the point it proved:\n{}",
+            run.transcript
+        );
+        assert_ne!(run.code, 0, "no broker is running, so it cannot succeed");
+    }
+}

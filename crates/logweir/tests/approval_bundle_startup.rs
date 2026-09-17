@@ -85,6 +85,10 @@ fn fixture_with_plan(plan: Vec<u8>) -> Fixture {
             approval_sidecar,
             approver_key,
             allowed_clusters: br#"{"allowed_cluster_ids":["cluster-a"]}"#.to_vec(),
+            // Bundle contract v2's three optional members. `None` is the
+            // ordinary approval-authorized shape, and every test below that
+            // exercises one sets it explicitly.
+            ..Default::default()
         },
         approver,
         signing,
@@ -105,6 +109,14 @@ fn contract(bundle: &ApprovalBundleBytes) -> ExecutionContract {
         approval_sidecar_sha256: sha256_prefixed(&bundle.approval_sidecar),
         approver_key_sha256: sha256_prefixed(&bundle.approver_key),
         allowed_clusters_sha256: sha256_prefixed(&bundle.allowed_clusters),
+        // Execution contract v2: this build's version, and the ordinary
+        // approval authorization with none of the optional v2 blocks.
+        version: wire::ContractVersion::V2,
+        authorization_kind: wire::AuthorizationKind::Approval,
+        scope_sha256: None,
+        rehearsal_schedule_uid: None,
+        policy_snapshot_sha256: None,
+        confirmation_key_sha256: None,
     }
 }
 
@@ -226,13 +238,20 @@ fn argv_and_environment_handshake_is_exact_while_legacy_omission_remains_support
         .to_string()
         .contains("without the required contract environment"));
 
+    // A version this build does not implement. It was `"2"` until the D3
+    // Amendment I bump made `"2"` the current one; `"9"` keeps the row's
+    // meaning — a NEWER controller than this runner is refused before
+    // dispatch — rather than silently becoming a supported case.
     let unsupported =
-        execution_contract_for_invocation(Some("2"), |name| complete.get(name).cloned())
+        execution_contract_for_invocation(Some("9"), |name| complete.get(name).cloned())
             .unwrap_err();
-    assert!(unsupported.to_string().contains("argv version \"2\""));
+    assert!(unsupported.to_string().contains("argv version \"9\""));
 
+    // The two channels disagreeing, with BOTH values implemented: this is the
+    // interesting shape after the bump, because neither half can be dismissed
+    // as an unknown version.
     let mut mismatched = complete.clone();
-    mismatched.insert(wire::VERSION_ENV.to_string(), "2".to_string());
+    mismatched.insert(wire::VERSION_ENV.to_string(), wire::VERSION_V1.to_string());
     let mismatch = execution_contract_for_invocation(Some(wire::VERSION), |name| {
         mismatched.get(name).cloned()
     })

@@ -1555,6 +1555,11 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             // tests call `admit_pinned_approver_key_id` directly and drive the
             // pinned path through the real binary.
             approver_key_ids: Vec::new(),
+            // Execution contract v2's optional bundle members; absent is
+            // every existing caller's shape (D3 §4.3, D0 bundle v2).
+            rehearsal_scope: None,
+            policy_snapshot: None,
+            confirmation_key: None,
         },
         run_id: logweir::ids::new_run_id(),
         ctx: logweir::drill::Ctx {

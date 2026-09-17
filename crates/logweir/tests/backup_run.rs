@@ -1332,6 +1332,60 @@ fn the_runner_prints_its_two_evidence_keys_last() {
     );
 }
 
+/// **D3 §2.4, the backup half.** The five named steps are announced at `-1`,
+/// in order, and interface I7's two keys are still the final two lines.
+///
+/// The backup path has no numbered phases after admission, so §2.4 gives it
+/// `admit`, `engine`, `readback`, `sign`, `upload` — the boundaries a
+/// controller can actually act on: "the engine is still running" and "the
+/// archive exists and the receipt is being signed" are different waits.
+///
+/// The same child, and the same fd-1 argument, as the I7 row above.
+#[test]
+fn the_backup_runner_announces_its_five_named_steps_before_the_evidence_keys() {
+    let out = Command::new(std::env::current_exe().expect("this test binary's own path"))
+        .args([
+            "--ignored",
+            "--exact",
+            "the_i7_child_runs_one_backup_and_exits",
+            "--nocapture",
+        ])
+        .output()
+        .expect("re-exec this test binary");
+    let stdout = String::from_utf8(out.stdout).expect("stdout is utf-8");
+    assert_eq!(out.status.code(), Some(0), "{stdout}");
+    let lines: Vec<&str> = stdout.lines().collect();
+
+    assert!(
+        lines.contains(&"progress-contract=2"),
+        "the channel announces its version once, before the steps:\n{stdout}"
+    );
+    let mut at = 0usize;
+    for step in logweir::backup::PROGRESS_STEPS {
+        let expected = format!("progress-phase=-1:{step}");
+        let found = lines[at..]
+            .iter()
+            .position(|l| *l == expected)
+            .unwrap_or_else(|| panic!("`{expected}` is missing or out of order in:\n{stdout}"));
+        at += found + 1;
+    }
+    // And I7 is unchanged: the progress lines all come BEFORE the keys.
+    let receipt_at = lines
+        .iter()
+        .position(|l| l.starts_with("receipt-key="))
+        .expect("interface I7's first key");
+    assert!(
+        at <= receipt_at,
+        "every progress line comes before interface I7's pair:\n{stdout}"
+    );
+    assert!(
+        !lines[receipt_at..]
+            .iter()
+            .any(|l| l.starts_with("progress-")),
+        "nothing may be printed after I7's two keys:\n{stdout}"
+    );
+}
+
 /// The child process of `the_runner_prints_its_two_evidence_keys_last`.
 ///
 /// `#[ignore]`d so the default suite never runs it: on its own it asserts only
