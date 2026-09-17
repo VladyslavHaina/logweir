@@ -112,7 +112,7 @@ use tracing::{debug, info, warn};
 use super::backup::{
     self, ARCHIVE_ACCESS_KEY, ARCHIVE_ACCESS_KEY_ENV, ARCHIVE_SECRET_KEY, ARCHIVE_SECRET_KEY_ENV,
     SIGNING_KEY_FILE, SIGNING_KEY_SECRET, SIGNING_KEY_SECRET_KEY, SIGNING_MOUNT_PATH,
-    SIGNING_VOLUME, TTL_SECONDS_AFTER_FINISHED,
+    SIGNING_VOLUME,
 };
 use super::Context;
 use crate::check;
@@ -133,6 +133,7 @@ use crate::crds::approval::Approval;
 use crate::crds::kafka_cluster::KafkaCluster;
 use crate::crds::restore::Restore;
 use crate::crds::trust_roster::TrustRoster;
+use crate::diagnostics;
 use crate::job::{
     self, ConfigMapMount, EnvFromSecret, RunnerJobSpec, RunnerOwner, SecretMount,
     APPROVAL_MOUNT_PATH, APPROVAL_VOLUME, CONTAINER_NAME, PLAN_MOUNT_PATH,
@@ -3455,19 +3456,62 @@ async fn reconcile_restore_inner(
 
     // STEP 2. Running.
     if !backup::job_finished(&job) {
+        // D3 §2.3 / §2.4 — PLAT-14.1, the same ONE derivation the `Backup`
+        // twin calls. A `Restore` whose runner cannot mount its approval
+        // bundle used to sit at `phase: Running` until its deadline with
+        // nothing on the object to say so.
+        let stored = restore.status.as_ref().and_then(|s| s.progress.as_ref());
+        let run = diagnostics::observe(
+            client,
+            &namespace,
+            &job,
+            &backup::pod_selectors(&job_name),
+            stored,
+            now,
+        )
+        .await
+        .map_err(RestoreError::Api)?;
         patch_status_if_changed(
             &restores,
             restore,
             &name,
-            running_status_patch(restore, &job_name, false, now),
+            diagnostics::apply(
+                running_status_patch(restore, &job_name, false, now),
+                &diagnostics::Write {
+                    derived: &run.derived,
+                    progress: &run.progress,
+                    stored,
+                    conditions: restore.status.as_ref().and_then(|s| s.conditions.as_ref()),
+                    generation: restore.meta().generation,
+                    // D3 §2.2: `Restore.status.reason` is the `RunnerReady`
+                    // reason WHILE IT IS FALSE, and the base builder's
+                    // `JobCreated` otherwise. Review finding M2's column keeps
+                    // its meaning — "the reason of the condition this patch
+                    // writes about current state" — and now answers it for the
+                    // four minutes a pod spends in `ImagePullBackOff`.
+                    scalar_reason: true,
+                    now,
+                },
+            ),
         )
         .await?;
+        let failed_fast = diagnostics::fail_fast(
+            client,
+            &namespace,
+            &job,
+            &restore.uid().unwrap_or_default(),
+            &run,
+            stored,
+            now,
+        )
+        .await
+        .map_err(RestoreError::Api)?;
         return Ok(RestoreOutcome {
             job_name,
             created: false,
             admission: None,
             exit_code: None,
-            terminal_state: None,
+            terminal_state: failed_fast.map(str::to_string),
             keys: RestoreEvidenceKeys::default(),
             ttl_patched: false,
             requeue: Requeue::After(REQUEUE_SECS),
@@ -3499,6 +3543,14 @@ async fn reconcile_restore_inner(
             "the status is already terminal; the runner's pod is not read again and no patch is \
              sent"
         );
+        // D3 §2.7's REPAIR — the `Backup` twin carries the reasoning. A
+        // terminal `Restore` requeues `AwaitChange`, so this is the ONE pass
+        // that will ever look at the Job again; a TTL patch that failed on the
+        // pass that made the object terminal is repaired here or never.
+        let ttl_patched =
+            diagnostics::repair_ttl(client, &namespace, &job, &restore.uid().unwrap_or_default())
+                .await
+                .map_err(RestoreError::Api)?;
         return Ok(RestoreOutcome {
             job_name,
             created: false,
@@ -3506,7 +3558,7 @@ async fn reconcile_restore_inner(
             exit_code: restore.status.as_ref().and_then(|s| s.exit_code),
             terminal_state: None,
             keys: RestoreEvidenceKeys::default(),
-            ttl_patched: false,
+            ttl_patched,
             requeue: Requeue::AwaitChange,
         });
     }
@@ -3524,7 +3576,18 @@ async fn reconcile_restore_inner(
     // path needs a code and this branch is "there is none".
     let Some((pod, exit_code)) = terminated else {
         let terminal_state = if found.contested.is_empty() {
-            backup::crash_terminal_state(found.pod.as_ref())
+            // D3 §2.2, the `Backup` twin's rule verbatim: the four new states
+            // replace `NoExitCode` only when a matching diagnostic was
+            // recorded before the Job ended.
+            let from_pod = backup::crash_terminal_state(found.pod.as_ref());
+            if from_pod == crate::conditions::TERMINAL_STATE_NO_EXIT_CODE {
+                diagnostics::recorded_terminal_state(
+                    restore.status.as_ref().and_then(|s| s.progress.as_ref()),
+                )
+                .unwrap_or(from_pod)
+            } else {
+                from_pod
+            }
         } else {
             TERMINAL_STATE_POD_OWNERSHIP_CONTESTED
         };
@@ -3542,7 +3605,11 @@ async fn reconcile_restore_inner(
             &restores,
             restore,
             &name,
-            crashed_status_patch(restore, terminal_state, &job_name, now),
+            diagnostics::apply_finished(
+                crashed_status_patch(restore, terminal_state, &job_name, now),
+                restore.status.as_ref().and_then(|s| s.progress.as_ref()),
+                now,
+            ),
         )
         .await?;
         return Ok(RestoreOutcome {
@@ -3613,14 +3680,18 @@ async fn reconcile_restore_inner(
     // this one carries: a JSON merge patch REPLACES arrays, and after this
     // PATCH returns the in-memory `restore` is stale and no longer says what
     // the object says. See `verification::second_patch`.
-    let terminal = finished_status_patch(
-        restore,
-        exit_code,
-        &keys,
-        refusal.as_deref(),
-        observed.as_ref(),
-        topics.as_ref(),
-        preflight.as_ref(),
+    let terminal = diagnostics::apply_finished(
+        finished_status_patch(
+            restore,
+            exit_code,
+            &keys,
+            refusal.as_deref(),
+            observed.as_ref(),
+            topics.as_ref(),
+            preflight.as_ref(),
+            now,
+        ),
+        restore.status.as_ref().and_then(|s| s.progress.as_ref()),
         now,
     );
     patch_status_if_changed(&restores, restore, &name, terminal.clone()).await?;
@@ -3633,7 +3704,9 @@ async fn reconcile_restore_inner(
         &job_name,
         &PatchParams::default(),
         &Patch::Merge(json!({
-            "spec": { "ttlSecondsAfterFinished": TTL_SECONDS_AFTER_FINISHED }
+            // D3 §2.7, chart value `controller.jobTtlSeconds`; the default
+            // is `TTL_SECONDS_AFTER_FINISHED`.
+            "spec": { "ttlSecondsAfterFinished": diagnostics::job_ttl_seconds() }
         })),
     )
     .await

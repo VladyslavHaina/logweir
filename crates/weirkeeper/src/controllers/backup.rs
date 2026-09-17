@@ -105,11 +105,12 @@ use crate::crds::backup::Backup;
 use crate::crds::backup_schedule::BackupSchedule;
 use crate::crds::kafka_cluster::KafkaCluster;
 use crate::crds::Condition;
+use crate::diagnostics;
 use crate::job::{self, EnvFromSecret, RunnerJobSpec, RunnerOwner, SecretMount, CONTAINER_NAME};
 use crate::policy::SelectionShape;
 use crate::verification::{
     backup_badge, conditions_in, second_patch, stored_verification, verified_condition,
-    EvidenceRef, VerifyOracle,
+    EvidenceRef, VerificationVerdict, VerifyOracle,
 };
 use logweir_core::ids::sha256_prefixed;
 use logweir_store::Store;
@@ -242,13 +243,49 @@ pub const REFUSAL_REASON_PREFIX: &str = "refusal-reason=";
 
 /// How many trailing lines of the pod log the key scan looks at.
 ///
-/// THE CONTRACT SAYS "THE FINAL TWO STDOUT LINES", AND THIS IS EIGHT. The two
+/// THE CONTRACT SAYS "THE FINAL TWO STDOUT LINES", AND THIS IS SIXTEEN. The
 /// extra reads cost nothing and buy tolerance for a trailing blank line, a
 /// `\r\n`, or a shutdown line a future runner appends — none of which changes
 /// which line carries which key, because the scan matches on the KEY NAME and
 /// not on a position. It is bounded rather than unbounded so a 200 MB log
 /// cannot make the scan the expensive part of a reconcile.
-pub const KEY_SCAN_TAIL_LINES: usize = 8;
+///
+/// # Why it was eight and is now sixteen — D3 W5's review finding F5
+///
+/// Execution contract v2 added a conditional `teardown-key=` line to the
+/// restore runner's tail. Measured on a PASSING restore
+/// (`crates/logweir/tests/progress_channel.rs`, child row
+/// `the_progress_child_runs_one_restore_and_exits`): summary,
+/// `topic-preflight=`, `teardown-key=`, `scorecard-key=`, `sidecar-key=`,
+/// `offset-report-key=` — six lines, **seven** in production where `tracing`
+/// also emits `drill finished`. That is seven of eight, and the next worker to
+/// append one trailing line would push `topic-preflight=` — erratum E10(c)'s
+/// only producer for `Restore.status.topicPreflight` — out of the window. The
+/// scan matches by key NAME, so the failure mode is a silently absent status
+/// field and not an error, which is exactly the kind of defect a budget
+/// exists to prevent.
+///
+/// So the constant is RAISED rather than the runner trimmed, and the budget is
+/// written down: **7 used, 9 reserved**. A larger window is safe by
+/// construction — every scanner here takes the LAST occurrence of each key
+/// prefix, so widening it can only find a key it would otherwise have missed,
+/// never a different one. [`BUDGETED_TRAILING_LINES`] is the measured seven,
+/// and `the_key_scan_window_has_room_for_the_runners_trailing_block` in
+/// `tests/backup_controller.rs` is what fails when the two disagree — mirrored
+/// from the runner-side row, which is where a runner-side change is caught.
+pub const KEY_SCAN_TAIL_LINES: usize = 16;
+
+/// How many trailing lines a passing restore actually prints in production —
+/// the number [`KEY_SCAN_TAIL_LINES`] is a budget over.
+///
+/// MIRRORED from `crates/logweir/tests/progress_channel.rs`'s
+/// `the_trailing_lines_a_passing_restore_prints_fit_the_controllers_scan_window`,
+/// which measures it by running the real runner. A `weirkeeper` dependency in
+/// that crate would invert the layering, so the number is stated on both sides
+/// and each side's test names the other. Raise this when a runner appends a
+/// trailing line; the controller-side row then says whether the window still
+/// has room.
+pub const BUDGETED_TRAILING_LINES: usize = 7;
 
 /// How long before an unfinished Job is looked at again.
 ///
@@ -621,6 +658,14 @@ pub struct ArchiveObservation {
     /// document cannot carry its own digest. `None` when the receipt could not
     /// be read at all, which is NOT OBSERVED and not "the receipt is empty".
     pub receipt_sha256: Option<String>,
+    /// The sum of `BackupReceipt.records` — how many records this run
+    /// archived, across every topic it names. **Defect STATUS-RECORDS**, and
+    /// see [`observe_archive`] for why it is summed here and written only
+    /// after the receipt VERIFIES.
+    pub records: Option<i64>,
+    /// `BackupReceipt.{started_at, finished_at}` — D3 §2.2's `status.capture`,
+    /// copied verbatim from the same verified receipt.
+    pub capture: Option<(DateTime<Utc>, DateTime<Utc>)>,
 }
 
 /// What the archive-facing half of this reconciler is handed, and the reason
@@ -728,10 +773,12 @@ pub fn observe_archive(store: &Store, keys: &EvidenceKeys) -> Option<ArchiveObse
         .sidecar
         .as_deref()
         .is_some_and(|key| store.get(key).is_ok());
-    let covered = receipt
+    let document = receipt
         .as_deref()
-        .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok())
-        .and_then(|doc| covered_from_receipt(&doc));
+        .and_then(|bytes| serde_json::from_slice::<Value>(bytes).ok());
+    let covered = document.as_ref().and_then(covered_from_receipt);
+    let records = document.as_ref().and_then(records_from_receipt);
+    let capture = document.as_ref().and_then(capture_from_receipt);
     // THE DIGEST OF WHAT WAS ACTUALLY FETCHED, in the one spelling this corpus
     // uses (`sha256:<lowercase hex>`), so a value read off the status and a
     // value read out of a signed document compare as strings. Task 24's
@@ -744,7 +791,48 @@ pub fn observe_archive(store: &Store, keys: &EvidenceKeys) -> Option<ArchiveObse
         },
         covered,
         receipt_sha256,
+        records,
+        capture,
     })
+}
+
+/// The total record count out of a receipt — **defect STATUS-RECORDS**.
+///
+/// `Backup.status.records` has been declared on the CRD with a `RECORDS`
+/// printer column since the kind existed and nothing ever wrote it: the column
+/// was blank on every `Backup` the PLAT-06.1 and PLAT-07.1 live runs produced,
+/// while the counts sat in the signed receipt all along. Found by
+/// `plat07-live`; D3 assigns it to PLAT-14.1.
+///
+/// **A SUM, AND THE FIELD IS SCALAR.** `BackupReceipt.records` is per topic
+/// and `status.records` is one integer, so the answer is their sum — which is
+/// exactly what the column means ("how many records the run archived") and
+/// what the CRD's field description already says. The per-topic breakdown
+/// stays where it is attested, in the signed document; a status is not a
+/// second copy of a receipt.
+///
+/// `None` rather than `0` when the block is absent or a value does not fit:
+/// a blank column is honest and a zero is a claim.
+#[must_use]
+pub fn records_from_receipt(receipt: &Value) -> Option<i64> {
+    let records = receipt.get("records")?.as_object()?;
+    let mut total: i64 = 0;
+    for value in records.values() {
+        total = total.checked_add(i64::try_from(value.as_u64()?).ok()?)?;
+    }
+    Some(total)
+}
+
+/// `status.capture`, from the same receipt — D3 §2.2.
+///
+/// BOTH INSTANTS OR NEITHER, for [`covered_from_receipt`]'s reason: a half-read
+/// window cannot be told apart from a window that is genuinely open-ended.
+#[must_use]
+pub fn capture_from_receipt(receipt: &Value) -> Option<(DateTime<Utc>, DateTime<Utc>)> {
+    let at = |key: &str| -> Option<DateTime<Utc>> {
+        receipt.get(key)?.as_str()?.parse::<DateTime<Utc>>().ok()
+    };
+    Some((at("started_at")?, at("finished_at")?))
 }
 
 /// Read the two evidence keys off a pod log — **by key name, never by
@@ -2319,7 +2407,11 @@ pub async fn reconcile_backup_with_runner_image(
                     &backups,
                     backup,
                     &name,
-                    refused_status_patch(&view, state, &message, now),
+                    diagnostics::apply_finished(
+                        refused_status_patch(&view, state, &message, now),
+                        backup.status.as_ref().and_then(|s| s.progress.as_ref()),
+                        now,
+                    ),
                 )
                 .await?;
             }
@@ -2679,18 +2771,63 @@ async fn reconcile_backup_inner(
 
     // STEP 2. Running.
     if !job_finished(&job) {
+        // D3 §2.3 / §2.4 — PLAT-14.1. The ONE derivation
+        // (`weirkeeper::diagnostics`), which is also the only thing on this
+        // path that lists events or reads the running pod's log. It answers
+        // the question `phase: Running` never could: a `Backup` whose pod sits
+        // in `ImagePullBackOff` is `Running` by every field that existed
+        // before this block.
+        let stored = backup.status.as_ref().and_then(|s| s.progress.as_ref());
+        let run = diagnostics::observe(
+            client,
+            &namespace,
+            &job,
+            &pod_selectors(&job_name),
+            stored,
+            now,
+        )
+        .await
+        .map_err(BackupError::Api)?;
         patch_status_if_changed(
             &backups,
             backup,
             &name,
-            running_status_patch(&view, &job_name, now),
+            diagnostics::apply(
+                running_status_patch(&view, &job_name, now),
+                &diagnostics::Write {
+                    derived: &run.derived,
+                    progress: &run.progress,
+                    stored,
+                    conditions: backup.status.as_ref().and_then(|s| s.conditions.as_ref()),
+                    generation: backup.meta().generation,
+                    // `Backup` HAS NO SCALAR `reason`. Its CRD carries no
+                    // REASON printer column and `BackupStatus` no such field;
+                    // `Restore`'s does, and review finding M2 is why.
+                    scalar_reason: false,
+                    now,
+                },
+            ),
         )
         .await?;
+        // FAIL FAST — D3 §2.3, and AFTER the status write above, which is
+        // what makes `recorded_terminal_state` able to name the cause on the
+        // pass that observes the cancelled Job.
+        let failed_fast = diagnostics::fail_fast(
+            client,
+            &namespace,
+            &job,
+            &backup.uid().unwrap_or_default(),
+            &run,
+            stored,
+            now,
+        )
+        .await
+        .map_err(BackupError::Api)?;
         return Ok(BackupOutcome {
             job_name,
             created: false,
             exit_code: None,
-            terminal_state: None,
+            terminal_state: failed_fast.map(str::to_string),
             keys: EvidenceKeys::default(),
             ttl_patched: false,
         });
@@ -2732,13 +2869,23 @@ async fn reconcile_backup_inner(
             "the status is already terminal; the runner's pod is not read again and no patch is \
              sent"
         );
+        // D3 §2.7's REPAIR, and the one thing this branch does. The guard
+        // above gives up retrying the pass that made the object terminal
+        // (see its note), and the TTL is the half of that pass whose loss is
+        // silent: a finished Job with no TTL is never collected, so it and
+        // its pod sit in somebody's namespace quota forever. No pod is read
+        // and no status is written — the Job's own spec is the whole input.
+        let ttl_patched =
+            diagnostics::repair_ttl(client, &namespace, &job, &backup.uid().unwrap_or_default())
+                .await
+                .map_err(BackupError::Api)?;
         return Ok(BackupOutcome {
             job_name,
             created: false,
             exit_code: backup.status.as_ref().and_then(|s| s.exit_code),
             terminal_state: None,
             keys: EvidenceKeys::default(),
-            ttl_patched: false,
+            ttl_patched,
         });
     }
 
@@ -2758,7 +2905,21 @@ async fn reconcile_backup_inner(
     // path needs a code and this branch is "there is none".
     let Some((pod, exit_code)) = terminated else {
         let terminal_state = if found.contested.is_empty() {
-            crash_terminal_state(found.pod.as_ref())
+            // D3 §2.2: the four new states REPLACE `NoExitCode` only when the
+            // matching diagnostic was recorded BEFORE the Job ended.
+            // `crash_terminal_state`'s existing table is otherwise unchanged —
+            // a disrupted node is still `DisruptedMidDrill` and an
+            // unschedulable pod is still `PodUnschedulable`, both of which are
+            // more specific than anything a diagnostic could add.
+            let from_pod = crash_terminal_state(found.pod.as_ref());
+            if from_pod == TERMINAL_STATE_NO_EXIT_CODE {
+                diagnostics::recorded_terminal_state(
+                    backup.status.as_ref().and_then(|s| s.progress.as_ref()),
+                )
+                .unwrap_or(from_pod)
+            } else {
+                from_pod
+            }
         } else {
             TERMINAL_STATE_POD_OWNERSHIP_CONTESTED
         };
@@ -2776,7 +2937,11 @@ async fn reconcile_backup_inner(
             &backups,
             backup,
             &name,
-            crashed_status_patch(&view, terminal_state, &job_name, now),
+            diagnostics::apply_finished(
+                crashed_status_patch(&view, terminal_state, &job_name, now),
+                backup.status.as_ref().and_then(|s| s.progress.as_ref()),
+                now,
+            ),
         )
         .await?;
         return Ok(BackupOutcome {
@@ -2846,14 +3011,18 @@ async fn reconcile_backup_inner(
     // this one carries: a JSON merge patch REPLACES arrays, and after this
     // PATCH returns, the in-memory `backup` is stale and no longer says what
     // the object says. See `verification::second_patch`.
-    let terminal = finished_status_patch(
-        &view,
-        exit_code,
-        &keys,
-        refusal.as_deref(),
-        orphan,
-        covered,
-        receipt_sha256.as_deref(),
+    let terminal = diagnostics::apply_finished(
+        finished_status_patch(
+            &view,
+            exit_code,
+            &keys,
+            refusal.as_deref(),
+            orphan,
+            covered,
+            receipt_sha256.as_deref(),
+            now,
+        ),
+        backup.status.as_ref().and_then(|s| s.progress.as_ref()),
         now,
     );
     patch_status_if_changed(&backups, backup, &name, terminal.clone()).await?;
@@ -2866,7 +3035,10 @@ async fn reconcile_backup_inner(
         &job_name,
         &PatchParams::default(),
         &Patch::Merge(json!({
-            "spec": { "ttlSecondsAfterFinished": TTL_SECONDS_AFTER_FINISHED }
+            // D3 §2.7, chart value `controller.jobTtlSeconds`. The default IS
+            // `TTL_SECONDS_AFTER_FINISHED`, so an installation that configures
+            // nothing keeps exactly the behaviour it had.
+            "spec": { "ttlSecondsAfterFinished": diagnostics::job_ttl_seconds() }
         })),
     )
     .await
@@ -2936,13 +3108,38 @@ async fn reconcile_backup_inner(
             "weirkeeper verified this Backup's signed receipt with its read-only evidence \
              credential"
         );
-        patch_status_if_changed(
-            &backups,
-            backup,
-            &name,
-            second_patch(&conditions_in(&terminal), verified, block),
-        )
-        .await?;
+        // DEFECT STATUS-RECORDS AND D3 §2.2's `capture`, ON THIS PATCH AND
+        // NO OTHER, AND ONLY ON `Valid`. Both are copied out of the receipt
+        // bytes this reconcile fetched — the same bytes whose digest is on
+        // `status.evidence.receiptSha256` and whose signature `verify` has
+        // just checked against this namespace's trust. "From the verified
+        // receipt" is therefore literal: an `Invalid`, `Untrusted` or
+        // `NotAttempted` verdict writes NEITHER field, so a count on a
+        // `Backup` is a count some key this installation accepts attested to.
+        //
+        // The asymmetry with `windowCovered` — written on the terminal patch,
+        // before verification — is deliberate and is not widened here.
+        // `windowCovered` predates the trust work and changing when it is
+        // written would change the meaning of a field other code already
+        // reads (`orphan_state`'s siblings, the protection evaluation).
+        let mut evidence_patch = second_patch(&conditions_in(&terminal), verified, block);
+        if result.result == VerificationVerdict::Valid {
+            if let Some(status) = evidence_patch
+                .get_mut("status")
+                .and_then(Value::as_object_mut)
+            {
+                if let Some(records) = observed.as_ref().and_then(|o| o.records) {
+                    status.insert("records".to_string(), json!(records));
+                }
+                if let Some((started, finished)) = observed.as_ref().and_then(|o| o.capture) {
+                    status.insert(
+                        "capture".to_string(),
+                        json!({ "startedAt": started, "finishedAt": finished }),
+                    );
+                }
+            }
+        }
+        patch_status_if_changed(&backups, backup, &name, evidence_patch).await?;
     }
 
     info!(
