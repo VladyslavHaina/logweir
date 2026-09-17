@@ -282,7 +282,10 @@ async fn applicability_is_recomputed_against_the_callers_current_plan() {
         .await;
     assert_eq!(changed.json()["item"]["applicable"], false);
     assert_eq!(changed.json()["item"]["stale"], true);
-    assert_eq!(changed.json()["item"]["staleReasons"][0], "planHashChanged");
+    assert_eq!(
+        changed.json()["item"]["staleReasons"][0]["reason"],
+        "planHashChanged"
+    );
 
     // And an expiry is the other way a verdict stops describing now.
     app.clock.advance(3600);
@@ -292,7 +295,10 @@ async fn applicability_is_recomputed_against_the_callers_current_plan() {
         ))
         .await;
     assert_eq!(expired.json()["item"]["applicable"], false);
-    assert_eq!(expired.json()["item"]["staleReasons"][0], "expired");
+    assert_eq!(
+        expired.json()["item"]["staleReasons"][0]["reason"],
+        "expired"
+    );
 
     // A malformed hash is refused rather than silently treated as absent.
     app.get(&format!(
@@ -502,4 +508,228 @@ fn field_names(problem: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+// ======================================================================
+// The stale-reason vocabulary
+// ======================================================================
+
+/// **The DTO's reasons are exactly the controller's reasons.**
+///
+/// Two components render the same six spellings: `logweir-core`'s
+/// `check_contract::StaleReason` (which the preflight controller uses and
+/// writes into `status.message`) and this API's `StaleReasonKind`. Nothing but
+/// a test holds them together, and the first cut of the DTO carried three of
+/// the six plus a seventh the controller never emits.
+///
+/// THE `match` HAS NO WILDCARD. That is the half of this test that survives
+/// someone adding a variant: a seventh `StaleReason` in `logweir-core` stops
+/// this file compiling, rather than arriving at runtime as a token the API
+/// silently drops. The published enum is read out of the checked-in OpenAPI
+/// document, so the wire spellings are compared and not just the Rust names.
+#[test]
+fn the_dto_reason_set_is_the_controllers_reason_set() {
+    use logweir_core::check_contract::StaleReason;
+
+    // Every variant, constructed. Adding one to `logweir-core` fails to
+    // compile here until it is listed.
+    let all = [
+        StaleReason::Expired,
+        StaleReason::PlanHashChanged,
+        StaleReason::ReferentChanged("BackupDestination/primary".to_string()),
+        StaleReason::CaBundleChanged,
+        StaleReason::PolicyChanged,
+        StaleReason::InputsDigestChanged,
+    ];
+    // The exhaustiveness proof: no `_` arm.
+    for reason in &all {
+        let _: &str = match reason {
+            StaleReason::Expired => "expired",
+            StaleReason::PlanHashChanged => "planHashChanged",
+            StaleReason::ReferentChanged(_) => "referentChanged",
+            StaleReason::CaBundleChanged => "caBundleChanged",
+            StaleReason::PolicyChanged => "policyChanged",
+            StaleReason::InputsDigestChanged => "inputsDigestChanged",
+        };
+    }
+
+    // What the CONTROLLER writes, as the token before any `:` subject.
+    let mut emitted: Vec<String> = all
+        .iter()
+        .map(|r| {
+            let rendered = r.to_string();
+            rendered
+                .split_once(':')
+                .map_or(rendered.clone(), |(head, _)| head.to_string())
+        })
+        .collect();
+    emitted.sort();
+    emitted.dedup();
+
+    // What the API PUBLISHES, read from the checked-in document.
+    let document: serde_json::Value =
+        serde_json::from_str(include_str!("../../../schemas/logweir-api-v1.openapi.json"))
+            .expect("the document is JSON");
+    let mut published: Vec<String> = document["components"]["schemas"]["StaleReasonKind"]["oneOf"]
+        .as_array()
+        .expect("StaleReasonKind is an enumeration in the document")
+        .iter()
+        .flat_map(|option| {
+            option["enum"]
+                .as_array()
+                .cloned()
+                .unwrap_or_default()
+                .into_iter()
+        })
+        .map(|v| v.as_str().unwrap_or_default().to_string())
+        .collect();
+    published.sort();
+    published.dedup();
+
+    assert_eq!(
+        published, emitted,
+        "the reasons this API can carry are not the reasons the controller emits. A reason the \
+         DTO lacks reaches a console as prose it has to parse; a reason the DTO invents is one \
+         nothing will ever send."
+    );
+    // And `cancelRequested` is on neither list: a cancelled check has no
+    // verdict to be stale.
+    assert!(!published.iter().any(|r| r == "cancelRequested"));
+}
+
+/// **Each of the four reasons the controller alone can compute survives the
+/// projection, typed.**
+///
+/// The `Preflight` CRD has no field for them: the reconciler renders them into
+/// `status.message` when it downgrades a verdict that stopped applying. The
+/// API recovers them there, splits `referentChanged:<Kind>/<name>` into
+/// structured fields once, and hands W13 something it does not have to parse.
+#[tokio::test]
+async fn the_four_controller_reasons_are_projected_as_typed_subjects() {
+    let app = TestApp::new();
+    seed_preflight(
+        &app.fake,
+        NS_A,
+        "pf-stale",
+        "Restore",
+        None,
+        Some(LOCAL_ADMIN_ACTOR),
+    );
+    let mut object = app.fake.object("preflights", NS_A, "pf-stale").unwrap();
+    object["status"]["message"] = json!(
+        "this result no longer applies (referentChanged:BackupDestination/primary,          caBundleChanged, policyChanged, inputsDigestChanged); create a new Preflight for the          current objects"
+    );
+    // Not expired and no draft hash, so every reason below is the
+    // controller's and none is this service's own.
+    object["status"]["result"]["expiresAt"] = json!("2099-01-01T00:00:00Z");
+    app.fake.seed("preflights", NS_A, object);
+
+    let response = app
+        .get(&format!("/api/v1/namespaces/{NS_A}/preflights/pf-stale"))
+        .await;
+    assert_eq!(response.status.as_u16(), 200, "{}", response.text());
+    let item = &response.json()["item"];
+    assert_eq!(item["stale"], true);
+    assert_eq!(item["applicable"], false);
+    assert_eq!(
+        item["staleReasons"],
+        json!([
+            {"reason": "referentChanged", "kind": "BackupDestination", "name": "primary"},
+            {"reason": "caBundleChanged"},
+            {"reason": "policyChanged"},
+            {"reason": "inputsDigestChanged"},
+        ]),
+        "the four reasons did not survive the projection"
+    );
+    // A reason with no subject carries no empty strings for one.
+    assert!(item["staleReasons"][1].get("kind").is_none());
+    app.fake.assert_strict();
+}
+
+/// The API's own two reasons and the controller's are one list, deduplicated,
+/// and an unrecognised token is dropped rather than guessed at.
+#[tokio::test]
+async fn the_two_sources_merge_and_an_unknown_token_is_never_invented() {
+    let app = TestApp::new();
+    let bound = format!("sha256:{}", "a".repeat(64));
+    seed_preflight(
+        &app.fake,
+        NS_A,
+        "pf-merge",
+        "Restore",
+        Some(&bound),
+        Some(LOCAL_ADMIN_ACTOR),
+    );
+    let mut object = app.fake.object("preflights", NS_A, "pf-merge").unwrap();
+    object["status"]["message"] = json!(
+        "this result no longer applies (expired, somethingNewer, policyChanged); create a new          Preflight for the current objects"
+    );
+    app.fake.seed("preflights", NS_A, object);
+
+    // The clock is past the recorded expiry, so BOTH sides say `expired`.
+    app.clock.advance(3600);
+    let response = app
+        .get(&format!(
+            "/api/v1/namespaces/{NS_A}/preflights/pf-merge?planHash=sha256:{}",
+            "c".repeat(64)
+        ))
+        .await;
+    let reasons = response.json()["item"]["staleReasons"].clone();
+    assert_eq!(
+        reasons,
+        json!([
+            {"reason": "expired"},
+            {"reason": "planHashChanged"},
+            {"reason": "policyChanged"},
+        ]),
+        "the two sources did not merge cleanly"
+    );
+    assert!(!response.text().contains("somethingNewer"));
+}
+
+/// A message this build does not recognise yields no reason at all.
+#[tokio::test]
+async fn prose_that_is_not_the_downgrade_sentence_produces_no_reasons() {
+    let app = TestApp::new();
+    seed_preflight(
+        &app.fake,
+        NS_A,
+        "pf-prose",
+        "Restore",
+        None,
+        Some(LOCAL_ADMIN_ACTOR),
+    );
+    let mut object = app.fake.object("preflights", NS_A, "pf-prose").unwrap();
+    object["status"]["message"] = json!("the check job was evicted (policyChanged was not why)");
+    object["status"]["result"]["expiresAt"] = json!("2099-01-01T00:00:00Z");
+    app.fake.seed("preflights", NS_A, object);
+    let response = app
+        .get(&format!("/api/v1/namespaces/{NS_A}/preflights/pf-prose"))
+        .await;
+    assert_eq!(response.json()["item"]["staleReasons"], json!([]));
+    assert_eq!(response.json()["item"]["stale"], false);
+}
+
+/// A cancelled check reports no stale reason: its verdict is absent, not out
+/// of date, and `state` and `terminal` are what say so.
+#[tokio::test]
+async fn a_cancel_request_is_not_a_stale_reason() {
+    let app = TestApp::new();
+    seed_running_preflight(&app.fake, NS_A, "pf-cancelled", LOCAL_ADMIN_ACTOR);
+    let mut object = app.fake.object("preflights", NS_A, "pf-cancelled").unwrap();
+    object["spec"]["cancelRequested"] = json!(true);
+    app.fake.seed("preflights", NS_A, object);
+    let response = app
+        .get(&format!(
+            "/api/v1/namespaces/{NS_A}/preflights/pf-cancelled"
+        ))
+        .await;
+    let item = &response.json()["item"];
+    assert_eq!(item["staleReasons"], json!([]));
+    assert_eq!(item["stale"], false);
+    assert_eq!(
+        item["applicable"], false,
+        "a running check applies to nothing"
+    );
+    assert_eq!(item["state"], "running");
 }
