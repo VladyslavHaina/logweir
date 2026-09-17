@@ -809,6 +809,147 @@ PLAT-15.2's connect-an-existing-archive path and **this build creates no sync Jo
 for it**: such a catalog reports `Ready=False/LegacyArchiveUnsupported` and names
 the supported path (a `BackupDestination` with a read-only `archiveRead` grant).
 
+### 7e. A `ProtectionPolicy` says whether you can recover, and a green schedule does not
+
+An enabled schedule is not protection. It says the cron is firing; it says
+nothing about whether a recoverable point exists, whether the archive still
+holds it, or whether the evidence verifies under a key this installation
+accepts. PLAT-14.2's `ProtectionPolicy` is the object that answers the second
+question, and the console renders the two side by side and never collapses
+them.
+
+**The spec is mutable, and it is the only new kind of this group that is.** An
+objective is evaluation policy, never an execution input: nothing here is
+frozen into a run, no run reads it, and editing it cannot change a recorded
+result — only what Logweir *says* about results that already exist. There is
+therefore no CEL seal on `.spec` and `status.observedGeneration` is how you
+tell which revision a verdict came from.
+
+**What `recoveryPointAt` is, and what it is not.** It is the **capture start**
+of the newest available point (`Backup.status.capture.startedAt`). It is not
+`windowCovered.toMs` — that is the newest *record* instant, so an idle topic
+would look stale forever — and it is not `finishedAt`, which would under-report
+the gap by the length of the run. The newest record instant is published beside
+it as `status.lastAvailablePoint.newestRecordAt`, under its own name, so the
+two are never conflated.
+
+**A point is AVAILABLE when all four hold:** the run is `phase: Succeeded` with
+`exitCode: 0`; its evidence is `Valid` or `ValidHistorical` (unless
+`objectives.requireVerifiedEvidence` is turned off); it covers this policy's
+source, destination and topics; and — when `protects.catalogRef` is set and
+`objectives.requireCatalogAvailability` is on — the catalog's materialised view
+is current and says the point is `Available`. `Untrusted` evidence is
+deliberately not a pass: the bytes verify, and the installation said it does not
+accept that key.
+
+**`health` has five values and `Unknown` is one of them.**
+
+| `status.health` | what it means |
+|---|---|
+| `Healthy` | an available point inside `maxRecoveryPointAgeSeconds`, failures below the threshold, no suspended or not-ready schedule, no missed slot |
+| `AtRisk` | inside the objective, but failures at the threshold, a suspended/not-ready schedule, or a missed slot |
+| `Stale` | the newest available point is older than the objective |
+| `Unprotected` | there is no available point at all |
+| `Unknown` | the evaluation could not happen: the catalog view expired or could not be read, or the referenced source or destination is gone |
+
+`Unknown` is **never rendered as healthy and never as a failure**. The
+`Protected` condition is `True` only for `Healthy`, `Unknown` for `Unknown`,
+and `False` otherwise — a `False` on an evaluation that did not happen reads
+everywhere as "Logweir checked and you are not protected", which is a claim the
+controller did not make. `status.availabilityBasis` says which claim you have:
+`KubernetesStatus` (from `Backup.status` alone), `Catalog` (a fresh view
+answered) or `CatalogStale`.
+
+**Failure accounting counts SLOTS, not attempts.** A retry chain (D1's
+`spec.trigger.kind=Retry`) is one failed slot — its final attempt — so
+`maxConsecutiveFailedRuns: 2` means two failed nights and not two retries of
+one. A slot still running stops the walk: counting past it would open an alert
+for a condition a run in flight may be about to end. Membership uses
+`spec.scheduleRef.uid` (the authority) and not the `logweir.dev/schedule-uid`
+label (the index), which is why **a manual run of a schedule counts as that
+schedule's history**.
+
+**Alerts are a ledger, not a log.** One open alert per `(policy, kind)` under a
+stable key, `logweir-protection-<policyUID>-<kind>`. `transition` increments on
+open, on resolve and on each re-notify; `notifiedTransition` records the last
+transition a delivery Job was created for. A condition that stays true produces
+**no further messages** — not one per reconcile — until it resolves or until
+`notifications.renotifyAfterSeconds` elapses. `RecoveryCompleted` is the
+exception in three ways: it keys on the **Restore** UID (a policy's points are
+restored many times), it is webhook/Slack only, and it auto-resolves the instant
+it opens.
+
+**Delivery is a Job, and that is a boundary and not an implementation detail.**
+The controller holds no verb on `secrets` and gains no HTTP egress. For each
+alert transition it creates one immutable `ConfigMap` `<policy>-ev-<sha8>`
+holding the unsigned protection event, then one Job
+`<policy>-n-<sha8>-<attempt>` running `logweir notify deliver --event
+/event/event.json` in the runner image, with the sink credentials projected as
+`valueFrom.secretKeyRef` — a reference the kubelet resolves, never a value this
+controller read. Both names are pure functions of
+`(policyUID, alertKey, transition)`, so a duplicate reconcile is a **409** and
+not a second page. Delivery is retried at most three times (60 s / 300 s /
+900 s); exhaustion sets `NotificationsDelivered=False` with reason
+`DeliveryFailed` **and does nothing else**. A notification failure never
+rewrites a backup result: this controller patches `protectionpolicies/status`
+and nothing else, and it reads `Backup` and `Restore` objects through bounded
+`list` calls only.
+
+**The ordering rules, all three of which are load-bearing.** The event
+`ConfigMap` is created **before** its Job (a Job whose mount does not exist sits
+in `ContainerCreating` until its deadline). `ttlSecondsAfterFinished` is patched
+onto a finished delivery Job **only after** the `/status` patch carrying that
+delivery's verdict returned 200 (the exit code lives on the pod, and the TTL
+controller removes the Job and its pod together). And the pod is proved by the
+Job's own `metadata.uid` on its controller `ownerReference` **before** one byte
+of its log is read — a `notify-result=` line becomes a status field and then an
+API response, so reading a stranger's is defect `SEC-PODLOG`. Only the seven
+`notify-result=` values this build knows are read; nothing else from a pod log
+can reach a status.
+
+**`verificationScope` is `sampled`, `degraded` or `none` — never `complete`.**
+Logweir compares a sample of records. The value reaches a PagerDuty incident
+title and a Slack channel where someone decides, during an incident, whether an
+archive can be trusted, so the type has three variants and `logweir notify
+deliver` refuses a fourth at parse time. See
+[`docs/formats/protection-event.md`](formats/protection-event.md).
+
+**Bounds.** At most 16 ledger entries (8 of them recoveries), 16 schedules, 64
+topics on `lastAvailablePoint` (`topicsTruncated: true` beyond that), the newest
+50 runs considered per evaluation over at most 5 API pages of 200, and at most 4
+delivery Jobs created per reconcile pass. Over a window `W` one policy therefore
+creates at most `5 kinds × (2 + W / renotifyAfterSeconds) × 3 attempts` delivery
+Jobs.
+
+**Deviations from decision D3 §3, recorded here rather than in a commit
+message.** The delivery Job runs as `logweir-runner` and not as a new
+`logweir-notifier` ServiceAccount: `logweir-runner` is granted no verb on
+anything, its token is not mounted, and creating a second zero-verb account
+would touch four files this worker does not own. A policy may declare up to
+four notification routes, but `logweir notify deliver` reads one environment
+variable per sink kind, so one Job addresses at most one PagerDuty, one webhook
+and one Slack — the **first** of each in route order.
+
+**RBAC.** This kind adds exactly two rules to the `weirkeeper` ClusterRole —
+`list`/`watch` on `protectionpolicies` and `patch` on
+`protectionpolicies/status` — and widens one that already existed: `get` joins
+`list`/`watch` on `recoverycatalogs`, for the ONE catalog a policy names
+(narrower than the cluster-wide `list` on `configmaps` the alternative would
+need, which `config/rbac/role.yaml` refuses by name). No `get` on
+`protectionpolicies` itself — the reconciler never re-reads a policy the watcher
+handed it — no verb on `secrets`, and no `delete` on anything.
+
+**Upgrade and rollback.** The kind is additive and off by default: nothing
+references it and an installation that never creates a `ProtectionPolicy`
+behaves exactly as before. An older controller running against the newer CRDs
+does not reconcile them, so they sit with no status — visibly pending rather
+than silently wrong. Rolling the CRD back deletes any `ProtectionPolicy` objects
+and, by owner cascade, their event `ConfigMap`s and delivery Jobs; no `Backup`,
+`Restore` or archive is affected, because a protection verdict is a derived
+projection and never an execution input. An absent `status.alerts` after a
+rollback and re-apply means only that no alert has been recorded yet: the ledger
+is state, not history, and a re-opened condition opens at transition 1 again.
+
 ## 8. The approval flow
 
 An `Approval` object that exists is **not** an approval. An `Approval` whose
