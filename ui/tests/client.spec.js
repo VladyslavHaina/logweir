@@ -229,6 +229,69 @@ test("console_mode_lists_through_api_v1_and_projects_onto_the_resource_the_page_
   }
 });
 
+test("a_schedule_s_destination_and_its_dynamic_selection_are_projected_and_absence_is_kept", async () => {
+  // THE TWO FIELDS D1 W6 ADDED, AND THE ADAPTER THAT CARRIES THEM. The product
+  // API spells them `destinationRef` and `allUserTopics` on `ScheduleView`;
+  // the pages read `spec.destinationRef` and `spec.allUserTopics`, and
+  // `projectSchedule` is the only place that knows both names.
+  //
+  // WITHOUT THIS ROW EITHER MAPPING COULD BE DELETED AND EVERY SUITE STAYED
+  // GREEN (review R1). `ui/tests/d2.spec.js` asserts what the schedules page
+  // RENDERS from a `spec` handed to it directly, so it never exercises the
+  // step that puts the field there -- and a dropped mapping reads exactly like
+  // a schedule that names no destination, which is a legal and common state.
+  // That is the shape of every silent projection loss: the failure is
+  // indistinguishable from an honest absence.
+  await console_();
+  const wire = transport(() => ({ status: 200, body: fixture("console/schedules-list.json") }));
+  try {
+    const collection = await apiClient().list("team-a", "backupschedules");
+    assert.equal(collection.items.length, 3);
+    const [legacy_, dynamic, orphaned] = collection.items;
+
+    // (1) A schedule that names a destination AND selects dynamically.
+    assert.equal(dynamic.metadata.name, "everything-nightly");
+    assert.deepEqual(
+      dynamic.spec.destinationRef,
+      { name: "primary" },
+      "the saved destination this schedule writes to, under the name the CRD uses",
+    );
+    assert.equal(dynamic.spec.allUserTopics.incompleteDiscovery, "Refuse");
+    assert.deepEqual(
+      dynamic.spec.allUserTopics.exclude,
+      { topics: ["scratch"], prefixes: ["tmp-"] },
+      "including what the selection leaves out, which is what the coverage line renders",
+    );
+
+    // (2) A schedule written before either field existed. ABSENT STAYS ABSENT:
+    // the projection adds no `destinationRef: null` and no empty block, because
+    // the pages branch on presence and a present-but-empty field is a third
+    // state nothing in this tree has words for.
+    assert.equal(legacy_.metadata.name, "orders-hourly");
+    assert.equal(legacy_.spec.destinationRef, undefined);
+    assert.equal(legacy_.spec.allUserTopics, undefined);
+    assert.equal(legacy_.spec.archive.url, "s3://kafka-backups/orders",
+      "and its inline archive is still what it carries");
+
+    // (3) One field without the other: a named destination and a named
+    // allowlist. The two mappings are independent and neither implies the
+    // other.
+    assert.equal(orphaned.metadata.name, "orphaned-weekly");
+    assert.deepEqual(orphaned.spec.destinationRef, { name: "vanished" });
+    assert.equal(orphaned.spec.allUserTopics, undefined);
+    assert.deepEqual(orphaned.spec.topics, ["orders"]);
+
+    // THE EXCLUSION LISTS ARE COPIES. A page that sorted or spliced what it was
+    // given would otherwise be editing the decoded response every other reader
+    // of this list is holding.
+    dynamic.spec.allUserTopics.exclude.topics.push("mutated");
+    const again = await apiClient().list("team-a", "backupschedules");
+    assert.deepEqual(again.items[1].spec.allUserTopics.exclude.topics, ["scratch"]);
+  } finally {
+    wire.restore();
+  }
+});
+
 test("console_mode_reads_a_backup_detail_with_the_evidence_from_its_operation_route", async () => {
   await console_();
   const wire = transport((u) =>
