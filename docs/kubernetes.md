@@ -3672,6 +3672,24 @@ So, concretely:
 - an **approval moving from pending to verified** changes its
   `resourceVersion`.
 
+**What the binding does NOT cover, and it is not a complete list of triggers.**
+Two inputs a preflight exists to prove are absent from `inputsDigest`:
+
+- **The credential Secrets.** `BindingInputs` carries no Secret reference of any
+  kind, so rotating the SASL password or the object-store access key between a
+  green preflight and the run leaves the stored verdict "applicable". The
+  preflight proved that the OLD credential worked.
+- **The recovery point's topic set.** A `Backup` referent is recorded by UID
+  alone (its `generation` is not meaningful), and `backup.spec.topics` — which
+  `plan.bindings` compares the plan against — is not in the digest. Editing a
+  recovery point's topic set is invisible to the applicability test.
+
+Both are properties of the shared `BindingInputs` contract rather than of this
+controller, and closing them means adding `secret.resourceVersion` and a
+recovery-point topic digest to it. Until then, treat a `ready` verdict as a
+statement about the objects **as they were**, and re-run the check after
+rotating a credential.
+
 Each row also carries its own `expiresAt`, and the verdict's is the soonest of
 them. `target.mappedTopics` and `target.topicCreate` expire in **five minutes**
 — the shortest in the catalogue, because a topic can appear on the target
@@ -3687,7 +3705,20 @@ passed, or a referent moved under it, `status.result.state` is **downgraded to
 `unknown` and never to `notReady`: nothing was found wrong, the answer simply
 stopped being about the current objects.
 
-### 21.5 A restore preflight writes nothing
+### 21.5 The one key a check may write, and only when you ask
+
+`destination.evidenceWritable` is answered by actually creating the create-only
+readiness marker `logweir/readiness/<destinationUid>.json` — but **only** when
+the destination opts in with `spec.readiness.writeProbe: CreateOnlyMarker`. With
+the field absent or `Disabled` nothing is written and the row is
+execution-only with `WriteNotProbed`.
+
+The opt-in is read from the object on every pass. It used to be hard-coded off,
+which gave an operator who had opted in a row whose message said their
+destination configured no probe — a status contradicting the spec, which is the
+defect this kind exists to close.
+
+### 21.6 A restore preflight writes nothing
 
 No topic is created, altered or deleted. The collision answer comes from
 targeted metadata per mapped name and from a **validate-only** `CreateTopics`
@@ -3697,7 +3728,7 @@ its own `/status`, its own Job's `ttlSecondsAfterFinished` (after the status
 commit, so garbage collection cannot race the relay) and its own owned
 `ConfigMap`s, and nothing else.
 
-### 21.6 Skipping a check is not answering it
+### 21.7 Skipping a check is not answering it
 
 `spec.request.skipChecks` leaves a row out of the run. The row is still
 reported, with `state: skipped`, and **a skipped blocking check keeps the
@@ -3706,7 +3737,7 @@ answer: a `Preflight` over `planBytes` has no `Restore` for an approver to sign,
 so `approval.state` is `skipped` with `SubjectNotCreated` and the verdict is
 `unknown` however green everything else is.
 
-### 21.7 What this build does not do
+### 21.8 What this build does not do
 
 - **An inline `legacyArchive` / `legacySourceArchive` is not checked.** Turning
   an `s3://…` URL into the location a check plan needs is the legacy-addressing
@@ -3722,8 +3753,29 @@ so `approval.state` is `skipped` with `SubjectNotCreated` and the verdict is
   `weirkeeper` ClusterRole grants `delete` on nothing. Remove them with
   `kubectl delete preflight`, and the owner cascade takes the Job and the
   `ConfigMap`s with each one.
+- **`signer.rostered` is EXECUTION-ONLY for a restore.** The verdict needs the
+  runner's public `signerKeyId`, which rides on `signer.privateKeyUsable`; the
+  landed `restorePreflight` check-plan contract carries no `signer_path`, so a
+  restore check pod is never given a key to report. The row is still published,
+  with `SignerKeyIdNotObserved` and a message naming the reason, and it does not
+  gate — a blocking row nobody can answer would pin every restore preflight at
+  `unknown`. The runner still validates its signer before it writes anything
+  (PLAT-02.2). Closing it means adding `signer_path` to the restore request.
+- **`destination.archivePrefixWritable` is not requested.** A backup readiness
+  plan asks for the `archiveRead`, `evidenceWrite` and — when the destination
+  configures one — `evidenceRead` grants. The archive-WRITE grant is what the
+  run itself exercises, and its row's whole content is "verified by the run", so
+  requesting it would add a line and no information.
+- **`destination.evidenceReadable` is only requested when the destination
+  configures an `evidenceRead` grant.** A check plan carries ONE credential for
+  its destination, so probing a role the object leaves unconfigured would
+  exercise the wrong credential and report a refusal about a grant nobody asked
+  for. Absent means verification is `NotAttempted` (§7b), and the advisory row
+  is then simply absent.
+- **The binding covers no credential Secret and no recovery-point topic set** —
+  see §21.4.
 
-### 21.8 Upgrade and rollback
+### 21.9 Upgrade and rollback
 
 Additive in both directions. The kind, its two RBAC rules and the
 `events: list` rule arrive with the controller image and leave with it; an
