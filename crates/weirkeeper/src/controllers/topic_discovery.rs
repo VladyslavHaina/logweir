@@ -159,6 +159,74 @@ pub const STALLED_GRACE_SECONDS: i64 = 300;
 // Pure: the plan
 // ---------------------------------------------------------------------------
 
+/// The CRD's `maxItems` on `status.result.chunks`.
+///
+/// **A SCHEMA BOUND, AND THEREFORE A HARD ONE.** A status patch that violates
+/// its own schema is a 422, the patch is rejected whole, the object never
+/// reaches a terminal phase, the Job's TTL is never set, and `error_policy`
+/// requeues the same doomed pass every thirty seconds — forever. The chunk
+/// `ConfigMap`s would already be in etcd by then, orphaned behind a status that
+/// never names them. [`visibility_status`] caps `basis` at the same kind of
+/// bound for the same reason.
+pub const MAX_STATUS_CHUNKS: usize = 64;
+
+/// The most inventory entries this controller will STORE for one observation —
+/// **pure**.
+///
+/// Two ceilings, and the lower wins:
+///
+/// * **The plan's own `maxTopics`.** A runner that relayed more than the plan
+///   allowed did not honour the plan; the surplus is not a result this
+///   controller may publish as if it had been asked for.
+/// * **`MAX_STATUS_CHUNKS × MAX_CHUNK_LINES`** — 160,000 entries. This is the
+///   schema backstop, and it binds only if an installation policy ever raised
+///   `hardMaxTopics` above it: at the contract's own 50,000 ceiling the plan
+///   bound is twenty chunks and this one is never reached.
+///
+/// A line is at most ~308 bytes and a chunk holds 2,500 of them (~752 KiB), so
+/// [`chunks::MAX_CHUNK_LINES`] binds before [`chunks::MAX_CHUNK_BYTES`] for
+/// every legal Kafka name, which is what makes an entry count a chunk count.
+#[must_use]
+pub fn storable_entry_ceiling(max_topics: u32) -> usize {
+    (max_topics as usize).min(MAX_STATUS_CHUNKS * chunks::MAX_CHUNK_LINES)
+}
+
+/// Cut a relayed inventory down to what may be stored — **pure**.
+///
+/// **THE ENTRIES ARE CUT, NOT THE INDEX.** Truncating the index alone would
+/// publish a `status.result.chunks` that does not describe the `ConfigMap`s
+/// that exist, and a digest over bytes no reader can fetch. Here the stored
+/// slice, the chunks written from it, the index and `topicsSha256` are all the
+/// same set, so the API's §5.6 integrity triple holds exactly as it does for an
+/// untruncated result.
+///
+/// The reason is [`TruncationReason::MaxTopics`] when the runner did not supply
+/// one: the inventory really was cut at `maxTopics`, and the fact that it was
+/// cut here rather than in the runner belongs in the message, not in a
+/// vocabulary D2 §5.1 does not have. A reason the runner DID supply is kept —
+/// `RelayLimit` is the more specific fact.
+#[must_use]
+pub fn clamp_to_storable<'a>(
+    inventory: &InventoryResult,
+    entries: &'a [TopicEntry],
+    ceiling: usize,
+) -> (InventoryResult, &'a [TopicEntry]) {
+    if entries.len() <= ceiling {
+        return (inventory.clone(), entries);
+    }
+    let stored = &entries[..ceiling];
+    let mut out = inventory.clone();
+    out.counts.returned = u32::try_from(stored.len()).unwrap_or(u32::MAX);
+    out.truncated = true;
+    out.truncation_reason = Some(
+        inventory
+            .truncation_reason
+            .unwrap_or(TruncationReason::MaxTopics),
+    );
+    out.topics_sha256 = topic_tsv_sha256(stored);
+    (out, stored)
+}
+
 /// The `maxTopics` this check actually runs with — D2 §5.2 step 4.
 ///
 /// `min(request, policy.hardMaxTopics)`. **The policy may only LOWER it**: a
@@ -225,10 +293,16 @@ pub fn plan_document(
         contract_version: CHECK_CONTRACT_VERSION,
         subject_uid: subject_uid.to_string(),
         timeout_seconds: u32::try_from(request.timeout_seconds.max(1)).unwrap_or(60),
-        // THE POLICY THE VERDICT WILL BE COMPUTED UNDER, pinned into the
-        // document the runner's digest covers. It is what makes a result say
-        // which attestation set was in force when it was taken, rather than
-        // which one happens to be in force when it is read.
+        // THE POLICY AS IT WAS WHEN THIS PLAN WAS RENDERED, pinned into the
+        // document the runner's digest covers, so the plan says which limits
+        // the check was dispatched under.
+        //
+        // IT IS NOT THE DIGEST THE VERDICT IS COMPUTED UNDER. The completeness
+        // verdict is a commit-time computation against the attestation set in
+        // force then (`commit`), and `status.binding.policyDigest` is updated
+        // to that digest at commit. Two different instants, two different
+        // facts; the CRD field means the one a reader needs to re-derive the
+        // verdict.
         policy_digest: Some(policy_digest.to_string()),
         request: CheckRequest::TopicInventory(TopicInventoryRequest {
             connection: connection_plan(resolved),
@@ -299,6 +373,45 @@ pub fn attestation_for<'a>(
     attestations
         .iter()
         .find(|a| a.namespace == namespace && a.kafka_cluster == cluster_name)
+}
+
+/// The attestation that may be applied to THIS observation — **pure**, and
+/// fail-closed.
+///
+/// [`attestation_for`] narrows by namespace and `KafkaCluster` name; this adds
+/// the half that cannot be left to a string comparison. The policy's matcher
+/// compares the attestation's `principal` and `clusterId` against the
+/// observation's, and an ABSENT observation value would otherwise arrive as
+/// `""` — which compares **equal** to an attestation whose own field is empty.
+/// That is a false `attestedComplete`, the one verdict D2 §5.4 exists to make
+/// hard to reach, produced by the two values being unknown rather than by
+/// anything being true.
+///
+/// So: no attestation is a candidate unless the observation carries a
+/// non-blank principal AND a non-blank observed cluster id, and unless the
+/// attestation itself names all four. `Policy::validate` requires only a
+/// non-empty `id`, so this is the guard and not a second opinion.
+#[must_use]
+pub fn attestation_candidate<'a>(
+    attestations: &'a [Attestation],
+    namespace: &str,
+    cluster_name: &str,
+    principal: &str,
+    cluster_id: &str,
+) -> Option<&'a Attestation> {
+    let blank = |v: &str| v.trim().is_empty();
+    if blank(namespace) || blank(cluster_name) || blank(principal) || blank(cluster_id) {
+        return None;
+    }
+    let candidate = attestation_for(attestations, namespace, cluster_name)?;
+    if blank(&candidate.namespace)
+        || blank(&candidate.kafka_cluster)
+        || blank(&candidate.principal)
+        || blank(&candidate.cluster_id)
+    {
+        return None;
+    }
+    Some(candidate)
 }
 
 /// What the runner OBSERVED, as the visibility policy's input — **pure**.
@@ -662,6 +775,12 @@ pub struct Outcome {
     pub created_job: bool,
     /// How many result chunks this pass wrote or adopted.
     pub chunks_written: usize,
+    /// Whether the status on the server now says what this pass computed.
+    ///
+    /// `false` for a pass whose `/status` PATCH answered **409** — the S7
+    /// precondition working, and the reason nothing further may be done with
+    /// this pass's conclusion. It is the gate on [`Outcome::ttl_patched`].
+    pub committed: bool,
     /// Whether this pass patched the Job's TTL — which happens ONLY after a
     /// status commit returned 200.
     pub ttl_patched: bool,
@@ -676,6 +795,7 @@ impl Outcome {
             reason: reason.to_string(),
             created_job: false,
             chunks_written: 0,
+            committed: false,
             ttl_patched: false,
             requeue_seconds,
         }
@@ -1118,12 +1238,11 @@ async fn start(
                 ..TopicDiscoveryStatus::default()
             },
         );
-        write_status(api, discovery, &status).await?;
-        return Ok(Outcome::new(
-            PHASE_QUEUED,
-            code.as_str(),
-            limits::QUEUED_REQUEUE_SECS,
-        ));
+        let commit = write_status(api, discovery, &status).await?;
+        return Ok(Outcome {
+            committed: commit.is_committed(),
+            ..Outcome::new(PHASE_QUEUED, code.as_str(), limits::QUEUED_REQUEUE_SECS)
+        });
     }
 
     // STEP 4. The plan, then the Job. In that order, because a Job whose plan
@@ -1191,6 +1310,28 @@ async fn start(
         }
     }
 
+    // THE GUARD THE OTHER THREE CONNECTION-PROJECTING PATHS CALL
+    // (`kafka_cluster.rs`, `restore.rs`, `backup_execution.rs`). One
+    // `namespace` variable feeds both the `KafkaCluster` GET and the Job here,
+    // so it is provably the same namespace today — and the helper exists, in
+    // its own words, "to make that a checked property instead of a coincidence
+    // of two lookups". The next edit that threads a different namespace in
+    // would otherwise project a Secret of the same name from somewhere else.
+    if let Err(refusal) = resolved.check_job_namespace(namespace) {
+        return terminal(
+            discovery,
+            api,
+            PHASE_FAILED,
+            CheckCode::ConnectionInvalid.as_str(),
+            &format!("{} ({})", refusal.message, refusal.field),
+            TopicDiscoveryStatus {
+                binding: Some(binding),
+                ..TopicDiscoveryStatus::default()
+            },
+            now,
+        )
+        .await;
+    }
     let projection = resolved.project();
     let spec = cjob::CheckJobSpec {
         kind: CheckPlanKind::TopicInventory,
@@ -1253,9 +1394,10 @@ async fn start(
             ..TopicDiscoveryStatus::default()
         },
     );
-    write_status(api, discovery, &status).await?;
+    let commit = write_status(api, discovery, &status).await?;
     Ok(Outcome {
         created_job: true,
+        committed: commit.is_committed(),
         ..Outcome::new(
             PHASE_RUNNING,
             CheckCode::PodNotStarted.as_str(),
@@ -1360,12 +1502,15 @@ async fn observe(
                     ..TopicDiscoveryStatus::default()
                 },
             );
-            write_status(api, discovery, &status).await?;
-            Ok(Outcome::new(
-                PHASE_RUNNING,
-                observation.reason.as_str(),
-                REQUEUE_RUNNING_SECS,
-            ))
+            let commit = write_status(api, discovery, &status).await?;
+            Ok(Outcome {
+                committed: commit.is_committed(),
+                ..Outcome::new(
+                    PHASE_RUNNING,
+                    observation.reason.as_str(),
+                    REQUEUE_RUNNING_SECS,
+                )
+            })
         }
         CheckPhase::Failed => {
             // EARLY CANCEL. A terminal waiting state cannot succeed and its
@@ -1391,7 +1536,15 @@ async fn observe(
                 now,
             )
             .await?;
-            finish_job(ctx, namespace, job_name, finished, outcome).await
+            // THE SAME GATE `commit` USES. A terminal status that 409'd is not
+            // on the server, and the relay is still on a pod the next pass has
+            // to read; a TTL here would let the TTL controller delete the Job
+            // and its pod together and take the reason with them.
+            if outcome.committed {
+                finish_job(ctx, namespace, job_name, finished, outcome).await
+            } else {
+                Ok(outcome)
+            }
         }
         CheckPhase::Succeeded => {
             commit(
@@ -1487,10 +1640,61 @@ async fn commit(
         .await;
     }
 
+    // THE POLICY THE VERDICT WILL ACTUALLY BE COMPUTED UNDER, loaded BEFORE
+    // anything is written, because it also supplies the ceiling the stored
+    // inventory is cut to. An UNREADABLE policy fails closed:
+    // `Policy::fail_closed` carries no attestations at all, so nothing taken
+    // under it can be `attestedComplete`.
+    let load = policy::load(&ctx.client, ctx.policy_ref.as_ref(), &ctx.policy_cache, now)
+        .await
+        .map_err(ReconcileError::Api)?;
+
+    // THE SCHEMA BOUND, BEFORE A SINGLE ConfigMap IS WRITTEN. A runner that
+    // relayed more entries than its plan allowed can otherwise produce more
+    // than the CRD's `maxItems: 64` chunks — the reviewer's measured case is
+    // 165,000 frames in 5,115,000 bytes, inside the plan's own 6 MiB relay
+    // budget and inside the 8 MiB log read, giving 66 chunks. Those 66
+    // `ConfigMap`s land in etcd and then the `/status` PATCH is refused 422,
+    // the object never reaches a terminal phase, the Job's TTL is never set,
+    // and the pass repeats every thirty seconds forever. The entries are cut
+    // here, so the chunks, the index and the digest are one set.
+    let ceiling = storable_entry_ceiling(effective_max_topics(
+        discovery.spec.request.max_topics,
+        load.policy().discovery.hard_max_topics,
+    ));
+    let (inventory, entries) = clamp_to_storable(&inventory, &relay.topics, ceiling);
+    let clamped = entries.len() < relay.topics.len();
+
     // THE CHUNKS, FIRST. D2 §5.5's two bounds together — at most 2,500 entries
     // AND at most 768 KiB per chunk — are `chunks::split`'s, so this file never
     // decides a size.
-    let split = chunks::split(&relay.topics);
+    let split = chunks::split(entries);
+    if split.len() > MAX_STATUS_CHUNKS {
+        // UNREACHABLE BY CONSTRUCTION, and a refusal rather than a debug
+        // assertion: `storable_entry_ceiling` already bounds the entry count at
+        // `MAX_STATUS_CHUNKS × MAX_CHUNK_LINES`, so getting here means
+        // `chunks::split` produced more chunks than it has lines to fill them
+        // with. Nothing is written, because a status that cannot name its own
+        // chunks is worse than no result.
+        return terminal(
+            discovery,
+            api,
+            PHASE_FAILED,
+            CheckCode::ResultUnreadable.as_str(),
+            &format!(
+                "the inventory split into {} chunks, over the {MAX_STATUS_CHUNKS} a \
+                 TopicDiscovery status can index; nothing was stored",
+                split.len()
+            ),
+            TopicDiscoveryStatus {
+                started_at,
+                observed_at: Some(observed_at),
+                ..TopicDiscoveryStatus::default()
+            },
+            now,
+        )
+        .await;
+    }
     let owner = owner_of(&discovery.name_any(), uid);
     let objects: Vec<ConfigMap> = split
         .iter()
@@ -1521,12 +1725,7 @@ async fn commit(
     };
 
     // The completeness verdict — D-SEAMS S3, and the ONE place an attestation
-    // is consulted. An UNREADABLE policy fails closed: `Policy::fail_closed`
-    // carries no attestations at all, so nothing taken under it can be
-    // `attestedComplete`.
-    let load = policy::load(&ctx.client, ctx.policy_ref.as_ref(), &ctx.policy_cache, now)
-        .await
-        .map_err(ReconcileError::Api)?;
+    // is consulted.
     let binding = discovery.status.as_ref().and_then(|s| s.binding.as_ref());
     let cluster_name = binding
         .and_then(|b| b.connection_name.clone())
@@ -1535,18 +1734,38 @@ async fn commit(
         .and_then(|b| b.principal.clone())
         .unwrap_or_default();
     let signals = visibility_signals(&inventory, namespace, &cluster_name, &principal);
-    let attestation = attestation_for(
+    // FAIL-CLOSED. An absent principal or an unobserved cluster id is not a
+    // wildcard; see `attestation_candidate`.
+    let attestation = attestation_candidate(
         &load.policy().discovery.visibility_attestations,
         namespace,
         &cluster_name,
+        &principal,
+        &signals.cluster_id,
     );
     let verdict = visibility(&signals, attestation, now);
 
-    let index = chunk_index(&relay.topics, &split, job_name);
-    let result = inventory_status(&inventory, &relay.topics, &verdict, index);
+    let index = chunk_index(entries, &split, job_name);
+    let result = inventory_status(&inventory, entries, &verdict, index);
     let returned = result.counts.returned;
     let visibility_state = result.visibility.state.clone();
 
+    // NAMED IN THE MESSAGE, and machine-readable in `result.truncated` /
+    // `result.truncationReason`, which is D2 §5.1's own vocabulary for exactly
+    // this. The condition stays `Complete=True/Succeeded`: a truncated
+    // inventory is a successful, honest observation, and inventing a reason
+    // outside the closed `CheckCode` vocabulary for it would give W12 and W13 a
+    // string with no remedy attached.
+    let note = if clamped {
+        format!(
+            "; the runner relayed {} entries and the plan allowed {ceiling}, so the inventory \
+             was cut to the first {} and is reported truncated",
+            relay.topics.len(),
+            entries.len()
+        )
+    } else {
+        String::new()
+    };
     let status = status_with_condition(
         discovery,
         PHASE_SUCCEEDED,
@@ -1554,7 +1773,7 @@ async fn commit(
         &format!(
             "observed {returned} visible topics at {observed_at}; completeness is \
              `{visibility_state}` — Kafka omits topics this principal cannot describe, so a \
-             successful listing alone is never proof that the cluster holds no others"
+             successful listing alone is never proof that the cluster holds no others{note}"
         ),
         now,
         TopicDiscoveryStatus {
@@ -1564,6 +1783,25 @@ async fn commit(
                 observed_at,
                 load.policy().discovery.fresh_seconds,
             )),
+            // THE POLICY THE VERDICT WAS ACTUALLY COMPUTED UNDER, and the ONE
+            // field of the binding this pass may move. The rest of the binding
+            // describes the CONNECTION as it was at Job creation and is never
+            // refreshed; `policyDigest` describes the ATTESTATION SET the
+            // verdict above came from, which is a commit-time fact — an
+            // administrator adding an attestation while the Job ran would
+            // otherwise leave `attestedComplete` beside the digest of the
+            // pre-attestation policy, and a reader re-deriving the verdict from
+            // the recorded digest would get a different answer. Every other
+            // field is `None`, so the merge patch touches nothing else.
+            binding: Some(DiscoveryBinding {
+                connection_name: None,
+                connection_uid: None,
+                connection_generation: None,
+                principal: None,
+                auth_mode: None,
+                bootstrap_sha256: None,
+                policy_digest: Some(load.policy().digest()),
+            }),
             result: Some(result),
             ..TopicDiscoveryStatus::default()
         },
@@ -1586,6 +1824,7 @@ async fn commit(
 
     let outcome = Outcome {
         chunks_written: written.len(),
+        committed: commit.is_committed(),
         ..Outcome::new(
             PHASE_SUCCEEDED,
             CheckCode::Succeeded.as_str(),
@@ -1632,6 +1871,14 @@ async fn finish_job(
 }
 
 /// Write a terminal status and return the outcome it describes.
+///
+/// **IT CARRIES ITS COMMIT.** The returned [`Outcome::committed`] is what the
+/// `Failed` arm gates the TTL patch on: a terminal status whose PATCH answered
+/// 409 did not land, so this pass's conclusion is not on the server and the
+/// pod that still holds the relay must stay alive for the pass that reads the
+/// newer object. Dropping that value is how the invariant `finish_job` and
+/// `docs/kubernetes.md` §7c both state came to hold on one path and not the
+/// other.
 async fn terminal(
     discovery: &TopicDiscovery,
     api: &Api<TopicDiscovery>,
@@ -1642,14 +1889,18 @@ async fn terminal(
     now: Time,
 ) -> Result<Outcome, ReconcileError> {
     let status = status_with_condition(discovery, phase, reason, message, now, status);
-    write_status(api, discovery, &status).await?;
+    let commit = write_status(api, discovery, &status).await?;
     warn!(
         discovery = %discovery.name_any(),
         phase = phase,
         reason = reason,
+        committed = commit.is_committed(),
         "topic discovery reached a terminal state"
     );
-    Ok(Outcome::new(phase, reason, REQUEUE_TERMINAL_SECS))
+    Ok(Outcome {
+        committed: commit.is_committed(),
+        ..Outcome::new(phase, reason, REQUEUE_TERMINAL_SECS)
+    })
 }
 
 /// The owner reference every object this reconciler creates carries.

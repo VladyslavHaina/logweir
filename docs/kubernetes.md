@@ -425,12 +425,23 @@ under the same name is a different input.
 
 **PARTLY IN THIS BUILD.** The reconciler described here exists and is tested: it
 resolves the connection, renders the plan, creates the check Job, stores the
-chunks and writes the status. What it needs at the other end — the runner's
-`logweir check run` subcommand, which prints the frames it reads — is a separate
-change that has not landed. Against a runner image without it, a discovery ends
-`Failed` with `RunnerContractUnsupported` or `ResultUnreadable`; nothing is
-stored and nothing is claimed. No end-to-end run against a real broker has been
-performed for this section.
+chunks and writes the status. The runner's `logweir check run` subcommand, which
+prints the frames it reads, is a separate change that has landed since. Against a
+runner image without it a discovery ends `Failed` with
+`RunnerContractUnsupported` or `ResultUnreadable`; nothing is stored and nothing
+is claimed. **No end-to-end run against a real broker has been performed for this
+section**, and nothing here is live evidence.
+
+**And `attestedComplete` is unreachable in this build.** The attestation route
+below is implemented and tested, but the controller only reads an installation
+policy when `LOGWEIR_POLICY_CONFIGMAP` — or `LOGWEIR_INSTALLATION_NAMESPACE`, for
+the default `weirkeeper-policy` name — is set on the `weirkeeper` Deployment, and
+**neither variable is set anywhere in `config/` or in the chart today**. Until
+the chart renders `weirkeeper-policy` and those variables (W11), every check runs
+under the built-in defaults: no attestations, so every honest observation is
+`unknown` or `limited`, and the concurrency ceilings and `freshSeconds` are the
+compiled-in numbers rather than an administrator's. Writing the `ConfigMap` by
+hand does not help while the variables are unset.
 
 A `TopicDiscovery` is a **request**, not a cache. `spec.request` is immutable, so
 one object is one observation with one recorded instant, and refreshing means
@@ -493,7 +504,12 @@ is the point of the kind:
   against something that changes after it is written. `status.binding` records
   the connection UID, generation, principal, auth mode and bootstrap digest the
   observation was taken against, and is written once and never refreshed, so that
-  comparison has something to compare.
+  comparison has something to compare. The one exception is
+  `binding.policyDigest`, which is written at plan time and then **updated at
+  commit** to the digest of the policy the completeness verdict was actually
+  computed under — the verdict is a commit-time computation, and an
+  administrator adding an attestation while the Job ran would otherwise leave
+  `attestedComplete` beside the digest of the pre-attestation policy.
 * **permission-limited** — `visibility.state: limited`.
 
 **`observedAt` is the runner container's own `finishedAt`**, not the instant a
@@ -511,6 +527,17 @@ whole canonical inventory, computed by the controller over the frames it verifie
 and never copied from the runner's own claim. A reader that fetches the chunks
 and hashes them gets the value the status published.
 
+**At most 64 chunks, because that is what the status schema can index.** The
+entries are cut to the plan's own `maxTopics` (and, as a backstop, to
+64 × 2,500 = 160,000) **before** any `ConfigMap` is written, and the result is
+then reported `truncated: true` with `truncationReason: MaxTopics`. The cut is
+made on the entries and never on the index alone, so the chunks that exist, the
+index that names them and `topicsSha256` are always one set. A runner that
+relayed more than its plan allowed therefore produces a smaller, honest,
+truncated result rather than a status the API server refuses — a `/status` PATCH
+rejected for violating its own schema would leave the chunks in etcd behind an
+object that never reaches a terminal phase and whose Job is never collected.
+
 Reading those chunks with `kubectl` needs `get` on `configmaps`, which no human
 Logweir role grants. `kubectl` users get the summary in the status; browsing the
 inventory is the console API's job.
@@ -527,8 +554,10 @@ and never back. Cancelling collapses the Job's `activeDeadlineSeconds` to 1 —
 the controller holds `delete` on nothing — after verifying that the Job's
 controller owner is this object, so a Job that merely shares the name is never
 touched. A finished Job gets `ttlSecondsAfterFinished: 600`, patched **only
-after** the status write returned 200: the relay lives on the pod, and the TTL
-controller removes a Job and its pods together. The plan and chunk `ConfigMap`s
+after** the status write returned 200 — on the failed path exactly as on the
+successful one: the relay lives on the pod, and the TTL controller removes a Job
+and its pods together, so a TTL set after a status write that answered 409 would
+let garbage collection take the reason an operator still has to read. The plan and chunk `ConfigMap`s
 carry an owner reference with `blockOwnerDeletion`, so deleting the
 `TopicDiscovery` removes everything it owns by cascade.
 
