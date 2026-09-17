@@ -932,7 +932,7 @@ const consoleApi = Object.freeze({
 // CONSOLE ONLY, AND SAID SO BY NAME. These three domains exist on the product
 // API and nowhere else this page can reach. `kubectl proxy` would serve the
 // custom resources -- they are in the same API group -- but the legacy UI
-// ServiceAccount has no binding for them (D2 §7.4 adds `get`/`list` for
+// ServiceAccount has no binding for them (D2 section 7.4 adds `get`/`list` for
 // read-only summaries and NO create), and `ui/api.js`'s `WRITABLE_PLURALS` is
 // deliberately unchanged. So in legacy mode every call below is refused HERE,
 // with a sentence saying which API serves the flow, rather than sent and

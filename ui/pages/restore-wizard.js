@@ -2315,7 +2315,7 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
     }
     // THE SOURCE ARCHIVE IS INLINE, BECAUSE THE RECOVERY POINT PUBLISHES NO
     // DESTINATION. `Backup`'s product-API projection carries `archive` and no
-    // `destination`/`locationDigest`, so D2 §9's "take the source destination
+    // `destination`/`locationDigest`, so D2 section 9's "take the source destination
     // from the recovery point's frozen destination" has nothing to read on
     // this build. The legacy inline archive is sent instead -- which is what
     // the `Restore` this wizard creates would carry anyway -- and the step

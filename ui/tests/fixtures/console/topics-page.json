@@ -19,7 +19,7 @@
       "partitions": 50
     },
     {
-      "errorCode": "TopicAuthorizationFailed",
+      "errorCode": "UnknownTopicOrPartition",
       "expected": false,
       "internal": false,
       "name": "shipments",

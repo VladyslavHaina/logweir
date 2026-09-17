@@ -512,7 +512,7 @@ export function renderDiscoveryPanel(view) {
         mutationStatus(state, { kind: "TopicDiscovery", name: (latest || {}).id || "" }, null) +
         "</div></form>"
       : (v.unavailable === true ? "" :
-        "<p class=\"note\">This session may read topic discoveries in this namespace and not " +
+        "<p class=\"note\">This login may read topic discoveries in this namespace and not " +
         "start one.</p>")) +
     (v.reused === true
       ? "<p class=\"note\" id=\"discovery-reused\">A fresh identical inventory already existed, " +
@@ -979,7 +979,7 @@ function wireDiscovery(node, ns, name, parse, lifecycle, api, object, view) {
       if (!active(lifecycle) || mutation.pending()) {
         return;
       }
-      const values = readClusterValues(form);
+      const values = readFormValues(form);
       const request = {};
       if (values.includeInternal === true) {
         request.includeInternal = true;
@@ -1026,7 +1026,7 @@ function wireDiscovery(node, ns, name, parse, lifecycle, api, object, view) {
     listen(filters, "submit", (event) => {
       event.preventDefault();
       readTopics(node, ns, name, parse, lifecycle, api, object, view,
-        readClusterValues(filters), null);
+        readFormValues(filters), null);
     }, lifecycle);
   }
   const more = node.querySelector("#topics-more");
@@ -1230,6 +1230,59 @@ function paintRow(node, parse, uid, html) {
 }
 
 /** The form's values, read from the DOM and trimmed where a name is involved. */
+/** EVERY NAMED CONTROL OF A FORM, BY NAME, WHATEVER THE FORM IS.
+ *
+ *  The three readers beside this one know their form's fields and name each
+ *  one, which is what makes a missing field a loud `undefined.value` rather
+ *  than a silently absent key. This one exists for the forms that DO NOT have
+ *  a fixed shape -- the discovery panel's controls, the topic filters, the
+ *  readiness panel, the destination form's four repeated grant blocks -- where
+ *  naming every field would be a second copy of the markup that renders them.
+ *
+ *  IT HANDLES BOTH `elements` SHAPES. A browser's `form.elements` is an
+ *  array-like collection; the behaviour suite's fake DOM builds a plain object
+ *  keyed by name. Reading one shape only would have made every row that drives
+ *  one of these forms pass in the suite and throw in a browser, or the reverse
+ *  -- and the point of the suite is that those two cannot differ. */
+export function readFormValues(form) {
+  const values = Object.create(null);
+  const bag = (form || {}).elements;
+  if (bag === null || bag === undefined) {
+    return values;
+  }
+  const controls = typeof bag.length === "number"
+    ? Array.prototype.slice.call(bag)
+    : Object.keys(bag).map((key) => bag[key]);
+  for (const element of controls) {
+    if (element === null || element === undefined) {
+      continue;
+    }
+    const name = element.name === undefined
+      ? (typeof element.getAttribute === "function" ? element.getAttribute("name") : null)
+      : element.name;
+    if (typeof name !== "string" || name.length === 0) {
+      continue;
+    }
+    const type = element.type || (element.tagName === "SELECT" ? "select-one" : "text");
+    if (type === "checkbox") {
+      values[name] = element.checked === true;
+    } else if (type === "radio") {
+      if (element.checked === true) {
+        values[name] = element.value;
+      } else if (values[name] === undefined) {
+        values[name] = "";
+      }
+    } else if (type === "select-multiple") {
+      values[name] = Array.prototype.slice
+        .call(element.selectedOptions || [])
+        .map((option) => option.value);
+    } else {
+      values[name] = element.value;
+    }
+  }
+  return values;
+}
+
 export function readClusterValues(form) {
   const e = form.elements;
   return {

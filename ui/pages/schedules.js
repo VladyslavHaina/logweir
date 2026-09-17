@@ -79,7 +79,7 @@ import {
   renderClusterSelector,
   resolveClusterSelection,
 } from "../select.js";
-import { focusFirstProblem, isObjectName, itemsOf } from "./clusters.js";
+import { focusFirstProblem, isObjectName, itemsOf, readFormValues } from "./clusters.js";
 import { renderPreflight } from "./destinations.js";
 import { isRecoveryPoint, recoveryPoints, restorePointRoute } from "./restore-wizard.js";
 
@@ -308,7 +308,7 @@ export function renderRetentionPanel(object) {
 //
 // WHAT LANDED HERE AND WHAT DID NOT, SAID PLAINLY AT THE TOP.
 //
-// D2 §9 asks this form to replace the archive URL and Secret inputs with a
+// D2 section 9 asks this form to replace the archive URL and Secret inputs with a
 // destination selector. IT CANNOT, YET, AND THE FORM SAYS SO RATHER THAN
 // PRETENDING. The product API's `CreateScheduleRequest` REQUIRES an inline
 // `archive` and has no `destinationRef` field at all: a schedule created
@@ -344,7 +344,7 @@ export function renderRetentionPanel(object) {
 export const COVERAGE_LABELS = Object.freeze({
   NamedTopics: "Named topics",
   AllUserTopicsAttested: "All user topics (attested complete)",
-  VisibleUserTopicsOnly: "Visible user topics only — completeness not established",
+  VisibleUserTopicsOnly: "Visible user topics only \u2014 completeness not established",
 });
 
 /** The only coverage that may be rendered as "all topics". One expression, for
@@ -622,7 +622,7 @@ export function renderReadinessPanel(view) {
     (v.unavailable === true
       ? "<p class=\"note\" id=\"readiness-unavailable\">" + cell(v.unavailableReason) + "</p>"
       : (v.mayOperate === false
-        ? "<p class=\"note\">This session may read readiness results in this namespace and not " +
+        ? "<p class=\"note\">This login may read readiness results in this namespace and not " +
           "start one.</p>"
         : "<form id=\"readiness-form\" novalidate" + (pending ? " aria-busy=\"true\"" : "") + ">" +
           "<fieldset class=\"form-body\"" + (pending ? " disabled" : "") + ">" +
@@ -1110,7 +1110,7 @@ function wireReadiness(node, ns, parse, lifecycle, api, readiness) {
     if (!active(lifecycle) || mutation.pending()) {
       return;
     }
-    const values = readScheduleValues(form);
+    const values = readFormValues(form);
     const selection = readClusterSelection(form, "readiness-source");
     const destination = node.querySelector("#readiness-destination-name");
     const topics = String(values.topics || "")

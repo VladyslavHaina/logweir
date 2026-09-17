@@ -226,7 +226,7 @@ export function windowMessage(fromMs, toMs) {
  *  recorded result; this sentence describes what EXECUTION will attempt, which
  *  is a different fact and one no check can confirm in advance -- the broker's
  *  answer to a topic create is only knowable when the create is made, which is
- *  why `target.logAppendTime` is an execution-only check (D2 §6.3, G12).
+ *  why `target.logAppendTime` is an execution-only check (D2 section 6.3, G12).
  *
  *  The old copy called this "preflight". That word now names the object above
  *  it, and one word for two things is how an operator comes to read a

@@ -3751,6 +3751,54 @@ Those are the page's limits, not the cluster's. The API server's limits are
 whatever the kubeconfig that started the proxy carries, which is the subject of
 "What that costs" above, and they are the ones that actually hold.
 
+### Destinations, topic discovery and readiness are console-only
+
+Three surfaces landed with D2 and none of them is reachable through
+`kubectl proxy`:
+
+| tab | routes it uses |
+|---|---|
+| `#/destinations` | `GET/POST .../destinations`, `.../destinations/{name}`, `:update-access`, `:test`, `:from-legacy`, `/usage` |
+| `#/clusters` (a connection's detail) | `.../connections/{name}/topic-discoveries`, `.../topic-discoveries/{id}`, `/topics`, `:cancel` |
+| `#/schedules` and `#/restore` step 5 | `POST .../preflights`, `.../preflights/{id}`, `/details`, `:cancel` |
+
+Every one of those is a `/api/v1/...` route on `logweir-api`. The custom
+resources behind them (`BackupDestination`, `TopicDiscovery`, `Preflight`) are
+in the same API group the proxy already forwards, so a page COULD have read them
+directly -- and deliberately does not. The legacy in-cluster UI ServiceAccount
+has no binding for the three kinds, `api.js`'s writable allowlist above is
+unchanged, and a page that asked anyway would render a 403 it did not cause.
+Instead the client refuses each call by name, in the page, with a sentence
+saying which API serves the flow. Run the console (`logweir-api`) to use them.
+
+The `#/destinations` tab is in the navigation in both modes on purpose: the mode
+is decided once at boot, after the first paint, so a tab that appeared only in
+console mode would appear and vanish under a reader.
+
+**What a readiness result does and does not claim.** A `Preflight` is a real
+check Job with the destination's and the connection's own credentials. Its
+verdict is that Job's recorded aggregate, and the console renders it and nothing
+else: an empty `checks` array is not a pass, a `skipped` blocking check is
+labelled as never a pass, a phase this build does not recognise reads `unknown`,
+and a `ready` aggregate is shown beside the execution-only checks with the
+sentence saying it never meant those passed. Execution-time guards remain the
+authority whatever a preflight says.
+
+**What a topic inventory does and does not claim.** An all-topics Kafka Metadata
+request silently omits every topic the principal cannot `DESCRIBE`, so
+`visibility.state` is `unknown` for a listing that succeeded, `unknown` is that
+field's healthy default, and the console never renders the word "complete" for
+one. `attestedComplete` is an administrator's claim from the installation policy
+`ConfigMap`, and it is always rendered with its author, its instant and
+"not verified by Logweir".
+
+**With no controller for the three kinds**, which is every installation whose
+`weirkeeper` image predates them, the API creates the objects and their statuses
+stay empty. The console renders that honestly: a destination reads "not judged
+yet" rather than valid or invalid, and a discovery or a preflight reads
+`pending`. Nothing is rendered as ready or as failed on the strength of an
+absent status.
+
 ### The gates that keep it that way
 
 `just lint` runs `scripts/check-ui-offline.sh`, which reads every shipped byte

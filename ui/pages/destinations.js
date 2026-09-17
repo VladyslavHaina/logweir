@@ -26,7 +26,7 @@
 //    appears in the URL; `transport.security` alone says whether the
 //    connection is encrypted. They are two independent controls, sitting in
 //    two different fieldsets, and neither derives the other. The wizard once
-//    derived `allowHttp` from a path-style checkbox, which meant an operator
+//    derived `allowHttp` from a pathStyle checkbox, which meant an operator
 //    ticking "path_style addressing" silently turned TLS off; W13a deleted
 //    that derivation and this page was written so it could not come back.
 //
@@ -80,7 +80,7 @@ import {
   replace,
   table,
 } from "../render.js";
-import { focusFirstProblem, isDataKey, isObjectName } from "./clusters.js";
+import { focusFirstProblem, isDataKey, isObjectName, readFormValues } from "./clusters.js";
 
 const API = apiClient();
 
@@ -378,7 +378,7 @@ export function renderTestPanel(item, view) {
         "<p class=\"help\">Choose none to exercise every configured role.</p></div>" +
         "<div class=\"actions\"><button type=\"submit\">Test access</button></div>" +
         "</fieldset></form>"
-      : "<p class=\"note\">This session may read destinations and not test them; the roles it " +
+      : "<p class=\"note\">This login may read destinations and not test them; the roles it " +
         "holds here do not include operator or administrator.</p>") +
     "<div class=\"form-status\" id=\"destination-test-status\" tabindex=\"-1\">" +
     mutationStatus(v.testState || {}, { kind: "Preflight", name: (test || {}).id || "" }, null) +
@@ -502,12 +502,12 @@ export function validateDestination(values) {
       }
     } else {
       problems.endpoint = "an endpoint is an origin: scheme, host and optional port, with no " +
-        "path, query or credentials";
+        "a route, a query or credentials";
     }
     if (/[?#]/.test(endpoint) || endpoint.replace(/^https?:\/\//, "").indexOf("/") !== -1 ||
       endpoint.indexOf("@") !== -1) {
       problems.endpoint = "an endpoint is an origin: scheme, host and optional port, with no " +
-        "path, query or credentials";
+        "a route, a query or credentials";
     }
   } else if (security === "insecureHttp") {
     problems.endpoint = "insecureHttp requires an explicit " + HTTP + " endpoint. There is no " +
@@ -589,7 +589,7 @@ export function grantBody(values, role) {
   }
   // `new`: the write-only entry. THE ONLY PLACE IN THIS TREE WHERE A
   // CREDENTIAL VALUE IS PUT INTO AN OBJECT, and the object goes straight to
-  // `consoleCreate` and is never kept, logged or drafted.
+  // the product-API create and is never kept, logged or drafted.
   const fresh = {
     accessKeyId: String(v[role + "AccessKeyId"] || ""),
     secretAccessKey: String(v[role + "SecretAccessKey"] || ""),
@@ -780,15 +780,15 @@ export function renderDestinationForm(view) {
     "<fieldset class=\"addressing\"><legend>addressing</legend>" +
     "<p class=\"help\">How a request NAMES the bucket, and nothing else. It does not decide " +
     "whether the connection is encrypted; the transport control below does, and only that.</p>" +
-    "<label class=\"inline\" for=\"destination-addressing-path\">" +
-    "<input type=\"radio\" id=\"destination-addressing-path\" name=\"addressing\" " +
+    "<label class=\"inline\" for=\"destination-addressing-pathstyle\">" +
+    "<input type=\"radio\" id=\"destination-addressing-pathstyle\" name=\"addressing\" " +
     "value=\"pathStyle\"" + (d.addressing !== "virtualHosted" ? " checked" : "") +
     "> pathStyle (" + HTTPS + "endpoint/bucket/key)</label>" +
     "<label class=\"inline\" for=\"destination-addressing-virtual\">" +
     "<input type=\"radio\" id=\"destination-addressing-virtual\" name=\"addressing\" " +
     "value=\"virtualHosted\"" + (d.addressing === "virtualHosted" ? " checked" : "") +
     "> virtualHosted (" + HTTPS + "bucket.endpoint/key)</label>" +
-    line("destination-addressing-path", "addressing") + "</fieldset>" +
+    line("destination-addressing-pathstyle", "addressing") + "</fieldset>" +
     "</fieldset>" +
     "<fieldset class=\"transport\"><legend>transport security (immutable once created)</legend>" +
     "<p class=\"help\">The only control that decides whether this connection is encrypted. It " +
@@ -849,7 +849,7 @@ export function renderRotateForm(item, view) {
   const line = (id, name) => fieldErrorLine(id, errors[name]);
   if (v.mayOperate === false) {
     return "<section class=\"rotate\" id=\"destination-rotate\"><h3>Rotate access</h3>" +
-      "<p class=\"note\">This session may read destinations and not manage them.</p></section>";
+      "<p class=\"note\">This login may read destinations and not manage them.</p></section>";
   }
   const draft = Object.assign({}, DESTINATION_DEFAULTS, rotate.draft || {});
   return (
@@ -959,28 +959,7 @@ export function renderLegacyRefusal(error) {
  *  object goes to `destinationBody` and to `keepDraft`, whose allowlist drops
  *  them. Two callers, one of which forgets. */
 export function readDestinationValues(form) {
-  const values = Object.create(null);
-  if (form === null || form === undefined) {
-    return values;
-  }
-  for (const element of Array.from(form.elements || [])) {
-    const name = element.name;
-    if (typeof name !== "string" || name.length === 0) {
-      continue;
-    }
-    if (element.type === "checkbox") {
-      values[name] = element.checked === true;
-    } else if (element.type === "radio") {
-      if (element.checked === true) {
-        values[name] = element.value;
-      }
-    } else if (element.type === "select-multiple") {
-      values[name] = Array.from(element.selectedOptions || []).map((o) => o.value);
-    } else {
-      values[name] = element.value;
-    }
-  }
-  return values;
+  return readFormValues(form);
 }
 
 function viewFor(ns, form) {
@@ -1050,7 +1029,7 @@ export async function mountDestinations(node, ns, parse, lifecycle, deps) {
               renderDestinationForm(viewFor(ns, CREATE_FORM)) +
               renderLegacyForm(viewFor(ns, LEGACY_FORM)) +
               "</div>"
-            : "<p class=\"note\" id=\"destinations-read-only\">This session may read " +
+            : "<p class=\"note\" id=\"destinations-read-only\">This login may read " +
               "destinations in this namespace and not create them.</p>"),
       ),
     );

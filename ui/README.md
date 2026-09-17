@@ -165,7 +165,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | file | what it is |
 |---|---|
 | `index.html` | the shell. Loads `./app.js` as a module; every reference relative. |
-| `app.js` | the hash router and the frame. Seven routes: `#/clusters`, `#/schedules`, `#/backups`, `#/history`, `#/restore`, `#/approvals`, `#/keys`. Two of them carry an identity in the hash -- see *The restore route, and the point it names*. |
+| `app.js` | the hash router and the frame. Eight routes: `#/clusters`, `#/destinations`, `#/schedules`, `#/backups`, `#/history`, `#/restore`, `#/approvals`, `#/keys`. Two of them carry an identity in the hash -- see *The restore route, and the point it names*. |
 | `api.js` | the **only** module that issues a network request, in either mode. One `fetch`, on one line, and every identifier built by `path(...)`. |
 | `client.js` | **which API is in front of this page**, decided once at boot, and the one object every page reads through. See *Two modes, one page*. |
 | `contract.js` | the typed contract: JSDoc types and strict decoders for every DTO the page consumes, in both modes. A required field that is absent is a **contract failure the page renders**, never an empty cell. |
@@ -179,6 +179,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `pages/history.js` | Backups and Restores interleaved, the Restore detail view, and the "Restore this point" link a completed Backup row carries. |
 | `pages/schedules.js` | the BackupSchedule list, the suspend toggle, the retention panel, and each schedule's recovery points with their own "Restore this point" links. |
 | `pages/approvals.js` | the Approval list, the Restores waiting for one, and the create form for ONE chosen Restore. Refuses a private key by name and by the words that open its PEM, and never parses the two documents. |
+| `pages/destinations.js` | **saved destinations** (PLAT-08): the list, the create form, the access rotation, the access test, `/usage`, and adopting a legacy inline archive. Console mode only -- see *Destinations, discovery and readiness*. |
 | `pages/keys.js` | the cluster-scoped `TrustRoster`, read-only, with the out-of-band fingerprint command. |
 | `style.css` | the design system, in one file: tokens, light and dark, every component. System fonts; no font is fetched from anywhere. |
 | `pages/index.html` | zero bytes, on purpose -- see below. |
@@ -190,6 +191,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `tests/client.spec.js` | the mode probe, the two modes' reads and writes, the idempotency key, the field-error translation and the plan round trip -- driven through the real transport with the one platform call stubbed. |
 | `tests/workflow.spec.js` | the named transitions, the transition errors and the wizard's six steps as a machine. |
 | `tests/selector.spec.js` | the saved-cluster selector: identity, rename, delete-and-recreate, freshness, the two contract v1 references, and the same rules in both client modes. |
+| `tests/d2.spec.js` | **destinations, topic discovery and operation readiness**: every state the product API can put in front of those three surfaces, and the five sentences this product refuses to render. |
 | `tests/preview-server.js` | a development tool, never a test: serves this directory over the fixtures under `tests/fixtures/preview/`. See *Previewing with fixtures*. |
 
 **The design system** lives in `style.css` and nowhere else. It is written from
@@ -227,7 +229,7 @@ published over HTTP.
 
 ## Two modes, one page
 
-The same twenty-one files are served two ways, and **they decide which one they are
+The same twenty-two files are served two ways, and **they decide which one they are
 looking at exactly once**.
 
 **Legacy mode** is what ships today and what every section above describes:
@@ -657,6 +659,130 @@ half and compares the bytes it submits.
 One endpoint, one region and one addressing value still apply to **both** the
 source archive and the evidence store. Separating those two is PLAT-08.2's UI
 slice and is not done here.
+
+## Destinations, discovery and readiness
+
+Three domains landed with D2, and all three are served by the **product API and
+nowhere else**. `kubectl proxy` would serve the custom resources -- they are in
+the same API group -- but the legacy UI ServiceAccount has no binding for them
+and `api.js`'s `WRITABLE_PLURALS` is deliberately unchanged, so in legacy mode
+every call is refused *here*, by name, with a sentence saying which API serves
+the flow. That is on purpose: a 403 from a route the page could not reach would
+have to be narrated, and a page that narrates an authorisation decision it did
+not make is the thing this whole tree is written to avoid.
+
+The `#/destinations` tab is in the navigation in **both** modes. Hiding it in
+legacy mode would be worse than showing it: the mode is decided once at boot,
+after the first paint, so the tab would appear and vanish under a reader.
+
+### What the three surfaces show, and the five sentences they will not write
+
+A destination is one archive location written down once, with an identity, so
+that schedules, backups and restores name it instead of each spelling a URL, an
+endpoint, a region, an addressing flag and a Secret of their own.
+
+| surface | where | what it does |
+|---|---|---|
+| destinations | `#/destinations` | list, create, rotate access (`:update-access`), test access (`:test`), `/usage`, adopt a legacy archive (`:from-legacy`) |
+| topic discovery | `#/clusters?...&name=<connection>` | start, cancel, the two slots, the searchable paged inventory with its filters |
+| backup readiness | `#/schedules` | a `Preflight` of operation `backup` over a chosen connection, destination and topic list |
+| restore readiness | `#/restore` step 5 | a `Preflight` of operation `restore`, bound to the exact plan hash on screen |
+
+Five sentences this product must never render, and where each refusal lives:
+
+1. **"complete"**, for a topic inventory. An all-topics Kafka Metadata request
+   silently omits every topic the principal cannot `DESCRIBE` -- no error, no
+   count, nothing to notice -- so a listing that worked perfectly proves nothing
+   about completeness. `visibility.state` is `unknown` for one, `unknown` is
+   that field's **healthy default**, and the word appears on the page only
+   inside `attestedComplete`.
+2. **"verified by Logweir"**, for an attestation. `attestedComplete` is an
+   administrator's claim recorded in a policy `ConfigMap`. Logweir checked that
+   the claim matches this cluster, this principal and this moment; it did not
+   check that the claim is true, and it cannot. `render.js`'s `attestationLine`
+   appends "not verified by Logweir" and is the only path that renders one.
+3. **"invalid"**, for a destination nothing has judged. `status.valid` is
+   absent until a controller reaches a verdict -- which on a cluster whose
+   controller predates the kind is always -- and the page reads "not judged
+   yet". Absent is not `false`, and it is not `true` either.
+4. **"ready"**, from an empty result. A readiness verdict comes from a
+   `Preflight`'s own recorded aggregate. An empty `checks` array is not a pass;
+   a state this build does not recognise is `unknown`, never `ready`; a
+   `skipped` blocking check is labelled *never a pass*; and a `ready` aggregate
+   is rendered beside its execution-only checks with the sentence saying it
+   never meant those passed.
+5. **"out of date"**, for `unverifiable`. That reason is the service saying it
+   could not **compare** something, with a `basis` naming what. It is rendered
+   "could not be checked", because a verdict nobody checked reported as merely
+   stale is a verdict somebody will act on.
+
+### A short page is not the last page
+
+`GET .../topic-discoveries/{id}/topics` reads at most eight stored chunks per
+request. `scan.complete: false` means that budget was spent before the end of
+the result -- which is exactly what a sparse `q` over a large inventory looks
+like -- so the table says so in words and offers `page.nextCursor`. Treating a
+short page as the end would have shown an operator four topics out of five
+thousand with nothing on screen saying so.
+
+### The credential is never in a draft
+
+`lifecycle.js`'s `keepDraft` takes an **allowlist** of field names, and
+`DESTINATION_DRAFT_FIELDS` names no credential input. A credential typed into
+the destination form therefore survives exactly as long as the form element
+does: through nothing -- not a refusal, not a re-render after a 409, not a route
+change. The form's credential inputs carry no `value` attribute in any render,
+so there is nowhere for one to land even if a draft somehow held it.
+`CREDENTIAL_INPUTS` is exported beside the allowlist so the suite can assert the
+two lists are disjoint mechanically rather than by reading them.
+
+### Who may start one
+
+`destinations`, `topicDiscovery` and `preflight` are the three domains' **read
+floors**: "this build serves the domain and you may read it". They are true for
+a Viewer, who may not create a destination, start a discovery or cancel a check.
+So every write goes through `client.js`'s `mayOperate(ns)`, which reads the
+product roles `/session` publishes per grant. An **empty role list is a mode,
+not a refusal**: legacy mode has no product roles at all and localAdmin has none
+either, and in both the server is the gate. What is refused is the case that
+really is one -- an authenticated actor who holds roles in this namespace and
+none of them is Operator or Administrator.
+
+Splitting the three flags into read/start pairs is the better answer and is
+deliberately not taken here: `CAPABILITY_FLAGS` is frozen at nineteen entries
+pinned against the schema's own `required` set, so it is one commit across
+`authz.rs`, `contract.rs`, `openapi.rs`, the schema and `contract.js`.
+
+### What this build cannot do yet, said rather than worked around
+
+* **A schedule cannot name a destination.** `CreateScheduleRequest` requires an
+  inline `archive` and has no `destinationRef` until PLAT-06.2. The create form
+  says so and keeps the inline fields; it does **not** derive an inline archive
+  from a chosen destination, because a destination carries an endpoint, a
+  region, an addressing mode and a CA bundle that an inline archive does not,
+  and dropping four of those silently would write to the wrong place. The
+  selector lives in the readiness panel instead, where
+  `BackupPreflightRequest.destination` makes it real, and moves into the create
+  form unchanged the day the field lands.
+* **A recovery point publishes no frozen destination.** `Backup`'s projection
+  carries `archive` and no `destination`/`locationDigest`, so the wizard cannot
+  take a source destination from the point's frozen one. It sends the inline
+  source archive -- which is what the `Restore` it creates carries anyway -- and
+  step 5 says so.
+* **A coverage label needs a field the console does not publish.** The three
+  strings are `Coverage::label()`'s, verbatim, and the schedule card renders one
+  when the object carries `status.selection.coverage` (legacy mode). The product
+  API's `Schedule` DTO publishes neither that nor `allUserTopics`, so in console
+  mode a schedule naming no topic gets a sentence saying which two shapes that
+  could be and to read the object with `kubectl` -- guessing "all user topics"
+  from an empty list would invent the very claim the labels exist to bound.
+* **There is no source-connectivity check kind.** D2 section 4.2's plan kinds
+  are `topicInventory`, `operationReadiness`, `restorePreflight`,
+  `destinationAccess` and `evidenceFetch`; none of them is "dial this connection
+  and tell me if it answers" on its own. So the clusters page keeps its re-read
+  control, still labelled *connection probe*, and the real dial available there
+  is "Discover topics".
+
 
 ## The three rules, each with a gate
 

@@ -29,7 +29,7 @@ import { mountKeys } from "./pages/keys.js";
 //
 // `#/destinations` IS CONSOLE-ONLY, AND IT IS STILL IN THIS LIST. The product
 // API serves saved destinations and `kubectl proxy` does not; the legacy UI
-// ServiceAccount has no binding for the kind either (D2 §7.4), so a page that
+// ServiceAccount has no binding for the kind either (D2 section 7.4), so a page that
 // tried would render a 403 it did not cause. Hiding the tab in legacy mode
 // would be worse than showing it: the route decides the mode ONCE at boot and
 // the tab would appear and vanish under a reader. So the route is always

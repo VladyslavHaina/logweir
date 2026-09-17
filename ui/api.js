@@ -381,13 +381,23 @@ export async function consoleAction(ns, action, name, body, options) {
         "answers 400); its replay guard is the request's own precondition.",
     );
   }
-  const identifier = route.named === true
-    ? path("api", "v1", "namespaces", ns, route.plural, String(name) + route.suffix)
-    : path("api", "v1", "namespaces", ns, route.plural + route.suffix);
-  const response = await request(
-    identifier,
-    writeInit(body, Object.assign({}, o, { idempotencyKey: route.key === true ? key : null })),
+  // TWO CALLS, NOT ONE CALL OVER A VARIABLE. `every_api_path_is_relative`
+  // requires the first argument of every send in this module to BE a
+  // `path(...)` call, so a reviewer grepping for the one network seam reads
+  // the identifier beside it rather than following a binding. Building the
+  // identifier above and passing it here would have been outside that
+  // guarantee -- not because this particular expression is wrong, but because
+  // the property stops being checkable by reading.
+  const init = writeInit(
+    body,
+    Object.assign({}, o, { idempotencyKey: route.key === true ? key : null }),
   );
+  const response = route.named === true
+    ? await request(
+      path("api", "v1", "namespaces", ns, route.plural, String(name) + route.suffix),
+      init,
+    )
+    : await request(path("api", "v1", "namespaces", ns, route.plural + route.suffix), init);
   return problemBody(response);
 }
 
