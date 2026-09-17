@@ -60,6 +60,7 @@
 //! evidence KEYS and leaves `status.evidence.verification` untouched.
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -69,6 +70,7 @@ use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{ConfigMap, Pod};
 use kube::api::{Api, LogParams, Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
+use kube::runtime::reflector::{self, ObjectRef};
 use kube::runtime::{watcher, Controller};
 use kube::{Resource, ResourceExt as _};
 use serde_json::{json, Value};
@@ -3022,6 +3024,109 @@ fn error_policy(backup: Arc<Backup>, err: &BackupError, _ctx: Arc<Context>) -> A
     Action::requeue(std::time::Duration::from_secs(REQUEUE_SECS))
 }
 
+// ---------------------------------------------------------------------------
+// The re-trust trigger — PLAT-19.1, D3 §7.4 "re-evaluation without re-fetching"
+// ---------------------------------------------------------------------------
+
+/// Every Backup a `TrustPolicy` event could change the verdict of.
+///
+/// # No LIST, and that is the whole design
+///
+/// The obvious shape is "one paginated LIST per bound namespace on every
+/// policy event". This controller already RUNS a watch over every Backup in
+/// the cluster — that is what `Controller::new` is — so `Controller::store()`
+/// is the same index, already paid for, already warm, and cannot be staler
+/// than the event being mapped. The trigger therefore costs **zero** API
+/// calls and is bounded by the objects this controller holds rather than by
+/// the cluster.
+///
+/// # It over-approximates on purpose
+///
+/// [`crate::trust::may_govern`] treats a `default: true` policy as claiming
+/// every namespace, although resolution would hand an explicitly-named
+/// namespace to its own policy instead. Enqueuing an object the policy does
+/// not govern costs one re-derivation that writes nothing
+/// (`verification::retrust` returns `None` for an unchanged block, erratum
+/// **E11(d)**); failing to enqueue one leaves a revoked key green until
+/// something else happens to reconcile it. The two errors are not symmetric.
+fn policy_targets(
+    objects: &reflector::Store<Backup>,
+    policy: &crate::crds::trust_policy::TrustPolicy,
+) -> Vec<ObjectRef<Backup>> {
+    {
+        objects
+            .state()
+            .into_iter()
+            .filter(|object| {
+                {
+                    object
+                        .namespace()
+                        .is_some_and(|ns| crate::trust::may_govern(policy, &ns))
+                }
+            })
+            .map(|object| ObjectRef::from_obj(&*object))
+            .collect()
+    }
+}
+
+/// [`reconcile`], with the re-trust pass in front of it.
+///
+/// # Why this is in FRONT and not inside
+///
+/// Because a terminal object short-circuits: [`reconcile_backup_inner`]
+/// returns long before the verification block is written, which is what keeps
+/// a finished run quiet (D3 §1) and is also why "force a reconcile" was never
+/// a way to re-apply a revocation. The re-trust pass is the other half of that
+/// rule — it re-derives the verdict from what is already ON the status, with
+/// no storage read and no signature check — so it belongs where a terminal
+/// object still reaches it.
+///
+/// It runs only when the object already carries a `matchedKeyId`
+/// ([`crate::verification::has_trust_verdict`]) and the policy reflector has
+/// synced. Both guards are about cost and correctness at once: an object with
+/// no verdict has nothing to re-decide, and an unsynced store looks like a
+/// cluster with no `TrustPolicy` at all, which would resolve every namespace
+/// to the legacy roster and write a verdict nobody asked for.
+async fn reconcile_with_trust(
+    backup: Arc<Backup>,
+    ctx: Arc<Context>,
+    policies: reflector::Store<crate::crds::trust_policy::TrustPolicy>,
+    synced: Arc<AtomicBool>,
+) -> Result<Action, BackupError> {
+    {
+        if synced.load(Ordering::Relaxed) {
+            {
+                let value = serde_json::to_value(&*backup).ok();
+                let status = value.as_ref().and_then(|v| v.get("status"));
+                if crate::verification::has_trust_verdict(status) {
+                    {
+                        if let Some(namespace) = backup.namespace() {
+                            {
+                                let snapshot: Vec<crate::crds::trust_policy::TrustPolicy> =
+                                    policies.state().into_iter().map(|p| (*p).clone()).collect();
+                                let resolution =
+                                    crate::trust::resolve_with(&snapshot, &ctx.client, &namespace)
+                                        .await?;
+                                let api: Api<Backup> =
+                                    Api::namespaced(ctx.client.clone(), &namespace);
+                                crate::verification::apply_retrust(
+                                    &api,
+                                    &*backup,
+                                    &resolution,
+                                    crate::verification::backup_badge,
+                                    Utc::now(),
+                                )
+                                .await?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        reconcile(backup, ctx).await
+    }
+}
+
 /// Run the `Backup` controller until the process ends.
 ///
 /// `Api::all`, and it `owns` the Jobs it creates so a pod terminating wakes
@@ -3050,15 +3155,58 @@ pub fn controller(
 ) -> impl std::future::Future<Output = ()> + Send {
     let api: Api<Backup> = Api::all(client.clone());
     let jobs: Api<Job> = Api::all(client.clone());
+    let client_for_watch = client.clone();
     let ctx = Arc::new(Context {
         client,
         archive,
         runner_image,
     });
+    // ONE reflector over `TrustPolicy`, shared by the trigger and by every
+    // resolution this controller performs (review finding F9). A watch is one
+    // long-lived connection; a LIST per reconcile is one round trip per object
+    // per requeue, and this controller holds every object in the cluster.
+    let (policies, policy_writer) = reflector::store::<crate::crds::trust_policy::TrustPolicy>();
+    let policy_api: Api<crate::crds::trust_policy::TrustPolicy> = Api::all(client_for_watch);
+    let synced = Arc::new(AtomicBool::new(false));
     async move {
-        Controller::new(api, watcher::Config::default())
+        // NOT `wait_until_ready().await` BEFORE STARTING. A cluster whose
+        // `trustpolicies` CRD is not installed never syncs, and awaiting here
+        // would mean this controller never reconciles anything at all — a
+        // startup regression for every install that has not migrated. The flag
+        // is the same answer without the hostage: until it is set, the
+        // re-trust pass is skipped and everything else runs exactly as before.
+        let ready_probe = policies.clone();
+        let ready_flag = Arc::clone(&synced);
+        tokio::spawn(async move {
+            if ready_probe.wait_until_ready().await.is_ok() {
+                ready_flag.store(true, Ordering::Relaxed);
+            }
+        });
+        tokio::spawn(
+            reflector::reflector(
+                policy_writer,
+                watcher(policy_api.clone(), watcher::Config::default()),
+            )
+            .for_each(|_| std::future::ready(())),
+        );
+
+        let controller = Controller::new(api, watcher::Config::default());
+        let objects = controller.store();
+        controller
             .owns(jobs, watcher::Config::default())
-            .run(reconcile, error_policy, ctx)
+            // THE RE-TRUST TRIGGER. A `TrustPolicy` event maps to the objects
+            // this controller already holds in the namespaces that policy could
+            // govern — see `policy_targets`.
+            .watches(policy_api, watcher::Config::default(), move |policy| {
+                policy_targets(&objects, &policy)
+            })
+            .run(
+                move |object, context| {
+                    reconcile_with_trust(object, context, policies.clone(), Arc::clone(&synced))
+                },
+                error_policy,
+                ctx,
+            )
             .for_each(|_| std::future::ready(()))
             .await;
     }

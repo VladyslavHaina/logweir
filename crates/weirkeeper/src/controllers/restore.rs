@@ -91,6 +91,7 @@
 //! which happens **inside the runner**, over topics, never here.
 
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -101,6 +102,7 @@ use k8s_openapi::api::core::v1::{ConfigMap, Pod};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
 use kube::api::{Api, LogParams, Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
+use kube::runtime::reflector::{self, ObjectRef};
 use kube::runtime::{watcher, Controller};
 use kube::{Resource, ResourceExt as _};
 use serde_json::{json, Value};
@@ -764,18 +766,59 @@ pub fn compatible_legacy_plan_config_map(
             })
 }
 
+/// The object an operator would edit to change a bundle refusal — the roster
+/// when this namespace resolves to the synthesised `legacy-roster-v1`, the
+/// policy otherwise.
+///
+/// THE REFUSAL NAMES THE THING TO EDIT. "absent from the TrustRoster" is the
+/// wrong sentence for a namespace governed by `org-default`, and it is the
+/// sentence that made F1 a permanent hold with no way out of it.
+fn trust_source_phrase(trust: &crate::trust::ResolvedTrust) -> String {
+    if trust.source.is_legacy() {
+        format!("the TrustRoster '{}'", crate::ROSTER_NAME)
+    } else {
+        format!("the TrustPolicy '{}'", trust.source.name())
+    }
+}
+
 /// Build the immutable public approval bundle for exactly one Restore.
 ///
 /// The bytes copied from `Approval.spec` are never parsed and re-emitted. The
-/// public key is the roster entry named by the verified status, and the
-/// allowlist is rendered from that same immutable roster. Owner UID plus the
-/// binding annotations make the Kubernetes object specific to this Restore;
-/// the runner still independently verifies the signature and plan hash from
-/// the mounted files.
+/// public key is the entry the verified status named, **taken from the trust
+/// this namespace resolves to**, and the allowlist is that same resolution's
+/// `allowedTargetClusterIds`. Owner UID plus the binding annotations make the
+/// Kubernetes object specific to this Restore; the runner still independently
+/// verifies the signature and plan hash from the mounted files.
+///
+/// # Why this reads the RESOLVED trust and not `TrustRoster/default` (PLAT-19.1)
+///
+/// Because admission does, and the two must not be able to disagree. Before
+/// PLAT-19.1 both `approval::decide` and this function read the one roster, so
+/// a key that verified an `Approval` was by construction a key this bundle
+/// could render. Once admission resolves a `TrustPolicy` (D3 §7.1) and this
+/// does not, a `GovernedApproval` key that lives only in the policy — which is
+/// exactly what §7.6 step 1 stages, and what §15's L7 namespace B has, with no
+/// roster at all — writes `Verified=True` on the `Approval` and then leaves
+/// the `Restore` in a **non-terminal** `ApprovalBundleMaterializationFailed`
+/// hold for ever, pointing the operator at an object D3 §7.2 says no longer
+/// decides anything for their namespace. It is fail-closed, and it is a
+/// permanent restore hold on the one procedure the decision documents.
+///
+/// # The expiry re-check is `may_sign_new`, not `status.expiredKeyIds`
+///
+/// Same reason, one level down. The roster's `expiredKeyIds` is a list its own
+/// reconciler derives from `notAfter` alone; the question this site asks is D3
+/// §7.4's first one — *may this key authorise something new* — which is also
+/// false for a `Retired` or `Revoked` key whose `notAfter` has not arrived. A
+/// bundle is the last thing written before a runner executes under that key,
+/// so asking the weaker question here would mount the public half of a key an
+/// administrator withdrew between admission and materialization. `now` is an
+/// argument: this function reads no clock.
 pub fn approval_bundle_config_map(
     restore: &Restore,
     approval: &Approval,
-    roster: &TrustRoster,
+    trust: &crate::trust::ResolvedTrust,
+    now: DateTime<Utc>,
 ) -> Result<ConfigMap, RestoreError> {
     let name = restore.name_any();
     let namespace = restore
@@ -801,28 +844,28 @@ pub fn approval_bundle_config_map(
                 approval.name_any()
             ))
         })?;
-    let expired = roster
-        .status
-        .as_ref()
-        .and_then(|status| status.expired_key_ids.as_deref())
-        .unwrap_or_default();
-    if expired.iter().any(|id| id == matched_key_id) {
+    let key = trust.key(matched_key_id).ok_or_else(|| {
+        RestoreError::Materialization(format!(
+            "the Approval {} verified under key {matched_key_id}, which {} does not carry; add \
+             the approver's public half there, not to an object this namespace no longer resolves \
+             to",
+            approval.name_any(),
+            trust_source_phrase(trust)
+        ))
+    })?;
+    if let Err(refusal) = trust.may_sign_new_for(
+        matched_key_id,
+        logweir_core::trust::KeyUsage::GovernedApproval,
+        now,
+    ) {
         return Err(RestoreError::Materialization(format!(
-            "the Approval {} verified under key {matched_key_id}, which the TrustRoster now marks expired",
-            approval.name_any()
+            "the Approval {} verified under key {matched_key_id}, which {} no longer accepts for \
+             a new authorisation ({}); no bundle is written and nothing executes under it",
+            approval.name_any(),
+            trust_source_phrase(trust),
+            refusal.as_str()
         )));
     }
-    let key = roster
-        .spec
-        .approver_keys
-        .iter()
-        .find(|entry| entry.key_id == matched_key_id)
-        .ok_or_else(|| {
-            RestoreError::Materialization(format!(
-                "the Approval {} verified under key {matched_key_id}, which is absent from the TrustRoster",
-                approval.name_any()
-            ))
-        })?;
     let plan_hash = recomputed_plan_hash(restore);
     let approval_hash = approval_plan_hash(approval).unwrap_or_default();
     if approval_hash != plan_hash {
@@ -833,13 +876,16 @@ pub fn approval_bundle_config_map(
             ),
         ));
     }
+    // `allowedTargetClusterIds` (D3 §7.2), which the synthesis carries verbatim
+    // from the roster's `allowedClusterIds` — so an unmigrated cluster renders
+    // the same bytes it always did.
     let allowed = logweir_core::spec::AllowedClusters {
-        allowed_cluster_ids: roster.spec.allowed_cluster_ids.clone(),
+        allowed_cluster_ids: trust.allowed_target_cluster_ids.clone(),
         source_cluster_id: None,
     };
     let allowed_bytes = serde_json::to_string_pretty(&allowed).map_err(|error| {
         RestoreError::Materialization(format!(
-            "the TrustRoster allowlist could not be rendered: {error}"
+            "the target-cluster allowlist could not be rendered: {error}"
         ))
     })?;
     let annotations = [
@@ -883,7 +929,7 @@ pub fn approval_bundle_config_map(
                     APPROVAL_SIG_FILE.to_string(),
                     approval.spec.sidecar_bytes.clone(),
                 ),
-                (APPROVER_KEY_FILE.to_string(), key.spki_pem.clone()),
+                (APPROVER_KEY_FILE.to_string(), key.spki_pem.clone()), // public SPKI only
                 (ALLOWED_CLUSTERS_FILE.to_string(), allowed_bytes),
             ]
             .into_iter()
@@ -900,11 +946,12 @@ pub fn approval_bundle_config_map(
 pub fn execution_contract_env(
     restore: &Restore,
     approval: &Approval,
-    roster: &TrustRoster,
+    trust: &crate::trust::ResolvedTrust,
+    now: DateTime<Utc>,
 ) -> Result<Vec<(String, String)>, RestoreError> {
     use logweir_core::execution_contract as contract;
 
-    let bundle = approval_bundle_config_map(restore, approval, roster)?;
+    let bundle = approval_bundle_config_map(restore, approval, trust, now)?;
     let data = bundle.data.as_ref().ok_or_else(|| {
         RestoreError::Materialization("the rendered approval bundle has no data".to_string())
     })?;
@@ -1206,7 +1253,8 @@ pub fn runner_job_spec(
     cluster: &KafkaCluster,
     approver_key_ids: &[String],
     approval: &Approval,
-    roster: &TrustRoster,
+    trust: &crate::trust::ResolvedTrust,
+    now: DateTime<Utc>,
 ) -> Result<RunnerJobSpec, RestoreError> {
     let name = restore.name_any();
     let namespace = restore
@@ -1316,7 +1364,7 @@ pub fn runner_job_spec(
         env_literal: {
             let mut env = vec![("RUST_LOG".to_string(), "info".to_string())];
             env.extend(backup::archive_addressing_env());
-            env.extend(execution_contract_env(restore, approval, roster)?);
+            env.extend(execution_contract_env(restore, approval, trust, now)?);
             env.extend(projection.env_literal);
             env
         },
@@ -2353,23 +2401,49 @@ async fn get_target_cluster(
     api.get_opt(&referent).await.map_err(RestoreError::Api)
 }
 
-/// `GET` the one cluster-scoped `TrustRoster`, for the argv's key ids.
+/// Resolve **this namespace's** trust, for the approval bundle and the argv —
+/// PLAT-19.1, D3 §7.1.
 ///
 /// **AFTER the admission, deliberately.** An unapproved plan creates nothing
-/// (Global Constraint 6) and it also READS nothing it does not need: the
-/// roster is an argv input, so it is fetched only once a Job is going to
-/// exist. `RosterLoad::NotFound` yields `None` — see [`approver_key_ids`].
+/// (Global Constraint 6) and it also READS nothing it does not need: this is a
+/// materialization input, so it is fetched only once a Job is going to exist.
+///
+/// The two non-`Trust` resolutions are **holds, not terminal refusals**, and
+/// the distinction is the point: a contested namespace and a cluster with no
+/// trust material at all are both administrator faults an administrator can
+/// fix, and the `Restore` must still be materializable afterwards. A terminal
+/// refusal would make the operator mint a new plan and a new approval to
+/// recover from someone else's typo.
 ///
 /// # Errors
 ///
-/// [`RestoreError::Api`] for a transport failure, which is a requeue.
-async fn get_roster(client: &kube::Client) -> Result<Option<TrustRoster>, RestoreError> {
-    match super::approval::load_roster(client)
+/// [`RestoreError::Api`] for a transport failure, which is a requeue;
+/// [`RestoreError::Materialization`] for a conflict or an unconfigured
+/// cluster, which is the non-terminal hold.
+async fn resolve_trust(
+    client: &kube::Client,
+    namespace: &str,
+) -> Result<crate::trust::ResolvedTrust, RestoreError> {
+    match crate::trust::resolve(client, namespace)
         .await
         .map_err(RestoreError::Api)?
     {
-        super::approval::RosterLoad::Found(roster) => Ok(Some(*roster)),
-        super::approval::RosterLoad::NotFound => Ok(None),
+        crate::trust::Resolution::Trust(trust) => Ok(*trust),
+        crate::trust::Resolution::Conflict {
+            namespace,
+            policies,
+        } => Err(RestoreError::Materialization(format!(
+            "{}: the namespace {namespace} is claimed by more than one TrustPolicy ({}), so it \
+             resolves to no trust at all and the verified Approval bundle cannot be \
+             materialized; remove the namespace from all but one policy",
+            crate::trust::REASON_TRUST_POLICY_CONFLICT,
+            policies.join(", ")
+        ))),
+        crate::trust::Resolution::Unconfigured => Err(RestoreError::Materialization(
+            "no TrustPolicy governs this namespace and there is no cluster-scoped TrustRoster \
+             named 'default', so the verified Approval bundle cannot be materialized"
+                .to_string(),
+        )),
     }
 }
 
@@ -2470,7 +2544,8 @@ async fn write_plan_config_map(
 async fn write_approval_bundle_config_map(
     restore: &Restore,
     approval: &Approval,
-    roster: &TrustRoster,
+    trust: &crate::trust::ResolvedTrust,
+    now: DateTime<Utc>,
     client: &kube::Client,
     namespace: &str,
 ) -> Result<(), RestoreError> {
@@ -2478,7 +2553,7 @@ async fn write_approval_bundle_config_map(
     let uid = restore
         .uid()
         .ok_or_else(|| RestoreError::NoUid(restore_name.clone()))?;
-    let desired = approval_bundle_config_map(restore, approval, roster)?;
+    let desired = approval_bundle_config_map(restore, approval, trust, now)?;
     let bundle_name = approval_bundle_config_map_name(&restore_name);
     let maps: Api<ConfigMap> = Api::namespaced(client.clone(), namespace);
 
@@ -2888,12 +2963,7 @@ async fn reconcile_restore_inner(
                 "the admitted Approval disappeared before its bundle was materialized".to_string(),
             )
         })?;
-        let roster = get_roster(client).await?.ok_or_else(|| {
-            RestoreError::Materialization(
-                "the TrustRoster disappeared before the verified Approval bundle was materialized"
-                    .to_string(),
-            )
-        })?;
+        let trust = resolve_trust(client, &namespace).await?;
         let matched_key_id = approval
             .status
             .as_ref()
@@ -2906,7 +2976,7 @@ async fn reconcile_restore_inner(
         // One exact verified key, not every key the roster happens to contain.
         // The runner pins this id and verifies the detached signature again.
         let key_ids = vec![matched_key_id];
-        let mut spec = runner_job_spec(restore, &cluster, &key_ids, &approval, &roster)?;
+        let mut spec = runner_job_spec(restore, &cluster, &key_ids, &approval, &trust, now)?;
         // THE TWO LINES THE OVERRIDES ARE (Task 33's image, Task 37's pull
         // policy). `None` in either leaves the compiled-in constant in place,
         // which is what every test that does not pass one sees.
@@ -2919,7 +2989,8 @@ async fn reconcile_restore_inner(
         // deadline fires — measured live on the `Backup` path, and the reason
         // every scheduled backup was failing as an unexplained `NoExitCode`.
         write_plan_config_map(restore, client, &namespace).await?;
-        write_approval_bundle_config_map(restore, &approval, &roster, client, &namespace).await?;
+        write_approval_bundle_config_map(restore, &approval, &trust, now, client, &namespace)
+            .await?;
 
         let created = match jobs
             .create(&PostParams::default(), &job::build(&spec))
@@ -3341,6 +3412,109 @@ fn error_policy(restore: Arc<Restore>, err: &RestoreError, _ctx: Arc<Context>) -
     Action::requeue(std::time::Duration::from_secs(REQUEUE_SECS))
 }
 
+// ---------------------------------------------------------------------------
+// The re-trust trigger — PLAT-19.1, D3 §7.4 "re-evaluation without re-fetching"
+// ---------------------------------------------------------------------------
+
+/// Every Restore a `TrustPolicy` event could change the verdict of.
+///
+/// # No LIST, and that is the whole design
+///
+/// The obvious shape is "one paginated LIST per bound namespace on every
+/// policy event". This controller already RUNS a watch over every Restore in
+/// the cluster — that is what `Controller::new` is — so `Controller::store()`
+/// is the same index, already paid for, already warm, and cannot be staler
+/// than the event being mapped. The trigger therefore costs **zero** API
+/// calls and is bounded by the objects this controller holds rather than by
+/// the cluster.
+///
+/// # It over-approximates on purpose
+///
+/// [`crate::trust::may_govern`] treats a `default: true` policy as claiming
+/// every namespace, although resolution would hand an explicitly-named
+/// namespace to its own policy instead. Enqueuing an object the policy does
+/// not govern costs one re-derivation that writes nothing
+/// (`verification::retrust` returns `None` for an unchanged block, erratum
+/// **E11(d)**); failing to enqueue one leaves a revoked key green until
+/// something else happens to reconcile it. The two errors are not symmetric.
+fn policy_targets(
+    objects: &reflector::Store<Restore>,
+    policy: &crate::crds::trust_policy::TrustPolicy,
+) -> Vec<ObjectRef<Restore>> {
+    {
+        objects
+            .state()
+            .into_iter()
+            .filter(|object| {
+                {
+                    object
+                        .namespace()
+                        .is_some_and(|ns| crate::trust::may_govern(policy, &ns))
+                }
+            })
+            .map(|object| ObjectRef::from_obj(&*object))
+            .collect()
+    }
+}
+
+/// [`reconcile`], with the re-trust pass in front of it.
+///
+/// # Why this is in FRONT and not inside
+///
+/// Because a terminal object short-circuits: [`reconcile_restore_inner`]
+/// returns long before the verification block is written, which is what keeps
+/// a finished run quiet (D3 §1) and is also why "force a reconcile" was never
+/// a way to re-apply a revocation. The re-trust pass is the other half of that
+/// rule — it re-derives the verdict from what is already ON the status, with
+/// no storage read and no signature check — so it belongs where a terminal
+/// object still reaches it.
+///
+/// It runs only when the object already carries a `matchedKeyId`
+/// ([`crate::verification::has_trust_verdict`]) and the policy reflector has
+/// synced. Both guards are about cost and correctness at once: an object with
+/// no verdict has nothing to re-decide, and an unsynced store looks like a
+/// cluster with no `TrustPolicy` at all, which would resolve every namespace
+/// to the legacy roster and write a verdict nobody asked for.
+async fn reconcile_with_trust(
+    restore: Arc<Restore>,
+    ctx: Arc<Context>,
+    policies: reflector::Store<crate::crds::trust_policy::TrustPolicy>,
+    synced: Arc<AtomicBool>,
+) -> Result<Action, RestoreError> {
+    {
+        if synced.load(Ordering::Relaxed) {
+            {
+                let value = serde_json::to_value(&*restore).ok();
+                let status = value.as_ref().and_then(|v| v.get("status"));
+                if crate::verification::has_trust_verdict(status) {
+                    {
+                        if let Some(namespace) = restore.namespace() {
+                            {
+                                let snapshot: Vec<crate::crds::trust_policy::TrustPolicy> =
+                                    policies.state().into_iter().map(|p| (*p).clone()).collect();
+                                let resolution =
+                                    crate::trust::resolve_with(&snapshot, &ctx.client, &namespace)
+                                        .await?;
+                                let api: Api<Restore> =
+                                    Api::namespaced(ctx.client.clone(), &namespace);
+                                crate::verification::apply_retrust(
+                                    &api,
+                                    &*restore,
+                                    &resolution,
+                                    crate::verification::restore_badge,
+                                    Utc::now(),
+                                )
+                                .await?;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        reconcile(restore, ctx).await
+    }
+}
+
 /// Run the `Restore` controller until the process ends.
 ///
 /// `Api::all`, and it `owns` the Jobs it creates so a pod terminating wakes
@@ -3363,15 +3537,58 @@ pub fn controller(
 ) -> impl std::future::Future<Output = ()> + Send {
     let api: Api<Restore> = Api::all(client.clone());
     let jobs: Api<Job> = Api::all(client.clone());
+    let client_for_watch = client.clone();
     let ctx = Arc::new(Context {
         client,
         archive,
         runner_image,
     });
+    // ONE reflector over `TrustPolicy`, shared by the trigger and by every
+    // resolution this controller performs (review finding F9). A watch is one
+    // long-lived connection; a LIST per reconcile is one round trip per object
+    // per requeue, and this controller holds every object in the cluster.
+    let (policies, policy_writer) = reflector::store::<crate::crds::trust_policy::TrustPolicy>();
+    let policy_api: Api<crate::crds::trust_policy::TrustPolicy> = Api::all(client_for_watch);
+    let synced = Arc::new(AtomicBool::new(false));
     async move {
-        Controller::new(api, watcher::Config::default())
+        // NOT `wait_until_ready().await` BEFORE STARTING. A cluster whose
+        // `trustpolicies` CRD is not installed never syncs, and awaiting here
+        // would mean this controller never reconciles anything at all — a
+        // startup regression for every install that has not migrated. The flag
+        // is the same answer without the hostage: until it is set, the
+        // re-trust pass is skipped and everything else runs exactly as before.
+        let ready_probe = policies.clone();
+        let ready_flag = Arc::clone(&synced);
+        tokio::spawn(async move {
+            if ready_probe.wait_until_ready().await.is_ok() {
+                ready_flag.store(true, Ordering::Relaxed);
+            }
+        });
+        tokio::spawn(
+            reflector::reflector(
+                policy_writer,
+                watcher(policy_api.clone(), watcher::Config::default()),
+            )
+            .for_each(|_| std::future::ready(())),
+        );
+
+        let controller = Controller::new(api, watcher::Config::default());
+        let objects = controller.store();
+        controller
             .owns(jobs, watcher::Config::default())
-            .run(reconcile, error_policy, ctx)
+            // THE RE-TRUST TRIGGER. A `TrustPolicy` event maps to the objects
+            // this controller already holds in the namespaces that policy could
+            // govern — see `policy_targets`.
+            .watches(policy_api, watcher::Config::default(), move |policy| {
+                policy_targets(&objects, &policy)
+            })
+            .run(
+                move |object, context| {
+                    reconcile_with_trust(object, context, policies.clone(), Arc::clone(&synced))
+                },
+                error_policy,
+                ctx,
+            )
             .for_each(|_| std::future::ready(()))
             .await;
     }

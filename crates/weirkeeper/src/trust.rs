@@ -692,9 +692,65 @@ pub fn algorithm_agrees(key: &ResolvedKey) -> Result<(), String> {
 pub async fn resolve(client: &kube::Client, namespace: &str) -> Result<Resolution, kube::Error> {
     let policies: Api<TrustPolicy> = Api::all(client.clone());
     let list = policies.list(&kube::api::ListParams::default()).await?;
+    resolve_with(&list.items, client, namespace).await
+}
+
+/// [`resolve`], with the policy set supplied by a caller that already holds one
+/// — a `reflector::Store` kept warm by a watch this controller runs anyway.
+///
+/// # Why this exists (review finding F9)
+///
+/// [`resolve`] performs a cluster-wide `LIST trustpolicies` on every call. That
+/// is correct — "is this namespace claimed twice" is not answerable from one
+/// object — and it is one round trip per reconcile on a path a controller takes
+/// for every object it holds. A controller that already WATCHES `TrustPolicy`
+/// (which the re-trust trigger requires it to) has the whole set in memory and
+/// has no business asking the API server again: the reflector's snapshot is the
+/// same answer, is already paid for, and cannot be staler than the event that
+/// woke the reconcile.
+///
+/// The roster is still fetched, because a `TrustRoster` reflector would be a
+/// second watch for one cluster-scoped object; that halving is recorded and not
+/// taken.
+///
+/// # Errors
+///
+/// A `kube::Error` from the roster read. A 404 there is NOT an error — it is
+/// [`Resolution::Unconfigured`] when no policy covered the namespace.
+pub async fn resolve_with(
+    policies: &[TrustPolicy],
+    client: &kube::Client,
+    namespace: &str,
+) -> Result<Resolution, kube::Error> {
     let roster = match crate::controllers::approval::load_roster(client).await? {
         crate::controllers::approval::RosterLoad::Found(roster) => Some(roster.spec),
         crate::controllers::approval::RosterLoad::NotFound => None,
     };
-    Ok(resolve_in(namespace, &list.items, roster.as_ref()))
+    Ok(resolve_in(namespace, policies, roster.as_ref()))
+}
+
+/// Whether a `TrustPolicy` event could change what `namespace` resolves to —
+/// the **trigger** half of the re-trust pass (D3 §7.4).
+///
+/// # Over-approximate, never under-approximate
+///
+/// This decides which objects a policy event ENQUEUES, not what any of them
+/// verdicts to. Enqueuing an object the policy does not govern costs one
+/// re-derivation that writes nothing (`verification::retrust` returns `None`
+/// when the rendered block is unchanged, erratum E11(d)); FAILING to enqueue one
+/// leaves a revoked key green until something else happens to reconcile it. So
+/// the two errors are not symmetric and this rounds the safe way.
+///
+/// A `default: true` policy therefore claims **every** namespace here, although
+/// resolution would hand an explicitly-named namespace to its own policy
+/// instead: deciding that properly needs the whole policy set, and getting it
+/// wrong in the other direction is the failure this function exists to prevent.
+#[must_use]
+pub fn may_govern(policy: &TrustPolicy, namespace: &str) -> bool {
+    policy.spec.default
+        || policy
+            .spec
+            .namespaces
+            .as_ref()
+            .is_some_and(|ns| ns.iter().any(|n| n == namespace))
 }

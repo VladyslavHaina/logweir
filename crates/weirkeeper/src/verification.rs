@@ -425,8 +425,36 @@ impl VerificationResult {
     /// wrap one optional instant.
     #[must_use]
     pub fn observation(existing: Option<&Value>) -> IndependentObservation {
-        match existing
-            .and_then(|e| e.get("verifiedAt"))
+        let Some(block) = existing else {
+            return IndependentObservation::none();
+        };
+        // ---- IT MUST BE AN OBSERVATION, NOT JUST AN INSTANT (finding F5) ---
+        //
+        // Every verdict carries a `verifiedAt`, including the ones that never
+        // read the document: a `NotAttempted` written because there was no
+        // credential, because the object could not be fetched, or because two
+        // policies contest the namespace, and an `Invalid` written because the
+        // digest did not match. None of those is evidence that this
+        // installation SAW the document, and D3 §7.4's compromise rule rests on
+        // exactly that claim — so accepting one would put a false provenance
+        // sentence ("recorded having seen this document before the revocation
+        // took effect") in front of an operator, about the one key nobody
+        // should trust.
+        //
+        // The two results a signature produced are the two that read it, and
+        // both of them name the key that made it.
+        let verdict_about_a_signature = matches!(
+            block.get("result").and_then(Value::as_str),
+            Some("Valid" | "Untrusted")
+        ) && block
+            .get("matchedKeyId")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !id.is_empty());
+        if !verdict_about_a_signature {
+            return IndependentObservation::none();
+        }
+        match block
+            .get("verifiedAt")
             .and_then(Value::as_str)
             .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         {
@@ -933,15 +961,23 @@ fn valid_verification(status: &Value) -> Result<(&str, &str, bool), &'static str
         .and_then(|v| v.get("matchedKeyId"))
         .and_then(Value::as_str)
         .ok_or(REASON_VERIFICATION_NOT_ATTEMPTED)?;
-    let basis = v
-        .and_then(|v| v.pointer("/trust/basis"))
-        .and_then(Value::as_str);
-    let historical = match basis {
-        Some(TRUST_BASIS_CURRENT) | None => false,
-        Some(TRUST_BASIS_HISTORICAL) => true,
-        // A `Valid` on any other basis is a shape this controller does not
-        // write. It is not green.
-        Some(_) => return Err(REASON_VERIFICATION_UNTRUSTED),
+    // TWO DIFFERENT STATES, AND THEY WERE FOLDED TOGETHER (finding F7).
+    //
+    // **No `trust` key at all** is the additive-compatibility case: an object
+    // written by a controller that predates PLAT-19.1, correctly green.
+    // **A `trust` key this build cannot read** — no `basis`, a `null`, a
+    // number, a basis nobody defined — is malformed, and a badge rule that
+    // reads one field is one edit away from rendering green over a state
+    // nobody intended. That is the argument this module makes for reading the
+    // basis clause at all, so the arm that keeps the old rule must not be the
+    // one that swallows a shape the old rule never had.
+    let historical = match v.and_then(|v| v.get("trust")) {
+        None => false,
+        Some(trust) => match trust.get("basis").and_then(Value::as_str) {
+            Some(TRUST_BASIS_CURRENT) => false,
+            Some(TRUST_BASIS_HISTORICAL) => true,
+            _ => return Err(REASON_VERIFICATION_UNTRUSTED),
+        },
     };
     Ok((at, key, historical))
 }
@@ -1475,21 +1511,36 @@ pub fn retrust(
         block.insert("verifiedAt".into(), v.clone());
     }
     let verification = Value::Object(block);
-    if &verification == stored {
-        return None;
-    }
 
     // THE BADGE IS COMPUTED OVER THE STATUS THAT WILL EXIST: this object's own
     // `exitCode`/`outcome`, which this pass does not touch, beside the new
     // verification block.
     let mut projected = status.clone();
     projected["evidence"] = json!({ "verification": verification.clone() });
+    let stored_condition = current_condition(existing, CONDITION_VERIFIED);
     let verified = verified_condition(
         &badge(&projected),
-        current_condition(existing, CONDITION_VERIFIED),
+        stored_condition,
         observed_generation,
         now,
     );
+
+    // BOTH HALVES, AND THE SECOND IS NOT DECORATION (finding F6).
+    //
+    // This header has always said the comparison is over the rendered block AND
+    // the rendered condition; the code compared the block alone and computed
+    // the condition after the early return. So a `Verified` condition left
+    // inconsistent with an already-correct block — one clobbered by another
+    // builder writing the array, or left by a partially applied patch — was
+    // never repaired: the pass saw an unchanged block and sent nothing, and a
+    // green condition beside an `Untrusted` result is the silent revocation
+    // this task exists to prevent. `merge_condition` keeps the stored
+    // `lastTransitionTime` when status and reason are unchanged, so a genuinely
+    // steady object still renders the identical condition and still sends
+    // nothing (erratum E11(d)).
+    if &verification == stored && stored_condition == Some(&verified) {
+        return None;
+    }
     Some(Retrust {
         verification,
         verified,
@@ -1544,8 +1595,8 @@ fn stored_claim(stored: &Value) -> EvidenceClaim {
 pub fn catalog_verification(
     result: VerificationVerdict,
     verdict: Option<&Verdict>,
-) -> &'static str {
-    match result {
+) -> CatalogVerdict {
+    let state = match result {
         VerificationVerdict::Invalid => "Invalid",
         VerificationVerdict::NotAttempted => "NotAttempted",
         VerificationVerdict::Valid => match verdict.map(|v| v.basis) {
@@ -1556,5 +1607,147 @@ pub fn catalog_verification(
             Some(UntrustReason::Revoked | UntrustReason::RecordedBeforeRevocation) => "Revoked",
             _ => "UntrustedSigner",
         },
+    };
+    CatalogVerdict {
+        state,
+        reason: verdict.and_then(|v| v.reason),
+        basis: verdict.map(|v| v.basis),
     }
+}
+
+/// One catalog point's verdict: §5.4's word, **and the row that produced it**.
+///
+/// # Why the reason travels with the word (review finding F4)
+///
+/// Because §5.4's six values are lossy in a way that changes the REMEDY. Three
+/// different rows flatten into `UntrustedSigner`, whose §5.4 definition is
+/// "signature verifies under a key the policy does not list" — true for
+/// [`UntrustReason::UntrustedSigner`] and false for
+/// [`UntrustReason::KeyUsageMismatch`] and
+/// [`UntrustReason::SignedOutsideValidity`], where the key IS listed. D3 §15's
+/// L7 remedy for `UntrustedSigner` is "add the key as
+/// `Retired/EvidenceSigning`"; an operator handed that for a
+/// `SignedOutsideValidity` point adds a key that is already there and nothing
+/// changes. `RecordedBeforeRevocation` flattens to `Revoked`, whose definition
+/// says explicitly "and **no** independent pre-revocation observation" — the
+/// opposite of what happened.
+///
+/// Adding the two missing words to §5.4 was the alternative and was not taken:
+/// that vocabulary is a shipped enum on a status a console renders, and
+/// widening it is a CRD decision belonging to whoever owns
+/// `recovery_catalog.rs`. This keeps the six values exactly as §5.4 defines
+/// them and hands W8 what it needs to write a remedy sentence that is true.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CatalogVerdict {
+    /// D3 §5.4's word: `Verified`, `VerifiedHistorical`, `UntrustedSigner`,
+    /// `Revoked`, `Invalid` or `NotAttempted`.
+    pub state: &'static str,
+    /// The row that produced it, when a signer was judged at all.
+    pub reason: Option<UntrustReason>,
+    /// The basis, so `Verified` and `VerifiedHistorical` stay distinguishable
+    /// without re-deriving them from [`Self::state`].
+    pub basis: Option<TrustBasis>,
+}
+
+/// Whether a stored status carries a verdict a policy change could re-decide.
+///
+/// THE CHEAP GUARD IN FRONT OF THE EXPENSIVE ONE. [`retrust`] declines a block
+/// with no `matchedKeyId` anyway, but [`apply_retrust`] has to RESOLVE trust
+/// before it can call it, and resolving costs an API read. An object that has
+/// never had a signature verified against it — every non-terminal run, every
+/// run that wrote no evidence — must not pay for a question it cannot have an
+/// answer to.
+#[must_use]
+pub fn has_trust_verdict(status: Option<&Value>) -> bool {
+    stored_verification(status)
+        .and_then(|v| v.get("matchedKeyId"))
+        .and_then(Value::as_str)
+        .is_some_and(|id| !id.is_empty())
+}
+
+/// Re-derive one object's stored verdict against `resolution` and, when it
+/// changed, PATCH it — D3 §7.4's "re-evaluation without re-fetching".
+///
+/// # What this sends, and the precondition it carries
+///
+/// A `/status` merge PATCH carrying exactly `evidence.verification` and the
+/// whole `conditions` array (a merge patch replaces arrays, RFC 7386), with
+/// `metadata.resourceVersion` as a **precondition** — seam **S7**. An object
+/// that changed between the read and this write answers 409 and the next
+/// reconcile starts again from what the object now says, which matters more
+/// here than anywhere else: this pass reasons from stored fields, so writing
+/// over a concurrent update would reason from fields it never saw.
+///
+/// `Ok(None)` means nothing changed and **nothing was sent** (erratum
+/// **E11(d)**): one `kubectl apply` on a policy must not wake every terminal
+/// object in the cluster into a write.
+///
+/// # Errors
+///
+/// Any `kube::Error` from the PATCH. A 409 is returned as-is so the caller
+/// requeues rather than retrying inside one reconcile.
+pub async fn apply_retrust<K>(
+    api: &kube::Api<K>,
+    object: &K,
+    resolution: &Resolution,
+    badge: fn(&Value) -> Badge,
+    now: DateTime<Utc>,
+) -> Result<Option<Retrust>, kube::Error>
+where
+    K: kube::Resource + Clone + serde::de::DeserializeOwned + std::fmt::Debug + serde::Serialize,
+    <K as kube::Resource>::DynamicType: Default,
+{
+    let name = kube::ResourceExt::name_any(object);
+    let Ok(value) = serde_json::to_value(object) else {
+        return Ok(None);
+    };
+    let Some(status) = value.get("status") else {
+        return Ok(None);
+    };
+    let conditions: Vec<Condition> = status
+        .get("conditions")
+        .and_then(|c| serde_json::from_value(c.clone()).ok())
+        .unwrap_or_default();
+    let Some(result) = retrust(
+        status,
+        resolution,
+        badge,
+        Some(&conditions),
+        object.meta().generation,
+        now,
+    ) else {
+        return Ok(None);
+    };
+    // NO PRECONDITION, NO PATCH. An object the API server handed us without a
+    // `resourceVersion` is not one this pass may write over blind.
+    let Some(resource_version) = object.meta().resource_version.clone() else {
+        tracing::warn!(
+            object = %name,
+            "the object carries no metadata.resourceVersion, so its verdict is not re-derived; \
+             seam S7 makes the precondition mandatory and there is nothing to precondition on"
+        );
+        return Ok(None);
+    };
+    let mut patch = result.patch(&conditions);
+    patch
+        .as_object_mut()
+        .expect("a status patch is always a JSON object")
+        .insert(
+            "metadata".to_string(),
+            json!({ "name": name, "resourceVersion": resource_version }),
+        );
+    tracing::info!(
+        object = %name,
+        from = %result.from,
+        to = %result.to,
+        "the resolved trust policy changed this object's verdict; re-deriving from the stored \
+         matchedKeyId, signedAt and verifiedAt — no storage read and no signature check"
+    );
+    api.patch_status(
+        &name,
+        &kube::api::PatchParams::default(),
+        &kube::api::Patch::Merge(patch),
+    )
+    .await?;
+    Ok(Some(result))
 }
