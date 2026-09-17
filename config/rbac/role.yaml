@@ -116,6 +116,28 @@ rules:
       - restores
       - trustrosters
     verbs: ["get", "list", "watch"]
+  # THE SEVENTH KIND, IN ITS OWN RULE AND NOT ADDED TO THE LIST ABOVE — D2 W7,
+  # PLAT-08.1. `list` and `watch` are `Controller::new(api, …)` in
+  # `controllers/backup_destination.rs`; `get` is the referent read —
+  # `destination::resolve_ref` `get_opt`s the `BackupDestination` a
+  # `destinationRef` names, in the referring object's OWN namespace and in no
+  # other.
+  #
+  # A SEPARATE RULE ON PURPOSE. The six-kind list above is the set the
+  # `logweir-viewer` role also names, verb for verb; folding a seventh kind
+  # into it would silently widen a human role in a diff that reads as a
+  # controller change. It also keeps the grant next to the reason it exists, so
+  # a reviewer sees the caller and the verb together.
+  #
+  # NOTE FOR W11 (D2 §13.2): these two rules are W11's to own. They are here
+  # because the reverse lint `every_call_site_has_a_grant` fails the moment
+  # `Api<BackupDestination>` appears under `crates/weirkeeper/src/`, and a call
+  # with no grant 403s in production while every route-table test stays green.
+  # W11 folds them into its own RBAC pass together with `topicdiscoveries` and
+  # `preflights`.
+  - apiGroups: ["logweir.dev"]
+    resources: ["backupdestinations"]
+    verbs: ["get", "list", "watch"]
   # THE ONE WRITE TO A CUSTOM RESOURCE THAT IS NOT A STATUS, AND ITS CALLER.
   # `controllers/backup_schedule.rs` creates one `Backup` per due slot. A
   # schedule that could not create a backup is a schedule that does nothing.
@@ -145,6 +167,14 @@ rules:
       - kafkaclusters/status
       - restores/status
       - trustrosters/status
+    verbs: ["patch"]
+  # AND ITS STATUS SUBRESOURCE, `patch` and nothing else — seam S7.
+  # `controllers/backup_destination.rs` writes its `Valid` condition, its
+  # `canonicalUrl` and its two digests with `Api::patch_status` and a
+  # `Patch::Merge`; there is no `replace_status` anywhere in this crate, and a
+  # literal `update` here would be a granted verb with no caller.
+  - apiGroups: ["logweir.dev"]
+    resources: ["backupdestinations/status"]
     verbs: ["patch"]
   # THE RUNNER JOBS. `create` in `controllers/{backup,kafka_cluster,restore}.rs`
   # (`jobs.create(&PostParams::default(), &job::build(&spec))`); `get` is each

@@ -526,6 +526,7 @@ fn every_granted_verb_has_a_caller() {
             "jobs" => "Job",
             "configmaps" => "ConfigMap",
             "approvals" => "Approval",
+            "backupdestinations" => "BackupDestination",
             "backups" => "Backup",
             "backupschedules" => "BackupSchedule",
             "kafkaclusters" => "KafkaCluster",
@@ -713,6 +714,10 @@ fn every_call_site_has_a_grant() {
         match ty {
             "Approval" => ("logweir.dev", "approvals"),
             "Backup" => ("logweir.dev", "backups"),
+            // D2 W7 (PLAT-08.1): the seventh kind. Its two rules are in
+            // `config/rbac/role.yaml` beside the six-kind list rather than
+            // inside it, so the `logweir-viewer` role is untouched.
+            "BackupDestination" => ("logweir.dev", "backupdestinations"),
             "BackupSchedule" => ("logweir.dev", "backupschedules"),
             "KafkaCluster" => ("logweir.dev", "kafkaclusters"),
             "Restore" => ("logweir.dev", "restores"),
@@ -863,6 +868,15 @@ fn the_four_cluster_roles_are_exactly_as_specified() {
             v(&SIX_KINDS),
             v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         ),
+        // D2 W7 (PLAT-08.1): the `BackupDestination` reconciler's `list`/`watch`
+        // and `destination::resolve_ref`'s `get_opt`. A SEPARATE rule, so the
+        // six-kind list the `logweir-viewer` role also names stays exactly what
+        // it was.
+        (
+            v(&["logweir.dev"]),
+            v(&["backupdestinations"]),
+            v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+        ),
         (v(&["logweir.dev"]), v(&["backups"]), v(&["create"])),
         (
             v(&["logweir.dev"]),
@@ -874,6 +888,13 @@ fn the_four_cluster_roles_are_exactly_as_specified() {
                 "restores/status",
                 "trustrosters/status",
             ]),
+            v(&["patch"]),
+        ),
+        // D2 W7: `controllers/backup_destination.rs`'s `Api::patch_status`, a
+        // merge PATCH — seam S7, and no `update` anywhere.
+        (
+            v(&["logweir.dev"]),
+            v(&["backupdestinations/status"]),
             v(&["patch"]),
         ),
         (

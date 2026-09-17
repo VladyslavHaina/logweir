@@ -6987,6 +6987,14 @@ rules:
 - apiGroups:
   - logweir.dev
   resources:
+  - backupdestinations
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - logweir.dev
+  resources:
   - backups
   verbs:
   - create
@@ -6999,6 +7007,12 @@ rules:
   - kafkaclusters/status
   - restores/status
   - trustrosters/status
+  verbs:
+  - patch
+- apiGroups:
+  - logweir.dev
+  resources:
+  - backupdestinations/status
   verbs:
   - patch
 - apiGroups:

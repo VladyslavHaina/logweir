@@ -23,6 +23,11 @@ rules:
       - restores
       - trustrosters
     verbs: ["get", "list", "watch"]
+  # D2 W7 (PLAT-08.1): the seventh kind, in its own rule so the six-kind list
+  # the `logweir-viewer` role shares is untouched. See `config/rbac/role.yaml`.
+  - apiGroups: ["logweir.dev"]
+    resources: ["backupdestinations"]
+    verbs: ["get", "list", "watch"]
   - apiGroups: ["logweir.dev"]
     resources: ["backups"]
     verbs: ["create"]
@@ -34,6 +39,9 @@ rules:
       - kafkaclusters/status
       - restores/status
       - trustrosters/status
+    verbs: ["patch"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["backupdestinations/status"]
     verbs: ["patch"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
