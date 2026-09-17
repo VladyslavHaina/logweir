@@ -27,6 +27,7 @@ use weirkeeper::conditions::apply_merge_patch;
 use weirkeeper::conditions::{
     TERMINAL_STATES, TERMINAL_STATE_CONNECTION_CONFIG_INVALID,
     TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE, TERMINAL_STATE_NAME_TOO_LONG,
+    TERMINAL_STATE_POD_OWNERSHIP_CONTESTED,
 };
 use weirkeeper::connection::{resolve, ConnectionUse};
 use weirkeeper::controllers::backup::{JOB_NAME_LABEL, JOB_NAME_LABEL_LEGACY, KEY_SCAN_TAIL_LINES};
@@ -67,8 +68,18 @@ const JOB_UID: &str = "bbbbbbbb-0000-4000-8000-0000000000b3";
 
 /// A pod's `ownerReferences` naming `job_uid` as its **controller**.
 fn pod_owner_json(kind: &str, job_uid: &str, controller: bool) -> String {
+    pod_owner_json_in("batch/v1", kind, job_uid, controller)
+}
+
+/// [`pod_owner_json`] with the owner's `apiVersion` as a parameter.
+///
+/// THE GROUP IS PART OF THE CHECK (review finding R3). `Job` is not a
+/// `batch/v1`-exclusive kind — `volcano.sh/v1alpha1` ships one — so a
+/// reference naming another group's `Job` must be refused like any other
+/// stranger.
+fn pod_owner_json_in(api_version: &str, kind: &str, job_uid: &str, controller: bool) -> String {
     format!(
-        r#"[{{"apiVersion":"batch/v1","kind":"{kind}","name":"{JOB}","uid":"{job_uid}",
+        r#"[{{"apiVersion":"{api_version}","kind":"{kind}","name":"{JOB}","uid":"{job_uid}",
       "controller":{controller},"blockOwnerDeletion":true}}]"#
     )
 }
@@ -986,6 +997,11 @@ async fn a_labelled_pod_this_job_does_not_own_is_never_read() {
             "a ReplicaSet owner reference carrying the Job's UID string",
             pod_owner_json("ReplicaSet", JOB_UID, true),
         ),
+        (
+            "a `Job` in ANOTHER API GROUP carrying the Job's UID string — `Job` is not a \
+             batch/v1-exclusive kind (review finding R3)",
+            pod_owner_json_in("volcano.sh/v1alpha1", "Job", JOB_UID, true),
+        ),
     ] {
         let routes = vec![
             Route {
@@ -1050,13 +1066,21 @@ async fn a_labelled_pod_this_job_does_not_own_is_never_read() {
     }
 }
 
-/// The positive control and the tie-break: an OWNED pod IS read, and two owned
-/// pods resolve to the newest one whichever order the listing arrives in.
+/// The positive control, and the contest: an OWNED pod IS read, and two pods
+/// claiming one probe Job are BOTH refused — review finding **R1**.
 ///
-/// KILLS: refusing every pod; reading the oldest of two owned pods; a
-/// selection that depends on the listing's order.
+/// An `ownerReference` is ordinary metadata its author writes and the API
+/// server does not validate, so a tenant who can read the probe Job's
+/// `metadata.uid` can mint a second claimant that prints interface **I14**'s
+/// two lines — and it is the newer pod by construction. Ranking would let it
+/// assert `status.reachable` and `status.clusterId`, the fields `Restore`
+/// admission refuses or allows on. Nothing is read instead, and `reachable`
+/// stays unset.
+///
+/// KILLS: refusing every pod; newest-wins over a contested Job; oldest-wins;
+/// writing `reachable` off a contested probe.
 #[tokio::test]
-async fn an_owned_pod_is_read_and_the_newest_of_two_wins() {
+async fn an_owned_pod_is_read_and_two_claimants_are_refused() {
     // ARM 1 — the ordinary case.
     let (client, _rec, bodies) =
         mock_client_recording_bodies(finished_routes(0, log_body(&i14_tail())));
@@ -1072,11 +1096,11 @@ async fn an_owned_pod_is_read_and_the_newest_of_two_wins() {
     let seen = bodies.lock().expect("the recorder is readable").clone();
     assert_eq!(count(&seen, "GET", "/log"), 1, "exactly one log read");
 
-    // ARM 2 — two owned pods, the listing given in both orders. Only the
-    // newest pod's log is routed, so reading the other one panics the double
-    // and fails this test loudly rather than quietly.
+    // ARM 2 — a forged second claimant, in both listing orders. BOTH pods'
+    // logs are routed and both answer the two contract lines, so "nothing was
+    // read" is a decision and not an inability.
     let owners = owned_by_job();
-    let pod_json = |suffix: &str, created: &str| {
+    let claimant = |suffix: &str, created: &str| {
         format!(
             r#"{{"apiVersion":"v1","kind":"Pod",
     "metadata":{{"name":"{POD}-{suffix}","namespace":"{NS}","ownerReferences":{owners},
@@ -1088,11 +1112,11 @@ async fn an_owned_pod_is_read_and_the_newest_of_two_wins() {
         "state":{{"terminated":{{"exitCode":0,"finishedAt":"2026-09-10T11:59:00Z"}}}}}}]}}}}"#
         )
     };
-    let one = pod_json("one", "2026-09-10T11:50:00Z");
-    let two = pod_json("two", "2026-09-10T11:55:00Z");
+    let genuine = claimant("genuine", "2026-09-10T11:50:00Z");
+    let forged = claimant("forged", "2026-09-10T11:55:00Z");
     for (label, items) in [
-        ("oldest first", format!("[{one},{two}]")),
-        ("newest first", format!("[{two},{one}]")),
+        ("forged last", format!("[{genuine},{forged}]")),
+        ("forged first", format!("[{forged},{genuine}]")),
     ] {
         let routes = vec![
             Route {
@@ -1111,7 +1135,7 @@ async fn an_owned_pod_is_read_and_the_newest_of_two_wins() {
             },
             Route {
                 method: "GET",
-                path_suffix: "/pods/logweir-probe-orders-prod-abcde-two/log",
+                path_suffix: "/log",
                 status: 200,
                 body: log_body(&i14_tail()),
             },
@@ -1121,33 +1145,41 @@ async fn an_owned_pod_is_read_and_the_newest_of_two_wins() {
                 status: 200,
                 body: cluster_json(NAME, PLAINTEXT_AUTH, "{}"),
             },
-            Route {
-                method: "PATCH",
-                path_suffix: "/jobs/logweir-probe-orders-prod",
-                status: 200,
-                body: job_body("Complete"),
-            },
         ];
         let (client, _rec, bodies) = mock_client_recording_bodies(routes);
         let outcome = reconcile_cluster(&cluster(), &client, now())
             .await
-            .unwrap_or_else(|e| panic!("{label}: {e}"));
-        assert_eq!(
-            outcome.reachable,
-            Some(true),
-            "{label}: the newest owned pod's log was the one read"
-        );
+            .unwrap_or_else(|e| panic!("{label}: a contested Job is a status, not an error: {e}"));
         let seen = bodies.lock().expect("the recorder is readable").clone();
         assert_eq!(
             count(&seen, "GET", "/log"),
-            1,
-            "{label}: exactly one log read, and the route table only answers for the NEWEST pod \
-             — so a reconciler reading the older one fails here rather than passing quietly"
+            0,
+            "{label}: NEITHER claimant's log is read, though both are routed"
         );
         assert_eq!(
-            mentioning(&seen, &format!("/pods/{POD}-one/")),
-            0,
-            "{label}: the older owned pod is not read at all"
+            outcome.reachable, None,
+            "{label}: and nothing is claimed about reachability"
+        );
+        assert_eq!(
+            outcome.cluster_id, None,
+            "{label}: nor about the cluster id"
+        );
+        let statuses = patched_statuses(&seen);
+        assert_eq!(statuses.len(), 1, "{label}: exactly one status patch");
+        assert!(
+            statuses[0].get("reachable").is_none() && statuses[0].get("clusterId").is_none(),
+            "{label}: neither field is written: {}",
+            statuses[0]
+        );
+        let condition = conditions_of(&statuses[0]).remove(0);
+        assert_eq!(condition.1, "Unknown", "{label}: `Reachable=Unknown`");
+        assert_eq!(
+            condition.2, TERMINAL_STATE_POD_OWNERSHIP_CONTESTED,
+            "{label}: and the reason NAMES the contest rather than saying `NoExitCode`"
+        );
+        assert!(
+            TERMINAL_STATES.contains(&TERMINAL_STATE_POD_OWNERSHIP_CONTESTED),
+            "{label}: and the state is in the one closed list"
         );
     }
 }

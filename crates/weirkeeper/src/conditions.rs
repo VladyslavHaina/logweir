@@ -159,6 +159,7 @@ pub const TERMINAL_STATES: &[&str] = &[
     "TargetTopicConfigRefused",
     "CredentialNotRenderable",
     "NoExitCode",
+    TERMINAL_STATE_POD_OWNERSHIP_CONTESTED,
     "GuardRefusedUnknownReason",
     "NameTooLong",
     "ReferentNotFound",
@@ -331,6 +332,24 @@ pub const TERMINAL_STATE_POD_UNSCHEDULABLE: &str = "PodUnschedulable";
 /// **A finished Job with zero pods is this state**, not a crash: the pod was
 /// garbage-collected (or never created) and the code went with it.
 pub const TERMINAL_STATE_NO_EXIT_CODE: &str = "NoExitCode";
+
+/// More than one pod claimed this run's Job as its controller owner, so none
+/// of them was read — D-SEAMS **S6**, defect `SEC-PODLOG`, review finding R1.
+///
+/// **NOT A SUB-CASE OF [`TERMINAL_STATE_NO_EXIT_CODE`].** "No pod reported"
+/// is an accident — garbage collection, an eviction, a node that went away.
+/// This is a namespace in which two objects claim one identity, which a Job
+/// pinned to `backoffLimit: 0` and `restartPolicy: Never` cannot produce, and
+/// an `ownerReferences` entry is ordinary metadata written by whoever created
+/// the pod. So at least one claimant was minted by a principal that read the
+/// Job's UID, and the controller cannot tell which. It reads none of them and
+/// says so under its own name, because an operator seeing `NoExitCode` would
+/// go looking for a deleted pod and find two.
+///
+/// Deliberately **not** in [`crate::cadence::RETRYABLE_TERMINAL_STATES`]: a
+/// retry re-runs the same Job into the same namespace and the same principal
+/// plants the same second claimant.
+pub const TERMINAL_STATE_POD_OWNERSHIP_CONTESTED: &str = "PodOwnershipContested";
 
 /// Exit 3, and the pod log carried no parseable `refusal-reason=` line.
 pub const TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON: &str = "GuardRefusedUnknownReason";

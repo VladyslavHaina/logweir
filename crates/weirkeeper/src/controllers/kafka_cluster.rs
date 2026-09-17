@@ -71,6 +71,7 @@ use super::Context;
 use crate::check;
 use crate::conditions::{
     current_condition, merge_condition, status_unchanged, TERMINAL_STATE_NAME_TOO_LONG,
+    TERMINAL_STATE_POD_OWNERSHIP_CONTESTED,
 };
 use crate::connection::{self, ConnectionUse, ResolvedConnection};
 use crate::crds::kafka_cluster::{AuthMode, KafkaCluster};
@@ -866,7 +867,7 @@ async fn find_pod(
     namespace: &str,
     job_name: &str,
     job_uid: Option<&str>,
-) -> Result<Option<Pod>, KafkaClusterError> {
+) -> Result<check::pod::FoundPod, KafkaClusterError> {
     check::pod::find_owned_pod_by_selectors(
         client,
         namespace,
@@ -1169,22 +1170,34 @@ async fn reconcile_cluster_inner(
         });
     }
 
-    let pod = find_pod(client, &namespace, &job_name, job.uid().as_deref()).await?;
-    let exit_code = pod.as_ref().and_then(backup::terminated_exit_code);
+    let found = find_pod(client, &namespace, &job_name, job.uid().as_deref()).await?;
+    // The pod and its code travel together; see the `Backup` twin for why the
+    // `pods/log` call below must hold a `&Pod` and not an `Option` (review
+    // finding R6).
+    let terminated = found
+        .pod
+        .as_ref()
+        .and_then(|p| backup::terminated_exit_code(p).map(|code| (p, code)));
 
     // STEP 4. The crashed-Job case, before the happy path, because the happy
     // path needs a pod whose container terminated and this branch is "there is
     // none".
-    let Some(exit_code) = exit_code else {
-        let terminal_state = backup::crash_terminal_state(pod.as_ref());
-        let observed = observed_at(&job, pod.as_ref(), now);
+    let Some((pod, exit_code)) = terminated else {
+        let terminal_state = if found.contested.is_empty() {
+            backup::crash_terminal_state(found.pod.as_ref())
+        } else {
+            TERMINAL_STATE_POD_OWNERSHIP_CONTESTED
+        };
+        let observed = observed_at(&job, found.pod.as_ref(), now);
         warn!(
             cluster = %name,
             namespace = %namespace,
             job = %job_name,
             terminal_state,
-            "the probe Job finished with no terminated state for the runner container; nothing \
-             about this cluster is known either way, and `reachable` is left unset"
+            contested = %found.contested.join(","),
+            "no probe output could be read: either the Job finished with no terminated state for \
+             the runner container, or more than one pod claimed the Job and none was read. \
+             Nothing about this cluster is known either way, and `reachable` is left unset"
         );
         patch_status_if_changed(
             &clusters,
@@ -1207,10 +1220,7 @@ async fn reconcile_cluster_inner(
     // STEP 3. Read the two lines through the `pods/log` subresource — the only
     // route to a runner's stdout, and the RBAC rule that grants it is Task 21's
     // (interface I28, a declared late binding).
-    let pod_name = pod
-        .as_ref()
-        .map(kube::ResourceExt::name_any)
-        .unwrap_or_default();
+    let pod_name = pod.name_any();
     let pods: Api<Pod> = Api::namespaced(client.clone(), &namespace);
     let log = pods
         .logs(&pod_name, &LogParams::default())
@@ -1218,7 +1228,7 @@ async fn reconcile_cluster_inner(
         .map_err(KafkaClusterError::Api)?;
     let report = probe_report(&log);
     let v = verdict(&report);
-    let observed = observed_at(&job, pod.as_ref(), now);
+    let observed = observed_at(&job, Some(pod), now);
 
     if v.reachable.is_none() {
         warn!(

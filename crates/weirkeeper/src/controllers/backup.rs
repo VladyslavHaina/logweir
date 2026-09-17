@@ -93,7 +93,8 @@ use crate::conditions::{
     TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON, TERMINAL_STATE_INVALID_TOPIC_SELECTION,
     TERMINAL_STATE_JOB_NAME_CONFLICT, TERMINAL_STATE_NAME_TOO_LONG, TERMINAL_STATE_NO_EXIT_CODE,
     TERMINAL_STATE_ORPHANED_SCORECARD, TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
-    TERMINAL_STATE_POD_UNSCHEDULABLE, TERMINAL_STATE_REFERENT_NOT_FOUND,
+    TERMINAL_STATE_POD_OWNERSHIP_CONTESTED, TERMINAL_STATE_POD_UNSCHEDULABLE,
+    TERMINAL_STATE_REFERENT_NOT_FOUND,
 };
 use crate::crds::backup::Backup;
 use crate::crds::kafka_cluster::KafkaCluster;
@@ -1963,7 +1964,7 @@ async fn find_pod(
     namespace: &str,
     job_name: &str,
     job_uid: Option<&str>,
-) -> Result<Option<Pod>, BackupError> {
+) -> Result<check::pod::FoundPod, BackupError> {
     check::pod::find_owned_pod_by_selectors(
         client,
         namespace,
@@ -2401,20 +2402,34 @@ async fn reconcile_backup_inner(
     }
 
     let job_uid = job.uid();
-    let pod = find_pod(client, &namespace, &job_name, job_uid.as_deref()).await?;
-    let exit_code = pod.as_ref().and_then(terminated_exit_code);
+    let found = find_pod(client, &namespace, &job_name, job_uid.as_deref()).await?;
+    // THE POD AND ITS CODE TRAVEL TOGETHER. Binding the pair is what lets the
+    // happy path below hold a `&Pod` instead of an `Option` it has to unwrap
+    // at the `pods/log` call — an `unwrap_or_default()` there would have read
+    // `GET …/pods//log`, the pod COLLECTION, on any future path that reached
+    // it with `None` (review finding R6).
+    let terminated = found
+        .pod
+        .as_ref()
+        .and_then(|p| terminated_exit_code(p).map(|code| (p, code)));
 
     // STEP 4. The crashed-Job case, before the happy path, because the happy
     // path needs a code and this branch is "there is none".
-    let Some(exit_code) = exit_code else {
-        let terminal_state = crash_terminal_state(pod.as_ref());
+    let Some((pod, exit_code)) = terminated else {
+        let terminal_state = if found.contested.is_empty() {
+            crash_terminal_state(found.pod.as_ref())
+        } else {
+            TERMINAL_STATE_POD_OWNERSHIP_CONTESTED
+        };
         warn!(
             backup = %name,
             namespace = %namespace,
             job = %job_name,
             terminal_state,
-            "the Job finished with no terminated state for the runner container; writing a \
-             terminal status rather than watching forever, and inventing no exit code"
+            contested = %found.contested.join(","),
+            "no exit code could be read for this run: either the Job finished with no terminated \
+             state for the runner container, or more than one pod claimed the Job and none was \
+             read. A terminal status rather than watching forever, and no invented exit code"
         );
         patch_status_if_changed(
             &backups,
@@ -2436,10 +2451,7 @@ async fn reconcile_backup_inner(
     // STEP 3. The code is known. Read the log through the `pods/log`
     // subresource — the only route to a runner's stdout, and the RBAC rule
     // that grants it is Task 21's (interface I28, a declared late binding).
-    let pod_name = pod
-        .as_ref()
-        .map(kube::ResourceExt::name_any)
-        .unwrap_or_default();
+    let pod_name = pod.name_any();
     let pods: Api<Pod> = Api::namespaced(client.clone(), &namespace);
     let log = pods
         .logs(&pod_name, &LogParams::default())

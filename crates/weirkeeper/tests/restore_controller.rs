@@ -37,7 +37,8 @@ use weirkeeper::conditions::{
     TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE, TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON,
     TERMINAL_STATE_JOB_NAME_CONFLICT, TERMINAL_STATE_NAME_TOO_LONG,
     TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT, TERMINAL_STATE_PLAN_HASH_MISMATCH,
-    TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED, TERMINAL_STATE_WINDOW_NOT_COVERED,
+    TERMINAL_STATE_POD_OWNERSHIP_CONTESTED, TERMINAL_STATE_TARGET_TOPIC_CONFIG_REFUSED,
+    TERMINAL_STATE_WINDOW_NOT_COVERED,
 };
 use weirkeeper::controllers::backup::SIGNING_VOLUME;
 use weirkeeper::controllers::backup::{JOB_NAME_LABEL, JOB_NAME_LABEL_LEGACY};
@@ -86,8 +87,18 @@ const JOB_UID: &str = "bbbbbbbb-0000-4000-8000-0000000000b2";
 /// `kind` and `controller` are parameters because the negative cases are
 /// exactly "one of these three is wrong".
 fn pod_owner_json(kind: &str, job_uid: &str, controller: bool) -> String {
+    pod_owner_json_in("batch/v1", kind, job_uid, controller)
+}
+
+/// [`pod_owner_json`] with the owner's `apiVersion` as a parameter.
+///
+/// THE GROUP IS PART OF THE CHECK (review finding R3). `Job` is not a
+/// `batch/v1`-exclusive kind — `volcano.sh/v1alpha1` ships one — so a
+/// reference naming another group's `Job` must be refused like any other
+/// stranger.
+fn pod_owner_json_in(api_version: &str, kind: &str, job_uid: &str, controller: bool) -> String {
     format!(
-        r#"[{{"apiVersion":"batch/v1","kind":"{kind}","name":"{NAME}","uid":"{job_uid}",
+        r#"[{{"apiVersion":"{api_version}","kind":"{kind}","name":"{NAME}","uid":"{job_uid}",
       "controller":{controller},"blockOwnerDeletion":true}}]"#
     )
 }
@@ -3010,6 +3021,11 @@ async fn a_labelled_pod_this_job_does_not_own_is_never_read() {
             "a ReplicaSet owner reference carrying the Job's UID string",
             pod_owner_json("ReplicaSet", JOB_UID, true),
         ),
+        (
+            "a `Job` in ANOTHER API GROUP carrying the Job's UID string — `Job` is not a \
+             batch/v1-exclusive kind (review finding R3)",
+            pod_owner_json_in("volcano.sh/v1alpha1", "Job", JOB_UID, true),
+        ),
     ] {
         let (client, rec, bodies) = mock_client_recording_bodies(finished_routes(
             pod_list_terminated_owned_by(0, &owners),
@@ -3062,16 +3078,21 @@ async fn a_labelled_pod_this_job_does_not_own_is_never_read() {
     }
 }
 
-/// The positive control and the tie-break: an OWNED pod IS read, and two owned
-/// pods resolve to the newest one whichever order the listing arrives in.
+/// The positive control, and the contest: an OWNED pod IS read, and two pods
+/// claiming one Job are BOTH refused under their own terminal state — review
+/// finding **R1**.
 ///
-/// Without this the guard above is satisfiable by a reconciler that reads no
-/// pod at all.
+/// An `ownerReference` is ordinary metadata its author writes and the API
+/// server does not validate, so a tenant who can read the Job's `metadata.uid`
+/// can mint a second claimant — and it is newer than the genuine runner pod by
+/// construction. Ranking would hand this `Restore`'s recorded outcome, the
+/// object an approver reads after data went back into a cluster, to whoever
+/// planted it. Nothing is read instead.
 ///
-/// KILLS: refusing every pod; reading the oldest of two owned pods; a
-/// selection that depends on the listing's order.
+/// KILLS: refusing every pod; newest-wins over a contested Job; oldest-wins;
+/// reporting a contest as an ordinary `NoExitCode`.
 #[tokio::test]
-async fn an_owned_pod_is_read_and_the_newest_of_two_wins() {
+async fn an_owned_pod_is_read_and_two_claimants_are_refused() {
     // ARM 1 — the ordinary case.
     let (client, rec, bodies) = mock_client_recording_bodies(finished_routes(
         pod_list_terminated(0),
@@ -3114,10 +3135,9 @@ async fn an_owned_pod_is_read_and_the_newest_of_two_wins() {
         "from the owned pod, by name; got {logs:?}"
     );
 
-    // ARM 2 — two owned pods, the listing given in both orders. An evicted and
-    // replaced runner shows this on a real cluster.
+    // ARM 2 — a forged second claimant, in both listing orders.
     let owners = owned_by_job();
-    let pod_json = |suffix: &str, created: &str, exit: i32| {
+    let claimant = |suffix: &str, created: &str, exit: i32| {
         format!(
             r#"{{"apiVersion":"v1","kind":"Pod",
     "metadata":{{"name":"{POD}-{suffix}","namespace":"{NS}","ownerReferences":{owners},
@@ -3129,15 +3149,15 @@ async fn an_owned_pod_is_read_and_the_newest_of_two_wins() {
         "state":{{"terminated":{{"exitCode":{exit},"finishedAt":"2026-09-10T11:59:00Z"}}}}}}]}}}}"#
         )
     };
-    let one = pod_json("one", "2026-09-10T11:50:00Z", 3);
-    let two = pod_json("two", "2026-09-10T11:55:00Z", 0);
+    let genuine = claimant("genuine", "2026-09-10T11:50:00Z", 3);
+    let forged = claimant("forged", "2026-09-10T11:55:00Z", 0);
     for (label, items) in [
-        ("oldest first", format!("[{one},{two}]")),
-        ("newest first", format!("[{two},{one}]")),
+        ("forged last", format!("[{genuine},{forged}]")),
+        ("forged first", format!("[{forged},{genuine}]")),
     ] {
         let list =
             format!(r#"{{"apiVersion":"v1","kind":"PodList","metadata":{{}},"items":{items}}}"#);
-        let (client, rec, _bodies) =
+        let (client, rec, bodies) =
             mock_client_recording_bodies(finished_routes(list, log_body(&i8_tail()), "Complete"));
         let outcome = reconcile_restore(
             &restore(),
@@ -3147,24 +3167,40 @@ async fn an_owned_pod_is_read_and_the_newest_of_two_wins() {
             now(),
         )
         .await
-        .unwrap_or_else(|e| panic!("{label}: {e}"));
-        assert_eq!(
-            outcome.exit_code,
-            Some(0),
-            "{label}: the NEWEST owned pod's exit code, not the first one listed — otherwise the \
-             same cluster state yields `0` on one reconcile and `3` on the next"
-        );
-        let logs: Vec<String> = rec
-            .lock()
-            .expect("the recorder is readable")
-            .iter()
-            .filter(|r| path(&r.uri).ends_with("/log"))
-            .map(|r| r.uri.clone())
-            .collect();
-        assert_eq!(logs.len(), 1, "{label}: exactly one log read; got {logs:?}");
+        .unwrap_or_else(|e| panic!("{label}: a contested Job is a status, not an error: {e}"));
+        let seen = rec.lock().expect("the recorder is readable").clone();
         assert!(
-            path(&logs[0]).contains(&format!("/pods/{POD}-two/log")),
-            "{label}: and it is the newest pod's log; got {logs:?}"
+            seen.iter().all(|r| !path(&r.uri).ends_with("/log")),
+            "{label}: NEITHER claimant's log is read; got {seen:?}"
+        );
+        assert_eq!(
+            outcome.exit_code, None,
+            "{label}: and neither claimant's exit code is taken — not the forged `0`, and not \
+             the genuine `3` either"
+        );
+        assert_eq!(
+            outcome.terminal_state.as_deref(),
+            Some(TERMINAL_STATE_POD_OWNERSHIP_CONTESTED),
+            "{label}: under its OWN name, not `NoExitCode`"
+        );
+        assert_eq!(
+            outcome.keys,
+            RestoreEvidenceKeys::default(),
+            "{label}: and no evidence key from either"
+        );
+        let bodies = bodies
+            .lock()
+            .expect("the body recorder is readable")
+            .clone();
+        let status = patched_statuses(&bodies).remove(0);
+        assert!(
+            status.get("exitCode").is_none(),
+            "{label}: `exitCode` absent, not `0`: {status}"
+        );
+        assert_eq!(status["phase"].as_str(), Some("Failed"), "{label}");
+        assert!(
+            TERMINAL_STATES.contains(&TERMINAL_STATE_POD_OWNERSHIP_CONTESTED),
+            "{label}: and the state is in the one closed list"
         );
     }
 }

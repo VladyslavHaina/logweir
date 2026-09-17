@@ -25,7 +25,7 @@ use weirkeeper::conditions::{
     reason_for_exit, wire_reason_for_exit, CONDITION_REASONS, CONDITION_TYPES,
     REASON_DRILL_NOT_PASS, REASON_GUARD_REFUSED, REASON_OK, REASON_OPERATIONAL,
     REASON_SIGNING_OR_LOCK, TERMINAL_STATES, TERMINAL_STATE_ARCHIVE_URL_UNREADABLE,
-    TERMINAL_STATE_NO_EXIT_CODE,
+    TERMINAL_STATE_NO_EXIT_CODE, TERMINAL_STATE_POD_OWNERSHIP_CONTESTED,
 };
 use weirkeeper::controllers::backup::{
     covered_from_receipt, crash_terminal_state, crashed_status_patch, evidence_keys,
@@ -69,10 +69,42 @@ const JOB_UID: &str = "bbbbbbbb-0000-4000-8000-0000000000b1";
 /// exactly "one of these three is wrong": another Job's UID, a
 /// non-controller reference, or a `Job`-shaped UID on a `ReplicaSet`.
 fn pod_owner_json(kind: &str, job_uid: &str, controller: bool) -> String {
+    pod_owner_json_in("batch/v1", kind, job_uid, controller)
+}
+
+/// [`pod_owner_json`] with the owner's `apiVersion` as a parameter.
+///
+/// THE GROUP IS PART OF THE CHECK (review finding R3). `Job` is not a
+/// `batch/v1`-exclusive kind — `volcano.sh/v1alpha1` ships one — so a
+/// reference naming another group's `Job` must be refused like any other
+/// stranger.
+fn pod_owner_json_in(api_version: &str, kind: &str, job_uid: &str, controller: bool) -> String {
     format!(
-        r#"[{{"apiVersion":"batch/v1","kind":"{kind}","name":"{NAME}","uid":"{job_uid}",
+        r#"[{{"apiVersion":"{api_version}","kind":"{kind}","name":"{NAME}","uid":"{job_uid}",
       "controller":{controller},"blockOwnerDeletion":true}}]"#
     )
+}
+
+/// A bare `Pod` with a name, an optional single owner reference
+/// `(apiVersion, kind, uid, controller)`, and an optional `creationTimestamp`.
+///
+/// For the pure `check::pod` tests, where the pod needs no status at all.
+fn owner_pod(
+    name: &str,
+    owner: Option<(&str, &str, &str, bool)>,
+    created: Option<&str>,
+) -> k8s_openapi::api::core::v1::Pod {
+    let mut v = serde_json::json!({"metadata": {"name": name}});
+    if let Some((api_version, kind, uid, controller)) = owner {
+        v["metadata"]["ownerReferences"] = serde_json::json!([{
+            "apiVersion": api_version, "kind": kind, "name": NAME, "uid": uid,
+            "controller": controller
+        }]);
+    }
+    if let Some(created) = created {
+        v["metadata"]["creationTimestamp"] = serde_json::json!(created);
+    }
+    serde_json::from_value(v).expect("the fixture is a Pod")
 }
 
 /// The ordinary case: owned, by the controller reference, by [`JOB_UID`].
@@ -1474,7 +1506,11 @@ async fn a_job_with_no_uid_adopts_nothing_and_lists_nothing() {
     let found = cpod::find_owned_pod_by_selectors(&client, NS, NAME, None, &pod_selectors(NAME))
         .await
         .expect("a Job with no UID is an answer, not an error");
-    assert!(found.is_none(), "nothing is adopted");
+    assert!(found.pod.is_none(), "nothing is adopted");
+    assert!(
+        found.contested.is_empty(),
+        "and there is no contest to report either — nothing was listed"
+    );
     assert!(
         seen.lock().expect("the recorder is readable").is_empty(),
         "and NO request was made — the pod list is not read at all, because no listing could \
@@ -1522,6 +1558,11 @@ async fn a_labelled_pod_this_job_does_not_own_is_never_read() {
         (
             "a ReplicaSet owner reference carrying the Job's UID string",
             pod_owner_json("ReplicaSet", JOB_UID, true),
+        ),
+        (
+            "a `Job` in ANOTHER API GROUP carrying the Job's UID string — `Job` is not a \
+             batch/v1-exclusive kind (review finding R3)",
+            pod_owner_json_in("volcano.sh/v1alpha1", "Job", JOB_UID, true),
         ),
     ] {
         let (client, seen, bodies) = mock_client_recording_bodies(finished_routes(
@@ -1576,16 +1617,20 @@ async fn a_labelled_pod_this_job_does_not_own_is_never_read() {
     }
 }
 
-/// The positive control, and the tie-break: an OWNED pod IS read, and two
-/// owned pods resolve to the newest one deterministically.
+/// The positive control, and the contest: an OWNED pod IS read, and two pods
+/// claiming one Job are BOTH refused under their own terminal state — review
+/// finding **R1**.
 ///
-/// Without this arm the guard above is satisfiable by a reconciler that never
-/// reads any pod at all.
+/// Without the first arm the guard is satisfiable by a reconciler that never
+/// reads any pod at all. Without the second, the residual the owner check
+/// leaves open — an `ownerReference` is author-written, so a tenant who can
+/// read the Job UID can mint a second claimant, and it is by construction the
+/// NEWER one — is decided in the planter's favour.
 ///
-/// KILLS: refusing every pod; reading the oldest of two owned pods; a
-/// selection that depends on the listing's order.
+/// KILLS: refusing every pod; newest-wins restored over a contested Job;
+/// oldest-wins; reporting a contest as an ordinary `NoExitCode`.
 #[tokio::test]
-async fn an_owned_pod_is_read_and_the_newest_of_two_wins() {
+async fn an_owned_pod_is_read_and_two_claimants_are_refused() {
     // ARM 1 — the ordinary case, end to end.
     let (client, seen) = mock_client_recording(finished_routes(
         &pod_list_terminated(0),
@@ -1625,36 +1670,34 @@ async fn an_owned_pod_is_read_and_the_newest_of_two_wins() {
         "from the owned pod, by name; got {logs:?}"
     );
 
-    // ARM 2 — two pods, both owned, the listing given in both orders. An
-    // evicted-and-replaced runner shows this on a real cluster.
+    // ARM 2 — a forged second claimant. It carries the Job's real UID, a real
+    // controller reference and the real `batch/v1` group, because that is all
+    // an `ownerReferences` entry is: metadata its author writes, which the API
+    // server does not validate. It reports SUCCESS and it is the NEWER pod, so
+    // a newest-wins rule would put its exit code and its evidence keys on this
+    // `Backup`.
     let owners = owned_by_job();
-    let one = format!(
-        r#"{{"apiVersion":"v1","kind":"Pod",
-    "metadata":{{"name":"{POD}-one","namespace":"{NS}","ownerReferences":{owners},
-      "creationTimestamp":"2026-11-09T03:17:00Z",
+    let claimant = |suffix: &str, created: &str, exit: i32| {
+        format!(
+            r#"{{"apiVersion":"v1","kind":"Pod",
+    "metadata":{{"name":"{POD}-{suffix}","namespace":"{NS}","ownerReferences":{owners},
+      "creationTimestamp":"{created}",
       "labels":{{"{JOB_NAME_LABEL}":"{NAME}"}}}},
     "spec":{{"containers":[]}},
     "status":{{"phase":"Failed","containerStatuses":[
       {{"name":"runner","ready":false,"restartCount":0,"image":"x","imageID":"x",
-        "state":{{"terminated":{{"exitCode":1,"finishedAt":"2026-11-09T03:18:00Z"}}}}}}]}}}}"#
-    );
-    let two = format!(
-        r#"{{"apiVersion":"v1","kind":"Pod",
-    "metadata":{{"name":"{POD}-two","namespace":"{NS}","ownerReferences":{owners},
-      "creationTimestamp":"2026-11-09T03:19:00Z",
-      "labels":{{"{JOB_NAME_LABEL}":"{NAME}"}}}},
-    "spec":{{"containers":[]}},
-    "status":{{"phase":"Succeeded","containerStatuses":[
-      {{"name":"runner","ready":false,"restartCount":0,"image":"x","imageID":"x",
-        "state":{{"terminated":{{"exitCode":0,"finishedAt":"2026-11-09T03:20:00Z"}}}}}}]}}}}"#
-    );
+        "state":{{"terminated":{{"exitCode":{exit},"finishedAt":"2026-11-09T03:19:00Z"}}}}}}]}}}}"#
+        )
+    };
+    let genuine = claimant("genuine", "2026-11-09T03:17:00Z", 1);
+    let forged = claimant("forged", "2026-11-09T03:19:00Z", 0);
     for (label, items) in [
-        ("oldest first", format!("[{one},{two}]")),
-        ("newest first", format!("[{two},{one}]")),
+        ("forged last", format!("[{genuine},{forged}]")),
+        ("forged first", format!("[{forged},{genuine}]")),
     ] {
         let list =
             format!(r#"{{"apiVersion":"v1","kind":"PodList","metadata":{{}},"items":{items}}}"#);
-        let (client, seen) = mock_client_recording(finished_routes(
+        let (client, seen, bodies) = mock_client_recording_bodies(finished_routes(
             &list,
             log_body(&i7_tail()),
             200,
@@ -1668,24 +1711,56 @@ async fn an_owned_pod_is_read_and_the_newest_of_two_wins() {
             utc(2026, 11, 9, 3, 20),
         )
         .await
-        .unwrap_or_else(|e| panic!("{label}: {e}"));
-        assert_eq!(
-            outcome.exit_code,
-            Some(0),
-            "{label}: the NEWEST owned pod's exit code, not the first one listed — otherwise the \
-             same cluster state yields `0` on one reconcile and `1` on the next"
-        );
-        let logs: Vec<String> = seen
-            .lock()
-            .expect("the recorder is readable")
-            .iter()
-            .filter(|r| path(&r.uri).ends_with("/log"))
-            .map(|r| r.uri.clone())
-            .collect();
-        assert_eq!(logs.len(), 1, "{label}: exactly one log read; got {logs:?}");
+        .unwrap_or_else(|e| panic!("{label}: a contested Job is a status, not an error: {e}"));
+
+        let seen = seen.lock().expect("the recorder is readable");
         assert!(
-            path(&logs[0]).contains(&format!("/pods/{POD}-two/log")),
-            "{label}: and it is the newest pod's log; got {logs:?}"
+            seen.iter().all(|r| !path(&r.uri).ends_with("/log")),
+            "{label}: NEITHER claimant's log is read. The forged pod is the newer one by \
+             construction, so ranking them hands the read to whoever planted it. Got {seen:?}"
+        );
+        assert_eq!(
+            outcome.exit_code, None,
+            "{label}: and neither claimant's exit code is taken — not the forged `0`, and not \
+             the genuine `1` either, because which is which is what this controller cannot tell"
+        );
+        assert_eq!(
+            outcome.terminal_state.as_deref(),
+            Some(TERMINAL_STATE_POD_OWNERSHIP_CONTESTED),
+            "{label}: under its OWN name. `NoExitCode` would send an operator looking for a \
+             deleted pod, and there are two"
+        );
+        assert_eq!(
+            outcome.keys,
+            EvidenceKeys::default(),
+            "{label}: no evidence key from either"
+        );
+        let statuses = patched_statuses(&bodies.lock().expect("the body recorder is readable"));
+        assert_eq!(statuses.len(), 1, "{label}: one status patch");
+        assert!(
+            statuses[0]["exitCode"].is_null(),
+            "{label}: `exitCode` absent, not `0`. Got {:?}",
+            statuses[0]["exitCode"]
+        );
+        assert_eq!(
+            statuses[0]["phase"].as_str(),
+            Some("Failed"),
+            "{label}: and the phase is not `Succeeded`"
+        );
+        let reasons: Vec<&str> = statuses[0]["conditions"]
+            .as_array()
+            .expect("conditions is an array")
+            .iter()
+            .filter_map(|c| c["reason"].as_str())
+            .collect();
+        assert_eq!(
+            reasons,
+            vec![TERMINAL_STATE_POD_OWNERSHIP_CONTESTED],
+            "{label}: the condition names the contest"
+        );
+        assert!(
+            TERMINAL_STATES.contains(&TERMINAL_STATE_POD_OWNERSHIP_CONTESTED),
+            "{label}: and it is in the one closed list the metav1-reason test walks"
         );
     }
 }
@@ -1941,8 +2016,8 @@ fn every_exit_code_maps_to_its_wire_reason() {
     );
     assert_eq!(
         TERMINAL_STATES.len(),
-        34,
-        "the thirty-four terminal states that are NOT an exit code — the original ten, plus \
+        35,
+        "the thirty-five terminal states that are NOT an exit code — the original ten, plus \
          `NameTooLong` (errata E5d) and `ReferentNotFound` / `PlanConfigMapConflict` / \
          `ApprovalBundleConflict` / `ApprovalSubjectMismatch` / `JobNameConflict` / \
          `ArchiveUrlUnreadable` (errata E5a), plus `PlanHashMismatch` / `ClusterNotReachable` \
@@ -1956,7 +2031,11 @@ fn every_exit_code_maps_to_its_wire_reason() {
          `RunPolicyDigestMismatch` and the seven selection and discovery refusals \
          `InvalidTopicSelection` / `DiscoveryFailed` / `DiscoveryIncomplete` / \
          `DiscoveryResultUnreadable` / `SelectionEmpty` / `SelectionTooLarge` / \
-         `SourceChangedDuringResolution`, of which only `DiscoveryFailed` is retryable; \
+         `SourceChangedDuringResolution`, of which only `DiscoveryFailed` is retryable, plus \
+         `PodOwnershipContested` (D-SEAMS S6 / `SEC-PODLOG` review finding R1: more than one pod \
+         claimed this run's Job, so none of them was read — NOT a sub-case of `NoExitCode`, \
+         because a contested Job is a namespace to look at and a garbage-collected pod is not, \
+         and deliberately not retryable because a retry invites the same second claimant); \
          got {TERMINAL_STATES:?}"
     );
     for state in TERMINAL_STATES {
@@ -6435,34 +6514,28 @@ fn a_manual_identity_is_the_object_uid_and_nothing_else() {
 /// [`a_labelled_pod_this_job_does_not_own_is_never_read`].
 ///
 /// KILLS: taking the first pod the selector returns; matching an owner
-/// reference of any kind; matching a non-controller owner reference; falling
-/// back to an ownerless pod when nothing is owned (the shape this file's
-/// previous version of this test ASSERTED, and which the `plat06` review
-/// recorded as L2).
+/// reference of any kind; matching a non-controller owner reference; matching
+/// a `Job` in another API group; falling back to an ownerless pod when nothing
+/// is owned (the shape this file's previous version of this test ASSERTED,
+/// and which the `plat06` review recorded as L2).
 #[test]
 fn a_recreated_job_reads_only_its_own_pod() {
-    let pod = |name: &str, owner: Option<(&str, &str, bool)>| -> k8s_openapi::api::core::v1::Pod {
-        let mut v = serde_json::json!({"metadata": {"name": name}});
-        if let Some((kind, uid, controller)) = owner {
-            v["metadata"]["ownerReferences"] = serde_json::json!([{
-                "apiVersion": "batch/v1", "kind": kind, "name": NAME, "uid": uid,
-                "controller": controller
-            }]);
-        }
-        serde_json::from_value(v).unwrap()
-    };
-    let stale = pod("old", Some(("Job", "old-job-uid", true)));
-    let mine = pod("new", Some(("Job", "new-job-uid", true)));
+    let stale = owner_pod("old", Some(("batch/v1", "Job", "old-job-uid", true)), None);
+    let mine = owner_pod("new", Some(("batch/v1", "Job", "new-job-uid", true)), None);
 
     let listed = [stale.clone(), mine.clone()];
-    let (chosen, ignored) = cpod::choose_owned(&listed, "new-job-uid");
+    let seen = cpod::claimants(&listed, "new-job-uid");
     assert_eq!(
-        chosen.and_then(|p| p.metadata.name.clone()),
+        seen.owned.and_then(|p| p.metadata.name.clone()),
         Some("new".to_string()),
         "the pod this Job owns, and not the first one the selector returned"
     );
+    assert!(
+        seen.contested.is_empty(),
+        "one claimant is not a contest — the predecessor's pod claims the OLD Job"
+    );
     assert_eq!(
-        ignored
+        seen.foreign
             .iter()
             .filter_map(|p| p.metadata.name.clone())
             .collect::<Vec<_>>(),
@@ -6474,86 +6547,46 @@ fn a_recreated_job_reads_only_its_own_pod() {
     for (label, impostor) in [
         (
             "the deleted Job's pod is nobody's evidence for the new Job",
-            pod("old", Some(("Job", "old-job-uid", true))),
+            owner_pod("old", Some(("batch/v1", "Job", "old-job-uid", true)), None),
         ),
         (
             "an ownerless pod wearing the label is a pod somebody created by hand",
-            pod("ownerless", None),
+            owner_pod("ownerless", None, None),
         ),
         (
             "a NON-controller owner reference is an association somebody else made",
-            pod("associated", Some(("Job", "new-job-uid", false))),
+            owner_pod(
+                "associated",
+                Some(("batch/v1", "Job", "new-job-uid", false)),
+                None,
+            ),
         ),
         (
             "a ReplicaSet that happens to carry the UID string is not this Job",
-            pod(
+            owner_pod(
                 "replicaset-owned",
-                Some(("ReplicaSet", "new-job-uid", true)),
+                Some(("batch/v1", "ReplicaSet", "new-job-uid", true)),
+                None,
+            ),
+        ),
+        (
+            "a `Job` IN ANOTHER API GROUP is not a batch/v1 Job (review finding R3)",
+            owner_pod(
+                "volcano-owned",
+                Some(("volcano.sh/v1alpha1", "Job", "new-job-uid", true)),
+                None,
             ),
         ),
     ] {
         let listed = [impostor];
-        let (chosen, ignored) = cpod::choose_owned(&listed, "new-job-uid");
-        assert!(chosen.is_none(), "{label}");
-        assert_eq!(ignored.len(), 1, "{label}: and it is reported");
-    }
-}
-
-/// Two pods owned by the same Job resolve to ONE, and always the same one.
-///
-/// `backoffLimit: 0` plus `restartPolicy: Never` yields one pod per Job, but
-/// that is the job controller's property and not the listing's: an evicted and
-/// replaced pod shows both for a while. A selection that depended on the order
-/// the API server returned them in would write two different exit codes onto
-/// one object across two reconciles over the same cluster state.
-///
-/// KILLS: `owned.into_iter().next()`; picking the oldest; a tie-break that is
-/// not total.
-#[test]
-fn two_owned_pods_resolve_deterministically_to_the_newest() {
-    let pod = |name: &str, created: &str| -> k8s_openapi::api::core::v1::Pod {
-        serde_json::from_value(serde_json::json!({"metadata": {
-            "name": name,
-            "creationTimestamp": created,
-            "ownerReferences": [{
-                "apiVersion": "batch/v1", "kind": "Job", "name": NAME, "uid": JOB_UID,
-                "controller": true
-            }]
-        }}))
-        .unwrap()
-    };
-    let first = pod("run-aaaaa", "2026-11-09T03:17:00Z");
-    let replacement = pod("run-zzzzz", "2026-11-09T03:18:00Z");
-
-    for listed in [
-        vec![first.clone(), replacement.clone()],
-        vec![replacement.clone(), first.clone()],
-    ] {
-        let (chosen, ignored) = cpod::choose_owned(&listed, JOB_UID);
-        assert_eq!(
-            chosen.and_then(|p| p.metadata.name.clone()),
-            Some("run-zzzzz".to_string()),
-            "the NEWEST by creationTimestamp, whichever order the listing arrived in"
-        );
+        let seen = cpod::claimants(&listed, "new-job-uid");
+        assert!(seen.owned.is_none(), "{label}");
         assert!(
-            ignored.is_empty(),
-            "the older pod is owned, so it is not a foreign pod to report"
+            seen.contested.is_empty(),
+            "{label}: one pod is not a contest"
         );
+        assert_eq!(seen.foreign.len(), 1, "{label}: and it is reported");
     }
-
-    // A `Time` is second-granular, so two pods created in the same second is
-    // not exotic; the name breaks the tie and the answer is still one value.
-    let same_second = [
-        pod("run-aaaaa", "2026-11-09T03:17:00Z"),
-        pod("run-bbbbb", "2026-11-09T03:17:00Z"),
-    ];
-    assert_eq!(
-        cpod::choose_owned(&same_second, JOB_UID)
-            .0
-            .and_then(|p| p.metadata.name.clone()),
-        Some("run-bbbbb".to_string()),
-        "the lexically greatest name among pods of the same second — any total order would do,          but it has to BE one"
-    );
 }
 
 /// A hostile annotation on a RUNNING typed Backup is surfaced once, and a steady

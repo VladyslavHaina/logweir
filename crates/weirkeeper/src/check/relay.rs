@@ -25,8 +25,7 @@
 //! controller's memory over the wire, the second stops one that stayed inside
 //! the wire budget from filling it with frame CONTENT.
 
-use k8s_openapi::api::core::v1::Pod;
-use kube::api::{Api, LogParams};
+use kube::api::LogParams;
 
 use logweir_core::check_contract::{
     frames::Decoder, redact, CheckCode, CheckRelay, FrameExpectations, DEFAULT_RELAY_BUDGET_BYTES,
@@ -137,21 +136,17 @@ pub fn refusal_reason(log: &str) -> Option<CheckCode> {
     found
 }
 
-/// Read and verify one check pod's relay.
-///
-/// # Errors
-///
-/// [`kube::Error`] from the `pods/log` read. A log that was read but does not
-/// verify is `Ok(Err(_))`: the difference matters, because the first is a
-/// transport failure this pass retries and the second is a terminal fact about
-/// the runner's output.
-pub async fn read(
-    client: &kube::Client,
-    namespace: &str,
-    pod_name: &str,
-    expect: &FrameExpectations,
-) -> Result<Result<CheckRelay, RelayRefusal>, kube::Error> {
-    let pods: Api<Pod> = Api::namespaced(client.clone(), namespace);
-    let log = pods.logs(pod_name, &log_params()).await?;
-    Ok(decode(&log, expect))
-}
+// `pub async fn read(client, namespace, pod_name, expect)` USED TO LIVE HERE,
+// AND IT IS DELETED RATHER THAN KEPT (review finding R5).
+//
+// It took a bare pod NAME and read `pods/log` off it with no ownership check,
+// and nothing called it — `check::observe` does its own read, off the pod
+// `pod::find_owned_pod` proved. So it was `pub` API whose only remaining
+// function was to offer the next author of a check controller a ready-made way
+// to reopen `SEC-PODLOG`: pass it a name you got from a label match and the
+// D-SEAMS S6 check is silently skipped, in code nobody thinks to review for
+// it. A convenience that can only be used wrongly is not a convenience.
+//
+// A future caller that wants this shape should take the `&Pod` that
+// `pod::find_owned_pod` returned, so the ownership proof is carried by the
+// argument type rather than by the caller remembering.
