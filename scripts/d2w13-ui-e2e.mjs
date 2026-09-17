@@ -48,7 +48,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import { createServer } from "node:net";
-import { mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
@@ -62,13 +62,27 @@ const REPO = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const UI_DIR = process.env.UI_E2E_UI_DIR || join(REPO, "ui");
 const API_BIN = process.env.UI_E2E_API_BIN || join(REPO, "target", "debug", "logweir-api");
 const OWNER = process.env.UI_E2E_OWNER || "d2w13";
-const ARTIFACTS = process.env.UI_E2E_ARTIFACTS ||
+const ARTIFACTS_ROOT = process.env.UI_E2E_ARTIFACTS ||
   ("/tmp/logweir-roadmap-run/claude/artifacts/" + OWNER);
 const NAMESPACE_PREFIX = process.env.UI_E2E_PREFIX || "lw-d2w13-";
 const OWNER_LABEL = "logweir.dev/test-owner=" + OWNER;
 const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..*/, "Z");
 const namespace = process.env.UI_E2E_NAMESPACE || (NAMESPACE_PREFIX + stamp.toLowerCase());
 const suffix = Math.random().toString(36).slice(2, 7);
+
+// EVERY RUN WRITES INTO ITS OWN DIRECTORY, NAMED AFTER ITS NAMESPACE, AND
+// NEVER OVERWRITES ANOTHER'S. The first cut wrote fixed filenames into one
+// directory, so pointing a second run (the negative control, at `main`'s
+// `ui/`) at the same place silently replaced the first run's result document,
+// its API log and its screenshots -- and the report then described evidence
+// that no longer existed. A run is identified by the namespace it created,
+// which is already unique, already timestamped and already the thing every
+// other line of the result document is about.
+const ARTIFACTS = join(ARTIFACTS_ROOT, namespace);
+// The temp directory is per-run too, so two runs cannot collide on the config
+// or the cursor key, and it is REMOVED in the `finally` below: the key is
+// signing material and it must not outlive the process that used it.
+const WORK_DIR = join("/tmp", "d2w13-live-" + namespace);
 
 // THE VALUE THAT MUST NEVER COME BACK. It is generated per run, so a match
 // anywhere is a match on THIS run's credential and not on a string that
@@ -150,7 +164,7 @@ function freePort() {
 }
 
 async function shot(page, name) {
-  const at = join(ARTIFACTS, "d2w13-" + name + ".png");
+  const at = join(ARTIFACTS, name + ".png");
   await page.screenshot({ path: at, fullPage: true });
   result.screenshots.push(at);
   return at;
@@ -184,11 +198,10 @@ let api = null;
 const apiLog = [];
 
 async function startApi(port) {
-  const dir = "/tmp/d2w13-live";
-  mkdirSync(dir, { recursive: true });
-  const cursorKey = join(dir, "cursor.key");
-  writeFileSync(cursorKey, randomBytes(32));
-  const configPath = join(dir, "config.yaml");
+  mkdirSync(WORK_DIR, { recursive: true, mode: 0o700 });
+  const cursorKey = join(WORK_DIR, "cursor.key");
+  writeFileSync(cursorKey, randomBytes(32), { mode: 0o600 });
+  const configPath = join(WORK_DIR, "config.yaml");
   const config = [
     "mode: localAdmin",
     "listen: \"127.0.0.1:" + port + "\"",
@@ -205,7 +218,7 @@ async function startApi(port) {
     "",
   ].join("\n");
   writeFileSync(configPath, config);
-  writeFileSync(join(ARTIFACTS, "d2w13-config.yaml"), config);
+  writeFileSync(join(ARTIFACTS, "config.yaml"), config);
   api = spawn(API_BIN, ["--config", configPath], { stdio: ["ignore", "pipe", "pipe"] });
   api.stdout.on("data", (b) => apiLog.push(String(b)));
   api.stderr.on("data", (b) => apiLog.push(String(b)));
@@ -509,25 +522,66 @@ async function main() {
     stopApi();
   }
 
-  writeFileSync(join(ARTIFACTS, "d2w13-api.log"), apiLog.join(""));
+  writeFileSync(join(ARTIFACTS, "api.log"), apiLog.join(""));
+}
 
-  // ------------------------------------------------------------- cleanup
-  assertSafeNamespace(namespace);
-  const before = kubeJson(["get", "namespace", namespace]);
-  check(before.metadata.uid === result.namespaceUid,
-    "the namespace about to be deleted is the one this run created (UID check)");
-  check((before.metadata.labels || {})["logweir.dev/test-owner"] === OWNER,
-    "and it carries this run's owner label");
-  const objects = kube(["-n", namespace, "get",
-    "backupdestinations,topicdiscoveries,preflights,kafkaclusters,secrets", "-o", "name"],
-    { expected: [0, 1] }).stdout;
-  if (process.env.UI_E2E_KEEP === "1") {
-    result.cleanup.push({ kept: true, namespace: namespace });
-  } else {
+// ---------------------------------------------------------------- cleanup
+
+let cleaned = false;
+
+/** Deletes this run's namespace, under the same three guards whichever way the
+ *  run ended.
+ *
+ *  IT RUNS ON THE FAILURE PATH TOO, which the first cut did not: the negative
+ *  control failed at its first journey and left its namespace behind to be
+ *  removed by hand. A harness that only tidies up when it succeeds is a
+ *  harness that leaves the most litter exactly when something went wrong.
+ *
+ *  THE THREE GUARDS ARE UNCHANGED AND NON-NEGOTIABLE: the prefix (asserted
+ *  here and again at the top of the run, before anything was created), the UID
+ *  recorded at creation, and the owner label. A namespace that fails any of
+ *  them is REPORTED and never deleted -- this harness would rather leave its
+ *  own litter than delete something it cannot prove is its own. */
+function cleanUp(how) {
+  if (cleaned) {
+    return;
+  }
+  cleaned = true;
+  try {
+    assertSafeNamespace(namespace);
+    const before = kube(["get", "namespace", namespace, "-o", "json"], { expected: [0, 1] });
+    if (before.status !== 0) {
+      result.cleanup.push({ namespace: namespace, how: how, alreadyGone: true });
+      return;
+    }
+    const object = JSON.parse(before.stdout);
+    if (object.metadata.uid !== result.namespaceUid) {
+      result.cleanup.push({
+        namespace: namespace, how: how, refused: true,
+        why: "the namespace under this name is not the one this run created",
+        expectedUid: result.namespaceUid, foundUid: object.metadata.uid,
+      });
+      return;
+    }
+    if ((object.metadata.labels || {})["logweir.dev/test-owner"] !== OWNER) {
+      result.cleanup.push({
+        namespace: namespace, how: how, refused: true,
+        why: "the namespace does not carry this run's owner label",
+      });
+      return;
+    }
+    const objects = kube(["-n", namespace, "get",
+      "backupdestinations,topicdiscoveries,preflights,kafkaclusters,secrets", "-o", "name"],
+      { expected: [0, 1] }).stdout;
+    if (process.env.UI_E2E_KEEP === "1") {
+      result.cleanup.push({ namespace: namespace, how: how, kept: true });
+      return;
+    }
     kube(["delete", "namespace", namespace, "--wait=true"], { timeout: 180000 });
     const after = kube(["get", "namespace", namespace], { expected: [0, 1] });
     result.cleanup.push({
       namespace: namespace,
+      how: how,
       uid: result.namespaceUid,
       ownerLabel: OWNER,
       objectsBefore: objects.trim().split("\n").filter((l) => l.length > 0),
@@ -536,25 +590,67 @@ async function main() {
       othersUntouched: kube(["get", "namespaces", "-o", "name"]).stdout.trim().split("\n"),
     });
     check(after.status !== 0, "the namespace is gone");
+  } catch (failed) {
+    result.cleanup.push({
+      namespace: namespace, how: how,
+      error: failed instanceof Error ? failed.message : String(failed),
+    });
   }
+}
 
+/** Writes the result document, REFUSING to replace one that is already there.
+ *
+ *  The path is inside this run's own directory, so a collision means two runs
+ *  shared a namespace name -- which the prefix and the timestamp make close to
+ *  impossible and which would be worth knowing about rather than silently
+ *  resolving in favour of whichever finished last. */
+function writeResult() {
   result.finishedAt = new Date().toISOString();
   result.passed = result.journeys.length;
-  const at = join(ARTIFACTS, "d2w13-live.json");
+  result.artifacts = ARTIFACTS;
+  mkdirSync(ARTIFACTS, { recursive: true });
+  const at = join(ARTIFACTS, "live.json");
+  if (existsSync(at)) {
+    throw new Error(
+      "a result document already exists at " + at + "; this harness never overwrites one. " +
+        "Two runs would have to have shared a namespace name for this to happen.",
+    );
+  }
   writeFileSync(at, JSON.stringify(result, null, 2) + "\n");
-  process.stderr.write("\n== " + result.journeys.length + " journey(s) passed; result: " + at + "\n");
+  return at;
+}
+
+function shutDown() {
+  stopApi();
+  // THE CURSOR KEY DOES NOT OUTLIVE THE PROCESS THAT USED IT. It is signing
+  // material for the API's opaque paging cursors, written into a shared `/tmp`
+  // by this harness, and the first cut left it there at mode 0644 for ever.
+  try {
+    rmSync(WORK_DIR, { recursive: true, force: true });
+  } catch (ignored) {
+    // A temp directory that cannot be removed is worth neither failing a green
+    // run nor hiding a red one; the result document records the path either way.
+  }
 }
 
 main().then(
-  () => process.exit(0),
+  () => {
+    shutDown();
+    cleanUp("passed");
+    const at = writeResult();
+    process.stderr.write(
+      "\n== " + result.journeys.length + " journey(s) passed; result: " + at + "\n",
+    );
+    process.exit(0);
+  },
   (error) => {
-    stopApi();
+    shutDown();
     result.failure = error instanceof Error ? error.stack : String(error);
-    result.finishedAt = new Date().toISOString();
+    cleanUp("failed");
     try {
-      mkdirSync(ARTIFACTS, { recursive: true });
-      writeFileSync(join(ARTIFACTS, "d2w13-live.json"), JSON.stringify(result, null, 2) + "\n");
-      writeFileSync(join(ARTIFACTS, "d2w13-api.log"), apiLog.join(""));
+      writeFileSync(join(ARTIFACTS, "api.log"), apiLog.join(""));
+      const at = writeResult();
+      process.stderr.write("== result: " + at + "\n");
     } catch (ignored) {
       // The failure below is what matters.
     }

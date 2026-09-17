@@ -1,76 +1,147 @@
 {
-  "items": [
-    {
-      "archive": {
-        "credentialRef": {
-          "name": "logweir-s3"
-        },
-        "url": "s3://kafka-backups/orders"
-      },
-      "concurrencyPolicy": "Forbid",
-      "createdAt": "2026-09-04T08:55:00Z",
-      "name": "orders-hourly",
-      "namespace": "team-a",
-      "resourceVersion": "60110",
-      "retention": {
-        "keepDays": 7,
-        "keepLast": 3
-      },
-      "schedule": "0 * * * *",
-      "sourceRef": {
-        "name": "orders-prod"
-      },
-      "status": {
-        "activeBackup": "orders-hourly-20260912-120000",
-        "lastFireTime": "2026-09-12T12:00:00Z",
-        "lastMissedSlot": "20260910-030000",
-        "nextFireTime": "2026-09-12T13:00:00Z",
-        "pendingBackup": "pendingBackup",
-        "ready": {
-          "lastTransitionTime": "2026-09-12T08:02:10Z",
-          "message": "the runner exited 0 (ok)",
-          "reason": "Reachable",
-          "status": "True",
-          "type": "Complete"
-        },
-        "retentionReport": {
-          "evaluatedAt": "2026-09-12T12:05:02Z",
-          "keepDays": 7,
-          "keepLast": 3,
-          "mcRemovalCommands": [
-            "mc rm --recursive --force 'local/kafka-backups/orders/01JB7A00000000000000000001/'"
-          ],
-          "removalCommands": [
-            "aws s3 rm 's3://kafka-backups/orders/01JB7A00000000000000000001/' --recursive"
-          ],
-          "setsKept": [
-            "01JB7Z0000000000000000000B",
-            "01JB7X00000000000000000009"
-          ],
-          "setsThatWouldBeRemoved": [
-            {
-              "backupId": "01JB7X00000000000000000009",
-              "days": 7,
-              "newestRecordAt": "2026-09-01T10:15:00Z",
-              "rank": 4,
-              "reason": "Reachable"
-            }
-          ],
-          "skippedManifests": 1,
-          "truncated": true
-        }
-      },
-      "suspended": false,
-      "topics": [
-        "orders",
-        "orders-dlq"
-      ],
-      "uid": "3b2a1c0d-9e8f-4a7b-8c6d-5e4f3a2b1c0d"
+ "items": [
+  {
+   "archive": {
+    "credentialRef": {
+     "name": "logweir-s3"
+    },
+    "url": "s3://kafka-backups/orders"
+   },
+   "concurrencyPolicy": "Forbid",
+   "createdAt": "2026-09-04T08:55:00Z",
+   "name": "orders-hourly",
+   "namespace": "team-a",
+   "resourceVersion": "60110",
+   "retention": {
+    "keepDays": 7,
+    "keepLast": 3
+   },
+   "schedule": "0 * * * *",
+   "sourceRef": {
+    "name": "orders-prod"
+   },
+   "status": {
+    "activeBackup": "orders-hourly-20260912-120000",
+    "lastFireTime": "2026-09-12T12:00:00Z",
+    "lastMissedSlot": "20260910-030000",
+    "nextFireTime": "2026-09-12T13:00:00Z",
+    "pendingBackup": "pendingBackup",
+    "ready": {
+     "lastTransitionTime": "2026-09-12T08:02:10Z",
+     "message": "the runner exited 0 (ok)",
+     "reason": "Reachable",
+     "status": "True",
+     "type": "Complete"
+    },
+    "retentionReport": {
+     "evaluatedAt": "2026-09-12T12:05:02Z",
+     "keepDays": 7,
+     "keepLast": 3,
+     "mcRemovalCommands": [
+      "mc rm --recursive --force 'local/kafka-backups/orders/01JB7A00000000000000000001/'"
+     ],
+     "removalCommands": [
+      "aws s3 rm 's3://kafka-backups/orders/01JB7A00000000000000000001/' --recursive"
+     ],
+     "setsKept": [
+      "01JB7Z0000000000000000000B",
+      "01JB7X00000000000000000009"
+     ],
+     "setsThatWouldBeRemoved": [
+      {
+       "backupId": "01JB7X00000000000000000009",
+       "days": 7,
+       "newestRecordAt": "2026-09-01T10:15:00Z",
+       "rank": 4,
+       "reason": "Reachable"
+      }
+     ],
+     "skippedManifests": 1,
+     "truncated": true
     }
-  ],
-  "page": {
-    "limit": 50,
-    "snapshot": "60877"
+   },
+   "suspended": false,
+   "topics": [
+    "orders",
+    "orders-dlq"
+   ],
+   "uid": "3b2a1c0d-9e8f-4a7b-8c6d-5e4f3a2b1c0d"
   },
-  "requestId": "01M2N5SHWR0N2E7SDCW2H22Z8W"
+  {
+   "allUserTopics": {
+    "exclude": {
+     "prefixes": [
+      "tmp-"
+     ],
+     "topics": [
+      "scratch"
+     ]
+    },
+    "incompleteDiscovery": "Refuse"
+   },
+   "archive": {
+    "url": "s3://logweir-destination/primary"
+   },
+   "concurrencyPolicy": "Forbid",
+   "createdAt": "2026-09-04T08:55:00Z",
+   "destinationRef": {
+    "name": "primary"
+   },
+   "name": "everything-nightly",
+   "namespace": "team-a",
+   "resourceVersion": "60111",
+   "schedule": "0 3 * * *",
+   "sourceRef": {
+    "name": "orders-prod"
+   },
+   "status": {
+    "ready": {
+     "lastTransitionTime": "2026-09-12T08:02:10Z",
+     "message": "the runner exited 0 (ok)",
+     "reason": "Reachable",
+     "status": "True",
+     "type": "Complete"
+    }
+   },
+   "suspended": false,
+   "topics": [],
+   "uid": "7c6b5a49-3827-4615-9403-2f1e0d9c8b7a"
+  },
+  {
+   "archive": {
+    "url": "s3://logweir-destination/primary"
+   },
+   "concurrencyPolicy": "Forbid",
+   "createdAt": "2026-09-04T08:55:00Z",
+   "destinationRef": {
+    "name": "vanished"
+   },
+   "name": "orphaned-weekly",
+   "namespace": "team-a",
+   "resourceVersion": "60112",
+   "schedule": "0 4 * * 0",
+   "sourceRef": {
+    "name": "orders-prod"
+   },
+   "status": {
+    "ready": {
+     "lastTransitionTime": "2026-09-12T08:02:10Z",
+     "message": "the runner exited 0 (ok)",
+     "reason": "Reachable",
+     "status": "True",
+     "type": "Complete"
+    }
+   },
+   "suspended": false,
+   "topics": [
+    "orders"
+   ],
+   "uid": "0a1b2c3d-4e5f-4061-8273-8495a6b7c8d9"
+  }
+ ],
+ "page": {
+  "limit": 50,
+  "snapshot": "60877"
+ },
+ "requestId": "01M2N5SHWR0N2E7SDCW2H22Z8W"
 }

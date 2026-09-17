@@ -187,7 +187,10 @@ const CONSOLE_FIXTURES = [
 ];
 
 test("console_fixtures_are_instances_of_the_published_schema", () => {
-  assert.ok(CONSOLE_FIXTURES.length >= 43, "the console fixture set covers both halves");
+  // AN EQUALITY, NOT A FLOOR (review F8). A floor stays green when a fixture is
+  // deleted together with the row that used it, which is exactly the change
+  // this arm exists to notice.
+  assert.equal(CONSOLE_FIXTURES.length, 44, "the console fixture set covers both halves");
   for (const [name, schema] of CONSOLE_FIXTURES) {
     assert.ok(DEFINITIONS[schema] !== undefined, schema + " is published");
     const findings = [];
@@ -419,7 +422,7 @@ test("every_closed_set_this_client_holds_is_the_schema_s_own", () => {
     );
     checked += 1;
   }
-  assert.equal(checked, 24, "this arm compared " + String(checked) + " sets");
+  assert.equal(checked, 25, "this arm compared " + String(checked) + " sets");
 });
 
 test("the_plan_module_s_target_modes_and_the_product_api_s_restore_modes_agree", () => {

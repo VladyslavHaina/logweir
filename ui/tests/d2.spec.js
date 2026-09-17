@@ -42,6 +42,7 @@ import {
 import { keepDraft, readDraft } from "../lifecycle.js";
 import {
   ATTESTATION_DISCLAIMER,
+  CREDENTIALS_CLEARED_CLAUSE,
   applicabilityLine,
   checkTable,
   destinationVerdict,
@@ -64,25 +65,35 @@ import {
   renderLastTest,
   renderLegacyRefusal,
   renderPreflight,
+  renderRotateForm,
   renderUsage,
   rotationBody,
+  submitRotation,
   validateDestination,
+  validateGrants,
 } from "../pages/destinations.js";
 import {
+  NO_CONNECTIVITY_CHECK_KIND,
   renderDiscovery,
   renderDiscoveryPanel,
   renderTopicTable,
 } from "../pages/clusters.js";
 import {
   COVERAGE_LABELS,
+  CREATE_HAS_NO_DESTINATION,
+  EDIT_IS_A_REPLACE,
   claimsWholeCluster,
   defaultDestination,
+  destinationCell,
   renderCoverageLine,
   renderDestinationSelector,
   renderReadinessPanel,
+  renderScheduleForm,
+  renderScheduleList,
   renderTopicPicker,
   resolveDestinationSelection,
 } from "../pages/schedules.js";
+import { SOURCE_DESTINATION_NOT_PUBLISHED } from "../pages/restore-wizard.js";
 
 const console_ = (name) =>
   JSON.parse(readFileSync(new URL("./fixtures/console/" + name, import.meta.url), "utf8"));
@@ -695,11 +706,10 @@ test("MUTANT_the_coverage_labels_are_the_controllers_own_strings_character_for_c
   assert.doesNotMatch(visible, /badge-green/, "only an attested coverage gets the green badge");
 });
 
-test("an_empty_topic_list_this_build_cannot_explain_says_what_it_does_not_know", () => {
+test("an_empty_topic_list_is_named_and_a_named_allowlist_carries_no_coverage_line", () => {
   const html = renderCoverageLine({ spec: { topics: [] } });
   assert.match(html, /data-coverage="unknown"/);
-  assert.match(html, /this page cannot tell you which it is/);
-  assert.match(html, /read the object with kubectl/);
+  assert.match(html, /Read the object with kubectl/);
   assert.doesNotMatch(html, /All user topics/,
     "guessing 'all user topics' from an empty list would invent the claim the labels bound");
 
@@ -772,4 +782,250 @@ test("a_contract_failure_names_the_dto_and_the_path_for_every_new_domain", () =>
     assert.match(error.message, /expected one of pending, queued, running, ready/);
     return true;
   });
+});
+
+// ===========================================================================
+// what D1 W6 landed, and what is still missing — fix round 1
+// ===========================================================================
+//
+// THE ROWS BELOW ARE PAIRED ON PURPOSE. For each of the four things D2 §9 asks
+// for, one row asserts what the page now DOES with the field that landed, and
+// one asserts that the sentence about what is still missing names the task
+// that owes it. A "not available yet" sentence with no owner is how a gap
+// becomes a permanent feature of a page; a "not available yet" sentence that
+// is FALSE — which two of these became when `89bba9e` landed `destinationRef`
+// and `allUserTopics` — is worse, because an operator acts on it.
+
+test("a_schedule_that_names_a_destination_is_rendered_by_that_name_and_its_location", () => {
+  // PRESENT: `ScheduleView.destinationRef` landed with D1 W6 (PLAT-06.2).
+  const schedules = decodeConsoleList("schedules", console_("schedules-list.json")).value;
+  const named = schedules.items.find((s) => s.name === "everything-nightly");
+  assert.equal(named.destinationRef.name, "primary", "the fixture is the landed shape");
+  assert.equal(named.allUserTopics.incompleteDiscovery, "Refuse");
+
+  const destinations =
+    decodeConsoleList("destinations", console_("destinations-list.json")).value.items;
+  const cell = destinationCell(
+    { spec: { destinationRef: { name: "primary" } } },
+    destinations,
+  );
+  assert.match(cell, /badge-green">primary/);
+  assert.match(cell, /s3:\/\/kafka-backups\/team-a\/prod/,
+    "and the cell shows WHERE that destination writes, not just its name");
+});
+
+test("a_schedule_naming_a_destination_that_is_gone_is_a_refusal_to_say_where_it_writes", () => {
+  // THE SAME RULE THE SELECTOR HOLDS. A destination deleted and recreated under
+  // one name is a different archive location reached with a different
+  // credential, so a cell that resolved the name onto whatever holds it now
+  // would answer a question about the old object with a fact about the new one.
+  const destinations =
+    decodeConsoleList("destinations", console_("destinations-list.json")).value.items;
+  const cell = destinationCell({ spec: { destinationRef: { name: "vanished" } } }, destinations);
+  assert.match(cell, /badge-unverified">names vanished/);
+  assert.match(cell, /will not say where this schedule writes/);
+  assert.doesNotMatch(cell, /s3:\/\//, "and it names no location at all");
+});
+
+test("a_schedule_with_no_destination_ref_shows_its_inline_archive_and_says_which_it_is", () => {
+  const cell = destinationCell(
+    { spec: { archive: { url: "s3://kafka-backups/orders" } } },
+    [],
+  );
+  assert.match(cell, /badge-pending">inline archive/);
+  assert.match(cell, /s3:\/\/kafka-backups\/orders/);
+  assert.equal(destinationCell({ spec: {} }, []), "-",
+    "and a schedule with neither prints the absent marker rather than a guess");
+});
+
+test("the_schedule_list_carries_a_destination_column_for_all_three_shapes", () => {
+  const schedules = decodeConsoleList("schedules", console_("schedules-list.json")).value;
+  const destinations =
+    decodeConsoleList("destinations", console_("destinations-list.json")).value.items;
+  // `renderScheduleList` takes the CR-shaped projection the pages read, so the
+  // rows are built the way `client.js` builds them.
+  const projected = schedules.items.map((item) => ({
+    metadata: { name: item.name },
+    spec: {
+      schedule: item.schedule,
+      archive: item.archive,
+      destinationRef: item.destinationRef === null ? undefined : item.destinationRef,
+    },
+    status: {},
+  }));
+  const html = renderScheduleList({ items: projected }, destinations);
+  assert.match(html, /<th scope="col">DESTINATION<\/th>/);
+  assert.match(html, /badge-green">primary/, "the one that names a live destination");
+  assert.match(html, /badge-unverified">names vanished/, "the one that names a gone one");
+  assert.match(html, /badge-pending">inline archive/, "and the legacy one");
+});
+
+test("MUTANT_the_create_form_names_the_task_that_owes_a_schedule_destination", () => {
+  // ABSENT, AND STILL ABSENT AFTER THE REBASE: `CreateScheduleRequest` has no
+  // `destinationRef`. THE MUTANT this row exists for is the sentence going
+  // stale the other way -- claiming a field is missing after it lands. It is
+  // held by naming BOTH halves: what is missing (the create route) and what is
+  // not (the edit route), so a future reader can check either against the
+  // schema in one step.
+  const html = renderScheduleForm({});
+  assert.match(html, /id="schedule-destination-gap"/);
+  assert.match(html, /POST \/schedules/, "the sentence names the route that lacks the field");
+  assert.match(html, /PLAT-06\.2 owes that one/, "and the task that owes it");
+  assert.doesNotMatch(
+    CREATE_HAS_NO_DESTINATION,
+    /cannot be named here yet|kubectl or the CLI to bind a schedule/,
+    "the pre-rebase sentence claimed no schedule could name a destination at all, which " +
+      "`ScheduleView.destinationRef` and `PUT .../schedules/{name}` have both made false",
+  );
+});
+
+test("the_edit_route_is_named_as_existing_and_as_out_of_this_pages_contract", () => {
+  // THE HONEST REASON. `PUT .../schedules/{name}` DOES take `destinationRef`
+  // under `expectedGeneration`. This page does not send it because `ui/api.js`
+  // exports `create` plus one narrow suspend patch and no replace at all, and
+  // `ui_lint::the_api_module_offers_no_delete_and_no_put` fails on the bare
+  // token for one. Saying "the field does not exist" would have been false;
+  // saying nothing would have left an operator looking for a control.
+  const html = renderScheduleForm({});
+  assert.match(html, /id="schedule-destination-edit"/);
+  assert.match(EDIT_IS_A_REPLACE, /PUT \.\.\.\/schedules\/\{name\} takes destinationRef/);
+  assert.match(EDIT_IS_A_REPLACE, /expectedGeneration/);
+  assert.match(EDIT_IS_A_REPLACE, /a field omitted is removed/,
+    "and why a partial edit from this page would be a destructive one");
+  assert.match(EDIT_IS_A_REPLACE, /D1 W7/, "with the form that owns that route named");
+});
+
+test("a_dynamic_selection_is_now_readable_and_its_coverage_still_is_not", () => {
+  // HALF LANDED. `ScheduleView.allUserTopics` arrived with D1 W6, so "which of
+  // the two shapes is this schedule" is answerable and the old two-shapes
+  // sentence is gone. `status.selection` / `coverage` did NOT arrive -- no API
+  // projection publishes either -- so `Coverage::label()` still cannot be
+  // rendered, and the page names who owes it instead of inventing a label.
+  const html = renderCoverageLine({
+    spec: {
+      topics: [],
+      allUserTopics: {
+        incompleteDiscovery: "Refuse",
+        exclude: { topics: ["scratch"], prefixes: ["tmp-"] },
+      },
+    },
+  });
+  assert.match(html, /data-coverage="dynamic"/);
+  assert.match(html, /<code>Refuse<\/code>/, "the policy's own answer to incomplete visibility");
+  assert.match(html, /Excluded: scratch, tmp-\*/, "and what the selection leaves out");
+  assert.match(html, /PLAT-09\.2 owes the projection and D1 W7 owes the surface/);
+  assert.doesNotMatch(html, /All user topics \(attested complete\)/,
+    "no coverage LABEL is rendered, because none is published");
+});
+
+test("a_schedule_with_neither_shape_is_now_named_exactly_rather_than_guessed_between", () => {
+  const html = renderCoverageLine({ spec: { topics: [] } });
+  assert.match(html, /data-coverage="unknown"/);
+  assert.match(html, /an empty allowlist is not an allowlist/);
+  assert.doesNotMatch(html, /this page cannot tell you which it is/,
+    "the pre-rebase sentence hedged between two shapes; `allUserTopics` distinguishes them now");
+});
+
+test("the_wizard_names_the_task_that_owes_a_recovery_points_frozen_destination", () => {
+  assert.match(SOURCE_DESTINATION_NOT_PUBLISHED, /PLAT-08\.2 \(D2 W10\) owes that projection/);
+  assert.match(SOURCE_DESTINATION_NOT_PUBLISHED, /neither destinationRef nor locationDigest/);
+});
+
+test("the_clusters_page_names_the_task_that_owes_a_connectivity_check_kind", () => {
+  assert.match(NO_CONNECTIVITY_CHECK_KIND, /PLAT-03\.1 owes a source-connectivity check kind/);
+  assert.match(NO_CONNECTIVITY_CHECK_KIND, /PLAT-07\.2 consumes it/);
+  const panel = renderDiscoveryPanel({ mayOperate: true, filters: {}, state: {} });
+  assert.match(panel, /id="no-connectivity-check"/);
+});
+
+// ------------------------------------------------- the rotation, after F3
+
+test("MUTANT_the_rotation_is_checked_before_it_is_sent", () => {
+  // THE GUARD: `submitRotation` runs `validateGrants` and throws `invalid`
+  // without a request when a grant does not make a credential. THE MUTANT:
+  // call `updateDestinationAccess` straight from the form, which is what the
+  // code did before this round -- an operator who chose `new` and typed
+  // nothing sent `secret.new.accessKeyId: ""`. Planted by hand; the second
+  // assertion went red.
+  const problems = validateGrants({ archiveWriteSource: "new" });
+  assert.match(problems.archiveWriteAccessKeyId, /needs both an access key id and a secret/);
+  assert.match(problems.archiveWriteAccessKeyId, /cleared on every render/,
+    "and the message says why a retry needs them typed again");
+
+  let sent = false;
+  return submitRotation("team-a", "primary", { archiveWriteSource: "new" }, 2, {
+    updateDestinationAccess() {
+      sent = true;
+      return Promise.resolve({});
+    },
+  }).then(
+    () => assert.fail("the rotation was sent with an empty credential"),
+    (error) => {
+      assert.equal(sent, false, "nothing reached the transport");
+      assert.equal(error.kind, "invalid");
+      assert.match(error.fields.archiveWriteAccessKeyId, /needs both an access key id/,
+        "and the message travels on the field it is about, which is what puts it beside the input");
+    },
+  );
+});
+
+test("MUTANT_a_credential_form_never_claims_it_kept_what_it_just_cleared", () => {
+  // THE GUARD: a form whose subject carries `clearsCredentials: true` gets
+  // `CREDENTIALS_CLEARED_CLAUSE` instead of " Your input is kept." THE MUTANT:
+  // drop the flag from the rotate form's subject. Planted by hand; the second
+  // and fourth assertions went red.
+  //
+  // The failure this is about is real and was on screen: the 409 banner said
+  // "nothing was changed. Your input is kept" directly above twelve credential
+  // fields the re-render had just emptied.
+  const conflicted = {
+    phase: "failed",
+    kind: "conflict",
+    error: {
+      message: "The Secret `lwd-primary-archive-write` already exists",
+      existing: { name: "primary", uid: "u1" },
+    },
+  };
+  const rotate = renderRotateForm({ name: "primary", generation: 2 },
+    { mayOperate: true, rotate: { state: conflicted } });
+  assert.match(rotate, /nothing was changed/);
+  assert.doesNotMatch(rotate, /Your input is kept/);
+  assert.ok(rotate.indexOf("except the credential fields") !== -1);
+  assert.ok(
+    CREDENTIALS_CLEARED_CLAUSE.indexOf("never kept anywhere, so type them again") !== -1,
+    "the true sentence tells the operator what to do, not just what happened",
+  );
+
+  const create = renderDestinationForm({ state: conflicted });
+  assert.doesNotMatch(create, /Your input is kept/,
+    "the create form carries credential inputs too and gets the same sentence");
+
+  // AND EVERY OTHER FORM IS UNCHANGED: the clause is a property of the form,
+  // not of the error, so a form with no credential input still says the true
+  // thing for it.
+  const schedule = renderScheduleForm({ state: conflicted });
+  assert.match(schedule, /Your input is kept/);
+});
+
+test("MUTANT_every_credential_field_name_is_outside_the_draft_allowlist_including_the_token", () => {
+  // THE EXTENSION OF M1 (review F4). `grantBody` already reads
+  // `<role>SessionToken` and puts it in `secret.new`, so the name belongs in
+  // `CREDENTIAL_INPUTS` before the input exists rather than after somebody
+  // notices. THE MUTANT: add `archiveWriteSessionToken` to the draft
+  // allowlist. Planted by hand; the loop below went red on that name.
+  assert.equal(CREDENTIAL_INPUTS.length, 12, "three field names per role, four roles");
+  for (const role of GRANT_ROLES) {
+    assert.ok(CREDENTIAL_INPUTS.indexOf(role + "SessionToken") !== -1,
+      role + "SessionToken is a credential value grantBody reads");
+  }
+  for (const input of CREDENTIAL_INPUTS) {
+    assert.equal(DESTINATION_DRAFT_FIELDS.indexOf(input), -1, input + " is in the allowlist");
+  }
+  const kept = keepDraft("d2-draft/token", {
+    bucket: "kafka-backups",
+    archiveWriteSessionToken: "FwoGZXIvYXdzEAAaDK-session-token-value",
+  }, DESTINATION_DRAFT_FIELDS);
+  assert.equal(kept.bucket, "kafka-backups");
+  assert.equal(kept.archiveWriteSessionToken, undefined);
+  assert.doesNotMatch(JSON.stringify(readDraft("d2-draft/token")), /session-token-value/);
 });
