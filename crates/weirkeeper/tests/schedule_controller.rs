@@ -4163,24 +4163,43 @@ async fn safe_replacement_drains_an_old_omitted_policy_schedule_and_retains_its_
         .iter()
         .all(|call| call.method != "DELETE"));
 
+    // THE DOCUMENTED PROCEDURE THIS TEST IS PAIRED WITH CHANGED WITH PLAT-05.2,
+    // and it changed because the reason for it went away. The old §9 said
+    // "retain the old, suspended schedule, because deleting it can let
+    // Kubernetes garbage collection delete that history" — true while every
+    // run carried a controller ownerReference to its schedule, and false now
+    // that none does (D1 §6.1). A test that still demanded that paragraph
+    // would be holding the documentation to a hazard the code no longer has.
+    //
+    // What this test's BEHAVIOUR asserts is unchanged and still passes: the old
+    // schedule is suspended, its running child is observed, the differently
+    // named replacement fires its own slot, and NOTHING is deleted. What the
+    // documentation must now say is the half an operator acts on.
     let docs = workspace_source("docs/kubernetes.md");
-    let replacement_guidance = docs
-        .split("Until PLAT-05.2 decouples retained history")
+    let retained_history = docs
+        .split("### Deleting a schedule keeps its history (PLAT-05.2)")
         .nth(1)
-        .expect("the migration procedure is documented");
+        .expect("§9 documents what deleting a schedule now does");
     for required in [
-        "Set `spec.suspend: true` on the old schedule",
-        "wait until all of them are terminal",
-        "Retain the old, suspended `BackupSchedule`",
-        "replacement under a **different name**",
-        "Do not delete and recreate a schedule under the same name",
-        "`concurrencyPolicy` field is omitted already behaves as\n`Forbid`",
+        "leaves every run",
+        "--cascade=orphan",
+        "`ScheduleNotFound`",
+        "`HistoryRetained`",
+        "`ActiveLegacyRunsOwned`",
+        "Recreating a schedule under the same name",
+        "new UID",
+        "`SlotNameUnavailable`",
     ] {
         assert!(
-            replacement_guidance.contains(required),
-            "migration guidance must contain {required:?}"
+            retained_history.contains(required),
+            "the retained-history guidance must contain {required:?}"
         );
     }
+    assert!(
+        !docs.contains("Until PLAT-05.2 decouples retained history"),
+        "and the drain-and-retain procedure, whose whole reason was the ownerReference this \
+         task removed, must not still be standing beside it"
+    );
 }
 
 #[tokio::test]

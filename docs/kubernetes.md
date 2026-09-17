@@ -1438,39 +1438,184 @@ spec resumes the schedule within one reconcile. There is no last-known-good
 fallback — silently continuing an old policy after an edit would contradict
 what the operator sees.
 
-### Replacing or deleting a schedule still needs the drain
+### Deleting a schedule keeps its history (PLAT-05.2)
 
-Editing covers every field but one. Protecting a **different `KafkaCluster`**
-means a different schedule, and deleting a schedule is still deleting a
-schedule — and until PLAT-05.2 decouples retained history from schedule
-ownership, every `Backup` a schedule created carries a controller
-ownerReference to it, so deleting the schedule lets Kubernetes garbage
-collection delete that history.
+**A `Backup` is not its schedule's dependent.** Since PLAT-05.2 a run the
+schedule creates carries *no* ownerReference to it; membership is
+`spec.scheduleRef {name, uid}` and the `logweir.dev/schedule-uid` label. So
 
-Until PLAT-05.2 decouples retained history from schedule ownership, replace or
-retire a schedule with this drain-and-retain procedure:
+```bash
+kubectl --context docker-desktop delete backupschedule nightly
+```
 
-1. Set `spec.suspend: true` on the old schedule so it admits no new slots.
-2. List every `Backup` whose **controller owner reference UID** equals the old
-   schedule UID, and wait until all of them are terminal (`Succeeded`, `Failed`,
-   or legacy `Refused`). Do not use the singular `activeBackupRef` as proof that
-   the drain is complete; `status.activeRuns` is the complete list.
-3. Retain the old, suspended `BackupSchedule`. Its controller owner references
-   still anchor the old `Backup` history; deleting it can let Kubernetes garbage
-   collection delete that history.
-4. Create the replacement under a **different name**, only after the drain.
-   The replacement has a different UID and therefore cannot see an old active
-   child as its own; starting it before the drain can overlap generations.
+— with the default propagation, with `--cascade=foreground`, and with
+`--cascade=orphan` — stops future admissions and **leaves every run, every
+immutable plan ConfigMap, every Job (until its own 7-day TTL) and every archive
+object in place**. Runs that are already frozen finish: their Jobs are owned by
+the `Backup`, not by the schedule. A scheduled run that has *not* frozen yet
+ends `Failed` with reason `ScheduleNotFound` — "deleting a schedule stops
+future work" — and manual runs are unaffected either way.
 
-Do not delete and recreate a schedule under the same name. That is not a safe
-migration: deletion can remove history, while the recreated object's new UID
-neither adopts nor excludes work owned by the old generation — and an old run
-sitting on a new slot's deterministic name is reported as
-`Ready=True reason=SlotNameUnavailable` with the slot recorded in
-`status.lastMissedSlot`, never re-run under a different name. A schedule whose
-`concurrencyPolicy` field is omitted already behaves as
-`Forbid`; that field is now editable in place, so it is no longer a reason to
-replace an object.
+There is no finalizer. A finalizer cannot stop foreground garbage collection of
+`blockOwnerDeletion` dependents, and it would strand schedules after an
+uninstall or a rollback.
+
+### `HistoryRetained`, and the one window in which deletion is still unsafe
+
+Runs created *before* this controller still carry the old ownerReference, and
+the controller detaches them in the background. Until it has finished, the
+default `kubectl delete` can still collect them. The schedule says which state
+it is in:
+
+```bash
+kubectl --context docker-desktop get backupschedules -A \
+  -o jsonpath='{range .items[*]}{.metadata.namespace}/{.metadata.name} {.status.conditions[?(@.type=="HistoryRetained")].reason}{"\n"}{end}'
+```
+
+| `HistoryRetained` | Reason | What it means |
+|---|---|---|
+| `True` | `Retained` | No run is owned by this schedule. Delete it however you like. |
+| `True` | `HistoryLarge` | The same, **and** the retained history is past the advisory below — prune. |
+| `False` | `LegacyOwnerReferencesRemain` | Terminal runs are still being detached; the next passes finish it. |
+| `False` | `ActiveLegacyRunsOwned` | The only owned runs left are still running. A pre-upgrade run keeps its ownerReference until it is terminal, because its scheduled identity derives from that UID. |
+| `False` | `MigrationBlocked` | The API server refused a detach (`403`, `422`) or the run could not be detached safely. `status.history.migrationBlocked` names up to ten. |
+
+`kubectl --context docker-desktop delete backupschedule <name> --cascade=orphan`
+is always safe, before or after the migration, and it is what to use while the
+condition says `False`.
+
+The detach itself is one JSON merge `PATCH` per run, carrying that object's
+`metadata.resourceVersion` as the update precondition. It removes only the
+schedule's own controller entry — every other ownerReference, label and
+annotation survives byte for byte — and adds
+`logweir.dev/schedule-uid: <uid>` and
+`logweir.dev/history-retained-from-owner: <uid>`, which is how a detached run is
+still recognised as that schedule's. Progress is derived from observation, not
+from a cursor: a controller that crashes between two patches leaves every object
+either fully migrated or untouched, and the next inventory continues.
+
+### Recreating a schedule under the same name
+
+A recreated `nightly` has a **new UID**, so it sees none of the old runs as its
+own: `status.history.runCount` counts only new runs, `concurrencyPolicy` ignores
+old active runs, execution ids differ (`<uid>-<slot>`) and archive prefixes
+cannot collide. List the two generations apart with
+
+```bash
+kubectl --context docker-desktop -n <ns> get backups -l logweir.dev/schedule-uid=<uid>
+```
+
+If the recreation lands inside a slot or retry window whose deterministic name
+is still held by the old generation, that slot is recorded
+`Ready=True reason=SlotNameUnavailable` with
+`status.lastSlot.disposition: NameUnavailable`, and nothing is created under a
+different name.
+
+Recreation is now only for changing `sourceRef`: everything else is an edit
+(see *Editing a schedule's policy*, above). The drain-and-replace procedure this
+section used to carry is gone with the ownerReference that made it necessary.
+
+### What retained history costs, and how to prune it
+
+Nothing here is deleted by Logweir — see *Retention **reports***, below, and
+the explicit rules under it. Retaining history is therefore an etcd cost you
+choose:
+
+Per retained run: the `Backup` CR is roughly 4–6 KiB (spec, status with three
+or four conditions and evidence, managedFields), the plan ConfigMap roughly
+2 KiB plus twice the topic-name bytes (the names appear both in `backup.yaml`
+and in `execution-inputs.json`). Jobs and pods (about 11 KiB per run, two Jobs
+for a dynamically-selected run) are bounded by the 7-day TTL.
+
+| Schedule | Per run retained | Runs/year | etcd growth/year | TTL-window Jobs/pods |
+|---|---|---|---|---|
+| daily, 20 named topics | ≈ 8 KiB | 365 | ≈ 3 MiB | ≈ 0.08 MiB |
+| hourly, 20 named topics | ≈ 8 KiB | 8 760 | ≈ 70 MiB | ≈ 1.8 MiB |
+| every 15 min, dynamic, 1 000 topics × 30 bytes | ≈ 79 KiB | 35 040 | ≈ 2.6 GiB | ≈ 14 MiB |
+
+The last row exceeds a default etcd quota inside a year, so pruning is
+**required** for high-frequency dynamic schedules. The controller publishes what
+it measured in `status.history {runCount, runCountCapped, estimatedBytes}` and
+raises `HistoryRetained=True reason=HistoryLarge` above 2 000 runs or 64 MiB per
+schedule. (`runCountCapped: true` means the inventory stopped at its page bound
+and the two numbers are floors, not totals.)
+
+**The cleanup rules, in full. Logweir applies none of them for you.**
+
+1. No Logweir component deletes a `Backup`, a ConfigMap or an archive object.
+   The controller ClusterRole carries no `delete` verb on any resource.
+2. You may delete **terminal** `Backup` CRs with your own RBAC. Deleting one
+   also removes its plan ConfigMap (the frozen inputs) and any remaining Job,
+   and removes the run from Kubernetes-backed history and from restore
+   selection until PLAT-15.1's catalog-backed discovery lands. The archive data
+   and the signed receipts stay in object storage — record
+   `status.backupId`, `status.evidence.receiptKey` and `sidecarKey` first.
+3. **Never delete a nonterminal `Backup`.** Its Job is collected with it,
+   mid-run: `NoExitCode` and a partial archive.
+4. Keep, per schedule UID, at least the newest `Succeeded` run whose evidence
+   verification is `Valid`, every run newer than
+   `max(startingDeadlineSeconds, maxRetries × delaySeconds + activeDeadlineSeconds)`,
+   and any run whose `backupId` appears in a nonterminal `Restore` plan.
+5. Select by label, filter terminal runs locally, then delete by name:
+
+```bash
+kubectl --context docker-desktop -n <ns> get backups \
+  -l logweir.dev/schedule-uid=<uid> -o json \
+  | jq -r '.items[]
+           | select(.status.phase == "Succeeded" or .status.phase == "Failed")
+           | select(.metadata.creationTimestamp < "2026-01-01T00:00:00Z")
+           | .metadata.name' \
+  | xargs -r -n1 kubectl --context docker-desktop -n <ns> delete backup
+```
+
+6. A pruned current-slot run is never re-run under the same execution id: the
+   scheduler's `S <= lastFireTime` guard reports `AlreadyFired` instead.
+
+### What a schedule costs to read, now that it keeps everything
+
+Listing every `Backup` on every reconcile stops being affordable once history is
+retained, so the controller does not. Per reconcile it `GET`s the ≤ 10 names in
+`status.activeRuns`, the ≤ 1 `status.pendingRun` name and the ≤ 4 deterministic
+names of the latest slot — at most 15 reads, O(active) and independent of how
+much history exists.
+
+A full **inventory** is taken instead: a paginated list (`limit=500`, a bounded
+number of pages) filtered by `logweir.dev/schedule-uid` once the migration is
+done, and namespace-wide while it is not, because a pre-upgrade object carries
+no UID label. It runs when `status.history` is absent, when `status.activeRuns`
+is, while there is migration work a pass can do, and otherwise once an hour —
+`status.history.inventoriedAt` records when. That hourly pass is the one thing
+that moves an otherwise settled schedule's status: 24 writes a day, against the
+2 880 a rewrite-on-every-reconcile would make.
+
+Admission never depends on how fresh that list is. Every schedule-created run is
+recorded in `status.pendingRun`/`status.activeRuns` by a
+resourceVersion-conditional status write *before* the run is created, so the
+reservation — not the list — is what makes a duplicate reconcile impossible.
+
+### Upgrading to, and rolling back from, retained history
+
+**Upgrade:** apply the CRD, roll the controller, then wait for
+`HistoryRetained=True` on every schedule (the `jsonpath` above) before deleting
+any schedule without `--cascade=orphan`. Nothing is rewritten: a pre-upgrade
+`Backup` keeps its ownerReference until the controller detaches it, and keeps
+every other field forever.
+
+**Rollback (controller only, never the CRD):** an older controller identifies a
+schedule's children only by ownerReference, so for runs that have been detached
+it neither counts them for `Forbid` — two runs of one schedule can then overlap
+— nor shows them as history; and it creates *owned* runs again, so the
+garbage-collection hazard returns for those new runs only. Migrated history
+stays retained whatever happens. Before rolling back, suspend any schedule whose
+overlap matters. After rolling forward, the migration picks up whatever the old
+controller owned.
+
+**PLAT-15.1** indexes recovery points from object storage by execution id, so a
+schedule's history view becomes "CR history (by `schedule-uid` label) ∪ catalog
+points attributed to that schedule UID", deduplicated by execution id. Pruning
+CRs then stops removing discoverability. A manual run's execution id is its own
+`Backup` UID and encodes no schedule, so attributing one needs origin metadata
+the receipt does not carry yet.
 
 ### Upgrading to, and rolling back from, the editable schedule
 
@@ -3083,13 +3228,22 @@ proxy and its authority.
 
 `logweir-operator` grants ordinary `update` on BackupSchedules. CEL in the CRD,
 not RBAC, restricts mutation to `spec.suspend`. The controller has reads on the
-six kinds, status patches, Backup creation, Job create/read/patch, Pod and
-`pods/log` reads, and ConfigMap create/get. It has no Secret read, pod exec,
-pod attach or delete permission, and **no `update` on anything**: every status
-write, the `Forbid` slot reservation included, is a merge `PATCH` whose body
-carries `metadata.resourceVersion` as the compare-and-set precondition (§10's
-three RBAC notes). Inspect [config/rbac](../config/rbac/) for the authoritative
-grants.
+six kinds, status patches, Backup creation **and one `patch` on Backups**, Job
+create/read/patch, Pod and `pods/log` reads, and ConfigMap create/get. It has no
+Secret read, pod exec, pod attach or delete permission, and **no `update` on
+anything**: every status write, the `Forbid` slot reservation included, is a
+merge `PATCH` whose body carries `metadata.resourceVersion` as the
+compare-and-set precondition (§10's three RBAC notes). Inspect
+[config/rbac](../config/rbac/) for the authoritative grants.
+
+The `patch` on `backups` is PLAT-05.2's history detach, and it is narrow by
+construction: it authorises the main resource and **not** `backups/status`,
+which is a separate resource string with its own rule, and it cannot change a
+`spec` the CRD's CEL rules seal — the API server evaluates those on every
+update however it is spelled. The one caller writes
+`metadata.ownerReferences`, one label and one annotation, always with
+`metadata.resourceVersion` in the body. There is no `update`, no `delete` and
+no `deletecollection` on `backups`.
 
 Job creation still allows the controller to mount a signing Secret. No Secret
 read permission is not isolation from the signing key; see §15.
