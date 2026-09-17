@@ -30,14 +30,36 @@
 //!    mutant must cost seconds, not a working day.
 //! 2. **No child outlives the test.** [`Reaped`] kills on `Drop`, so a panic
 //!    between spawn and the intended stop cannot leak a listener.
-//! 3. **No fixed ports.** Every port comes from [`free_port`], so a stray
-//!    listener — this suite's or another worker's — can neither fail this file
-//!    nor let a bind assertion pass for the wrong reason.
+//! 3. **No fixed ports, AND no assumption that a free port stays free.** Every
+//!    port comes from [`free_port`], which can only report a port nothing is
+//!    listening on right now — it cannot reserve one. Between that answer and
+//!    the child's own `bind`, any process on this host may take it, and under
+//!    concurrency one regularly does.
+//!
+//! Rule 3's second half is a regression fix too, from 2026-09-17
+//! (`FLAKE-APISHUTDOWN`). Five concurrent runs of THIS test binary failed 5
+//! times in 15, every failure a socket that belonged to another run:
+//! `ConnectionReset` reading a response, `ConnectionRefused` connecting to a
+//! server that had just been confirmed listening, an RST on the 48th
+//! connection of the ceiling test, and `0.0.0.0:64169 left a listener behind`
+//! for a listener this binary never opened. None of them was a timeout, so
+//! none of them would have been fixed by a longer deadline. What was wrong was
+//! the identification: a connect that succeeds proves only that SOMEONE is
+//! listening.
+//!
+//! So no test here infers a server from a port. It waits for its OWN child to
+//! print [`STARTED`] naming that exact port ([`start_server`]), starts again on
+//! a fresh port when the child reports [`BIND_FAILED`] instead, retries a
+//! request until [`SERVE_LIMIT`] rather than reading one socket once
+//! ([`http_get`]), and asserts "nothing was bound" from the child's own output
+//! rather than from the port
+//! ([`a_non_loopback_listener_is_refused_before_anything_is_bound`]).
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Output, Stdio};
+use std::process::{Command, ExitStatus, Output, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 /// How long any child spawned here may run before it is killed and the test
@@ -47,15 +69,45 @@ use std::time::{Duration, Instant};
 /// WIDENED FROM 30 s FOR A LOADED HOST, not for a slow product. Two tests in
 /// this suite flaked during a concurrent mutant build, both on reaching or
 /// leaving the socket rather than on any property they assert. This bound and
-/// [`SERVE_LIMIT`] exist to stop a WEDGED process, so doubling them costs a
-/// red build nothing and buys immunity to the machine being busy; the
-/// assertions about the shutdown grace period below are untouched and still
-/// compare against `main::SHUTDOWN_GRACE`'s own ten seconds.
+/// [`SERVE_LIMIT`] exist to stop a WEDGED process, so doubling them costs a red
+/// build nothing; the assertions about the shutdown grace period below are
+/// untouched and still compare against `main::SHUTDOWN_GRACE`'s own ten
+/// seconds.
+///
+/// THE WIDENING DID NOT BUY IMMUNITY TO A BUSY MACHINE, and the sentence that
+/// once claimed it did is deleted rather than softened. Those same two tests
+/// went on flaking at these limits, because they were never waiting too
+/// briefly — see [`SERVE_LIMIT`] and rule 3.
 const CHILD_LIMIT: Duration = Duration::from_secs(60);
 
-/// How long the served process is given to reach its listening socket, and to
-/// exit after SIGTERM. See [`CHILD_LIMIT`] on why this is 40 s and not 20.
+/// How long the served process is given to reach its listening socket, to
+/// answer a request, and to exit after SIGTERM. See [`CHILD_LIMIT`] on why this
+/// is 40 s and not 20.
+///
+/// IT IS DELIBERATELY NOT RAISED AGAIN for `FLAKE-APISHUTDOWN`. Every one of
+/// the five failures reproduced on 2026-09-17 happened in under 13 s, on a
+/// socket that answered immediately — with the wrong answer, from the wrong
+/// process. A deadline cannot fix a misidentification, and a bigger one only
+/// makes a real hang cost more; 40 s is already several hundred times the
+/// startup this binary needs on an idle host. What changed instead is what the
+/// suite waits FOR: see rule 3 in the module documentation.
 const SERVE_LIMIT: Duration = Duration::from_secs(40);
+
+/// The one line the binary writes AFTER its listener is bound, and never
+/// before — `main::run` logs it between `TcpListener::bind` and `serve`. It
+/// carries the bound address, so it identifies the port as well as the process:
+/// `{"…","message":"logweir-api started","listen":"127.0.0.1:PORT",…}`.
+const STARTED: &str = "logweir-api started";
+
+/// The line the binary writes when the port it was configured with was taken by
+/// someone else first (`Address already in use`), after which it exits 1. For
+/// this suite that is never a product failure — it is [`free_port`]'s answer
+/// going stale — so [`start_server`] starts again on a fresh port.
+const BIND_FAILED: &str = "cannot bind the listener";
+
+/// How many fresh ports [`start_server`] will try before giving up. Losing the
+/// same race five times running is no longer a race.
+const START_ATTEMPTS: usize = 5;
 
 fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_logweir-api")
@@ -138,6 +190,121 @@ impl Drop for Reaped {
     }
 }
 
+/// A [`Reaped`] child whose stdout and stderr are drained into one buffer by
+/// their own threads for its whole life.
+///
+/// The draining is the same requirement [`bounded_output`] documents — a child
+/// blocked writing into a full pipe never reaches exit — but here it is also
+/// the only way to hear the child SPEAK while it runs, which is how a test
+/// tells this server apart from another run's server on the same port.
+struct Watched {
+    child: Reaped,
+    output: Arc<Mutex<Vec<u8>>>,
+}
+
+impl Watched {
+    /// Start the binary with `config`, draining both pipes from this moment on.
+    fn spawn(config: &Path) -> Self {
+        let mut child = Command::new(binary())
+            .arg("--config")
+            .arg(config)
+            .env_remove("KUBECONFIG")
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("the binary starts");
+        let output = Arc::new(Mutex::new(Vec::new()));
+        let pipes: [Box<dyn Read + Send>; 2] = [
+            Box::new(child.stdout.take().expect("stdout was piped")),
+            Box::new(child.stderr.take().expect("stderr was piped")),
+        ];
+        for mut pipe in pipes {
+            let sink = Arc::clone(&output);
+            std::thread::spawn(move || {
+                let mut buffer = [0u8; 4096];
+                while let Ok(read) = pipe.read(&mut buffer) {
+                    if read == 0 {
+                        break;
+                    }
+                    sink.lock()
+                        .unwrap_or_else(|poisoned| poisoned.into_inner())
+                        .extend_from_slice(&buffer[..read]);
+                }
+            });
+        }
+        Self {
+            child: Reaped(child),
+            output,
+        }
+    }
+
+    fn id(&self) -> u32 {
+        self.child.0.id()
+    }
+
+    fn try_wait(&mut self) -> Option<ExitStatus> {
+        self.child.0.try_wait().expect("the child is waitable")
+    }
+
+    /// Everything the child has said so far. Quoted into every failure in this
+    /// file: a test that fails on a socket must show whose socket it thought it
+    /// was.
+    fn log(&self) -> String {
+        let buffer = self
+            .output
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        String::from_utf8_lossy(&buffer).into_owned()
+    }
+}
+
+/// What a start attempt came to.
+enum Start {
+    /// The child itself said it is listening on the port it was given.
+    Listening,
+    /// The child could not bind: [`free_port`]'s answer went stale. Not a
+    /// product failure, and not this suite's to assert — try another port.
+    PortTaken,
+}
+
+/// Wait until `server` announces a listener on `port`, or fails to bind it.
+///
+/// Panics for anything else, quoting the child, because everything else IS the
+/// product failing to start.
+fn wait_until_listening(server: &mut Watched, port: u16) -> Start {
+    // Both halves matter: the message proves the bind succeeded, the address
+    // proves it is THIS port and not one a previous attempt used.
+    let announced = format!("\"listen\":\"127.0.0.1:{port}\"");
+    let deadline = Instant::now() + SERVE_LIMIT;
+    loop {
+        let log = server.log();
+        if log.contains(STARTED) && log.contains(&announced) {
+            return Start::Listening;
+        }
+        if let Some(exit) = server.try_wait() {
+            // The reader threads can be a moment behind the child, and the
+            // reason for the exit is in what they have not copied yet.
+            let flushed = Instant::now() + Duration::from_secs(2);
+            while Instant::now() < flushed && server.log().is_empty() {
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            let log = server.log();
+            if log.contains(BIND_FAILED) {
+                return Start::PortTaken;
+            }
+            panic!("the server exited before it listened on 127.0.0.1:{port} ({exit}):\n{log}");
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "the server did not announce a listener on 127.0.0.1:{port} within \
+                 {SERVE_LIMIT:?}:\n{log}"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
 /// A scratch directory holding a configuration, a cursor key and a kubeconfig.
 struct Fixture(PathBuf);
 
@@ -201,6 +368,11 @@ fn run(config: &Path, label: &str) -> Output {
 }
 
 /// A port nothing is listening on right now, taken fresh for every case.
+///
+/// READ THE TENSE. "Right now" is the whole guarantee: this binds, asks the
+/// kernel what it got, and lets go. It does not reserve the port, and nothing
+/// can — a port held open is a port the child cannot bind. Every caller must
+/// therefore survive losing it, which is what [`START_ATTEMPTS`] is for.
 fn free_port() -> u16 {
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     listener.local_addr().unwrap().port()
@@ -260,14 +432,32 @@ fn a_non_loopback_listener_is_refused_before_anything_is_bound() {
             stderr.contains("loopback") || stderr.contains("IP:port"),
             "{listen}: {stderr}"
         );
-        // Nothing is listening on that port afterwards.
+        // NOTHING WAS BOUND — read off the child, not off the port.
+        //
+        // This replaces a connect to `127.0.0.1:{port}` that asserted nothing
+        // was listening afterwards, which was the third `FLAKE-APISHUTDOWN`
+        // failure: on 2026-09-17 it reported `0.0.0.0:64169 left a listener
+        // behind` for a listener this binary had never opened, because by then
+        // `port` belonged to a concurrent run. It could only ever have gone
+        // that way. The child is dead before the assertion runs — `run` waits
+        // for its exit or kills it — and a dead process holds no socket, so a
+        // listener seen here is by construction somebody else's, and a listener
+        // this binary opened and closed again is invisible.
+        //
+        // The child's stdout answers the real question, and answers it for the
+        // bound-then-refused case too: `STARTED` is written between a
+        // successful `bind` and `serve`, `BIND_FAILED` when a bind was tried
+        // and refused, and neither can appear at all here — `main` installs the
+        // logging subscriber only after the configuration has been accepted, so
+        // a refusal this early leaves stdout empty.
+        let stdout = String::from_utf8_lossy(&out.stdout);
         assert!(
-            TcpStream::connect_timeout(
-                &format!("127.0.0.1:{port}").parse::<SocketAddr>().unwrap(),
-                Duration::from_millis(200)
-            )
-            .is_err(),
-            "{listen} left a listener behind"
+            !stdout.contains(STARTED) && !stdout.contains(BIND_FAILED),
+            "{listen}: the listener was bound before the address was judged: {stdout}"
+        );
+        assert!(
+            stdout.trim().is_empty(),
+            "{listen}: the refusal came after startup got as far as logging: {stdout}"
         );
     }
 }
@@ -487,13 +677,45 @@ fn a_kubeconfig_user_that_impersonates_is_refused() {
     assert!(text.contains("impersonates another identity"), "{text}");
 }
 
-/// One request/response over a real socket, with a deadline on connect, write
-/// and read: a server that accepts and then says nothing must fail this test,
-/// not stall it.
+/// One answered request over a real socket, retried on a TRANSPORT failure
+/// until [`SERVE_LIMIT`].
+///
+/// Every caller asserts something about the ANSWER — a status, a header, a
+/// body — and none of them is about this particular TCP connection. A refused
+/// connect or a reset mid-response is therefore not the answer being wrong, it
+/// is not having got one yet, and under concurrency it is usually somebody
+/// else's socket ([`free_port`]); retrying on a new connection is what makes
+/// the assertion about the property.
+///
+/// It stays bounded, and it still fails on a server that accepts and says
+/// nothing — just at [`SERVE_LIMIT`] rather than at five seconds, quoting the
+/// last transport error. The fast path is unchanged: the first attempt
+/// normally succeeds and nothing sleeps.
 fn http_get(port: u16, path: &str, host: &str) -> String {
     let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(5))
-        .expect("the server accepts the connection");
+    let deadline = Instant::now() + SERVE_LIMIT;
+    let mut last;
+    loop {
+        match one_http_get(&address, path, host) {
+            Ok(response) => return response,
+            Err(error) => last = error,
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "GET {path} (Host: {host}) on 127.0.0.1:{port} never completed within \
+                 {SERVE_LIMIT:?}; last transport failure: {last}"
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// A single attempt, with a deadline on connect, write and read. Any transport
+/// failure comes back as a message for [`http_get`] to retry or report; an
+/// answered request, however it answered, comes back as the answer.
+fn one_http_get(address: &SocketAddr, path: &str, host: &str) -> Result<String, String> {
+    let mut stream = TcpStream::connect_timeout(address, Duration::from_secs(5))
+        .map_err(|error| format!("connect: {error}"))?;
     stream
         .set_write_timeout(Some(Duration::from_secs(5)))
         .unwrap();
@@ -504,12 +726,15 @@ fn http_get(port: u16, path: &str, host: &str) -> String {
         stream,
         "GET {path} HTTP/1.1\r\nHost: {host}\r\nConnection: close\r\n\r\n"
     )
-    .unwrap();
+    .map_err(|error| format!("write: {error}"))?;
     let mut response = Vec::new();
     stream
         .read_to_end(&mut response)
-        .expect("the server answers within five seconds");
-    String::from_utf8_lossy(&response).into_owned()
+        .map_err(|error| format!("read: {error}"))?;
+    if response.is_empty() {
+        return Err("the connection closed without a byte of answer".to_owned());
+    }
+    Ok(String::from_utf8_lossy(&response).into_owned())
 }
 
 /// The started process, end to end on a real loopback socket: it serves the
@@ -518,44 +743,11 @@ fn http_get(port: u16, path: &str, host: &str) -> String {
 #[test]
 fn the_binary_serves_loopback_and_stops_on_sigterm() {
     let fixture = Fixture::new("serve");
-    let port = free_port();
-    let config = fixture.config(&config_text(
-        &fixture,
-        &format!("127.0.0.1:{port}"),
-        &format!("http://127.0.0.1:{port}"),
-        "fixture",
-    ));
-    // `Reaped`, not a bare `Child`: every assertion below can panic, and a
-    // panic here must not leave a listener on this host.
-    let mut child = Reaped(
-        Command::new(binary())
-            .arg("--config")
-            .arg(&config)
-            .env_remove("KUBECONFIG")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("the binary starts"),
-    );
-
-    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let deadline = Instant::now() + SERVE_LIMIT;
-    let mut listening = false;
-    while Instant::now() < deadline {
-        if let Some(exit) = child.0.try_wait().expect("the child is waitable") {
-            panic!("the server exited before it listened: {exit}");
-        }
-        if TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok() {
-            listening = true;
-            break;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    assert!(
-        listening,
-        "the server did not listen on 127.0.0.1:{port} within {SERVE_LIMIT:?}"
-    );
+    // `start_server`, not a hand-rolled spawn-and-connect: the child is
+    // `Watched` (so a panic below cannot leave a listener on this host, and
+    // every failure can quote the server), and the port is the one the child
+    // itself reported binding rather than the one `free_port` guessed.
+    let (mut child, port) = start_server(&fixture);
 
     let health = http_get(port, "/healthz", &format!("127.0.0.1:{port}"));
     assert!(health.starts_with("HTTP/1.1 200"), "{health}");
@@ -596,55 +788,72 @@ fn the_binary_serves_loopback_and_stops_on_sigterm() {
     );
 
     let mut kill = Command::new("kill");
-    kill.arg("-TERM").arg(child.0.id().to_string());
+    kill.arg("-TERM").arg(child.id().to_string());
     assert!(
         bounded_output(kill, "kill -TERM").status.success(),
         "the TERM signal was not delivered"
     );
     let deadline = Instant::now() + SERVE_LIMIT;
     let exit = loop {
-        if let Some(exit) = child.0.try_wait().unwrap() {
+        if let Some(exit) = child.try_wait() {
             break exit;
         }
         assert!(
             Instant::now() < deadline,
-            "the process did not stop on SIGTERM within {SERVE_LIMIT:?}"
+            "the process did not stop on SIGTERM within {SERVE_LIMIT:?}:\n{}",
+            child.log()
         );
         std::thread::sleep(Duration::from_millis(100));
     };
-    assert_eq!(exit.code(), Some(0), "SIGTERM must be a clean stop");
+    assert_eq!(
+        exit.code(),
+        Some(0),
+        "SIGTERM must be a clean stop:\n{}",
+        child.log()
+    );
 }
 
-/// Start the server on a free port and return it with the port. The caller
-/// keeps the `Reaped` alive for as long as it wants the server.
-fn start_server(fixture: &Fixture) -> (Reaped, u16) {
-    let port = free_port();
-    let config = fixture.config(&config_text(
-        fixture,
-        &format!("127.0.0.1:{port}"),
-        &format!("http://127.0.0.1:{port}"),
-        "fixture",
-    ));
-    let child = Reaped(
-        Command::new(binary())
-            .arg("--config")
-            .arg(&config)
-            .env_remove("KUBECONFIG")
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("the binary starts"),
-    );
-    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-    let deadline = Instant::now() + SERVE_LIMIT;
-    while Instant::now() < deadline {
-        if TcpStream::connect_timeout(&address, Duration::from_millis(200)).is_ok() {
-            return (child, port);
+/// Start the server and return it with the port IT SAID it is listening on.
+/// The caller keeps the [`Watched`] alive for as long as it wants the server.
+///
+/// THIS IS THE FIX FOR `FLAKE-APISHUTDOWN`, so it is worth being plain about
+/// what it replaced. The old helper connected to the port [`free_port`] had
+/// suggested and returned as soon as the connect succeeded — which proves that
+/// SOMETHING is listening there, not that this child is. When several runs of
+/// this binary share a host they draw ports from one kernel range, and the
+/// stale answer is common enough to have produced every failure recorded in
+/// rule 3: the caller then held a stranger's socket while its own child was
+/// dying of `Address already in use` three lines below.
+///
+/// The child's own [`STARTED`] line carries the bound address and is written
+/// only after the bind returns, so waiting for it settles both questions at
+/// once. [`BIND_FAILED`] settles the third: the port went, take another.
+fn start_server(fixture: &Fixture) -> (Watched, u16) {
+    let mut lost = Vec::new();
+    for _ in 0..START_ATTEMPTS {
+        let port = free_port();
+        let config = fixture.config(&config_text(
+            fixture,
+            &format!("127.0.0.1:{port}"),
+            &format!("http://127.0.0.1:{port}"),
+            "fixture",
+        ));
+        let mut server = Watched::spawn(&config);
+        match wait_until_listening(&mut server, port) {
+            Start::Listening => return (server, port),
+            // Dropped here, before the next attempt rewrites the configuration
+            // this child was started with.
+            Start::PortTaken => {
+                drop(server);
+                lost.push(port);
+            }
         }
-        std::thread::sleep(Duration::from_millis(100));
     }
-    panic!("the server did not listen on 127.0.0.1:{port} within {SERVE_LIMIT:?}");
+    panic!(
+        "the server lost the port it was given {START_ATTEMPTS} times running ({lost:?}). That is \
+         no longer another process winning a race — suspect a listener this suite leaked, or a \
+         fixed port somewhere it should not be."
+    );
 }
 
 /// **A connection that never finishes its headers is closed, and does not hold
@@ -812,54 +1021,61 @@ fn the_connection_ceiling_holds_and_then_releases() {
 fn a_held_connection_does_not_block_shutdown_past_the_grace_period() {
     let fixture = Fixture::new("shutdown");
     let (mut server, port) = start_server(&fixture);
-    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
 
     // A complete request on a keep-alive connection, answered, then held open:
     // hyper is waiting for the next request on a connection that will never
-    // send one.
-    let mut held = TcpStream::connect_timeout(&address, Duration::from_secs(5)).unwrap();
-    held.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    write!(
-        held,
-        "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"
-    )
-    .unwrap();
-    let mut first = [0u8; 12];
-    held.read_exact(&mut first).unwrap();
-    assert!(
-        String::from_utf8_lossy(&first).starts_with("HTTP/1.1 200"),
-        "{:?}",
-        String::from_utf8_lossy(&first)
-    );
+    // send one. Setting that up is not the property under test, so it is
+    // retried rather than unwrapped — see `hold_an_answered_keep_alive`.
+    let mut held = hold_an_answered_keep_alive(&mut server, port);
 
     let mut kill = Command::new("kill");
-    kill.arg("-TERM").arg(server.0.id().to_string());
+    kill.arg("-TERM").arg(server.id().to_string());
     assert!(bounded_output(kill, "kill -TERM").status.success());
 
     // Past the grace period plus slack, but nowhere near forever.
     let started = Instant::now();
     let deadline = started + Duration::from_secs(25);
     let exit = loop {
-        if let Some(exit) = server.0.try_wait().unwrap() {
+        if let Some(exit) = server.try_wait() {
             break exit;
         }
         assert!(
             Instant::now() < deadline,
-            "a single held connection kept the process alive past the shutdown grace period"
+            "a single held connection kept the process alive past the shutdown grace period:\n{}",
+            server.log()
         );
         std::thread::sleep(Duration::from_millis(100));
     };
     assert_eq!(
         exit.code(),
         Some(0),
-        "stopping with a connection held open is still a clean stop"
+        "stopping with a connection held open is still a clean stop:\n{}",
+        server.log()
     );
     assert!(
         started.elapsed() < Duration::from_secs(20),
         "the held connection delayed the exit past the grace period: {:?}",
         started.elapsed()
     );
-    drop(held);
+
+    // AND THE RESET IS THE PASS. The server took this connection down with it,
+    // so reading it now ends — at EOF, or with `ConnectionReset` if the kernel
+    // answered for a process that is already gone. Either is the shutdown
+    // doing its job, and neither is an error to unwrap.
+    //
+    // Which way round matters. A reset BEFORE the signal is the server dropping
+    // a live client, and `hold_an_answered_keep_alive` fails on it. A read that
+    // neither ends nor resets after it is the hang, and the deadline above has
+    // already caught that.
+    held.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    let mut rest = Vec::new();
+    match held.read_to_end(&mut rest) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::ConnectionReset => {}
+        Err(error) => {
+            panic!("the held connection neither closed nor reset after the process exited: {error}")
+        }
+    }
 }
 
 // WHAT THIS PAIR DOES AND DOES NOT PROVE. The test above holds an IDLE
@@ -875,3 +1091,63 @@ fn a_held_connection_does_not_block_shutdown_past_the_grace_period() {
 // adding one to the product router to test the server would be the wrong
 // trade. It is recorded as unexercised in the task report rather than implied
 // by a passing test.
+
+/// Open a keep-alive connection to `port`, get one request answered on it, and
+/// return it STILL OPEN.
+///
+/// Every failure here is a failure to set the test up, not a failure of the
+/// thing the test asserts, and until 2026-09-17 they were the same panic: the
+/// read `unwrap`ed, so a `ConnectionReset` from another run's socket came out
+/// as `FLAKE-APISHUTDOWN`. It is retried on a fresh connection while the server
+/// is alive and the deadline holds, and only then reported — as what it is, a
+/// server resetting a live connection before anyone asked it to stop.
+fn hold_an_answered_keep_alive(server: &mut Watched, port: u16) -> TcpStream {
+    let address: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
+    let deadline = Instant::now() + SERVE_LIMIT;
+    let mut last;
+    loop {
+        if let Some(exit) = server.try_wait() {
+            panic!(
+                "the server exited before it was told to stop ({exit}):\n{}",
+                server.log()
+            );
+        }
+        match answered_keep_alive(&address, port) {
+            Ok(held) => return held,
+            Err(error) => last = error,
+        }
+        if Instant::now() >= deadline {
+            panic!(
+                "no request was answered on a held keep-alive connection to 127.0.0.1:{port} \
+                 within {SERVE_LIMIT:?}; last failure: {last}. A reset here is BEFORE the \
+                 shutdown signal, so it is the server dropping a live connection — only a reset \
+                 after the signal is the behaviour this test is about.\n{}",
+                server.log()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// One attempt at [`hold_an_answered_keep_alive`]. No `Connection: close`, so
+/// the connection stays open behind the answer.
+fn answered_keep_alive(address: &SocketAddr, port: u16) -> Result<TcpStream, String> {
+    let mut held = TcpStream::connect_timeout(address, Duration::from_secs(5))
+        .map_err(|error| format!("connect: {error}"))?;
+    held.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    held.set_write_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    write!(
+        held,
+        "GET /healthz HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\n\r\n"
+    )
+    .map_err(|error| format!("write: {error}"))?;
+    let mut first = [0u8; 12];
+    held.read_exact(&mut first)
+        .map_err(|error| format!("read: {error}"))?;
+    let status = String::from_utf8_lossy(&first).into_owned();
+    if !status.starts_with("HTTP/1.1 200") {
+        return Err(format!("the answer began {status:?}"));
+    }
+    Ok(held)
+}
