@@ -1400,11 +1400,21 @@ impl Pass<'_> {
         // The `evidenceWrite` grant, for the record under `logweir/`. The
         // destination's own, resolved separately, and NEVER the delete
         // credential reused.
-        env_from_secret.extend(dest_env.from_secret.iter().filter_map(|e| {
-            (e.name != destination::AWS_ACCESS_KEY_ID_ENV
-                && e.name != destination::AWS_SECRET_ACCESS_KEY_ENV)
-                .then(|| e.clone())
-        }));
+        env_from_secret.extend(
+            dest_env
+                .from_secret
+                .iter()
+                .filter(|e| {
+                    // THE DESTINATION'S ARCHIVE CREDENTIAL IS DROPPED HERE ON
+                    // PURPOSE. `AWS_ACCESS_KEY_ID` in a retention pod is the
+                    // DELETE-capable grant and nothing else; letting the
+                    // destination's read grant land on the same variable would
+                    // silently decide which of the two the worker deletes with.
+                    e.name != destination::AWS_ACCESS_KEY_ID_ENV
+                        && e.name != destination::AWS_SECRET_ACCESS_KEY_ENV
+                })
+                .cloned(),
+        );
         if let Some(evidence) = self.evidence_env_from_secret(resolved) {
             env_from_secret.extend(evidence);
         }

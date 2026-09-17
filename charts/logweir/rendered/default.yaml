@@ -6818,6 +6818,18 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["restores"]
     verbs: ["create"]
+  # PLAT-16.1 / PLAT-16.2 (D3 W9): the `RetentionPolicy` reconciler's
+  # `Controller::new` watch, its namespace-wide `list` for the two-policies-one-
+  # destination conflict check, and its `Api::patch_status`. No `get` on the
+  # kind, no `update` anywhere, and no `delete` on anything: the controller
+  # creates the retention Job and does not link the code that deletes. See
+  # `config/rbac/role.yaml`.
+  - apiGroups: ["logweir.dev"]
+    resources: ["retentionpolicies"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["retentionpolicies/status"]
+    verbs: ["patch"]
 ---
 # Source: logweir/templates/human-roles.yaml
 apiVersion: rbac.authorization.k8s.io/v1

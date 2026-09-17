@@ -559,6 +559,8 @@ fn every_granted_verb_has_a_caller() {
             "trustrosters" => "TrustRoster",
             // PLAT-19.1, the other direction of the same mapping.
             "trustpolicies" => "TrustPolicy",
+            // PLAT-16.1 / PLAT-16.2 (D3 W9).
+            "retentionpolicies" => "RetentionPolicy",
             // PLAT-14.2 (D3 W6).
             "protectionpolicies" => "ProtectionPolicy",
             // PLAT-14.3 (D3 W7), the other direction of the same mapping.
@@ -1035,6 +1037,13 @@ fn every_call_site_has_a_grant() {
             // `Approval` names — D3 §4.3's digest is recomputed from the
             // referent's own sealed spec, so the referent has to be read.
             "RehearsalSchedule" => ("logweir.dev", "rehearsalschedules"),
+            // PLAT-16.1 / PLAT-16.2 (D3 W9): `controllers/retention_policy.rs`
+            // reaches its own kind for the `Controller::new` watch, the
+            // namespace-wide conflict `list` and `patch_status`; ONE named
+            // `RecoveryCatalog` and its page `ConfigMap`s for `get_opt`; every
+            // `Restore` for the active-restore protection set; and `Job` for
+            // the one Job it creates.
+            "RetentionPolicy" => ("logweir.dev", "retentionpolicies"),
             "Job" => ("batch", "jobs"),
             "ConfigMap" => ("", "configmaps"),
             "Pod" => ("", "pods"),
@@ -1371,6 +1380,28 @@ fn the_five_cluster_roles_are_exactly_as_specified() {
         // rehearsal that could edit its own child after creating it could
         // change the plan its approver's scope was proved against.
         (v(&["logweir.dev"]), v(&["restores"]), v(&["create"])),
+        // PLAT-16.1 / PLAT-16.2 (D3 W9) — the `RetentionPolicy` reconciler's
+        // own rows. `watch` is `Controller::new`; `list` is the conflict check,
+        // which needs the whole namespace to find a second policy covering the
+        // same destination. NO `get` on the kind — the watcher hands the object
+        // over and the reconciler never re-reads it.
+        //
+        // AND NO `delete`, WHICH IS THE POINT. This is the reconciler whose Job
+        // can remove data and the controller still holds no delete verb on
+        // anything: `every_granted_verb_has_a_caller` above asserts `delete`
+        // appears in no rule of this role, and
+        // `scripts/check-no-archive-write.sh` check 3 proves from `cargo
+        // metadata` that the deleting crate is not linked into this process.
+        (
+            v(&["logweir.dev"]),
+            v(&["retentionpolicies"]),
+            v(&["list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+        ),
+        (
+            v(&["logweir.dev"]),
+            v(&["retentionpolicies/status"]),
+            v(&["patch"]),
+        ),
     ];
     assert_eq!(
         rules_of("config/rbac/role.yaml", "weirkeeper"),

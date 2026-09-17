@@ -45,13 +45,34 @@
 # Constraint 38 and `scripts/check-deps-count.sh` are what govern. This gate is
 # the cheap, fast half that catches the idiomatic spelling on the way in.
 #
-# WHY THE RETENTION REPORT IS A REPORT. Deleting from an archive is the one
-# operation whose first defect is unrecoverable. Global Constraint 6 — "Logweir
-# writes only under its own `logweir/` prefix… `PutMode::Create` everywhere" —
-# stands unamended, and no Logweir component in tag 1 holds any delete
-# capability against object storage. Logweir prints the `aws s3 rm` / `mc rm`
-# commands; an operator runs them; the adopter's own bucket lifecycle policy
-# does the deleting.
+# WHY THE RETENTION REPORT IS A REPORT, AND WHERE THAT CLAIM IS NOW SCOPED
+# (D3 §6.5, ADR 0008 Amendment H). Deleting from an archive is the one operation
+# whose first defect is unrecoverable. Global Constraint 6 — "Logweir writes only
+# under its own `logweir/` prefix… `PutMode::Create` everywhere" — stands
+# unamended for every WRITE. The tag-1 sentence "no Logweir component holds any
+# delete capability against object storage" is now VERSION-SCOPED: it is true of
+# the control plane, of the store crate, of the everyday `logweir` binary and of
+# the product API, always and unconditionally, and it is false of exactly one
+# binary — `logweir-retention` — which an operator opts into by setting a
+# `RetentionPolicy` to `mode: Enforce` and approving a plan digest.
+#
+# THAT IS WHY CHECK 3 EXISTS. The two source greps above answer "does this text
+# name a delete?"; they cannot answer "can this binary reach one?", and with a
+# deleting crate in the workspace that second question is the one that matters.
+# Check 3 walks `cargo metadata` — the shape `scripts/check-one-signer.sh` check
+# 1 already uses — and asserts that the set of workspace crates from which
+# `logweir-reaper` is reachable, over EVERY dependency kind, is exactly
+# {logweir-retention}. Adding `logweir-reaper` to `weirkeeper`, `logweir-store`,
+# `logweir` or `logweir-api` — under `[dependencies]` or under
+# `[dev-dependencies]`, which links just as hard — fails this gate, and that is
+# the mutant it exists to kill. A STALE ALLOWLIST FAILS IT TOO: a name that no
+# longer reaches the reaper is an allowlist that has outlived its edge.
+#
+# WHAT CHECK 3 DOES NOT PROVE. That the retention Job cannot be handed a wider
+# credential than the design calls for, or that a cluster administrator cannot
+# run the binary by hand. The credential's own IAM scope — prefix-only, never
+# `logweir/` — is the hard boundary there, and `docs/kubernetes.md` §7f says so
+# rather than implying it.
 #
 # ---------------------------------------------------------------------------
 # THE THREE THINGS THAT MAKE THIS GREP PRECISE, AND WHY IT HAS NO EXEMPTIONS
@@ -254,17 +275,119 @@ scan "$ROOT_CONTROL_PLANE" "$TOKENS_CONTROL_PLANE" \
 scan "$ROOT_STORE" "$TOKENS_STORE" \
   "an object-store delete, or a delete method definition"
 
+# --------------------------------------------------------------- check 3
+# THE LINKAGE WALK. Which workspace crates can REACH the one crate allowed to
+# delete. Run only over the DEFAULT roots: the two fixture entry points exist so
+# the GREP can be pointed at a scratch tree, and a dependency walk of the real
+# workspace has nothing to do with a scratch tree.
+REAPER="logweir-reaper"
+# The crates permitted to LINK the deleter, over any dependency kind.
+ALLOWED_REAPER_LINK="logweir-retention"
+# The walk's own program, kept in the repository rather than in a heredoc: a
+# heredoc body containing backticks inside a command substitution is mis-parsed
+# by bash, which is the measured failure `check-one-signer.sh` records, and a
+# gate that reports success having run nothing is this repository's signature
+# defect.
+REAPER_WALK="scripts/reaper-linkage-walk.py"
+
+linkage_walk() {
+  echo "== cargo metadata: which workspace crates reach $REAPER, over EVERY dependency kind =="
+  local meta_file reach_file reaching c status
+  for tool in cargo python3; do
+    if ! command -v "$tool" >/dev/null 2>&1; then
+      echo "FAIL: check 3 needs \`$tool\` and it is not on PATH. A gate that skips a check" >&2
+      echo "  and still exits 0 is a check that cannot fail." >&2
+      fail=1
+      return
+    fi
+  done
+  if [ ! -f "$REAPER_WALK" ]; then
+    echo "FAIL: $REAPER_WALK is missing, so check 3 walked nothing — and a walk that walks" >&2
+    echo "  nothing passes forever." >&2
+    fail=1
+    return
+  fi
+  # The toolchain pin, for the reason `check-one-signer.sh` records: a bare
+  # `cargo` reached through rustup's shim with no override in scope resolves
+  # rustup's DEFAULT channel and SYNCS IT FROM THE NETWORK.
+  if [ -z "${RUSTUP_TOOLCHAIN:-}" ] && [ -f rust-toolchain.toml ]; then
+    local pinned
+    pinned="$(sed -n 's/^[[:space:]]*channel[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' rust-toolchain.toml | head -1)"
+    if [ -n "$pinned" ]; then
+      RUSTUP_TOOLCHAIN="$pinned"
+      export RUSTUP_TOOLCHAIN
+    fi
+  fi
+  meta_file="$(mktemp)"
+  reach_file="$(mktemp)"
+  # STANDING RULE 20: every status read on its OWN line, never through a pipe.
+  cargo metadata --no-deps --format-version 1 > "$meta_file"
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "FAIL: cargo metadata exited $status; the linkage walk asserted nothing" >&2
+    fail=1
+    rm -f "$meta_file" "$reach_file"
+    return
+  fi
+  python3 "$REAPER_WALK" "$meta_file" "$REAPER" > "$reach_file"
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    echo "FAIL: the reverse-dependency walk over cargo metadata exited $status" >&2
+    fail=1
+    rm -f "$meta_file" "$reach_file"
+    return
+  fi
+  reaching="$(tr '\n' ' ' < "$reach_file")"
+  rm -f "$meta_file" "$reach_file"
+  # Equality against the allowlist, BOTH directions. An extra member is a crate
+  # that gained the deleter; a missing member is an allowlist that has outlived
+  # the edge it was written for.
+  for c in $reaching; do
+    case " $ALLOWED_REAPER_LINK " in
+      *" $c "*) ;;
+      *)
+        echo "FAIL: $c links $REAPER and is not on the allowlist — it can delete from object" >&2
+        echo "  storage. ADR 0008 Amendment H scopes the deletion capability to ONE binary;" >&2
+        echo "  adding this edge widens it, and that is a spec change and a security review," >&2
+        echo "  not an edit to ALLOWED_REAPER_LINK." >&2
+        fail=1
+        ;;
+    esac
+  done
+  for c in $ALLOWED_REAPER_LINK; do
+    case " $reaching " in
+      *" $c "*) ;;
+      *)
+        echo "FAIL: allowlist names $c, which no longer reaches $REAPER (the allowlist is" >&2
+        echo "  stale, and a stale allowlist is how this check quietly stops meaning anything)" >&2
+        fail=1
+        ;;
+    esac
+  done
+  if [ "$fail" -eq 0 ]; then
+    echo "ok: the crates reaching $REAPER are exactly {$(echo $reaching | tr ' ' ',')}"
+  fi
+}
+
+if [ "$ROOT_CONTROL_PLANE" = "crates/weirkeeper/src" ] && [ "$ROOT_STORE" = "crates/logweir-store/src" ]; then
+  linkage_walk
+fi
+
 if [ "$fail" -ne 0 ]; then
   printf '%s\n' "$hits" >&2
   echo "" >&2
-  echo "G-RET: the retention path holds no writable archive handle, and neither the control" >&2
-  echo "  plane nor the store crate may name one. Global Constraint 6 stands unamended:" >&2
-  echo "  Logweir writes only under its own \`logweir/\` prefix, and no Logweir component in" >&2
-  echo "  tag 1 holds any object-store delete capability. Retention REPORTS what it would" >&2
-  echo "  remove — it renders the \`aws s3 rm\` / \`mc rm\` command into" >&2
-  echo "  BackupSchedule.status.retentionReport and runs nothing." >&2
+  echo "G-RET: the retention path holds no writable archive handle, the control plane and" >&2
+  echo "  the store crate may not name one, and exactly one binary may reach the deleter." >&2
+  echo "  Global Constraint 6 stands unamended for every WRITE: Logweir writes only under" >&2
+  echo "  its own \`logweir/\` prefix. The DELETE claim is scoped by ADR 0008 Amendment H —" >&2
+  echo "  \`crates/logweir-reaper\` is the one crate that may name an object-store delete and" >&2
+  echo "  \`logweir-retention\` is the one binary that may link it. A \`RetentionPolicy\` in" >&2
+  echo "  \`mode: Report\`, which is the default, still REPORTS what it would remove and runs" >&2
+  echo "  nothing." >&2
   echo "  If a genuinely new write path is being introduced, that is a Global Constraint 6" >&2
-  echo "  amendment and a spec change, not an edit to this script." >&2
+  echo "  amendment and a spec change, not an edit to this script. If a new crate needs the" >&2
+  echo "  deleter, that is an Amendment H change and a security review, not an edit to" >&2
+  echo "  ALLOWED_REAPER_LINK." >&2
   exit 1
 fi
 

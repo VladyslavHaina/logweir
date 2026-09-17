@@ -7640,6 +7640,19 @@ rules:
   - restores
   verbs:
   - create
+- apiGroups:
+  - logweir.dev
+  resources:
+  - retentionpolicies
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - logweir.dev
+  resources:
+  - retentionpolicies/status
+  verbs:
+  - patch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

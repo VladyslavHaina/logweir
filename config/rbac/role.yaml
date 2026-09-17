@@ -559,3 +559,42 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["restores"]
     verbs: ["create"]
+  # PLAT-16.1 / PLAT-16.2 (D3 W9) — the `RetentionPolicy` reconciler's own two
+  # rows. `watch` is `Controller::new(api, …)` in
+  # `controllers/retention_policy.rs`; `list` is the CONFLICT check, which needs
+  # every policy in the namespace to find a second one covering the same
+  # destination (D3 §6.3 — two policies for one destination could approve two
+  # different plans for the same objects, so both go `Ready=False/Conflict` and
+  # neither evaluates). NO `get`: the reconciler never re-reads the policy the
+  # watcher handed it.
+  #
+  # AND NO `delete`, ON ANYTHING, HERE OR ANYWHERE IN THIS ROLE. This is the
+  # reconciler whose Job can remove data, and the point of the design is that
+  # the CONTROLLER still cannot: it creates a Job, the Job's pod mounts a
+  # separate delete-capable credential the controller has no verb to read, and
+  # the deleting code (`crates/logweir-reaper`) is not linked into this process
+  # at all — `scripts/check-no-archive-write.sh` check 3 proves that from
+  # `cargo metadata`. D3 §9: "on `delete`: this decision adds NONE".
+  #
+  # A SEPARATE RULE AND NOT A TENTH ENTRY IN THE SIX-KINDS LIST, for the reason
+  # every kind since the seventh has had its own: that list is shared verbatim
+  # with `viewer_role.yaml`, and whether an ordinary viewer may read a retention
+  # policy is the wave-4 RBAC worker's decision, not this one's.
+  #
+  # NOTE FOR W13 (D3 §9): the human-role rows — viewer get/list/watch, and the
+  # new namespaced `logweir-retention-admin` with create/update on
+  # `retentionpolicies` — are W13's, together with the `logweir-retention`
+  # ServiceAccount, its `retention.enabled` chart value and the retention
+  # NetworkPolicy.
+  - apiGroups: ["logweir.dev"]
+    resources: ["retentionpolicies"]
+    verbs: ["list", "watch"]
+  # The status subresource, `patch` and nothing else — seam S7. Every write in
+  # `controllers/retention_policy.rs` is `Api::patch_status` with a
+  # `Patch::Merge` whose body carries `metadata.resourceVersion` as the API
+  # server's update precondition, including the LEASE: the lease is the object
+  # that makes an active-restore race impossible, and a lease written with a
+  # last-writer-wins update would be no lease at all.
+  - apiGroups: ["logweir.dev"]
+    resources: ["retentionpolicies/status"]
+    verbs: ["patch"]
