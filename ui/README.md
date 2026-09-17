@@ -581,6 +581,14 @@ as a bare word so `already` in a neighbouring sentence is not a false positive.
 | absent, some other `reason` | `connection probe: unknown` |
 | absent, no `reason` at all | `connection probe: never probed` |
 
+A connection carrying no `status.observedAt` is **never stale** -- it is
+`never observed`, its own badge. `stale` means "this reading describes the past"
+and is a statement *about* an observation; a connection the controller refused
+has none for it to be about, and labelling it stale said two contradictory
+things at once and told an operator to wait for a refresh that a refused
+connection never gets (the controller starts no probe Job for one). The "older
+than the budget" clause is emitted only when there is an instant to measure.
+
 **Freshness is its own badge**, because "reachable, and nobody has checked in
 two hours" is two facts and a reader needs both. An observation older than
 **630 seconds** is labelled `stale` beside whatever it says. That budget is
