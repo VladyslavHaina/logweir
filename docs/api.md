@@ -224,30 +224,49 @@ response's `data` is dropped by the parser before anything can see it, and every
 response, log line and stored projection carries the Secret's **name** and the
 **key names** inside it, both of which are public references.
 
-**Entering a value twice for the same role is `409 state_conflict`, and nothing
-changes.** The Secret's name is a function of the destination and the role, so
-a second `secret.new` names an object that already exists — and this service
-holds `create` and nothing else: it cannot read the existing value to compare
-it, and it cannot overwrite it. Answering `200` there would let an operator
-responding to a leaked key record a rotation that did not happen while the
-leaked value stayed live, so the route **fails closed**: the refusal names the
-Secret, says the value was not written, and the destination is left exactly as
-it was (no patch is sent). To rotate, change the Secret's content out of band
-with `kubectl` or your secret manager, or point the grant at a different
-existing Secret with `secret.existing`. The same rule protects a create: a
-Secret already sitting under that name is never adopted in place of the value
-you just entered. A genuine **replay** — the same `Idempotency-Key` and the
-same body, after a lost response — is the one case that accepts it, because
-the existing object is then the one that request wrote; the audit line reports
-`credentialSecretsCreated` and `credentialSecretsReplayed` separately.
+**Entering a value twice for the same role is `409 state_conflict`, and
+nothing at all is written.** The Secret's name is a function of the destination
+and the role, so a second `secret.new` names an object that already exists —
+and this service holds `create` and nothing else: it cannot read the existing
+value to compare it, and it cannot overwrite it. Answering `200` there would
+let an operator responding to a leaked key record a rotation that did not
+happen while the leaked value stayed live.
 
-**The retry contract.** A create writes the `BackupDestination` first and its
-credential Secrets second, because the Secrets are owned by the destination and
-an owner reference needs a UID. If the Secret write fails (a timeout, a refusal,
-Kubernetes unavailable) the destination already exists and names a Secret that
-does not. **Repeat the request with the same `Idempotency-Key`**: the replay
-returns the same destination and finishes the credential writes. Repeating with
-a *new* key does not — it is a different request against an existing name.
+So **every credential name a request would write is checked before anything is
+written** — before the Secrets, and before the `BackupDestination` itself. The
+check needs no read verb: a `dryRun: All` create is still the `create` verb,
+and it answers `AlreadyExists` for a taken name while telling the caller
+nothing about the object holding it. The probe carries an empty `data`, so the
+value you typed does not travel to the API server before the decision to write
+it has been made. The refusal names **every** taken name, not the first, and
+nothing is created: not the destination, and not the credential of some other
+role that happened to come earlier. To rotate, change the Secret's content out
+of band with `kubectl` or your secret manager, or point the grant at a
+different existing Secret with `secret.existing`.
+
+That ordering is what makes the retry below safe. A first attempt that refuses
+leaves no destination behind, so the retry cannot look like a replay of one —
+and a Secret sitting under a deterministic name is never, in any path, taken as
+evidence that *this* request wrote it. Only this service's own idempotency
+record (the scope and request hashes it stamps on the object it creates) marks
+a request as its own earlier attempt.
+
+**The retry contract.** Once the names are known to be free, a create writes the
+`BackupDestination` first and its credential Secrets second, because the Secrets
+are owned by the destination and an owner reference needs a UID. If a Secret
+write then fails (a timeout, a refusal, Kubernetes unavailable) the destination
+exists and names a Secret that does not. **Repeat the request with the same
+`Idempotency-Key`**: the replay is recognised from that record, returns the same
+destination and finishes the credential writes. Repeating with a *new* key does
+not — it is a different request against an existing name, and is refused. The
+audit line reports `credentialSecretsCreated` and `credentialSecretsReplayed`
+separately, so "written now" and "already there from my earlier attempt" are
+never the same entry.
+
+There is one window this cannot close: a name taken by someone else *between*
+the check and the write. The write then refuses, and because an earlier role may
+already be live the message names the Secrets that **were** created and says
+they must be deleted before a retry, rather than claiming nothing changed.
 
 **The request hash on the object is salted.** Every durable create records
 `api.logweir.dev/request-sha256`. For a destination that request contained an
@@ -320,7 +339,9 @@ chunk and detail documents a check owns, and every read is verified by owner
 UID, immutability and digest before a row is served. `Secret` is a `create` and
 nothing else — **there is no Secret read verb in this service**, so a stored
 credential cannot be read back by any route, any projection or any future
-refactor of one. `k8s-openapi`'s own `Secret` and `ConfigMap` types are
+refactor of one. Asking whether a name is free is the same `create` verb with
+`dryRun: All`, which is why establishing that costs no extra permission and
+still reveals nothing about the object occupying the name. `k8s-openapi`'s own `Secret` and `ConfigMap` types are
 deliberately not imported: a type that can hold a Secret's data is a type that
 can leak one. The credential type's `data` field is `skip_deserializing`, so the
 API server's create response — which echoes `data` — is parsed into a value
