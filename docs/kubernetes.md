@@ -1478,11 +1478,28 @@ kubectl --context docker-desktop get backupschedules -A \
 | `True` | `HistoryLarge` | The same, **and** the retained history is past the advisory below — prune. |
 | `False` | `LegacyOwnerReferencesRemain` | Terminal runs are still being detached; the next passes finish it. |
 | `False` | `ActiveLegacyRunsOwned` | The only owned runs left are still running. A pre-upgrade run keeps its ownerReference until it is terminal, because its scheduled identity derives from that UID. |
-| `False` | `MigrationBlocked` | The API server refused a detach (`403`, `422`) or the run could not be detached safely. `status.history.migrationBlocked` names up to ten. |
+| `False` | `MigrationBlocked` | Either the inventory **did not finish** (`status.history.ownershipScanComplete: false`), or one or more runs could not be detached. `status.history.migrationBlocked` names up to ten, sorted by name; the total is in `legacyOwnedRuns`. See the table below. |
 
 `kubectl --context docker-desktop delete backupschedule <name> --cascade=orphan`
 is always safe, before or after the migration, and it is what to use while the
 condition says `False`.
+
+**`MigrationBlocked` covers four different situations, and the message says
+which.** `status.history.migrationBlocked[].reason` is a closed vocabulary:
+
+| `reason` | Clears itself? | What to do |
+|---|---|---|
+| `ApiForbidden` (the API server answered `403`) | yes | Fix the RoleBinding. The next hourly inventory sends the same patch. |
+| `ApiInvalid` (the API server answered `422`) | yes | A pre-upgrade object that fails a newer schema. Fix it; the next inventory retries. |
+| `NoScheduleReference` | **no, never** | The run's `spec.scheduleRef` does not name this schedule, so detaching it would leave it a member of nothing — and `Backup.spec` is sealed by CEL, so the reference cannot be added to an object that already exists. **This condition will not reach `True` while such a run exists.** Delete the schedule with `--cascade=orphan`, or record `status.backupId` and `status.evidence.*` and delete the run. |
+| `InventoryCapped` (the entry names no object) | when the history shrinks | The inventory stopped at its page bound, or with its per-pass detach budget spent, so it cannot show that nothing is still owned. A migration in progress clears this within a few reconciles; a schedule with more runs than the bound needs pruning (below). |
+
+**`status.history.ownershipScanComplete` is the machine-readable form of the
+last row, and it is the field to gate an upgrade script on** — more precisely
+than the condition, because it is `false` exactly when the controller has not
+looked everywhere it would have to look. While it is `false` the schedule keeps
+listing namespace-wide and never narrows to the `logweir.dev/schedule-uid`
+label, which no pre-upgrade run carries.
 
 The detach itself is one JSON merge `PATCH` per run, carrying that object's
 `metadata.resourceVersion` as the update precondition. It removes only the
@@ -1593,6 +1610,24 @@ recorded in `status.pendingRun`/`status.activeRuns` by a
 resourceVersion-conditional status write *before* the run is created, so the
 reservation — not the list — is what makes a duplicate reconcile impossible.
 
+**During the migration window the cost is higher, and bounded.** While a
+schedule still has runs to detach it re-inventories on every reconcile (every
+30 s) rather than hourly, because waiting an hour between batches would stretch
+an upgrade over days. The detaching happens *inside* the paginated walk, and the
+walk **stops as soon as that pass has spent its detach budget of 500**, so:
+
+| | LIST requests | objects read |
+|---|---|---|
+| a migrating pass | 1 | ≤ 500 |
+| the whole migration of *n* pre-upgrade runs | ≈ *n* / 500 + 1 | ≈ *n* |
+| steady state, per hour | 1 | ≤ 10 000 |
+| steady state, per 30 s reconcile | **0** | 0 |
+
+So 10 000 pre-upgrade runs cost about 21 paginated LISTs spread over ten
+minutes, not one full namespace-wide walk every 30 s for the duration. A
+namespace-wide walk is `limit`ed and page-bounded like every other: it never
+streams an unbounded response body.
+
 ### Upgrading to, and rolling back from, retained history
 
 **Upgrade:** apply the CRD, roll the controller, then wait for
@@ -1607,8 +1642,17 @@ it neither counts them for `Forbid` — two runs of one schedule can then overla
 — nor shows them as history; and it creates *owned* runs again, so the
 garbage-collection hazard returns for those new runs only. Migrated history
 stays retained whatever happens. Before rolling back, suspend any schedule whose
-overlap matters. After rolling forward, the migration picks up whatever the old
-controller owned.
+overlap matters.
+
+**After rolling forward, the migration picks those runs up**, and it does so by
+construction rather than by luck. A run the older controller created carries
+both the ownerReference *and* the `logweir.dev/schedule-uid` label, so even a
+label-selected inventory sees it; the moment it does, `legacyOwnedRuns` goes
+positive, the condition drops to `False`, and every later walk is namespace-wide
+again until the detach is complete. The narrowing is never a one-way latch: it
+is on only while the last **complete** walk concluded that nothing is owned, and
+a walk that did not complete records `ownershipScanComplete: false` and turns it
+straight back off.
 
 **PLAT-15.1** indexes recovery points from object storage by execution id, so a
 schedule's history view becomes "CR history (by `schedule-uid` label) ∪ catalog
