@@ -409,15 +409,18 @@ runs a pod in the object's own namespace and reports what the kubelet said.
 
 ### 7b. A destination-backed run carries a complete `AWS_*` set, and none of it is the controller's
 
-**NOT IN THIS BUILD.** The resolver, the environment below and the frozen
-snapshot exist and are tested; nothing calls them yet. No `Backup`, `Restore` or
-`BackupSchedule` in this release reads a `destinationRef`, so an object that
-carries one gets the legacy inline path — and, because `archive.url` must then
-be the `logweir-destination://` sentinel, that path refuses it terminally with
-`ArchiveUrlUnreadable` rather than writing anywhere. This section describes the
-contract the execution wiring will keep, so that the shape is reviewable before
-it is load-bearing; until it lands, `AWS_ALLOW_HTTP` on a runner Job is still
-whatever the legacy path forwards.
+**IN THIS BUILD**, for `Backup`, `BackupSchedule` and `Restore`. A `Backup`
+naming a `destinationRef` resolves it for `archiveWrite` before anything is
+created, freezes the resolution into its execution inputs (§10's `destination`
+block) and renders the environment below into its runner Job from that FROZEN
+block; a `Restore` naming `sourceDestinationRef` and `evidenceDestinationRef`
+resolves both and checks the approved plan against them (§7d). A schedule
+propagates its `destinationRef` to the `Backup`s it creates.
+
+What is NOT in this build is listed in §7e: the evidence-fetch Job for a
+`SecretKeys` or `WorkloadIdentity` `evidenceRead`, the frozen destination on
+`Backup.status`, and a destination carrying a `transport.caBundle` for a
+Backup or Restore — that last one is refused, not ignored.
 
 The controller's own environment reaches no destination-backed runner Job. That
 is not a convention — it is the defect the design closes. The legacy inline path
@@ -458,6 +461,77 @@ execution inputs, with the destination's UID, generation, location digest and CA
 digest. Editing a destination afterwards — rotating a credential, rotating a CA —
 cannot change a run that already exists, and a destination deleted and recreated
 under the same name is a different input.
+
+### 7d. What a destination-backed `Restore` is checked against
+
+A `Restore` names TWO destinations and they are set together or neither is: it
+reads its archive under the source destination's `archiveRead` and writes its
+scorecard under the evidence destination's `evidenceWrite`. Half a pair is
+refused by CEL on admission and refused again by the controller, because an
+object admitted by an older CRD revision reaches the controller unchecked and
+would read from a saved destination while writing its evidence wherever the
+inline block says.
+
+After the existing approval and target checks — so today's reason precedence is
+unchanged — the controller adds five:
+
+| # | Check | On failure |
+|---|---|---|
+| 5 | Both destinations resolve and carry `Valid=True` for their current generation | **Hold**, `phase: Pending` with `Admitted=False`, requeued at 30 s. Not terminal: an operator still creating the destination is in the position of an approver who has not signed yet, and `Restore.spec` is immutable |
+| 6 | `spec.planBytes` parses as a restore plan (read only; the bytes are never re-emitted) | `PlanUnparseable`, terminal |
+| 7 | `plan.source.storage` is the source destination's archive location, **exact on all six fields** | `PlanDestinationMismatch`, terminal; the message names both locations and no credential |
+| 8 | `plan.evidence` is the evidence destination's evidence location | `PlanEvidenceDestinationMismatch`, terminal |
+| 9 | Both grants resolve and can be satisfied by ONE pod | `DestinationRoleNotConfigured` / `ExecutionContextConflict`, terminal |
+
+**Checks 7 and 8 are what make a saved destination mean anything here.** The
+runner reads its location out of the PLAN — those are the bytes an approver
+signed — so a destination whose location differs contributes only its
+CREDENTIALS, and the run would then present that credential at a location
+nobody approved.
+
+**A destination edit never invalidates an approval.** `spec.storage` and
+`spec.transport.security` are immutable on a `BackupDestination`, so the plan
+bytes cannot go stale through an edit; only preflights do (§21).
+
+Both destinations' CA bundles are copied into the run's own immutable plan
+`ConfigMap`, beside `restore.yaml`, and `LOGWEIR_ARCHIVE_CA_FILE` /
+`LOGWEIR_EVIDENCE_CA_FILE` point there. Mounting the destination's own
+`ConfigMap` would mean a root rotated mid-run changes what an approved run
+trusts. `restore.yaml` is still `spec.planBytes` verbatim.
+
+### 7e. What destination-backed execution does not do in this build
+
+- **A destination declaring `spec.transport.caBundle` is REFUSED for `Backup`
+  and `Restore`** with `CaBundleUnsupportedByEngine`. Whether the pinned engine
+  honours a custom CA through `SSL_CERT_FILE` has not been measured on a
+  recorded engine digest, and the failure if it does not is a TLS handshake
+  inside the engine child reported as an opaque operational error with no
+  mention of certificates. Checks, verification and the controller's own
+  evidence reads DO support the CA — no engine child is involved there. An
+  administrator who accepts the risk for their installation sets
+  `engine.allowUnverifiedCustomCa` in the installation policy `ConfigMap`; the
+  compiled constant flips only after the measurement.
+- **A `SecretKeys` or `WorkloadIdentity` `evidenceRead` is not read.** That
+  grant needs an evidence-fetch Job in the object's own namespace, because the
+  controller holds no verb on `secrets` and must not. Such a run gets
+  `verification: NotAttempted` whose `detail` names the missing capability and
+  the two ways forward; what it never gets is a fall-back to the controller's
+  global handle, which holds a different principal over a different bucket.
+  `evidenceRead: ControllerIdentity` at an allowlisted location IS read, through
+  the bounded store cache, and verified by the same verifier every other path
+  uses.
+- **The frozen destination does not reach `Backup.status`.** `BackupStatus` has
+  no field for it in this CRD revision, so `Preflight`'s
+  `RecoveryPointLocationMismatch` still has no digest to compare (§21.8) and the
+  catalogue cannot index a recovery point by its destination. The digest IS in
+  the run's frozen `execution-inputs.json`, which is where a later reader will
+  find it.
+- **A destination-backed `BackupSchedule` gets no retention report.** The
+  controller's one global archive handle is for objects without a
+  `destinationRef` (§9); a report computed through it would describe another
+  bucket's catalogue while printing `aws s3 rm` commands naming keys in this
+  one. A schedule whose `archive.url` bucket differs from the handle's gets the
+  same answer, and one INFO line names both buckets.
 
 ### 7c. A `TopicDiscovery` is one observation, and `unknown` is its honest default
 
@@ -2929,8 +3003,8 @@ it carries **three keys**:
   | `source` | `v1` | the source `KafkaCluster`'s **UID** and everything the one resolver (§20) decided about its connection — bootstrap addresses, auth mode, SCRAM username, the TLS flag and the `auth.tlsCa` reference |
   | `topics` | `v1` | **the exact list this run executes**, in the order `backup.yaml` carries it: `spec.topics` verbatim in named mode. Never empty and never a pattern |
   | `selection` | **`v2`** | `{mode, coverage, resolvedTopicCount, resolvedTopicBytes, exclude?, incompleteDiscovery?, discovery?}` — where `topics` came from and what the run may claim to have covered. **The names are not repeated here**: `topics` is the one copy, and `selection` is its provenance |
-  | `destination` | **`v2`** | **reserved**. The resolved saved `BackupDestination` a run writes to. Nothing writes it yet; the block is declared so that destination-backed execution lands inside this one document rather than in a second freeze |
-  | `archive` | `v1` | the archive URL, the resolved `storage` block and the object-store addressing variables this controller forwards |
+  | `destination` | **`v2`** | the resolved saved `BackupDestination` this run writes to: `{name, uid, generation, locationDigest, archiveStorage, evidenceStorage, transport, addressing, caSha256?, grant}`. Absent for a legacy inline-`archive` run. **The Job is rendered from THIS block and not from the live object**, so a credential or CA rotated between the freeze and a Job re-creation cannot change what an approved, half-written run addresses. It carries no credential value: the grant is a Secret name and data key names |
+  | `archive` | `v1` | the archive URL, the resolved `storage` block and the object-store addressing variables this controller forwards. **For a destination-backed run the forwarded list is EMPTY and `storage` comes from the destination**; `url` is then the `logweir-destination://` sentinel, which an older controller refuses terminally as `ArchiveUrlUnreadable` rather than writing anywhere |
   | `runner` | `v1` | the runner argv, deadline and engine tunables |
 
   **Every `v2` block is optional and omitted when unset** — never written as
@@ -5154,9 +5228,11 @@ so `approval.state` is `skipped` with `SubjectNotCreated` and the verdict is
   message saying to create a `BackupDestination` and use `destinationRef`. It
   is never a verdict about the operation.
 - **`recoveryPoint.state` cannot report `RecoveryPointLocationMismatch`.** The
-  frozen destination snapshot does not reach `Backup.status` in this build, so
-  there is no digest to compare and the comparison is skipped rather than
-  guessed at.
+  frozen destination snapshot reaches the run's immutable
+  `execution-inputs.json` (§10) but not `Backup.status`: `BackupStatus` carries
+  no field for it in this CRD revision. So there is still no digest on the
+  object to compare, and the comparison is skipped rather than guessed at.
+  Closing it means one additive status field and one read.
 - **`gc.rs` IS wired, since D2 W11.** A terminal `Preflight` is collected an
   hour after `result.expiresAt` (or after `observedAt`, when it never produced
   a verdict with an expiry), by the reconciler's own hourly pass, with a UID
