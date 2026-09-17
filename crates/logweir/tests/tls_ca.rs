@@ -430,14 +430,57 @@ fn every_construction_site_hands_its_clients_the_path_it_read() {
 
     assert_eq!(
         sites.len(),
-        4,
-        "four files wire a CA into a client today — backup, probe, drill and doctor. A change \
-         to that COUNT is a decision about Global Constraint 29's runner half and belongs in a \
-         commit message, not in a passing test: {:?}",
+        5,
+        "five files wire a CA into a client today — backup, probe, drill, doctor and D2 §4.2's \
+         check runner. A change to that COUNT is a decision about Global Constraint 29's \
+         runner half and belongs in a commit message, not in a passing test: {:?}",
         sites.iter().map(|(p, _)| p).collect::<Vec<_>>()
     );
 
-    for (site, code) in &sites {
+    // THE ONE SITE WHOSE CA DOES NOT COME FROM AN ENVIRONMENT VARIABLE, and
+    // the reason it is named here rather than exempted by a prefix rule.
+    //
+    // The four rows below read `LOGWEIR_SOURCE_TLS_CA_FILE` /
+    // `LOGWEIR_TARGET_TLS_CA_FILE` through `tls_ca::projected_ca_file`,
+    // because an execution Job is rendered with exactly one connection and the
+    // controller projects its trust anchor under a fixed variable name. A
+    // CHECK Job is not: one check plan can carry a source connection, a target
+    // connection and up to two destinations, each with its own CA, so D2 §4.2
+    // renders the trust files into the plan `ConfigMap`
+    // (`source-ca.pem`, `target-ca.pem`, `archive-ca.pem`, `evidence-ca.pem`)
+    // and the plan NAMES the path per connection
+    // (`check_contract::ConnectionPlan::ca_file`). Four connections cannot
+    // share two variable names, and adding four more variables would put the
+    // "which side is this?" decision back in the runner — which is the defect
+    // finding H2 names, reached from the other end.
+    //
+    // What the exemption does NOT relax: the site still hands the path it was
+    // given to `AuthConfig::with_tls_ca_file`, which refuses a CA on a
+    // connection that is not TLS, and `crates/logweir/tests/check_cli.rs`
+    // asserts the check runner confines its dial to one function. It is
+    // spelled as an exact path so a FIFTH site cannot inherit the exemption.
+    const PLAN_PROJECTED: &str = "src/check/kafka.rs";
+    let (plan_projected, env_projected): (Vec<_>, Vec<_>) = sites
+        .iter()
+        .partition(|(p, _)| p.replace('\\', "/").ends_with(PLAN_PROJECTED));
+    assert_eq!(
+        plan_projected.len(),
+        1,
+        "exactly one site takes its CA from the check plan rather than the environment: {:?}",
+        plan_projected.iter().map(|(p, _)| p).collect::<Vec<_>>()
+    );
+    for (site, code) in &plan_projected {
+        assert!(
+            code.contains("plan.ca_file"),
+            "{site} is the plan-projected site and does not read the plan's own `ca_file`"
+        );
+        assert!(
+            !code.contains("TLS_CA_FILE"),
+            "{site} reads an execution-side CA variable; a check plan names its own paths"
+        );
+    }
+
+    for (site, code) in &env_projected {
         assert!(
             code.contains("tls_ca::projected_ca_file("),
             "{site} builds a client but does not read the projected CA through the ONE reader"

@@ -493,9 +493,10 @@ fn no_construction_site_hardcodes_plaintext() {
     walk(&src, &mut sites);
     assert_eq!(
         sites.len(),
-        4,
-        "four sites construct a client today — drill::context, doctor::check_target, \
-         backup::run and probe::dial. A change to that COUNT is a decision about interface I1 \
+        5,
+        "five sites construct a client today — drill::context, doctor::check_target, \
+         backup::run, probe::dial and check::kafka::dial (D2 §4.2's check runner, added with \
+         `logweir check run`). A change to that COUNT is a decision about interface I1 \
          and belongs in `no_network_in_unit_tests.rs`'s CONSTRUCTION_SITES with a reason, not \
          in a passing test: {:?}",
         sites.iter().map(|(p, _)| p).collect::<Vec<_>>()

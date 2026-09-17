@@ -54,8 +54,15 @@ use std::path::{Path, PathBuf};
 /// the two constructors, the compose stack's own endpoints, and ureq's
 /// AGENTLESS request builders (which carry no timeout — see
 /// `crates/logweir/tests/notify.rs`).
-const DIAL_TOKENS: [&str; 16] = [
+const DIAL_TOKENS: [&str; 17] = [
     "RdKafkaReader::connect(",
+    // D2 W3's check client (`crates/logweir-kafka/src/inventory.rs`). It is a
+    // dialling constructor in exactly the sense the one above is: it returns a
+    // handle whose first method call opens a socket. The kafka-check report
+    // asked for it here because that crate could not edit this file, and it is
+    // the constructor D2 W4's runner uses — so leaving it out would point this
+    // gate at the shrinking half of the surface.
+    "KafkaInventory::connect(",
     "Store::from_url(",
     "Store::read_only_from_url(",
     // D2 W2's EXPLICIT constructors (`crates/logweir-store/src/lib.rs`).
@@ -108,7 +115,34 @@ const DIAL_TOKENS: [&str; 16] = [
 /// Relative to the workspace root, `/`-separated. Production modules whose
 /// job IS to dial come first; the rest are files where the token is a string
 /// fed to a double, never a client.
-const ALLOWED: [(&str, &str); 24] = [
+const ALLOWED: [(&str, &str); 27] = [
+    (
+        "crates/logweir/src/check/kafka.rs",
+        "production: D2 §4.2's check runner dials BY DESIGN, and this module is the one \
+         place it does. `dial` is the only function here that names the constructor; \
+         `auth_spec`, `projected_password`, `auth_config` and `bootstrap` are pure and every \
+         rule above them is driven through `&dyn InventoryProbe` \
+         (`crates/logweir/src/check/kinds/`), which is what keeps the whole check contract \
+         socket-free in the default suite",
+    ),
+    (
+        "crates/logweir/src/check/store.rs",
+        "production: the check runner's object-store handles. `open_read` and \
+         `open_evidence_write` are the only functions in `crates/logweir/src/check/` that name \
+         a store constructor, and they name the EXPLICIT ones (D2 W2) rather than \
+         `from_url`/`read_only_from_url`, because a destination-backed Job must take its \
+         addressing and transport from the approved plan and never from the environment \
+         (D-SEAMS S5). Every probe above them takes a `&dyn ObjectAccess`",
+    ),
+    (
+        "crates/logweir/tests/check_cli.rs",
+        "D2 W4's suite. It names `KafkaInventory::connect(` and `Store::read_only_with(` in \
+         two places: the e2e-gated rows at the end of the file, which are the only rows that \
+         dial and which the `logweir` crate's `e2e` feature gates; and the structural guards \
+         that assert `crates/logweir/src/check/` confines those constructors to one function \
+         each, which have to spell them to check for them. Every other row runs against \
+         in-memory fakes or a tempdir filesystem `Store`, with no endpoint and no network",
+    ),
     (
         "crates/logweir-kafka/src/rdkafka_reader.rs",
         "the broker client itself — this is where connecting to Kafka lives",
@@ -486,12 +520,26 @@ fn every_allow_list_entry_is_still_earned() {
 /// constructor; the last two are the arms a call site must never pin — the
 /// defect Task 6 found in two of three sites, under which a spec asking for
 /// `scramSha512` was recorded in the receipt and then dialled unauthenticated.
-const CONSTRUCTION_TOKENS: [&str; 4] = [
+const CONSTRUCTION_TOKENS: [&str; 5] = [
     "RdKafkaReader::connect(",
+    // D2 W3's check client, added with W4's runner. It is a SECOND dialling
+    // constructor over the same `AuthConfig`, so leaving it out would have let
+    // a file build a client's auth and dial with it while satisfying the
+    // "exactly one function names the constructor" clause vacuously — the
+    // clause counts functions naming a constructor, and a file naming NONE of
+    // the listed ones fails it rather than passing it, which is how this was
+    // noticed.
+    "KafkaInventory::connect(",
     "AuthConfig::from_spec",
     "AuthConfig::Plaintext",
     "AuthConfig::ScramSha512",
 ];
+
+/// The constructors that DIAL. A subset of [`CONSTRUCTION_TOKENS`], named
+/// separately because the confinement clause below is about them and not about
+/// `from_spec`: a file may build an `AuthConfig` in several places, but the
+/// socket must be opened from exactly one function.
+const DIALLING_CONSTRUCTORS: [&str; 2] = ["RdKafkaReader::connect(", "KafkaInventory::connect("];
 
 /// The arms no call site may pin. A subset of [`CONSTRUCTION_TOKENS`], named
 /// separately because the offence is different: naming `from_spec` is the
@@ -506,7 +554,15 @@ const PINNED_ARMS: [&str; 2] = ["AuthConfig::Plaintext", "AuthConfig::ScramSha51
 /// absence is asserted rather than assumed: the walk covers weirkeeper's whole
 /// `src`, so a `RdKafkaReader::connect(` appearing there would be an
 /// unsanctioned site and would fail this guard by name.
-const CONSTRUCTION_SITES: [(&str, &str, &str); 4] = [
+const CONSTRUCTION_SITES: [(&str, &str, &str); 5] = [
+    (
+        "crates/logweir/src/check/kafka.rs",
+        "pub fn dial(",
+        "`check::kafka::dial` — D2 §4.2's check runner IS a dial, for every plan kind that \
+         names a connection. Its pure halves (`auth_spec`, `auth_config`, `bootstrap`) take a \
+         `&ConnectionPlan` and return a value, and every check rule above it takes a \
+         `&dyn InventoryProbe`",
+    ),
     (
         "crates/logweir/src/drill/mod.rs",
         "fn context(",
@@ -632,7 +688,7 @@ fn construction_offences(rel_path: &str, contents: &str) -> Vec<String> {
     }
     let dialling: Vec<String> = fn_bodies(&code)
         .into_iter()
-        .filter(|(_, body)| body.contains("RdKafkaReader::connect("))
+        .filter(|(_, body)| DIALLING_CONSTRUCTORS.iter().any(|t| body.contains(t)))
         .map(|(sig, _)| sig)
         .collect();
     if dialling.len() != 1 {
