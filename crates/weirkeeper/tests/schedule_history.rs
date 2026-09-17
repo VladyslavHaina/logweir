@@ -25,7 +25,7 @@ use weirkeeper::conditions::CONDITION_HISTORY_RETAINED;
 use weirkeeper::controllers::backup_schedule::{reconcile_schedule, scheduled_backup};
 use weirkeeper::controllers::schedule_history::{
     history_condition, inventory_due, may_use_label_selector, migration_patch, migration_refusal,
-    observe, MigrationRefusal, INVENTORY_PAGE_SIZE, MAX_INVENTORY_PAGES,
+    observe, MigrationRefusal, INVENTORY_PAGE_SIZE, MAX_INVENTORY_PAGES, MIGRATION_BLOCKED_SAMPLE,
 };
 use weirkeeper::crds::backup::Backup;
 use weirkeeper::crds::backup_schedule::{
@@ -375,14 +375,50 @@ fn migration_patch_removes_only_the_matching_owner_entry() {
         "the migration writes METADATA and nothing else: {patch}"
     );
 
-    // MUTANT: a patch that matched on UID alone. The `other` entry carries a
-    // different UID and the same kind, so a UID-only match would still remove
-    // one entry — but a `name`-only match would remove the third, which is
-    // another schedule's claim on this object.
+    // THE WHOLE TRIPLE, AND EACH THIRD OF IT ON ITS OWN.
+    //
+    // `controller: true` — the `other` entry above carries a real schedule UID
+    // and a real kind and is NOT a controller reference, so it is not an
+    // ownership claim and nothing may offer to remove it.
     assert!(
         migration_patch(&typed(&object), "other", OTHER_UID).is_none(),
-        "the `other` entry is not `controller: true`, so it is not a legacy ownership claim \
-         and this function must not offer to remove it"
+        "a non-controller entry is not a legacy ownership claim"
+    );
+
+    // `name` — this is the case `identity::legacy_owner_uid` calls an archive
+    // bug in capitals: a `Backup` whose `spec.scheduleRef` names `hist` while
+    // its controller ownerReference names `retired-nightly`. It is NOT a member
+    // of `hist` (membership rule 2 requires the name to match), so `hist`'s
+    // migration must not reach into it — detaching another schedule's claim is
+    // how one schedule comes to delete the other's garbage-collection anchor.
+    let mut other_name = legacy_backup(name, "hist", UID, "Succeeded");
+    other_name["metadata"]["ownerReferences"][0]["name"] = serde_json::json!("retired-nightly");
+    assert!(
+        migration_patch(&typed(&other_name), "hist", UID).is_none(),
+        "the owner entry names another schedule, so it is not this schedule's to remove"
+    );
+    assert!(
+        !is_run_of_schedule(&typed(&other_name), "hist", UID),
+        "and the object is not this schedule's run either — which is exactly why removing \
+         the entry would be reaching into somebody else's object"
+    );
+
+    // `kind` and `apiVersion` — a controller reference from another API, with
+    // the same name and the same UID string. Kubernetes UIDs do not collide,
+    // but this function is what decides whether an ownerReference is deleted
+    // from an object, and "the UID looked familiar" is not a reason to.
+    let mut other_kind = legacy_backup(name, "hist", UID, "Succeeded");
+    other_kind["metadata"]["ownerReferences"][0]["kind"] = serde_json::json!("RehearsalSchedule");
+    assert!(
+        migration_patch(&typed(&other_kind), "hist", UID).is_none(),
+        "a different kind is a different owner"
+    );
+    let mut other_group = legacy_backup(name, "hist", UID, "Succeeded");
+    other_group["metadata"]["ownerReferences"][0]["apiVersion"] =
+        serde_json::json!("example.com/v1");
+    assert!(
+        migration_patch(&typed(&other_group), "hist", UID).is_none(),
+        "and a different API group is a different owner"
     );
 }
 
@@ -963,6 +999,49 @@ async fn a_422_legacy_object_reports_migration_blocked() {
             "{code}: and the condition names it too"
         );
     }
+
+    // THE SAMPLE IS BOUNDED; THE COUNT IS NOT. `migrationBlocked` names at most
+    // ten (D1 §6.2 step 4), but `legacyOwnedRuns` is the TOTAL an operator reads
+    // before deciding whether an ordinary `kubectl delete` is safe. Reading it
+    // off the truncated sample would report ten owned runs on a schedule with
+    // twenty-five — an undercount of exactly the number the decision turns on.
+    let names: Vec<String> = (0..25)
+        .map(|i| format!("logweir-backup-hist-2026091{}-00000{}", i / 10, i % 10))
+        .collect();
+    let mut routes = vec![list_route(
+        names
+            .iter()
+            .map(|n| legacy_backup(n, "hist", UID, "Succeeded"))
+            .collect(),
+        None,
+    )];
+    routes.extend(
+        names
+            .iter()
+            .map(|n| patch_route(n, 422, api_error(422, "Invalid"))),
+    );
+    let (client, _rec, _bodies) = mock_client_recording_bodies(routes);
+    let observed = observe(&backups(&client), None, "hist", UID, None, now)
+        .await
+        .expect("twenty-five refusals are a condition, not an error");
+    assert_eq!(
+        observed
+            .history
+            .migration_blocked
+            .as_deref()
+            .unwrap_or_default()
+            .len(),
+        MIGRATION_BLOCKED_SAMPLE,
+        "the SAMPLE is ten"
+    );
+    assert_eq!(
+        observed.history.legacy_owned_runs, 25,
+        "and the COUNT is all of them"
+    );
+    assert_eq!(
+        observed.history.legacy_migratable_runs, 0,
+        "none of which the next pass may retry faster than the inventory interval"
+    );
 }
 
 /// **§12 PLAT-05.2, "Unrelated-resource preservation" (double).**

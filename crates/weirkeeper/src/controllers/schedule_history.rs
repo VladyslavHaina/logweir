@@ -700,8 +700,13 @@ async fn inventory(
             .saturating_sub(i64::try_from(MAX_MIGRATIONS_PER_PASS).unwrap_or(i64::MAX))
             .max(0),
     );
+    // THE COUNT IS TAKEN BEFORE THE SAMPLE IS TRUNCATED. `migrationBlocked` is
+    // a bounded SAMPLE (D1 §6.2 step 4 names up to ten); `legacyOwnedRuns` is a
+    // TOTAL, and reading it off the truncated list would report ten owned runs
+    // on a schedule with twenty-five — an undercount of exactly the thing an
+    // operator checks before deleting.
+    let blocked_count = i64::try_from(blocked.len()).unwrap_or(i64::MAX);
     blocked.truncate(MIGRATION_BLOCKED_SAMPLE);
-    let blocked_count = i64::try_from(blocked.len()).unwrap_or(0);
 
     let history = ScheduleHistory {
         run_count,
