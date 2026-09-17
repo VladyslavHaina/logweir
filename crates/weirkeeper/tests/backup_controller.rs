@@ -6589,6 +6589,123 @@ fn a_recreated_job_reads_only_its_own_pod() {
     }
 }
 
+/// **Two pods claiming one Job is a REFUSAL, not a ranking** — review finding
+/// **R1**.
+///
+/// An `ownerReference` is ordinary metadata written by whoever creates the
+/// pod: the API server does not check that the owner exists, that the UID is
+/// right, or that the creator may claim it. So a tenant who can read the Job's
+/// `metadata.uid` can mint a pod that passes all four conditions — and, being
+/// created after the genuine runner pod, it is BY CONSTRUCTION the newer one.
+/// An earlier version of this module handed that case to `newest`, which
+/// handed the read to the planter every single time, silently, with no
+/// `ForeignPodIgnored` line because the pod passed.
+///
+/// `backoffLimit: 0` plus `restartPolicy: Never` means the job controller
+/// cannot produce a second pod for one Job, so a second claimant is
+/// illegitimate by construction and the only safe answer is to read neither.
+///
+/// KILLS: newest-wins restored; oldest-wins (the mirror bug — a planter who
+/// creates their pod before the Job wins that one); returning one claimant and
+/// reporting the other as foreign; dropping the claimants from the report;
+/// letting a pod that FAILED the owner check contest the Job.
+#[test]
+fn two_pods_claiming_one_job_are_both_refused() {
+    let owner = Some(("batch/v1", "Job", JOB_UID, true));
+    let genuine = owner_pod("run-genuine", owner, Some("2026-11-09T03:17:00Z"));
+    let forged = owner_pod("run-forged", owner, Some("2026-11-09T03:19:00Z"));
+
+    for (label, listed) in [
+        ("forged last", vec![genuine.clone(), forged.clone()]),
+        ("forged first", vec![forged.clone(), genuine.clone()]),
+    ] {
+        let seen = cpod::claimants(&listed, JOB_UID);
+        assert!(
+            seen.owned.is_none(),
+            "{label}: NOTHING is read when the Job is contested — the forged pod is the newer \
+             one by construction, so ranking hands the read to whoever planted it"
+        );
+        let mut named: Vec<String> = seen
+            .contested
+            .iter()
+            .filter_map(|p| p.metadata.name.clone())
+            .collect();
+        named.sort();
+        assert_eq!(
+            named,
+            vec!["run-forged".to_string(), "run-genuine".to_string()],
+            "{label}: BOTH claimants are reported. Which of them is the real runner pod is \
+             exactly what this controller cannot tell, so naming one would suggest otherwise"
+        );
+        assert!(
+            seen.foreign.is_empty(),
+            "{label}: a rival claimant is not a `foreign` pod — it passed the owner check, and \
+             that is the point"
+        );
+    }
+
+    // ONE claimant plus any number of strangers is still the ordinary case.
+    let with_strangers = [
+        genuine.clone(),
+        owner_pod("ownerless", None, Some("2026-11-09T03:20:00Z")),
+        owner_pod(
+            "other-job",
+            Some(("batch/v1", "Job", "another-uid", true)),
+            Some("2026-11-09T03:21:00Z"),
+        ),
+    ];
+    let seen = cpod::claimants(&with_strangers, JOB_UID);
+    assert_eq!(
+        seen.owned.and_then(|p| p.metadata.name.clone()),
+        Some("run-genuine".to_string()),
+        "a pod that FAILS the owner check is not a claimant, so it cannot contest the Job — \
+         otherwise anyone able to set the LABEL could shut every run in the namespace down"
+    );
+    assert!(seen.contested.is_empty());
+    assert_eq!(seen.foreign.len(), 2);
+}
+
+/// `newest` is still a total order, and still exercised — it is no longer what
+/// resolves a contested Job (see [`two_pods_claiming_one_job_are_both_refused`])
+/// but it is the documented answer for a caller whose Job legitimately owns
+/// several pods.
+///
+/// KILLS: picking the oldest; a same-second tie resolved the other way; a
+/// timestamp-less pod winning a tie-break.
+#[test]
+fn newest_is_a_total_order_over_creation_time_then_name() {
+    let owner = Some(("batch/v1", "Job", JOB_UID, true));
+    let first = owner_pod("run-aaaaa", owner, Some("2026-11-09T03:17:00Z"));
+    let replacement = owner_pod("run-zzzzz", owner, Some("2026-11-09T03:18:00Z"));
+
+    for listed in [vec![&first, &replacement], vec![&replacement, &first]] {
+        assert_eq!(
+            cpod::newest(&listed).and_then(|p| p.metadata.name.clone()),
+            Some("run-zzzzz".to_string()),
+            "the NEWEST by creationTimestamp, whichever order the listing arrived in"
+        );
+    }
+
+    // A `Time` is second-granular, so two pods created in the same second is
+    // not exotic; the name breaks the tie and the answer is still one value.
+    let a = owner_pod("run-aaaaa", owner, Some("2026-11-09T03:17:00Z"));
+    let b = owner_pod("run-bbbbb", owner, Some("2026-11-09T03:17:00Z"));
+    assert_eq!(
+        cpod::newest(&[&a, &b]).and_then(|p| p.metadata.name.clone()),
+        Some("run-bbbbb".to_string()),
+        "the lexically greatest name among pods of the same second — any total order would do, \
+         but it has to BE one"
+    );
+
+    // And a pod with no creationTimestamp never wins against one that has it.
+    let undated = owner_pod("run-zzzzzz-undated", owner, None);
+    assert_eq!(
+        cpod::newest(&[&undated, &first]).and_then(|p| p.metadata.name.clone()),
+        Some("run-aaaaa".to_string()),
+        "the API server always sets creationTimestamp, so its absence means a fabricated object"
+    );
+}
+
 /// A hostile annotation on a RUNNING typed Backup is surfaced once, and a steady
 /// pass over that object writes nothing.
 ///
