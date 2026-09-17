@@ -6383,6 +6383,12 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["create", "get"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustpolicies"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustpolicies/status"]
+    verbs: ["patch"]
 ---
 # Source: logweir/templates/human-roles.yaml
 apiVersion: rbac.authorization.k8s.io/v1

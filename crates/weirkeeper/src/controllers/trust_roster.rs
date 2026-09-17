@@ -154,23 +154,39 @@ pub fn status_for(
     verdict: &RosterVerdict,
     now: DateTime<Utc>,
 ) -> TrustRosterStatus {
+    let existing = roster.status.as_ref().and_then(|s| s.conditions.as_ref());
+    // EVERY CONDITION THIS RECONCILER DOES NOT OWN, CARRIED FORWARD — PLAT-19.1.
+    //
+    // A JSON merge patch REPLACES arrays (RFC 7386), so a status carrying only
+    // `[Loaded]` DELETES whatever else is on the object. Until PLAT-19.1
+    // nothing else wrote here and the array could be built from scratch;
+    // `controllers::trust_policy` now writes `Superseded` (D3 §7.5), and
+    // without this carry the two reconcilers would delete each other's
+    // condition on every pass — the same hot loop `verification::carry_verified`
+    // was written for, measured at 133 reconciles a second (erratum E11(d)).
+    let mut conditions: Vec<Condition> = existing
+        .map(|c| {
+            c.iter()
+                .filter(|c| c.r#type != CONDITION_LOADED)
+                .cloned()
+                .collect()
+        })
+        .unwrap_or_default();
+    conditions.push(merge_condition(
+        current_condition(existing, CONDITION_LOADED),
+        Condition {
+            r#type: CONDITION_LOADED.to_string(),
+            status: if verdict.loaded { "True" } else { "False" }.to_string(),
+            observed_generation: roster.metadata.generation,
+            last_transition_time: Some(now),
+            reason: Some(verdict.reason.to_string()),
+            message: Some(verdict.message.clone()),
+        },
+    ));
     TrustRosterStatus {
         loaded: Some(verdict.loaded),
         expired_key_ids: Some(verdict.expired_key_ids.clone()),
-        conditions: Some(vec![merge_condition(
-            current_condition(
-                roster.status.as_ref().and_then(|s| s.conditions.as_ref()),
-                CONDITION_LOADED,
-            ),
-            Condition {
-                r#type: CONDITION_LOADED.to_string(),
-                status: if verdict.loaded { "True" } else { "False" }.to_string(),
-                observed_generation: roster.metadata.generation,
-                last_transition_time: Some(now),
-                reason: Some(verdict.reason.to_string()),
-                message: Some(verdict.message.clone()),
-            },
-        )]),
+        conditions: Some(conditions),
     }
 }
 

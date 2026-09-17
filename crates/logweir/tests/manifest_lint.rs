@@ -532,6 +532,8 @@ fn every_granted_verb_has_a_caller() {
             "kafkaclusters" => "KafkaCluster",
             "restores" => "Restore",
             "trustrosters" => "TrustRoster",
+            // PLAT-19.1, the other direction of the same mapping.
+            "trustpolicies" => "TrustPolicy",
             other => panic!(
                 "role.yaml grants a verb on `{other}`, which this test cannot map to an \
                  `Api<T>`. Add the mapping — a resource with no type is a grant nobody can \
@@ -722,6 +724,11 @@ fn every_call_site_has_a_grant() {
             "KafkaCluster" => ("logweir.dev", "kafkaclusters"),
             "Restore" => ("logweir.dev", "restores"),
             "TrustRoster" => ("logweir.dev", "trustrosters"),
+            // PLAT-19.1. Added with the `TrustPolicy` reconciler, which is
+            // what makes this mapping necessary: the panic below is a HARD
+            // failure on an unmapped type, so a new `Api<T>` cannot reach a
+            // release with its grant unchecked.
+            "TrustPolicy" => ("logweir.dev", "trustpolicies"),
             "Job" => ("batch", "jobs"),
             "ConfigMap" => ("", "configmaps"),
             "Pod" => ("", "pods"),
@@ -908,6 +915,34 @@ fn the_four_cluster_roles_are_exactly_as_specified() {
         (v(&[""]), v(&["pods"]), v(&["list"])), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         (v(&[""]), v(&["pods/log"]), v(&["get"])),
         (v(&[""]), v(&["configmaps"]), v(&["create", "get"])),
+        // PLAT-19.1 — the `TrustPolicy` reconciler's own two rows, added by the
+        // wave-1 trust worker because `every_call_site_has_a_grant` above is a
+        // hard failure without them. TWO SEPARATE RULES rather than a seventh
+        // entry in the six-kinds rule: that list is shared verbatim with
+        // `viewer_role.yaml`, and whether an ordinary viewer may read a trust
+        // policy is the wave-4 RBAC worker's decision, not this one's.
+        //
+        // NO `get`. Nothing in the crate calls `Api<TrustPolicy>::get` — a
+        // namespace never names its own trust (D3 §7.1), so there is no name
+        // to get, and the conflict rule needs the whole set anyway. A granted
+        // `get` here would be a verb with no caller, which is exactly what
+        // `every_granted_verb_has_a_caller` above exists to refuse.
+        //
+        // NO `update` ANYWHERE. `update` on `trustpolicies` is PLAT-19.1's
+        // authorized-update half and belongs to the new `logweir-trust-admin`
+        // ClusterRole, which the wave-4 worker adds. The controller holds
+        // none of it: it reads policies and writes their status, and an
+        // administrator is the only thing that edits a key's lifecycle.
+        (
+            v(&["logweir.dev"]),
+            v(&["trustpolicies"]),
+            v(&["list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+        ),
+        (
+            v(&["logweir.dev"]),
+            v(&["trustpolicies/status"]),
+            v(&["patch"]),
+        ),
     ];
     assert_eq!(
         rules_of("config/rbac/role.yaml", "weirkeeper"),

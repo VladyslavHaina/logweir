@@ -232,3 +232,30 @@ rules:
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["create", "get"]
+  # PLAT-19.1 — THE `TrustPolicy` RECONCILER'S OWN ROWS, AND NOTHING MORE.
+  #
+  # Added here by the wave-1 trust worker because `manifest_lint.rs`'s
+  # `every_call_site_has_a_grant` is a hard failure otherwise: the reconciler
+  # calls `Api<TrustPolicy>::list` and `::patch_status`, and `Controller::new`
+  # over the same handle LISTs and WATCHes. The rest of PLAT-19.1's RBAC — the
+  # viewer and operator reads, and the new `logweir-trust-admin` ClusterRole
+  # that is the only holder of `update` on `trustpolicies` — belongs to the
+  # D3 wave-4 RBAC/chart/docs worker and is deliberately NOT here.
+  #
+  # A SEPARATE RULE RATHER THAN A SEVENTH ENTRY IN THE SIX-KINDS RULE ABOVE,
+  # for two reasons. The six-kinds list is shared, verbatim, with
+  # `viewer_role.yaml`, and whether an ordinary viewer may read a trust policy
+  # is a decision for the worker that owns both files. And `get` is absent
+  # here: nothing in this crate calls `Api<TrustPolicy>::get` — a namespace
+  # never names its own trust (D3 §7.1), so there is no name to get and the
+  # conflict rule needs the whole set anyway. A granted `get` would be a verb
+  # with no caller, which is the defect critique B M18 names.
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustpolicies"]
+    verbs: ["list", "watch"]
+  # The status subresource, `patch` only, exactly like the six above: every
+  # write is `Api::patch_status` with `Patch::Merge`, and no reconciler calls
+  # `Api::replace`.
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustpolicies/status"]
+    verbs: ["patch"]

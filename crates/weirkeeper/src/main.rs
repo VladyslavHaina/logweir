@@ -327,6 +327,15 @@ fn run() -> ExitCode {
         controllers.push(Box::pin(weirkeeper::controllers::trust_roster::controller(
             client.clone(),
         )));
+        // PLAT-19.1 / decision D3 §7.1 — ONE LINE, at the registration point
+        // this file's header reserves for exactly that. The `TrustPolicy`
+        // reconciler parses each key, resolves it against the clock, reports
+        // which namespaces this policy governs and which two policies contest,
+        // and writes `Superseded` onto the roster it replaces. It holds no
+        // archive handle and creates no Job, so it takes only the client.
+        controllers.push(Box::pin(weirkeeper::controllers::trust_policy::controller(
+            client.clone(),
+        )));
         controllers.push(Box::pin(weirkeeper::controllers::approval::controller(
             client.clone(),
         )));

@@ -157,6 +157,12 @@ pub mod verification;
 /// have that path move.
 pub use controllers::approval::ROSTER_NAME;
 
+/// PLAT-19.1 / decision D3 §7.1 and §7.5: which `TrustPolicy` a namespace
+/// resolves to, the synthesised `legacy-roster-v1`, and the two seams
+/// (`decide_for`, `may_sign_new_for`) that `verification` and
+/// `controllers::approval` call in place of reading the roster directly.
+pub mod trust;
+
 /// Install the process-level rustls [`CryptoProvider`] this binary's TLS stack
 /// needs, and report whether this call was the one that installed it.
 ///

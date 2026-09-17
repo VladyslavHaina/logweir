@@ -77,6 +77,7 @@ pub mod backup_destination;
 pub mod backup_schedule;
 pub mod kafka_cluster;
 pub mod restore;
+pub mod trust_policy;
 pub mod trust_roster;
 
 use std::future::Future;
