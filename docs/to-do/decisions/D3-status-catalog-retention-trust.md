@@ -65,7 +65,7 @@ PLAT-16.1, PLAT-16.2 and PLAT-19.1, plus the ADR 0008 Amendment A kind decision 
    delete-free (amended G-RET gate).
 6. **Trust lifecycle (PLAT-19.1).** New cluster-scoped kind `TrustPolicy` replaces the implicit
    `TrustRoster/default`: explicit namespace bindings, append-only key entries with usage
-   (`EvidenceSigning` | `GovernedApproval` | `ConfirmationIssuer`), validity, and monotonic
+   (`EvidenceSigning` | `GovernedApproval` | `ConsoleConfirmation`), validity, and monotonic
    lifecycle (`Active → Retired → Revoked`) enforced by CEL transition rules. Retirement keeps old
    evidence valid (`trust.basis: Historical`); compromise revocation invalidates evidence without an
    independent pre-revocation observation. Missing policy synthesizes `legacy-roster-v1` from the
@@ -1159,13 +1159,13 @@ plus `evaluatedAt`, so a consumer can tell "not evaluated" from "evaluated and v
 |---|---|---|
 | `EvidenceSigning` | runner signing key (the installation identity, `logweir-signing-key`) | verify receipts, scorecards, teardown attestations, catalog records, retention records |
 | `GovernedApproval` | human approvers, on their own machines | sign approval and standing-authorization documents |
-| `ConfirmationIssuer` | `logweir-api`'s confirmation key (PLAT-19.2 ordinary mode) | attest the authenticated requester |
+| `ConsoleConfirmation` (amended 2026-09-17: the landed CRD spells this usage `ConsoleConfirmation`; the decision's earlier name `ConfirmationIssuer` is retired because an immutable enum value cannot be renamed once an object exists) | `logweir-api`'s confirmation key (PLAT-19.2 ordinary mode) | attest the authenticated requester |
 
 CEL forbids combining `EvidenceSigning` with either approval usage, and forbids combining
-`GovernedApproval` with `ConfirmationIssuer`. This turns today's labelled
+`GovernedApproval` with `ConsoleConfirmation`. This turns today's labelled
 `selfAttestedRisk` (`controllers/approval.rs:485`) into an enforced separation for policy-backed
 namespaces; the label remains for legacy-roster namespaces, where the two lists may overlap.
-A `ConfirmationIssuer` key is never synthesized from the legacy roster, so an old controller
+A `ConsoleConfirmation` key is never synthesized from the legacy roster, so an old controller
 reached by rollback cannot mistake an ordinary confirmation for a governed approval (P17's
 fail-closed rule).
 
