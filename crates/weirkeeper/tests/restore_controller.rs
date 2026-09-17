@@ -4590,6 +4590,67 @@ fn the_real_oracle_reads_one_object_and_an_unreadable_one_is_not_observed() {
 /// the status is patchable. No admission routes: the Job already exists, so
 /// the reconcile never reaches the approval.
 fn running_routes() -> Vec<Route> {
+    running_routes_with(pod_list_running(), progress_log("6:restore"))
+}
+
+/// A pod list holding one owned pod whose `runner` container is RUNNING — what
+/// D3 §2.3's derivation sees on the ordinary in-flight pass. The sidecar stays
+/// at index 0 for [`pod_list_terminated`]'s reason.
+fn pod_list_running() -> String {
+    let owners = owned_by_job();
+    format!(
+        r#"{{"apiVersion":"v1","kind":"PodList","metadata":{{}},"items":[
+  {{"apiVersion":"v1","kind":"Pod",
+    "metadata":{{"name":"{POD}","namespace":"{NS}","ownerReferences":{owners},
+      "creationTimestamp":"2026-09-10T11:58:00Z",
+      "labels":{{"{JOB_NAME_LABEL}":"{NAME}","{JOB_NAME_LABEL_LEGACY}":"{NAME}"}}}},
+    "spec":{{"containers":[]}},
+    "status":{{"phase":"Running",
+      "conditions":[{{"type":"PodScheduled","status":"True",
+        "lastTransitionTime":"2026-09-10T11:58:05Z"}}],
+      "containerStatuses":[
+      {{"name":"log-shipper","ready":true,"restartCount":0,"image":"x","imageID":"x",
+        "state":{{"running":{{"startedAt":"2026-09-10T11:58:10Z"}}}}}},
+      {{"name":"runner","ready":true,"restartCount":0,"image":"x","imageID":"x",
+        "state":{{"running":{{"startedAt":"2026-09-10T11:58:12Z"}}}}}}
+    ]}}}}]}}"#
+    )
+}
+
+/// A pod list holding one owned pod whose `runner` container is WAITING with
+/// the kubelet's own `reason` and `message`.
+fn pod_list_waiting(reason: &str, message: &str) -> String {
+    let owners = owned_by_job();
+    format!(
+        r#"{{"apiVersion":"v1","kind":"PodList","metadata":{{}},"items":[
+  {{"apiVersion":"v1","kind":"Pod",
+    "metadata":{{"name":"{POD}","namespace":"{NS}","ownerReferences":{owners},
+      "creationTimestamp":"2026-09-10T11:58:00Z",
+      "labels":{{"{JOB_NAME_LABEL}":"{NAME}","{JOB_NAME_LABEL_LEGACY}":"{NAME}"}}}},
+    "spec":{{"containers":[]}},
+    "status":{{"phase":"Pending",
+      "conditions":[{{"type":"PodScheduled","status":"True",
+        "lastTransitionTime":"2026-09-10T11:58:05Z"}}],
+      "containerStatuses":[
+      {{"name":"log-shipper","ready":false,"restartCount":0,"image":"x","imageID":"x",
+        "state":{{"running":{{"startedAt":"2026-09-10T11:58:10Z"}}}}}},
+      {{"name":"runner","ready":false,"restartCount":0,"image":"x","imageID":"x",
+        "state":{{"waiting":{{"reason":"{reason}","message":"{message}"}}}}}}
+    ]}}}}]}}"#
+    )
+}
+
+/// The progress channel a v2 runner prints at the top of its log — D3 §2.4.
+fn progress_log(phase: &str) -> String {
+    format!("progress-contract=2\nprogress-phase=0:admit\nprogress-phase={phase}\n")
+}
+
+/// [`running_routes`] with the pod list and the pod log as parameters.
+///
+/// **THE POD LIST, THE LOG AND THE EVENTS ROUTES ARE NEW IN D3 W2
+/// (PLAT-14.1).** Before §2.3 the running pass read the Job and nothing else;
+/// it now derives the one diagnosis for every Job-backed run.
+fn running_routes_with(pods: String, log: String) -> Vec<Route> {
     vec![
         Route {
             method: "GET",
@@ -4598,10 +4659,34 @@ fn running_routes() -> Vec<Route> {
             body: running_job_body(),
         },
         Route {
+            method: "GET",
+            path_suffix: "/pods",
+            status: 200,
+            body: pods,
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/log",
+            status: 200,
+            body: log,
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/events",
+            status: 200,
+            body: r#"{"apiVersion":"v1","kind":"EventList","metadata":{},"items":[]}"#.to_string(),
+        },
+        Route {
             method: "PATCH",
             path_suffix: "/restores/logweir-restore-incident-4471/status",
             status: 200,
             body: restore_json(PLAN_BYTES, APPROVAL, NAME),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/jobs/logweir-restore-incident-4471",
+            status: 200,
+            body: running_job_body(),
         },
     ]
 }
@@ -4832,7 +4917,11 @@ async fn a_steady_restore_issues_no_second_status_patch() {
         &client,
         &unobserved_scorecard,
         &unverified_evidence,
-        now() + chrono::Duration::minutes(1),
+        // ONE REQUEUE LATER (`REQUEUE_SECS` = 15), and INSIDE D3 §2.2's 60 s
+        // heartbeat window: `progress.lastObservedTime` is rewritten at most
+        // once per minute, so a pass at exactly +60 s would legitimately write
+        // one patch. That rule has its own row on the `Backup` twin.
+        now() + chrono::Duration::seconds(15),
     )
     .await
     .expect("the second reconcile succeeds");
@@ -5299,5 +5388,163 @@ fn a_bundle_refusal_names_the_object_an_operator_would_edit() {
             .to_string()
             .contains("the TrustRoster 'default' does not carry"),
         "got {error}"
+    );
+}
+
+// ===========================================================================
+// D3 §13 — PLAT-14.1's `Restore` half
+// ===========================================================================
+
+/// **D3 §2.2's scalar-reason rule, through the reconciler.** While
+/// `RunnerReady` is `False`, `status.reason` — the REASON printer column —
+/// carries the `RunnerReady` reason, not `JobCreated`.
+///
+/// This EXTENDS `every_status_write_sets_the_scalar_reason`, it does not
+/// weaken it: the field is still always set, still CamelCase, and still
+/// VERBATIM the reason of a condition in the same patch.
+#[tokio::test]
+async fn the_reason_column_names_what_the_runner_is_stuck_on_and_not_job_created() {
+    let (client, _rec, bodies) = mock_client_recording_bodies(running_routes_with(
+        pod_list_waiting(
+            "CreateContainerConfigError",
+            "secret \\\"logweir-restore-incident-4471-approval-bundle\\\" not found",
+        ),
+        String::new(),
+    ));
+    reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now() + chrono::Duration::minutes(5),
+    )
+    .await
+    .expect("the reconcile succeeds");
+    let status = &patched_statuses(&bodies.lock().expect("the body recorder is readable"))[0];
+    assert_eq!(
+        status["reason"].as_str(),
+        Some("CredentialReferenceMissing"),
+        "review finding M2 one layer down: `kubectl get restores` reading `JobCreated` for the \
+         four minutes a pod spends unable to mount its approval bundle is a blank answer to the \
+         only question being asked. Got {status}"
+    );
+    // …and it IS a condition's own reason in this very patch.
+    let reasons: Vec<String> = conditions_of(status)
+        .into_iter()
+        .map(|(_, _, reason)| reason)
+        .collect();
+    assert!(
+        reasons.contains(&"CredentialReferenceMissing".to_string()),
+        "not a third vocabulary beside errata E5b's two: {reasons:?}"
+    );
+    assert_eq!(
+        status["progress"]["diagnostics"][0]["code"].as_str(),
+        Some("CredentialSecretNotFound"),
+        "and the DIAGNOSTIC keeps the specific code: \"the Secret does not exist\" and \"the key \
+         is not in it\" are two different repairs"
+    );
+    assert_eq!(status["progress"]["stage"].as_str(), Some("Preparing"));
+    assert_eq!(
+        status["phase"].as_str(),
+        Some("Running"),
+        "nothing about the OUTCOME changed: the Job has not failed"
+    );
+}
+
+/// The `Restore` half of D3 §2.4: the runner's own phase reaches the status,
+/// and phase 7 is `Verifying`.
+#[tokio::test]
+async fn the_restore_runners_phase_reaches_the_status_and_phase_seven_is_verifying() {
+    for (phase, stage) in [("6:restore", "Running"), ("7:verify", "Verifying")] {
+        let (client, _rec, bodies) = mock_client_recording_bodies(running_routes_with(
+            pod_list_running(),
+            progress_log(phase),
+        ));
+        reconcile_restore(
+            &restore(),
+            &client,
+            &unobserved_scorecard,
+            &unverified_evidence,
+            now(),
+        )
+        .await
+        .expect("the reconcile succeeds");
+        let status = &patched_statuses(&bodies.lock().expect("the body recorder is readable"))[0];
+        let (number, name) = phase.split_once(':').expect("the fixture's own grammar");
+        assert_eq!(
+            status["progress"]["runnerPhase"]["number"]
+                .as_str()
+                .map_or_else(
+                    || status["progress"]["runnerPhase"]["number"].as_i64(),
+                    |s| s.parse().ok()
+                ),
+            number.parse::<i64>().ok(),
+            "the phase NUMBER, from the runner's own line: {status}"
+        );
+        assert_eq!(
+            status["progress"]["runnerPhase"]["name"].as_str(),
+            Some(name)
+        );
+        assert_eq!(
+            status["progress"]["stage"].as_str(),
+            Some(stage),
+            "D3 §2.5: restore phase 7 is the one the console shows as verifying"
+        );
+        assert_eq!(status["reason"].as_str(), Some("JobCreated"));
+    }
+}
+
+/// **D3 §13's "Completed Job cleanup" repair row, the `Restore` half.**
+///
+/// A terminal `Restore` requeues `AwaitChange`, so this is the ONE pass that
+/// will ever look at the Job again: repaired here, or never.
+#[tokio::test]
+async fn a_terminal_restore_whose_job_lost_its_ttl_has_it_repaired() {
+    let mut terminal = restore();
+    terminal.status = Some(RestoreStatus {
+        phase: Some("Succeeded".to_string()),
+        exit_code: Some(0),
+        ..RestoreStatus::default()
+    });
+    let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes(
+        pod_list_terminated(0),
+        log_body(""),
+        "Complete",
+    ));
+    let outcome = reconcile_restore(
+        &terminal,
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile succeeds");
+    assert!(outcome.ttl_patched, "the missing TTL is repaired");
+    let bodies = bodies
+        .lock()
+        .expect("the body recorder is readable")
+        .clone();
+    assert_eq!(
+        patched_statuses(&bodies).len(),
+        0,
+        "and step 2b's guard is untouched: the pod is not read, the exit code is not re-derived \
+         and no status is written"
+    );
+    assert!(
+        !bodies.iter().any(|b| b.uri.contains("/pods")),
+        "no pod list and no log read"
+    );
+    let patch: Value = serde_json::from_str(
+        &bodies
+            .iter()
+            .find(|b| b.method == "PATCH" && b.uri.contains("/jobs/"))
+            .expect("the Job is patched")
+            .body,
+    )
+    .expect("the patch is JSON");
+    assert!(
+        patch["spec"]["ttlSecondsAfterFinished"].as_i64().is_some(),
+        "with the configured TTL and nothing else: {patch}"
     );
 }

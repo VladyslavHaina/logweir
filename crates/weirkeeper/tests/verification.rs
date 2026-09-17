@@ -749,6 +749,14 @@ fn observed_archive(
             },
             covered: Some((1_760_000_000_000, 1_760_000_060_000)),
             receipt_sha256: Some(RECEIPT_DIGEST.to_string()),
+            // D3 W2 (PLAT-14.1, defect STATUS-RECORDS): two additive fields
+            // on the observation. `None` here on purpose — this fixture is
+            // about the VERIFICATION path, and a `Valid` verdict with nothing
+            // observed must write neither `status.records` nor
+            // `status.capture`. `tests/backup_controller.rs` owns the rows
+            // where they ARE observed.
+            records: None,
+            capture: None,
         })
     })
 }

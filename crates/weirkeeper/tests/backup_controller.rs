@@ -411,6 +411,62 @@ fn pod_list_terminated_owned_by(exit_code: i32, owners: &str) -> String {
     )
 }
 
+/// A pod list holding one owned pod whose `runner` container is RUNNING —
+/// what D3 §2.3's derivation sees on the ordinary in-flight pass.
+///
+/// The sidecar stays at index 0 for [`pod_list_terminated`]'s reason: a
+/// fixture whose `runner` is first cannot tell a by-name reader from a
+/// by-index one.
+fn pod_list_running() -> String {
+    let owners = owned_by_job();
+    format!(
+        r#"{{"apiVersion":"v1","kind":"PodList","metadata":{{}},"items":[
+  {{"apiVersion":"v1","kind":"Pod",
+    "metadata":{{"name":"{POD}","namespace":"{NS}","ownerReferences":{owners},
+      "creationTimestamp":"2026-11-09T03:17:00Z",
+      "labels":{{"{JOB_NAME_LABEL}":"{NAME}","{JOB_NAME_LABEL_LEGACY}":"{NAME}"}}}},
+    "spec":{{"containers":[]}},
+    "status":{{"phase":"Running",
+      "conditions":[{{"type":"PodScheduled","status":"True",
+        "lastTransitionTime":"2026-11-09T03:17:05Z"}}],
+      "containerStatuses":[
+      {{"name":"log-shipper","ready":true,"restartCount":0,"image":"x","imageID":"x",
+        "state":{{"running":{{"startedAt":"2026-11-09T03:17:10Z"}}}}}},
+      {{"name":"runner","ready":true,"restartCount":0,"image":"x","imageID":"x",
+        "state":{{"running":{{"startedAt":"2026-11-09T03:17:12Z"}}}}}}
+    ]}}}}]}}"#
+    )
+}
+
+/// A pod list holding one owned pod whose `runner` container is WAITING with
+/// `reason`/`message` — the kubelet's own words, which D2's classification
+/// table turns into a code.
+fn pod_list_waiting(reason: &str, message: &str) -> String {
+    let owners = owned_by_job();
+    format!(
+        r#"{{"apiVersion":"v1","kind":"PodList","metadata":{{}},"items":[
+  {{"apiVersion":"v1","kind":"Pod",
+    "metadata":{{"name":"{POD}","namespace":"{NS}","ownerReferences":{owners},
+      "creationTimestamp":"2026-11-09T03:17:00Z",
+      "labels":{{"{JOB_NAME_LABEL}":"{NAME}","{JOB_NAME_LABEL_LEGACY}":"{NAME}"}}}},
+    "spec":{{"containers":[]}},
+    "status":{{"phase":"Pending",
+      "conditions":[{{"type":"PodScheduled","status":"True",
+        "lastTransitionTime":"2026-11-09T03:17:05Z"}}],
+      "containerStatuses":[
+      {{"name":"log-shipper","ready":false,"restartCount":0,"image":"x","imageID":"x",
+        "state":{{"running":{{"startedAt":"2026-11-09T03:17:10Z"}}}}}},
+      {{"name":"runner","ready":false,"restartCount":0,"image":"x","imageID":"x",
+        "state":{{"waiting":{{"reason":"{reason}","message":"{message}"}}}}}}
+    ]}}}}]}}"#
+    )
+}
+
+/// The progress channel a v2 runner prints at the top of its log — D3 §2.4.
+fn progress_log(phase: &str) -> String {
+    format!("progress-contract=2\nprogress-phase=-1:admit\nprogress-phase={phase}\n")
+}
+
 /// An empty pod list — the "the selector matched nothing" answer.
 const EMPTY_POD_LIST: &str = r#"{"apiVersion":"v1","kind":"PodList","metadata":{},"items":[]}"#;
 
@@ -2046,8 +2102,8 @@ fn every_exit_code_maps_to_its_wire_reason() {
     );
     assert_eq!(
         TERMINAL_STATES.len(),
-        35,
-        "the thirty-five terminal states that are NOT an exit code — the original ten, plus \
+        39,
+        "the thirty-nine terminal states that are NOT an exit code — the original ten, plus \
          `NameTooLong` (errata E5d) and `ReferentNotFound` / `PlanConfigMapConflict` / \
          `ApprovalBundleConflict` / `ApprovalSubjectMismatch` / `JobNameConflict` / \
          `ArchiveUrlUnreadable` (errata E5a), plus `PlanHashMismatch` / `ClusterNotReachable` \
@@ -2065,8 +2121,33 @@ fn every_exit_code_maps_to_its_wire_reason() {
          `PodOwnershipContested` (D-SEAMS S6 / `SEC-PODLOG` review finding R1: more than one pod \
          claimed this run's Job, so none of them was read — NOT a sub-case of `NoExitCode`, \
          because a contested Job is a namespace to look at and a garbage-collected pod is not, \
-         and deliberately not retryable because a retry invites the same second claimant); \
+         and deliberately not retryable because a retry invites the same second claimant), \
+         plus D3 §2.2's four — `VolumeMountFailed` / `CredentialReferenceMissing` / \
+         `RunnerImageUnavailable` / `PodCreationForbidden`, the `RunnerReady=False` reasons that \
+         cannot get better on their own. Each REPLACES `NoExitCode` only when the matching \
+         diagnostic was recorded before the Job ended, so `crash_terminal_state`'s existing \
+         table is unchanged and `exitCode` stays absent in all four; \
          got {TERMINAL_STATES:?}"
+    );
+    // D3 §2.2's four are the `RunnerReady` PROJECTION of a diagnosis and not
+    // its raw code, which is why `SigningKeyMissing` — a real
+    // `diagnostics::Code` — is deliberately absent from this list.
+    for state in [
+        "VolumeMountFailed",
+        "CredentialReferenceMissing",
+        "RunnerImageUnavailable",
+        "PodCreationForbidden",
+    ] {
+        assert!(
+            TERMINAL_STATES.contains(&state),
+            "`{state}` is what a fail-fast cancellation's crashed-Job pass writes; without it \
+             the run is `NoExitCode` and the operator is told nothing"
+        );
+    }
+    assert!(
+        !TERMINAL_STATES.contains(&"WaitingForPod"),
+        "`WaitingForPod` is a `RunnerReady` reason and NEVER a verdict: \"nothing has happened \
+         yet\" cannot be what a run finished as"
     );
     for state in TERMINAL_STATES {
         assert!(
@@ -4159,6 +4240,12 @@ async fn window_covered_is_epoch_milliseconds_on_the_status() {
                     sidecar: true,
                 },
                 covered: Some(covered),
+                // D3 W2: two additive observation fields. This row is about
+                // `windowCovered`'s units, so both are `None` — and that is a
+                // negative control for STATUS-RECORDS: an unobserved count
+                // writes no `status.records`.
+                records: None,
+                capture: None,
             })
         })
     };
@@ -4571,6 +4658,8 @@ async fn exit_four_with_a_payload_and_no_sidecar_is_orphaned_scorecard() {
                         sidecar: false,
                     },
                     covered: None,
+                    records: None,
+                    capture: None,
                 })
             })
         };
@@ -4733,24 +4822,22 @@ async fn exit_three_takes_its_terminal_state_from_the_refusal_reason_line() {
     assert_eq!(refusal_state("nothing\n"), None);
 }
 
-/// The `Running` pass patches the status and does nothing else.
+/// The `Running` pass patches the status, observes the pod, and writes no
+/// outcome.
+///
+/// # This row CHANGED at D3 W2 (PLAT-14.1), and the change is the point
+///
+/// It used to assert that an unfinished Job's pod is **not read at all**. D3
+/// §2.3 makes that exactly backwards: the pod is where every answer to "why
+/// has nothing happened for four minutes" lives, and a `Backup` whose runner
+/// sits in `ImagePullBackOff` was `phase: Running` by every field that existed
+/// before. What has NOT changed, and is asserted below, is everything the old
+/// row was really protecting: no exit code, no evidence, no outcome and no
+/// Job write while the run is in flight — and the pod is still reached only
+/// through the owner-UID-verified selectors (seam S6).
 #[tokio::test]
 async fn a_running_job_patches_only_the_phase_and_the_job_ref() {
-    let routes = vec![
-        Route {
-            method: "GET",
-            path_suffix: "/jobs/logweir-backup-nightly-20261109-031700",
-            status: 200,
-            body: running_job_body(),
-        },
-        Route {
-            method: "PATCH",
-            path_suffix: "/backups/logweir-backup-nightly-20261109-031700/status",
-            status: 200,
-            body: backup_json(),
-        },
-    ];
-    let (client, seen, bodies) = mock_client_recording_bodies(routes);
+    let (client, seen, bodies) = mock_client_recording_bodies(running_routes());
     let outcome = reconcile_backup(
         &frozen_backup(),
         &client,
@@ -4786,14 +4873,49 @@ async fn a_running_job_patches_only_the_phase_and_the_job_ref() {
         Some("JobCreated"),
         "the condition is `JobCreated`"
     );
+    // D3 §2.2 — the progress block, and `RunnerReady` beside `JobCreated` in
+    // the SAME array, because a merge patch replaces arrays.
+    assert_eq!(
+        statuses[0]["progress"]["stage"].as_str(),
+        Some("Running"),
+        "the runner container is running, so the stage is `Running`; got {}",
+        statuses[0]["progress"]
+    );
+    assert_eq!(
+        statuses[0]["progress"]["runner"]["podName"].as_str(),
+        Some(POD),
+        "the runner block names the one owned pod"
+    );
+    assert_eq!(
+        statuses[0]["progress"]["runnerPhase"]["name"].as_str(),
+        Some("engine"),
+        "and the runner's own phase, out of the ratified progress channel"
+    );
+    assert!(
+        statuses[0]["progress"]["diagnostics"].is_null(),
+        "nothing is wrong, so there is no diagnostic — an empty array would render as a \
+         warning badge; got {}",
+        statuses[0]["progress"]
+    );
+    let (status, reason, _) = condition_named(&statuses[0], "RunnerReady").expect("RunnerReady");
+    assert_eq!(
+        (status.as_str(), reason.as_str()),
+        ("True", "RunnerStarted"),
+        "the container has been seen running"
+    );
 
-    // NO `/pods` OR `/log` ROUTE IN THE TABLE ABOVE. The double panics on an
-    // unrecorded request, so a reconciler that read a log for a Job that has
-    // not finished would fail here.
+    // THE POD IS LISTED THROUGH THE SELECTORS AND NOTHING IS WRITTEN TO IT.
     let seen = seen.lock().expect("the recorder is readable");
     assert!(
-        seen.iter().all(|r| !r.uri.contains("/pods")),
-        "an unfinished Job's pod is not read at all; got {seen:?}"
+        seen.iter()
+            .any(|r| r.method == "GET" && r.uri.contains("/pods?")),
+        "the owned pod is found by the two selectors, never by name; got {seen:?}"
+    );
+    assert!(
+        seen.iter()
+            .all(|r| r.method == "GET" || (r.method == "PATCH" && r.uri.contains("/backups/"))),
+        "an unfinished run writes only its own status — no Job patch, no TTL, no delete; got \
+         {seen:?}"
     );
 }
 
@@ -5093,6 +5215,18 @@ fn the_pod_selectors_are_the_prefixed_label_then_the_legacy_one() {
 /// The routes a RUNNING pass needs: the Job exists and has not finished, and
 /// the status is patchable.
 fn running_routes() -> Vec<Route> {
+    running_routes_with(pod_list_running(), progress_log("-1:engine"))
+}
+
+/// [`running_routes`] with the pod list and the pod log as parameters.
+///
+/// **THE POD LIST AND THE LOG ROUTE ARE NEW IN D3 W2 (PLAT-14.1).** Before
+/// §2.3 the running pass read the Job and nothing else; it now derives the one
+/// diagnosis for every Job-backed run, which means finding the owned pod
+/// (owner-UID verified, seam S6) and — while the runner is running — reading
+/// the bounded progress tail. Both are parameters so a row can put a
+/// `CreateContainerConfigError` or an empty list in front of the reconciler.
+fn running_routes_with(pods: String, log: String) -> Vec<Route> {
     vec![
         Route {
             method: "GET",
@@ -5101,10 +5235,34 @@ fn running_routes() -> Vec<Route> {
             body: running_job_body(),
         },
         Route {
+            method: "GET",
+            path_suffix: "/pods",
+            status: 200,
+            body: pods,
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/log",
+            status: 200,
+            body: log,
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/events",
+            status: 200,
+            body: r#"{"apiVersion":"v1","kind":"EventList","metadata":{},"items":[]}"#.to_string(),
+        },
+        Route {
             method: "PATCH",
             path_suffix: "/backups/logweir-backup-nightly-20261109-031700/status",
             status: 200,
             body: backup_json(),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/jobs/logweir-backup-nightly-20261109-031700",
+            status: 200,
+            body: running_job_body(),
         },
     ]
 }
@@ -5166,14 +5324,14 @@ async fn a_steady_backup_issues_no_second_status_patch() {
             .expect("the patched status is a BackupStatus — the API server stores it"),
     );
 
-    // FOUR REQUEUES LATER, a different clock, the same still-running Job.
+    // ONE REQUEUE LATER (`REQUEUE_SECS` = 15), the same still-running Job.
     let (client, _seen, bodies) = mock_client_recording_bodies(running_routes());
     reconcile_backup(
         &steady,
         &client,
         &unobserved_archive,
         &unverified_evidence,
-        utc(2026, 11, 9, 3, 21),
+        utc(2026, 11, 9, 3, 20) + chrono::Duration::seconds(15),
     )
     .await
     .expect("the second reconcile succeeds");
@@ -5187,17 +5345,65 @@ async fn a_steady_backup_issues_no_second_status_patch() {
         "the second pass over an unchanged object writes NOTHING. At REQUEUE_SECS = 15 that is \
          5,760 API writes a day per running Backup this reconciler no longer makes: {second:?}"
     );
-    // A RESTART WITH THE JOB PRESENT READS THE JOB AND NOTHING ELSE (PLAT-06.1):
-    // the frozen inputs are not re-read, re-rendered or re-created while a Job
-    // this Backup controls is running.
+    // A RESTART WITH THE JOB PRESENT RE-READS NO INPUTS (PLAT-06.1): the
+    // frozen inputs are not re-read, re-rendered or re-created while a Job
+    // this Backup controls is running. The reads that DO happen are D3 §2.3's
+    // observation — the Job, its owned pod, and nothing else: the runner is
+    // running so no events are listed, and `lastObservedTime` is 15 s old so
+    // the progress read is throttled out.
     assert_eq!(
         calls(&second),
-        vec![(
-            "GET".to_string(),
-            format!("/apis/batch/v1/namespaces/{NS}/jobs/{NAME}")
-        )],
-        "the running pass is one Job read: {:?}",
+        vec![
+            (
+                "GET".to_string(),
+                format!("/apis/batch/v1/namespaces/{NS}/jobs/{NAME}")
+            ),
+            ("GET".to_string(), format!("/api/v1/namespaces/{NS}/pods")),
+        ],
+        "the running pass is one Job read and one owned-pod list: {:?}",
         calls(&second)
+    );
+
+    // ---- D3 §13's regression row, second half: the heartbeat --------------
+    //
+    // `lastObservedTime` is rewritten AT MOST ONCE PER 60 s (E11(d)), which
+    // means it IS rewritten after 60 s — the field exists so a console can
+    // tell "still running" from "the controller stopped looking", and one that
+    // never moved could not. At +61 s exactly one patch is sent, and the only
+    // thing in it that moved is that field.
+    let (client, _seen, bodies) = mock_client_recording_bodies(running_routes());
+    reconcile_backup(
+        &steady,
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 20) + chrono::Duration::seconds(61),
+    )
+    .await
+    .expect("the heartbeat reconcile succeeds");
+    let third = bodies
+        .lock()
+        .expect("the body recorder is readable")
+        .clone();
+    assert_eq!(
+        status_patch_count(&third),
+        1,
+        "one heartbeat per minute per running run, and not one per requeue: {third:?}"
+    );
+    let heartbeat = &patched_statuses(&third)[0];
+    let before = &patched_statuses(&first)[0];
+    assert_ne!(
+        heartbeat["progress"]["lastObservedTime"], before["progress"]["lastObservedTime"],
+        "the heartbeat is what moved"
+    );
+    assert_eq!(
+        heartbeat["progress"]["lastTransitionTime"], before["progress"]["lastTransitionTime"],
+        "and `lastTransitionTime` did NOT: neither the stage nor the reason changed, which is \
+         the `metav1.Condition` rule applied to the progress block"
+    );
+    assert_eq!(
+        heartbeat["progress"]["stage"], before["progress"]["stage"],
+        "nor the stage"
     );
 }
 
@@ -6272,8 +6478,18 @@ async fn an_in_flight_legacy_job_is_observed_unchanged_and_reported() {
             .iter()
             .map(|(m, _)| m.as_str())
             .collect::<Vec<_>>(),
-        vec!["GET", "PATCH"],
-        "the Job is read and the status patched, and NOTHING else — no plan, no Job write: {:?}",
+        vec!["GET", "GET", "GET", "PATCH"],
+        "the Job is read, its owned pod is listed, its progress tail is read and the status is \
+         patched — and NOTHING else. No plan read, no plan write, no Job write. The three GETs \
+         are D3 §2.3's observation (added at D3 W2); the ONE write is still this object's own \
+         status: {:?}",
+        calls(&bodies)
+    );
+    assert!(
+        calls(&bodies)
+            .iter()
+            .all(|(m, p)| m != "PATCH" || p.contains("/backups/")),
+        "and in particular the legacy Job's pod template is never rewritten: {:?}",
         calls(&bodies)
     );
     let running = &patched_statuses(&bodies)[0];
@@ -6806,13 +7022,17 @@ async fn a_surfaced_annotation_on_a_running_backup_is_steady() {
     assert!(condition_named(&patch["status"], CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED).is_some());
     let steady = with_status_patch(&annotated, &patch);
 
+    // ONE REQUEUE LATER, and INSIDE the 60 s heartbeat window (D3 §2.2): a
+    // second pass at exactly +60 s would legitimately rewrite
+    // `progress.lastObservedTime`, which is a different rule and has its own
+    // row in `a_steady_backup_issues_no_second_status_patch`.
     let (client, _seen, bodies) = mock_client_recording_bodies(running_routes());
     reconcile_backup(
         &steady,
         &client,
         &unobserved_archive,
         &unverified_evidence,
-        utc(2026, 11, 9, 3, 21),
+        utc(2026, 11, 9, 3, 20) + chrono::Duration::seconds(15),
     )
     .await
     .unwrap();
@@ -8299,4 +8519,788 @@ async fn a_frozen_dynamic_backup_never_reruns_discovery() {
         "exactly one Job, the runner's: {:?}",
         calls(&bodies)
     );
+}
+
+// ===========================================================================
+// D3 §13 — PLAT-14.1's controller rows
+// ===========================================================================
+
+use serde_json::json;
+use weirkeeper::controllers::backup::{
+    capture_from_receipt, records_from_receipt, tail_lines, BUDGETED_TRAILING_LINES,
+    KEY_SCAN_TAIL_LINES,
+};
+use weirkeeper::diagnostics::{
+    self, BACKUP_STEPS, PROGRESS_LIMIT_BYTES, PROGRESS_TAIL_LINES, RESTORE_PHASES,
+};
+use weirkeeper::verification::{EvidenceRef, VerificationResult, VerificationVerdict};
+
+/// A verification oracle that answers `Valid` — the only verdict that lets
+/// `status.records` and `status.capture` be written (defect STATUS-RECORDS).
+fn valid_evidence(r: EvidenceRef) -> BoxFuture<'static, VerificationResult> {
+    Box::pin(async move {
+        VerificationResult {
+            result: VerificationVerdict::Valid,
+            matched_key_id: Some("test-key".to_string()),
+            payload_type: r.payload_type.to_string(),
+            verified_at: utc(2026, 11, 9, 3, 20),
+            detail: None,
+            trust: None,
+        }
+    })
+}
+
+/// **D3 §13's "Mount failure" controller row, first half.** The reconcile
+/// WRITES the diagnostic, and it does it off the pod and the events and
+/// nothing else.
+#[tokio::test]
+async fn a_credential_reference_that_is_not_there_reaches_the_status_within_one_requeue() {
+    let (client, _seen, bodies) = mock_client_recording_bodies(running_routes_with(
+        pod_list_waiting(
+            "CreateContainerConfigError",
+            "secret \\\"logweir-archive\\\" not found",
+        ),
+        String::new(),
+    ));
+    reconcile_backup(
+        &frozen_backup(),
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        // 3 minutes in: past every grace, inside the 300 s fail-fast window.
+        utc(2026, 11, 9, 3, 20),
+    )
+    .await
+    .expect("the reconcile succeeds");
+    let status = &patched_statuses(&bodies.lock().expect("the body recorder is readable"))[0];
+    let d = &status["progress"]["diagnostics"][0];
+    assert_eq!(
+        d["code"].as_str(),
+        Some("CredentialSecretNotFound"),
+        "the SPECIFIC code, which is what tells an operator to create a Secret rather than add \
+         a key to one: {status}"
+    );
+    assert_eq!(d["severity"].as_str(), Some("Error"));
+    assert_eq!(d["object"]["kind"].as_str(), Some("Pod"));
+    assert_eq!(d["object"]["name"].as_str(), Some(POD));
+    assert_eq!(d["count"].as_i64(), Some(1));
+    assert!(
+        d["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("logweir-archive")),
+        "the message NAMES the Secret — a diagnostic nobody can act on is no diagnostic. It is \
+         already a reference in the spec every viewer of this namespace can read: {d}"
+    );
+    let (state, reason, _) =
+        condition_named(status, "RunnerReady").expect("the RunnerReady condition");
+    assert_eq!(
+        (state.as_str(), reason.as_str()),
+        ("False", "CredentialReferenceMissing"),
+        "D3 §15's L1 asserts exactly this pair live"
+    );
+    assert_eq!(status["progress"]["stage"].as_str(), Some("Preparing"));
+    assert!(
+        status["exitCode"].is_null() && status["phase"].as_str() == Some("Running"),
+        "nothing is terminal yet: the Job has not failed, and a controller that decided the \
+         outcome from a waiting pod would be inventing one: {status}"
+    );
+}
+
+/// **D3 §13's "Mount failure" controller row, second half.** After
+/// `failFastSeconds` of the same non-transient diagnostic, the Job's deadline
+/// is collapsed — through **D2's `cancel.rs`**, and only after the status
+/// recording it has landed.
+#[tokio::test]
+async fn a_run_that_cannot_start_has_its_job_deadline_collapsed_after_the_fail_fast_window() {
+    // The object already carries the diagnostic, first seen five minutes ago.
+    let mut stuck = frozen_backup();
+    let seen_at = utc(2026, 11, 9, 3, 15);
+    let stored = json!({
+        "stage": "Preparing",
+        "reason": "CredentialReferenceMissing",
+        "lastTransitionTime": seen_at,
+        "lastObservedTime": seen_at,
+        "diagnostics": [{
+            "code": "CredentialSecretNotFound",
+            "severity": "Error",
+            "message": "secret \"logweir-archive\" not found",
+            "object": {"kind": "Pod", "name": POD},
+            "firstSeen": seen_at,
+            "lastSeen": seen_at,
+            "count": 5,
+        }],
+    });
+    stuck.status.as_mut().expect("a status").progress =
+        Some(serde_json::from_value(stored).expect("the stored block is a RunProgress"));
+
+    let (client, seen, bodies) = mock_client_recording_bodies(running_routes_with(
+        pod_list_waiting(
+            "CreateContainerConfigError",
+            "secret \\\"logweir-archive\\\" not found",
+        ),
+        String::new(),
+    ));
+    reconcile_backup(
+        &stuck,
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        // Exactly 300 s after `firstSeen` — the default `failFastSeconds`.
+        utc(2026, 11, 9, 3, 20),
+    )
+    .await
+    .expect("the reconcile succeeds");
+
+    let bodies = bodies
+        .lock()
+        .expect("the body recorder is readable")
+        .clone();
+    let job_patch = bodies
+        .iter()
+        .find(|b| b.method == "PATCH" && b.uri.contains("/jobs/"))
+        .expect("the Job's deadline is patched");
+    let patch: Value = serde_json::from_str(&job_patch.body).expect("the patch is JSON");
+    assert_eq!(
+        patch["spec"]["activeDeadlineSeconds"].as_i64(),
+        Some(1),
+        "D2's `cancel.rs` and not a second cancellation path: the weirkeeper ClusterRole grants \
+         `delete` on nothing, and collapsing the deadline makes the Job FAIL with \
+         `DeadlineExceeded` so the existing crashed-Job path runs and the object stays around \
+         to say what happened. Got {patch}"
+    );
+    assert_eq!(
+        patch.as_object().map(serde_json::Map::len),
+        Some(1),
+        "and it patches the deadline and NOTHING else: {patch}"
+    );
+    // ORDER: the status that RECORDS the diagnostic lands BEFORE the
+    // cancellation, because the crashed pass reads that record to name the
+    // terminal state.
+    let calls = calls(&bodies);
+    let status_at = calls
+        .iter()
+        .position(|(m, p)| m == "PATCH" && p.contains("/backups/"));
+    let cancel_at = calls
+        .iter()
+        .position(|(m, p)| m == "PATCH" && p.contains("/jobs/"));
+    assert!(
+        matches!((status_at, cancel_at), (Some(s), Some(c)) if s < c),
+        "the deadline patch is sent AFTER the status write it is justified by: {calls:?}"
+    );
+    assert!(
+        seen.lock()
+            .expect("the recorder is readable")
+            .iter()
+            .all(|r| r.method != "DELETE"),
+        "nothing is deleted, ever"
+    );
+}
+
+/// **D3 §13's "Unschedulable pod" controller row.** The diagnostic is written
+/// and NO fail-fast patch is issued — D3 §15's L2.
+///
+/// MUTANT: moving `PodUnschedulable` out of the transient class makes this row
+/// fail on the Job patch.
+#[tokio::test]
+async fn an_unschedulable_run_is_reported_and_left_to_its_own_deadline() {
+    let unschedulable = {
+        let owners = owned_by_job();
+        format!(
+            r#"{{"apiVersion":"v1","kind":"PodList","metadata":{{}},"items":[
+  {{"apiVersion":"v1","kind":"Pod",
+    "metadata":{{"name":"{POD}","namespace":"{NS}","ownerReferences":{owners},
+      "creationTimestamp":"2026-11-09T03:17:00Z",
+      "labels":{{"{JOB_NAME_LABEL}":"{NAME}"}}}},
+    "spec":{{"containers":[]}},
+    "status":{{"phase":"Pending",
+      "conditions":[{{"type":"PodScheduled","status":"False","reason":"Unschedulable",
+        "message":"0/1 nodes are available: 1 Insufficient memory.",
+        "lastTransitionTime":"2026-11-09T03:17:05Z"}}],
+      "containerStatuses":[
+      {{"name":"runner","ready":false,"restartCount":0,"image":"x","imageID":"x",
+        "state":{{"waiting":{{"reason":"ContainerCreating"}}}}}}
+    ]}}}}]}}"#
+        )
+    };
+    // The object has carried the finding for an hour.
+    let mut stuck = frozen_backup();
+    let seen_at = utc(2026, 11, 9, 2, 20);
+    stuck.status.as_mut().expect("a status").progress = Some(
+        serde_json::from_value(json!({
+            "stage": "Preparing",
+            "reason": "PodUnschedulable",
+            "lastTransitionTime": seen_at,
+            "lastObservedTime": seen_at,
+            "diagnostics": [{
+                "code": "PodUnschedulable", "severity": "Warning",
+                "object": {"kind": "Pod", "name": POD},
+                "firstSeen": seen_at, "lastSeen": seen_at, "count": 60,
+            }],
+        }))
+        .expect("a RunProgress"),
+    );
+    let (client, _seen, bodies) =
+        mock_client_recording_bodies(running_routes_with(unschedulable, String::new()));
+    reconcile_backup(
+        &stuck,
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 20),
+    )
+    .await
+    .expect("the reconcile succeeds");
+    let bodies = bodies
+        .lock()
+        .expect("the body recorder is readable")
+        .clone();
+    assert!(
+        !bodies
+            .iter()
+            .any(|b| b.method == "PATCH" && b.uri.contains("/jobs/")),
+        "AN HOUR of being unschedulable issues no fail-fast patch. A node can join a cluster, a \
+         pod can be preempted and a cluster autoscaler exists — so this is reported and left to \
+         the Job's own `activeDeadlineSeconds`, which is D3 §15's L2 verbatim: {:?}",
+        calls(&bodies)
+    );
+    let status = &patched_statuses(&bodies)[0];
+    assert_eq!(
+        status["progress"]["diagnostics"][0]["code"].as_str(),
+        Some("PodUnschedulable")
+    );
+    assert_eq!(
+        status["progress"]["diagnostics"][0]["severity"].as_str(),
+        Some("Warning"),
+        "it may still resolve, so it is a warning and not an error"
+    );
+    assert!(
+        status["progress"]["diagnostics"][0]["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("unschedulable")),
+        "the message says what is happening; got {}",
+        status["progress"]["diagnostics"][0]
+    );
+    assert_eq!(
+        status["progress"]["diagnostics"][0]["count"].as_i64(),
+        Some(61),
+        "the count moves with the heartbeat and not with the requeue: an hour of 15-second \
+         reconciles is 60 minutes, not 240 passes"
+    );
+}
+
+/// The terminal state a fail-fast cancellation produces on the NEXT pass —
+/// D3 §2.2's "replaces `NoExitCode` only when the matching diagnostic was
+/// recorded before the Job ended".
+#[tokio::test]
+async fn the_recorded_diagnostic_names_the_terminal_state_of_a_cancelled_run() {
+    let mut stuck = frozen_backup();
+    let seen_at = utc(2026, 11, 9, 3, 15);
+    stuck.status.as_mut().expect("a status").progress = Some(
+        serde_json::from_value(json!({
+            "stage": "Preparing",
+            "reason": "CredentialReferenceMissing",
+            "diagnostics": [{
+                "code": "CredentialSecretNotFound", "severity": "Error",
+                "message": "secret \"logweir-archive\" not found",
+                "object": {"kind": "Pod", "name": POD},
+                "firstSeen": seen_at, "lastSeen": seen_at, "count": 5,
+            }],
+        }))
+        .expect("a RunProgress"),
+    );
+    // The Job failed on the deadline the fail-fast collapsed; the pod never
+    // ran, so there is no terminated state and no exit code.
+    let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes(
+        &pod_list_untermined(
+            r#""phase":"Pending","containerStatuses":[
+               {"name":"runner","ready":false,"restartCount":0,"image":"x","imageID":"x",
+                "state":{"waiting":{"reason":"CreateContainerConfigError"}}}]"#,
+        ),
+        log_body(""),
+        200,
+        "Failed",
+    ));
+    reconcile_backup(
+        &stuck,
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 25),
+    )
+    .await
+    .expect("the reconcile succeeds");
+    let status = &patched_statuses(&bodies.lock().expect("the body recorder is readable"))[0];
+    let (_, reason, _) = condition_named(status, "Failed").expect("a Failed condition");
+    assert_eq!(
+        reason, "CredentialReferenceMissing",
+        "and NOT `NoExitCode`. The pod never started, so there is no code to lift — but the \
+         controller wrote down WHY three passes ago, and `NoExitCode` would throw that away and \
+         tell the operator nothing: {status}"
+    );
+    assert!(
+        status["exitCode"].is_null(),
+        "`exitCode` stays ABSENT in all four of D3 §2.2's new states — a fabricated 1 is \
+         indistinguishable from a real operational failure: {status}"
+    );
+    assert_eq!(status["phase"].as_str(), Some("Failed"));
+    assert_eq!(
+        status["progress"]["stage"].as_str(),
+        Some("Finished"),
+        "and the progress block says the run is over, or D3 §2.5's staleness row would call a \
+         finished run `unknown` five minutes later"
+    );
+    assert!(
+        status["progress"]["lastObservedTime"].is_null(),
+        "with the heartbeat cleared by an explicit null"
+    );
+}
+
+/// The diagnostic does NOT override a terminal state the pod itself answers.
+///
+/// MUTANT: applying the recorded state unconditionally loses `DisruptedMidDrill`
+/// and `PodUnschedulable`, both of which are stronger observations.
+#[tokio::test]
+async fn a_pod_that_answers_for_itself_is_not_overridden_by_a_recorded_diagnostic() {
+    let mut stuck = frozen_backup();
+    stuck.status.as_mut().expect("a status").progress = Some(
+        serde_json::from_value(json!({
+            "stage": "Preparing",
+            "diagnostics": [{
+                "code": "CredentialSecretNotFound", "severity": "Error",
+                "object": {"kind": "Pod", "name": POD},
+                "firstSeen": utc(2026, 11, 9, 3, 15),
+                "lastSeen": utc(2026, 11, 9, 3, 15), "count": 1,
+            }],
+        }))
+        .expect("a RunProgress"),
+    );
+    let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes(
+        &pod_list_untermined(
+            r#""phase":"Pending","conditions":[
+               {"type":"DisruptionTarget","status":"True",
+                "lastTransitionTime":"2026-11-09T03:19:00Z"}]"#,
+        ),
+        log_body(""),
+        200,
+        "Failed",
+    ));
+    reconcile_backup(
+        &stuck,
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 25),
+    )
+    .await
+    .expect("the reconcile succeeds");
+    let status = &patched_statuses(&bodies.lock().expect("the body recorder is readable"))[0];
+    let (_, reason, _) = condition_named(status, "Failed").expect("a Failed condition");
+    assert_eq!(
+        reason, "DisruptedMidDrill",
+        "the node going away is what happened to THIS run, now; the recorded diagnostic is what \
+         was happening before. `crash_terminal_state`'s existing table is unchanged"
+    );
+}
+
+/// **D3 §13's "Completed Job cleanup" row, the repair half.** A terminal
+/// object whose finished Job has no TTL gets one on the next reconcile.
+#[tokio::test]
+async fn a_terminal_object_whose_job_lost_its_ttl_has_it_repaired() {
+    let mut terminal = frozen_backup();
+    terminal.status.as_mut().expect("a status").phase = Some("Succeeded".to_string());
+    terminal.status.as_mut().expect("a status").exit_code = Some(0);
+
+    let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes(
+        &pod_list_terminated(0),
+        log_body(&i7_tail()),
+        200,
+        "Complete",
+    ));
+    let outcome = reconcile_backup(
+        &terminal,
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 25),
+    )
+    .await
+    .expect("the reconcile succeeds");
+    assert!(
+        outcome.ttl_patched,
+        "the TTL is repaired: the step-2b guard gives up RETRYING the pass that made the object \
+         terminal, and the TTL is the half of that pass whose loss is silent — a finished Job \
+         with no TTL is never collected and sits in somebody's quota for ever"
+    );
+    let bodies = bodies
+        .lock()
+        .expect("the body recorder is readable")
+        .clone();
+    assert_eq!(
+        status_patch_count(&bodies),
+        0,
+        "and NOTHING is written to the status: the pod is not read, the exit code is not \
+         re-derived, and step 2b's whole point is preserved: {:?}",
+        calls(&bodies)
+    );
+    let patch: Value = serde_json::from_str(
+        &bodies
+            .iter()
+            .find(|b| b.method == "PATCH" && b.uri.contains("/jobs/"))
+            .expect("the Job is patched")
+            .body,
+    )
+    .expect("the patch is JSON");
+    assert_eq!(
+        patch["spec"]["ttlSecondsAfterFinished"].as_i64(),
+        Some(i64::from(TTL_SECONDS_AFTER_FINISHED)),
+        "with the configured value, whose default is the compiled-in seven days"
+    );
+    assert!(
+        !bodies.iter().any(|b| b.uri.contains("/pods")),
+        "no pod list and no log read: {:?}",
+        calls(&bodies)
+    );
+}
+
+/// …and a Job that already has a TTL, or that this object does not own, is not
+/// touched.
+///
+/// MUTANT: dropping the owner check makes the second arm patch a stranger's
+/// Job — which is deleting somebody else's work on a timer.
+#[tokio::test]
+async fn the_ttl_repair_never_patches_a_job_that_has_one_or_that_is_not_ours() {
+    let mut terminal = frozen_backup();
+    terminal.status.as_mut().expect("a status").phase = Some("Succeeded".to_string());
+
+    // ARM 1: the Job already has a TTL.
+    let with_ttl = {
+        let mut v: Value = serde_json::from_str(&job_body("Complete")).expect("JSON");
+        v["spec"]["ttlSecondsAfterFinished"] = json!(604_800);
+        v.to_string()
+    };
+    let mut routes = finished_routes(
+        &pod_list_terminated(0),
+        log_body(&i7_tail()),
+        200,
+        "Complete",
+    );
+    routes[0].body = with_ttl;
+    let (client, _seen, bodies) = mock_client_recording_bodies(routes);
+    let outcome = reconcile_backup(
+        &terminal,
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 25),
+    )
+    .await
+    .expect("the reconcile succeeds");
+    assert!(!outcome.ttl_patched, "there is nothing to repair");
+    assert!(
+        !bodies
+            .lock()
+            .expect("readable")
+            .iter()
+            .any(|b| b.method == "PATCH"),
+        "and a repair that re-sent the value every reconcile would be the write loop E11(d) is \
+         about"
+    );
+
+    // ARM 2: a Job of the same name that this Backup does not control. The
+    // compatibility guard refuses it before the repair is even reached, which
+    // is the belt; `repair_ttl`'s own owner check is the braces.
+    let foreign = {
+        let mut v: Value = serde_json::from_str(&job_body("Complete")).expect("JSON");
+        v["metadata"]["ownerReferences"][0]["uid"] = json!("someone-elses-uid");
+        v.to_string()
+    };
+    let mut routes = finished_routes(
+        &pod_list_terminated(0),
+        log_body(&i7_tail()),
+        200,
+        "Complete",
+    );
+    routes[0].body = foreign;
+    let (client, _seen, bodies) = mock_client_recording_bodies(routes);
+    reconcile_backup(
+        &terminal,
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 25),
+    )
+    .await
+    .expect("the reconcile succeeds");
+    assert!(
+        !bodies
+            .lock()
+            .expect("readable")
+            .iter()
+            .any(|b| b.method == "PATCH"),
+        "a Job's NAME proves nothing. Patching a stranger's Job with a TTL is deleting somebody \
+         else's work on a timer"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Defect STATUS-RECORDS — `Backup.status.records`
+// ---------------------------------------------------------------------------
+
+/// The signed receipt this suite's archive oracle serves.
+fn receipt_document() -> Value {
+    json!({
+        "format_version": "1.0.0",
+        "run_id": "r1",
+        "backup_id": UID,
+        "requested_at": "2026-11-09T03:17:00Z",
+        "started_at": "2026-11-09T03:17:30Z",
+        "finished_at": "2026-11-09T03:19:00Z",
+        "exit_code": 0,
+        "triggered_by": "manual",
+        "records": {"orders": 120_000_u64, "payments": 4_096_u64},
+        "covered": {"from_ms": 1_760_000_000_000_i64, "to_ms": 1_760_000_060_000_i64},
+    })
+}
+
+/// **Defect STATUS-RECORDS.** `status.records` is written, and it is the sum
+/// of the receipt's per-topic counts.
+#[test]
+fn the_record_count_is_the_sum_of_the_receipts_own_per_topic_counts() {
+    assert_eq!(
+        records_from_receipt(&receipt_document()),
+        Some(124_096),
+        "`Backup.status.records` is ONE integer and the receipt counts per topic, so the answer \
+         is their sum — which is what the CRD's field description and the RECORDS printer \
+         column have always said. The per-topic breakdown stays where it is ATTESTED"
+    );
+    assert_eq!(
+        records_from_receipt(&json!({"records": {}})),
+        Some(0),
+        "a run over an empty topic set counted zero records, which is a fact"
+    );
+    assert_eq!(
+        records_from_receipt(&json!({})),
+        None,
+        "MUTANT: a receipt with no `records` block is UNREAD, not zero. A blank column is \
+         honest and a zero is a claim"
+    );
+    assert_eq!(
+        records_from_receipt(&json!({"records": {"orders": -1}})),
+        None,
+        "and a value that is not a count is not counted"
+    );
+    assert_eq!(
+        capture_from_receipt(&receipt_document()).map(|(s, f)| (s.to_rfc3339(), f.to_rfc3339())),
+        Some((
+            "2026-11-09T03:17:30+00:00".to_string(),
+            "2026-11-09T03:19:00+00:00".to_string()
+        )),
+        "and `status.capture` is copied verbatim from the same document"
+    );
+    assert_eq!(
+        capture_from_receipt(&json!({"started_at": "2026-11-09T03:17:30Z"})),
+        None,
+        "both instants or neither — a half-read window cannot be told apart from one that is \
+         genuinely open-ended"
+    );
+}
+
+/// **Defect STATUS-RECORDS, through the reconciler.** The count reaches the
+/// status only on a VERIFIED receipt.
+#[tokio::test]
+async fn the_record_count_is_written_from_a_verified_receipt_and_from_nothing_else() {
+    let bytes = serde_json::to_vec(&receipt_document()).expect("the receipt serialises");
+    let observation = move |_keys: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
+        let doc: Value = serde_json::from_slice(&bytes).expect("JSON");
+        Box::pin(async move {
+            Some(ArchiveObservation {
+                presence: EvidencePresence {
+                    payload: true,
+                    sidecar: true,
+                },
+                covered: covered_from_receipt(&doc),
+                receipt_sha256: Some("sha256:deadbeef".to_string()),
+                records: records_from_receipt(&doc),
+                capture: capture_from_receipt(&doc),
+            })
+        })
+    };
+
+    // ARM 1: `Valid`.
+    let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes(
+        &pod_list_terminated(0),
+        log_body(&i7_tail()),
+        200,
+        "Complete",
+    ));
+    reconcile_backup(
+        &frozen_backup(),
+        &client,
+        &observation,
+        &valid_evidence,
+        utc(2026, 11, 9, 3, 20),
+    )
+    .await
+    .expect("the reconcile succeeds");
+    let statuses = patched_statuses(&bodies.lock().expect("the body recorder is readable"));
+    let second = statuses.last().expect("the verification patch");
+    assert_eq!(
+        second["records"].as_i64(),
+        Some(124_096),
+        "defect STATUS-RECORDS: the field the CRD has declared since the kind existed, with a \
+         RECORDS printer column, was blank on every Backup the PLAT-06.1 and PLAT-07.1 live \
+         runs produced while the counts sat in the signed receipt. Got: {second}"
+    );
+    assert_eq!(
+        second["capture"]["startedAt"].as_str(),
+        Some("2026-11-09T03:17:30Z"),
+        "and D3 §2.2's capture window beside it — `ProtectionPolicy` measures freshness from \
+         `startedAt`, because a four-hour backup that STARTED at 02:00 protects you to 02:00"
+    );
+    assert!(
+        statuses[0]["records"].is_null(),
+        "ON THE VERIFICATION PATCH AND NO OTHER. The terminal patch speaks before any signature \
+         has been checked: {}",
+        statuses[0]
+    );
+
+    // ARM 2: the same bytes, no verification. NOTHING is written.
+    let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes(
+        &pod_list_terminated(0),
+        log_body(&i7_tail()),
+        200,
+        "Complete",
+    ));
+    reconcile_backup(
+        &frozen_backup(),
+        &client,
+        &observation,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 20),
+    )
+    .await
+    .expect("the reconcile succeeds");
+    for status in patched_statuses(&bodies.lock().expect("the body recorder is readable")) {
+        assert!(
+            status["records"].is_null() && status["capture"].is_null(),
+            "MUTANT: writing the count off the OBSERVATION rather than the VERIFIED receipt. A \
+             count on a Backup has to be a count some key this installation accepts attested \
+             to, or the RECORDS column is a number anybody who can write to the bucket chose. \
+             Got: {status}"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// D3 W5 review finding F5 — the key-scan window's budget
+// ---------------------------------------------------------------------------
+
+/// The controller's key-scan window has room for everything a passing restore
+/// prints, and the budget is stated rather than assumed.
+///
+/// **MIRRORED** from `crates/logweir/tests/progress_channel.rs`'s
+/// `the_trailing_lines_a_passing_restore_prints_fit_the_controllers_scan_window`,
+/// which measures the count by running the real runner. A `weirkeeper`
+/// dependency in that crate would invert the layering, so the number lives on
+/// both sides and each side names the other. This is the side that answers
+/// "does the window still fit"; that side answers "did the runner grow".
+#[test]
+fn the_key_scan_window_has_room_for_the_runners_trailing_block() {
+    assert_eq!(
+        BUDGETED_TRAILING_LINES, 7,
+        "measured on a passing restore at execution contract v2: the summary, \
+         `topic-preflight=`, `teardown-key=`, `scorecard-key=`, `sidecar-key=`, \
+         `offset-report-key=`, and the `drill finished` line production's `tracing` subscriber \
+         emits. If the runner grows a line, raise this — and then this row says whether the \
+         window still fits"
+    );
+    // `black_box` because both sides are compile-time constants and clippy
+    // folds a const comparison into `assert!(true)` and refuses it. The
+    // comparison is the whole point of the row, so it is kept opaque rather
+    // than dropped.
+    let budget = std::hint::black_box(BUDGETED_TRAILING_LINES);
+    let window = std::hint::black_box(KEY_SCAN_TAIL_LINES);
+    assert!(
+        budget < window,
+        "the scan matches by key NAME, so a key pushed out of the window is a SILENTLY ABSENT \
+         status field and not an error. That is why this is a budget and not a hope"
+    );
+    assert!(
+        window - budget >= 8,
+        "…with room for a whole second trailing block. At eight the margin was ONE line (D3 W5 \
+         review finding F5), which is why the constant was raised rather than the runner trimmed"
+    );
+
+    // AND THE SCAN FINDS EVERY KEY AT THE MEASURED SHAPE. A budget nobody
+    // exercises is arithmetic.
+    let tail = format!(
+        "run r1 outcome=pass\n\
+         topic-preflight={{\"ok\":true}}\n\
+         teardown-key=logweir/drills/r1.teardown.json\n\
+         scorecard-key=logweir/drills/r1.json\n\
+         sidecar-key={SIDECAR_KEY}\n\
+         offset-report-key=logweir/drills/r1.offsets.json\n\
+         {{\"level\":\"INFO\",\"message\":\"drill finished\"}}\n"
+    );
+    let long_log = format!("{}{tail}", "noise\n".repeat(200));
+    let scanned = tail_lines(&long_log);
+    for prefix in [
+        "topic-preflight=",
+        "teardown-key=",
+        "scorecard-key=",
+        "sidecar-key=",
+        "offset-report-key=",
+    ] {
+        assert!(
+            scanned.iter().any(|l| l.starts_with(prefix)),
+            "`{prefix}` is inside the {KEY_SCAN_TAIL_LINES}-line window: {scanned:?}"
+        );
+    }
+    // The BACKUP tail too — I7's two keys plus D3 W3's conditional one.
+    let backup_tail = format!(
+        "run r1 outcome=ok\n\
+         catalog-key=logweir/catalog/v1/p.json\n\
+         receipt-key={RECEIPT_KEY}\n\
+         sidecar-key={SIDECAR_KEY}\n\
+         {{\"level\":\"INFO\",\"message\":\"backup finished\"}}\n"
+    );
+    let keys = evidence_keys(&format!("{}{backup_tail}", "noise\n".repeat(200)));
+    assert_eq!(keys.receipt.as_deref(), Some(RECEIPT_KEY));
+    assert_eq!(keys.sidecar.as_deref(), Some(SIDECAR_KEY));
+    // A WIDER window is safe by construction, and this says why: the scan
+    // takes the LAST occurrence of each prefix.
+    let redrafted = format!("receipt-key=logweir/draft.json\n{backup_tail}");
+    assert_eq!(
+        evidence_keys(&redrafted).receipt.as_deref(),
+        Some(RECEIPT_KEY),
+        "a runner that logged an earlier draft of the key has the FINAL one be the one that was \
+         written — which is why widening the window can only find a key it would otherwise have \
+         missed, never a different one"
+    );
+}
+
+/// The progress read's own bounds are D3 §2.4's, and the two vocabularies are
+/// the runner's.
+#[test]
+fn the_progress_read_is_bounded_and_its_vocabularies_are_the_runners() {
+    assert_eq!(PROGRESS_TAIL_LINES, 50, "D3 §2.4's `tail_lines`");
+    assert_eq!(PROGRESS_LIMIT_BYTES, 65_536, "D3 §2.4's `limit_bytes`");
+    assert_eq!(
+        RESTORE_PHASES.len(),
+        10,
+        "phases 0..9, the drill's own, in its own order"
+    );
+    assert_eq!(BACKUP_STEPS.len(), 5, "and the backup's five named steps");
+    assert_eq!(
+        diagnostics::EVENT_LIMIT,
+        20,
+        "D3 §2.3's `limit=20` per events list — a namespace with ten thousand events must not \
+         make a diagnostic the expensive part of a reconcile"
+    );
+    for name in RESTORE_PHASES.iter().chain(BACKUP_STEPS.iter()) {
+        assert!(
+            !name.contains(':') && name.len() <= 32,
+            "`{name}` has to survive `<n>:<name>` and the CRD's 32-byte bound"
+        );
+    }
 }
