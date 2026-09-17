@@ -595,10 +595,10 @@ two hours" is two facts and a reader needs both. An observation older than
 derived, not picked: `weirkeeper`'s `controllers::kafka_cluster::PROBE_TTL_SECONDS`
 is 300 and `RE_PROBE_SECS` is that plus a 15 s margin, so a healthy controller
 refreshes `status.observedAt` about every 315 s and twice that is the point at
-which a missed refresh is no longer jitter. An observation with **no**
-`observedAt`, or one more than a minute in the **future**, is stale too -- in
-the second case the arithmetic itself cannot be trusted, and an untrustworthy
-number presented as current is the same defect wearing a different hat.
+which a missed refresh is no longer jitter. An observation more than a minute
+in the **future** is stale too -- there the arithmetic itself cannot be trusted,
+and an untrustworthy number presented as current is the same defect wearing a
+different hat. (No `observedAt` at all is `never observed`, above, not stale.)
 
 **"Test connection" is a read, and the control says so.** The page has no
 authority to make the controller dial anything: `KafkaCluster.spec` is

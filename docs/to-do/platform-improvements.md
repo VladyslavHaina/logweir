@@ -132,6 +132,7 @@ Wave 2 resumes every branch in place with the prompts under
 | PLAT-04.1 defect (P0) | Fixed (`bdd26dc`, live-proved) | w0-reservation → plat06-live | `backup_schedule.rs:1359` reserves a Forbid slot with `replace_status`, which RBAC authorizes as `update` on `backupschedules/status`; the shipped role grants only `patch` (`config/rbac/role.yaml:118`, `charts/logweir/templates/clusterrole.yaml:29`). Confirmed on docker-desktop: the lab ServiceAccount has `update` no, `patch` yes, so with the default `Forbid` policy no scheduled Backup is created on a shipped install. PLAT-04.1's live run used custom namespace Roles and never exercised this. Fix: resourceVersion-conditional merge PATCH, an audit of every other call against the shipped role, a reverse "every call has a grant" lint with mutant evidence, and live proof under shipped RBAC. |
 | PLAT-06.1 | Done | plat06-live, plat06-review | Completion record under PLAT-06.1. Integrated into main as `8e362f9..10f6c28`. |
 | PLAT-07.1 | Done | plat07-finish, plat07-integrate, plat07-review, plat07-live | Completion record under PLAT-07.1. Integrated into main as `6c534b2..199020a` plus the live harness `50e641f`. | Versioned connection contract, one shared resolver for probe/backup/restore Jobs, TLS private CA, rotation, redaction, write-only credential builder; live SCRAM rotation and TLS cases. |
+| PLAT-07.2 | In progress | ui072, ui072-review | Partial record under PLAT-07.2. Integrated into main as `8bbe4d1..b65f23f`. "Test connection" cannot yet force a re-probe (D2 W13). | Saved-cluster selector by UID, probe vocabulary, freshness budget; live 20/20 |
 | PLAT-13.2 | Done | ui-correct, ui-correct-review, ui-correct-fix | Completion record under PLAT-13.2. Integrated into main as `2a34abd..8020876`. |
 | PLAT-11.1 | Done | ui-restore-selection, ui-restore-selection-review | Completion record under PLAT-11.1. Integrated into main as `6c2c95e..02426c8`; the same branch fixes the `allowHttp` half of UI-HTTPDOWNGRADE (D2 W13a). |
 | PLAT-18.1 | Done | ui-typed-client, ui-typed-client-review | Completion record under PLAT-18.1; D0 stage 6 (static client migration) done for its own scope. Integrated into main as `fa73824..48d5ec0`. |
@@ -760,6 +761,59 @@ PLAT-07.1, PLAT-13.1.
 **Migration/safety and done evidence:** Existing KafkaCluster references remain
 usable. Do not pool runner sockets across pods or infer EKS compatibility solely
 from a broker metadata success; capture settings used by each tested path.
+
+**Partial record (2026-09-17) — PLAT-07.2: the saved-cluster selector, identity
+by UID, the probe vocabulary and the freshness budget landed; the task stays In
+progress until "Test connection" can start a real source check (D2 W13 wires it
+to a `Preflight` through the product API) and the console API can create a
+contract v1 connection.** Landed in main as `8bbe4d1` (choose a saved cluster by
+UID, and call a probe a probe), `c65db2d`/`baa6929` (the selector's identity
+rules, freshness, both client modes and the wizard guards), `35e3dce` (read the
+connections again before creating against one), `ac48919` (four live browser
+journeys), `1cdefdf`/`b65f23f` (the selection contract, the probe vocabulary and
+the freshness budget), `13fab98` and `e6b88a8` (review fixes). Contract
+(`ui/select.js`, for PLAT-10.1/11.2): `selection = {uid, name}`;
+`resolveClusterSelection(clusters, selection)` yields `none | selected |
+recreated | missing` — the UID wins, a rename keeps the selection and the
+request body spells the CURRENT name, a delete-and-recreate is a refusal naming
+both UIDs with zero POSTs (the refusal states render an explicit empty selected
+option and the hidden pair is the refused identity), a name-only reference (an
+existing `sourceRef.name`) resolves and is pinned as the migration clause; every
+role is offered and shown; a namespace change clears the selection; both submits
+re-read the connections first and a failed re-read is a refusal that keeps the
+draft (the wizard's `confirmClusters` is now guarded by rows that assert `list`
+precedes `create` and that a mid-wizard recreation creates nothing). Probe
+vocabulary: `reachable | not reachable | refused | probing | unknown | never
+probed`, never "ready"; a connection with no observation is `never observed`
+and is never `stale`; the `stale` badge starts at 630 s (twice the controller's
+315 s `RE_PROBE_SECS`); the controller's reason is rendered verbatim through
+text nodes; "Test connection" is a re-read and its own sentence says so. Asset
+set 20 → 21 files in `Dockerfile.ui`, `check-image-ui.sh`, `chart_lint`, the
+API `boundary` suite and the chart prose. Verified at `b65f23f` on main: node
+197/197 (+29 rows), `check-ui-behaviour.sh` 197 with the plan golden
+byte-identical, `check-ui-offline.sh` 21 files, `ui_lint` 26, `chart_lint` 28,
+`doc_lint` 12, `gate_lint` 13, `boundary` 13, `chart-check`, `links`, fmt; nine
+planted mutants killed (selection by name, stale as valid, a password field in a
+draft, a recreated cluster silently re-selected, "ready" wording, and the
+review's four). Live on docker-desktop against the lab images: 20/20 journeys
+(`claude/artifacts/ui072/live-result-20260917T054314Z.json`; the reviewer
+reproduced 19/19 before the fix round and re-ran after it) — selection by UID
+surviving a rename across a route change, a recreated cluster refused with 0
+POSTs and the draft kept, two real controller refusals
+(`ConnectionConfigInvalid`, `CredentialNotRenderable`) rendered verbatim with
+zero probe Jobs, a real credential rotation under contract v1 re-probed by the
+controller with `spec` byte-identical, and the mid-wizard recreation creating
+nothing; every namespace deleted after an owner-label and UID check. Independent
+review `claude/ui072.review.md`: ACCEPT-WITH-FIXES (three medium: the refusal
+states left a third cluster selected; a contradictory stale text; the unguarded
+wizard re-read) then ACCEPT. Gaps: the browser cannot force a re-probe (needs a
+controller annotation trigger or a check through the API — D2 W13); console
+mode cannot create a contract v1 connection because `ConnectionAuthView` and
+`CreateConnectionRequest` carry neither field (the page refuses by name,
+`NoConsoleRoute`) — owed to the API's connection routes; the freshness budget is
+a constant, not an installation setting; the rename journey is fault-injected
+because object names are immutable. Migration: none — existing `KafkaCluster`
+references remain usable and a name-only reference resolves.
 
 **Completion record — Done (2026-09-16), PLAT-07.1.** Landed in main as
 `6c534b2` (a projected private CA trusted by both of the runner's TLS clients),
