@@ -77,6 +77,26 @@ const NAME: &str = "logweir-restore-incident-4471";
 /// The pod the job controller made.
 const POD: &str = "logweir-restore-incident-4471-abcde";
 
+/// The runner Job's own `metadata.uid`, and the ONLY thing that makes [`POD`]
+/// this run's pod — D-SEAMS **S6**, defect `SEC-PODLOG`.
+const JOB_UID: &str = "bbbbbbbb-0000-4000-8000-0000000000b2";
+
+/// A pod's `ownerReferences` naming `job_uid` as its **controller**.
+///
+/// `kind` and `controller` are parameters because the negative cases are
+/// exactly "one of these three is wrong".
+fn pod_owner_json(kind: &str, job_uid: &str, controller: bool) -> String {
+    format!(
+        r#"[{{"apiVersion":"batch/v1","kind":"{kind}","name":"{NAME}","uid":"{job_uid}",
+      "controller":{controller},"blockOwnerDeletion":true}}]"#
+    )
+}
+
+/// The ordinary case: owned, by the controller reference, by [`JOB_UID`].
+fn owned_by_job() -> String {
+    pod_owner_json("Job", JOB_UID, true)
+}
+
 const UID: &str = "5c2e7b91-0000-4000-8000-0000000000a2";
 const CLUSTER_UID: &str = "8b3c1d2e-0000-4000-8000-0000000000c2";
 const APPROVAL: &str = "a1";
@@ -386,7 +406,7 @@ fn not_found_body(kind: &str, name: &str) -> String {
 fn running_job_body() -> String {
     format!(
         r#"{{"apiVersion":"batch/v1","kind":"Job",
-  "metadata":{{"name":"{NAME}","namespace":"{NS}","uid":"bbbbbbbb-0000-4000-8000-0000000000b2",
+  "metadata":{{"name":"{NAME}","namespace":"{NS}","uid":"{JOB_UID}",
     "ownerReferences":[{{"apiVersion":"logweir.dev/v1alpha1","kind":"Restore","name":"{NAME}","uid":"{UID}","controller":true,"blockOwnerDeletion":true}}]}},
   "spec":{{"template":{{"spec":{{"containers":[],"restartPolicy":"Never"}}}}}},
   "status":{{"active":1}}}}"#
@@ -397,7 +417,7 @@ fn running_job_body() -> String {
 fn job_body(condition: &str) -> String {
     format!(
         r#"{{"apiVersion":"batch/v1","kind":"Job",
-  "metadata":{{"name":"{NAME}","namespace":"{NS}","uid":"bbbbbbbb-0000-4000-8000-0000000000b2",
+  "metadata":{{"name":"{NAME}","namespace":"{NS}","uid":"{JOB_UID}",
     "ownerReferences":[{{"apiVersion":"logweir.dev/v1alpha1","kind":"Restore","name":"{NAME}","uid":"{UID}","controller":true,"blockOwnerDeletion":true}}]}},
   "spec":{{"template":{{"spec":{{"containers":[],"restartPolicy":"Never"}}}}}},
   "status":{{"conditions":[{{"type":"{condition}","status":"True",
@@ -411,10 +431,19 @@ fn job_body(condition: &str) -> String {
 /// THE SIDECAR IS AT INDEX 0 ON PURPOSE. A suite whose happy path has `runner`
 /// at index 0 cannot tell a by-name reader from a by-index one.
 fn pod_list_terminated(exit_code: i32) -> String {
+    pod_list_terminated_owned_by(exit_code, &owned_by_job())
+}
+
+/// [`pod_list_terminated`] with the pod's `ownerReferences` as a parameter.
+///
+/// THE OWNER IS A PARAMETER BECAUSE IT IS THE SECURITY BOUNDARY (D-SEAMS
+/// **S6**): `"null"` gives an ownerless pod, `pod_owner_json(…)` gives a wrong
+/// one, and both must end where an empty list ends — no log read, no exit code.
+fn pod_list_terminated_owned_by(exit_code: i32, owners: &str) -> String {
     format!(
         r#"{{"apiVersion":"v1","kind":"PodList","metadata":{{}},"items":[
   {{"apiVersion":"v1","kind":"Pod",
-    "metadata":{{"name":"{POD}","namespace":"{NS}",
+    "metadata":{{"name":"{POD}","namespace":"{NS}","ownerReferences":{owners},
       "labels":{{"{JOB_NAME_LABEL}":"{NAME}","{JOB_NAME_LABEL_LEGACY}":"{NAME}"}}}},
     "spec":{{"containers":[]}},
     "status":{{"phase":"Failed","containerStatuses":[

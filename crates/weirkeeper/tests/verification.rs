@@ -673,10 +673,18 @@ fn job_body() -> String {
 }
 
 fn pod_list() -> String {
+    // THE OWNER REFERENCE IS NOT DECORATION (D-SEAMS **S6**, defect
+    // `SEC-PODLOG`). The reconciler reads a pod's exit code and stdout only
+    // when the pod's CONTROLLER owner reference is the Job it is holding, so a
+    // fixture without one is a fixture whose pod is never read and whose every
+    // verification assertion would be vacuous.
     format!(
         r#"{{"apiVersion":"v1","kind":"PodList","metadata":{{}},"items":[
   {{"apiVersion":"v1","kind":"Pod",
     "metadata":{{"name":"{POD}","namespace":"{NS}",
+      "ownerReferences":[{{"apiVersion":"batch/v1","kind":"Job","name":"{NAME}",
+        "uid":"bbbbbbbb-0000-4000-8000-0000000000b1","controller":true,
+        "blockOwnerDeletion":true}}],
       "labels":{{"batch.kubernetes.io/job-name":"{NAME}","job-name":"{NAME}"}}}},
     "spec":{{"containers":[]}},
     "status":{{"phase":"Succeeded","containerStatuses":[

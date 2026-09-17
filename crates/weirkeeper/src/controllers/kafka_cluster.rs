@@ -58,7 +58,7 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::Pod;
-use kube::api::{Api, ListParams, LogParams, Patch, PatchParams, PostParams};
+use kube::api::{Api, LogParams, Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
 use kube::runtime::{watcher, Controller};
 use kube::{Resource, ResourceExt as _};
@@ -68,6 +68,7 @@ use tracing::{debug, info, warn};
 
 use super::backup;
 use super::Context;
+use crate::check;
 use crate::conditions::{
     current_condition, merge_condition, status_unchanged, TERMINAL_STATE_NAME_TOO_LONG,
 };
@@ -840,29 +841,41 @@ impl From<kube::Error> for KafkaClusterError {
 // The reconcile
 // ---------------------------------------------------------------------------
 
-/// The probe pod for a Job, found by the two labels in
-/// [`backup::pod_selectors`]'s order.
+/// The probe pod for a Job — D-SEAMS **S6**, `SEC-PODLOG`.
+///
+/// Found by the two labels in [`backup::pod_selectors`]'s order, and then by
+/// the one selection rule the three execution controllers and the check
+/// framework share ([`check::pod::find_owned_pod_by_selectors`]): a candidate
+/// is read only when its **controller** `ownerReference` is a `Job` carrying
+/// this probe Job's `metadata.uid`.
+///
+/// # What this used to do, and why it is gone
+///
+/// `list.items.into_iter().next()` — the first pod the label selector
+/// returned. The probe's two interface **I14** stdout lines become
+/// `status.reachable` and `status.clusterId` on the `KafkaCluster`, and
+/// `Restore` admission refuses on `reachable: false`
+/// (`TERMINAL_STATE_CLUSTER_NOT_REACHABLE` on the other side), so a pod
+/// planted with `batch.kubernetes.io/job-name=<probe job>` could assert that
+/// an unreachable cluster is reachable, or hold a reachable one shut. Zero
+/// owned pods is now "no pod yet" and leaves `reachable` untouched — which is
+/// exactly what the crashed-probe branch below already does, and what "nothing
+/// about this cluster is known either way" means.
 async fn find_pod(
     client: &kube::Client,
     namespace: &str,
     job_name: &str,
+    job_uid: Option<&str>,
 ) -> Result<Option<Pod>, KafkaClusterError> {
-    let api: Api<Pod> = Api::namespaced(client.clone(), namespace);
-    for selector in backup::pod_selectors(job_name) {
-        let list = api
-            .list(&ListParams::default().labels(&selector))
-            .await
-            .map_err(KafkaClusterError::Api)?;
-        if let Some(pod) = list.items.into_iter().next() {
-            return Ok(Some(pod));
-        }
-        debug!(
-            job = %job_name,
-            selector = %selector,
-            "no probe pod matched this selector; trying the next"
-        );
-    }
-    Ok(None)
+    check::pod::find_owned_pod_by_selectors(
+        client,
+        namespace,
+        job_name,
+        job_uid,
+        &backup::pod_selectors(job_name),
+    )
+    .await
+    .map_err(KafkaClusterError::Api)
 }
 
 /// Reconcile one `KafkaCluster` at the instant `now`.
@@ -1156,7 +1169,7 @@ async fn reconcile_cluster_inner(
         });
     }
 
-    let pod = find_pod(client, &namespace, &job_name).await?;
+    let pod = find_pod(client, &namespace, &job_name, job.uid().as_deref()).await?;
     let exit_code = pod.as_ref().and_then(backup::terminated_exit_code);
 
     // STEP 4. The crashed-Job case, before the happy path, because the happy

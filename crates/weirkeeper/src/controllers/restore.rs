@@ -99,7 +99,7 @@ use futures::StreamExt as _;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{ConfigMap, Pod};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
-use kube::api::{Api, ListParams, LogParams, Patch, PatchParams, PostParams};
+use kube::api::{Api, LogParams, Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
 use kube::runtime::{watcher, Controller};
 use kube::{Resource, ResourceExt as _};
@@ -112,6 +112,7 @@ use super::backup::{
     SIGNING_VOLUME, TTL_SECONDS_AFTER_FINISHED,
 };
 use super::Context;
+use crate::check;
 use crate::conditions::{
     current_condition, merge_condition, reason_for_exit, status_unchanged, wire_reason_for_exit,
     CONDITION_ADMITTED, CONDITION_COMPLETE, CONDITION_EVIDENCE_RECORDED, CONDITION_FAILED,
@@ -2530,33 +2531,43 @@ async fn write_approval_bundle_config_map(
     }
 }
 
-/// Find the pod the exit code is read from.
+/// Find the pod the exit code is read from — D-SEAMS **S6**, `SEC-PODLOG`.
 ///
 /// The prefixed selector first, the legacy one as a fallback — the same two,
 /// in the same order, as the `Backup` path, through
 /// [`super::backup::pod_selectors`] so the two reconcilers cannot disagree
-/// about which label the job controller sets.
+/// about which label the job controller sets — and then the same ONE selection
+/// rule, [`check::pod::find_owned_pod_by_selectors`]: a candidate is read only
+/// when its **controller** `ownerReference` is a `Job` carrying this Job's
+/// `metadata.uid`.
+///
+/// # What this used to do, and why it is gone
+///
+/// `list.items.into_iter().next()` — the first pod the label selector
+/// returned, with no owner check at all. `batch.kubernetes.io/job-name` is a
+/// plain label that anything able to create a pod in the namespace can set, so
+/// a planted pod's `exitCode` and its three interface **I8** evidence keys
+/// became this `Restore`'s recorded outcome. A `Restore` is the path that
+/// writes data back into a cluster and the object whose status an approver
+/// reads afterwards, which is why a stranger's exit code on it is worse than a
+/// missing one. Zero owned pods is now "no pod yet" and goes to the
+/// crashed-Job branch, which writes a terminal `NoExitCode` rather than a
+/// borrowed success.
 async fn find_pod(
     client: &kube::Client,
     namespace: &str,
     job_name: &str,
+    job_uid: Option<&str>,
 ) -> Result<Option<Pod>, RestoreError> {
-    let api: Api<Pod> = Api::namespaced(client.clone(), namespace);
-    for selector in backup::pod_selectors(job_name) {
-        let list = api
-            .list(&ListParams::default().labels(&selector))
-            .await
-            .map_err(RestoreError::Api)?;
-        if let Some(pod) = list.items.into_iter().next() {
-            return Ok(Some(pod));
-        }
-        debug!(
-            job = %job_name,
-            selector = %selector,
-            "no pod matched this selector; trying the next"
-        );
-    }
-    Ok(None)
+    check::pod::find_owned_pod_by_selectors(
+        client,
+        namespace,
+        job_name,
+        job_uid,
+        &backup::pod_selectors(job_name),
+    )
+    .await
+    .map_err(RestoreError::Api)
 }
 
 /// Reconcile one `Restore` at the instant `now`.
@@ -3034,7 +3045,7 @@ async fn reconcile_restore_inner(
         });
     }
 
-    let pod = find_pod(client, &namespace, &job_name).await?;
+    let pod = find_pod(client, &namespace, &job_name, job.uid().as_deref()).await?;
     let exit_code = pod.as_ref().and_then(backup::terminated_exit_code);
 
     // STEP 4. The crashed-Job case, before the happy path, because the happy

@@ -67,7 +67,7 @@ use futures::future::BoxFuture;
 use futures::StreamExt as _;
 use k8s_openapi::api::batch::v1::Job;
 use k8s_openapi::api::core::v1::{ConfigMap, Pod};
-use kube::api::{Api, ListParams, LogParams, Patch, PatchParams, PostParams};
+use kube::api::{Api, LogParams, Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
 use kube::runtime::{watcher, Controller};
 use kube::{Resource, ResourceExt as _};
@@ -81,6 +81,7 @@ use crate::backup_execution::{
     runner_argv_annotation, verify_frozen_config_map, ExecutionRefusal, FrozenInputs,
     JobProvenance, RunnerArgvAnnotation, INPUTS_SHA256_ANNOTATION, RUNNER_ARGV_ANNOTATION,
 };
+use crate::check;
 use crate::conditions::{
     current_condition, merge_condition, reason_for_exit, status_unchanged, wire_reason_for_exit,
     CONDITION_COMPLETE, CONDITION_EVIDENCE_RECORDED, CONDITION_EXECUTION_INPUTS_UNVERIFIED,
@@ -1931,66 +1932,47 @@ async fn create_runner_job(
     }
 }
 
-/// The pod a Job with UID `job_uid` produced, out of a label-selected list.
-///
-/// A `Backup`'s Job is named after the `Backup`, so a Job deleted and
-/// re-created from the same frozen inputs leaves the job-name label selector
-/// matching BOTH the new Job's pod and, until garbage collection finishes, the
-/// deleted Job's. A pod owned by some OTHER Job is therefore never read: its
-/// exit code belongs to a run this Job is not. A pod naming no Job owner at
-/// all (a shape the job controller does not produce) is the fallback.
-#[must_use]
-pub fn select_job_pod(pods: Vec<Pod>, job_uid: Option<&str>) -> Option<Pod> {
-    let job_owners = |pod: &Pod| -> Vec<String> {
-        pod.metadata
-            .owner_references
-            .as_deref()
-            .unwrap_or_default()
-            .iter()
-            .filter(|owner| owner.kind == "Job")
-            .map(|owner| owner.uid.clone())
-            .collect()
-    };
-    if let Some(uid) = job_uid {
-        if let Some(at) = pods
-            .iter()
-            .position(|pod| job_owners(pod).iter().any(|owner| owner == uid))
-        {
-            return pods.into_iter().nth(at);
-        }
-    }
-    pods.into_iter().find(|pod| job_owners(pod).is_empty())
-}
-
-/// Find the pod the exit code is read from.
+/// Find the pod the exit code is read from — D-SEAMS **S6**, `SEC-PODLOG`.
 ///
 /// The prefixed selector first, the legacy one as a fallback — see
-/// [`JOB_NAME_LABEL_LEGACY`]. Of the pods a selector returns, the one
-/// [`select_job_pod`] attributes to THIS Job's UID: `backoffLimit: 0` plus
-/// `restartPolicy: Never` yields exactly one per Job (verified live), and a Job
-/// re-created under the same name must not read its predecessor's pod.
+/// [`JOB_NAME_LABEL_LEGACY`] — and of the pods a selector returns, ONLY one
+/// whose **controller** `ownerReference` is a `Job` carrying THIS Job's
+/// `metadata.uid` ([`check::pod::is_owned_by_job`]).
+///
+/// # What this used to do, and why it is gone
+///
+/// It matched the label, then preferred a pod naming this Job's UID among its
+/// owner references — of any kind, controller or not — and otherwise **fell
+/// back to the first pod with no Job owner at all**. Both halves are readable
+/// by a namespace tenant: `batch.kubernetes.io/job-name` is a plain label, and
+/// a pod created by hand has no owner references, so planting a labelled,
+/// ownerless pod put its `exitCode`, its `refusal-reason=` and its two
+/// evidence keys onto somebody else's `Backup` as soon as the real pod was
+/// garbage-collected — which the Job outlives by
+/// [`TTL_SECONDS_AFTER_FINISHED`], seven days. There is no fallback now: zero
+/// owned pods is "no pod yet", the same state a Job whose pod has not been
+/// scheduled is in, and it is handled by the crashed-Job branch that already
+/// exists for it.
+///
+/// A `Backup`'s Job is named after the `Backup`, so a Job deleted and
+/// re-created from the same frozen inputs also leaves the label selector
+/// matching BOTH the new Job's pod and, until garbage collection finishes, the
+/// deleted Job's — the UID check is what separates them.
 async fn find_pod(
     client: &kube::Client,
     namespace: &str,
     job_name: &str,
     job_uid: Option<&str>,
 ) -> Result<Option<Pod>, BackupError> {
-    let api: Api<Pod> = Api::namespaced(client.clone(), namespace);
-    for selector in pod_selectors(job_name) {
-        let list = api
-            .list(&ListParams::default().labels(&selector))
-            .await
-            .map_err(BackupError::Api)?;
-        if let Some(pod) = select_job_pod(list.items, job_uid) {
-            return Ok(Some(pod));
-        }
-        debug!(
-            job = %job_name,
-            selector = %selector,
-            "no pod of this Job matched this selector; trying the next"
-        );
-    }
-    Ok(None)
+    check::pod::find_owned_pod_by_selectors(
+        client,
+        namespace,
+        job_name,
+        job_uid,
+        &pod_selectors(job_name),
+    )
+    .await
+    .map_err(BackupError::Api)
 }
 
 /// Reconcile one `Backup` at the instant `now`.

@@ -1165,6 +1165,37 @@ Three RBAC notes, because each is easy to get wrong:
   by deriving each `Api<T>` call in `crates/weirkeeper/src/` and requiring a
   grant for it in every shipped copy of the role.
 
+### Which pod is read: the Job's owner UID, never the label alone
+
+**A pod is read only when its controller `ownerReference` is a `Job` whose
+`uid` is the run's own Job UID.** The `batch.kubernetes.io/job-name` label (and
+its legacy unprefixed spelling, still set on 1.29) narrows the listing, because
+a Job's pod name is generated and cannot be known in advance — but the label is
+a *selector*, never a *decision*. Anything that can create a pod in the
+namespace can set it, so a controller that read "the first pod with this label"
+would lift a planted pod's `state.terminated.exitCode`, its `refusal-reason=`
+line and its evidence keys onto somebody else's `Backup`, `Restore` or
+`KafkaCluster` — a tenant-authored exit code and a tenant-authored pair of
+object keys on an object an approver reads. A UID is minted by the API server
+and cannot be forged by a pod author, and `controller: true` is required
+because a pod may carry several owner references and only one of them is the
+controller; an added non-controller reference is an association its own author
+made. The same rule covers a Job deleted and re-created under the same name
+(`Backup` and `Restore` Jobs *are* named after their object), whose
+predecessor's pod keeps the label until garbage collection finishes. **There is
+no fallback**: zero owned pods is "no pod yet" and takes the crashed-Job branch
+below — `exitCode` absent, phase `Failed`, reason `NoExitCode`, and for a
+`KafkaCluster` probe `reachable` left untouched — which is also what happens
+when the pod was genuinely garbage-collected. If a Job somehow owns two pods
+(an evicted runner replaced mid-reconcile), the **newest by
+`creationTimestamp`** is read, tie-broken by name, so two reconciles over the
+same cluster state cannot record two different exit codes. An ignored
+candidate is not silent: the controller logs it once per pod with code
+`ForeignPodIgnored`, naming the namespace, the Job and the pod. Nothing about
+this is configurable and nothing about it changes an object's schema, so there
+is no migration step, and an operator sees the change only as a run whose pod
+was never really its own no longer producing a status.
+
 ### The crashed Job: when there is no exit code at all
 
 A Job can finish having produced no terminated state for `runner` — the node

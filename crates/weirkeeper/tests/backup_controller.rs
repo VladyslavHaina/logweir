@@ -19,6 +19,7 @@ use futures::future::BoxFuture;
 use logweir_store::Store;
 use serde_json::Value;
 use weirkeeper::backup_execution::{runner_argv, ExecutionTrigger, INPUTS_SHA256_ANNOTATION};
+use weirkeeper::check::pod as cpod;
 use weirkeeper::conditions::apply_merge_patch;
 use weirkeeper::conditions::{
     reason_for_exit, wire_reason_for_exit, CONDITION_REASONS, CONDITION_TYPES,
@@ -53,6 +54,30 @@ const NAME: &str = "logweir-backup-nightly-20261109-031700";
 
 /// The pod the job controller made.
 const POD: &str = "logweir-backup-nightly-20261109-031700-abcde";
+
+/// The runner Job's own `metadata.uid`, and the ONLY thing that makes [`POD`]
+/// this run's pod — D-SEAMS **S6**, defect `SEC-PODLOG`. Named rather than
+/// spelled inline because it now has to appear in two places that must agree:
+/// the Job fixture the reconciler reads and the `ownerReferences` of the pod
+/// it is allowed to read back.
+const JOB_UID: &str = "bbbbbbbb-0000-4000-8000-0000000000b1";
+
+/// A pod's `ownerReferences` naming `job_uid` as its **controller**.
+///
+/// `controller` and `kind` are parameters because the negative cases are
+/// exactly "one of these three is wrong": another Job's UID, a
+/// non-controller reference, or a `Job`-shaped UID on a `ReplicaSet`.
+fn pod_owner_json(kind: &str, job_uid: &str, controller: bool) -> String {
+    format!(
+        r#"[{{"apiVersion":"batch/v1","kind":"{kind}","name":"{NAME}","uid":"{job_uid}",
+      "controller":{controller},"blockOwnerDeletion":true}}]"#
+    )
+}
+
+/// The ordinary case: owned, by the controller reference, by [`JOB_UID`].
+fn owned_by_job() -> String {
+    pod_owner_json("Job", JOB_UID, true)
+}
 
 const UID: &str = "3f1c8a5e-0000-4000-8000-0000000000a1";
 
@@ -268,7 +293,7 @@ fn job_body(condition: &str) -> String {
     let owners = job_owner_json();
     format!(
         r#"{{"apiVersion":"batch/v1","kind":"Job",
-  "metadata":{{"name":"{NAME}","namespace":"{NS}","uid":"bbbbbbbb-0000-4000-8000-0000000000b1",
+  "metadata":{{"name":"{NAME}","namespace":"{NS}","uid":"{JOB_UID}",
     "ownerReferences":{owners},
     "annotations":{{"{INPUTS_SHA256_ANNOTATION}":"{FIXTURE_INPUTS_SHA256}"}}}},
   "spec":{{"template":{{"spec":{{"containers":[],"restartPolicy":"Never"}}}}}},
@@ -283,7 +308,7 @@ fn running_job_body() -> String {
     let owners = job_owner_json();
     format!(
         r#"{{"apiVersion":"batch/v1","kind":"Job",
-  "metadata":{{"name":"{NAME}","namespace":"{NS}","uid":"bbbbbbbb-0000-4000-8000-0000000000b1",
+  "metadata":{{"name":"{NAME}","namespace":"{NS}","uid":"{JOB_UID}",
     "ownerReferences":{owners},
     "annotations":{{"{INPUTS_SHA256_ANNOTATION}":"{FIXTURE_INPUTS_SHA256}"}}}},
   "spec":{{"template":{{"spec":{{"containers":[],"restartPolicy":"Never"}}}}}},
@@ -299,10 +324,19 @@ fn running_job_body() -> String {
 /// by-index one, so the by-index mutant would survive every test but the one
 /// written for it.
 fn pod_list_terminated(exit_code: i32) -> String {
+    pod_list_terminated_owned_by(exit_code, &owned_by_job())
+}
+
+/// [`pod_list_terminated`] with the pod's `ownerReferences` as a parameter.
+///
+/// THE OWNER IS A PARAMETER BECAUSE IT IS THE SECURITY BOUNDARY. `"null"`
+/// gives an ownerless pod, `pod_owner_json(…)` gives a wrong one, and both
+/// must end at the same place as an empty list: no log read, no exit code.
+fn pod_list_terminated_owned_by(exit_code: i32, owners: &str) -> String {
     format!(
         r#"{{"apiVersion":"v1","kind":"PodList","metadata":{{}},"items":[
   {{"apiVersion":"v1","kind":"Pod",
-    "metadata":{{"name":"{POD}","namespace":"{NS}",
+    "metadata":{{"name":"{POD}","namespace":"{NS}","ownerReferences":{owners},
       "labels":{{"{JOB_NAME_LABEL}":"{NAME}","{JOB_NAME_LABEL_LEGACY}":"{NAME}"}}}},
     "spec":{{"containers":[]}},
     "status":{{"phase":"Failed","containerStatuses":[
@@ -320,10 +354,11 @@ const EMPTY_POD_LIST: &str = r#"{"apiVersion":"v1","kind":"PodList","metadata":{
 /// A pod list holding one pod with NO terminated state, plus whatever
 /// `status_extra` says about why.
 fn pod_list_untermined(status_extra: &str) -> String {
+    let owners = owned_by_job();
     format!(
         r#"{{"apiVersion":"v1","kind":"PodList","metadata":{{}},"items":[
   {{"apiVersion":"v1","kind":"Pod",
-    "metadata":{{"name":"{POD}","namespace":"{NS}",
+    "metadata":{{"name":"{POD}","namespace":"{NS}","ownerReferences":{owners},
       "labels":{{"{JOB_NAME_LABEL}":"{NAME}"}}}},
     "spec":{{"containers":[]}},
     "status":{{{status_extra}}}}}]}}"#
@@ -4838,7 +4873,7 @@ use weirkeeper::conditions::{
 };
 use weirkeeper::controllers::backup::{
     desired_execution_inputs, plan_config_map, runner_job, runner_job_spec_from_inputs,
-    running_status_patch, select_job_pod, with_status_patch,
+    running_status_patch, with_status_patch,
 };
 use weirkeeper::crds::kafka_cluster::KafkaCluster;
 
@@ -6155,38 +6190,77 @@ fn a_manual_identity_is_the_object_uid_and_nothing_else() {
     assert_eq!(execution_identity(&decorated).unwrap(), first);
 }
 
-/// A re-created Job must not read its predecessor's pod: the label selector
-/// matches both until garbage collection finishes.
+/// A re-created Job must not read its predecessor's pod, and NOTHING the label
+/// alone selects is read — D-SEAMS **S6**, defect `SEC-PODLOG`.
 ///
-/// KILLS: taking the first pod the selector returns.
+/// This is the pure half of the rule the three execution controllers now share
+/// with the check framework ([`weirkeeper::check::pod`]). The controller half,
+/// over the double and asserting the ABSENCE of a `pods/log` request, is
+/// [`a_labelled_pod_this_job_does_not_own_is_never_read`].
+///
+/// KILLS: taking the first pod the selector returns; matching an owner
+/// reference of any kind; matching a non-controller owner reference; falling
+/// back to an ownerless pod when nothing is owned (the shape this file's
+/// previous version of this test ASSERTED, and which the `plat06` review
+/// recorded as L2).
 #[test]
 fn a_recreated_job_reads_only_its_own_pod() {
-    let pod = |name: &str, job_uid: Option<&str>| -> k8s_openapi::api::core::v1::Pod {
+    let pod = |name: &str, owner: Option<(&str, &str, bool)>| -> k8s_openapi::api::core::v1::Pod {
         let mut v = serde_json::json!({"metadata": {"name": name}});
-        if let Some(uid) = job_uid {
+        if let Some((kind, uid, controller)) = owner {
             v["metadata"]["ownerReferences"] = serde_json::json!([{
-                "apiVersion": "batch/v1", "kind": "Job", "name": NAME, "uid": uid, "controller": true
+                "apiVersion": "batch/v1", "kind": kind, "name": NAME, "uid": uid,
+                "controller": controller
             }]);
         }
         serde_json::from_value(v).unwrap()
     };
-    let old = pod("old", Some("old-job-uid"));
-    let new = pod("new", Some("new-job-uid"));
-    let picked = select_job_pod(vec![old.clone(), new.clone()], Some("new-job-uid"));
+    let stale = pod("old", Some(("Job", "old-job-uid", true)));
+    let mine = pod("new", Some(("Job", "new-job-uid", true)));
+
+    let listed = [stale.clone(), mine.clone()];
+    let (chosen, ignored) = cpod::choose_owned(&listed, "new-job-uid");
     assert_eq!(
-        picked.and_then(|p| p.metadata.name),
-        Some("new".to_string())
+        chosen.and_then(|p| p.metadata.name.clone()),
+        Some("new".to_string()),
+        "the pod this Job owns, and not the first one the selector returned"
     );
     assert_eq!(
-        select_job_pod(vec![old.clone()], Some("new-job-uid")),
-        None,
-        "the deleted Job's pod is nobody's evidence for the new Job"
+        ignored
+            .iter()
+            .filter_map(|p| p.metadata.name.clone())
+            .collect::<Vec<_>>(),
+        vec!["old".to_string()],
+        "and the predecessor's pod is REPORTED as ignored, not silently dropped"
     );
-    assert_eq!(
-        select_job_pod(vec![pod("ownerless", None)], Some("new-job-uid"))
-            .and_then(|p| p.metadata.name),
-        Some("ownerless".to_string())
-    );
+
+    // Each way of not being this Job's pod, one at a time, alone in the list.
+    for (label, impostor) in [
+        (
+            "the deleted Job's pod is nobody's evidence for the new Job",
+            pod("old", Some(("Job", "old-job-uid", true))),
+        ),
+        (
+            "an ownerless pod wearing the label is a pod somebody created by hand",
+            pod("ownerless", None),
+        ),
+        (
+            "a NON-controller owner reference is an association somebody else made",
+            pod("associated", Some(("Job", "new-job-uid", false))),
+        ),
+        (
+            "a ReplicaSet that happens to carry the UID string is not this Job",
+            pod(
+                "replicaset-owned",
+                Some(("ReplicaSet", "new-job-uid", true)),
+            ),
+        ),
+    ] {
+        let listed = [impostor];
+        let (chosen, ignored) = cpod::choose_owned(&listed, "new-job-uid");
+        assert!(chosen.is_none(), "{label}");
+        assert_eq!(ignored.len(), 1, "{label}: and it is reported");
+    }
 }
 
 /// A hostile annotation on a RUNNING typed Backup is surfaced once, and a steady

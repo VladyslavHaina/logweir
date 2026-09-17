@@ -61,6 +61,23 @@ const JOB: &str = "logweir-probe-orders-prod";
 /// The pod the job controller made.
 const POD: &str = "logweir-probe-orders-prod-abcde";
 
+/// The probe Job's own `metadata.uid`, and the ONLY thing that makes [`POD`]
+/// this probe's pod — D-SEAMS **S6**, defect `SEC-PODLOG`.
+const JOB_UID: &str = "bbbbbbbb-0000-4000-8000-0000000000b3";
+
+/// A pod's `ownerReferences` naming `job_uid` as its **controller**.
+fn pod_owner_json(kind: &str, job_uid: &str, controller: bool) -> String {
+    format!(
+        r#"[{{"apiVersion":"batch/v1","kind":"{kind}","name":"{JOB}","uid":"{job_uid}",
+      "controller":{controller},"blockOwnerDeletion":true}}]"#
+    )
+}
+
+/// The ordinary case: owned, by the controller reference, by [`JOB_UID`].
+fn owned_by_job() -> String {
+    pod_owner_json("Job", JOB_UID, true)
+}
+
 const UID: &str = "7d1f4a52-0000-4000-8000-0000000000f1";
 
 /// The cluster id interface **I14**'s first line carries on the reachable arm.
@@ -118,7 +135,7 @@ fn not_found_body(kind: &str, name: &str) -> String {
 fn job_body(condition: &str) -> String {
     format!(
         r#"{{"apiVersion":"batch/v1","kind":"Job",
-  "metadata":{{"name":"{JOB}","namespace":"{NS}","uid":"bbbbbbbb-0000-4000-8000-0000000000b3"}},
+  "metadata":{{"name":"{JOB}","namespace":"{NS}","uid":"{JOB_UID}"}},
   "spec":{{"template":{{"spec":{{"containers":[],"restartPolicy":"Never"}}}}}},
   "status":{{"conditions":[{{"type":"{condition}","status":"True",
      "lastProbeTime":"2026-09-10T11:59:00Z","lastTransitionTime":"2026-09-10T11:59:00Z"}}]}}}}"#
@@ -129,7 +146,7 @@ fn job_body(condition: &str) -> String {
 fn running_job_body() -> String {
     format!(
         r#"{{"apiVersion":"batch/v1","kind":"Job",
-  "metadata":{{"name":"{JOB}","namespace":"{NS}","uid":"bbbbbbbb-0000-4000-8000-0000000000b3"}},
+  "metadata":{{"name":"{JOB}","namespace":"{NS}","uid":"{JOB_UID}"}},
   "spec":{{"template":{{"spec":{{"containers":[],"restartPolicy":"Never"}}}}}},
   "status":{{"active":1}}}}"#
     )
@@ -141,10 +158,19 @@ fn running_job_body() -> String {
 /// THE SIDECAR IS AT INDEX 0 ON PURPOSE. A suite whose happy path has `runner`
 /// at index 0 cannot tell a by-name reader from a by-index one.
 fn pod_list_terminated(exit_code: i32) -> String {
+    pod_list_terminated_owned_by(exit_code, &owned_by_job())
+}
+
+/// [`pod_list_terminated`] with the pod's `ownerReferences` as a parameter.
+///
+/// THE OWNER IS A PARAMETER BECAUSE IT IS THE SECURITY BOUNDARY (D-SEAMS
+/// **S6**): a probe's two stdout lines become `status.reachable` and
+/// `status.clusterId`, which `Restore` admission then refuses or allows on.
+fn pod_list_terminated_owned_by(exit_code: i32, owners: &str) -> String {
     format!(
         r#"{{"apiVersion":"v1","kind":"PodList","metadata":{{}},"items":[
   {{"apiVersion":"v1","kind":"Pod",
-    "metadata":{{"name":"{POD}","namespace":"{NS}",
+    "metadata":{{"name":"{POD}","namespace":"{NS}","ownerReferences":{owners},
       "labels":{{"{JOB_NAME_LABEL}":"{JOB}","{JOB_NAME_LABEL_LEGACY}":"{JOB}"}}}},
     "spec":{{"containers":[]}},
     "status":{{"phase":"Succeeded","containerStatuses":[
@@ -158,10 +184,11 @@ fn pod_list_terminated(exit_code: i32) -> String {
 
 /// A pod list holding one pod whose `runner` never terminated.
 fn pod_list_no_exit_code() -> String {
+    let owners = owned_by_job();
     format!(
         r#"{{"apiVersion":"v1","kind":"PodList","metadata":{{}},"items":[
   {{"apiVersion":"v1","kind":"Pod",
-    "metadata":{{"name":"{POD}","namespace":"{NS}",
+    "metadata":{{"name":"{POD}","namespace":"{NS}","ownerReferences":{owners},
       "labels":{{"{JOB_NAME_LABEL}":"{JOB}"}}}},
     "spec":{{"containers":[]}},
     "status":{{"phase":"Failed","containerStatuses":[
