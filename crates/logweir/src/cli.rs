@@ -567,15 +567,23 @@ pub struct RestoreRunArgs {
     /// offset on any cluster.
     #[arg(long)]
     pub offset_report_out: Option<PathBuf>,
-    /// **Execution contract v2** (decision D3 §4.3): the signed standing
-    /// rehearsal authorization's scope document, projected into the bundle.
+    /// **Execution contract v2** (decision D3 §4.3(e)): the SIGNED standing
+    /// rehearsal authorization document, projected into the bundle. Its DSSE
+    /// sidecar is read from the same path with the extension replaced by
+    /// `.sig`, exactly as `--approval`'s is.
     ///
     /// Omit it for every ordinary Restore — omitting it changes nothing. When
-    /// it IS given, its bytes must match `LOGWEIR_EXECUTION_SCOPE_SHA256` and
-    /// the rendered plan must fall inside the scope, or the run is refused
-    /// with exit 3 before any client is constructed.
+    /// it IS given, `--authorization-keys` is required too, its bytes must
+    /// match `LOGWEIR_EXECUTION_AUTHORIZATION_SHA256`, the signature must
+    /// verify under a pinned key allowed to authorise, and the rendered plan
+    /// must fall inside the scope the signed document carries — or the run is
+    /// refused with exit 3 before any client is constructed.
     #[arg(long)]
-    pub rehearsal_scope: Option<PathBuf>,
+    pub standing_authorization: Option<PathBuf>,
+    /// **Execution contract v2**: the trusted public keys the standing
+    /// authorization's signature is checked against (D3 §4.3(e)).
+    #[arg(long)]
+    pub authorization_keys: Option<PathBuf>,
     /// **Bundle contract v2**: the approval-policy snapshot (PLAT-19.2). This
     /// build pins its digest and interprets nothing in it.
     #[arg(long)]
@@ -603,7 +611,8 @@ impl From<RestoreRunArgs> for crate::drill::RunArgs {
             out: a.out,
             metrics_file: a.metrics_file,
             offset_report_out: a.offset_report_out,
-            rehearsal_scope: a.rehearsal_scope,
+            standing_authorization: a.standing_authorization,
+            authorization_keys: a.authorization_keys,
             policy_snapshot: a.policy_snapshot,
             confirmation_key: a.confirmation_key,
         }

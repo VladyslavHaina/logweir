@@ -26,9 +26,11 @@
 use crate::drill::DrillError;
 use logweir_core::execution_contract::{self as wire, PointBinding};
 use logweir_core::guard::GuardRefusal;
-use logweir_core::rehearsal_scope::RehearsalScope;
 use logweir_core::spec::{AllowedClusters, DrillSpec};
 use logweir_engine_oso::storage::{Store, StoreError};
+use logweir_evidence::{
+    keys::VerifyingKey, verify::verify_detached, Error as EvidenceError, Sidecar,
+};
 
 /// The prose a point-binding refusal opens with.
 ///
@@ -230,37 +232,189 @@ fn check_point_shape(point: &PointBinding) -> Result<(), DrillError> {
     )))
 }
 
-/// Prove the mounted plan falls inside the signed standing rehearsal scope
-/// (D3 §4.3(d)), the runner's half of the two checks.
+/// **Verify the SIGNED standing rehearsal authorization, then prove the plan
+/// falls inside the scope it carries** — D3 §4.3(d) and (e), the runner's half
+/// of "checked twice".
 ///
-/// `scope_bytes` are the digest-verified bundle member;
-/// `validate_execution_contract` has already established they are the bytes
-/// the controller pinned, so this function's only job is to read them and
-/// apply the predicate.
+/// # Why a signature and not a digest
 ///
-/// Pure apart from its arguments: no clock, no network, no store. The scope's
-/// `issuedAt`/`expiresAt` live on the enclosing authorization document and are
-/// the controller's each-slot check (§4.3(c)) — a runner has no trusted clock
-/// to re-decide an expiry with, and pretending otherwise would put a Job's
-/// node time in the authorization path.
-pub fn verify_standing_scope(
+/// The first shape of this check parsed a bare `RehearsalScope` out of bytes
+/// pinned by `LOGWEIR_EXECUTION_SCOPE_SHA256`. That digest is set by the same
+/// controller that mounts the volume, so against the adversary §4.3's own
+/// first sentence names — "a controller that could mint its own
+/// authorization" — the check proved nothing: mint a scope that fits the plan,
+/// pin its digest, mount it, pass. §4.3(e) says the bundle carries "the
+/// authorization document, ITS SIGNATURES and THE TRUSTED PUBLIC KEYS, the
+/// scope and the rendered plan", and this function is why that list is what it
+/// is.
+///
+/// # The order, and why each step is where it is
+///
+/// 1. the keyring, so there is something to anchor in;
+/// 2. the sidecar signature over the ENVELOPE BYTES, under a pinned key —
+///    before the envelope is parsed, for the same reason
+///    [`verify_point_binding`] checks its digest before parsing: everything
+///    read out of the document is trustworthy only because these exact bytes
+///    were signed;
+/// 3. the signing key's USAGE, judged on the key that actually verified. A key
+///    carrying only `EvidenceSigning` is refused even though its signature is
+///    perfectly good — that is D3 §7.3's key-usage separation, and it is a
+///    different fault from a forgery, so it is named differently;
+/// 4. the document's own admissibility — kind, subject, the UID binding to
+///    THIS schedule, and the validity window
+///    (`logweir_core::execution_contract::admit_standing_authorization`, with
+///    `now` passed in from the caller because Global Constraint 1 puts the
+///    clock in this crate);
+/// 5. only then, `plan ∈ scope`.
+///
+/// # Verification only
+///
+/// No signing primitive is constructed here and no key material is minted:
+/// `verify_detached` and `VerifyingKey::from_pem_str` are the same two calls
+/// `phase1_approval::verify_bytes` already makes, so `check-one-signer.sh`'s
+/// picture of which crates reach the SIGNING half is unchanged.
+///
+/// # The clock, honestly
+///
+/// A Job's node clock is not a trusted time source, and `docs/stability.md`
+/// says so. The runner's expiry check is a SECOND line behind the controller's
+/// each-slot check (§4.3(c)), not a replacement for it — but it is still worth
+/// having: a bundle replayed weeks later against a skew-free node is refused
+/// here and nowhere else.
+pub fn verify_standing_authorization(
     plan: &DrillSpec,
     allowed: &AllowedClusters,
-    scope_bytes: &[u8],
+    document: &[u8],
+    sidecar_bytes: &[u8],
+    keyring_bytes: &[u8],
     schedule_uid: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
 ) -> Result<(), DrillError> {
-    let scope: RehearsalScope = serde_json::from_slice(scope_bytes).map_err(|error| {
-        refuse(format!(
-            "{REHEARSAL_SCOPE_VIOLATION}. The mounted standing rehearsal scope does not parse: \
-             {error}; no data operation was started."
+    let keyring: wire::AuthorizationKeyring =
+        serde_json::from_slice(keyring_bytes).map_err(|error| {
+            // Structural corruption of a mounted member says nothing about
+            // whether anyone tried to forge anything — the routing
+            // `phase1_approval::verify_bytes` gives a sidecar that will not
+            // parse.
+            DrillError::Operational(format!(
+                "the mounted authorization keyring does not parse: {error}"
+            ))
+        })?;
+    if keyring.keys.is_empty() {
+        return Err(refuse(format!(
+            "{}. The bundle presents no trusted public key, so a signature over the standing \
+             authorization could anchor in nothing; no data operation was started.",
+            wire::AUTHORIZATION_INVALID
+        )));
+    }
+    let sidecar: Sidecar = serde_json::from_slice(sidecar_bytes).map_err(|error| {
+        DrillError::Operational(format!(
+            "the standing authorization DSSE sidecar does not parse: {error}"
         ))
     })?;
-    let facts = wire::plan_scope_facts(plan, allowed);
-    if let Err(refusal) = wire::plan_within_scope(&facts, &scope) {
+
+    // EVERY key is tried, and the one that VERIFIED is the one whose usage is
+    // judged. Filtering by usage first would turn "a key that may not
+    // authorise signed this" — a real and reportable fault — into the
+    // indistinguishable "nothing verified".
+    let mut verified: Option<&wire::AuthorizationKey> = None;
+    let mut unusable: Vec<String> = Vec::new();
+    for key in &keyring.keys {
+        let parsed = match VerifyingKey::from_pem_str(&key.public_key_pem) {
+            Ok(parsed) => parsed,
+            Err(error) => {
+                unusable.push(format!("{} ({error})", key.key_id));
+                continue;
+            }
+        };
+        match verify_detached(
+            &parsed,
+            wire::PAYLOAD_TYPE_STANDING_AUTHORIZATION,
+            document,
+            &sidecar,
+        ) {
+            Ok(_) => {
+                verified = Some(key);
+                break;
+            }
+            // The sidecar itself is broken — truncated base64, a DER blob of
+            // the wrong length, no signature at all. Operational, per
+            // `EvidenceError::Malformed`'s own doc comment.
+            Err(EvidenceError::Malformed(message)) => {
+                return Err(DrillError::Operational(format!(
+                    "standing authorization sidecar signature data is malformed: {message}"
+                )))
+            }
+            // This key did not sign it. Try the next one.
+            Err(EvidenceError::Verify(_)) => {}
+            Err(EvidenceError::Key(message)) => {
+                unusable.push(format!("{} ({message})", key.key_id))
+            }
+        }
+    }
+
+    let Some(key) = verified else {
         return Err(refuse(format!(
-            "{REHEARSAL_SCOPE_VIOLATION}. {refusal}. The standing authorization for \
-             RehearsalSchedule {} does not cover this plan; no data operation was started.",
-            schedule_uid.unwrap_or("<unnamed>")
+            "{}. The standing authorization's signature does not verify under any of the {} \
+             trusted public keys the bundle pins{}. The document is not the one a human signed, \
+             or it was signed by a key this installation does not trust; no data operation was \
+             started.",
+            wire::AUTHORIZATION_INVALID,
+            keyring.keys.len(),
+            if unusable.is_empty() {
+                String::new()
+            } else {
+                format!(" (unusable: {})", unusable.join(", "))
+            }
+        )));
+    };
+    // **A GOOD SIGNATURE UNDER THE WRONG KIND OF KEY.** Named as a usage
+    // mismatch and never as a signature failure: an operator told "bad
+    // signature" about a genuinely signed document goes looking at the wrong
+    // thing, which is exactly what `trust::UntrustReason::KeyUsageMismatch`
+    // exists to prevent.
+    if !key.may_authorize() {
+        return Err(refuse(format!(
+            "{}. {}: the standing authorization verifies under key {}, whose usages are [{}]. A \
+             rehearsal may be authorised only by a key carrying {} or {} — the installation's \
+             own evidence-signing identity must never be able to authorise its own rehearsals \
+             (D3 §7.3); no data operation was started.",
+            wire::AUTHORIZATION_INVALID,
+            logweir_core::trust::UntrustReason::KeyUsageMismatch.as_str(),
+            key.key_id,
+            key.usages
+                .iter()
+                .map(|u| u.as_str())
+                .collect::<Vec<_>>()
+                .join(", "),
+            logweir_core::trust::KeyUsage::GovernedApproval.as_str(),
+            logweir_core::trust::KeyUsage::ConsoleConfirmation.as_str(),
+        )));
+    }
+
+    // Only NOW are the bytes read as a document: the signature covers them.
+    let doc: wire::StandingAuthorization = serde_json::from_slice(document).map_err(|error| {
+        // The signature verified, so these ARE the approved bytes and the
+        // fault is in what was signed — the same argument
+        // `verify_point_binding` makes for a receipt that will not parse after
+        // its digest matched.
+        refuse(format!(
+            "{}. The signed bytes are not a standing rehearsal authorization: {error}; no data \
+             operation was started.",
+            wire::AUTHORIZATION_INVALID
+        ))
+    })?;
+    if let Err(refusal) = wire::admit_standing_authorization(&doc, schedule_uid, now) {
+        return Err(refuse(format!("{refusal}; no data operation was started.")));
+    }
+
+    let facts = wire::plan_scope_facts(plan, allowed);
+    if let Err(refusal) = wire::plan_within_scope(&facts, &doc.scope) {
+        return Err(refuse(format!(
+            "{REHEARSAL_SCOPE_VIOLATION}. {refusal}. The standing authorization key {} signed \
+             for RehearsalSchedule {} ({}) does not cover this plan; no data operation was \
+             started.",
+            key.key_id, doc.subject_ref.name, doc.subject_ref.uid
         )));
     }
     Ok(())
@@ -371,6 +525,7 @@ sample:
   window_start: 2026-01-01T00:00:00Z
   window_end: 2026-01-02T00:00:00Z
   records_per_partition: 25
+  max_partitions: 200
 objectives: {rto_seconds: 1800, pass_rate: 1.0}
 evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
 "#;
@@ -489,6 +644,57 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         );
     }
 
+    /// **F2's MUTANT: tolerate a manifest whose bytes changed under an intact
+    /// receipt.**
+    ///
+    /// The review planted `if false && manifest_digest != point.manifest_sha256`
+    /// and the ENTIRE suite passed: the `NotFound` half of this step was
+    /// guarded and the DIGEST half was not. This row kills it — every document
+    /// agrees with every other document, and the archive holds something else.
+    ///
+    /// Seeded by ATTESTING bytes A and STORING bytes B, because `Store` is
+    /// create-only by construction (Global Constraint 6) and a test cannot
+    /// overwrite a key it already wrote. The effect is identical to a manifest
+    /// replaced in place.
+    #[test]
+    fn a_manifest_whose_bytes_changed_under_an_intact_receipt_is_refused() {
+        let store = Store::in_memory("");
+        let attested = br#"{"topics":[]}"#.to_vec();
+        let attested_sha256 = logweir_core::ids::sha256_prefixed(&attested);
+        let substituted = br#"{"topics":["swapped"]}"#.to_vec();
+        assert_ne!(
+            logweir_core::ids::sha256_prefixed(&substituted),
+            attested_sha256
+        );
+        let receipt_bytes =
+            serde_json::to_vec(&receipt(MANIFEST_KEY, &attested_sha256)).expect("serialises");
+        store
+            .put_create_only(RECEIPT_KEY, &receipt_bytes)
+            .expect("the receipt is written");
+        store
+            .put_create_only(MANIFEST_KEY, &substituted)
+            .expect("the substituted manifest is written");
+        let binding = PointBinding {
+            point_id: crate::catalog::record::point_id(&receipt_bytes),
+            receipt_key: RECEIPT_KEY.into(),
+            receipt_sha256: logweir_core::ids::sha256_prefixed(&receipt_bytes),
+            // The plan and the receipt agree, and both are wrong about the
+            // bucket.
+            manifest_sha256: attested_sha256.clone(),
+        };
+        let error = verify_point_binding(&plan_with(Some(binding)), &store)
+            .expect_err("a substituted manifest is refused");
+        assert_eq!(
+            error.exit_code(),
+            crate::exit::ExitCode::GuardRefused,
+            "the archive does not hold what the approver bound to: {error}"
+        );
+        let rendered = error.to_string();
+        assert!(rendered.contains("hashes to"), "{rendered}");
+        assert!(rendered.contains(POINT_BINDING_MISMATCH), "{rendered}");
+        assert!(rendered.contains(&attested_sha256), "{rendered}");
+    }
+
     /// A missing point is exit 1, NOT exit 3: the archive did not answer, and
     /// telling an operator to change an approved plan would be wrong.
     #[test]
@@ -555,8 +761,14 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         );
     }
 
-    fn scope_json(prefix: &str, cluster: &str) -> Vec<u8> {
-        serde_json::to_vec(&serde_json::json!({
+    // ---- the SIGNED standing authorization (D3 §4.3(e)) -------------------
+
+    use logweir_core::trust::KeyUsage;
+    use logweir_evidence::keys::SigningKey;
+    use logweir_evidence::sign::sign_detached;
+
+    fn scope_value(prefix: &str, cluster: &str) -> serde_json::Value {
+        serde_json::json!({
             "templateDigest": "sha256:aa",
             "targetClusterId": cluster,
             "topicPrefix": prefix,
@@ -565,8 +777,86 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
             "recordsPerPartition": 25,
             "deadlineSeconds": 3600,
             "modes": ["scratch"],
+        })
+    }
+
+    fn document(uid: &str, prefix: &str, cluster: &str, issued_days_ago: i64) -> Vec<u8> {
+        let issued = chrono::Utc::now() - chrono::Duration::days(issued_days_ago);
+        serde_json::to_vec(&serde_json::json!({
+            "formatVersion": "1.0.0",
+            "kind": "StandingRehearsalAuthorization",
+            "subjectRef": {
+                "apiVersion": "logweir.dev/v1alpha1",
+                "kind": "RehearsalSchedule",
+                "namespace": "team-a",
+                "name": "weekly-orders",
+                "uid": uid,
+            },
+            "scope": scope_value(prefix, cluster),
+            "issuedAt": issued.to_rfc3339(),
+            "expiresAt": (issued + chrono::Duration::days(30)).to_rfc3339(),
         }))
-        .expect("the scope serialises")
+        .expect("the document serialises")
+    }
+
+    /// The three byte-streams D3 §4.3(e) names, as they arrive in the bundle.
+    struct Signed {
+        document: Vec<u8>,
+        sidecar: Vec<u8>,
+        keys: Vec<u8>,
+    }
+
+    fn keyring(entries: Vec<(&SigningKey, Vec<KeyUsage>)>) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "formatVersion": "1.0.0",
+            "keys": entries
+                .iter()
+                .map(|(key, usages)| {
+                    serde_json::json!({
+                        "keyId": key.key_id(),
+                        "publicKeyPem": key
+                            .verifying_key()
+                            .to_public_key_pem()
+                            .expect("pem"),
+                        "usages": usages,
+                    })
+                })
+                .collect::<Vec<_>>(),
+        }))
+        .expect("the keyring serialises")
+    }
+
+    /// Signed by a `GovernedApproval` key, for this schedule, covering the
+    /// fixture plan.
+    ///
+    /// The key is generated IN THE TEST. `crates/logweir` is already one of the
+    /// three crates `scripts/check-one-signer.sh` permits to name the signing
+    /// API, and this is test-only material that exists so the runner's
+    /// VERIFICATION path has something real to verify — no production code in
+    /// this module signs anything.
+    fn signed_with(document: Vec<u8>, usages: Vec<KeyUsage>) -> Signed {
+        let approver = SigningKey::generate_ed25519();
+        let sidecar = serde_json::to_vec(
+            &sign_detached(
+                &approver,
+                wire::PAYLOAD_TYPE_STANDING_AUTHORIZATION,
+                &document,
+            )
+            .expect("sign"),
+        )
+        .expect("the sidecar serialises");
+        Signed {
+            document,
+            sidecar,
+            keys: keyring(vec![(&approver, usages)]),
+        }
+    }
+
+    fn signed_authorization() -> Signed {
+        signed_with(
+            document("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000", 1),
+            vec![KeyUsage::GovernedApproval],
+        )
     }
 
     fn allowed(ids: &[&str]) -> AllowedClusters {
@@ -576,45 +866,218 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         }
     }
 
-    #[test]
-    fn a_plan_inside_the_signed_scope_passes_the_runners_half() {
-        verify_standing_scope(
+    fn verify(signed: &Signed, uid: Option<&str>) -> Result<(), DrillError> {
+        verify_standing_authorization(
             &plan_with(None),
             &allowed(&["TARGET00000000000000000"]),
-            &scope_json("rehearsal-3f2a91c7-", "TARGET00000000000000000"),
-            Some("uid-1"),
+            &signed.document,
+            &signed.sidecar,
+            &signed.keys,
+            uid,
+            chrono::Utc::now(),
         )
-        .expect("the plan is inside the signed scope");
     }
 
-    /// THE MUTANT: skip the scope check. A plan whose prefix is not the signed
-    /// one must not run, and the refusal must name the schedule and the
-    /// mismatch.
     #[test]
-    fn a_plan_outside_the_signed_prefix_is_refused_before_any_client() {
-        let error = verify_standing_scope(
-            &plan_with(None),
-            &allowed(&["TARGET00000000000000000"]),
-            &scope_json("rehearsal-deadbeef-", "TARGET00000000000000000"),
-            Some("uid-1"),
-        )
-        .expect_err("a plan outside the scope is refused");
+    fn a_validly_signed_authorization_for_this_schedule_and_plan_is_admitted() {
+        verify(&signed_authorization(), Some("uid-1"))
+            .expect("a signed, current, in-scope authorization is admitted");
+    }
+
+    /// **THE MUTANT F1 EXISTS FOR: skip the signature check.**
+    ///
+    /// This is the adversary D3 §4.3 names in its own first sentence — "a
+    /// controller that could mint its own authorization". A controller can
+    /// write any bytes it likes and sign them with any key IT holds; what it
+    /// does not hold is an approver key. So: a well-formed, current,
+    /// plan-fitting document, genuinely signed, by a key the bundle's keyring
+    /// does not pin. Before the signature check landed, this passed.
+    #[test]
+    fn a_document_minted_and_signed_by_a_key_the_bundle_does_not_pin_is_refused() {
+        let minted = document("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000", 1);
+        let controller = SigningKey::generate_ed25519();
+        let approver = SigningKey::generate_ed25519();
+        let forged = Signed {
+            sidecar: serde_json::to_vec(
+                &sign_detached(
+                    &controller,
+                    wire::PAYLOAD_TYPE_STANDING_AUTHORIZATION,
+                    &minted,
+                )
+                .expect("sign"),
+            )
+            .expect("serialises"),
+            document: minted,
+            // The keyring the controller cannot change without the contract
+            // digest failing: it pins the human approver, not itself.
+            keys: keyring(vec![(&approver, vec![KeyUsage::GovernedApproval])]),
+        };
+        let error = verify(&forged, Some("uid-1")).expect_err("a minted document is refused");
+        assert_eq!(error.exit_code(), crate::exit::ExitCode::GuardRefused);
+        assert!(
+            error.to_string().contains(wire::AUTHORIZATION_INVALID),
+            "{error}"
+        );
+        assert!(
+            error.to_string().contains("does not verify under any"),
+            "{error}"
+        );
+    }
+
+    /// One byte of the scope changed after signing.
+    #[test]
+    fn a_tampered_envelope_is_refused() {
+        let signed = signed_authorization();
+        let tampered = Signed {
+            document: String::from_utf8(signed.document.clone())
+                .expect("utf-8")
+                .replace("rehearsal-3f2a91c7-", "rehearsal-deadbeef-")
+                .into_bytes(),
+            sidecar: signed.sidecar.clone(),
+            keys: signed.keys.clone(),
+        };
+        let error = verify(&tampered, Some("uid-1")).expect_err("a tampered envelope is refused");
+        assert_eq!(error.exit_code(), crate::exit::ExitCode::GuardRefused);
+        assert!(
+            error.to_string().contains("does not verify under any"),
+            "{error}"
+        );
+    }
+
+    /// A perfectly good signature, made by a key the bundle does not pin.
+    #[test]
+    fn a_signature_under_an_unpinned_key_is_refused() {
+        let signed = signed_authorization();
+        let stranger = SigningKey::generate_ed25519();
+        let swapped = Signed {
+            document: signed.document.clone(),
+            sidecar: signed.sidecar.clone(),
+            keys: keyring(vec![(&stranger, vec![KeyUsage::GovernedApproval])]),
+        };
+        let error = verify(&swapped, Some("uid-1")).expect_err("an unpinned signer is refused");
+        assert_eq!(error.exit_code(), crate::exit::ExitCode::GuardRefused);
+        assert!(error.to_string().contains("trusted public keys"), "{error}");
+    }
+
+    /// **Key-usage separation (D3 §7.3).** The signature is genuine and the key
+    /// is pinned — and it is the installation's EVIDENCE key, which must never
+    /// be able to authorise its own rehearsals. Named as a usage mismatch,
+    /// never as a signature failure.
+    #[test]
+    fn a_signature_under_a_wrong_usage_key_is_refused_by_usage_and_not_by_signature() {
+        let signed = signed_with(
+            document("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000", 1),
+            vec![KeyUsage::EvidenceSigning],
+        );
+        let error = verify(&signed, Some("uid-1")).expect_err("a wrong-usage key is refused");
+        assert_eq!(error.exit_code(), crate::exit::ExitCode::GuardRefused);
+        let rendered = error.to_string();
+        assert!(rendered.contains("KeyUsageMismatch"), "{rendered}");
+        assert!(rendered.contains("EvidenceSigning"), "{rendered}");
+        assert!(
+            !rendered.contains("does not verify"),
+            "a genuinely signed document must not be reported as a bad signature: {rendered}"
+        );
+    }
+
+    #[test]
+    fn an_empty_keyring_anchors_in_nothing_and_is_refused() {
+        let signed = signed_authorization();
+        let empty = Signed {
+            document: signed.document.clone(),
+            sidecar: signed.sidecar.clone(),
+            keys: serde_json::to_vec(&serde_json::json!({"formatVersion":"1.0.0","keys":[]}))
+                .expect("serialises"),
+        };
+        let error = verify(&empty, Some("uid-1")).expect_err("an empty keyring is refused");
+        assert!(
+            error.to_string().contains("no trusted public key"),
+            "{error}"
+        );
+    }
+
+    /// A sidecar carrying no signature at all is STRUCTURAL corruption, and
+    /// `EvidenceError::Malformed`'s own doc comment says so: evidence that the
+    /// file is broken, not that anyone forged anything. Exit 1, the same
+    /// routing `phase1_approval::verify_bytes` gives the approval's.
+    #[test]
+    fn a_sidecar_carrying_no_signature_is_operational() {
+        let signed = signed_authorization();
+        let empty = Signed {
+            document: signed.document.clone(),
+            sidecar: serde_json::to_vec(&serde_json::json!({"signatures": []}))
+                .expect("serialises"),
+            keys: signed.keys.clone(),
+        };
+        let error = verify(&empty, Some("uid-1")).expect_err("an empty sidecar is refused");
+        assert_eq!(error.exit_code(), crate::exit::ExitCode::Operational);
+    }
+
+    #[test]
+    fn an_expired_authorization_is_refused_by_name() {
+        let signed = signed_with(
+            // Issued 60 days ago with a 30-day life.
+            document(
+                "uid-1",
+                "rehearsal-3f2a91c7-",
+                "TARGET00000000000000000",
+                60,
+            ),
+            vec![KeyUsage::GovernedApproval],
+        );
+        let error =
+            verify(&signed, Some("uid-1")).expect_err("an expired authorization is refused");
+        assert_eq!(error.exit_code(), crate::exit::ExitCode::GuardRefused);
+        assert!(
+            error.to_string().contains(wire::AUTHORIZATION_EXPIRED),
+            "{error}"
+        );
+    }
+
+    /// The UID is now a VERIFIED binding: the environment says which schedule
+    /// this run claims to be, the SIGNED document says which schedule the human
+    /// authorised, and they must agree.
+    #[test]
+    fn an_authorization_signed_for_another_schedule_is_refused() {
+        let signed = signed_with(
+            document(
+                "uid-other",
+                "rehearsal-3f2a91c7-",
+                "TARGET00000000000000000",
+                1,
+            ),
+            vec![KeyUsage::GovernedApproval],
+        );
+        let error = verify(&signed, Some("uid-1")).expect_err("a foreign subject is refused");
+        assert_eq!(error.exit_code(), crate::exit::ExitCode::GuardRefused);
+        assert!(error.to_string().contains("uid-other"), "{error}");
+    }
+
+    /// The scope check still runs — on the scope the SIGNATURE covers, not on
+    /// one anybody could substitute.
+    #[test]
+    fn a_signed_authorization_whose_scope_excludes_the_plan_is_refused() {
+        let signed = signed_with(
+            document("uid-1", "rehearsal-deadbeef-", "TARGET00000000000000000", 1),
+            vec![KeyUsage::GovernedApproval],
+        );
+        let error =
+            verify(&signed, Some("uid-1")).expect_err("a plan outside the scope is refused");
         assert_eq!(error.exit_code(), crate::exit::ExitCode::GuardRefused);
         let rendered = error.to_string();
         assert!(rendered.contains(REHEARSAL_SCOPE_VIOLATION), "{rendered}");
         assert!(rendered.contains("rehearsal-deadbeef-"), "{rendered}");
-        assert!(rendered.contains("uid-1"), "{rendered}");
+        assert!(rendered.contains("weekly-orders"), "{rendered}");
     }
 
     #[test]
-    fn a_scope_naming_another_cluster_is_refused() {
-        let error = verify_standing_scope(
-            &plan_with(None),
-            &allowed(&["TARGET00000000000000000"]),
-            &scope_json("rehearsal-3f2a91c7-", "OTHER000000000000000000"),
-            Some("uid-1"),
-        )
-        .expect_err("a foreign target cluster is refused");
+    fn a_signed_authorization_naming_another_cluster_is_refused() {
+        let signed = signed_with(
+            document("uid-1", "rehearsal-3f2a91c7-", "OTHER000000000000000000", 1),
+            vec![KeyUsage::GovernedApproval],
+        );
+        let error =
+            verify(&signed, Some("uid-1")).expect_err("a foreign target cluster is refused");
         assert!(
             error.to_string().contains("OTHER000000000000000000"),
             "{error}"
@@ -622,15 +1085,46 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
     }
 
     #[test]
-    fn an_unparseable_scope_is_refused_rather_than_ignored() {
-        let error = verify_standing_scope(
-            &plan_with(None),
-            &allowed(&["TARGET00000000000000000"]),
-            b"not json",
-            None,
-        )
-        .expect_err("an unparseable scope is refused");
+    fn an_unparseable_keyring_or_sidecar_is_operational_not_a_plan_refusal() {
+        let signed = signed_authorization();
+        let bad_keys = Signed {
+            document: signed.document.clone(),
+            sidecar: signed.sidecar.clone(),
+            keys: b"not json".to_vec(),
+        };
+        assert_eq!(
+            verify(&bad_keys, Some("uid-1"))
+                .expect_err("an unparseable keyring is refused")
+                .exit_code(),
+            crate::exit::ExitCode::Operational
+        );
+        let bad_sidecar = Signed {
+            document: signed.document.clone(),
+            sidecar: b"not json".to_vec(),
+            keys: signed.keys.clone(),
+        };
+        assert_eq!(
+            verify(&bad_sidecar, Some("uid-1"))
+                .expect_err("an unparseable sidecar is refused")
+                .exit_code(),
+            crate::exit::ExitCode::Operational
+        );
+    }
+
+    /// Signed bytes that verify and are not the document this build reads.
+    #[test]
+    fn signed_bytes_that_are_not_an_authorization_are_a_plan_refusal() {
+        let signed = signed_with(
+            br#"{"not":"an authorization"}"#.to_vec(),
+            vec![KeyUsage::GovernedApproval],
+        );
+        let error = verify(&signed, Some("uid-1")).expect_err("non-document bytes are refused");
         assert_eq!(error.exit_code(), crate::exit::ExitCode::GuardRefused);
-        assert!(error.to_string().contains("does not parse"), "{error}");
+        assert!(
+            error
+                .to_string()
+                .contains("not a standing rehearsal authorization"),
+            "{error}"
+        );
     }
 }

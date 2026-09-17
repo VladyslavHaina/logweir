@@ -249,14 +249,22 @@ pub struct RunArgs {
     /// in roster order), which is how the one source of truth reaches a pod
     /// that holds no cluster credential.
     pub approver_key_ids: Vec<String>,
-    /// `--rehearsal-scope`. The signed standing rehearsal authorization's
-    /// scope document (D3 §4.3), projected into the bundle beside the plan.
+    /// `--standing-authorization`. The **signed** standing rehearsal
+    /// authorization document (D3 §4.3(e)), projected into the bundle beside
+    /// the plan. Its DSSE sidecar is read from the same path with the
+    /// extension replaced by `.sig` — the exact convention `--approval`
+    /// already uses, so an operator learns one rule for both.
     ///
     /// **Optional, and absent is the only legal state for an ordinary
     /// approval-authorized Restore.** Its bytes are pinned by
-    /// `LOGWEIR_EXECUTION_SCOPE_SHA256`, and the pairing is enforced in both
-    /// directions by [`validate_execution_contract`].
-    pub rehearsal_scope: Option<PathBuf>,
+    /// `LOGWEIR_EXECUTION_AUTHORIZATION_SHA256` (and the sidecar's by
+    /// `…_SIDECAR_SHA256`), and the pairing is enforced in both directions by
+    /// [`validate_execution_contract`].
+    pub standing_authorization: Option<PathBuf>,
+    /// `--authorization-keys`. D3 §4.3(e)'s "the trusted public keys" — the
+    /// anchor the standing authorization's signature is checked against.
+    /// Mandatory whenever `--standing-authorization` is given.
+    pub authorization_keys: Option<PathBuf>,
     /// `--policy-snapshot`. PLAT-19.2's approval-policy snapshot. This build
     /// pins its digest and carries it no further; the contract exists so the
     /// worker who interprets it does not also have to change the bundle.
@@ -294,10 +302,20 @@ pub struct ExecutionContract {
     pub allowed_clusters_sha256: String,
     /// v2. Absent means [`AuthorizationKind::Approval`] — tag 1's shape.
     pub authorization_kind: logweir_core::execution_contract::AuthorizationKind,
-    /// v2, and MANDATORY under `authorization_kind: Standing`: the digest of
-    /// the mounted rehearsal scope document (D3 §4.3).
-    pub scope_sha256: Option<String>,
-    /// v2, and mandatory under `Standing`: whose standing authorization this is.
+    /// v2, MANDATORY under `authorization_kind: Standing`: the digest of the
+    /// mounted **signed standing rehearsal authorization document** (D3
+    /// §4.3(e)). The scope is inside it and is read only after the signature
+    /// over these exact bytes verifies.
+    pub authorization_sha256: Option<String>,
+    /// v2, mandatory under `Standing`: the digest of the DSSE sidecar carrying
+    /// the approver's signature over the document above.
+    pub authorization_sidecar_sha256: Option<String>,
+    /// v2, mandatory under `Standing`: the digest of the mounted trusted
+    /// public keys — §4.3(e)'s anchor for that signature.
+    pub authorization_keys_sha256: Option<String>,
+    /// v2, and mandatory under `Standing`: whose standing authorization this
+    /// is. **Now a verified binding and not merely a label**: it is compared
+    /// against the SIGNED document's `subjectRef.uid`.
     pub rehearsal_schedule_uid: Option<String>,
     /// v2, PLAT-19.2's half: the approval-policy snapshot digest. Absent means
     /// the synthesized `legacy-governed-v1` policy, which is what D0 says an
@@ -368,7 +386,9 @@ pub fn execution_contract_from(
     // The v2 block. Read first, refused under v1 second, so the refusal can
     // name exactly WHICH piece of v2 material a v1 invocation carried.
     let authorization_kind_text = optional(wire::AUTHORIZATION_KIND_ENV);
-    let scope_sha256 = optional(wire::SCOPE_SHA256_ENV);
+    let authorization_sha256 = optional(wire::AUTHORIZATION_SHA256_ENV);
+    let authorization_sidecar_sha256 = optional(wire::AUTHORIZATION_SIDECAR_SHA256_ENV);
+    let authorization_keys_sha256 = optional(wire::AUTHORIZATION_KEYS_SHA256_ENV);
     let rehearsal_schedule_uid = optional(wire::REHEARSAL_SCHEDULE_UID_ENV);
     let policy_snapshot_sha256 = optional(wire::POLICY_SNAPSHOT_SHA256_ENV);
     let confirmation_key_sha256 = optional(wire::CONFIRMATION_KEY_SHA256_ENV);
@@ -377,7 +397,18 @@ pub fn execution_contract_from(
             authorization_kind_text.as_deref() == Some(wire::AUTHORIZATION_KIND_STANDING),
             "a standing rehearsal authorization",
         ),
-        (scope_sha256.is_some(), "a signed rehearsal scope"),
+        (
+            authorization_sha256.is_some(),
+            "a signed standing rehearsal authorization",
+        ),
+        (
+            authorization_sidecar_sha256.is_some(),
+            "a standing rehearsal authorization signature",
+        ),
+        (
+            authorization_keys_sha256.is_some(),
+            "a trusted authorization keyring",
+        ),
         (
             rehearsal_schedule_uid.is_some(),
             "a RehearsalSchedule subject",
@@ -405,6 +436,7 @@ pub fn execution_contract_from(
         // ordinary path and its unexpected scope file is refused below —
         // rather than a scope check being quietly skipped.
         None => wire::AuthorizationKind::Approval,
+        // (the parse arm below)
         Some(text) => wire::AuthorizationKind::parse(text).ok_or_else(|| -> DrillError {
             GuardRefusal(format!(
                 "unsupported Restore execution contract authorization kind {text:?}; expected \
@@ -421,7 +453,15 @@ pub fn execution_contract_from(
     // nothing to check".
     if authorization_kind == wire::AuthorizationKind::Standing {
         for (value, name) in [
-            (&scope_sha256, wire::SCOPE_SHA256_ENV),
+            (&authorization_sha256, wire::AUTHORIZATION_SHA256_ENV),
+            (
+                &authorization_sidecar_sha256,
+                wire::AUTHORIZATION_SIDECAR_SHA256_ENV,
+            ),
+            (
+                &authorization_keys_sha256,
+                wire::AUTHORIZATION_KEYS_SHA256_ENV,
+            ),
             (&rehearsal_schedule_uid, wire::REHEARSAL_SCHEDULE_UID_ENV),
         ] {
             if value.is_none() {
@@ -434,10 +474,15 @@ pub fn execution_contract_from(
                 .into());
             }
         }
-    } else if scope_sha256.is_some() || rehearsal_schedule_uid.is_some() {
+    } else if authorization_sha256.is_some()
+        || authorization_sidecar_sha256.is_some()
+        || authorization_keys_sha256.is_some()
+        || rehearsal_schedule_uid.is_some()
+    {
         return Err(GuardRefusal(format!(
-            "the Restore execution contract pins a rehearsal scope but names authorization kind \
-             {:?}; a scope is meaningful only under {:?}; no data operation was started",
+            "the Restore execution contract pins standing-authorization material but names \
+             authorization kind {:?}; it is meaningful only under {:?}; no data operation was \
+             started",
             authorization_kind.as_str(),
             wire::AUTHORIZATION_KIND_STANDING
         ))
@@ -459,7 +504,9 @@ pub fn execution_contract_from(
         approver_key_sha256: required(wire::APPROVER_KEY_SHA256_ENV)?,
         allowed_clusters_sha256: required(wire::ALLOWED_CLUSTERS_SHA256_ENV)?,
         authorization_kind,
-        scope_sha256,
+        authorization_sha256,
+        authorization_sidecar_sha256,
+        authorization_keys_sha256,
         rehearsal_schedule_uid,
         policy_snapshot_sha256,
         confirmation_key_sha256,
@@ -537,10 +584,11 @@ pub fn execution_contract_for_invocation(
 /// Exact projected bytes captured once at process startup.
 ///
 /// The five mandatory members are v1's bundle. The three `Option`s are D0's
-/// **bundle contract v2** additions — the signed rehearsal scope (D3 §4.3),
-/// the approval-policy snapshot and the confirmation-issuer public key (the
-/// second of D0's "both public keys"). Each is `None` for a bundle that does
-/// not carry it, and each is pinned by its own digest in the environment
+/// **bundle contract v2** additions — D3 §4.3(e)'s three-part standing
+/// authorization (the signed document, its signature and the trusted public
+/// keys), plus D0's approval-policy snapshot and confirmation-issuer public
+/// key (the second of "both public keys"). Each is `None` for a bundle that
+/// does not carry it, and each is pinned by its own digest in the environment
 /// contract exactly as the mandatory five are.
 #[derive(Clone, Debug, Default)]
 pub struct ApprovalBundleBytes {
@@ -549,7 +597,13 @@ pub struct ApprovalBundleBytes {
     pub approval_sidecar: Vec<u8>,
     pub approver_key: Vec<u8>,
     pub allowed_clusters: Vec<u8>,
-    pub scope: Option<Vec<u8>>,
+    /// The signed standing rehearsal authorization envelope. The scope lives
+    /// INSIDE it — there is deliberately no bare-scope member, because a scope
+    /// separable from the signature over it is a scope the controller could
+    /// mint (D3 §4.3's own stated adversary).
+    pub authorization: Option<Vec<u8>>,
+    pub authorization_sidecar: Option<Vec<u8>>,
+    pub authorization_keys: Option<Vec<u8>>,
     pub policy_snapshot: Option<Vec<u8>>,
     pub confirmation_key: Option<Vec<u8>>,
 }
@@ -623,11 +677,21 @@ pub fn validate_execution_contract(
     /// One optional bundle-v2 member: its label, the digest the contract pins
     /// for it, and the bytes that were mounted.
     type OptionalMember<'a> = (&'a str, Option<&'a String>, Option<&'a Vec<u8>>);
-    let optional_members: [OptionalMember; 3] = [
+    let optional_members: [OptionalMember; 5] = [
         (
-            "rehearsal scope",
-            contract.scope_sha256.as_ref(),
-            bundle.scope.as_ref(),
+            "standing rehearsal authorization",
+            contract.authorization_sha256.as_ref(),
+            bundle.authorization.as_ref(),
+        ),
+        (
+            "standing rehearsal authorization signature",
+            contract.authorization_sidecar_sha256.as_ref(),
+            bundle.authorization_sidecar.as_ref(),
+        ),
+        (
+            "trusted authorization keyring",
+            contract.authorization_keys_sha256.as_ref(),
+            bundle.authorization_keys.as_ref(),
         ),
         (
             "approval-policy snapshot",
@@ -1153,11 +1217,21 @@ fn exiting(
     // run whose leftover topics block the next slot (D3 §4.4), and it prints no
     // evidence keys at all. The note this reads is pushed after phase 8 signed,
     // so nothing here can reach the signed document.
-    if let Some(key) = scorecard.and_then(phase9_teardown::attested_key) {
-        println!(
-            "{}{key}",
-            logweir_core::execution_contract::TEARDOWN_KEY_PREFIX
-        );
+    //
+    // **AND IT IS GATED ON THE EXIT CODE**, because interface I9 states that
+    // `refusal-reason=` is the process's FINAL stdout line for exit 3 and
+    // `exiting` prints that line just above. Unreachable today — a run refused
+    // by a guard has no phase-9-attested scorecard — and harmless if it were,
+    // since every reader matches by prefix over a bounded tail. But an
+    // invariant that holds only by accident is one a future change breaks
+    // silently, and restoring it structurally costs one condition.
+    if code != ExitCode::GuardRefused {
+        if let Some(key) = scorecard.and_then(phase9_teardown::attested_key) {
+            println!(
+                "{}{key}",
+                logweir_core::execution_contract::TEARDOWN_KEY_PREFIX
+            );
+        }
     }
     if let (ExitCode::Ok, Some(e)) = (code, evidence) {
         println!("scorecard-key={}", e.scorecard_key);
@@ -1605,10 +1679,22 @@ struct StartupInputs {
     spec_text: String,
     allowed_text: String,
     approved: phase1_approval::Approved,
-    /// The bytes of the signed rehearsal scope, when this run carries one.
-    /// Already digest-checked against the execution contract by the time this
-    /// exists.
-    scope: Option<Vec<u8>>,
+    /// The three bytes-streams of D3 §4.3(e)'s standing authorization, when
+    /// this run carries one. Already digest-checked against the execution
+    /// contract by the time this exists — the SIGNATURE is checked later, in
+    /// `check_v2_bindings`, because it needs the clock.
+    authorization: Option<StandingAuthorizationBytes>,
+}
+
+/// The signed standing authorization as three mounted byte-streams.
+///
+/// One struct rather than three `Option`s threaded separately, because they
+/// are only ever meaningful together: a document with no signature proves
+/// nothing, and a signature with no keyring anchors in nothing.
+struct StandingAuthorizationBytes {
+    document: Vec<u8>,
+    sidecar: Vec<u8>,
+    keys: Vec<u8>,
 }
 
 fn read_startup_file(path: &std::path::Path, label: &str) -> Result<Vec<u8>, DrillError> {
@@ -1622,7 +1708,15 @@ fn load_startup_inputs(
     contract: Option<&ExecutionContract>,
 ) -> Result<StartupInputs, DrillError> {
     let sidecar_path = args.approval.with_extension("sig");
-    // The three v2 members are read the same way the five mandatory ones are —
+    // The standing authorization's sidecar is DERIVED from the document's own
+    // path, exactly as the approval's is from `--approval`. One flag fewer to
+    // get wrong, and the two files cannot be mismatched by an operator who
+    // pointed them at different runs.
+    let authorization_sidecar_path = args
+        .standing_authorization
+        .as_ref()
+        .map(|p| p.with_extension("sig"));
+    // The five v2 members are read the same way the five mandatory ones are —
     // once, at startup, before anything is parsed — so the bytes the digest
     // check covers are the bytes every later step uses. A member the operator
     // named but that is not there is an operational failure with the path in
@@ -1640,7 +1734,18 @@ fn load_startup_inputs(
         approval_sidecar: read_startup_file(&sidecar_path, "approval sidecar")?,
         approver_key: read_startup_file(&args.approver_key, "approver public key")?,
         allowed_clusters: read_startup_file(&args.allowed_clusters, "allowed-clusters")?,
-        scope: optional_member(&args.rehearsal_scope, "rehearsal scope")?,
+        authorization: optional_member(
+            &args.standing_authorization,
+            "standing rehearsal authorization",
+        )?,
+        authorization_sidecar: optional_member(
+            &authorization_sidecar_path,
+            "standing rehearsal authorization signature",
+        )?,
+        authorization_keys: optional_member(
+            &args.authorization_keys,
+            "trusted authorization keyring",
+        )?,
         policy_snapshot: optional_member(&args.policy_snapshot, "approval-policy snapshot")?,
         confirmation_key: optional_member(
             &args.confirmation_key,
@@ -1649,19 +1754,21 @@ fn load_startup_inputs(
     };
     if let Some(contract) = contract {
         validate_execution_contract(contract, args.triggered_by.as_deref(), &bundle)?;
-    } else if bundle.scope.is_some()
+    } else if bundle.authorization.is_some()
+        || bundle.authorization_sidecar.is_some()
+        || bundle.authorization_keys.is_some()
         || bundle.policy_snapshot.is_some()
         || bundle.confirmation_key.is_some()
     {
         // A standalone invocation has no controller to pin anything, so there
         // is nothing that could make bundle-v2 material trustworthy. Refusing
-        // is the only honest answer: silently ignoring a `--rehearsal-scope`
-        // would let an operator believe a scope was enforced when no digest,
-        // no signature and no controller ever bound it to this run.
+        // is the only honest answer: silently ignoring a
+        // `--standing-authorization` would let an operator believe a scope was
+        // enforced when no digest and no controller ever bound it to this run.
         return Err(GuardRefusal(
             "bundle contract v2 material was supplied without a Restore execution contract; \
-             an unpinned scope, policy snapshot or confirmation key is never acted on; no data \
-             operation was started"
+             an unpinned standing authorization, policy snapshot or confirmation key is never \
+             acted on; no data operation was started"
                 .to_string(),
         )
         .into());
@@ -1679,11 +1786,38 @@ fn load_startup_inputs(
         &bundle.approver_key,
         signing_key,
     )?;
+    // All three, or none. `validate_execution_contract` has already refused a
+    // pinned digest with nothing mounted and a mounted member with no pinned
+    // digest, so a partial set can only arrive on the contract-free path — and
+    // that path refuses the material outright above. The explicit `else` is
+    // still here because "two of the three arrived" must never silently become
+    // "no standing authorization to check".
+    let authorization = match (
+        bundle.authorization,
+        bundle.authorization_sidecar,
+        bundle.authorization_keys,
+    ) {
+        (None, None, None) => None,
+        (Some(document), Some(sidecar), Some(keys)) => Some(StandingAuthorizationBytes {
+            document,
+            sidecar,
+            keys,
+        }),
+        _ => {
+            return Err(GuardRefusal(
+                "an incomplete standing rehearsal authorization was mounted: D3 §4.3(e) needs \
+                 the signed document, its signature and the trusted public keys together, and a \
+                 partial set proves nothing; no data operation was started"
+                    .to_string(),
+            )
+            .into())
+        }
+    };
     Ok(StartupInputs {
         spec_text,
         allowed_text,
         approved,
-        scope: bundle.scope,
+        authorization,
     })
 }
 
@@ -1803,31 +1937,53 @@ fn check_v2_bindings(
 ) -> Result<(), DrillError> {
     use logweir_core::execution_contract::AuthorizationKind;
 
-    if let Some(scope_bytes) = startup.scope.as_deref() {
+    if let Some(authorization) = startup.authorization.as_ref() {
         let allowed: AllowedClusters =
             serde_json::from_str(&startup.allowed_text).map_err(|error| {
                 DrillError::Operational(format!("allowed-clusters does not parse: {error}"))
             })?;
-        binding::verify_standing_scope(
+        binding::verify_standing_authorization(
             plan,
             &allowed,
-            scope_bytes,
+            &authorization.document,
+            &authorization.sidecar,
+            &authorization.keys,
             contract.and_then(|c| c.rehearsal_schedule_uid.as_deref()),
+            // **Global Constraint 1: the clock is read HERE**, in
+            // `crates/logweir`, and passed down. `logweir-core` takes `now` as
+            // an argument everywhere for exactly this reason.
+            chrono::Utc::now(),
         )?;
     } else if contract.is_some_and(|c| c.authorization_kind == AuthorizationKind::Standing) {
         // Unreachable through `execution_contract_from`, which refuses a
-        // `Standing` contract with no pinned scope digest, and through
-        // `validate_execution_contract`, which refuses a pinned digest with no
-        // mounted member. Kept because the failure it would otherwise cause is
-        // silent: a rehearsal running with no scope check at all, which is the
-        // exact mutant D3 §4.3 exists to make impossible.
+        // `Standing` contract with no pinned authorization digests, and
+        // through `validate_execution_contract`, which refuses a pinned digest
+        // with no mounted member. Kept because the failure it would otherwise
+        // cause is silent: a rehearsal running with no authorization check at
+        // all, which is the exact mutant D3 §4.3 exists to make impossible.
         return Err(GuardRefusal(
-            "the execution contract names a standing rehearsal authorization but no scope \
-             document is mounted; the runner's half of the authorization cannot be performed; \
-             no data operation was started"
+            "the execution contract names a standing rehearsal authorization but no signed \
+             authorization document is mounted; the runner's half of the authorization cannot \
+             be performed; no data operation was started"
                 .to_string(),
         )
         .into());
+    }
+
+    // **F3 / D3 §8: `source.point` is v2 material, so a v1 invocation may not
+    // carry it either.** The five environment items are refused in
+    // `execution_contract_from`; this is the sixth, and it is HERE rather than
+    // there because the plan is not parsed until the bundle has been
+    // digest-checked and the approval verified. `docs/stability.md` and
+    // `docs/formats/drill-spec.md` both state this rule, and a documented
+    // contract nothing enforces is worse than one nobody wrote down.
+    if plan.source.point.is_some() {
+        if let Some(refusal) = contract
+            .map(|c| c.version)
+            .and_then(|v| v.refuse_v2_material("a recovery point binding (`source.point`)"))
+        {
+            return Err(GuardRefusal(refusal).into());
+        }
     }
 
     if plan.source.point.is_some() {
@@ -3090,7 +3246,8 @@ mod tests {
             approver_key_ids: Vec::new(),
             // Execution contract v2's optional bundle members; absent is
             // every existing caller's shape (D3 §4.3, D0 bundle v2).
-            rehearsal_scope: None,
+            standing_authorization: None,
+            authorization_keys: None,
             policy_snapshot: None,
             confirmation_key: None,
         }
