@@ -320,30 +320,56 @@ that was skipped keeps the aggregate `unknown` — skipping a question is not
 answering it — and a `Completed` check with no recorded aggregate reads
 `unknown`, never `ready`.
 
-**`staleReasons` is typed and closed.** Each entry is `{reason, kind?, name?}`,
-and `reason` is one of six:
+**`staleReasons` is typed and closed, and it is RECOMPUTED, not reported.**
+On every read of a preflight this service reads back each object
+`status.binding.referents[]` names — `kind`, `name`, `uid`, `generation` are
+all structured there — and compares them with the recorded revisions using
+`logweir-core`'s own `stale_reasons`, so the API and the controller cannot each
+implement half of the rule. Nothing parses a message. `staleBasis` lists what
+the comparison covered, in order, so an empty `staleReasons` cannot be confused
+with a check that was skipped.
+
+Each entry is `{reason, kind?, name?, basis?}`, and `reason` is one of seven:
 
 | reason | what moved |
 |---|---|
 | `expired` | the verdict is past `expiresAt`, or recorded no expiry at all |
 | `planHashChanged` | the plan you are looking at is not the plan the check was bound to |
 | `referentChanged` | a named object's UID or generation moved, or it appeared or vanished — a recreated destination, an edited access block, a re-created recovery point, a `TrustRoster` edit, or an `Approval` whose resourceVersion moved when verification landed. `kind` and `name` say **which**; for the single `TrustRoster` and `Approval` a binding names, `name` is the UID, because that is what identifies them there |
-| `caBundleChanged` | a destination's CA bundle `ConfigMap` now digests differently, so the trust material the check exercised is not the trust material a run would use |
+| `caBundleChanged` | a destination's CA bundle now digests differently. **RESERVED — nothing emits it.** `status.binding` does not record the CA bundle list, so neither the controller nor this service can compare it; CA drift surfaces through the destination's own `referentChanged`, because editing its `caBundle` reference bumps its generation. Do not branch on it |
 | `policyChanged` | the installation policy `ConfigMap` digests differently, which can change the concurrency ceilings, the engine CA rule, the `ControllerIdentity` allowlist and the visibility attestations the verdict was computed under |
-| `inputsDigestChanged` | the recomputed digest differs and none of the named reasons explains it — the catch-all that exists so "stale" is never reported without a reason |
+| `inputsDigestChanged` | the recomputed digest differs and none of the named reasons explains it. **RESERVED on the same grounds:** the recorded digest was taken over a wider document than this service can rebuild, so comparing the two would report an artefact of the narrower recomputation rather than a change in the world |
+| `unverifiable` | **this service could not compare something, so it will not call the verdict applicable.** `basis` says what: a referent whose read failed, a referent of a kind the console has no verb for (`TrustRoster` is cluster-scoped and outside the sealed set), or a result that recorded no binding at all |
 
-Two components produce them. This service compares the expiry and the plan hash
-itself; the other four need a binding recomputed from live objects, which the
-controller does — it records them in `status.message` when it downgrades a
-verdict that stopped applying, and the API recovers them there, splits
-`referentChanged:<Kind>/<name>` **once**, and merges the two lists without
-duplicates. A spelling this build does not recognise is dropped, never guessed
-at. The list is pinned against `logweir-core`'s own reason enum by a test, so
-neither side can grow a reason the other cannot carry.
+**Who compares what.** This service compares the expiry, the `?planHash=` you
+sent, and every referent it can read — the five namespaced product kinds. The
+installation policy it cannot read: that digest is `CheckPolicy::digest()` over
+the parsed `LOGWEIR_POLICY_CONFIGMAP` document (default `weirkeeper-policy`,
+key `policy.json`) in the installation namespace, and this service reads a
+`ConfigMap` only when a check owns it. The **controller** compares it on every
+reconcile and downgrades `result.state` to `unknown` when it moves, so
+`staleBasis` records `policyDigest:byController` rather than pretending either
+that it was checked here or that nobody checked it. Reaching that document from
+the API is D2 W11's to grant.
+
+**It never fails open.** Anything that could not be compared is `unverifiable`
+with a cause, and `applicable` is false — because "I did not check" and "I
+checked and it matches" are different answers and only one of them may look
+like a green badge. An earlier build recovered the reasons from the
+controller's prose instead; that prose is redacted and capped at 512
+characters, so a long referent list lost its closing bracket, the parse
+returned nothing, and a downgraded verdict was reported as applicable.
 
 There is no `cancelRequested` reason. A cancelled check ends with no result at
 all, so its verdict is not out of date — it is **absent**, and `state:
 cancelled` with `terminal: true` is what says so.
+
+**One asymmetry to know about.** The controller only rewrites `result.state`
+for verdicts that were `ready`: a `notReady` or `unknown` result that later
+stops applying keeps its recorded state. The API's recomputation has no such
+limit — `stale`, `staleReasons` and `applicable` are computed the same way for
+every completed verdict — so the two can disagree about a non-green result, and
+the API's is the current one.
 
 An actor bound **only** as Approver reads `Restore` readiness, because that is
 what an approval packet needs, and gets the nonexistent-resource answer for
