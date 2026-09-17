@@ -140,7 +140,7 @@ Wave 2 resumes every branch in place with the prompts under
 | PLAT-17.2 (stage 2) | In progress (stage landed) | plat17-2-authz, plat17-2-authz-review | Partial record under PLAT-17.2. Integrated into main as `24752f4..90ecd0c`. Shared mode is implemented and live-verified locally but not deployable or declarable secure until D0 stages 5 and 7. |
 | PLAT-17.1 (stages 1 and 3) | In progress (stages landed) | plat17-api-finish, plat17-api-review | Partial record under PLAT-17.1. Integrated into main as `4b571d1..de0207c`. Remaining for Done: console image and chart with the API's own RBAC (D0 stage 7), transient-check cancellation once PLAT-03/09.1 exist, `POST …/backups` (PLAT-06.2), SSE (PLAT-14.1), a browser journey through the API, and PLAT-17.2. |
 | PLAT-04.2, 05.x, 06.2, 09.2 | Contract decided | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. W1 (the pure cadence engine) landed in main as `6eedc0a..4b54a5c` after review; see the PLAT-04.2 partial record. W3a (the `Backup` run contract: `spec.trigger`, `spec.scheduleRef` with generation and `runPolicySha256`, the selection type with `allUserTopics` requiring `incompleteDiscovery`, `status.selection`, `src/identity.rs`, `src/policy.rs`, the §3.4 vocabulary) landed in `696c81a`/`b334a98` inside `crds-shapes`; a `Backup` naming both `topics` and `allUserTopics` is refused by CEL and, terminally, by admission. W3b (the reconciler consumes the contract; grammar `v2`) landed at `397e37d`; see the PLAT-04.2 partial record. W2 (editable policy, the §4.5 scheduler; `destinationRef` editable) landed at `98257f8`; see the PLAT-05.1/04.2 partial record. W4, W5, W6, W7, W8 remain. |
-| PLAT-03.x, 08.x, 09.1 | In progress (W1, W2, W3, W4, W5, W6a, W6b, W7, W8 landed, W12) | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. W1 (pure check contract and destination model) and W2 (explicit store options) landed as `c13b0cc..56bd074` after review (ACCEPT after two high and three medium fixes: JSON-form redaction bypass, ambient credentials inheriting the environment). W3 (`logweir_kafka::inventory`: bounded targeted describe, broker count, validate-only `CreateTopics`, error classification where an observed authorization failure makes visibility `limited` and anything unknown is failure, with a real admin-client fault capture because rdkafka 0.36 never invokes `ClientContext::error` for a metadata-only workflow — D2 §4.2 `[VERIFY U5]` corrected) and W5 (`weirkeeper::check`: check Jobs mirroring the execution pod, pod selection by controller owner UID only, framed-stdout relay through the W1 decoder, the full waiting-code table, TTL, plan/chunk/limit modules, the installation policy loader failing closed) landed as `23cec50..b8e62d1` after review (ACCEPT after one high and three medium fixes; 19 mutants killed; the rebase over PLAT-07.1 then routed the inventory client through the reader's `client_config`, removing a drifted copy that could upgrade plaintext to TLS when a CA was present — re-checked ACCEPT; weirkeeper 435, kafka 57). RBAC still owed by W11: `events: list` plus its `manifest_lint` row, the three new kinds' verbs, and a decision on `gc.rs`'s deletes. The reviewers' SEC-PODLOG finding against `controllers::backup::select_job_pod` is closed by `secpodlog` (see the defects table). W6a and W6b (the three Amendment F kinds and the destination sentinel on existing kinds) landed in `46880a3`/`88232f5`/`b334a98` inside `crds-shapes`; W7 (destination resolver, controller, evidence store cache) landed as `27fb924..0b25e95` (see the PLAT-08.1 partial record); W4 (runner `logweir check run`) landed at `537657d` (see the PLAT-03 partial record); W8 (`TopicDiscovery` controller) and W12 (API routes) are in review or in progress. W9, W10, W11, W13, W14 remain. |
+| PLAT-03.x, 08.x, 09.1 | In progress (W1, W2, W3, W4, W5, W6a, W6b, W7, W8, W9, W12 landed) | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. W1 (pure check contract and destination model) and W2 (explicit store options) landed as `c13b0cc..56bd074` after review (ACCEPT after two high and three medium fixes: JSON-form redaction bypass, ambient credentials inheriting the environment). W3 (`logweir_kafka::inventory`: bounded targeted describe, broker count, validate-only `CreateTopics`, error classification where an observed authorization failure makes visibility `limited` and anything unknown is failure, with a real admin-client fault capture because rdkafka 0.36 never invokes `ClientContext::error` for a metadata-only workflow — D2 §4.2 `[VERIFY U5]` corrected) and W5 (`weirkeeper::check`: check Jobs mirroring the execution pod, pod selection by controller owner UID only, framed-stdout relay through the W1 decoder, the full waiting-code table, TTL, plan/chunk/limit modules, the installation policy loader failing closed) landed as `23cec50..b8e62d1` after review (ACCEPT after one high and three medium fixes; 19 mutants killed; the rebase over PLAT-07.1 then routed the inventory client through the reader's `client_config`, removing a drifted copy that could upgrade plaintext to TLS when a CA was present — re-checked ACCEPT; weirkeeper 435, kafka 57). RBAC still owed by W11: `events: list` plus its `manifest_lint` row, the three new kinds' verbs, and a decision on `gc.rs`'s deletes. The reviewers' SEC-PODLOG finding against `controllers::backup::select_job_pod` is closed by `secpodlog` (see the defects table). W6a and W6b (the three Amendment F kinds and the destination sentinel on existing kinds) landed in `46880a3`/`88232f5`/`b334a98` inside `crds-shapes`; W7 (destination resolver, controller, evidence store cache) landed as `27fb924..0b25e95` (see the PLAT-08.1 partial record); W4 (runner `logweir check run`) landed at `537657d` (see the PLAT-03 partial record); W8 (`TopicDiscovery` controller) and W12 (API routes) are in review or in progress. W9, W10, W11, W13, W14 remain. |
 | PLAT-14.x, 15.x, 16.x, 19.1 | In progress (W0, W1, W3, W4, W8 landed) | [D3](decisions/D3-status-catalog-retention-trust.md) | Operation states, protection freshness, rehearsals, durable catalog, retention enforcement boundary, trust lifecycle; fifteen worker tasks. W4 (`d3-notify`: the shared notification module and `logweir notify deliver`) landed after review (ACCEPT after two high fixes); W3 (`d3-catalog-writer`: signed catalog point records, `list_page`, `logweir catalog sync|list`) landed after review (see the PLAT-15.1 partial record); W0 (the five Amendment G kinds, additive run status, `Restore.spec` additions, the `Approval` enum) landed in `496451a`/`88232f5`/`b334a98` inside `crds-shapes`; W1 (trust lifecycle core, `TrustPolicy` controller, `trust export|migrate-roster`, G8) landed as `64fcd38..5fc1a72` (see the PLAT-19.1 partial record); W8 (`RecoveryCatalog` controller) in progress. W2, W5, W6, W7, W9, W10, W11, W12, W13, W14 remain. |
 
 ### Decision records
@@ -470,6 +470,59 @@ Jobs and W9's preflight Jobs run with a runner image built from this source.
 Limitations: a true authenticated-but-unauthorized store denial and the
 private-CA broker are not proven live (W14); the restore preflight's
 `writeProbe` needs a field in the pure contract (W1 amendment for W9).
+
+**Partial record (2026-09-17) — PLAT-03.1/03.2 controller half: the `Preflight`
+reconciler (D2 W9) landed as the eleventh controller; the tasks stay In progress
+until W10 wires execution to consult a green preflight, W13 shows one, and W14
+proves S15b live.** Landed in main as `` (the controller, its catalogue half
+and its binding), `4c4d2ed` (the three grants it calls and no more), `b8c3bab`/
+`ccff054` (tests), `388b18c`/`5694ad5` (docs) and `0de5e10` (review fixes).
+Contract for W12/W13: `phase ∈ {Pending, Queued, Running, Completed, Failed,
+Cancelled}` with `reason` always a `CheckCode`; `Failed` is narrower than "the pod
+failed" — it means no result could be produced (an unattributed waiting code,
+`ResultUnreadable`, `CheckPlanConflict`, `ArchiveUrlUnreadable`), while a missing
+Secret is `Completed`/`notReady` with a remedy; `result.state` is `aggregate()`
+verbatim (an empty set is `unknown`), `result.expiresAt` the minimum over
+non-skipped rows, `checks[]` carry id/category/scope/state/gating/authority/code/
+message/remedy/observedAt/expiresAt with facts and detail folded into `message`
+and an offending name carried on `scope`; `Ready` is `Unknown`, never `False`, for
+an `unknown` verdict. The expected rows are derived from the RENDERED
+`CheckRequest` — never a static list per operation — and a cross-crate guard reads
+the runner's pinned `want` literals so the two sides cannot drift (the review found
+that the static list made every preflight `unknown`, so none could ever be
+`ready`; both happy paths now build the relay from the runner's own emission and
+assert `ready`); the backup plan requests `ArchiveRead`/`EvidenceWrite` (and
+`EvidenceRead` when configured); `readiness.writeProbe` is threaded through
+`weirkeeper::destination` into the Job so a requested `CreateOnlyMarker` is
+honoured, never silently `false` (UI-FAKEPREFLIGHT's defect class). `binding`
+(recomputed `planHash`, `inputsDigest`, referents with UID and generation,
+`policyDigest`) is written BEFORE the Job — asserted by route order — and W12
+decides applicability with `check_contract::stale_reasons`; the four reasons the
+controller emits that W12's DTO lacked (`referentChanged:<Kind>/<name>`,
+`caBundleChanged`, `policyChanged`, `inputsDigestChanged`) are widened into the
+API by the `d2w12b` follow-up. Seams: S1 (the plan through `check::plan::build`
+and `logweir check run`), S2 (`no_execution_path_reads_preflight_or_discovery`
+now globs both `src` trees and catches `as` aliases), S6 (pod by owner UID), S7
+(every status write resourceVersion-preconditioned). RBAC: `preflights: [list,
+watch]` (no `get` — nothing looks one up), `preflights/status: [patch]`,
+`events: [list]` (D2 §7.1: without it three of the runner pod's four refusals and
+`SigningKeyMissing` are unreachable), each with a note for W11; no `secrets`, no
+`delete`. Verified at `fdbe553` on main: weirkeeper 795/795 (`preflight_controller`
+78), `check_cli` 91, `manifest_lint` 29, `doc_lint` 12, `chart_lint` 28,
+`crds-check`, `chart-check`, `render-install --check`, `check-no-archive-write`,
+strict clippy and fmt; nineteen planted mutants killed (five original, fourteen
+from the fix round, including the review's two survivors). Independent review
+`claude/d2w9.review.md`: REJECT (one critical: no preflight could ever be `ready`;
+one high: two surviving mutants; four medium; four low; two questions) then
+ACCEPT. Hand-offs recorded: D2 W1 amendment — `BindingInputs` should gain the
+credential Secret's `resourceVersion` and the recovery point's topic digest (§21.4
+now says the list is not complete); W11 — the namespace-scoped `Role` question
+and the three grant notes. Gaps: an inline `legacyArchive` is reported
+`Failed`/`ArchiveUrlUnreadable` rather than checked (needs the resolver's
+legacy-addressing block); `RecoveryPointLocationMismatch` is inert until W10 puts
+the frozen snapshot on `Backup.status`; no `gc.rs`. Live: none here — W14 owes
+S15b (a green preflight, then a collision, then `exitCode=3`). Migration: three
+additive grants on a kind nothing had created yet.
 
 ## PLAT-04 — Make scheduling policy predictable
 
