@@ -1754,9 +1754,16 @@ fn reservation_patch(
                 observed_generation: schedule.metadata.generation,
                 last_transition_time: Some(now),
                 reason: Some(REASON_SCHEDULED.to_string()),
+                // THE ACTUAL POLICY, NOT A LITERAL. `admit` is the uniform
+                // path for both policies now, so a hard-coded `Forbid` made an
+                // `Allow` schedule publish a condition naming the wrong one.
+                // It is replaced by the final write moments later, but a
+                // watcher, `kubectl get -w` or the console can read it.
                 message: Some(format!(
-                    "{}; concurrencyPolicy Forbid atomically admitted this slot and is creating the Backup",
-                    decision.message()
+                    "{}; concurrencyPolicy {:?} atomically admitted this slot and is creating \
+                     the Backup",
+                    decision.message(),
+                    schedule.spec.concurrency_policy
                 )),
             },
         )]),
@@ -2363,6 +2370,23 @@ pub async fn reconcile_schedule_with_archive(
 
     // ---- step 1: the active set -----------------------------------------
     let reservation = stored.and_then(|status| reserved_run(&name, status));
+    // A RESERVATION NEITHER SPELLING CAN BE PARSED INTO IS STALE STATUS, AND
+    // CLEARING IT IS NOT OPTIONAL. Only a deterministic scheduled name over a
+    // real instant can be an admission reservation; anything else — a name from
+    // an older shape, a slot the calendar does not have, a hand-edited status —
+    // names no work this controller could resume. Leaving it would be invisible
+    // on a schedule that admits something (the admission clears it on the way
+    // past) and permanent on one that does not: a SUSPENDED schedule would
+    // carry a reservation nobody will ever act on, and `kubectl get`, the
+    // console and PLAT-14.2's staleness alert would all show accepted work that
+    // does not exist.
+    if reservation.is_none()
+        && stored.is_some_and(|status| {
+            status.pending_run.is_some() || status.pending_backup_ref.is_some()
+        })
+    {
+        work.pending = PendingRefUpdate::Clear;
+    }
     let observed = refresh_active_runs(
         &backups_api,
         stored,
@@ -2465,29 +2489,30 @@ pub async fn reconcile_schedule_with_archive(
         &slot,
         walk_retries(schedule, stored, &work.active),
     )
-    .await;
-    let chain = match chain {
-        Ok(chain) => chain,
-        Err(ChainError::Foreign(held)) => {
-            // ROW 6: the deterministic name is held by an object this schedule
-            // does not own. The slot is skipped and RECORDED, never re-run
-            // under a different name.
-            decision = SlotDecision::SlotNameUnavailable {
-                slot: slot.clone(),
-                name: held,
-                next_fire_time: decision.next_fire_time(),
-            };
-            work.record_slot(&decision, &slot, due, 0, None, now);
-            work.account_skipped(schedule, &decision, &slot, due, now, true);
-            return finish(
-                schedule, client, archive, &namespace, &name, decision, work, now,
-            )
-            .await;
-        }
-        Err(ChainError::Api(e)) => return Err(e),
-    };
+    .await?;
 
-    let attempt = decide_attempt(&name, due, &chain, retry, now);
+    let attempt = decide_attempt(&name, due, &chain.attempts, retry, now);
+    // ROW 6, AND IT IS ASKED AFTER THE CHAIN HAS BEEN READ. The deterministic
+    // name the next admission needs is held by an object this schedule does not
+    // own, so the slot is skipped and RECORDED, never re-run under a different
+    // name. It is asked here rather than inside the walk because a foreign
+    // object at a LATER attempt must not erase what the earlier ones already
+    // proved about this window.
+    if slot_name_is_unavailable(&chain, &attempt) {
+        let held = chain.foreign_next.clone().unwrap_or_default();
+        decision = SlotDecision::SlotNameUnavailable {
+            slot: slot.clone(),
+            name: held,
+            next_fire_time: decision.next_fire_time(),
+        };
+        let attempt_index = u32::try_from(chain.attempts.len()).unwrap_or(0);
+        work.record_slot(&decision, &slot, due, attempt_index, None, now);
+        work.account_skipped(schedule, &decision, &slot, due, now, true);
+        return finish(
+            schedule, client, archive, &namespace, &name, decision, work, now,
+        )
+        .await;
+    }
     let blocked = blocking_runs(schedule, &work.active);
 
     match attempt {
@@ -2566,7 +2591,7 @@ pub async fn reconcile_schedule_with_archive(
                 next_fire_time: decision.next_fire_time(),
             };
             work.fired_due = Some(due);
-            let last = chain.last().map(|a| a.name.clone());
+            let last = chain.attempts.last().map(|a| a.name.clone());
             work.created = last.clone();
             work.already_existed = last.is_some();
             work.record_slot(&decision, &slot, due, attempt, last, now);
@@ -2584,7 +2609,7 @@ pub async fn reconcile_schedule_with_archive(
                 next_fire_time: decision.next_fire_time(),
             };
             work.fired_due = Some(due);
-            work.created = chain.last().map(|a| a.name.clone());
+            work.created = chain.attempts.last().map(|a| a.name.clone());
             work.already_existed = work.created.is_some();
             work.account_skipped(schedule, &decision, &slot, due, now, false);
             return finish(
@@ -2818,12 +2843,30 @@ impl Reconcile {
             last_evaluated_slot: None,
             recent: None,
         });
+        // THE THIRD GUARD, AND THE ONE THAT MAKES "EXACTLY ONCE" TRUE.
+        //
+        // The other two cover other cases: the early return above suppresses a
+        // NON-final disposition, and the `previous < due` filter below
+        // suppresses the GAP enumeration. Neither stops this slot being counted
+        // again when the SAME slot reaches the SAME final disposition on the
+        // next pass — which is the steady state of a missed slot, because a
+        // slot that was missed stays the latest due slot until the next one
+        // comes due. On a 30-second requeue a daily schedule that misses one
+        // slot would inflate `count` by ~2,880 for that single slot, fill
+        // `recent` with ten copies of it, and bump `resourceVersion` every time
+        // — the churn erratum E11(d) exists to prevent, reached through a third
+        // field. `SlotNameUnavailable` takes the same path, so an R8 foreign
+        // occupant inflates identically for as long as its slot is the latest.
+        if missed.last_evaluated_slot.as_deref() == Some(slot) {
+            return;
+        }
         let previous = missed
             .last_evaluated_slot
             .as_deref()
             .and_then(slot_instant)
             .filter(|previous| *previous < due);
         let mut recent: Vec<MissedSlot> = Vec::new();
+        let mut gap = 0usize;
         if let Some(previous) = previous {
             if let Ok(cadence) =
                 Cadence::parse(&schedule.spec.schedule, schedule.spec.time_zone.as_deref())
@@ -2831,6 +2874,7 @@ impl Reconcile {
                 // BOTH ENDS EXCLUSIVE: `previous` already has a disposition and
                 // `due` is being given one now.
                 let skipped = cadence.skipped_slots(previous, due, MAX_SKIPPED_SLOT_ENUMERATION);
+                gap = skipped.count;
                 missed.count = missed
                     .count
                     .saturating_add(i64::try_from(skipped.count).unwrap_or(i64::MAX));
@@ -2849,16 +2893,22 @@ impl Reconcile {
                 reason: reason.to_string(),
                 recorded_at: now,
             });
-        } else if previous.is_some() {
+        } else if previous.is_some() && gap > 0 {
+            // THE BOUNDARY ENTRY, AND WHY IT IS THE SLOT THAT WAS **NOT**
+            // SKIPPED. This arm runs when the gap moved the count but THIS slot
+            // received a disposition of its own (it ran, or it was already
+            // fired), so `recent` would otherwise hold nothing at all for a
+            // downtime that counted dozens of slots — a `count` of 31 with an
+            // empty sample is a number an operator cannot act on. One entry
+            // naming the slot the accounting caught up AT, with the reason
+            // those slots were skipped, is what makes the count legible. The
+            // names of the gap itself are deliberately not enumerated: a week
+            // of one-minute slots is ten thousand of them.
             recent.push(MissedSlot {
                 slot: slot.to_string(),
                 reason: MISSED_CONTROLLER_UNAVAILABLE.to_string(),
                 recorded_at: now,
             });
-            // The marker entry above is dropped again below when the slot was
-            // not itself skipped; it exists only so a caller reading `recent`
-            // sees the boundary the count moved across.
-            recent.pop();
         }
         if !recent.is_empty() {
             let mut all = recent;
@@ -2914,7 +2964,28 @@ fn missed_reason(decision: &SlotDecision) -> Option<&'static str> {
     }
 }
 
-/// The instant a `yyyymmdd-hhmmss` slot name spells.
+/// The instant a `yyyymmdd-hhmmss` slot name spells, or `None` when the
+/// calendar has no such instant.
+///
+/// # Why there is no `format(…) == slot` round trip here, measured
+///
+/// [`crate::identity::run_identity`] guards `spec.slot` with a round trip,
+/// because for the shapes it accepts `parse_from_str` normalises some
+/// out-of-range fields instead of refusing them. For THIS format
+/// (`%Y%m%d-%H%M%S`, fifteen bytes, no separators inside the date) it does not:
+/// measured against `20261309-031700`, `20260230-000000`, `20260915-256100`,
+/// `00000000-000000`, `20260915-236000`, `20261232-000000`, `20260931-000000`
+/// and `99999999-999999`, the parser refuses **every one**. The only non-obvious
+/// string it accepts is `20260915-235960`, a leap second, which round-trips to
+/// itself — so a round trip would reject nothing the parse already rejects.
+///
+/// Adding one anyway would be a guard no mutant can kill, which this repository
+/// treats as no guard at all. What the parse does refuse is what matters: a
+/// `status.pendingBackupRef` naming a non-calendar slot is stale status, not
+/// work to resume, and the composed-name check beside it cannot say so (the
+/// name carries the slot string verbatim, so it re-composes exactly).
+/// `a_reservation_naming_an_impossible_slot_is_cleared_rather_than_resumed`
+/// drives four such names through a reconcile.
 fn slot_instant(slot: &str) -> Option<DateTime<Utc>> {
     chrono::NaiveDateTime::parse_from_str(slot, "%Y%m%d-%H%M%S")
         .ok()
@@ -3107,14 +3178,6 @@ fn active_entry(backup: &Backup) -> ActiveRun {
     }
 }
 
-/// Why the attempt chain could not be observed.
-enum ChainError {
-    /// The deterministic name is held by an object this schedule does not own.
-    Foreign(String),
-    /// The API server could not be talked to.
-    Api(ScheduleError),
-}
-
 /// D1 §4.5 step 6: the attempt chain of one slot, by GET of deterministic
 /// names, stopping at the first 404.
 ///
@@ -3135,7 +3198,7 @@ async fn observe_attempt_chain(
     uid: &str,
     slot: &str,
     walk_retries: bool,
-) -> Result<Vec<ObservedAttempt>, ChainError> {
+) -> Result<ObservedChain, ScheduleError> {
     let mut chain: Vec<ObservedAttempt> = Vec::new();
     let highest = if walk_retries {
         crate::slot::MAX_RETRIES
@@ -3147,10 +3210,7 @@ async fn observe_attempt_chain(
         else {
             break;
         };
-        let found = api
-            .get_opt(&name)
-            .await
-            .map_err(|e| ChainError::Api(ScheduleError::Api(e)))?;
+        let found = api.get_opt(&name).await.map_err(ScheduleError::Api)?;
         let Some(backup) = found else { break };
         // D1 §3.1 RULE 1 CONSTRAINS SCHEDULED NAMES ONLY, SO THIS HAS TO
         // DECIDE WHAT ELSE MAY SIT ON ONE. Nothing refuses a `Manual` Backup
@@ -3162,8 +3222,20 @@ async fn observe_attempt_chain(
         // run that wrote a different archive. The slot is reported
         // `SlotNameUnavailable` and never re-run under a different name — the
         // same answer another schedule's object gets, for the same reason.
+        //
+        // THE WALK STOPS HERE AND THE ATTEMPTS ALREADY OBSERVED STILL COUNT.
+        // Returning nothing would let a foreign object at `-r1` erase a
+        // SUCCEEDED attempt 0 sitting right beside it: the slot would be
+        // reported as name-unavailable, `lastFireTime` would not advance, and
+        // the history would say a window was missed that a successful run had
+        // covered. Which of the two facts wins is the caller's to decide
+        // ([`slot_name_is_unavailable`]), and it decides on what the next
+        // ADMISSION would need rather than on what happens to exist.
         if !participates_in_concurrency(&backup, schedule_name, uid) {
-            return Err(ChainError::Foreign(name));
+            return Ok(ObservedChain {
+                attempts: chain,
+                foreign_next: Some(name),
+            });
         }
         chain.push(ObservedAttempt {
             name,
@@ -3171,7 +3243,39 @@ async fn observe_attempt_chain(
             outcome: attempt_outcome(&backup),
         });
     }
-    Ok(chain)
+    Ok(ObservedChain {
+        attempts: chain,
+        foreign_next: None,
+    })
+}
+
+/// The attempt chain of one slot, and the name the walk stopped at.
+///
+/// `foreign_next` is the deterministic name of the attempt AFTER the last one
+/// in `attempts` when that name is held by something this schedule does not
+/// own — which is exactly the name the next admission for this slot would need.
+struct ObservedChain {
+    attempts: Vec<ObservedAttempt>,
+    foreign_next: Option<String>,
+}
+
+/// Whether the foreign occupant blocks what this reconcile would actually do
+/// (D1 §4.7 row 6).
+///
+/// A HELD NAME MATTERS ONLY WHEN SOMETHING WOULD BE CREATED UNDER IT. The two
+/// decisions that create are step 7's admission of `name(S, 0)` — reached when
+/// no attempt exists at all — and a retry of `name(S, k+1)`; in both the name
+/// the walk stopped at IS the name that would be POSTed, so it cannot be used
+/// and the slot is `SlotNameUnavailable`. Every other decision creates nothing,
+/// so the occupant is irrelevant to it and the honest report is what the
+/// attempts say: a succeeded attempt 0 beside a squatted `-r1` is
+/// `AlreadyFired`, because the window really was covered.
+fn slot_name_is_unavailable(chain: &ObservedChain, attempt: &AttemptDecision) -> bool {
+    chain.foreign_next.is_some()
+        && matches!(
+            attempt,
+            AttemptDecision::NoAttempt | AttemptDecision::Retry { .. }
+        )
 }
 
 /// Whether the attempt chain walk should look past attempt 0.
