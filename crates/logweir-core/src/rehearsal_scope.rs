@@ -1,19 +1,35 @@
 //! The scope a standing rehearsal authorization signs over (decision D3 §4.3).
 //!
-//! # Types only, and the reason the check is not here yet
+//! # Types only — and the predicate LANDED, in `execution_contract`
 //!
-//! D3 §14 gives this file to W1 with "only the scope types §4.3 names". The
-//! predicate those types exist for —
-//! `rehearsal_scope::plan_within_scope(plan, scope)` — reads a rendered
-//! restore plan, whose shape is W5's execution contract v2, and is W7's to
-//! write against it. Landing the check here against today's plan shape would
-//! be a second definition of "the plan" that W5 would then have to keep in
-//! step.
+//! D3 §14 gave this file to W1 with "only the scope types §4.3 names", and the
+//! predicate those types exist for was left for later. It has since landed, as
+//! D3 W5's execution contract v2:
 //!
-//! What lands now is the **document half**: the scope is part of a signed
-//! authorization, so its field names and its serialisation are an interface
-//! the approver's `logweir approve rehearsal` and the controller's each-slot
-//! re-check must already agree on, long before the predicate runs.
+//! ```text
+//! logweir_core::execution_contract::plan_scope_facts(&DrillSpec, &AllowedClusters)
+//!     -> PlanScopeFacts
+//! logweir_core::execution_contract::plan_within_scope(&PlanScopeFacts, &RehearsalScope)
+//!     -> Result<(), Box<ScopeRefusal>>
+//! ```
+//!
+//! **Call those. Do not write a second one here.** It is in
+//! `execution_contract` and not in this file because it reads a rendered
+//! restore plan, whose shape IS the v2 contract, and because the
+//! [`PlanScopeFacts`] split is what lets D3 §4.3's "checked twice" use ONE
+//! predicate from two producers: the controller builds the facts from the plan
+//! it is about to render and freeze, the runner from the bytes it actually
+//! mounted. Two predicates would be exactly the drift the split exists to
+//! prevent. (D3 §4.3(d) still names `rehearsal_scope::plan_within_scope`; the
+//! orchestrator amends the decision to the landed symbol.)
+//!
+//! [`PlanScopeFacts`]: crate::execution_contract::PlanScopeFacts
+//!
+//! What lands *here* is the **document half**: the scope is part of a signed
+//! authorization ([`crate::execution_contract::StandingAuthorization`] carries
+//! it), so its field names and its serialisation are an interface the
+//! approver's `logweir approve rehearsal` and the controller's each-slot
+//! re-check must agree on.
 //!
 //! # Why a signed scope at all
 //!

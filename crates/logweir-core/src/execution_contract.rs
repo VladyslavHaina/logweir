@@ -87,9 +87,22 @@ pub const ALL_ENV: [&str; 13] = [
 /// `standing` gets the ordinary path and the scope file it mounted is refused
 /// as unexpected, rather than a scope check being silently skipped.
 pub const AUTHORIZATION_KIND_ENV: &str = "LOGWEIR_EXECUTION_AUTHORIZATION_KIND";
-/// `sha256:<hex>` over the exact mounted rehearsal scope document bytes, in
-/// the same shape and for the same reason as `PLAN_SHA256_ENV`.
-pub const SCOPE_SHA256_ENV: &str = "LOGWEIR_EXECUTION_SCOPE_SHA256";
+/// `sha256:<hex>` over the exact mounted **standing rehearsal authorization
+/// document** — the envelope the approver signed, from which the scope is
+/// derived. Same shape and same reason as `PLAN_SHA256_ENV`.
+///
+/// It replaced a bare `LOGWEIR_EXECUTION_SCOPE_SHA256` over a raw
+/// [`RehearsalScope`], and the replacement is the whole point: a scope whose
+/// only provenance is a digest the CONTROLLER set is a scope the controller
+/// could mint, and D3 §4.3's own first sentence names "a controller that could
+/// mint its own authorization" as the bypass PLAT-19.2 exists to prevent.
+pub const AUTHORIZATION_SHA256_ENV: &str = "LOGWEIR_EXECUTION_AUTHORIZATION_SHA256";
+/// `sha256:<hex>` over the DSSE sidecar carrying the approver's signature over
+/// those exact envelope bytes.
+pub const AUTHORIZATION_SIDECAR_SHA256_ENV: &str = "LOGWEIR_EXECUTION_AUTHORIZATION_SIDECAR_SHA256";
+/// `sha256:<hex>` over the mounted [`AuthorizationKeyring`] — D3 §4.3(e)'s
+/// "the trusted public keys", the anchor the signature is checked against.
+pub const AUTHORIZATION_KEYS_SHA256_ENV: &str = "LOGWEIR_EXECUTION_AUTHORIZATION_KEYS_SHA256";
 /// The `RehearsalSchedule` UID the standing authorization names as its
 /// subject. Carried so the runner's refusal can say WHICH schedule's
 /// authorization it was executing under without parsing the document.
@@ -104,9 +117,11 @@ pub const CONFIRMATION_KEY_SHA256_ENV: &str = "LOGWEIR_EXECUTION_CONFIRMATION_KE
 
 /// Every v2-only variable. **Each is optional**, in the blocks
 /// [`ContractVersion`] documents; none of them may appear under v1.
-pub const V2_ENV: [&str; 5] = [
+pub const V2_ENV: [&str; 7] = [
     AUTHORIZATION_KIND_ENV,
-    SCOPE_SHA256_ENV,
+    AUTHORIZATION_SHA256_ENV,
+    AUTHORIZATION_SIDECAR_SHA256_ENV,
+    AUTHORIZATION_KEYS_SHA256_ENV,
     REHEARSAL_SCHEDULE_UID_ENV,
     POLICY_SNAPSHOT_SHA256_ENV,
     CONFIRMATION_KEY_SHA256_ENV,
@@ -119,7 +134,7 @@ pub const V2_ENV: [&str; 5] = [
 /// variables — a controller bug, or a partially applied template — must be
 /// diagnosed as an incomplete contract, not treated as a credential-free
 /// standalone invocation that runs with no contract checks whatsoever.
-pub const ALL_ENV_ANY: [&str; 18] = [
+pub const ALL_ENV_ANY: [&str; 20] = [
     VERSION_ENV,
     SUBJECT_API_VERSION_ENV,
     SUBJECT_KIND_ENV,
@@ -134,7 +149,9 @@ pub const ALL_ENV_ANY: [&str; 18] = [
     APPROVER_KEY_SHA256_ENV,
     ALLOWED_CLUSTERS_SHA256_ENV,
     AUTHORIZATION_KIND_ENV,
-    SCOPE_SHA256_ENV,
+    AUTHORIZATION_SHA256_ENV,
+    AUTHORIZATION_SIDECAR_SHA256_ENV,
+    AUTHORIZATION_KEYS_SHA256_ENV,
     REHEARSAL_SCHEDULE_UID_ENV,
     POLICY_SNAPSHOT_SHA256_ENV,
     CONFIRMATION_KEY_SHA256_ENV,
@@ -295,6 +312,283 @@ pub struct PointBinding {
 }
 
 // ---------------------------------------------------------------------------
+// The SIGNED standing rehearsal authorization (D3 §4.3(e), D0 authorization
+// document v2)
+// ---------------------------------------------------------------------------
+
+/// The DSSE payload type the standing rehearsal authorization is signed under.
+///
+/// Its own type, not the drill approval's: a payload type is part of what
+/// `verify_detached` checks, so a genuinely signed *approval* replayed as a
+/// standing authorization is refused by the signature layer rather than by a
+/// field comparison somebody could forget to write.
+pub const PAYLOAD_TYPE_STANDING_AUTHORIZATION: &str =
+    "application/vnd.logweir.standing-rehearsal-authorization+json;version=1.0.0";
+
+/// The document format this build reads. A MAJOR bump is a refusal; a minor
+/// adds optional fields only (GC12's rule, applied to this document).
+pub const STANDING_AUTHORIZATION_FORMAT_VERSION: &str = "1.0.0";
+/// `kind` — inside the signed bytes, so it cannot be relabelled.
+pub const STANDING_AUTHORIZATION_KIND: &str = "StandingRehearsalAuthorization";
+/// The only subject kind a standing rehearsal authorization may name.
+pub const REHEARSAL_SCHEDULE_KIND: &str = "RehearsalSchedule";
+/// The API group/version every subject of this document belongs to.
+pub const SUBJECT_API_VERSION: &str = "logweir.dev/v1alpha1";
+/// D3 §4.3: `expiresAt - issuedAt <= 90 days`. Re-checked at the runner
+/// because it is a property of the SIGNED bytes: a document minted with a
+/// ten-year life is one the decision does not permit, whoever minted it.
+pub const MAX_STANDING_AUTHORIZATION_DAYS: i64 = 90;
+
+/// What the standing authorization names as its subject (D3 §4.3, §4.5).
+///
+/// The UID is the field that matters. It is what turns
+/// `LOGWEIR_EXECUTION_REHEARSAL_SCHEDULE_UID` — a label the controller sets —
+/// into a binding the runner can actually check: the environment says which
+/// schedule this run claims to be, the SIGNED document says which schedule the
+/// human authorised, and the runner requires them to agree.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthorizationSubject {
+    pub api_version: String,
+    pub kind: String,
+    pub namespace: String,
+    pub name: String,
+    pub uid: String,
+}
+
+/// **The document a human signs once so an unattended rehearsal can run many
+/// times** (D3 §4.3(e)).
+///
+/// # Why the runner reads THIS and not a bare scope
+///
+/// The first shape of this contract mounted a raw [`RehearsalScope`] pinned by
+/// a digest in the pod template. That digest is set by the controller, so
+/// against the adversary §4.3 actually names — "a controller that could mint
+/// its own authorization" — the runner's half of "checked twice" proved
+/// nothing at all. §4.3(e) says the bundle carries "the authorization
+/// document, its signatures, the trusted public keys, the scope and the
+/// rendered plan"; this is that document, the scope is INSIDE it, and the
+/// runner derives the scope only after the signature over these exact bytes
+/// verifies under a pinned key that is allowed to authorise.
+///
+/// # The shape, and who owns it
+///
+/// D0's authorization document v2 fixes the family (`formatVersion`, a
+/// `subject` block with a UID, `issuedAt`/`expiresAt`, a DSSE sidecar over the
+/// exact bytes). PLAT-19.2 has not fixed the standing variant, so this is the
+/// minimal document D3 §4.3/§4.5 requires, and it is the contract W7 and
+/// PLAT-19.2 must PRODUCE. Fields PLAT-19.2 adds later (`policy`, `requester`,
+/// `ticket`, a second signature) are additive: unknown keys are ignored on
+/// read, so a document carrying them still verifies here.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct StandingAuthorization {
+    pub format_version: String,
+    pub kind: String,
+    pub subject_ref: AuthorizationSubject,
+    /// What the signature actually authorises. Read only after it verified.
+    pub scope: RehearsalScope,
+    pub issued_at: chrono::DateTime<chrono::Utc>,
+    pub expires_at: chrono::DateTime<chrono::Utc>,
+}
+
+/// One key the bundle presents as able to authorise a rehearsal.
+///
+/// It carries KEY MATERIAL, which is what makes it different from
+/// [`crate::trust::TrustedKey`] — that type is the POLICY record and holds no
+/// material by design. This is the controller's projection of the keys its
+/// `TrustPolicy` resolution already accepted, rendered into the bundle so the
+/// runner can check a signature without holding a cluster credential.
+///
+/// **Lifecycle stays the controller's.** `state`, `notBefore`/`notAfter` and
+/// revocation are `trust::decide`'s to evaluate, and they are evaluated before
+/// this keyring is written. What the runner re-checks is what it can: that the
+/// signature verifies under a key the controller PINNED, and that the key
+/// carries a usage allowed to authorise.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthorizationKey {
+    /// The sha256 of the DER SPKI, lowercase hex — the same number `openssl`
+    /// prints (`docs/keys.md`).
+    pub key_id: String,
+    /// PEM SPKI. Public material only; a private key here would be a defect
+    /// this type cannot express a use for.
+    pub public_key_pem: String,
+    pub usages: Vec<crate::trust::KeyUsage>,
+}
+
+impl AuthorizationKey {
+    /// Whether this key may authorise a rehearsal at all.
+    ///
+    /// [`crate::trust::KeyUsage::GovernedApproval`] is the governed path's
+    /// usage and [`crate::trust::KeyUsage::ConsoleConfirmation`] is the
+    /// ordinary path's (D3 §4.3: "Ordinary policy: the console confirmation
+    /// issuer signature alone"). **`EvidenceSigning` is not on the list, and
+    /// that is the point of the list existing**: the installation's own
+    /// signing identity must never be able to authorise its own rehearsals,
+    /// which is the key-usage separation D3 §7.3 requires for PLAT-19.2.
+    #[must_use]
+    pub fn may_authorize(&self) -> bool {
+        self.usages.iter().any(|u| {
+            matches!(
+                u,
+                crate::trust::KeyUsage::GovernedApproval
+                    | crate::trust::KeyUsage::ConsoleConfirmation
+            )
+        })
+    }
+}
+
+/// D3 §4.3(e)'s "the trusted public keys", as a mounted bundle member.
+#[derive(Deserialize, Serialize, Clone, Debug, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AuthorizationKeyring {
+    pub format_version: String,
+    pub keys: Vec<AuthorizationKey>,
+}
+
+/// The token a standing-authorization refusal opens with.
+///
+/// The two spellings are D3 §4.3's own controller skip reasons, reused so the
+/// controller's `status.lastSkipped.reason` and the runner's refusal say the
+/// same word about the same fault.
+pub const AUTHORIZATION_INVALID: &str = "AuthorizationInvalid";
+/// The expiry half of the pair.
+pub const AUTHORIZATION_EXPIRED: &str = "AuthorizationExpired";
+
+/// Why a standing authorization was refused, with the token a reader greps for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AuthorizationRefusal {
+    pub token: &'static str,
+    pub detail: String,
+}
+
+impl AuthorizationRefusal {
+    fn invalid(detail: String) -> Self {
+        Self {
+            token: AUTHORIZATION_INVALID,
+            detail,
+        }
+    }
+    fn expired(detail: String) -> Self {
+        Self {
+            token: AUTHORIZATION_EXPIRED,
+            detail,
+        }
+    }
+}
+
+impl std::fmt::Display for AuthorizationRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}. {}", self.token, self.detail)
+    }
+}
+
+/// Everything about a VERIFIED standing authorization that is decidable
+/// without a broker, a bucket or a cluster credential — **except the
+/// signature**, which is `crates/logweir`'s to check because this crate links
+/// no crypto (Global Constraint 1, `scripts/check-pure-core.sh`).
+///
+/// `now` is an ARGUMENT and never a clock read here, for the same reason every
+/// other predicate in this crate takes one.
+///
+/// # What it does NOT check, and who does
+///
+/// `scope.template_digest` — whether the scope matches the schedule's sealed
+/// spec — is the CONTROLLER's each-slot check (D3 §4.3(a)). It is recomputed
+/// from the `RehearsalSchedule`'s own spec, which a runner holding no cluster
+/// credential cannot read at all. The runner's half is the subject UID, which
+/// it can compare because both sides are in hand.
+pub fn admit_standing_authorization(
+    doc: &StandingAuthorization,
+    expected_schedule_uid: Option<&str>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<(), AuthorizationRefusal> {
+    let major = doc
+        .format_version
+        .split('.')
+        .next()
+        .unwrap_or_default()
+        .to_string();
+    if major != "1" {
+        return Err(AuthorizationRefusal::invalid(format!(
+            "the standing authorization declares formatVersion {:?}; this build reads major 1 \
+             ({STANDING_AUTHORIZATION_FORMAT_VERSION})",
+            doc.format_version
+        )));
+    }
+    if doc.kind != STANDING_AUTHORIZATION_KIND {
+        return Err(AuthorizationRefusal::invalid(format!(
+            "the signed document declares kind {:?}, not {STANDING_AUTHORIZATION_KIND:?}",
+            doc.kind
+        )));
+    }
+    if doc.subject_ref.api_version != SUBJECT_API_VERSION
+        || doc.subject_ref.kind != REHEARSAL_SCHEDULE_KIND
+    {
+        return Err(AuthorizationRefusal::invalid(format!(
+            "the signed document authorises {}/{}, not a {SUBJECT_API_VERSION} \
+             {REHEARSAL_SCHEDULE_KIND}",
+            doc.subject_ref.api_version, doc.subject_ref.kind
+        )));
+    }
+    if doc.subject_ref.uid.trim().is_empty() {
+        return Err(AuthorizationRefusal::invalid(
+            "the signed document names no subject UID, so it cannot be bound to a schedule"
+                .to_string(),
+        ));
+    }
+    // THE BINDING. Without it a document signed for one schedule authorises
+    // every schedule in the namespace, and the environment's UID is decoration.
+    match expected_schedule_uid {
+        None => {
+            return Err(AuthorizationRefusal::invalid(format!(
+                "the execution contract names no RehearsalSchedule UID, so the signed \
+                 authorization for {} cannot be bound to this run",
+                doc.subject_ref.uid
+            )))
+        }
+        Some(uid) if uid != doc.subject_ref.uid => {
+            return Err(AuthorizationRefusal::invalid(format!(
+                "the signed authorization is for RehearsalSchedule UID {}, but this run is \
+                 RehearsalSchedule UID {uid}",
+                doc.subject_ref.uid
+            )))
+        }
+        Some(_) => {}
+    }
+    if doc.expires_at <= doc.issued_at {
+        return Err(AuthorizationRefusal::invalid(format!(
+            "the signed authorization expires at {} , at or before it was issued at {}",
+            doc.expires_at.to_rfc3339(),
+            doc.issued_at.to_rfc3339()
+        )));
+    }
+    if (doc.expires_at - doc.issued_at).num_days() > MAX_STANDING_AUTHORIZATION_DAYS {
+        return Err(AuthorizationRefusal::invalid(format!(
+            "the signed authorization runs {} days, and D3 §4.3 caps a standing rehearsal \
+             authorization at {MAX_STANDING_AUTHORIZATION_DAYS}",
+            (doc.expires_at - doc.issued_at).num_days()
+        )));
+    }
+    if doc.issued_at > now {
+        return Err(AuthorizationRefusal::invalid(format!(
+            "the signed authorization is not valid until {}; it is now {}",
+            doc.issued_at.to_rfc3339(),
+            now.to_rfc3339()
+        )));
+    }
+    if doc.expires_at <= now {
+        return Err(AuthorizationRefusal::expired(format!(
+            "the signed authorization expired at {}; it is now {}",
+            doc.expires_at.to_rfc3339(),
+            now.to_rfc3339()
+        )));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // The progress channel (D3 §2.4), contract-versioned and bounded
 // ---------------------------------------------------------------------------
 
@@ -434,6 +728,14 @@ pub struct PlanScopeFacts {
     pub mode: String,
     /// `sample.records_per_partition`.
     pub records_per_partition: u64,
+    /// `sample.max_partitions` — **`None` means the plan states no bound**,
+    /// which is how a plan asks to sample every candidate partition.
+    ///
+    /// It is an `Option` and not a defaulted number because absent and "a very
+    /// large number" are different claims, and only one of them can be
+    /// compared against a signed ceiling. See [`plan_within_scope`] for why
+    /// absent is a MISMATCH here rather than a pass.
+    pub max_partitions: Option<u32>,
 }
 
 /// The facts a mounted restore plan and its allowlist state.
@@ -460,6 +762,7 @@ pub fn plan_scope_facts(
         source_topics: plan.source.topics.clone(),
         mode: plan.target.mode.to_string(),
         records_per_partition: plan.sample.records_per_partition as u64,
+        max_partitions: plan.sample.max_partitions,
     }
 }
 
@@ -496,10 +799,24 @@ impl std::fmt::Display for ScopeRefusal {
 ///   observed id outside that set. Narrowing the allowlist is what turns
 ///   "the signed scope names cluster X" into "this run cannot reach anything
 ///   but X" without a second broker round trip;
-/// * `max_partitions` and `deadline_seconds` are NOT plan fields at all — the
-///   first is a catalog-supplied bound and the second is the Job's
-///   `activeDeadlineSeconds`. They are the controller's half of §4.3(d) and
-///   this predicate does not pretend to check them.
+/// * **`max_partitions` IS a plan field** (`sample.max_partitions`,
+///   `spec.rs`), and it is compared — with absent read as UNBOUNDED and
+///   therefore as a mismatch, which is the fail-closed direction. An earlier
+///   revision of this comment claimed it was "not a plan field at all"; that
+///   was simply wrong, and the review that caught it was right that the
+///   asymmetry against `records_per_partition` was invisible to W7.
+///
+///   The honest caveat is about MEANING, not about existence: the scope's
+///   `maxPartitions` is D3 §4.1's bound on the point ("partition total `<=`
+///   maxPartitions when the catalog supplies counts"), i.e. a ceiling on how
+///   big a point the rehearsal may select, while `sample.max_partitions`
+///   TRUNCATES the candidate list phase 4 built (`phase4_sample.rs`). A plan
+///   that satisfies the second has not thereby satisfied the first — the
+///   controller still owes the point-selection check — so this comparison is
+///   necessary and not sufficient, and W7 keeps §4.2's filter.
+/// * `deadline_seconds` genuinely is NOT a plan field — it is the Job's
+///   `activeDeadlineSeconds`. It stays the controller's half of §4.3(d) and
+///   this predicate does not pretend to check it.
 pub fn plan_within_scope(
     facts: &PlanScopeFacts,
     scope: &RehearsalScope,
@@ -569,6 +886,22 @@ pub fn plan_within_scope(
             "the plan samples {} records per partition; the signed scope permits {}",
             facts.records_per_partition, scope.records_per_partition
         ));
+    }
+    // ABSENT IS A MISMATCH, not a pass. A plan stating no partition bound is a
+    // plan asking for every candidate partition, and "unbounded" is not inside
+    // any finite ceiling a human signed. Reading absent as "fine" would make
+    // the one way to evade this check the easiest thing to write.
+    match facts.max_partitions {
+        None => mismatches.push(format!(
+            "the plan states no `sample.max_partitions`, so it is unbounded; the signed scope \
+             permits at most {}",
+            scope.max_partitions
+        )),
+        Some(max) if max > scope.max_partitions => mismatches.push(format!(
+            "the plan samples up to {max} partitions; the signed scope permits {}",
+            scope.max_partitions
+        )),
+        Some(_) => {}
     }
     // The target cluster id, through the allowlist — see this function's doc
     // comment for why that is the strongest form available before a broker
@@ -733,6 +1066,7 @@ mod tests {
             mapped_topics: vec!["rehearsal-3f2a91c7-orders".into()],
             mode: MODE_SCRATCH.to_string(),
             records_per_partition: 25,
+            max_partitions: Some(200),
         }
     }
 
@@ -749,6 +1083,7 @@ mod tests {
         f.source_topics = vec!["ledger".into()];
         f.mode = "newTopic".into();
         f.records_per_partition = 1000;
+        f.max_partitions = Some(4000);
         f.allowed_cluster_ids = vec!["OTHER000000000000000000".into()];
         let refusal = plan_within_scope(&f, &scope()).expect_err("outside the scope");
         let rendered = refusal.to_string();
@@ -757,6 +1092,7 @@ mod tests {
             "rehearsal-deadbeef-",
             "`ledger`",
             "1000 records per partition",
+            "up to 4000 partitions",
             "OTHER000000000000000000",
         ] {
             assert!(
@@ -765,7 +1101,7 @@ mod tests {
             );
         }
         assert!(
-            refusal.mismatches.len() >= 5,
+            refusal.mismatches.len() >= 6,
             "only {} mismatches named:\n{rendered}",
             refusal.mismatches.len()
         );
@@ -806,6 +1142,224 @@ mod tests {
                 .contains("exactly the signed target cluster id"),
             "{refusal}"
         );
+    }
+
+    // ---- the signed standing authorization (D3 §4.3(e)) -------------------
+
+    fn authorization(uid: &str, issued_days_ago: i64, life_days: i64) -> StandingAuthorization {
+        let issued = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00Z")
+            .expect("a fixed instant")
+            .with_timezone(&chrono::Utc)
+            - chrono::Duration::days(issued_days_ago);
+        StandingAuthorization {
+            format_version: STANDING_AUTHORIZATION_FORMAT_VERSION.to_string(),
+            kind: STANDING_AUTHORIZATION_KIND.to_string(),
+            subject_ref: AuthorizationSubject {
+                api_version: SUBJECT_API_VERSION.to_string(),
+                kind: REHEARSAL_SCHEDULE_KIND.to_string(),
+                namespace: "team-a".to_string(),
+                name: "weekly-orders".to_string(),
+                uid: uid.to_string(),
+            },
+            scope: scope(),
+            issued_at: issued,
+            expires_at: issued + chrono::Duration::days(life_days),
+        }
+    }
+
+    fn at(rfc3339: &str) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::parse_from_rfc3339(rfc3339)
+            .expect("a fixed instant")
+            .with_timezone(&chrono::Utc)
+    }
+
+    #[test]
+    fn a_valid_standing_authorization_for_this_schedule_is_admitted() {
+        admit_standing_authorization(
+            &authorization("uid-1", 1, 30),
+            Some("uid-1"),
+            at("2026-06-02T00:00:00Z"),
+        )
+        .expect("a current, correctly-subjected authorization is admitted");
+    }
+
+    /// THE BINDING the environment's UID could not provide on its own: a
+    /// document signed for another schedule must not authorise this run.
+    #[test]
+    fn an_authorization_for_another_schedule_is_refused() {
+        let refusal = admit_standing_authorization(
+            &authorization("uid-other", 1, 30),
+            Some("uid-1"),
+            at("2026-06-02T00:00:00Z"),
+        )
+        .expect_err("a foreign subject is refused");
+        assert_eq!(refusal.token, AUTHORIZATION_INVALID);
+        assert!(refusal.to_string().contains("uid-other"), "{refusal}");
+        assert!(refusal.to_string().contains("uid-1"), "{refusal}");
+    }
+
+    #[test]
+    fn an_authorization_with_no_uid_in_the_contract_cannot_be_bound() {
+        let refusal = admit_standing_authorization(
+            &authorization("uid-1", 1, 30),
+            None,
+            at("2026-06-02T00:00:00Z"),
+        )
+        .expect_err("an unbindable authorization is refused");
+        assert_eq!(refusal.token, AUTHORIZATION_INVALID);
+        assert!(
+            refusal
+                .to_string()
+                .contains("names no RehearsalSchedule UID"),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn an_expired_authorization_is_refused_under_its_own_token() {
+        let refusal = admit_standing_authorization(
+            &authorization("uid-1", 40, 30),
+            Some("uid-1"),
+            at("2026-06-02T00:00:00Z"),
+        )
+        .expect_err("an expired authorization is refused");
+        assert_eq!(
+            refusal.token, AUTHORIZATION_EXPIRED,
+            "expiry is its own reason, so a controller's skip reason and the runner's refusal \
+             say the same word (D3 §4.3)"
+        );
+    }
+
+    #[test]
+    fn an_authorization_that_is_not_yet_valid_is_refused() {
+        let refusal = admit_standing_authorization(
+            &authorization("uid-1", -5, 30),
+            Some("uid-1"),
+            at("2026-06-02T00:00:00Z"),
+        )
+        .expect_err("a future authorization is refused");
+        assert_eq!(refusal.token, AUTHORIZATION_INVALID);
+        assert!(refusal.to_string().contains("not valid until"), "{refusal}");
+    }
+
+    /// D3 §4.3 caps a standing authorization at 90 days, and the cap is a
+    /// property of the SIGNED bytes — so the runner re-checks it rather than
+    /// trusting whoever minted the document to have applied it.
+    #[test]
+    fn an_authorization_longer_than_ninety_days_is_refused() {
+        let refusal = admit_standing_authorization(
+            &authorization("uid-1", 1, MAX_STANDING_AUTHORIZATION_DAYS + 1),
+            Some("uid-1"),
+            at("2026-06-02T00:00:00Z"),
+        )
+        .expect_err("a document beyond the cap is refused");
+        assert_eq!(refusal.token, AUTHORIZATION_INVALID);
+        assert!(
+            refusal.to_string().contains("caps a standing rehearsal"),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn a_document_of_another_kind_or_major_is_refused() {
+        let mut wrong_kind = authorization("uid-1", 1, 30);
+        wrong_kind.kind = "Approval".to_string();
+        assert_eq!(
+            admit_standing_authorization(&wrong_kind, Some("uid-1"), at("2026-06-02T00:00:00Z"))
+                .expect_err("another kind is refused")
+                .token,
+            AUTHORIZATION_INVALID
+        );
+
+        let mut wrong_major = authorization("uid-1", 1, 30);
+        wrong_major.format_version = "2.0.0".to_string();
+        let refusal =
+            admit_standing_authorization(&wrong_major, Some("uid-1"), at("2026-06-02T00:00:00Z"))
+                .expect_err("a higher major is refused");
+        assert!(refusal.to_string().contains("major 1"), "{refusal}");
+
+        let mut wrong_subject = authorization("uid-1", 1, 30);
+        wrong_subject.subject_ref.kind = "Restore".to_string();
+        assert!(admit_standing_authorization(
+            &wrong_subject,
+            Some("uid-1"),
+            at("2026-06-02T00:00:00Z")
+        )
+        .is_err());
+    }
+
+    /// Key-usage separation (D3 §7.3): the installation's own evidence key may
+    /// never authorise its own rehearsals.
+    #[test]
+    fn only_an_authorization_usage_key_may_authorize() {
+        use crate::trust::KeyUsage;
+        let key = |usages: Vec<KeyUsage>| AuthorizationKey {
+            key_id: "sha256:aa".to_string(),
+            public_key_pem: "-----BEGIN PUBLIC KEY-----".to_string(),
+            usages,
+        };
+        assert!(key(vec![KeyUsage::GovernedApproval]).may_authorize());
+        assert!(key(vec![KeyUsage::ConsoleConfirmation]).may_authorize());
+        assert!(
+            !key(vec![KeyUsage::EvidenceSigning]).may_authorize(),
+            "the evidence signing key must never be able to authorise a rehearsal"
+        );
+        assert!(
+            !key(vec![]).may_authorize(),
+            "an empty usage set may do nothing"
+        );
+        assert!(key(vec![KeyUsage::EvidenceSigning, KeyUsage::GovernedApproval]).may_authorize());
+    }
+
+    #[test]
+    fn the_signed_document_round_trips_through_its_camel_case_grammar() {
+        let doc = authorization("uid-1", 1, 30);
+        let json = serde_json::to_string(&doc).expect("serialises");
+        for key in [
+            "formatVersion",
+            "subjectRef",
+            "apiVersion",
+            "issuedAt",
+            "expiresAt",
+        ] {
+            assert!(json.contains(key), "{key} missing from {json}");
+        }
+        let back: StandingAuthorization = serde_json::from_str(&json).expect("parses");
+        assert_eq!(back, doc);
+        // Unknown fields are IGNORED, so a document PLAT-19.2 later enriches
+        // with `policy`/`requester`/`ticket` still verifies against this build.
+        let enriched = json.replace(
+            "{\"formatVersion\"",
+            "{\"requester\":{\"issuer\":\"https://idp\"},\"formatVersion\"",
+        );
+        let with_extras: StandingAuthorization =
+            serde_json::from_str(&enriched).expect("an enriched document still parses");
+        assert_eq!(with_extras.scope, doc.scope);
+    }
+
+    /// F4: `sample.max_partitions` IS a plan field, and absent is UNBOUNDED,
+    /// which is not inside any finite ceiling a human signed.
+    #[test]
+    fn an_unbounded_partition_count_is_outside_every_signed_ceiling() {
+        let mut f = facts();
+        f.max_partitions = None;
+        let refusal = plan_within_scope(&f, &scope()).expect_err("unbounded is refused");
+        assert!(
+            refusal
+                .to_string()
+                .contains("states no `sample.max_partitions`"),
+            "{refusal}"
+        );
+
+        f.max_partitions = Some(scope().max_partitions + 1);
+        let refusal = plan_within_scope(&f, &scope()).expect_err("over the ceiling is refused");
+        assert!(
+            refusal.to_string().contains("up to 201 partitions"),
+            "{refusal}"
+        );
+
+        f.max_partitions = Some(scope().max_partitions);
+        plan_within_scope(&f, &scope()).expect("exactly the ceiling is inside it");
     }
 
     #[test]
