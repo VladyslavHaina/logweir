@@ -67,12 +67,16 @@ fn the_document_names_every_route_and_every_route_answers() {
             "/api/v1/namespaces/{ns}/destinations",
             "/api/v1/namespaces/{ns}/destinations:from-legacy",
             "/api/v1/namespaces/{ns}/destinations/{name}",
+            "/api/v1/namespaces/{ns}/destinations/{name}:update-access",
+            "/api/v1/namespaces/{ns}/destinations/{name}:test",
             "/api/v1/namespaces/{ns}/destinations/{name}/usage",
             "/api/v1/namespaces/{ns}/connections/{name}/topic-discoveries",
             "/api/v1/namespaces/{ns}/topic-discoveries/{id}",
+            "/api/v1/namespaces/{ns}/topic-discoveries/{id}:cancel",
             "/api/v1/namespaces/{ns}/topic-discoveries/{id}/topics",
             "/api/v1/namespaces/{ns}/preflights",
             "/api/v1/namespaces/{ns}/preflights/{id}",
+            "/api/v1/namespaces/{ns}/preflights/{id}:cancel",
             "/api/v1/namespaces/{ns}/preflights/{id}/details",
             "/api/v1/namespaces/{ns}/operations/{kind}/{name}",
         ]
@@ -88,7 +92,7 @@ fn the_document_names_every_route_and_every_route_answers() {
             );
         }
     }
-    assert_eq!(operation_ids.len(), 38);
+    assert_eq!(operation_ids.len(), 39);
 }
 
 /// Three documented paths exist only in shared mode: the two `/auth` routes and

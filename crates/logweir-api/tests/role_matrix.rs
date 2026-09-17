@@ -376,6 +376,26 @@ fn probes() -> Vec<Probe> {
             body: nothing_object,
             action: Action::CancelPreflight,
         },
+        // THE TWO OPERATION ALIASES, WITH THEIR OWN ACTIONS. `operations/{kind}`
+        // dispatches a check to its own domain's authorization, NOT to
+        // `operation.read` — which is invisible today only because all four
+        // roles happen to agree on the three actions. The moment the three
+        // capability flags are split into read/start pairs, these are the rows
+        // nobody would be checking.
+        Probe {
+            label: "read discovery operation",
+            method: "GET",
+            path: "/operations/discovery/td-1",
+            body: nothing,
+            action: Action::ReadTopicDiscoveries,
+        },
+        Probe {
+            label: "read preflight operation",
+            method: "GET",
+            path: "/operations/preflight/pf-1",
+            body: nothing,
+            action: Action::ReadPreflights,
+        },
     ]
 }
 

@@ -43,11 +43,19 @@ use std::time::{Duration, Instant};
 /// How long any child spawned here may run before it is killed and the test
 /// fails. Startup is milliseconds and every refusal path is immediate; this is
 /// a ceiling for a wedged process, not an expected wait.
-const CHILD_LIMIT: Duration = Duration::from_secs(30);
+///
+/// WIDENED FROM 30 s FOR A LOADED HOST, not for a slow product. Two tests in
+/// this suite flaked during a concurrent mutant build, both on reaching or
+/// leaving the socket rather than on any property they assert. This bound and
+/// [`SERVE_LIMIT`] exist to stop a WEDGED process, so doubling them costs a
+/// red build nothing and buys immunity to the machine being busy; the
+/// assertions about the shutdown grace period below are untouched and still
+/// compare against `main::SHUTDOWN_GRACE`'s own ten seconds.
+const CHILD_LIMIT: Duration = Duration::from_secs(60);
 
 /// How long the served process is given to reach its listening socket, and to
-/// exit after SIGTERM.
-const SERVE_LIMIT: Duration = Duration::from_secs(20);
+/// exit after SIGTERM. See [`CHILD_LIMIT`] on why this is 40 s and not 20.
+const SERVE_LIMIT: Duration = Duration::from_secs(40);
 
 fn binary() -> &'static str {
     env!("CARGO_BIN_EXE_logweir-api")

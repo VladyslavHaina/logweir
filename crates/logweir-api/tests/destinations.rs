@@ -308,14 +308,17 @@ async fn a_credential_value_is_created_once_and_never_comes_back() {
     app.fake.assert_strict();
 }
 
-/// THE MUTANT. The fake API server echoes `data` on a create exactly as
-/// Kubernetes does. If the adapter's Secret type could deserialize `data`, the
-/// value would be inside this process and one careless projection would ship
-/// it. This asserts the echo really is in the response the adapter received —
-/// so the guard above is testing something — and that it is gone by the time
-/// anything can see it.
+/// The fake API server echoes `data` on a create exactly as Kubernetes does.
+/// This asserts the echo really is on the wire — so the greps above are
+/// testing something — and that nothing which leaves this service carries it.
+///
+/// IT DOES NOT PROVE THE PARSER DROP. Removing `skip_deserializing` from
+/// `WriteOnlyCredential::data` leaves this green, because what it exercises is
+/// `create_credential`'s narrowing to `{name, uid}`. The parser drop itself is
+/// `kube::tests::an_api_server_create_response_cannot_carry_a_credential_into_this_process`,
+/// which that mutant kills.
 #[tokio::test]
-async fn the_api_servers_credential_echo_is_dropped_by_the_parser() {
+async fn the_credential_echo_is_dropped_before_any_route_sees_it() {
     let app = TestApp::new();
     let request = support::destination_body_with_new_credential("primary");
     app.post(
@@ -645,8 +648,17 @@ async fn a_test_starts_a_destination_access_preflight_labelled_for_the_destinati
     app.fake.assert_strict();
 }
 
+/// **A legacy location is adopted from facts, or not at all.**
+///
+/// D2 §3.12 step 2 has three branches and this build can reach only (c). A
+/// legacy `archive.url` carries the bucket and the prefix; the endpoint, the
+/// region, the addressing and the transport live in the frozen execution
+/// inputs (PLAT-06.1) or the installation policy ConfigMap (W11), neither of
+/// which the sealed adapter can read. So the route refuses — and, critically,
+/// refuses for a URL that an AWS installation and a MinIO installation would
+/// produce IDENTICALLY, which is why no guess can be right.
 #[tokio::test]
-async fn a_legacy_schedule_becomes_a_destination_from_facts_or_is_refused() {
+async fn a_legacy_location_is_refused_until_a_source_that_records_it_is_readable() {
     let app = TestApp::new();
     app.fake.seed(
         "backupschedules",
@@ -668,17 +680,64 @@ async fn a_legacy_schedule_becomes_a_destination_from_facts_or_is_refused() {
             &request.to_string(),
         )
         .await;
-    assert_eq!(response.status.as_u16(), 201, "{}", response.text());
-    let v = response.json();
-    assert_eq!(v["item"]["storage"]["bucket"], "legacy-bucket");
-    assert_eq!(v["item"]["storage"]["prefix"], "team-a");
-    assert_eq!(v["item"]["transport"]["security"], "tls");
-    // WHAT IT WAS DERIVED FROM IS PART OF THE ANSWER, and the note says what
-    // was not recovered rather than guessing it.
-    assert_eq!(v["addressingSource"], "installationConfig");
-    assert!(v["notes"][0].as_str().unwrap().contains("frozen execution"));
+    response.assert_problem(404, "legacy_location_unknown");
+    let detail = response.json()["detail"].as_str().unwrap().to_string();
+    // The two facts that WERE recovered are named, so an operator can paste
+    // them into an explicit create.
+    assert!(detail.contains("s3://legacy-bucket/team-a"), "{detail}");
+    // And the refusal says which source is missing and when it arrives.
+    assert!(detail.contains("policy ConfigMap"), "{detail}");
+    assert!(detail.contains("W11"), "{detail}");
+    // NOTHING WAS CREATED. A half-adopted destination at a guessed location is
+    // worse than none, because it looks derived from facts.
+    assert_eq!(app.fake.count("backupdestinations", NS_A), 0);
 
-    // A scheme this adoption cannot describe is refused, not guessed.
+    // THE MINIO CASE, WHICH IS THE WHOLE POINT. An installation whose runs
+    // used MinIO over a custom endpoint with path-style addressing writes the
+    // SAME archive.url as one that used AWS S3. The previous shape answered
+    // 201 here with `endpoint: null`, `addressing: virtualHosted` and
+    // `addressingSource: "installationConfig"` — a different location, under a
+    // provenance label naming a source it had not read.
+    app.fake.seed(
+        "backups",
+        NS_A,
+        json!({
+            "metadata": {"name": "logweir-backup-nightly-20260915-030000"},
+            "spec": {"sourceRef": {"name": "source"}, "topics": ["orders"], "archive": {"url": "s3://kafka-backups/team-a/prod"}, "triggeredBy": "schedule", "deadlineSeconds": 3600}
+        }),
+    );
+    let mut minio = request.clone();
+    minio["name"] = json!("adopted-minio");
+    minio["sourceSchedule"] = Value::Null;
+    minio["sourceBackup"] = json!("logweir-backup-nightly-20260915-030000");
+    let response = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/destinations:from-legacy"),
+            Some("from-legacy-000002"),
+            &minio.to_string(),
+        )
+        .await;
+    response.assert_problem(404, "legacy_location_unknown");
+    assert_eq!(app.fake.count("backupdestinations", NS_A), 0);
+
+    // No response from this route names a provenance it did not read.
+    for body in [
+        response.text(),
+        app.get(&format!("/api/v1/namespaces/{NS_A}/destinations"))
+            .await
+            .text(),
+    ] {
+        assert!(!body.contains("installationConfig"), "{body}");
+        assert!(!body.contains("addressingSource"), "{body}");
+    }
+    app.fake.assert_strict();
+}
+
+/// A scheme this adoption cannot describe at all is refused before the source
+/// question is even reached.
+#[tokio::test]
+async fn a_legacy_archive_that_is_not_s3_is_refused_by_scheme() {
+    let app = TestApp::new();
     app.fake.seed(
         "backupschedules",
         NS_A,
@@ -687,17 +746,216 @@ async fn a_legacy_schedule_becomes_a_destination_from_facts_or_is_refused() {
             "spec": {"schedule": "0 3 * * *", "sourceRef": {"name": "source"}, "topics": ["orders"], "archive": {"url": "file:///var/archive"}}
         }),
     );
-    let mut other = request.clone();
-    other["name"] = json!("adopted-file");
-    other["sourceSchedule"] = json!("filey");
+    let response = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/destinations:from-legacy"),
+            Some("from-legacy-000003"),
+            &json!({
+                "name": "adopted-file",
+                "sourceSchedule": "filey",
+                "access": {"archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "logweir-s3"}}}}
+            })
+            .to_string(),
+        )
+        .await;
+    response.assert_problem(404, "legacy_location_unknown");
+    assert!(response.json()["detail"]
+        .as_str()
+        .unwrap()
+        .contains("scheme"));
+    app.fake.assert_strict();
+}
+
+/// The route still requires and validates its `Idempotency-Key`, so a client
+/// learns the durable-POST contract here rather than after W11 makes the route
+/// create something.
+#[tokio::test]
+async fn from_legacy_still_requires_an_idempotency_key() {
+    let app = TestApp::new();
     app.post(
         &format!("/api/v1/namespaces/{NS_A}/destinations:from-legacy"),
-        Some("from-legacy-000002"),
-        &other.to_string(),
+        None,
+        &json!({
+            "name": "adopted",
+            "sourceSchedule": "nightly",
+            "access": {"archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "s"}}}}
+        })
+        .to_string(),
     )
     .await
-    .assert_problem(404, "legacy_location_unknown");
+    .assert_problem(400, "idempotency_key_required");
+    assert!(app.fake.requests().is_empty());
+}
+
+// ======================================================================
+// H1: a rotation that cannot write the value changes nothing
+// ======================================================================
+
+/// **`:update-access` fails closed when the deterministic Secret exists.**
+///
+/// The Secret name is a function of the destination and the role, so a SECOND
+/// `secret.new` for the same role can never be written: this service holds
+/// `create` on Secrets and nothing else. The previous shape answered 200 with
+/// the name in `credentialSecrets`, which let an operator responding to a
+/// leaked key record a rotation while the leaked value stayed live.
+#[tokio::test]
+async fn a_rotation_that_cannot_write_the_value_changes_nothing() {
+    let app = TestApp::new();
+    let request = support::destination_body_with_new_credential("primary");
+    app.post(
+        &format!("/api/v1/namespaces/{NS_A}/destinations"),
+        Some("rotate-closed-0001"),
+        &request.to_string(),
+    )
+    .await;
+    let before = app
+        .fake
+        .object("backupdestinations", NS_A, "primary")
+        .unwrap();
+    let generation = before["metadata"]["generation"].as_i64().unwrap();
+
+    // A fresh value for the SAME role: the Secret is already there.
+    let rotation = json!({
+        "expectedGeneration": generation,
+        "access": {
+            "archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "logweir-s3"}}},
+            "archiveRead": {"mode": "secretKeys", "secret": {"new": {"accessKeyId": "AKIAROTATED", "secretAccessKey": "a-brand-new-value-that-was-not-written"}}},
+            "evidenceRead": {"mode": "archiveReadGrant"}
+        }
+    });
+    app.fake.clear_requests();
+    let response = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/destinations/primary:update-access"),
+            None,
+            &rotation.to_string(),
+        )
+        .await;
+    response.assert_problem(409, "state_conflict");
+    let detail = response.json()["detail"].as_str().unwrap().to_string();
+    assert!(detail.contains("lwd-primary-archive-read"), "{detail}");
+    assert!(detail.contains("NOT written"), "{detail}");
+    assert!(detail.contains("secret.existing"), "{detail}");
+    // The refusal does not echo the value it declined to write.
+    assert!(!response
+        .text()
+        .contains("a-brand-new-value-that-was-not-written"));
+
+    // NOTHING CHANGED: no patch was sent, and the destination is byte-identical.
+    assert!(
+        !app.fake.requests().iter().any(|r| r.method == "PATCH"),
+        "a refused rotation still patched the destination"
+    );
+    assert_eq!(
+        app.fake
+            .object("backupdestinations", NS_A, "primary")
+            .unwrap(),
+        before
+    );
     app.fake.assert_strict();
+}
+
+/// The working direction: a value for a role whose Secret does NOT exist is
+/// written, and the rotation lands.
+#[tokio::test]
+async fn a_rotation_into_a_role_with_no_secret_yet_is_written_and_lands() {
+    let app = TestApp::new();
+    seed_destination(&app.fake, NS_A, "primary");
+    let rotation = json!({
+        "expectedGeneration": 3,
+        "access": {
+            "archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "logweir-s3"}}},
+            "evidenceWrite": {"mode": "secretKeys", "secret": {"new": {"accessKeyId": "AKIANEW", "secretAccessKey": "a-value-for-a-role-with-no-secret"}}}
+        }
+    });
+    let response = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/destinations/primary:update-access"),
+            None,
+            &rotation.to_string(),
+        )
+        .await;
+    assert_eq!(response.status.as_u16(), 200, "{}", response.text());
+    assert!(app
+        .fake
+        .object("secrets", NS_A, "lwd-primary-evidence-write")
+        .is_some());
+    assert_eq!(
+        response.json()["item"]["access"]["evidenceWrite"]["secretName"],
+        "lwd-primary-evidence-write"
+    );
+    assert!(!response
+        .text()
+        .contains("a-value-for-a-role-with-no-secret"));
+    app.fake.assert_strict();
+}
+
+/// **A fresh create never adopts a Secret it did not write, and a replay does.**
+///
+/// The mirror of the rotation case: a stale or planted `lwd-…` Secret under
+/// the deterministic name would otherwise be adopted IN PLACE OF the value the
+/// operator just entered. A genuine replay — the same key and the same body,
+/// after a lost response — must still succeed, because the existing object is
+/// then the one this very request wrote.
+#[tokio::test]
+async fn a_create_refuses_a_foreign_credential_secret_and_accepts_its_own_replay() {
+    let app = TestApp::new();
+    // Someone else already holds the name.
+    app.fake.seed(
+        "secrets",
+        NS_A,
+        json!({"metadata": {"name": "lwd-primary-archive-read"}, "type": "Opaque"}),
+    );
+    let request = support::destination_body_with_new_credential("primary");
+    let response = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/destinations"),
+            Some("create-foreign-0001"),
+            &request.to_string(),
+        )
+        .await;
+    response.assert_problem(409, "state_conflict");
+    assert!(response.json()["detail"]
+        .as_str()
+        .unwrap()
+        .contains("lwd-primary-archive-read"));
+    assert!(!response.text().contains(SECRET_ACCESS_KEY));
+
+    // Now the replay path, on a clean cluster: the first attempt writes both
+    // the destination and the Secret, and the second finds them and says so.
+    let app = TestApp::new();
+    let path = format!("/api/v1/namespaces/{NS_A}/destinations");
+    let first = app
+        .post(&path, Some("create-replay-0001"), &request.to_string())
+        .await;
+    assert_eq!(first.status.as_u16(), 201, "{}", first.text());
+    let replay = app
+        .post(&path, Some("create-replay-0001"), &request.to_string())
+        .await;
+    assert_eq!(replay.status.as_u16(), 200, "{}", replay.text());
+    assert_eq!(replay.json()["replayed"], true);
+    assert_eq!(app.fake.count("secrets", NS_A), 1);
+    app.fake.assert_strict();
+}
+
+/// The audit line distinguishes a Secret this call WROTE from one it found.
+#[tokio::test]
+async fn the_audit_line_separates_written_credentials_from_replayed_ones() {
+    let app = TestApp::new();
+    let request = support::destination_body_with_new_credential("primary");
+    let path = format!("/api/v1/namespaces/{NS_A}/destinations");
+    app.post(&path, Some("audit-split-00001"), &request.to_string())
+        .await;
+    app.post(&path, Some("audit-split-00001"), &request.to_string())
+        .await;
+    // The names never end up in one undifferentiated list again: the create
+    // reports `created`, the replay reports `replayed`, and neither reports
+    // both. (The values themselves are asserted in `tests/audit.rs`.)
+    let stored = app
+        .fake
+        .object("backupdestinations", NS_A, "primary")
+        .unwrap();
+    assert!(!stored.to_string().contains(SECRET_ACCESS_KEY));
 }
 
 // ------------------------------------------------------------------ helpers
@@ -712,4 +970,149 @@ fn field_codes(problem: &Value) -> Vec<String> {
                 .collect()
         })
         .unwrap_or_default()
+}
+
+// ======================================================================
+// M3 / L2: bounded reads that report their own bound
+// ======================================================================
+
+/// **`lastTest` finds the newest access test, however many checks there are.**
+///
+/// Preflight names are hashes, and Kubernetes pages a list in NAME order, so
+/// the newest test can sit on any page. `:test` sets a label only an access
+/// test carries, and the read follows the continue token — otherwise an
+/// operator who has just fixed a credential sees the old red verdict.
+#[tokio::test]
+async fn last_test_pages_past_the_backup_preflights_that_share_the_other_label() {
+    let app = TestApp::new();
+    seed_destination(&app.fake, NS_A, "primary");
+    // Enough Backup preflights to bury an access test in name order, all
+    // carrying `logweir.dev/destination=primary`.
+    for i in 0..30 {
+        app.fake.seed(
+            "preflights",
+            NS_A,
+            json!({
+                "metadata": {"name": format!("pf-aaaa{i:04}"), "labels": {"logweir.dev/destination": "primary"}, "creationTimestamp": "2026-09-15T09:00:00Z"},
+                "spec": {"request": {"operation": "Backup", "backup": {"sourceRef": {"name": "source"}, "destinationRef": {"name": "primary"}, "topics": ["orders"]}, "timeoutSeconds": 120}, "cancelRequested": false},
+                "status": {"phase": "Completed", "result": {"state": "ready"}}
+            }),
+        );
+    }
+    // The access test sorts LAST by name and is the newest by time.
+    app.fake.seed(
+        "preflights",
+        NS_A,
+        json!({
+            "metadata": {
+                "name": "pf-zzzz0001",
+                "labels": {"logweir.dev/destination": "primary", "logweir.dev/destination-test": "primary"},
+                "creationTimestamp": "2026-09-15T11:59:00Z"
+            },
+            "spec": {"request": {"operation": "DestinationAccess", "destinationAccess": {"destinationRef": {"name": "primary"}, "roles": ["ArchiveWrite"]}, "timeoutSeconds": 120}, "cancelRequested": false},
+            "status": {"phase": "Completed", "reason": "NotReady", "observedAt": "2026-09-15T11:59:00Z", "result": {"state": "notReady", "expiresAt": "2026-09-15T12:14:00Z"}}
+        }),
+    );
+    let response = app
+        .get(&format!("/api/v1/namespaces/{NS_A}/destinations/primary"))
+        .await;
+    let last = &response.json()["item"]["lastTest"];
+    assert_eq!(last["preflightId"], "pf-zzzz0001");
+    assert_eq!(last["state"], "notReady");
+    // The read reached the end, so the answer really is the last one.
+    assert_eq!(last["truncated"], false);
+    // ONE SELECTOR, and it is the access-test one.
+    let selectors: Vec<String> = app
+        .fake
+        .requests()
+        .iter()
+        .filter(|r| r.path.ends_with("/preflights"))
+        .map(|r| r.query.clone())
+        .collect();
+    assert!(
+        selectors
+            .iter()
+            .all(|q| q.contains("destination-test") || q.contains("destination-test%3Dprimary")),
+        "lastTest selected on something other than the access-test label: {selectors:?}"
+    );
+    app.fake.assert_strict();
+}
+
+/// **The at-most-one default check is one bounded selector read.**
+///
+/// The previous shape listed a single 200-object page and searched it for an
+/// annotation, so a namespace with more than 200 destinations could accept a
+/// second default — the very state the refusal calls impossible.
+#[tokio::test]
+async fn the_default_check_selects_on_a_label_rather_than_scanning() {
+    let app = TestApp::new();
+    let path = format!("/api/v1/namespaces/{NS_A}/destinations");
+    let mut first = support::destination_body("primary");
+    first["default"] = json!(true);
+    let response = app
+        .post(&path, Some("default-label-0001"), &first.to_string())
+        .await;
+    assert_eq!(response.status.as_u16(), 201, "{}", response.text());
+    // BOTH SPELLINGS ARE WRITTEN: the annotation D2 §3.1 names, for a human
+    // reading the object, and the label the check selects on.
+    let stored = app
+        .fake
+        .object("backupdestinations", NS_A, "primary")
+        .unwrap();
+    assert_eq!(
+        stored["metadata"]["annotations"]["logweir.dev/default-destination"],
+        "true"
+    );
+    assert_eq!(
+        stored["metadata"]["labels"]["logweir.dev/default-destination"],
+        "true"
+    );
+
+    app.fake.clear_requests();
+    let mut second = support::destination_body("secondary");
+    second["default"] = json!(true);
+    app.post(&path, Some("default-label-0002"), &second.to_string())
+        .await
+        .assert_problem(409, "state_conflict");
+    let list_queries: Vec<String> = app
+        .fake
+        .requests()
+        .iter()
+        .filter(|r| r.method == "GET" && r.path.ends_with("/backupdestinations"))
+        .map(|r| r.query.clone())
+        .collect();
+    assert_eq!(
+        list_queries.len(),
+        1,
+        "more than one read: {list_queries:?}"
+    );
+    assert!(
+        list_queries[0].contains("labelSelector"),
+        "the default check scanned instead of selecting: {list_queries:?}"
+    );
+    assert_eq!(app.fake.count("backupdestinations", NS_A), 1);
+
+    // A default set by hand with only the ANNOTATION still reads as one.
+    app.fake.seed(
+        "backupdestinations",
+        NS_A,
+        json!({
+            "metadata": {"name": "by-hand", "annotations": {"logweir.dev/default-destination": "true"}},
+            "spec": {
+                "storage": {"provider": "S3", "bucket": "kafka-backups", "prefix": "", "addressing": "VirtualHosted"},
+                "transport": {"security": "TLS"},
+                "access": {"archiveWrite": {"mode": "SecretKeys", "secret": {"name": "s", "accessKeyIdKey": "access-key-id", "secretAccessKeyKey": "secret-access-key"}}}
+            }
+        }),
+    );
+    let rows = app.get(&path).await;
+    let by_hand = rows.json()["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|d| d["name"] == "by-hand")
+        .cloned()
+        .unwrap();
+    assert_eq!(by_hand["default"], true);
+    app.fake.assert_strict();
 }

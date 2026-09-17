@@ -657,3 +657,146 @@ async fn an_unrecognised_phase_is_never_read_as_success() {
     assert_eq!(response.json()["item"]["state"], "unknown");
     assert_eq!(response.json()["item"]["terminal"], false);
 }
+
+/// **A claim of completeness without an attestation is downgraded here.**
+///
+/// D2 §5.4 and D-SEAMS S3: `attestedComplete` requires an explicit,
+/// administrator-governed attestation. The API is the last honest boundary
+/// before the console, so a controller that writes the state and forgets the
+/// attestation gets `unknown` — with the downgrade written into `basis`, not
+/// silently — rather than a console rendering "all topics" over an inventory
+/// an ACL may have trimmed.
+#[tokio::test]
+async fn a_completeness_claim_without_an_attestation_is_published_as_unknown() {
+    let app = TestApp::new();
+    seed_discovery(
+        &app.fake,
+        NS_A,
+        "td-attest",
+        "source",
+        Some(LOCAL_ADMIN_ACTOR),
+        &[lines("bulk", 0, 2)],
+    );
+    let mut object = app
+        .fake
+        .object("topicdiscoveries", NS_A, "td-attest")
+        .unwrap();
+    object["status"]["result"]["visibility"] = json!({"state": "attestedComplete", "basis": []});
+    app.fake.seed("topicdiscoveries", NS_A, object.clone());
+
+    let response = app
+        .get(&format!(
+            "/api/v1/namespaces/{NS_A}/topic-discoveries/td-attest"
+        ))
+        .await;
+    let visibility = &response.json()["item"]["visibility"];
+    assert_eq!(
+        visibility["state"], "unknown",
+        "an unattested claim of completeness was published as one"
+    );
+    assert_eq!(visibility["basis"], json!(["attestationMissing"]));
+    assert!(visibility.get("attestation").is_none());
+    assert!(!response.text().contains("attestedComplete"));
+
+    // WITH the attestation it is published as the controller wrote it.
+    object["status"]["result"]["visibility"] = json!({"state": "attestedComplete", "basis": ["operatorAttestation"], "attestation": "roster/all-user-topics"});
+    app.fake.seed("topicdiscoveries", NS_A, object);
+    let response = app
+        .get(&format!(
+            "/api/v1/namespaces/{NS_A}/topic-discoveries/td-attest"
+        ))
+        .await;
+    let visibility = &response.json()["item"]["visibility"];
+    assert_eq!(visibility["state"], "attestedComplete");
+    assert_eq!(visibility["attestation"], "roster/all-user-topics");
+    assert_eq!(visibility["basis"], json!(["operatorAttestation"]));
+
+    // `limited` is the controller's own verdict about a failure it OBSERVED
+    // inside the check Job. The API has nothing to check it against and passes
+    // it through unchanged.
+    let mut object = app
+        .fake
+        .object("topicdiscoveries", NS_A, "td-attest")
+        .unwrap();
+    object["status"]["result"]["visibility"] =
+        json!({"state": "limited", "basis": ["expectedTopicNotAuthorized"]});
+    app.fake.seed("topicdiscoveries", NS_A, object);
+    let response = app
+        .get(&format!(
+            "/api/v1/namespaces/{NS_A}/topic-discoveries/td-attest"
+        ))
+        .await;
+    assert_eq!(response.json()["item"]["visibility"]["state"], "limited");
+    app.fake.assert_strict();
+}
+
+/// **An administrator may stop any check in a namespace it administers.**
+///
+/// D0's "cancel own checks" is the OPERATOR row. An administrator who cannot
+/// stop a long discovery an operator started has to wait out `timeoutSeconds`
+/// or reach for `kubectl`, which is the outcome a console exists to avoid.
+/// The exception is narrow — cancel only — and the audit line records that it
+/// was somebody else's check.
+#[tokio::test]
+async fn an_administrator_may_cancel_a_check_an_operator_started() {
+    let fake = support::FakeKube::new();
+    fake.seed(
+        "kafkaclusters",
+        NS_A,
+        json!({
+            "metadata": {"name": "source"},
+            "spec": {"bootstrapServers": ["kafka:9096"], "auth": {"mode": "plaintext", "tls": false}, "role": "source"}
+        }),
+    );
+    seed_running_discovery(
+        &fake,
+        NS_A,
+        "td-operators",
+        "source",
+        "urn:test#an-operator",
+    );
+    let app = support::SharedApp::new(
+        fake.clone(),
+        support::idp::MockIdp::new(support::ISSUER, &[]),
+        support::SharedOptions {
+            bindings: support::RoleBindings {
+                revision: "admin-cancel-1".into(),
+                bindings: vec![
+                    support::binding(support::Role::Operator, NS_A, &["lw-a-operators"]),
+                    support::binding(support::Role::Administrator, NS_A, &["lw-a-admins"]),
+                ],
+            },
+            ..support::SharedOptions::default()
+        },
+    );
+    let path = format!("/api/v1/namespaces/{NS_A}/topic-discoveries/td-operators:cancel");
+
+    // Another OPERATOR still cannot.
+    let operator = app.session_cookie("u-op-2", &["lw-a-operators"]);
+    let refused = app
+        .post(&path, &operator, Some(&app.csrf_for("u-op-2")), None, "{}")
+        .await;
+    refused.assert_problem(403, "forbidden");
+    assert!(refused.json()["detail"]
+        .as_str()
+        .unwrap()
+        .contains("administrator of this namespace may cancel any"));
+    assert_eq!(
+        fake.object("topicdiscoveries", NS_A, "td-operators")
+            .unwrap()["spec"]["cancelRequested"],
+        false
+    );
+
+    // The ADMINISTRATOR of this namespace can.
+    let admin = app.session_cookie("u-admin", &["lw-a-admins"]);
+    let allowed = app
+        .post(&path, &admin, Some(&app.csrf_for("u-admin")), None, "{}")
+        .await;
+    assert_eq!(allowed.status.as_u16(), 200, "{}", allowed.text());
+    assert_eq!(
+        fake.object("topicdiscoveries", NS_A, "td-operators")
+            .unwrap()["spec"]["cancelRequested"],
+        true
+    );
+    fake.assert_strict();
+}
