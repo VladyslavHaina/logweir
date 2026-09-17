@@ -78,12 +78,24 @@ pub const MAX_TOPICS: usize = 64;
 /// namespace with ten thousand runs costs one bounded list per schedule.
 pub const MAX_BACKUPS_SCANNED: usize = 50;
 
-/// D3 §3.4 point 4: "retries at most 3 times".
+/// D3 §3.4 point 4's bound: **three attempts in total** for one transition.
+///
+/// # Three attempts, two waits, and why the third wait is not here
+///
+/// Review **F8**. D3 §3.4 reads "retries at most 3 times with 60 s/300 s/900 s
+/// backoff", which is four attempts if "retries" excludes the first. Three was
+/// implemented, so `DELIVERY_BACKOFF_SECONDS[2] = 900` was dead code that two
+/// prose sites nonetheless advertised. The count is the one kept — three
+/// attempts bound a transition's delivery at roughly six minutes, inside the
+/// interval a policy is re-evaluated on, so a failure is visible in status
+/// before the next pass rather than a quarter of an hour later — and the waits
+/// are now exactly the two a three-attempt schedule uses. `docs/kubernetes.md`
+/// §7e and the report say the same number.
 pub const MAX_DELIVERY_ATTEMPTS: i64 = 3;
 
-/// D3 §3.4 point 4's backoff, in seconds, indexed by the attempt that just
-/// failed.
-pub const DELIVERY_BACKOFF_SECONDS: [i64; 3] = [60, 300, 900];
+/// The wait before each retry, in seconds, indexed by the attempt that just
+/// failed. Two entries for three attempts; see [`MAX_DELIVERY_ATTEMPTS`].
+pub const DELIVERY_BACKOFF_SECONDS: [i64; 2] = [60, 300];
 
 /// The most delivery Jobs one reconcile pass may create for one policy.
 ///
@@ -664,20 +676,77 @@ pub struct CatalogEntry {
     pub verification: String,
     /// `availability.selectable() && verification.selectable()`, materialised
     /// by the catalog controller so no surface recomputes D3 §5.4's rule.
+    ///
+    /// AN `Option`, AND THE THIRD STATE IS THE POINT. `#[serde(default)]` on a
+    /// `bool` reads a writer that does not emit the field as `false`, which
+    /// would make every point in the cluster unselectable the day W8 renamed
+    /// it. `None` means "this view did not materialise the rule" and falls
+    /// back to the two axes; `Some(false)` is a real refusal and is honoured.
     #[serde(default)]
-    pub selectable: bool,
+    pub selectable: Option<bool>,
 }
 
 impl CatalogEntry {
-    /// Whether the bytes are there — the FIRST axis alone.
+    /// The verification verdicts D3 §5.4 calls selectable.
+    pub const VERIFIED: [&'static str; 2] = ["Verified", "VerifiedHistorical"];
+
+    /// Whether this point may be counted as protection — **BOTH** of D3 §5.4's
+    /// axes, not the availability one alone.
+    ///
+    /// # Why the second axis is here and was not (review F6)
+    ///
+    /// An entry that is `Available` but `UntrustedSigner` is bytes this
+    /// installation will not accept. Selecting on availability alone made that
+    /// point the policy's answer, reported `health: Healthy`, and then
+    /// suppressed `ArchiveUnavailable` by its own guard — the tracker's
+    /// "unavailable archive" row failing silently, on the exact surface an
+    /// incident responder reads. `selectable` is the field W8 materialised so
+    /// that no surface recomputes the rule; where it is present it decides,
+    /// and where it is absent the two axes are read here rather than guessed.
     #[must_use]
     pub fn is_available(&self) -> bool {
-        self.availability == "Available"
+        if self.has_blank_axis() {
+            // Neither "available" nor "gone": UNANSWERED. The caller turns this
+            // into `CatalogUnreadable`; see `blank_axis` on the answer type.
+            return false;
+        }
+        match self.selectable {
+            Some(selectable) => selectable,
+            None => {
+                self.availability == "Available"
+                    && Self::VERIFIED.contains(&self.verification.as_str())
+            }
+        }
+    }
+
+    /// Whether either axis came through empty.
+    ///
+    /// # A blank axis is "could not answer", never "your backups are gone"
+    ///
+    /// Review **F12**. `#[serde(default)]` on the two axes means a RENAME in
+    /// W8's `ViewEntry` yields `""` for every entry rather than a parse error
+    /// — and reading `"" != "Available"` as "not available" would put every
+    /// catalog-backed policy in the cluster into `Unprotected` at once, on a
+    /// schema change. The honest reading of an axis this build cannot find is
+    /// [`FreshnessReason::CatalogUnreadable`]: the view could not answer, which
+    /// is `Unknown` and pages nobody with a false bereavement.
+    ///
+    /// The two spellings agree today (`catalog_view::ViewEntry` is
+    /// `rename_all = "camelCase"` and both vocabularies serialise as the
+    /// PascalCase strings compared here). The gap is that nothing holds them
+    /// together; `docs/kubernetes.md` §7e names the one-line fixture W8 or W13
+    /// should add.
+    #[must_use]
+    pub fn has_blank_axis(&self) -> bool {
+        self.availability.is_empty() || self.verification.is_empty()
     }
 
     /// Whether this entry is one of D3 §3.3's `ArchiveUnavailable` triggers:
     /// the bytes are gone or unreadable, or the signature is not one this
     /// installation accepts.
+    ///
+    /// **BOTH AXES**, which is D3 §3.3's own wording: "`Missing`/`Unreadable`/
+    /// **`Untrusted`** in the catalog".
     #[must_use]
     pub fn is_degraded(&self) -> bool {
         matches!(
@@ -701,6 +770,23 @@ pub enum CatalogAnswer {
     /// A `catalogRef` is set and the view is expired, never synced, or the
     /// object is gone. **Never `Healthy`** — D3 §3.2.
     Stale(FreshnessReason),
+}
+
+impl CatalogAnswer {
+    /// Whether a fresh view answered with an entry whose axes this build could
+    /// not read — review **F12**.
+    ///
+    /// The caller turns this into [`FreshnessReason::CatalogUnreadable`] and
+    /// therefore [`Health::Unknown`], rather than letting every entry fail
+    /// [`CatalogEntry::is_available`] and reporting a whole cluster
+    /// `Unprotected` because a field was renamed.
+    #[must_use]
+    pub fn blank_axis(&self) -> bool {
+        match self {
+            Self::Fresh(entries) => entries.iter().any(CatalogEntry::has_blank_axis),
+            Self::NotConsulted | Self::Stale(_) => false,
+        }
+    }
 }
 
 /// One `BackupSchedule` as this policy sees it, plus the run facts D1 owns.
@@ -845,10 +931,29 @@ pub struct Verdict {
     pub schedules: Vec<ScheduleSummary>,
     /// The rehearsal side.
     pub rehearsal: Option<RehearsalSummary>,
+    /// Whether any schedule missed a slot SINCE IT LAST FIRED — the live
+    /// signal, as opposed to `missed.lastMissedSlot`'s sticky audit trail
+    /// (review F5). It is what `AtRisk` and the event's `missed_slots` read.
+    pub missed_since_last_fire: bool,
     /// Which alerts D3 §3.3 says should be OPEN right now.
     pub open_kinds: Vec<PolicyAlertKind>,
-    /// One sentence for a human. Reaches a PagerDuty incident title verbatim.
+    /// One sentence for a human. Reaches a PagerDuty incident title verbatim,
+    /// and carries the concrete age because an incident title is where a
+    /// number earns its place.
     pub summary: String,
+    /// The same verdict WITHOUT the clock-derived number — what the `Ready`
+    /// and `Protected` condition `message`s carry.
+    ///
+    /// # Two sentences, and erratum **E11(d)** is why (review F4)
+    ///
+    /// A condition `message` is part of the object. A message embedding
+    /// `humanize(age)` changes the moment the minute rolls over, so the status
+    /// differs from the stored one on a pass where NOTHING about the cluster
+    /// changed, a PATCH goes out, `resourceVersion` bumps, and the reconciler's
+    /// own write wakes it again — the measured `KafkaCluster` defect, on every
+    /// policy, for ever. The event document is the opposite case: it is written
+    /// once, read by a human in an incident, and never compared to anything.
+    pub condition_summary: String,
 }
 
 /// D3 §3.2's availability rule, as one predicate with the four conjuncts
@@ -1022,6 +1127,10 @@ pub fn evaluate(input: &Inputs<'_>) -> Verdict {
         Some(FreshnessReason::ScheduleMissing)
     } else if let CatalogAnswer::Stale(reason) = catalog {
         Some(*reason)
+    } else if catalog.blank_axis() {
+        // Review F12: an entry whose axes this build cannot read is a view that
+        // could not ANSWER, not a point that is gone.
+        Some(FreshnessReason::CatalogUnreadable)
     } else {
         None
     };
@@ -1039,6 +1148,9 @@ pub fn evaluate(input: &Inputs<'_>) -> Verdict {
         },
     };
 
+    // D3 §3.2's `Healthy` row says "no missed slot SINCE LAST FIRE", and
+    // `missed_since_last_fire` is why that phrase is load-bearing (review F5).
+    let missed_recently = input.schedules.iter().any(missed_since_last_fire);
     let at_risk = consecutive_failed_runs >= i64::from(spec.objectives.max_consecutive_failed_runs)
         && spec.objectives.max_consecutive_failed_runs > 0
         || input.schedules.iter().any(|s| s.suspended)
@@ -1046,7 +1158,7 @@ pub fn evaluate(input: &Inputs<'_>) -> Verdict {
             .schedules
             .iter()
             .any(|s| s.ready.as_deref() == Some("False"))
-        || missed.last_missed_slot.is_some();
+        || missed_recently;
 
     let health = match freshness {
         Freshness::Unknown => Health::Unknown,
@@ -1063,6 +1175,15 @@ pub fn evaluate(input: &Inputs<'_>) -> Verdict {
         reason,
         point.as_ref(),
         consecutive_failed_runs,
+        true,
+    );
+    let condition_summary = summarize(
+        spec,
+        health,
+        reason,
+        point.as_ref(),
+        consecutive_failed_runs,
+        false,
     );
 
     Verdict {
@@ -1076,8 +1197,10 @@ pub fn evaluate(input: &Inputs<'_>) -> Verdict {
         missed,
         schedules,
         rehearsal: rehearsal_summary(input.rehearsal),
+        missed_since_last_fire: missed_recently,
         open_kinds,
         summary,
+        condition_summary,
     }
 }
 
@@ -1098,9 +1221,62 @@ fn point_facts(candidate: &PointCandidate, now: Time) -> AvailablePointFacts {
     }
 }
 
+/// The UTC instant a `yyyymmdd-hhmmss` slot name denotes, or `None`.
+///
+/// The same grammar `identity::valid_slot` checks, read rather than validated:
+/// a name this build cannot parse is not evidence that a slot was missed
+/// recently, so it answers `None` and the caller treats it as "not recent".
+#[must_use]
+pub fn slot_instant(slot: &str) -> Option<Time> {
+    chrono::NaiveDateTime::parse_from_str(slot, "%Y%m%d-%H%M%S")
+        .ok()
+        .map(|naive| naive.and_utc())
+}
+
+/// Whether this schedule missed a slot **since it last fired** — D3 §3.2's
+/// `Healthy` row, word for word.
+///
+/// # Why the sticky field cannot be read as a live signal (review F5)
+///
+/// `BackupSchedule.status.lastMissedSlot` is documented as an AUDIT TRAIL:
+/// "written when a slot is skipped and is **never cleared afterwards**". Read
+/// as a live risk signal it pins a policy to `AtRisk` for the life of the
+/// schedule — and `AtRisk` publishes `Protected=False`, which reads on every
+/// surface as "Logweir checked and you are not protected" about a schedule
+/// that has fired correctly every night since. One controller restart past the
+/// one-hour miss horizon, in January, and the policy is red in December.
+///
+/// A slot name is `yyyymmdd-hhmmss` in UTC, so it is an INSTANT, and the
+/// question D3 actually asks is whether that instant is newer than the last
+/// successful fire. D1 W2's `status.missedSlots.count` is preferred where the
+/// schedule carries it and the count is zero — an explicit "none" beats an
+/// inference — but a non-zero count is still about the schedule's whole life,
+/// so the instant comparison decides.
+#[must_use]
+pub fn missed_since_last_fire(facts: &ScheduleFacts) -> bool {
+    if facts.missed_slots == Some(0) {
+        return false;
+    }
+    let Some(slot) = facts.last_missed_slot.as_deref() else {
+        return false;
+    };
+    let Some(missed_at) = slot_instant(slot) else {
+        return false;
+    };
+    match facts.last_fire_time {
+        // Never fired: every recorded miss is still outstanding.
+        None => true,
+        Some(fired) => missed_at > fired,
+    }
+}
+
 fn missed_summary(input: &Inputs<'_>) -> MissedSummary {
     // The NEWEST missed slot across the schedules: a slot name is
     // `yyyymmdd-hhmmss`, so lexical order IS chronological order.
+    //
+    // REPORTED WHETHER OR NOT IT IS RECENT. It is the schedule's audit trail
+    // and an operator reading `status.missed` wants it; what it may not do is
+    // decide `AtRisk` (`missed_since_last_fire`, review F5).
     let last = input
         .schedules
         .iter()
@@ -1152,17 +1328,41 @@ fn open_alert_kinds(
     {
         open.push(PolicyAlertKind::BackupFailure);
     }
-    if health == Health::Stale {
+    // `Staleness` COVERS `Unprotected` TOO — review **F2**.
+    //
+    // `Unprotected` is the worst value the enum has: there is nothing to
+    // recover from at all. It opened no alert of any kind, so a policy whose
+    // only point was deleted, or whose points never verified, or whose catalog
+    // has never heard of them, paged NOBODY, for ever. `BackupFailure` does not
+    // cover it — that needs `consecutiveFailedRuns >= threshold`, and a policy
+    // with no runs at all has zero — and D3 §15 L5's "exactly 1 POST" would
+    // have been 0 on the very branch its own criterion 1 admits.
+    //
+    // It is the SAME kind rather than a sixth, because D3 §3.3's resolve column
+    // for `Staleness` is "`health` back to `Healthy`/`AtRisk`", which already
+    // treats `Unprotected` as a non-resolved state; a separate kind would open
+    // a second incident for the same objective the moment a stale policy lost
+    // its last point, and close neither.
+    if matches!(health, Health::Stale | Health::Unprotected) {
         open.push(PolicyAlertKind::Staleness);
     }
 
-    // `ArchiveUnavailable`: the newest OTHERWISE-available point is degraded
-    // in the catalog. "Otherwise available" is the run half of the rule
-    // without its catalog conjunct — the point Logweir would have chosen if
-    // the bytes were there — which is why this is not simply "the chosen point
-    // is missing": the chosen point is by construction available, so that
-    // reading would make the alert unreachable.
+    // `ArchiveUnavailable`: a point this policy would otherwise count is
+    // degraded in the catalog — on EITHER of D3 §5.4's axes, which is §3.3's
+    // own wording ("`Missing`/`Unreadable`/`Untrusted` in the catalog").
+    //
+    // TWO WAYS IN, AND THE SECOND ONE WAS MISSING (review **F6**). The first is
+    // the newest OTHERWISE-available point — the run half of the rule without
+    // its catalog conjunct, the point Logweir would have chosen if the bytes
+    // were there. The second is the point actually CHOSEN: with selection now
+    // reading both axes, a chosen point can still be degraded on an axis the
+    // selection tolerates, and the old `chosen_is_top` guard suppressed exactly
+    // the case the tracker's "unavailable archive" row is about — a signer
+    // retired or revoked under a point the `Backup` CR still calls `Valid`.
     if let CatalogAnswer::Fresh(entries) = catalog {
+        let degraded_id = |id: Option<&str>| {
+            id.is_some_and(|id| entries.iter().any(|e| e.point_id == id && e.is_degraded()))
+        };
         let mut otherwise: Vec<&PointCandidate> = input
             .candidates
             .iter()
@@ -1171,18 +1371,12 @@ fn open_alert_kinds(
             })
             .collect();
         otherwise.sort_by_key(|c| std::cmp::Reverse(c.recovery_point_at));
-        if let Some(top) = otherwise.first() {
-            let degraded = top
-                .point_id
-                .as_deref()
-                .is_some_and(|id| entries.iter().any(|e| e.point_id == id && e.is_degraded()));
-            // Only when the degraded point is NOT the one finally chosen —
-            // otherwise the chosen point is available and there is nothing
-            // unavailable to report.
-            let chosen_is_top = newest.is_some_and(|n| n.point_id == top.point_id);
-            if degraded && !chosen_is_top {
-                open.push(PolicyAlertKind::ArchiveUnavailable);
-            }
+        let top_degraded = otherwise
+            .first()
+            .is_some_and(|top| degraded_id(top.point_id.as_deref()));
+        let chosen_degraded = newest.is_some_and(|n| degraded_id(n.point_id.as_deref()));
+        if top_degraded || chosen_degraded {
+            open.push(PolicyAlertKind::ArchiveUnavailable);
         }
     }
 
@@ -1216,6 +1410,16 @@ fn open_alert_kinds(
 /// as "…an exhaustive comparison" is worse than no sentence. Nothing generated
 /// here reaches for that vocabulary; `no_summary_claims_an_exhaustive_check`
 /// is the test over every arm.
+///
+/// # `with_age`, and why one function produces two sentences
+///
+/// `true` embeds the concrete age and is what the EVENT carries: it is written
+/// once and read by a human during an incident, where "31h 0m old" is the whole
+/// point. `false` drops it and is what a CONDITION `message` carries, because a
+/// condition is part of the object and a message that changes when the minute
+/// rolls over is a status patch on a pass where nothing happened — erratum
+/// **E11(d)**, review F4. The objective itself is a spec value and never moves,
+/// so it stays in both.
 #[must_use]
 pub fn summarize(
     spec: &ProtectionPolicySpec,
@@ -1223,23 +1427,28 @@ pub fn summarize(
     reason: FreshnessReason,
     point: Option<&AvailablePointFacts>,
     consecutive_failed_runs: i64,
+    with_age: bool,
 ) -> String {
     let objective = i64::from(spec.objectives.max_recovery_point_age_seconds);
+    let age = point.and_then(|p| p.age_seconds).filter(|_| with_age);
     match health {
-        Health::Healthy => match point.and_then(|p| p.age_seconds) {
+        Health::Healthy => match age {
             Some(age) => format!(
                 "the newest available recovery point is {} old, inside the objective of {}",
                 humanize(age),
                 humanize(objective)
             ),
-            None => "an available recovery point is inside the objective".to_string(),
+            None => format!(
+                "the newest available recovery point is inside the objective of {}",
+                humanize(objective)
+            ),
         },
         Health::AtRisk => format!(
             "a recovery point is inside the objective, but protection is at risk: \
              {consecutive_failed_runs} consecutive failed slots, a suspended or not-ready \
-             schedule, or a missed slot"
+             schedule, or a slot missed since the last fire"
         ),
-        Health::Stale => match point.and_then(|p| p.age_seconds) {
+        Health::Stale => match age {
             Some(age) => format!(
                 "the newest available recovery point is {} old, past the objective of {}",
                 humanize(age),
@@ -1308,16 +1517,35 @@ pub struct LedgerOutcome {
 /// `desired_open` is [`Verdict::open_kinds`]. Entries for kinds no longer open
 /// are RESOLVED, not deleted: the resolve is a transition of its own and the
 /// `resolve` PagerDuty needs under the same `dedup_key`.
+///
+/// # A resolve is a CLAIM, and `health` decides whether it may be made
+///
+/// Review **F1**. "Not in `open_kinds`" is not the same fact as "the condition
+/// cleared". D3 §3.3's resolve column says `health` back to
+/// `Healthy`/`AtRisk` — and `Unprotected` and `Unknown` also produce no open
+/// kind for some of these, so reading absence as a resolve closed the incident
+/// at the instant protection got WORSE or became unmeasurable:
+///
+/// * `Stale` → `Unprotected` (retention or GC took the last point): the page
+///   that woke on-call resolved itself the moment the archive stopped existing.
+/// * `Stale` → `Unknown` (the catalog view expired, the source was deleted):
+///   the page resolved because Logweir stopped being able to look.
+///
+/// [`resolves_alerts`] is the gate. Under any other health an open entry is
+/// left EXACTLY as it is — same state, same transition, no delivery — because
+/// nothing was measured and a ledger is not a place to guess.
 #[must_use]
 pub fn reconcile_alerts(
     existing: &[AlertEntry],
     desired_open: &[PolicyAlertKind],
+    health: Health,
     policy_uid: &str,
     notifications: Option<&Notifications>,
     now: Time,
 ) -> LedgerOutcome {
     let renotify = notifications.map_or(0, |n| i64::from(n.renotify_after_seconds));
     let send_resolved = notifications.is_none_or(|n| n.send_resolved);
+    let may_resolve = resolves_alerts(health);
 
     let mut by_key: BTreeMap<String, AlertEntry> = existing
         .iter()
@@ -1367,7 +1595,7 @@ pub fn reconcile_alerts(
             }
             (Some(entry), false) => {
                 let open = entry.state == AlertState::Open.as_str();
-                if open {
+                if open && may_resolve {
                     Some(AlertEntry {
                         state: AlertState::Resolved.as_str().to_string(),
                         resolved_at: Some(now),
@@ -1375,6 +1603,10 @@ pub fn reconcile_alerts(
                         ..entry
                     })
                 } else {
+                    // OPEN AND LEFT ALONE. Protection got worse, or became
+                    // unmeasurable; either way this is not the condition
+                    // clearing, and a `resolve` on the shared dedup key would
+                    // close a real incident (review F1).
                     Some(entry)
                 }
             }
@@ -1505,6 +1737,17 @@ fn prune_recoveries(entries: Vec<AlertEntry>) -> Vec<AlertEntry> {
                 || rank.contains(&(e.notified_transition.is_none(), e.opened_at, e.key.clone()))
         })
         .collect()
+}
+
+/// Whether this health may CLOSE an open alert — D3 §3.3's resolve column,
+/// verbatim: "`health` back to `Healthy`/`AtRisk`".
+///
+/// Two values and not "anything but `Stale`", which is the distinction review
+/// **F1** is about. See [`reconcile_alerts`] for what the wider reading closed
+/// and when.
+#[must_use]
+pub fn resolves_alerts(health: Health) -> bool {
+    matches!(health, Health::Healthy | Health::AtRisk)
 }
 
 /// Whether a delivery that FAILED for the current transition may be attempted

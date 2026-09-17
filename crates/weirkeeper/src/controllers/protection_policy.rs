@@ -360,6 +360,7 @@ pub async fn reconcile_policy(
     let ledger = p::reconcile_alerts(
         &observed,
         &verdict.open_kinds,
+        verdict.health,
         &uid,
         spec.notifications.as_ref(),
         now,
@@ -367,8 +368,8 @@ pub async fn reconcile_policy(
     let mut alerts = ledger.alerts;
 
     // ------------------------------------------------------------------
-    // Deliver. The event `ConfigMap` first, then the Job, then the ledger
-    // note that a Job exists for this transition.
+    // Deliver. The Job first, then the event `ConfigMap` it mounts and OWNS
+    // it, then the ledger note that a Job exists for this transition.
     // ------------------------------------------------------------------
     let owner = owner_of(&name, &uid);
     let mut created = 0usize;
@@ -452,9 +453,6 @@ pub async fn reconcile_policy(
         };
         let document = p::event_document(&facts);
         let config_map_name = p::event_config_map_name(&name, &alerts[index].key, transition);
-        create_event_config_map(&ctx.client, &namespace, &config_map_name, &owner, &document)
-            .await?;
-
         let job_name = p::delivery_job_name(&name, &uid, &alerts[index].key, transition, attempt);
         let spec_for_job = delivery_job_spec(
             &job_name,
@@ -466,7 +464,30 @@ pub async fn reconcile_policy(
                 .and_then(|n| n.routes.as_deref()),
             &ctx.runner_image,
         );
+        // THE JOB FIRST, AND THE ConfigMap IT MOUNTS SECOND — review F7, and
+        // the shape `controllers/recovery_catalog.rs` already uses for its
+        // pages. The event ConfigMap is `immutable: true` and this role holds
+        // no `delete`; owned by the POLICY, nothing ever removed it, so one
+        // object per `(alertKey, transition)` accumulated for the life of the
+        // policy. Owned by the FIRST attempt's Job, the API server's TTL
+        // controller collects it with that Job.
+        //
+        // The cost is stated rather than buried: a pod scheduled in the window
+        // between the two creates sits `ContainerCreating` on a mount the
+        // kubelet retries, and a crash inside that window leaves a Job whose
+        // ConfigMap never arrives — which the next pass repairs, because the
+        // ledger records the delivery only after BOTH objects exist.
         create_delivery_job(&ctx.client, &namespace, &spec_for_job).await?;
+        let first_job = p::delivery_job_name(&name, &uid, &alerts[index].key, transition, 1);
+        let cm_owner = event_config_map_owner(&ctx.client, &namespace, &first_job).await?;
+        create_event_config_map(
+            &ctx.client,
+            &namespace,
+            &config_map_name,
+            &cm_owner,
+            &document,
+        )
+        .await?;
         created += 1;
 
         alerts[index].notified_transition = Some(transition);
@@ -577,7 +598,10 @@ fn missed_slot_count(schedules: &[p::ScheduleFacts], verdict: &p::Verdict) -> i6
     if declared > 0 {
         return declared;
     }
-    i64::from(verdict.missed.last_missed_slot.is_some())
+    // The LIVE signal, not the sticky audit field (review F5): a slot missed in
+    // January and fired over every night since is not a miss this event should
+    // report to the person it wakes.
+    i64::from(verdict.missed_since_last_fire)
 }
 
 /// `sampled` when the newest available point carries verified evidence, `none`
@@ -888,13 +912,39 @@ async fn read_recoveries(
             restore_uid: uid,
             phase,
             outcome: status.and_then(|s| s.outcome.clone()),
-            at: restore.creation_timestamp().map(|t| t.0),
+            at: restore_finished_at(&restore),
         });
         if out.len() >= p::MAX_RECOVERY_ALERTS {
             break;
         }
     }
     Ok(out)
+}
+
+/// When this `Restore` actually FINISHED — review **F10**.
+///
+/// `RestoreStatus` carries no `finishedAt`, so the terminal instant is the
+/// `lastTransitionTime` of its terminal condition (`Complete` or `Failed`),
+/// which the restore reconciler writes when the run ends.
+/// `metadata.creationTimestamp` is the fallback and only the fallback: for a
+/// long recovery it is HOURS before completion, and it is that instant that
+/// lands in the ledger's `openedAt`/`resolvedAt` and in the event a responder
+/// reads on D3 §3.5's incident-facing surface.
+fn restore_finished_at(restore: &Restore) -> Option<Time> {
+    restore
+        .status
+        .as_ref()
+        .and_then(|s| s.conditions.as_ref())
+        .and_then(|conditions| {
+            conditions
+                .iter()
+                .filter(|c| {
+                    matches!(c.r#type.as_str(), "Complete" | "Failed") && c.status == "True"
+                })
+                .filter_map(|c| c.last_transition_time)
+                .max()
+        })
+        .or_else(|| restore.creation_timestamp().map(|t| t.0))
 }
 
 /// The `Restore` read the archive this policy protects.
@@ -1043,6 +1093,65 @@ fn deletion_safe_owner(
         uid: owner.uid.clone(),
         controller: Some(true),
         block_owner_deletion: Some(false),
+    }
+}
+
+/// The owner every event `ConfigMap` carries: the FIRST delivery Job for its
+/// transition.
+///
+/// # Why the Job and not the policy (review F7)
+///
+/// The ConfigMap is `immutable: true` and this role holds `delete` on nothing,
+/// so whoever owns it decides when it goes away. Owned by the
+/// `ProtectionPolicy` it never went away: one object per
+/// `(alertKey, transition)`, for the life of the policy — with a daily
+/// re-notify and two long-open alerts, thousands a year that every
+/// `kubectl get cm` and every controller LIST pays for. Owned by the Job, the
+/// API server's TTL controller collects it with that Job.
+///
+/// **The FIRST attempt's Job**, not this attempt's: retries share the one
+/// ConfigMap, and hanging it off attempt 3 would leave attempts 1 and 2 to
+/// create an owner reference to a Job that does not exist yet. Attempt 1's TTL
+/// is patched only once its own verdict is recorded, and the whole retry
+/// schedule runs inside six minutes against a 3600 s TTL, so the mount is alive
+/// for every attempt that can still be made.
+///
+/// The Job's `metadata.uid` is read back from the create — or, on the
+/// duplicate-reconcile 409, from a `get`. A UID that cannot be read at all
+/// falls back to the policy: an unowned immutable object is worse than one
+/// collected late, and the fallback is logged rather than silent.
+async fn event_config_map_owner(
+    client: &kube::Client,
+    namespace: &str,
+    job_name: &str,
+) -> Result<RunnerOwner, ReconcileError> {
+    let jobs: Api<Job> = Api::namespaced(client.clone(), namespace);
+    let uid = jobs
+        .get_opt(job_name)
+        .await
+        .map_err(ReconcileError::Api)?
+        .and_then(|job| job.uid());
+    match uid {
+        Some(uid) => Ok(RunnerOwner {
+            api_version: "batch/v1".to_string(),
+            kind: "Job".to_string(),
+            name: job_name.to_string(),
+            uid,
+        }),
+        None => {
+            warn!(
+                namespace = %namespace,
+                job = %job_name,
+                "the first delivery Job for this transition carries no readable metadata.uid; \
+                 the event ConfigMap is owned by the ProtectionPolicy instead and is collected \
+                 when the policy is deleted rather than by the Job's TTL"
+            );
+            Err(ReconcileError::Api(kube::Error::Discovery(
+                kube::error::DiscoveryError::MissingResource(format!(
+                    "delivery Job {job_name} has no metadata.uid to own its event ConfigMap"
+                )),
+            )))
+        }
     }
 }
 
@@ -1384,7 +1493,11 @@ pub fn build_status(
             observed_generation: generation,
             last_transition_time: Some(now),
             reason: Some(REASON_EVALUATED.to_string()),
-            message: Some(verdict.summary.clone()),
+            // `condition_summary` AND NOT `summary` — review F4. A condition
+            // `message` is part of the object; the event's sentence carries the
+            // concrete age and would make the status differ every time a minute
+            // rolled over (erratum E11(d)).
+            message: Some(verdict.condition_summary.clone()),
         },
     );
     let protected = merge_condition(
@@ -1395,7 +1508,7 @@ pub fn build_status(
             observed_generation: generation,
             last_transition_time: Some(now),
             reason: Some(verdict.reason.as_str().to_string()),
-            message: Some(verdict.summary.clone()),
+            message: Some(verdict.condition_summary.clone()),
         },
     );
     let (delivery_status, delivery_reason, delivery_message) = delivery_condition(&alerts);
@@ -1411,7 +1524,7 @@ pub fn build_status(
         },
     );
 
-    let mut status = ProtectionPolicyStatus {
+    let status = ProtectionPolicyStatus {
         observed_generation: generation,
         evaluated_at: None,
         health: Some(verdict.health.as_str().to_string()),
@@ -1428,8 +1541,59 @@ pub fn build_status(
         alerts: (!alerts.is_empty()).then_some(alerts),
         conditions: Some(vec![ready, protected, delivered]),
     };
-    status.evaluated_at = decide_evaluated_at(stored, &status, interval, now);
-    status
+    settle_clock_fields(stored, status, interval, now)
+}
+
+/// Decide `evaluatedAt` and the two fields measured FROM it, together.
+///
+/// # D3 §3.1's rule, and the two fields that were outside it (review F4)
+///
+/// `evaluatedAt` is "rewritten only on change or when older than interval/2".
+/// `lastAvailablePoint.ageSeconds` and `missed.sinceLastFire` are both
+/// documented as "at `evaluatedAt`" — they are *derived from that instant*, not
+/// from `now` — but they were computed from a live clock read, so a pass over
+/// unchanged cluster state produced a different status every second: a PATCH,
+/// a `resourceVersion` bump, the reconciler's own write waking it again. That
+/// is the measured `KafkaCluster` defect (erratum **E11(d)**) on every policy,
+/// for ever, and the test that claimed otherwise passed only because it froze
+/// the clock.
+///
+/// All three move together or none of them does. The comparison is over the
+/// computed status with all three stripped, so "did the VERDICT change?" is
+/// asked about the cluster and not about the clock. When nothing changed and
+/// the stored instant is younger than half the interval, the stored values for
+/// all three are restored and [`crate::conditions::status_unchanged`] then
+/// sends nothing at all.
+fn settle_clock_fields(
+    stored: Option<&ProtectionPolicyStatus>,
+    mut next: ProtectionPolicyStatus,
+    interval: i32,
+    now: Time,
+) -> ProtectionPolicyStatus {
+    let fresh = |stored_at: Time| {
+        let half = i64::from(interval).max(2) / 2;
+        (now - stored_at).num_seconds() < half
+    };
+    let keep = stored
+        .filter(|s| s.evaluated_at.is_some_and(fresh) && verdict_bytes(s) == verdict_bytes(&next));
+    match keep {
+        Some(stored) => {
+            next.evaluated_at = stored.evaluated_at;
+            if let (Some(point), Some(stored_point)) = (
+                next.last_available_point.as_mut(),
+                stored.last_available_point.as_ref(),
+            ) {
+                point.age_seconds = stored_point.age_seconds;
+            }
+            if let (Some(missed), Some(stored_missed)) =
+                (next.missed.as_mut(), stored.missed.as_ref())
+            {
+                missed.since_last_fire = stored_missed.since_last_fire;
+            }
+        }
+        None => next.evaluated_at = Some(now),
+    }
+    next
 }
 
 /// `staleSince` — set the first time health becomes `Stale` or `Unprotected`
@@ -1449,38 +1613,24 @@ fn stale_since(
     stored.and_then(|s| s.stale_since).or(Some(now))
 }
 
-/// D3 §3.1: `evaluatedAt` is "rewritten only on change or when older than
-/// interval/2".
+/// A status serialized with every CLOCK-DERIVED field removed, for the
+/// equality [`settle_clock_fields`] asks.
 ///
-/// The comparison is over the WHOLE computed status with `evaluatedAt`
-/// removed, so a pass that concluded exactly what the last one concluded sends
-/// no patch at all — and a steady object therefore costs ZERO writes per
-/// reconcile, which is erratum **E11(d)**'s measured requirement and not a
-/// preference.
-fn decide_evaluated_at(
-    stored: Option<&ProtectionPolicyStatus>,
-    next: &ProtectionPolicyStatus,
-    interval: i32,
-    now: Time,
-) -> Option<Time> {
-    let Some(stored) = stored else {
-        return Some(now);
-    };
-    let Some(stored_at) = stored.evaluated_at else {
-        return Some(now);
-    };
-    let same = verdict_bytes(stored) == verdict_bytes(next);
-    let half = i64::from(interval).max(2) / 2;
-    if same && (now - stored_at).num_seconds() < half {
-        Some(stored_at)
-    } else {
-        Some(now)
-    }
-}
-
-/// A status serialized with `evaluatedAt` removed, for the equality above.
+/// The three: `evaluatedAt`, `lastAvailablePoint.ageSeconds` and
+/// `missed.sinceLastFire`. Each is a measurement of an instant against a stored
+/// fact, so each moves on its own with no change to the cluster; comparing them
+/// would make "did the verdict change?" answer "yes" for ever.
 fn verdict_bytes(status: &ProtectionPolicyStatus) -> Value {
     let mut value = serde_json::to_value(status).unwrap_or(Value::Null);
+    if let Some(point) = value
+        .get_mut("lastAvailablePoint")
+        .and_then(Value::as_object_mut)
+    {
+        point.remove("ageSeconds");
+    }
+    if let Some(missed) = value.get_mut("missed").and_then(Value::as_object_mut) {
+        missed.remove("sinceLastFire");
+    }
     if let Some(map) = value.as_object_mut() {
         map.remove("evaluatedAt");
     }
@@ -1581,6 +1731,57 @@ fn status_patch_with_preconditions(
     Ok(patch)
 }
 
+/// Every `status` key that this pass may need to REMOVE, and therefore must
+/// spell as an explicit `null` when it computed `None`.
+///
+/// # An omitted key is "leave it alone", not "clear it" (review F3)
+///
+/// Every field of `ProtectionPolicyStatus` is `skip_serializing_if =
+/// "Option::is_none"`, and RFC 7386 removes a key only for an explicit `null`.
+/// So a status serialized straight to a merge patch could SET each of these and
+/// never clear one — and the consequences are the two claims this controller
+/// exists to avoid making:
+///
+/// * `lastAvailablePoint` survived a verdict that just decided no point is
+///   available, so the API and the console kept naming a recovery point while
+///   `health` read `Unknown` — the exact conflation D3 §3.2 is written against,
+///   on the surface an incident responder reads;
+/// * `staleSince` from a long-resolved outage sat on a `Healthy` policy,
+///   contradicting its own field documentation.
+///
+/// `conditions` is deliberately NOT here: this controller always writes all
+/// three, so a `null` would be a removal that never applies, and an array in a
+/// merge patch is replaced wholesale anyway.
+///
+/// `metadata` is not a status key and never appears in this list;
+/// [`status_patch_with_preconditions`] adds it to the body afterwards.
+pub const CLEARABLE_STATUS_FIELDS: [&str; 7] = [
+    "lastAvailablePoint",
+    "lastAttempt",
+    "missed",
+    "schedules",
+    "rehearsal",
+    "staleSince",
+    "alerts",
+];
+
+/// The `{"status": …}` merge-patch body, with an explicit `null` for every
+/// clearable field this pass computed as `None`.
+///
+/// [`crate::conditions::status_unchanged`] applies the body exactly as the API
+/// server would, so the no-op skip keeps working: a `null` for a key the object
+/// does not have is itself a no-op.
+#[must_use]
+pub fn status_patch_body(status: &ProtectionPolicyStatus) -> Value {
+    let mut body = serde_json::to_value(status).unwrap_or(Value::Null);
+    if let Some(map) = body.as_object_mut() {
+        for field in CLEARABLE_STATUS_FIELDS {
+            map.entry(field.to_string()).or_insert(Value::Null);
+        }
+    }
+    json!({ "status": body })
+}
+
 /// Patch `/status`, with the S7 precondition and the no-op skip.
 async fn write_status(
     api: &Api<ProtectionPolicy>,
@@ -1588,7 +1789,7 @@ async fn write_status(
     status: &ProtectionPolicyStatus,
 ) -> Result<Commit, ReconcileError> {
     let name = policy.name_any();
-    let patch = json!({ "status": status });
+    let patch = status_patch_body(status);
     if status_unchanged(
         policy
             .status
