@@ -3619,6 +3619,11 @@ spec:
                 (!has(self.sync) || self.sync == oldSelf.sync)
             - message: set exactly one of spec.destinationRef or spec.legacyArchive
               rule: has(self.destinationRef) != has(self.legacyArchive)
+            - message: spec.sync.intervalSeconds is 0 (manual only) or at least 300
+                seconds; a shorter cadence publishes more view generations than the
+                sync Job TTL can collect
+              rule: '!has(self.sync) || self.sync.intervalSeconds == 0 || self.sync.intervalSeconds
+                >= 300'
           status:
             description: '`RecoveryCatalog.status`.'
             nullable: true

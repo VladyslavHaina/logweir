@@ -318,6 +318,10 @@ pub async fn reconcile_catalog(
         uid,
         trust,
         ctx,
+        // Corrected by `run` as its first act; `false` is the conservative
+        // starting point, and an arm that ran before the lookup would report a
+        // view as gone rather than report a view that is gone as present.
+        job_present: false,
     };
     pass.run().await
 }
@@ -355,6 +359,12 @@ struct Pass<'a> {
     uid: String,
     trust: TrustView,
     ctx: &'a SyncContext<'a>,
+    /// Whether the Job named in `status.lastSyncJob` still exists.
+    ///
+    /// SET ONCE PER PASS, BEFORE ANY ARM RUNS (review finding F2). The pages
+    /// are owned by that Job, so "the Job is gone" IS "the pages are gone", and
+    /// every arm that writes a status has to know it — not only the idle one.
+    job_present: bool,
 }
 
 impl Pass<'_> {
@@ -383,14 +393,9 @@ impl Pass<'_> {
     }
 
     async fn run(&mut self) -> Result<Outcome, ReconcileError> {
-        // 1. `spec.legacyArchive` is a named absence, not a Job.
-        if self.catalog.spec.destination_ref.is_none() {
-            return self
-                .publish_refusal(REASON_LEGACY_ARCHIVE_UNSUPPORTED, LEGACY_ARCHIVE_MESSAGE)
-                .await;
-        }
-
-        // 2. The tracked Job, before any decision to start one.
+        // 1. The tracked Job, BEFORE every other decision — including the
+        //    refusal arms, which must also know whether the published view's
+        //    Job is still there (review finding F2).
         let tracked = self
             .catalog
             .status
@@ -404,6 +409,14 @@ impl Pass<'_> {
             }
             None => None,
         };
+        self.job_present = tracked_job.is_some();
+
+        // 2. `spec.legacyArchive` is a named absence, not a Job.
+        if self.catalog.spec.destination_ref.is_none() {
+            return self
+                .publish_refusal(REASON_LEGACY_ARCHIVE_UNSUPPORTED, LEGACY_ARCHIVE_MESSAGE)
+                .await;
+        }
 
         if let Some(job) = tracked_job.as_ref() {
             if !owned_by(job, &self.uid) {
@@ -436,12 +449,12 @@ impl Pass<'_> {
 
         // 3. The trigger.
         let Some(trigger) = self.trigger() else {
-            return self.report_idle(tracked_job.is_some()).await;
+            return self.report_idle().await;
         };
         let stem = view::sync_stem(&self.uid, &trigger.token());
         if Some(&stem) == tracked.as_ref() {
             // The trigger this pass computed is the one already carried out.
-            return self.report_idle(tracked_job.is_some()).await;
+            return self.report_idle().await;
         }
         self.start(&trigger, &stem).await
     }
@@ -570,48 +583,45 @@ impl Pass<'_> {
         };
         let plan_digest = logweir_core::ids::sha256_prefixed(&plan_bytes);
 
-        // The plan ConfigMap, through the framework's own builder and its 409
-        // rule: immutable, owned, digest-pinned, never adopted across owners.
+        let plan_name = check::plan::plan_config_map_name(stem);
         let documents = check::plan::PlanDocuments {
             check_plan: plan_bytes,
             archive_ca: resolved.ca_pem.clone(),
             ..check::plan::PlanDocuments::default()
         };
-        let plan_name = check::plan::plan_config_map_name(stem);
-        let config_map = match check::plan::build(stem, &self.namespace, &self.owner(), &documents)
-        {
-            Ok(cm) => cm,
-            Err(e) => {
-                return self
-                    .publish_refusal(REASON_PAGE_CONFLICT, &e.to_string())
-                    .await;
-            }
-        };
-        match check::plan::ensure(
-            self.ctx.client,
-            &self.namespace,
-            &config_map,
-            &self.uid,
-            &plan_digest,
-        )
-        .await
-        {
-            Ok(_) => {}
-            Err(check::plan::EnsureError::Api(e)) => return Err(ReconcileError::Api(e)),
-            Err(check::plan::EnsureError::Plan(e)) => {
-                return self
-                    .publish_refusal(REASON_PAGE_CONFLICT, &e.to_string())
-                    .await;
-            }
-        }
 
+        // ==================================================================
+        // THE JOB IS CREATED FIRST, AND THE PLAN SECOND — review finding F1
+        // ==================================================================
+        //
+        // The plan `ConfigMap` must be owned by the **sync Job**, because the
+        // Job's `ttlSecondsAfterFinished` is the only thing in this design that
+        // ever removes anything. Owned by the CATALOG — which is long-lived and
+        // whose plan name changes every slot — each plan would be an orphan
+        // nothing collects: one per sync, forever, with no `delete` verb
+        // anywhere and no remedy short of deleting the `RecoveryCatalog`.
+        //
+        // An owner reference needs the owner's UID, and a Job's UID exists only
+        // after the API server has created it. So the order inverts, and the
+        // consequence is stated rather than hidden: **there is a window in
+        // which the Job exists and its plan does not**, and a pod scheduled
+        // inside it sits `ContainerCreating` on the missing volume. The kubelet
+        // retries that mount indefinitely, so the ordinary case resolves in
+        // milliseconds; a controller that crashed between the two calls leaves
+        // a pod pending until the Job's `activeDeadlineSeconds` fires.
+        //
+        // WHICH IS WHY NOTHING IS RECORDED UNTIL BOTH EXIST. `lastSyncJob.name`
+        // is written only after the plan is in place, so a pass that died in
+        // the window is reached again by the SAME trigger token, computes the
+        // SAME name, gets 409 `AlreadyExists` on the Job, reads its UID back
+        // and creates the plan the pod is waiting for.
         let env = resolved.job_env();
         let spec = view::SyncJobSpec {
             name: stem.to_string(),
             namespace: self.namespace.clone(),
             owner: self.owner(),
             plan_config_map: plan_name,
-            plan_sha256: plan_digest,
+            plan_sha256: plan_digest.clone(),
             subject_uid: self.uid.clone(),
             timeout_seconds: SYNC_TIMEOUT_SECONDS,
             ttl_seconds: view::ttl_seconds(self.interval()),
@@ -626,19 +636,75 @@ impl Pass<'_> {
             image_pull_policy: self.ctx.runner_image.image_pull_policy.clone(),
         };
         let jobs: Api<Job> = Api::namespaced(self.ctx.client.clone(), &self.namespace);
-        match jobs
+        let job = match jobs
             .create(&PostParams::default(), &view::build_sync_job(&spec))
             .await
         {
-            Ok(_) => {}
+            Ok(job) => job,
             // A 409 IS THE DUPLICATE RECONCILE WORKING. The name is a pure
             // function of the catalog UID and the trigger token, so a second
-            // pass computing the same name finds the Job it wanted.
+            // pass computing the same name finds the Job it wanted — and reads
+            // it back, because the plan below needs its UID.
             Err(kube::Error::Api(e)) if e.code == 409 => {
                 debug!(catalog = %self.name, namespace = %self.namespace, job = %stem,
                        "the sync Job this pass wanted already exists");
+                let Some(existing) = jobs.get_opt(stem).await? else {
+                    // Created and gone between the two calls; the next pass
+                    // creates it again.
+                    return Err(ReconcileError::Api(kube::Error::Api(e)));
+                };
+                existing
             }
             Err(e) => return Err(ReconcileError::Api(e)),
+        };
+        if !owned_by(&job, &self.uid) {
+            return self
+                .publish_refusal(
+                    REASON_JOB_NAME_CONFLICT,
+                    &format!(
+                        "Job {}/{stem} carries this sync's name and is controlled by something \
+                         else; no plan is written for it and nothing is read from it",
+                        self.namespace
+                    ),
+                )
+                .await;
+        }
+        let job_owner = RunnerOwner {
+            api_version: "batch/v1".to_string(),
+            kind: "Job".to_string(),
+            name: stem.to_string(),
+            uid: job.uid().unwrap_or_default(),
+        };
+
+        // `blockOwnerDeletion: false`, never `true`: blocking deletion asks the
+        // API server for `update` on `jobs/finalizers` under the
+        // `OwnerReferencesPermissionEnforcement` admission plugin, and this
+        // ClusterRole grants that on nothing.
+        let config_map =
+            match check::plan::build_owned(stem, &self.namespace, &job_owner, &documents, false) {
+                Ok(cm) => cm,
+                Err(e) => {
+                    return self
+                        .publish_refusal(REASON_PAGE_CONFLICT, &e.to_string())
+                        .await;
+                }
+            };
+        match check::plan::ensure(
+            self.ctx.client,
+            &self.namespace,
+            &config_map,
+            &job_owner.uid,
+            &plan_digest,
+        )
+        .await
+        {
+            Ok(_) => {}
+            Err(check::plan::EnsureError::Api(e)) => return Err(ReconcileError::Api(e)),
+            Err(check::plan::EnsureError::Plan(e)) => {
+                return self
+                    .publish_refusal(REASON_PAGE_CONFLICT, &e.to_string())
+                    .await;
+            }
         }
 
         let mut status = json!({
@@ -652,12 +718,16 @@ impl Pass<'_> {
         if let SyncTrigger::Requested(token) = trigger {
             status["observedSyncRequest"] = Value::String(token.clone());
         }
+        // `Ready` IS ABOUT THE VIEW, NOT ABOUT THE SYNC (review finding F6).
+        // A catalog with live pages that starts its hourly sync still HAS a
+        // usable view, which is D3 §5.3's own definition of `Ready`; hardcoding
+        // `Unknown` here made it flap `True -> Unknown -> True` every hour
+        // inside the fifteen-second requeue gap, and any alerting that reads
+        // `Ready != True` as "no view" blinked with it. `SyncInProgress` lives
+        // on `Synced`, where it belongs.
+        let ready = self.published_ready();
         let conditions = self.conditions(
-            (
-                "Unknown",
-                REASON_SYNC_IN_PROGRESS,
-                "a catalog sync is running",
-            ),
+            ready,
             (
                 "Unknown",
                 REASON_SYNC_IN_PROGRESS.to_string(),
@@ -665,6 +735,7 @@ impl Pass<'_> {
             ),
         );
         status["conditions"] = Value::Array(conditions);
+        self.clear_expired_view(&mut status);
         self.patch_status(status).await?;
         info!(
             catalog = %self.name, namespace = %self.namespace, job = %stem,
@@ -672,8 +743,8 @@ impl Pass<'_> {
         );
         Ok(Outcome {
             phase: CatalogPhase::Started,
-            ready: "Unknown",
-            ready_reason: REASON_SYNC_IN_PROGRESS,
+            ready: ready.0,
+            ready_reason: ready.1,
             synced_reason: REASON_SYNC_IN_PROGRESS.to_string(),
             pages: 0,
             entries: 0,
@@ -750,7 +821,7 @@ impl Pass<'_> {
                    reason = %observation.reason, "the sync Job cannot succeed; its deadline was collapsed");
         }
         let ready = self.published_ready();
-        let status = json!({
+        let mut status = json!({
             "observedGeneration": self.generation(),
             "conditions": self.conditions(
                 ready,
@@ -761,6 +832,7 @@ impl Pass<'_> {
                 ),
             ),
         });
+        self.clear_expired_view(&mut status);
         self.patch_status(status).await?;
         Ok(Outcome {
             phase: CatalogPhase::Running,
@@ -825,7 +897,7 @@ impl Pass<'_> {
             // so they age out on their own TTL. A failed sync must not blank a
             // view that is still true.
             let reason = observation.reason;
-            let status = json!({
+            let mut status = json!({
                 "observedGeneration": self.generation(),
                 "lastSyncJob": last_job(Some(&reason)),
                 "conditions": self.conditions(
@@ -833,6 +905,7 @@ impl Pass<'_> {
                     ("False", reason.as_str().to_string(), observation.message.clone()),
                 ),
             });
+            self.clear_expired_view(&mut status);
             self.patch_status(status).await?;
             warn!(
                 catalog = %self.name, namespace = %self.namespace, job = %job_name,
@@ -869,7 +942,12 @@ impl Pass<'_> {
                     .await;
             }
         };
-        let parsed = match view::parse_body(body) {
+        let limits = ViewLimits::from_settings(&self.catalog.spec.sync);
+        // The entry cap is this catalog's OWN `viewLimit`, not a constant: the
+        // runner is told to relay the newest `viewLimit` points and nothing
+        // more, so a body that carries more is a body that did not honour the
+        // plan it was given (review finding F7).
+        let parsed = match view::parse_body(body, limits.view_limit) {
             Ok(parsed) => parsed,
             Err(e) => {
                 return self
@@ -879,9 +957,12 @@ impl Pass<'_> {
         };
 
         let counts = parsed.counts.clone().unwrap_or_default();
-        let signers = view::signer_summaries(&parsed.signers, &self.trust);
-        let tally = view::tally(&counts, &signers);
-        let limits = ViewLimits::from_settings(&self.catalog.spec.sync);
+        // THE FULL SIGNER LIST FEEDS THE COUNTERS, the bounded one feeds the
+        // status (review finding F10): `untrustedSigner` covers the whole walk,
+        // and summing it over the sixteen rows the status can display would
+        // under-report an archive written by more installations than that.
+        let all_signers = view::signer_summaries(&parsed.signers, &self.trust);
+        let signers = view::bounded(all_signers.clone());
         let materialised = view::materialise(
             parsed.entries(),
             counts.total,
@@ -889,6 +970,7 @@ impl Pass<'_> {
             &limits,
             self.ctx.now,
         );
+        let tally = view::tally(&counts, &all_signers, materialised.window);
 
         // The pages, owned by the Job so the TTL collects them.
         let job_owner = RunnerOwner {
@@ -900,7 +982,14 @@ impl Pass<'_> {
         let mut page_names = Vec::with_capacity(materialised.pages.len());
         for (index, draft) in materialised.pages.iter().enumerate() {
             let page_name = view::page_config_map_name(&job_name, index);
-            let cm = view::page_config_map(&page_name, &self.namespace, &job_owner, draft, index);
+            let cm = view::page_config_map(
+                &page_name,
+                &self.namespace,
+                &job_owner,
+                &self.uid,
+                draft,
+                index,
+            );
             if let Err(conflict) = self
                 .put_immutable(&cm, &job_owner.uid, &draft.sha256)
                 .await?
@@ -914,20 +1003,25 @@ impl Pass<'_> {
 
         let document = view::index_document(&job_name, &limits, &materialised, &page_names);
         let index_name = view::index_config_map_name(&job_name);
-        let index_cm =
-            match view::index_config_map(&index_name, &self.namespace, &job_owner, &document) {
-                Ok(cm) => cm,
-                Err(e) => {
-                    return self
-                        .publish_sync_failure(
-                            &job_name,
-                            last_job(None),
-                            CheckCode::ResultUnreadable,
-                            &format!("the fence-pointer document did not serialise: {e}"),
-                        )
-                        .await;
-                }
-            };
+        let index_cm = match view::index_config_map(
+            &index_name,
+            &self.namespace,
+            &job_owner,
+            &self.uid,
+            &document,
+        ) {
+            Ok(cm) => cm,
+            Err(e) => {
+                return self
+                    .publish_sync_failure(
+                        &job_name,
+                        last_job(None),
+                        CheckCode::ResultUnreadable,
+                        &format!("the fence-pointer document did not serialise: {e}"),
+                    )
+                    .await;
+            }
+        };
         let index_digest = index_cm
             .metadata
             .annotations
@@ -1058,7 +1152,7 @@ impl Pass<'_> {
         message: &str,
     ) -> Result<Outcome, ReconcileError> {
         let ready = self.published_ready();
-        let status = json!({
+        let mut status = json!({
             "observedGeneration": self.generation(),
             "lastSyncJob": last_job,
             "conditions": self.conditions(
@@ -1066,6 +1160,7 @@ impl Pass<'_> {
                 ("False", code.as_str().to_string(), message.to_string()),
             ),
         });
+        self.clear_expired_view(&mut status);
         self.patch_status(status).await?;
         warn!(
             catalog = %self.name, namespace = %self.namespace, job = %job_name,
@@ -1087,38 +1182,14 @@ impl Pass<'_> {
     // Idle, expiry and refusals
     // -----------------------------------------------------------------------
 
-    async fn report_idle(&mut self, job_present: bool) -> Result<Outcome, ReconcileError> {
-        let has_pages = self
-            .catalog
-            .status
-            .as_ref()
-            .and_then(|s| s.pages.as_ref())
-            .is_some_and(|p| !p.is_empty());
-        let expired = self.view_expired() || (has_pages && !job_present);
-        let ready = if expired {
-            (
-                "False",
-                REASON_VIEW_EXPIRED,
-                "the view's pages aged out with their sync Job's TTL. The archive is untouched: \
-                 the durable catalog is still in object storage and the next sync republishes \
-                 the window.",
-            )
-        } else {
-            self.published_ready()
-        };
+    async fn report_idle(&mut self) -> Result<Outcome, ReconcileError> {
+        let expired = self.view_gone();
+        let ready = self.published_ready();
         let mut status = json!({
             "observedGeneration": self.generation(),
             "conditions": self.conditions(ready, self.published_synced()),
         });
-        if expired && has_pages {
-            // `null` DELETES THE KEY in an RFC 7386 merge patch. Pages that are
-            // gone must stop being listed: a `status.pages[]` naming a
-            // ConfigMap the API server no longer has is a link to a 404, and a
-            // reader cannot tell it from a page it simply has not fetched.
-            status["pages"] = Value::Null;
-            status["indexConfigMap"] = Value::Null;
-            status["truncated"] = Value::Null;
-        }
+        self.clear_expired_view(&mut status);
         self.patch_status(status).await?;
         Ok(Outcome {
             phase: CatalogPhase::Idle,
@@ -1145,13 +1216,19 @@ impl Pass<'_> {
         reason: &'static str,
         message: &str,
     ) -> Result<Outcome, ReconcileError> {
-        let status = json!({
+        let mut status = json!({
             "observedGeneration": self.generation(),
             "conditions": self.conditions(
                 ("False", reason, message),
                 self.published_synced(),
             ),
         });
+        // THE REFUSAL PATH CLEARS AN EXPIRED VIEW TOO (review finding F2). A
+        // catalog whose destination went invalid after its sync Job aged out
+        // kept naming garbage-collected page ConfigMaps forever, with `Ready`'s
+        // reason pointing at the destination and nothing at all saying the
+        // window was gone.
+        self.clear_expired_view(&mut status);
         self.patch_status(status).await?;
         warn!(
             catalog = %self.name, namespace = %self.namespace, reason = reason,
@@ -1167,6 +1244,48 @@ impl Pass<'_> {
             truncated: false,
             job_name: None,
         })
+    }
+
+    /// Whether this catalog has any published pages at all.
+    fn has_pages(&self) -> bool {
+        self.catalog
+            .status
+            .as_ref()
+            .and_then(|s| s.pages.as_ref())
+            .is_some_and(|p| !p.is_empty())
+    }
+
+    /// Whether the published view is GONE — either past its recorded expiry, or
+    /// owned by a Job the API server no longer has.
+    ///
+    /// The second half is the one that matters in practice: the TTL controller
+    /// removes the Job and garbage collection takes its pages with it, and that
+    /// can happen before `viewExpiresAt` if the clock or the TTL moved.
+    fn view_gone(&self) -> bool {
+        self.view_expired() || (self.has_pages() && !self.job_present)
+    }
+
+    /// Stop listing pages that are gone — **on every path that writes a
+    /// status**, review finding F2.
+    ///
+    /// `null` DELETES THE KEY in an RFC 7386 merge patch. A `status.pages[]`
+    /// naming a `ConfigMap` the API server no longer has is a link to a 404,
+    /// and a reader cannot tell it from a page it simply has not fetched — the
+    /// published contract tells W11 and W12 to read these names and never
+    /// compute one, so leaving them is leading them straight into it. It used
+    /// to happen only on the idle path; a catalog whose destination went
+    /// invalid after its Job aged out kept naming garbage-collected objects
+    /// forever.
+    fn clear_expired_view(&self, status: &mut Value) {
+        if !(self.view_gone() && self.has_pages()) {
+            return;
+        }
+        let Some(map) = status.as_object_mut() else {
+            return;
+        };
+        map.insert("pages".to_string(), Value::Null);
+        map.insert("indexConfigMap".to_string(), Value::Null);
+        map.insert("truncated".to_string(), Value::Null);
     }
 
     fn view_expired(&self) -> bool {
@@ -1188,12 +1307,7 @@ impl Pass<'_> {
     /// `Ready` for a pass that publishes no new view: whatever the published
     /// one justifies.
     fn published_ready(&self) -> (&'static str, &'static str, &'static str) {
-        let has_pages = self
-            .catalog
-            .status
-            .as_ref()
-            .and_then(|s| s.pages.as_ref())
-            .is_some_and(|p| !p.is_empty());
+        let has_pages = self.has_pages();
         if !has_pages {
             return (
                 "Unknown",
@@ -1202,11 +1316,13 @@ impl Pass<'_> {
                  unaffected",
             );
         }
-        if self.view_expired() {
+        if self.view_gone() {
             return (
                 "False",
                 REASON_VIEW_EXPIRED,
-                "the view's pages aged out with their sync Job's TTL; the archive is untouched",
+                "the view's pages aged out with their sync Job's TTL. The archive is untouched: \
+                 the durable catalog is still in object storage and the next sync republishes \
+                 the window.",
             );
         }
         (
@@ -1474,9 +1590,15 @@ fn sync_message(materialised: &view::View, parsed: &view::SyncBody, tally: &view
             parsed.skipped_entries
         ));
     }
-    for (state, count) in &tally.unrepresented {
+    if materialised.dropped_oversized > 0 {
         message.push_str(&format!(
-            ". {count} point(s) are {state}, which this status has no counter for"
+            ". {} entr(y/ies) do not fit one page and were refused, never counted as available",
+            materialised.dropped_oversized
+        ));
+    }
+    for (state, count, scope) in &tally.unrepresented {
+        message.push_str(&format!(
+            ". {count} point(s) in {scope} are {state}, which this status has no counter for"
         ));
     }
     message

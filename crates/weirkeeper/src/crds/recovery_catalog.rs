@@ -50,10 +50,32 @@ pub const J2_DESTINATION_XOR_RULE: &str = "has(self.destinationRef) != has(self.
 pub const J2_DESTINATION_XOR_MESSAGE: &str =
     "set exactly one of spec.destinationRef or spec.legacyArchive";
 
+/// J3 — D3 §5.3's own floor on the sync cadence, enforced.
+///
+/// `300..86400` is what D3 §5.3 specifies; the `schemars` range on the field
+/// admits `0..86400`, because **`0` is a documented value meaning "manual
+/// only"** and a schema minimum of 300 would refuse it. A CEL rule is the only
+/// place the two can both be true.
+///
+/// IT IS A BOUND ON OBJECT COUNT, NOT A STYLE RULE (review finding F3). One
+/// sync Job lives per slot and each carries
+/// `ttlSecondsAfterFinished = max(3 x intervalSeconds, 3600)`, so the number of
+/// generations alive at once is bounded by `3600 / intervalSeconds` and each
+/// generation holds up to eight page `ConfigMap`s, a fence pointer and a plan.
+/// At the 300 s floor that is 12 generations; at `intervalSeconds: 1`, which
+/// the schema range alone would admit, it would be 3 600.
+pub const J3_INTERVAL_FLOOR_RULE: &str =
+    "!has(self.sync) || self.sync.intervalSeconds == 0 || self.sync.intervalSeconds >= 300";
+/// The message [`J3_INTERVAL_FLOOR_RULE`] travels with.
+pub const J3_INTERVAL_FLOOR_MESSAGE: &str =
+    "spec.sync.intervalSeconds is 0 (manual only) or at least 300 seconds; a shorter cadence \
+     publishes more view generations than the sync Job TTL can collect";
+
 /// The rules on `.spec`.
-pub const SPEC_RULES: [SpecRule; 2] = [
+pub const SPEC_RULES: [SpecRule; 3] = [
     SpecRule::new(SYNC_REQUEST_ONLY_RULE, SYNC_REQUEST_ONLY_MESSAGE),
     SpecRule::new(J2_DESTINATION_XOR_RULE, J2_DESTINATION_XOR_MESSAGE),
+    SpecRule::new(J3_INTERVAL_FLOOR_RULE, J3_INTERVAL_FLOOR_MESSAGE),
 ];
 
 fn default_interval_seconds() -> i32 {

@@ -176,6 +176,42 @@ pub fn build(
     owner: &RunnerOwner,
     documents: &PlanDocuments,
 ) -> Result<ConfigMap, PlanError> {
+    // `true`, byte for byte what every D2 caller got before this parameter
+    // existed. See [`build_owned`] for who needs the other value and why.
+    build_owned(job_name, namespace, owner, documents, true)
+}
+
+/// [`build`] with `blockOwnerDeletion` as a parameter — D3 W8, review finding
+/// F1.
+///
+/// # WHY THE FLAG BECAME A PARAMETER
+///
+/// [`build`]'s "THE CASCADE IS THE DELETE" holds for D2's transient subjects: a
+/// `Preflight` or a `TopicDiscovery` is itself short-lived, so a plan
+/// `ConfigMap` owned by it goes away when it does. A `RecoveryCatalog` is
+/// long-lived and syncs on a timer, so a plan owned by the CATALOG is never
+/// collected at all — one orphan per slot, forever, with no `delete` verb
+/// anywhere to clean them up. The `RecoveryCatalog` controller therefore owns
+/// each plan by its own **sync Job**, whose `ttlSecondsAfterFinished` collects
+/// it with the view pages it also owns.
+///
+/// And that owner takes `blockOwnerDeletion: false`, never `true`: blocking
+/// deletion asks the API server for `update` on the owner's `finalizers`
+/// subresource under the `OwnerReferencesPermissionEnforcement` admission
+/// plugin, and this `ClusterRole` grants `jobs/finalizers` on nothing — so a
+/// `true` here would make every plan `ConfigMap` create 403 on a cluster that
+/// enables the plugin.
+///
+/// # Errors
+///
+/// [`PlanError::NotUtf8`] from [`PlanDocuments::data`].
+pub fn build_owned(
+    job_name: &str,
+    namespace: &str,
+    owner: &RunnerOwner,
+    documents: &PlanDocuments,
+    block_owner_deletion: bool,
+) -> Result<ConfigMap, PlanError> {
     Ok(ConfigMap {
         metadata: ObjectMeta {
             name: Some(plan_config_map_name(job_name)),
@@ -192,7 +228,7 @@ pub fn build(
                 // THE CASCADE IS THE DELETE. Nothing in this crate calls
                 // `Api::delete`, and the `ClusterRole` grants it on nothing.
                 controller: Some(true),
-                block_owner_deletion: Some(true),
+                block_owner_deletion: Some(block_owner_deletion),
             }]),
             ..ObjectMeta::default()
         },

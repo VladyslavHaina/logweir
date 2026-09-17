@@ -444,10 +444,48 @@ pub const CURSOR_LINE_PREFIX: &str = "catalog-cursor=";
 /// `catalog-signers=<json>`.
 pub const SIGNERS_LINE_PREFIX: &str = "catalog-signers=";
 
-/// The most entries one body may declare, whatever it says — five times the
-/// `viewLimit` ceiling, so a runner may report more than is materialised
-/// without being able to exhaust the controller.
-pub const MAX_BODY_ENTRIES: usize = 25_000;
+/// `catalog-format=<n>` — the grammar's own version line, which the parser
+/// REQUIRES.
+///
+/// The record layout is versioned in its key path and in `format_version`; the
+/// relay grammar was not, which meant a newer runner could only extend it by
+/// hoping this parser ignored what it did not know (review finding F7). A body
+/// with no version line, or with a version this build does not know, is refused
+/// by name instead.
+pub const FORMAT_LINE_PREFIX: &str = "catalog-format=";
+
+/// The only [`FORMAT_LINE_PREFIX`] value this build reads.
+pub const BODY_FORMAT_VERSION: u32 = 1;
+
+/// The most bytes of `details` one body may carry — review finding F7.
+///
+/// FIVE MEGABYTES, AND IT IS A BYTE BUDGET BECAUSE THE TRANSPORT IS. The
+/// relay bounds the body twice by bytes and never by lines:
+/// [`crate::check::relay::RELAY_LIMIT_BYTES`] is 8 MiB on the `pods/log` read
+/// and [`crate::check::relay::DECODER_BUDGET_BYTES`] is 8 MiB counted over
+/// BASE64 part-frame lines, i.e. roughly 5.9 MB of raw `details` after the
+/// ~1.35x expansion. A line cap says nothing about either: 25 000 entries at a
+/// realistic 600 B each is ~15 MB, which blows both budgets and surfaces as
+/// `ResultUnreadable` — a transport message for what is really "you sent too
+/// much". Five megabytes sits inside the narrower of the two with headroom and
+/// is what D2's runner is told to honour.
+pub const MAX_BODY_BYTES: usize = 5 * 1024 * 1024;
+
+/// The most `catalog-signers` rows one body may declare — review finding F7.
+///
+/// SIXTY-FOUR, four times the sixteen [`MAX_SIGNERS`] the status can carry, so
+/// an archive written by many installations still reports an exact
+/// `untrustedSigner` total (finding F10) without an unbounded list reaching
+/// this process.
+pub const MAX_BODY_SIGNERS: usize = 64;
+
+/// The most locations one point may be reported at — review finding F12.
+///
+/// SIXTEEN. `locations[]` is the only unbounded field in an entry, and an
+/// entry whose rendered line does not fit a page is an entry that cannot be
+/// published; bounding it in the GRAMMAR turns that into a named refusal rather
+/// than a `ConfigMap` the API server rejects at CREATE.
+pub const MAX_ENTRY_LOCATIONS: usize = 16;
 
 /// The most pages a body may declare. Eight is the CRD's `status.pages`
 /// `maxItems`; a body that declares more is refused rather than truncated,
@@ -481,11 +519,14 @@ pub struct RunnerEntry {
     pub covered_from_ms: i64,
     /// The covered window's end, EXCLUSIVE (invariant I22).
     pub covered_to_ms: i64,
-    /// Where the bytes could be read from — one entry per location holding the
-    /// same receipt. An archive copied to a second bucket is ONE point in TWO
-    /// places (D3 §5.1).
+    /// Where the bytes could be read from, and **how each place fared** — one
+    /// entry per location holding the same receipt. An archive copied to a
+    /// second bucket is ONE point in TWO places (D3 §5.1).
+    ///
+    /// A location whose own `availability` is absent inherits the entry's.
+    /// Bounded by [`MAX_ENTRY_LOCATIONS`].
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub locations: Vec<String>,
+    pub locations: Vec<EntryLocation>,
     /// The receipt's key under `logweir/`.
     pub receipt_key: String,
     /// `sha256:<hex>` of the receipt bytes — the binding the short id displays.
@@ -537,6 +578,54 @@ impl RunnerEntry {
     }
 }
 
+/// One place a point's bytes were looked for, and what was found there.
+///
+/// PER-LOCATION AVAILABILITY IS WHY A COPY IS AN ASSET AND NOT A LIABILITY
+/// (review finding F9, decision recorded at integration as an amendment to D3
+/// §5.4). D3 §5.1's whole point is that an archive copied to a second bucket is
+/// ONE point in TWO places; a merge that took the WORST availability across
+/// those places would hide a fully recoverable point because a second copy went
+/// missing — the opposite of what a second copy is for. So availability merges
+/// **best-of**, each location keeps its own verdict here, and the degraded ones
+/// are named in `remedy` so nobody has to guess which copy to repair.
+///
+/// The SIGNATURE half keeps worst-of, and that asymmetry is deliberate: bytes
+/// that fail verification in one place are evidence about the point, not about
+/// the place.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct EntryLocation {
+    /// `s3://<bucket>/<prefix>` — bucket and prefix only. No endpoint, no
+    /// region, no credential, and deliberately NOT part of the identity.
+    pub location_id: String,
+    /// What was found HERE. Absent inherits the entry's own availability, which
+    /// is what a runner reporting one observation at one place writes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub availability: Option<Availability>,
+}
+
+impl EntryLocation {
+    /// This location's availability, falling back to the observation's.
+    #[must_use]
+    pub fn availability_or(&self, fallback: Availability) -> Availability {
+        self.availability.unwrap_or(fallback)
+    }
+}
+
+/// One location in a published view entry, with its verdict RESOLVED.
+///
+/// `availability` is required here and optional on [`EntryLocation`]: a reader
+/// of the view must never have to re-apply an inheritance rule to find out
+/// whether a copy is readable.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ResolvedLocation {
+    /// See [`EntryLocation::location_id`].
+    pub location_id: String,
+    /// What was found there.
+    pub availability: Availability,
+}
+
 /// One point as it is written into a page — the runner's entry with the
 /// controller's [`Verification`] in place of the Job's [`SignatureVerdict`].
 ///
@@ -558,9 +647,9 @@ pub struct ViewEntry {
     pub covered_from_ms: i64,
     /// See [`RunnerEntry::covered_to_ms`].
     pub covered_to_ms: i64,
-    /// See [`RunnerEntry::locations`].
+    /// See [`RunnerEntry::locations`]. Every verdict is resolved.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub locations: Vec<String>,
+    pub locations: Vec<ResolvedLocation>,
     /// See [`RunnerEntry::receipt_key`].
     pub receipt_key: String,
     /// See [`RunnerEntry::receipt_sha256`].
@@ -760,8 +849,25 @@ pub enum BodyError {
         /// What the body declared.
         declared: u32,
     },
-    /// The body carried more entry lines than [`MAX_BODY_ENTRIES`].
-    TooManyEntries,
+    /// The body carried more entry lines than the caller's `viewLimit`.
+    TooManyEntries {
+        /// What the caller allowed.
+        allowed: usize,
+    },
+    /// The body is larger than [`MAX_BODY_BYTES`].
+    TooLarge {
+        /// How many bytes arrived.
+        got: usize,
+    },
+    /// The body carries no [`FORMAT_LINE_PREFIX`] line.
+    MissingFormat,
+    /// The body declares a grammar version this build does not read.
+    UnsupportedBodyFormat {
+        /// What it declared.
+        got: String,
+    },
+    /// A summary line arrived twice. The field names which.
+    RepeatedSummary(&'static str),
     /// Page indices were not `1..=n`, in order, each exactly once.
     PageSequence,
     /// A `catalog-counts=`, `catalog-cursor=` or `catalog-signers=` line did
@@ -800,9 +906,30 @@ impl std::fmt::Display for BodyError {
                 f,
                 "the body declares {declared} pages and at most {MAX_BODY_PAGES} are readable"
             ),
-            Self::TooManyEntries => write!(
+            Self::TooManyEntries { allowed } => write!(
                 f,
-                "the body carries more than {MAX_BODY_ENTRIES} entry lines"
+                "the body carries more than the {allowed} entry lines this catalog's viewLimit \
+                 allows"
+            ),
+            Self::TooLarge { got } => write!(
+                f,
+                "the result body is {got} bytes and at most {MAX_BODY_BYTES} are readable; the \
+                 relay's own budget is narrower still"
+            ),
+            Self::MissingFormat => write!(
+                f,
+                "the body carries no `{FORMAT_LINE_PREFIX}` line, so its grammar version is \
+                 unknown and nothing in it is read"
+            ),
+            Self::UnsupportedBodyFormat { got } => write!(
+                f,
+                "the body declares grammar version `{got}` and this build reads \
+                 {BODY_FORMAT_VERSION}"
+            ),
+            Self::RepeatedSummary(which) => write!(
+                f,
+                "the `{which}` line arrived twice; a summary that could be overwritten is a \
+                 summary nobody can attribute"
             ),
             Self::PageSequence => {
                 write!(f, "page headers are not 1..=n in order, each exactly once")
@@ -854,15 +981,28 @@ pub fn page_digest(entry_lines: &[&str]) -> String {
 /// # Errors
 ///
 /// [`BodyError`], naming which rule failed and carrying no body content.
-pub fn parse_body(text: &str) -> Result<SyncBody, BodyError> {
+pub fn parse_body(text: &str, max_entries: usize) -> Result<SyncBody, BodyError> {
+    // THE BYTE BUDGET FIRST, before a single line is scanned. The transport
+    // bounds this body by bytes twice over (see [`MAX_BODY_BYTES`]), so a body
+    // that is too large is refused as too large rather than as whatever its
+    // first malformed line happens to be.
+    if text.len() > MAX_BODY_BYTES {
+        return Err(BodyError::TooLarge { got: text.len() });
+    }
     let mut out = SyncBody::default();
     let mut headers: Vec<(u32, u32, u32, String)> = Vec::new();
     let mut raw_pages: Vec<Vec<&str>> = Vec::new();
     let mut entry_lines = 0usize;
+    let mut format: Option<String> = None;
 
     for line in text.lines() {
         let line = line.trim_end_matches('\r');
-        if let Some(rest) = line.strip_prefix(PAGE_LINE_PREFIX) {
+        if let Some(rest) = line.strip_prefix(FORMAT_LINE_PREFIX) {
+            if format.is_some() {
+                return Err(BodyError::RepeatedSummary(FORMAT_LINE_PREFIX));
+            }
+            format = Some(rest.trim().to_string());
+        } else if let Some(rest) = line.strip_prefix(PAGE_LINE_PREFIX) {
             let header = parse_page_header(rest).ok_or(BodyError::MalformedPageHeader)?;
             if header.1 as usize > MAX_BODY_PAGES {
                 return Err(BodyError::TooManyPages { declared: header.1 });
@@ -872,26 +1012,57 @@ pub fn parse_body(text: &str) -> Result<SyncBody, BodyError> {
         } else if let Some(rest) = line.strip_prefix(ENTRY_LINE_PREFIX) {
             let page = raw_pages.last_mut().ok_or(BodyError::EntryBeforePage)?;
             entry_lines += 1;
-            if entry_lines > MAX_BODY_ENTRIES {
-                return Err(BodyError::TooManyEntries);
+            if entry_lines > max_entries {
+                return Err(BodyError::TooManyEntries {
+                    allowed: max_entries,
+                });
             }
             page.push(rest);
         } else if let Some(rest) = line.strip_prefix(COUNTS_LINE_PREFIX) {
+            // A REPEAT IS AN ERROR AND NOT LAST-WINS (review finding F7). Two
+            // `catalog-counts=` lines mean the runner disagreed with itself
+            // about the whole walk, and silently keeping one of them publishes
+            // a number nobody can attribute to an observation.
+            if out.counts.is_some() {
+                return Err(BodyError::RepeatedSummary(COUNTS_LINE_PREFIX));
+            }
             out.counts = Some(
                 serde_json::from_str(rest)
                     .map_err(|_| BodyError::MalformedSummary(COUNTS_LINE_PREFIX))?,
             );
         } else if let Some(rest) = line.strip_prefix(CURSOR_LINE_PREFIX) {
+            if out.cursor.is_some() {
+                return Err(BodyError::RepeatedSummary(CURSOR_LINE_PREFIX));
+            }
             out.cursor = Some(
                 serde_json::from_str(rest)
                     .map_err(|_| BodyError::MalformedSummary(CURSOR_LINE_PREFIX))?,
             );
         } else if let Some(rest) = line.strip_prefix(SIGNERS_LINE_PREFIX) {
-            out.signers = serde_json::from_str(rest)
+            if !out.signers.is_empty() {
+                return Err(BodyError::RepeatedSummary(SIGNERS_LINE_PREFIX));
+            }
+            let signers: Vec<RunnerSigner> = serde_json::from_str(rest)
                 .map_err(|_| BodyError::MalformedSummary(SIGNERS_LINE_PREFIX))?;
+            if signers.len() > MAX_BODY_SIGNERS {
+                return Err(BodyError::MalformedSummary(SIGNERS_LINE_PREFIX));
+            }
+            out.signers = signers;
         }
         // Anything else is ignored: a result body shares the stream with
         // whatever else the runner wrote, exactly as D2's frame decoder does.
+    }
+
+    // THE VERSION LINE IS REQUIRED. A body with no declared grammar is a body
+    // this build cannot promise it read the way the writer meant.
+    match format.as_deref() {
+        None => return Err(BodyError::MissingFormat),
+        Some(v) if v.parse::<u32>().ok() == Some(BODY_FORMAT_VERSION) => {}
+        Some(other) => {
+            return Err(BodyError::UnsupportedBodyFormat {
+                got: other.to_string(),
+            })
+        }
     }
 
     if headers.len() > MAX_BODY_PAGES {
@@ -920,6 +1091,11 @@ pub fn parse_body(text: &str) -> Result<SyncBody, BodyError> {
         // THE DIGEST BEFORE THE PARSE. A page whose bytes did not survive the
         // log read is refused as a page; deciding that after parsing would let
         // a truncated read contribute the entries that happened to be whole.
+        //
+        // IT COVERS THE ENTRY LINES AND NOTHING ELSE. The three summary lines
+        // are covered by the frame stream's own digest, which D2's decoder
+        // verifies before this function is ever called; a second digest over
+        // them would be a second answer to a question already answered.
         if page_digest(&raw) != declared_sha256 {
             return Err(BodyError::PageDigestMismatch { index });
         }
@@ -927,6 +1103,13 @@ pub fn parse_body(text: &str) -> Result<SyncBody, BodyError> {
         let mut skipped = 0u32;
         for body in &raw {
             match serde_json::from_str::<RunnerEntry>(body) {
+                // AN UNBOUNDED `locations[]` IS A MALFORMED ENTRY (review
+                // finding F12). It is the only unbounded field an entry has,
+                // and an entry whose rendered line cannot fit a page is an
+                // entry that cannot be published.
+                Ok(entry) if entry.locations.len() > MAX_ENTRY_LOCATIONS => {
+                    skipped = skipped.saturating_add(1);
+                }
                 Ok(entry) => entries.push(entry),
                 // SKIPPED AND COUNTED, NEVER FATAL — D3 §5.2's reading rules:
                 // a malformed entry is one point this build cannot show, not a
@@ -985,13 +1168,33 @@ fn parse_page_header(rest: &str) -> Option<(u32, u32, u32, String)> {
 /// * Two receipts under one `backupId` have DIFFERENT point ids and are two
 ///   rows — defect **RECEIPT-DUP**.
 ///
+/// # The two axes merge in OPPOSITE directions, and that asymmetry is the rule
+///
+/// * **Availability merges BEST-of** (review finding F9; recorded as an
+///   amendment to D3 §5.4 at integration). A point present in bucket A and
+///   absent from bucket B is still fully recoverable from A, and hiding it from
+///   the restore wizard because a second copy went missing is the opposite of
+///   what a second copy is for. Each location keeps its own verdict in
+///   [`EntryLocation`], and the degraded ones are NAMED in `remedy` so nobody
+///   has to guess which copy to repair.
+/// * **The signature merges WORST-of**, with the key id following the worst
+///   verdict. Bytes that fail verification in one place are evidence about the
+///   POINT, not about the place, and `selectable` must never survive it.
+/// * **`Conflict` overrides both.** A receipt-derived disagreement is a fact
+///   about the records and not about any location, so it is applied last.
+///
 /// The output is sorted newest recovery point first, with the point id as the
 /// tie-break so the order is total and the page set is reproducible.
 #[must_use]
 pub fn merge_entries(entries: Vec<RunnerEntry>) -> Vec<RunnerEntry> {
     let mut by_id: BTreeMap<String, RunnerEntry> = BTreeMap::new();
     let mut conflicted: BTreeSet<String> = BTreeSet::new();
-    for entry in entries {
+    for mut entry in entries {
+        // Resolve every location's verdict against the observation ONCE, here,
+        // so the merge below never has to know which side an entry came from.
+        for location in &mut entry.locations {
+            location.availability = Some(location.availability_or(entry.availability));
+        }
         match by_id.get_mut(&entry.point_id) {
             None => {
                 by_id.insert(entry.point_id.clone(), entry);
@@ -1001,17 +1204,34 @@ pub fn merge_entries(entries: Vec<RunnerEntry>) -> Vec<RunnerEntry> {
                     conflicted.insert(entry.point_id.clone());
                 }
                 for location in entry.locations {
-                    if !kept.locations.contains(&location) {
-                        kept.locations.push(location);
+                    match kept
+                        .locations
+                        .iter_mut()
+                        .find(|l| l.location_id == location.location_id)
+                    {
+                        // ONE PLACE REPORTED TWICE KEEPS THE WORSE VERDICT. Two
+                        // observations of the SAME bucket are two attempts at
+                        // one thing, and "it worked once" is not a property of
+                        // the bucket.
+                        Some(existing) => {
+                            let a = existing.availability_or(kept.availability);
+                            let b = location.availability_or(entry.availability);
+                            if worse(b, a) {
+                                existing.availability = Some(b);
+                            }
+                        }
+                        None => kept.locations.push(location),
                     }
                 }
-                kept.locations.sort();
-                // The WORSE of the two availabilities is kept, so a point that
-                // is readable in one place and missing in another is not
-                // advertised as simply available.
-                if worse(entry.availability, kept.availability) {
-                    kept.availability = entry.availability;
-                }
+                kept.locations
+                    .sort_by(|a, b| a.location_id.cmp(&b.location_id));
+                // THE ENTRY-LEVEL VERDICT IS NOT DECIDED HERE. Every location's
+                // own availability was resolved on the way in, so the best-of
+                // answer is a `max` over `kept.locations` and is computed once,
+                // below, when every observation has been folded in. Doing it
+                // pairwise here as well would be a second implementation of the
+                // same rule — and a dead one, since the value it wrote would be
+                // overwritten by that `max`.
                 if worse_signature(entry.signature, kept.signature) {
                     kept.signature = entry.signature;
                     kept.signer_key_id = entry.signer_key_id;
@@ -1021,6 +1241,17 @@ pub fn merge_entries(entries: Vec<RunnerEntry>) -> Vec<RunnerEntry> {
     }
     let mut out: Vec<RunnerEntry> = by_id.into_values().collect();
     for entry in &mut out {
+        // The entry-level verdict is the BEST any location reached; with no
+        // locations at all it is the observation's own.
+        if let Some(best) = entry
+            .locations
+            .iter()
+            .map(|l| l.availability_or(entry.availability))
+            .max_by_key(|a| availability_rank(*a))
+        {
+            entry.availability = best;
+        }
+        entry.remedy = name_degraded_locations(entry);
         if conflicted.contains(&entry.point_id) {
             entry.availability = Availability::Conflict;
         }
@@ -1033,7 +1264,42 @@ pub fn merge_entries(entries: Vec<RunnerEntry>) -> Vec<RunnerEntry> {
     out
 }
 
-/// A total order on "how bad is this availability", worst first.
+/// The entry's remedy, with every location that is not [`Availability::Available`]
+/// named — review finding F9.
+///
+/// A best-of merge would otherwise DROP the information that a copy is broken:
+/// the entry says `Available` and nothing says which bucket to repair. Names
+/// only: a location id is a bucket and a prefix, never an endpoint, a region or
+/// a credential.
+fn name_degraded_locations(entry: &RunnerEntry) -> Option<String> {
+    let degraded: Vec<String> = entry
+        .locations
+        .iter()
+        .filter(|l| l.availability_or(entry.availability) != Availability::Available)
+        .map(|l| {
+            format!(
+                "{} is {}",
+                l.location_id,
+                l.availability_or(entry.availability)
+            )
+        })
+        .collect();
+    if degraded.is_empty() {
+        return entry.remedy.clone();
+    }
+    let note = format!(
+        "this point is readable, and {} of its {} location(s) is not: {}",
+        degraded.len(),
+        entry.locations.len(),
+        degraded.join("; ")
+    );
+    Some(match entry.remedy.as_deref() {
+        Some(existing) if !existing.trim().is_empty() => format!("{existing}. {note}"),
+        _ => note,
+    })
+}
+
+/// A total order on "how good is this availability", worst first.
 fn availability_rank(a: Availability) -> u8 {
     match a {
         Availability::Conflict => 0,
@@ -1219,6 +1485,29 @@ pub struct View {
     /// opposed to because of `viewLimit`. Reported so "the view is a window"
     /// and "this build could not fit the window" stay distinguishable.
     pub dropped_for_space: usize,
+    /// How many entries were refused because ONE rendered line does not fit a
+    /// page at all — review finding F12. An entry that cannot be published is
+    /// counted here rather than producing a `ConfigMap` the API server rejects
+    /// at CREATE, which would surface as a requeue loop and not as a verdict.
+    pub dropped_oversized: usize,
+    /// How many of the materialised entries are `Revoked`, and how many are
+    /// `VerifiedHistorical` — the two verification states `status.counts` has
+    /// no field for (review finding F4).
+    pub window: WindowStates,
+}
+
+/// The states of the materialised window that the ten status counters cannot
+/// carry — review finding F4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WindowStates {
+    /// Points whose signing key this installation has REVOKED. Latent until a
+    /// trust source can express revocation, and the reason this is counted at
+    /// all: a revoked point is `selectable: false` inside the page and would
+    /// otherwise appear in no adverse number on the status.
+    pub revoked: i64,
+    /// Points that verify under a retired or expired key, for evidence signed
+    /// while it was valid.
+    pub verified_historical: i64,
 }
 
 /// The bounds a view is materialised under.
@@ -1275,10 +1564,20 @@ pub fn materialise(
     let mut current_bytes = 0usize;
     let mut placed = 0usize;
     let mut dropped_for_space = 0usize;
+    let mut dropped_oversized = 0usize;
+    let mut states = WindowStates::default();
 
     for entry in window {
         let line = serde_json::to_string(&entry).unwrap_or_default();
         let cost = line.len() + 1;
+        // ONE LINE THAT CANNOT FIT A PAGE IS REFUSED, NOT PLACED ANYWAY
+        // (review finding F12). The old guard only sealed a page when the
+        // current one was non-empty, so a single oversized entry went into an
+        // over-budget ConfigMap the API server rejects at CREATE.
+        if cost > limits.page_max_bytes {
+            dropped_oversized += 1;
+            continue;
+        }
         if !current.is_empty() && current_bytes + cost > limits.page_max_bytes {
             pages.push(seal(std::mem::take(&mut current)));
             current_bytes = 0;
@@ -1286,6 +1585,11 @@ pub fn materialise(
         if pages.len() >= limits.max_pages && current.is_empty() {
             dropped_for_space += 1;
             continue;
+        }
+        match entry.verification {
+            Verification::Revoked => states.revoked += 1,
+            Verification::VerifiedHistorical => states.verified_historical += 1,
+            _ => {}
         }
         current_bytes += cost;
         current.push(entry);
@@ -1303,8 +1607,11 @@ pub fn materialise(
         // view is a window whenever either exceeds what was placed.
         truncated: total > i64::try_from(placed).unwrap_or(i64::MAX)
             || merged_len > placed
-            || dropped_for_space > 0,
+            || dropped_for_space > 0
+            || dropped_oversized > 0,
         dropped_for_space,
+        dropped_oversized,
+        window: states,
     }
 }
 
@@ -1336,15 +1643,23 @@ pub fn view_entry(entry: RunnerEntry, trust: &TrustView, now: DateTime<Utc>) -> 
         trust,
         now,
     );
+    let availability = entry.availability;
     ViewEntry {
-        selectable: selectable(entry.availability, verification),
+        selectable: selectable(availability, verification),
         point_id: entry.point_id,
         backup_id: entry.backup_id,
         run_id: entry.run_id,
         recovery_point_at_ms: entry.recovery_point_at_ms,
         covered_from_ms: entry.covered_from_ms,
         covered_to_ms: entry.covered_to_ms,
-        locations: entry.locations,
+        locations: entry
+            .locations
+            .into_iter()
+            .map(|l| ResolvedLocation {
+                availability: l.availability_or(availability),
+                location_id: l.location_id,
+            })
+            .collect(),
         receipt_key: entry.receipt_key,
         receipt_sha256: entry.receipt_sha256,
         manifest_key: entry.manifest_key,
@@ -1392,11 +1707,22 @@ pub fn index_document(
 pub struct Tally {
     /// What goes on `status.counts`.
     pub counts: CatalogCounts,
-    /// `(state, count)` for every state the ten fields cannot carry, in a
-    /// stable order. Named in the `Synced` condition message rather than
+    /// `(state, count, scope)` for every state the ten fields cannot carry, in
+    /// a stable order. Named in the `Synced` condition message rather than
     /// dropped.
-    pub unrepresented: Vec<(&'static str, i64)>,
+    ///
+    /// `scope` is [`SCOPE_WALK`] or [`SCOPE_VIEW`] — some of these numbers can
+    /// only be known for the materialised window, and saying which is the
+    /// difference between a bounded fact and a wrong one.
+    pub unrepresented: Vec<(&'static str, i64, &'static str)>,
 }
+
+/// A residue count that covers everything the sync walked.
+pub const SCOPE_WALK: &str = "the archive";
+/// A residue count that covers only the materialised window — the verification
+/// axis is re-decided HERE, so it is only known for the entries this controller
+/// re-classified.
+pub const SCOPE_VIEW: &str = "the materialised view";
 
 /// Project the walk's counts and signer summary onto the CRD's ten counters.
 ///
@@ -1419,7 +1745,11 @@ pub struct Tally {
 ///   `total`. **NOTE FOR W13:** `status.counts.partial` and
 ///   `status.counts.verifiedHistorical` are the two fields this would want.
 #[must_use]
-pub fn tally(counts: &RunnerCounts, signers: &[SignerSummary]) -> Tally {
+pub fn tally(counts: &RunnerCounts, signers: &[SignerSummary], window: WindowStates) -> Tally {
+    // THE FULL SIGNER LIST, BEFORE [`bounded`] TRUNCATES IT (review finding
+    // F10). `untrustedSigner` is documented as covering the whole walk, and
+    // summing it over the sixteen rows the status can DISPLAY would silently
+    // under-report an archive written by seventeen installations.
     let untrusted: i64 = signers
         .iter()
         .filter(|s| s.trusted == Some(false))
@@ -1427,7 +1757,22 @@ pub fn tally(counts: &RunnerCounts, signers: &[SignerSummary]) -> Tally {
         .sum();
     let mut unrepresented = Vec::new();
     if counts.partial > 0 {
-        unrepresented.push((Availability::Partial.as_str(), counts.partial));
+        unrepresented.push((Availability::Partial.as_str(), counts.partial, SCOPE_WALK));
+    }
+    // `Revoked` AND `VerifiedHistorical` HAVE NO COUNTER EITHER (review
+    // finding F4). A revoked point is `selectable: false` inside the page and
+    // would otherwise land in NO adverse number on the status — `invalid` comes
+    // from the runner's signature verdict, `unverified` from
+    // notAttempted + noEvidence, and `untrustedSigner` from unlisted keys.
+    if window.revoked > 0 {
+        unrepresented.push((Verification::Revoked.as_str(), window.revoked, SCOPE_VIEW));
+    }
+    if window.verified_historical > 0 {
+        unrepresented.push((
+            Verification::VerifiedHistorical.as_str(),
+            window.verified_historical,
+            SCOPE_VIEW,
+        ));
     }
     Tally {
         counts: CatalogCounts {
@@ -1469,7 +1814,7 @@ pub fn signer_summaries(signers: &[RunnerSigner], trust: &TrustView) -> Vec<Sign
             // on a surface whose whole job is to say whether an unknown key
             // signed these points; with no trust material every key is
             // untrusted, and the `TrustAvailable` condition is what says why.
-            trusted: Some(trust.key(&s.key_id).is_some()),
+            trusted: Some(accepts(trust, &s.key_id)),
         })
         .collect();
     rows.sort_by(|a, b| {
@@ -1478,6 +1823,32 @@ pub fn signer_summaries(signers: &[RunnerSigner], trust: &TrustView) -> Vec<Sign
             .then_with(|| b.points.cmp(&a.points))
             .then_with(|| a.key_id.cmp(&b.key_id))
     });
+    rows
+}
+
+/// Whether this installation ACCEPTS evidence from a key — review finding F4.
+///
+/// **Listed is not accepted.** A key the trust source lists with
+/// `state: Revoked` is a key whose private half is in someone else's hands, and
+/// reporting `trusted: true` for it would tell an operator reading `status`
+/// alone that a compromised signer is fine. `Retired` IS accepted, because a
+/// retirement is what makes `VerifiedHistorical` meaningful: the evidence it
+/// signed while valid still verifies.
+#[must_use]
+pub fn accepts(trust: &TrustView, key_id: &str) -> bool {
+    matches!(
+        trust.key(key_id).map(|k| k.state),
+        Some(TrustKeyState::Active | TrustKeyState::Retired)
+    )
+}
+
+/// [`signer_summaries`]'s output, cut to what `status.signers` can carry.
+///
+/// A SEPARATE STEP so the counters can be summed over the FULL list first
+/// (review finding F10). Untrusted keys are already first, so the rows that
+/// survive are the ones an administrator has to act on.
+#[must_use]
+pub fn bounded(mut rows: Vec<SignerSummary>) -> Vec<SignerSummary> {
     rows.truncate(MAX_SIGNERS);
     rows
 }
@@ -1495,7 +1866,20 @@ pub fn histogram(counts: &RunnerCounts) -> Vec<HistogramBucket> {
         })
         .collect();
     days.sort_by(|a, b| b.day.cmp(&a.day));
-    days.dedup_by(|a, b| a.day == b.day);
+    // FOLDED WITH `+=`, NEVER DROPPED (review finding F11). A runner that
+    // reports one day in two shards must not lose those points from the
+    // histogram while `counts.total` still includes them — silently losing
+    // points is the one option this module's own philosophy argues against.
+    // `dedup_by` sees `(later, earlier)` and keeps the EARLIER element, so the
+    // sum is accumulated onto that one.
+    days.dedup_by(|later, earlier| {
+        if later.day == earlier.day {
+            earlier.points = earlier.points.saturating_add(later.points);
+            true
+        } else {
+            false
+        }
+    });
     days.truncate(MAX_HISTOGRAM_DAYS);
     days
 }
@@ -1622,18 +2006,46 @@ pub const TRUST_BUNDLE_KEY: &str = "trust-bundle.pem";
 /// The `ConfigMap` key holding the key ids, one per line, in bundle order.
 pub const TRUST_KEY_IDS_KEY: &str = "key-ids.txt";
 
-/// The floor on a sync Job's `ttlSecondsAfterFinished` — D3 §5.3's one day.
-pub const TTL_FLOOR_SECONDS: i32 = 86_400;
+/// The floor on a sync Job's `ttlSecondsAfterFinished` — **one hour**.
+///
+/// IT WAS A DAY, AND A DAY WAS A LEAK (review finding F3). One sync Job lives
+/// per slot, so the number of GENERATIONS alive at once is
+/// `ttl / intervalSeconds`, not three: at `intervalSeconds: 3600` a day's floor
+/// kept 24 of them — about 216 page `ConfigMap`s and, at a realistic 600 B an
+/// entry over 5 000 points, some 72 MB of etcd per catalog. At D3 §5.3's own
+/// 300 s floor it was 288 generations and near a gigabyte, past etcd's default
+/// quota with two or three catalogs.
+///
+/// An hour bounds it: with the CEL floor of 300 s
+/// ([`crate::crds::recovery_catalog::J3_INTERVAL_FLOOR_RULE`]) at most **12**
+/// generations coexist, and at an hourly cadence exactly **3** — which is what
+/// "three intervals" was always meant to mean. A manual-only catalog keeps its
+/// view for an hour after its last sync and republishes on the next request.
+pub const TTL_FLOOR_SECONDS: i32 = 3_600;
 
-/// `ttlSecondsAfterFinished` for a sync Job: `max(3 × interval, 86400)`.
+/// `ttlSecondsAfterFinished` for a sync Job: `max(3 × interval, 3600)`.
 ///
 /// THREE INTERVALS, so a view outlives two missed syncs and the page set does
-/// not blink out between them; a day at minimum, so a manual-only catalog
-/// (`intervalSeconds: 0`) still keeps its view for a working day. The TTL is
-/// the ONLY thing that removes a page — `delete` is granted on nothing.
+/// not blink out between them, with an hour's floor so a manual-only catalog
+/// (`intervalSeconds: 0`) still has one. The TTL is the ONLY thing that removes
+/// a page, a fence pointer or a plan — `delete` is granted on nothing — so it
+/// is also the only bound on how many of them exist at once.
 #[must_use]
 pub fn ttl_seconds(interval_seconds: i32) -> i32 {
     interval_seconds.saturating_mul(3).max(TTL_FLOOR_SECONDS)
+}
+
+/// How many view generations can be alive at once at this cadence.
+///
+/// `ttl / interval`, which is the number D3 §5.3's "the previous one ages out"
+/// glosses over. Stated as a function so the documentation and the test read
+/// one arithmetic.
+#[must_use]
+pub fn live_generations(interval_seconds: i32) -> i32 {
+    if interval_seconds <= 0 {
+        return 1;
+    }
+    ttl_seconds(interval_seconds) / interval_seconds
 }
 
 /// When the view ages out: the Job's finish plus its TTL.
@@ -1691,6 +2103,7 @@ pub fn page_config_map(
     name: &str,
     namespace: &str,
     job_owner: &RunnerOwner,
+    catalog_uid: &str,
     draft: &PageDraft,
     index: usize,
 ) -> ConfigMap {
@@ -1707,7 +2120,11 @@ pub fn page_config_map(
                     LABEL_COMPONENT.to_string(),
                     COMPONENT_CATALOG_PAGE.to_string(),
                 ),
-                (LABEL_CATALOG_UID.to_string(), job_owner.uid.clone()),
+                // THE CATALOG'S UID, NOT THE JOB'S (review finding F8). The label
+                // exists so an operator can find every object of ONE catalog with
+                // `kubectl get cm -l`; keyed on the Job it changed every slot and
+                // matched nothing but that slot.
+                (LABEL_CATALOG_UID.to_string(), catalog_uid.to_string()),
                 (LABEL_PAGE_INDEX.to_string(), index.to_string()),
             ])),
             annotations: Some(BTreeMap::from([(
@@ -1739,6 +2156,7 @@ pub fn index_config_map(
     name: &str,
     namespace: &str,
     job_owner: &RunnerOwner,
+    catalog_uid: &str,
     document: &IndexDocument,
 ) -> Result<ConfigMap, serde_json::Error> {
     let body = serde_json::to_string(document)?;
@@ -1755,7 +2173,8 @@ pub fn index_config_map(
                     LABEL_COMPONENT.to_string(),
                     COMPONENT_CATALOG_INDEX.to_string(),
                 ),
-                (LABEL_CATALOG_UID.to_string(), job_owner.uid.clone()),
+                // See `page_config_map` — the CATALOG's UID (finding F8).
+                (LABEL_CATALOG_UID.to_string(), catalog_uid.to_string()),
             ])),
             annotations: Some(BTreeMap::from([(
                 PAGE_DIGEST_ANNOTATION.to_string(),
