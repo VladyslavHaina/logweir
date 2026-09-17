@@ -320,6 +320,31 @@ that was skipped keeps the aggregate `unknown` — skipping a question is not
 answering it — and a `Completed` check with no recorded aggregate reads
 `unknown`, never `ready`.
 
+**`staleReasons` is typed and closed.** Each entry is `{reason, kind?, name?}`,
+and `reason` is one of six:
+
+| reason | what moved |
+|---|---|
+| `expired` | the verdict is past `expiresAt`, or recorded no expiry at all |
+| `planHashChanged` | the plan you are looking at is not the plan the check was bound to |
+| `referentChanged` | a named object's UID or generation moved, or it appeared or vanished — a recreated destination, an edited access block, a re-created recovery point, a `TrustRoster` edit, or an `Approval` whose resourceVersion moved when verification landed. `kind` and `name` say **which**; for the single `TrustRoster` and `Approval` a binding names, `name` is the UID, because that is what identifies them there |
+| `caBundleChanged` | a destination's CA bundle `ConfigMap` now digests differently, so the trust material the check exercised is not the trust material a run would use |
+| `policyChanged` | the installation policy `ConfigMap` digests differently, which can change the concurrency ceilings, the engine CA rule, the `ControllerIdentity` allowlist and the visibility attestations the verdict was computed under |
+| `inputsDigestChanged` | the recomputed digest differs and none of the named reasons explains it — the catch-all that exists so "stale" is never reported without a reason |
+
+Two components produce them. This service compares the expiry and the plan hash
+itself; the other four need a binding recomputed from live objects, which the
+controller does — it records them in `status.message` when it downgrades a
+verdict that stopped applying, and the API recovers them there, splits
+`referentChanged:<Kind>/<name>` **once**, and merges the two lists without
+duplicates. A spelling this build does not recognise is dropped, never guessed
+at. The list is pinned against `logweir-core`'s own reason enum by a test, so
+neither side can grow a reason the other cannot carry.
+
+There is no `cancelRequested` reason. A cancelled check ends with no result at
+all, so its verdict is not out of date — it is **absent**, and `state:
+cancelled` with `terminal: true` is what says so.
+
 An actor bound **only** as Approver reads `Restore` readiness, because that is
 what an approval packet needs, and gets the nonexistent-resource answer for
 anything else.
