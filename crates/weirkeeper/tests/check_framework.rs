@@ -1910,6 +1910,82 @@ fn labelled_job(namespace: &str, kind: &str, connection: Option<&str>, finished:
     .expect("the fixture is a Job")
 }
 
+/// **A `Backup`'S OWN DISCOVERY SPENDS THE CONNECTION AND NOTHING ELSE** —
+/// PLAT-09.2 against D2 §4.4's `maxActiveDiscoveriesPerConnection`.
+///
+/// A per-run discovery Job (`logweir.dev/purpose=topic-discovery`) deliberately
+/// does NOT wear `app.kubernetes.io/component=check`: nothing admits it —
+/// `admit` is never called for work an operator already scheduled — so wearing
+/// that label would spend the interactive pool without ever being bounded by
+/// it, and a browser click would queue behind a nightly schedule. What it
+/// should spend is the per-connection ceiling, which exists to bound
+/// simultaneous dials at one broker: eight dynamic schedules firing at 02:00
+/// against one `KafkaCluster` is exactly the case.
+///
+/// KILLS: counting a run discovery into `namespace`/`total` (which would let a
+/// schedule queue a console click); ignoring it entirely (which would leave the
+/// administrator's connection budget unenforced); attributing it to a
+/// connection whose UID it does not carry.
+#[test]
+fn a_run_discovery_counts_against_the_connection_and_not_the_interactive_pools() {
+    let run_discovery = |connection: Option<&str>| -> Job {
+        let mut j = labelled_job(NS, "topicInventory", connection, false);
+        let labels = j.metadata.labels.get_or_insert_with(Default::default);
+        labels.remove("app.kubernetes.io/component");
+        labels.insert(
+            "logweir.dev/purpose".to_string(),
+            "topic-discovery".to_string(),
+        );
+        j.metadata.name = Some(format!("lwd-{}", connection.unwrap_or("none")));
+        j
+    };
+
+    let counts = limits::count(
+        &[run_discovery(Some(CONNECTION_UID))],
+        NS,
+        Some(CONNECTION_UID),
+    );
+    assert_eq!(counts.per_connection, 1, "it spends the broker's budget");
+    assert_eq!(counts.namespace, 0, "and not the namespace pool");
+    assert_eq!(counts.total, 0, "and not the installation pool");
+    assert_eq!(counts.evidence_namespace, 0);
+    assert_eq!(
+        limits::admit(
+            &counts,
+            &policy::ChecksPolicy::default(),
+            CheckPlanKind::TopicInventory
+        ),
+        limits::Admission::Queued(CheckCode::ConcurrencyLimited),
+        "an interactive discovery against that connection is now queued"
+    );
+
+    // Against a DIFFERENT connection it counts for nothing at all.
+    let counts = limits::count(
+        &[run_discovery(Some(CONNECTION_UID))],
+        NS,
+        Some(OTHER_JOB_UID),
+    );
+    assert_eq!(counts, limits::ActiveCounts::default());
+
+    // A FINISHED run discovery holds nothing, like every other finished Job.
+    let mut done = run_discovery(Some(CONNECTION_UID));
+    done.status = serde_json::from_value(json!({"conditions":[{"type":"Complete","status":"True",
+        "lastProbeTime":"2026-09-16T11:59:00Z","lastTransitionTime":"2026-09-16T11:59:00Z"}]}))
+    .expect("a JobStatus");
+    assert_eq!(
+        limits::count(&[done], NS, Some(CONNECTION_UID)),
+        limits::ActiveCounts::default()
+    );
+
+    // The selector that finds them is its own, because a label selector ANDs
+    // its terms and cannot express "either key".
+    assert_eq!(
+        limits::run_discovery_selector(),
+        "logweir.dev/purpose=topic-discovery"
+    );
+    assert_ne!(limits::run_discovery_selector(), limits::check_selector());
+}
+
 /// D2 §12's framework row `limits::queues_over_namespace_cap`.
 #[test]
 fn limits_queues_over_namespace_cap() {

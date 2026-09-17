@@ -156,6 +156,14 @@ fn kafka_cluster_json(cluster_id: &str) -> String {
     .to_string()
 }
 
+/// The same `KafkaCluster`, on a pass where the probe has cleared
+/// `status.clusterId` — which it does on any unreachable or unreadable probe.
+fn kafka_cluster_without_observed_id() -> String {
+    let mut v: Value = serde_json::from_str(&kafka_cluster_json(CLUSTER_ID)).expect("JSON");
+    v["status"] = json!({ "reachable": false });
+    v.to_string()
+}
+
 fn not_found(kind: &str, name: &str) -> String {
     json!({"kind":"Status","apiVersion":"v1","status":"Failure",
            "message": format!("{kind} \"{name}\" not found"),
@@ -276,6 +284,28 @@ fn pod_object(name: &str, owner_uid: Option<&str>, job: &str) -> Value {
                      "startedAt":"2026-09-16T01:58:45Z","finishedAt":"2026-09-16T01:59:00Z"}}
         }]}
     })
+}
+
+/// A finished Job the API server dated nowhere: no `completionTime`, and a
+/// terminal condition with no `lastTransitionTime`.
+fn undated_finished_job() -> k8s_openapi::api::batch::v1::Job {
+    let mut v: Value = serde_json::from_str(&discovery_job_body(
+        UID,
+        UID,
+        Some("Complete"),
+        &source_sha(CLUSTER_ID),
+    ))
+    .expect("JSON");
+    v["status"] = json!({"conditions": [{"type": "Complete", "status": "True", "reason": "x"}]});
+    serde_json::from_value(v).expect("a Job")
+}
+
+/// Its pod: the `runner` container terminated, and no `finishedAt`.
+fn undated_pod() -> k8s_openapi::api::core::v1::Pod {
+    let mut v = pod_object(POD, Some(DISCOVERY_JOB_UID), &discovery_job(UID));
+    v["status"]["containerStatuses"][0]["state"]["terminated"] =
+        json!({"exitCode": 0, "startedAt": "2026-09-16T01:58:45Z"});
+    serde_json::from_value(v).expect("a Pod")
 }
 
 fn pod_list(pods: Vec<Value>) -> String {
@@ -1078,13 +1108,26 @@ fn the_discovery_job_is_the_check_job_shape_named_after_the_backup() {
         (3600_i64, 300_i64, 210_u32),
         (300, 300, 210),
         (120, 120, 30),
-        (60, 60, 1),
-        (1, 1, 1),
+        (
+            sel::MIN_DYNAMIC_DEADLINE_SECONDS,
+            sel::MIN_DYNAMIC_DEADLINE_SECONDS,
+            30,
+        ),
     ] {
         assert_eq!(
             sel::discovery_budget(deadline),
-            (expect_job, expect_plan),
+            Some((expect_job, expect_plan)),
             "deadlineSeconds {deadline}"
+        );
+    }
+    // A DEADLINE THAT CANNOT FUND A DISCOVERY HAS NO BUDGET, IT DOES NOT GET A
+    // ONE-SECOND ONE. A clamp here is how a run comes to die `DiscoveryFailed`
+    // with nothing naming the deadline as the cause.
+    for deadline in [sel::MIN_DYNAMIC_DEADLINE_SECONDS - 1, 60, 30, 1] {
+        assert_eq!(
+            sel::discovery_budget(deadline),
+            None,
+            "deadlineSeconds {deadline} cannot fund a discovery"
         );
     }
 
@@ -1135,17 +1178,18 @@ fn the_discovery_job_is_the_check_job_shape_named_after_the_backup() {
     assert_eq!(value["spec"]["activeDeadlineSeconds"], json!(300));
 
     // AND THE CEILING BINDS WHERE IT ACTUALLY DIFFERS FROM THE FRAMEWORK'S OWN
-    // BUDGET-PLUS-MARGIN. For a `Backup` whose own deadline is under the
-    // ninety-second margin, `discovery_budget` floors the plan at one second
-    // and `min(300, spec.deadlineSeconds)` is 60 — while the framework would
-    // give the Job 1 + 90. D1 §7.2 R2 says 60, so the Job says 60.
-    let (short_job, short_plan) = sel::discovery_budget(60);
-    let mut short = spec.clone();
-    short.timeout_seconds = i64::from(short_plan);
-    let short = sel::build_discovery_job(&short, &discovery_job(UID), short_job, "sha256:abc");
+    // BUDGET-PLUS-MARGIN. At the smallest deadline a dynamic run may carry, D1
+    // §7.2 R2 says 120 and `cjob::runner_job_spec` would say 30 + 90 — the same
+    // number by construction, so the case that separates them is the one just
+    // above the floor, where the ceiling clamps at 300 and the framework would
+    // not.
+    let (long_job, long_plan) = sel::discovery_budget(3600).expect("an hour funds a discovery");
+    let mut long = spec.clone();
+    long.timeout_seconds = i64::from(long_plan) + 45;
+    let long = sel::build_discovery_job(&long, &discovery_job(UID), long_job, "sha256:abc");
     assert_eq!(
-        serde_json::to_value(&short).expect("serialisable")["spec"]["activeDeadlineSeconds"],
-        json!(60),
+        serde_json::to_value(&long).expect("serialisable")["spec"]["activeDeadlineSeconds"],
+        json!(300),
         "the run's ceiling binds, not the framework's plan-plus-margin"
     );
     assert!(
@@ -1214,9 +1258,13 @@ fn the_discovery_plan_is_a_topic_inventory_with_no_credential() {
     let bytes = logweir_core::det_json::to_deterministic_json(&document).expect("serialisable");
     let text = String::from_utf8(bytes).expect("UTF-8");
     assert!(
-        !text.contains("prod-sasl") && !text.to_lowercase().contains("password\":\"")
-            || !text.contains("prod-sasl"),
-        "no Secret name and no credential in a ConfigMap: {text}"
+        !text.contains("prod-sasl"),
+        "no Secret name in a world-readable ConfigMap: {text}"
+    );
+    assert!(
+        !text.to_lowercase().contains("password\":\""),
+        "and no credential VALUE either — `ConnectionPlan` has no password field \
+         at all, and this is the assertion that would notice if one appeared: {text}"
     );
     // A second render of the same inputs is byte-identical, which is what makes
     // the plan's 409 rule a comparison rather than a coin toss.
@@ -1227,6 +1275,139 @@ fn the_discovery_plan_is_a_topic_inventory_with_no_credential() {
     // And it round-trips through the runner's own parser.
     let parsed: CheckPlan = serde_json::from_str(&text).expect("the runner parses it");
     assert_eq!(parsed.subject_uid, UID);
+}
+
+/// **A NAME NO KAFKA BROKER WOULD ACCEPT IS NOT ADOPTED** — D1 §3.3's
+/// "Kafka-legal names `^[a-zA-Z0-9._-]{1,249}$` are re-validated before
+/// freeze", D1 §7.2 R3.
+///
+/// This list comes off a runner's stdout, not out of a CRD field the API
+/// server pattern-checked, and the glob rail covers six characters — not a
+/// space, a slash, a control character or a 250-character name. A name the
+/// cluster could not hold would otherwise freeze into an immutable plan and
+/// fail opaquely inside the engine.
+///
+/// It is `DiscoveryResultUnreadable`, the NOT-retryable class: nothing is
+/// wrong with the selection the operator wrote; the runner's output is what
+/// did not verify.
+///
+/// KILLS: relying on the glob rail alone; accepting an over-length name;
+/// reporting it as `InvalidTopicSelection` (which would blame the spec) or as
+/// the retryable `DiscoveryFailed`; putting the raw entry into a status message
+/// unbounded.
+#[test]
+fn a_relayed_name_that_is_not_kafka_legal_is_unreadable() {
+    let exclusions = sel::Exclusions::default();
+    for bad in [
+        "orders eu",
+        "orders/eu",
+        "orders:9092",
+        &"x".repeat(250),
+        "ordërs",
+    ] {
+        let entries = [entry("orders", 6), entry(bad, 1)];
+        let (state, message) = sel::resolved_selection(
+            &observed(&entries, &exclusions, VisibilityState::Unknown),
+            &exclusions,
+            IncompleteDiscovery::BackUpVisibleTopics,
+            NAME,
+        )
+        .expect_err("a name the broker could not hold never freezes");
+        assert_eq!(
+            state,
+            TERMINAL_STATE_DISCOVERY_RESULT_UNREADABLE,
+            "`{}`: {message}",
+            bad.escape_debug()
+        );
+        assert!(
+            message.contains("^[a-zA-Z0-9._-]{1,249}$"),
+            "the message names the grammar: {message}"
+        );
+        // BOUNDED IN THE MESSAGE. A 250-character name is spec-derived text,
+        // not a credential, but a condition is not a place for an unbounded
+        // string.
+        assert!(
+            message.len() < 512,
+            "the message is bounded: {}",
+            message.len()
+        );
+    }
+
+    // The glob rail does NOT cover this, which is why the second rail exists.
+    assert!(logweir_core::guard::reject_glob_metacharacters(&["orders eu".to_string()]).is_ok());
+
+    // AND THE FREEZE BOUNDARY REFUSES IT FOR EVERY PRODUCER, not only for the
+    // discovery path.
+    let cluster: weirkeeper::crds::kafka_cluster::KafkaCluster =
+        serde_json::from_str(&kafka_cluster_json(CLUSTER_ID)).expect("a KafkaCluster");
+    let mut illegal = weirkeeper::backup_execution::ResolvedSelection::named(&named_backup().spec);
+    illegal.topics = vec!["orders eu".to_string()];
+    let refusal = weirkeeper::controllers::backup::desired_execution_inputs_for(
+        &named_backup(),
+        &cluster,
+        &illegal,
+    )
+    .expect_err("an illegal name never freezes");
+    assert!(
+        matches!(
+            refusal,
+            weirkeeper::controllers::backup::BackupError::Refused(
+                weirkeeper::conditions::TERMINAL_STATE_INVALID_TOPIC_SELECTION,
+                _
+            )
+        ),
+        "{refusal}"
+    );
+}
+
+/// **A `deadlineSeconds` THAT CANNOT FUND A DISCOVERY IS REFUSED UP FRONT** —
+/// D1 §7.2 R2, and the operability half of it.
+///
+/// `spec.deadlineSeconds` has no `minimum` on the CRD, and the discovery Job's
+/// deadline is `min(300, spec.deadlineSeconds)` with ninety seconds of that
+/// spent on image pull, scheduling and container start. So `deadlineSeconds:
+/// 60` — entirely legal, and reasonable for a small cluster — leaves the runner
+/// under a second. Dispatching that Job produces `DiscoveryFailed` with nothing
+/// naming the deadline; raising the Job's own deadline would break R2's
+/// ceiling. The honest answer is to refuse, naming the field and the floor.
+///
+/// KILLS: clamping the runner's budget to one second and dispatching anyway;
+/// refusing without naming `spec.deadlineSeconds`; creating the plan ConfigMap
+/// or the Job before the check.
+#[tokio::test]
+async fn a_deadline_too_small_to_fund_a_discovery_is_refused_before_any_job() {
+    let mut value = serde_json::to_value(visible_only()).expect("serialisable");
+    value["spec"]["deadlineSeconds"] = json!(60);
+    let b: Backup = serde_json::from_value(value).expect("a Backup");
+
+    let (terminal, bodies) = reconcile_with(&b, start_routes()).await;
+    assert_eq!(
+        terminal.as_deref(),
+        Some(weirkeeper::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID),
+        "{:?}",
+        calls(&bodies)
+    );
+    assert!(
+        posted_jobs(&bodies).is_empty() && posted_config_maps(&bodies).is_empty(),
+        "nothing is created for a run that cannot discover: {:?}",
+        calls(&bodies)
+    );
+    let status = patched_statuses(&bodies).pop().expect("a terminal status");
+    let text = status.to_string();
+    assert!(
+        text.contains("spec.deadlineSeconds")
+            && text.contains(&sel::MIN_DYNAMIC_DEADLINE_SECONDS.to_string()),
+        "the refusal names the field and the floor: {status}"
+    );
+
+    // AND THE FLOOR ITSELF IS FUNDABLE: one second more than the refusal
+    // boundary dispatches a Job.
+    let mut value = serde_json::to_value(visible_only()).expect("serialisable");
+    value["spec"]["deadlineSeconds"] = json!(sel::MIN_DYNAMIC_DEADLINE_SECONDS);
+    let b: Backup = serde_json::from_value(value).expect("a Backup");
+    let (terminal, bodies) = reconcile_with(&b, start_routes()).await;
+    assert_eq!(terminal, None, "{:?}", calls(&bodies));
+    assert_eq!(posted_jobs(&bodies).len(), 1);
 }
 
 // ===========================================================================
@@ -2132,6 +2313,228 @@ async fn the_discovery_job_ttl_is_patched_only_after_the_status_landed() {
         .expect("TopicsResolved survives the later patches");
     assert_eq!(condition["status"], json!("True"));
     assert_eq!(condition["reason"], json!(REASON_RESOLVED));
+}
+
+/// **PROBE CHURN ON THE `KafkaCluster` IS NOT A SOURCE CHANGE** — D1 §7.2 R1
+/// and R4, and the one field the R4 digest must not pin.
+///
+/// `KafkaCluster.status.clusterId` is written asynchronously by ANOTHER
+/// controller, and `controllers::kafka_cluster` clears it to `None` on every
+/// probe pass that reports the cluster unreachable or whose output it could not
+/// read. So it flips `Some → None → Some` inside the ≤ 300 s a discovery Job
+/// runs. Hashing it into the resolution digest would refuse a perfectly good
+/// run as `SourceChangedDuringResolution` — with a message saying the saved
+/// connection changed when nothing about it had, no runner Job, and a new
+/// `Backup` needed.
+///
+/// The repointed-endpoint case is still caught: `source_unchanged` compares the
+/// broker-reported id against the observed one whenever BOTH are present, which
+/// is the non-volatile form of the same rule.
+///
+/// KILLS: putting `status.clusterId` back into `SourceFacts`; making the
+/// cluster-id comparison fire when either side is absent.
+#[tokio::test]
+async fn probe_churn_on_the_observed_cluster_id_is_not_a_source_change() {
+    // The digest is a pure function of the connection and the cluster UID, and
+    // of nothing the probe writes.
+    let with_id: weirkeeper::crds::kafka_cluster::KafkaCluster =
+        serde_json::from_str(&kafka_cluster_json(CLUSTER_ID)).expect("a KafkaCluster");
+    let without_id: weirkeeper::crds::kafka_cluster::KafkaCluster =
+        serde_json::from_str(&kafka_cluster_without_observed_id()).expect("a KafkaCluster");
+    let resolved =
+        weirkeeper::connection::resolve(&with_id, weirkeeper::connection::ConnectionUse::Discovery)
+            .expect("it resolves");
+    assert_eq!(
+        sel::source_digest(&resolved, &with_id).expect("digests"),
+        sel::source_digest(&resolved, &without_id).expect("digests"),
+        "gaining or losing status.clusterId is not a change to the SOURCE"
+    );
+
+    // And a whole pass agrees: the Job was dispatched while the id was there,
+    // the probe has since cleared it, and the run freezes.
+    let entries = [entry("orders", 6)];
+    let inventory = inventory_of(&entries, CLUSTER_ID, false);
+    let mut routes = finished_routes(
+        NAME,
+        UID,
+        relay_log(&entries, &inventory, UID),
+        pod_list(vec![pod_object(
+            POD,
+            Some(DISCOVERY_JOB_UID),
+            &discovery_job(UID),
+        )]),
+        CLUSTER_ID,
+    );
+    for route in &mut routes {
+        if route.method == "GET" && route.path_suffix.ends_with("/kafkaclusters/prod") {
+            route.body = kafka_cluster_without_observed_id();
+        }
+    }
+    let (terminal, bodies) = reconcile_with(&visible_only(), routes).await;
+    assert_eq!(
+        terminal,
+        None,
+        "a cleared status.clusterId does not kill a good run: {:?}",
+        calls(&bodies)
+    );
+    assert_eq!(frozen_inputs(&bodies)["topics"], json!(["orders"]));
+}
+
+/// **EVERY REFUSAL ARMS THE DISCOVERY JOB'S TTL, AND ONLY AFTER THE TERMINAL
+/// STATUS LANDED** — D1 §7.2 R9's ordering, applied to the paths that do not
+/// freeze.
+///
+/// A refused run has reached its conclusion, so the relay on the discovery pod
+/// is no longer needed and the Job may be collected. Without this, a namespace
+/// with a dynamic schedule against an under-permissioned principal accumulates
+/// one finished Job, one pod and one plan `ConfigMap` per attempt.
+///
+/// KILLS: arming the TTL only on the resolved path; arming it before the
+/// terminal status write; arming it on a refusal raised before the Job exists
+/// (a 404 the route table would panic on).
+#[tokio::test]
+async fn every_refusal_leaves_the_discovery_job_collectable() {
+    let ttl_path = format!("/jobs/{}", discovery_job(UID));
+    // (backup, entries, cluster id the broker reports, expected state)
+    let cases: Vec<(Backup, Vec<TopicEntry>, &str, &str)> = vec![
+        (
+            visible_only(),
+            vec![internal_entry("__consumer_offsets")],
+            CLUSTER_ID,
+            TERMINAL_STATE_SELECTION_EMPTY,
+        ),
+        (
+            refusing(),
+            vec![entry("orders", 6)],
+            CLUSTER_ID,
+            TERMINAL_STATE_DISCOVERY_INCOMPLETE,
+        ),
+        (
+            visible_only(),
+            vec![entry("orders eu", 6)],
+            CLUSTER_ID,
+            TERMINAL_STATE_DISCOVERY_RESULT_UNREADABLE,
+        ),
+        (
+            visible_only(),
+            vec![entry("orders", 6)],
+            "a-different-cluster",
+            TERMINAL_STATE_SOURCE_CHANGED_DURING_RESOLUTION,
+        ),
+    ];
+    for (b, entries, reported, expected) in cases {
+        let inventory = inventory_of(&entries, reported, false);
+        let routes = finished_routes(
+            NAME,
+            UID,
+            relay_log(&entries, &inventory, UID),
+            pod_list(vec![pod_object(
+                POD,
+                Some(DISCOVERY_JOB_UID),
+                &discovery_job(UID),
+            )]),
+            CLUSTER_ID,
+        );
+        let (terminal, bodies) = reconcile_with(&b, routes).await;
+        assert_eq!(terminal.as_deref(), Some(expected), "{:?}", calls(&bodies));
+        let status_at = bodies
+            .iter()
+            .position(|r| r.method == "PATCH" && path(&r.uri).ends_with("/status"))
+            .expect("a terminal status is written");
+        let ttl_at = bodies
+            .iter()
+            .position(|r| {
+                r.method == "PATCH"
+                    && path(&r.uri).ends_with(&ttl_path)
+                    && r.body.contains("ttlSecondsAfterFinished")
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "{expected} leaves the Job collectable: {:?}",
+                    calls(&bodies)
+                )
+            });
+        assert!(
+            status_at < ttl_at,
+            "{expected}: the terminal status lands before the TTL: {:?}",
+            calls(&bodies)
+        );
+    }
+
+    // AND A REFUSAL RAISED BEFORE ANY JOB EXISTS PATCHES NOTHING — `start_routes`
+    // has no PATCH route for the discovery Job, so the double would panic.
+    let mut value = serde_json::to_value(visible_only()).expect("serialisable");
+    value["spec"]["deadlineSeconds"] = json!(60);
+    let early: Backup = serde_json::from_value(value).expect("a Backup");
+    let (terminal, bodies) = reconcile_with(&early, start_routes()).await;
+    assert_eq!(
+        terminal.as_deref(),
+        Some(weirkeeper::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID)
+    );
+    assert!(
+        !calls(&bodies)
+            .iter()
+            .any(|c| c.starts_with("PATCH") && c.contains("lwd-")),
+        "no TTL for a Job that was never created: {:?}",
+        calls(&bodies)
+    );
+}
+
+/// **A FINISHED DISCOVERY WITH NO RECORDED FINISH INSTANT IS REFUSED, NOT
+/// DATED FROM THE CLOCK** — the freeze's byte-stability, D1 §3.3.
+///
+/// `selection.discovery.observedAt` goes into an IMMUTABLE plan, and the plan's
+/// digest is what `verify_frozen_config_map` compares on every later pass. A
+/// value taken from `now` would differ between the pass that POSTed the plan
+/// and any pass that re-renders it — turning a run that was fine into a
+/// terminal `PlanConfigMapConflict` for no reason but the passage of time.
+///
+/// KILLS: falling back to `now` in `recorded_finish`; taking the instant from
+/// anywhere the API server did not record it.
+#[tokio::test]
+async fn a_discovery_with_no_recorded_finish_instant_is_refused() {
+    assert!(
+        sel::recorded_finish(&undated_finished_job(), Some(&undated_pod())).is_none(),
+        "no terminated finishedAt, no completionTime and no condition timestamp is no instant"
+    );
+    // The ordinary fixture DOES carry one, so the refusal is not vacuous.
+    let dated: k8s_openapi::api::batch::v1::Job = serde_json::from_str(&discovery_job_body(
+        UID,
+        UID,
+        Some("Complete"),
+        &source_sha(CLUSTER_ID),
+    ))
+    .expect("a Job");
+    let dated_pod: k8s_openapi::api::core::v1::Pod = serde_json::from_value(pod_object(
+        POD,
+        Some(DISCOVERY_JOB_UID),
+        &discovery_job(UID),
+    ))
+    .expect("a Pod");
+    assert!(sel::recorded_finish(&dated, Some(&dated_pod)).is_some());
+
+    let entries = [entry("orders", 6)];
+    let inventory = inventory_of(&entries, CLUSTER_ID, false);
+    let mut routes = finished_routes(
+        NAME,
+        UID,
+        relay_log(&entries, &inventory, UID),
+        pod_list(vec![serde_json::to_value(undated_pod()).expect("a Pod")]),
+        CLUSTER_ID,
+    );
+    for route in &mut routes {
+        if route.method == "GET" && route.path_suffix.ends_with(&discovery_job(UID)) {
+            route.body = serde_json::to_string(&undated_finished_job()).expect("serialisable");
+        }
+    }
+    let (terminal, bodies) = reconcile_with(&visible_only(), routes).await;
+    assert_eq!(
+        terminal.as_deref(),
+        Some(TERMINAL_STATE_DISCOVERY_RESULT_UNREADABLE),
+        "{:?}",
+        calls(&bodies)
+    );
+    assert!(posted_config_maps(&bodies).is_empty(), "nothing was frozen");
 }
 
 /// **A `v1`-FROZEN `Backup` IS UNTOUCHED BY ANY OF THIS** — D1 §3.3, §7.7.

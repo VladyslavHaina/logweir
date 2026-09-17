@@ -8192,30 +8192,34 @@ async fn a_month_thirteen_slot_and_a_foreign_legacy_owner_are_refused_before_any
 }
 
 /// **A FROZEN RUN EXECUTES THE SELECTION IT WAS ADMITTED WITH, AND NEVER
-/// RESOLVES A SECOND ONE** — D1 §12's `a_frozen_dynamic_backup_never_reruns_discovery`,
-/// in the strongest form this build can state it.
+/// RESOLVES A SECOND ONE** — the NAMED-shape half of the post-freeze gate.
 ///
-/// # What makes this row real today
+/// # Which half this is, and where the other one lives
 ///
-/// This build resolves no discovery, so a dynamic run cannot be frozen through
-/// the reconciler. What CAN be built is the state such a run leaves behind: a
-/// `v2` plan whose frozen `topics` and `selection` are **not** what a fresh
-/// resolution would produce — here `AllUserTopics` coverage over a list the
-/// spec does not name — plus the `status.execution` a freeze records. A
-/// Job-recreate pass over that state is exactly the pass W5's discovery would
-/// sit in, and the assertions are the ones that matter whether the second
-/// resolution would come from a discovery Job or from `spec.topics`: the Job is
-/// re-created **from the stored plan**, there is no `PlanConfigMapConflict`, and
-/// nothing resolves a selection again.
+/// The fixture is [`backup`] — `spec.topics: ["orders","payments"]` and **no**
+/// `spec.allUserTopics` — so its declared shape is `SelectedTopics` and the
+/// dynamic arm of the gate is never entered here. What it holds is the half
+/// that is true for every run: a `v2` plan whose frozen `topics` and
+/// `selection` are **not** what a fresh resolution would produce — here
+/// `AllUserTopics` coverage over a list the spec does not name — is still what
+/// a Job-recreate pass executes, because the gate reads the plan back rather
+/// than re-resolving from `spec`.
 ///
-/// Without the gate, `desired` is built from `spec` (or, after W5, from a fresh
-/// discovery), the stored `topics`/`selection` no longer match it, and
+/// **The dynamic half — D1 §12's row of this name — is
+/// `tests/backup_selection.rs`'s `a_frozen_dynamic_backup_never_reruns_discovery`**,
+/// which freezes a real dynamic run and re-passes it over a route table with no
+/// discovery-Job route and no pod route at all, so a second discovery is a
+/// panic rather than an assertion. A gate bypass scoped to
+/// `SelectionShape::AllUserTopics` alone leaves THIS row passing and kills that
+/// one.
+///
+/// Without the gate, `desired` is built from `spec` (or, in dynamic mode, from
+/// a fresh discovery), the stored `topics`/`selection` no longer match it, and
 /// `verify_frozen_config_map` refuses the run terminally — on an archive that
 /// may be half written, for no reason but the passage of time.
 ///
-/// KILLS: removing the `status.execution` gate from the W5 call site;
-/// resolving the selection before the gate; building `desired` from `spec`
-/// when a plan exists.
+/// KILLS: removing the `status.execution` gate; building `desired` from `spec`
+/// when a plan exists; re-rendering the plan instead of verifying it.
 #[tokio::test]
 async fn a_frozen_dynamic_backup_never_reruns_discovery() {
     // A plan frozen for a selection the spec does not state: the resolved list
