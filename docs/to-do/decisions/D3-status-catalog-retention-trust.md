@@ -288,7 +288,7 @@ stays absent). The restore runner additionally prints a conditional
 `offset-report-key=`); the controller verifies the teardown attestation with
 `PAYLOAD_TYPE_TEARDOWN` and copies names into `status.teardown`. Both are additions to the
 interface I7/I8 key-line contract and bump `logweir_core::execution_contract::VERSION` to `"2"`
-together with the §5 point binding (old runners reject the new version argument before dispatch).
+together with the §5 point binding (old runners reject the new version argument before dispatch). *(Amended 2026-09-17 at W5's integration, review `d3w5`: the `progress-contract=` line is ratified as the backup path's only version signal. It means the execution contract version when the run was invoked under one — the restore path — and the binary's own version otherwise; a consumer must read it against the path it is on and never treat the two as one number space.)*
 
 ### 2.5 Stage and normalized state mapping (pure, table-tested; `logweir-api/src/status.rs`)
 
@@ -644,7 +644,7 @@ policy  {...}, requester {...}, issuedAt, expiresAt   # expiresAt - issuedAt <= 
 - Each slot: the controller (a) recomputes the digest, (b) re-verifies the Approval is
   `Verified=True` with a subject UID equal to this schedule's UID, (c) checks `expiresAt` is in the
   future, (d) renders the plan and proves `plan ∈ scope` with the pure
-  `logweir_core::rehearsal_scope::plan_within_scope(plan, scope)` (prefix, target cluster id,
+  `logweir_core::execution_contract::plan_within_scope(&PlanScopeFacts, &RehearsalScope)` (amended 2026-09-17 at W5's integration: the landed predicate takes the plan's scope FACTS, produced by `plan_scope_facts`, so both producers — the controller before admission and the runner before any data-plane work — compare the same projection; the earlier `rehearsal_scope::` path was never landed) (prefix, target cluster id,
   topics, mode scratch, partitions, records per partition, deadline), (e) creates the Restore with
   `spec.authorization {kind: Standing, approvalRef, rehearsalScheduleRef}` and a bundle carrying
   the authorization document, its signatures, the trusted public keys, the scope and the rendered

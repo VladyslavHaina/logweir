@@ -141,7 +141,7 @@ Wave 2 resumes every branch in place with the prompts under
 | PLAT-17.1 (stages 1 and 3) | In progress (stages landed) | plat17-api-finish, plat17-api-review | Partial record under PLAT-17.1. Integrated into main as `4b571d1..de0207c`. Remaining for Done: console image and chart with the API's own RBAC (D0 stage 7), transient-check cancellation once PLAT-03/09.1 exist, `POST …/backups` (PLAT-06.2), SSE (PLAT-14.1), a browser journey through the API, and PLAT-17.2. |
 | PLAT-04.2, 05.x, 06.2, 09.2 | Contract decided | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. W1 (the pure cadence engine) landed in main as `6eedc0a..4b54a5c` after review; see the PLAT-04.2 partial record. W3a (the `Backup` run contract: `spec.trigger`, `spec.scheduleRef` with generation and `runPolicySha256`, the selection type with `allUserTopics` requiring `incompleteDiscovery`, `status.selection`, `src/identity.rs`, `src/policy.rs`, the §3.4 vocabulary) landed in `696c81a`/`b334a98` inside `crds-shapes`; a `Backup` naming both `topics` and `allUserTopics` is refused by CEL and, terminally, by admission. W3b (the reconciler consumes the contract; grammar `v2`) landed at `397e37d`; see the PLAT-04.2 partial record. W2 (editable policy, the §4.5 scheduler; `destinationRef` editable) landed at `98257f8`; see the PLAT-05.1/04.2 partial record. W4, W5, W6, W7, W8 remain. |
 | PLAT-03.x, 08.x, 09.1 | In progress (W1, W2, W3, W4, W5, W6a, W6b, W7, W8, W9, W12 landed) | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. W1 (pure check contract and destination model) and W2 (explicit store options) landed as `c13b0cc..56bd074` after review (ACCEPT after two high and three medium fixes: JSON-form redaction bypass, ambient credentials inheriting the environment). W3 (`logweir_kafka::inventory`: bounded targeted describe, broker count, validate-only `CreateTopics`, error classification where an observed authorization failure makes visibility `limited` and anything unknown is failure, with a real admin-client fault capture because rdkafka 0.36 never invokes `ClientContext::error` for a metadata-only workflow — D2 §4.2 `[VERIFY U5]` corrected) and W5 (`weirkeeper::check`: check Jobs mirroring the execution pod, pod selection by controller owner UID only, framed-stdout relay through the W1 decoder, the full waiting-code table, TTL, plan/chunk/limit modules, the installation policy loader failing closed) landed as `23cec50..b8e62d1` after review (ACCEPT after one high and three medium fixes; 19 mutants killed; the rebase over PLAT-07.1 then routed the inventory client through the reader's `client_config`, removing a drifted copy that could upgrade plaintext to TLS when a CA was present — re-checked ACCEPT; weirkeeper 435, kafka 57). RBAC still owed by W11: `events: list` plus its `manifest_lint` row, the three new kinds' verbs, and a decision on `gc.rs`'s deletes. The reviewers' SEC-PODLOG finding against `controllers::backup::select_job_pod` is closed by `secpodlog` (see the defects table). W6a and W6b (the three Amendment F kinds and the destination sentinel on existing kinds) landed in `46880a3`/`88232f5`/`b334a98` inside `crds-shapes`; W7 (destination resolver, controller, evidence store cache) landed as `27fb924..0b25e95` (see the PLAT-08.1 partial record); W4 (runner `logweir check run`) landed at `537657d` (see the PLAT-03 partial record); W8 (`TopicDiscovery` controller) and W12 (API routes) are in review or in progress. W9, W10, W11, W13, W14 remain. |
-| PLAT-14.x, 15.x, 16.x, 19.1 | In progress (W0, W1, W3, W4, W8 landed) | [D3](decisions/D3-status-catalog-retention-trust.md) | Operation states, protection freshness, rehearsals, durable catalog, retention enforcement boundary, trust lifecycle; fifteen worker tasks. W4 (`d3-notify`: the shared notification module and `logweir notify deliver`) landed after review (ACCEPT after two high fixes); W3 (`d3-catalog-writer`: signed catalog point records, `list_page`, `logweir catalog sync|list`) landed after review (see the PLAT-15.1 partial record); W0 (the five Amendment G kinds, additive run status, `Restore.spec` additions, the `Approval` enum) landed in `496451a`/`88232f5`/`b334a98` inside `crds-shapes`; W1 (trust lifecycle core, `TrustPolicy` controller, `trust export|migrate-roster`, G8) landed as `64fcd38..5fc1a72` (see the PLAT-19.1 partial record); W8 (`RecoveryCatalog` controller) in progress. W2, W5, W6, W7, W9, W10, W11, W12, W13, W14 remain. |
+| PLAT-14.x, 15.x, 16.x, 19.1 | In progress (W0, W1, W3, W4, W8, W5 landed) | [D3](decisions/D3-status-catalog-retention-trust.md) | Operation states, protection freshness, rehearsals, durable catalog, retention enforcement boundary, trust lifecycle; fifteen worker tasks. W4 (`d3-notify`: the shared notification module and `logweir notify deliver`) landed after review (ACCEPT after two high fixes); W3 (`d3-catalog-writer`: signed catalog point records, `list_page`, `logweir catalog sync|list`) landed after review (see the PLAT-15.1 partial record); W0 (the five Amendment G kinds, additive run status, `Restore.spec` additions, the `Approval` enum) landed in `496451a`/`88232f5`/`b334a98` inside `crds-shapes`; W1 (trust lifecycle core, `TrustPolicy` controller, `trust export|migrate-roster`, G8) landed as `64fcd38..5fc1a72` (see the PLAT-19.1 partial record); W8 (`RecoveryCatalog` controller) in progress. W2, W5, W6, W7, W9, W10, W11, W12, W13, W14 remain. |
 
 ### Decision records
 
@@ -213,7 +213,7 @@ surviving. None is fixed yet except where a worker is named.
 | UI-HTTPDOWNGRADE | The restore wizard sets `allowHttp` from the path-style checkbox (`ui/pages/restore-wizard.js:1142`) and applies one endpoint/region/addressing to both the source archive and evidence store (`:1135`). **First half fixed** in `6c2c95e` (D2 W13a): path-style never sets `allowHttp`; an explicit, separate "allow insecure HTTP" control defaulting off is the only source of `allow_http: true`, guarded by a behaviour row and a live journey that reads the plan bytes the API server holds. The one-endpoint-for-archive-and-evidence half remains PLAT-08.2. | PLAT-08.2 UI slice |
 | UI-FAKEPREFLIGHT | Wizard step 5 "Target-topic preflight" shows only the target cluster's cached `status.reachable` (`ui/pages/restore-wizard.js:424`), and restore admission gates on the same cached value (`controllers/restore.rs:638`). | PLAT-03.2 |
 | RET-WRONGBUCKET | Retention lists manifests through the controller's single global store while rendering commands for the schedule's own URL (`backup_schedule.rs:1417`), so a schedule on another bucket is reported against the wrong catalog. Since D1 W2 (2026-09-17) `destinationRef` is editable, so the wrong-bucket case is also reachable by an edit between runs; retention must evaluate per frozen run (D3 W9), not the schedule's current URL. | PLAT-16.1 |
-| FLAKE-APISHUTDOWN | `a_held_connection_does_not_block_shutdown_past_the_grace_period` (`crates/logweir-api/tests/local_admin.rs`) fails with `ConnectionReset` when several cargo test runs share the host and passes in isolation (2/2 on 2026-09-17 at the D2 W12 rebase); the held connection's read `unwrap`s, so a reset past the grace deadline — the behaviour under test — is reported as an error. Fix: accept reset/EOF after the deadline as the pass, or serialise the process tests. Recorded, not fixed. | PLAT-17.1 |
+| FLAKE-APISHUTDOWN | `a_held_connection_does_not_block_shutdown_past_the_grace_period` (`crates/logweir-api/tests/local_admin.rs`) fails with `ConnectionReset` when several cargo test runs share the host and passes in isolation (2/2 on 2026-09-17 at the D2 W12 rebase); the held connection's read `unwrap`s, so a reset past the grace deadline — the behaviour under test — is reported as an error. Also seen under the same load: `the_binary_serves_loopback_and_stops_on_sigterm` ("answers within five seconds: ConnectionReset", the d2w9 integration gates, 2412/1) and once `a_non_loopback_listener_is_refused_before_anything_is_bound`; the suite is 12/12 alone. Fix (assigned to `flake-localadmin`): assert the property, not the timing — retry until a load-tolerant `SERVE_LIMIT`, treat a reset after the grace deadline as the pass, and prove a genuine hang still fails. | PLAT-17.1 |
 | ENGINE-PATHSTYLE | The pinned engine ignores `path_style` and forces path-style addressing whenever an endpoint is set (`kafka-backup-core storage/s3.rs:66`), so virtual-hosted addressing with a custom endpoint cannot be honoured and must be refused rather than advertised. | PLAT-08.1 (documented refusal) |
 | STATUS-RECORDS | `Backup.status.records` is declared in `config/crd/backups.yaml` with a `RECORDS` printer column and is never written by any controller path; it is blank on every Backup the PLAT-06.1 and PLAT-07.1 live runs produced and on the lab's own scheduled Backup, while the counts exist in the signed receipt. Found by plat07-live. Either write it from the verified receipt or drop the field and column. | PLAT-14.1 (D3 W2 status/progress) |
 | RECEIPT-DUP | A Backup Job re-created from its frozen inputs (PLAT-06.1 case e) writes a second run-id receipt under the same execution id while overwriting the manifest at the same key; if the topic advanced between the runs, the first signed receipt's digests no longer match and a verifier reports it Invalid. Found by plat06-review (M1); run identity is idempotent, signed evidence is not. | PLAT-15.1 catalog / D3 W3 (point identity is content-derived from the receipt) |
@@ -1510,6 +1510,57 @@ and incomplete verification are separately legible. **Tests:** Mount failure,
 unschedulable pod, engine crash, verification downgrade, stream disconnect,
 refresh and completed Job cleanup. **Dependencies:** PLAT-03.1, PLAT-13.1;
 PLAT-17.1 for shared status endpoints.
+
+**Partial record (2026-09-17) — PLAT-14.1, PLAT-14.3 and PLAT-19.2 runner half: D3
+W5, execution contract v2 with the progress channel, the recovery-point binding and
+the standing-authorization scope check; the tasks stay In progress until D3 W2
+(controller-side progress and diagnostics), W7 (the rehearsal controller that
+PRODUCES the signed authorization document) and W14 (live) land.** Landed in main
+as ``/`f5e2e66` (`logweir_core::execution_contract` v2: `ContractVersion {V1, V2}`
+explicit in the type, point binding, the scope predicate, the progress grammar),
+`51f5b70`/`cbab961` (the runner half), `b4bcbcd`/`057d9b0` (tests) and `c3f7ddf`/`7e13fdc` (docs).
+Contract (`docs/stability.md`, `docs/formats/`): `VERSION = "2"`; a `v1` invocation
+is accepted only when it carries NO v2 material (five optional environment items and
+`source.point` are each refused by name under `v1`), the only test a credential-less
+runner can perform, and a `v1` document still loads and verifies byte for byte (S4);
+the three bundle members are digest-pinned and verified before any data-plane work.
+Stdout grammar: `progress-contract=2` once (ratified — on the restore path it is the
+execution contract version, otherwise the binary's own; D3 §2.4 amended), then
+`progress-phase=<n>:<name>` from a closed vocabulary (restore 0–9; backup
+`-1:admit|engine|readback|sign|upload`) within a 96-byte bound; `teardown-key=` only
+when phase 9 attested, before I8's trio, also on exit 2, and never after a
+`refusal-reason=` line (I9's "final line for exit 3" holds). Point binding: the plan's
+bound recovery-point id and receipt digest must match what the archive holds — a
+manifest that hashes to something else is `GuardRefused` "hashes to", a manifest the
+archive does not hold is refused — before any data-plane work. Standing authorization
+(PLAT-19.2, D3 §4.3): the bundle member is the SIGNED authorization document — an
+envelope, its DSSE sidecar and the trusted public keys, each digest-pinned — and the
+runner verifies the signature over the envelope BEFORE parsing it, judges the
+verifying key's usage (an `EvidenceSigning` key is `KeyUsageMismatch`, not a bad
+signature), checks kind, subject UID, window and a 90-day cap, then derives the scope
+and refuses a rendered plan outside it (`execution_contract::plan_within_scope(&PlanScopeFacts,
+&RehearsalScope)` over prefix, target cluster id — exactly the signed id, no
+prefix or glob — topics, mode, `max_partitions` (absent ⇒ unbounded ⇒ mismatch),
+records per partition; D3 §4.3(d) amended to the landed symbol); the schedule UID is
+a verified binding, `templateDigest` stays the controller's check. Verified at `63fe262`
+on main: `logweir-core` + `logweir` 1200/1200 (+80), strict clippy and fmt,
+`check-pure-core`, `check-one-signer` (verification only, signing crates
+unchanged), `check-verifier-parity`, `verify-py` 106, `doc_lint`/`gate_lint`/
+`withdrawn_claim`; fourteen planted mutants killed (five original, eight from the fix
+round including the review's surviving manifest-digest one, and the review's
+confused-deputy mutant — the usage judged is the VERIFYING key's, proven by a
+two-key keyring row in both directions; two real defects found by the original five). Independent review `claude/d3w5.review.md`: ACCEPT-WITH-FIXES
+(one high: the standing scope was not signature-verified at the runner — fixed by
+landing the signed document here rather than deferring to W7; four medium; five
+low) then ACCEPT after one test-only follow-up. Hand-offs recorded: D3 W2 must raise or budget weirkeeper's
+`KEY_SCAN_TAIL_LINES` (a passing restore now prints seven of the eight trailing
+lines — a runner-side row pins the count); W7/PLAT-19.2 must produce the signed
+document exactly as `claude/d3w5.result.md` §R1.3 states, and should say in signed
+material that a run is a rehearsal (review F8). Live: none here — W14 owes an old
+runner refusing a v2 invocation and a rehearsal refused out of scope against a real
+archive. Gaps: no declared terminal state for the new refusals (`TERMINAL_STATES` is
+W2's); the receipt signature is not yet judged against the trust bundle (D3 W10).
+Migration: additive; every `v1` plan keeps running.
 
 ### PLAT-14.2 — Add protection freshness and useful notifications
 
