@@ -7744,55 +7744,81 @@ fn a_retry_freezes_a_new_execution_id_and_a_catch_up_reuses_the_slots() {
     );
 }
 
-/// **A DYNAMIC SELECTION IS REFUSED TERMINALLY, AND NO EMPTY ALLOWLIST EVER
-/// REACHES THE ENGINE** — D1 §7.1, guard **G-GLOB**, until W5 lands.
+/// **A DYNAMIC SELECTION STARTS A DISCOVERY, AND NO EMPTY ALLOWLIST EVER
+/// REACHES THE ENGINE** — D1 §7.1, §7.2 R2, guard **G-GLOB**.
 ///
-/// `spec.allUserTopics` with `topics: []` is a VALID D1 §7.1 shape that this
-/// build cannot resolve. The only two things it may do are refuse the run or
-/// resolve it; what it must never do is render `spec.topics` — empty, in this
-/// mode — into `backup.yaml`, which is precisely the "no allowlist means
-/// everything" shape the mandatory allowlist exists to make impossible.
+/// `spec.allUserTopics` with `topics: []` is D1 §7.1's second shape. The only
+/// two things this controller may do with it are resolve it or refuse it; what
+/// it must never do is render `spec.topics` — empty, in this mode — into
+/// `backup.yaml`, which is precisely the "no allowlist means everything" shape
+/// the mandatory allowlist exists to make impossible.
 ///
-/// KILLS: falling through to the freeze with an empty list; treating the
-/// dynamic shape as the third (invalid) shape and thereby refusing it for the
-/// wrong reason in a way W5 would have to unpick; requeueing forever on a
-/// CEL-immutable spec.
+/// Since PLAT-09.2 it RESOLVES it: one discovery Job owned by this `Backup`,
+/// its plan `ConfigMap` first, phase `Resolving`, and no runner Job until the
+/// exact names are frozen. The whole state machine lives in
+/// `tests/backup_selection.rs`; this row is the `backup_controller` half —
+/// that the shape reaches the resolver at all, and that the freeze boundary
+/// still refuses an empty or patterned list from ANY producer.
+///
+/// KILLS: falling through to the freeze with an empty list; creating the runner
+/// Job before the names exist; refusing the dynamic shape as the third
+/// (invalid) shape; creating the discovery Job before its plan.
 #[tokio::test]
-async fn a_dynamic_selection_is_refused_and_no_empty_allowlist_reaches_the_engine() {
+async fn a_dynamic_selection_starts_a_discovery_and_no_empty_allowlist_reaches_the_engine() {
     let mut value: Value = serde_json::from_str(&backup_json()).expect("JSON");
     value["spec"]["topics"] = serde_json::json!([]);
     value["spec"]["allUserTopics"] =
         serde_json::json!({ "incompleteDiscovery": "BackUpVisibleTopics" });
+    // EVERY STATUS WRITE ON THE DYNAMIC PATH IS A `resourceVersion`
+    // COMPARE-AND-SET (D-SEAMS S7), so the fixture carries one.
+    value["metadata"]["resourceVersion"] = serde_json::json!("4242");
     let b: Backup = serde_json::from_value(value).expect("a Backup");
 
-    let (terminal, bodies) =
-        reconcile_with(&b, create_routes(201, existing_plan_config_map(UID))).await;
+    let mut routes = create_routes(201, existing_plan_config_map(UID));
+    routes.push(Route {
+        method: "GET",
+        path_suffix: "/jobs/lwd-3f1c8a5e-0000-4000-8000-0000000000a1",
+        status: 404,
+        body: not_found_body("jobs.batch", "lwd-3f1c8a5e-0000-4000-8000-0000000000a1"),
+    });
+    let (terminal, bodies) = reconcile_with(&b, routes).await;
+    assert_eq!(terminal, None, "{:?}", calls(&bodies));
+
+    let job = posted_job(&bodies).expect("a Job is created");
     assert_eq!(
-        terminal.as_deref(),
-        Some(TERMINAL_STATE_INVALID_TOPIC_SELECTION),
-        "{:?}",
+        job["metadata"]["name"],
+        serde_json::json!("lwd-3f1c8a5e-0000-4000-8000-0000000000a1"),
+        "the ONE Job this pass creates is the discovery Job: {:?}",
         calls(&bodies)
     );
-    assert!(
-        !bodies.iter().any(|r| r.method == "POST"),
-        "no plan ConfigMap and no Job: {:?}",
-        calls(&bodies)
-    );
-    let refused = patched_statuses(&bodies)
-        .pop()
-        .expect("the refusal is written");
-    assert!(
-        refused["conditions"]
-            .as_array()
-            .expect("conditions")
+    assert_eq!(
+        bodies
             .iter()
-            .any(|c| c["message"].as_str().is_some_and(|m| m.contains("G-GLOB"))),
-        "the message says WHY it is a refusal and not an empty run: {refused}"
+            .filter(|r| r.method == "POST" && path(&r.uri).ends_with("/jobs"))
+            .count(),
+        1,
+        "and no runner Job: {:?}",
+        calls(&bodies)
+    );
+    let plan = posted_config_map(&bodies);
+    assert_eq!(
+        plan["metadata"]["name"],
+        serde_json::json!("lwd-3f1c8a5e-0000-4000-8000-0000000000a1-plan"),
+        "the discovery plan, POSTed before the Job"
+    );
+    let status = patched_statuses(&bodies)
+        .pop()
+        .expect("the Resolving status is written");
+    assert_eq!(status["phase"], serde_json::json!("Resolving"));
+    assert_eq!(
+        condition_named(&status, "TopicsResolved").map(|(s, r, _)| (s, r)),
+        Some(("False".to_string(), "DiscoveryRunning".to_string())),
+        "{status}"
     );
 
     // AND THE FREEZE BOUNDARY ITSELF REFUSES AN EMPTY OR PATTERNED LIST,
-    // whatever produced it. W5's resolver is the second producer of a
-    // `ResolvedSelection`, and this is the rail it will be behind.
+    // whatever produced it. The discovery resolver is the second producer of a
+    // `ResolvedSelection`, and this is the rail it is behind.
     let cluster = prod_cluster();
     let mut empty = ResolvedSelection::named(&backup().spec);
     empty.topics.clear();
