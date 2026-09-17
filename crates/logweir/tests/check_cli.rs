@@ -3414,6 +3414,45 @@ mod live {
         std::env::set_var(MINIO_PASSWORD_VAR, "minioadmin");
         std::env::set_var("AWS_REGION", "us-east-1");
         let dir = tempfile::tempdir().unwrap();
+        // A TOPIC OF THIS ROW'S OWN, with records in it.
+        //
+        // `topic-setup` creates `test-topic` and produces nothing into it, and
+        // `logweir backup run` refuses a backup set that "declares no segment
+        // for any of the named topics" — correctly: an archive of an empty
+        // topic bounds no window, and a receipt naming one would attest to
+        // nothing. So this row seeds its own topic rather than depending on
+        // `scripts/e2e-seed.sh`, and it does not touch `test-topic`, which
+        // other e2e suites assert the shape of.
+        let source_topic = "check-e2e-src";
+        let seed = std::process::Command::new("docker")
+            .args([
+                "compose",
+                "-f",
+                &repo_root()
+                    .join("e2e/compose/docker-compose.yml")
+                    .to_string_lossy(),
+                "exec",
+                "-T",
+                "kafka-broker-1",
+                "bash",
+                "-c",
+            ])
+            .arg(format!(
+                "/opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka-broker-1:9094 \
+                 --create --if-not-exists --topic {source_topic} --partitions 1 \
+                 --replication-factor 1 && seq 1 200 | \
+                 /opt/kafka/bin/kafka-console-producer.sh \
+                 --bootstrap-server kafka-broker-1:9094 --topic {source_topic}"
+            ))
+            .output()
+            .expect("the compose broker is reachable through `docker compose exec`");
+        assert!(
+            seed.status.success(),
+            "seeding `{source_topic}` failed:\n{}\n{}",
+            String::from_utf8_lossy(&seed.stdout),
+            String::from_utf8_lossy(&seed.stderr)
+        );
+
         let backup_id = format!(
             "check-e2e-{}",
             std::time::SystemTime::now()
@@ -3426,7 +3465,7 @@ mod live {
                 "backup_id: {id}\n",
                 "source:\n",
                 "  bootstrap_servers: [{bootstrap}]\n",
-                "  topics: [test-topic]\n",
+                "  topics: [{topic}]\n",
                 "storage:\n",
                 "  backend: s3\n",
                 "  bucket: kafka-backups\n",
@@ -3437,15 +3476,59 @@ mod live {
                 "  allow_http: true\n",
             ),
             id = backup_id,
+            topic = source_topic,
             bootstrap = plain_bootstrap(),
             endpoint = s3_endpoint()
         );
         std::fs::write(dir.path().join("backup.yaml"), spec).unwrap();
         std::fs::write(
             dir.path().join("allowed.json"),
-            br#"{"allowed_cluster_ids":[],"refuse_if_source":true}"#,
+            br#"{"allowed_cluster_ids":[],"source_cluster_id":null}"#,
         )
         .unwrap();
+
+        // THE ENGINE ROUTE, resolved the way `scripts/demo.sh` resolves it and
+        // never hardcoded: upstream publishes `osodevops/kafka-backup` for
+        // linux/amd64 only, so on darwin/arm64 `.engine/kafka-backup` cannot be
+        // exec'd at all (ENOEXEC) and `e2e/fixtures/engine-docker.sh` is the
+        // stand-in. The version in the SIGNED receipt has to describe the
+        // binary that really ran, which is why it is read off `--version`
+        // rather than typed here (global ruling GR8 permits `--version`).
+        let native = repo_root().join(".engine/kafka-backup");
+        let shim = repo_root().join("e2e/fixtures/engine-docker.sh");
+        let engine_bin = if std::process::Command::new(&native)
+            .arg("--version")
+            .output()
+            .is_ok_and(|o| o.status.success())
+        {
+            native
+        } else {
+            shim
+        };
+        let version_out = std::process::Command::new(&engine_bin)
+            .arg("--version")
+            .output()
+            .expect("the engine answers --version");
+        assert!(
+            version_out.status.success(),
+            "neither the native engine nor the container shim answered --version;              `just engine` extracts the first and the second needs the pinned image: {}",
+            String::from_utf8_lossy(&version_out.stderr)
+        );
+        let engine_version = String::from_utf8_lossy(&version_out.stdout)
+            .split_whitespace()
+            .last()
+            .expect("--version prints a version")
+            .to_string();
+        let engine_digest =
+            std::fs::read_to_string(repo_root().join("third_party/kafka-backup-binary.digest"))
+                .expect("the pinned digest is readable")
+                .trim()
+                .to_string();
+        // The ONE host directory the engine reads and writes, mounted at the
+        // SAME path inside the container so every absolute path Logweir
+        // rendered is valid there too (`e2e/fixtures/engine-docker.sh`).
+        let engine_mount = repo_root().join(".e2e/tmp");
+        std::fs::create_dir_all(&engine_mount).unwrap();
 
         let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_logweir"));
         cmd.args([
@@ -3460,7 +3543,14 @@ mod live {
                 .join("e2e/fixtures/signed/signing.pem")
                 .to_string_lossy(),
         ]);
-        cmd.env("LOGWEIR_ENGINE", repo_root().join(".engine/kafka-backup"));
+        cmd.env("LOGWEIR_ENGINE_BIN", &engine_bin)
+            .env("LOGWEIR_ENGINE_VERSION", &engine_version)
+            .env("LOGWEIR_ENGINE_DIGEST", &engine_digest)
+            .env("LOGWEIR_E2E_ENGINE_MOUNT", &engine_mount)
+            .env("TMPDIR", &engine_mount)
+            .env("AWS_ACCESS_KEY_ID", MINIO_USER)
+            .env("AWS_SECRET_ACCESS_KEY", "minioadmin")
+            .env("AWS_REGION", "us-east-1");
         let backup = bounded_output(&mut cmd, std::time::Duration::from_secs(300));
         assert_eq!(
             backup.code,
