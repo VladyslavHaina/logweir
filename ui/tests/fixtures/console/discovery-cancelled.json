@@ -1,0 +1,27 @@
+{
+  "item": {
+    "chunkCount": 0,
+    "conditions": [],
+    "connection": {
+      "authMode": "scramSha512",
+      "generation": 3,
+      "name": "source",
+      "principal": "User:backup",
+      "uid": "c1"
+    },
+    "createdAt": "2026-09-17T04:56:54Z",
+    "id": "td-akkwhbx3ek33inhuajcdtth7q5",
+    "namespace": "team-a",
+    "reason": "Cancelled",
+    "resourceVersion": "2429142",
+    "stale": false,
+    "staleReasons": [],
+    "state": "cancelled",
+    "terminal": true,
+    "truncated": false,
+    "uid": "51627361-4b95-4ca5-aa26-8f97fe847b2a"
+  },
+  "replayed": false,
+  "requestId": "r6",
+  "reused": false
+}

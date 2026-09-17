@@ -1,0 +1,83 @@
+{
+  "item": {
+    "applicable": true,
+    "binding": {
+      "inputsDigest": "sha256:bb",
+      "referents": [
+        {
+          "generation": 2,
+          "kind": "BackupDestination",
+          "name": "primary",
+          "uid": "17bc54c4-2e52-4607-b4ac-c31517a6e568"
+        }
+      ]
+    },
+    "checks": [
+      {
+        "authority": "controller",
+        "category": "destination",
+        "code": "DestinationValid",
+        "expiresAt": "2026-09-17T05:13:00Z",
+        "gating": "blocking",
+        "id": "destination.resolved",
+        "observedAt": "2026-09-17T04:58:00Z",
+        "scope": {
+          "kind": "BackupDestination",
+          "name": "primary",
+          "uid": "17bc54c4-2e52-4607-b4ac-c31517a6e568"
+        },
+        "state": "ready"
+      },
+      {
+        "authority": "checkJob",
+        "category": "destination",
+        "code": "ArchiveListable",
+        "expiresAt": "2026-09-17T05:13:05Z",
+        "gating": "blocking",
+        "id": "destination.archiveListable",
+        "observedAt": "2026-09-17T04:58:05Z",
+        "state": "ready"
+      }
+    ],
+    "conditions": [],
+    "createdAt": "2026-09-17T04:57:46Z",
+    "detailsAvailable": false,
+    "executionOnly": [
+      {
+        "id": "destination.archivePrefixWritable",
+        "note": "A write under the archive prefix is only proven by the run itself; preflight never writes there."
+      }
+    ],
+    "expiresAt": "2026-09-17T05:13:10Z",
+    "id": "pf-c5ovcfrjvxwk7axdpexnma4w6l",
+    "namespace": "team-a",
+    "observedAt": "2026-09-17T04:58:10Z",
+    "operation": "destinationAccess",
+    "reason": "Ready",
+    "resourceVersion": "2429248",
+    "stale": false,
+    "staleBasis": [
+      "expiry",
+      "referent:BackupDestination/primary"
+    ],
+    "staleReasons": [],
+    "state": "ready",
+    "terminal": true,
+    "uid": "93af5a92-8d71-4947-9f1b-c7137429a5ab",
+    "warnings": [
+      {
+        "authority": "controller",
+        "category": "destination",
+        "code": "EvidenceReadNotConfigured",
+        "gating": "advisory",
+        "id": "destination.evidenceReadable",
+        "message": "no evidenceRead grant is configured",
+        "observedAt": "2026-09-17T04:58:06Z",
+        "remedy": "Configure an evidenceRead grant if verification should read evidence back.",
+        "state": "unknown"
+      }
+    ]
+  },
+  "replayed": false,
+  "requestId": "p1"
+}

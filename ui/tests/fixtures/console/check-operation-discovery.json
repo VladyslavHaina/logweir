@@ -1,0 +1,16 @@
+{
+  "item": {
+    "cancellable": true,
+    "conditions": [],
+    "createdAt": "2026-09-17T04:56:54Z",
+    "kind": "discovery",
+    "name": "td-akkwhbx3ek33inhuajcdtth7q5",
+    "namespace": "team-a",
+    "resourceVersion": "2429142",
+    "state": "running",
+    "stateReason": "Running",
+    "terminal": false,
+    "uid": "51627361-4b95-4ca5-aa26-8f97fe847b2a"
+  },
+  "requestId": "o1"
+}

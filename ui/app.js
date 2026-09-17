@@ -17,6 +17,7 @@ import { GROUP, VERSION, path } from "./api.js";
 import { CONSOLE, applyGrants, grantedNamespaces, selectMode } from "./client.js";
 import { el, replace } from "./render.js";
 import { mountClusterDetail, mountClusters } from "./pages/clusters.js";
+import { mountDestinationDetail, mountDestinations } from "./pages/destinations.js";
 import { mountSchedules } from "./pages/schedules.js";
 import { mountBackupDetail, mountBackups } from "./pages/backups.js";
 import { mountHistory, mountRestoreDetail } from "./pages/history.js";
@@ -24,9 +25,19 @@ import { mountRestoreWizard, restoreRouteParams } from "./pages/restore-wizard.j
 import { approvalRouteParams, mountApprovals } from "./pages/approvals.js";
 import { mountKeys } from "./pages/keys.js";
 
-// The seven routes, in navigation order. The hash is the whole route.
+// The eight routes, in navigation order. The hash is the whole route.
+//
+// `#/destinations` IS CONSOLE-ONLY, AND IT IS STILL IN THIS LIST. The product
+// API serves saved destinations and `kubectl proxy` does not; the legacy UI
+// ServiceAccount has no binding for the kind either (D2 §7.4), so a page that
+// tried would render a 403 it did not cause. Hiding the tab in legacy mode
+// would be worse than showing it: the route decides the mode ONCE at boot and
+// the tab would appear and vanish under a reader. So the route is always
+// there, and in legacy mode `ui/client.js` refuses each call BY NAME, with a
+// sentence saying which API serves the flow.
 const ROUTES = [
   { hash: "#/clusters", title: "Clusters", blurb: "The KafkaCluster objects this namespace can reach.", mount: mountClusters, detail: mountClusterDetail },
+  { hash: "#/destinations", title: "Destinations", blurb: "Saved archive locations: one location, written down once, referenced by name.", mount: mountDestinations, detail: mountDestinationDetail },
   { hash: "#/schedules", title: "Schedules", blurb: "BackupSchedule objects, their next slot and their suspend state.", mount: mountSchedules },
   { hash: "#/backups", title: "Backups", blurb: "Backup runs, each with the evidence weirkeeper recorded for it.", mount: mountBackups, detail: mountBackupDetail },
   { hash: "#/history", title: "History", blurb: "Completed runs over time, newest first.", mount: mountHistory, detail: mountRestoreDetail },

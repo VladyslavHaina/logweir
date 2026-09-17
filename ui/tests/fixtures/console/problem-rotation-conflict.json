@@ -1,0 +1,9 @@
+{
+  "code": "state_conflict",
+  "detail": "The Secret `lwd-primary-archive-write` already exists, so the credential you entered was NOT written. Nothing was changed. This service holds `create` on Secrets and nothing else: it cannot read the existing value to compare it, and it cannot overwrite it. Rotate `lwd-primary-archive-write`'s content out of band (kubectl, or your secret manager), or point this grant at a different existing Secret with `secret.existing`.",
+  "requestId": "01M2PVN7TQMHHBWFVDG297ASWH",
+  "retryable": false,
+  "status": 409,
+  "title": "State conflict",
+  "type": "https://logweir.dev/problems/state-conflict"
+}

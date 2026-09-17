@@ -1,0 +1,39 @@
+{
+  "items": [
+    {
+      "expected": true,
+      "internal": false,
+      "name": "orders",
+      "partitions": 12
+    },
+    {
+      "expected": false,
+      "internal": false,
+      "name": "payments",
+      "partitions": 6
+    },
+    {
+      "expected": false,
+      "internal": true,
+      "name": "__consumer_offsets",
+      "partitions": 50
+    },
+    {
+      "errorCode": "TopicAuthorizationFailed",
+      "expected": false,
+      "internal": false,
+      "name": "shipments",
+      "partitions": 0
+    }
+  ],
+  "page": {
+    "limit": 200,
+    "nextCursor": "Y3Vyc29yOjI=",
+    "snapshot": "51627361-4b95-4ca5-aa26-8f97fe847b2a@sha256:aa"
+  },
+  "requestId": "r11",
+  "scan": {
+    "chunksScanned": 8,
+    "complete": false
+  }
+}

@@ -1,0 +1,20 @@
+{
+  "backups": [
+    {
+      "createdAt": "2026-09-17T03:00:00Z",
+      "kind": "Backup",
+      "name": "nightly-20260917-030000"
+    }
+  ],
+  "basis": "Objects carrying the label logweir.dev/destination=primary, which this service sets on the objects it creates. A schedule created with kubectl carries no such label and is not listed here.",
+  "name": "primary",
+  "requestId": "01M2PVJAG6XYXD15XXHNZFGC2H",
+  "schedules": [
+    {
+      "createdAt": "2026-09-16T22:00:00Z",
+      "kind": "BackupSchedule",
+      "name": "nightly"
+    }
+  ],
+  "truncated": false
+}

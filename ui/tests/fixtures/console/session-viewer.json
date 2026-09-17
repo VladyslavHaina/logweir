@@ -1,33 +1,34 @@
 {
   "actor": {
-    "displayName": "Local administrator",
-    "id": "localAdmin#admin",
-    "issuer": "localAdmin",
-    "subject": "admin"
+    "displayName": "Dana Viewer",
+    "id": "oidc#dana",
+    "issuer": "https://issuer.example",
+    "subject": "dana"
   },
-  "authenticationMode": "localAdmin",
-  "bindingRevision": "",
+  "authenticationMode": "oidc",
+  "bindingRevision": "rev-7",
   "capabilities": {
     "approvalPacketRead": true,
     "approvalSubmit": false,
     "approvalsRead": true,
     "backupsRead": true,
-    "connectionCreate": true,
+    "connectionCreate": false,
     "connectionTest": false,
     "connectionsRead": true,
-    "credentialWrite": true,
+    "credentialWrite": false,
     "destinations": true,
     "manualBackupCreate": false,
     "operationEvents": false,
     "operationsRead": true,
     "preflight": true,
-    "restoreCreate": true,
+    "restoreCreate": false,
     "restoresRead": true,
-    "scheduleCreate": true,
+    "scheduleCreate": false,
     "scheduleSetSuspension": true,
     "schedulesRead": true,
     "topicDiscovery": true
   },
+  "csrfToken": "t-0123456789abcdef",
   "namespaces": [
     {
       "capabilities": {
@@ -35,24 +36,26 @@
         "approvalSubmit": false,
         "approvalsRead": true,
         "backupsRead": true,
-        "connectionCreate": true,
+        "connectionCreate": false,
         "connectionTest": false,
         "connectionsRead": true,
-        "credentialWrite": true,
+        "credentialWrite": false,
         "destinations": true,
         "manualBackupCreate": false,
         "operationEvents": false,
         "operationsRead": true,
         "preflight": true,
-        "restoreCreate": true,
+        "restoreCreate": false,
         "restoresRead": true,
-        "scheduleCreate": true,
+        "scheduleCreate": false,
         "scheduleSetSuspension": true,
         "schedulesRead": true,
         "topicDiscovery": true
       },
       "name": "team-a",
-      "roles": []
+      "roles": [
+        "viewer"
+      ]
     }
   ],
   "requestId": "01M2N5SHWR0N2E7SDCW2H22Z8W"

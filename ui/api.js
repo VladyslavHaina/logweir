@@ -233,15 +233,22 @@ export function apiError(response, text) {
   return error;
 }
 
-/** The console mode's own writable set. `connections`, `schedules` and
- *  `restores` are the three the product API has a create route for today;
- *  `backups` has none until PLAT-06 and `approvals` none until PLAT-19.2, and
- *  a page that reached for either gets a RangeError here rather than a 404
- *  from a route that does not exist. */
+/** The console mode's own writable set: the collection routes the product API
+ *  has a POST for today. `backups` has none until PLAT-06 and `approvals` none
+ *  until PLAT-19.2, and a page that reached for either gets a RangeError here
+ *  rather than a 404 from a route that does not exist.
+ *
+ *  `destinations` and `preflights` joined it with D2 W12. `topic-discoveries`
+ *  did NOT: a discovery is created under the connection it is about
+ *  (`/connections/{name}/topic-discoveries`), which is a sub-collection and is
+ *  reached through [`consoleAction`] and its own bounded table -- not by
+ *  POSTing to a top-level plural that has no create route at all. */
 export const CONSOLE_WRITABLE_PLURALS = Object.freeze([
   "connections",
   "schedules",
   "restores",
+  "destinations",
+  "preflights",
 ]);
 
 /** The product API's session document: the actor, the namespace grants and the
@@ -276,37 +283,110 @@ export async function consoleList(ns, plural, options) {
   return problemBody(response);
 }
 
-/** Reads one product object by name. */
+/** Reads one product object by name.
+ *
+ *  `options.planHash` is the ONE query parameter an item read takes: `GET
+ *  .../preflights/{id}?planHash=` asks the product API to recompute
+ *  applicability against the plan the caller is looking at NOW, rather than
+ *  against the plan the check was bound to when it ran. Every other read
+ *  sends no query at all. */
 export async function consoleGet(ns, plural, name, options) {
+  const o = options || {};
   const response = await request(
-    path("api", "v1", "namespaces", ns, plural, name),
-    readInit(options),
+    path("api", "v1", "namespaces", ns, plural, name) + listQuery(o),
+    readInit(o),
   );
   return problemBody(response);
 }
 
-/** Reads one explicitly named sub-resource of a product object -- today the
- *  approval packet, which is the ONLY route that returns approval document
- *  bytes and is reached only by naming it. */
+/** Reads one explicitly named sub-resource of a product object: the approval
+ *  packet, a destination's `/usage`, a discovery's stored `/topics` page, a
+ *  preflight's `/details` page, and a connection's `/topic-discoveries` list.
+ *  Each is reached only by naming it.
+ *
+ *  `options` may carry the product API's paging parameters and the bounded
+ *  FILTERS the paged sub-resources declare. The filter names are a frozen
+ *  list, so a caller cannot smuggle an arbitrary query parameter through this
+ *  seam, and the values are encoded here exactly as `limit` and `cursor` are. */
 export async function consoleSub(ns, plural, name, sub, options) {
+  const o = options || {};
   const response = await request(
-    path("api", "v1", "namespaces", ns, plural, name, sub),
-    readInit(options),
+    path("api", "v1", "namespaces", ns, plural, name, sub) + listQuery(o),
+    readInit(o),
   );
   return problemBody(response);
 }
 
 /** Reads one operation's normalized status. `kind` is the closed set the
- *  product API declares; anything else is refused here, before the network. */
+ *  product API declares; anything else is refused here, before the network.
+ *
+ *  FOUR KINDS, TWO SHAPES. `backup` and `restore` answer `OperationResponse`;
+ *  `discovery` and `preflight` answer `CheckOperationResponse`, which carries
+ *  no result, no evidence and no verification -- a transient check has none of
+ *  those facts. This module only builds the identifier; `ui/contract.js`
+ *  decides which shape the answer is read as, and refuses to read one as the
+ *  other. */
 export async function consoleOperation(ns, kind, name, options) {
-  if (kind !== "backup" && kind !== "restore") {
+  if (CONSOLE_OPERATION_KINDS.indexOf(kind) === -1) {
     throw new RangeError(
-      "consoleOperation(): kind is backup or restore; got " + String(kind),
+      "consoleOperation(): kind is one of " + CONSOLE_OPERATION_KINDS.join(", ") +
+        "; got " + String(kind),
     );
   }
   const response = await request(
     path("api", "v1", "namespaces", ns, "operations", kind, name),
     readInit(options),
+  );
+  return problemBody(response);
+}
+
+/** THE SIX NAMED ACTION ROUTES, AND NOTHING ELSE. The product API spells an
+ *  action as a verb suffix on an object's own identifier
+ *  (`destinations/primary:test`) or as a sub-collection create
+ *  (`connections/source/topic-discoveries`). Neither shape is a plural this
+ *  page could POST to, so neither could go through `consoleCreate`.
+ *
+ *  THIS IS NOT A GENERIC POST HELPER. `action` is looked up in a FROZEN table
+ *  below, so the set of routes any page in this tree can reach is a list a
+ *  reviewer reads in one place -- exactly as `CONSOLE_WRITABLE_PLURALS` bounds
+ *  the creates. An action the table does not name is a RangeError before the
+ *  network, with the permitted set in the message.
+ *
+ *  THE IDEMPOTENCY KEY IS THE ROUTE'S, NOT THE CALLER'S. Three of these six
+ *  are durable creates and the product API REQUIRES a key on each; the other
+ *  three refuse one with a 400 (a rotation's replay guard is
+ *  `expectedGeneration`, and a cancel's is that cancelling twice is the same
+ *  wish). The table says which, and a caller that hands a key to a route that
+ *  refuses one -- or omits it on a route that requires one -- is refused here
+ *  rather than by the server. */
+export async function consoleAction(ns, action, name, body, options) {
+  const route = CONSOLE_ACTIONS[action];
+  if (route === undefined) {
+    throw new RangeError(
+      "consoleAction(): " + String(action) + " is not an action this page may take; the set " +
+        "is " + Object.keys(CONSOLE_ACTIONS).join(", ") + ".",
+    );
+  }
+  const o = options || {};
+  const key = o.idempotencyKey === undefined ? null : o.idempotencyKey;
+  if (route.key === true && (key === null || key === undefined)) {
+    throw new RangeError(
+      "consoleAction(): " + String(action) + " is a durable create and the route requires an " +
+        "Idempotency-Key; none was given.",
+    );
+  }
+  if (route.key === false && key !== null && key !== undefined) {
+    throw new RangeError(
+      "consoleAction(): " + String(action) + " refuses an Idempotency-Key (the product API " +
+        "answers 400); its replay guard is the request's own precondition.",
+    );
+  }
+  const identifier = route.named === true
+    ? path("api", "v1", "namespaces", ns, route.plural, String(name) + route.suffix)
+    : path("api", "v1", "namespaces", ns, route.plural + route.suffix);
+  const response = await request(
+    identifier,
+    writeInit(body, Object.assign({}, o, { idempotencyKey: route.key === true ? key : null })),
   );
   return problemBody(response);
 }
@@ -411,6 +491,61 @@ function readInit(options) {
 // place, beside the paragraph that says what it is.
 const SUSPENSION_VERB = ":set-suspension";
 
+// The four kinds `GET .../operations/{kind}/{name}` serves. `backup` and
+// `restore` are durable runs; `discovery` and `preflight` are transient checks
+// and answer a DIFFERENT document. The list is frozen here so a page cannot
+// address a fifth kind that no route serves.
+const CONSOLE_OPERATION_KINDS = Object.freeze([
+  "backup",
+  "restore",
+  "discovery",
+  "preflight",
+]);
+
+// THE SIX ACTION ROUTES, WRITTEN OUT. `plural` is the collection the route
+// hangs off, `named` says whether it addresses one object, `suffix` is the
+// verb or sub-collection, and `key` says whether the product API requires an
+// `Idempotency-Key` (`true`), refuses one (`false`).
+//
+// The three `key: false` routes are not "less safe": a rotation's replay guard
+// is `expectedGeneration` and a cancel's is that cancelling a cancelled check
+// is the same wish, so a key there would be a second answer to a question that
+// already has one -- which is why the product API answers 400 for it.
+const CONSOLE_ACTIONS = Object.freeze({
+  "destinations:from-legacy": Object.freeze({
+    plural: "destinations", named: false, suffix: ":from-legacy", key: true,
+  }),
+  "destinations:update-access": Object.freeze({
+    plural: "destinations", named: true, suffix: ":update-access", key: false,
+  }),
+  "destinations:test": Object.freeze({
+    plural: "destinations", named: true, suffix: ":test", key: true,
+  }),
+  "connections:topic-discoveries": Object.freeze({
+    plural: "connections", named: true, suffix: "/topic-discoveries", key: true,
+  }),
+  "topic-discoveries:cancel": Object.freeze({
+    plural: "topic-discoveries", named: true, suffix: ":cancel", key: false,
+  }),
+  "preflights:cancel": Object.freeze({
+    plural: "preflights", named: true, suffix: ":cancel", key: false,
+  }),
+});
+
+// The bounded FILTER parameters the paged sub-resources declare, by the name
+// the route publishes. An allowlist and never a pass-through bag: a caller
+// hands `{q: "orders"}` and gets `?q=orders`, and a caller that invented a
+// parameter gets nothing rather than a query string this page cannot account
+// for.
+const SUB_FILTERS = Object.freeze([
+  // GET .../topic-discoveries/{id}/topics
+  "q", "prefix", "internal", "errored",
+  // GET .../preflights/{id}/details
+  "check",
+  // GET .../connections/{name}/topic-discoveries
+  "latest",
+]);
+
 // The header name that carries the product API's synchroniser token on an
 // unsafe request. PLAT-17.2 owns the final spelling -- today's localAdmin mode
 // returns `null` for the token and relies on the loopback listener and an
@@ -429,6 +564,22 @@ function listQuery(options) {
   }
   if (typeof options.cursor === "string" && options.cursor.length > 0) {
     parts.push("cursor=" + encodeURIComponent(options.cursor));
+  }
+  for (const filter of SUB_FILTERS) {
+    const value = options[filter];
+    if (typeof value === "string" && value.length > 0) {
+      parts.push(filter + "=" + encodeURIComponent(value));
+    } else if (value === true) {
+      parts.push(filter + "=true");
+    }
+  }
+  // THE PLAN HASH A PREFLIGHT READ IS COMPARED AGAINST. `GET
+  // .../preflights/{id}?planHash=` is how the product API recomputes
+  // applicability against the plan the caller is LOOKING AT rather than the
+  // one the check was bound to; sending nothing means "no plan of my own",
+  // which is a different question and not a weaker one.
+  if (typeof options.planHash === "string" && options.planHash.length > 0) {
+    parts.push("planHash=" + encodeURIComponent(options.planHash));
   }
   return parts.length === 0 ? "" : "?" + parts.join("&");
 }

@@ -1,0 +1,9 @@
+{
+  "code": "legacy_location_unknown",
+  "detail": "No frozen execution input and no spec archive URL could be read for BackupSchedule `nightly`, so this service cannot derive a location from facts. It will not guess one: a destination pointed at the wrong bucket would be worse than no destination.",
+  "requestId": "01M2PVN7TQMHHBWFVDG297ASWG",
+  "retryable": false,
+  "status": 404,
+  "title": "Not found",
+  "type": "https://logweir.dev/problems/not-found"
+}

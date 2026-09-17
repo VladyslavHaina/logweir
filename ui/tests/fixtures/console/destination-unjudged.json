@@ -1,0 +1,53 @@
+{
+  "item": {
+    "access": {
+      "archiveRead": {
+        "keys": [
+          "access-key-id",
+          "secret-access-key"
+        ],
+        "mode": "secretKeys",
+        "secretName": "lwd-primary-archive-read"
+      },
+      "archiveWrite": {
+        "keys": [
+          "access-key-id",
+          "secret-access-key"
+        ],
+        "mode": "secretKeys",
+        "secretName": "logweir-s3"
+      },
+      "evidenceRead": {
+        "keys": [],
+        "mode": "archiveReadGrant"
+      },
+      "evidenceWrite": {
+        "keys": [],
+        "mode": "inheritsArchiveWrite"
+      }
+    },
+    "canonicalUrl": "s3://kafka-backups/team-a/prod",
+    "createdAt": "2026-09-17T04:56:13Z",
+    "default": false,
+    "description": "the team-a production archive",
+    "generation": 1,
+    "name": "lab",
+    "namespace": "team-a",
+    "resourceVersion": "2428991",
+    "status": {},
+    "storage": {
+      "addressing": "pathStyle",
+      "bucket": "kafka-backups",
+      "endpoint": "http://minio.storage.svc:9000",
+      "prefix": "team-a/prod",
+      "provider": "s3",
+      "region": "us-east-1"
+    },
+    "transport": {
+      "security": "insecureHttp"
+    },
+    "uid": "17bc54c4-2e52-4607-b4ac-c31517a6e568",
+    "writeProbe": "createOnlyMarker"
+  },
+  "requestId": "01M2PVJAFQA8EG6T7QMMQMM63Q"
+}

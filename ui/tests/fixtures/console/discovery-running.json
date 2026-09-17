@@ -1,0 +1,35 @@
+{
+  "item": {
+    "chunkCount": 0,
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-17T04:56:58Z",
+        "message": "the check Job is running",
+        "reason": "Running",
+        "status": "False",
+        "type": "Ready"
+      }
+    ],
+    "connection": {
+      "authMode": "scramSha512",
+      "generation": 3,
+      "name": "source",
+      "principal": "User:backup",
+      "uid": "c1"
+    },
+    "createdAt": "2026-09-17T04:56:54Z",
+    "id": "td-akkwhbx3ek33inhuajcdtth7q5",
+    "namespace": "team-a",
+    "reason": "Running",
+    "resourceVersion": "2429142",
+    "stale": false,
+    "staleReasons": [],
+    "state": "running",
+    "terminal": false,
+    "truncated": false,
+    "uid": "51627361-4b95-4ca5-aa26-8f97fe847b2a"
+  },
+  "replayed": false,
+  "requestId": "r5",
+  "reused": false
+}

@@ -1,0 +1,19 @@
+{
+  "items": [
+    {
+      "expected": false,
+      "internal": false,
+      "name": "zeta",
+      "partitions": 1
+    }
+  ],
+  "page": {
+    "limit": 200,
+    "snapshot": "51627361-4b95-4ca5-aa26-8f97fe847b2a@sha256:aa"
+  },
+  "requestId": "r12",
+  "scan": {
+    "chunksScanned": 2,
+    "complete": true
+  }
+}

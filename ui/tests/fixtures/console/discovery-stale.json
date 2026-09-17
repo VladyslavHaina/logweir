@@ -1,0 +1,53 @@
+{
+  "item": {
+    "chunkCount": 3,
+    "clusterId": "MkU3NEVCTTlSM0FCQVRMQQ",
+    "conditions": [],
+    "connection": {
+      "authMode": "scramSha512",
+      "generation": 3,
+      "name": "source",
+      "principal": "User:backup",
+      "uid": "c1"
+    },
+    "counts": {
+      "errored": 0,
+      "internalExcluded": 1,
+      "listed": 5004,
+      "returned": 5003
+    },
+    "createdAt": "2026-09-17T04:56:54Z",
+    "expected": {
+      "notAuthorized": 0,
+      "notFound": 0,
+      "requested": 2,
+      "unknown": 0,
+      "visible": 2
+    },
+    "freshUntil": "2026-09-17T04:00:00Z",
+    "id": "td-akkwhbx3ek33inhuajcdtth7q5",
+    "namespace": "team-a",
+    "observedAt": "2026-09-17T04:57:20Z",
+    "reason": "Succeeded",
+    "resourceVersion": "2429142",
+    "stale": true,
+    "staleReasons": [
+      "expired",
+      "principalChanged"
+    ],
+    "state": "succeeded",
+    "terminal": true,
+    "topicsSha256": "sha256:aa",
+    "truncated": false,
+    "uid": "51627361-4b95-4ca5-aa26-8f97fe847b2a",
+    "visibility": {
+      "basis": [
+        "listingOnly"
+      ],
+      "state": "unknown"
+    }
+  },
+  "replayed": false,
+  "requestId": "r8",
+  "reused": false
+}

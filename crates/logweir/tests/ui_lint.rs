@@ -74,7 +74,7 @@ const VIEWER_AUTHORITY: &str = "viewer's entire cluster authority";
 /// has nothing to do with the `kafka-backup` subcommand GC3 denies. The escape
 /// sits on the element's own line because that gate matches per physical line
 /// -- which is also why this paragraph spells the name without its quotes.
-const API_EXPORTS: [&str; 19] = [
+const API_EXPORTS: [&str; 20] = [
     "GROUP",
     "VERSION",
     "WRITABLE_PLURALS",
@@ -96,6 +96,13 @@ const API_EXPORTS: [&str; 19] = [
     "consoleGet",
     "consoleSub",
     "consoleOperation",
+    // D2 W13: the SIX named action routes the product API spells as a verb
+    // suffix (`destinations/primary:test`) or a sub-collection create
+    // (`connections/source/topic-discoveries`) -- neither of which is a plural
+    // `consoleCreate` could POST to. It is not a generic POST helper: the
+    // action is looked up in a frozen table in `api.js`, so the reachable set
+    // is still a list a reviewer reads in one place.
+    "consoleAction",
     "consoleCreate",
     "consoleSetSuspension",
     "problemError",

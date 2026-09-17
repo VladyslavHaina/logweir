@@ -1,0 +1,32 @@
+{
+  "item": {
+    "chunkCount": 0,
+    "conditions": [],
+    "connection": {
+      "authMode": "scramSha512",
+      "generation": 3,
+      "name": "source",
+      "principal": "User:backup",
+      "uid": "c1"
+    },
+    "createdAt": "2026-09-17T04:56:54Z",
+    "error": {
+      "code": "BrokerUnreachable",
+      "message": "no broker answered within the metadata budget"
+    },
+    "id": "td-akkwhbx3ek33inhuajcdtth7q5",
+    "namespace": "team-a",
+    "observedAt": "2026-09-17T04:57:10Z",
+    "reason": "BrokerUnreachable",
+    "resourceVersion": "2429142",
+    "stale": false,
+    "staleReasons": [],
+    "state": "failed",
+    "terminal": true,
+    "truncated": false,
+    "uid": "51627361-4b95-4ca5-aa26-8f97fe847b2a"
+  },
+  "replayed": false,
+  "requestId": "r7",
+  "reused": false
+}

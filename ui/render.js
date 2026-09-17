@@ -217,15 +217,27 @@ export function windowMessage(fromMs, toMs) {
   );
 }
 
-/** What the run will do to the target BEFORE the engine starts, named in the
+/** What the RUN will do to the target before the engine starts, named in the
  *  page so an operator reads it before the plan is signed rather than out of a
- *  refusal afterwards (spec section 6.1, guard G-TS). */
+ *  refusal afterwards (spec section 6.1, guard G-TS).
+ *
+ *  IT IS NOT A READINESS VERDICT, AND SINCE D2 IT SAYS SO. The wizard's step 5
+ *  now carries a real `Preflight`, whose aggregate comes from a check Job's own
+ *  recorded result; this sentence describes what EXECUTION will attempt, which
+ *  is a different fact and one no check can confirm in advance -- the broker's
+ *  answer to a topic create is only knowable when the create is made, which is
+ *  why `target.logAppendTime` is an execution-only check (D2 §6.3, G12).
+ *
+ *  The old copy called this "preflight". That word now names the object above
+ *  it, and one word for two things is how an operator comes to read a
+ *  description of an intention as a statement that it was checked. */
 export function preflightSentence(topicCount) {
   return (
-    "Logweir will create " +
+    "At execution time Logweir will create " +
     String(topicCount) +
     " topics with message.timestamp.type=CreateTime and retention.ms=-1 before the " +
-    "engine runs, and will refuse if the broker is LogAppendTime and rejects the override."
+    "engine runs, and will refuse if the broker is LogAppendTime and rejects the override. " +
+    "This says what the run will attempt; it is not a check and nothing above has confirmed it."
   );
 }
 
@@ -364,6 +376,265 @@ export function phaseBadge(phase) {
   }
   const kind = "phase-" + phase.toLowerCase().replace(/[^a-z0-9]+/g, "-");
   return badge(kind, phase);
+}
+
+// ===========================================================================
+// D2 (PLAT-08, PLAT-09.1, PLAT-03): the words for destinations, topic
+// visibility and operation readiness
+// ===========================================================================
+//
+// THREE SENTENCES THIS PRODUCT MUST NEVER RENDER, and the reason each one is
+// forbidden. They are kept together because they are one rule seen three
+// times: a page states what was OBSERVED and by WHOM, and never a conclusion
+// nobody drew.
+//
+//   1. "complete", for a topic inventory. An all-topics Kafka Metadata request
+//      SILENTLY OMITS topics the principal cannot DESCRIBE -- no error, no
+//      count, nothing to notice. A successful listing therefore proves nothing
+//      about completeness, which is why `visibility.state` is `unknown` for
+//      one and why `unknown` is that field's HEALTHY default rather than a
+//      fault. [`visibilityLine`] carries the words.
+//   2. "verified by Logweir", for an attestation. `attestedComplete` is an
+//      ADMINISTRATOR'S CLAIM recorded in a policy ConfigMap. Logweir checked
+//      that the claim matches this cluster, this principal and this moment; it
+//      did not check that the claim is TRUE, and it cannot. So the attestation
+//      is always rendered with its author, its instant and the disclaimer.
+//   3. "ready", for anything this page decided. A readiness verdict comes from
+//      a `Preflight`'s own recorded aggregate and from nowhere else -- not
+//      from "no checks failed", not from "the list came back", not from an
+//      empty `checks` array. [`preflightVerdict`] reads `state` and renders
+//      `unknown` for every shape it does not recognise.
+
+/** The disclaimer every rendered attestation carries. Not a suffix a caller
+ *  may leave off: [`attestationLine`] appends it, and the specs assert that
+ *  no attestation reaches the page without it. */
+export const ATTESTATION_DISCLAIMER = "not verified by Logweir";
+
+/** What a successful listing alone means, said plainly. */
+export const VISIBILITY_UNKNOWN_SENTENCE =
+  "Kafka hides topics this principal cannot describe, and hides them without saying so, so a " +
+  "successful listing is not proof that this is every topic. Logweir records that as unknown " +
+  "rather than calling it complete.";
+
+/** What `limited` means. */
+export const VISIBILITY_LIMITED_SENTENCE =
+  "An authorization omission was observed: at least one topic exists that this principal may " +
+  "not describe. The list below is a subset, and Logweir cannot say how large a subset.";
+
+/** What an empty result means, which is NOT "the cluster is empty". */
+export const EMPTY_INVENTORY_SENTENCE =
+  "No visible topics. Kafka hides topics this principal cannot describe; this is not proof " +
+  "that the cluster is empty.";
+
+/** What "ready" does NOT cover. Rendered beside every ready verdict that
+ *  carries execution-only checks, because "ready" never means those passed. */
+export const EXECUTION_ONLY_SENTENCE =
+  "These can only be answered while the run executes. They are excluded from the verdict " +
+  "above, and a ready verdict never means they passed.";
+
+/** What a destination test proves and what it does not. */
+export const DESTINATION_TEST_SENTENCE =
+  "A test starts a Preflight: a real Job, with this destination's own credentials, against " +
+  "this destination's own endpoint. The verdict below is that check's recorded result, read " +
+  "back from its status -- this page performs no I/O of its own and decides nothing.";
+
+/** The one sentence that says what a readiness result is ABOUT. */
+export const APPLICABILITY_SENTENCE =
+  "Applicability is recomputed on every read against the objects as they are now. A result " +
+  "that no longer describes your current inputs is shown as out of date, never as a verdict.";
+
+/** How an attestation is rendered, always: who, when, and the disclaimer.
+ *
+ *  THE PRODUCT API PUBLISHES ONE STRING for it, not a `{by, at}` pair, so this
+ *  function does not invent a structure it was not given: it prints the
+ *  recorded claim verbatim and appends the disclaimer. What it refuses to do
+ *  is print the claim ALONE. */
+export function attestationLine(attestation) {
+  if (typeof attestation !== "string" || attestation.length === 0) {
+    return "";
+  }
+  return esc(attestation) + "; " + ATTESTATION_DISCLAIMER;
+}
+
+/** The visibility banner: the state, what it means, and the basis the check
+ *  recorded for it.
+ *
+ *  AN ABSENT `visibility` IS `unknown`, NOT A BLANK. A discovery that has not
+ *  finished has no visibility block at all, and "we do not know" is exactly
+ *  what that is -- so the same words are used, with no basis line. */
+export function visibilityLine(visibility) {
+  const v = visibility || {};
+  const state = typeof v.state === "string" ? v.state : "unknown";
+  const basis = Array.isArray(v.basis) ? v.basis : [];
+  let sentence = VISIBILITY_UNKNOWN_SENTENCE;
+  let kind = "visibility-unknown";
+  if (state === "limited") {
+    sentence = VISIBILITY_LIMITED_SENTENCE;
+    kind = "visibility-limited";
+  } else if (state === "attestedComplete") {
+    sentence = "An administrator attests that this principal sees every topic: " +
+      attestationLine(v.attestation) + ".";
+    kind = "visibility-attested";
+  }
+  return (
+    "<div class=\"visibility " + kind + "\" role=\"status\">" +
+    badge(kind, "visibility: " + state) +
+    "<p class=\"note\">" + (state === "attestedComplete" ? sentence : esc(sentence)) + "</p>" +
+    (basis.length === 0
+      ? ""
+      : "<p class=\"basis\">basis: " + esc(basis.join(", ")) + "</p>") +
+    "</div>"
+  );
+}
+
+/** A destination's `status.valid`, in words.
+ *
+ *  ABSENT IS "NOT JUDGED". `null` there means the controller has not reached a
+ *  verdict -- which is what every object one second old looks like, and what
+ *  EVERY object looks like on a cluster whose controller predates these kinds.
+ *  Rendering it as "invalid" would report a missing controller as a broken
+ *  destination. */
+export function destinationVerdict(status) {
+  const s = status || {};
+  if (s.valid === true) {
+    return badge("green", "valid" + (typeof s.reason === "string" && s.reason.length > 0
+      ? " (" + s.reason + ")" : ""));
+  }
+  if (s.valid === false) {
+    return badge("unverified", "not valid" + (typeof s.reason === "string" && s.reason.length > 0
+      ? " (" + s.reason + ")" : ""));
+  }
+  return badge("pending", "not judged yet");
+}
+
+/** The sentence beside [`destinationVerdict`] when nothing has judged it. */
+export const NOT_JUDGED_SENTENCE =
+  "No controller has recorded a verdict for this destination yet. That is what a new object " +
+  "looks like, and it is also what an installation whose controller predates these kinds looks " +
+  "like. It is not a claim that the destination is wrong, and it is not a claim that it works.";
+
+/** A preflight's aggregate, as a badge. The RECORDED state and nothing else:
+ *  a shape this build does not recognise is `unknown`, never `ready`. */
+export function preflightVerdict(state) {
+  if (state === "ready") {
+    return badge("green", "ready");
+  }
+  if (state === "notReady") {
+    return badge("unverified", "not ready");
+  }
+  if (state === "failed") {
+    return badge("unverified", "failed: no result");
+  }
+  if (state === "cancelled") {
+    return badge("pending", "cancelled: no result");
+  }
+  if (state === "pending" || state === "queued" || state === "running") {
+    return badge("pending", state);
+  }
+  return badge("pending", "unknown");
+}
+
+/** One stale reason, in words, with its subject when it has one.
+ *
+ *  `unverifiable` IS NOT A KIND OF STALENESS and is not rendered as one. It is
+ *  this service saying it could not COMPARE something, and its `basis` says
+ *  what -- so the words are "could not be checked", never "out of date". */
+export function staleReasonLine(reason) {
+  const r = reason || {};
+  const subject = typeof r.kind === "string" && r.kind.length > 0
+    ? " (" + r.kind + (typeof r.name === "string" && r.name.length > 0 ? "/" + r.name : "") + ")"
+    : "";
+  if (r.reason === "unverifiable") {
+    return "could not be checked" + subject +
+      (typeof r.basis === "string" && r.basis.length > 0 ? ": " + r.basis : "");
+  }
+  return String(r.reason) + subject;
+}
+
+/** The applicability banner: whether this result still describes the caller's
+ *  inputs, why not, and what the comparison actually covered.
+ *
+ *  `staleBasis` IS RENDERED, and that is the point of it. An empty
+ *  `staleReasons` means "I compared these and they match"; without the list of
+ *  "these" a reader cannot tell a verdict that was re-checked against live
+ *  objects from one where the check was skipped, and those two look identical
+ *  in every other field. */
+export function applicabilityLine(preflight) {
+  const p = preflight || {};
+  const reasons = Array.isArray(p.staleReasons) ? p.staleReasons : [];
+  const basis = Array.isArray(p.staleBasis) ? p.staleBasis : [];
+  const head = p.applicable === true
+    ? badge("green", "applies to your current inputs")
+    : badge("unverified", "does not apply to your current inputs");
+  return (
+    "<div class=\"applicability\" role=\"status\">" +
+    head +
+    (reasons.length === 0
+      ? ""
+      : "<ul class=\"stale-reasons\">" +
+        reasons.map((r) => "<li>" + esc(staleReasonLine(r)) + "</li>").join("") +
+        "</ul>") +
+    (basis.length === 0
+      ? "<p class=\"basis\">compared: nothing. An empty comparison is not a match.</p>"
+      : "<p class=\"basis\">compared: " + esc(basis.join(", ")) + "</p>") +
+    "<p class=\"note\">" + esc(APPLICABILITY_SENTENCE) + "</p>" +
+    "</div>"
+  );
+}
+
+/** The verdict of one check, as a badge. `skipped` is never a pass. */
+export function checkVerdict(state) {
+  if (state === "ready") {
+    return badge("green", "ready");
+  }
+  if (state === "notReady") {
+    return badge("unverified", "not ready");
+  }
+  if (state === "skipped") {
+    return badge("pending", "skipped (never a pass)");
+  }
+  return badge("pending", "unknown");
+}
+
+/** The check table: one row per recorded entry, with the gating, the code, the
+ *  message, the remedy, and when the fact stops counting.
+ *
+ *  EVERY COLUMN IS A RECORDED FIELD. Nothing here is computed from the others,
+ *  and an absent field prints [`ABSENT`] rather than a guess: a check with no
+ *  `expiresAt` is one whose expiry the producer did not record, which is a
+ *  different thing from one that never expires. */
+export function checkTable(checks, empty) {
+  const rows = (Array.isArray(checks) ? checks : []).map((c) => [
+    "<code>" + cell(c.id) + "</code>",
+    checkVerdict(c.state),
+    cell(c.gating),
+    cell(c.code),
+    cell(c.message),
+    cell(c.remedy),
+    cell(c.observedAt),
+    cell(c.expiresAt),
+  ]);
+  return table(
+    ["CHECK", "VERDICT", "GATING", "CODE", "MESSAGE", "REMEDY", "OBSERVED", "EXPIRES"],
+    rows,
+    empty,
+  );
+}
+
+/** The execution-only list, with the sentence that says what "ready" does not
+ *  cover. Rendered whenever the result names any, whatever the aggregate. */
+export function executionOnlyBlock(entries) {
+  const list = Array.isArray(entries) ? entries : [];
+  if (list.length === 0) {
+    return "";
+  }
+  return (
+    "<section class=\"execution-only\"><h4>Only knowable at execution time</h4>" +
+    "<p class=\"note\">" + esc(EXECUTION_ONLY_SENTENCE) + "</p>" +
+    "<ul>" +
+    list.map((e) => "<li><code>" + cell(e.id) + "</code> " + cell(e.note) + "</li>").join("") +
+    "</ul></section>"
+  );
 }
 
 /** The footer every list view carries. */

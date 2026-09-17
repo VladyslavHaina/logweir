@@ -1,0 +1,37 @@
+{
+  "items": [
+    {
+      "addressing": "pathStyle",
+      "canonicalUrl": "s3://kafka-backups/team-a/prod",
+      "default": true,
+      "description": "the team-a production archive",
+      "endpoint": "https://minio.storage.svc:9000",
+      "generation": 2,
+      "name": "primary",
+      "status": {
+        "observedAt": "2026-09-17T05:10:00Z",
+        "observedGeneration": 2,
+        "reason": "Valid",
+        "valid": true
+      },
+      "transport": "tls",
+      "uid": "17bc54c4-2e52-4607-b4ac-c31517a6e568"
+    },
+    {
+      "addressing": "pathStyle",
+      "canonicalUrl": "s3://kafka-backups/lab",
+      "default": false,
+      "endpoint": "http://minio.storage.svc:9000",
+      "generation": 1,
+      "name": "lab",
+      "status": {},
+      "transport": "insecureHttp",
+      "uid": "6f1e0f1a-1111-4a2b-9c3d-000000000002"
+    }
+  ],
+  "page": {
+    "limit": 200,
+    "snapshot": "2429022"
+  },
+  "requestId": "01M2PVJAG6XYXD15XXHNZFGC2G"
+}

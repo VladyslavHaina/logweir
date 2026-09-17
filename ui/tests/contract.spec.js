@@ -19,13 +19,19 @@ import {
   CONSOLE_REQUESTS,
   CONSOLE_SHAPES,
   CONTRACT_REASON,
+  decodeCancel,
+  decodeCheckOperation,
   decodeConsoleItem,
   decodeConsoleList,
+  decodeDestinationUsage,
+  decodeDetailPage,
+  decodeDiscoveryLatest,
   decodeLegacyList,
   decodeLegacyObject,
   decodeOperation,
   decodeProblem,
   decodeSession,
+  decodeTopicPage,
   isContractFailure,
 } from "../contract.js";
 import { TARGET_MODES } from "../plan.js";
@@ -44,8 +50,20 @@ function console_(name) {
   return fixture("console/" + name);
 }
 
+// A `$ref` NODE MAY CARRY ITS OWN `nullable`, AND IT DOES ALL OVER THIS
+// DOCUMENT: `{"$ref": "#/…/VisibilityView", "nullable": true}` is how the
+// generator spells an optional nested object. Resolving the reference and
+// throwing the referencing node away lost that flag, so every fixture with an
+// explicit `null` in such a field read as a schema violation -- which is a
+// validator that refuses documents the server is allowed to send.
 function resolve(node) {
-  return node.$ref === undefined ? node : DEFINITIONS[node.$ref.split("/").pop()];
+  if (node.$ref === undefined) {
+    return node;
+  }
+  const target = DEFINITIONS[node.$ref.split("/").pop()];
+  return node.nullable === true && target !== undefined && target.nullable !== true
+    ? Object.assign({}, target, { nullable: true })
+    : target;
 }
 
 /** A small validator over the published document: required fields present,
@@ -132,10 +150,44 @@ const CONSOLE_FIXTURES = [
   ["operation-backup.json", "OperationResponse"],
   ["problem-validation.json", "Problem"],
   ["problem-conflict.json", "Problem"],
+
+  // D2 W13: destinations, topic discoveries and operation readiness. Every
+  // state the pages render has a fixture here, and every fixture is held to
+  // the published schema by the arm below -- so a page cannot be written
+  // against a shape the server does not send.
+  ["session-viewer.json", "SessionResponse"],
+  ["destination.json", "DestinationResponse"],
+  ["destination-unjudged.json", "DestinationResponse"],
+  ["destinations-list.json", "DestinationList"],
+  ["destination-usage.json", "DestinationUsageResponse"],
+  ["discovery-unknown.json", "TopicDiscoveryResponse"],
+  ["discovery-limited.json", "TopicDiscoveryResponse"],
+  ["discovery-attested.json", "TopicDiscoveryResponse"],
+  ["discovery-empty.json", "TopicDiscoveryResponse"],
+  ["discovery-running.json", "TopicDiscoveryResponse"],
+  ["discovery-cancelled.json", "TopicDiscoveryResponse"],
+  ["discovery-failed.json", "TopicDiscoveryResponse"],
+  ["discovery-stale.json", "TopicDiscoveryResponse"],
+  ["discovery-truncated.json", "TopicDiscoveryResponse"],
+  ["discovery-latest.json", "DiscoveryLatestResponse"],
+  ["topics-page.json", "TopicPageResponse"],
+  ["topics-page-last.json", "TopicPageResponse"],
+  ["preflight-ready.json", "PreflightResponse"],
+  ["preflight-pending.json", "PreflightResponse"],
+  ["preflight-not-ready.json", "PreflightResponse"],
+  ["preflight-skipped.json", "PreflightResponse"],
+  ["preflight-stale.json", "PreflightResponse"],
+  ["preflight-cancelled.json", "PreflightResponse"],
+  ["check-operation-discovery.json", "CheckOperationResponse"],
+  ["cancel-discovery.json", "CancelResponse"],
+  ["cancel-already-terminal.json", "CancelResponse"],
+  ["detail-page.json", "DetailPageResponse"],
+  ["problem-legacy-unknown.json", "Problem"],
+  ["problem-rotation-conflict.json", "Problem"],
 ];
 
 test("console_fixtures_are_instances_of_the_published_schema", () => {
-  assert.ok(CONSOLE_FIXTURES.length >= 15, "the console fixture set is not empty");
+  assert.ok(CONSOLE_FIXTURES.length >= 43, "the console fixture set covers both halves");
   for (const [name, schema] of CONSOLE_FIXTURES) {
     assert.ok(DEFINITIONS[schema] !== undefined, schema + " is published");
     const findings = [];
@@ -177,7 +229,7 @@ test("every_console_decoder_requires_exactly_what_the_schema_requires", () => {
     checked += 1;
   }
   assert.ok(
-    checked >= 50,
+    checked >= 105,
     "this arm compared " + String(checked) + " shapes; it covers every response DTO, every list " +
       "and single-item envelope, and every request body the client builds",
   );
@@ -367,7 +419,7 @@ test("every_closed_set_this_client_holds_is_the_schema_s_own", () => {
     );
     checked += 1;
   }
-  assert.equal(checked, 10, "this arm compared " + String(checked) + " sets");
+  assert.equal(checked, 24, "this arm compared " + String(checked) + " sets");
 });
 
 test("the_plan_module_s_target_modes_and_the_product_api_s_restore_modes_agree", () => {

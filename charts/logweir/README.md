@@ -58,7 +58,7 @@ install document; this README is the chart's own.
 | `NetworkPolicy` `logweir-identity-kubernetes-api-egress` | every identity-enabled runner namespace | excludes bootstrap from runner arbitrary-443 egress; permits DNS plus discovered/configured Kubernetes API destinations only |
 | `Deployment` + `Service` `<release>-minio`, a PVC, `Secret` `<release>-minio-root`, `Secret` `logweir-s3`, `Job` `<release>-minio-seed` | `minio.enabled` | an in-cluster archive with the buckets `kafka-backups` and `logweir-evidence` |
 | `StatefulSet` + two `Service`s `<release>-kafka-source` and `-target`, `Job` `<release>-kafka-seed` | `demoKafka.enabled` | two single-broker KRaft clusters; `orders` and `payments` seeded on the source, the marker topic `logweir.scratch` on the target |
-| `Deployment`, `Service`, `ServiceAccount`, `ClusterRole`s, `RoleBinding` `<release>-ui` | `ui.enabled` | `kubectl proxy` serving the twenty-one UI files and the API on one origin, with its own authority (below). The files come from the image `ui.image`, not from a ConfigMap |
+| `Deployment`, `Service`, `ServiceAccount`, `ClusterRole`s, `RoleBinding` `<release>-ui` | `ui.enabled` | `kubectl proxy` serving the twenty-two UI files and the API on one origin, with its own authority (below). The files come from the image `ui.image`, not from a ConfigMap |
 
 Nothing optional is on by default. The release gate renders the snapshots with
 the pinned bootstrap digest exactly as shipped; the rest of the default render
@@ -467,7 +467,7 @@ serves it).
 
 `ui.image` defaults to `docker.io/vladyslavhaina/logweir-ui:latest`. **What is
 in it:** the pinned `registry.k8s.io/kubectl` (v1.34.1, resolved by digest on
-2026-09-12 — the command is below) with the **twenty-one shipped UI files copied
+2026-09-12 — the command is below) with the **twenty-two shipped UI files copied
 in at `/ui`** and nothing else: no `README.md`, no `ui/tests/` (which carries a
 throwaway keypair), no key material of any kind. It also carries Logweir's
 `LICENSE` and `NOTICE` and, under `/usr/share/licenses/kubectl/`, kubectl's
@@ -786,7 +786,7 @@ Logweir — Global Constraint 6.
   namespace derived from the runner pin.
 * `scripts/check-image-ui.sh` (`just smoke-ui`; needs a Docker daemon, so it is
   in `docs/gates.md`'s stack/cluster table rather than in `just gate`): the
-  twenty-one files the `logweir-ui` image serves, sha256 for sha256 against
+  twenty-two files the `logweir-ui` image serves, sha256 for sha256 against
   `ui/`, and nothing else under `/ui`. This is what replaced the chart's
   byte-copy arm.
 * The existing image publication path runs `scripts/check-image.sh` against the

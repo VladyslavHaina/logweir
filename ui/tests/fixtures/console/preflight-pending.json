@@ -1,0 +1,26 @@
+{
+  "item": {
+    "applicable": false,
+    "binding": {
+      "referents": []
+    },
+    "checks": [],
+    "conditions": [],
+    "createdAt": "2026-09-17T04:57:46Z",
+    "detailsAvailable": false,
+    "executionOnly": [],
+    "id": "pf-c5ovcfrjvxwk7axdpexnma4w6l",
+    "namespace": "team-a",
+    "operation": "destinationAccess",
+    "resourceVersion": "2429248",
+    "stale": false,
+    "staleBasis": [],
+    "staleReasons": [],
+    "state": "pending",
+    "terminal": false,
+    "uid": "93af5a92-8d71-4947-9f1b-c7137429a5ab",
+    "warnings": []
+  },
+  "replayed": false,
+  "requestId": "p2"
+}

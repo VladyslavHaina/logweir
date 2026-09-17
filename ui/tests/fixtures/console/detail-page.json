@@ -1,0 +1,21 @@
+{
+  "items": [
+    {
+      "check": "archive.segments",
+      "entry": {
+        "missingKey": "team-a/prod/logweir-backup/000012.seg"
+      }
+    },
+    {
+      "check": "archive.segments",
+      "entry": {
+        "missingKey": "team-a/prod/logweir-backup/000013.seg"
+      }
+    }
+  ],
+  "page": {
+    "limit": 100,
+    "snapshot": "sha256:cc"
+  },
+  "requestId": "d1"
+}

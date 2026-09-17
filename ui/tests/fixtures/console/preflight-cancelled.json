@@ -1,0 +1,35 @@
+{
+  "item": {
+    "applicable": false,
+    "binding": {
+      "inputsDigest": "sha256:bb",
+      "referents": [
+        {
+          "generation": 2,
+          "kind": "BackupDestination",
+          "name": "primary",
+          "uid": "17bc54c4-2e52-4607-b4ac-c31517a6e568"
+        }
+      ]
+    },
+    "checks": [],
+    "conditions": [],
+    "createdAt": "2026-09-17T04:57:46Z",
+    "detailsAvailable": false,
+    "executionOnly": [],
+    "id": "pf-c5ovcfrjvxwk7axdpexnma4w6l",
+    "namespace": "team-a",
+    "operation": "destinationAccess",
+    "reason": "Cancelled",
+    "resourceVersion": "2429248",
+    "stale": false,
+    "staleBasis": [],
+    "staleReasons": [],
+    "state": "cancelled",
+    "terminal": true,
+    "uid": "93af5a92-8d71-4947-9f1b-c7137429a5ab",
+    "warnings": []
+  },
+  "replayed": false,
+  "requestId": "p6"
+}

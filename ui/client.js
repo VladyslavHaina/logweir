@@ -39,6 +39,7 @@
 // every response is read by `api.js`, which holds the one `fetch` in the tree.
 
 import {
+  consoleAction,
   consoleCreate,
   consoleGet,
   consoleList,
@@ -53,13 +54,21 @@ import {
   session,
 } from "./api.js";
 import {
+  contractFailure,
   decodeApprovalPacket,
+  decodeCancel,
+  decodeCheckOperation,
   decodeConsoleItem,
   decodeConsoleList,
+  decodeDestinationUsage,
+  decodeDetailPage,
+  decodeDiscoveryLatest,
   decodeLegacyList,
   decodeLegacyObject,
   decodeOperation,
+  decodeRequest,
   decodeSession,
+  decodeTopicPage,
   isContractFailure,
 } from "./contract.js";
 import { preparedFor } from "./plan.js";
@@ -916,6 +925,354 @@ const consoleApi = Object.freeze({
   },
 });
 
+// ===========================================================================
+// D2: destinations, topic discoveries and operation readiness
+// ===========================================================================
+//
+// CONSOLE ONLY, AND SAID SO BY NAME. These three domains exist on the product
+// API and nowhere else this page can reach. `kubectl proxy` would serve the
+// custom resources -- they are in the same API group -- but the legacy UI
+// ServiceAccount has no binding for them (D2 §7.4 adds `get`/`list` for
+// read-only summaries and NO create), and `ui/api.js`'s `WRITABLE_PLURALS` is
+// deliberately unchanged. So in legacy mode every call below is refused HERE,
+// with a sentence saying which API serves the flow, rather than sent and
+// answered with a 403 the page would then have to narrate.
+//
+// WHO MAY START ONE. The three capability flags `destinations`,
+// `topicDiscovery` and `preflight` are the domains' READ FLOORS: "this build
+// serves the domain and you may read it". Whether the actor may also START,
+// CANCEL or MANAGE is the role table, which `/session` publishes per grant in
+// `namespaces[].roles` -- and D2 W12 deliberately did not split the three
+// flags into read/start pairs, because `CAPABILITY_FLAGS` is frozen at
+// nineteen entries and pinned against the schema's own `required` set. So the
+// read is gated by the FLAG and the write by [`mayOperate`], which reads the
+// roles.
+
+/** The capability flag that is each domain's READ FLOOR. */
+const DOMAIN_CAPABILITY = Object.freeze({
+  destinations: "destinations",
+  "topic-discoveries": "topicDiscovery",
+  preflights: "preflight",
+});
+
+/** The two product roles that may start, cancel and manage in a namespace.
+ *  Taken from `authz.rs`'s decision table: Viewer reads, Approver reads what a
+ *  governed approval needs, and Operator and Administrator are the two that
+ *  mutate. */
+export const OPERATING_ROLES = Object.freeze(["operator", "administrator"]);
+
+/** Whether this actor may take an operator-level action in `ns`.
+ *
+ *  A ROLE, NOT A FLAG, AND THE DIFFERENCE MATTERS. `granted(ns, "destinations")`
+ *  is `implemented && may read`; it is true for a Viewer, who may not create a
+ *  destination, start a discovery or cancel a check. Branching a BUTTON on it
+ *  would put a control on screen that the server answers 403 for every time.
+ *
+ *  AN EMPTY ROLE LIST IS A MODE, NOT A REFUSAL. Legacy mode has no product
+ *  roles at all -- the API server's own RBAC is the whole authorisation story
+ *  there -- and localAdmin mode has none either: it is one administrator on a
+ *  loopback listener, and `authz.rs` answers every action `true` for it. In
+ *  both the server is the gate and the control is offered. What this refuses
+ *  is the case that is actually a refusal: an authenticated actor who HOLDS
+ *  roles in this namespace and none of them is Operator or Administrator. */
+export function mayOperate(ns) {
+  if (decided === null || decided.mode !== CONSOLE) {
+    return true;
+  }
+  const document = decided.session;
+  if (document !== null && document.authenticationMode === "localAdmin") {
+    return true;
+  }
+  const held = decided.roles[ns];
+  if (held === undefined) {
+    return false;
+  }
+  for (const role of held) {
+    if (OPERATING_ROLES.indexOf(role) !== -1) {
+      return true;
+    }
+  }
+  return false;
+}
+
+/** An error for a flow this page will not attempt because the actor's own
+ *  roles do not cover it. `status` is 403 and `reason` is the product API's
+ *  own code, so it renders exactly as the server's refusal would. */
+function notOperator(ns, what) {
+  const held = decided === null ? [] : (decided.roles[ns] || []);
+  const error = new Error(
+    "this session may not " + what + " in namespace " + String(ns) + ". The roles it holds " +
+      "there are " + (held.length === 0 ? "none" : held.join(", ")) + "; " +
+      OPERATING_ROLES.join(" or ") + " is required. The roles come from the product API's " +
+      "own session document; nothing on this page decides them.",
+  );
+  error.kind = "rejected";
+  error.status = 403;
+  error.reason = "namespace_forbidden";
+  return error;
+}
+
+// THE READ GATE AND THE WRITE GATE, SEPARATELY. Every D2 call below opens with
+// one of these two, so "which permission does this need" is one line at the
+// top of each method and not a paragraph somewhere else.
+function requireDomain(ns, domain) {
+  requireGrant(ns, DOMAIN_CAPABILITY[domain]);
+}
+
+function requireOperator(ns, domain, what) {
+  requireDomain(ns, domain);
+  if (!mayOperate(ns)) {
+    throw notOperator(ns, what);
+  }
+}
+
+// THE BODY IS CHECKED AGAINST THE PUBLISHED REQUEST SHAPE BEFORE IT IS SENT.
+// `ui/contract.js` declares every D2 request; a field that became required on
+// the server, or one this page invented, is a named contract failure here
+// rather than a 422 in front of an operator. It is the same rule the read side
+// has had since PLAT-18.1, applied to the half that was never checked.
+function sending(name, body) {
+  const decodedBody = decodeRequest(name, body);
+  if (decodedBody.unknown.length > 0) {
+    throw contractFailure(
+      name,
+      decodedBody.unknown[0],
+      "this page built a field the published request schema does not declare, and a mutation " +
+        "input that carries one is a 422 from the product API",
+    );
+  }
+  return body;
+}
+
+// The refusal every D2 method answers in legacy mode.
+function consoleOnly(what) {
+  return noRoute(
+    what + " is served by the Logweir product API and not by the Kubernetes API this page is " +
+      "talking to. Open the console (`logweir-api`) to use it, or drive the custom resources " +
+      "with kubectl; this page will not pretend to a route it cannot reach.",
+  );
+}
+
+const legacyChecks = Object.freeze({
+  destinations() { return Promise.reject(consoleOnly("Saved destinations")); },
+  destination() { return Promise.reject(consoleOnly("Saved destinations")); },
+  createDestination() { return Promise.reject(consoleOnly("Creating a destination")); },
+  updateDestinationAccess() { return Promise.reject(consoleOnly("Rotating destination access")); },
+  testDestination() { return Promise.reject(consoleOnly("Testing destination access")); },
+  destinationUsage() { return Promise.reject(consoleOnly("What uses a destination")); },
+  destinationFromLegacy() { return Promise.reject(consoleOnly("Adopting a legacy archive")); },
+  latestDiscoveries() { return Promise.reject(consoleOnly("Topic discovery")); },
+  startDiscovery() { return Promise.reject(consoleOnly("Topic discovery")); },
+  discovery() { return Promise.reject(consoleOnly("Topic discovery")); },
+  discoveryTopics() { return Promise.reject(consoleOnly("Topic discovery")); },
+  cancelDiscovery() { return Promise.reject(consoleOnly("Cancelling a discovery")); },
+  startPreflight() { return Promise.reject(consoleOnly("Operation readiness")); },
+  preflight() { return Promise.reject(consoleOnly("Operation readiness")); },
+  preflightDetails() { return Promise.reject(consoleOnly("Operation readiness")); },
+  cancelPreflight() { return Promise.reject(consoleOnly("Cancelling a preflight")); },
+  checkOperation() { return Promise.reject(consoleOnly("A check's status")); },
+});
+
+// Every D2 read returns the DECODED DTO, not a projection into a custom
+// resource. The five older kinds are projected because their pages were
+// written against `kubectl proxy`'s shape and both modes must render the same
+// string; these three have no legacy page to agree with, so the DTO IS the
+// shape -- and a projection would be a second vocabulary for one set of facts.
+const consoleChecks = Object.freeze({
+  async destinations(ns, options) {
+    requireDomain(ns, "destinations");
+    const decoded = decodeConsoleList(
+      "destinations",
+      await consoleList(ns, "destinations", Object.assign({ limit: LIST_PAGE_SIZE }, options || {})),
+    );
+    return { items: decoded.value.items, page: decoded.value.page, unknown: decoded.unknown };
+  },
+  async destination(ns, name, options) {
+    requireDomain(ns, "destinations");
+    const decoded = decodeConsoleItem("destinations", await consoleGet(ns, "destinations", name, options));
+    return { item: decoded.value.item, unknown: decoded.unknown };
+  },
+  async createDestination(ns, request) {
+    requireOperator(ns, "destinations", "create a destination");
+    const answer = await consoleCreate(ns, "destinations", sending("destinations", request), {
+      idempotencyKey: idempotencyKey("destinations", ns, request.name),
+      token: tokenNow(),
+    });
+    const decoded = decodeConsoleItem("destinations", answer);
+    return { item: decoded.value.item, replayed: decoded.value.replayed === true };
+  },
+  async updateDestinationAccess(ns, name, request) {
+    requireOperator(ns, "destinations", "rotate destination access");
+    // NO IDEMPOTENCY KEY, AND NOT BECAUSE ONE WAS FORGOTTEN. This route's
+    // replay guard is `expectedGeneration`: a second send of the same body
+    // after the first landed is a 412, which is the RIGHT answer -- the object
+    // moved. The product API answers 400 for a key here, and `api.js`'s action
+    // table refuses to send one at all.
+    const answer = await consoleAction(
+      ns, "destinations:update-access", name,
+      sending("destinations:update-access", request),
+      { token: tokenNow() },
+    );
+    const decoded = decodeConsoleItem("destinations", answer);
+    return { item: decoded.value.item };
+  },
+  async testDestination(ns, name, request) {
+    requireOperator(ns, "destinations", "test destination access");
+    const body = sending("destinations:test", request || {});
+    const answer = await consoleAction(ns, "destinations:test", name, body, {
+      // THE KEY IS A FUNCTION OF WHAT IS BEING TESTED AND OF WHICH ROLES, so a
+      // double click is one Preflight and a test of a different role set is
+      // another. A key that ignored the roles would answer the second request
+      // with the first one's result.
+      idempotencyKey: idempotencyKey("destinations:test", ns, name + "." + rolesTag(body.roles)),
+      token: tokenNow(),
+    });
+    const decoded = decodeConsoleItem("preflights", answer);
+    return { item: decoded.value.item, replayed: decoded.value.replayed === true };
+  },
+  async destinationUsage(ns, name, options) {
+    requireDomain(ns, "destinations");
+    const decoded = decodeDestinationUsage(await consoleSub(ns, "destinations", name, "usage", options));
+    return decoded.value;
+  },
+  async destinationFromLegacy(ns, request) {
+    requireOperator(ns, "destinations", "adopt a legacy archive as a destination");
+    const answer = await consoleAction(
+      ns, "destinations:from-legacy", null,
+      sending("destinations:from-legacy", request),
+      { idempotencyKey: idempotencyKey("destinations:from-legacy", ns, request.name), token: tokenNow() },
+    );
+    const decoded = decodeConsoleItem("destinations", answer);
+    return { item: decoded.value.item, replayed: decoded.value.replayed === true };
+  },
+  async latestDiscoveries(ns, connection, options) {
+    requireDomain(ns, "topic-discoveries");
+    const decoded = decodeDiscoveryLatest(
+      await consoleSub(ns, "connections", connection, "topic-discoveries",
+        Object.assign({}, options || {}, { latest: true })),
+    );
+    return {
+      latestAttempt: decoded.value.latestAttempt,
+      lastSuccessful: decoded.value.lastSuccessful,
+      unknown: decoded.unknown,
+    };
+  },
+  async startDiscovery(ns, connection, request) {
+    requireOperator(ns, "topic-discoveries", "start a topic discovery");
+    const body = sending("connections:topic-discoveries", request || {});
+    const answer = await consoleAction(ns, "connections:topic-discoveries", connection, body, {
+      idempotencyKey: idempotencyKey("topic-discoveries", ns, connection + "." + discoveryTag(body)),
+      token: tokenNow(),
+    });
+    const decoded = decodeConsoleItem("topic-discoveries", answer);
+    return {
+      item: decoded.value.item,
+      replayed: decoded.value.replayed === true,
+      reused: decoded.value.reused === true,
+    };
+  },
+  async discovery(ns, id, options) {
+    requireDomain(ns, "topic-discoveries");
+    const decoded = decodeConsoleItem("topic-discoveries", await consoleGet(ns, "topic-discoveries", id, options));
+    return { item: decoded.value.item, unknown: decoded.unknown };
+  },
+  async discoveryTopics(ns, id, options) {
+    requireDomain(ns, "topic-discoveries");
+    const decoded = decodeTopicPage(
+      await consoleSub(ns, "topic-discoveries", id, "topics",
+        Object.assign({ limit: TOPIC_PAGE_SIZE }, options || {})),
+    );
+    return decoded.value;
+  },
+  async cancelDiscovery(ns, id) {
+    requireOperator(ns, "topic-discoveries", "cancel a topic discovery");
+    const decoded = decodeCancel(
+      await consoleAction(ns, "topic-discoveries:cancel", id, {}, { token: tokenNow() }),
+    );
+    return decoded.value;
+  },
+  async startPreflight(ns, request) {
+    requireOperator(ns, "preflights", "start a readiness check");
+    const body = sending("preflights", request);
+    const answer = await consoleCreate(ns, "preflights", body, {
+      idempotencyKey: idempotencyKey("preflights", ns, preflightTag(body)),
+      token: tokenNow(),
+    });
+    const decoded = decodeConsoleItem("preflights", answer);
+    return { item: decoded.value.item, replayed: decoded.value.replayed === true };
+  },
+  async preflight(ns, id, options) {
+    requireDomain(ns, "preflights");
+    // `?planHash=` IS THE QUESTION, NOT A FILTER. It asks the product API to
+    // recompute `applicable` and `staleReasons` against the plan the operator
+    // is looking at NOW. Omitting it is a different question -- "is this
+    // result still about its own inputs" -- and not a weaker one.
+    const decoded = decodeConsoleItem("preflights", await consoleGet(ns, "preflights", id, options));
+    return { item: decoded.value.item, unknown: decoded.unknown };
+  },
+  async preflightDetails(ns, id, options) {
+    requireDomain(ns, "preflights");
+    const decoded = decodeDetailPage(
+      await consoleSub(ns, "preflights", id, "details",
+        Object.assign({ limit: DETAIL_PAGE_SIZE }, options || {})),
+    );
+    return decoded.value;
+  },
+  async cancelPreflight(ns, id) {
+    requireOperator(ns, "preflights", "cancel a readiness check");
+    const decoded = decodeCancel(
+      await consoleAction(ns, "preflights:cancel", id, {}, { token: tokenNow() }),
+    );
+    return decoded.value;
+  },
+  async checkOperation(ns, kind, name, options) {
+    requireDomain(ns, kind === "discovery" ? "topic-discoveries" : "preflights");
+    const decoded = decodeCheckOperation(await consoleOperation(ns, kind, name, options));
+    return { item: decoded.value.item, unknown: decoded.unknown };
+  },
+});
+
+/** The page size a topic listing asks for. The product API's own maximum for
+ *  that route; a smaller one only means more round trips over the same chunks. */
+export const TOPIC_PAGE_SIZE = 200;
+
+/** The page size a preflight's detail document is read in. */
+export const DETAIL_PAGE_SIZE = 100;
+
+// The synchroniser token, or null. One expression, so no method below has to
+// remember the `decided === null` arm.
+function tokenNow() {
+  return decided === null ? null : decided.token;
+}
+
+// The roles a destination test exercises, as one stable tag for the
+// idempotency key. Sorted, because `["archiveRead","archiveWrite"]` and
+// `["archiveWrite","archiveRead"]` are the same test and must not be two.
+function rolesTag(roles) {
+  return Array.isArray(roles) && roles.length > 0 ? roles.slice().sort().join("-") : "configured";
+}
+
+// A discovery's parameters, as one tag. Two requests that differ only in
+// `reuseFresh` are the same discovery to the server's own parameter hash, so
+// they are the same key here too.
+function discoveryTag(body) {
+  return [
+    body.includeInternal === true ? "i1" : "i0",
+    "m" + String(typeof body.maxTopics === "number" ? body.maxTopics : 0),
+    "t" + String(typeof body.timeoutSeconds === "number" ? body.timeoutSeconds : 0),
+    "e" + digest32((Array.isArray(body.expectedTopics) ? body.expectedTopics : []).join(",")),
+  ].join(".");
+}
+
+// A preflight's subject, as one tag: the operation plus a digest over the
+// block that names what it is about. A second click on "Check readiness" for
+// the SAME plan is the same check; an edited plan is a different one, because
+// the plan hash is inside the digest.
+function preflightTag(body) {
+  const block = body[body.operation];
+  return body.operation + "." + digest32(JSON.stringify(block === undefined ? null : block));
+}
+
 function consolePlural(plural) {
   const route = CONSOLE_PLURAL[plural];
   if (route === undefined) {
@@ -1156,6 +1513,62 @@ export function apiClient() {
     listCluster(plural, options) {
       return dispatch((api) => api.listCluster(plural, options));
     },
+
+    // D2 (PLAT-08, PLAT-09.1, PLAT-03): saved destinations, bounded topic
+    // discovery and operation readiness. Console mode only; the legacy half
+    // answers each of these with a named refusal rather than a 403 from a
+    // route the page cannot reach.
+    destinations(ns, options) {
+      return dispatchChecks((api) => api.destinations(ns, options));
+    },
+    destination(ns, name, options) {
+      return dispatchChecks((api) => api.destination(ns, name, options));
+    },
+    createDestination(ns, request) {
+      return dispatchChecks((api) => api.createDestination(ns, request));
+    },
+    updateDestinationAccess(ns, name, request) {
+      return dispatchChecks((api) => api.updateDestinationAccess(ns, name, request));
+    },
+    testDestination(ns, name, request) {
+      return dispatchChecks((api) => api.testDestination(ns, name, request));
+    },
+    destinationUsage(ns, name, options) {
+      return dispatchChecks((api) => api.destinationUsage(ns, name, options));
+    },
+    destinationFromLegacy(ns, request) {
+      return dispatchChecks((api) => api.destinationFromLegacy(ns, request));
+    },
+    latestDiscoveries(ns, connection, options) {
+      return dispatchChecks((api) => api.latestDiscoveries(ns, connection, options));
+    },
+    startDiscovery(ns, connection, request) {
+      return dispatchChecks((api) => api.startDiscovery(ns, connection, request));
+    },
+    discovery(ns, id, options) {
+      return dispatchChecks((api) => api.discovery(ns, id, options));
+    },
+    discoveryTopics(ns, id, options) {
+      return dispatchChecks((api) => api.discoveryTopics(ns, id, options));
+    },
+    cancelDiscovery(ns, id) {
+      return dispatchChecks((api) => api.cancelDiscovery(ns, id));
+    },
+    startPreflight(ns, request) {
+      return dispatchChecks((api) => api.startPreflight(ns, request));
+    },
+    preflight(ns, id, options) {
+      return dispatchChecks((api) => api.preflight(ns, id, options));
+    },
+    preflightDetails(ns, id, options) {
+      return dispatchChecks((api) => api.preflightDetails(ns, id, options));
+    },
+    cancelPreflight(ns, id) {
+      return dispatchChecks((api) => api.cancelPreflight(ns, id));
+    },
+    checkOperation(ns, kind, name, options) {
+      return dispatchChecks((api) => api.checkOperation(ns, kind, name, options));
+    },
   });
 }
 
@@ -1170,6 +1583,24 @@ function dispatch(call) {
   return ensure().then((record) => call(record.mode === CONSOLE ? consoleApi : legacyApi));
 }
 
+// The D2 half dispatches exactly as the five older kinds do, over its own pair
+// of implementations. A separate pair and not five more methods on the
+// existing ones: the older kinds are PROJECTED into custom resources so both
+// modes render one string, and these three have no legacy page to agree with.
+function dispatchChecks(call) {
+  if (decided !== null) {
+    try {
+      return Promise.resolve(call(decided.mode === CONSOLE ? consoleChecks : legacyChecks));
+    } catch (refused) {
+      return Promise.reject(refused);
+    }
+  }
+  return ensure().then((record) => call(record.mode === CONSOLE ? consoleChecks : legacyChecks));
+}
+
 /** The two implementations, by name, for the suite and for a reader who wants
  *  to see one without the other. A page never picks: `apiClient` does. */
 export const MODES = Object.freeze({ legacy: legacyApi, console: consoleApi });
+
+/** The D2 half of the same pair. */
+export const CHECK_MODES = Object.freeze({ legacy: legacyChecks, console: consoleChecks });

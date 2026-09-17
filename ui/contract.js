@@ -682,6 +682,445 @@ const SET_SUSPENSION_REQUEST = shapeOf(
   { suspended: bool, expectedResourceVersion: str },
 );
 
+// ===========================================================================
+// D2: destinations, topic discoveries and operation readiness
+// ===========================================================================
+//
+// THREE DOMAINS, ONE RULE: NOTHING HERE READS AS HEALTH BY DEFAULT.
+//
+//   * A destination's `status.valid` is OPTIONAL, and absent means the
+//     controller has not reached a verdict. Absent is not `false` and is not
+//     `true`; the page renders it as "not judged".
+//   * A discovery's `visibility.state` is `unknown` for a listing that
+//     succeeded. `unknown` is the HEALTHY default of that field, not a
+//     failure, and never the word "complete".
+//   * A check's lifecycle carries `unknown` as a member: a controller phase
+//     this build does not recognise reads `unknown` and never `succeeded`.
+//
+// A decoder cannot enforce those readings on its own -- it can only make the
+// fields impossible to MISS, which is what the required/optional split below
+// does. `ui/render.js` carries the words and `ui/tests/pages.spec.js` holds
+// them.
+
+/** How a request names the bucket. NEVER a transport choice (defect G5). */
+export const ADDRESSING_MODES = Object.freeze(["pathStyle", "virtualHosted"]);
+
+/** Transport security. Immutable once the destination exists. */
+export const TRANSPORT_SECURITY = Object.freeze(["tls", "insecureHttp"]);
+
+/** The one object-store provider a destination may name today. */
+export const STORAGE_PROVIDERS = Object.freeze(["s3"]);
+
+/** How one role's credential is obtained. The last two are RESPONSE-ONLY
+ *  spellings of an absent grant: sending either is a 422. */
+export const ACCESS_MODES = Object.freeze([
+  "secretKeys", "workloadIdentity", "controllerIdentity", "archiveReadGrant",
+  "inheritsArchiveWrite", "notConfigured",
+]);
+
+/** Whether an explicit readiness test may write a marker object. */
+export const WRITE_PROBES = Object.freeze(["disabled", "createOnlyMarker"]);
+
+/** The four credentials a destination test can exercise. */
+export const DESTINATION_ROLES = Object.freeze([
+  "archiveWrite", "archiveRead", "evidenceWrite", "evidenceRead",
+]);
+
+/** The lifecycle of a transient check. `unknown` is a MEMBER, not an error:
+ *  a controller phase this build does not recognise reads `unknown` and never
+ *  `succeeded`. */
+export const CHECK_LIFECYCLE = Object.freeze([
+  "pending", "queued", "running", "succeeded", "failed", "cancelled", "unknown",
+]);
+
+/** The aggregate a preflight reports. `unknown` sits between `notReady` and
+ *  `failed` on purpose: a blocking check that could not be decided, or was
+ *  skipped, is neither a pass nor a refusal. */
+export const PREFLIGHT_STATES = Object.freeze([
+  "pending", "queued", "running", "ready", "notReady", "unknown", "failed", "cancelled",
+]);
+
+/** What a preflight is about. */
+export const PREFLIGHT_OPERATIONS = Object.freeze(["backup", "restore", "destinationAccess"]);
+
+/** One check's verdict. `skipped` never counts as a pass. */
+export const CHECK_VERDICTS = Object.freeze(["ready", "notReady", "unknown", "skipped"]);
+
+/** Whether a check's verdict gates the operation. */
+export const CHECK_GATING = Object.freeze(["blocking", "advisory", "executionOnly"]);
+
+/** How complete a topic inventory's own author believes it is. A successful
+ *  Kafka list ALONE is `unknown`; this page must never render it "complete". */
+export const VISIBILITY_STATES = Object.freeze(["unknown", "limited", "attestedComplete"]);
+
+/** The two transient check kinds `GET .../operations/{kind}/{name}` serves. */
+export const CHECK_OPERATION_KINDS = Object.freeze(["discovery", "preflight"]);
+
+/** Why a stored readiness verdict no longer describes the caller's inputs.
+ *
+ *  SEVEN, AND THE SEVENTH IS THE IMPORTANT ONE. Six are the spellings
+ *  `logweir_core::check_contract::StaleReason` renders; `unverifiable` is the
+ *  product API's own, and it means "this service could not COMPARE something,
+ *  so it will not call the verdict applicable". A page that treated it as a
+ *  kind of freshness would be reporting a verdict nobody checked as current. */
+export const STALE_REASONS = Object.freeze([
+  "expired", "planHashChanged", "referentChanged", "caBundleChanged",
+  "policyChanged", "inputsDigestChanged", "unverifiable",
+]);
+
+const CA_BUNDLE = shapeOf("CaBundleView", { configMapName: str, key: str }, { sha256: str });
+
+const STORAGE = shapeOf(
+  "StorageView",
+  {
+    provider: oneOf(STORAGE_PROVIDERS), bucket: str, prefix: str,
+    addressing: oneOf(ADDRESSING_MODES),
+  },
+  { endpoint: str, region: str },
+);
+
+const TRANSPORT = shapeOf(
+  "TransportView",
+  { security: oneOf(TRANSPORT_SECURITY) },
+  { caBundle: objectOf(CA_BUNDLE) },
+);
+
+const ACCESS_GRANT = shapeOf(
+  "AccessGrantView",
+  { mode: oneOf(ACCESS_MODES), keys: listOf(str) },
+  { secretName: str, serviceAccountName: str },
+);
+
+const ACCESS = shapeOf("AccessView", {
+  archiveWrite: objectOf(ACCESS_GRANT), archiveRead: objectOf(ACCESS_GRANT),
+  evidenceWrite: objectOf(ACCESS_GRANT), evidenceRead: objectOf(ACCESS_GRANT),
+});
+
+// EVERY FIELD OPTIONAL, AND THAT IS THE CONTRACT. `valid` absent means the
+// controller has not judged this destination; a decoder that required it would
+// refuse every object one second old, and one that defaulted it to `false`
+// would render "invalid" for "not looked at yet".
+const DESTINATION_STATUS = shapeOf(
+  "DestinationStatusView",
+  {},
+  { valid: bool, reason: str, message: str, observedGeneration: int, observedAt: str },
+);
+
+const LAST_TEST = shapeOf(
+  "LastTestView",
+  {
+    preflightId: str, state: oneOf(PREFLIGHT_STATES), stale: bool, truncated: bool,
+  },
+  { observedAt: str },
+);
+
+const DESTINATION = shapeOf(
+  "Destination",
+  {
+    name: str, namespace: str, uid: str, resourceVersion: str, generation: int,
+    storage: objectOf(STORAGE), transport: objectOf(TRANSPORT),
+    access: objectOf(ACCESS), writeProbe: oneOf(WRITE_PROBES),
+    canonicalUrl: str, status: objectOf(DESTINATION_STATUS),
+    default: bool,
+  },
+  { createdAt: str, description: str, locationDigest: str, lastTest: objectOf(LAST_TEST) },
+);
+
+const DESTINATION_SUMMARY = shapeOf(
+  "DestinationSummary",
+  {
+    name: str, uid: str, generation: int, canonicalUrl: str,
+    addressing: oneOf(ADDRESSING_MODES), transport: oneOf(TRANSPORT_SECURITY),
+    status: objectOf(DESTINATION_STATUS), default: bool,
+  },
+  { description: str, endpoint: str },
+);
+
+const DESTINATION_USE = shapeOf("DestinationUseView", { kind: str, name: str }, { createdAt: str });
+
+const DESTINATION_USAGE_RESPONSE = shapeOf("DestinationUsageResponse", {
+  requestId: str, name: str, truncated: bool, basis: str,
+  schedules: listOf(objectOf(DESTINATION_USE)),
+  backups: listOf(objectOf(DESTINATION_USE)),
+});
+
+const DISCOVERY_CONNECTION = shapeOf(
+  "DiscoveryConnectionView",
+  { name: str },
+  { uid: str, generation: int, principal: str, authMode: str },
+);
+
+const DISCOVERY_COUNTS = shapeOf("DiscoveryCountsView", {
+  listed: int, returned: int, internalExcluded: int, errored: int,
+});
+
+const VISIBILITY = shapeOf(
+  "VisibilityView",
+  { state: oneOf(VISIBILITY_STATES), basis: listOf(str) },
+  { attestation: str },
+);
+
+const EXPECTED_TOPICS = shapeOf("ExpectedTopicsView", {
+  requested: int, visible: int, notAuthorized: int, notFound: int, unknown: int,
+});
+
+const CHECK_ERROR = shapeOf("CheckErrorView", { code: str }, { message: str });
+
+const TOPIC_DISCOVERY = shapeOf(
+  "TopicDiscovery",
+  {
+    id: str, namespace: str, uid: str, resourceVersion: str,
+    connection: objectOf(DISCOVERY_CONNECTION),
+    state: oneOf(CHECK_LIFECYCLE), terminal: bool,
+    stale: bool, staleReasons: listOf(str), truncated: bool, chunkCount: int,
+    conditions: listOf(objectOf(CONDITION)),
+  },
+  {
+    createdAt: str, reason: str, observedAt: str, freshUntil: str, clusterId: str,
+    counts: objectOf(DISCOVERY_COUNTS), truncationReason: str,
+    visibility: objectOf(VISIBILITY), expected: objectOf(EXPECTED_TOPICS),
+    topicsSha256: str, error: objectOf(CHECK_ERROR),
+  },
+);
+
+const TOPIC_ENTRY = shapeOf(
+  "TopicEntryView",
+  { name: str, partitions: int, internal: bool, expected: bool },
+  { errorCode: str },
+);
+
+const SCAN = shapeOf("ScanView", { complete: bool, chunksScanned: int });
+
+const TOPIC_PAGE_RESPONSE = shapeOf("TopicPageResponse", {
+  requestId: str, items: listOf(objectOf(TOPIC_ENTRY)), page: objectOf(PAGE),
+  scan: objectOf(SCAN),
+});
+
+// TWO SLOTS, NOT ONE. A failed attempt never hides the last successful
+// inventory, and a successful inventory never hides that the newest attempt
+// failed -- so both are optional and a page renders whichever it was given.
+const DISCOVERY_LATEST_RESPONSE = shapeOf(
+  "DiscoveryLatestResponse",
+  { requestId: str },
+  { latestAttempt: objectOf(TOPIC_DISCOVERY), lastSuccessful: objectOf(TOPIC_DISCOVERY) },
+);
+
+const REFERENT = shapeOf("ReferentView", { kind: str, name: str }, { uid: str, generation: int });
+
+const PREFLIGHT_BINDING = shapeOf(
+  "PreflightBindingView",
+  { referents: listOf(objectOf(REFERENT)) },
+  { planHash: str, inputsDigest: str },
+);
+
+const CHECK_SCOPE = shapeOf("CheckScopeView", {}, { kind: str, name: str, uid: str });
+
+const CHECK_ENTRY = shapeOf(
+  "CheckEntryView",
+  { id: str, state: oneOf(CHECK_VERDICTS) },
+  {
+    category: str, gating: oneOf(CHECK_GATING), code: str, message: str,
+    remedy: str, authority: str, scope: objectOf(CHECK_SCOPE),
+    observedAt: str, expiresAt: str,
+  },
+);
+
+const EXECUTION_ONLY = shapeOf("ExecutionOnlyView", { id: str, note: str });
+
+const STALE_REASON = shapeOf(
+  "StaleReasonView",
+  { reason: oneOf(STALE_REASONS) },
+  { kind: str, name: str, basis: str },
+);
+
+const PREFLIGHT = shapeOf(
+  "Preflight",
+  {
+    id: str, namespace: str, uid: str, resourceVersion: str,
+    operation: oneOf(PREFLIGHT_OPERATIONS), state: oneOf(PREFLIGHT_STATES),
+    terminal: bool, binding: objectOf(PREFLIGHT_BINDING),
+    applicable: bool, stale: bool,
+    staleReasons: listOf(objectOf(STALE_REASON)), staleBasis: listOf(str),
+    checks: listOf(objectOf(CHECK_ENTRY)), warnings: listOf(objectOf(CHECK_ENTRY)),
+    executionOnly: listOf(objectOf(EXECUTION_ONLY)),
+    detailsAvailable: bool, conditions: listOf(objectOf(CONDITION)),
+  },
+  { createdAt: str, reason: str, observedAt: str, expiresAt: str },
+);
+
+const DETAIL_ENTRY = shapeOf("DetailEntryView", { entry: opaque }, { check: str });
+
+const DETAIL_PAGE_RESPONSE = shapeOf("DetailPageResponse", {
+  requestId: str, items: listOf(objectOf(DETAIL_ENTRY)), page: objectOf(PAGE),
+});
+
+// NO `result`, NO `evidence`, NO `verification`, AND THAT IS THE POINT. A
+// transient check has none of those facts, so the product API publishes a
+// DIFFERENT document for it rather than three empty fields a console would be
+// invited to render as "verification: pending" for a topic list.
+const CHECK_OPERATION = shapeOf(
+  "CheckOperation",
+  {
+    kind: oneOf(CHECK_OPERATION_KINDS), name: str, namespace: str, uid: str,
+    resourceVersion: str, state: oneOf(CHECK_LIFECYCLE), terminal: bool,
+    cancellable: bool, conditions: listOf(objectOf(CONDITION)),
+  },
+  { createdAt: str, stateReason: str, message: str, observedAt: str },
+);
+
+const CANCEL_RESPONSE = shapeOf("CancelResponse", {
+  requestId: str, id: str, state: str, alreadyTerminal: bool,
+});
+
+const DESTINATION_LIST = envelope("DestinationList");
+const TOPIC_DISCOVERY_LIST = envelope("TopicDiscoveryList");
+
+const DESTINATION_RESPONSE = item("DestinationResponse", DESTINATION);
+const CHECK_OPERATION_RESPONSE = readOnlyItem("CheckOperationResponse", CHECK_OPERATION);
+const PREFLIGHT_RESPONSE = item("PreflightResponse", PREFLIGHT);
+
+// `reused` is this route's own third answer: not "made" and not "replayed"
+// but "a fresh identical result already existed and you are getting it".
+const TOPIC_DISCOVERY_RESPONSE = shapeOf(
+  "TopicDiscoveryResponse",
+  { item: objectOf(TOPIC_DISCOVERY), requestId: str },
+  { replayed: bool, reused: bool },
+);
+
+// ------------------------------------------------- the D2 request shapes
+
+const CA_BUNDLE_REQUEST = shapeOf("CaBundleRequest", { configMapName: str }, { key: str });
+
+const STORAGE_REQUEST = shapeOf(
+  "StorageRequest",
+  { provider: oneOf(STORAGE_PROVIDERS), bucket: str, addressing: oneOf(ADDRESSING_MODES) },
+  { prefix: str, region: str, endpoint: str },
+);
+
+const TRANSPORT_REQUEST = shapeOf(
+  "TransportRequest",
+  { security: oneOf(TRANSPORT_SECURITY) },
+  { caBundle: objectOf(CA_BUNDLE_REQUEST) },
+);
+
+const UPDATE_TRANSPORT_REQUEST = shapeOf(
+  "UpdateTransportRequest",
+  {},
+  { caBundle: objectOf(CA_BUNDLE_REQUEST) },
+);
+
+const EXISTING_SECRET_REQUEST = shapeOf(
+  "ExistingSecretRequest",
+  { name: str },
+  { accessKeyIdKey: str, secretAccessKeyKey: str, sessionTokenKey: str },
+);
+
+// THE WRITE-ONLY HALF. These three field names appear in this module and in
+// the form that collects them, and nowhere else: no draft keeps them, no log
+// line carries them, and the response to a create that used them carries a
+// Secret NAME and no value at all.
+const NEW_CREDENTIAL_REQUEST = shapeOf(
+  "NewCredentialRequest",
+  { accessKeyId: str, secretAccessKey: str },
+  { sessionToken: str },
+);
+
+const SECRET_SOURCE_REQUEST = shapeOf(
+  "SecretSourceRequest",
+  {},
+  { existing: objectOf(EXISTING_SECRET_REQUEST), new: objectOf(NEW_CREDENTIAL_REQUEST) },
+);
+
+const WORKLOAD_IDENTITY_REQUEST = shapeOf("WorkloadIdentityRequest", {}, { serviceAccountName: str });
+
+const ACCESS_GRANT_REQUEST = shapeOf(
+  "AccessGrantRequest",
+  { mode: oneOf(ACCESS_MODES) },
+  { secret: objectOf(SECRET_SOURCE_REQUEST), workloadIdentity: objectOf(WORKLOAD_IDENTITY_REQUEST) },
+);
+
+const ACCESS_REQUEST = shapeOf(
+  "AccessRequest",
+  { archiveWrite: objectOf(ACCESS_GRANT_REQUEST) },
+  {
+    archiveRead: objectOf(ACCESS_GRANT_REQUEST),
+    evidenceWrite: objectOf(ACCESS_GRANT_REQUEST),
+    evidenceRead: objectOf(ACCESS_GRANT_REQUEST),
+  },
+);
+
+const READINESS_REQUEST = shapeOf("ReadinessRequest", {}, { writeProbe: oneOf(WRITE_PROBES) });
+
+const CREATE_DESTINATION_REQUEST = shapeOf(
+  "CreateDestinationRequest",
+  {
+    name: str, storage: objectOf(STORAGE_REQUEST), transport: objectOf(TRANSPORT_REQUEST),
+    access: objectOf(ACCESS_REQUEST),
+  },
+  { description: str, readiness: objectOf(READINESS_REQUEST), default: bool },
+);
+
+const UPDATE_DESTINATION_ACCESS_REQUEST = shapeOf(
+  "UpdateDestinationAccessRequest",
+  { expectedGeneration: int, access: objectOf(ACCESS_REQUEST) },
+  { transport: objectOf(UPDATE_TRANSPORT_REQUEST) },
+);
+
+const TEST_DESTINATION_REQUEST = shapeOf(
+  "TestDestinationRequest",
+  {},
+  { roles: listOf(oneOf(DESTINATION_ROLES)) },
+);
+
+const DESTINATION_FROM_LEGACY_REQUEST = shapeOf(
+  "DestinationFromLegacyRequest",
+  { name: str, access: objectOf(ACCESS_REQUEST) },
+  { description: str, sourceSchedule: str, sourceBackup: str },
+);
+
+const CREATE_TOPIC_DISCOVERY_REQUEST = shapeOf(
+  "CreateTopicDiscoveryRequest",
+  {},
+  {
+    includeInternal: bool, expectedTopics: listOf(str), maxTopics: int,
+    timeoutSeconds: int, reuseFresh: bool,
+  },
+);
+
+const RECOVERY_POINT_REQUEST = shapeOf("RecoveryPointRequest", { backupName: str }, { backupUid: str });
+
+const BACKUP_PREFLIGHT_REQUEST = shapeOf(
+  "BackupPreflightRequest",
+  { sourceConnection: str, topics: listOf(str) },
+  { destination: str, legacyArchive: objectOf(ARCHIVE_REQUEST), schedule: str },
+);
+
+const RESTORE_PREFLIGHT_REQUEST = shapeOf(
+  "RestorePreflightRequest",
+  {},
+  {
+    planBytes: str, planHash: str, target: str, restoreName: str,
+    sourceDestination: str, evidenceDestination: str,
+    legacySourceArchive: objectOf(ARCHIVE_REQUEST),
+    recoveryPoint: objectOf(RECOVERY_POINT_REQUEST),
+  },
+);
+
+const DESTINATION_ACCESS_PREFLIGHT_REQUEST = shapeOf("DestinationAccessPreflightRequest", {
+  destination: str, roles: listOf(oneOf(DESTINATION_ROLES)),
+});
+
+const CREATE_PREFLIGHT_REQUEST = shapeOf(
+  "CreatePreflightRequest",
+  { operation: oneOf(PREFLIGHT_OPERATIONS) },
+  {
+    backup: objectOf(BACKUP_PREFLIGHT_REQUEST),
+    restore: objectOf(RESTORE_PREFLIGHT_REQUEST),
+    destinationAccess: objectOf(DESTINATION_ACCESS_PREFLIGHT_REQUEST),
+    skipChecks: listOf(str), timeoutSeconds: int,
+  },
+);
+
 /** The request shapes, by the plural whose create route takes them, plus the
  *  one update. `ui/client.js` builds a body for each; the suite checks the
  *  body it built against the shape, and the shape against the schema. */
@@ -690,6 +1129,15 @@ export const CONSOLE_REQUESTS = Object.freeze({
   schedules: CREATE_SCHEDULE_REQUEST,
   restores: CREATE_RESTORE_REQUEST,
   "schedules:set-suspension": SET_SUSPENSION_REQUEST,
+  // D2 W13. Keyed by the ACTION the client names, which is the same key
+  // `api.js`'s frozen action table uses, so the body a page builds and the
+  // route it is sent to cannot come apart.
+  destinations: CREATE_DESTINATION_REQUEST,
+  preflights: CREATE_PREFLIGHT_REQUEST,
+  "destinations:update-access": UPDATE_DESTINATION_ACCESS_REQUEST,
+  "destinations:test": TEST_DESTINATION_REQUEST,
+  "destinations:from-legacy": DESTINATION_FROM_LEGACY_REQUEST,
+  "connections:topic-discoveries": CREATE_TOPIC_DISCOVERY_REQUEST,
 });
 
 /** Checks a body this client BUILT against the shape the server publishes.
@@ -762,6 +1210,67 @@ export const CONSOLE_SHAPES = Object.freeze({
   RestoreTargetRequest: RESTORE_TARGET_REQUEST,
   CreateRestoreRequest: CREATE_RESTORE_REQUEST,
   SetSuspensionRequest: SET_SUSPENSION_REQUEST,
+
+  // D2: destinations, topic discoveries and operation readiness.
+  CaBundleView: CA_BUNDLE,
+  StorageView: STORAGE,
+  TransportView: TRANSPORT,
+  AccessGrantView: ACCESS_GRANT,
+  AccessView: ACCESS,
+  DestinationStatusView: DESTINATION_STATUS,
+  LastTestView: LAST_TEST,
+  Destination: DESTINATION,
+  DestinationSummary: DESTINATION_SUMMARY,
+  DestinationUseView: DESTINATION_USE,
+  DestinationUsageResponse: DESTINATION_USAGE_RESPONSE,
+  DestinationList: DESTINATION_LIST,
+  DestinationResponse: DESTINATION_RESPONSE,
+  DiscoveryConnectionView: DISCOVERY_CONNECTION,
+  DiscoveryCountsView: DISCOVERY_COUNTS,
+  VisibilityView: VISIBILITY,
+  ExpectedTopicsView: EXPECTED_TOPICS,
+  CheckErrorView: CHECK_ERROR,
+  TopicDiscovery: TOPIC_DISCOVERY,
+  TopicDiscoveryList: TOPIC_DISCOVERY_LIST,
+  TopicDiscoveryResponse: TOPIC_DISCOVERY_RESPONSE,
+  DiscoveryLatestResponse: DISCOVERY_LATEST_RESPONSE,
+  TopicEntryView: TOPIC_ENTRY,
+  ScanView: SCAN,
+  TopicPageResponse: TOPIC_PAGE_RESPONSE,
+  ReferentView: REFERENT,
+  PreflightBindingView: PREFLIGHT_BINDING,
+  CheckScopeView: CHECK_SCOPE,
+  CheckEntryView: CHECK_ENTRY,
+  ExecutionOnlyView: EXECUTION_ONLY,
+  StaleReasonView: STALE_REASON,
+  Preflight: PREFLIGHT,
+  PreflightResponse: PREFLIGHT_RESPONSE,
+  DetailEntryView: DETAIL_ENTRY,
+  DetailPageResponse: DETAIL_PAGE_RESPONSE,
+  CheckOperation: CHECK_OPERATION,
+  CheckOperationResponse: CHECK_OPERATION_RESPONSE,
+  CancelResponse: CANCEL_RESPONSE,
+  CaBundleRequest: CA_BUNDLE_REQUEST,
+  StorageRequest: STORAGE_REQUEST,
+  TransportRequest: TRANSPORT_REQUEST,
+  UpdateTransportRequest: UPDATE_TRANSPORT_REQUEST,
+  ExistingSecretRequest: EXISTING_SECRET_REQUEST,
+  NewCredentialRequest: NEW_CREDENTIAL_REQUEST,
+  SecretSourceRequest: SECRET_SOURCE_REQUEST,
+  WorkloadIdentityRequest: WORKLOAD_IDENTITY_REQUEST,
+  AccessGrantRequest: ACCESS_GRANT_REQUEST,
+  AccessRequest: ACCESS_REQUEST,
+  ReadinessRequest: READINESS_REQUEST,
+  CreateDestinationRequest: CREATE_DESTINATION_REQUEST,
+  UpdateDestinationAccessRequest: UPDATE_DESTINATION_ACCESS_REQUEST,
+  TestDestinationRequest: TEST_DESTINATION_REQUEST,
+  DestinationFromLegacyRequest: DESTINATION_FROM_LEGACY_REQUEST,
+  CreateTopicDiscoveryRequest: CREATE_TOPIC_DISCOVERY_REQUEST,
+  RecoveryPointRequest: RECOVERY_POINT_REQUEST,
+  BackupPreflightRequest: BACKUP_PREFLIGHT_REQUEST,
+  RestorePreflightRequest: RESTORE_PREFLIGHT_REQUEST,
+  DestinationAccessPreflightRequest: DESTINATION_ACCESS_PREFLIGHT_REQUEST,
+  CreatePreflightRequest: CREATE_PREFLIGHT_REQUEST,
 });
 
 /** EVERY CLOSED SET THIS CLIENT HOLDS, by the name the OpenAPI document gives
@@ -787,6 +1296,20 @@ export const CONSOLE_ENUMS = Object.freeze({
   ConcurrencyPolicy: CONCURRENCY_POLICIES,
   RestoreMode: RESTORE_MODES,
   Role: ROLES,
+  AddressingDto: ADDRESSING_MODES,
+  TransportSecurityDto: TRANSPORT_SECURITY,
+  StorageProviderDto: STORAGE_PROVIDERS,
+  AccessModeDto: ACCESS_MODES,
+  WriteProbeDto: WRITE_PROBES,
+  DestinationRoleDto: DESTINATION_ROLES,
+  CheckLifecycle: CHECK_LIFECYCLE,
+  PreflightState: PREFLIGHT_STATES,
+  PreflightOperationDto: PREFLIGHT_OPERATIONS,
+  CheckVerdict: CHECK_VERDICTS,
+  CheckGating: CHECK_GATING,
+  VisibilityState: VISIBILITY_STATES,
+  CheckOperationKind: CHECK_OPERATION_KINDS,
+  StaleReasonKind: STALE_REASONS,
 });
 
 /** @returns {Decoded} */
@@ -818,12 +1341,26 @@ export const CONSOLE_ROUTES = Object.freeze({
   approvals: Object.freeze({
     list: APPROVAL_LIST, item: APPROVAL, response: APPROVAL_RESPONSE,
   }),
+  destinations: Object.freeze({
+    list: DESTINATION_LIST, item: DESTINATION_SUMMARY, response: DESTINATION_RESPONSE,
+  }),
+  // A DISCOVERY'S LIST ROW IS THE WHOLE OBJECT, unlike a destination's, whose
+  // list row is a summary. That is the product API's shape and not a
+  // simplification here: a caller choosing between the latest attempt and the
+  // last successful inventory needs the counts and the visibility state on
+  // both, so a summary would have had to carry them anyway.
+  "topic-discoveries": Object.freeze({
+    list: TOPIC_DISCOVERY_LIST, item: TOPIC_DISCOVERY, response: TOPIC_DISCOVERY_RESPONSE,
+  }),
+  preflights: Object.freeze({
+    list: null, item: PREFLIGHT, response: PREFLIGHT_RESPONSE,
+  }),
 });
 
 /** @returns {Decoded} */
 export function decodeConsoleList(plural, value) {
   const route = CONSOLE_ROUTES[plural];
-  if (route === undefined) {
+  if (route === undefined || route.list === null) {
     throw contractFailure("ConsoleRoute", plural, "no list route is defined for this kind");
   }
   return decodeListWith(route.list, route.item, value);
@@ -843,9 +1380,52 @@ export function decodeApprovalPacket(value) {
   return decodeWith(APPROVAL_PACKET_RESPONSE, value);
 }
 
-/** @returns {Decoded} */
+/** A durable run's normalized status: a `Backup` or a `Restore`.
+ *  @returns {Decoded} */
 export function decodeOperation(value) {
   return decodeWith(OPERATION_RESPONSE, value);
+}
+
+/** A TRANSIENT CHECK's normalized status: a `TopicDiscovery` or a `Preflight`.
+ *
+ *  A SEPARATE DECODER BECAUSE IT IS A SEPARATE DOCUMENT. `GET
+ *  .../operations/{kind}/{name}` answers `OperationResponse` for `backup` and
+ *  `restore` and `CheckOperationResponse` for `discovery` and `preflight`, and
+ *  the second carries no `result`, no `evidence`, no `verification` and no
+ *  `verifiedSuccess`. Reading one as the other would either fail on four
+ *  required fields or -- with a tolerant reader -- put "verification: pending"
+ *  on screen for a topic list. Two decoders is the shape of that fact.
+ *  @returns {Decoded} */
+export function decodeCheckOperation(value) {
+  return decodeWith(CHECK_OPERATION_RESPONSE, value);
+}
+
+/** One page of a discovery's stored topics. @returns {Decoded} */
+export function decodeTopicPage(value) {
+  return decodeWith(TOPIC_PAGE_RESPONSE, value);
+}
+
+/** The newest attempt and the last successful inventory for one connection.
+ *  Both slots are optional and neither hides the other. @returns {Decoded} */
+export function decodeDiscoveryLatest(value) {
+  return decodeWith(DISCOVERY_LATEST_RESPONSE, value);
+}
+
+/** What names a destination, with the BASIS on which the lists were built --
+ *  so an empty answer is never read as "nothing uses this". @returns {Decoded} */
+export function decodeDestinationUsage(value) {
+  return decodeWith(DESTINATION_USAGE_RESPONSE, value);
+}
+
+/** One page of a preflight's detail document. @returns {Decoded} */
+export function decodeDetailPage(value) {
+  return decodeWith(DETAIL_PAGE_RESPONSE, value);
+}
+
+/** The answer to a cancel: the state after the request, and whether the check
+ *  had already finished. @returns {Decoded} */
+export function decodeCancel(value) {
+  return decodeWith(CANCEL_RESPONSE, value);
 }
 
 // ===========================================================================
