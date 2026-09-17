@@ -1012,6 +1012,21 @@ export const READINESS_BINDING_SENTENCE =
   "so the result stops describing what you are about to submit and is shown as out of date " +
   "rather than as a verdict. Run it again against the new plan.";
 
+/** Why this step sends an inline source archive rather than a destination, and
+ *  who owes the field that would change that.
+ *
+ *  D2 section 9 asks step 1 to take the source destination from the recovery
+ *  point's FROZEN destination and match it by `locationDigest`. The CRD has
+ *  the field (`weirkeeper/src/crds/backup.rs`); the product API's `Backup`
+ *  projection publishes neither `destinationRef` nor `locationDigest`, so
+ *  there is nothing here to read. It is a projection gap, not a model gap. */
+export const SOURCE_DESTINATION_NOT_PUBLISHED =
+  "This check reads the archive from the recovery point's own inline URL. A destination-backed " +
+  "point would let it name the saved destination instead and match the frozen locationDigest, " +
+  "which is what D2 asks for -- but this build's product API publishes neither destinationRef " +
+  "nor locationDigest on a Backup. PLAT-08.2 (D2 W10) owes that projection; until it lands this " +
+  "step cannot tell you which saved destination a recovery point came from.";
+
 /** Why a readiness result is not a promise about the run. */
 export const READINESS_CAVEAT_SENTENCE =
   "A ready verdict says these checks passed when they ran. It is not a promise about the run: a " +
@@ -1094,6 +1109,8 @@ export function renderPreflightStep(state, prepared) {
         "Nothing below claims this restore will work.</p>"
       : renderPreflight(result)) +
     "<p class=\"note\">" + esc(READINESS_CAVEAT_SENTENCE) + "</p>" +
+    "<p class=\"note\" id=\"readiness-source-destination\">" +
+    esc(SOURCE_DESTINATION_NOT_PUBLISHED) + "</p>" +
     "<h4>Target cluster probe (context, not a verdict)</h4>" +
     facts([
       ["target cluster", cell((((cluster || {}).metadata) || {}).name)],

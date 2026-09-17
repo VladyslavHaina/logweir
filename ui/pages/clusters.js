@@ -359,6 +359,24 @@ export function renderClusterDetail(object, now, freshSeconds, pending, discover
 /** The identity of the discovery form in the draft and mutation registries. */
 export const DISCOVERY_FORM = "topic-discovery";
 
+/** Why "Test connection" on this page is still a re-read, and who owes the
+ *  check kind that would make it a dial.
+ *
+ *  D2 section 4.2's plan kinds are `topicInventory`, `operationReadiness`,
+ *  `restorePreflight`, `destinationAccess` and `evidenceFetch`. None of them
+ *  is "dial this connection and tell me whether it answers": a backup
+ *  readiness check reaches `connection.authenticated`, but its request REQUIRES
+ *  one to a thousand named topics, so asking an operator to name a topic in
+ *  order to test a connection would be a different control with the same
+ *  label. The tracker's own PLAT-07.2 row already reads "'Test connection'
+ *  cannot yet force a re-probe". */
+export const NO_CONNECTIVITY_CHECK_KIND =
+  "\"Test connection\" above re-reads what the controller recorded; it cannot make anything " +
+  "dial, because no check kind does that on its own. PLAT-03.1 owes a source-connectivity check " +
+  "kind and PLAT-07.2 consumes it. Until then the only control on this page that really dials " +
+  "is \"Discover topics\" below, which runs a check Job against this connection's own " +
+  "credential and reports the broker's own error code when it cannot.";
+
 /** What a short page means, rendered beside one. */
 export const SCAN_INCOMPLETE_SENTENCE =
   "This page stopped at its chunk budget, not at the end of the result. There is more to read: " +
@@ -485,6 +503,8 @@ export function renderDiscoveryPanel(view) {
     "credential and asks the broker for metadata. It is the only control on this page that " +
     "makes anything dial; the connection probe above re-reads what the controller already " +
     "recorded.</p>" +
+    "<p class=\"note\" id=\"no-connectivity-check\">" + esc(NO_CONNECTIVITY_CHECK_KIND) +
+    "</p>" +
     (v.unavailable === true
       ? "<p class=\"note\" id=\"discovery-unavailable\">" + cell(v.unavailableReason) + "</p>"
       : "") +

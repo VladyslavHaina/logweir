@@ -830,7 +830,7 @@ export function mutationStatus(state, subject, unmatched) {
         "disabled until it answers, so one click makes one request.</p>",
     );
   }
-  const kept = patch ? "" : " Your input is kept.";
+  const kept = patch ? "" : keptClause(who);
   if (s.phase === "succeeded") {
     const result = s.result || {};
     const meta = ((result.object || {}).metadata) || {};
@@ -875,7 +875,7 @@ export function mutationStatus(state, subject, unmatched) {
       "failed",
       "<p>" + kind + " " + esc(existing.name || who.name) + " already exists with different " +
         "content" + (existing.uid ? " (uid " + esc(existing.uid) + ")" : "") + "; nothing was " +
-        "changed. Your input is kept." +
+        "changed." + keptClause(who) +
         (differences.length > 0 ? " It differs at: " + differences.map((d) => esc(d)).join(", ") + "." : "") +
         "</p>" + errorBlock(error, false),
     );
@@ -921,10 +921,34 @@ function unknownOutcome(who, patch, kind, name) {
     );
   }
   return (
-    "whether " + kind + " " + name + " was created is unknown. Your input is kept. Submitting " +
+    "whether " + kind + " " + name + " was created is unknown." + keptClause(who) + " Submitting " +
     "again is safe: it reuses the name " + name + ", and an object that already exists with " +
     "exactly this content is recognised instead of duplicated."
   );
+}
+
+/** WHAT A CREDENTIAL FORM'S FAILURE MAY SAY ABOUT WHAT IT KEPT.
+ *
+ *  "Your input is kept" is true of every form in this tree except the two that
+ *  take a credential, and on those it is the exact opposite of what happened:
+ *  the draft allowlist drops every credential value, so the re-render an
+ *  operator is reading has just emptied the boxes the sentence is about. The
+ *  observed failure (review F3) is an operator reading "nothing was changed.
+ *  Your input is kept", pressing the button again, and sending an empty
+ *  credential -- which fails closed at the API, but only because the API is
+ *  careful, not because the page was honest.
+ *
+ *  A form declares `clearsCredentials: true` on its subject and gets the true
+ *  sentence instead. It is a property of the FORM and not of the error, so it
+ *  is on the subject beside `kind` and `name`. */
+export const CREDENTIALS_CLEARED_CLAUSE =
+  " What you typed is kept, except the credential fields: those are cleared on every render and " +
+  "are never kept anywhere, so type them again.";
+
+function keptClause(who) {
+  return (who || {}).clearsCredentials === true
+    ? CREDENTIALS_CLEARED_CLAUSE
+    : " Your input is kept.";
 }
 
 function statusRegion(phase, body) {

@@ -544,6 +544,28 @@ function projectSchedule(item) {
     }
     object.spec.retention = retention;
   }
+  // THE TWO FIELDS D1 W6 ADDED, PROJECTED UNDER THE NAMES THE CRD USES.
+  // `spec.destinationRef` is the saved destination this schedule writes to,
+  // and `spec.allUserTopics` is its dynamic-selection policy. Both are absent
+  // on every schedule written before PLAT-06.2, and absent keeps meaning what
+  // it meant: an inline archive, and a named allowlist.
+  if (item.destinationRef !== null) {
+    object.spec.destinationRef = nameRef(item.destinationRef);
+  }
+  if (item.allUserTopics !== null) {
+    const dynamic = { incompleteDiscovery: item.allUserTopics.incompleteDiscovery };
+    if (item.allUserTopics.exclude !== null) {
+      const exclude = {};
+      if (item.allUserTopics.exclude.topics !== null) {
+        exclude.topics = item.allUserTopics.exclude.topics.slice();
+      }
+      if (item.allUserTopics.exclude.prefixes !== null) {
+        exclude.prefixes = item.allUserTopics.exclude.prefixes.slice();
+      }
+      dynamic.exclude = exclude;
+    }
+    object.spec.allUserTopics = dynamic;
+  }
   const view = item.status;
   const status = {};
   for (const field of ["lastFireTime", "nextFireTime", "lastMissedSlot"]) {

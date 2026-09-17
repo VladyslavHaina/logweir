@@ -56,6 +56,7 @@ import {
   watchMutation,
 } from "../lifecycle.js";
 import {
+  ABSENT,
   RETENTION_SENTENCE,
   badge,
   cell,
@@ -155,13 +156,14 @@ export const NO_SCHEDULE_SENTENCE =
   "Backup at each slot of its cron schedule.";
 
 /** The schedules table. NAME, SCHEDULE, SUSPEND, LAST, NEXT, READY. */
-export function renderScheduleList(input) {
+export function renderScheduleList(input, destinations) {
   const rows = itemsOf(input).map((object) => {
     const spec = object.spec || {};
     const status = object.status || {};
     return [
       nameOf(object),
       "<code>" + cell(spec.schedule) + "</code>",
+      destinationCell(object, destinations),
       suspendBadge(spec),
       cell(status.lastFireTime),
       cell(status.nextFireTime),
@@ -171,11 +173,48 @@ export function renderScheduleList(input) {
   return (
     "<h2>Schedules</h2>" +
     "<p class=\"blurb\">Every BackupSchedule in this namespace. " +
-    "<code>suspend</code> is the only field of a schedule's spec that can be changed " +
+    "<code>suspend</code> is the only field of a schedule's spec that THIS PAGE can change " +
     "after it is created.</p>" +
-    table(["NAME", "SCHEDULE", "SUSPEND", "LAST", "NEXT", "READY"], rows, NO_SCHEDULE_SENTENCE) +
+    table(
+      ["NAME", "SCHEDULE", "DESTINATION", "SUSPEND", "LAST", "NEXT", "READY"],
+      rows,
+      NO_SCHEDULE_SENTENCE,
+    ) +
     listFooter()
   );
+}
+
+/** WHERE A SCHEDULE WRITES, in one cell, and by IDENTITY where it can be.
+ *
+ *  A schedule that names a destination (`spec.destinationRef`, PLAT-06.2) is
+ *  resolved against the destinations this page actually read, with the same
+ *  rules the selector uses: a name that resolves is shown with its location, a
+ *  name that resolves to nothing is a REFUSAL to claim where this schedule
+ *  writes -- because a destination deleted and recreated under one name is a
+ *  different archive location reached with a different credential, and a cell
+ *  that printed the new one would be answering a question about the old.
+ *
+ *  A schedule with no `destinationRef` carries an inline archive, which is
+ *  what every schedule written before PLAT-06.2 carries, and the cell says so
+ *  rather than leaving a blank that reads as "none". */
+export function destinationCell(object, destinations) {
+  const spec = (object || {}).spec || {};
+  const ref = spec.destinationRef;
+  const name = ref === null || ref === undefined ? "" : String(ref.name || "");
+  if (name.length === 0) {
+    const url = (spec.archive || {}).url;
+    return typeof url === "string" && url.length > 0
+      ? badge("pending", "inline archive") + " <code>" + esc(url) + "</code>"
+      : ABSENT;
+  }
+  const all = Array.isArray(destinations) ? destinations : [];
+  const found = all.find((d) => d.name === name);
+  if (found === undefined) {
+    return badge("unverified", "names " + name) +
+      " <span class=\"note\">no destination of that name is in this namespace now, so this " +
+      "page will not say where this schedule writes</span>";
+  }
+  return badge("green", found.name) + " <code>" + esc(found.canonicalUrl) + "</code>";
 }
 
 /** The suspend toggle's control for one schedule, disabled while its patch is
@@ -360,20 +399,56 @@ export const DYNAMIC_SELECTION_SENTENCE =
   "when the run starts and not when the schedule is written. What each run actually covered is " +
   "recorded on that run, with a coverage label, and only an attested one ever means everything.";
 
-/** The sentence a schedule with an empty topic list carries when this build
- *  cannot tell which of the two shapes it is.
+/** What a schedule naming no topic and carrying no dynamic block is.
  *
- *  THE PRODUCT API PUBLISHES NEITHER `allUserTopics` NOR `status.selection` ON
- *  ITS `Schedule` DTO. D1 added dynamic selection to the CRD and the
- *  controller; the console's own projection has not caught up, so in console
- *  mode an empty `topics` is all this page is given. Guessing "all user topics"
- *  from an empty list would be inventing the very claim the coverage labels
- *  exist to bound, so the page says what it does not know. */
+ *  THIS SENTENCE GOT SHORTER WHEN `ScheduleView.allUserTopics` LANDED (D1 W6,
+ *  PLAT-06.2/09.2). Before it, an empty `topics` could have been either shape
+ *  and this page could not tell; now the block itself is published, so the two
+ *  cases are distinguishable and only the genuinely empty one is left. */
 export const SELECTION_UNKNOWN_SENTENCE =
-  "This schedule names no topic. That is the shape a dynamic (all user topics) selection has, " +
-  "and it is also the shape of an empty allowlist, which no run will back anything up under. " +
-  "This build's product API publishes neither the selection block nor the recorded coverage, so " +
-  "this page cannot tell you which it is -- read the object with kubectl.";
+  "This schedule names no topic and carries no dynamic-selection block. No run under it will " +
+  "back anything up: an empty allowlist is not an allowlist. Read the object with kubectl.";
+
+/** Why no run's COVERAGE is rendered, and by whom that is owed.
+ *
+ *  `weirkeeper::crds::selection::Coverage::label()` renders the three strings
+ *  every surface must use, and the controller records one on every run. NO API
+ *  PROJECTION PUBLISHES IT: neither `status.selection` nor any `coverage` field
+ *  appears anywhere in `logweir-api`'s contract, so the console has nothing to
+ *  render. Saying which task owes it is the difference between a gap and an
+ *  omission. */
+export const COVERAGE_NOT_PUBLISHED =
+  "What each RUN actually covered is recorded on that run with a coverage label, and only an " +
+  "attested one ever means everything. This build's product API publishes no selection or " +
+  "coverage block on a schedule or a backup, so the console cannot show it: PLAT-09.2 owes the " +
+  "projection and D1 W7 owes the surface. Read a run with kubectl until then.";
+
+/** Why a saved destination still cannot be named on a NEW schedule. */
+export const CREATE_HAS_NO_DESTINATION =
+  "A saved destination cannot be named on a NEW schedule from this page: POST /schedules takes " +
+  "an inline archive and has no destinationRef field. PLAT-06.2 owes that one. The inline URL " +
+  "and Secret below carry no endpoint, region, addressing mode or CA bundle -- which is what a " +
+  "destination exists to hold -- so this page will not derive one from the other and drop all " +
+  "four silently.";
+
+/** Why this page cannot CHANGE an existing schedule's destination either, and
+ *  the reason is this page's own contract rather than a missing field.
+ *
+ *  `PUT .../schedules/{name}` LANDED WITH D1 W6 and does take a
+ *  `destinationRef` under `expectedGeneration`. This page still cannot send
+ *  it: `ui/api.js` exports `create` plus exactly ONE narrow update -- a
+ *  JSON-merge patch touching `spec.suspend` -- and
+ *  `ui_lint::the_api_module_offers_no_delete_and_no_put` fails on the bare
+ *  token for a replace anywhere in that module. That is a deliberate boundary
+ *  and widening it is not this task's to decide. The route is a WHOLE-POLICY
+ *  replace in which an omitted field is REMOVED, so the form that owns it is
+ *  the one that owns every field of that policy: D1 W7's. */
+export const EDIT_IS_A_REPLACE =
+  "An EXISTING schedule can be pointed at a saved destination: PUT .../schedules/{name} takes " +
+  "destinationRef under expectedGeneration. This page does not send it. That route replaces the " +
+  "whole future policy -- a field omitted is removed -- and ui/api.js exports create plus one " +
+  "narrow suspend patch and no replace at all, which ui_lint holds. The schedule policy form " +
+  "(D1 W7) owns that route; use it, or kubectl.";
 
 /** The coverage label for one object, or the empty string.
  *
@@ -404,11 +479,17 @@ export function renderCoverageLine(object) {
     );
   }
   if (spec.allUserTopics !== undefined && spec.allUserTopics !== null) {
+    const exclude = spec.allUserTopics.exclude || {};
+    const left = []
+      .concat(Array.isArray(exclude.topics) ? exclude.topics : [])
+      .concat(Array.isArray(exclude.prefixes) ? exclude.prefixes.map((x) => x + "*") : []);
     return (
       "<p class=\"coverage\" data-coverage=\"dynamic\">" + badge("pending", "dynamic selection") +
       " " + esc(DYNAMIC_SELECTION_SENTENCE) +
       " On incomplete visibility this policy says: <code>" +
-      cell(spec.allUserTopics.incompleteDiscovery) + "</code>.</p>"
+      cell(spec.allUserTopics.incompleteDiscovery) + "</code>." +
+      (left.length === 0 ? "" : " Excluded: " + esc(left.join(", ")) + ".") +
+      " " + esc(COVERAGE_NOT_PUBLISHED) + "</p>"
     );
   }
   if (topics.length === 0) {
@@ -780,13 +861,9 @@ export function renderScheduleForm(view) {
     line("schedule-topics", "topics") + "</div>" +
     "<fieldset class=\"legacy-archive\" id=\"schedule-legacy-archive\">" +
     "<legend>archive (inline)</legend>" +
-    "<p class=\"help\" id=\"schedule-destination-gap\">A saved destination cannot be named " +
-    "here yet: this build's <code>POST /schedules</code> takes an inline archive and has no " +
-    "destinationRef field (PLAT-06.2 adds one). The inline URL and Secret below are therefore " +
-    "the only way to write a schedule from this page, and they carry no endpoint, region, " +
-    "addressing mode or CA bundle -- which is what a destination exists to hold. Deriving one " +
-    "from the other would drop all four silently, so this page will not. Use the readiness " +
-    "panel to check a destination, and kubectl or the CLI to bind a schedule to one.</p>" +
+    "<p class=\"help\" id=\"schedule-destination-gap\">" + esc(CREATE_HAS_NO_DESTINATION) +
+    "</p>" +
+    "<p class=\"help\" id=\"schedule-destination-edit\">" + esc(EDIT_IS_A_REPLACE) + "</p>" +
     "<div class=\"field\"><label for=\"schedule-archive\">archive URL</label>" +
     "<input id=\"schedule-archive\" name=\"archive\" required value=\"" + esc(d.archive) + "\"" +
     field("schedule-archive", "archive") + ">" +
@@ -1181,7 +1258,7 @@ export async function mountSchedules(node, ns, parse, lifecycle, deps) {
     replace(
       node,
       parse(
-        renderScheduleList(collection) + panels +
+        renderScheduleList(collection, readiness.destinations) + panels +
           "<div class=\"form-slot\" id=\"schedule-form-slot\">" +
           renderScheduleForm(scheduleFormView(ns, clusters)) + "</div>" +
           "<div class=\"readiness-slot\" id=\"readiness-slot\">" +

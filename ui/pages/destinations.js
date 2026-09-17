@@ -20,6 +20,8 @@
 //    not a re-render after a 409. That is deliberate and it is the whole
 //    reason the allowlist is an allowlist -- a denylist would have meant the
 //    safe default for the NEXT credential field somebody adds is "kept".
+//    The twelve credential field names are DERIVED from the four roles, so a
+//    fifth role cannot add three the disjointness assertion does not cover.
 //    `ui/tests/credentials.spec.js` plants a password in a draft and fails.
 //
 // 2. ADDRESSING IS NOT TRANSPORT (defect G5). `addressing` says how the bucket
@@ -146,10 +148,9 @@ export const DESTINATION_DEFAULTS = Object.freeze({
 
 /** THE DRAFT ALLOWLIST. Read rule 1 at the top of this file before adding to
  *  it. Every field here is a NAME, a FLAG or an ENUM MEMBER -- a bucket, a
- *  Secret's name, a radio's value. Not one of them is a credential, and the
- *  six inputs that take a credential value are deliberately absent, so
- *  `keepDraft` cannot keep one even if a future caller hands it the whole
- *  form. */
+ *  Secret's name, a radio's value. Not one of them is a credential, and every
+ *  name in [`CREDENTIAL_INPUTS`] is deliberately absent, so `keepDraft` cannot
+ *  keep one even if a future caller hands it the whole form. */
 export const DESTINATION_DRAFT_FIELDS = Object.freeze([
   "name", "description", "bucket", "prefix", "region", "endpoint",
   "addressing", "security", "caName", "caKey", "writeProbe", "isDefault",
@@ -159,17 +160,25 @@ export const DESTINATION_DRAFT_FIELDS = Object.freeze([
   "evidenceReadSource", "evidenceReadSecret", "evidenceReadServiceAccount",
 ]);
 
-/** THE SIX INPUTS THAT CARRY A CREDENTIAL VALUE, by the `name` attribute each
- *  one has in the form. Exported so the suite can assert -- mechanically, not
- *  by reading the list above -- that NONE of them is in the draft allowlist.
- *  A field added to the form and forgotten here is still not kept, because the
- *  allowlist is the gate; this list is what makes the forgetting VISIBLE. */
-export const CREDENTIAL_INPUTS = Object.freeze([
-  "archiveWriteAccessKeyId", "archiveWriteSecretAccessKey",
-  "archiveReadAccessKeyId", "archiveReadSecretAccessKey",
-  "evidenceWriteAccessKeyId", "evidenceWriteSecretAccessKey",
-  "evidenceReadAccessKeyId", "evidenceReadSecretAccessKey",
-]);
+/** EVERY FIELD NAME THAT CARRIES A CREDENTIAL VALUE, derived from the four
+ *  roles rather than written out, so a fifth role cannot add three names this
+ *  list does not have.
+ *
+ *  Exported so the suite can assert -- mechanically, not by reading the
+ *  allowlist above -- that NONE of them is in it. A field added to the form and
+ *  forgotten here is still not kept, because the allowlist is the gate; this
+ *  list is what makes the forgetting VISIBLE.
+ *
+ *  `<role>SessionToken` IS IN IT even though no input renders one yet (review
+ *  F4). `grantBody` already reads that field and puts it in `secret.new`, so
+ *  the day the input lands the disjointness assertion covers it -- rather than
+ *  the day after, when somebody notices. */
+export const CREDENTIAL_INPUTS = Object.freeze(GRANT_ROLES.reduce(
+  (all, role) => all.concat([
+    role + "AccessKeyId", role + "SecretAccessKey", role + "SessionToken",
+  ]),
+  [],
+));
 
 /** The sentence beside the credential inputs. */
 export const WRITE_ONLY_SENTENCE =
@@ -526,6 +535,27 @@ export function validateDestination(values) {
       problems.caKey = "a ConfigMap data key is letters, digits, '-', '_' and '.'";
     }
   }
+  Object.assign(problems, validateGrants(v));
+  return problems;
+}
+
+/** The four grants' own checks, for the CREATE form and the ROTATION alike.
+ *
+ *  FACTORED OUT BECAUSE THE ROTATION HAD NONE (review F3). `wireRotate` called
+ *  `rotationBody` straight from the form, so an operator who chose `new` and
+ *  typed nothing sent `secret.new.accessKeyId: ""`. That fails closed at the
+ *  API -- `check_credential` answers `required`, "the value is empty" -- but
+ *  the 422 comes back on paths (`archiveWrite.secret.new.accessKeyId`) that do
+ *  not match this form's input names, so it landed as an unplaced banner on the
+ *  one form whose entire subject is a credential. The message here is the same
+ *  one the create form has always shown, beside the field it is about.
+ *
+ *  IT IS THE ROTATION'S ONLY CHECK, and that is correct: the location and the
+ *  transport security are immutable, so there are no bucket, endpoint or
+ *  scheme rules to run -- there is nothing on that form they could be about. */
+export function validateGrants(values) {
+  const v = values || {};
+  const problems = Object.create(null);
   for (const role of GRANT_ROLES) {
     const source = String(v[role + "Source"] || "absent");
     if (role === "archiveWrite" && source === "absent") {
@@ -546,7 +576,8 @@ export function validateDestination(values) {
       const key = String(v[role + "SecretAccessKey"] || "");
       if (id.length === 0 || key.length === 0) {
         problems[role + "AccessKeyId"] = "a new credential needs both an access key id and a " +
-          "secret access key";
+          "secret access key. They are cleared on every render, so a retry after a refusal " +
+          "needs them typed again";
       }
     }
     if (source === "workloadIdentity") {
@@ -831,8 +862,11 @@ export function renderDestinationForm(view) {
     "<div class=\"actions\"><button type=\"submit\" class=\"primary\">Create</button></div>" +
     "</fieldset>" +
     "<div class=\"form-status\" id=\"destination-form-status\" tabindex=\"-1\">" +
-    mutationStatus(state, { kind: "BackupDestination", name: d.name },
-      ((v.errors || {}).unmatched)) +
+    mutationStatus(
+      state,
+      { kind: "BackupDestination", name: d.name, clearsCredentials: true },
+      ((v.errors || {}).unmatched),
+    ) +
     "</div></form></section>"
   );
 }
@@ -884,8 +918,11 @@ export function renderRotateForm(item, view) {
     "<div class=\"actions\"><button type=\"submit\">Rotate access</button></div>" +
     "</fieldset>" +
     "<div class=\"form-status\" id=\"destination-rotate-status\" tabindex=\"-1\">" +
-    mutationStatus(state, { kind: "BackupDestination", name: d.name },
-      ((rotate.errors || {}).unmatched)) +
+    mutationStatus(
+      state,
+      { kind: "BackupDestination", name: d.name, clearsCredentials: true },
+      ((rotate.errors || {}).unmatched),
+    ) +
     "</div></form></section>"
   );
 }
@@ -1008,6 +1045,16 @@ export async function submitDestination(ns, values, deps) {
     throw invalidInput(problems);
   }
   return (deps || API).createDestination(ns, destinationBody(values));
+}
+
+/** Checks the grants, then rotates. Nothing is sent when a grant does not make
+ *  a credential the API could use -- see [`validateGrants`]. */
+export async function submitRotation(ns, name, values, generation, deps) {
+  const problems = validateGrants(values);
+  if (Object.keys(problems).length > 0) {
+    throw invalidInput(problems);
+  }
+  return (deps || API).updateDestinationAccess(ns, name, rotationBody(values, generation));
 }
 
 // --------------------------------------------------------------- mount half
@@ -1276,6 +1323,6 @@ function wireRotate(node, ns, name, parse, lifecycle, api, item, view) {
     }
     const values = readDestinationValues(form);
     keepDraft(key, values, DESTINATION_DRAFT_FIELDS.concat(["caChange"]));
-    mutation.run(() => api.updateDestinationAccess(ns, name, rotationBody(values, item.generation)));
+    mutation.run(() => submitRotation(ns, name, values, item.generation, api));
   }, lifecycle);
 }

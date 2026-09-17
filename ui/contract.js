@@ -426,6 +426,36 @@ const SCHEDULE_STATUS = shapeOf(
   },
 );
 
+/** What a dynamic run does when discovery cannot prove it saw everything.
+ *  Required on the block, with NO default, for the reason D1 gives: both
+ *  possible defaults are wrong in a way the operator would not notice. */
+export const INCOMPLETE_DISCOVERY_POLICIES = Object.freeze(["Refuse", "BackUpVisibleTopics"]);
+
+const TOPIC_EXCLUSIONS = shapeOf(
+  "TopicExclusions",
+  {},
+  { topics: listOf(str), prefixes: listOf(str) },
+);
+
+const ALL_USER_TOPICS = shapeOf(
+  "AllUserTopics",
+  { incompleteDiscovery: oneOf(INCOMPLETE_DISCOVERY_POLICIES) },
+  { exclude: objectOf(TOPIC_EXCLUSIONS) },
+);
+
+// `destinationRef` AND `allUserTopics` LANDED WITH D1 W6 (PLAT-06.2, PLAT-09.2)
+// AND ARE DECODED HERE, which is the whole of what this client does with them:
+// a schedule may now NAME a saved destination, and it may now say that its
+// selection is dynamic. Both are OPTIONAL and both are absent on every schedule
+// written before that change, so absent keeps meaning what it meant.
+//
+// EVERY OTHER FIELD D1 W6 ADDED IS DELIBERATELY NOT DECLARED HERE. `preset`,
+// `timeZone`, `retry`, `catchUpPolicy`, `startingDeadlineSeconds`,
+// `activeDeadlineSeconds` and `generation` are the editable future policy, and
+// the form that owns them is D1 W7's. Leaving them undeclared puts them in the
+// decoder's `unknown` list -- tolerated, recorded, and visibly unrendered --
+// which is exactly what "an older client tolerates a newer field" is for, and
+// is honest in a way that declaring a field nothing renders would not be.
 const SCHEDULE = shapeOf(
   "Schedule",
   {
@@ -434,7 +464,10 @@ const SCHEDULE = shapeOf(
     archive: objectOf(ARCHIVE), suspended: bool,
     concurrencyPolicy: str, status: objectOf(SCHEDULE_STATUS),
   },
-  { createdAt: str, retention: objectOf(RETENTION) },
+  {
+    createdAt: str, retention: objectOf(RETENTION),
+    destinationRef: objectOf(NAME_REF), allUserTopics: objectOf(ALL_USER_TOPICS),
+  },
 );
 
 /** The normalized operation states `crates/logweir-api/src/status.rs` emits. */
@@ -1174,6 +1207,8 @@ export const CONSOLE_SHAPES = Object.freeze({
   RemovableSetView: REMOVABLE_SET,
   RetentionReportView: RETENTION_REPORT,
   ScheduleStatusView: SCHEDULE_STATUS,
+  TopicExclusions: TOPIC_EXCLUSIONS,
+  AllUserTopics: ALL_USER_TOPICS,
   Schedule: SCHEDULE,
   OperationSummary: OPERATION_SUMMARY,
   WindowCoveredView: WINDOW_COVERED,
@@ -1296,6 +1331,7 @@ export const CONSOLE_ENUMS = Object.freeze({
   ConcurrencyPolicy: CONCURRENCY_POLICIES,
   RestoreMode: RESTORE_MODES,
   Role: ROLES,
+  IncompleteDiscoveryPolicy: INCOMPLETE_DISCOVERY_POLICIES,
   AddressingDto: ADDRESSING_MODES,
   TransportSecurityDto: TRANSPORT_SECURITY,
   StorageProviderDto: STORAGE_PROVIDERS,
