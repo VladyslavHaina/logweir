@@ -252,7 +252,7 @@ No OpenAPI `default:` is added for these fields (so `has()` keeps meaning "set b
 4. policy invalid → no admissions; Ready=False <reason>; go to 8.
 5. S = latest due slot (tz). None → NoDueSlot; go to 8.
    Account skipped slots in (status.missedSlots.lastEvaluatedSlot, S) (enumeration capped at 1000; reasons
-   ControllerUnavailable | ConcurrencyBlocked | Superseded; not while suspended). lastEvaluatedSlot advances
+   ControllerUnavailable | ConcurrencyBlocked | PastStartingDeadline | BeforeRevision | NameUnavailable — amended 2026-09-17 at W2's integration: `Superseded` is not emitted; a slot that waits and is then overtaken is accounted under the reason that blocked it, and the three added reasons are what the landed controller records; a `ControllerUnavailable` gap records ONE boundary entry in `recent`, only when the gap count moved, because `SkippedSlots` exposes no names; not while suspended). lastEvaluatedSlot advances
    to S only when S receives a final disposition (admitted, missed, name unavailable, done or exhausted), so a
    slot that waits and is then superseded is counted exactly once.
 6. Observe attempt chain of S by GET name(S,0), name(S,1), … up to the hard maximum 3, stopping at the first 404
@@ -338,7 +338,7 @@ Downtime outcomes users can predict from the table: a controller down for a week
 | `observedGeneration` | int64 | — |
 | `policy` | `{generation, runPolicySha256, timeZone (effective, "UTC" when absent), tzdb, effectiveSince, evaluatedAt}` | — |
 | `nextRuns` | list of `{at, localTime, adjustment?}` | ≤ 5 |
-| `lastSlot` | `{slot, dueAt, attempt, disposition, backupRef?, reason, decidedAt}`; `disposition` is one of `Admitted`, `CaughtUp`, `Retried`, `Missed`, `Superseded`, `Blocked`, `NameUnavailable`, `Released`, `Failed`, `Exhausted` | — |
+| `lastSlot` | `{slot, dueAt, attempt, disposition, backupRef?, reason, decidedAt}`; `disposition` is one of `Admitted`, `CaughtUp`, `Retried`, `Missed`, `Blocked`, `NameUnavailable`, `Released`, `Failed`, `Exhausted` (amended 2026-09-17 at W2's integration: `Superseded` is not a disposition the landed controller emits; a reconcile that resumes an accepted reservation returns without considering the newer slot, which is decided on the next pass) | — |
 | `missedSlots` | `{count, countCapped, lastEvaluatedSlot, recent:[{slot, reason, recordedAt}]}` | recent ≤ 10 |
 | `pendingRun` | `{name, slot, attempt, kind, generation}`; `pendingBackupRef` stays mirrored | 1 |
 | `activeRuns` | `[{name, kind, attempt}]`; `activeBackupRef` stays mirrored (first entry) | ≤ 10 |
@@ -351,7 +351,7 @@ Downtime outcomes users can predict from the table: a controller down for a week
 - Legacy `status.pendingBackupRef` without `pendingRun` is resumed through the existing `reserved_slot` parser, extended to accept `-r<k>`.
 - CRD-before-controller guard (no new RBAC): the API server silently prunes fields an old CRD does not declare. The scheduler therefore checks its own write responses — the reservation response must contain `status.pendingRun`, and the created Backup must contain `spec.trigger` and `spec.scheduleRef.uid`. If either is missing it sets `Ready=False reason=CrdOutdated` (added to §3.4) and admits nothing further; a Backup already created without its identity fields has neither `scheduleRef.uid` nor an ownerReference and is refused `ScheduledIdentityMismatch` by the Backup controller before any POST, so nothing executes under an ambiguous identity.
 - Upgrade order: W0 fix → CRD apply (additive) → controller rollout. A mixed old/new replica pair does not share `pendingRun`; suspend schedules or stop the old controller first for strict no-overlap, as `docs/kubernetes.md:466-476` already requires.
-- Rollback (controller only; never downgrade the CRD): an older controller ignores `timeZone` (fires in UTC), retries, catch-up and deadlines; it clears `-r<k>` reservations as unparseable (safe: no retry is created). Before rollback, suspend or edit schedules that set `timeZone` ≠ UTC, `retry`, `catchUpPolicy` or `startingDeadlineSeconds`. `status.nextRuns`/`missedSlots` go stale; the UI marks them stale when `status.policy.evaluatedAt` is older than 2× the requeue interval.
+- Rollback (controller only; never downgrade the CRD): an older controller ignores `timeZone` (fires in UTC), retries, catch-up and deadlines; it clears `-r<k>` reservations as unparseable (safe: no retry is created). Before rollback, suspend or edit schedules that set `timeZone` ≠ UTC, `retry`, `catchUpPolicy` or `startingDeadlineSeconds`. `status.nextRuns`/`missedSlots` go stale; the UI marks them stale when `status.nextRuns[0].at` is in the past (amended 2026-09-17 at W2's integration: `status.policy.evaluatedAt` is the instant the status last MOVED, not a liveness probe — rewriting an instant on every 30 s pass would bump `resourceVersion` 2 880 times a day on a schedule that never changes — so a console must not compare it with the requeue interval; `status.activeRuns` absent means not yet computed, never empty).
 
 ### 4.10 Rejected alternatives
 
@@ -370,6 +370,7 @@ Downtime outcomes users can predict from the table: a controller down for a week
 | `sourceRef` | **immutable** | Identity of the protected cluster; one schedule's history must not mix clusters. Create a new schedule for a different cluster. |
 | `schedule`, `timeZone`, `startingDeadlineSeconds`, `catchUpPolicy`, `retry`, `concurrencyPolicy`, `suspend` | mutable | Future admissions only |
 | `topics`, `allUserTopics`, `archive`, `activeDeadlineSeconds` | mutable | Future runs only; each run records its own copy |
+| `destinationRef` | mutable | Amended 2026-09-17 at W2's integration (review `d1w2`, ratified): `archive.url` and `destinationRef` are two spellings of one location, so sealing one while the other moves is incoherent, and PLAT-05.1's own text says a changed destination must not require a new schedule; a run frozen before the edit keeps its snapshot (§3.3), so a mid-run edit is safe; the wrong-bucket case of RET-WRONGBUCKET is reachable only between runs. Supersedes D2 §3.6's W6b sealing. |
 | `retention` | mutable | Reporting only; evaluates the **current** `archive.url` (PLAT-16.1 owns per-destination history) |
 
 `metadata.name` is immutable by Kubernetes; `Backup.spec` remains fully sealed (`self == oldSelf`).

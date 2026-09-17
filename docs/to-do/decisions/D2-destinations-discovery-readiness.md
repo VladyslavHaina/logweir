@@ -423,7 +423,7 @@ credentials for the evidence store.
 **Additive, optional fields (W6b):**
 
 - `BackupSchedule.spec.destinationRef: LocalRef`; also add its two halves to
-  `SUSPEND_ONLY_RULE` (`crds/backup_schedule.rs:65`).
+  `SUSPEND_ONLY_RULE` (`crds/backup_schedule.rs:65`). *(Superseded 2026-09-17 at D1 W2's integration: D1 §5.2 R1 replaces `SUSPEND_ONLY_RULE` and D1 §5.1 makes `destinationRef` mutable, as amended there.)*
 - `Backup.spec.destinationRef: LocalRef`.
 - `Restore.spec.sourceDestinationRef: LocalRef` and
   `Restore.spec.evidenceDestinationRef: LocalRef`.
