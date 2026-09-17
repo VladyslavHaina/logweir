@@ -47,6 +47,14 @@
 //! `revocationEffectiveFrom` are never synthesised — a migration that invented
 //! a lifecycle event would be asserting something nobody recorded.
 //!
+//! A roster key that is on **both** lists is REFUSED, naming the key id: CRD
+//! rule G8 gives a policy key exactly one usage, so such a key cannot be
+//! expressed at all and emitting it would produce a file the API server
+//! rejects at `kubectl apply` time, after the operator had reviewed it. The
+//! roster itself keeps working unchanged — `weirkeeper::trust::synthesize_legacy`
+//! still merges the two lists in memory, which is what keeps an unmigrated
+//! cluster running.
+//!
 //! Reviewable: the output is a plain `TrustPolicy` document with a header
 //! comment naming what was translated, meant to be read and then applied by a
 //! human. Nothing here applies it, and the roster is not deleted — D3 §7.5's
@@ -76,16 +84,37 @@ pub const TRUST_POLICY_KIND: &str = "TrustPolicy";
 /// The kind [`migrate_roster`] reads.
 pub const TRUST_ROSTER_KIND: &str = "TrustRoster";
 
-/// The PEM header no exported document may contain.
+/// The substring that decides. **THE CHECK IS THIS, AND NOT THE LIST BELOW.**
 ///
-/// FOUR SPELLINGS AND NOT ONE. PKCS#8, PKCS#1, SEC1 and the encrypted form all
-/// say "private" differently, and a check that knew only `BEGIN PRIVATE KEY`
-/// would pass an `EC PRIVATE KEY` straight through.
-pub const PRIVATE_PEM_MARKERS: [&str; 4] = [
+/// Review finding F5: the first version of this guard enumerated four PEM
+/// spellings — PKCS#8, PKCS#1, SEC1 and the encrypted form — and an enumeration
+/// is a list somebody has to keep complete. `BEGIN OPENSSH PRIVATE KEY`,
+/// `BEGIN DSA PRIVATE KEY`, `BEGIN PGP PRIVATE KEY BLOCK` and
+/// `BEGIN SSH2 ENCRYPTED PRIVATE KEY` all walked straight past it.
+///
+/// Every one of those — and every one of the original four — contains the two
+/// words below, because that is what the PEM label grammar makes them contain.
+/// So the check is the substring, and it can only be widened by a format that
+/// stops saying "private key" at all.
+pub const PRIVATE_PEM_SUBSTRING: &str = "PRIVATE KEY";
+
+/// The spellings [`refuse_private_material`] can NAME when it refuses.
+///
+/// **NOT THE CHECK** — see [`PRIVATE_PEM_SUBSTRING`]. This list exists so the
+/// refusal says `BEGIN OPENSSH PRIVATE KEY` rather than "a private key",
+/// which is the difference between an operator knowing which file they pasted
+/// and an operator guessing. A spelling missing from here is a less specific
+/// message, never a missed refusal — which is the whole point of splitting the
+/// two.
+pub const PRIVATE_PEM_MARKERS: [&str; 8] = [
     "BEGIN PRIVATE KEY",
     "BEGIN RSA PRIVATE KEY",
     "BEGIN EC PRIVATE KEY",
+    "BEGIN DSA PRIVATE KEY",
     "BEGIN ENCRYPTED PRIVATE KEY",
+    "BEGIN OPENSSH PRIVATE KEY",
+    "BEGIN SSH2 ENCRYPTED PRIVATE KEY",
+    "BEGIN PGP PRIVATE KEY BLOCK",
 ];
 
 /// Where a command reads its object from.
@@ -135,6 +164,9 @@ pub enum TrustError {
     WrongObject(String),
     /// The input carries private key material.
     PrivateMaterial(String),
+    /// A roster key appears on both `approverKeys` and `signingKeys`, which
+    /// no `TrustPolicy` key may express.
+    UsageOverlap(String),
     /// A required field is missing or malformed.
     Field(String),
     /// The output could not be serialised.
@@ -156,6 +188,16 @@ impl std::fmt::Display for TrustError {
                 "REFUSING to write anything: {m}. `logweir trust export` writes public key \
                  material only, and an object carrying a private key is a disclosure to handle \
                  before it is a backup to take."
+            ),
+            Self::UsageOverlap(key_id) => write!(
+                f,
+                "roster key {key_id} is on BOTH approverKeys and signingKeys, and a TrustPolicy \
+                 key declares exactly one usage (CEL rule G8): a key that both attests and \
+                 authorises is a key whose holder can approve their own work. REFUSING to emit \
+                 a document the API server would reject at apply time. Issue a separate keyId \
+                 per usage — mint a new signing key, add its public half to the policy as \
+                 EvidenceSigning, and keep this one as GovernedApproval. The roster is \
+                 untouched and keeps working until you do (docs/keys.md, migration)."
             ),
             Self::Field(m) => write!(f, "{m}"),
             Self::Render(m) => write!(f, "the document could not be serialised: {m}"),
@@ -297,13 +339,10 @@ pub fn migrate_roster(args: &MigrateArgs) -> Result<String, TrustError> {
     let approver = list(spec, "approverKeys")?;
     let signing = list(spec, "signingKeys")?;
 
-    // ONE ENTRY PER KEY ID, USAGES MERGED, IN `approverKeys`-THEN-`signingKeys`
-    // ORDER. `spec.keys` is an associative list keyed by `keyId`, so a key on
-    // both roster lists cannot be emitted twice: the API server would refuse
-    // the document. The overlap itself is what `selfAttestedRisk` labels
-    // today, and D3 §7.3 keeps that label for legacy namespaces precisely
-    // because the two lists may overlap — so this is a faithful translation
-    // rather than a widening.
+    // ONE ENTRY PER KEY ID, ONE USAGE PER ENTRY, IN
+    // `approverKeys`-THEN-`signingKeys` ORDER. A key on both lists is a
+    // refusal, not a merge — see this module's header and
+    // `TrustError::UsageOverlap`.
     let mut order: Vec<String> = Vec::new();
     let mut merged: std::collections::BTreeMap<String, (Value, Vec<&str>)> =
         std::collections::BTreeMap::new();
@@ -322,8 +361,25 @@ pub fn migrate_roster(args: &MigrateArgs) -> Result<String, TrustError> {
                 .to_string();
             match merged.get_mut(&key_id) {
                 Some((_, usages)) => {
+                    // ONE KEY, ONE USAGE — CRD rule G8, and this is where an
+                    // operator finds out. `spec.keys` is an associative list
+                    // keyed by `keyId`, so a key on BOTH roster lists cannot be
+                    // emitted twice, and emitting it once with both usages is a
+                    // document the API server now refuses (D3 §7.3: the usage
+                    // separation is ENFORCED for policy-backed namespaces).
+                    //
+                    // REFUSING HERE RATHER THAN AT `kubectl apply` is the whole
+                    // value: the operator learns which key ids overlap and what
+                    // to do about them while reading a migration plan, not from
+                    // an admission error against a file they had already
+                    // reviewed. The roster keeps working unchanged in the
+                    // meantime — `weirkeeper::trust::synthesize_legacy` still
+                    // merges the two lists in memory, which is what keeps an
+                    // unmigrated cluster running and is exactly the
+                    // `selfAttestedRisk` LABEL §7.3 preserves for legacy
+                    // namespaces.
                     if !usages.contains(&usage) {
-                        usages.push(usage);
+                        return Err(TrustError::UsageOverlap(key_id));
                     }
                 }
                 None => {
@@ -427,8 +483,11 @@ pub fn migrate_roster(args: &MigrateArgs) -> Result<String, TrustError> {
          # REVIEW THIS FILE BEFORE APPLYING IT. approverKeys became GovernedApproval,\n\
          # signingKeys became EvidenceSigning, allowedClusterIds became\n\
          # allowedTargetClusterIds, and every key is Active with notBefore {} because the\n\
-         # roster records no lifecycle. No ConsoleConfirmation key is ever synthesised.\n\
-         # The roster is NOT deleted: a rollback still reads it, unchanged.\n",
+         # roster records no lifecycle. Each key declares EXACTLY ONE usage (CEL rule G8).\n\
+         # No ConsoleConfirmation key is ever synthesised.\n\
+         # The roster is NOT deleted: a rollback still reads it, unchanged, and nothing\n\
+         # consults this policy for a verification or an approval until PLAT-19.1's\n\
+         # verification worker lands (docs/keys.md).\n",
         object
             .pointer("/metadata/name")
             .and_then(Value::as_str)
@@ -545,14 +604,17 @@ fn expect_kind(object: &Value, want: &str) -> Result<(), TrustError> {
 /// put it in the terminal scrollback, the shell history file and any CI log
 /// capturing stderr, which is the disclosure this check exists to prevent.
 pub fn refuse_private_material(raw: &str) -> Result<(), TrustError> {
-    for marker in PRIVATE_PEM_MARKERS {
-        if raw.contains(marker) {
-            return Err(TrustError::PrivateMaterial(format!(
-                "the input contains a `{marker}` PEM header"
-            )));
-        }
+    if !raw.contains(PRIVATE_PEM_SUBSTRING) {
+        return Ok(());
     }
-    Ok(())
+    // THE SUBSTRING DECIDED; the list only names what it found. A spelling
+    // this build has never heard of still refuses, and says so in the general
+    // form rather than passing.
+    let named = PRIVATE_PEM_MARKERS.iter().find(|m| raw.contains(*m));
+    Err(TrustError::PrivateMaterial(match named {
+        Some(marker) => format!("the input contains a `{marker}` PEM header"),
+        None => format!("the input contains the words `{PRIVATE_PEM_SUBSTRING}`"),
+    }))
 }
 
 /// `logweir trust export`, as the binary runs it.
