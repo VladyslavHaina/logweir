@@ -827,6 +827,13 @@ fn a_restore_plan_must_agree_with_the_saved_connection() {
 /// `scramSha512` connection with no `secretRef` and a `plaintext` connection
 /// with `tls: true` are now refused rather than run, and the goldens record
 /// exactly what they used to do.
+///
+/// The restore goldens' `--execution-contract-version` moved `1` -> `2` with
+/// decision D3's Amendment I, and that is not an exception: this row is about
+/// whether the CONNECTION contract changed a Job, and the contract version is
+/// stamped by `logweir_core::execution_contract::VERSION` for every Restore
+/// alike (a v2 invocation carrying no v2 material is exactly what a legacy
+/// object produces, and the new runner accepts it).
 #[test]
 fn legacy_objects_build_the_jobs_they_always_did() {
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/connection");

@@ -376,7 +376,7 @@
                     "restore",
                     "run",
                     "--execution-contract-version",
-                    "1",
+                    "2",
                     "--spec",
                     "/plan/restore.yaml",
                     "--approval",
@@ -415,7 +415,7 @@
                     },
                     {
                       "name": "LOGWEIR_EXECUTION_CONTRACT_VERSION",
-                      "value": "1"
+                      "value": "2"
                     },
                     {
                       "name": "LOGWEIR_EXECUTION_SUBJECT_API_VERSION",
