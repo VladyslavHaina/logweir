@@ -492,6 +492,8 @@ fn every_code_is_produced_or_reserved() {
         "transport_downgrade_forbidden", // destinations::update_access_refuses_an_idempotency_key_and_a_ca_bundle_on_plaintext
         "legacy_location_unknown", // destinations::a_legacy_schedule_becomes_a_destination_from_facts_or_is_refused
         "result_integrity_failed", // topic_discoveries::a_chunk_that_fails_its_integrity_check_refuses_the_page
+        // D1 W6.
+        "policy_changed", // manual_backups::an_expected_generation_that_moved_is_policy_changed
     ]
     .into_iter()
     .collect();

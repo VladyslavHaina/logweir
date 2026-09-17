@@ -661,7 +661,24 @@ fn answer_inner(state: &Arc<Mutex<State>>, recorded: Recorded) -> (Option<Durati
             // CEL leaves mutable. A patch outside it is `unexpected`, so a
             // route that learned to write something else fails every test.
             let allowed_spec: &[&str] = match plural.as_str() {
-                "backupschedules" => &["suspend"],
+                // D1 §5.1's mutability matrix. `sourceRef` is NOT here: no
+                // route may build a patch that names it, and a route that
+                // learned to would fail every test in this crate.
+                "backupschedules" => &[
+                    "suspend",
+                    "schedule",
+                    "timeZone",
+                    "topics",
+                    "allUserTopics",
+                    "archive",
+                    "destinationRef",
+                    "concurrencyPolicy",
+                    "startingDeadlineSeconds",
+                    "catchUpPolicy",
+                    "retry",
+                    "activeDeadlineSeconds",
+                    "retention",
+                ],
                 "backupdestinations" => &["access", "transport"],
                 "topicdiscoveries" | "preflights" => &["cancelRequested"],
                 _ => &[],
@@ -720,6 +737,17 @@ fn answer_inner(state: &Arc<Mutex<State>>, recorded: Recorded) -> (Option<Durati
             body.as_object_mut().unwrap().remove("metadata");
             let spec_changed = body.get("spec").is_some();
             merge(&mut updated, &body);
+            // THE CRD'S OWN CEL, ON THE MERGED RESULT, LIKE A REAL API SERVER.
+            // D1 §5.2 says the API must NOT keep a copy of R1-R3 and pre-empt
+            // them; the API server refuses and the API maps the refusal. A
+            // fake that accepted these shapes would let that mapping go
+            // untested and would let a route ship a second, drifting copy of
+            // the rules.
+            if plural == "backupschedules" {
+                if let Some(message) = refused_by_schedule_cel(&updated) {
+                    return (None, 422, status_body(422, "Invalid", &message));
+                }
+            }
             s.next_rv += 1;
             updated["metadata"]["resourceVersion"] = json!(s.next_rv.to_string());
             if spec_changed {
@@ -739,6 +767,60 @@ fn answer_inner(state: &Arc<Mutex<State>>, recorded: Recorded) -> (Option<Durati
             )
         }
     }
+}
+
+/// The `BackupSchedule` CEL rule a merged object breaks, if any (D1 §5.2).
+///
+/// R1 is not here: no adapter method can build a `sourceRef` key, so the
+/// transition it would refuse is unreachable rather than merely refused.
+fn refused_by_schedule_cel(object: &Value) -> Option<String> {
+    let spec = object.get("spec")?;
+    let topics = spec
+        .get("topics")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    if spec.get("allUserTopics").is_some() && topics > 0 {
+        return Some(format!(
+            "BackupSchedule.logweir.dev \"x\" is invalid: spec: Invalid value: \"object\": {}",
+            weirkeeper::crds::backup_schedule::SELECTION_SHAPE_MESSAGE
+        ));
+    }
+    let name = object
+        .pointer("/metadata/name")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let max_retries = spec
+        .pointer("/retry/maxRetries")
+        .and_then(Value::as_i64)
+        .unwrap_or(0);
+    if max_retries > 0 && name.len() > 29 {
+        return Some(format!(
+            "BackupSchedule.logweir.dev \"{name}\" is invalid: <nil>: Invalid value: \"object\": {}",
+            weirkeeper::crds::backup_schedule::RETRY_NAME_BUDGET_MESSAGE
+        ));
+    }
+    let destination = spec.pointer("/destinationRef/name").and_then(Value::as_str);
+    let url = spec
+        .pointer("/archive/url")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let has_secret = spec.pointer("/archive/secretRef").is_some();
+    let sentinel_ok = match destination {
+        Some(name) => {
+            url == format!(
+                "{}{name}",
+                weirkeeper::crds::backup_destination::DESTINATION_URL_SCHEME
+            ) && !has_secret
+        }
+        None => !url.starts_with(weirkeeper::crds::backup_destination::DESTINATION_URL_SCHEME),
+    };
+    if !sentinel_ok {
+        return Some(format!(
+            "BackupSchedule.logweir.dev \"{name}\" is invalid: spec: Invalid value: \"object\": {}",
+            weirkeeper::crds::backup_schedule::DESTINATION_SENTINEL_MESSAGE
+        ));
+    }
+    None
 }
 
 /// A settable clock.
@@ -944,6 +1026,20 @@ impl TestApp {
                 .uri(path)
                 .header("host", HOST)
                 .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+    }
+
+    pub async fn put(&self, path: &str, body: &str) -> TestResponse {
+        self.send(
+            Request::builder()
+                .method("PUT")
+                .uri(path)
+                .header("host", HOST)
+                .header("origin", ORIGIN)
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
                 .unwrap(),
         )
         .await

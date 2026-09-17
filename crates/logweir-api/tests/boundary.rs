@@ -74,14 +74,22 @@ async fn kubernetes_shaped_and_unlisted_paths_are_404_and_reach_nothing() {
 #[tokio::test]
 async fn unimplemented_mutations_have_no_route() {
     let app = TestApp::new();
-    // Manual backup create, approval submission, delete and patch: absent.
+    // Approval submission, delete and patch: absent. D1 W6 gave `POST
+    // .../backups` and `PUT .../schedules/{name}` real routes, so they moved
+    // to the list below; the shapes that must NEVER exist are these.
+    //
+    // `PATCH` and `PUT` ARE NOT THE SAME QUESTION. The edit route is a `PUT`
+    // of the whole policy through a typed DTO; a `PATCH` would be a
+    // caller-supplied patch document, which is the one thing this API does not
+    // accept, and it stays 405.
     for (method, path) in [
-        ("POST", "/api/v1/namespaces/team-a/backups"),
         ("POST", "/api/v1/namespaces/team-a/approvals"),
         ("DELETE", "/api/v1/namespaces/team-a/backups/x"),
         ("DELETE", "/api/v1/namespaces/team-a/restores/x"),
+        ("DELETE", "/api/v1/namespaces/team-a/schedules/x"),
         ("PATCH", "/api/v1/namespaces/team-a/schedules/x"),
-        ("PUT", "/api/v1/namespaces/team-a/schedules/x"),
+        ("PUT", "/api/v1/namespaces/team-a/backups/x"),
+        ("PUT", "/api/v1/namespaces/team-a/restores/x"),
         ("OPTIONS", "/api/v1/namespaces/team-a/schedules"),
     ] {
         let response = app
@@ -101,6 +109,41 @@ async fn unimplemented_mutations_have_no_route() {
         assert!(response.header("access-control-allow-origin").is_none());
     }
     assert!(app.fake.requests().is_empty());
+}
+
+/// **The two routes D1 W6 added are routed, and refuse before Kubernetes.**
+///
+/// A negative control for the list above: if `POST .../backups` were dropped
+/// from the router, the test above would still pass (it no longer probes it)
+/// and this one would fail.
+#[tokio::test]
+async fn the_manual_run_and_the_policy_edit_are_routed() {
+    let app = TestApp::new();
+    for (method, path, key) in [
+        ("POST", "/api/v1/namespaces/team-a/backups", true),
+        ("PUT", "/api/v1/namespaces/team-a/schedules/x", false),
+    ] {
+        let mut builder = Request::builder()
+            .method(method)
+            .uri(path)
+            .header("host", HOST)
+            .header("origin", ORIGIN)
+            .header("content-type", "application/json");
+        if key {
+            builder = builder.header("idempotency-key", "routed-probe-01");
+        }
+        let response = app.send(builder.body(Body::from("{}")).unwrap()).await;
+        assert_ne!(
+            response.status.as_u16(),
+            405,
+            "{method} {path} is not routed"
+        );
+        // An empty body is a validation failure, and it happens BEFORE any
+        // Kubernetes call.
+        response.assert_problem(422, "validation_failed");
+    }
+    assert!(app.fake.requests().is_empty());
+    app.fake.assert_strict();
 }
 
 #[tokio::test]

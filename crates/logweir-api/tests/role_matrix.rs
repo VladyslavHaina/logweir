@@ -31,7 +31,7 @@ use support::{
 /// table edited to match a wrong implementation still fails.
 #[test]
 fn the_decision_table_is_exactly_this() {
-    let expected: [(Action, [bool; 4]); 24] = [
+    let expected: [(Action, [bool; 4]); 25] = [
         //                                     V      O      A     Adm
         (Action::ReadConnections, [true, true, false, true]),
         (Action::CreateConnection, [false, true, false, true]),
@@ -51,6 +51,9 @@ fn the_decision_table_is_exactly_this() {
         (Action::ReadSchedules, [true, true, false, true]),
         (Action::CreateSchedule, [false, true, false, true]),
         (Action::SetScheduleSuspension, [false, true, false, true]),
+        // D1 W6: editing a schedule's FUTURE policy. Same row as
+        // `CreateSchedule` on purpose — see the invariant below.
+        (Action::EditSchedulePolicy, [false, true, false, true]),
         (Action::ReadBackups, [true, true, true, true]),
         (Action::CreateManualBackup, [false, true, false, true]),
         (Action::ReadRestores, [true, true, true, true]),
@@ -80,6 +83,7 @@ fn the_decision_table_is_exactly_this() {
         Action::ManageDestinations,
         Action::CreateSchedule,
         Action::SetScheduleSuspension,
+        Action::EditSchedulePolicy,
         Action::CreateManualBackup,
         Action::CreateRestore,
         Action::SubmitApproval,
@@ -94,6 +98,7 @@ fn the_decision_table_is_exactly_this() {
     for action in [
         Action::CreateConnection,
         Action::CreateSchedule,
+        Action::EditSchedulePolicy,
         Action::CreateRestore,
         Action::CreateManualBackup,
         Action::SetScheduleSuspension,
@@ -116,6 +121,37 @@ fn the_decision_table_is_exactly_this() {
         !Role::Administrator.allows(Action::SubmitApproval),
         "administrator is not a self-approval bypass; approving needs a separate Approver binding"
     );
+}
+
+/// **Editing a schedule's policy is exactly the authority to create one.**
+///
+/// D0's matrix gives an operator "create and set suspension" on schedules and
+/// says nothing about editing, because PLAT-05.1 had not made a schedule
+/// editable. This crate's decision (recorded in `docs/api.md`) is that writing
+/// a NEW policy over a schedule is the same authority as writing the first
+/// one: it reaches exactly the fields `POST` already sets, it cannot reach
+/// `spec.sourceRef`, and it cannot touch a run that already exists.
+///
+/// THE TEST IS WHAT MAKES THE ONE CAPABILITY FLAG HONEST. `ui/contract.js`'s
+/// `CAPABILITY_FLAGS` is a frozen 19-entry list, so the edit route has no flag
+/// of its own and a console reads `scheduleCreate` for both buttons. That is
+/// only true while the two actions have the same row, and this is the assertion
+/// that stops them drifting apart silently: split them, and split the flag in
+/// the same commit as `ui/contract.js`.
+#[test]
+fn editing_a_policy_is_exactly_the_authority_to_create_one() {
+    for role in Role::ALL {
+        assert_eq!(
+            role.allows(Action::EditSchedulePolicy),
+            role.allows(Action::CreateSchedule),
+            "{role:?} may create a schedule and may not edit one, or the other way round. \
+             `Capabilities::schedule_create` is published for BOTH routes; splitting them is a \
+             contract change that must land with ui/contract.js's CAPABILITY_FLAGS."
+        );
+    }
+    // And it is still a mutation: a viewer is refused, whatever the flag says.
+    assert!(!Role::Viewer.allows(Action::EditSchedulePolicy));
+    assert!(!Role::Approver.allows(Action::EditSchedulePolicy));
 }
 
 // ------------------------------------------------------------------ HTTP
@@ -199,6 +235,21 @@ fn probes() -> Vec<Probe> {
             path: "/schedules/sched-1",
             body: suspension,
             action: Action::SetScheduleSuspension,
+        },
+        // ------------------------------------------------------- D1 W6
+        Probe {
+            label: "edit schedule policy",
+            method: "PUT",
+            path: "/schedules/sched-1",
+            body: policy_edit,
+            action: Action::EditSchedulePolicy,
+        },
+        Probe {
+            label: "create manual backup",
+            method: "POST",
+            path: "/backups",
+            body: manual_backup,
+            action: Action::CreateManualBackup,
         },
         Probe {
             label: "list backups",
@@ -399,6 +450,21 @@ fn probes() -> Vec<Probe> {
     ]
 }
 
+fn policy_edit() -> String {
+    serde_json::json!({
+        "expectedGeneration": 1,
+        "schedule": "0 4 * * *",
+        "topicSelection": {"topics": ["orders"]},
+        "archive": {"url": "s3://b/p"},
+        "suspended": false
+    })
+    .to_string()
+}
+
+fn manual_backup() -> String {
+    serde_json::json!({ "scheduleRef": {"name": "sched-1"} }).to_string()
+}
+
 fn nothing_object() -> String {
     "{}".to_string()
 }
@@ -446,12 +512,16 @@ async fn drive(
         .uri(&uri)
         .header("host", SHARED_HOST)
         .header("cookie", cookie);
-    if probe.method == "POST" {
+    if probe.method == "POST" || probe.method == "PUT" {
         builder = builder
             .header("origin", SHARED_ORIGIN)
             .header("content-type", "application/json")
-            .header("x-csrf-token", csrf)
-            .header("idempotency-key", key);
+            .header("x-csrf-token", csrf);
+        // A `PUT` edit is not a durable create: its precondition IS its
+        // idempotence, and it refuses the header outright.
+        if probe.method == "POST" {
+            builder = builder.header("idempotency-key", key);
+        }
     }
     app.app
         .send(builder.body(Body::from((probe.body)())).unwrap())

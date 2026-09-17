@@ -475,15 +475,14 @@ async fn session_and_namespaces_come_from_configuration_only() {
         "preflight",
         "destinations",
         "credentialWrite",
+        // D1 W6: `POST .../backups` has a route. `scheduleCreate` also covers
+        // `PUT .../schedules/{name}`: the same authority, one flag, and
+        // `role_matrix` pins that the two actions have the same role row.
+        "manualBackupCreate",
     ] {
         assert_eq!(caps[enabled], true, "{enabled}");
     }
-    for disabled in [
-        "manualBackupCreate",
-        "connectionTest",
-        "approvalSubmit",
-        "operationEvents",
-    ] {
+    for disabled in ["connectionTest", "approvalSubmit", "operationEvents"] {
         assert_eq!(caps[disabled], false, "{disabled}");
     }
     let namespaces = app.get("/api/v1/namespaces").await.json();

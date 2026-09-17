@@ -54,6 +54,7 @@ fn the_document_names_every_route_and_every_route_answers() {
             "/api/v1/namespaces",
             "/api/v1/namespaces/{ns}/connections",
             "/api/v1/namespaces/{ns}/connections/{name}",
+            "/api/v1/cadence-previews",
             "/api/v1/namespaces/{ns}/schedules",
             "/api/v1/namespaces/{ns}/schedules/{name}",
             "/api/v1/namespaces/{ns}/schedules/{name}:set-suspension",
@@ -92,7 +93,7 @@ fn the_document_names_every_route_and_every_route_answers() {
             );
         }
     }
-    assert_eq!(operation_ids.len(), 39);
+    assert_eq!(operation_ids.len(), 42);
 }
 
 /// Three documented paths exist only in shared mode: the two `/auth` routes and
@@ -127,6 +128,7 @@ async fn every_documented_operation_is_routed() {
             let response = match (method.as_str(), shared_only) {
                 ("get", false) => app.get(&concrete).await,
                 ("post", false) => app.post(&concrete, Some("documented-route-01"), "{}").await,
+                ("put", false) => app.put(&concrete, "{}").await,
                 ("get", true) => shared.get(&concrete, &cookie).await,
                 ("post", true) => {
                     shared
