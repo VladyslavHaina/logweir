@@ -139,7 +139,7 @@ Wave 2 resumes every branch in place with the prompts under
 | PLAT-17.2 (stage 2) | In progress (stage landed) | plat17-2-authz, plat17-2-authz-review | Partial record under PLAT-17.2. Integrated into main as `24752f4..90ecd0c`. Shared mode is implemented and live-verified locally but not deployable or declarable secure until D0 stages 5 and 7. |
 | PLAT-17.1 (stages 1 and 3) | In progress (stages landed) | plat17-api-finish, plat17-api-review | Partial record under PLAT-17.1. Integrated into main as `4b571d1..de0207c`. Remaining for Done: console image and chart with the API's own RBAC (D0 stage 7), transient-check cancellation once PLAT-03/09.1 exist, `POST …/backups` (PLAT-06.2), SSE (PLAT-14.1), a browser journey through the API, and PLAT-17.2. |
 | PLAT-04.2, 05.x, 06.2, 09.2 | Contract decided | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. W1 (the pure cadence engine) landed in main as `6eedc0a..4b54a5c` after review; see the PLAT-04.2 partial record. W3a (the `Backup` run contract: `spec.trigger`, `spec.scheduleRef` with generation and `runPolicySha256`, the selection type with `allUserTopics` requiring `incompleteDiscovery`, `status.selection`, `src/identity.rs`, `src/policy.rs`, the §3.4 vocabulary) landed in `696c81a`/`b334a98` inside `crds-shapes`; a `Backup` naming both `topics` and `allUserTopics` is refused by CEL and, terminally, by admission. W2, W3b, W4, W5, W6, W7, W8 remain. |
-| PLAT-03.x, 08.x, 09.1 | In progress (W1, W2 landed) | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. W1 (pure check contract and destination model) and W2 (explicit store options) landed as `c13b0cc..56bd074` after review (ACCEPT after two high and three medium fixes: JSON-form redaction bypass, ambient credentials inheriting the environment). W3 (`logweir_kafka::inventory`: bounded targeted describe, broker count, validate-only `CreateTopics`, error classification where an observed authorization failure makes visibility `limited` and anything unknown is failure, with a real admin-client fault capture because rdkafka 0.36 never invokes `ClientContext::error` for a metadata-only workflow — D2 §4.2 `[VERIFY U5]` corrected) and W5 (`weirkeeper::check`: check Jobs mirroring the execution pod, pod selection by controller owner UID only, framed-stdout relay through the W1 decoder, the full waiting-code table, TTL, plan/chunk/limit modules, the installation policy loader failing closed) landed as `23cec50..b8e62d1` after review (ACCEPT after one high and three medium fixes; 19 mutants killed; the rebase over PLAT-07.1 then routed the inventory client through the reader's `client_config`, removing a drifted copy that could upgrade plaintext to TLS when a CA was present — re-checked ACCEPT; weirkeeper 435, kafka 57). RBAC still owed by W11: `events: list` plus its `manifest_lint` row, the three new kinds' verbs, and a decision on `gc.rs`'s deletes. The reviewers' SEC-PODLOG finding against `controllers::backup::select_job_pod` is closed by `secpodlog` (see the defects table). W6a and W6b (the three Amendment F kinds and the destination sentinel on existing kinds) landed in `46880a3`/`88232f5`/`b334a98` inside `crds-shapes`; W7 (destination resolver, controller, evidence store cache) landed as `27fb924..0b25e95` (see the PLAT-08.1 partial record). W4 (runner `logweir check run`) is in review; W8, W9, W10, W11, W12, W13, W14 remain. |
+| PLAT-03.x, 08.x, 09.1 | In progress (W1, W2 landed) | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. W1 (pure check contract and destination model) and W2 (explicit store options) landed as `c13b0cc..56bd074` after review (ACCEPT after two high and three medium fixes: JSON-form redaction bypass, ambient credentials inheriting the environment). W3 (`logweir_kafka::inventory`: bounded targeted describe, broker count, validate-only `CreateTopics`, error classification where an observed authorization failure makes visibility `limited` and anything unknown is failure, with a real admin-client fault capture because rdkafka 0.36 never invokes `ClientContext::error` for a metadata-only workflow — D2 §4.2 `[VERIFY U5]` corrected) and W5 (`weirkeeper::check`: check Jobs mirroring the execution pod, pod selection by controller owner UID only, framed-stdout relay through the W1 decoder, the full waiting-code table, TTL, plan/chunk/limit modules, the installation policy loader failing closed) landed as `23cec50..b8e62d1` after review (ACCEPT after one high and three medium fixes; 19 mutants killed; the rebase over PLAT-07.1 then routed the inventory client through the reader's `client_config`, removing a drifted copy that could upgrade plaintext to TLS when a CA was present — re-checked ACCEPT; weirkeeper 435, kafka 57). RBAC still owed by W11: `events: list` plus its `manifest_lint` row, the three new kinds' verbs, and a decision on `gc.rs`'s deletes. The reviewers' SEC-PODLOG finding against `controllers::backup::select_job_pod` is closed by `secpodlog` (see the defects table). W6a and W6b (the three Amendment F kinds and the destination sentinel on existing kinds) landed in `46880a3`/`88232f5`/`b334a98` inside `crds-shapes`; W7 (destination resolver, controller, evidence store cache) landed as `27fb924..0b25e95` (see the PLAT-08.1 partial record); W4 (runner `logweir check run`) landed at `537657d` (see the PLAT-03 partial record); W8 (`TopicDiscovery` controller) and W12 (API routes) are in review or in progress. W9, W10, W11, W13, W14 remain. |
 | PLAT-14.x, 15.x, 16.x, 19.1 | In progress (W4 landed) | [D3](decisions/D3-status-catalog-retention-trust.md) | Operation states, protection freshness, rehearsals, durable catalog, retention enforcement boundary, trust lifecycle; fifteen worker tasks. W4 (`d3-notify`: the shared notification module and `logweir notify deliver`) landed after review (ACCEPT after two high fixes); W3 (`d3-catalog-writer`: signed catalog point records, `list_page`, `logweir catalog sync|list`) landed after review (see the PLAT-15.1 partial record); W0 (the five Amendment G kinds, additive run status, `Restore.spec` additions, the `Approval` enum) landed in `496451a`/`88232f5`/`b334a98` inside `crds-shapes`; W1 (trust lifecycle core, `TrustPolicy` controller, `trust export|migrate-roster`, G8) landed as `64fcd38..5fc1a72` (see the PLAT-19.1 partial record); W8 (`RecoveryCatalog` controller) in progress. W2, W5, W6, W7, W9, W10, W11, W12, W13, W14 remain. |
 
 ### Decision records
@@ -430,6 +430,44 @@ denied access and expired approval. **Dependencies:** PLAT-03.1, PLAT-11.1.
 **Migration/safety and done evidence:** Distinguish connection health from
 operation readiness; retain existing runner guards. Capture both early error
 messages and a race rejected at execution.
+
+**Partial record (2026-09-17) — PLAT-03.1/03.2 and PLAT-09.1 runner half: the one
+check runner `logweir check run` (D2 W4) landed; the tasks stay In progress until
+the `Preflight` controller (W9), the API (W12) and the UI (W13) exist and W14
+proves them live.** Landed in main as `claude/d2w4` (tip `537657d`: the runner,
+its contract tests, docs, the redaction fixes and the closed startup rule).
+Contract (`docs/stability.md`, D2 §4.2): argv `check run --plan <path>
+--check-contract-version 1` with `LOGWEIR_CHECK_{CONTRACT_VERSION,PLAN_SHA256,
+SUBJECT_UID}`; steps 1–4 (argv, plan bytes, sha, strict parse with subject UID)
+open nothing and refuse with exit 3 and a lone `refusal-reason=CheckContractMismatch`
+line, enforced by a module rule that every function reachable before step 5 names
+no client constructor (the reviewer's helper-dial mutants die); all five plan
+kinds (`topicInventory`, `operationReadiness`, `restorePreflight`,
+`destinationAccess`, `evidenceFetch`) run over the landed pure contract, the Kafka
+inventory probes and the store options, emit `check_contract` frames with the
+relay budget respected and one end line last; exit 0 when an end line was printed
+whatever the per-check states, 1 when it could not be, 2 and 4 structurally
+unreachable; the engine is never invoked; the only write is the optional
+create-only readiness marker (`AlreadyExists` counts as write-authorised); every
+message, scope name, detail sample and stream passes `redact` (an AWS key planted in
+a connection, a store error or the details stream is absent from the decoded
+relay and from stderr); `plaintext` with `tls: true` is refused, transport comes
+only from `plan.tls` and the connection CA is a projected in-pod path handed to
+`ssl.ca.location` unopened; `EndpointUnreachable` is distinguished from `Timeout`;
+`result`/`details` stream names are refused by name. Verified at `537657d`: logweir
+904/904 (`check_cli` 91), the whole workspace, strict clippy (default and `e2e`),
+fmt, `no-oso`, `no-archive-write`, `one-signer`, `pure-core`, `just lint`; four live
+Compose rows (SASL inventory, a refused SCRAM credential classified
+`AuthenticationFailed`, a MinIO denial versus not-found, an `evidenceFetch` of a
+receipt a real `backup run` wrote; stack torn down); thirteen planted mutants
+killed across three rounds. Independent review `claude/d2w4.review.md`:
+ACCEPT-WITH-FIXES (two high: a plaintext dial under `tls: true`; a startup guard
+that missed helpers) then ACCEPT, with two test-only guard gaps closed in a final
+round. Migration: a new subcommand only; nothing invokes it until W8's discovery
+Jobs and W9's preflight Jobs run with a runner image built from this source.
+Limitations: a true authenticated-but-unauthorized store denial and the
+private-CA broker are not proven live (W14); the restore preflight's
+`writeProbe` needs a field in the pure contract (W1 amendment for W9).
 
 ## PLAT-04 — Make scheduling policy predictable
 
