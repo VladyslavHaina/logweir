@@ -331,6 +331,15 @@ fn read_routes(backups: Vec<Value>, schedule_status: Value) -> Vec<Route> {
     ]
 }
 
+/// The GET route the event `ConfigMap`'s owner read needs (review F7): the
+/// FIRST delivery Job for a transition, answered with the UID the ConfigMap's
+/// `ownerReferences` entry is built from.
+fn first_job_route(key: &str, transition: i64) -> Route {
+    let name = p::delivery_job_name(POLICY, POLICY_UID, key, transition, 1);
+    let path: &'static str = Box::leak(format!("/jobs/{name}").into_boxed_str());
+    ok(path, running_job(&name))
+}
+
 /// A `RestoreList`, for the `RecoveryCompleted` path.
 fn restore_list(items: Vec<Value>) -> String {
     json!({
@@ -649,7 +658,12 @@ fn entry(point_id: &str, availability: &str, verification: &str) -> p::CatalogEn
         "recoveryPointAtMs": 1_700_000_000_000_i64,
         "availability": availability,
         "verification": verification,
-        "selectable": availability == "Available",
+        // BOTH axes, exactly as `catalog_view::view_entry` materialises it
+        // (`availability.selectable() && verification.selectable()`). A helper
+        // that keyed on availability alone would hand the reader a `selectable`
+        // the real catalog never writes.
+        "selectable": availability == "Available"
+            && matches!(verification, "Verified" | "VerifiedHistorical"),
         "runId": "ignored-unknown-field",
         "coveredFromMs": 0
     }))
@@ -722,7 +736,14 @@ fn a_condition_that_stays_true_pages_exactly_once() {
     let open = [p::PolicyAlertKind::Staleness];
 
     // Pass 1 — the alert opens at transition 1 and is due.
-    let first = p::reconcile_alerts(&[], &open, POLICY_UID, notifications(&spec), now());
+    let first = p::reconcile_alerts(
+        &[],
+        &open,
+        p::Health::Stale,
+        POLICY_UID,
+        notifications(&spec),
+        now(),
+    );
     assert_eq!(first.alerts.len(), 1);
     assert_eq!(first.alerts[0].transition, Some(1));
     assert_eq!(first.due.len(), 1);
@@ -744,6 +765,7 @@ fn a_condition_that_stays_true_pages_exactly_once() {
         let out = p::reconcile_alerts(
             &ledger,
             &open,
+            p::Health::Stale,
             POLICY_UID,
             notifications(&spec),
             now() + Duration::minutes(5 * (pass + 1)),
@@ -761,6 +783,7 @@ fn a_condition_that_stays_true_pages_exactly_once() {
     let out = p::reconcile_alerts(
         &ledger,
         &open,
+        p::Health::Stale,
         POLICY_UID,
         notifications(&spec),
         now() + Duration::seconds(86_400),
@@ -775,6 +798,7 @@ fn the_key_is_stable_across_open_and_resolve_and_is_its_own_family() {
     let open = p::reconcile_alerts(
         &[],
         &[p::PolicyAlertKind::Staleness],
+        p::Health::Stale,
         POLICY_UID,
         notifications(&spec),
         now(),
@@ -785,6 +809,7 @@ fn the_key_is_stable_across_open_and_resolve_and_is_its_own_family() {
     let resolved = p::reconcile_alerts(
         &open.alerts,
         &[],
+        p::Health::Healthy,
         POLICY_UID,
         notifications(&spec),
         now() + Duration::hours(1),
@@ -1030,18 +1055,51 @@ fn no_summary_claims_an_exhaustive_check() {
     let point = facts_point();
     for health in p::Health::ALL {
         for reason in p::FreshnessReason::ALL {
-            let summary = p::summarize(&spec, *health, *reason, Some(&point), 2);
-            let lowered = summary.to_ascii_lowercase();
-            for phrase in BANNED {
-                assert!(
-                    !lowered.contains(phrase),
-                    "the summary reaches a PagerDuty incident title verbatim and must not claim \
-                     `{phrase}`: {summary}"
-                );
+            for with_age in [true, false] {
+                let summary = p::summarize(&spec, *health, *reason, Some(&point), 2, with_age);
+                let lowered = summary.to_ascii_lowercase();
+                for phrase in BANNED {
+                    assert!(
+                        !lowered.contains(phrase),
+                        "the summary reaches a PagerDuty incident title verbatim and must not \
+                         claim `{phrase}`: {summary}"
+                    );
+                }
+                assert!(!summary.is_empty());
             }
-            assert!(!summary.is_empty());
         }
     }
+
+    // The condition sentence carries NO clock-derived number (review F4): the
+    // event's does, because it is written once and read by a human, and a
+    // condition `message` is part of an object that is compared on every pass.
+    let event = p::summarize(
+        &spec,
+        p::Health::Stale,
+        p::FreshnessReason::PointOlderThanObjective,
+        Some(&point),
+        2,
+        true,
+    );
+    let condition = p::summarize(
+        &spec,
+        p::Health::Stale,
+        p::FreshnessReason::PointOlderThanObjective,
+        Some(&point),
+        2,
+        false,
+    );
+    // 111 600 s is 1d 7h, and the objective 93 600 s is 1d 2h.
+    assert!(event.contains("1d 7h old"), "{event}");
+    assert!(
+        !condition.contains("1d 7h"),
+        "a condition message that embeds the age changes when the minute rolls over, which is a \
+         status patch on a pass where nothing happened: {condition}"
+    );
+    assert!(
+        condition.contains("1d 2h"),
+        "the objective is a spec value and never moves: {condition}"
+    );
 }
 
 fn facts_point() -> p::AvailablePointFacts {
@@ -1301,7 +1359,7 @@ fn a_sink_error_is_reported_and_never_echoed_from_the_log() {
 #[test]
 fn the_retry_schedule_is_three_bounded_attempts() {
     assert_eq!(p::MAX_DELIVERY_ATTEMPTS, 3);
-    assert_eq!(p::DELIVERY_BACKOFF_SECONDS, [60, 300, 900]);
+    assert_eq!(p::DELIVERY_BACKOFF_SECONDS, [60, 300]);
     let mut delivery = AlertDelivery {
         state: Some("Failed".to_string()),
         attempts: Some(1),
@@ -1368,13 +1426,29 @@ fn the_derived_names_are_pure_functions_and_fit_kubernetes() {
 // ===========================================================================
 
 fn drive(policy: &ProtectionPolicy, routes: Vec<Route>) -> (pp::Outcome, Recorder, BodyRecorder) {
+    drive_at(policy, routes, now())
+}
+
+/// [`drive`] with the reconcile's `now` named.
+///
+/// **The clock is a parameter because freezing it hides the defect** (review
+/// F4). `a_steady_policy_issues_no_patch_at_all` used to call `drive` twice,
+/// which passed the same frozen instant both times, so it proved nothing about
+/// a reconciler whose clock advances — and the reconciler wrote a live
+/// `sinceLastFire` and a humanized age into the object, so every real pass was
+/// a PATCH.
+fn drive_at(
+    policy: &ProtectionPolicy,
+    routes: Vec<Route>,
+    at: DateTime<Utc>,
+) -> (pp::Outcome, Recorder, BodyRecorder) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("a current-thread runtime");
     runtime.block_on(async {
         let (client, recorder, bodies) = mock_client_recording_bodies(routes);
-        let outcome = pp::reconcile_policy(policy, &context(client), now())
+        let outcome = pp::reconcile_policy(policy, &context(client), at)
             .await
             .expect("the reconcile did not error");
         (outcome, recorder, bodies)
@@ -1453,18 +1527,36 @@ fn a_steady_policy_issues_no_patch_at_all() {
         value
     };
     // Pass 1: learn the status this pass computes.
+    //
+    // THE SCHEDULE HAS FIRED, which is what puts `missed.sinceLastFire` in the
+    // status at all — and that field is one of the three clock-derived ones, so
+    // a fixture without it cannot see the defect (review F4).
     let routes = {
-        let mut routes = read_routes(vec![backup("b-1", 2, json!({}))], json!({}));
+        let mut routes = read_routes(
+            vec![backup("b-1", 2, json!({}))],
+            json!({"lastFireTime": at(10)}),
+        );
         routes.push(patch(STATUS_PATH));
         routes
     };
     let (_, _, bodies) = drive(&policy_with(no_catalog.clone(), json!({})), routes);
     let written = last_status_patch(&bodies)["status"].clone();
 
-    // Pass 2: the same object, now carrying that status, and NO patch route.
+    // Pass 2: the same object, now carrying that status, THE CLOCK ADVANCED,
+    // and NO patch route — the double panics on a PATCH it was not given one
+    // for.
+    //
+    // THE CLOCK MOVES, which is the whole point (review F4). The old form drove
+    // twice at the same frozen instant and so could not see a status field that
+    // is a live clock reading. A hundred seconds is inside `evaluatedAt`'s
+    // half-interval window (150 s at the fixture's 300 s), so the honest
+    // expectation is still ZERO writes: nothing about the cluster changed.
     let steady = policy_with(no_catalog, written);
-    let routes = read_routes(vec![backup("b-1", 2, json!({}))], json!({}));
-    let (outcome, recorder, _) = drive(&steady, routes);
+    let routes = read_routes(
+        vec![backup("b-1", 2, json!({}))],
+        json!({"lastFireTime": at(10)}),
+    );
+    let (outcome, recorder, _) = drive_at(&steady, routes, now() + Duration::seconds(100));
     assert!(outcome.committed);
     let calls = requests(&recorder);
     assert!(
@@ -1473,6 +1565,80 @@ fn a_steady_policy_issues_no_patch_at_all() {
          clock reading spins the loop at whatever rate the API server will serve. Calls: \
          {calls:?}"
     );
+}
+
+/// The other side of erratum **E11(d)**: past `evaluatedAt`'s half-interval
+/// window the object IS written, and the only things that move are the three
+/// clock-derived fields.
+///
+/// MUTANT: compute `ageSeconds` or `sinceLastFire` from `now` instead of from
+/// the settled `evaluatedAt`. The equality below then fails on a field that is
+/// not in the allowed set — which is what "a steady object costs one bounded
+/// write per interval, not one per reconcile" actually means.
+#[test]
+fn past_the_half_interval_only_the_clock_fields_move() {
+    let no_catalog = {
+        let mut value = spec_value();
+        merge(
+            &mut value,
+            &json!({"objectives": {"requireCatalogAvailability": false}}),
+        );
+        value
+    };
+    let fired = json!({"lastFireTime": at(10)});
+    let routes = {
+        let mut routes = read_routes(vec![backup("b-1", 2, json!({}))], fired.clone());
+        routes.push(patch(STATUS_PATH));
+        routes
+    };
+    let (_, _, bodies) = drive(&policy_with(no_catalog.clone(), json!({})), routes);
+    let first = last_status_patch(&bodies)["status"].clone();
+    assert!(
+        first["missed"]["sinceLastFire"].is_i64(),
+        "the fixture must actually carry a clock-derived field, or this test is vacuous: {first}"
+    );
+
+    let steady = policy_with(no_catalog, first.clone());
+    let routes = {
+        let mut routes = read_routes(vec![backup("b-1", 2, json!({}))], fired);
+        routes.push(patch(STATUS_PATH));
+        routes
+    };
+    let (_, recorder, bodies) = drive_at(&steady, routes, now() + Duration::seconds(300));
+    assert_eq!(
+        requests(&recorder)
+            .iter()
+            .filter(|(m, _)| m == "PATCH")
+            .count(),
+        1,
+        "one bounded write per interval, and not one per reconcile"
+    );
+    let second = last_status_patch(&bodies)["status"].clone();
+
+    let strip = |value: &Value| {
+        let mut v = value.clone();
+        if let Some(map) = v.as_object_mut() {
+            map.remove("evaluatedAt");
+            if let Some(point) = map
+                .get_mut("lastAvailablePoint")
+                .and_then(Value::as_object_mut)
+            {
+                point.remove("ageSeconds");
+            }
+            if let Some(missed) = map.get_mut("missed").and_then(Value::as_object_mut) {
+                missed.remove("sinceLastFire");
+            }
+        }
+        v
+    };
+    assert_eq!(
+        strip(&first),
+        strip(&second),
+        "past the half-interval the object is rewritten, but ONLY `evaluatedAt`, \
+         `lastAvailablePoint.ageSeconds` and `missed.sinceLastFire` may differ — a condition \
+         message or any other field moving here is a write the cluster did not ask for"
+    );
+    assert_ne!(first["evaluatedAt"], second["evaluatedAt"]);
 }
 
 /// The tracker's acceptance sentence, as a test.
@@ -1742,6 +1908,10 @@ fn one_delivery_job_per_transition_and_a_replay_is_a_409() {
     let mut routes = read_routes(vec![backup("b-1", 40, json!({}))], json!({}));
     routes.push(post("/configmaps", json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm", "namespace": NS}}).to_string()));
     routes.push(post("/jobs", json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "j", "namespace": NS}, "spec": {}}).to_string()));
+    routes.push(first_job_route(
+        &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
+        1,
+    ));
     routes.push(patch(STATUS_PATH));
 
     let (outcome, recorder, bodies) = drive(&policy, routes);
@@ -1757,17 +1927,20 @@ fn one_delivery_job_per_transition_and_a_replay_is_a_409() {
         "one alert transition is one page: {calls:?}"
     );
 
-    // The ConfigMap is created BEFORE the Job: a Job whose mounted ConfigMap
-    // does not exist sits in ContainerCreating until its deadline.
-    let cm_at = calls
-        .iter()
-        .position(|(m, u)| m == "POST" && path_of(u).ends_with("/configmaps"))
-        .expect("the event ConfigMap was created");
+    // The Job is created BEFORE the ConfigMap it mounts, and the ConfigMap's
+    // owner UID is read back from it (review F7). The cost is a window in which
+    // a scheduled pod sits `ContainerCreating` on a mount the kubelet retries;
+    // the benefit is that the Job's TTL collects the immutable object, which
+    // policy ownership never did.
     let job_at = calls
         .iter()
         .position(|(m, u)| m == "POST" && path_of(u).ends_with("/jobs"))
         .expect("the delivery Job was created");
-    assert!(cm_at < job_at, "{calls:?}");
+    let cm_at = calls
+        .iter()
+        .position(|(m, u)| m == "POST" && path_of(u).ends_with("/configmaps"))
+        .expect("the event ConfigMap was created");
+    assert!(job_at < cm_at, "{calls:?}");
 
     // The replay: the SAME object, now carrying the ledger the first pass
     // wrote, against an API server that answers 409 to both creates.
@@ -1917,6 +2090,10 @@ fn the_delivery_job_does_not_block_deleting_its_policy() {
     let mut routes = read_routes(vec![backup("b-1", 40, json!({}))], json!({}));
     routes.push(post("/configmaps", json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm", "namespace": NS}}).to_string()));
     routes.push(post("/jobs", json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "j", "namespace": NS}, "spec": {}}).to_string()));
+    routes.push(first_job_route(
+        &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
+        1,
+    ));
     routes.push(patch(STATUS_PATH));
     let (_, _, body_log) = drive(&policy, routes);
 
@@ -1925,8 +2102,6 @@ fn the_delivery_job_does_not_block_deleting_its_policy() {
     }) {
         let object: Value = serde_json::from_str(&body).expect("the created object is JSON");
         let owner = &object["metadata"]["ownerReferences"][0];
-        assert_eq!(owner["kind"].as_str(), Some("ProtectionPolicy"), "{uri}");
-        assert_eq!(owner["uid"].as_str(), Some(POLICY_UID), "{uri}");
         assert_eq!(owner["controller"].as_bool(), Some(true), "{uri}");
         assert_eq!(
             owner["blockOwnerDeletion"].as_bool(),
@@ -1935,6 +2110,24 @@ fn the_delivery_job_does_not_block_deleting_its_policy() {
              on a notification Job waiting out a 120-second deadline against a sink that is \
              down: {uri}"
         );
+        if path_of(&uri).ends_with("/jobs") {
+            assert_eq!(owner["kind"].as_str(), Some("ProtectionPolicy"), "{uri}");
+            assert_eq!(owner["uid"].as_str(), Some(POLICY_UID), "{uri}");
+        } else {
+            // REVIEW F7. The event ConfigMap is `immutable: true` and this role
+            // holds `delete` on nothing, so a policy-owned one is never removed
+            // until the policy is: one object per `(alertKey, transition)`,
+            // thousands a year. Owned by the Job, the API server's TTL
+            // controller collects it.
+            assert_eq!(
+                owner["kind"].as_str(),
+                Some("Job"),
+                "the event ConfigMap must be collected by a Job TTL, not accumulate for the \
+                 life of the policy: {uri}"
+            );
+            assert_eq!(owner["uid"].as_str(), Some(JOB_UID), "{uri}");
+            assert_ne!(owner["uid"].as_str(), Some(POLICY_UID), "{uri}");
+        }
     }
 
     // The event ConfigMap is immutable and carries the event under the key the
@@ -2021,6 +2214,10 @@ fn a_run_of_another_source_is_not_this_policys_history() {
     let mut routes = read_routes(vec![foreign], json!({}));
     routes.push(post("/configmaps", json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm", "namespace": NS}}).to_string()));
     routes.push(post("/jobs", json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "j", "namespace": NS}, "spec": {}}).to_string()));
+    routes.push(first_job_route(
+        &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
+        1,
+    ));
     routes.push(patch(STATUS_PATH));
     let (outcome, _, _) = drive(&policy_with(no_catalog, json!({})), routes);
     assert_eq!(outcome.health, p::Health::Unprotected);
@@ -2231,6 +2428,7 @@ fn the_number_of_delivery_jobs_per_pass_is_bounded() {
     let out = p::reconcile_alerts(
         &noise,
         &p::PolicyAlertKind::ALL,
+        p::Health::Stale,
         POLICY_UID,
         notifications(&spec),
         now(),
@@ -2317,6 +2515,7 @@ fn a_terminal_restore_of_this_policys_point_is_recorded_once_and_never_pages() {
         json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "j", "namespace": NS}, "spec": {}})
             .to_string(),
     ));
+    routes.push(first_job_route(&p::recovery_completed_key(RESTORE_UID), 1));
     routes.push(patch(STATUS_PATH));
 
     let (outcome, recorder, body_log) = drive(&policy_with(no_catalog.clone(), json!({})), routes);
@@ -2425,6 +2624,7 @@ fn a_failed_delivery_is_retried_three_times_and_then_stops() {
         json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "j", "namespace": NS}, "spec": {}})
             .to_string(),
     ));
+    routes.push(first_job_route(&key, 1));
     routes.push(patch(STATUS_PATH));
     let (outcome, _, body_log) = drive(&policy, routes);
     assert_eq!(outcome.created_jobs, 1);
@@ -2549,4 +2749,569 @@ fn a_conflicted_status_patch_leaves_the_delivery_job_alone() {
             .any(|(m, u)| m == "PATCH" && u.contains("/jobs/")),
         "a conclusion that is not on the server must not garbage-collect the pod that proves it"
     );
+}
+
+// ===========================================================================
+// Fix round 1 — the review's findings, each with the row that would have
+// caught it
+// ===========================================================================
+
+/// **F1.** Protection getting WORSE must never send a `resolve`.
+///
+/// D3 §3.3's resolve column is "`health` back to `Healthy`/`AtRisk`", not
+/// "anything other than `Stale`". Read the wider way, the page that woke
+/// on-call resolved itself at the instant the archive stopped existing.
+///
+/// MUTANT: drop the `may_resolve` gate in `reconcile_alerts`'s `(Some, false)`
+/// arm, or widen `resolves_alerts` to `!matches!(health, Health::Stale)`.
+/// Either makes the first two assertions fail with `state: Resolved` and a
+/// transition of 2.
+#[test]
+fn protection_getting_worse_never_resolves_the_page() {
+    let spec = spec();
+    let open = p::reconcile_alerts(
+        &[],
+        &[p::PolicyAlertKind::Staleness],
+        p::Health::Stale,
+        POLICY_UID,
+        notifications(&spec),
+        now(),
+    );
+    assert_eq!(open.alerts[0].state, "Open");
+    assert_eq!(open.alerts[0].transition, Some(1));
+
+    // On-call has been woken: the ledger records a delivery for transition 1,
+    // which is what makes "nothing further is due" mean "no second message".
+    let mut delivered = open.alerts.clone();
+    delivered[0].notified_transition = Some(1);
+    delivered[0].delivery = Some(AlertDelivery {
+        state: Some("Delivered".to_string()),
+        attempts: Some(1),
+        last_attempt_at: Some(now()),
+        job_ref: None,
+        last_error: None,
+    });
+
+    // Retention or GC took the last point: `Stale` → `Unprotected`.
+    let worse = p::reconcile_alerts(
+        &delivered,
+        &[],
+        p::Health::Unprotected,
+        POLICY_UID,
+        notifications(&spec),
+        now() + Duration::hours(1),
+    );
+    assert_eq!(
+        worse.alerts[0].state, "Open",
+        "the objective is breached AND the last point is gone; a `resolve` under the shared \
+         dedup key would close the incident at the instant the archive stopped existing"
+    );
+    assert_eq!(worse.alerts[0].transition, Some(1), "no transition at all");
+    assert!(worse.due.is_empty(), "and therefore nothing to deliver");
+
+    // The catalog view expired: `Stale` → `Unknown`. Nothing was measured.
+    let unknown = p::reconcile_alerts(
+        &delivered,
+        &[],
+        p::Health::Unknown,
+        POLICY_UID,
+        notifications(&spec),
+        now() + Duration::hours(2),
+    );
+    assert_eq!(
+        unknown.alerts[0].state, "Open",
+        "Logweir stopped being able to look; that is not the condition clearing"
+    );
+    assert!(unknown.due.is_empty());
+
+    // And the two healths that MAY resolve, still do.
+    for health in [p::Health::Healthy, p::Health::AtRisk] {
+        let resolved = p::reconcile_alerts(
+            &delivered,
+            &[],
+            health,
+            POLICY_UID,
+            notifications(&spec),
+            now() + Duration::hours(3),
+        );
+        assert_eq!(resolved.alerts[0].state, "Resolved", "{health}");
+        assert_eq!(resolved.alerts[0].transition, Some(2), "{health}");
+        assert_eq!(resolved.due.len(), 1, "{health}");
+    }
+    assert!(p::resolves_alerts(p::Health::Healthy));
+    assert!(p::resolves_alerts(p::Health::AtRisk));
+    for health in [p::Health::Stale, p::Health::Unprotected, p::Health::Unknown] {
+        assert!(!p::resolves_alerts(health), "{health}");
+    }
+}
+
+/// **F2.** `Unprotected` — the worst value the enum has — must page.
+///
+/// MUTANT: narrow the open rule back to `health == Health::Stale`. The first
+/// assertion fails with an empty `open_kinds`, and D3 §15 L5's "exactly 1
+/// POST" becomes 0 on the branch its own criterion 1 admits.
+#[test]
+fn a_policy_with_no_recoverable_point_at_all_opens_an_alert() {
+    let spec = spec();
+    let schedules = [healthy_schedule()];
+    let rehearsal = p::RehearsalFacts::default();
+    let catalog = p::CatalogAnswer::NotConsulted;
+
+    let verdict = p::evaluate(&inputs(&spec, &[], &catalog, &schedules, &[], &rehearsal));
+    assert_eq!(verdict.health, p::Health::Unprotected);
+    assert_eq!(
+        verdict.open_kinds,
+        vec![p::PolicyAlertKind::Staleness],
+        "`BackupFailure` does not cover it — that needs consecutiveFailedRuns >= threshold, and \
+         a policy with no runs at all has zero"
+    );
+
+    // And it is the SAME key `Stale` uses, so a policy that loses its last
+    // point while already stale does not open a second incident.
+    let stale = p::evaluate(&inputs(
+        &spec,
+        &[candidate(31)],
+        &catalog,
+        &schedules,
+        &[],
+        &rehearsal,
+    ));
+    assert_eq!(stale.health, p::Health::Stale);
+    assert_eq!(stale.open_kinds, verdict.open_kinds);
+
+    // End to end: the controller creates exactly one delivery Job for it.
+    let no_catalog = {
+        let mut value = spec_value();
+        merge(
+            &mut value,
+            &json!({"objectives": {"requireCatalogAvailability": false}}),
+        );
+        value
+    };
+    let mut routes = read_routes(Vec::new(), json!({}));
+    routes.push(post(
+        "/configmaps",
+        json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm", "namespace": NS}})
+            .to_string(),
+    ));
+    routes.push(post(
+        "/jobs",
+        json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "j", "namespace": NS}, "spec": {}})
+            .to_string(),
+    ));
+    routes.push(first_job_route(
+        &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
+        1,
+    ));
+    routes.push(patch(STATUS_PATH));
+    let (outcome, _, body_log) = drive(&policy_with(no_catalog, json!({})), routes);
+    assert_eq!(outcome.health, p::Health::Unprotected);
+    assert_eq!(outcome.created_jobs, 1);
+    let status = last_status_patch(&body_log);
+    assert_eq!(
+        status["status"]["alerts"][0]["kind"].as_str(),
+        Some("Staleness")
+    );
+    assert_eq!(
+        status["status"]["alerts"][0]["state"].as_str(),
+        Some("Open")
+    );
+}
+
+/// **F3.** A field this pass computed as `None` must DISAPPEAR from the object.
+///
+/// An RFC 7386 merge patch removes a key only for an explicit `null`, and every
+/// status field is `skip_serializing_if = "Option::is_none"`. Without the nulls
+/// the API and the console kept serving a `lastAvailablePoint` naming a point
+/// the controller had just decided was not available — with `health: Unknown`
+/// beside it.
+///
+/// MUTANT: build the body with `json!({"status": status})` again. The merged
+/// result below keeps both fields and the two `is_null` assertions fail.
+#[test]
+fn a_cleared_field_disappears_from_the_merged_status() {
+    let stored = json!({
+        "health": "Stale",
+        "staleSince": at(48),
+        "lastAvailablePoint": {"pointId": "lwp1-deadbeef", "ageSeconds": 172_800},
+        "lastAttempt": {"phase": "Failed"},
+        "schedules": [{"name": SCHEDULE}],
+        "alerts": [],
+        "conditions": []
+    });
+    let policy = policy_with(
+        {
+            let mut value = spec_value();
+            merge(
+                &mut value,
+                &json!({"objectives": {"requireCatalogAvailability": false}}),
+            );
+            value
+        },
+        stored.clone(),
+    );
+
+    // No runs at all, so this pass computes NO point and NO lastAttempt — and
+    // (per F2) opens a Staleness alert, which is why the create routes are
+    // here.
+    let mut routes = read_routes(Vec::new(), json!({}));
+    routes.push(post(
+        "/configmaps",
+        json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm", "namespace": NS}})
+            .to_string(),
+    ));
+    routes.push(post(
+        "/jobs",
+        json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "j", "namespace": NS}, "spec": {}})
+            .to_string(),
+    ));
+    routes.push(first_job_route(
+        &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
+        1,
+    ));
+    routes.push(patch(STATUS_PATH));
+    let (outcome, _, body_log) = drive(&policy, routes);
+    assert_eq!(outcome.health, p::Health::Unprotected);
+
+    let patch_body = last_status_patch(&body_log)["status"].clone();
+    for field in ["lastAvailablePoint", "lastAttempt"] {
+        assert!(
+            patch_body[field].is_null(),
+            "`{field}` must be an explicit null: an omitted key means `leave it alone`, and the \
+             console would keep naming a recovery point this verdict just refused"
+        );
+    }
+    // And the merge, applied exactly as the API server would, removes them.
+    let mut merged = stored;
+    weirkeeper::conditions::apply_merge_patch(&mut merged, &patch_body);
+    assert!(merged.get("lastAvailablePoint").is_none(), "{merged}");
+    assert!(merged.get("lastAttempt").is_none(), "{merged}");
+    assert_eq!(merged["health"].as_str(), Some("Unprotected"));
+
+    // The no-op skip still works: applying the same body to the result changes
+    // nothing, so a steady object still sends nothing.
+    let before = merged.clone();
+    weirkeeper::conditions::apply_merge_patch(&mut merged, &patch_body);
+    assert_eq!(before, merged);
+}
+
+/// **F5.** A missed slot from last January must not pin a policy to `AtRisk`.
+///
+/// `BackupSchedule.status.lastMissedSlot` is an audit trail that is never
+/// cleared. Read as a live signal it made `Protected=False` — "Logweir checked
+/// and you are not protected" — permanent on a schedule that has fired
+/// correctly every night since.
+///
+/// MUTANT: put `missed.last_missed_slot.is_some()` back into `at_risk`. The
+/// first assertion fails with `AtRisk`.
+#[test]
+fn a_missed_slot_older_than_the_last_fire_does_not_pin_at_risk() {
+    let spec = spec();
+    let rehearsal = p::RehearsalFacts::default();
+    let catalog = p::CatalogAnswer::NotConsulted;
+    let fresh = [candidate(1)];
+
+    let long_ago = [p::ScheduleFacts {
+        last_missed_slot: Some("20250101-000000".to_string()),
+        last_fire_time: Some(now() - Duration::minutes(5)),
+        ..healthy_schedule()
+    }];
+    let verdict = p::evaluate(&inputs(&spec, &fresh, &catalog, &long_ago, &[], &rehearsal));
+    assert_eq!(
+        verdict.health,
+        p::Health::Healthy,
+        "one controller restart past the miss horizon, in January, must not make the policy red \
+         in December"
+    );
+    assert!(!verdict.missed_since_last_fire);
+    assert_eq!(
+        verdict.missed.last_missed_slot.as_deref(),
+        Some("20250101-000000"),
+        "the audit trail is still REPORTED; what it may not do is decide AtRisk"
+    );
+
+    // A slot missed SINCE the last fire is the live signal, and does.
+    let recent = [p::ScheduleFacts {
+        last_missed_slot: Some("20260917-020000".to_string()),
+        last_fire_time: Some(now() - Duration::days(1)),
+        ..healthy_schedule()
+    }];
+    let verdict = p::evaluate(&inputs(&spec, &fresh, &catalog, &recent, &[], &rehearsal));
+    assert_eq!(verdict.health, p::Health::AtRisk);
+    assert!(verdict.missed_since_last_fire);
+
+    // D1 W2's explicit zero beats any inference.
+    let declared_none = [p::ScheduleFacts {
+        missed_slots: Some(0),
+        ..recent[0].clone()
+    }];
+    assert!(!p::missed_since_last_fire(&declared_none[0]));
+
+    // A schedule that has never fired still owes every recorded miss.
+    let never_fired = p::ScheduleFacts {
+        last_fire_time: None,
+        ..recent[0].clone()
+    };
+    assert!(p::missed_since_last_fire(&never_fired));
+
+    // An unparseable slot name proves nothing and is not read as recent.
+    let nonsense = p::ScheduleFacts {
+        last_missed_slot: Some("not-a-slot".to_string()),
+        ..recent[0].clone()
+    };
+    assert!(!p::missed_since_last_fire(&nonsense));
+    assert_eq!(
+        p::slot_instant("20260917-020000"),
+        Some(
+            Utc.with_ymd_and_hms(2026, 9, 17, 2, 0, 0)
+                .single()
+                .expect("the slot instant exists")
+        )
+    );
+}
+
+/// **F6.** A point the catalog calls `UntrustedSigner` is not protection, and
+/// the archive alert opens.
+///
+/// A `TrustPolicy` retires or revokes a signer; W8's catalog re-trust marks the
+/// entries, while the `Backup` CR's own `status.evidence` still says `Valid`
+/// until W10's asynchronous pass rewrites it. Selecting on the availability
+/// axis alone reported `Healthy` with an empty alert set.
+///
+/// MUTANT: make `CatalogEntry::is_available` test `availability == "Available"`
+/// again, or restore the `chosen_is_top` guard. The health assertion fails.
+#[test]
+fn a_point_the_catalog_does_not_trust_is_not_protection() {
+    let spec = spec_with_catalog();
+    let schedules = [healthy_schedule()];
+    let rehearsal = p::RehearsalFacts::default();
+    let candidates = [candidate(2)];
+
+    let untrusted = p::CatalogAnswer::Fresh(vec![entry(
+        &point_id("b-1"),
+        "Available",
+        "UntrustedSigner",
+    )]);
+    let verdict = p::evaluate(&inputs(
+        &spec,
+        &candidates,
+        &untrusted,
+        &schedules,
+        &[],
+        &rehearsal,
+    ));
+    assert_ne!(
+        verdict.health,
+        p::Health::Healthy,
+        "the bytes are there and this installation will not accept the key that signed them"
+    );
+    assert_eq!(verdict.health, p::Health::Unprotected);
+    assert!(
+        verdict
+            .open_kinds
+            .contains(&p::PolicyAlertKind::ArchiveUnavailable),
+        "D3 §3.3 opens ArchiveUnavailable for `Missing`/`Unreadable`/`Untrusted` — all three"
+    );
+    assert!(
+        verdict.open_kinds.contains(&p::PolicyAlertKind::Staleness),
+        "and F2's rule pages for the Unprotected state itself"
+    );
+
+    // `Revoked` and `Invalid` read the same way; `VerifiedHistorical` is a PASS.
+    for verification in ["Revoked", "Invalid"] {
+        let answer =
+            p::CatalogAnswer::Fresh(vec![entry(&point_id("b-1"), "Available", verification)]);
+        let verdict = p::evaluate(&inputs(
+            &spec,
+            &candidates,
+            &answer,
+            &schedules,
+            &[],
+            &rehearsal,
+        ));
+        assert_ne!(verdict.health, p::Health::Healthy, "{verification}");
+    }
+    let historical = p::CatalogAnswer::Fresh(vec![entry(
+        &point_id("b-1"),
+        "Available",
+        "VerifiedHistorical",
+    )]);
+    let verdict = p::evaluate(&inputs(
+        &spec,
+        &candidates,
+        &historical,
+        &schedules,
+        &[],
+        &rehearsal,
+    ));
+    assert_eq!(
+        verdict.health,
+        p::Health::Healthy,
+        "a key valid when it signed and since retired is what rotation looks like"
+    );
+
+    // The materialised `selectable`, where the view carries it, decides.
+    let refused: p::CatalogEntry = serde_json::from_value(json!({
+        "pointId": point_id("b-1"), "availability": "Available",
+        "verification": "Verified", "selectable": false
+    }))
+    .expect("a view entry parses");
+    assert!(!refused.is_available());
+}
+
+/// **F9.** The boundary of the one comparison PLAT-14.2 is named after.
+///
+/// MUTANT (the reviewer's, which SURVIVED all 36 rows): `age <= objective`
+/// becomes `age <`. The first assertion then fails.
+#[test]
+fn the_objective_boundary_is_inclusive() {
+    let spec = spec();
+    let schedules = [healthy_schedule()];
+    let rehearsal = p::RehearsalFacts::default();
+    let catalog = p::CatalogAnswer::NotConsulted;
+    let objective = i64::from(spec.objectives.max_recovery_point_age_seconds);
+
+    let exactly = [p::PointCandidate {
+        recovery_point_at: Some(now() - Duration::seconds(objective)),
+        ..candidate(0)
+    }];
+    let verdict = p::evaluate(&inputs(
+        &spec,
+        &exactly,
+        &catalog,
+        &schedules,
+        &[],
+        &rehearsal,
+    ));
+    assert_eq!(
+        verdict.point.as_ref().and_then(|p| p.age_seconds),
+        Some(objective)
+    );
+    assert_eq!(
+        verdict.freshness,
+        p::Freshness::Fresh,
+        "`maxRecoveryPointAgeSeconds` is the oldest age the objective ALLOWS; a point of exactly \
+         that age meets it"
+    );
+    assert_eq!(verdict.reason, p::FreshnessReason::WithinObjective);
+    assert_eq!(verdict.health, p::Health::Healthy);
+
+    let one_more = [p::PointCandidate {
+        recovery_point_at: Some(now() - Duration::seconds(objective + 1)),
+        ..candidate(0)
+    }];
+    let verdict = p::evaluate(&inputs(
+        &spec,
+        &one_more,
+        &catalog,
+        &schedules,
+        &[],
+        &rehearsal,
+    ));
+    assert_eq!(verdict.freshness, p::Freshness::Stale);
+    assert_eq!(verdict.reason, p::FreshnessReason::PointOlderThanObjective);
+    assert_eq!(verdict.health, p::Health::Stale);
+}
+
+/// **F12.** A catalog axis this build cannot read is "could not answer", never
+/// "your backups are gone".
+///
+/// `#[serde(default)]` on the two axes means a rename in W8's `ViewEntry`
+/// yields `""` for every entry. Read as "not available" that puts every
+/// catalog-backed policy in the cluster into `Unprotected` at once, on a schema
+/// change — and (per F2) pages for all of them.
+///
+/// MUTANT: drop the `has_blank_axis` arm from `evaluate`'s `unresolvable`
+/// chain. The health assertion reads `Unprotected` instead of `Unknown`.
+#[test]
+fn a_blank_catalog_axis_reads_as_unreadable_and_not_as_missing() {
+    let spec = spec_with_catalog();
+    let schedules = [healthy_schedule()];
+    let rehearsal = p::RehearsalFacts::default();
+    let candidates = [candidate(2)];
+
+    let renamed: p::CatalogEntry = serde_json::from_value(json!({
+        "pointId": point_id("b-1"),
+        "availabilityState": "Available",
+        "verificationState": "Verified"
+    }))
+    .expect("an entry from a renamed writer still parses");
+    assert!(renamed.has_blank_axis());
+
+    let answer = p::CatalogAnswer::Fresh(vec![renamed]);
+    assert!(answer.blank_axis());
+    let verdict = p::evaluate(&inputs(
+        &spec,
+        &candidates,
+        &answer,
+        &schedules,
+        &[],
+        &rehearsal,
+    ));
+    assert_eq!(
+        verdict.health,
+        p::Health::Unknown,
+        "a field this build cannot find is a view that could not answer; reporting Unprotected \
+         would tell a whole cluster its backups are gone because of a rename"
+    );
+    assert_eq!(verdict.reason, p::FreshnessReason::CatalogUnreadable);
+    assert!(
+        verdict.open_kinds.is_empty(),
+        "and nothing was measured, so nothing pages"
+    );
+}
+
+/// **F10.** The recovery event is stamped when the Restore FINISHED.
+#[test]
+fn a_recovery_is_stamped_when_it_finished_and_not_when_it_was_created() {
+    let no_catalog = {
+        let mut value = spec_value();
+        merge(
+            &mut value,
+            &json!({"objectives": {"requireCatalogAvailability": false}}),
+        );
+        value
+    };
+    let set = format!("{SCHEDULE_UID}-b-1");
+    let finished = at(1);
+    let mut routes = read_routes(vec![backup("b-1", 2, json!({}))], json!({}));
+    routes.retain(|r| r.path_suffix != RESTORES_PATH);
+    routes.push(ok(
+        RESTORES_PATH,
+        restore_list(vec![restore(
+            "r-long",
+            RESTORE_UID,
+            &set,
+            json!({
+                // Created eight hours ago, finished one hour ago.
+                "metadata": {"creationTimestamp": at(8)},
+                "status": {"conditions": [
+                    {"type": "Complete", "status": "True", "lastTransitionTime": finished}
+                ]}
+            }),
+        )]),
+    ));
+    routes.push(post(
+        "/configmaps",
+        json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "cm", "namespace": NS}})
+            .to_string(),
+    ));
+    routes.push(post(
+        "/jobs",
+        json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {"name": "j", "namespace": NS}, "spec": {}})
+            .to_string(),
+    ));
+    routes.push(first_job_route(&p::recovery_completed_key(RESTORE_UID), 1));
+    routes.push(patch(STATUS_PATH));
+    let (_, _, body_log) = drive(&policy_with(no_catalog, json!({})), routes);
+
+    let status = last_status_patch(&body_log);
+    let alert = &status["status"]["alerts"][0];
+    assert_eq!(
+        alert["openedAt"].as_str(),
+        Some(finished.as_str()),
+        "a long recovery is created hours before it completes, and D3 §3.5's incident-facing \
+         surface reads the instant this ledger entry carries"
+    );
+    assert_eq!(alert["resolvedAt"].as_str(), Some(finished.as_str()));
 }
