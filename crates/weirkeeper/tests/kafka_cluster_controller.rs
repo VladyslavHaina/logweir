@@ -947,6 +947,211 @@ async fn a_refused_connection_adopts_an_existing_probe_job_without_reading_it() 
     }
 }
 
+/// A pod wearing this probe Job's name label but not owned by it is NEVER
+/// read — D-SEAMS **S6**, defect `SEC-PODLOG`.
+///
+/// This reconciler used to take `list.items.into_iter().next()`: the first pod
+/// the label selector returned, with no owner check.
+/// `batch.kubernetes.io/job-name` is a plain label, so a pod planted by
+/// anything with pod-create in the namespace could assert interface **I14**'s
+/// two lines — and those become `status.reachable` and `status.clusterId`,
+/// which `Restore` admission then refuses or allows on
+/// (`ClusterNotReachable`), and which Global Constraint 18's fourth rail
+/// compares a target's id against.
+///
+/// Every impostor reports `reachable=true` and a cluster id in a terminated
+/// `runner`, so a reconciler that read one would write BOTH fields. The
+/// expected answer is the crashed-probe branch: no `/log` request, `reachable`
+/// and `clusterId` absent, and nothing claimed about the cluster.
+///
+/// KILLS: `list.items.into_iter().next()`; an ownerless-pod fallback; matching
+/// an owner reference without `controller: true`; matching an owner reference
+/// of any kind.
+#[tokio::test]
+async fn a_labelled_pod_this_job_does_not_own_is_never_read() {
+    for (label, owners) in [
+        (
+            "an ownerless pod — the shape a hand-created pod with the label has",
+            "null".to_string(),
+        ),
+        (
+            "a pod owned by a DIFFERENT Job's UID",
+            pod_owner_json("Job", "cccccccc-0000-4000-8000-0000000000c9", true),
+        ),
+        (
+            "a NON-controller owner reference carrying the right UID",
+            pod_owner_json("Job", JOB_UID, false),
+        ),
+        (
+            "a ReplicaSet owner reference carrying the Job's UID string",
+            pod_owner_json("ReplicaSet", JOB_UID, true),
+        ),
+    ] {
+        let routes = vec![
+            Route {
+                method: "GET",
+                path_suffix: "/jobs/logweir-probe-orders-prod",
+                status: 200,
+                body: job_body("Complete"),
+            },
+            Route {
+                method: "GET",
+                path_suffix: "/pods",
+                status: 200,
+                body: pod_list_terminated_owned_by(0, &owners),
+            },
+            // ROUTED AND EXPECTED TO GO UNUSED: the double panics on an
+            // unrouted request, so without this route "it did not read the
+            // log" would be an inability rather than an assertion.
+            Route {
+                method: "GET",
+                path_suffix: "/pods/logweir-probe-orders-prod-abcde/log",
+                status: 200,
+                body: log_body(&i14_tail()),
+            },
+            Route {
+                method: "PATCH",
+                path_suffix: "/kafkaclusters/orders-prod/status",
+                status: 200,
+                body: cluster_json(NAME, PLAINTEXT_AUTH, "{}"),
+            },
+        ];
+        let (client, _rec, bodies) = mock_client_recording_bodies(routes);
+        let outcome = reconcile_cluster(&cluster(), &client, now())
+            .await
+            .unwrap_or_else(|e| panic!("{label}: an unowned pod is a status, not an error: {e}"));
+        let seen = bodies.lock().expect("the recorder is readable").clone();
+        assert_eq!(
+            count(&seen, "GET", "/log"),
+            0,
+            "{label}: the log of a pod this probe Job does not own is NOT FETCHED"
+        );
+        assert_eq!(
+            outcome.reachable, None,
+            "{label}: and nothing is claimed about reachability"
+        );
+        assert_eq!(
+            outcome.cluster_id, None,
+            "{label}: nor about the cluster's id"
+        );
+        let statuses = patched_statuses(&seen);
+        assert_eq!(statuses.len(), 1, "{label}: exactly one status patch");
+        assert!(
+            statuses[0].get("reachable").is_none() && statuses[0].get("clusterId").is_none(),
+            "{label}: and neither field is written: {}",
+            statuses[0]
+        );
+        assert_eq!(
+            conditions_of(&statuses[0])[0].1,
+            "Unknown",
+            "{label}: `Reachable=Unknown` — the crashed-probe answer, which is what zero OWNED \
+             pods means"
+        );
+    }
+}
+
+/// The positive control and the tie-break: an OWNED pod IS read, and two owned
+/// pods resolve to the newest one whichever order the listing arrives in.
+///
+/// KILLS: refusing every pod; reading the oldest of two owned pods; a
+/// selection that depends on the listing's order.
+#[tokio::test]
+async fn an_owned_pod_is_read_and_the_newest_of_two_wins() {
+    // ARM 1 — the ordinary case.
+    let (client, _rec, bodies) =
+        mock_client_recording_bodies(finished_routes(0, log_body(&i14_tail())));
+    let outcome = reconcile_cluster(&cluster(), &client, now())
+        .await
+        .expect("the reconcile completes");
+    assert_eq!(
+        outcome.reachable,
+        Some(true),
+        "the pod this probe Job's UID owns IS read — the guard refuses impostors, not everything"
+    );
+    assert_eq!(outcome.cluster_id.as_deref(), Some(CLUSTER_ID));
+    let seen = bodies.lock().expect("the recorder is readable").clone();
+    assert_eq!(count(&seen, "GET", "/log"), 1, "exactly one log read");
+
+    // ARM 2 — two owned pods, the listing given in both orders. Only the
+    // newest pod's log is routed, so reading the other one panics the double
+    // and fails this test loudly rather than quietly.
+    let owners = owned_by_job();
+    let pod_json = |suffix: &str, created: &str| {
+        format!(
+            r#"{{"apiVersion":"v1","kind":"Pod",
+    "metadata":{{"name":"{POD}-{suffix}","namespace":"{NS}","ownerReferences":{owners},
+      "creationTimestamp":"{created}",
+      "labels":{{"{JOB_NAME_LABEL}":"{JOB}"}}}},
+    "spec":{{"containers":[]}},
+    "status":{{"phase":"Succeeded","containerStatuses":[
+      {{"name":"runner","ready":false,"restartCount":0,"image":"x","imageID":"x",
+        "state":{{"terminated":{{"exitCode":0,"finishedAt":"2026-09-10T11:59:00Z"}}}}}}]}}}}"#
+        )
+    };
+    let one = pod_json("one", "2026-09-10T11:50:00Z");
+    let two = pod_json("two", "2026-09-10T11:55:00Z");
+    for (label, items) in [
+        ("oldest first", format!("[{one},{two}]")),
+        ("newest first", format!("[{two},{one}]")),
+    ] {
+        let routes = vec![
+            Route {
+                method: "GET",
+                path_suffix: "/jobs/logweir-probe-orders-prod",
+                status: 200,
+                body: job_body("Complete"),
+            },
+            Route {
+                method: "GET",
+                path_suffix: "/pods",
+                status: 200,
+                body: format!(
+                    r#"{{"apiVersion":"v1","kind":"PodList","metadata":{{}},"items":{items}}}"#
+                ),
+            },
+            Route {
+                method: "GET",
+                path_suffix: "/pods/logweir-probe-orders-prod-abcde-two/log",
+                status: 200,
+                body: log_body(&i14_tail()),
+            },
+            Route {
+                method: "PATCH",
+                path_suffix: "/kafkaclusters/orders-prod/status",
+                status: 200,
+                body: cluster_json(NAME, PLAINTEXT_AUTH, "{}"),
+            },
+            Route {
+                method: "PATCH",
+                path_suffix: "/jobs/logweir-probe-orders-prod",
+                status: 200,
+                body: job_body("Complete"),
+            },
+        ];
+        let (client, _rec, bodies) = mock_client_recording_bodies(routes);
+        let outcome = reconcile_cluster(&cluster(), &client, now())
+            .await
+            .unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_eq!(
+            outcome.reachable,
+            Some(true),
+            "{label}: the newest owned pod's log was the one read"
+        );
+        let seen = bodies.lock().expect("the recorder is readable").clone();
+        assert_eq!(
+            count(&seen, "GET", "/log"),
+            1,
+            "{label}: exactly one log read, and the route table only answers for the NEWEST pod \
+             — so a reconciler reading the older one fails here rather than passing quietly"
+        );
+        assert_eq!(
+            mentioning(&seen, &format!("/pods/{POD}-one/")),
+            0,
+            "{label}: the older owned pod is not read at all"
+        );
+    }
+}
+
 /// A probe Job that finished with no terminated `runner` container leaves
 /// `reachable` alone and names the sub-case.
 #[tokio::test]

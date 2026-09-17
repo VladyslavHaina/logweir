@@ -25,6 +25,7 @@ use weirkeeper::conditions::{
     reason_for_exit, wire_reason_for_exit, CONDITION_REASONS, CONDITION_TYPES,
     REASON_DRILL_NOT_PASS, REASON_GUARD_REFUSED, REASON_OK, REASON_OPERATIONAL,
     REASON_SIGNING_OR_LOCK, TERMINAL_STATES, TERMINAL_STATE_ARCHIVE_URL_UNREADABLE,
+    TERMINAL_STATE_NO_EXIT_CODE,
 };
 use weirkeeper::controllers::backup::{
     covered_from_receipt, crash_terminal_state, crashed_status_patch, evidence_keys,
@@ -1452,6 +1453,241 @@ async fn the_exit_code_and_the_keys_come_from_the_logs_subresource() {
         2,
         "two list calls and no more — the fallback is a fallback, not a retry loop; got {table:?}"
     );
+}
+
+/// A Job with NO `metadata.uid` adopts nothing — and does not even list.
+///
+/// A Job the API server returned always carries one; `metadata.uid` is
+/// `Option` in the type, not in reality. The point is what the absent case
+/// falls back to: nothing can be proved to belong to an object with no
+/// identity, so the answer is "no pod", not "the label will do".
+///
+/// THE ROUTE TABLE IS EMPTY, WHICH IS THE ASSERTION. The double refuses every
+/// request it has no route for, so an `Ok(None)` here is only reachable by a
+/// code path that made no request at all.
+///
+/// KILLS: falling back to the label when the UID is absent; listing first and
+/// deciding afterwards.
+#[tokio::test]
+async fn a_job_with_no_uid_adopts_nothing_and_lists_nothing() {
+    let (client, seen) = mock_client_recording(vec![]);
+    let found = cpod::find_owned_pod_by_selectors(&client, NS, NAME, None, &pod_selectors(NAME))
+        .await
+        .expect("a Job with no UID is an answer, not an error");
+    assert!(found.is_none(), "nothing is adopted");
+    assert!(
+        seen.lock().expect("the recorder is readable").is_empty(),
+        "and NO request was made — the pod list is not read at all, because no listing could \
+         answer the question"
+    );
+}
+
+/// A pod wearing this Job's name label but not owned by it is NEVER read —
+/// D-SEAMS **S6**, defect `SEC-PODLOG`.
+///
+/// `batch.kubernetes.io/job-name` is a plain label. Anything that can create a
+/// pod in the namespace can set it, and the reconciler then lifts that pod's
+/// `state.terminated.exitCode` and the last two lines of its stdout onto the
+/// `Backup` — `status.exitCode`, the `Complete` condition, and interface
+/// **I7**'s two evidence keys, which is what the UI renders and what the
+/// retention and verification paths address the archive by. So the property is
+/// an ABSENCE: no `GET …/pods/<p>/log` at all, and a terminal `NoExitCode`
+/// rather than a borrowed success.
+///
+/// Every impostor here carries `exitCode: 0` on a `runner` container, so a
+/// reconciler that read it would report `phase: Succeeded` with a GREEN badge —
+/// the loudest possible difference from the expected `Failed`/`NoExitCode`.
+///
+/// KILLS: the label-only `list.items.into_iter().next()`; the ownerless-pod
+/// fallback (`plat06` review L2); matching an owner reference without
+/// `controller: true`; matching an owner reference of any kind.
+#[tokio::test]
+async fn a_labelled_pod_this_job_does_not_own_is_never_read() {
+    for (label, owners) in [
+        (
+            "an ownerless pod — the shape a `kubectl run` with the label produces, and the one \
+             the previous code ADOPTED",
+            "null".to_string(),
+        ),
+        (
+            "a pod owned by a DIFFERENT Job's UID — a re-created Job's predecessor, or another \
+             tenant's run",
+            pod_owner_json("Job", "cccccccc-0000-4000-8000-0000000000c9", true),
+        ),
+        (
+            "a NON-controller owner reference carrying the right UID — an association anybody \
+             with pod-create can add to their own pod",
+            pod_owner_json("Job", JOB_UID, false),
+        ),
+        (
+            "a ReplicaSet owner reference carrying the Job's UID string",
+            pod_owner_json("ReplicaSet", JOB_UID, true),
+        ),
+    ] {
+        let (client, seen, bodies) = mock_client_recording_bodies(finished_routes(
+            &pod_list_terminated_owned_by(0, &owners),
+            log_body(&i7_tail()),
+            200,
+            "Complete",
+        ));
+        let outcome = reconcile_backup(
+            &frozen_backup(),
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            utc(2026, 11, 9, 3, 20),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{label}: an unowned pod is a status, not an error: {e}"));
+
+        let seen = seen.lock().expect("the recorder is readable");
+        assert!(
+            seen.iter().all(|r| !path(&r.uri).ends_with("/log")),
+            "{label}: the log of a pod this Job does not own is NOT FETCHED. A `pods/log` read \
+             is the whole attack: its last two lines become this run's evidence keys. Got {seen:?}"
+        );
+        assert_eq!(
+            outcome.exit_code, None,
+            "{label}: and no exit code is taken from it"
+        );
+        assert_eq!(
+            outcome.terminal_state.as_deref(),
+            Some(TERMINAL_STATE_NO_EXIT_CODE),
+            "{label}: zero OWNED pods is the same state as zero pods — `NoExitCode`, the branch \
+             that already exists for a garbage-collected pod"
+        );
+        assert_eq!(
+            outcome.keys,
+            EvidenceKeys::default(),
+            "{label}: no evidence key is recorded from a stranger's stdout"
+        );
+        let statuses = patched_statuses(&bodies.lock().expect("the body recorder is readable"));
+        assert_eq!(statuses.len(), 1, "{label}: one status patch");
+        assert!(
+            statuses[0]["exitCode"].is_null(),
+            "{label}: `exitCode` is ABSENT on the object, not `0`. Got {:?}",
+            statuses[0]["exitCode"]
+        );
+        assert_eq!(
+            statuses[0]["phase"].as_str(),
+            Some("Failed"),
+            "{label}: and the phase is not `Succeeded`"
+        );
+    }
+}
+
+/// The positive control, and the tie-break: an OWNED pod IS read, and two
+/// owned pods resolve to the newest one deterministically.
+///
+/// Without this arm the guard above is satisfiable by a reconciler that never
+/// reads any pod at all.
+///
+/// KILLS: refusing every pod; reading the oldest of two owned pods; a
+/// selection that depends on the listing's order.
+#[tokio::test]
+async fn an_owned_pod_is_read_and_the_newest_of_two_wins() {
+    // ARM 1 — the ordinary case, end to end.
+    let (client, seen) = mock_client_recording(finished_routes(
+        &pod_list_terminated(0),
+        log_body(&i7_tail()),
+        200,
+        "Complete",
+    ));
+    let outcome = reconcile_backup(
+        &frozen_backup(),
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 20),
+    )
+    .await
+    .expect("the reconcile succeeds");
+    assert_eq!(
+        outcome.exit_code,
+        Some(0),
+        "the pod this Job's UID owns IS read — the guard refuses impostors, not everything"
+    );
+    assert_eq!(
+        outcome.keys.receipt.as_deref(),
+        Some(RECEIPT_KEY),
+        "and its stdout is where the evidence keys come from"
+    );
+    let logs: Vec<String> = seen
+        .lock()
+        .expect("the recorder is readable")
+        .iter()
+        .filter(|r| path(&r.uri).ends_with("/log"))
+        .map(|r| r.uri.clone())
+        .collect();
+    assert_eq!(logs.len(), 1, "exactly one log read; got {logs:?}");
+    assert!(
+        path(&logs[0]).contains(&format!("/pods/{POD}/log")),
+        "from the owned pod, by name; got {logs:?}"
+    );
+
+    // ARM 2 — two pods, both owned, the listing given in both orders. An
+    // evicted-and-replaced runner shows this on a real cluster.
+    let owners = owned_by_job();
+    let one = format!(
+        r#"{{"apiVersion":"v1","kind":"Pod",
+    "metadata":{{"name":"{POD}-one","namespace":"{NS}","ownerReferences":{owners},
+      "creationTimestamp":"2026-11-09T03:17:00Z",
+      "labels":{{"{JOB_NAME_LABEL}":"{NAME}"}}}},
+    "spec":{{"containers":[]}},
+    "status":{{"phase":"Failed","containerStatuses":[
+      {{"name":"runner","ready":false,"restartCount":0,"image":"x","imageID":"x",
+        "state":{{"terminated":{{"exitCode":1,"finishedAt":"2026-11-09T03:18:00Z"}}}}}}]}}}}"#
+    );
+    let two = format!(
+        r#"{{"apiVersion":"v1","kind":"Pod",
+    "metadata":{{"name":"{POD}-two","namespace":"{NS}","ownerReferences":{owners},
+      "creationTimestamp":"2026-11-09T03:19:00Z",
+      "labels":{{"{JOB_NAME_LABEL}":"{NAME}"}}}},
+    "spec":{{"containers":[]}},
+    "status":{{"phase":"Succeeded","containerStatuses":[
+      {{"name":"runner","ready":false,"restartCount":0,"image":"x","imageID":"x",
+        "state":{{"terminated":{{"exitCode":0,"finishedAt":"2026-11-09T03:20:00Z"}}}}}}]}}}}"#
+    );
+    for (label, items) in [
+        ("oldest first", format!("[{one},{two}]")),
+        ("newest first", format!("[{two},{one}]")),
+    ] {
+        let list =
+            format!(r#"{{"apiVersion":"v1","kind":"PodList","metadata":{{}},"items":{items}}}"#);
+        let (client, seen) = mock_client_recording(finished_routes(
+            &list,
+            log_body(&i7_tail()),
+            200,
+            "Complete",
+        ));
+        let outcome = reconcile_backup(
+            &frozen_backup(),
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            utc(2026, 11, 9, 3, 20),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_eq!(
+            outcome.exit_code,
+            Some(0),
+            "{label}: the NEWEST owned pod's exit code, not the first one listed — otherwise the \
+             same cluster state yields `0` on one reconcile and `1` on the next"
+        );
+        let logs: Vec<String> = seen
+            .lock()
+            .expect("the recorder is readable")
+            .iter()
+            .filter(|r| path(&r.uri).ends_with("/log"))
+            .map(|r| r.uri.clone())
+            .collect();
+        assert_eq!(logs.len(), 1, "{label}: exactly one log read; got {logs:?}");
+        assert!(
+            path(&logs[0]).contains(&format!("/pods/{POD}-two/log")),
+            "{label}: and it is the newest pod's log; got {logs:?}"
+        );
+    }
 }
 
 /// Percent-encode the way `kube`'s query builder does, for the selector
@@ -6261,6 +6497,63 @@ fn a_recreated_job_reads_only_its_own_pod() {
         assert!(chosen.is_none(), "{label}");
         assert_eq!(ignored.len(), 1, "{label}: and it is reported");
     }
+}
+
+/// Two pods owned by the same Job resolve to ONE, and always the same one.
+///
+/// `backoffLimit: 0` plus `restartPolicy: Never` yields one pod per Job, but
+/// that is the job controller's property and not the listing's: an evicted and
+/// replaced pod shows both for a while. A selection that depended on the order
+/// the API server returned them in would write two different exit codes onto
+/// one object across two reconciles over the same cluster state.
+///
+/// KILLS: `owned.into_iter().next()`; picking the oldest; a tie-break that is
+/// not total.
+#[test]
+fn two_owned_pods_resolve_deterministically_to_the_newest() {
+    let pod = |name: &str, created: &str| -> k8s_openapi::api::core::v1::Pod {
+        serde_json::from_value(serde_json::json!({"metadata": {
+            "name": name,
+            "creationTimestamp": created,
+            "ownerReferences": [{
+                "apiVersion": "batch/v1", "kind": "Job", "name": NAME, "uid": JOB_UID,
+                "controller": true
+            }]
+        }}))
+        .unwrap()
+    };
+    let first = pod("run-aaaaa", "2026-11-09T03:17:00Z");
+    let replacement = pod("run-zzzzz", "2026-11-09T03:18:00Z");
+
+    for listed in [
+        vec![first.clone(), replacement.clone()],
+        vec![replacement.clone(), first.clone()],
+    ] {
+        let (chosen, ignored) = cpod::choose_owned(&listed, JOB_UID);
+        assert_eq!(
+            chosen.and_then(|p| p.metadata.name.clone()),
+            Some("run-zzzzz".to_string()),
+            "the NEWEST by creationTimestamp, whichever order the listing arrived in"
+        );
+        assert!(
+            ignored.is_empty(),
+            "the older pod is owned, so it is not a foreign pod to report"
+        );
+    }
+
+    // A `Time` is second-granular, so two pods created in the same second is
+    // not exotic; the name breaks the tie and the answer is still one value.
+    let same_second = [
+        pod("run-aaaaa", "2026-11-09T03:17:00Z"),
+        pod("run-bbbbb", "2026-11-09T03:17:00Z"),
+    ];
+    assert_eq!(
+        cpod::choose_owned(&same_second, JOB_UID)
+            .0
+            .and_then(|p| p.metadata.name.clone()),
+        Some("run-bbbbb".to_string()),
+        "the lexically greatest name among pods of the same second — any total order would do,          but it has to BE one"
+    );
 }
 
 /// A hostile annotation on a RUNNING typed Backup is surfaced once, and a steady

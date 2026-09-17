@@ -2973,6 +2973,202 @@ fn window_not_covered_is_exit_two_with_a_coverage_outcome() {
     );
 }
 
+/// A pod wearing this Job's name label but not owned by it is NEVER read —
+/// D-SEAMS **S6**, defect `SEC-PODLOG`.
+///
+/// This reconciler used to take `list.items.into_iter().next()`: the first pod
+/// the label selector returned, with no owner check at all.
+/// `batch.kubernetes.io/job-name` is a plain label that anything able to
+/// create a pod in the namespace can set, so a planted pod's `exitCode` and
+/// the three interface **I8** keys in its stdout became this `Restore`'s
+/// recorded outcome — on the object an approver reads after data went back
+/// into a cluster.
+///
+/// Every impostor carries `exitCode: 0`, so a reconciler that read one would
+/// report `phase: Succeeded`. The expected answer is a terminal `NoExitCode`
+/// with no `exitCode` on the object and NO `GET …/pods/<p>/log` at all.
+///
+/// KILLS: `list.items.into_iter().next()`; an ownerless-pod fallback; matching
+/// an owner reference without `controller: true`; matching an owner reference
+/// of any kind.
+#[tokio::test]
+async fn a_labelled_pod_this_job_does_not_own_is_never_read() {
+    for (label, owners) in [
+        (
+            "an ownerless pod — the shape a hand-created pod with the label has",
+            "null".to_string(),
+        ),
+        (
+            "a pod owned by a DIFFERENT Job's UID",
+            pod_owner_json("Job", "cccccccc-0000-4000-8000-0000000000c9", true),
+        ),
+        (
+            "a NON-controller owner reference carrying the right UID",
+            pod_owner_json("Job", JOB_UID, false),
+        ),
+        (
+            "a ReplicaSet owner reference carrying the Job's UID string",
+            pod_owner_json("ReplicaSet", JOB_UID, true),
+        ),
+    ] {
+        let (client, rec, bodies) = mock_client_recording_bodies(finished_routes(
+            pod_list_terminated_owned_by(0, &owners),
+            log_body(&i8_tail()),
+            "Complete",
+        ));
+        let outcome = reconcile_restore(
+            &restore(),
+            &client,
+            &unobserved_scorecard,
+            &unverified_evidence,
+            now(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{label}: an unowned pod is a status, not an error: {e}"));
+
+        let seen = rec.lock().expect("the recorder is readable").clone();
+        assert!(
+            seen.iter().all(|r| !path(&r.uri).ends_with("/log")),
+            "{label}: the log of a pod this Job does not own is NOT FETCHED. Got {seen:?}"
+        );
+        assert_eq!(
+            outcome.exit_code, None,
+            "{label}: and no exit code is taken from it"
+        );
+        assert_eq!(
+            outcome.terminal_state.as_deref(),
+            Some("NoExitCode"),
+            "{label}: zero OWNED pods is the same state as zero pods"
+        );
+        assert_eq!(
+            outcome.keys,
+            RestoreEvidenceKeys::default(),
+            "{label}: and no evidence key is recorded from a stranger's stdout"
+        );
+        let bodies = bodies
+            .lock()
+            .expect("the body recorder is readable")
+            .clone();
+        let status = patched_statuses(&bodies).remove(0);
+        assert!(
+            status.get("exitCode").is_none(),
+            "{label}: `exitCode` is ABSENT on the object, not `0`: {status}"
+        );
+        assert_eq!(
+            status["phase"].as_str(),
+            Some("Failed"),
+            "{label}: and the phase is not `Succeeded`"
+        );
+    }
+}
+
+/// The positive control and the tie-break: an OWNED pod IS read, and two owned
+/// pods resolve to the newest one whichever order the listing arrives in.
+///
+/// Without this the guard above is satisfiable by a reconciler that reads no
+/// pod at all.
+///
+/// KILLS: refusing every pod; reading the oldest of two owned pods; a
+/// selection that depends on the listing's order.
+#[tokio::test]
+async fn an_owned_pod_is_read_and_the_newest_of_two_wins() {
+    // ARM 1 — the ordinary case.
+    let (client, rec, bodies) = mock_client_recording_bodies(finished_routes(
+        pod_list_terminated(0),
+        log_body(&i8_tail()),
+        "Complete",
+    ));
+    let outcome = reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
+    assert_eq!(
+        outcome.exit_code,
+        Some(0),
+        "the pod this Job's UID owns IS read — the guard refuses impostors, not everything"
+    );
+    let bodies_seen = bodies
+        .lock()
+        .expect("the body recorder is readable")
+        .clone();
+    assert_eq!(
+        patched_statuses(&bodies_seen).remove(0)["evidence"]["scorecardKey"].as_str(),
+        Some(SCORECARD_KEY),
+        "and its stdout is where the evidence keys come from"
+    );
+    let logs: Vec<String> = rec
+        .lock()
+        .expect("the recorder is readable")
+        .iter()
+        .filter(|r| path(&r.uri).ends_with("/log"))
+        .map(|r| r.uri.clone())
+        .collect();
+    assert_eq!(logs.len(), 1, "exactly one log read; got {logs:?}");
+    assert!(
+        path(&logs[0]).contains(&format!("/pods/{POD}/log")),
+        "from the owned pod, by name; got {logs:?}"
+    );
+
+    // ARM 2 — two owned pods, the listing given in both orders. An evicted and
+    // replaced runner shows this on a real cluster.
+    let owners = owned_by_job();
+    let pod_json = |suffix: &str, created: &str, exit: i32| {
+        format!(
+            r#"{{"apiVersion":"v1","kind":"Pod",
+    "metadata":{{"name":"{POD}-{suffix}","namespace":"{NS}","ownerReferences":{owners},
+      "creationTimestamp":"{created}",
+      "labels":{{"{JOB_NAME_LABEL}":"{NAME}"}}}},
+    "spec":{{"containers":[]}},
+    "status":{{"phase":"Failed","containerStatuses":[
+      {{"name":"runner","ready":false,"restartCount":0,"image":"x","imageID":"x",
+        "state":{{"terminated":{{"exitCode":{exit},"finishedAt":"2026-09-10T11:59:00Z"}}}}}}]}}}}"#
+        )
+    };
+    let one = pod_json("one", "2026-09-10T11:50:00Z", 3);
+    let two = pod_json("two", "2026-09-10T11:55:00Z", 0);
+    for (label, items) in [
+        ("oldest first", format!("[{one},{two}]")),
+        ("newest first", format!("[{two},{one}]")),
+    ] {
+        let list =
+            format!(r#"{{"apiVersion":"v1","kind":"PodList","metadata":{{}},"items":{items}}}"#);
+        let (client, rec, _bodies) =
+            mock_client_recording_bodies(finished_routes(list, log_body(&i8_tail()), "Complete"));
+        let outcome = reconcile_restore(
+            &restore(),
+            &client,
+            &unobserved_scorecard,
+            &unverified_evidence,
+            now(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("{label}: {e}"));
+        assert_eq!(
+            outcome.exit_code,
+            Some(0),
+            "{label}: the NEWEST owned pod's exit code, not the first one listed — otherwise the \
+             same cluster state yields `0` on one reconcile and `3` on the next"
+        );
+        let logs: Vec<String> = rec
+            .lock()
+            .expect("the recorder is readable")
+            .iter()
+            .filter(|r| path(&r.uri).ends_with("/log"))
+            .map(|r| r.uri.clone())
+            .collect();
+        assert_eq!(logs.len(), 1, "{label}: exactly one log read; got {logs:?}");
+        assert!(
+            path(&logs[0]).contains(&format!("/pods/{POD}-two/log")),
+            "{label}: and it is the newest pod's log; got {logs:?}"
+        );
+    }
+}
+
 /// The crashed-Job case: a Job that finished with no terminated state for
 /// `runner` gets a TERMINAL status with `exitCode` ABSENT.
 #[tokio::test]
