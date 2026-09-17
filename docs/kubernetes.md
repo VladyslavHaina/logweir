@@ -1233,19 +1233,105 @@ not run at all, and anyone who could annotate a `Backup` could change the
 subcommand, the spec path, the signing key path or the archive prefix of a run
 holding the signing key.
 
-**The run identity is the control plane's, not the client's.**
+**The run identity is the control plane's, not the client's.** It is derived
+from the object and nothing else — no clock, no status field, no annotation —
+by one function, so the name a schedule mints and the identity the reconciler
+executes cannot disagree.
 
-| `spec.triggeredBy` | What must also be true | The run identity (`status.execution.id`, the archive `backup_id`) |
-|---|---|---|
-| `manual` | no `spec.slot` | this object's **API-server UID** |
-| `schedule` | `spec.scheduleRef`, a `spec.slot` of `yyyymmdd-hhmmss`, a controller owner reference to that `BackupSchedule`, and the deterministic name `logweir-backup-<schedule>-<slot>` | `<BackupSchedule UID>-<slot>` |
+`spec.trigger.kind` is the finer trigger and is what identity is derived from;
+`spec.triggeredBy` is unchanged, is still `manual` or `schedule`, and is still
+what the signed receipt carries. The two must agree, or the run is refused: a
+manual run may not sign a receipt saying `schedule`.
 
-Anything else — a `manual` Backup naming a slot, a `schedule` claim without the
-owner reference the `BackupSchedule` controller writes, an unknown
-`triggeredBy`, a non-positive `deadlineSeconds` — is terminal
-`ExecutionSpecInvalid`, before anything is created. A hand-written object may
-not claim `schedule`: its signed receipt would say `schedule` about a run no
-schedule created.
+| `spec.trigger.kind` | `triggeredBy` | What must also be true | `metadata.name` | The run identity (`status.execution.id`, the archive `backup_id`) |
+|---|---|---|---|---|
+| `Scheduled` | `schedule` | `spec.scheduleRef` with a `uid` **or** a `BackupSchedule` controller owner reference of the same name; `spec.slot` a real UTC instant `yyyymmdd-hhmmss`; `attempt: 0` | `logweir-backup-<schedule>-<slot>` | `<BackupSchedule UID>-<slot>` |
+| `CatchUp` | `schedule` | the same — **it is slot S, started late** | the same as `Scheduled` | the same as `Scheduled` |
+| `Retry` | `schedule` | `attempt` 1–3 and `trigger.retryOf.name` equal to the previous attempt's name | `logweir-backup-<schedule>-<slot>-r<k>` | `<BackupSchedule UID>-<slot>-r<k>` |
+| `Manual` | `manual` | no `spec.slot`, no `attempt` | any DNS-1123 name; the API mints `logweir-manual-<26 base32>` | this object's **API-server UID** |
+| *absent* | `schedule` | as `Scheduled`/attempt 0 — every `Backup` created before `spec.trigger` existed | as `Scheduled` | as `Scheduled` |
+| *absent* | `manual` | as `Manual` | any | as `Manual` |
+
+A **catch-up shares the scheduled run's identity** because it is the same slot:
+giving it one of its own would let a controller restart write a second archive
+of one window. A **retry does not**, because the attempt it retries may have
+written part of an archive, and re-using that `backup_id` would append into the
+partial prefix.
+
+Two further checks run before anything is created:
+
+- **The schedule must exist, for a scheduled kind, and only before the freeze.**
+  A `BackupSchedule` of that name, in this namespace, with that UID — otherwise
+  terminal `ScheduleNotFound`. A schedule deleted and recreated under the same
+  name is a *different* schedule and does not adopt the run. Once
+  `status.execution` is recorded nothing is re-checked: a frozen run executes
+  the policy it copied, and deleting its schedule mid-run does not stop it.
+  **A manual run never requires the schedule**, even when it copied one.
+- **A copied run policy digest must be the one this object's own fields
+  produce.** `spec.scheduleRef.runPolicySha256` is recomputed from the `Backup`
+  itself; a mismatch is terminal `RunPolicyDigestMismatch`. This is an integrity
+  check against control-plane bugs and **not** a security boundary: a subject
+  who can create `Backup`s in a namespace can already run any policy there.
+
+Anything else is terminal before anything is created:
+`ScheduledIdentityMismatch` when the object's own fields do not compose the run
+it claims to be — a `manual` Backup naming a slot, a `Retry` at attempt 0, a
+scheduled object under a name its trigger does not compose, a `spec.slot` that
+is fifteen digits and not a date, a scheduled kind with no UID anywhere — and
+`ExecutionSpecInvalid` for what is wrong with the spec as an execution request,
+such as an unknown `triggeredBy` or a non-positive `deadlineSeconds`. A
+hand-written object may not claim `schedule`: its signed receipt would say
+`schedule` about a run no schedule created.
+
+**Topic selection.** `spec.topics` is a mandatory named allowlist; a glob
+metacharacter in it is terminal `GuardRefused`. `spec.allUserTopics` beside a
+non-empty `spec.topics` is two answers to one question and is refused by
+admission and by the controller alike (`InvalidTopicSelection`). `topics: []`
+with `spec.allUserTopics` is the **dynamic** shape: this controller build does
+not resolve topic discovery and refuses such a run terminally with
+`InvalidTopicSelection`, naming the reason. It is never started with an empty
+allowlist — an empty `source.topics` in `backup.yaml` is the "no allowlist means
+everything" shape the mandatory allowlist exists to make impossible.
+
+**`status.selection` is written at the freeze**, in the same patch as
+`status.execution`, and says what the run may honestly claim to have covered:
+
+```json
+{"mode":"SelectedTopics","coverage":"NamedTopics","resolvedTopicCount":2,"resolvedTopicBytes":14}
+```
+
+Only `coverage: AllUserTopicsAttested` may ever be rendered as "all topics".
+A named allowlist is `NamedTopics` and claims nothing about the cluster. The
+block is **absent** on a `Backup` frozen by a controller that predates it,
+which is the documented absent-field behaviour and not a degraded state.
+
+**A manual run from a schedule.** "Back up now" copies the schedule's current
+policy into an ordinary `Backup` and records which revision it copied:
+
+```yaml
+metadata:
+  name: logweir-manual-2v4qk7bhq8nwz3xr9fcm5td6ea   # the API derives it from the idempotency scope
+  labels:
+    logweir.dev/schedule: nightly
+    logweir.dev/schedule-uid: <uid>
+    logweir.dev/trigger: manual
+spec:
+  sourceRef: { name: source }            # copied from the schedule at generation 7
+  topics: [orders, payments]
+  archive: { url: s3://kafka-backups/logweir, secretRef: { name: logweir-s3 } }
+  deadlineSeconds: 3600
+  triggeredBy: manual
+  trigger: { kind: Manual, attempt: 0 }
+  scheduleRef: { name: nightly, uid: <uid>, generation: 7, runPolicySha256: sha256:… }
+```
+
+`scheduleRef` on a manual run is a **record, not an identity**: the run still
+executes under its own UID, and the reconciler never reads the
+`BackupSchedule`. So the run is allowed while the schedule is **suspended**,
+while another run of it is **active**, and after the schedule has been
+**deleted** — a "Back up now" pressed a second before someone deletes the
+schedule still completes. The labels are hints for selection and are never
+authority. Omit `scheduleRef` entirely for an ad-hoc run against a cluster.
 
 **Idempotence, which is what PLAT-06.2's "Back up now" needs.** Creating a
 `Backup` under a **new name** is a new run. Re-creating the same name while the
@@ -1277,15 +1363,31 @@ with `controller: true` and `blockOwnerDeletion: true` (so deleting the
 it carries **three keys**:
 
 - **`execution-inputs.json`** — the canonical typed snapshot of everything the
-  run executes: the identity and trigger above, the source `KafkaCluster`'s
-  **UID**, and everything the one resolver (§20) decided about its connection —
-  bootstrap addresses, auth mode, SCRAM username, the TLS flag and the
-  `auth.tlsCa` reference — plus the topic allowlist, the archive URL with the
-  resolved `storage` block and the object-store addressing variables this
-  controller forwards, and the runner argv, deadline and engine tunables. Its
-  grammar is versioned (`logweir.dev/backup-execution-inputs/v1`); `tlsCa` is
-  absent for a connection that names no CA, so a snapshot frozen before that
-  field existed is still read and re-encoded unchanged.
+  run executes. Its grammar is versioned. **This controller writes
+  `logweir.dev/backup-execution-inputs/v2` and reads both `v2` and `v1`**; a
+  snapshot naming any other version is a conflict and never a best-effort
+  parse. The document is:
+
+  | Key | Grammar | What it holds |
+  |---|---|---|
+  | `version` | `v1` | the grammar string above |
+  | `execution` | `v1` | the run identity: `id`, `trigger` (`manual`/`schedule`), the `Backup`'s namespace, name and UID, and `schedule {name, uid, slot}` for a scheduled kind |
+  | `trigger` | **`v2`** | `{kind, attempt, retryOf?, timeZone?}` — the finer trigger of the table above. `timeZone` is informational: the zone the slot was computed in, so a history row keeps its local time after somebody edits the schedule's `timeZone` |
+  | `scheduleRef` | **`v2`** | `{name, uid?, generation?, runPolicySha256?}` — the `BackupSchedule` **revision this run copied**, verbatim from the object. It is copied and never re-resolved, so a schedule edited between admission and freeze cannot rewrite what a created run records; and it survives the schedule's deletion, which is what makes a retained history answerable |
+  | `runPolicySha256` | **`v2`** | the digest of **this run's own** policy fields, recorded for every run including an ad-hoc manual one that copied no schedule |
+  | `source` | `v1` | the source `KafkaCluster`'s **UID** and everything the one resolver (§20) decided about its connection — bootstrap addresses, auth mode, SCRAM username, the TLS flag and the `auth.tlsCa` reference |
+  | `topics` | `v1` | **the exact list this run executes**, in the order `backup.yaml` carries it: `spec.topics` verbatim in named mode. Never empty and never a pattern |
+  | `selection` | **`v2`** | `{mode, coverage, resolvedTopicCount, resolvedTopicBytes, exclude?, incompleteDiscovery?, discovery?}` — where `topics` came from and what the run may claim to have covered. **The names are not repeated here**: `topics` is the one copy, and `selection` is its provenance |
+  | `destination` | **`v2`** | **reserved**. The resolved saved `BackupDestination` a run writes to. Nothing writes it yet; the block is declared so that destination-backed execution lands inside this one document rather than in a second freeze |
+  | `archive` | `v1` | the archive URL, the resolved `storage` block and the object-store addressing variables this controller forwards |
+  | `runner` | `v1` | the runner argv, deadline and engine tunables |
+
+  **Every `v2` block is optional and omitted when unset** — never written as
+  `null` — and `tlsCa` is likewise absent for a connection that names no CA.
+  That is what lets a `v1` snapshot frozen by an older controller parse under
+  this grammar and **re-encode to the exact bytes it was stored as**, which is
+  the property the digest, the annotation and the whole verification below rest
+  on.
 - **`backup.yaml`** — the typed `BackupSpec` document `logweir backup run
   --spec` parses, rendered **from that snapshot**. `source.bootstrapServers`
   and `source.auth` come from the `KafkaCluster` that `spec.sourceRef` names,
@@ -1324,6 +1426,16 @@ naming which of those failed. **Nothing is ever patched, replaced or deleted**:
 a plan another pass may already have mounted is never rewritten, a foreign,
 extra-owner or mismatched object is never adopted, and a mutable plan left by a
 controller that predates frozen inputs is refused rather than reused.
+
+**The comparison is made at the stored document's own grammar.** A stored `v2`
+snapshot is compared whole, so a changed `trigger`, `scheduleRef`,
+`runPolicySha256`, `selection` or `destination` is a conflict — and the refusal
+names *which* block moved. A stored **`v1`** snapshot is compared against the
+`v1` view of the fresh resolution: it is asked only the question a `v1` plan
+can answer, "are the fields it actually froze still the fields this run
+resolves?". Without that rule every `Backup` in flight at the moment an
+upgraded controller starts would become a terminal `PlanConfigMapConflict` at
+its next pass, for no reason but an added optional block.
 
 One difference is informational and deliberate: a newly observed
 `KafkaCluster.status.clusterId` changes the snapshot's bytes but not its
@@ -1417,6 +1529,49 @@ plan and re-create it under the same name in the window before the kubelet
 projects it. Such a subject can create Backups outright, so this widens no
 boundary — but a runner-side digest check (the `Restore` path's shape) is the
 remaining hardening, and it is not claimed here.
+
+### Backups created under the previous execution contract
+
+Every `Backup` a PLAT-06.1 controller created or froze keeps working, unchanged
+and unconverted. Nothing is rewritten and no write happens on upgrade.
+
+| What the stored object carries | How this controller reads it |
+|---|---|
+| No `spec.trigger` and `triggeredBy: schedule` | `Scheduled`, attempt 0 — exactly what the controller that created it did |
+| No `spec.trigger` and `triggeredBy: manual` | `Manual` |
+| `spec.scheduleRef: {name}` with no `uid`, plus the `BackupSchedule` controller owner reference | The UID comes from that owner reference, so the execution id is `<owner uid>-<slot>`, the value PLAT-06.1 computed. The owner's **name** must still equal `scheduleRef.name` |
+| `spec.scheduleRef` with a `uid` and **no** owner reference (what a D1 schedule writes) | The UID comes from the reference. This is the shape that lets deleting a schedule keep its history |
+| No `spec.allUserTopics` | Named mode, coverage `NamedTopics`. Existing allowlists are unaffected |
+| A `v1` plan ConfigMap | Read, verified, re-encoded to its own bytes and executed. See the comparison rule above |
+| No `status.selection` | Absent, and stays absent: the block is written at the freeze and this run was frozen before it existed |
+| A `logweir.dev/runner-argv` annotation | Observed, never executed, surfaced as `RunnerArgvAnnotationIgnored` — as before |
+
+Two behaviours **change** for a stored object, both deliberately and both only
+before its inputs are frozen:
+
+1. A scheduled `Backup` whose `BackupSchedule` no longer exists (or exists
+   under a new UID) is now terminal `ScheduleNotFound` instead of running. That
+   is the rule "deleting a schedule stops future work", which has to be stated
+   by the run itself once the owner reference that used to state it is gone. A
+   run whose inputs **are** frozen is unaffected.
+2. The terminal state for a bad identity moved from `ExecutionSpecInvalid` to
+   `ScheduledIdentityMismatch` (and `RunPolicyDigestMismatch`,
+   `ScheduleNotFound`, `NameTooLong` where they apply). Every one of these was
+   already terminal and already refused before any `POST`; only the name an
+   operator reads has become more specific. `ExecutionSpecInvalid` keeps the
+   spec-as-request cases: an unknown `triggeredBy`, a non-positive
+   `deadlineSeconds`.
+
+**Rollback to a PLAT-06.1 controller.** A `v1` plan keeps working under both
+controllers. A **`v2`** plan does not: every struct in the snapshot grammar
+denies unknown fields and the older loader requires its version string exactly,
+so an older controller handed a `v2` document writes `PlanConfigMapConflict`
+rather than mounting a plan it cannot read. That is fail-closed — the run stops
+visibly instead of executing a plan the controller did not understand — but it
+means a `Backup` frozen under `v2` must be allowed to finish, or deleted and
+re-created, before rolling back. `spec.trigger`, the new `spec.scheduleRef`
+fields and `status.selection` are additive CRD fields and are inert for an
+older controller; leave the CRD in place.
 
 ### Legacy Backups, upgrade and rollback
 
