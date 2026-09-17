@@ -604,6 +604,11 @@ the evidence destination.
      published in the policy `ConfigMap`, rendered from the same chart values as
      the Deployment env. `addressingSource: installationConfig`; the user must
      confirm.
+     *(Amended 2026-09-17 at W12's integration: until W11 publishes the legacy
+     addressing in the policy `ConfigMap`, the route reads no installation config
+     and therefore never emits `installationConfig` — it takes (c). A provenance
+     label must never name a source that was not read; a hard-coded AWS/TLS guess
+     was reviewed and removed.)*
    - (c) Otherwise refuse with `legacy_location_unknown`.
 3. **Mapping rules.**
    - Legacy `allow_http=true` becomes `InsecureHTTP` **only** with an `http://`
