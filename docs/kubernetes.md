@@ -1008,6 +1008,126 @@ projection and never an execution input. An absent `status.alerts` after a
 rollback and re-apply means only that no alert has been recorded yet: the ledger
 is state, not history, and a re-opened condition opens at transition 1 again.
 
+### 7g. A `RehearsalSchedule` proves recovery on a cron, under one signed authorization
+
+A backup that has never been restored is a hypothesis. PLAT-14.3's
+`RehearsalSchedule` is the object that tests it on a cadence: every slot it
+picks a qualifying recovery point, restores it into an isolated scratch cluster
+under a prefix nothing else uses, scores the result and tears the topics down —
+and records a reason for every slot that produced no rehearsal at all.
+
+**The spec is sealed except `suspend`.** The standing authorization binds a
+`sha256` over the canonical JSON of `spec` minus `suspend`, so a template that
+could be edited after approval would authorize work nobody approved. One CEL
+rule enumerates every other field; a change means a NEW `RehearsalSchedule` and
+a NEW authorization. `suspend` is outside the digest on purpose: pausing an
+unattended rehearsal must not invalidate the document authorising it, or the
+one control an operator reaches for in an incident would be the control that
+breaks the schedule. The controller publishes the recomputed digest at
+`status.templateDigest`, so minting an authorization is a copy and not an
+arithmetic exercise.
+
+**One standing approval, checked twice — and never minted here.** The
+authorization is an ordinary immutable `Approval` with
+`spec.subjectRef.kind: RehearsalSchedule` and `spec.planHash` equal to the
+template digest. Its `spec.approvalBytes` is a signed
+`StandingRehearsalAuthorization` document carrying the subject (with its
+**UID**), the scope and `issuedAt`/`expiresAt`, and its DSSE payload type is
+that document's own — so a genuinely signed drill approval replayed as a
+standing authorization is refused by the signature layer rather than by a field
+comparison. `weirkeeper` links no signer at all (`tests/linkage.rs`), so the
+controller COPIES that envelope and its sidecar into the run's bundle byte for
+byte; it cannot produce one.
+
+Each slot the controller re-checks, in this order, and a failure is a recorded
+skip with no `Restore`:
+
+| It checks | Skip reason |
+|---|---|
+| `spec.suspend`, then topics a previous teardown could not remove | `LeftoverTopics` |
+| the slot is inside `spec.bounds.startingDeadlineSeconds` | `ConcurrencyBlocked` |
+| this schedule's own previous rehearsal finished | `ConcurrencyBlocked` |
+| no other schedule is rehearsing against the same target cluster | `TargetBusy` |
+| the `Approval` is `Verified=True`, bound to **this object's UID**, its `planHash` is the recomputed digest, its key may still authorise and carries an approver usage | `AuthorizationInvalid` |
+| the signed document has not expired and was not minted for more than 90 days | `AuthorizationExpired` |
+| the target `KafkaCluster` reports `reachable: true` and a `clusterId` | `TargetUnavailable` |
+| the signed scope's `templateDigest`, `targetClusterId` and `deadlineSeconds` agree with the sealed spec | `AuthorizationInvalid` |
+| a point qualifies: covered by `spec.point.topics`, old enough, with a non-empty window, inside `maxPartitions`, not captured from the target cluster, not inside a retention lease | `NoQualifyingPoint`, `TargetUnavailable` or `PointRetentionInProgress` |
+| the RENDERED plan falls inside the signed scope | `AuthorizationInvalid` |
+
+The last row is the one that matters most, and it runs over the bytes that will
+be frozen, before the reservation and before any `POST`: an out-of-scope plan
+reaches no `Restore`, no `ConfigMap` and no Job. The runner then proves the same
+thing again against the mounted bundle, through the same predicate from the same
+projection, before it constructs any client.
+
+**The rendered prefix is unique per schedule object.**
+`spec.target.topicPrefix` is rendered as `<prefix><schedule-uid-first-8>-`, for
+example `rehearsal-3f2a91c7-`. Two schedules therefore can never map a source
+topic to the same target name, and the runner's own prefix-scoped deletion
+guard can be scoped to one run. A schedule deleted and recreated gets a new UID
+and so a new prefix — correct, because it is a different object and its
+authorization is a different document.
+
+**The controller deletes no topic, ever.** Teardown is the runner's phase 9,
+which deletes the exact names it created through a deleter that refuses any name
+outside the prefix. Failures are read from the signed teardown attestation into
+`Restore.status.teardown` and mirrored to
+`RehearsalSchedule.status.cleanup.pendingTopics`; while that list is non-empty
+the next slot is **skipped** with `LeftoverTopics`, because the run that would
+otherwise collide is not allowed to adopt or delete topics it did not create.
+Clear them with your own Kafka tooling and then clear the status field:
+
+```
+kubectl --context <ctx> -n <ns> get rehearsalschedule weekly-orders \
+  -o jsonpath='{.status.cleanup.pendingTopics}'
+# delete those exact topics with kafka-topics.sh, then:
+kubectl --context <ctx> -n <ns> patch rehearsalschedule weekly-orders \
+  --subresource=status --type=merge -p '{"status":{"cleanup":null}}'
+```
+
+**What the status says, and who reads it.** `lastSucceeded` carries the
+`Restore`, the instant, the evidence key and the measured RTO; `lastFailed`
+carries the terminal reason verbatim; `lastSkipped` carries the slot and one of
+the reasons above. The three conditions are `Ready` (this controller could act),
+`Authorized` (the standing document currently admits a slot) and
+`RehearsalHealthy` (the last finished rehearsal passed). A `ProtectionPolicy`
+reads `lastSucceeded.{at,restoreRef}` and `lastFailed.{at,reason}` — the four
+fields its `RehearsalFailure` alert is computed from — and reads nothing else
+here.
+
+**Evidence is never deleted.** Rehearsals write ordinary scorecards, sidecars,
+offset reports and teardown attestations under `logweir/drills/`. Their
+`Restore` objects are owned by the schedule with `blockOwnerDeletion: false`, so
+deleting the schedule collects the CRs and never the signed evidence, and a
+rehearsal in flight never blocks the delete.
+
+**RBAC.** This kind adds three rules to the `weirkeeper` ClusterRole:
+`get`/`list`/`watch` on `rehearsalschedules` (the `get` has a caller — the
+`Approval` reconciler reads the referent whose sealed spec the digest is
+recomputed from), `patch` on `rehearsalschedules/status`, and `create` on
+`restores`. No `delete` anywhere, no `update` on any kind, and no verb on
+`secrets`: the envelope, the sidecar and the approver's PUBLIC key all come from
+an `Approval` and from the namespace's resolved `TrustPolicy`.
+
+**Upgrade and rollback.** The kind is additive and off by default: an
+installation that never creates a `RehearsalSchedule` behaves exactly as before.
+`Restore.spec.approvalRef` became optional in this group, and a
+standing-authorized `Restore` carries `spec.authorization` instead; an OLDER
+controller reading one sees an empty `approvalRef` and refuses terminally with
+`ApprovalNotReceived` — fail closed, which is the required rollback behaviour.
+Rolling the CRDs back deletes any `RehearsalSchedule` objects and, by owner
+cascade, their `Restore` CRs and approval bundles; no archive object and no
+signed evidence is affected.
+
+**What is not wired yet.** A standing-authorized `Restore` is created, and its
+bundle is materialised, but the `Restore` reconciler's admission still resolves
+`spec.approvalRef` only: until that arm lands, such a `Restore` holds at
+`ApprovalNotReceived` and no Job is created. The runner also still requires a
+per-run approval over the plan bytes (`logweir restore run --approval`), which
+an unattended controller cannot mint. Both are recorded gaps, not behaviours to
+rely on.
+
 ## 8. The approval flow
 
 An `Approval` object that exists is **not** an approval. An `Approval` whose
