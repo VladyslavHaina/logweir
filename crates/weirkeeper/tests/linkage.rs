@@ -949,15 +949,16 @@ fn the_no_argv_binary_starts_and_exits_zero_on_sigterm() {
          11), so a non-empty stderr is a panic or a missing subscriber. Got: {stderr:?}"
     );
     assert!(
-        stdout.contains("\"controllers\":8"),
+        stdout.contains("\"controllers\":9"),
         "the startup line names the registered controller count. It was 0 until Task 16, which \
          registered TWO — `controllers::trust_roster` and `controllers::approval`, in that \
          order — Task 18 registered the THIRD, `controllers::backup_schedule`, Task 17 the \
          FOURTH, `controllers::backup`, Task 20 the FIFTH, `controllers::restore`, Task 15c \
          the SIXTH, `controllers::kafka_cluster`, D2 W7 the SEVENTH, \
-         `controllers::backup_destination`, and PLAT-19.1 the EIGHTH, \
-         `controllers::trust_policy` (D2 §13.4: W8 and W9 take it further). A count \
-         that is not 8 means `main`'s registration point lost a `controllers.push(…)` line. \
+         `controllers::backup_destination`, PLAT-19.1 the EIGHTH, \
+         `controllers::trust_policy`, and D2 W8 the NINTH, \
+         `controllers::topic_discovery` (D2 §13.4: W9 takes it further). A count \
+         that is not 9 means `main`'s registration point lost a `controllers.push(…)` line. \
          Got: {stdout:?}"
     );
 

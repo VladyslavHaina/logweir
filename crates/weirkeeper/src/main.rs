@@ -390,6 +390,23 @@ fn run() -> ExitCode {
         controllers.push(Box::pin(
             weirkeeper::controllers::backup_destination::controller(client.clone()),
         ));
+        // D2 W8 pushes the NINTH — the `TopicDiscovery` reconciler that turns
+        // one bounded discovery request into one isolated check Job, stores the
+        // inventory as owned immutable ConfigMap chunks and publishes the
+        // completeness verdict. It takes the runner image, because it CREATES
+        // Jobs, and the installation policy reference, because the attestation
+        // that can upgrade a result to `attestedComplete` lives in a ConfigMap
+        // only a release-namespace administrator can write. It takes no archive
+        // handle: a discovery reads no archive. `tests/linkage.rs`'s
+        // `"controllers":8` moved to 9 in this same commit (D2 §13.4: W9 takes
+        // it further).
+        controllers.push(Box::pin(
+            weirkeeper::controllers::topic_discovery::controller(
+                client.clone(),
+                runner.clone(),
+                weirkeeper::controllers::topic_discovery::configured_policy_ref(),
+            ),
+        ));
 
         let registered = controllers.len();
         info!(
