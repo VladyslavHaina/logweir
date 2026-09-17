@@ -168,6 +168,31 @@ public key merely because the new signer works.
 
 ## Rotation with a `TrustPolicy`, and old archives still verifying
 
+> **NOT YET IN EFFECT. Read this before acting on anything below it.**
+>
+> `TrustPolicy` is served, validated by the API server and reconciled: you can
+> create one, the controller parses every key, resolves it against the clock
+> and reports `status.keys[].effectiveState`, and `kubectl get trustpolicy`
+> renders it. **Nothing consults it for a verification or an approval yet.**
+> `Approval` admission and evidence verification both still read
+> `TrustRoster/default` and nothing else.
+>
+> The practical consequence, stated plainly because it is the one that bites:
+> **a revocation you record on a `TrustPolicy` today is not applied.** Set a key
+> to `state: Revoked, revocationReason: KeyCompromise` and the policy will show
+> `effectiveState: Revoked` while governed approvals signed by that key are
+> still accepted, because the code that admits them has never read the policy.
+> **To withdraw a key today, remove it from `TrustRoster/default`'s
+> `approverKeys` / `signingKeys`** — that is still the only enforcement point.
+>
+> The consumer is PLAT-19.1's verification worker, which replaces `load_roster`
+> in `weirkeeper::controllers::approval` and the roster read in
+> `weirkeeper::verification`. Until it lands, treat everything below as the
+> contract those two will implement — accurate about the shapes, and not yet
+> about the enforcement. `docs/stability.md`'s rule applies: a documented
+> guarantee the code does not deliver is a defect, so this notice is part of
+> the document and stays until the wiring does.
+
 `TrustPolicy` (cluster-scoped, PLAT-19.1) is what makes a rotation an overlap
 instead of a replacement. A key on it carries a lifecycle — `notBefore`,
 `notAfter`, `state: Active | Retired | Revoked`, `retiredAt`, and for a
@@ -178,20 +203,25 @@ only be brought forward, `state` moves `Active → Retired` and
 are write-once. Public material can never be edited out, because a receipt
 signed in March must still verify in December.
 
-`update` on `trustpolicies` is granted only by the `logweir-trust-admin`
-ClusterRole. An operator or approver has read only, and the controller itself
-holds `list`, `watch` and `patch` on the status subresource — it never edits a
-key's lifecycle.
+The controller holds `list`, `watch` and `patch` on the status subresource and
+nothing else — it never edits a key's lifecycle. **Today no Logweir ClusterRole
+grants `update` on `trustpolicies` at all**, so editing one is a cluster-admin
+action. *Planned (PLAT-19.1, not shipped):* a `logweir-trust-admin` ClusterRole
+that is the only holder of that verb, with operator and approver read-only.
+Until it exists, scope the permission yourself.
 
 ### The supported procedure
 
 1. **Add the new public key to the bound `TrustPolicy`** as `state: Active`,
    `usages: [EvidenceSigning]`. The overlap begins here: both keys are valid,
    both sign, both verify, and there is no window in which nothing is trusted.
-2. **Point the runner at the new private key.** A new retained Secret and the
-   controller value `identity.activeSigningSecretName`.
-   `logweir identity bootstrap` is unchanged and still refuses to replace an
-   established identity.
+2. **Point the runner at the new private key.** *Planned (PLAT-19.1, not
+   shipped):* a new retained Secret selected by a chart value
+   `identity.activeSigningSecretName`. **That value does not exist yet** — the
+   signing Secret name is still compiled in — so today this step means
+   replacing the contents of the established Secret, which
+   `logweir identity bootstrap` deliberately refuses to do for you. There is no
+   supported in-place runner cutover in this release.
 3. **Wait for in-flight Jobs**, then set the old key `state: Retired` with
    `retiredAt: <now>`.
 4. **Old archives keep verifying.** A retired key's evidence verifies with
@@ -227,7 +257,13 @@ evidence this installation never observed is a refusal.
 
 ### Key usage separation
 
-A key declares what it may do, and the three uses are separate grants:
+A key declares what it may do, **exactly one** of the three uses below, enforced
+by the API server (CEL rule G8) because `usages` is immutable once written and
+`spec.keys` is append-only — a key that both attests and authorises could never
+be narrowed afterwards. A key presented for the wrong use is refused with
+`KeyUsageMismatch` **once the verification worker lands** (see the notice at the
+top of this section); on the roster path the overlap is still only *labelled*,
+as `selfAttestedRisk`.
 
 | usage | who holds it | what it may do |
 |---|---|---|
@@ -235,13 +271,24 @@ A key declares what it may do, and the three uses are separate grants:
 | `GovernedApproval` | human approvers, on their own machines | sign approval and standing-authorization documents |
 | `ConsoleConfirmation` | the API's confirmation key | attest the authenticated requester |
 
-A key presented for the wrong use is refused with `KeyUsageMismatch`, which is
-a different refusal from a bad signature and points at a different fix.
+`KeyUsageMismatch` is a different refusal from a bad signature and points at a
+different fix.
 
 ### Migrating from the roster, and rolling back
 
 Until a `TrustPolicy` exists, a controller synthesises `legacy-roster-v1` from
-`TrustRoster/default` and behaves exactly as before: `approverKeys` become
+`TrustRoster/default`. Behaviour is today's, with **one deliberate
+tightening**: the roster's `signingKeys[].notAfter` is carried verbatim and
+then *enforced*, so evidence claiming a signing time **after** an expired
+signing key's `notAfter` becomes `Untrusted / SignedOutsideValidity` where the
+roster path renders it green. Evidence signed at or before that instant stays
+`Valid` (basis `Historical`). The blast radius is narrow — `notAfter` is
+optional on a roster entry and an absent one is synthesised to
+`9999-12-31T23:59:59Z`, so only rosters where somebody explicitly set a
+signing-key expiry are affected at all — and the evidence it catches is
+evidence signed by a key past its own declared expiry, which is the hole
+PLAT-19.1 exists to close. Everything else maps across unchanged:
+`approverKeys` become
 `GovernedApproval`, `signingKeys` become `EvidenceSigning`,
 `allowedClusterIds` becomes `allowedTargetClusterIds`, `notAfter` is carried
 verbatim, every key is `Active`, and a roster with one unparseable
@@ -259,8 +306,13 @@ kubectl --context <ctx> apply -f trustpolicy.yaml
 ```
 
 The command reads no clock and generates no name, so re-running it over the
-same roster produces byte-identical output. It invents no `retiredAt` and no
-revocation: the roster records no lifecycle event, those fields are write-once
+same roster produces byte-identical output. **It refuses a roster key that is
+on both `approverKeys` and `signingKeys`**, naming the key id: a policy key
+declares exactly one usage (CEL rule G8), so such a key cannot be expressed at
+all, and emitting it would produce a file the API server rejects after you had
+reviewed it. Issue a separate `keyId` per usage — mint a new signing key and
+keep the old one as the approver. The roster keeps working unchanged until you
+do. It invents no `retiredAt` and no revocation: the roster records no lifecycle event, those fields are write-once
 on the CRD, and a migration that wrote one would assert something nobody
 recorded and could never take back.
 

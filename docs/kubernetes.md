@@ -466,6 +466,16 @@ does not share with the controller.
 
 ### Trust resolution: which keys govern a namespace
 
+> **NOT YET WIRED.** `TrustPolicy` is served, validated and reconciled, and the
+> resolution below is implemented and tested as a pure function — but **no
+> approval and no verification consults it yet.** The nine `Verified` reasons
+> above are still the whole vocabulary, `TrustPolicyConflict` is not among them
+> yet, and every `Approval` in this cluster is still decided against
+> `TrustRoster/default` alone. **A key revoked on a `TrustPolicy` today is not
+> withdrawn**: remove it from the roster to withdraw it. The consumer is
+> PLAT-19.1's verification worker; until it lands, read this section as the
+> contract it will implement rather than as what the cluster does.
+
 `TrustRoster/default` is the **fallback**, not the only answer. A cluster may
 carry cluster-scoped `TrustPolicy` objects (PLAT-19.1), and each one names the
 namespaces it governs. A namespace still never names its own trust — for
@@ -509,6 +519,16 @@ tell "not evaluated" from "evaluated and valid" — the thing
 lags `metadata.generation`, or when `evaluatedAt` is more than fifteen minutes
 old.
 
+A `TrustPolicy` key declares **exactly one** usage — `EvidenceSigning`,
+`GovernedApproval` or `ConsoleConfirmation` — and the API server enforces it
+(CEL rule G8). It has to be enforced at admission rather than later: `usages` is
+immutable and `spec.keys` is append-only, so a key that both attested and
+authorised could never afterwards be narrowed or removed. `logweir trust
+migrate-roster` therefore refuses a roster key that is on both `approverKeys`
+and `signingKeys`, naming it, instead of emitting a document `kubectl apply`
+would reject. The in-memory `legacy-roster-v1` still merges them, which is what
+keeps an unmigrated cluster working.
+
 An unparseable `spkiPem` on a `TrustPolicy` is **one key** reported
 `Unparseable` and `Loaded=False`; the other keys keep working. That is
 deliberately different from the roster's all-or-nothing rule above, and the
@@ -518,11 +538,24 @@ unparseable key verifies nothing, so excluding it widens no trust — whereas
 refusing a 64-key policy over one bad paste would stop every restore in every
 bound namespace.
 
-Once any `TrustPolicy` exists, `TrustRoster/default` is marked
-`Superseded=True/SupersededByTrustPolicy`. **Its spec is not touched and it is
-not deleted**, which is the rollback path: an older controller reads only the
-roster, still present and unchanged. See [`keys.md`](keys.md) for the rotation
-procedure, the migration command and the one thing rollback does not carry.
+`TrustRoster/default` carries a `Superseded` condition, and it has **two**
+states. It reads `Superseded=True/SupersededByTrustPolicy` only when one
+`TrustPolicy` sets `spec.default: true` — that is the only policy that displaces
+the roster for *every* namespace, because resolution reaches the roster only
+after the default has been tried. With no policy, with policies that name only
+some namespaces, or with two contesting defaults, it reads
+`Superseded=False/RosterStillConsulted` with a message naming which: every
+namespace no policy governs still resolves to `legacy-roster-v1`, **synthesised
+from that roster**, so it must keep being maintained. The condition is
+recomputed by the roster's own reconciler as well as by the policy's, so
+deleting every policy clears it within one 300 s requeue rather than leaving the
+roster advertising a supersession that has been rolled back.
+
+**Its spec is not touched and it is not deleted**, which is the rollback path:
+an older controller reads only the roster, still present and unchanged. See
+[`keys.md`](keys.md) for the rotation procedure, the migration command, the one
+deliberate tightening the synthesis applies, and the one thing rollback does not
+carry.
 
 
 ### The checks
