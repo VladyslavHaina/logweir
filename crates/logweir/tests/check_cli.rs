@@ -596,6 +596,30 @@ impl Run {
         self.result().checks.iter().any(|c| c.id == id)
     }
 
+    /// The raw stdout PLUS every decoded stream's bytes.
+    ///
+    /// A disclosure assertion over `stdout` alone is not one: every stream
+    /// travels as base64 part frames, so a credential inside the result
+    /// document is invisible to a plaintext scan of the log. The mutant round
+    /// for M4 found exactly that — the planted secret was redacted, the
+    /// bypass was planted, and the test still passed, because it was reading
+    /// the wrapper and not the payload.
+    ///
+    /// The decoded bytes here are the RUNNER's, before
+    /// `CheckRelay::result()`'s `sanitise` — which is the point: the claim is
+    /// that the runner did not print a credential, not that the controller
+    /// would have scrubbed one.
+    fn everything(&self) -> String {
+        let mut all = self.stdout.clone();
+        if let Ok(relay) = &self.relay {
+            for bytes in relay.streams.values() {
+                all.push('\n');
+                all.push_str(&String::from_utf8_lossy(bytes));
+            }
+        }
+        all
+    }
+
     fn topic_frame_count(&self) -> usize {
         self.stdout
             .lines()
@@ -847,7 +871,16 @@ fn the_refusal_key_is_the_controllers_key() {
     );
 }
 
-/// **M1, the structural half.** Steps 1-4 build nothing.
+/// **M1, the structural half.** Steps 1-4 build nothing, and `run` reaches a
+/// kind only through a verified plan.
+///
+/// The scan is over the BODIES of `load` and `runner_bounds` — brace-counted,
+/// because "this function opens nothing" is a claim about a body and a
+/// line-based scan cannot tell which function a line is inside. It forbids the
+/// constructors AND this crate's own wrappers around them, which is the
+/// difference between a guard and a tripwire: the first version listed only
+/// `KafkaInventory::connect(` and a planted `kafka::dial(` walked straight
+/// past it.
 #[test]
 fn the_startup_path_builds_no_client() {
     let src = std::fs::read_to_string(repo_root().join("crates/logweir/src/check/mod.rs"))
@@ -860,24 +893,98 @@ fn the_startup_path_builds_no_client() {
         })
         .collect::<Vec<_>>()
         .join("\n");
-    for token in [
-        "KafkaInventory::connect(",
-        "RdKafkaReader::connect(",
-        "Store::read_only_with(",
-        "Store::from_url_with(",
-        "AuthConfig::from_spec",
-    ] {
+
+    let bodies = fn_bodies(&code);
+    for wanted in ["pub fn load(", "pub fn runner_bounds(", "pub fn run("] {
         assert!(
-            !code.contains(token),
-            "`crates/logweir/src/check/mod.rs` holds the startup order (D2 §4.2 steps 1-4) and \
-             names `{token}`; no client may be built before the plan verifies"
+            bodies.iter().any(|(sig, _)| sig.starts_with(wanted)),
+            "`{wanted}` is no longer in `check/mod.rs`; this guard is scanning nothing"
         );
     }
-    // And the one function that runs a kind takes a VERIFIED plan.
+
+    // (a) The two functions that ARE steps 1-4 open nothing, name no
+    //     constructor, and reach no wrapper around one.
+    for (sig, body) in &bodies {
+        if !(sig.starts_with("pub fn load(") || sig.starts_with("pub fn runner_bounds(")) {
+            continue;
+        }
+        for token in [
+            "KafkaInventory::connect(",
+            "RdKafkaReader::connect(",
+            "Store::read_only_with(",
+            "Store::from_url_with(",
+            "AuthConfig::from_spec",
+            "kafka::dial(",
+            "store::open_read(",
+            "store::open_evidence_write(",
+            "kinds::Live",
+            "kinds::run_kind",
+            "run_kind_with(",
+            "execute_with(",
+            "Wiring",
+        ] {
+            assert!(
+                !body.contains(token),
+                "`{sig}` holds D2 §4.2's startup order and names `{token}`; no client may be \
+                 built, and no kind may run, before the plan verifies"
+            );
+        }
+    }
+
+    // (b) `run` reaches a kind only after `load` returned Ok, and it does so
+    //     through a `&Loaded` that only `load` produces.
+    let (_, run_body) = bodies
+        .iter()
+        .find(|(sig, _)| sig.starts_with("pub fn run("))
+        .unwrap();
+    let load_at = run_body.find("load(").expect("`run` calls `load`");
+    let exec_at = run_body.find("execute(").expect("`run` calls `execute`");
+    assert!(
+        load_at < exec_at,
+        "`run` must verify the plan before it executes a kind"
+    );
     assert!(
         code.contains("pub fn execute_with<W: Write>(loaded: &Loaded"),
         "a kind must only be reachable from a `&Loaded`, which only `load` produces"
     );
+}
+
+/// The bodies of every `fn` in a source file, keyed by its signature line.
+///
+/// Brace-counted, and consumed in shape from
+/// `crates/logweir/tests/no_network_in_unit_tests.rs::fn_bodies`, whose own
+/// header records why a line-based scan cannot answer a question about a body.
+fn fn_bodies(src: &str) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let mut line_start = 0usize;
+    for line in src.lines() {
+        let start = line_start;
+        line_start += line.len() + 1;
+        let t = line.trim_start();
+        if !(t.starts_with("fn ") || t.starts_with("pub fn ") || t.starts_with("pub(crate) fn ")) {
+            continue;
+        }
+        let Some(open) = src[start..].find('{').map(|i| start + i) else {
+            continue;
+        };
+        let mut depth = 0usize;
+        let mut end = open;
+        for (i, c) in src[open..].char_indices() {
+            match c {
+                '{' => depth += 1,
+                '}' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = open + i;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        out.push((t.to_string(), src[open..=end].to_string()));
+    }
+    out
 }
 
 // ===========================================================================
@@ -2413,17 +2520,19 @@ fn a_credential_planted_in_every_error_path_is_redacted() {
                 "signing prerequisite is not ready: the PEM began {PLANTED_SECRET}"
             ))),
     );
+    let seen = run.everything();
     for s in secrets {
         assert!(
-            !run.stdout.contains(s),
-            "`{s}` reached the readiness relay:\n{}",
-            run.stdout
+            !seen.contains(s),
+            "`{s}` reached the readiness relay:\n{seen}"
         );
     }
 
-    // (b) evidence fetch: a poisoned key and a poisoned backend error.
-    let key = format!("logweir/backups/{PLANTED_KEY_ID}/receipt.json");
-    let m = mount(&fetch_plan(&key, 1 << 20));
+    // (b) evidence fetch: a poisoned backend error. The KEY is deliberately
+    //     clean here — see `the_evidence_result_echoes_the_requested_key`,
+    //     which owns the one documented exception.
+    let key = "logweir/backups/20260916/receipt.json";
+    let m = mount(&fetch_plan(key, 1 << 20));
     let run = drive(
         &m,
         &FakeWiring::default().with_role(
@@ -2433,8 +2542,12 @@ fn a_credential_planted_in_every_error_path_is_redacted() {
             ))),
         ),
     );
+    let seen = run.everything();
     for s in secrets {
-        assert!(!run.stdout.contains(s), "`{s}` reached the evidence relay");
+        assert!(
+            !seen.contains(s),
+            "`{s}` reached the evidence relay:\n{seen}"
+        );
     }
 
     // (c) restore preflight: a poisoned plan path and a poisoned mapped name.
@@ -2455,14 +2568,76 @@ fn a_credential_planted_in_every_error_path_is_redacted() {
             .with_probe(FakeProbe::new())
             .with_file(&format!("/check/{PLANTED_KEY_ID}.yaml"), yaml.as_bytes()),
     );
+    let seen = run.everything();
     for s in secrets {
-        assert!(!run.stdout.contains(s), "`{s}` reached the preflight relay");
+        assert!(
+            !seen.contains(s),
+            "`{s}` reached the preflight relay:\n{seen}"
+        );
     }
     // ...and the code still says what happened.
     assert_eq!(
         run.row(CheckId::PlanParse).code,
         CheckCode::PlanHashMismatch
     );
+}
+
+/// The ONE field a check echoes verbatim, and why.
+///
+/// `EvidenceObjectResult::key` is the plan's own key returned unchanged: it is
+/// the correlation between a three-object request and its three answers, and a
+/// redacted key would match nothing the controller holds. Everything else the
+/// runner writes — message, remedy, fact, scope, detail sample — goes through
+/// `check_contract::redact`. This row pins the exception so that widening it
+/// is a decision and not an edit.
+#[test]
+fn the_evidence_result_echoes_the_requested_key() {
+    let key = "logweir/backups/20260916/AKIAFAKEFAKEFAKEFAKE.receipt.json";
+    let m = mount(&fetch_plan(key, 1 << 20));
+    let run = drive(
+        &m,
+        &FakeWiring::default().with_role(DestinationRole::EvidenceRead, FakeObjects::new()),
+    );
+    let e = &run.result().evidence[0];
+    assert_eq!(
+        e.key, key,
+        "the key is the correlation and is returned unchanged"
+    );
+    // ...and nothing ELSE in the document carries it.
+    let doc = String::from_utf8(
+        run.relay
+            .as_ref()
+            .unwrap()
+            .stream(Stream::Result)
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert_eq!(
+        doc.matches("AKIAFAKEFAKEFAKEFAKE").count(),
+        1,
+        "the requested key is the only place a plan-supplied identifier is echoed:\n{doc}"
+    );
+}
+
+/// A scope and a detail sample are redacted although both are references: the
+/// chokepoint is worth more than the two exceptions.
+#[test]
+fn a_scope_and_a_detail_sample_are_redacted() {
+    let scope = logweir::check::catalogue::scope(
+        "BackupDestination",
+        &format!("prod-{PLANTED_KEY_ID}"),
+        Some(DEST_UID),
+    );
+    assert!(!scope.name.contains(PLANTED_KEY_ID), "{scope:?}");
+    assert_eq!(
+        scope.uid.as_deref(),
+        Some(DEST_UID),
+        "a UUID is not credential-shaped and survives"
+    );
+    let d = kinds::readiness::detail(&["orders".to_string(), format!("orders-{PLANTED_KEY_ID}")]);
+    assert_eq!(d["sample"][0], "orders", "an ordinary name is untouched");
+    assert!(!d["sample"][1].as_str().unwrap().contains(PLANTED_KEY_ID));
 }
 
 /// The marker body is deterministic and carries no credential, no subject and
@@ -3131,8 +3306,8 @@ mod live {
             "a targeted request for a name that is not there answers UNKNOWN_TOPIC_OR_PARTITION"
         );
         assert!(
-            !run.stdout.contains("logweir-e2e-not-a-secret"),
-            "the SASL password reached stdout"
+            !run.everything().contains("logweir-e2e-not-a-secret"),
+            "the SASL password reached a frame"
         );
     }
 
@@ -3158,8 +3333,8 @@ mod live {
             "a wrong SCRAM password must not be reported as an unreachable broker: {row:?}"
         );
         assert!(
-            !run.stdout.contains("this-password-is-wrong"),
-            "the refused password reached stdout"
+            !run.everything().contains("this-password-is-wrong"),
+            "the refused password reached a frame"
         );
     }
 
@@ -3227,8 +3402,8 @@ mod live {
         );
         assert_eq!(row.state, CheckState::NotReady);
         assert!(
-            !run.stdout.contains("not-the-minio-password"),
-            "the refused secret reached stdout"
+            !run.everything().contains("not-the-minio-password"),
+            "the refused secret reached a frame"
         );
     }
 
@@ -3343,8 +3518,8 @@ mod live {
             Some(logweir_core::ids::sha256_prefixed(payload).as_str())
         );
         assert!(
-            !run.stdout.contains("minioadmin"),
-            "the MinIO credential reached stdout"
+            !run.everything().contains("minioadmin"),
+            "the MinIO credential reached a frame"
         );
     }
 }

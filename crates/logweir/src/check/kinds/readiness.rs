@@ -139,16 +139,27 @@ pub fn topics_describable(
         .with_detail(detail(&sample))
 }
 
-/// `{"count": N, "sample": [… ≤ 10 …]}` — D2 §6.4's bounded detail shape.
+/// `{"count": N, "sample": [… ≤ 10 …]}` — D2 §6.4's bounded detail shape, with
+/// every sampled name **redacted**.
 ///
 /// TEN, and the full list goes to the `details` stream. A status field that
 /// grew with the number of collisions is how a `Preflight` object stops
 /// fitting in etcd.
+///
+/// The redaction is the same chokepoint argument
+/// [`crate::check::catalogue::scope`] records: `CheckOutcome::with_detail`
+/// does not redact, and a rule with two exceptions is a rule a reader has to
+/// remember. `redact` fires only on credential shapes, so an ordinary topic
+/// name reaches the UI unchanged.
 #[must_use]
 pub fn detail(names: &[String]) -> serde_json::Value {
     serde_json::json!({
         "count": names.len(),
-        "sample": names.iter().take(DETAIL_SAMPLE).collect::<Vec<_>>(),
+        "sample": names
+            .iter()
+            .take(DETAIL_SAMPLE)
+            .map(|n| logweir_core::check_contract::redact(n))
+            .collect::<Vec<_>>(),
     })
 }
 

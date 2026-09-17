@@ -217,12 +217,34 @@ pub fn outcome_gated(
     out
 }
 
-/// A scope naming the object a row is about.
+/// A scope naming the object a row is about — **redacted**.
+///
+/// # Why a scope is redacted although a scope is a public reference
+///
+/// D2 §6.5 says Secret and `ConfigMap` names "may appear", and a destination
+/// name, a `KafkaCluster` name and a SASL principal are references a
+/// controller already holds. So this is not a disclosure fix; it is a
+/// CHOKEPOINT fix.
+///
+/// `CheckOutcome::with_message` / `with_remedy` / `with_fact` redact and
+/// `with_scope` / `with_detail` do not, which makes "nothing the runner
+/// prints is credential-shaped" a claim with two exceptions that a reader has
+/// to remember. The mutant round for M4 found exactly that shape: a planted
+/// AWS key survived in `scope.name` and in a `detail` sample while every
+/// message was clean, and the assertion that was supposed to notice was
+/// reading the base64 wrapper instead of the payload.
+///
+/// Running the same rules over the scope costs nothing — `redact` fires only
+/// on credential shapes, so `prod-archive`, `User:backup` and an ordinary
+/// topic name pass through unchanged — and it makes the property hold for
+/// EVERY string the runner writes rather than for most of them. A name that
+/// really does contain a 40-character hex run is redacted, which is the same
+/// trade-off `message` already makes and the safer of the two failures.
 #[must_use]
 pub fn scope(kind: &str, name: &str, uid: Option<&str>) -> CheckScope {
     CheckScope {
         kind: kind.to_string(),
-        name: name.to_string(),
-        uid: uid.map(ToString::to_string),
+        name: logweir_core::check_contract::redact(name),
+        uid: uid.map(logweir_core::check_contract::redact),
     }
 }

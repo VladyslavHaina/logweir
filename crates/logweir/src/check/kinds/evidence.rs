@@ -17,6 +17,22 @@
 //! object was longer — in which case the relayed digest is the PREFIX's digest
 //! and not the object's, which is exactly why the flag exists.
 //!
+//! # The `key` is echoed VERBATIM, and that is deliberate
+//!
+//! `EvidenceObjectResult::key` is the plan's own key, returned unchanged and
+//! un-redacted, because it is the CORRELATION between the request and the
+//! answer: the controller asked for three objects and has to know which result
+//! is which, and a redacted key would match nothing it holds. It is a
+//! reference the controller wrote, not a secret the runner discovered — D2
+//! §6.5's "what may appear: Secret and `ConfigMap` names and key names, which
+//! are public references".
+//!
+//! It is the ONE field in a check's output that is not run through
+//! `check_contract::redact`; every message, remedy, fact, scope and detail
+//! sample is (see [`crate::check::catalogue::scope`] for why the scope is,
+//! although it is a reference too). The exception is written down here rather
+//! than left to be rediscovered.
+//!
 //! # `present: false` is never a guess
 //!
 //! `present` is `true` only when the object was read. A `false` requires a
