@@ -1420,7 +1420,9 @@ export function validateRestore(state) {
       "the KafkaCluster this wizard selected (" + resolvedTarget.name + ", uid " +
       resolvedTarget.uid + ") is not in this namespace any more; choose the target you mean";
   } else if (resolvedTarget.state !== "selected") {
-    problems.targetCluster = "choose the KafkaCluster the restore writes to";
+    problems.targetCluster =
+      "choose a saved connection: nothing is selected, so there is no cluster for this restore " +
+      "to write to";
   }
   if (typeof ((fields.evidence || {}).bucket) !== "string" || fields.evidence.bucket.length === 0) {
     problems.evidenceBucket = "the bucket the signed evidence is written to";
@@ -1758,6 +1760,18 @@ export async function confirmClusters(state, api) {
         "target this plan names could not be confirmed (" + String(unread && unread.message) +
         "). Nothing was sent; the plan and every value you typed are still here.",
     });
+  }
+  // AND THE LABEL FOLLOWS THE IDENTITY (review finding F4). `restoreBody`
+  // spells `target.clusterRef.name` from `state.targetClusterName`, so a
+  // connection renamed between opening the wizard and submitting it would be
+  // sent under the name it no longer has. The schedule form already does this
+  // (`submitSchedule` sends `resolved.name`); this is the same rule for a
+  // restore, and it touches `state.fields` not at all -- the plan bytes and
+  // the reviewed-hash guard are unaffected.
+  const resolved = resolveTarget(s);
+  if (resolved.state === "selected") {
+    s.targetClusterName = resolved.name;
+    s.targetClusterUid = resolved.uid;
   }
   return s.clusters;
 }
@@ -2111,8 +2125,16 @@ function targetAuth(cluster) {
  *  what was asked for, because that is what the refusal has to be able to
  *  print. */
 export function selectTarget(state, uid, name) {
-  state.targetClusterUid = typeof uid === "string" ? uid : "";
-  if (typeof name === "string" && name.length > 0) {
+  const wanted = typeof uid === "string" ? uid : "";
+  state.targetClusterUid = wanted;
+  if (wanted.length === 0) {
+    // THE EMPTY OPTION CLEARS THE NAME TOO (review finding F1). A refused
+    // selector opens on `<option value="">`, and leaving the refused NAME
+    // behind would let `resolveClusterSelection` fall back to resolving by
+    // name -- onto the very object the refusal is about, which is the
+    // substitution the refusal exists to prevent.
+    state.targetClusterName = "";
+  } else if (typeof name === "string" && name.length > 0) {
     state.targetClusterName = name;
   }
   const resolved = resolveTarget(state);

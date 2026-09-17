@@ -330,7 +330,15 @@ export function validateSchedule(values) {
     problems.cron = "five cron fields (minute hour day-of-month month day-of-week), or @hourly, " +
       "@daily or @weekly";
   }
-  if (!isObjectName(v.source)) {
+  // THE EMPTY SELECTION IS ITS OWN REFUSAL (review finding F1). A refused
+  // selector opens on `<option value="" selected>`, so a Create click that did
+  // not choose anything arrives here with both halves empty -- and is refused
+  // by name rather than by the DNS-1123 check happening to reject "".
+  const uid = String(v.sourceUid === undefined || v.sourceUid === null ? "" : v.sourceUid).trim();
+  if (String(v.source || "").trim().length === 0 && uid.length === 0) {
+    problems.source = "choose a saved connection: nothing is selected, so there is no cluster " +
+      "for this schedule to read from";
+  } else if (!isObjectName(v.source)) {
     problems.source = "choose a saved KafkaCluster in this namespace";
   }
   const topics = String(v.topics || "").split(",").map((t) => t.trim()).filter((t) => t.length > 0);

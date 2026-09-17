@@ -82,6 +82,17 @@ export const PROBE_FRESH_SECONDS = 630;
  *  freshness arithmetic below cannot be trusted either way. */
 export const PROBE_SKEW_SECONDS = 60;
 
+/** The words for a connection with NO `status.observedAt` at all.
+ *
+ *  ITS OWN WORD, BECAUSE IT IS ITS OWN STATE. `stale` means "this reading
+ *  describes the past" and is a statement ABOUT an observation; a connection
+ *  the controller refused to dial has no observation for it to be about, and
+ *  labelling it stale says two contradictory things at once -- "no observation
+ *  recorded" and "this observation is older than the budget" -- and tells an
+ *  operator to wait for a refresh that will never come, because a refused
+ *  connection starts no probe Job. */
+export const NEVER_OBSERVED_WORDS = "never observed";
+
 /** The four `status.reason` values PLAT-07.1's resolver writes when it REFUSES
  *  a saved connection before any probe Job exists.
  *
@@ -393,23 +404,21 @@ export function probeState(cluster, now, freshSeconds) {
   const observedMs = observedAt.length === 0 ? null : Date.parse(observedAt);
   const parsed = observedMs === null || isNaN(observedMs) ? null : observedMs;
   const ageMs = parsed === null ? null : at - parsed;
-  let stale;
-  if (verdict === "probing") {
-    stale = false;
-  } else if (parsed === null) {
-    stale = verdict !== "never";
-  } else if (ageMs > budget) {
-    stale = true;
-  } else if (ageMs < -PROBE_SKEW_SECONDS * 1000) {
-    stale = true;
-  } else {
-    stale = false;
+  // STALENESS IS A STATEMENT ABOUT AN OBSERVATION, so it needs one. With no
+  // `observedAt` -- which is every refused connection, because the resolver
+  // refuses before a probe Job exists and the refusal clears the whole reading
+  // -- there is nothing for "older than the budget" to be about, and the honest
+  // answer is `observed: false` and its own word (review finding F2).
+  let stale = false;
+  if (verdict !== "probing" && parsed !== null) {
+    stale = ageMs > budget || ageMs < -PROBE_SKEW_SECONDS * 1000;
   }
   return {
     verdict: verdict,
     reason: reason,
     observedAt: observedAt,
     observedMs: parsed,
+    observed: parsed !== null,
     ageMs: ageMs,
     ageSeconds: ageMs === null ? null : Math.floor(ageMs / 1000),
     stale: stale,
@@ -447,9 +456,28 @@ export function probeBadge(state) {
 
 /** The STALE badge, or the empty string when the observation is current. It is
  *  its own badge rather than a different colour on the first one: "reachable,
- *  and nobody has checked in two hours" is two facts and a reader needs both. */
+ *  and nobody has checked in two hours" is two facts and a reader needs both.
+ *
+ *  It can only ever appear beside an observation that EXISTS: `probeState`
+ *  leaves `stale` false when there is no `observedAt`, and [`observedBadge`]
+ *  carries that case instead. */
 export function staleBadge(state) {
   return (state || {}).stale === true ? badge("warn", "stale") : "";
+}
+
+/** The `never observed` badge: a connection carrying no `status.observedAt`
+ *  that is not already saying so in its verdict.
+ *
+ *  `never probed` (the verdict for a cluster the controller has written
+ *  nothing about) already says it, so this does not repeat it; what it is for
+ *  is the `refused` and `unknown` cases, where the verdict says what happened
+ *  and this says that nothing was ever measured. */
+export function observedBadge(state) {
+  const s = state || {};
+  if (s.observed === true || s.verdict === "never" || s.verdict === "probing") {
+    return "";
+  }
+  return badge("flat", NEVER_OBSERVED_WORDS);
 }
 
 /** The one line that says what the probe observed and when: the badges, the
@@ -467,6 +495,10 @@ export function probeLine(state) {
   const stale = staleBadge(s);
   if (stale.length > 0) {
     parts.push(stale);
+  }
+  const never = observedBadge(s);
+  if (never.length > 0) {
+    parts.push(never);
   }
   if (s.observedAt) {
     const age = s.ageSeconds === null ? "" : " (" + ageWords(s.ageSeconds) + ")";
@@ -555,6 +587,13 @@ export function renderProbePanel(cluster, view) {
 }
 
 // --------------------------------------------------------------- the selector
+
+/** The option a refused selector opens on: no identity, marked `selected`, and
+ *  saying what has to happen next. `value=""` is what
+ *  [`readClusterSelection`] reads back and what the two forms' own checks
+ *  refuse, so a Create click under a standing refusal sends nothing. */
+export const EMPTY_OPTION =
+  "<option value=\"\" selected data-name=\"\" data-search=\"\">choose a saved connection</option>";
 
 /** The refusal a selection whose UID is gone gets. Named for the two cases it
  *  distinguishes, because they call for different things: a recreated cluster
@@ -651,7 +690,19 @@ export function renderClusterSelector(view) {
   const field = typeof v.name === "string" && v.name.length > 0 ? v.name : "cluster";
   const all = savedClusters(v.clusters);
   const resolved = resolveClusterSelection(all, v.selection);
-  const fallback = resolved.state === "selected" ? resolved.cluster : preferredCluster(all, v.prefer);
+  // A REFUSAL SELECTS NOTHING (review finding F1). `recreated` and `missing`
+  // are the two states in which the connection this form was bound to is not
+  // there, and the page has just said so. Preselecting a DEFAULT under that
+  // refusal -- which is what a `none`-shaped fallback did -- leaves a
+  // submit-ready form bound to a connection nobody chose: a browser defaults an
+  // unselected `<select>` to its first option, so one more click on Create sent
+  // a schedule at whatever happened to sort first. So the two refusal states
+  // render an explicit empty option, marked `selected`, and the empty value is
+  // what `validateSchedule` and `validateRestore` refuse.
+  const refused = resolved.state === "recreated" || resolved.state === "missing";
+  const fallback = resolved.state === "selected" || refused
+    ? resolved.cluster
+    : preferredCluster(all, v.prefer);
   const chosenUid = resolved.state === "selected" ? resolved.uid : "";
   const errors = (v.errors || {})[field] || (v.errors || {})[id];
   const options = all
@@ -673,16 +724,25 @@ export function renderClusterSelector(view) {
       );
     })
     .join("");
-  const chosenName =
-    resolved.state === "selected"
+  // THE HIDDEN PAIR IS THE REFUSED PAIR while a refusal stands: it is what the
+  // refusal is ABOUT, and it is what a reader, a screenshot and a bug report
+  // need. It is never a third cluster's identity, and it is never what gets
+  // submitted -- `readClusterSelection` prefers the `<select>`, whose value is
+  // the empty option's empty string until somebody picks a connection.
+  const chosenName = refused
+    ? resolved.name
+    : resolved.state === "selected"
       ? resolved.name
       : fallback === null
         ? ""
         : clusterName(fallback);
-  const chosenObject = resolved.state === "selected" ? resolved.cluster : fallback;
+  const chosenObject = resolved.state === "selected" ? resolved.cluster : (refused ? null : fallback);
+  const hiddenUid = refused
+    ? resolved.uid
+    : (chosenUid.length > 0 ? chosenUid : (chosenObject === null ? "" : clusterUid(chosenObject)));
   const detail =
     chosenObject === null
-      ? "<p class=\"note\">no saved connection is selected.</p>"
+      ? "<p class=\"note\" id=\"" + esc(id) + "-probe\">no saved connection is selected.</p>"
       : "<p class=\"probe-line\" id=\"" + esc(id) + "-probe\">" +
         probeLine(probeState(chosenObject, v.now, v.freshSeconds)) + "</p>";
   return (
@@ -703,11 +763,11 @@ export function renderClusterSelector(view) {
     (errors === undefined ? "" : " aria-invalid=\"true\" aria-describedby=\"" + esc(id) + "-error\"") +
     ">" +
     (all.length === 0
-      ? "<option value=\"\">no KafkaCluster in this namespace</option>"
-      : options) +
+      ? "<option value=\"\" selected data-name=\"\">no KafkaCluster in this namespace</option>"
+      : (refused ? EMPTY_OPTION : "") + options) +
     "</select>" +
     "<input type=\"hidden\" id=\"" + esc(id) + "-uid\" name=\"" + esc(field) + "Uid\" value=\"" +
-    esc(chosenUid.length > 0 ? chosenUid : (chosenObject === null ? "" : clusterUid(chosenObject))) +
+    esc(hiddenUid) +
     "\">" +
     "<input type=\"hidden\" id=\"" + esc(id) + "-name\" name=\"" + esc(field) + "Name\" value=\"" +
     esc(chosenName) + "\">" +
