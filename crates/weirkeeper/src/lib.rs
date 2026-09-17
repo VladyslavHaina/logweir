@@ -139,6 +139,8 @@ pub mod connection;
 pub mod controllers;
 pub mod crds;
 pub mod destination;
+/// D3 §2.3 — the one diagnostic derivation for every Job-backed run.
+pub mod diagnostics;
 pub mod evidence_store;
 pub mod identity;
 pub mod job;

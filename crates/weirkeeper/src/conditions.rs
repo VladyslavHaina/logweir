@@ -185,7 +185,77 @@ pub const TERMINAL_STATES: &[&str] = &[
     TERMINAL_STATE_SELECTION_EMPTY,
     TERMINAL_STATE_SELECTION_TOO_LARGE,
     TERMINAL_STATE_SOURCE_CHANGED_DURING_RESOLUTION,
+    // D3 §2.2 — the four states a run can reach WITHOUT AN EXIT CODE because
+    // its runner container never started. They are the `RunnerReady=False`
+    // reasons that cannot get better on their own, and each one is written
+    // only when the matching diagnostic was recorded BEFORE the Job ended;
+    // otherwise `crash_terminal_state`'s existing table is unchanged and the
+    // answer is still `NoExitCode`. `exitCode` stays absent in all four.
+    TERMINAL_STATE_VOLUME_MOUNT_FAILED,
+    TERMINAL_STATE_CREDENTIAL_REFERENCE_MISSING,
+    TERMINAL_STATE_RUNNER_IMAGE_UNAVAILABLE,
+    TERMINAL_STATE_POD_CREATION_FORBIDDEN,
 ];
+
+// ===========================================================================
+// D3 §2.2 — the `RunnerReady` condition, and the states a run reaches when
+// its runner container never starts
+// ===========================================================================
+
+/// The condition carrying whether the one runner pod's `runner` container has
+/// started — D3 §2.2, PLAT-14.1.
+///
+/// `False` WHILE THE CONTAINER CANNOT START, `True` once
+/// `containerStatuses[name=runner].state.running|terminated` has been seen.
+/// It is the answer to "why has nothing happened for four minutes", which
+/// `phase: Running` could never give: a `Backup` whose pod sits in
+/// `ImagePullBackOff` is `Running` by every existing field on the object.
+///
+/// EVERY TERMINAL BUILDER CARRIES IT FORWARD, beside
+/// [`CONDITION_VERIFIED`]: a JSON merge patch REPLACES `status.conditions`, so
+/// a builder that emits one and not the other deletes the one it left out.
+pub const CONDITION_RUNNER_READY: &str = "RunnerReady";
+
+/// [`CONDITION_RUNNER_READY`] `True`: the container has been seen running or
+/// terminated.
+pub const REASON_RUNNER_STARTED: &str = "RunnerStarted";
+
+/// [`CONDITION_RUNNER_READY`] `False`: there is no pod yet, or there is one
+/// and nothing has said why its container has not started.
+///
+/// **NOT A TERMINAL STATE, AND THAT IS THE ASSERTION.** "Nothing has happened
+/// yet" is the one answer that can never be a verdict about a run; a
+/// fail-fast on it would cancel every Job created in a busy cluster.
+pub const REASON_WAITING_FOR_POD: &str = "WaitingForPod";
+
+/// A volume the runner pod declares did not mount — D3 §2.2.
+///
+/// Both a [`CONDITION_RUNNER_READY`] reason and, after `failFastSeconds` of
+/// it, a terminal state. The DIAGNOSTIC keeps the more specific code
+/// (`weirkeeper::diagnostics::Code::SigningKeyMissing` for the signing volume,
+/// `VolumeMountFailed` for any other) and names the volume in its message; a
+/// `metav1` condition reason is a closed label other software matches on, so
+/// the parameters travel in the diagnostic and never in the reason.
+pub const TERMINAL_STATE_VOLUME_MOUNT_FAILED: &str = "VolumeMountFailed";
+
+/// A Secret or ConfigMap the pod's configuration names is not there — D3
+/// §2.2. The diagnostic distinguishes "no Secret", "no key in the Secret" and
+/// "no trust bundle"; the condition reason is their class.
+///
+/// **NOT [`TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE`]**, which is the
+/// controller refusing to RENDER a credential into a Job it has not created
+/// yet. This one is the kubelet refusing to start a container in a Job that
+/// exists.
+pub const TERMINAL_STATE_CREDENTIAL_REFERENCE_MISSING: &str = "CredentialReferenceMissing";
+
+/// The runner image could not be pulled, is not present under a `Never` pull
+/// policy, or is not a valid reference — D3 §2.2.
+pub const TERMINAL_STATE_RUNNER_IMAGE_UNAVAILABLE: &str = "RunnerImageUnavailable";
+
+/// The Job controller could not create the pod at all: a missing
+/// ServiceAccount, a `ResourceQuota`, a PodSecurity level or an admission
+/// webhook — D3 §2.2.
+pub const TERMINAL_STATE_POD_CREATION_FORBIDDEN: &str = "PodCreationForbidden";
 
 /// The typed `Backup.spec` cannot produce a runner execution: `triggeredBy` is
 /// not `manual` or `schedule`, a `schedule` trigger lacks the complete
@@ -644,6 +714,11 @@ pub const CONDITION_REASONS: &[&str] = &[
     REASON_INVALID_TOPIC_SELECTION,
     REASON_INVALID_RUN_POLICY,
     REASON_CRD_OUTDATED,
+    // D3 §2.2. The other four `RunnerReady=False` reasons are NOT here: they
+    // are `TERMINAL_STATES` members, the regex test iterates both lists, and a
+    // reason in both would be counted twice and asserted twice about nothing.
+    REASON_RUNNER_STARTED,
+    REASON_WAITING_FOR_POD,
 ];
 
 // ===========================================================================
@@ -790,6 +865,7 @@ pub const CONDITION_TYPES: &[&str] = &[
     CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED,
     CONDITION_TOPICS_RESOLVED,
     CONDITION_HISTORY_RETAINED,
+    CONDITION_RUNNER_READY,
 ];
 
 /// `phase` for a `Restore` whose admission has not passed yet — **interface
