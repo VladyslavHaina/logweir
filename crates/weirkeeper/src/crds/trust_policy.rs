@@ -140,6 +140,48 @@ pub const G6_VALIDITY_ORDER_RULE: &str = "self.notBefore < self.notAfter";
 /// G6's message.
 pub const G6_VALIDITY_ORDER_MESSAGE: &str = "notBefore must be before notAfter";
 
+/// G8 — one key, one usage.
+///
+/// # Why `size() == 1` is the whole of §7.3's three exclusions
+///
+/// D3 §7.3 forbids `EvidenceSigning` with either approval usage and forbids
+/// `GovernedApproval` with `ConfirmationIssuer` (landed here as
+/// [`KeyUsage::ConsoleConfirmation`]). With exactly three enum values those
+/// three pairs are every pair there is, so "at most one usage" is EXACTLY
+/// equivalent to the pairwise form and costs the estimator one `size()` call
+/// instead of three list scans. `usages` already has `length(min = 1)`, so the
+/// rule reads as "exactly one".
+///
+/// # A NON-TRANSITION rule, per item, and why the distinction matters
+///
+/// Beside G5 and G6, not beside G7. A transition rule is not evaluated for a
+/// newly added key, which would leave a dual-usage key creatable on the very
+/// path — appending to `spec.keys` — that G1 makes the only path there is.
+///
+/// # Why it lands NOW rather than with its consumer
+///
+/// **The window closes permanently the first time a policy is applied.** G7
+/// makes `usages` immutable and G1 makes `spec.keys` append-only, so a
+/// dual-usage key created before this rule exists can never be narrowed and
+/// never be removed — no Logweir role holds `delete` on `trustpolicies`. And
+/// adding the rule afterwards BRICKS that object: a per-item non-transition
+/// rule is evaluated on every write, so the policy becomes un-updatable and
+/// its keys can never be retired or revoked. A cluster today has no
+/// `TrustPolicy` at all, which is the only moment this costs nothing.
+///
+/// # One key on two roster lists
+///
+/// `logweir trust migrate-roster` REFUSES such a roster, naming the
+/// overlapping `keyId`s, rather than emitting an entry the API server would
+/// reject at `kubectl apply` time. `weirkeeper::trust::synthesize_legacy`
+/// still merges them in memory: it is never written as an object, this rule
+/// never sees it, and the merge is what keeps an unmigrated roster-only
+/// cluster working (§7.3 keeps the `selfAttestedRisk` LABEL for exactly those
+/// namespaces).
+pub const G8_ONE_USAGE_PER_KEY_RULE: &str = "self.usages.size() == 1";
+/// G8's message.
+pub const G8_ONE_USAGE_PER_KEY_MESSAGE: &str = "a key declares exactly one usage: EvidenceSigning, GovernedApproval and ConsoleConfirmation are mutually exclusive, because a key that both attests and authorises is a key whose holder can approve their own work — issue a separate keyId per usage";
+
 /// The rules on `.spec`: exactly the one that cannot be asked of an item.
 pub const SPEC_RULES: [SpecRule; 1] = [SpecRule::new(
     G1_KEYS_ARE_APPEND_ONLY_RULE,
@@ -147,7 +189,7 @@ pub const SPEC_RULES: [SpecRule; 1] = [SpecRule::new(
 )];
 
 /// The NON-transition rules attached to one key entry.
-pub const NESTED_RULES: [(&[&str], &str, &str); 2] = [
+pub const NESTED_RULES: [(&[&str], &str, &str); 3] = [
     (
         &["keys", "[]"],
         G5_LIFECYCLE_FIELDS_RULE,
@@ -157,6 +199,11 @@ pub const NESTED_RULES: [(&[&str], &str, &str); 2] = [
         &["keys", "[]"],
         G6_VALIDITY_ORDER_RULE,
         G6_VALIDITY_ORDER_MESSAGE,
+    ),
+    (
+        &["keys", "[]"],
+        G8_ONE_USAGE_PER_KEY_RULE,
+        G8_ONE_USAGE_PER_KEY_MESSAGE,
     ),
 ];
 
@@ -284,6 +331,11 @@ pub struct TrustedKey {
     pub algorithm: KeyAlgorithm,
     /// What this key may be used for. Immutable (G7).
     ///
+    /// **EXACTLY ONE** (G8): the three usages are mutually exclusive, so a key
+    /// that both attests and authorises cannot exist on a policy. See
+    /// [`G8_ONE_USAGE_PER_KEY_RULE`] for why the rule had to land before the
+    /// first policy object did.
+    ///
     /// COMPARED AS AN ORDERED LIST, which is stricter than the property needs.
     /// CEL's `==` on a list is order-sensitive and this is not declared
     /// `x-kubernetes-list-type: set`, so re-ordering `usages` without changing
@@ -292,7 +344,7 @@ pub struct TrustedKey {
     /// relax the comparison; it would also let the API server merge entries
     /// from two appliers, which is not wanted on a field that decides what a
     /// key may authorise.
-    #[schemars(length(min = 1, max = 3))]
+    #[schemars(length(min = 1, max = 1))]
     pub usages: Vec<KeyUsage>,
     /// Who holds it.
     pub principal: KeyPrincipal,

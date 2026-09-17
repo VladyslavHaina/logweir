@@ -1352,6 +1352,17 @@ const NAMED_RULES: &[(&str, &str, &str)] = &[
         weirkeeper::crds::trust_policy::G6_VALIDITY_ORDER_RULE,
         weirkeeper::crds::trust_policy::G6_VALIDITY_ORDER_MESSAGE,
     ),
+    // PLAT-19.1 / D3 §7.3, added at the W1 review round. The window to add it
+    // closes the first time a policy object is applied: G7 makes `usages`
+    // immutable and G1 makes `spec.keys` append-only, so a dual-usage key
+    // created before the rule can never be narrowed or removed — and adding
+    // the rule afterwards makes that object un-updatable, so its keys could
+    // never be retired or revoked either.
+    (
+        "trustpolicies.yaml",
+        weirkeeper::crds::trust_policy::G8_ONE_USAGE_PER_KEY_RULE,
+        weirkeeper::crds::trust_policy::G8_ONE_USAGE_PER_KEY_MESSAGE,
+    ),
     (
         "trustpolicies.yaml",
         weirkeeper::crds::trust_policy::G7_KEY_MATERIAL_IS_IMMUTABLE_RULE,

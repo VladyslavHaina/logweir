@@ -140,6 +140,8 @@ spec:
                       description: |-
                         What this key may be used for. Immutable (G7).
 
+                        **EXACTLY ONE** (G8): the three usages are mutually exclusive, so a key that both attests and authorises cannot exist on a policy. See [`G8_ONE_USAGE_PER_KEY_RULE`] for why the rule had to land before the first policy object did.
+
                         COMPARED AS AN ORDERED LIST, which is stricter than the property needs. CEL's `==` on a list is order-sensitive and this is not declared `x-kubernetes-list-type: set`, so re-ordering `usages` without changing the SET is refused with G7's message — over-strict, and harmless because a usage set is written once and never edited. Declaring it a set would relax the comparison; it would also let the API server merge entries from two appliers, which is not wanted on a field that decides what a key may authorise.
                       items:
                         description: |-
@@ -151,7 +153,7 @@ spec:
                         - GovernedApproval
                         - ConsoleConfirmation
                         type: string
-                      maxItems: 3
+                      maxItems: 1
                       minItems: 1
                       type: array
                   required:
@@ -169,6 +171,8 @@ spec:
                     rule: (self.state != 'Revoked' || (has(self.revokedAt) && has(self.revocationEffectiveFrom))) && (self.state != 'Retired' || has(self.retiredAt))
                   - message: notBefore must be before notAfter
                     rule: self.notBefore < self.notAfter
+                  - message: 'a key declares exactly one usage: EvidenceSigning, GovernedApproval and ConsoleConfirmation are mutually exclusive, because a key that both attests and authorises is a key whose holder can approve their own work — issue a separate keyId per usage'
+                    rule: self.usages.size() == 1
                   - message: a key's spkiPem, algorithm, usages, principal.id and notBefore are immutable; issue a new keyId instead
                     rule: self.spkiPem == oldSelf.spkiPem && self.algorithm == oldSelf.algorithm && self.usages == oldSelf.usages && self.principal.id == oldSelf.principal.id && self.notBefore == oldSelf.notBefore
                   - message: a key's notAfter may only be brought forward, never extended
