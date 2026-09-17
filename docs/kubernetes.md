@@ -1822,10 +1822,23 @@ spec:
     incompleteDiscovery: BackUpVisibleTopics   # or Refuse. REQUIRED, no default
 ```
 
+**`spec.deadlineSeconds` must fund a discovery.** The discovery Job's
+`activeDeadlineSeconds` is `min(300, spec.deadlineSeconds)` and ninety seconds
+of that is image pull, scheduling and container start, so a dynamic run needs
+**at least 120 seconds** — thirty for the runner itself. A smaller
+`deadlineSeconds` is refused terminally as `ExecutionSpecInvalid`, naming the
+field and the floor, **before** any Job or ConfigMap is created; dispatching a
+Job with a one-second budget would die `DiscoveryFailed` with nothing naming
+the deadline as the cause. A named allowlist has no such floor.
+
 **What the controller does, in order.**
 
 1. Resolves `spec.sourceRef` once with the saved-connection resolver and
-   records the digest of that resolution.
+   records the digest of that resolution. The digest covers the cluster's UID
+   and its connection settings, and deliberately **not**
+   `KafkaCluster.status.clusterId` — that field is written by the probe and
+   cleared on any unreachable or unreadable pass, so pinning it would turn
+   ordinary probe churn during the discovery window into a refused run.
 2. Creates `lwd-<backup uid>` — a `topicInventory` check Job, running
    `logweir check run --plan /check/check-plan.json --check-contract-version 1`
    as the runner ServiceAccount with **no** Kubernetes token, **no** signing key
@@ -1843,10 +1856,20 @@ spec:
 4. Classifies: internal is `entry.internal` **or** a `__` prefix; a topic the
    broker refused to describe is `limited`; an exact or prefix rule hit is
    `excludedByRule`; the rest is the resolved list, byte-sorted and
-   deduplicated.
+   deduplicated. Every resolved name is then re-validated against the Kafka
+   grammar `^[a-zA-Z0-9._-]{1,249}$` — this list came off a runner's stdout,
+   not out of a CRD field the API server pattern-checked — and a name the
+   broker could not hold is `DiscoveryResultUnreadable`.
 5. Freezes it through exactly the path a named allowlist takes, records
    `status.selection`, writes `TopicsResolved=True/Resolved`, and only then
    patches the discovery Job's `ttlSecondsAfterFinished`.
+
+**The discovery Job is collected after every outcome, refusals included**, by
+patching its `ttlSecondsAfterFinished` once the run's terminal status is on the
+server — never before, because the relay lives on the pod and the TTL
+controller deletes a Job and its pods together. Ten minutes later the Job, its
+pod and the plan ConfigMap are gone; a `Backup` deleted sooner takes them by
+owner cascade.
 
 **The terminal states, and which of them a new `Backup` could survive.** All of
 them are `Failed=True`, `exitReason: operational`, with no `exitCode`, and none
@@ -1858,9 +1881,17 @@ of them starts a runner Job.
 | `DiscoveryResultUnreadable` | It produced output that did not verify — frames that do not decode, a result document whose counts or digest the frames do not support, a missing plan ConfigMap | no, not without fixing the runner |
 | `DiscoveryIncomplete` | Visibility was not established and the policy is `Refuse` | only with more permission, or an attestation |
 | `SelectionEmpty` | Nothing was left after internal topics, exclusions and the topics the broker would not describe | only if the cluster changes |
-| `SelectionTooLarge` | Over 5,000 names, over 256 KiB of names, or a listing the runner had to truncate | only with more exclusions |
+| `SelectionTooLarge` | Over 5,000 resolved names, or over 256 KiB of them | only with more exclusions |
+| `SelectionTooLarge` (truncated listing) | The runner had to cut the listing at the plan's 20,000-topic `maxTopics` or at its relay budget, so the names are a **prefix** of what the principal can see | **not** with more exclusions — they are applied controller-side, after the listing. Name the topics explicitly, or split the cluster across schedules |
 | `SourceChangedDuringResolution` | The broker's `clusterId` is not the one the `KafkaCluster` observed, or the saved connection changed while the discovery ran | yes |
 | `JobNameConflict` | Something else owns `lwd-<backup uid>` | remove it first |
+
+**The two `SelectionTooLarge` rows share one reason and one condition**, and
+are told apart by the message: the truncated case says the names it returned
+are a `PREFIX` of what the principal can see. They are not split into two
+reasons because from a consumer's side "this cluster has more topics than one
+run may name" is one fact — but the remedies differ, so a surface that renders
+a remedy must read the message and not only the reason.
 
 `spec` is CEL-immutable and a terminal run is never restarted, so "retryable"
 always means **a new `Backup`** — which discovers afresh, in its own Job. That
