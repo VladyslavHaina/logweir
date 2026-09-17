@@ -1053,15 +1053,16 @@ does not share with the controller.
 
 ### Trust resolution: which keys govern a namespace
 
-> **NOT YET WIRED.** `TrustPolicy` is served, validated and reconciled, and the
-> resolution below is implemented and tested as a pure function — but **no
-> approval and no verification consults it yet.** The nine `Verified` reasons
-> above are still the whole vocabulary, `TrustPolicyConflict` is not among them
-> yet, and every `Approval` in this cluster is still decided against
-> `TrustRoster/default` alone. **A key revoked on a `TrustPolicy` today is not
-> withdrawn**: remove it from the roster to withdraw it. The consumer is
-> PLAT-19.1's verification worker; until it lands, read this section as the
-> contract it will implement rather than as what the cluster does.
+> **WIRED, with one exception named at the end of this section.** Every
+> `Approval` admission and every evidence verification now resolves trust as
+> below: `approval::decide` asks which trust governs the `Approval`'s own
+> namespace instead of loading `TrustRoster/default`, and the evidence verifier
+> asks the same question about the `Backup` or `Restore` it is verifying. **A
+> key revoked on a `TrustPolicy` IS withdrawn** — a fresh verification and a
+> fresh approval both refuse it. The exception is *already-terminal* objects:
+> a revocation does not by itself rewrite a `Backup` that finished last week,
+> because nothing yet watches `TrustPolicy` to enqueue them. See
+> [What a revocation changes, and when](#what-a-revocation-changes-and-when).
 
 `TrustRoster/default` is the **fallback**, not the only answer. A cluster may
 carry cluster-scoped `TrustPolicy` objects (PLAT-19.1), and each one names the
@@ -1177,13 +1178,26 @@ a signature at all. They are properties of the **referent** — the object
 | — | `spec.subjectRef` names an object that does not exist in this namespace | `ReferentNotFound` |
 | — | The referent exists and its KIND carries no `spec.planBytes` for check 7 to recompute a hash from — in tag 1 that is `subjectRef.kind: Backup` | `ReferentHasNoPlanBytes` |
 
-**So `Verified`'s `reason` is one of NINE strings, and this is the one place
-all nine are named**: `PayloadTypeMismatch`, `SignatureInvalid`,
-`KeyIdNotInRoster`, `KeyIdExpired`, `PlanHashMismatch`, `SubjectKindMismatch`,
-`RosterNotFound` (install step 1, above), `ReferentNotFound` and
-`ReferentHasNoPlanBytes`. A tenth would be a compile error rather than a
-surprise: each reason is the name of the enum variant that produced it, and
-both `match`es are wildcard-free on purpose.
+**So `Verified`'s `reason` is one of FOURTEEN strings, and this is the one place
+all fourteen are named**: `PayloadTypeMismatch`, `SignatureInvalid`,
+`KeyIdNotInRoster`, `KeyIdExpired`, `KeyRetired`, `KeyRevoked`,
+`KeyNotYetValid`, `TrustPolicyConflict`, `PlanHashMismatch`,
+`SubjectKindMismatch`, `RosterNotFound` (install step 1, above),
+`ReferentNotFound`, `ReferentHasNoPlanBytes` and `ReferentUidChanged`. A
+fifteenth would be a compile error rather than a surprise: each reason is the
+name of the enum variant that produced it, and both `match`es are wildcard-free
+on purpose.
+
+Four of those arrived with PLAT-19.1 and three of them say what `KeyIdExpired`
+used to say badly. **Admission is a NEW use of a key** (decision D3 §7.4): an
+`Approval` that arrives today carrying a signature by a key retired last week
+is asking whether that key may authorise something *now*, which is a different
+question from whether an archive it signed last year still verifies. A key that
+may not is refused — and the refusal says which lifecycle event refused it,
+because a retirement, an expiry, a revocation and a key staged for a rotation
+that has not started are four different things to do something about. Reporting
+a `KeyCompromise` revocation as an expiry would send an operator to extend a
+`notAfter` instead of to an investigation.
 
 `ReferentNotFound` is also the one reason that can be a RACE rather than a
 problem: an `Approval` reconciled before its `Restore` exists reports it, and
@@ -3211,7 +3225,94 @@ is not green renders the literal word **`unverified`**, never `pass`.
 
 Both rules also appear on the object itself, as a `Verified` condition whose
 `reason` is `Verified`, `VerificationInvalid`, `VerificationNotAttempted`,
-`ExitCodeNotZero` or `OutcomeNotPass`, and whose `message` is the badge label.
+`VerificationUntrusted`, `ExitCodeNotZero` or `OutcomeNotPass`, and whose
+`message` is the badge label.
+
+Since PLAT-19.1 the green rule reads `result == Valid` **and**
+`trust.basis` is `Current` or `Historical`. The second clause is redundant
+against what the controller writes — a `Valid` is only ever reached on those
+two bases — and it is read anyway, because a badge rule that consults one field
+is one edit away from rendering green over a basis nobody intended. An object
+written by a controller that predates the `trust` block carries no `basis` at
+all, and that is **not** a downgrade: the block is additive and an absent one
+renders exactly as it did before.
+
+A `Historical` badge carries a qualifier:
+
+> verified by weirkeeper at `<verifiedAt>` against key `<matchedKeyId>` (signed before that key was retired)
+
+**`Historical` is a pass, not a warning.** The key was valid when it signed and
+has since been retired, which is what key rotation is supposed to look like
+(§7.6 of decision D3). The qualifier is there so nobody has to guess why a
+green badge names a retired key.
+
+### 15.2a A fourth verdict: `Untrusted`
+
+`result` is now one of `Valid`, `Invalid`, `NotAttempted` **or** `Untrusted`.
+
+| verdict | what it is a claim about |
+|---|---|
+| `Valid` | the document, and the signer: the bytes verify and this installation accepts the key |
+| `Invalid` | the DOCUMENT: the digest did not match, or no key verified the sidecar |
+| `NotAttempted` | the CONTROLLER: no evidence credential, an unreadable object, no trust material, or a namespace two policies contest |
+| `Untrusted` | the SIGNER: the bytes are authentic and the key that made them is one this installation will not accept |
+
+`Untrusted` is deliberately not `Invalid`. Telling an operator their archive is
+corrupt when their key was revoked sends them to re-run a backup instead of to
+their trust policy. It is also deliberately not a silent `NotAttempted`: a
+verdict *was* reached, and `detail` names the row that reached it —
+`UntrustedSigner`, `KeyUsageMismatch`, `SignedOutsideValidity`, `Revoked` or
+`RecordedBeforeRevocation` — beside the key id and the policy name. Every
+reader that predates the value treats anything that is not `Valid` as
+unverified (`ui/pages/backups.js`), so it fails closed on every old surface.
+
+Two new fields sit beside it, both additive:
+
+```yaml
+signedAt: 2026-09-03T09:00:00Z          # the document's OWN claimed signing time
+trust:
+  basis: Current                        # Current | Historical | RecordedBeforeRevocation | None
+  keyState: Active                      # Active | Retired | Expired | Revoked | Unknown
+  policy: {name: org-default, uid: …, generation: 4}
+```
+
+`signedAt` is **recorded, not trusted**. For a retired or expired key it is
+what distinguishes "signed while valid" from "signed afterwards". For a key
+revoked as `KeyCompromise` it is attacker-controlled, so it is not consulted at
+all: the only observation accepted there is one a controller of this
+installation wrote itself — the `verifiedAt` of an earlier reconcile. An
+imported archive with no such history and a compromise-revoked signer fails
+closed, and `detail` says so.
+
+### 15.2b What a revocation changes, and when
+
+A fresh verification — a run finishing now, or a `Backup` still being
+reconciled — asks the current policy and gets the current answer.
+
+An object that is **already terminal** is not re-read (that is the rule that
+keeps this controller quiet), so its verdict does not change by itself. When it
+is re-derived, it is re-derived from what is already on the status: the stored
+`matchedKeyId`, `signedAt` and `verifiedAt` are the three facts the decision
+takes, so there is **no storage read, no signature check and no Job**. Such a
+pass writes `evidence.verification.{result,trust,detail}` and the `Verified`
+condition that says the same thing, and touches `phase`, `exitCode`, `outcome`,
+the evidence keys, `matchedKeyId`, `signedAt` and `verifiedAt` not at all.
+
+`verifiedAt` in particular is **never** refreshed by a trust change. It is the
+one independent observation this installation has about when it saw the
+document, and a pass that recorded its own conclusion over it would read that
+write as corroboration on the next pass — flipping a
+`RecordedBeforeRevocation` verdict to `Revoked` and leaving it there. So the
+instant moves only when the *signature* changes: a different key, or a
+different media type.
+
+**Not yet shipped:** nothing watches `TrustPolicy` to enqueue terminal objects,
+so re-derivation happens when something else reconciles them. Until that
+watch lands, the supported way to make a revocation visible on an archive that
+already finished is to look at the `TrustPolicy` itself —
+`kubectl --context <ctx> get trustpolicy <name> -o yaml` reports every key's
+`effectiveState` and `usableForVerification` — and to treat a `Revoked` key
+there as authoritative over any badge written before the revocation.
 
 ### 15.3 What the controller actually checks, in order
 
@@ -3225,16 +3326,28 @@ Both rules also appear on the object itself, as a `Verified` condition whose
    the detail names both digests. Skipping this and checking the signature
    alone would accept a genuinely-signed *older* document put in this one's
    place.
-4. **For each `TrustRoster.spec.signingKeys[]` entry**, build a verifying key
-   from its `spkiPem` and check the DSSE sidecar. The first success is `Valid`
-   carrying that entry's own `keyId`; otherwise `Invalid` with the last error.
-   An **empty** list is `NotAttempted` with
+4. **Resolve the object's namespace's trust** (§8's "Trust resolution"), then
+   for each resolved key declared for **`EvidenceSigning`** build a verifying
+   key from its `spkiPem` and check the DSSE sidecar. The first success selects
+   that entry's own `keyId`; otherwise `Invalid` with the last error. A key
+   declared for `GovernedApproval` or `ConsoleConfirmation` is never offered to
+   the verifier at all, so it cannot become a `matchedKeyId` by accident. An
+   **empty** list is `NotAttempted` with
 
    > the TrustRoster lists no signing key material; add the runner's public key to spec.signingKeys
 
-   — it names itself rather than failing silently, and an `Invalid` there would
-   blame every document in the cluster for one missing line in one
-   cluster-scoped object.
+   on a roster-only cluster, and
+
+   > the TrustPolicy bound to this namespace lists no key with usage EvidenceSigning; add the runner's public key to spec.keys
+
+   under a policy — each names the object an operator would actually edit,
+   rather than failing silently. An `Invalid` there would blame every document
+   in the cluster for one missing line in one cluster-scoped object. A
+   namespace two policies claim is `NotAttempted` naming
+   `TrustPolicyConflict` and both claimants.
+5. **Ask whether that key is still trusted** — §15.2a. A key that is retired,
+   expired, revoked or was used outside its window gives `Untrusted`, never
+   `Invalid`: the bytes are exactly what they claim to be.
 
 This is written in a **second, separate `PATCH …/status`** after the terminal
 one, so a verification failure — or a 500 on that patch — can never prevent the
