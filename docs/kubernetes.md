@@ -1141,6 +1141,26 @@ grants `patch` beside `update`: both commands send a PATCH, and an
 widens what may change — the API server applies the CRD's CEL rules to every
 subject, cluster-admin included.
 
+**Re-pointing a schedule at a different destination IS now possible**, and it is
+the edit PLAT-05.1 exists for: `spec.destinationRef` and `spec.archive` are both
+editable, and the CEL sentinel keeps them consistent with each other. A run that
+was frozen before the edit keeps its own snapshot — `scheduled_run` copies the
+destination into the created `Backup`, `Backup.spec` is sealed whole, and
+PLAT-06.1 freezes the resolved settings into an immutable ConfigMap before any
+Job exists — so an edit reaches the next admission and **cannot** move a run
+that is already going, its inputs or its Job.
+
+One operator-facing consequence, because it is reachable by an edit and was not
+before. Retention evaluates the **current** `archive.url`, so after a move the
+old destination's sets stop being reported; and the open defect
+**RET-WRONGBUCKET** (`docs/to-do/platform-improvements.md`, PLAT-16.1 — the
+controller lists manifests through its single global store while rendering
+removal commands for the schedule's own URL) is now reachable by editing a
+schedule's destination, not only by creating a schedule on another bucket. The
+wrong-bucket report can therefore appear **between** runs; it can never appear
+mid-run, because the run that is going froze its destination before the edit
+landed. PLAT-16.1 owns the fix.
+
 Re-pointing a schedule at a different `KafkaCluster` is refused:
 
 ```
