@@ -108,7 +108,7 @@ const DIAL_TOKENS: [&str; 16] = [
 /// Relative to the workspace root, `/`-separated. Production modules whose
 /// job IS to dial come first; the rest are files where the token is a string
 /// fed to a double, never a client.
-const ALLOWED: [(&str, &str); 23] = [
+const ALLOWED: [(&str, &str); 24] = [
     (
         "crates/logweir-kafka/src/rdkafka_reader.rs",
         "the broker client itself — this is where connecting to Kafka lives",
@@ -226,6 +226,24 @@ const ALLOWED: [(&str, &str); 23] = [
         "crates/weirkeeper/tests/retention.rs",
         "read-only handles over a filesystem archive copied into a scratch directory — no \
          endpoint, no network",
+    ),
+    (
+        // D2 W7 (PLAT-08.1). THIS FILE IS W4'S BY D2 §13.2 AND THIS ONE ENTRY IS
+        // W7'S — kept to a single narrow row for that reason.
+        "crates/weirkeeper/src/evidence_store.rs",
+        "production: `StoreCache::get_or_build` is the ONE place in the control plane \
+         that builds a per-destination read-only evidence handle (D2 §3.10's \
+         allowlisted `ControllerIdentity` path), and it names `Store::read_only_with` \
+         because addressing, transport and the CA must come from the destination and \
+         never from the controller's environment. It is the explicit twin of \
+         `main.rs`'s one `read_only_from_url`, listed above. The CONSTRUCTION opens no \
+         socket — `AmazonS3Builder::build()` configures a client and dials nothing — \
+         and it happens inside `tokio::task::spawn_blocking`, which \
+         `crates/weirkeeper/tests/retention.rs::no_store_call_is_made_outside_spawn_blocking` \
+         pins together with the fact that this is the only \
+         `Store::read_only_with` site in the crate. There is exactly one such call \
+         here, in one function, and the cache is the reason a second one would be a \
+         reviewable event rather than a convenience",
     ),
     (
         "crates/logweir/tests/restore_mode.rs",

@@ -188,12 +188,40 @@ pub async fn reconcile_destination(
             "the computed status equals the one on the object; no patch is sent"
         );
     } else {
-        // A MERGE PATCH CARRYING NO `resourceVersion` IS STILL NOT AN `update`
-        // — seam S7. Nothing in this crate calls `Api::replace_status`, and the
-        // role grants `patch` on `backupdestinations/status` and nothing else.
-        api.patch_status(&name, &PatchParams::default(), &Patch::Merge(patch))
+        // SEAM S7 IN BOTH ITS HALVES. A merge PATCH and never `Api::replace_status`
+        // (which the API server authorises as `update`, a verb this role grants
+        // on nothing) — AND the body carries `metadata.resourceVersion` as the
+        // update precondition, which is the half the first draft of this
+        // reconciler argued its way out of.
+        //
+        // WHY IT MATTERS FOR A SINGLE-WRITER STATUS. Two replicas of this
+        // controller, or a future API path that touches the same status,
+        // otherwise lose one write silently: each computed its verdict from the
+        // object it read, and last-write-wins picks the stale one. With the
+        // precondition the loser gets 409 and reconciles again from what is
+        // actually stored. The 300 s requeue would eventually repair it, which
+        // is why this was a medium and not a high — but "eventually, for five
+        // minutes, `VALID` names the wrong CA" is not a property worth keeping.
+        let body =
+            status_patch_with_preconditions(dest, patch).map_err(|e| ReconcileError::Api(*e))?;
+        if let Err(kube::Error::Api(e)) = api
+            .patch_status(&name, &PatchParams::default(), &Patch::Merge(body))
             .await
-            .map_err(ReconcileError::Api)?;
+        {
+            // A 409 IS NOT A FAILURE, IT IS THE PRECONDITION WORKING. Something
+            // wrote this status between the read and the write; the object in
+            // hand is stale, so there is nothing useful to retry with here and
+            // the next reconcile reads the newer one.
+            if e.code == 409 {
+                debug!(
+                    destination = %name,
+                    namespace = %namespace,
+                    "the status changed under this reconcile (409); the next pass reads it"
+                );
+                return Ok(verdict);
+            }
+            return Err(ReconcileError::Api(kube::Error::Api(e)));
+        }
     }
 
     if verdict.valid {
@@ -216,6 +244,50 @@ pub async fn reconcile_destination(
         );
     }
     Ok(verdict)
+}
+
+/// Add the optimistic-concurrency precondition to a `/status` merge patch —
+/// D-SEAMS **S7**.
+///
+/// THE SAME BODY SHAPE `controllers::backup_schedule::status_patch_with_preconditions`
+/// USES, and not a second invention: the API server applies a
+/// `metadata.resourceVersion` carried in a patch BODY as an update precondition
+/// and answers `409 Conflict` on a mismatch, which is how a merge PATCH gets a
+/// compare-and-set without the `update` verb. `metadata.name` travels with it so
+/// the body is self-identifying and the precondition is tied to the same object
+/// the request path names.
+///
+/// # Errors
+///
+/// A [`kube::Error`] shaped as the API server's own "no resourceVersion" answer,
+/// for an object that carries none. Unreachable for anything that came from a
+/// watch or a `get`; named rather than unwrapped.
+fn status_patch_with_preconditions(
+    dest: &BackupDestination,
+    mut patch: serde_json::Value,
+) -> Result<serde_json::Value, Box<kube::Error>> {
+    let name = dest.name_any();
+    let resource_version = dest
+        .metadata
+        .resource_version
+        .clone()
+        .filter(|v| !v.is_empty())
+        .ok_or_else(|| {
+            Box::new(kube::Error::Discovery(
+                kube::error::DiscoveryError::MissingResource(format!(
+                    "BackupDestination {name} carries no metadata.resourceVersion, which a \
+                     /status compare-and-set needs (D-SEAMS S7)"
+                )),
+            ))
+        })?;
+    patch
+        .as_object_mut()
+        .expect("a status patch is always a JSON object")
+        .insert(
+            "metadata".to_string(),
+            json!({ "name": name, "resourceVersion": resource_version }),
+        );
+    Ok(patch)
 }
 
 /// The `kube::runtime` reconcile entry point.

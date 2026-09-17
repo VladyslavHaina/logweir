@@ -280,8 +280,21 @@ impl std::error::Error for ResolveError {}
 // ---------------------------------------------------------------------------
 
 /// One role's credential, after defaulting — REFERENCES ONLY.
+/// **`rename_all_fields`, NOT JUST `rename_all`.** On an ENUM, `rename_all`
+/// renames the VARIANTS and leaves struct-variant FIELDS alone — so the first
+/// version of this type serialised `{"mode":"secretKeys","access_key_id_key":…}`
+/// inside a snapshot that is camelCase everywhere else, against D2 §3.7's
+/// `{mode, secretName?, keys?, serviceAccountName?}`. That block is frozen into
+/// `execution-inputs.json` under `deny_unknown_fields` and re-encoded byte for
+/// byte on every later pass, so renaming a key after W10 lands turns every
+/// running `Backup` into a `PlanConfigMapConflict`. `the_snapshot_key_spellings_are_pinned`
+/// is the golden-bytes test that keeps it.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", tag = "mode")]
+/// The VARIANT names are left PascalCase deliberately, so the snapshot's `mode`
+/// reads exactly as `spec.access.<role>.mode` reads on the object it was
+/// resolved from — `SecretKeys`, `WorkloadIdentity`, `ControllerIdentity`. One
+/// vocabulary, one spelling; a camelCased tag here would be a second.
+#[serde(rename_all_fields = "camelCase", tag = "mode")]
 pub enum ResolvedGrant {
     /// Keys the kubelet projects from a Secret in the destination's own
     /// namespace.
@@ -988,9 +1001,15 @@ fn decode_base64(s: &str) -> Option<Vec<u8>> {
         return None;
     }
     let mut out = Vec::with_capacity(bytes.len() / 4 * 3);
-    for chunk in bytes.chunks(4) {
+    let last = bytes.len() / 4 - 1;
+    for (group, chunk) in bytes.chunks(4).enumerate() {
+        // PADDING ONLY IN THE FINAL GROUP. Counting it per group accepted
+        // `AA==AAAA`, which is not base64 at all — and a body that is not base64
+        // is a body `object_store::Certificate::from_pem_bundle` will refuse
+        // later, so accepting it here only made `CaBundleInvalid` fire at the
+        // wrong moment.
         let pad = chunk.iter().rev().take_while(|c| **c == b'=').count();
-        if pad > 2 {
+        if pad > 2 || (pad > 0 && group != last) {
             return None;
         }
         let mut acc = 0u32;
@@ -1359,6 +1378,29 @@ fn bool_env(value: bool) -> String {
 
 /// The resolved destination as one run freezes it — D2 §3.7, seam **S4**.
 ///
+/// # BEFORE W10 FREEZES THIS, READ THESE TWO LINES
+///
+/// 1. **The key spellings are settled and pinned.** They were not, in the first
+///    version of this type: `#[serde(rename_all)]` on an enum renames VARIANTS
+///    and not struct-variant FIELDS, so `grant` carried `access_key_id_key`
+///    inside a camelCase document. `rename_all_fields` fixes it and
+///    `tests/destination_controller.rs::the_snapshot_key_spellings_are_pinned`
+///    is the golden-bytes row that keeps it. Do not freeze a build without that
+///    row green: once these bytes are in an immutable `ConfigMap` that is
+///    re-encoded and compared on every later pass, renaming one key turns every
+///    running `Backup` into a `TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT`.
+/// 2. **Rollback is an open ruling, not an oversight.** Adding this block under
+///    the existing [`crate::backup_execution::INPUTS_VERSION`] with
+///    `#[serde(default)]` keeps FORWARD compatibility — a `v1` document with no
+///    `destination` still loads. It does NOT give backward compatibility: every
+///    struct in that module is `deny_unknown_fields` and the loader requires the
+///    version string exactly, so an OLDER controller handed a document carrying
+///    `destination` refuses the run. That is fail-closed and probably right, but
+///    it is a rollback behaviour nobody has written down. W10 (with the
+///    orchestrator) decides between "additive under the current version, with the
+///    refusal recorded in `docs/stability.md`" and a version bump. This type is
+///    fit for either; nothing here presumes one.
+///
 /// # It is a BLOCK inside PLAT-06.1's document, not a second freeze
 ///
 /// Seam S4 is explicit: `execution-inputs.json` is the single frozen grammar
@@ -1602,13 +1644,25 @@ pub async fn read_ca_bundle(
         return Ok(CaObservation::NotDeclared);
     };
     let maps: Api<ConfigMap> = Api::namespaced(client.clone(), &resolved.namespace);
-    match maps.get_opt(&reference.config_map_name).await? {
-        None => Ok(CaObservation::NotFound),
-        Some(cm) => match cm.data.as_ref().and_then(|d| d.get(&reference.key)) {
-            None => Ok(CaObservation::KeyMissing),
-            Some(pem) => Ok(CaObservation::Present(pem.clone().into_bytes())),
-        },
+    let Some(cm) = maps.get_opt(&reference.config_map_name).await? else {
+        return Ok(CaObservation::NotFound);
+    };
+    if let Some(pem) = cm.data.as_ref().and_then(|d| d.get(&reference.key)) {
+        return Ok(CaObservation::Present(pem.clone().into_bytes()));
     }
+    // `binaryData` IS READ TOO, AND IT IS NOT A CONVENIENCE. The API server puts
+    // a key in `binaryData` and not `data` whenever its value is not valid
+    // UTF-8, which is exactly what `kubectl create configmap ca --from-file=ca.crt=ca.der`
+    // produces. Reading `data` alone answered `CaBundleKeyMissing` — "that
+    // ConfigMap carries no such key" — for a key the operator can see in
+    // `kubectl get cm -o yaml`, and sent them looking for the wrong thing. Read
+    // here, the bytes reach `check_ca_bundle`, which refuses them as
+    // `CaBundleInvalid` with the message that names the real problem: a DER file
+    // is not a PEM bundle.
+    if let Some(bytes) = cm.binary_data.as_ref().and_then(|d| d.get(&reference.key)) {
+        return Ok(CaObservation::Present(bytes.0.clone()));
+    }
+    Ok(CaObservation::KeyMissing)
 }
 
 // ---------------------------------------------------------------------------
