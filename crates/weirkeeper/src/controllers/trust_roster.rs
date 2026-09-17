@@ -51,8 +51,10 @@ use serde_json::json;
 use tracing::{debug, info, warn};
 
 use super::approval::{ReconcileError, ROSTER_NAME};
+use super::trust_policy::{superseded_condition, with_precondition, CONDITION_SUPERSEDED};
 use super::Context;
 use crate::conditions::{current_condition, merge_condition, status_unchanged};
+use crate::crds::trust_policy::TrustPolicy;
 use crate::crds::trust_roster::{KeyEntry, TrustRoster, TrustRosterSpec, TrustRosterStatus};
 use crate::crds::Condition;
 
@@ -152,6 +154,7 @@ fn lists(spec: &TrustRosterSpec) -> impl Iterator<Item = (&'static str, &KeyEntr
 pub fn status_for(
     roster: &TrustRoster,
     verdict: &RosterVerdict,
+    policies: &[TrustPolicy],
     now: DateTime<Utc>,
 ) -> TrustRosterStatus {
     let existing = roster.status.as_ref().and_then(|s| s.conditions.as_ref());
@@ -167,11 +170,19 @@ pub fn status_for(
     let mut conditions: Vec<Condition> = existing
         .map(|c| {
             c.iter()
-                .filter(|c| c.r#type != CONDITION_LOADED)
+                .filter(|c| c.r#type != CONDITION_LOADED && c.r#type != CONDITION_SUPERSEDED)
                 .cloned()
                 .collect()
         })
         .unwrap_or_default();
+    // `Superseded` IS RECOMPUTED HERE, NOT JUST CARRIED — PLAT-19.1 review
+    // finding F2, second half. `trust_policy::reconcile_policy` runs only for a
+    // policy that EXISTS, so deleting every policy left `Superseded=True` on
+    // this roster forever: a rollback-in-place advertised the opposite of what
+    // was happening. This reconciler requeues every 300 s whether or not a
+    // policy exists, so it is the one that can clear it. Both writers call the
+    // same function, so they cannot disagree about what the condition means.
+    conditions.push(superseded_condition(roster, policies, now));
     conditions.push(merge_condition(
         current_condition(existing, CONDITION_LOADED),
         Condition {
@@ -205,14 +216,27 @@ pub async fn reconcile_roster(
     // side of the same instant.
     let now = Utc::now();
     let verdict = evaluate(&roster.spec, now);
-    let status = status_for(roster, &verdict, now);
+    // THE WHOLE POLICY SET, because `Superseded` is a statement about which of
+    // them displaces this roster and that is not answerable from one object.
+    // The `trustpolicies` `list` grant PLAT-19.1 added already covers it.
+    let policies: Api<TrustPolicy> = Api::all(client.clone());
+    let all = policies
+        .list(&kube::api::ListParams::default())
+        .await
+        .map_err(ReconcileError::Api)?;
+    let status = status_for(roster, &verdict, &all.items, now);
 
     // CLUSTER-SCOPED: `Api::all`, no namespace. `TrustRoster` is the one kind
     // in this group that is not namespaced, and cluster scope is the point —
     // in Kubernetes the strong form of "a separate file argument the drill
     // spec cannot widen" is "a different RBAC subject".
     let api: Api<TrustRoster> = Api::all(client.clone());
-    let patch = json!({ "status": status });
+    // SEAM S7's precondition (PLAT-19.1 review finding F6). This roster's
+    // `status.conditions` now has TWO writers doing read-modify-write on an
+    // array an RFC 7386 merge patch REPLACES, so a pass computing from a stale
+    // watch-cache copy must be refused rather than silently delete the other
+    // writer's condition.
+    let patch = with_precondition(&roster.metadata, &name, json!({ "status": status }))?;
     // NO WRITE WHEN NOTHING CHANGED — plan erratum E11(d), review finding H-1.
     // This reconciler's own status patch is what wakes it, so a patch that
     // changed nothing but the clock spun it at 133 reconciles a second on an
@@ -236,7 +260,8 @@ pub async fn reconcile_roster(
         );
     } else {
         api.patch_status(&name, &PatchParams::default(), &Patch::Merge(patch))
-            .await?;
+            .await
+            .map_err(ReconcileError::Api)?;
     }
 
     if verdict.loaded {

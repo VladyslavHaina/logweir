@@ -122,10 +122,13 @@ pub const REASON_EXPIRING_SOON: &str = "ExpiringSoon";
 /// `ExpiringSoon=False`: no `Active` key is inside the window.
 pub const REASON_NOT_EXPIRING: &str = "NotExpiring";
 
-/// `Superseded=True` on the roster this policy replaces.
+/// `Superseded` on the roster a policy replaces.
 pub const CONDITION_SUPERSEDED: &str = "Superseded";
-/// The `reason` on that condition (D3 §7.5, verbatim).
+/// `Superseded=True`: a MATCHING policy exists (D3 §7.5, verbatim).
 pub const REASON_SUPERSEDED_BY_TRUST_POLICY: &str = "SupersededByTrustPolicy";
+/// `Superseded=False`: no policy displaces the roster, so it is still what
+/// unbound namespaces resolve to.
+pub const REASON_ROSTER_STILL_CONSULTED: &str = "RosterStillConsulted";
 
 /// What one policy reconcile decided.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -515,7 +518,10 @@ pub async fn reconcile_policy(
     let verdict = evaluate(policy, &all.items, now);
     let status = status_for(policy, &verdict, now);
 
-    let patch = json!({ "status": status });
+    // SEAM S7's precondition (review finding F6): the body carries
+    // `metadata.resourceVersion`, so a pass computing from a stale watch-cache
+    // copy gets `409 Conflict` rather than overwriting a newer verdict.
+    let patch = with_precondition(&policy.metadata, &name, json!({ "status": status }))?;
     // NO WRITE WHEN NOTHING CHANGED — erratum E11(d). With the debounce above,
     // a steady policy reaches this branch on four reconciles out of five.
     if status_unchanged(
@@ -552,17 +558,104 @@ pub async fn reconcile_policy(
     Ok(verdict)
 }
 
-/// Report `Superseded=True/SupersededByTrustPolicy` on `TrustRoster/default`
-/// once any `TrustPolicy` exists (D3 §7.5).
+/// The `Superseded` condition `TrustRoster/default` should carry, given every
+/// `TrustPolicy` in the cluster (D3 §7.5).
+///
+/// # "Once a **matching** policy exists" — and the matching one is the DEFAULT
+///
+/// Review finding F2. The first version of this wrote `Superseded=True` as soon
+/// as ANY policy existed, which is broader than the contract and is wrong in a
+/// way an operator acts on: a policy governing only `team-a` leaves every other
+/// namespace resolving to `legacy-roster-v1`, **synthesised from this very
+/// roster**, while the roster advertises that it has been replaced. An operator
+/// reading that reasonably stops maintaining it — or deletes it — and silently
+/// un-trusts every unbound namespace.
+///
+/// The only policy that displaces the roster for every namespace is the one
+/// with `spec.default: true`, because the resolution order (§7.1) reaches the
+/// roster only after the default has been tried. So that, and nothing else, is
+/// a match. Two defaults are NOT a match either: they contest each other, every
+/// fallback namespace resolves to nothing rather than to either of them, and a
+/// roster marked superseded by a conflict would be superseded by something that
+/// governs nobody.
+///
+/// # It is a CONDITION WITH TWO STATES, not a flag that gets set
+///
+/// The other half of F2: `reconcile_policy` runs only for a policy that exists,
+/// so deleting every policy left `Superseded=True` on the roster forever —
+/// rollback-in-place advertised the opposite of what was happening. Returning
+/// `Superseded=False/RosterStillConsulted` makes the condition self-clearing,
+/// and [`super::trust_roster`] writes it too, from its own 300 s requeue, so
+/// the clearing pass does not depend on a policy existing to run it.
+#[must_use]
+pub fn superseded_condition(
+    roster: &TrustRoster,
+    policies: &[TrustPolicy],
+    now: DateTime<Utc>,
+) -> Condition {
+    let defaults: Vec<String> = policies
+        .iter()
+        .filter(|p| p.spec.default)
+        .map(kube::ResourceExt::name_any)
+        .collect();
+    let (status, reason, message) = match defaults.as_slice() {
+        [only] => (
+            true,
+            REASON_SUPERSEDED_BY_TRUST_POLICY,
+            format!(
+                "TrustPolicy/{only} is the cluster default, so every namespace resolves through                  a policy and this roster is no longer consulted. Nothing here is deleted or                  edited — a rollback reads it unchanged (docs/keys.md, rollback)"
+            ),
+        ),
+        [] if policies.is_empty() => (
+            false,
+            REASON_ROSTER_STILL_CONSULTED,
+            "no TrustPolicy exists, so every namespace resolves to legacy-roster-v1,              synthesised from this roster"
+                .to_string(),
+        ),
+        [] => (
+            false,
+            REASON_ROSTER_STILL_CONSULTED,
+            format!(
+                "{} TrustPolicy object(s) exist and none sets spec.default: true, so every                  namespace they do not name explicitly still resolves to legacy-roster-v1,                  synthesised from THIS roster. Do not stop maintaining it",
+                policies.len()
+            ),
+        ),
+        many => (
+            false,
+            REASON_ROSTER_STILL_CONSULTED,
+            format!(
+                "{} TrustPolicy objects set spec.default: true ({}), so they contest every                  fallback namespace and each resolves to NOTHING rather than to either of them.                  A roster superseded by a conflict would be superseded by something that governs                  nobody",
+                many.len(),
+                many.join(", ")
+            ),
+        ),
+    };
+    merge_condition(
+        current_condition(
+            roster.status.as_ref().and_then(|s| s.conditions.as_ref()),
+            CONDITION_SUPERSEDED,
+        ),
+        Condition {
+            r#type: CONDITION_SUPERSEDED.to_string(),
+            status: if status { "True" } else { "False" }.to_string(),
+            observed_generation: roster.metadata.generation,
+            last_transition_time: Some(now),
+            reason: Some(reason.to_string()),
+            message: Some(message),
+        },
+    )
+}
+
+/// Write [`superseded_condition`] onto `TrustRoster/default`.
 ///
 /// # Why the whole condition list is carried
 ///
 /// A JSON merge patch REPLACES arrays (RFC 7386), so a patch carrying only
-/// `[Superseded]` would DELETE the `Loaded` condition
-/// [`super::trust_roster`] wrote — and that reconciler would put it back,
-/// deleting this one, forever. The existing list is read and merged, exactly
-/// as `verification::carry_verified` does for the same reason, and the roster
-/// reconciler carries conditions it does not own forward.
+/// `[Superseded]` would DELETE the `Loaded` condition [`super::trust_roster`]
+/// wrote — and that reconciler would put it back, deleting this one, forever.
+/// The existing list is read and merged, exactly as `verification::carry_verified`
+/// does for the same reason, and the roster reconciler carries conditions it
+/// does not own forward.
 ///
 /// # Errors
 ///
@@ -573,9 +666,6 @@ async fn supersede_roster(
     policies: &[TrustPolicy],
     now: DateTime<Utc>,
 ) -> Result<(), ReconcileError> {
-    if policies.is_empty() {
-        return Ok(());
-    }
     let api: Api<TrustRoster> = Api::all(client.clone());
     let roster = match api
         .get_opt(ROSTER_NAME)
@@ -586,22 +676,7 @@ async fn supersede_roster(
         None => return Ok(()),
     };
     let existing = roster.status.as_ref().and_then(|s| s.conditions.as_ref());
-    let superseded = merge_condition(
-        current_condition(existing, CONDITION_SUPERSEDED),
-        Condition {
-            r#type: CONDITION_SUPERSEDED.to_string(),
-            status: "True".to_string(),
-            observed_generation: roster.metadata.generation,
-            last_transition_time: Some(now),
-            reason: Some(REASON_SUPERSEDED_BY_TRUST_POLICY.to_string()),
-            message: Some(format!(
-                "{} TrustPolicy object(s) exist; bound namespaces resolve through them and no \
-                 longer consult this roster. Nothing here is deleted or edited — a rollback reads \
-                 it unchanged (docs/keys.md, rollback)",
-                policies.len()
-            )),
-        },
-    );
+    let superseded = superseded_condition(&roster, policies, now);
     let mut conditions: Vec<Condition> = existing
         .map(|c| {
             c.iter()
@@ -611,7 +686,11 @@ async fn supersede_roster(
         })
         .unwrap_or_default();
     conditions.push(superseded);
-    let patch = json!({ "status": { "conditions": conditions } });
+    let patch = with_precondition(
+        &roster.metadata,
+        ROSTER_NAME,
+        json!({ "status": { "conditions": conditions } }),
+    )?;
     if status_unchanged(
         roster
             .status
@@ -626,6 +705,47 @@ async fn supersede_roster(
         .await
         .map_err(ReconcileError::Api)?;
     Ok(())
+}
+
+/// Add seam **S7**'s optimistic-concurrency precondition to a `/status` merge
+/// patch.
+///
+/// Review finding F6. Kubernetes applies `metadata.resourceVersion` in a patch
+/// body as an update precondition and answers `409 Conflict` on a mismatch;
+/// the object name beside it makes the body self-identifying and ties the
+/// precondition to the object the request path names. This is
+/// `backup_schedule::status_patch_with_preconditions`'s shape, kept separate
+/// because that one is typed to `BackupSchedule`.
+///
+/// IT MATTERS MORE HERE THAN ANYWHERE ELSE IN THE CRATE, and that is why it
+/// went in for a `low`. `TrustRoster/default`'s `status.conditions` now has
+/// **two** writers doing read-modify-write on an array an RFC 7386 merge patch
+/// REPLACES: without the precondition, a roster reconcile computing from a
+/// watch-cache copy that predates [`supersede_roster`]'s write silently deletes
+/// `Superseded`, and the roster advertises the wrong thing for up to 300 s.
+///
+/// # Errors
+///
+/// [`ReconcileError::NoUid`] naming the object when it carries no
+/// `resourceVersion` — unreachable for anything that came from the API server,
+/// named rather than unwrapped.
+pub fn with_precondition(
+    meta: &kube::api::ObjectMeta,
+    name: &str,
+    mut patch: serde_json::Value,
+) -> Result<serde_json::Value, ReconcileError> {
+    let resource_version = meta
+        .resource_version
+        .clone()
+        .ok_or_else(|| ReconcileError::NoUid(format!("{name} (no metadata.resourceVersion)")))?;
+    patch
+        .as_object_mut()
+        .expect("a status patch is always a JSON object")
+        .insert(
+            "metadata".to_string(),
+            json!({ "name": name, "resourceVersion": resource_version }),
+        );
+    Ok(patch)
 }
 
 /// The `kube::runtime` reconcile entry point.
