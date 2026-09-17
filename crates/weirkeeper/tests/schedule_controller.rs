@@ -120,20 +120,24 @@ fn backup_value(
             "name": name,
             "namespace": NS,
             "uid": format!("backup-{name}"),
-            "ownerReferences": [{
-                "apiVersion": "logweir.dev/v1alpha1",
-                "kind": "BackupSchedule",
-                "name": "nightly",
-                "uid": owner_uid,
-                "controller": true,
-                "blockOwnerDeletion": true
-            }]
+            "resourceVersion": "41",
+            "labels": {
+                "logweir.dev/schedule": "nightly",
+                "logweir.dev/schedule-uid": owner_uid
+            }
+            // NO `ownerReferences` SINCE PLAT-05.2 (D1 §6.1). This fixture is
+            // what THIS controller creates, and it stopped making its runs the
+            // schedule's dependents: membership is `spec.scheduleRef {name,
+            // uid}` below, which survives the schedule being deleted. The
+            // LEGACY shape — a controller ownerReference and a `scheduleRef`
+            // with no UID — is what `tests/schedule_history.rs` builds, because
+            // migrating it is that file's subject.
         },
         "spec": {
             "sourceRef": { "name": "prod" },
             "topics": ["orders"],
             "archive": { "url": "s3://kafka-backups/logweir" },
-            "scheduleRef": { "name": "nightly" },
+            "scheduleRef": { "name": "nightly", "uid": owner_uid },
             "slot": name.get(name.len().saturating_sub(15)..).unwrap_or_default(),
             "triggeredBy": "schedule",
             "deadlineSeconds": 3600
@@ -1984,16 +1988,27 @@ fn the_backup_id_override_is_passed_not_defined() {
         backup.spec.schedule_ref.as_ref().map(|r| r.name.as_str()),
         Some("nightly")
     );
-    let owner = &backup
-        .metadata
-        .owner_references
-        .as_ref()
-        .expect("a scheduled Backup is owned by its schedule")[0];
-    assert_eq!(owner.kind, "BackupSchedule");
-    assert_eq!(owner.api_version, "logweir.dev/v1alpha1");
-    assert_eq!(owner.uid, UID);
-    assert_eq!(owner.controller, Some(true));
-    assert_eq!(owner.block_owner_deletion, Some(true));
+    // NO ownerReference TO THE SCHEDULE — PLAT-05.2, D1 §6.1. This assertion
+    // used to require one, `controller: true` and `blockOwnerDeletion: true`;
+    // that reference is what made `kubectl delete backupschedule` delete the
+    // history, and removing it is the whole of PLAT-05.2. The identity this
+    // test is about — `backup_id_for(scheduleUid, slot)` — is unchanged,
+    // because it is built from `spec.scheduleRef.uid`, asserted above, and
+    // never from an owner entry.
+    assert_eq!(
+        backup
+            .metadata
+            .owner_references
+            .as_deref()
+            .unwrap_or_default(),
+        &[],
+        "a scheduled Backup is NOT a dependent of its schedule (D1 §6.1); deleting the          schedule must leave this object, its plan ConfigMap and its Job in place"
+    );
+    assert_eq!(
+        backup.spec.schedule_ref.as_ref().and_then(|r| r.uid.as_deref()),
+        Some(UID),
+        "and the UID membership is built on is on the SPEC, where deleting the owner cannot          reach it"
+    );
     let labels = backup.metadata.labels.expect("labels");
     assert_eq!(labels[SCHEDULE_LABEL], "nightly");
     assert_eq!(labels[SLOT_LABEL], slot);
@@ -2736,12 +2751,23 @@ async fn a_steady_backup_schedule_is_patched_once_and_a_suspend_flip_once_more()
         .and_then(|c| c.last_transition_time)
         .expect("the settled condition carries a transition time");
 
-    // PASS 3 — an hour later, nothing about the schedule or the slot has moved.
-    // ZERO requests to `/status`.
+    // PASS 3 — half an hour later, nothing about the schedule or the slot has
+    // moved. ZERO requests to `/status`.
+    //
+    // HALF AN HOUR AND NOT AN HOUR SINCE PLAT-05.2, and the difference is a
+    // fact and not a fudge. D1 §6.7 re-inventories a schedule every 60 minutes,
+    // and `status.history.inventoriedAt` is when that last happened — so a pass
+    // exactly 3 600 s after pass 2 DOES move the status, once, because it took
+    // a real inventory. That is 24 writes a day, not the 2 880 this test is
+    // about, and it is guarded on its own in `tests/schedule_history.rs`
+    // (`the_hourly_inventory_is_the_only_thing_that_moves_a_settled_status`).
+    // Pass 3 therefore sits INSIDE the inventory window, where the property it
+    // names — a recomputed status equal to the stored one writes nothing — is
+    // the only thing in play.
     let mut steady = schedule("nightly", UID, DAILY, false);
     steady.status = Some(settled.clone());
     let (client, _calls, bodies) = mock_client_recording_bodies(daily_routes(&name, 409));
-    let outcome = reconcile_schedule(&steady, &client, utc(2026, 9, 10, 13, 0))
+    let outcome = reconcile_schedule(&steady, &client, utc(2026, 9, 10, 12, 30))
         .await
         .expect("the steady reconcile completes");
     let third = bodies.lock().expect("readable").clone();
@@ -3802,21 +3828,40 @@ async fn an_invalid_pending_reference_is_cleared_with_a_resource_version_precond
 async fn allow_rejects_foreign_ownerless_and_old_generation_409_winners() {
     let now = utc(2026, 9, 10, 12, 1);
     let current = scheduled_backup_name("nightly", &slot_name(now)).unwrap();
+    // THE THREE WAYS TO FAIL MEMBERSHIP, RESPELLED FOR PLAT-05.2. They used to
+    // be three shapes of ownerReference, because that was the authority; D1 §6.1
+    // removed the reference, so `spec.scheduleRef` is. The cases are the same
+    // three facts — a different schedule UID, no reference at all, and a
+    // reference naming another schedule — plus a fourth that the old spelling
+    // could not express: a LEGACY object, with no `scheduleRef.uid`, whose
+    // surviving controller ownerReference names somebody else. Membership rule
+    // 2 still reads that one, so it still has to be refused.
     let mut wrong_name = backup_value(&current, UID, Some("Running"), None);
-    wrong_name["metadata"]["ownerReferences"][0]["name"] = serde_json::json!("retired-nightly");
+    wrong_name["spec"]["scheduleRef"]["name"] = serde_json::json!("retired-nightly");
     let mut ownerless = backup_value(&current, UID, Some("Running"), None);
-    ownerless["metadata"]
+    ownerless["spec"]
         .as_object_mut()
         .unwrap()
-        .remove("ownerReferences");
+        .remove("scheduleRef");
+    let mut legacy_other_owner = backup_value(&current, UID, Some("Running"), None);
+    legacy_other_owner["spec"]["scheduleRef"] = serde_json::json!({ "name": "nightly" });
+    legacy_other_owner["metadata"]["ownerReferences"] = serde_json::json!([{
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "BackupSchedule",
+        "name": "retired-nightly",
+        "uid": OTHER_UID,
+        "controller": true,
+        "blockOwnerDeletion": true
+    }]);
 
     for (case, holder) in [
         (
             "old UID",
             backup_value(&current, OTHER_UID, Some("Running"), None),
         ),
-        ("ownerless", ownerless),
-        ("wrong controller name", wrong_name),
+        ("no schedule reference", ownerless),
+        ("wrong schedule name", wrong_name),
+        ("legacy owner naming another schedule", legacy_other_owner),
     ] {
         let schedule = schedule("nightly", UID, "* * * * *", false);
         let (client, calls, bodies) = mock_client_recording_bodies(vec![
@@ -5392,6 +5437,11 @@ async fn downtime_with_catch_up_none_records_missed_and_creates_nothing() {
     });
     let latest = utc(2026, 9, 10, 12, 30);
     let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+        // PLAT-05.2: step 1's inventory (D1 §6.7) replaced the bootstrap
+        // LIST, and it runs on the FIRST pass over a schedule whose
+        // `status.history` is absent. This schedule has no runs, so the
+        // one page it reads is empty.
+        no_backups(),
         absent_backup(&due_name(latest)),
         Route {
             method: "POST",
@@ -5497,6 +5547,11 @@ async fn downtime_with_catch_up_latest_creates_exactly_one_catch_up() {
     });
     let name: &'static str = Box::leak(due_name(latest).into_boxed_str());
     let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+        // PLAT-05.2: step 1's inventory (D1 §6.7) replaced the bootstrap
+        // LIST, and it runs on the FIRST pass over a schedule whose
+        // `status.history` is absent. This schedule has no runs, so the
+        // one page it reads is empty.
+        no_backups(),
         absent_backup(name),
         Route {
             method: "POST",
@@ -5595,6 +5650,11 @@ async fn catch_up_never_runs_a_slot_before_the_observed_revision() {
         ..BackupScheduleStatus::default()
     });
     let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+        // PLAT-05.2: step 1's inventory (D1 §6.7) replaced the bootstrap
+        // LIST, and it runs on the FIRST pass over a schedule whose
+        // `status.history` is absent. This schedule has no runs, so the
+        // one page it reads is empty.
+        no_backups(),
         absent_backup(&due_name(latest)),
         // PRESENT AND UNUSED.
         Route {
@@ -6407,6 +6467,23 @@ async fn a_blocked_slot_is_not_counted_and_waiting_longer_does_not_count_it_agai
             status: 200,
             body: backup_value(&blocker, UID, Some("Running"), Some(&blocker)).to_string(),
         },
+        // PLAT-05.2: step 1's inventory (D1 §6.7) replaced the bootstrap
+        // LIST, and it runs on the FIRST pass over a schedule whose
+        // `status.history` is absent. IT SEES THE BLOCKER, because that is
+        // what the inventory is for: a repaired `activeRuns` has to contain
+        // the run that is blocking, or the slot this test says is blocked
+        // would be admitted instead.
+        Route {
+            method: "GET",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 200,
+            body: backup_list_body(vec![backup_value(
+                &blocker,
+                UID,
+                Some("Running"),
+                Some(&blocker),
+            )]),
+        },
         absent_backup(&current),
         // PRESENT AND UNUSED.
         Route {
@@ -6556,6 +6633,11 @@ async fn a_final_disposition_is_not_counted_twice_for_the_same_slot() {
     });
 
     let routes = vec![
+        // PLAT-05.2: step 1's inventory (D1 §6.7) replaced the bootstrap
+        // LIST, and it runs on the FIRST pass over a schedule whose
+        // `status.history` is absent. This schedule has no runs, so the
+        // one page it reads is empty.
+        no_backups(),
         absent_backup(&due_name(latest)),
         // PRESENT AND UNUSED in both passes.
         Route {
@@ -6642,6 +6724,9 @@ async fn a_final_disposition_is_not_counted_twice_for_the_same_slot() {
         ..BackupScheduleStatus::default()
     });
     let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+        // PLAT-05.2: this pass's status carries no `history` block either, so
+        // step 1 inventories before it admits. The schedule has no runs yet.
+        no_backups(),
         absent_backup(admitted),
         Route {
             method: "POST",

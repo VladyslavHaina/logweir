@@ -2639,10 +2639,20 @@ fn a_steady_schedule_with_an_archive_does_not_rewrite_evaluated_at() {
             .expect("the patched status is a BackupScheduleStatus"),
     );
 
-    // PASS 2 — A DIFFERENT CLOCK, six hours later, over the SAME archive.
-    // SIX HOURS LATER, in the same 24 h slot: the schedule is `suspend: true`
-    // so no slot decision moves, and the archive is unchanged.
-    let later = now() + chrono::Duration::hours(6);
+    // PASS 2 — A DIFFERENT CLOCK, half an hour later, over the SAME archive.
+    // In the same 24 h slot: the schedule is `suspend: true` so no slot
+    // decision moves, and the archive is unchanged.
+    //
+    // HALF AN HOUR AND NOT SIX SINCE PLAT-05.2. D1 §6.7 re-inventories a
+    // schedule's retained history every 60 minutes and records when in
+    // `status.history.inventoriedAt`, so a second pass six hours out DOES move
+    // the status — once, because it took a real inventory. That is 24 writes a
+    // day, four orders of magnitude below the ~3,850-in-90-s defect this test
+    // is about, and it is guarded on its own in `tests/schedule_history.rs`
+    // (`the_hourly_inventory_is_the_only_thing_that_moves_a_settled_status`).
+    // This pass stays inside the inventory window so that the only thing it
+    // measures is the retention report's own idempotence.
+    let later = now() + chrono::Duration::minutes(30);
     let second = rt.block_on(async {
         let (client, _rec, bodies) = mock_client_recording_bodies(route());
         weirkeeper::controllers::backup_schedule::reconcile_schedule_with_archive(
