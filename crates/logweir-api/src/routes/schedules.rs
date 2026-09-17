@@ -219,6 +219,19 @@ pub fn build(
             // the saved-destination reference is absent and the sentinel rule
             // has nothing to bind.
             destination_ref: None,
+            // D1 W2 added the cadence and selection policy fields to
+            // `BackupScheduleSpec`. This route is PLAT-17.1's create shape and
+            // its DTO does not carry them yet (D1 §11.1 gives the API routes to
+            // W6), so it writes the absent value for each — which is exactly
+            // today's behaviour: UTC, a one-hour starting deadline, no
+            // catch-up, no retries, a 3600 s run deadline and a named
+            // allowlist.
+            all_user_topics: None,
+            time_zone: None,
+            starting_deadline_seconds: None,
+            catch_up_policy: None,
+            retry: None,
+            active_deadline_seconds: None,
             concurrency_policy: match request.concurrency_policy {
                 None | Some(ConcurrencyPolicy::Forbid) => CrdConcurrency::Forbid,
                 Some(ConcurrencyPolicy::Allow) => CrdConcurrency::Allow,

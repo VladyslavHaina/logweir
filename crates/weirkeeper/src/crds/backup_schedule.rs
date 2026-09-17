@@ -1,28 +1,45 @@
-//! `BackupSchedule` — the one kind with a mutable field, and therefore the one
-//! kind whose CEL seal is object-level.
+//! `BackupSchedule` — the kind whose policy an operator edits, and the one
+//! field editing may never reach.
 //!
-//! # The seal, and why it is not five per-field rules
+//! # What PLAT-05.1 changed, and the one thing it did not
 //!
-//! Five of the six kinds carry `self == oldSelf` on `.spec`. This one cannot:
-//! `suspend` must be flippable without recreating the schedule, which is the
-//! only write the controller performs on any `.spec` in tag 1 (spec §7).
+//! Until D1 this spec carried an object-level seal that made `suspend` the one
+//! mutable field, so changing a cron expression meant creating a second
+//! schedule and draining the first. D1 §5.1 inverts that: **every field is
+//! mutable except `sourceRef`**, because a schedule's identity is the cluster
+//! it protects and nothing else. One schedule's history must not mix two
+//! clusters, so `sourceRef` keeps its seal ([`SOURCE_REF_IMMUTABLE_RULE`], D1's
+//! rule R1) and everything else — cadence, zone, deadlines, catch-up, retry,
+//! topics, archive, destination, retention, concurrency, suspend — is future
+//! policy the next admission reads.
 //!
-//! The obvious shape — a `self == oldSelf` transition rule on each of the
-//! other six fields — DOES NOT HOLD. A per-field transition rule is evaluated
-//! only when `oldSelf` exists for that field, so an OPTIONAL field could be
-//! **added** after creation (absent → present) and the rule would never fire.
-//! `retention` is optional, and `retention.keepDays` inside it is optional
-//! too, so the hole is not theoretical: an adopter could add a retention block
-//! to an approved, running schedule. `optionalOldSelf` closes exactly this and
-//! is Kubernetes 1.30+, above the 1.29 floor Global Constraint 25 fixes.
+//! That is safe because a **run** is still immutable. Each created `Backup`
+//! copies the policy and records `spec.scheduleRef {uid, generation,
+//! runPolicySha256}`, and PLAT-06.1 freezes the resolved settings into an
+//! immutable ConfigMap before any Job exists. An edit therefore changes the
+//! next admission and can never reach a run that already exists.
 //!
-//! [`SUSPEND_ONLY_RULE`] is therefore ONE object-level rule on `.spec`, which
-//! is evaluated on every update, and its `has(self.x) == has(oldSelf.x)`
-//! halves are what refuse the absent → present transition.
+//! `destinationRef` WAS SEALED BY THE OLD RULE AND IS NOW MUTABLE, and that is
+//! a decision rather than an oversight: D1 §5.1 makes `archive` mutable, and
+//! `archive` and `destinationRef` are two spellings of one location (the
+//! sentinel rule below binds them). Sealing one while the other moves would be
+//! an immutability claim an operator could route around by editing the
+//! spelling the seal did not name.
+//!
+//! # Why R1 is still an object-level rule
+//!
+//! The obvious shape — `self.sourceRef == oldSelf.sourceRef` on
+//! `.spec.sourceRef` — DOES NOT HOLD for an optional field, because a
+//! per-field transition rule is evaluated only when `oldSelf` exists at that
+//! path, so an absent → present transition never fires it. `sourceRef` is
+//! required today, but a rule whose soundness depends on a `required:` list
+//! somebody may edit is a rule that stops working silently. R1 is therefore on
+//! `.spec`, where it is evaluated on every update, and it carries its own
+//! `has(self.x) == has(oldSelf.x)` half.
 //!
 //! # One disclosed divergence, with its reason
 //!
-//! Critique B M3 supplies this rule text:
+//! Critique B M3 supplied a map-shaped rule text:
 //!
 //! ```text
 //! self.filter(k, k != 'suspend').all(k, has(oldSelf[k]) == has(self[k]) && (!has(self[k]) || self[k] == oldSelf[k]))
@@ -41,33 +58,83 @@
 //!   ERROR: <input>:1:50: invalid argument to has() macro
 //! ```
 //!
-//! — three times over, once for each `has()` on a subscript. The enumerated
-//! form in [`SUSPEND_ONLY_RULE`] holds M3's property exactly — object-level
-//! evaluation, the absent → present transition closed, `suspend` alone mutable
-//! — in CEL the API server compiles, and the same live run confirmed the
-//! behaviour end to end: changing `spec.schedule` was refused with
-//! [`SUSPEND_ONLY_MESSAGE`], flipping `spec.suspend` was accepted, and ADDING
-//! the absent optional `spec.retention` was refused.
-//!
 //! This note exists so the next reader does not "restore" the map form. The
 //! rejected string is above; it is quoted here and nowhere else.
+//!
+//! # What is deliberately NOT in CEL
+//!
+//! "Exactly one of a non-empty `topics` or `allUserTopics`" is not expressible
+//! without breaking stored objects: a schedule stored with `topics: []` would
+//! fail the rule on every update, including a `suspend` flip, and the 1.29
+//! floor has no validation ratcheting. Cron validity and time-zone validity are
+//! not expressible at all. All three are controller fail-closed checks (D1 §4.5
+//! step 0) and API 422s; the CRD carries only what it can carry without
+//! stranding an object somebody already created.
 
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
+use super::selection::AllUserTopics;
 use super::{ArchiveRef, Condition, LocalRef, SpecRule, Time};
 
-/// The object-level CEL rule that makes `spec.suspend` the only mutable field.
+/// The IANA zone-name grammar D1 §4.1 states.
 ///
-/// Read the module header for why this is one rule on `.spec` and not six
-/// rules on six fields, and for the rejected map-based form. The clause order
-/// is the field order of [`BackupScheduleSpec`], minus `suspend`.
-pub const SUSPEND_ONLY_RULE: &str = "has(self.schedule) == has(oldSelf.schedule) && (!has(self.schedule) || self.schedule == oldSelf.schedule) && has(self.sourceRef) == has(oldSelf.sourceRef) && (!has(self.sourceRef) || self.sourceRef == oldSelf.sourceRef) && has(self.topics) == has(oldSelf.topics) && (!has(self.topics) || self.topics == oldSelf.topics) && has(self.archive) == has(oldSelf.archive) && (!has(self.archive) || self.archive == oldSelf.archive) && has(self.destinationRef) == has(oldSelf.destinationRef) && (!has(self.destinationRef) || self.destinationRef == oldSelf.destinationRef) && has(self.concurrencyPolicy) == has(oldSelf.concurrencyPolicy) && (!has(self.concurrencyPolicy) || self.concurrencyPolicy == oldSelf.concurrencyPolicy) && has(self.retention) == has(oldSelf.retention) && (!has(self.retention) || self.retention == oldSelf.retention)";
+/// A SYNTAX GATE AND NOT A ZONE LIST. The schema cannot hold the tz database,
+/// and an enum of 600 zone names would go stale with every tzdata release, so
+/// the CRD refuses what is not shaped like a zone name and the controller
+/// resolves the rest against the compiled-in database — `Ready=False` with
+/// reason `UnknownTimeZone` for a well-shaped name nobody has (D1 §4.3).
+pub const TIME_ZONE_PATTERN: &str = r"^[A-Za-z][A-Za-z0-9_+\-]*(/[A-Za-z0-9_+\-]+){0,2}$";
 
-/// The message the API server returns when [`SUSPEND_ONLY_RULE`] refuses an
-/// update.
-pub const SUSPEND_ONLY_MESSAGE: &str =
-    "only spec.suspend is mutable; create a new BackupSchedule instead";
+/// **R1** (D1 §5.2). The object-level CEL rule that makes `spec.sourceRef` the
+/// one field an edit may not reach.
+///
+/// Read the module header for why this is on `.spec` and not on
+/// `.spec.sourceRef`, and for the rejected map-based form. It compares a
+/// REQUIRED field to itself, so no stored object can fail it — which is what
+/// makes it applicable on the 1.29 floor, where there is no validation
+/// ratcheting to rescue an object an added rule strands.
+pub const SOURCE_REF_IMMUTABLE_RULE: &str = "has(self.sourceRef) == has(oldSelf.sourceRef) && (!has(self.sourceRef) || self.sourceRef == oldSelf.sourceRef)";
+
+/// The message the API server returns when [`SOURCE_REF_IMMUTABLE_RULE`]
+/// refuses an update.
+pub const SOURCE_REF_IMMUTABLE_MESSAGE: &str =
+    "spec.sourceRef is immutable; create a new BackupSchedule to protect a different cluster";
+
+/// **R2** (D1 §5.2). Dynamic selection and a named allowlist are two answers to
+/// one question.
+///
+/// A VALIDATION RULE AND NOT A TRANSITION RULE, so it runs on create as well.
+/// It names a field no stored object has (`allUserTopics` is new), so it cannot
+/// strand anything: the left disjunct is true for every object that exists
+/// today.
+///
+/// The converse — "`topics: []` requires `allUserTopics`" — is deliberately NOT
+/// here; see the module header.
+pub const SELECTION_SHAPE_RULE: &str = "!has(self.allUserTopics) || size(self.topics) == 0";
+
+/// The message [`SELECTION_SHAPE_RULE`] travels with.
+pub const SELECTION_SHAPE_MESSAGE: &str = "spec.allUserTopics requires spec.topics to be empty";
+
+/// **R3** (D1 §5.2). The retry name budget, on the schema ROOT because that is
+/// the one node a rule may read `self.metadata.name` from.
+///
+/// A retry `Backup` is named `logweir-backup-<schedule>-<slot>-r<N>`, three
+/// characters longer than attempt 0, so a schedule that wants retries has a
+/// 29-character name budget instead of 32
+/// ([`crate::slot::max_schedule_name_len`]). Refusing the EDIT is the only
+/// place this can be refused usefully: refusing at admission time would leave a
+/// schedule that looks configured and silently never retries.
+///
+/// `maxRetries == 0` is exempt, because a schedule that configured zero retries
+/// never composes a `-r<N>` name. No stored object has `spec.retry`, so the
+/// first disjunct is true for every object that exists today.
+pub const RETRY_NAME_BUDGET_RULE: &str =
+    "!has(self.spec.retry) || self.spec.retry.maxRetries == 0 || size(self.metadata.name) <= 29";
+
+/// The message [`RETRY_NAME_BUDGET_RULE`] travels with.
+pub const RETRY_NAME_BUDGET_MESSAGE: &str =
+    "a BackupSchedule with retries must be named in 29 characters or fewer; retry Backups are named logweir-backup-<schedule>-<slot>-r<N>";
 
 /// The CEL rule that ties `spec.destinationRef` to the sentinel in
 /// `spec.archive.url`.
@@ -84,11 +151,15 @@ pub const DESTINATION_SENTINEL_MESSAGE: &str = super::backup::DESTINATION_SENTIN
 
 /// The rules on `BackupSchedule`'s `.spec`.
 ///
-/// The seal is first, the sentinel second: the seal is a transition rule and
-/// is skipped on create, and the sentinel is a validation rule that must run
-/// on create as well.
-pub const SPEC_RULES: [SpecRule; 2] = [
-    SpecRule::new(SUSPEND_ONLY_RULE, SUSPEND_ONLY_MESSAGE),
+/// The seal (R1) is first: it is a transition rule and is skipped on create.
+/// R2 and the destination sentinel are validation rules that must run on create
+/// as well. R3 is not here — a name-length budget may only read
+/// `self.metadata.name`, which is readable only at the schema ROOT, so it is
+/// attached by `crds::mod`'s emitter through
+/// [`super::attach_root_rule`].
+pub const SPEC_RULES: [SpecRule; 3] = [
+    SpecRule::new(SOURCE_REF_IMMUTABLE_RULE, SOURCE_REF_IMMUTABLE_MESSAGE),
+    SpecRule::new(SELECTION_SHAPE_RULE, SELECTION_SHAPE_MESSAGE),
     SpecRule::new(DESTINATION_SENTINEL_RULE, DESTINATION_SENTINEL_MESSAGE),
 ];
 
@@ -126,6 +197,77 @@ pub enum ConcurrencyPolicy {
     Forbid,
     /// Permit different scheduled slots to run at the same time.
     Allow,
+}
+
+/// What to do with a slot that came due while nothing was watching (D1 §4.1).
+///
+/// A CRD ENUM BESIDE [`crate::cadence::CatchUpPolicy`], not that type itself,
+/// and the reason is ownership: `cadence` is a pure module with no `schemars`
+/// dependency and no Kubernetes types in it, and making a wire schema out of it
+/// would put the CRD's compatibility contract inside a module whose job is
+/// arithmetic. [`CatchUpPolicy::policy`] is the one conversion, so the two
+/// cannot drift.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, Default, JsonSchema, PartialEq, Eq)]
+pub enum CatchUpPolicy {
+    /// Count the slot in `status.missedSlots` and move on — **today's
+    /// behaviour, and what an absent field means**.
+    #[default]
+    None,
+    /// The LATEST due slot, and only that one, may still run after its
+    /// starting deadline. At most one catch-up run, ever. Bounded(N) was
+    /// rejected (D1 §4.10): `logweir backup run` captures what the broker
+    /// retains WHEN IT RUNS, so N catch-up runs back to back produce
+    /// near-identical archives at N times the load.
+    Latest,
+}
+
+impl CatchUpPolicy {
+    /// This policy as the cadence engine spells it.
+    #[must_use]
+    pub const fn policy(self) -> crate::cadence::CatchUpPolicy {
+        match self {
+            Self::None => crate::cadence::CatchUpPolicy::None,
+            Self::Latest => crate::cadence::CatchUpPolicy::Latest,
+        }
+    }
+}
+
+/// `spec.retry` (D1 §4.1). Absent means **no retries**.
+///
+/// `maxRetries` IS REQUIRED AND HAS NO SCHEMA DEFAULT, so writing the block at
+/// all is a decision about how many attempts a slot gets; `0` is a legal value
+/// that records "retries were considered and declined". `delaySeconds` is
+/// optional and defaults to [`crate::cadence::DEFAULT_RETRY_DELAY_SECONDS`].
+///
+/// Retries are only ever attempted for a **retryable** failure (D1 §4.6), only
+/// for the latest due slot, and only until the next slot comes due.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RetrySpec {
+    /// How many retries one slot may have, `0..=3`. Each retry is a new
+    /// `Backup` with a new execution id: a failed attempt's partial archive is
+    /// never appended to.
+    #[schemars(range(min = 0, max = 3))]
+    pub max_retries: i32,
+    /// Seconds between a failed attempt finishing and its retry becoming
+    /// admissible. Absent means 300.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 60, max = 21600))]
+    pub delay_seconds: Option<i64>,
+}
+
+impl RetrySpec {
+    /// This block as the cadence engine spells it, with the documented default
+    /// filled in.
+    #[must_use]
+    pub fn policy(&self) -> crate::cadence::RetryPolicy {
+        crate::cadence::RetryPolicy {
+            max_retries: u32::try_from(self.max_retries).unwrap_or(u32::MAX),
+            delay_seconds: self
+                .delay_seconds
+                .unwrap_or(crate::cadence::DEFAULT_RETRY_DELAY_SECONDS),
+        }
+    }
 }
 
 /// What a retention evaluation found. **Nothing here was deleted.**
@@ -274,19 +416,20 @@ pub struct RemovableSetReport {
     pub rank: Option<i64>,
 }
 
-/// `BackupSchedule.spec`. Only `suspend` is mutable — see the module header.
+/// `BackupSchedule.spec`. Every field is editable except `sourceRef` — see the
+/// module header.
 #[derive(kube::CustomResource, Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[kube(
     group = "logweir.dev",
     version = "v1alpha1",
     kind = "BackupSchedule",
-    doc = "A recurring backup of a named topic set into an archive. `spec.suspend` is the only mutable field; every other field is sealed by an object-level CEL rule. Retention REPORTS what it would remove and deletes nothing.",
+    doc = "A recurring backup of a topic set into an archive. Every spec field is EDITABLE except `sourceRef`, which is sealed by an object-level CEL rule; each created Backup copies the policy and records the revision it ran, so an edit reaches the next run and never a run that exists. Retention REPORTS what it would remove and deletes nothing.",
     plural = "backupschedules",
     singular = "backupschedule",
     namespaced,
     status = "BackupScheduleStatus",
     printcolumn = r#"{"name":"SCHEDULE","type":"string","jsonPath":".spec.schedule"}"#,
-    printcolumn = r#"{"name":"SUSPEND","type":"string","jsonPath":".spec.suspend","description":"the one mutable spec field"}"#,
+    printcolumn = r#"{"name":"SUSPEND","type":"string","jsonPath":".spec.suspend"}"#,
     printcolumn = r#"{"name":"LAST","type":"date","jsonPath":".status.lastFireTime"}"#,
     printcolumn = r#"{"name":"NEXT","type":"date","jsonPath":".status.nextFireTime"}"#,
     printcolumn = r#"{"name":"READY","type":"string","jsonPath":".status.conditions[?(@.type==\"Ready\")].status"}"#,
@@ -294,22 +437,40 @@ pub struct RemovableSetReport {
 )]
 #[serde(rename_all = "camelCase")]
 pub struct BackupScheduleSpec {
-    /// A five-field cron expression, in UTC: minute hour day-of-month month
+    /// A five-field cron expression: minute hour day-of-month month
     /// day-of-week. `*`, a literal, a comma list, an `a-b` range and a `*/n`
     /// step are accepted, as are `@hourly`, `@daily` and `@weekly`; anything
     /// else is refused with a `Ready` condition naming the field, never read as
-    /// a silent match-all. A slot that comes due more than the ONE-HOUR
-    /// missed-slot horizon before the controller looks is skipped and recorded
-    /// in `status.lastMissedSlot`.
+    /// a silent match-all. The fields are read in `timeZone`, which is UTC when
+    /// absent; the slot identity is always the UTC instant. A slot that comes
+    /// due more than `startingDeadlineSeconds` before the controller looks is
+    /// skipped and counted in `status.missedSlots`, unless `catchUpPolicy` is
+    /// `Latest`.
     pub schedule: String,
     /// The `KafkaCluster` to back up, in this namespace.
+    ///
+    /// **The one immutable field on this spec.** A schedule's identity is the
+    /// cluster it protects; one schedule's history must not mix two clusters,
+    /// so protecting a different cluster is a different schedule.
     pub source_ref: LocalRef,
     /// NAMED topics, never patterns. Global Constraint 18's first rail and
     /// guard **G-GLOB**: a glob metacharacter is refused, and an omitted list
     /// is not permitted at all — the one shape that would mean "everything" to
     /// the engine. A mandatory allowlist whose absence means "all topics" is
     /// not an allowlist.
+    ///
+    /// `[]` WITH `allUserTopics` SET is the one other legal shape: dynamic
+    /// selection, resolved per run. `[]` on its own is refused by the
+    /// controller before it admits anything.
     pub topics: Vec<String>,
+    /// Dynamic selection: every user topic the run's principal can see, minus
+    /// the exclusions. Requires `topics: []` (CEL).
+    ///
+    /// Wire-compatible with an older controller by construction: it reads
+    /// `topics: []`, renders an empty list, and the runner's own empty-list
+    /// rail exits 3 without contacting the engine.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub all_user_topics: Option<AllUserTopics>,
     /// Where the backup is written.
     ///
     /// With `destinationRef` set this is the sentinel
@@ -329,19 +490,234 @@ pub struct BackupScheduleSpec {
     /// stored before this field was introduced. `Allow` is explicit.
     #[serde(default)]
     pub concurrency_policy: ConcurrencyPolicy,
+    /// The IANA zone `schedule`'s fields are read in. **Absent means UTC and
+    /// reproduces the slots an older controller computed, instant for
+    /// instant.**
+    ///
+    /// The slot identity stays the UTC instant, so names remain unique and
+    /// monotonic whatever the zone. Every real instant whose local wall time
+    /// matches fires once; a matching local time that does not exist (a DST
+    /// gap) fires once at the end of the gap; a fixed local time inside a
+    /// repeated hour therefore fires at BOTH occurrences, and
+    /// `status.nextRuns` marks which is which. A name this build's tz database
+    /// does not have is `Ready=False` with reason `UnknownTimeZone` and admits
+    /// nothing — never a silent fall back to UTC.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 64), regex(path = "TIME_ZONE_PATTERN"))]
+    pub time_zone: Option<String>,
+    /// How long after a slot came due it may still start. **Absent means
+    /// 3600** — the one-hour horizon an older controller hard-coded.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 60, max = 604800))]
+    pub starting_deadline_seconds: Option<i64>,
+    /// What to do with a slot that is past its starting deadline. **Absent
+    /// means `None`** — count it and move on, which is today's behaviour.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub catch_up_policy: Option<CatchUpPolicy>,
+    /// How many times a slot may be retried, and how long after the failure.
+    /// **Absent means no retries**, which is today's behaviour. Only a
+    /// retryable failure is retried, only for the latest due slot, and only
+    /// until the next slot comes due.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetrySpec>,
+    /// The Job deadline copied into every created `Backup`'s
+    /// `spec.deadlineSeconds`. **Absent means 3600**, the constant an older
+    /// controller used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(range(min = 60, max = 86400))]
+    pub active_deadline_seconds: Option<i64>,
     /// `{keepLast, keepDays}` — **reporting only**. Logweir deletes nothing.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention: Option<Retention>,
-    /// Stop firing new `Backup`s. **The only mutable field on this spec**, and
-    /// the only `.spec` write the controller performs on any kind in tag 1.
+    /// Stop admitting new slots, catch-ups and retries. Runs that already
+    /// exist are unaffected, and a reservation that was already accepted is
+    /// still resumed — suspending stops future work, it does not cancel
+    /// accepted work.
     #[serde(default)]
     pub suspend: bool,
+}
+
+/// The revision the controller last evaluated, and the digest of what a run
+/// under it does (D1 §4.8).
+///
+/// `runPolicySha256` COVERS WHAT A RUN DOES AND NOT WHEN IT RUNS. Cadence, zone,
+/// deadlines, catch-up, retry, concurrency, retention and `suspend` are
+/// excluded, so an operator can see at a glance that suspending and resuming a
+/// schedule left the policy digest alone and that a topic-list edit did not.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyStatus {
+    /// The `metadata.generation` this block was computed from.
+    pub generation: i64,
+    /// `sha256:<lowercase hex>` over the run policy of that generation.
+    pub run_policy_sha256: String,
+    /// The EFFECTIVE zone — `UTC` when `spec.timeZone` is absent, so a reader
+    /// never has to know the default to read the status.
+    pub time_zone: String,
+    /// Which time-zone database resolved it, so a slot computed by one release
+    /// can be explained after a tzdata update.
+    pub tzdb: String,
+    /// When this revision was first observed. A catch-up never runs a slot
+    /// older than this: a schedule edited at noon does not retroactively back
+    /// up the morning under the new policy.
+    pub effective_since: Time,
+    /// When this status last MOVED — not when the controller last looked.
+    ///
+    /// The controller re-examines every schedule every 30 s and deliberately
+    /// writes nothing when the computed status equals the stored one, so this
+    /// instant standing still means "nothing has changed", not "nobody is
+    /// watching". The staleness signal is `status.nextRuns[0].at`: a live
+    /// controller rewrites the previews once their first entry has passed.
+    pub evaluated_at: Time,
+}
+
+/// One upcoming firing (D1 §4.4).
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct NextRun {
+    /// The UTC instant.
+    pub at: Time,
+    /// The same instant rendered in the schedule's zone, offset included —
+    /// `2026-10-25T02:30:00+02:00`.
+    pub local_time: String,
+    /// `NonexistentLocalTimeShifted`, `RepeatedLocalTimeFirst` or
+    /// `RepeatedLocalTimeSecond`. Omitted when the instant needed no
+    /// adjustment, which is every instant outside a DST transition.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub adjustment: Option<String>,
+}
+
+/// What happened to the most recent slot the controller decided about
+/// (D1 §4.8).
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct LastSlot {
+    /// The slot, `yyyymmdd-hhmmss` of its UTC instant.
+    pub slot: String,
+    /// The instant that name spells.
+    pub due_at: Time,
+    /// Which attempt of it this disposition is about.
+    pub attempt: i32,
+    /// One of `Admitted`, `CaughtUp`, `Retried`, `Missed`, `Superseded`,
+    /// `Blocked`, `NameUnavailable`, `Released`, `Failed`, `Exhausted`.
+    pub disposition: String,
+    /// The `Backup` the disposition is about, when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub backup_ref: Option<LocalRef>,
+    /// The `Ready` reason that accompanied the decision.
+    pub reason: String,
+    /// When it was decided.
+    pub decided_at: Time,
+}
+
+/// One slot that came due and was not run (D1 §4.8).
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MissedSlot {
+    /// The slot.
+    pub slot: String,
+    /// `ControllerUnavailable`, `ConcurrencyBlocked`, `Superseded` or
+    /// `BeforeRevision`.
+    pub reason: String,
+    /// When the controller noticed.
+    pub recorded_at: Time,
+}
+
+/// The running total of slots that came due and were not run (D1 §4.8).
+///
+/// A COUNT PLUS A BOUNDED SAMPLE. A controller down for a week under a
+/// one-minute schedule skipped ten thousand slots; naming them all would put
+/// half a megabyte in a status. The count is the fact an operator acts on and
+/// the ten most recent are the evidence.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MissedSlots {
+    /// How many slots have been skipped since the schedule was created.
+    pub count: i64,
+    /// Whether any single evaluation stopped at its 1000-slot enumeration cap,
+    /// so `count` is a floor rather than a total.
+    pub count_capped: bool,
+    /// The newest slot the accounting has already considered. It advances only
+    /// when a slot receives a FINAL disposition, so a slot that waits and is
+    /// then superseded is counted exactly once.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_evaluated_slot: Option<String>,
+    /// The ten most recent skips, newest first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recent: Option<Vec<MissedSlot>>,
+}
+
+/// A slot admitted in status but whose `Backup` creation has not been confirmed
+/// (D1 §4.8, §5.4).
+///
+/// THE ATOMIC BOUNDARY. The reservation is a resourceVersion-conditional merge
+/// PATCH; a 409 means an edit landed and the reconcile starts again under the
+/// new generation. Once it is accepted, the `Backup` is created from the same
+/// in-memory object, so the run's copied policy is always the policy of the
+/// generation recorded here.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct PendingRun {
+    /// The `Backup`'s deterministic name.
+    pub name: String,
+    /// The slot it is for.
+    pub slot: String,
+    /// `0` for a scheduled or catch-up run, `1..=3` for a retry.
+    pub attempt: i32,
+    /// `Scheduled`, `CatchUp` or `Retry`.
+    pub kind: String,
+    /// The `metadata.generation` the reservation was made under, and therefore
+    /// the generation the created run records.
+    pub generation: i64,
+}
+
+/// One schedule-created run that is not terminal (D1 §4.8).
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveRun {
+    /// The `Backup`'s name.
+    pub name: String,
+    /// `Scheduled`, `CatchUp` or `Retry`.
+    pub kind: String,
+    /// `0` for a scheduled or catch-up run, `1..=3` for a retry.
+    pub attempt: i32,
 }
 
 /// `BackupSchedule.status`.
 #[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupScheduleStatus {
+    /// The `metadata.generation` the controller has evaluated. A generation
+    /// ahead of this one is an edit the controller has not seen yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
+    /// The revision that is in force, and the digest of what a run under it
+    /// does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<PolicyStatus>,
+    /// The next five firings, computed by the controller. **The browser never
+    /// evaluates cron**; it renders what this says. Empty while the schedule is
+    /// suspended or its policy is invalid.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub next_runs: Option<Vec<NextRun>>,
+    /// What happened to the most recent slot that was decided about.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_slot: Option<LastSlot>,
+    /// How many slots came due and were not run, with the ten most recent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub missed_slots: Option<MissedSlots>,
+    /// The reservation, if one is outstanding. `pendingBackupRef` mirrors its
+    /// name for readers written before this block existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_run: Option<PendingRun>,
+    /// Every nonterminal schedule-created run, at most ten. `activeBackupRef`
+    /// mirrors the first entry.
+    ///
+    /// An ABSENT list and an EMPTY list are different facts: absent means this
+    /// controller has not yet taken an inventory of the schedule's runs, and
+    /// empty means it has and there are none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active_runs: Option<Vec<ActiveRun>>,
     /// When this schedule last created a `Backup`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_fire_time: Option<Time>,

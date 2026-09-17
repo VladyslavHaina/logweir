@@ -1399,8 +1399,7 @@ spec:
     - jsonPath: .spec.schedule
       name: SCHEDULE
       type: string
-    - description: the one mutable spec field
-      jsonPath: .spec.suspend
+    - jsonPath: .spec.suspend
       name: SUSPEND
       type: string
     - jsonPath: .status.lastFireTime
@@ -1418,11 +1417,55 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: A recurring backup of a named topic set into an archive. `spec.suspend` is the only mutable field; every other field is sealed by an object-level CEL rule. Retention REPORTS what it would remove and deletes nothing.
+        description: A recurring backup of a topic set into an archive. Every spec field is EDITABLE except `sourceRef`, which is sealed by an object-level CEL rule; each created Backup copies the policy and records the revision it ran, so an edit reaches the next run and never a run that exists. Retention REPORTS what it would remove and deletes nothing.
         properties:
           spec:
-            description: '`BackupSchedule.spec`. Only `suspend` is mutable — see the module header.'
+            description: '`BackupSchedule.spec`. Every field is editable except `sourceRef` — see the module header.'
             properties:
+              activeDeadlineSeconds:
+                description: The Job deadline copied into every created `Backup`'s `spec.deadlineSeconds`. **Absent means 3600**, the constant an older controller used.
+                format: int64
+                maximum: 86400
+                minimum: 60
+                nullable: true
+                type: integer
+              allUserTopics:
+                description: |-
+                  Dynamic selection: every user topic the run's principal can see, minus the exclusions. Requires `topics: []` (CEL).
+
+                  Wire-compatible with an older controller by construction: it reads `topics: []`, renders an empty list, and the runner's own empty-list rail exits 3 without contacting the engine.
+                nullable: true
+                properties:
+                  exclude:
+                    description: What to leave out.
+                    nullable: true
+                    properties:
+                      prefixes:
+                        description: Literal prefixes, never patterns.
+                        items:
+                          pattern: ^[a-zA-Z0-9._-]{1,249}$
+                          type: string
+                        maxItems: 32
+                        nullable: true
+                        type: array
+                      topics:
+                        description: Exact names.
+                        items:
+                          pattern: ^[a-zA-Z0-9._-]{1,249}$
+                          type: string
+                        maxItems: 1000
+                        nullable: true
+                        type: array
+                    type: object
+                  incompleteDiscovery:
+                    description: What to do about incomplete visibility. Required.
+                    enum:
+                    - Refuse
+                    - BackUpVisibleTopics
+                    type: string
+                required:
+                - incompleteDiscovery
+                type: object
               archive:
                 description: |-
                   Where the backup is written.
@@ -1445,6 +1488,13 @@ spec:
                 required:
                 - url
                 type: object
+              catchUpPolicy:
+                description: What to do with a slot that is past its starting deadline. **Absent means `None`** — count it and move on, which is today's behaviour.
+                enum:
+                - None
+                - Latest
+                nullable: true
+                type: string
               concurrencyPolicy:
                 default: Forbid
                 description: Whether a due slot may start while an earlier Backup owned by this schedule is unfinished. Omitted means `Forbid`, including on schedules stored before this field was introduced. `Allow` is explicit.
@@ -1480,11 +1530,34 @@ spec:
                     nullable: true
                     type: integer
                 type: object
+              retry:
+                description: How many times a slot may be retried, and how long after the failure. **Absent means no retries**, which is today's behaviour. Only a retryable failure is retried, only for the latest due slot, and only until the next slot comes due.
+                nullable: true
+                properties:
+                  delaySeconds:
+                    description: Seconds between a failed attempt finishing and its retry becoming admissible. Absent means 300.
+                    format: int64
+                    maximum: 21600
+                    minimum: 60
+                    nullable: true
+                    type: integer
+                  maxRetries:
+                    description: 'How many retries one slot may have, `0..=3`. Each retry is a new `Backup` with a new execution id: a failed attempt''s partial archive is never appended to.'
+                    format: int32
+                    maximum: 3
+                    minimum: 0
+                    type: integer
+                required:
+                - maxRetries
+                type: object
               schedule:
-                description: 'A five-field cron expression, in UTC: minute hour day-of-month month day-of-week. `*`, a literal, a comma list, an `a-b` range and a `*/n` step are accepted, as are `@hourly`, `@daily` and `@weekly`; anything else is refused with a `Ready` condition naming the field, never read as a silent match-all. A slot that comes due more than the ONE-HOUR missed-slot horizon before the controller looks is skipped and recorded in `status.lastMissedSlot`.'
+                description: 'A five-field cron expression: minute hour day-of-month month day-of-week. `*`, a literal, a comma list, an `a-b` range and a `*/n` step are accepted, as are `@hourly`, `@daily` and `@weekly`; anything else is refused with a `Ready` condition naming the field, never read as a silent match-all. The fields are read in `timeZone`, which is UTC when absent; the slot identity is always the UTC instant. A slot that comes due more than `startingDeadlineSeconds` before the controller looks is skipped and counted in `status.missedSlots`, unless `catchUpPolicy` is `Latest`.'
                 type: string
               sourceRef:
-                description: The `KafkaCluster` to back up, in this namespace.
+                description: |-
+                  The `KafkaCluster` to back up, in this namespace.
+
+                  **The one immutable field on this spec.** A schedule's identity is the cluster it protects; one schedule's history must not mix two clusters, so protecting a different cluster is a different schedule.
                 properties:
                   name:
                     description: The referenced object's `metadata.name`, in this namespace.
@@ -1492,12 +1565,31 @@ spec:
                 required:
                 - name
                 type: object
+              startingDeadlineSeconds:
+                description: How long after a slot came due it may still start. **Absent means 3600** — the one-hour horizon an older controller hard-coded.
+                format: int64
+                maximum: 604800
+                minimum: 60
+                nullable: true
+                type: integer
               suspend:
                 default: false
-                description: Stop firing new `Backup`s. **The only mutable field on this spec**, and the only `.spec` write the controller performs on any kind in tag 1.
+                description: Stop admitting new slots, catch-ups and retries. Runs that already exist are unaffected, and a reservation that was already accepted is still resumed — suspending stops future work, it does not cancel accepted work.
                 type: boolean
+              timeZone:
+                description: |-
+                  The IANA zone `schedule`'s fields are read in. **Absent means UTC and reproduces the slots an older controller computed, instant for instant.**
+
+                  The slot identity stays the UTC instant, so names remain unique and monotonic whatever the zone. Every real instant whose local wall time matches fires once; a matching local time that does not exist (a DST gap) fires once at the end of the gap; a fixed local time inside a repeated hour therefore fires at BOTH occurrences, and `status.nextRuns` marks which is which. A name this build's tz database does not have is `Ready=False` with reason `UnknownTimeZone` and admits nothing — never a silent fall back to UTC.
+                maxLength: 64
+                nullable: true
+                pattern: ^[A-Za-z][A-Za-z0-9_+\-]*(/[A-Za-z0-9_+\-]+){0,2}$
+                type: string
               topics:
-                description: 'NAMED topics, never patterns. Global Constraint 18''s first rail and guard **G-GLOB**: a glob metacharacter is refused, and an omitted list is not permitted at all — the one shape that would mean "everything" to the engine. A mandatory allowlist whose absence means "all topics" is not an allowlist.'
+                description: |-
+                  NAMED topics, never patterns. Global Constraint 18's first rail and guard **G-GLOB**: a glob metacharacter is refused, and an omitted list is not permitted at all — the one shape that would mean "everything" to the engine. A mandatory allowlist whose absence means "all topics" is not an allowlist.
+
+                  `[]` WITH `allUserTopics` SET is the one other legal shape: dynamic selection, resolved per run. `[]` on its own is refused by the controller before it admits anything.
                 items:
                   type: string
                 type: array
@@ -1508,8 +1600,10 @@ spec:
             - topics
             type: object
             x-kubernetes-validations:
-            - message: only spec.suspend is mutable; create a new BackupSchedule instead
-              rule: has(self.schedule) == has(oldSelf.schedule) && (!has(self.schedule) || self.schedule == oldSelf.schedule) && has(self.sourceRef) == has(oldSelf.sourceRef) && (!has(self.sourceRef) || self.sourceRef == oldSelf.sourceRef) && has(self.topics) == has(oldSelf.topics) && (!has(self.topics) || self.topics == oldSelf.topics) && has(self.archive) == has(oldSelf.archive) && (!has(self.archive) || self.archive == oldSelf.archive) && has(self.destinationRef) == has(oldSelf.destinationRef) && (!has(self.destinationRef) || self.destinationRef == oldSelf.destinationRef) && has(self.concurrencyPolicy) == has(oldSelf.concurrencyPolicy) && (!has(self.concurrencyPolicy) || self.concurrencyPolicy == oldSelf.concurrencyPolicy) && has(self.retention) == has(oldSelf.retention) && (!has(self.retention) || self.retention == oldSelf.retention)
+            - message: spec.sourceRef is immutable; create a new BackupSchedule to protect a different cluster
+              rule: has(self.sourceRef) == has(oldSelf.sourceRef) && (!has(self.sourceRef) || self.sourceRef == oldSelf.sourceRef)
+            - message: spec.allUserTopics requires spec.topics to be empty
+              rule: '!has(self.allUserTopics) || size(self.topics) == 0'
             - message: with destinationRef, archive.url is exactly logweir-destination://<destinationRef.name> and archive.secretRef is absent; the logweir-destination scheme is otherwise reserved
               rule: 'has(self.destinationRef) ? (self.archive.url == ''logweir-destination://'' + self.destinationRef.name && !has(self.archive.secretRef)) : !self.archive.url.startsWith(''logweir-destination://'')'
           status:
@@ -1526,6 +1620,31 @@ spec:
                 required:
                 - name
                 type: object
+              activeRuns:
+                description: |-
+                  Every nonterminal schedule-created run, at most ten. `activeBackupRef` mirrors the first entry.
+
+                  An ABSENT list and an EMPTY list are different facts: absent means this controller has not yet taken an inventory of the schedule's runs, and empty means it has and there are none.
+                items:
+                  description: One schedule-created run that is not terminal (D1 §4.8).
+                  properties:
+                    attempt:
+                      description: '`0` for a scheduled or catch-up run, `1..=3` for a retry.'
+                      format: int32
+                      type: integer
+                    kind:
+                      description: '`Scheduled`, `CatchUp` or `Retry`.'
+                      type: string
+                    name:
+                      description: The `Backup`'s name.
+                      type: string
+                  required:
+                  - attempt
+                  - kind
+                  - name
+                  type: object
+                nullable: true
+                type: array
               conditions:
                 description: '`Ready`, and whatever else the controller reports.'
                 items:
@@ -1573,11 +1692,122 @@ spec:
                   THE MISSED-SLOT HORIZON IS ONE HOUR. A slot that came due more than one hour before the controller looked is skipped and recorded here, with a `Ready` condition whose reason is `SlotMissed`; a controller restarted after a week therefore fires at most the current slot and never six days of backlog. A concurrency skip uses reason `ConcurrencyBlocked`. The field is written when a slot is skipped and is never cleared afterwards — it is the audit trail of the skip, so a correct implementation is distinguishable from a broken schedule.
                 nullable: true
                 type: string
+              lastSlot:
+                description: What happened to the most recent slot that was decided about.
+                nullable: true
+                properties:
+                  attempt:
+                    description: Which attempt of it this disposition is about.
+                    format: int32
+                    type: integer
+                  backupRef:
+                    description: The `Backup` the disposition is about, when there is one.
+                    nullable: true
+                    properties:
+                      name:
+                        description: The referenced object's `metadata.name`, in this namespace.
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  decidedAt:
+                    description: When it was decided.
+                    format: date-time
+                    type: string
+                  disposition:
+                    description: One of `Admitted`, `CaughtUp`, `Retried`, `Missed`, `Superseded`, `Blocked`, `NameUnavailable`, `Released`, `Failed`, `Exhausted`.
+                    type: string
+                  dueAt:
+                    description: The instant that name spells.
+                    format: date-time
+                    type: string
+                  reason:
+                    description: The `Ready` reason that accompanied the decision.
+                    type: string
+                  slot:
+                    description: The slot, `yyyymmdd-hhmmss` of its UTC instant.
+                    type: string
+                required:
+                - attempt
+                - decidedAt
+                - disposition
+                - dueAt
+                - reason
+                - slot
+                type: object
+              missedSlots:
+                description: How many slots came due and were not run, with the ten most recent.
+                nullable: true
+                properties:
+                  count:
+                    description: How many slots have been skipped since the schedule was created.
+                    format: int64
+                    type: integer
+                  countCapped:
+                    description: Whether any single evaluation stopped at its 1000-slot enumeration cap, so `count` is a floor rather than a total.
+                    type: boolean
+                  lastEvaluatedSlot:
+                    description: The newest slot the accounting has already considered. It advances only when a slot receives a FINAL disposition, so a slot that waits and is then superseded is counted exactly once.
+                    nullable: true
+                    type: string
+                  recent:
+                    description: The ten most recent skips, newest first.
+                    items:
+                      description: One slot that came due and was not run (D1 §4.8).
+                      properties:
+                        reason:
+                          description: '`ControllerUnavailable`, `ConcurrencyBlocked`, `Superseded` or `BeforeRevision`.'
+                          type: string
+                        recordedAt:
+                          description: When the controller noticed.
+                          format: date-time
+                          type: string
+                        slot:
+                          description: The slot.
+                          type: string
+                      required:
+                      - reason
+                      - recordedAt
+                      - slot
+                      type: object
+                    nullable: true
+                    type: array
+                required:
+                - count
+                - countCapped
+                type: object
               nextFireTime:
                 description: When it will next create one, given `schedule` and `suspend`.
                 format: date-time
                 nullable: true
                 type: string
+              nextRuns:
+                description: The next five firings, computed by the controller. **The browser never evaluates cron**; it renders what this says. Empty while the schedule is suspended or its policy is invalid.
+                items:
+                  description: One upcoming firing (D1 §4.4).
+                  properties:
+                    adjustment:
+                      description: '`NonexistentLocalTimeShifted`, `RepeatedLocalTimeFirst` or `RepeatedLocalTimeSecond`. Omitted when the instant needed no adjustment, which is every instant outside a DST transition.'
+                      nullable: true
+                      type: string
+                    at:
+                      description: The UTC instant.
+                      format: date-time
+                      type: string
+                    localTime:
+                      description: The same instant rendered in the schedule's zone, offset included — `2026-10-25T02:30:00+02:00`.
+                      type: string
+                  required:
+                  - at
+                  - localTime
+                  type: object
+                nullable: true
+                type: array
+              observedGeneration:
+                description: The `metadata.generation` the controller has evaluated. A generation ahead of this one is an edit the controller has not seen yet.
+                format: int64
+                nullable: true
+                type: integer
               pendingBackupRef:
                 description: A `Forbid` slot atomically admitted in status but whose `Backup` creation has not yet been confirmed. This short-lived reservation closes the controller crash window and is cleared after the child is observed or created.
                 nullable: true
@@ -1587,6 +1817,70 @@ spec:
                     type: string
                 required:
                 - name
+                type: object
+              pendingRun:
+                description: The reservation, if one is outstanding. `pendingBackupRef` mirrors its name for readers written before this block existed.
+                nullable: true
+                properties:
+                  attempt:
+                    description: '`0` for a scheduled or catch-up run, `1..=3` for a retry.'
+                    format: int32
+                    type: integer
+                  generation:
+                    description: The `metadata.generation` the reservation was made under, and therefore the generation the created run records.
+                    format: int64
+                    type: integer
+                  kind:
+                    description: '`Scheduled`, `CatchUp` or `Retry`.'
+                    type: string
+                  name:
+                    description: The `Backup`'s deterministic name.
+                    type: string
+                  slot:
+                    description: The slot it is for.
+                    type: string
+                required:
+                - attempt
+                - generation
+                - kind
+                - name
+                - slot
+                type: object
+              policy:
+                description: The revision that is in force, and the digest of what a run under it does.
+                nullable: true
+                properties:
+                  effectiveSince:
+                    description: 'When this revision was first observed. A catch-up never runs a slot older than this: a schedule edited at noon does not retroactively back up the morning under the new policy.'
+                    format: date-time
+                    type: string
+                  evaluatedAt:
+                    description: |-
+                      When this status last MOVED — not when the controller last looked.
+
+                      The controller re-examines every schedule every 30 s and deliberately writes nothing when the computed status equals the stored one, so this instant standing still means "nothing has changed", not "nobody is watching". The staleness signal is `status.nextRuns[0].at`: a live controller rewrites the previews once their first entry has passed.
+                    format: date-time
+                    type: string
+                  generation:
+                    description: The `metadata.generation` this block was computed from.
+                    format: int64
+                    type: integer
+                  runPolicySha256:
+                    description: '`sha256:<lowercase hex>` over the run policy of that generation.'
+                    type: string
+                  timeZone:
+                    description: The EFFECTIVE zone — `UTC` when `spec.timeZone` is absent, so a reader never has to know the default to read the status.
+                    type: string
+                  tzdb:
+                    description: Which time-zone database resolved it, so a slot computed by one release can be explained after a tzdata update.
+                    type: string
+                required:
+                - effectiveSince
+                - evaluatedAt
+                - generation
+                - runPolicySha256
+                - timeZone
+                - tzdb
                 type: object
               retentionReport:
                 description: What retention WOULD remove. Nothing was deleted — see [`RetentionReport`].
@@ -1687,6 +1981,9 @@ spec:
         - spec
         title: BackupSchedule
         type: object
+        x-kubernetes-validations:
+        - message: a BackupSchedule with retries must be named in 29 characters or fewer; retry Backups are named logweir-backup-<schedule>-<slot>-r<N>
+          rule: '!has(self.spec.retry) || self.spec.retry.maxRetries == 0 || size(self.metadata.name) <= 29'
     served: true
     storage: true
     subresources:
@@ -6512,7 +6809,7 @@ rules:
     verbs: ["create"]
   - apiGroups: ["logweir.dev"]
     resources: ["backupschedules"]
-    verbs: ["update"]
+    verbs: ["update", "patch"]
 ---
 # Source: logweir/templates/human-roles.yaml
 apiVersion: rbac.authorization.k8s.io/v1

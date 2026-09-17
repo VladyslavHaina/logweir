@@ -8,9 +8,12 @@ view, operate or approve in which namespace is your decision:
 
 `logweir-approver` is `create` on `approvals` and nothing else; bind it to
 somebody who is not the operator (`self_attested: false` means only "two
-different keys"). `logweir-operator`'s `update` on `backupschedules` is plain
-because the `suspend`-only restriction is the CRD's own CEL rule, applied to
-every subject, cluster-admin included.
+different keys"). `logweir-operator`'s `update` and `patch` on
+`backupschedules` are plain verbs because what may change is the CRD's own CEL
+rule — `spec.sourceRef` is immutable and everything else is editable policy —
+applied to every subject, cluster-admin included. `patch` is there because
+`kubectl edit` and `kubectl apply` send one, so `update` alone cannot edit a
+schedule at all.
 */ -}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -47,7 +50,7 @@ rules:
     verbs: ["create"]
   - apiGroups: ["logweir.dev"]
     resources: ["backupschedules"]
-    verbs: ["update"]
+    verbs: ["update", "patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole

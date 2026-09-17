@@ -38,7 +38,7 @@ use weirkeeper::controllers::backup_schedule::{
     SLOT_LABEL, TRIGGERED_BY_SCHEDULE,
 };
 use weirkeeper::crds::backup_schedule::{
-    BackupSchedule, BackupScheduleStatus, ConcurrencyPolicy, SUSPEND_ONLY_RULE,
+    BackupSchedule, BackupScheduleStatus, ConcurrencyPolicy, SOURCE_REF_IMMUTABLE_RULE,
 };
 use weirkeeper::crds::LocalRef;
 use weirkeeper::slot::{
@@ -2314,11 +2314,18 @@ async fn a_name_that_does_not_fit_is_reported_rather_than_dropped() {
     );
 }
 
-/// The CRD field descriptions state the missed-slot horizon.
+/// The CRD field descriptions state the missed-slot horizon, the field that now
+/// sets it, and what an absent field means.
 ///
-/// The horizon reaches `docs/kubernetes.md` through these descriptions and
-/// through Task 19's chain-W slot; this task's obligation is that
-/// `kubectl explain` says it.
+/// # What PLAT-04.2 changed about this obligation
+///
+/// The horizon used to be a constant nobody could see from the cluster, so the
+/// obligation was that its description said "one hour". It is now
+/// `spec.startingDeadlineSeconds`, and the obligation grew a second half: the
+/// DEFAULT has to be discoverable too, because the whole compatibility promise
+/// is that an absent field reproduces the old constant. A description that
+/// named the field but not the default would leave every existing schedule's
+/// behaviour undocumented at exactly the moment it became configurable.
 #[test]
 fn the_crd_states_the_missed_slot_horizon() {
     let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2333,7 +2340,11 @@ fn the_crd_states_the_missed_slot_horizon() {
     for needle in [
         "THE MISSED-SLOT HORIZON IS ONE HOUR",
         "reason is `SlotMissed`",
-        "ONE-HOUR missed-slot horizon",
+        // The field that sets it, named from the cron field an operator reads
+        // first...
+        "more than `startingDeadlineSeconds` before the controller looks",
+        // ...and the default, on the field itself.
+        "How long after a slot came due it may still start. **Absent means 3600**",
     ] {
         assert!(
             flat.contains(needle),
@@ -2502,9 +2513,17 @@ fn omitted_concurrency_policy_defaults_to_forbid_and_the_schema_validates_both_v
         ["properties"]["concurrencyPolicy"];
     assert_eq!(policy["default"], serde_json::json!("Forbid"));
     assert_eq!(policy["enum"], serde_json::json!(["Forbid", "Allow"]));
+    // PLAT-05.1 MADE IT EDITABLE, AND THAT IS THE ASSERTION NOW. Before D1 the
+    // policy was sealed with the rest of the spec, so an old omitted-field
+    // schedule needed a replacement object to opt into `Allow`; it is now a
+    // one-field edit, and the seal names `sourceRef` and nothing else.
     assert!(
-        SUSPEND_ONLY_RULE.contains("self.concurrencyPolicy == oldSelf.concurrencyPolicy"),
-        "the new policy is sealed with the rest of the schedule inputs"
+        !SOURCE_REF_IMMUTABLE_RULE.contains("concurrencyPolicy"),
+        "concurrencyPolicy is editable policy (D1 §5.1) and must not appear in the seal"
+    );
+    assert!(
+        SOURCE_REF_IMMUTABLE_RULE.contains("self.sourceRef == oldSelf.sourceRef"),
+        "the seal still pins the one immutable field"
     );
 }
 
@@ -3834,4 +3853,789 @@ async fn an_old_finalizer_cannot_clear_a_newer_reservation_and_that_reservation_
         state.schedule["status"]["activeBackupRef"]["name"],
         serde_json::json!(slot_b)
     );
+}
+
+// ===========================================================================
+// D1 §12 — PLAT-05.1: an editable policy with immutable run snapshots
+// ===========================================================================
+
+/// Whether a recorded request targets the `backups` resource.
+///
+/// A PATH SEGMENT AND NOT A SUBSTRING. `/namespaces/x/backupschedules/nightly/status`
+/// contains the text `/backups`, so a substring test would report every status
+/// patch this reconciler makes as a write against a run — a green assertion
+/// about the wrong thing, or a red one about nothing.
+fn targets_backups(uri: &str) -> bool {
+    uri.split('?')
+        .next()
+        .unwrap_or(uri)
+        .split('/')
+        .any(|segment| segment == "backups")
+}
+
+/// A schedule fixture with an arbitrary spec body, so an edit is a fixture
+/// difference rather than a mutation helper.
+fn schedule_with(uid: &str, generation: i64, resource_version: &str, spec: &str) -> BackupSchedule {
+    serde_json::from_str(&format!(
+        r#"{{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "BackupSchedule",
+  "metadata": {{
+    "name": "nightly",
+    "namespace": "{NS}",
+    "uid": "{uid}",
+    "resourceVersion": "{resource_version}",
+    "generation": {generation}
+  }},
+  "spec": {spec}
+}}"#
+    ))
+    .expect("the fixture is a BackupSchedule")
+}
+
+/// The spec every PLAT-05.1 fixture starts from: `Forbid`, daily, two topics.
+const EDITABLE_SPEC: &str = r#"{
+    "schedule": "0 0 * * *",
+    "sourceRef": { "name": "prod" },
+    "topics": ["orders", "payments"],
+    "archive": { "url": "s3://kafka-backups/logweir" },
+    "concurrencyPolicy": "Forbid",
+    "suspend": false
+  }"#;
+
+/// A `Forbid` route table for a slot with no prior run: the owned-Backup list
+/// is empty, the reservation and the finalization are answered, and the create
+/// is answered with `post_status`.
+fn admitting_routes(name: &'static str, post_status: u16, schedule_body: String) -> Vec<Route> {
+    vec![
+        Route {
+            method: "GET",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 200,
+            body: backup_list_body(vec![]),
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: post_status,
+            body: if post_status == 201 {
+                created_backup_body(name)
+            } else {
+                already_exists_body(name)
+            },
+        },
+        Route {
+            method: "GET",
+            path_suffix: Box::leak(format!("/backups/{name}").into_boxed_str()),
+            status: 200,
+            body: backup_value(name, UID, Some("Running"), Some(name)).to_string(),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: schedule_body,
+        },
+    ]
+}
+
+/// The `spec` of the one `Backup` this reconcile POSTed.
+fn posted_spec(bodies: &[SeenBody]) -> serde_json::Value {
+    let posts = posts(bodies);
+    assert_eq!(posts.len(), 1, "exactly one Backup is created: {posts:?}");
+    let v: serde_json::Value =
+        serde_json::from_str(&posts[0].body).expect("a recorded POST body is JSON");
+    v["spec"].clone()
+}
+
+/// D1 §5.3 and §5.4's invariant: **a Backup's copied policy equals the schedule
+/// spec at the generation recorded in it.**
+///
+/// The run records `uid`, `generation` and `runPolicySha256`, and the digest it
+/// records is the digest of the fields it actually carries — which is exactly
+/// what `identity::check_run_policy_digest` recomputes before the Backup
+/// controller freezes anything. A scheduler that copied the policy of one
+/// generation and stamped the number of another would produce a run the Backup
+/// controller refuses terminally with `RunPolicyDigestMismatch`, so this is the
+/// assertion that keeps that refusal unreachable in normal operation.
+#[tokio::test]
+async fn a_created_run_records_the_revision_whose_policy_it_copied() {
+    let fire = utc(2026, 9, 10, 0, 0);
+    let slot = slot_name(fire);
+    let name: &'static str = Box::leak(
+        scheduled_backup_name("nightly", &slot)
+            .expect("fits")
+            .into_boxed_str(),
+    );
+
+    let schedule = schedule_with(UID, 7, "17", EDITABLE_SPEC);
+    let (client, _calls, bodies) = mock_client_recording_bodies(admitting_routes(
+        name,
+        201,
+        serde_json::to_string(&schedule).expect("the fixture serialises"),
+    ));
+    reconcile_schedule(&schedule, &client, fire)
+        .await
+        .expect("the slot fires");
+
+    let bodies = bodies.lock().expect("readable").clone();
+    let spec = posted_spec(&bodies);
+    assert_eq!(spec["scheduleRef"]["name"], serde_json::json!("nightly"));
+    assert_eq!(spec["scheduleRef"]["uid"], serde_json::json!(UID));
+    assert_eq!(
+        spec["scheduleRef"]["generation"],
+        serde_json::json!(7),
+        "the run records the generation it was admitted under: {spec}"
+    );
+
+    // The digest is the digest of the POSTed object's own fields, recomputed
+    // the way the Backup controller recomputes it.
+    let posted: weirkeeper::crds::backup::Backup =
+        serde_json::from_str(&posts(&bodies)[0].body).expect("the POST body is a Backup");
+    assert_eq!(
+        spec["scheduleRef"]["runPolicySha256"].as_str(),
+        Some(weirkeeper::policy::run_policy_sha256(&posted.spec).as_str()),
+        "the recorded digest must equal the digest of the fields the run carries; a mismatch \
+         is what `identity::check_run_policy_digest` refuses terminally: {spec}"
+    );
+    assert_eq!(
+        spec["scheduleRef"]["runPolicySha256"].as_str(),
+        Some(weirkeeper::controllers::backup_schedule::run_policy_digest(&schedule.spec).as_str()),
+        "and it must equal the schedule's own digest for that generation: {spec}"
+    );
+    weirkeeper::identity::check_run_policy_digest(&posted)
+        .expect("the created run passes the digest check the Backup controller performs");
+
+    // The reservation carried the same generation, BEFORE the create: that is
+    // the §5.4 boundary, and it is what a 409 protects.
+    let reserved = reserved_status(&bodies);
+    assert_eq!(
+        reserved["pendingRun"]["generation"],
+        serde_json::json!(7),
+        "the reservation records the generation the child will be created under: {reserved}"
+    );
+    assert_eq!(reserved["pendingRun"]["name"], serde_json::json!(name));
+    assert_eq!(reserved["pendingRun"]["slot"], serde_json::json!(slot));
+    assert_eq!(reserved["pendingRun"]["attempt"], serde_json::json!(0));
+    assert_eq!(
+        reserved["pendingRun"]["kind"],
+        serde_json::json!("Scheduled")
+    );
+
+    // And the settled status records the revision an operator reads.
+    let status = patched_status(&bodies);
+    assert_eq!(status["observedGeneration"], serde_json::json!(7));
+    assert_eq!(status["policy"]["generation"], serde_json::json!(7));
+    assert_eq!(
+        status["policy"]["runPolicySha256"],
+        spec["scheduleRef"]["runPolicySha256"]
+    );
+    assert_eq!(status["policy"]["timeZone"], serde_json::json!("UTC"));
+    assert_eq!(
+        status["policy"]["tzdb"],
+        serde_json::json!(weirkeeper::cadence::TZDB_SOURCE)
+    );
+}
+
+/// The run policy digest covers WHAT a run does and not WHEN it runs.
+///
+/// This is the whole value of the field: an operator who suspends and resumes a
+/// schedule sees `metadata.generation` move twice and `runPolicySha256` stand
+/// still, so "did anything about my backups change?" has an answer that is not
+/// "diff two YAML documents".
+#[test]
+fn run_policy_digest_ignores_cadence_suspension_and_topic_order() {
+    let base = schedule_with(UID, 1, "1", EDITABLE_SPEC);
+    let digest = weirkeeper::controllers::backup_schedule::run_policy_digest(&base.spec);
+
+    // WHEN — every one of these leaves the digest alone.
+    for (what, spec) in [
+        (
+            "the cron expression",
+            EDITABLE_SPEC.replace("0 0 * * *", "30 2 * * 1"),
+        ),
+        (
+            "suspension",
+            EDITABLE_SPEC.replace("\"suspend\": false", "\"suspend\": true"),
+        ),
+        (
+            "the concurrency policy",
+            EDITABLE_SPEC.replace("\"Forbid\"", "\"Allow\""),
+        ),
+        (
+            "a time zone",
+            EDITABLE_SPEC.replace(
+                "\"suspend\": false",
+                "\"suspend\": false, \"timeZone\": \"Europe/Berlin\"",
+            ),
+        ),
+        (
+            "a retry policy",
+            EDITABLE_SPEC.replace(
+                "\"suspend\": false",
+                "\"suspend\": false, \"retry\": { \"maxRetries\": 2 }",
+            ),
+        ),
+        (
+            "a catch-up policy",
+            EDITABLE_SPEC.replace(
+                "\"suspend\": false",
+                "\"suspend\": false, \"catchUpPolicy\": \"Latest\"",
+            ),
+        ),
+        (
+            "the starting deadline",
+            EDITABLE_SPEC.replace(
+                "\"suspend\": false",
+                "\"suspend\": false, \"startingDeadlineSeconds\": 600",
+            ),
+        ),
+        (
+            "the retention report policy",
+            EDITABLE_SPEC.replace(
+                "\"suspend\": false",
+                "\"suspend\": false, \"retention\": { \"keepLast\": 3 }",
+            ),
+        ),
+        (
+            "the ORDER of the topic list",
+            EDITABLE_SPEC.replace("[\"orders\", \"payments\"]", "[\"payments\", \"orders\"]"),
+        ),
+    ] {
+        let edited = schedule_with(UID, 2, "2", &spec);
+        assert_eq!(
+            weirkeeper::controllers::backup_schedule::run_policy_digest(&edited.spec),
+            digest,
+            "{what} decides WHEN a run happens, not WHAT it does, so it must not move \
+             runPolicySha256"
+        );
+    }
+
+    // WHAT — every one of these moves it.
+    for (what, spec) in [
+        (
+            "the topic SET",
+            EDITABLE_SPEC.replace("\"payments\"", "\"shipments\""),
+        ),
+        (
+            "the archive URL",
+            EDITABLE_SPEC.replace("kafka-backups/logweir", "kafka-backups/elsewhere"),
+        ),
+        (
+            "the archive credential",
+            EDITABLE_SPEC.replace(
+                "\"url\": \"s3://kafka-backups/logweir\"",
+                "\"url\": \"s3://kafka-backups/logweir\", \"secretRef\": { \"name\": \"s3\" }",
+            ),
+        ),
+        (
+            "the run deadline",
+            EDITABLE_SPEC.replace(
+                "\"suspend\": false",
+                "\"suspend\": false, \"activeDeadlineSeconds\": 7200",
+            ),
+        ),
+    ] {
+        let edited = schedule_with(UID, 2, "2", &spec);
+        assert_ne!(
+            weirkeeper::controllers::backup_schedule::run_policy_digest(&edited.spec),
+            digest,
+            "{what} changes what a run does and must move runPolicySha256"
+        );
+    }
+}
+
+/// D1 §5.4: an edit that lands between the read and the reservation gets a
+/// **409**, and the reconcile creates nothing.
+///
+/// The reservation is a merge PATCH carrying `metadata.resourceVersion`, which
+/// Kubernetes applies as an update precondition. The 409 is the whole
+/// mechanism: the reconcile aborts, requeues, re-reads the newer object and
+/// decides again under the new generation — so a run is never created from a
+/// policy the reservation did not agree with.
+#[tokio::test]
+async fn an_edit_between_the_read_and_the_reservation_gets_409_and_creates_nothing() {
+    let fire = utc(2026, 9, 10, 0, 0);
+    let slot = slot_name(fire);
+    let name: &'static str = Box::leak(
+        scheduled_backup_name("nightly", &slot)
+            .expect("fits")
+            .into_boxed_str(),
+    );
+    let schedule = schedule_with(UID, 7, "17", EDITABLE_SPEC);
+
+    let mut routes = admitting_routes(name, 201, String::new());
+    routes.retain(|r| r.method != "PATCH");
+    routes.push(Route {
+        method: "PATCH",
+        path_suffix: "/backupschedules/nightly/status",
+        status: 409,
+        body: r#"{"kind":"Status","apiVersion":"v1","status":"Failure",
+  "message":"Operation cannot be fulfilled on backupschedules.logweir.dev \"nightly\": the object has been modified",
+  "reason":"Conflict","code":409}"#
+            .to_string(),
+    });
+    let (client, _calls, bodies) = mock_client_recording_bodies(routes);
+
+    let err = reconcile_schedule(&schedule, &client, fire)
+        .await
+        .expect_err("a rejected reservation aborts the reconcile");
+    assert!(
+        format!("{err}").contains("409") || format!("{err}").to_lowercase().contains("conflict"),
+        "the error names the conflict so the requeue is legible: {err}"
+    );
+
+    let bodies = bodies.lock().expect("readable").clone();
+    assert!(
+        posts(&bodies).is_empty(),
+        "NOTHING is created when the reservation was refused — that is the atomic boundary, \
+         and a create after a 409 would run a policy the schedule no longer has: {bodies:?}"
+    );
+    let reserved = reserved_status(&bodies);
+    assert_eq!(
+        reserved["pendingRun"]["generation"],
+        serde_json::json!(7),
+        "the reservation that was refused carried the generation it was decided under"
+    );
+}
+
+/// D1 §5.4, the other half: a restart after an accepted reservation creates the
+/// child **with the generation it reads now**, and records that generation.
+///
+/// The decision tree says so in one line — "crash before POST → restart reads
+/// G_m ≥ G_n → step 2: create with G_m, recording G_m" — and the reason is that
+/// there is nothing else to be truthful about. The reservation named a slot and
+/// an object name, not a policy; the object the controller can see is the
+/// current one; and recording the current generation keeps the invariant that a
+/// run's copied policy equals the spec at the generation written inside it.
+#[tokio::test]
+async fn a_restart_after_a_reservation_creates_under_the_generation_it_reads() {
+    let fire = utc(2026, 9, 10, 0, 0);
+    let slot = slot_name(fire);
+    let name: &'static str = Box::leak(
+        scheduled_backup_name("nightly", &slot)
+            .expect("fits")
+            .into_boxed_str(),
+    );
+
+    // The reservation was made at generation 7; the operator then edited the
+    // topic list, so the object the restarted controller reads is generation 8.
+    let edited_spec = EDITABLE_SPEC.replace("\"payments\"", "\"shipments\"");
+    let mut schedule = schedule_with(UID, 8, "23", &edited_spec);
+    schedule.status = Some(BackupScheduleStatus {
+        pending_backup_ref: Some(LocalRef {
+            name: name.to_string(),
+        }),
+        ..BackupScheduleStatus::default()
+    });
+
+    let (client, _calls, bodies) = mock_client_recording_bodies(admitting_routes(
+        name,
+        201,
+        serde_json::to_string(&schedule).expect("serialises"),
+    ));
+    // An hour past the slot, so the cron decision is no longer `Due`: the
+    // reservation is resumed on its own account.
+    reconcile_schedule(&schedule, &client, fire + chrono::Duration::hours(2))
+        .await
+        .expect("the accepted reservation is resumed");
+
+    let bodies = bodies.lock().expect("readable").clone();
+    assert!(
+        reserved_status_opt(&bodies).is_none(),
+        "a resumed reservation is not re-reserved: {bodies:?}"
+    );
+    let spec = posted_spec(&bodies);
+    assert_eq!(
+        spec["scheduleRef"]["generation"],
+        serde_json::json!(8),
+        "the resumed child records the generation the controller could actually read: {spec}"
+    );
+    assert_eq!(
+        spec["topics"],
+        serde_json::json!(["orders", "shipments"]),
+        "and it copies THAT generation's policy, so the digest it records is true: {spec}"
+    );
+    let posted: weirkeeper::crds::backup::Backup =
+        serde_json::from_str(&posts(&bodies)[0].body).expect("the POST body is a Backup");
+    weirkeeper::identity::check_run_policy_digest(&posted)
+        .expect("the resumed run's recorded digest matches the policy it copied");
+
+    let status = patched_status(&bodies);
+    assert_eq!(
+        status["pendingBackupRef"],
+        serde_json::Value::Null,
+        "the reservation is cleared once the child exists: {status}"
+    );
+    assert_eq!(
+        status["pendingRun"],
+        serde_json::Value::Null,
+        "and BOTH spellings of it are cleared, or a reader of the typed block would still see \
+         an outstanding reservation: {status}"
+    );
+}
+
+/// D1 §12: editing a schedule never touches a running `Backup`.
+///
+/// The reconciler's whole write surface against `backups` is a `POST`; there is
+/// no PUT, no PATCH and no DELETE. So an edit cannot reach a run's spec, its
+/// frozen inputs or its Job — which is what makes "immutable run snapshots"
+/// true by construction rather than by care.
+#[tokio::test]
+async fn editing_a_schedule_never_writes_to_a_running_backup() {
+    let fire = utc(2026, 9, 10, 0, 0);
+    let slot = slot_name(fire);
+    let running: &'static str = Box::leak(
+        scheduled_backup_name("nightly", &slot)
+            .expect("fits")
+            .into_boxed_str(),
+    );
+
+    // Generation 9: the topic list was edited while the midnight run is still
+    // Running. The next slot is not due yet.
+    let edited_spec = EDITABLE_SPEC.replace("\"payments\"", "\"shipments\"");
+    let schedule = schedule_with(UID, 9, "31", &edited_spec);
+    let (client, calls, bodies) = mock_client_recording_bodies(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 200,
+            body: backup_list_body(vec![backup_value(
+                running,
+                UID,
+                Some("Running"),
+                Some(running),
+            )]),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).expect("serialises"),
+        },
+    ]);
+    reconcile_schedule(&schedule, &client, fire + chrono::Duration::minutes(30))
+        .await
+        .expect("the reconcile completes");
+
+    for seen in calls.lock().expect("readable").iter() {
+        assert!(
+            !(targets_backups(&seen.uri)
+                && matches!(seen.method.as_str(), "PATCH" | "PUT" | "DELETE")),
+            "the schedule reconciler never writes to a Backup: an edit must not be able to \
+             reach a run that already exists. Saw {} {}",
+            seen.method,
+            seen.uri
+        );
+    }
+    assert!(
+        posts(&bodies.lock().expect("readable")).is_empty(),
+        "and no new run is created while the previous one is active under Forbid"
+    );
+}
+
+/// D1 §5.5: an edit the schema accepts but the controller cannot run stops
+/// admissions, says why, and leaves running work alone.
+///
+/// The converse of R2 — "`topics: []` requires `allUserTopics`" — is not
+/// expressible in CEL on the 1.29 floor without stranding every object already
+/// stored with an empty list, and cron and time-zone validity are not
+/// expressible at all. So the controller is the gate, and this is the table of
+/// what it refuses.
+#[tokio::test]
+async fn semantic_invalid_edits_fail_closed_with_reasons() {
+    let fire = utc(2026, 9, 10, 0, 0);
+
+    let cases: [(&str, String, &str); 4] = [
+        (
+            "an empty topic list with no dynamic block",
+            EDITABLE_SPEC.replace("[\"orders\", \"payments\"]", "[]"),
+            "InvalidTopicSelection",
+        ),
+        (
+            "a glob metacharacter in the allowlist",
+            EDITABLE_SPEC.replace("\"payments\"", "\"orders-*\""),
+            "InvalidTopicSelection",
+        ),
+        (
+            "a dynamic block beside a named allowlist",
+            EDITABLE_SPEC.replace(
+                "\"suspend\": false",
+                "\"suspend\": false, \"allUserTopics\": { \"incompleteDiscovery\": \"Refuse\" }",
+            ),
+            "InvalidTopicSelection",
+        ),
+        (
+            "an unparseable cron expression",
+            EDITABLE_SPEC.replace("0 0 * * *", "61 * * * *"),
+            "UnparseableSchedule",
+        ),
+    ];
+
+    for (what, spec, reason) in cases {
+        let schedule = schedule_with(UID, 11, "41", &spec);
+        let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+            Route {
+                method: "GET",
+                path_suffix: "/namespaces/logweir-t18/backups",
+                status: 200,
+                body: backup_list_body(vec![]),
+            },
+            Route {
+                method: "PATCH",
+                path_suffix: "/backupschedules/nightly/status",
+                status: 200,
+                body: serde_json::to_string(&schedule).expect("serialises"),
+            },
+        ]);
+        let outcome = reconcile_schedule(&schedule, &client, fire)
+            .await
+            .expect("an invalid policy is a decision, not a reconcile failure");
+        assert_eq!(
+            outcome.decision.reason(),
+            reason,
+            "{what}: the reason names what the operator has to fix. Got {:?}",
+            outcome.decision
+        );
+        let bodies = bodies.lock().expect("readable").clone();
+        assert!(
+            posts(&bodies).is_empty(),
+            "{what}: nothing is admitted while the policy is unusable: {bodies:?}"
+        );
+        let status = patched_status(&bodies);
+        assert_eq!(
+            status["conditions"][0]["status"],
+            serde_json::json!("False"),
+            "{what}: Ready=False is what PLAT-14.2's staleness alert reads: {status}"
+        );
+        assert_eq!(status["conditions"][0]["reason"], serde_json::json!(reason));
+        assert_eq!(
+            status["nextFireTime"],
+            serde_json::Value::Null,
+            "{what}: a schedule that will not fire has no next firing to advertise: {status}"
+        );
+        assert_eq!(
+            status["observedGeneration"],
+            serde_json::json!(11),
+            "{what}: the controller still records which revision it judged: {status}"
+        );
+    }
+}
+
+/// D1 §4.5 step 2 / §4.7 row 2: an invalid policy RELEASES a pending
+/// reservation instead of resuming it.
+///
+/// Resuming it would POST a `Backup` whose copied policy the Backup controller
+/// refuses terminally (`InvalidTopicSelection`), which costs an object, a
+/// condition and an operator's attention to reach the same conclusion the
+/// scheduler already had. Releasing it means that fixing the spec resumes the
+/// schedule within one reconcile, and the slot is accounted rather than run.
+#[tokio::test]
+async fn an_invalid_policy_releases_a_pending_reservation_and_leaves_running_work_alone() {
+    let fire = utc(2026, 9, 10, 0, 0);
+    let slot = slot_name(fire);
+    let reserved: &'static str = Box::leak(
+        scheduled_backup_name("nightly", &slot)
+            .expect("fits")
+            .into_boxed_str(),
+    );
+    let earlier: &'static str = Box::leak(
+        scheduled_backup_name("nightly", &slot_name(utc(2026, 9, 9, 0, 0)))
+            .expect("fits")
+            .into_boxed_str(),
+    );
+
+    let spec = EDITABLE_SPEC.replace("[\"orders\", \"payments\"]", "[]");
+    let mut schedule = schedule_with(UID, 12, "43", &spec);
+    schedule.status = Some(BackupScheduleStatus {
+        pending_backup_ref: Some(LocalRef {
+            name: reserved.to_string(),
+        }),
+        ..BackupScheduleStatus::default()
+    });
+
+    let (client, calls, bodies) = mock_client_recording_bodies(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 200,
+            body: backup_list_body(vec![backup_value(
+                earlier,
+                UID,
+                Some("Running"),
+                Some(earlier),
+            )]),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).expect("serialises"),
+        },
+    ]);
+    reconcile_schedule(&schedule, &client, fire + chrono::Duration::minutes(5))
+        .await
+        .expect("an invalid policy is a decision");
+
+    let bodies = bodies.lock().expect("readable").clone();
+    assert!(
+        posts(&bodies).is_empty(),
+        "the reservation is NOT resumed into a run the Backup controller would refuse: \
+         {bodies:?}"
+    );
+    let status = patched_status(&bodies);
+    assert_eq!(
+        status["pendingBackupRef"],
+        serde_json::Value::Null,
+        "the reservation is released: {status}"
+    );
+    assert_eq!(status["pendingRun"], serde_json::Value::Null);
+    assert_eq!(
+        status["conditions"][0]["reason"],
+        serde_json::json!("InvalidTopicSelection")
+    );
+    // The run that was already going is untouched — no write of any kind
+    // against `backups`.
+    for seen in calls.lock().expect("readable").iter() {
+        assert!(
+            !(targets_backups(&seen.uri)
+                && matches!(seen.method.as_str(), "PATCH" | "PUT" | "DELETE" | "POST")),
+            "a released reservation writes nothing against backups; saw {} {}",
+            seen.method,
+            seen.uri
+        );
+    }
+}
+
+/// D1 §5.7: a schedule stored before PLAT-05.1 reconciles with no rewrite, and
+/// its absent fields mean what they meant.
+///
+/// The object here is byte-for-byte what an older controller stored: no
+/// `timeZone`, no deadlines, no catch-up, no retry, no dynamic selection, and a
+/// status that has never held `observedGeneration` or `policy`. Nothing about
+/// it is converted; the controller reads the defaults, fires the slot it would
+/// always have fired, under the name it would always have used, and ADDS the
+/// revision block.
+#[tokio::test]
+async fn a_pre_upgrade_schedule_reconciles_without_a_rewrite() {
+    let fire = utc(2026, 9, 10, 0, 0);
+    let slot = slot_name(fire);
+    let name: &'static str = Box::leak(
+        scheduled_backup_name("nightly", &slot)
+            .expect("fits")
+            .into_boxed_str(),
+    );
+
+    // The exact spec an older controller would have stored: five fields.
+    let legacy_spec = r#"{
+    "schedule": "0 0 * * *",
+    "sourceRef": { "name": "prod" },
+    "topics": ["orders"],
+    "archive": { "url": "s3://kafka-backups/logweir" },
+    "suspend": false
+  }"#;
+    let schedule = schedule_with(UID, 1, "5", legacy_spec);
+    assert!(schedule.spec.time_zone.is_none());
+    assert!(schedule.spec.starting_deadline_seconds.is_none());
+    assert!(schedule.spec.catch_up_policy.is_none());
+    assert!(schedule.spec.retry.is_none());
+    assert!(schedule.spec.active_deadline_seconds.is_none());
+    assert!(schedule.spec.all_user_topics.is_none());
+
+    let (client, _calls, bodies) = mock_client_recording_bodies(admitting_routes(
+        name,
+        201,
+        serde_json::to_string(&schedule).expect("serialises"),
+    ));
+    reconcile_schedule(&schedule, &client, fire)
+        .await
+        .expect("a legacy schedule still fires");
+
+    let bodies = bodies.lock().expect("readable").clone();
+    let spec = posted_spec(&bodies);
+    assert_eq!(
+        body_name(posts(&bodies)[0]),
+        name,
+        "the slot name is the one the old controller would have computed"
+    );
+    assert_eq!(
+        spec["deadlineSeconds"],
+        serde_json::json!(3600),
+        "an absent activeDeadlineSeconds is the constant the old controller used: {spec}"
+    );
+    assert!(
+        spec["trigger"]["timeZone"].is_null(),
+        "no zone was configured, so none is recorded: {spec}"
+    );
+    assert_eq!(spec["trigger"]["kind"], serde_json::json!("Scheduled"));
+    assert_eq!(spec["trigger"]["attempt"], serde_json::json!(0));
+
+    let status = patched_status(&bodies);
+    assert_eq!(
+        status["policy"]["timeZone"],
+        serde_json::json!("UTC"),
+        "the EFFECTIVE zone is reported, so a reader never has to know the default: {status}"
+    );
+    assert_eq!(status["observedGeneration"], serde_json::json!(1));
+    assert_eq!(
+        status["policy"]["effectiveSince"],
+        serde_json::json!(fire),
+        "the first observation of a revision is when this controller first saw it: {status}"
+    );
+}
+
+/// D1 §5.7 rollback shape: a status written by an older controller — a
+/// `pendingBackupRef` with no `pendingRun` beside it — is resumed, not
+/// discarded.
+///
+/// This is the state a roll-forward finds after an older controller made a
+/// reservation and stopped. The typed block is the newer spelling; the mirror
+/// is the one the old controller wrote, and it is still the authority for
+/// resuming, so no accepted slot is lost across a version boundary in either
+/// direction.
+#[tokio::test]
+async fn an_old_style_reservation_without_pending_run_is_resumed() {
+    let fire = utc(2026, 9, 10, 0, 0);
+    let slot = slot_name(fire);
+    let name: &'static str = Box::leak(
+        scheduled_backup_name("nightly", &slot)
+            .expect("fits")
+            .into_boxed_str(),
+    );
+
+    let mut schedule = schedule_with(UID, 3, "9", EDITABLE_SPEC);
+    schedule.status = Some(BackupScheduleStatus {
+        pending_backup_ref: Some(LocalRef {
+            name: name.to_string(),
+        }),
+        ..BackupScheduleStatus::default()
+    });
+    assert!(
+        schedule
+            .status
+            .as_ref()
+            .expect("a status")
+            .pending_run
+            .is_none(),
+        "the fixture is the OLD spelling: a mirror with no typed block beside it"
+    );
+
+    let (client, _calls, bodies) = mock_client_recording_bodies(admitting_routes(
+        name,
+        201,
+        serde_json::to_string(&schedule).expect("serialises"),
+    ));
+    reconcile_schedule(&schedule, &client, fire + chrono::Duration::hours(3))
+        .await
+        .expect("the old-style reservation is resumed");
+
+    let bodies = bodies.lock().expect("readable").clone();
+    assert_eq!(
+        body_name(posts(&bodies)[0]),
+        name,
+        "the accepted slot is created, not abandoned: {bodies:?}"
+    );
+    let status = patched_status(&bodies);
+    assert_eq!(status["pendingBackupRef"], serde_json::Value::Null);
+    assert_eq!(status["pendingRun"], serde_json::Value::Null);
 }

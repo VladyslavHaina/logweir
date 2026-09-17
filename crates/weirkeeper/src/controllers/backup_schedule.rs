@@ -92,11 +92,12 @@ use super::Context;
 use crate::conditions::{current_condition, merge_condition, status_unchanged};
 use crate::crds::backup::{Backup, BackupSpec, ScheduleRef, Trigger, TriggerKind};
 use crate::crds::backup_schedule::{
-    BackupSchedule, BackupScheduleSpec, ConcurrencyPolicy, Retention,
+    BackupSchedule, BackupScheduleSpec, ConcurrencyPolicy, PendingRun, PolicyStatus, Retention,
 };
 use crate::crds::{Condition, LocalRef};
 use crate::retention::RetentionReport;
 use crate::slot::{scheduled_backup_name, slot_name, Cron, CronError, SlotError};
+use logweir_core::destination::FieldError;
 
 /// The condition type this reconciler owns.
 pub const CONDITION_READY: &str = "Ready";
@@ -125,6 +126,20 @@ pub const REASON_UNPARSEABLE_SCHEDULE: &str = "UnparseableSchedule";
 /// cap.
 pub const REASON_NAME_TOO_LONG: &str = "NameTooLong";
 
+/// `reason` when `spec.topics`/`spec.allUserTopics` are not one of the two
+/// legal selection shapes, or a name in either is not Kafka-legal.
+///
+/// FAIL CLOSED, AND THAT IS D1 §5.5. The API server accepts these edits (the
+/// converse of R2 is not expressible on the 1.29 floor without stranding stored
+/// objects), so the controller is where they stop: `Ready=False`, no
+/// admissions, running Backups untouched, and one reconcile after the spec is
+/// fixed the schedule resumes.
+pub const REASON_INVALID_TOPIC_SELECTION: &str = crate::conditions::REASON_INVALID_TOPIC_SELECTION;
+
+/// `reason` when some other run-policy field is unusable — a non-positive
+/// deadline, a retry block outside its range.
+pub const REASON_INVALID_RUN_POLICY: &str = crate::conditions::REASON_INVALID_RUN_POLICY;
+
 /// `spec.triggeredBy` on every `Backup` this reconciler creates.
 ///
 /// RECORDED RATHER THAN INFERRED from the presence of `scheduleRef`, because
@@ -144,6 +159,16 @@ pub const SCHEDULE_LABEL: &str = "logweir.dev/schedule";
 
 /// The label carrying the slot a `Backup` is for.
 pub const SLOT_LABEL: &str = "logweir.dev/slot";
+
+/// The label carrying the schedule's UID, which — unlike its name — a recreated
+/// schedule does not share.
+pub const SCHEDULE_UID_LABEL: &str = crate::identity::SCHEDULE_UID_LABEL;
+
+/// The label carrying the trigger kind, lowercase-hyphenated.
+pub const TRIGGER_LABEL: &str = crate::identity::TRIGGER_LABEL;
+
+/// The label carrying the attempt number.
+pub const ATTEMPT_LABEL: &str = crate::identity::ATTEMPT_LABEL;
 
 // NO RUNNER ARGV, AND NO ANNOTATION CARRYING ONE (PLAT-06.1). This reconciler
 // used to write the runner-argv annotation onto every Backup it created, and
@@ -198,6 +223,18 @@ pub enum SlotDecision {
     Suspended,
     /// `spec.schedule` did not parse. Create nothing.
     Unparseable(CronError),
+    /// `spec.topics`/`spec.allUserTopics` are not one of the two legal
+    /// selection shapes, or a name in either is not Kafka-legal. Create
+    /// nothing; running Backups are untouched.
+    InvalidTopicSelection {
+        /// Every problem, each naming a dotted path rooted at `spec`.
+        errors: Vec<FieldError>,
+    },
+    /// Some other run-policy field is unusable. Create nothing.
+    InvalidRunPolicy {
+        /// Every problem, each naming a dotted path rooted at `spec`.
+        errors: Vec<FieldError>,
+    },
     /// The expression parses but no slot has come due inside the parser's
     /// lookback.
     NoDueSlot {
@@ -282,6 +319,8 @@ impl SlotDecision {
         match self {
             Self::Suspended => REASON_SUSPENDED,
             Self::Unparseable(_) => REASON_UNPARSEABLE_SCHEDULE,
+            Self::InvalidTopicSelection { .. } => REASON_INVALID_TOPIC_SELECTION,
+            Self::InvalidRunPolicy { .. } => REASON_INVALID_RUN_POLICY,
             Self::NoDueSlot { .. } => REASON_NO_DUE_SLOT,
             Self::Missed { .. } => REASON_SLOT_MISSED,
             Self::ConcurrencyBlocked { .. } => REASON_CONCURRENCY_BLOCKED,
@@ -312,7 +351,11 @@ impl SlotDecision {
             | Self::AlreadyFired { .. }
             | Self::Missed { .. }
             | Self::ConcurrencyBlocked { .. } => true,
-            Self::Suspended | Self::Unparseable(_) | Self::NoDueSlot { .. } => false,
+            Self::Suspended
+            | Self::Unparseable(_)
+            | Self::InvalidTopicSelection { .. }
+            | Self::InvalidRunPolicy { .. }
+            | Self::NoDueSlot { .. } => false,
             Self::NameTooLong { .. } => false,
         }
     }
@@ -325,7 +368,10 @@ impl SlotDecision {
             // instant the cron expression would have chosen would put a future
             // timestamp in `kubectl get`'s NEXT column for a schedule that is
             // not going to fire.
-            Self::Suspended | Self::Unparseable(_) => None,
+            Self::Suspended
+            | Self::Unparseable(_)
+            | Self::InvalidTopicSelection { .. }
+            | Self::InvalidRunPolicy { .. } => None,
             Self::NoDueSlot { next_fire_time }
             | Self::AlreadyFired { next_fire_time, .. }
             | Self::Missed { next_fire_time, .. }
@@ -346,6 +392,19 @@ impl SlotDecision {
                     .to_string()
             }
             Self::Unparseable(e) => format!("spec.schedule does not parse: {e}"),
+            // NAMES EVERY PROBLEM, NOT THE FIRST. An operator who fixes one of
+            // three mistakes and waits thirty seconds to learn about the next
+            // has been told three times to submit three times.
+            Self::InvalidTopicSelection { errors } => format!(
+                "the topic selection is not usable and no slot will be admitted until it is \
+                 fixed: {}",
+                render_field_errors(errors)
+            ),
+            Self::InvalidRunPolicy { errors } => format!(
+                "the run policy is not usable and no slot will be admitted until it is fixed: \
+                 {}",
+                render_field_errors(errors)
+            ),
             Self::NoDueSlot { .. } => format!(
                 "spec.schedule has no firing at or before now, so nothing is due; the next \
                  firing is {next}"
@@ -390,6 +449,26 @@ impl SlotDecision {
     }
 }
 
+/// Every field error in one sentence, bounded so a condition message stays a
+/// message.
+///
+/// `metav1.Condition.message` IS 32 KiB AND AN OPERATOR IS NOT. Ten problems is
+/// already more than anyone reads in a `kubectl describe`; the eleventh and
+/// beyond are counted rather than printed, and the API's 422 carries the full
+/// list.
+fn render_field_errors(errors: &[FieldError]) -> String {
+    const SHOWN: usize = 10;
+    let mut parts: Vec<String> = errors
+        .iter()
+        .take(SHOWN)
+        .map(|e| format!("{}: {}", e.field, e.message))
+        .collect();
+    if errors.len() > SHOWN {
+        parts.push(format!("and {} more", errors.len() - SHOWN));
+    }
+    parts.join("; ")
+}
+
 /// An optional next-firing instant, as a condition message spells it.
 fn render_next(next: Option<DateTime<Utc>>) -> String {
     match next {
@@ -416,6 +495,16 @@ fn render_next(next: Option<DateTime<Utc>>) -> String {
 pub fn decide(name: &str, spec: &BackupScheduleSpec, now: DateTime<Utc>) -> SlotDecision {
     if spec.suspend {
         return SlotDecision::Suspended;
+    }
+    // D1 §4.5 STEP 0, AND IT IS BEFORE THE CRON PARSE ON PURPOSE. A schedule
+    // whose topic selection cannot produce a run has nothing to admit whatever
+    // its cadence says, and reporting the cadence problem first would send an
+    // operator to fix the field that is not broken.
+    if let Err(errors) = crate::policy::validate_topic_selection(&run_policy_spec(spec)) {
+        return SlotDecision::InvalidTopicSelection { errors };
+    }
+    if let Err(errors) = crate::policy::validate_run_policy(&run_policy_spec(spec)) {
+        return SlotDecision::InvalidRunPolicy { errors };
     }
     let cron = match Cron::parse(&spec.schedule) {
         Ok(cron) => cron,
@@ -499,12 +588,67 @@ pub fn refine_against_last_fire(
     }
 }
 
+/// The policy half of the `Backup` this schedule would create — everything
+/// that decides WHAT a run does, and none of the identity that decides which
+/// run it is.
+///
+/// ONE BUILDER, THREE READERS. [`decide`] validates this (D1 §4.5 step 0),
+/// [`run_policy_digest`] digests it, and [`scheduled_backup`] fills in the
+/// identity and POSTs it. A second construction anywhere is how a schedule
+/// comes to admit a policy the run then refuses, or to record a digest over
+/// fields the run does not carry.
+///
+/// `deadlineSeconds` RESOLVES THE ABSENT DEFAULT HERE, because D1 §3.2 puts
+/// `activeDeadlineSeconds` inside the digested document: a schedule that says
+/// nothing and a schedule that says 3600 ask for the same run and must digest
+/// the same.
+#[must_use]
+pub fn run_policy_spec(spec: &BackupScheduleSpec) -> BackupSpec {
+    BackupSpec {
+        source_ref: spec.source_ref.clone(),
+        topics: spec.topics.clone(),
+        archive: spec.archive.clone(),
+        destination_ref: spec.destination_ref.clone(),
+        all_user_topics: spec.all_user_topics.clone(),
+        schedule_ref: None,
+        slot: None,
+        triggered_by: TRIGGERED_BY_SCHEDULE.to_string(),
+        trigger: None,
+        deadline_seconds: spec
+            .active_deadline_seconds
+            .unwrap_or(SCHEDULED_DEADLINE_SECONDS),
+    }
+}
+
+/// `sha256:<lowercase hex>` over this schedule's run policy (D1 §3.2).
+///
+/// It covers the source, the topic selection, the archive and the run deadline
+/// — what a run DOES. Cadence, zone, deadlines, catch-up, retry, concurrency,
+/// retention and `suspend` are excluded, so flipping `suspend` moves
+/// `metadata.generation` and visibly leaves this alone.
+#[must_use]
+pub fn run_policy_digest(spec: &BackupScheduleSpec) -> String {
+    crate::policy::run_policy_sha256(&run_policy_spec(spec))
+}
+
 /// The `Backup` object one due slot produces.
 ///
 /// PURE, AND THAT IS WHY THE OWNER UID IS AN ARGUMENT. Everything here is a
 /// function of `(schedule, schedule_uid, slot, name)`: the object a test builds
 /// is byte-identical to the one the reconciler `POST`s, so an assertion over
 /// this function is an assertion over the request.
+///
+/// # The revision, and why it comes from the object rather than an argument
+///
+/// D1 §5.4's atomic boundary says a `Backup` always runs exactly the generation
+/// it records. The way to guarantee that is not to pass a generation in — a
+/// caller could pass one it read somewhere else — but to take BOTH the policy
+/// and the generation from the SAME in-memory `BackupSchedule` the reservation
+/// was made against. `spec.scheduleRef.generation` is then
+/// `schedule.metadata.generation` by construction and
+/// `spec.scheduleRef.runPolicySha256` is the digest of the fields this very
+/// object copied, which is what `identity::check_run_policy_digest` recomputes
+/// and what `run_identity` refuses on a mismatch.
 ///
 /// NO ANNOTATION. The run identity the `Backup` reconciler derives from this
 /// object is `backup_id_for(schedule_uid, slot)`: `spec.triggeredBy: schedule`,
@@ -516,7 +660,8 @@ pub fn refine_against_last_fire(
 /// deleting the schedule garbage-collects its backups and a half-deleted
 /// schedule cannot orphan them. `api_version` and `kind` come from the derive's
 /// own [`Resource`] impl rather than from two string literals, so they cannot
-/// drift from the CRD.
+/// drift from the CRD. **PLAT-05.2 (W4) is the task that removes this
+/// reference**; until it lands, history is still owned.
 #[must_use]
 pub fn scheduled_backup(
     schedule: &BackupSchedule,
@@ -524,15 +669,86 @@ pub fn scheduled_backup(
     slot: &str,
     name: &str,
 ) -> Backup {
+    scheduled_run(schedule, schedule_uid, &RunPlan::scheduled(slot, name))
+}
+
+/// What one admission decided to create: which slot, under which trigger kind,
+/// at which attempt, under which object name.
+///
+/// A VALUE AND NOT FOUR ARGUMENTS, because the four are not independent: a
+/// retry's name, attempt and `retryOf` are one derivation
+/// ([`crate::slot::scheduled_backup_name_for_attempt`]), and splitting them
+/// across a call signature is how a `-r1` object comes to claim attempt 0.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RunPlan {
+    /// The slot, `yyyymmdd-hhmmss`.
+    pub slot: String,
+    /// The `Backup`'s deterministic name.
+    pub name: String,
+    /// Which kind of run this admission is.
+    pub kind: TriggerKind,
+    /// `0` for `Scheduled` and `CatchUp`, `1..=3` for `Retry`.
+    pub attempt: u32,
+    /// The attempt this one retries, for `Retry` only.
+    pub retry_of: Option<String>,
+}
+
+impl RunPlan {
+    /// Attempt 0 of a slot that fired at its own instant.
+    #[must_use]
+    pub fn scheduled(slot: &str, name: &str) -> Self {
+        Self {
+            slot: slot.to_string(),
+            name: name.to_string(),
+            kind: TriggerKind::Scheduled,
+            attempt: 0,
+            retry_of: None,
+        }
+    }
+
+    /// `Scheduled`, `CatchUp` or `Retry`, as the status spells it.
+    #[must_use]
+    pub fn kind_name(&self) -> &'static str {
+        match self.kind {
+            TriggerKind::Scheduled => "Scheduled",
+            TriggerKind::CatchUp => "CatchUp",
+            TriggerKind::Retry => "Retry",
+            TriggerKind::Manual => "Manual",
+        }
+    }
+
+    /// The label value for [`crate::identity::TRIGGER_LABEL`].
+    #[must_use]
+    pub fn trigger_label(&self) -> &'static str {
+        match self.kind {
+            TriggerKind::Scheduled => "scheduled",
+            TriggerKind::CatchUp => "catch-up",
+            TriggerKind::Retry => "retry",
+            TriggerKind::Manual => "manual",
+        }
+    }
+}
+
+/// The `Backup` object one admission produces, for any of the three
+/// schedule-created trigger kinds.
+///
+/// See [`scheduled_backup`] for why the revision is read off the object.
+#[must_use]
+pub fn scheduled_run(schedule: &BackupSchedule, schedule_uid: &str, plan: &RunPlan) -> Backup {
     let schedule_name = schedule.name_any();
+    let policy = run_policy_spec(&schedule.spec);
+    let digest = crate::policy::run_policy_sha256(&policy);
     Backup {
         metadata: ObjectMeta {
-            name: Some(name.to_string()),
+            name: Some(plan.name.clone()),
             namespace: schedule.namespace(),
             labels: Some(
                 [
                     (SCHEDULE_LABEL.to_string(), schedule_name.clone()),
-                    (SLOT_LABEL.to_string(), slot.to_string()),
+                    (SCHEDULE_UID_LABEL.to_string(), schedule_uid.to_string()),
+                    (SLOT_LABEL.to_string(), plan.slot.clone()),
+                    (TRIGGER_LABEL.to_string(), plan.trigger_label().to_string()),
+                    (ATTEMPT_LABEL.to_string(), plan.attempt.to_string()),
                 ]
                 .into_iter()
                 .collect(),
@@ -548,42 +764,31 @@ pub fn scheduled_backup(
             ..ObjectMeta::default()
         },
         spec: BackupSpec {
-            source_ref: schedule.spec.source_ref.clone(),
-            topics: schedule.spec.topics.clone(),
-            archive: schedule.spec.archive.clone(),
-            // COPIED, NOT RESOLVED. The child carries the same saved
-            // destination the schedule names, so `archive.url`'s sentinel and
-            // `destinationRef` stay the pair the admission rule requires; the
-            // Backup controller is what resolves it, once, before it freezes.
-            destination_ref: schedule.spec.destination_ref.clone(),
             // `name` AND `uid`, because a schedule deleted and recreated under
             // the same name is a different schedule and must not adopt this
-            // run. `generation` and `runPolicySha256` are D1 W2's — the
-            // scheduler that knows which revision it admitted under fills
-            // them; this builder records only what it has in hand.
+            // run; `generation` and `runPolicySha256` because PLAT-05.1 makes
+            // the policy editable, so "which schedule" stopped answering
+            // "under which policy".
             schedule_ref: Some(ScheduleRef {
                 name: schedule_name,
                 uid: Some(schedule_uid.to_string()),
-                generation: None,
-                run_policy_sha256: None,
+                generation: schedule.metadata.generation,
+                run_policy_sha256: Some(digest),
             }),
-            slot: Some(slot.to_string()),
-            triggered_by: TRIGGERED_BY_SCHEDULE.to_string(),
-            // The finer trigger, written explicitly rather than left to D1
-            // §3.1 rule 4's legacy reading. It says exactly what that rule
-            // would infer from `triggeredBy: schedule` — Scheduled, attempt 0
-            // — so nothing about this child changes meaning; catch-up and
-            // retry are the scheduler's to write, in W2.
+            slot: Some(plan.slot.clone()),
             trigger: Some(Trigger {
-                kind: TriggerKind::Scheduled,
-                attempt: 0,
-                retry_of: None,
-                time_zone: None,
+                kind: plan.kind,
+                attempt: i32::try_from(plan.attempt).unwrap_or(i32::MAX),
+                retry_of: plan
+                    .retry_of
+                    .as_ref()
+                    .map(|name| LocalRef { name: name.clone() }),
+                // INFORMATIONAL. The slot is a UTC instant whatever the zone;
+                // this records the zone it was COMPUTED in, so a history row
+                // keeps its local time after somebody edits `spec.timeZone`.
+                time_zone: schedule.spec.time_zone.clone(),
             }),
-            // Dynamic selection is a schedule-spec field D1 W2 adds; until it
-            // exists a schedule-created Backup is always a named allowlist.
-            all_user_topics: None,
-            deadline_seconds: SCHEDULED_DEADLINE_SECONDS,
+            ..policy
         },
         status: None,
     }
@@ -651,15 +856,33 @@ pub fn backup_is_terminal(backup: &Backup) -> bool {
 fn reservation_patch(
     schedule: &BackupSchedule,
     decision: &SlotDecision,
-    backup_name: &str,
+    plan: &RunPlan,
     now: DateTime<Utc>,
 ) -> serde_json::Value {
+    let backup_name = plan.name.as_str();
     let mut status = serde_json::Map::new();
     status.insert("activeBackupRef".to_string(), serde_json::Value::Null);
     status.insert(
         "pendingBackupRef".to_string(),
         json!(LocalRef {
             name: backup_name.to_string(),
+        }),
+    );
+    // THE GENERATION TRAVELS WITH THE RESERVATION, AND THAT IS D1 §5.4. The
+    // patch carries `metadata.resourceVersion`, so an edit that landed between
+    // the read and this write makes the API server answer 409 and the reconcile
+    // starts again under the new generation. When it is accepted, this number
+    // is the generation the `Backup` created from the same in-memory object
+    // records — so a run's copied policy always equals the schedule spec at the
+    // generation written inside it.
+    status.insert(
+        "pendingRun".to_string(),
+        json!(PendingRun {
+            name: backup_name.to_string(),
+            slot: plan.slot.clone(),
+            attempt: i32::try_from(plan.attempt).unwrap_or(i32::MAX),
+            kind: plan.kind_name().to_string(),
+            generation: schedule.metadata.generation.unwrap_or_default(),
         }),
     );
     status.insert(
@@ -819,6 +1042,52 @@ pub fn status_patch_with_retention(
     )
 }
 
+/// The `status.policy` block this reconcile should carry, and whether
+/// `observedGeneration` has to move (D1 §4.5 step 0).
+///
+/// # The three instants, and why only one of them is `now`
+///
+/// `generation`, `runPolicySha256` and `timeZone` are facts about the object.
+/// `effectiveSince` is the instant THIS REVISION was first observed, so it must
+/// be kept while the generation is unchanged — a catch-up decides against it
+/// (D1 §4.7 row 19), and refreshing it every pass would make every catch-up
+/// look "before the revision" forever.
+///
+/// `evaluatedAt` IS THE INSTANT THE STATUS LAST MOVED, NOT THE INSTANT THE
+/// CONTROLLER LAST LOOKED, and that is a deliberate refinement of D1 §4.9. This
+/// reconciler requeues every thirty seconds; an instant rewritten on every pass
+/// would put 2,880 `resourceVersion` bumps a day on a schedule that never
+/// changed state, wake this reconciler's own watch and spin it — the identical
+/// defect that two unconditional `lastTransitionTime` writes and one
+/// unconditional `retentionReport.evaluatedAt` already caused in this file
+/// (plan erratum E11(d)). It is therefore built from the stored value, and the
+/// caller rewrites it to `now` only when the status is being written anyway.
+///
+/// The consequence for readers: **`evaluatedAt` is not a liveness probe.** The
+/// staleness signal D1 §4.9 wanted is `status.nextRuns[0].at` in the past by
+/// more than a couple of requeue intervals — a live controller rewrites
+/// `nextRuns` when its first entry passes, so a first entry that has gone stale
+/// is a controller that stopped.
+fn policy_status(schedule: &BackupSchedule, now: DateTime<Utc>) -> PolicyStatus {
+    let generation = schedule.metadata.generation.unwrap_or_default();
+    let stored = schedule.status.as_ref().and_then(|s| s.policy.as_ref());
+    let unchanged = stored.filter(|p| p.generation == generation);
+    let effective_since = unchanged.map_or(now, |p| p.effective_since);
+    let evaluated_at = unchanged.map_or(now, |p| p.evaluated_at);
+    PolicyStatus {
+        generation,
+        run_policy_sha256: run_policy_digest(&schedule.spec),
+        time_zone: schedule
+            .spec
+            .time_zone
+            .clone()
+            .unwrap_or_else(|| crate::cadence::Zone::Utc.name().to_string()),
+        tzdb: crate::cadence::TZDB_SOURCE.to_string(),
+        effective_since,
+        evaluated_at,
+    }
+}
+
 fn status_patch_with_refs(
     schedule: &BackupSchedule,
     decision: &SlotDecision,
@@ -829,6 +1098,15 @@ fn status_patch_with_refs(
     now: DateTime<Utc>,
 ) -> serde_json::Value {
     let mut status = serde_json::Map::new();
+    // D1 §4.5 STEP 0 AND §5.3. Written on every final patch, so an operator can
+    // always read which revision the controller acted on and what the run
+    // policy of that revision digests to — a `suspend` flip moves `generation`
+    // and visibly leaves `runPolicySha256` alone.
+    status.insert(
+        "observedGeneration".to_string(),
+        json!(schedule.metadata.generation.unwrap_or_default()),
+    );
+    status.insert("policy".to_string(), json!(policy_status(schedule, now)));
     if let Some(report) = retention {
         // `evaluatedAt` IS KEPT WHEN THE FINDINGS ARE THE SAME — plan erratum
         // E11(d), review finding M-1. `evaluatedAt` is a "when computed" field,
@@ -881,8 +1159,13 @@ fn status_patch_with_refs(
     }
     match pending {
         PendingRefUpdate::Keep => {}
+        // BOTH KEYS, ALWAYS. `pendingRun` is the typed reservation and
+        // `pendingBackupRef` is the mirror older readers use; clearing one and
+        // leaving the other would present a reservation that no longer exists
+        // to whichever reader looked at the wrong field.
         PendingRefUpdate::Clear => {
             status.insert("pendingBackupRef".to_string(), serde_json::Value::Null);
+            status.insert("pendingRun".to_string(), serde_json::Value::Null);
         }
     }
     let ready = if decision.ready() { "True" } else { "False" };
@@ -1223,12 +1506,23 @@ pub async fn reconcile_schedule_with_archive(
             }
         }
 
-        // A reservation is accepted in-flight work even when the controller
-        // was down long enough that the cron decision is now Missed, or the
-        // operator suspended future slots. Resume it before considering a new
-        // admission; `activeBackupRef` is not used for this because a missing
-        // active child is stale, while a missing pending child is intentional.
-        if !matches!(decision, SlotDecision::Due { .. }) && active_names.is_empty() {
+        // D1 §4.5 STEP 2 AND §5.5, THE RELEASE ARM. A reservation is accepted
+        // in-flight work even when the controller was down long enough that
+        // the cron decision is now Missed, or the operator suspended future
+        // slots — but NOT when the run policy the child would copy is invalid.
+        // Creating it then would POST a `Backup` the Backup controller refuses
+        // terminally (`InvalidTopicSelection`), so the reservation is released
+        // instead and one reconcile after the spec is fixed the schedule
+        // resumes. Backups that already exist are untouched either way: this
+        // arm reads and writes status, and never a child's spec.
+        if matches!(
+            decision,
+            SlotDecision::InvalidTopicSelection { .. } | SlotDecision::InvalidRunPolicy { .. }
+        ) {
+            if pending_name.is_some() {
+                pending_update = PendingRefUpdate::Clear;
+            }
+        } else if !matches!(decision, SlotDecision::Due { .. }) && active_names.is_empty() {
             if let Some(pending) = pending_name.as_deref() {
                 if let Some(existing) = listed
                     .items
@@ -1332,7 +1626,12 @@ pub async fn reconcile_schedule_with_archive(
                         Api::namespaced(client.clone(), &namespace);
                     let body = status_patch_with_preconditions(
                         schedule,
-                        reservation_patch(schedule, &decision, &create_name, now),
+                        reservation_patch(
+                            schedule,
+                            &decision,
+                            &RunPlan::scheduled(&create_slot, &create_name),
+                            now,
+                        ),
                     )?;
                     status_write_base = schedules_api
                         .patch_status(&name, &PatchParams::default(), &Patch::Merge(body))
@@ -1470,6 +1769,18 @@ pub async fn reconcile_schedule_with_archive(
             "the computed status equals the one on the object; no patch is sent"
         );
     } else {
+        // THE ONE PLACE `evaluatedAt` MOVES. The computed block carries the
+        // stored instant so that a steady schedule compares equal and is not
+        // written; once this branch is taken the status is moving anyway, so
+        // the instant catches up in the same patch and costs no extra write.
+        let mut patch = patch;
+        if let Some(evaluated) = patch
+            .get_mut("status")
+            .and_then(|s| s.get_mut("policy"))
+            .and_then(|p| p.get_mut("evaluatedAt"))
+        {
+            *evaluated = json!(now);
+        }
         // Every finalization and stale-reference clear is a real CAS. In
         // particular, `pendingBackupRef: null` can be applied only to the
         // resourceVersion that still held the reservation this reconcile

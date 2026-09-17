@@ -1085,51 +1085,61 @@ fn every_spec_carries_exactly_its_declared_rules() {
         );
     }
 
-    // Stated separately, because it is the mutant's target: NOTHING is
-    // attached to `spec.suspend`. A rule there would be evaluated on the one
-    // field that has to change.
+    // Stated separately, because it is the mutant's target: the BackupSchedule
+    // seal names `sourceRef` AND NOTHING ELSE, and no rule is attached to any
+    // editable field. PLAT-05.1 inverted this kind's mutability — a rule
+    // attached below `.spec` here would be evaluated on a field an operator is
+    // now told they may change.
     let schedule = crd("backupschedules.yaml");
-    let on_suspend: Vec<Attached> = attached_rules(&schedule)
+    let below_spec: Vec<Attached> = attached_rules(&schedule)
         .into_iter()
-        .filter(|r| r.path == ["spec", "suspend"])
+        .filter(|r| r.path.len() > 1)
         .collect();
     assert!(
-        on_suspend.is_empty(),
-        "no CEL rule may be attached to `spec.suspend` — it is the one mutable field, and the \
-         only `.spec` write the controller performs in tag 1. Got {on_suspend:?}"
+        below_spec.is_empty(),
+        "no CEL rule may be attached below `BackupSchedule.spec`: every field but `sourceRef` \
+         is editable policy, and `sourceRef`'s seal is the object-level R1. Got {below_spec:?}"
     );
 
-    // And the schedule seal still names every field but `suspend`, including
-    // the one W6b added.
     let rule = &attached_rules(&schedule)
         .into_iter()
-        .find(|r| r.path == ["spec"])
-        .expect("the schedule seals its spec")
+        .find(|r| r.path == ["spec"] && r.rule.contains("oldSelf"))
+        .expect("the schedule seals sourceRef")
         .rule;
-    for named in [
-        "schedule",
-        "sourceRef",
-        "topics",
-        "archive",
-        "destinationRef",
-        "concurrencyPolicy",
-        "retention",
-    ] {
+    assert!(
+        rule.contains("has(self.sourceRef) == has(oldSelf.sourceRef)"),
+        "backupschedules.yaml: `sourceRef` needs its `has(self.x) == has(oldSelf.x)` half, \
+         which is what refuses the absent -> present transition; rule was:\n{rule}"
+    );
+    assert!(
+        rule.contains("self.sourceRef == oldSelf.sourceRef"),
+        "backupschedules.yaml: `sourceRef` must be compared against oldSelf; rule was:\n{rule}"
+    );
+    // EVERY OTHER FIELD IS EDITABLE, AND THE SEAL MUST NOT NAME IT. This is
+    // the mutant that matters now: re-adding a clause for `schedule`, `topics`,
+    // `archive`, `timeZone`, `retry` or any other field would silently restore
+    // the pre-PLAT-05.1 behaviour, and the operator role's `patch` would then
+    // be a grant nobody can use.
+    let editable: Vec<String> = spec_schema(&schedule)["properties"]
+        .as_mapping()
+        .expect("BackupSchedule.spec has properties")
+        .keys()
+        .filter_map(|k| k.as_str())
+        .filter(|k| *k != "sourceRef")
+        .map(str::to_string)
+        .collect();
+    assert!(
+        editable.len() >= 12,
+        "BackupSchedule.spec should carry at least twelve editable fields after PLAT-04.2 and \
+         PLAT-05.1; got {editable:?}"
+    );
+    for field in &editable {
         assert!(
-            rule.contains(&format!("has(self.{named}) == has(oldSelf.{named})")),
-            "backupschedules.yaml: `{named}` needs its `has(self.x) == has(oldSelf.x)` half, \
-             which is what refuses the absent -> present transition; rule was:\n{rule}"
-        );
-        assert!(
-            rule.contains(&format!("self.{named} == oldSelf.{named}")),
-            "backupschedules.yaml: `{named}` must be compared against oldSelf; rule was:\n{rule}"
+            !rule.contains(&format!("self.{field} == oldSelf.{field}")),
+            "backupschedules.yaml: `{field}` is editable policy (D1 §5.1) and must not appear \
+             in the seal; rule was:\n{rule}"
         );
     }
-    assert!(
-        !rule.contains("suspend"),
-        "backupschedules.yaml: `suspend` is the one mutable field and must not appear in the \
-         seal; rule was:\n{rule}"
-    );
 }
 
 /// Every CEL rule the three decisions name is PRESENT in the shipped CRD, by
@@ -1174,8 +1184,13 @@ const NAMED_RULES: &[(&str, &str, &str)] = &[
     ),
     (
         "backupschedules.yaml",
-        weirkeeper::crds::backup_schedule::SUSPEND_ONLY_RULE,
-        weirkeeper::crds::backup_schedule::SUSPEND_ONLY_MESSAGE,
+        weirkeeper::crds::backup_schedule::SOURCE_REF_IMMUTABLE_RULE,
+        weirkeeper::crds::backup_schedule::SOURCE_REF_IMMUTABLE_MESSAGE,
+    ),
+    (
+        "backupschedules.yaml",
+        weirkeeper::crds::backup_schedule::SELECTION_SHAPE_RULE,
+        weirkeeper::crds::backup_schedule::SELECTION_SHAPE_MESSAGE,
     ),
     (
         "backupschedules.yaml",
@@ -2088,15 +2103,33 @@ fn yaml(text: &str) -> Value {
     serde_yaml::from_str(text).expect("the fixture is YAML")
 }
 
-/// The hole a per-field rule leaves open, closed: an OPTIONAL field cannot be
-/// added on update.
+/// D1 §5.2's rules R1, R2 and R3 accept and refuse exactly the table the
+/// decision states.
 ///
-/// A table over `(oldSelf, self, expected)` against the rule text the CRD
-/// actually carries. Case 1 is the named one — `retention` absent, then
-/// present — and cases 8 and 9 are the same hole one level down, inside
-/// `retention` and inside `archive`.
+/// # What replaced what, and why the property is different now
+///
+/// This test used to be `an_absent_optional_field_cannot_be_added_on_update`,
+/// and it asserted the opposite of what the product now promises: that adding
+/// an optional field to a stored `BackupSchedule` was refused. PLAT-05.1 makes
+/// **every field but `sourceRef` editable**, so those rows are now the
+/// behaviour rather than the defect, and asserting them would pin a seal the
+/// decision deliberately removed.
+///
+/// The property that survives is narrower and sharper: R1 refuses a `sourceRef`
+/// change in BOTH directions (changed value, and the absent → present
+/// transition a per-field rule would miss), R2 refuses the two-answers shape on
+/// create as well as on update, and R3 refuses a retrying schedule whose name
+/// cannot hold a `-r<N>` suffix. Everything else is accepted, and each accepted
+/// row is a mutant target: re-adding a clause for `schedule`, `topics` or
+/// `archive` turns that row red.
+///
+/// The evaluator is the same fragment the rest of this file uses; R3 is
+/// evaluated against the schema ROOT, which is the one node a rule may read
+/// `self.metadata.name` from.
 #[test]
-fn an_absent_optional_field_cannot_be_added_on_update() {
+fn crd_rules_r1_r2_r3_accept_and_refuse_the_table() {
+    use weirkeeper::crds::backup_schedule as bs;
+
     let doc = crd("backupschedules.yaml");
 
     let base = "\
@@ -2111,68 +2144,122 @@ suspend: false
 ";
     let with_retention = format!("{base}retention:\n  keepLast: 3\n");
     let with_forbid = format!("{base}concurrencyPolicy: Forbid\n");
+    let dynamic = "\
+schedule: '0 3 * * *'
+sourceRef:
+  name: prod
+topics: []
+allUserTopics:
+  incompleteDiscovery: Refuse
+archive:
+  url: s3://bucket/archive
+suspend: false
+";
 
+    // (name, oldSelf, self, accepted)
     let cases: Vec<(&str, Value, Value, bool)> = vec![
+        // --- R1: the one seal ------------------------------------------
         (
-            "an absent optional field is ADDED on update",
+            "R1 refuses a changed sourceRef",
             yaml(base),
-            yaml(&with_retention),
+            yaml(&base.replace("name: prod", "name: staging")),
             false,
         ),
         (
-            "a present optional field is REMOVED on update",
-            yaml(&with_retention),
-            yaml(base),
-            false,
-        ),
-        (
-            "nothing changes, no retention",
+            "R1 accepts an unchanged sourceRef",
             yaml(base),
             yaml(base),
             true,
         ),
-        (
-            "nothing changes, with retention",
-            yaml(&with_retention),
-            yaml(&with_retention),
-            true,
-        ),
-        (
-            "only suspend flips",
-            yaml(base),
-            yaml(&base.replace("suspend: false", "suspend: true")),
-            true,
-        ),
+        // --- every other field is EDITABLE (D1 §5.1) --------------------
         (
             "the cron expression changes",
             yaml(base),
             yaml(&base.replace("'0 3 * * *'", "'0 4 * * *'")),
-            false,
+            true,
         ),
         (
             "the topic list changes",
             yaml(base),
             yaml(&base.replace("- orders", "- orders\n- payments")),
-            false,
+            true,
+        ),
+        (
+            "the archive URL changes",
+            yaml(base),
+            yaml(&base.replace("s3://bucket/archive", "s3://bucket/archive-2")),
+            true,
+        ),
+        (
+            "suspend flips",
+            yaml(base),
+            yaml(&base.replace("suspend: false", "suspend: true")),
+            true,
+        ),
+        (
+            "an absent optional field is ADDED on update",
+            yaml(base),
+            yaml(&with_retention),
+            true,
+        ),
+        (
+            "a present optional field is REMOVED on update",
+            yaml(&with_retention),
+            yaml(base),
+            true,
         ),
         (
             "the concurrency policy changes",
             yaml(&with_forbid),
             yaml(&with_forbid.replace("Forbid", "Allow")),
-            false,
+            true,
+        ),
+        (
+            "a time zone is added",
+            yaml(base),
+            yaml(&format!("{base}timeZone: Europe/Berlin\n")),
+            true,
+        ),
+        (
+            "a retry block is added",
+            yaml(base),
+            yaml(&format!("{base}retry:\n  maxRetries: 2\n")),
+            true,
+        ),
+        (
+            "a catch-up policy is added",
+            yaml(base),
+            yaml(&format!("{base}catchUpPolicy: Latest\n")),
+            true,
         ),
         (
             "a nested optional inside retention is added",
             yaml(&with_retention),
             yaml(&format!("{base}retention:\n  keepLast: 3\n  keepDays: 7\n")),
+            true,
+        ),
+        // --- R2: the two-answers shape ----------------------------------
+        (
+            "R2 accepts a dynamic selection with an empty topics list",
+            yaml(dynamic),
+            yaml(dynamic),
+            true,
+        ),
+        (
+            "R2 refuses allUserTopics beside a non-empty topics list",
+            yaml(base),
+            yaml(&format!(
+                "{base}allUserTopics:\n  incompleteDiscovery: Refuse\n"
+            )),
             false,
         ),
         (
-            "a nested optional inside archive is added",
-            yaml(base),
-            yaml(&base.replace(
-                "  url: s3://bucket/archive",
-                "  url: s3://bucket/archive\n  secretRef:\n    name: creds",
+            "R2 refuses it on CREATE too (self == oldSelf)",
+            yaml(&format!(
+                "{base}allUserTopics:\n  incompleteDiscovery: Refuse\n"
+            )),
+            yaml(&format!(
+                "{base}allUserTopics:\n  incompleteDiscovery: Refuse\n"
             )),
             false,
         ),
@@ -2182,10 +2269,79 @@ suspend: false
         let got = eval_attached(&doc, &new, &old);
         assert_eq!(
             got, expected,
-            "case `{name}`: the checked-in BackupSchedule seal evaluated to {got}, expected \
-             {expected}.\nold: {old:?}\nnew: {new:?}"
+            "case `{name}`: the checked-in BackupSchedule `.spec` rules evaluated to {got}, \
+             expected {expected}.\nold: {old:?}\nnew: {new:?}"
         );
     }
+
+    // --- R3: the retry name budget, on the schema ROOT -------------------
+    //
+    // The root is the one node a rule may read `self.metadata.name` from, so
+    // `eval_attached` (which walks `.spec`) cannot reach it and the rows are
+    // evaluated directly against the rule the CRD actually ships.
+    let root = root_schema(&doc)
+        .get("x-kubernetes-validations")
+        .and_then(Value::as_sequence)
+        .expect("BackupSchedule carries a root rule")
+        .iter()
+        .filter_map(|e| e.get("rule").and_then(Value::as_str))
+        .find(|r| *r == bs::RETRY_NAME_BUDGET_RULE)
+        .expect("the shipped root rule is R3");
+
+    let object = |name: &str, retry: Option<&str>| -> Value {
+        let spec = match retry {
+            Some(block) => format!("spec:\n  retry:\n{block}"),
+            None => "spec: {}\n".to_string(),
+        };
+        yaml(&format!("metadata:\n  name: {name}\n{spec}"))
+    };
+    let twenty_nine = "n".repeat(29);
+    let thirty = "n".repeat(30);
+    let r3: Vec<(&str, Value, bool)> = vec![
+        (
+            "no retry block: any name is accepted",
+            object(&thirty, None),
+            true,
+        ),
+        (
+            "maxRetries 0 on a 30-character name is accepted",
+            object(&thirty, Some("    maxRetries: 0\n")),
+            true,
+        ),
+        (
+            "maxRetries 1 on a 30-character name is refused",
+            object(&thirty, Some("    maxRetries: 1\n")),
+            false,
+        ),
+        (
+            "maxRetries 1 on a 29-character name is accepted",
+            object(&twenty_nine, Some("    maxRetries: 1\n")),
+            true,
+        ),
+        (
+            "maxRetries 3 on a short name is accepted",
+            object("nightly", Some("    maxRetries: 3\n")),
+            true,
+        ),
+    ];
+    for (name, object, expected) in r3 {
+        let got = eval(root, &object, &object);
+        assert_eq!(
+            got, expected,
+            "R3 case `{name}` evaluated to {got}, expected {expected}. A retry Backup is named \
+             `logweir-backup-<schedule>-<slot>-r<N>`, three characters longer than attempt 0, \
+             so 29 is the budget when retries are on.\nobject: {object:?}"
+        );
+    }
+
+    // The budget in the rule is the budget the name functions enforce. Two
+    // numbers that must agree, read from the two places they live.
+    assert_eq!(
+        weirkeeper::slot::max_schedule_name_len(true),
+        29,
+        "R3's literal 29 and `slot::max_schedule_name_len(true)` are the same budget"
+    );
+    assert_eq!(weirkeeper::slot::max_schedule_name_len(false), 32);
 }
 
 // ---------------------------------------------------------------------------

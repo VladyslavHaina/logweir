@@ -177,7 +177,7 @@ arrives as a reviewable diff. Do not hand-edit those files.
 | Kind | Scope | What it is |
 |---|---|---|
 | `KafkaCluster` | Namespaced | A saved connection (contract v1, §20): bootstrap servers, `auth{mode, username, secretRef, tls, tlsCa}`, role, and the marker topic that proves a scratch target. The password and the private CA are REFERENCES into this namespace, never values. `status.clusterId` is read from the broker, never from the spec. |
-| `BackupSchedule` | Namespaced | A recurring backup of a **named** topic set (no wildcard, no glob metacharacter). `spec.concurrencyPolicy` is `Forbid` by default or explicitly `Allow`; `spec.suspend` is the only mutable field. `retention{keepLast, keepDays}` **reports** what it would remove and deletes nothing. |
+| `BackupSchedule` | Namespaced | A recurring backup of a topic set — a **named** allowlist (no wildcard, no glob metacharacter), or `topics: []` with an `allUserTopics` block resolved per run. `spec.concurrencyPolicy` is `Forbid` by default or explicitly `Allow`. **Every field is editable except `sourceRef`**, which is sealed by CEL; each created `Backup` copies the policy and records `spec.scheduleRef {uid, generation, runPolicySha256}`, so an edit reaches the next run and never a run that exists. `spec.timeZone`, `startingDeadlineSeconds`, `catchUpPolicy`, `retry` and `activeDeadlineSeconds` are optional and absent means today's behaviour. `retention{keepLast, keepDays}` **reports** what it would remove and deletes nothing. |
 | `Backup` | Namespaced | One archive run, as a Job. Its name and `status.backupId` are a pure function of the trigger, so a duplicate reconcile gets `AlreadyExists` rather than a second partial archive. |
 | `Restore` | Namespaced | One restore run, as a Job. **A drill is a `Restore` with `spec.target.mode: scratch`** — there is no `Drill` kind. A `Restore` only ever writes a *new* topic, so it is non-destructive by construction. |
 | `Approval` | Namespaced | A DSSE-signed authorisation for one `Restore` or `Backup`. **Four required spec fields**; `approvalBytes` and `sidecarBytes` are the UTF-8 document text, verbatim, never base64. |
@@ -214,6 +214,44 @@ describe, so no discovery proves whole-cluster visibility, and both possible
 defaults are wrong in a way an operator would not notice. A run records what it
 actually covered in `status.selection.coverage`, and no surface renders "all
 topics" unless that reads `AllUserTopicsAttested`.
+
+**Absent-field behaviour for the editable schedule (PLAT-04.2, PLAT-05.1).**
+`BackupSchedule.spec` gained `timeZone`, `startingDeadlineSeconds`,
+`catchUpPolicy`, `retry {maxRetries, delaySeconds}`, `activeDeadlineSeconds` and
+`allUserTopics`. **Every one is optional and absent reproduces the behaviour of
+the controller that stored the object**, field by field: UTC evaluation, a
+one-hour starting deadline, no catch-up, no retries, a 3600-second run deadline
+and a named allowlist. No stored schedule is rewritten, its
+`metadata.generation` does not move, and the first reconcile after the upgrade
+only ADDS `status.observedGeneration` and `status.policy`. Nothing about slot
+identity changes: a slot is the UTC instant whatever the zone, so
+`logweir-backup-<schedule>-<slot>` is the name it always was.
+
+`sourceRef` IS THE ONE FIELD AN EDIT MAY NOT REACH. The CRD carries three CEL
+rules: `spec.sourceRef` is immutable (a schedule's identity is the cluster it
+protects, and one schedule's history must not mix two clusters);
+`spec.allUserTopics` requires `spec.topics` to be empty; and a schedule with
+`retry.maxRetries > 0` must be named in 29 characters or fewer, because a retry
+`Backup` is named `…-<slot>-r<N>`. All three reference a required field compared
+to itself or a field no stored object has, so **no existing object can fail them
+on the 1.29 floor**, where there is no validation ratcheting. Two things are
+deliberately NOT in CEL and are controller checks instead: "exactly one of a
+non-empty `topics` or `allUserTopics`" (a schedule stored with `topics: []`
+would otherwise be unable to accept even a `suspend` flip) and cron/time-zone
+validity (not expressible). Those produce `Ready=False` with a reason and admit
+nothing; see §9.
+
+**Editing is safe because a run is not editable.** Every `Backup` a schedule
+creates copies the policy and records `spec.scheduleRef {name, uid, generation,
+runPolicySha256}`, and its resolved settings are frozen into an immutable
+ConfigMap before any Job exists. The schedule reconciler's entire write surface
+against `backups` is a `POST` — no PUT, no PATCH, no DELETE — so an edit cannot
+reach a run's spec, its frozen inputs or its Job. `status.policy` reports the
+revision in force and the digest of what a run under it does; `runPolicySha256`
+covers the source, the topic selection, the archive and the run deadline and
+excludes cadence, zone, deadlines, catch-up, retry, concurrency, retention and
+`suspend`, so suspending and resuming a schedule visibly leaves it unchanged
+while a topic-list edit visibly does not.
 
 **Absent-field behaviour for the D3 additions.** `Backup.status.progress`,
 `Backup.status.capture`, `Restore.status.progress`, `Restore.status.completion`,
@@ -1084,36 +1122,123 @@ duplicate reconcile a 409 `AlreadyExists` instead of a second, partial archive
 (guard **G-SLOT**), and a name that had to be shortened to fit would not be
 that function any more.
 
+### Editing a schedule's policy (PLAT-05.1)
+
+**Every `spec` field is editable except `sourceRef`.** Change the cron
+expression, the time zone, the topic list, the archive, the deadlines, the
+catch-up policy, the retry policy, the concurrency policy, the retention rules
+or `suspend` in place:
+
+```bash
+kubectl --context docker-desktop -n <namespace> \
+  patch backupschedule nightly --type merge \
+  -p '{"spec":{"schedule":"0 3 * * *","timeZone":"Europe/Berlin"}}'
+```
+
+`kubectl edit` and `kubectl apply` work too, which is why `logweir-operator`
+grants `patch` beside `update`: both commands send a PATCH, and an
+`update`-only grant could not perform the edit the CRD permits. Neither verb
+widens what may change — the API server applies the CRD's CEL rules to every
+subject, cluster-admin included.
+
+Re-pointing a schedule at a different `KafkaCluster` is refused:
+
+```
+spec.sourceRef is immutable; create a new BackupSchedule to protect a different cluster
+```
+
+A schedule's identity is the cluster it protects, and one schedule's history
+must not mix two clusters. Create a second schedule instead.
+
+**An edit reaches the next admission and never a run that exists.** Each
+`Backup` copies the policy at creation and records the revision it copied:
+
+```bash
+kubectl --context docker-desktop -n <namespace> \
+  get backup logweir-backup-nightly-20260910-030000 \
+  -o jsonpath='{.spec.scheduleRef}'
+# {"generation":7,"name":"nightly","runPolicySha256":"sha256:…","uid":"3f0c…"}
+```
+
+and the schedule reports the revision in force:
+
+```bash
+kubectl --context docker-desktop -n <namespace> \
+  get backupschedule nightly -o jsonpath='{.status.policy}'
+# {"effectiveSince":"…","evaluatedAt":"…","generation":7,
+#  "runPolicySha256":"sha256:…","timeZone":"UTC","tzdb":"chrono-tz 0.10.4"}
+```
+
+`runPolicySha256` digests **what a run does** — source, topic selection,
+archive, run deadline — and excludes **when it runs**. So suspending and
+resuming a schedule moves `metadata.generation` twice and leaves the digest
+alone, while a topic-list edit moves both. `status.policy.evaluatedAt` is the
+instant this status last MOVED, not the instant the controller last looked: the
+reconciler deliberately writes nothing when the computed status equals the
+stored one, so a staleness check reads `status.nextRuns[0].at` instead.
+
+`status.policy.effectiveSince` is when the current revision was first observed.
+A catch-up never runs a slot older than it — editing a schedule at noon does not
+retroactively back up the morning under the new policy.
+
+### An edit the schema accepts but the controller cannot run
+
+Two classes of mistake are not expressible in CEL on the 1.29 floor: "exactly
+one of a non-empty `topics` or `allUserTopics`" would strand every object
+already stored with an empty list, and cron and time-zone validity are not
+expressible at all. The controller is the gate for both, and it **fails
+closed**:
+
+| Edit | Where it is refused | What happens |
+|---|---|---|
+| Change `sourceRef` | API server (CEL), 422 | The object is unchanged |
+| `allUserTopics` beside a non-empty `topics` | API server (CEL), 422 | Unchanged |
+| `retry.maxRetries > 0` on a name longer than 29 characters | API server (CEL), 422 | Unchanged |
+| A deadline out of range, a bad enum, a zone name that is not shaped like one, an exclusion that is not a legal topic name | API server (OpenAPI), 422 | Unchanged |
+| An unparseable cron expression | Controller | `Ready=False`, reason `UnparseableSchedule` |
+| A zone name this build's database does not have | Controller | `Ready=False`, reason `UnknownTimeZone` |
+| `topics: []` with no `allUserTopics`, a glob metacharacter, a name that is not Kafka-legal | Controller | `Ready=False`, reason `InvalidTopicSelection` |
+| Any other unusable run-policy field | Controller | `Ready=False`, reason `InvalidRunPolicy` |
+
+In every controller row: **no slot, catch-up or retry is admitted**, a pending
+reservation is released rather than turned into a run the `Backup` controller
+would refuse, `Backup`s that are already running are untouched, and fixing the
+spec resumes the schedule within one reconcile. There is no last-known-good
+fallback — silently continuing an old policy after an edit would contradict
+what the operator sees.
+
+### Upgrading to, and rolling back from, the editable schedule
+
+**Apply the CRD before rolling the controller**, in that order, and never
+downgrade the CRD on its own. The three CEL rules are additive and no stored
+object can fail them, so applying them changes nothing about what is installed;
+the controller rollout is what starts writing `status.observedGeneration` and
+`status.policy`. There is one stored version, no conversion webhook and no
+object rewrite: a `Backup` created before PLAT-05.1 simply has no
+`scheduleRef.uid`/`generation`/`runPolicySha256`, and a console reads that as
+"revision not recorded (created before PLAT-05.1)".
+
+**Rolling back means rolling back the controller, not the CRD.** An older
+controller running against the new CRD honours edits of `schedule`, `topics` and
+`archive` naturally — it copies them at creation — but records no revision on
+the runs it creates, ignores the fields it does not declare, and would copy
+`topics: []` for a dynamically-selected schedule, whose runs then fail safe at
+the runner (exit 3) rather than backing up nothing silently.
+
+Re-applying the OLD CRD would re-seal the spec and prune the new fields from
+every API response. If a CRD downgrade is unavoidable, first remove `timeZone`,
+`retry`, `catchUpPolicy`, the two deadline fields and `allUserTopics` from every
+schedule and record them somewhere you can re-apply them from; suspend any
+schedule whose behaviour depended on them before the swap.
+
 ### Concurrency policy uses owned Backup state
 
 `spec.concurrencyPolicy` controls whether different scheduled slots may run at
 the same time. The field has two values: `Forbid` (recommended and default) and
 `Allow` (explicit opt-in). An existing `BackupSchedule` stored before the field
-was added behaves as `Forbid` without an object rewrite. The policy is sealed
-with the other schedule inputs, so choosing `Allow` for an old omitted-field
-schedule requires creating a replacement schedule. This changes no cron
-expression, timezone, missed-slot horizon, catch-up, or retry behavior.
-
-Until PLAT-05 decouples retained history from schedule ownership, replace an
-immutable schedule policy only with this drain-and-retain procedure:
-
-1. Set `spec.suspend: true` on the old schedule so it admits no new slots.
-2. List every `Backup` whose **controller owner reference UID** equals the old
-   schedule UID, and wait until all of them are terminal (`Succeeded`, `Failed`,
-   or legacy `Refused`). Do not use the singular `activeBackupRef` as proof that
-   the drain is complete.
-3. Retain the old, suspended `BackupSchedule`. Its controller owner references
-   still anchor the old `Backup` history; deleting it can let Kubernetes garbage
-   collection delete that history.
-4. Create the replacement under a **different name**, only after the drain.
-   The replacement has a different UID and therefore cannot see an old active
-   child as its own; starting it before the drain can overlap generations.
-
-Do not delete and recreate a schedule under the same name. That is not a safe
-policy migration: deletion can remove history, while the recreated object's new
-UID neither adopts nor excludes work owned by the old generation. An old
-schedule whose `concurrencyPolicy` field is omitted already behaves as
-`Forbid`; suspend that same object and follow the procedure above.
+was added behaves as `Forbid` without an object rewrite. Since PLAT-05.1 the
+field is editable in place, so moving an old omitted-field schedule to `Allow`
+is a one-field patch and no longer needs a replacement object.
 
 Under `Forbid`, the controller lists Backups in the schedule's namespace and
 accepts only children whose controller owner UID is the schedule's current UID.

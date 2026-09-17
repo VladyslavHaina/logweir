@@ -3,17 +3,31 @@
 #     kubectl --context docker-desktop -n <namespace> \
 #       apply -f config/samples/backupschedule.yaml
 #
-# EVERY `.spec` FIELD EXCEPT `suspend` IS SEALED BY THE CRD'S OWN CEL RULE.
+# EVERY `.spec` FIELD IS EDITABLE EXCEPT `sourceRef` (PLAT-05.1, D1 §5.1).
 # `config/crd/backupschedules.yaml` carries an object-level
-# `x-kubernetes-validations` rule with the message `only spec.suspend is
-# mutable; create a new BackupSchedule instead`, and the API server applies it
-# to **every** subject — cluster-admin included. To change a schedule's topics,
-# archive, source or cron expression, create a new object. This is also why
-# `config/rbac/operator_role.yaml` grants a plain `update`: RBAC has no
-# expression language, so the restriction cannot live there (critique B H13).
+# `x-kubernetes-validations` rule with the message `spec.sourceRef is
+# immutable; create a new BackupSchedule to protect a different cluster`, and
+# the API server applies it to **every** subject — cluster-admin included. A
+# schedule's identity is the cluster it protects, so one schedule's history
+# never mixes two clusters.
+#
+# EDITING IS SAFE BECAUSE A RUN IS NOT EDITABLE. Every `Backup` this schedule
+# creates copies the policy and records `spec.scheduleRef {uid, generation,
+# runPolicySha256}`, and its resolved settings are frozen into an immutable
+# ConfigMap before any Job exists. An edit therefore reaches the NEXT
+# admission and can never reach a run that already exists — `kubectl get
+# backupschedule nightly -o jsonpath='{.status.policy}'` shows the revision in
+# force and the digest of what a run under it does.
+#
+# `config/rbac/operator_role.yaml` grants `update` AND `patch`: `kubectl edit`
+# and `kubectl apply` send a PATCH, so `update` alone cannot edit a schedule at
+# all. Neither verb widens what may change — the CRD's CEL rule does that, and
+# RBAC has no expression language to restrict it with (critique B H13).
 #
 # `topics` IS A NAMED ALLOWLIST WITH NO WILDCARD (GC18(c) rail 1, guard
-# **G-GLOB**). A `*` here is a refusal, not a match-all.
+# **G-GLOB**). A `*` here is a refusal, not a match-all. The one other legal
+# shape is `topics: []` with an `allUserTopics` block, which resolves the list
+# per run and labels the run's coverage honestly.
 #
 # RETENTION **REPORTS AND NEVER DELETES** (GC6, guard **G-RET**). `keepLast`
 # and `keepDays` produce a `status.retentionReport` naming what WOULD be
@@ -26,6 +40,10 @@
 apiVersion: logweir.dev/v1alpha1
 kind: BackupSchedule
 metadata:
+  # 32 characters is the budget for a schedule that does not retry, and 29 for
+  # one that does — a retry Backup is named `…-<slot>-r<N>`. The CRD's root CEL
+  # rule refuses `retry.maxRetries > 0` on a longer name rather than letting the
+  # schedule look configured and silently never retry.
   name: nightly
   labels:
     app.kubernetes.io/name: logweir
@@ -33,6 +51,11 @@ spec:
   # Five fields, space-separated, and a hand-written parser — no cron crate
   # (Global Constraint 38 closes the workspace graph).
   schedule: "0 2 * * *"
+  # The IANA zone the five fields are read in. OMITTING IT MEANS UTC and
+  # reproduces, instant for instant, the slots a controller without this field
+  # computed. The slot identity is always the UTC instant, whatever the zone.
+  timeZone: Europe/Berlin
+  # IMMUTABLE. Everything else on this spec may be edited in place.
   sourceRef:
     name: source
   topics:
@@ -42,7 +65,20 @@ spec:
     url: s3://kafka-backups/logweir
     secretRef:
       name: logweir-s3
+  # How long after a slot came due it may still start. Omitting it means 3600.
+  startingDeadlineSeconds: 3600
+  # `None` (the default) counts a slot past its deadline in
+  # `status.missedSlots` and moves on. `Latest` lets the ONE most recent such
+  # slot still run, as a `CatchUp`; never more than one.
+  catchUpPolicy: None
+  # Omitting `retry` means no retries — today's behaviour. Only a RETRYABLE
+  # failure is retried (a broker that was down, a pod that was never
+  # scheduled); a guard refusal is a decision and is never retried.
+  retry:
+    maxRetries: 2
+    delaySeconds: 300
+  # The Job deadline every created Backup carries. Omitting it means 3600.
+  activeDeadlineSeconds: 3600
   retention:
     keepLast: 7
-  # The one mutable field.
   suspend: false

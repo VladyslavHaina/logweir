@@ -31,7 +31,7 @@
 //! generated [`CustomResourceDefinition`] after the fact. kube 0.99 does ship
 //! a separate `CELSchema` derive with a `#[cel_validate]` attribute; it is
 //! deliberately not used here, because the rules this task lands are attached
-//! to `.spec` as a whole (see [`backup_schedule::SUSPEND_ONLY_RULE`] for why
+//! to `.spec` as a whole (see [`backup_schedule::SOURCE_REF_IMMUTABLE_RULE`] for why
 //! that placement is load-bearing) and one helper that all six kinds pass
 //! through is what makes `every_spec_is_sealed_and_only_suspend_is_mutable`
 //! checkable at one place.
@@ -458,9 +458,9 @@ pub const WHOLE_SPEC_SEAL: [SpecRule; 1] =
 /// there.
 ///
 /// `rules` is [`WHOLE_SPEC_SEAL`] for the kinds whose whole `.spec` is sealed,
-/// [`backup_schedule::SUSPEND_ONLY_RULE`]'s pair for the one kind with a
-/// mutable field, and a kind-specific list for the ones whose `.spec` carries
-/// several rules (`backup_destination::SPEC_RULES` is four).
+/// [`backup_schedule::SPEC_RULES`] for the kind whose policy is editable, and
+/// a kind-specific list for the ones whose `.spec` carries several rules
+/// (`backup_destination::SPEC_RULES` is four).
 ///
 /// THE RULES GO ON `.spec`, NOT ON `.spec`'s FIELDS. A per-field transition
 /// rule is evaluated only when `oldSelf` exists for that field, so an optional
@@ -469,8 +469,8 @@ pub const WHOLE_SPEC_SEAL: [SpecRule; 1] =
 /// 1.30+, above the 1.29 floor Global Constraint 25 fixes. An object-level
 /// rule is evaluated on every update, which is what makes the
 /// `has(self.x) == has(oldSelf.x)` half of
-/// [`backup_schedule::SUSPEND_ONLY_RULE`] able to refuse the absent → present
-/// transition at all. The one exception is a rule attached to a REQUIRED
+/// [`backup_schedule::SOURCE_REF_IMMUTABLE_RULE`] able to refuse the absent →
+/// present transition at all. The one exception is a rule attached to a REQUIRED
 /// sub-object — `spec.request` on the two check kinds — which is evaluated on
 /// every update for the same reason; [`attach_transition_rule`] is how that is
 /// spelled, and it says so at its own call site.
@@ -850,7 +850,18 @@ pub fn render_all() -> Vec<Rendered> {
     push(
         "BackupSchedule",
         "backupschedules.yaml",
-        backup_schedule::BackupSchedule::crd(),
+        {
+            let mut crd = backup_schedule::BackupSchedule::crd();
+            // D1 §5.2 R3, THE RETRY NAME BUDGET. The schema root is the one
+            // node a rule may read `self.metadata.name` from, which is why a
+            // name-length budget cannot live on `.spec` beside R1 and R2.
+            attach_root_rule(
+                &mut crd,
+                backup_schedule::RETRY_NAME_BUDGET_RULE,
+                backup_schedule::RETRY_NAME_BUDGET_MESSAGE,
+            );
+            crd
+        },
         &backup_schedule::SPEC_RULES,
     );
     push(

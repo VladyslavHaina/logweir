@@ -1,26 +1,38 @@
-# `logweir-operator` — create the four operational kinds, and suspend a
-# schedule.
+# `logweir-operator` — create the four operational kinds, and edit a schedule.
 #
 # ---------------------------------------------------------------------------
-# THE `suspend` RESTRICTION IS CEL, NOT RBAC, AND IT CANNOT BE WRITTEN HERE
+# WHAT MAY CHANGE IS CEL, NOT RBAC, AND IT CANNOT BE WRITTEN HERE
 # ---------------------------------------------------------------------------
 # An RBAC `rules[]` entry is `apiGroups`, `resources`, `verbs` and
 # `resourceNames` and nothing else — there is no field in which a CEL
-# expression could be written, so "`update` restricted by CEL to `suspend`" is
-# not expressible in a ClusterRole and must not be attempted (critique B H13,
+# expression could be written, so "`update` restricted to these fields" is not
+# expressible in a ClusterRole and must not be attempted (critique B H13,
 # spec §9 amendment 4b, claim C97). An implementer who tries produces either a
 # ClusterRole the API server rejects or a key it silently ignores, and the
 # second is worse: the install succeeds and the restriction does not exist.
 #
 # THE RESTRICTION ALREADY EXISTS, IN THE CRD. `config/crd/backupschedules.yaml`
 # carries an object-level `x-kubernetes-validations` rule on `.spec` sealing
-# every field except `suspend` — `schedule`, `sourceRef`, `topics`, `archive`
-# and `retention`, each pinned both for presence and for value — with the
-# message `only spec.suspend is mutable; create a new BackupSchedule instead`.
-# **The API server applies it to every subject, cluster-admin included**, which
-# is a stronger statement than any ClusterRole could make about any one of
-# them. So the grant below is a plain `update`, and the restriction to
-# `suspend` is enforced one layer up.
+# `sourceRef` — pinned both for presence and for value — with the message
+# `spec.sourceRef is immutable; create a new BackupSchedule to protect a
+# different cluster`, plus a rule binding `allUserTopics` to an empty `topics`
+# and a root rule bounding a retrying schedule's name. **The API server applies
+# them to every subject, cluster-admin included**, which is a stronger
+# statement than any ClusterRole could make about any one of them. So the
+# grants below are plain verbs, and what they may change is enforced one layer
+# up.
+#
+# BOTH `update` AND `patch` (PLAT-05.1). PLAT-05.1 makes a schedule's policy
+# editable, and the two commands an operator actually runs — `kubectl edit` and
+# `kubectl apply` — send a PATCH. `update` alone leaves an operator who is told
+# the policy is editable unable to edit it. `patch` widens nothing the CRD does
+# not already allow: it reaches exactly the fields `update` reaches, and
+# `sourceRef` is refused through either verb.
+#
+# Editing is safe because a RUN is not editable: every `Backup` a schedule
+# creates copies the policy and records the revision it ran under, and its
+# resolved settings are frozen before any Job exists. An edit reaches the next
+# admission and never a run that exists.
 #
 # SHIPPED UNBOUND. Bind it per namespace:
 #
@@ -47,8 +59,9 @@ rules:
       - kafkaclusters
       - restores
     verbs: ["create"]
-  # Suspend and resume a schedule. PLAIN `update` — see this file's header for
-  # why it cannot carry the restriction and where the restriction actually is.
+  # Edit a schedule's policy, and suspend or resume it. PLAIN verbs — see this
+  # file's header for why they cannot carry the restriction, where the
+  # restriction actually is, and why `patch` is needed beside `update`.
   - apiGroups: ["logweir.dev"]
     resources: ["backupschedules"]
-    verbs: ["update"]
+    verbs: ["update", "patch"]

@@ -1017,16 +1017,23 @@ fn the_four_cluster_roles_are_exactly_as_specified() {
     }
 
     // --- `logweir-operator` -----------------------------------------------
-    // `create` on the four operational kinds, plus a PLAIN `update` on
-    // `backupschedules`. The restriction to `suspend` is the CRD's CEL rule —
-    // see `the_suspend_restriction_is_cel_not_rbac`.
+    // `create` on the four operational kinds, plus PLAIN `update` AND `patch`
+    // on `backupschedules`. What may change is the CRD's CEL rule — see
+    // `the_schedule_edit_restriction_is_cel_not_rbac`. `patch` is there because
+    // PLAT-05.1 makes the policy editable and the two commands an operator
+    // runs (`kubectl edit`, `kubectl apply`) both send a PATCH, so `update`
+    // alone is a grant nobody can use.
     let operator = vec![
         (
             v(&["logweir.dev"]),
             v(&["backups", "backupschedules", "kafkaclusters", "restores"]),
             v(&["create"]),
         ),
-        (v(&["logweir.dev"]), v(&["backupschedules"]), v(&["update"])),
+        (
+            v(&["logweir.dev"]),
+            v(&["backupschedules"]),
+            v(&["update", "patch"]),
+        ),
     ];
     assert_eq!(
         rules_of("config/rbac/operator_role.yaml", "logweir-operator"),
@@ -1053,8 +1060,8 @@ fn the_four_cluster_roles_are_exactly_as_specified() {
     );
 }
 
-/// The `suspend` restriction is the CRD's CEL rule, and `operator_role.yaml`
-/// says so instead of trying to express it.
+/// What an operator may change on a `BackupSchedule` is the CRD's CEL rule, and
+/// `operator_role.yaml` says so instead of trying to express it.
 ///
 /// Critique B **H13**, spec §9 amendment 4b, claim **C97**. An RBAC `rules[]`
 /// entry is `apiGroups`/`resources`/`verbs`/`resourceNames` and nothing else —
@@ -1062,8 +1069,15 @@ fn the_four_cluster_roles_are_exactly_as_specified() {
 /// produces either a ClusterRole the API server rejects or a key it silently
 /// ignores, and the second is worse: the install succeeds and the restriction
 /// does not exist.
+///
+/// PLAT-05.1 INVERTED WHAT THE RULE SAYS, NOT WHERE IT LIVES. The seal used to
+/// name every field but `suspend`; it now names `sourceRef` alone, because a
+/// schedule's policy is editable and its identity is the cluster it protects.
+/// The RBAC half is unchanged in kind and grew one verb: `kubectl edit` and
+/// `kubectl apply` send a PATCH, so an `update`-only grant left an operator
+/// unable to perform the edit the CRD now permits.
 #[test]
-fn the_suspend_restriction_is_cel_not_rbac() {
+fn the_schedule_edit_restriction_is_cel_not_rbac() {
     let role = read("config/rbac/operator_role.yaml");
 
     // --- no CEL, structurally -------------------------------------------
@@ -1129,8 +1143,8 @@ fn the_suspend_restriction_is_cel_not_rbac() {
          config/crd/backupschedules.yaml"
     );
 
-    // And the CRD really does carry it, over every `.spec` field except
-    // `suspend` (Task 15b).
+    // And the CRD really does carry it, over `sourceRef` and nothing else
+    // (Task 15b's shape, D1 §5.1's content).
     let crd = manifests_in(&repo().join("config/crd/backupschedules.yaml"));
     let schema =
         &crd[0].value["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"];
@@ -1155,28 +1169,32 @@ fn the_suspend_restriction_is_cel_not_rbac() {
          {seals:?}"
     );
     let rule = seals[0];
-    let sealed: Vec<&str> = schema["properties"]
+    assert!(
+        rule.contains("self.sourceRef == oldSelf.sourceRef")
+            && rule.contains("has(self.sourceRef) == has(oldSelf.sourceRef)"),
+        "the object-level CEL rule does not seal `sourceRef`, so an `update` or a `patch` could \
+         re-point a schedule at a different cluster and mix two clusters' history under one \
+         object"
+    );
+    let editable: Vec<&str> = schema["properties"]
         .as_mapping()
         .expect("BackupSchedule.spec has properties")
         .keys()
         .filter_map(|k| k.as_str())
-        .filter(|k| *k != "suspend")
+        .filter(|k| *k != "sourceRef")
         .collect();
     assert!(
-        !sealed.is_empty(),
-        "BackupSchedule.spec has no sealed field"
+        editable.len() >= 12,
+        "BackupSchedule.spec should carry at least twelve editable fields after PLAT-04.2 and \
+         PLAT-05.1; got {editable:?}"
     );
-    for field in &sealed {
+    for field in &editable {
         assert!(
-            rule.contains(&format!("self.{field} == oldSelf.{field}")),
-            "the object-level CEL rule does not seal `{field}`, so an `update` could change it \
-             and `logweir-operator`'s plain `update` would be unbounded"
+            !rule.contains(&format!("self.{field} == oldSelf.{field}")),
+            "the CEL rule seals `{field}`, which PLAT-05.1 makes editable policy — and the \
+             operator role's `update`/`patch` would then be grants nobody can use"
         );
     }
-    assert!(
-        !rule.contains("self.suspend == oldSelf.suspend"),
-        "the CEL rule seals `suspend`, which is the ONE field it must leave mutable"
-    );
 }
 
 // ---------------------------------------------------------------------------
