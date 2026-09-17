@@ -1740,6 +1740,28 @@ export async function restoreDestination(api, state, prepared, restore) {
   return approvalRoute(s, p);
 }
 
+/** Reads the namespace's saved connections again and puts them on the state,
+ *  so every later resolution -- `validateRestore`'s target check included --
+ *  is made against what the namespace holds NOW. It sets `state.clusters` and
+ *  touches no field of the plan.
+ *
+ *  The read carries no route signal: a submit in flight is a durable operation
+ *  and navigation must not cancel it (PLAT-13.2), and this read is part of
+ *  that operation. */
+export async function confirmClusters(state, api) {
+  const s = state || {};
+  try {
+    s.clusters = await api.list(s.ns, CLUSTERS);
+  } catch (unread) {
+    throw invalidInput({
+      targetCluster: "the saved connections could not be read again before submitting, so the " +
+        "target this plan names could not be confirmed (" + String(unread && unread.message) +
+        "). Nothing was sent; the plan and every value you typed are still here.",
+    });
+  }
+  return s.clusters;
+}
+
 // SUBMIT-REGION-END
 
 // --------------------------------------------------------------- private half
@@ -2357,6 +2379,18 @@ function wire(node, state, parse, api, lifecycle, prepared) {
       // name minted from it -- so an outcome that arrives after the fields have
       // changed can still be told, and named, for what it is.
       record.run(async () => {
+        // THE CONNECTIONS ARE READ AGAIN FIRST (PLAT-07.2). The target was
+        // resolved against the list this view read when it mounted, and the
+        // window that matters is the one between reviewing a plan and
+        // submitting it. The re-read REPLACES the list the state resolves
+        // against and NOTHING ELSE: the plan's own fields are untouched, so
+        // `preparePlan` renders the same bytes and the reviewed-hash guard
+        // still compares the hash that was on screen. What changes is that
+        // `validateRestore` now refuses a target whose uid has stopped
+        // answering -- including one deleted and recreated under the same
+        // name. A read that fails is a refusal, not a shrug: the draft is
+        // kept, and "I could not find out" is not "it is still there".
+        await confirmClusters(state, api);
         const result = await submitRestore(state, api, lifecycle, { reviewedHash: reviewed });
         return result === null ? { outcome: "abandoned" } : result;
       }, { about: { hash: reviewed, restoreName: (prepared || {}).restoreName } });

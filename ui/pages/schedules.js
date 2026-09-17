@@ -761,8 +761,37 @@ function wireCreate(node, ns, parse, lifecycle, api, clusters) {
     }
     const values = readScheduleValues(form);
     keepDraft(key, values, SCHEDULE_DRAFT_FIELDS);
-    mutation.run(() => submitSchedule(ns, values, api, clusters));
+    // THE CONNECTIONS ARE READ AGAIN, HERE, BEFORE THE CREATE. Resolving the
+    // chosen uid against the list this view read at mount would only catch a
+    // connection that was already gone when the form opened; the window that
+    // matters is the one between opening the form and submitting it, which is
+    // exactly when somebody rebuilds a cluster. The read carries NO ROUTE
+    // SIGNAL: a submit in flight is a durable operation and navigation must
+    // not cancel it (PLAT-13.2), and this read is part of that operation.
+    mutation.run(() => confirmThenCreate(ns, values, api));
   }, lifecycle);
+}
+
+/** Re-reads the namespace's saved connections and creates the schedule against
+ *  that list, or refuses.
+ *
+ *  A FAILED RE-READ IS A REFUSAL, not a shrug. The whole point of the read is
+ *  to find out whether the connection this draft names still exists; "I could
+ *  not find out" is not "it does", and the draft is kept either way, so the
+ *  cost of refusing is one more click and the cost of not refusing is a
+ *  schedule pointed at a connection nobody chose. */
+export async function confirmThenCreate(ns, values, api) {
+  let clusters;
+  try {
+    clusters = await api.list(ns, CLUSTERS);
+  } catch (unread) {
+    throw invalidInput({
+      source: "the saved connections could not be read again before creating this schedule, so " +
+        "the connection it names could not be confirmed (" + String(unread && unread.message) +
+        "). Nothing was sent; everything you typed is still here.",
+    });
+  }
+  return submitSchedule(ns, values, api, clusters);
 }
 
 /** THE SOURCE SELECTOR'S TWO BEHAVIOURS, both local to the form.

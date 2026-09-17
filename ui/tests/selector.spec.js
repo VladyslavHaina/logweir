@@ -58,12 +58,14 @@ import {
 } from "../pages/clusters.js";
 import {
   SCHEDULE_DRAFT_FIELDS,
+  confirmThenCreate,
   renderScheduleForm,
   scheduleBody,
   sourceRefusal,
   submitSchedule,
 } from "../pages/schedules.js";
 import {
+  confirmClusters,
   initialState,
   recoveryPoints,
   renderTargetStep,
@@ -937,4 +939,78 @@ test("the_clusters_list_offers_a_test_connection_per_row_and_names_the_row_by_ui
     list: async () => clusters,
   });
   assert.deepEqual(wired, ["uid-a:submit", "uid-b:submit"], "one control per row, and no more");
+});
+
+// ===========================================================================
+// 8. THE WINDOW BETWEEN OPENING A FORM AND SUBMITTING IT.
+// ===========================================================================
+
+test("both_submits_read_the_connections_again_and_refuse_what_changed_under_them", async () => {
+  // Resolving against the list the view read at mount only catches a
+  // connection that was already gone when the form opened. The window that
+  // matters is the one between opening the form and submitting it -- which is
+  // exactly when somebody rebuilds a cluster -- so both submits read again.
+  const values = {
+    name: "hourly", cron: "0 * * * *", source: "orders-prod", sourceUid: "uid-a",
+    topics: "orders", archive: "s3://b/p", archiveSecret: "logweir-s3",
+    keepLast: "", keepDays: "",
+  };
+  const created = [];
+  const fresh = { items: [cluster({ uid: "uid-a", name: "orders-prod" })] };
+  await confirmThenCreate("team-a", values, {
+    list: async () => fresh,
+    create: async (...a) => { created.push(a); return { metadata: { name: "hourly" } }; },
+  });
+  assert.equal(created.length, 1);
+
+  // The SAME draft, submitted after the cluster was recreated under its name:
+  // the re-read finds the impostor and the create never happens.
+  const none = [];
+  await assert.rejects(
+    () => confirmThenCreate("team-a", values, {
+      list: async () => ({ items: [cluster({ uid: "uid-b", name: "orders-prod" })] }),
+      create: async (...a) => { none.push(a); },
+    }),
+    (error) => {
+      assert.match(error.fields.source, /uid-b/);
+      return true;
+    },
+  );
+  assert.equal(none.length, 0);
+
+  // AND A FAILED RE-READ IS A REFUSAL, not a shrug: "I could not find out" is
+  // not "it is still there", and the draft is kept either way.
+  await assert.rejects(
+    () => confirmThenCreate("team-a", values, {
+      list: async () => { throw new Error("connection reset"); },
+      create: async (...a) => { none.push(a); },
+    }),
+    (error) => {
+      assert.match(error.fields.source, /could not be read again/);
+      assert.match(error.fields.source, /connection reset/);
+      return true;
+    },
+  );
+  assert.equal(none.length, 0, "nothing is created when the confirmation failed");
+
+  // THE WIZARD'S HALF puts the fresh list on the state and touches no plan
+  // field, so the reviewed hash still compares the bytes that were on screen.
+  const backups = fixture("wizard-backups.json");
+  const point = { uid: recoveryPoints(backups)[0].metadata.uid, backup: "" };
+  const state = initialState("logweir-t27", fixture("wizard-clusters.json"), backups, point);
+  const before = JSON.stringify(state.fields);
+  const replacement = { items: [cluster({ uid: "uid-z", name: "elsewhere" })] };
+  await confirmClusters(state, { list: async () => replacement });
+  assert.equal(state.clusters, replacement, "the state now resolves against what exists now");
+  assert.equal(JSON.stringify(state.fields), before, "and no field of the plan moved");
+  assert.equal(resolveTarget(state).state, "missing");
+  assert.ok(validateRestore(state).targetCluster, "so the submit that follows refuses");
+
+  await assert.rejects(
+    () => confirmClusters(state, { list: async () => { throw new Error("gateway timeout"); } }),
+    (error) => {
+      assert.match(error.fields.targetCluster, /could not be read again/);
+      return true;
+    },
+  );
 });
