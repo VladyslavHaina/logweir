@@ -30,8 +30,9 @@ use logweir_core::check_contract::{
 };
 use weirkeeper::catalog_view as view;
 use weirkeeper::catalog_view::{
-    Availability, RunnerCounts, RunnerEntry, RunnerSigner, SignatureCounts, SignatureVerdict,
-    SyncTrigger, TrustKey, TrustKeyState, TrustView, Verification, ViewLimits,
+    Availability, EntryLocation, RunnerCounts, RunnerEntry, RunnerSigner, SignatureCounts,
+    SignatureVerdict, SyncTrigger, TrustKey, TrustKeyState, TrustView, Verification, ViewLimits,
+    WindowStates,
 };
 use weirkeeper::check;
 use weirkeeper::conditions::apply_merge_patch;
@@ -157,6 +158,13 @@ fn catalog(spec_extra: Value, status: Value) -> RecoveryCatalog {
         .expect("the fixture is a RecoveryCatalog")
 }
 
+/// The stem of the PREVIOUS slot's sync — a Job that has aged out while this
+/// pass's trigger names a new one.
+fn previous_stem() -> String {
+    let slot = view::periodic_slot(now(), 3600).expect("an hourly catalog has slots");
+    view::sync_stem(UID, &SyncTrigger::Periodic(slot - 1).token())
+}
+
 /// The Job name this catalog's periodic sync computes at [`now`].
 fn periodic_stem() -> String {
     let slot = view::periodic_slot(now(), 3600).expect("an hourly catalog has slots");
@@ -226,7 +234,7 @@ fn entry_value(point: &str, at_ms: i64, availability: &str, signature: &str, key
         "recoveryPointAtMs": at_ms,
         "coveredFromMs": at_ms - 3_600_000,
         "coveredToMs": at_ms,
-        "locations": ["s3://lw-archive/team-a"],
+        "locations": [{"locationId": "s3://lw-archive/team-a"}],
         "receiptKey": format!("logweir/backups/sched-1/{point}.receipt.json"),
         "receiptSha256": format!("sha256:{}", "0".repeat(64)),
         "manifestKey": "logweir/backups/sched-1/manifest.json",
@@ -273,7 +281,11 @@ fn counts_value(total: i64, available: i64) -> Value {
 }
 
 fn body_for(pages: &[Vec<Value>], counts: Value, signers: Value, complete: bool) -> String {
-    let mut out = String::new();
+    let mut out = format!(
+        "{}{}\n",
+        view::FORMAT_LINE_PREFIX,
+        view::BODY_FORMAT_VERSION
+    );
     let of = u32::try_from(pages.len()).expect("a small page count");
     for (i, entries) in pages.iter().enumerate() {
         out.push_str(&page_block(
@@ -436,8 +448,21 @@ fn empty_config_map() -> String {
     json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {}}).to_string()
 }
 
+/// What the API server answers a `POST /jobs` with: the object it created,
+/// carrying the UID the plan `ConfigMap`'s ownerReference needs (finding F1).
 fn empty_job() -> String {
-    json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {}}).to_string()
+    json!({
+        "apiVersion": "batch/v1", "kind": "Job",
+        "metadata": {
+            "name": periodic_stem(), "namespace": NS, "uid": JOB_UID,
+            "ownerReferences": [{
+                "apiVersion": "logweir.dev/v1alpha1", "kind": "RecoveryCatalog",
+                "name": NAME, "uid": UID, "controller": true,
+                "blockOwnerDeletion": true
+            }]
+        }
+    })
+    .to_string()
 }
 
 fn patched_catalog() -> String {
@@ -715,6 +740,15 @@ fn the_roster_projects_its_signing_keys_and_not_its_approver_keys() {
 // 3. The result-body grammar
 // ===========================================================================
 
+/// A body fragment with the grammar version line the parser requires.
+fn versioned(body: &str) -> String {
+    format!(
+        "{}{}\n{body}",
+        view::FORMAT_LINE_PREFIX,
+        view::BODY_FORMAT_VERSION
+    )
+}
+
 #[test]
 fn a_page_whose_digest_does_not_match_is_refused_and_no_page_is_written_from_it() {
     let entries = vec![ok_entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1)];
@@ -724,13 +758,13 @@ fn a_page_whose_digest_does_not_match_is_refused_and_no_page_is_written_from_it(
         "\"availability\":\"Deleted\"",
     );
     assert_ne!(good, tampered, "the fixture really was changed");
-    match view::parse_body(&tampered) {
+    match view::parse_body(&versioned(&tampered), 5000) {
         Err(view::BodyError::PageDigestMismatch { index }) => assert_eq!(index, 1),
         other => panic!("a tampered page must be refused, got {other:?}"),
     }
     // The control: the untouched page parses.
     assert_eq!(
-        view::parse_body(&good)
+        view::parse_body(&versioned(&good), 5000)
             .expect("the untouched page parses")
             .pages[0]
             .entries
@@ -755,7 +789,8 @@ fn a_malformed_entry_is_skipped_and_counted_and_never_fatal() {
         body.push_str(line);
         body.push('\n');
     }
-    let parsed = view::parse_body(&body).expect("one broken entry is not a broken sync");
+    let parsed =
+        view::parse_body(&versioned(&body), 5000).expect("one broken entry is not a broken sync");
     assert_eq!(parsed.pages[0].entries.len(), 1);
     assert_eq!(parsed.skipped_entries, 1);
 }
@@ -764,7 +799,10 @@ fn a_malformed_entry_is_skipped_and_counted_and_never_fatal() {
 fn page_headers_must_be_one_to_n_in_order_each_exactly_once() {
     let e = vec![ok_entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1)];
     let body = format!("{}{}", page_block(2, 2, &e), page_block(1, 2, &e));
-    assert_eq!(view::parse_body(&body), Err(view::BodyError::PageSequence));
+    assert_eq!(
+        view::parse_body(&versioned(&body), 5000),
+        Err(view::BodyError::PageSequence)
+    );
 }
 
 #[test]
@@ -775,7 +813,7 @@ fn an_entry_line_before_any_page_header_is_refused() {
         ok_entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1)
     );
     assert_eq!(
-        view::parse_body(&body),
+        view::parse_body(&versioned(&body), 5000),
         Err(view::BodyError::EntryBeforePage)
     );
 }
@@ -787,7 +825,14 @@ fn every_body_error_is_d2s_one_closed_code() {
         view::BodyError::EntryBeforePage,
         view::BodyError::PageDigestMismatch { index: 1 },
         view::BodyError::PageSequence,
-        view::BodyError::TooManyEntries,
+        view::BodyError::TooManyEntries { allowed: 5000 },
+        view::BodyError::TooLarge { got: 9 },
+        view::BodyError::MissingFormat,
+        view::BodyError::UnsupportedBodyFormat {
+            got: "2".to_string(),
+        },
+        view::BodyError::RepeatedSummary(view::COUNTS_LINE_PREFIX),
+        view::BodyError::MalformedSummary(view::SIGNERS_LINE_PREFIX),
         view::BodyError::NotUtf8,
     ] {
         assert_eq!(
@@ -806,7 +851,7 @@ fn unrelated_lines_are_ignored() {
     let e = vec![ok_entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1)];
     let body = format!("noise\n{}{{\"level\":\"warn\"}}\n", page_block(1, 1, &e));
     assert_eq!(
-        view::parse_body(&body)
+        view::parse_body(&versioned(&body), 5000)
             .expect("noise does not break a body")
             .pages[0]
             .entries
@@ -835,8 +880,8 @@ fn two_receipts_under_one_backup_id_are_two_points_and_one_copied_archive_is_one
     let merged = view::merge_entries(vec![a, copy]);
     assert_eq!(merged.len(), 1, "one receipt, one point");
     assert_eq!(
-        merged[0].locations,
-        vec!["s3://one/p".to_string(), "s3://two/p".to_string()],
+        location_ids(&merged[0]),
+        vec!["s3://one/p", "s3://two/p"],
         "an archive copied to a second bucket is ONE point with TWO locations (D3 §5.1)"
     );
     assert_eq!(merged[0].availability, Availability::Available);
@@ -864,7 +909,7 @@ fn a_record_mismatch_is_a_conflict_and_an_informational_difference_is_not() {
 
     // The control: an INFORMATIONAL difference is one point in two places.
     let mut informational = a.clone();
-    informational.locations = vec!["s3://two/p".to_string()];
+    informational.locations = vec![at("s3://two/p", None)];
     informational.recorded_at = Some(now());
     informational.remedy = Some("ignored".to_string());
     let merged = view::merge_entries(vec![a, informational]);
@@ -876,16 +921,121 @@ fn a_record_mismatch_is_a_conflict_and_an_informational_difference_is_not() {
     );
 }
 
-/// The merge keeps the WORSE availability, so a point readable in one place and
-/// missing in another is not advertised as simply available.
+/// **Review finding F9 — availability merges BEST-of.** A point present in one
+/// bucket and absent from another is still fully recoverable from the first;
+/// hiding it because a second copy went missing is the opposite of what a
+/// second copy is for. Asserted in BOTH arrival orders, because a merge whose
+/// answer depends on which observation arrived first is not a merge.
 #[test]
-fn the_worse_state_wins_a_merge() {
-    let a = entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 20, "s3://one/p");
-    let mut missing = a.clone();
-    missing.availability = Availability::Missing;
-    missing.locations = vec!["s3://two/p".to_string()];
-    let merged = view::merge_entries(vec![a, missing]);
-    assert_eq!(merged[0].availability, Availability::Missing);
+fn availability_merges_best_of_across_locations_in_either_order() {
+    let good = entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 20, "s3://one/p");
+    let mut lost = good.clone();
+    lost.availability = Availability::Missing;
+    lost.locations = vec![at("s3://two/p", None)];
+
+    for (label, order) in [
+        ("good first", vec![good.clone(), lost.clone()]),
+        ("lost first", vec![lost.clone(), good.clone()]),
+    ] {
+        let merged = view::merge_entries(order);
+        assert_eq!(merged.len(), 1, "{label}: one receipt, one point");
+        assert_eq!(
+            merged[0].availability,
+            Availability::Available,
+            "{label}: D3 §5.1's copied archive is ONE point in TWO places, and it is still \
+             recoverable from the place that has it"
+        );
+        assert_eq!(location_ids(&merged[0]), vec!["s3://one/p", "s3://two/p"]);
+        // Each place keeps its OWN verdict, so nobody has to guess.
+        let by_id: Vec<(&str, Availability)> = merged[0]
+            .locations
+            .iter()
+            .map(|l| {
+                (
+                    l.location_id.as_str(),
+                    l.availability_or(merged[0].availability),
+                )
+            })
+            .collect();
+        assert_eq!(
+            by_id,
+            vec![
+                ("s3://one/p", Availability::Available),
+                ("s3://two/p", Availability::Missing),
+            ],
+            "{label}"
+        );
+        // And the degraded one is NAMED, so a best-of merge does not silently
+        // drop the fact that a copy needs repairing.
+        let remedy = merged[0].remedy.clone().unwrap_or_default();
+        assert!(
+            remedy.contains("s3://two/p") && remedy.contains("Missing"),
+            "{label}: the remedy names the broken copy: {remedy:?}"
+        );
+        assert!(
+            !remedy.contains("AWS_") && !remedy.contains("minio.storage.svc"),
+            "{label}: a location id is a bucket and a prefix, never an endpoint or a credential"
+        );
+    }
+}
+
+/// **Review finding F5 — the SIGNATURE half merges worst-of**, with the key id
+/// following the worse verdict, in both arrival orders.
+///
+/// The reviewer's mutant (`worse_signature` returns `false`) survived all 54
+/// rows before this one existed: bytes that verify in bucket A and fail in
+/// bucket B would have been published `selectable: true` whenever the good
+/// observation happened to arrive first.
+#[test]
+fn the_signature_merges_worst_of_with_its_key_id_in_either_order() {
+    let mut good = entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 20, "s3://one/p");
+    good.signature = SignatureVerdict::Verified;
+    good.signer_key_id = Some(TRUSTED_KEY.to_string());
+    let mut corrupt = good.clone();
+    corrupt.locations = vec![at("s3://two/p", None)];
+    corrupt.signature = SignatureVerdict::Invalid;
+    corrupt.signer_key_id = Some(STRANGER_KEY.to_string());
+
+    for (label, order) in [
+        ("good first", vec![good.clone(), corrupt.clone()]),
+        ("corrupt first", vec![corrupt.clone(), good.clone()]),
+    ] {
+        let merged = view::merge_entries(order);
+        assert_eq!(merged.len(), 1, "{label}");
+        assert_eq!(
+            merged[0].signature,
+            SignatureVerdict::Invalid,
+            "{label}: bytes that fail verification in one place are evidence about the POINT, \
+             not about the place"
+        );
+        assert_eq!(
+            merged[0].signer_key_id.as_deref(),
+            Some(STRANGER_KEY),
+            "{label}: the key id follows the verdict it belongs to"
+        );
+        let trust = trust_with(TRUSTED_KEY, TrustKeyState::Active, None);
+        let view_row = view::view_entry(merged[0].clone(), &trust, now());
+        assert_eq!(view_row.verification, Verification::Invalid, "{label}");
+        assert!(!view_row.selectable, "{label}: and it is never offered");
+    }
+}
+
+/// One PLACE reported twice keeps the worse of the two: two attempts at one
+/// bucket are two attempts at one thing, and "it worked once" is not a property
+/// of the bucket.
+#[test]
+fn one_location_observed_twice_keeps_its_worse_verdict() {
+    let good = entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 20, "s3://one/p");
+    let mut flaky = good.clone();
+    flaky.availability = Availability::Unreadable;
+    let merged = view::merge_entries(vec![good, flaky]);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(merged[0].locations.len(), 1);
+    assert_eq!(
+        merged[0].locations[0].availability,
+        Some(Availability::Unreadable)
+    );
+    assert_eq!(merged[0].availability, Availability::Unreadable);
 }
 
 /// The view order is total and reproducible: newest recovery point first, point
@@ -910,8 +1060,21 @@ fn the_view_is_newest_first_with_a_total_order() {
 fn entry(point: &str, at_ms: i64, location: &str) -> RunnerEntry {
     let mut e: RunnerEntry =
         serde_json::from_value(ok_entry(point, at_ms)).expect("an entry parses");
-    e.locations = vec![location.to_string()];
+    e.locations = vec![at(location, None)];
     e
+}
+
+/// One location, with its own verdict or inheriting the entry's.
+fn at(location_id: &str, availability: Option<Availability>) -> EntryLocation {
+    EntryLocation {
+        location_id: location_id.to_string(),
+        availability,
+    }
+}
+
+/// The location ids of a merged entry, in order.
+fn location_ids(e: &RunnerEntry) -> Vec<&str> {
+    e.locations.iter().map(|l| l.location_id.as_str()).collect()
 }
 
 // ===========================================================================
@@ -1075,7 +1238,7 @@ fn the_counters_are_a_projection_and_the_residue_is_named() {
             trusted: Some(false),
         },
     ];
-    let tally = view::tally(&counts, &signers);
+    let tally = view::tally(&counts, &signers, WindowStates::default());
     assert_eq!(tally.counts.total, Some(100));
     assert_eq!(tally.counts.available, Some(80));
     assert_eq!(
@@ -1091,7 +1254,7 @@ fn the_counters_are_a_projection_and_the_residue_is_named() {
     assert_eq!(tally.counts.invalid, Some(4));
     assert_eq!(
         tally.unrepresented,
-        vec![("Partial", 5)],
+        vec![("Partial", 5, view::SCOPE_WALK)],
         "the v1alpha1 status has no `counts.partial`; it is NAMED rather than dropped (NOTE FOR \
          W13)"
     );
@@ -1114,7 +1277,13 @@ fn the_signer_summary_lists_the_unknown_key_first_and_is_bounded() {
             points: 1,
         });
     }
-    let rows = view::signer_summaries(&signers, &trust);
+    let all = view::signer_summaries(&signers, &trust);
+    assert_eq!(
+        all.len(),
+        21,
+        "`signer_summaries` returns the FULL list; `bounded` is what cuts it (finding F10)"
+    );
+    let rows = view::bounded(all);
     assert_eq!(rows.len(), view::MAX_SIGNERS);
     assert_eq!(rows[0].trusted, Some(false));
     assert!(
@@ -1219,14 +1388,70 @@ fn the_view_is_stale_after_two_intervals() {
 
 /// The TTL is `max(3 × interval, 86400)` and it is the ONLY thing that removes
 /// a page.
+/// **Review finding F3.** The TTL bounds how many view generations coexist, and
+/// the old day-long floor did not: one Job lives per slot, so the number alive
+/// is `ttl / interval`, which at an hourly cadence was 24 and at D3 §5.3's own
+/// 300 s floor was 288.
 #[test]
-fn the_ttl_outlives_three_intervals_and_never_falls_below_a_day() {
-    assert_eq!(view::ttl_seconds(3600), 86_400);
+fn the_ttl_bounds_how_many_generations_coexist() {
+    assert_eq!(view::TTL_FLOOR_SECONDS, 3_600, "an hour, not a day");
+    assert_eq!(view::ttl_seconds(3600), 10_800, "three intervals");
     assert_eq!(view::ttl_seconds(86_400), 259_200);
+    assert_eq!(
+        view::ttl_seconds(300),
+        3_600,
+        "the floor wins under 20 minutes"
+    );
     assert_eq!(view::ttl_seconds(0), view::TTL_FLOOR_SECONDS);
     assert_eq!(
         view::view_expires_at(now(), 3600),
-        now() + chrono::Duration::seconds(86_400)
+        now() + chrono::Duration::seconds(10_800)
+    );
+
+    // The property the number exists for, stated as arithmetic.
+    assert_eq!(view::live_generations(3600), 3, "exactly three at an hour");
+    assert_eq!(
+        view::live_generations(300),
+        12,
+        "twelve at the CEL floor — at most 12 x (8 pages + index + plan) = 120 ConfigMaps"
+    );
+    assert_eq!(
+        view::live_generations(0),
+        1,
+        "a manual-only catalog has one"
+    );
+    for interval in [300, 600, 900, 1800, 3600, 21_600, 86_400] {
+        assert!(
+            view::live_generations(interval) <= 12,
+            "{interval}s keeps {} generations alive",
+            view::live_generations(interval)
+        );
+    }
+}
+
+/// **Review finding F3, the other half.** The CRD refuses a cadence below D3
+/// §5.3's own floor, which the `schemars` range alone admitted.
+#[test]
+fn the_crd_refuses_a_cadence_below_the_floor() {
+    let rule = weirkeeper::crds::recovery_catalog::J3_INTERVAL_FLOOR_RULE;
+    assert!(
+        rule.contains("self.sync.intervalSeconds >= 300")
+            && rule.contains("self.sync.intervalSeconds == 0"),
+        "the rule keeps `0` (manual only) AND imposes D3 §5.3's 300 s floor: {rule}"
+    );
+    assert_eq!(
+        weirkeeper::crds::recovery_catalog::SPEC_RULES.len(),
+        3,
+        "J1 (syncRequest-only), J2 (destinationRef xor legacyArchive), J3 (the cadence floor)"
+    );
+    let crd = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../config/crd/recoverycatalogs.yaml"),
+    )
+    .expect("the generated CRD is on disk");
+    assert!(
+        crd.contains("self.sync.intervalSeconds >= 300"),
+        "`just crds` has not been re-run: the rule is in the type and not in the shipped CRD"
     );
 }
 
@@ -1260,7 +1485,7 @@ fn a_page_is_immutable_and_owned_by_the_job_without_blocking_its_deletion() {
         name: "sync".to_string(),
         uid: JOB_UID.to_string(),
     };
-    let cm = view::page_config_map("p0", NS, &owner, &built.pages[0], 0);
+    let cm = view::page_config_map("p0", NS, &owner, UID, &built.pages[0], 0);
     assert_eq!(cm.immutable, Some(true));
     let refs = cm.metadata.owner_references.expect("owned");
     assert_eq!(refs.len(), 1);
@@ -1366,7 +1591,7 @@ fn the_trust_bundle_is_public_material_owned_by_the_catalog() {
 fn the_sync_job_carries_its_ttl_at_creation_and_mounts_no_secret() {
     let job = view::build_sync_job(&sync_job_spec());
     let spec = job.spec.expect("a Job spec");
-    assert_eq!(spec.ttl_seconds_after_finished, Some(86_400));
+    assert_eq!(spec.ttl_seconds_after_finished, Some(10_800));
     assert_eq!(spec.backoff_limit, Some(0));
     let pod = spec.template.spec.expect("a pod spec");
     assert_eq!(pod.automount_service_account_token, Some(false));
@@ -1441,16 +1666,69 @@ async fn a_first_pass_creates_one_sync_job_and_deletes_nothing() {
     ]);
     let outcome = run(&f, &catalog(json!({}), json!({}))).await;
     assert_eq!(outcome.phase, ctrl::CatalogPhase::Started);
+    // `Ready` IS ABOUT THE VIEW (finding F6). This catalog has never synced, so
+    // it is `Unknown/NeverSynced` — not `SyncInProgress`, which belongs on
+    // `Synced` and is asserted there.
     assert_eq!(outcome.ready, "Unknown");
-    assert_eq!(outcome.ready_reason, ctrl::REASON_SYNC_IN_PROGRESS);
+    assert_eq!(outcome.ready_reason, ctrl::REASON_NEVER_SYNCED);
+    assert_eq!(outcome.synced_reason, ctrl::REASON_SYNC_IN_PROGRESS);
     assert_eq!(outcome.job_name.as_deref(), Some(periodic_stem().as_str()));
 
     let jobs = f.posted("/jobs");
     assert_eq!(jobs.len(), 1, "exactly one sync Job per trigger");
     assert_eq!(jobs[0]["metadata"]["name"], periodic_stem());
     assert_eq!(
-        jobs[0]["spec"]["ttlSecondsAfterFinished"], 86400,
-        "the TTL is the only garbage collector this design has"
+        jobs[0]["spec"]["ttlSecondsAfterFinished"], 10800,
+        "the TTL is the only garbage collector this design has, and it bounds how many \
+         generations coexist (finding F3)"
+    );
+
+    // **Review finding F1.** The plan `ConfigMap` is created AFTER the Job and
+    // is owned BY the Job, so the Job's TTL collects it with the pages. Owned
+    // by the catalog it was an orphan per slot that nothing ever removed.
+    let plans = f.posted("/configmaps");
+    let plan = plans
+        .iter()
+        .find(|cm| {
+            cm["metadata"]["name"]
+                .as_str()
+                .is_some_and(|n| n.ends_with(check::plan::PLAN_SUFFIX))
+        })
+        .expect("the plan ConfigMap was written");
+    let owner = &plan["metadata"]["ownerReferences"][0];
+    assert_eq!(
+        owner["kind"], "Job",
+        "the plan is owned by the SYNC JOB and not by the RecoveryCatalog: a catalog is \
+         long-lived and its plan name changes every slot, so a catalog-owned plan is an orphan \
+         per sync that no `delete` verb exists to remove"
+    );
+    assert_eq!(owner["uid"], JOB_UID);
+    assert_eq!(owner["controller"], true);
+    assert_eq!(
+        owner["blockOwnerDeletion"], false,
+        "`true` asks for `update` on jobs/finalizers under \
+         OwnerReferencesPermissionEnforcement, which this ClusterRole grants on nothing"
+    );
+
+    // AND THE ORDER IS OBSERVABLE. The Job is POSTed before its plan, because
+    // an ownerReference needs a UID the API server has not minted yet.
+    let order: Vec<String> = f
+        .seen()
+        .into_iter()
+        .filter(|(m, _)| m == "POST")
+        .map(|(_, u)| u.split('?').next().unwrap_or(&u).to_string())
+        .collect();
+    let job_at = order
+        .iter()
+        .position(|u| u.ends_with("/jobs"))
+        .expect("a Job was posted");
+    let plan_at = order
+        .iter()
+        .rposition(|u| u.ends_with("/configmaps"))
+        .expect("a ConfigMap was posted");
+    assert!(
+        job_at < plan_at,
+        "the Job is created first so its UID can own the plan: {order:?}"
     );
 
     assert_no_delete(&f);
@@ -1576,8 +1854,8 @@ async fn a_finished_sync_publishes_a_bounded_view() {
     assert_eq!(status["signers"][0]["trusted"], true);
     assert_eq!(status["syncedAt"], "2026-09-16T11:55:00Z");
     assert_eq!(
-        status["viewExpiresAt"], "2026-09-17T11:55:00Z",
-        "finish + max(3 × interval, one day)"
+        status["viewExpiresAt"], "2026-09-16T14:55:00Z",
+        "finish + max(3 × interval, one hour) — three generations at an hourly cadence"
     );
     assert_eq!(status["cursor"]["indexShard"], "2026/09/16");
     assert_eq!(status["cursor"]["complete"], true);
@@ -2179,6 +2457,514 @@ async fn an_unchanged_status_sends_no_patch() {
         "a patch that would change nothing is not sent: this reconciler's own status write is \
          what wakes it, and a patch that moved only the clock spins the loop"
     );
+}
+
+// ===========================================================================
+// 9b. The fix round's own rows
+// ===========================================================================
+
+/// **Review finding F7.** The body declares its grammar version, and a body
+/// that does not — or declares one this build cannot read — is refused by name
+/// rather than parsed on hope.
+#[test]
+fn the_body_must_declare_a_grammar_version_this_build_reads() {
+    let e = vec![ok_entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1)];
+    let page = page_block(1, 1, &e);
+    assert_eq!(
+        view::parse_body(&page, 5000),
+        Err(view::BodyError::MissingFormat),
+        "the record layout is versioned; the relay grammar was not, so a newer runner could \
+         only extend it by hoping this parser ignored what it did not know"
+    );
+    let future = format!("{}2\n{page}", view::FORMAT_LINE_PREFIX);
+    assert_eq!(
+        view::parse_body(&future, 5000),
+        Err(view::BodyError::UnsupportedBodyFormat {
+            got: "2".to_string()
+        })
+    );
+    // The control.
+    assert!(view::parse_body(&versioned(&page), 5000).is_ok());
+}
+
+/// **Review finding F7.** A summary line that arrived twice is an ERROR, not
+/// last-wins: two `catalog-counts=` lines mean the runner disagreed with itself
+/// about the whole walk.
+#[test]
+fn a_repeated_summary_line_is_refused_and_never_silently_overwritten() {
+    let e = vec![ok_entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1)];
+    for (prefix, first, second) in [
+        (
+            view::COUNTS_LINE_PREFIX,
+            counts_value(1, 1).to_string(),
+            counts_value(9, 9).to_string(),
+        ),
+        (
+            view::CURSOR_LINE_PREFIX,
+            json!({"complete": true}).to_string(),
+            json!({"complete": false}).to_string(),
+        ),
+        (
+            view::SIGNERS_LINE_PREFIX,
+            json!([{"keyId": TRUSTED_KEY, "points": 1}]).to_string(),
+            json!([{"keyId": STRANGER_KEY, "points": 9}]).to_string(),
+        ),
+    ] {
+        let body = versioned(&format!(
+            "{}{prefix}{first}\n{prefix}{second}\n",
+            page_block(1, 1, &e)
+        ));
+        assert_eq!(
+            view::parse_body(&body, 5000),
+            Err(view::BodyError::RepeatedSummary(prefix)),
+            "`{prefix}` twice must be refused: a summary that can be overwritten is a summary \
+             nobody can attribute to an observation"
+        );
+    }
+}
+
+/// **Review finding F7.** The body is bounded by BYTES and by this catalog's own
+/// `viewLimit` — never by an unreachable line count.
+#[test]
+fn the_body_is_bounded_by_bytes_and_by_the_view_limit() {
+    let entries: Vec<Value> = (0..5)
+        .map(|i| ok_entry(&format!("lwp1-{i:032x}"), i64::from(i)))
+        .collect();
+    let body = versioned(&page_block(1, 1, &entries));
+    assert_eq!(
+        view::parse_body(&body, 3),
+        Err(view::BodyError::TooManyEntries { allowed: 3 }),
+        "the runner is told to relay the newest `viewLimit` points and nothing more"
+    );
+    assert!(view::parse_body(&body, 5).is_ok());
+
+    let huge = format!("{}{}", versioned(""), "x".repeat(view::MAX_BODY_BYTES));
+    match view::parse_body(&huge, 5000) {
+        Err(view::BodyError::TooLarge { got }) => assert!(got > view::MAX_BODY_BYTES),
+        other => panic!("a body over the byte budget must be refused, got {other:?}"),
+    }
+    // The relay's own budget is ~5.9 MB of raw `details` after the ~1.35x
+    // base64 part-frame expansion of `DECODER_BUDGET_BYTES`; this cap must sit
+    // inside it, and it is derived rather than asserted so a change to either
+    // constant is visible here.
+    let relay_raw_budget = (check::relay::DECODER_BUDGET_BYTES * 3) / 4;
+    assert!(
+        view::MAX_BODY_BYTES < relay_raw_budget,
+        "{} is not inside the relay's ~{relay_raw_budget} bytes of raw details",
+        view::MAX_BODY_BYTES
+    );
+}
+
+/// **Review finding F7 / F12.** `catalog-signers` is capped, and so is one
+/// point's `locations[]`.
+#[test]
+fn the_signer_list_and_an_entrys_locations_are_both_capped() {
+    let e = vec![ok_entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1)];
+    let many: Vec<Value> = (0..view::MAX_BODY_SIGNERS + 1)
+        .map(|i| json!({"keyId": format!("{i:064x}"), "points": 1}))
+        .collect();
+    let body = versioned(&format!(
+        "{}{}{}\n",
+        page_block(1, 1, &e),
+        view::SIGNERS_LINE_PREFIX,
+        json!(many)
+    ));
+    assert_eq!(
+        view::parse_body(&body, 5000),
+        Err(view::BodyError::MalformedSummary(view::SIGNERS_LINE_PREFIX))
+    );
+
+    // An entry naming more places than the grammar allows is SKIPPED and
+    // counted, exactly like any other malformed entry — `locations[]` is the
+    // only unbounded field an entry has.
+    let mut wide = ok_entry("lwp1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 2);
+    wide["locations"] = json!((0..view::MAX_ENTRY_LOCATIONS + 1)
+        .map(|i| json!({"locationId": format!("s3://b{i}/p")}))
+        .collect::<Vec<_>>());
+    let body = versioned(&page_block(1, 1, &[wide]));
+    let parsed = view::parse_body(&body, 5000).expect("skipped, never fatal");
+    assert_eq!(parsed.pages[0].entries.len(), 0);
+    assert_eq!(parsed.skipped_entries, 1);
+}
+
+/// **Review finding F12.** One entry whose rendered line cannot fit a page is
+/// refused rather than placed into a `ConfigMap` the API server rejects at
+/// CREATE — which would surface as a requeue loop and not as a verdict.
+#[test]
+fn an_entry_too_large_for_any_page_is_refused_and_counted() {
+    let trust = trust_with(TRUSTED_KEY, TrustKeyState::Active, None);
+    let mut fat = entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 20, "s3://one/p");
+    fat.remedy = Some("y".repeat(4096));
+    let small = entry("lwp1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 10, "s3://one/p");
+    let limits = ViewLimits {
+        view_limit: 10,
+        page_max_bytes: 1024,
+        max_pages: 8,
+    };
+    let built = view::materialise(vec![fat, small], 2, &trust, &limits, now());
+    assert_eq!(built.dropped_oversized, 1);
+    assert_eq!(built.entries, 1);
+    assert!(
+        built.truncated,
+        "the view is not the whole archive, and says so"
+    );
+    for page in &built.pages {
+        assert!(page.body.len() <= limits.page_max_bytes);
+    }
+}
+
+/// **Review finding F11.** A day reported in two shards is FOLDED, never
+/// dropped: `counts.total` would still include those points.
+#[test]
+fn a_histogram_day_reported_twice_is_summed_and_not_dropped() {
+    let counts = RunnerCounts {
+        by_day: vec![
+            view::DayCount {
+                day: "2026-09-16".to_string(),
+                points: 7,
+            },
+            view::DayCount {
+                day: "2026-09-15".to_string(),
+                points: 1,
+            },
+            view::DayCount {
+                day: "2026-09-16".to_string(),
+                points: 5,
+            },
+        ],
+        ..RunnerCounts::default()
+    };
+    let out = view::histogram(&counts);
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0].day, "2026-09-16");
+    assert_eq!(
+        out[0].points, 12,
+        "7 + 5, never 7: silently losing points is the one option this module's philosophy \
+         argues against"
+    );
+    assert_eq!(out[1].points, 1);
+}
+
+/// **Review finding F4.** `trusted` answers "does this installation ACCEPT
+/// evidence from this key", not "is it listed" — and `Revoked` and
+/// `VerifiedHistorical`, which have no counter, are named instead of lost.
+#[test]
+fn a_revoked_key_is_not_trusted_and_its_points_are_named() {
+    let revoked = trust_with(TRUSTED_KEY, TrustKeyState::Revoked, None);
+    assert!(
+        !view::accepts(&revoked, TRUSTED_KEY),
+        "a key whose private half is in someone else's hands is LISTED and not ACCEPTED"
+    );
+    assert!(view::accepts(
+        &trust_with(TRUSTED_KEY, TrustKeyState::Retired, None),
+        TRUSTED_KEY
+    ));
+    assert!(view::accepts(
+        &trust_with(TRUSTED_KEY, TrustKeyState::Active, None),
+        TRUSTED_KEY
+    ));
+
+    let signers = vec![RunnerSigner {
+        key_id: TRUSTED_KEY.to_string(),
+        principal_hint: None,
+        points: 4,
+    }];
+    let rows = view::signer_summaries(&signers, &revoked);
+    assert_eq!(
+        rows[0].trusted,
+        Some(false),
+        "an operator reading `status` alone must not see a compromised signer reported as fine"
+    );
+    let counts = RunnerCounts {
+        total: 4,
+        available: 4,
+        ..RunnerCounts::default()
+    };
+    let tally = view::tally(
+        &counts,
+        &rows,
+        WindowStates {
+            revoked: 4,
+            verified_historical: 1,
+        },
+    );
+    assert_eq!(
+        tally.counts.untrusted_signer,
+        Some(4),
+        "revoked points land in an adverse counter and not in none at all"
+    );
+    assert_eq!(
+        tally.unrepresented,
+        vec![
+            ("Revoked", 4, view::SCOPE_VIEW),
+            ("VerifiedHistorical", 1, view::SCOPE_VIEW),
+        ],
+        "neither has a counter, so both are NAMED in the Synced message"
+    );
+}
+
+/// **Review finding F10, through the reconciler.** `counts.untrustedSigner`
+/// covers the whole walk, so it must be summed over the full signer list and
+/// not over the sixteen rows `status.signers` can display.
+#[tokio::test]
+async fn the_status_counts_every_untrusted_signer_and_displays_sixteen() {
+    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let signers: Vec<Value> = (0..20)
+        .map(|i| json!({"keyId": format!("{i:064x}"), "points": 1}))
+        .collect();
+    let body = body_for(
+        &[vec![ok_entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 30)]],
+        counts_value(20, 20),
+        json!(signers),
+        true,
+    );
+    let f = fixture(harvest_routes(
+        &plan_sha,
+        framed(&plan_sha, UID, &body),
+        UID,
+    ));
+    run(&f, &catalog(json!({}), tracked_status(&periodic_stem()))).await;
+    let status = f.patched_status()["status"].clone();
+    assert_eq!(
+        status["counts"]["untrustedSigner"], 20,
+        "twenty untrusted signers signed these points; summing over the sixteen the status can \
+         DISPLAY would under-report an archive written by more installations than that"
+    );
+    assert_eq!(
+        status["signers"].as_array().expect("signers").len(),
+        view::MAX_SIGNERS,
+        "and the displayed list is still bounded"
+    );
+}
+
+/// **Review finding F10.** `counts.untrustedSigner` is summed over the FULL
+/// signer list, before the sixteen-row display bound.
+#[test]
+fn the_untrusted_total_is_summed_before_the_display_bound() {
+    let trust = trust_with(TRUSTED_KEY, TrustKeyState::Active, None);
+    let signers: Vec<RunnerSigner> = (0..20)
+        .map(|i| RunnerSigner {
+            key_id: format!("{i:064x}"),
+            principal_hint: None,
+            points: 1,
+        })
+        .collect();
+    let all = view::signer_summaries(&signers, &trust);
+    let tally = view::tally(&RunnerCounts::default(), &all, WindowStates::default());
+    assert_eq!(
+        tally.counts.untrusted_signer,
+        Some(20),
+        "twenty untrusted signers, not the sixteen the status can display"
+    );
+    assert_eq!(view::bounded(all).len(), view::MAX_SIGNERS);
+}
+
+/// **Review finding F2, the refusal path.** A catalog whose destination went
+/// invalid AFTER its sync Job aged out must stop naming garbage-collected page
+/// ConfigMaps — and it used to name them forever.
+#[tokio::test]
+async fn an_expired_view_is_cleared_on_the_refusal_path_too() {
+    // The tracked Job is the PREVIOUS slot's and has aged out, so this pass
+    // computes a NEW trigger and reaches `start()` — where the destination
+    // refuses it. That is the reviewer's reproduction exactly.
+    let stem: &'static str = Box::leak(previous_stem().into_boxed_str());
+    let job_path: &'static str = Box::leak(format!("/jobs/{stem}").into_boxed_str());
+    let mut dest: Value = serde_json::from_str(&destination_body()).expect("json");
+    dest["status"]["conditions"][0]["status"] = json!("False");
+    let f = fixture(vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        Route {
+            method: "GET",
+            path_suffix: job_path,
+            status: 404,
+            body: json!({"kind": "Status", "code": 404, "reason": "NotFound",
+                         "message": "jobs not found", "status": "Failure"})
+            .to_string(),
+        },
+        route("GET", "/backupdestinations/archive", dest.to_string()),
+        route(
+            "PATCH",
+            "/recoverycatalogs/primary/status",
+            patched_catalog(),
+        ),
+    ]);
+    let status = json!({
+        "observedGeneration": 1,
+        "syncedAt": "2026-09-16T09:00:00Z",
+        "viewExpiresAt": "2026-09-16T23:00:00Z",
+        "truncated": false,
+        "pages": [{"configMapName": "gone-p0", "index": 0, "count": 4}],
+        "indexConfigMap": "gone-index",
+        "lastSyncJob": {"name": stem, "finishedAt": "2026-09-16T09:00:00Z"},
+        "conditions": [{"type": "Synced", "status": "True", "reason": "Succeeded"}]
+    });
+    let outcome = run(&f, &catalog(json!({}), status)).await;
+    assert_eq!(outcome.phase, ctrl::CatalogPhase::Refused);
+    assert_eq!(outcome.ready_reason, ctrl::REASON_DESTINATION_UNUSABLE);
+    let patch = f.patched_status()["status"].clone();
+    assert_eq!(
+        patch.get("pages"),
+        Some(&Value::Null),
+        "the pages are gone with their Job even though `viewExpiresAt` has not passed, and the \
+         published contract tells W11/W12 to read these names: leaving them is leading them \
+         into a 404 with no signal at all. Got {patch}"
+    );
+    assert_eq!(patch.get("indexConfigMap"), Some(&Value::Null));
+    assert_eq!(patch.get("truncated"), Some(&Value::Null));
+}
+
+/// **Review finding F2, the sync-failure path.**
+#[tokio::test]
+async fn an_expired_view_is_cleared_when_a_sync_result_does_not_read() {
+    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let stem = periodic_stem();
+    let job_path: &'static str = Box::leak(format!("/jobs/{stem}").into_boxed_str());
+    // The tracked Job is present but its RESULT does not read; the PREVIOUS
+    // view's Job (a different, older one) is what aged out — modelled by a
+    // status whose recorded expiry has passed.
+    let f = fixture(vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        route("GET", job_path, job_body(&stem, true, &plan_sha, UID)),
+        route("GET", "/pods", pod_list_body(JOB_UID)),
+        route(
+            "GET",
+            "/log",
+            framed(&plan_sha, UID, "not a catalog body at all"),
+        ),
+        route(
+            "PATCH",
+            "/recoverycatalogs/primary/status",
+            patched_catalog(),
+        ),
+    ]);
+    let status = json!({
+        "observedGeneration": 1,
+        "syncedAt": "2026-09-15T09:00:00Z",
+        "viewExpiresAt": "2026-09-15T12:00:00Z",
+        "truncated": true,
+        "pages": [{"configMapName": "gone-p0", "index": 0, "count": 4}],
+        "indexConfigMap": "gone-index",
+        "lastSyncJob": {"name": stem},
+        "conditions": [{"type": "Synced", "status": "True", "reason": "Succeeded"}]
+    });
+    let outcome = run(&f, &catalog(json!({}), status)).await;
+    assert_eq!(outcome.phase, ctrl::CatalogPhase::Failed);
+    assert_eq!(outcome.ready_reason, ctrl::REASON_VIEW_EXPIRED);
+    let patch = f.patched_status()["status"].clone();
+    assert_eq!(patch.get("pages"), Some(&Value::Null), "{patch}");
+    assert_eq!(patch.get("indexConfigMap"), Some(&Value::Null));
+    assert!(
+        patch["lastSyncJob"]["finishedAt"].is_string(),
+        "the failed sync is still recorded: the view is gone, the attempt is not"
+    );
+}
+
+/// **Review finding F6.** A catalog with a LIVE view that starts its next sync
+/// keeps `Ready=True`; `SyncInProgress` lives on `Synced`.
+#[tokio::test]
+async fn a_catalog_with_live_pages_that_starts_a_sync_keeps_ready_true() {
+    let stem: &'static str = Box::leak(periodic_stem().into_boxed_str());
+    let job_path: &'static str = Box::leak(format!("/jobs/{stem}").into_boxed_str());
+    let f = fixture(vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        // The PREVIOUS generation's Job, still present and already harvested.
+        route("GET", job_path, job_body(stem, true, "sha256:x", UID)),
+        route("GET", "/backupdestinations/archive", destination_body()),
+        route("POST", "/configmaps", empty_config_map()),
+        route("POST", "/jobs", empty_job()),
+        route(
+            "PATCH",
+            "/recoverycatalogs/primary/status",
+            patched_catalog(),
+        ),
+    ]);
+    let status = json!({
+        "observedGeneration": 1,
+        "observedSyncRequest": "t1",
+        "syncedAt": "2026-09-16T11:55:00Z",
+        "viewExpiresAt": "2026-09-16T14:55:00Z",
+        "truncated": false,
+        "pages": [{"configMapName": "p0", "index": 0, "count": 2}],
+        "indexConfigMap": "idx",
+        "lastSyncJob": {"name": stem, "finishedAt": "2026-09-16T11:55:00Z"},
+        "conditions": [{"type": "Synced", "status": "True", "reason": "Succeeded"}]
+    });
+    let outcome = run(&f, &catalog(json!({"syncRequest": "t2"}), status)).await;
+    assert_eq!(outcome.phase, ctrl::CatalogPhase::Started);
+    assert_eq!(
+        outcome.ready, "True",
+        "D3 §5.3 defines `Ready` as `a usable view exists right now`, and one does throughout \
+         the sync. Hardcoding `Unknown` made it flap True -> Unknown -> True every hour."
+    );
+    assert_eq!(outcome.ready_reason, ctrl::REASON_VIEW_READY);
+    assert_eq!(outcome.synced_reason, ctrl::REASON_SYNC_IN_PROGRESS);
+    let patch = f.patched_status()["status"].clone();
+    assert_condition(&patch, ctrl::CONDITION_READY, "True");
+    assert_condition(&patch, ctrl::CONDITION_SYNCED, "Unknown");
+    assert!(
+        patch.get("pages").is_none(),
+        "a live view is neither cleared nor rewritten by starting a sync: {patch}"
+    );
+}
+
+/// **Review finding F8.** Pages and the fence pointer carry the CATALOG's UID,
+/// so `kubectl get cm -l logweir.dev/catalog-uid=<uid>` finds every object of
+/// one catalog — which is the triage the label exists for.
+#[test]
+fn every_object_is_labelled_with_the_catalogs_uid_and_not_the_jobs() {
+    let trust = trust_with(TRUSTED_KEY, TrustKeyState::Active, None);
+    let built = view::materialise(
+        vec![entry(
+            "lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            1,
+            "s3://b/p",
+        )],
+        1,
+        &trust,
+        &ViewLimits {
+            view_limit: 10,
+            page_max_bytes: view::PAGE_MAX_BYTES,
+            max_pages: 8,
+        },
+        now(),
+    );
+    let job_owner = weirkeeper::job::RunnerOwner {
+        api_version: "batch/v1".to_string(),
+        kind: "Job".to_string(),
+        name: "sync".to_string(),
+        uid: JOB_UID.to_string(),
+    };
+    let catalog_owner = weirkeeper::job::RunnerOwner {
+        api_version: "logweir.dev/v1alpha1".to_string(),
+        kind: "RecoveryCatalog".to_string(),
+        name: NAME.to_string(),
+        uid: UID.to_string(),
+    };
+    let page = view::page_config_map("p0", NS, &job_owner, UID, &built.pages[0], 0);
+    let document = view::index_document(
+        "g",
+        &ViewLimits::from_settings(&catalog(json!({}), json!({})).spec.sync),
+        &built,
+        &["p0".to_string()],
+    );
+    let index = view::index_config_map("idx", NS, &job_owner, UID, &document).expect("serialises");
+    let trust_cm = view::trust_config_map("t", NS, &catalog_owner, &trust);
+    for (what, cm) in [("page", &page), ("index", &index), ("trust", &trust_cm)] {
+        let labels = cm.metadata.labels.as_ref().expect("labelled");
+        assert_eq!(
+            labels[view::LABEL_CATALOG_UID],
+            UID,
+            "the {what} ConfigMap must carry the CATALOG's uid; keyed on the Job it changed \
+             every slot and matched nothing but that slot"
+        );
+    }
+    // And ownership is still the Job's for the two the TTL collects.
+    for cm in [&page, &index] {
+        assert_eq!(
+            cm.metadata.owner_references.as_ref().expect("owned")[0].uid,
+            JOB_UID
+        );
+    }
 }
 
 // ===========================================================================
