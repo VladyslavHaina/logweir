@@ -529,11 +529,11 @@ A pod whose PodSpec names no ServiceAccount silently gets `default` — the one
 account an operator is most likely to have granted something to. That is why
 the name is set explicitly and why this step is not optional.
 
-### 5. Binding the three human roles
+### 5. Binding the four human roles
 
-`logweir.yaml` ships `logweir-viewer`, `logweir-operator` and
-`logweir-approver` **unbound**. Who may approve a restore in which namespace is
-your decision, not the install file's.
+`logweir.yaml` ships `logweir-viewer`, `logweir-operator`, `logweir-approver`
+and `logweir-trust-admin` **unbound**. Who may approve a restore in which
+namespace is your decision, not the install file's.
 
 ```bash
 kubectl --context docker-desktop create rolebinding logweir-viewer \
@@ -544,9 +544,115 @@ kubectl --context docker-desktop create rolebinding logweir-approver \
   --clusterrole=logweir-approver --user=<someone-else> -n <namespace>
 ```
 
-`logweir-approver` is `create` on `approvals` and **nothing else**. Bind it to
-somebody who is not the operator: `self_attested: false` means only "two
-different keys", and one person holding both keypairs satisfies it.
+`logweir-approver` is `create` on `approvals` plus **read** on `preflights`
+(approval context — a readiness verdict is redacted by construction and
+authorizes nothing on its own) and **nothing else**. Bind it to somebody who is
+not the operator: `self_attested: false` means only "two different keys", and
+one person holding both keypairs satisfies it.
+
+**`logweir-trust-admin` is cluster-scoped and needs a `ClusterRoleBinding`.**
+`TrustPolicy` is a cluster-scoped kind — a namespace never names its own trust
+— so a `RoleBinding` of this role grants nothing at all, silently:
+
+```bash
+kubectl --context docker-desktop create clusterrolebinding logweir-trust-admin \
+  --clusterrole=logweir-trust-admin --user=<security-owner>
+```
+
+It is the **only** holder of a write verb on `trustpolicies`, and that is the
+point: a trust policy decides whose keys may sign an approval, so an operator
+who could edit one could add their own key and then approve their own restore.
+It carries no `delete` — deleting a policy does not retire a key, it removes
+the binding that governs a namespace and sends every namespace it bound back to
+the legacy roster, which is a widening dressed as a cleanup. Withdrawing trust
+is an edit.
+
+**What the viewer can and cannot see.** `logweir-viewer` reads all fourteen
+kinds, including `backupdestinations`, `topicdiscoveries` and `preflights`. It
+holds no verb on `configmaps`, so a kubectl viewer sees a topic inventory's
+**summary** on `status.result.counts` and never its pages: the chunk documents
+are ConfigMaps, and paging them is the console API's job, with its own
+owner-UID, immutability and digest checks. `trustpolicies` is cluster-scoped,
+so a namespace `RoleBinding` of `logweir-viewer` does not convey it; a viewer
+who should also read trust needs a `ClusterRoleBinding`, which is a separate
+and visible decision.
+
+### 5a. The installation policy `ConfigMap` (optional, and what it unlocks)
+
+The controller reads one administrator-owned document, `weirkeeper-policy`, in
+the **release** namespace, under the key `policy.json`. **It is optional**: an
+install that renders none runs on the documented defaults and reports
+`configuration.policy` as *ready*, never as an error. `docs/kubernetes.md` §22
+is the field reference.
+
+**The Helm chart renders it** from `values.yaml` and needs nothing here.
+**`logweir.yaml` does not**, because a kustomize install has no values file to
+render it from; the Deployment it ships points at
+`weirkeeper-policy` in its own namespace through
+`LOGWEIR_INSTALLATION_NAMESPACE` (the downward API) and finds nothing until you
+create it. The consequence is worth stating plainly: until that document
+exists, **`visibility.state: attestedComplete` is unreachable** on a kustomize
+install, because the only thing that can produce it is an administrator
+attestation inside this ConfigMap.
+
+```bash
+kubectl --context docker-desktop -n logweir-system create configmap weirkeeper-policy \
+  --from-file=policy.json=./policy.json
+```
+
+**Who may write it is the access-control decision.** `create`/`update` on a
+ConfigMap in the release namespace is a chart or cluster administrator;
+`logweir-operator` names no `configmaps` at all and cannot. That is what makes
+an attestation an administrator statement rather than a self-assessment.
+
+**A document the controller refuses fails closed and says so quietly.** It is
+parsed with unknown fields rejected and ten range rules applied; a refusal
+yields empty attestations and an empty evidence allowlist plus one advisory
+`configuration.policy notReady PolicyUnreadable` row on a `Preflight`. Nothing
+else goes red. If you hand-write the file, validate it against
+`charts/logweir/values.schema.json`'s `checks`/`engine`/`evidence` blocks, or
+render one with `helm template` and copy the result.
+
+### 5b. Fencing the console's `create secrets` (Kubernetes 1.30+)
+
+`logweir-api` holds `create` on `secrets` and **no read verb**, so a stored
+credential cannot be read back by any route. `create` alone is still the widest
+grant the service asks for: in a namespace it could in principle mint a
+`kubernetes.io/service-account-token` Secret for any ServiceAccount there.
+
+Both credential builders stamp a distinct `type` —
+`logweir.dev/object-store-credential` and `logweir.dev/kafka-sasl-password` —
+and the `app.kubernetes.io/managed-by: logweir` label, so a
+`ValidatingAdmissionPolicy` can require both:
+
+```bash
+# Helm
+helm upgrade --kube-context docker-desktop logweir charts/logweir \
+  --set admissionPolicy.enabled=true \
+  --set admissionPolicy.consoleServiceAccountName=logweir-api
+
+# kustomize: edit the principal first, then apply by hand
+kubectl --context docker-desktop apply \
+  -f config/samples/console-credential-admission-policy.yaml
+```
+
+**It is off by default for one reason**, and it is not a security opinion:
+`admissionregistration.k8s.io/v1` `ValidatingAdmissionPolicy` is Kubernetes
+**1.30+**, and Logweir's floor is 1.29, where the document is rejected with
+`no matches for kind` and the whole apply fails. Turn it on wherever the API
+server has the kind.
+
+**What it does not do.** A cluster administrator can delete the policy; it
+raises the cost of a mistake and of a compromised console, not of a deliberate
+administrator. It says nothing about what the console does with a credential it
+legitimately creates, and it is not what keeps the value unreadable — that is
+the missing read verb. **[UNVERIFIED — neither document has been applied to a
+live API server]**. What would verify it: on a 1.30+ cluster, as the console
+ServiceAccount, create a Secret of type
+`logweir.dev/object-store-credential` carrying the managed-by label (must be
+accepted) and one of type `kubernetes.io/service-account-token` (must be
+rejected, naming the policy's message), then show the second succeeding once
+the binding is deleted.
 
 ---
 
@@ -612,9 +718,13 @@ Use the selected installation path above. The namespace is **not** created by ha
 
 `logweir.yaml` is the checked-in `kubectl kustomize` output of `config/`,
 regenerated by `just install-yaml` and never edited by hand. It contains the
-Namespace, the fourteen CustomResourceDefinitions, the RBAC, the controller
-Deployment and the runner NetworkPolicy, and **no custom resource** — so the
-CRD-not-yet-established ordering failure cannot happen.
+Namespace, the fourteen CustomResourceDefinitions, the RBAC — one
+ServiceAccount, **five** ClusterRoles (`weirkeeper`, the three human roles and
+`logweir-trust-admin`) and one ClusterRoleBinding — the controller Deployment
+and the runner NetworkPolicy, and **no custom resource** — so the
+CRD-not-yet-established ordering failure cannot happen. It carries no
+`ValidatingAdmissionPolicy` either, and cannot: that kind is 1.30+ and this
+file has to apply unedited on the stated 1.29 floor (§5b).
 
 ## The samples, applied second
 

@@ -2367,7 +2367,12 @@ fn chart_lint_the_config_copy_of_the_admission_policy_is_applied_by_hand() {
         "logweir.dev/kafka-sasl-password",
         "app.kubernetes.io/managed-by",
         "request.userInfo.username",
-        "[UNVERIFIED",
+        // SPELT IN TWO PIECES, exactly as `label_gate.rs` spells its own
+        // needle: `scripts/check-unverified-labels.sh` greps the tree for the
+        // bare token and refuses one that carries no description, and a test
+        // asserting the mark exists must not itself look like an unlabelled
+        // mark.
+        concat!("[", "UNVERIFIED —"),
     ] {
         assert!(
             sample.contains(needle),

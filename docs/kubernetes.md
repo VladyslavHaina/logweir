@@ -589,7 +589,7 @@ data from a selection. `spec.request.includeInternal: true` returns them, flagge
 
 **Cancel, TTL and cleanup.** `spec.cancelRequested` may move `false` → `true`
 and never back. Cancelling collapses the Job's `activeDeadlineSeconds` to 1 —
-the controller holds `delete` on nothing — after verifying that the Job's
+the controller holds no `delete` on **Jobs** — after verifying that the Job's
 controller owner is this object, so a Job that merely shares the name is never
 touched. A finished Job gets `ttlSecondsAfterFinished: 600`, patched **only
 after** the status write returned 200 — on the failed path exactly as on the
@@ -599,11 +599,13 @@ let garbage collection take the reason an operator still has to read. The plan a
 carry an owner reference with `blockOwnerDeletion`, so deleting the
 `TopicDiscovery` removes everything it owns by cascade.
 
-**Retention is not yet automatic.** D2 §5.8's 24-hour retention and keep-last-five
-per connection are implemented as a pure rule and are *not wired*: deleting the
-custom resource needs a `delete` verb the `weirkeeper` ClusterRole grants on
-nothing today. Until that grant lands, terminal `TopicDiscovery` objects
-accumulate and are deleted by an operator or by namespace cleanup.
+**Retention IS automatic, since D2 W11.** D2 §5.8's 24-hour window and
+keep-last-five per connection are enforced by the reconciler's own hourly pass
+over a terminal object: it lists the namespace, collects what is past
+`observedAt + retentionSeconds` or outside the newest `keepPerConnection` for
+its connection UID, and deletes with a UID precondition, at most twenty per
+pass. Both numbers come from the installation policy (§22.2), and §22.3 is the
+full rule, its four bounds and what a truncated listing does.
 
 **Status writes clear what they no longer claim.** The `/status` merge PATCH
 carries an explicit `null` for every clearable field this pass computed as
@@ -621,10 +623,12 @@ no clock-derived number at all. A pass over unchanged cluster state inside the
 half-interval window therefore sends nothing, and past it sends exactly one
 patch in which only those three fields differ.
 
-**RBAC.** This kind adds exactly two rules to the `weirkeeper` ClusterRole:
-`list`/`watch` on `topicdiscoveries` (the controller's watch) and `patch` on
-`topicdiscoveries/status`. No `get`: the reconciler never re-reads a discovery.
-No verb on `secrets`, and no `delete` on anything.
+**RBAC.** This kind adds three rules to the `weirkeeper` ClusterRole:
+`list`/`watch` on `topicdiscoveries` (the controller's watch), `patch` on
+`topicdiscoveries/status`, and `delete` on `topicdiscoveries` — shared with
+`preflights` in one rule, and granted on nothing else in the cluster (§22.1).
+No `get`: the reconciler never re-reads a discovery, and the collector lists
+rather than naming one. No verb on `secrets`.
 
 **Upgrade and rollback.** The kind is additive: nothing existing references it,
 and an installation that never creates one behaves exactly as before. An older
@@ -708,8 +712,10 @@ one, a running sync, a sync whose result did not read, and a refusal about
 something else entirely, such as a destination that went invalid meanwhile. A
 `status.pages[]` naming a `ConfigMap` the API server no longer has is a link to
 a 404, and a reader cannot tell it from a page it simply has not fetched. **The archive is untouched by any of this**: the
-controller holds no `delete` verb on anything, and `logweir catalog list` still
-reads the durable catalog.
+controller holds no delete capability against object storage at all (§15.1) and
+no `delete` verb on a `ConfigMap`, a Job or a `RecoveryCatalog` — its only
+`delete` is on the two transient check kinds (§22.1) — and `logweir catalog
+list` still reads the durable catalog.
 
 **Two axes, and nothing merges them.** Each entry carries an `availability` and a
 `verification`, and a `selectable` flag that is their conjunction.
@@ -3550,6 +3556,14 @@ It cannot write or delete in any bucket, and — because retention only reports
 (guard **G-RET**) — **no Logweir component has any delete capability against
 object storage in tag 1.**
 
+That sentence is about **object storage**, and it is unchanged. The controller
+does now hold a Kubernetes `delete` verb, on exactly two resources:
+`topicdiscoveries` and `preflights`, the transient check requests, so their
+retention windows can be enforced (§22.3). It is a different subject and a
+different mechanism — `scripts/check-no-archive-write.sh` still refuses any
+delete on a store-shaped receiver anywhere under `crates/weirkeeper/src/`, and
+`Store` exposes no delete method for one to be written against.
+
 It is projected into the controller's own pod as environment, with
 `optional: true`:
 
@@ -3803,6 +3817,21 @@ an adopter on MinIO or Ceph configures the endpoint **once**, on the
 Deployment, rather than in two places that can disagree. A variable that is not
 set is not forwarded, so the default install's runner Job env is exactly what
 it was before.
+
+**This forwarding is LEGACY-ONLY.** It applies to a `Backup`, `Restore` or
+`BackupSchedule` that names an inline `archive.url`. An object that names a
+`BackupDestination` instead gets a complete `AWS_*` set rendered from that
+destination and **none** of the controller's own — §7b is the rule and
+`plan_addressing` is the test. The two paths never mix.
+
+**And the same four values are published**, read-only, in the installation
+policy `ConfigMap`'s `legacyArchiveAddressing` block (§22.2), from the same
+chart values and behind the same "only when an endpoint is set" guard. That
+block exists so `POST …/destinations:from-legacy` can derive a legacy object's
+location from configuration it has actually READ and label the result
+`installationConfig`. An install that forwards no addressing publishes an empty
+block — not `allowHttp: true` — because transport security is never derived
+(D-SEAMS S5).
 
 ## 16. Serving the UI
 
@@ -4669,10 +4698,14 @@ so `approval.state` is `skipped` with `SubjectNotCreated` and the verdict is
   frozen destination snapshot does not reach `Backup.status` in this build, so
   there is no digest to compare and the comparison is skipped rather than
   guessed at.
-- **No `gc.rs`.** A terminal `Preflight` is not deleted by the controller; the
-  `weirkeeper` ClusterRole grants `delete` on nothing. Remove them with
-  `kubectl delete preflight`, and the owner cascade takes the Job and the
-  `ConfigMap`s with each one.
+- **`gc.rs` IS wired, since D2 W11.** A terminal `Preflight` is collected an
+  hour after `result.expiresAt` (or after `observedAt`, when it never produced
+  a verdict with an expiry), by the reconciler's own hourly pass, with a UID
+  precondition and at most twenty per pass. `preflight.retentionSeconds` in the
+  installation policy is the window; §22.3 is the rule and its four bounds.
+  `kubectl delete preflight` still works, and the owner cascade takes the Job
+  and the `ConfigMap`s with each one either way. **To keep a verdict, copy it
+  out** — there is no per-object retention override.
 - **`signer.rostered` is EXECUTION-ONLY for a restore.** The verdict needs the
   runner's public `signerKeyId`, which rides on `signer.privateKeyUsable`; the
   landed `restorePreflight` check-plan contract carries no `signer_path`, so a
@@ -4705,6 +4738,262 @@ what it does when it is `ready`, too. Nothing on an execution path reads one,
 so no `Backup`, `Restore` or `BackupSchedule` behaves differently on either
 side of the upgrade. An absent `status.binding` means "never bound" and a
 consumer must treat the result as inapplicable.
+
+## 22. The installation policy, the RBAC rows, and the console admission policy
+
+Everything an **administrator** controls that a namespace operator cannot. The
+three parts are separate on purpose: §22.1 is who may do what,
+§22.2 is the one document that tunes the check framework, and §22.4 is an
+optional admission rule that narrows a grant RBAC cannot narrow.
+
+### 22.1 The roles, and the one verb that changed
+
+`logweir.yaml` and the chart ship **five** ClusterRoles, all of them unbound
+except the controller's.
+
+| Role | What it is for |
+|---|---|
+| `weirkeeper` | The controller. Bound by one `ClusterRoleBinding` at install. |
+| `logweir-viewer` | Read on all fourteen kinds. No `/status` resource is named — `get` already returns it — and no verb on `configmaps` or `secrets`. |
+| `logweir-operator` | `create` on the operational kinds; `update`/`patch` on `backupschedules`; `create`/`patch` on `backupdestinations`, `topicdiscoveries` and `preflights`. |
+| `logweir-approver` | `create` on `approvals`, `get`/`list` on `preflights`, nothing else. |
+| `logweir-trust-admin` | Cluster-scoped read and write on `trustpolicies`. The only holder of a write verb on the kind. |
+
+**What an operator may change on the three check kinds is the CRD's CEL rule,
+not RBAC.** A `BackupDestination`'s location and transport are sealed; its
+access grants and CA reference are editable. A `TopicDiscovery` and a
+`Preflight` have exactly one mutable field, `spec.cancelRequested`, and the CEL
+rule permits only `false → true`. The grant is a plain `patch` because that is
+what `kubectl edit`, `kubectl apply` and the console all send; `update` is
+absent because nothing issues one.
+
+**`logweir-approver` reads `preflights` and that is safe to state.** A readiness
+verdict is redacted by construction (no credential value, no broker error body,
+no URL carrying userinfo), references no Secret, and authorizes nothing on its
+own — the execution-time guards are what decide (§21.1). Reading one cannot
+approve anything; it lets an approver see whether the check for *this plan*
+said `ready` before signing.
+
+**`logweir-trust-admin` needs a `ClusterRoleBinding`**, and a `RoleBinding` of
+it grants nothing at all, silently: `TrustPolicy` is cluster-scoped. Bind it to
+somebody who does not hold `logweir-operator` — a trust policy decides whose
+keys may sign an approval, so one person holding both could add their own key
+and then approve their own restore. It carries **no `delete`**: deleting a
+policy does not retire a key, it removes the binding that governs a namespace.
+
+#### The legacy in-cluster UI proxy
+
+The optional `ui.enabled` proxy (§16, §19) gains `get`/`list` on
+`backupdestinations`, `topicdiscoveries` and `preflights` and nothing else. No
+`create`, no `patch`: the page has no form for any of them and the new flows
+are console-only. Without the read it would render a destination-backed
+schedule as though its archive were unconfigured. It still holds no verb on
+`configmaps`, so it shows an inventory's **counts** and never its pages.
+
+#### `delete`: exactly two resources, and why the doctrine sentence moved
+
+The controller's ClusterRole used to grant `delete` on nothing, and
+`crates/logweir/tests/manifest_lint.rs` asserted that twice. It now grants it on
+**`topicdiscoveries` and `preflights`**, in one rule, and on nothing else.
+
+The reason is that nothing else can collect them. A `TopicDiscovery` is one
+observation with an immutable spec and a `Preflight` is one verdict about one
+plan; neither is owned by another object, so no ownerReference cascade reaches
+them, and a custom resource has no `ttlSecondsAfterFinished`. A namespace that
+refreshes an inventory every minute would fill etcd with objects a fresh check
+has already replaced.
+
+Everything else is unchanged and is asserted to be:
+
+* **No `delete` on** `backups`, `restores`, `approvals`, `backupschedules`,
+  `kafkaclusters`, `backupdestinations`, `trustrosters`, `trustpolicies`,
+  `recoverycatalogs`, `jobs`, `configmaps`, `pods` or `events`. A finished Job
+  still goes by the API server's TTL controller, and plan and result
+  `ConfigMap`s still go by owner cascade — which is why collecting a check
+  leaves nothing behind.
+* **No delete capability against object storage**, at all, anywhere (§15.1).
+  That is a different subject, guarded by a different gate, and this change did
+  not touch it.
+
+### 22.2 `weirkeeper-policy`: the one administrator-owned document
+
+A `ConfigMap` named `weirkeeper-policy` in the **release** namespace, under the
+key `policy.json`. The Deployment finds it through
+`LOGWEIR_INSTALLATION_NAMESPACE` (the pod's own `metadata.namespace`, from the
+downward API) or an explicit `LOGWEIR_POLICY_CONFIGMAP=<namespace>/<name>`.
+
+**It is optional.** No document — or no `ConfigMap` — means the documented
+defaults below, and `configuration.policy` reads **ready**. An install that
+renders none is a supported install, not a degraded one.
+
+```json
+{"version": 1,
+ "checks": {"maxActivePerNamespace": 4, "maxActiveTotal": 20,
+            "maxActiveDiscoveriesPerConnection": 1,
+            "maxEvidenceFetchActivePerNamespace": 4},
+ "discovery": {"freshSeconds": 900, "retentionSeconds": 86400, "keepPerConnection": 5,
+               "defaultMaxTopics": 20000, "hardMaxTopics": 50000,
+               "visibilityAttestations": []},
+ "preflight": {"defaultTimeoutSeconds": 120, "retentionSeconds": 3600},
+ "engine": {"allowUnverifiedCustomCa": false},
+ "evidence": {"controllerIdentityLocations": []},
+ "legacyArchiveAddressing": {"endpoint": "", "region": "", "allowHttp": false,
+                             "virtualHostedStyle": false}}
+```
+
+| Block | What it decides |
+|---|---|
+| `checks` | How many check Jobs may run at once, per namespace and in total. Evidence fetches have their **own** pool, so verification cannot be starved by interactive checks. Over a ceiling a request is `Queued` with reason `ConcurrencyLimited` — not an error. |
+| `discovery.freshSeconds` | After this an inventory reads **stale**, never wrong. |
+| `discovery.retentionSeconds` / `keepPerConnection` | The collector's two rules (§22.3). |
+| `discovery.defaultMaxTopics` / `hardMaxTopics` | The default for a request that names none, and the ceiling a request is clamped to. The ceiling only ever LOWERS a request. |
+| `discovery.visibilityAttestations` | The **only** route to `visibility.state: attestedComplete` (§7c). |
+| `preflight.defaultTimeoutSeconds` / `retentionSeconds` | The default check budget, and the collector's window. |
+| `engine.allowUnverifiedCustomCa` | Whether a `BackupDestination` may carry a private CA the archive engine cannot verify. |
+| `evidence.controllerIdentityLocations` | Where the controller's own identity may read evidence from. An unlisted location is refused with `ControllerIdentityNotAllowlisted`, so the empty default is the closed direction. |
+| `legacyArchiveAddressing` | The installation's inline-archive addressing, published read-only so `POST …/destinations:from-legacy` can derive a legacy object's location from configuration it has actually read (§15.5). |
+
+**Who may write it is the access-control statement.** `create`/`update` on a
+ConfigMap in the release namespace is a chart or cluster administrator;
+`logweir-operator` names no `configmaps` at all. That is what makes an
+attestation an *administrator* statement, which is what
+`attestedComplete` requires.
+
+**An attestation is nine required fields**, and every one of them must be
+non-blank:
+
+```json
+{"id": "att-orders-prod", "namespace": "team-a", "kafkaCluster": "source",
+ "clusterId": "M29I2S7FQPyHBEX12Vx7XA", "principal": "User:backup",
+ "attestedBy": "platform-admin@example.invalid",
+ "attestedAt": "2026-09-15T00:00:00Z", "expiresAt": "2026-12-15T00:00:00Z",
+ "statement": "User:backup has DESCRIBE on literal Topic:* with no DENY; reviewed ACL export 2026-09-14"}
+```
+
+It applies only on an **exact** match of namespace, `KafkaCluster` name, the
+cluster id the runner read from the broker, and the principal Logweir
+presented — and only before `expiresAt`, and only to a listing that was not
+truncated. A blank `clusterId` or `principal` matches nothing while *looking*
+like an attestation somebody can rely on, which is why
+`charts/logweir/values.schema.json` refuses one at install time. **Logweir never
+verifies the statement**: the UI renders "attested by *X* at *T*; not verified
+by Logweir".
+
+**A document the controller refuses fails closed, and quietly.** It is parsed
+with unknown fields rejected and ten range rules applied. A refusal produces
+empty attestations and an empty evidence allowlist, plus one advisory
+`configuration.policy notReady PolicyUnreadable` row on a `Preflight` — and
+nothing else goes red. So: render it with `helm template` and copy the result,
+or validate a hand-written file against the chart's schema. The digest of the
+policy that was actually in force is recorded on every check's
+`status.binding.policyDigest`, so a verdict can be traced to the document it was
+computed under.
+
+### 22.3 Retention: the check kinds are collected, and nothing else is
+
+`Backup`, `Restore` and every other kind are still never deleted by Logweir
+(§9). The two transient check kinds are, by the reconciler that owns them, on
+the hourly pass a terminal object already takes.
+
+| Kind | Collected when |
+|---|---|
+| `TopicDiscovery` | `now > observedAt + discovery.retentionSeconds`, **or** it is outside the newest `discovery.keepPerConnection` terminal discoveries for the same connection UID. |
+| `Preflight` | `now > result.expiresAt + preflight.retentionSeconds`, or `observedAt + …` when the check never produced a verdict with an expiry. |
+
+Four bounds make that safe, and each has a test:
+
+1. **Terminal only.** A `Queued` or `Running` check is never collected, however
+   old: its pod holds the only copy of a relay nobody has read.
+2. **UID preconditions.** Every delete carries the object's UID, so a
+   same-named replacement created between the listing and the delete is
+   refused with a 409 rather than removed.
+3. **Twenty per pass.** A namespace holding thousands drains over many passes
+   rather than in one burst against the API server.
+4. **A truncated listing applies the age rule alone.** The API server returns
+   items in name order, not by `observedAt`, so one page of a truncated listing
+   is not "the newest" anything and the keep-last-N rule cannot be computed
+   over it.
+
+A failed delete is logged and the pass continues — garbage collection is never
+the reason a check's own reconcile reports an error. The result `ConfigMap`s
+and the check Job go with the object by owner cascade.
+
+**To keep a verdict or an inventory, copy it out.** There is no per-object
+retention override; the windows are installation-wide, in the document only an
+administrator can write.
+
+### 22.4 Fencing the console's `create secrets` (Kubernetes 1.30+)
+
+The console API (`logweir-api`) holds `create` on `secrets` and **no read
+verb**, so a stored credential cannot be read back by any route, any projection
+or any future refactor of one. `create` alone is still the widest grant it asks
+for: in a namespace it could in principle mint a
+`kubernetes.io/service-account-token` Secret for any ServiceAccount there, and
+RBAC cannot express "only this shape of Secret".
+
+Both credential builders stamp a distinct, immutable-after-create `type` —
+`logweir.dev/object-store-credential` for a destination credential and
+`logweir.dev/kafka-sasl-password` for a connection credential — and the
+`app.kubernetes.io/managed-by: logweir` label. The shipped
+`ValidatingAdmissionPolicy` requires both, for the console principals only:
+
+```yaml
+matchConditions:
+  - name: console-service-account
+    expression: request.userInfo.username in ["system:serviceaccount:logweir-system:logweir-api"]
+validations:
+  - expression: has(object.type) && (object.type == 'logweir.dev/object-store-credential' || object.type == 'logweir.dev/kafka-sasl-password')
+  - expression: has(object.metadata.labels) && 'app.kubernetes.io/managed-by' in object.metadata.labels && object.metadata.labels['app.kubernetes.io/managed-by'] == 'logweir'
+```
+
+`failurePolicy: Fail` is safe **because** of that subject test: every other
+principal in the cluster — an administrator, the controller, a CSI driver — is
+skipped before a validation runs. The binding's action is `Deny`; `Warn` would
+leave the grant exactly as wide as it is today while reading, on an audit
+surface, as though it did not.
+
+Turn it on with `admissionPolicy.enabled=true` (Helm) or apply
+`config/samples/console-credential-admission-policy.yaml` after editing the
+principal (kustomize). **It is off by default for one reason and it is not a
+security opinion:** `admissionregistration.k8s.io/v1`
+`ValidatingAdmissionPolicy` is Kubernetes 1.30+ and Logweir's floor is 1.29,
+where the document is rejected with `no matches for kind`.
+
+**What it does not do.** A cluster administrator can delete the policy — it
+raises the cost of a mistake and of a compromised console, not of a deliberate
+administrator. It says nothing about what the console does with a credential it
+legitimately creates, and it is not what keeps the value unreadable; the
+missing read verb is.
+
+**[UNVERIFIED — no API server has seen either document.]** What would verify it:
+on a 1.30+ cluster, apply both, then as the console ServiceAccount create (a) a
+Secret of type `logweir.dev/object-store-credential` carrying the managed-by
+label, which must be **accepted**, and (b) one of type
+`kubernetes.io/service-account-token`, which must be **rejected** with the
+message above — then show (b) succeeding once the binding is deleted.
+
+### 22.5 Upgrade, rollback and what an older controller does
+
+**Order.** RBAC before the controller image, as always: the `delete` rule must
+be in place before the image that calls it, or the collector 403s on every
+terminal pass. The rule is additive, so applying it early costs nothing.
+
+**The policy `ConfigMap` can be created at any time.** The controller caches it
+for 30 s and an absent one is the defaults; creating it later turns
+attestations on without a restart. Changing it changes the `policyDigest`
+recorded on subsequent checks, and never one already written.
+
+**Rolling the controller back** leaves the `delete` rule granted to an image
+that never calls it — harmless, and removable. Terminal `TopicDiscovery` and
+`Preflight` objects then accumulate again, exactly as they did before this
+change; `kubectl delete topicdiscoveries,preflights --all -n <namespace>`
+clears them and their Jobs and `ConfigMap`s by cascade. The policy `ConfigMap`
+is simply ignored by an older image.
+
+**An older controller with the new roles** reconciles nothing differently: it
+does not know the three check kinds, does not call `delete`, and never reads the
+policy document. The human roles are additive grants on kinds an older image
+ignores.
 
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 

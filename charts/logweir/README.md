@@ -49,10 +49,12 @@ install document; this README is the chart's own.
 
 | object | when | why |
 |---|---|---|
-| the six `CustomResourceDefinition`s under `logweir.dev/v1alpha1` | always — from `crds/`, **once**, on `helm install` | Helm never upgrades or deletes the contents of `crds/`; see *Upgrading the CRDs* below |
-| `ServiceAccount`, `ClusterRole`, `ClusterRoleBinding` `weirkeeper` | always | the one API client in the design; every granted verb has a caller and every call has a grant, no verb on `secrets`, no `delete` on anything, and no `update` on anything — status writes are merge `PATCH`es carrying a `metadata.resourceVersion` precondition. Since PLAT-05.2 it also holds `patch` on `backups`, for the one caller that detaches a terminal run from its schedule so that deleting the schedule stops collecting its history: metadata only, never `backups/status` (a separate resource string), and never a CEL-sealed `spec` (see [`docs/kubernetes.md`](../../docs/kubernetes.md) §9 and §13) |
-| `Deployment` `weirkeeper` | always | the control plane. Image `controllerImage`, pull policy `imagePullPolicy`, `LOGWEIR_RUNNER_IMAGE` from `runnerImage`, `LOGWEIR_RUNNER_PULL_POLICY` from `runnerImagePullPolicy`, the archive env from `archive.*` |
-| `ClusterRole`s `logweir-viewer`, `logweir-operator`, `logweir-approver` | always, **unbound** | the three human roles; who may act where is your decision |
+| the fourteen `CustomResourceDefinition`s under `logweir.dev/v1alpha1` | always — from `crds/`, **once**, on `helm install` | Helm never upgrades or deletes the contents of `crds/`; see *Upgrading the CRDs* below |
+| `ServiceAccount`, `ClusterRole`, `ClusterRoleBinding` `weirkeeper` | always | the one API client in the design; every granted verb has a caller and every call has a grant, no verb on `secrets`, no `update` on anything, and `delete` on **exactly** `topicdiscoveries` and `preflights` — the transient check kinds, whose retention windows nothing else can enforce ([`docs/kubernetes.md`](../../docs/kubernetes.md) §22.3). Status writes are merge `PATCH`es carrying a `metadata.resourceVersion` precondition. Since PLAT-05.2 it also holds `patch` on `backups`, for the one caller that detaches a terminal run from its schedule so that deleting the schedule stops collecting its history: metadata only, never `backups/status` (a separate resource string), and never a CEL-sealed `spec` (see §9 and §13) |
+| `Deployment` `weirkeeper` | always | the control plane. Image `controllerImage`, pull policy `imagePullPolicy`, `LOGWEIR_RUNNER_IMAGE` from `runnerImage`, `LOGWEIR_RUNNER_PULL_POLICY` from `runnerImagePullPolicy`, the archive env from `archive.*`, and `LOGWEIR_POLICY_CONFIGMAP` / `LOGWEIR_INSTALLATION_NAMESPACE` for the policy below |
+| `ConfigMap` `weirkeeper-policy` | always | the installation policy — check ceilings, retention windows, discovery bounds, completeness attestations, the evidence allowlist and the legacy addressing. Rendered from `checks.*`, `engine.*`, `evidence.*` and `archive.s3.*`; see *The installation policy* below |
+| `ClusterRole`s `logweir-viewer`, `logweir-operator`, `logweir-approver`, `logweir-trust-admin` | always, **unbound** | the four human roles; who may act where is your decision. `logweir-trust-admin` is cluster-scoped and needs a `ClusterRoleBinding` |
+| `ValidatingAdmissionPolicy` + binding `logweir-console-credentials-only` | `admissionPolicy.enabled` | fences the console API's `create secrets` to the two Logweir credential types. **Kubernetes 1.30+ only** — see below |
 | retained Secret `logweir-signing-key`, retained ConfigMap `logweir-signing-trust`, authority-free singleton `ClusterRole`, scoped Role/Binding, short-lived Job | `identity.enabled` | atomically provision/adopt one cluster installation signer without Helm ever carrying private bytes; validate on install, upgrade and supported rollback |
 | `NetworkPolicy` `logweir-runner-egress`, `ServiceAccount` `logweir-runner` | release namespace and every `identity.authorizedRunnerNamespaces` entry | runner prerequisites; additional namespaces receive the same retained signer through scoped short-lived distribution, never an independently minted key |
 | `NetworkPolicy` `logweir-identity-kubernetes-api-egress` | every identity-enabled runner namespace | excludes bootstrap from runner arbitrary-443 egress; permits DNS plus discovered/configured Kubernetes API destinations only |
@@ -65,6 +67,96 @@ the pinned bootstrap digest exactly as shipped; the rest of the default render
 matches the same
 controller, env, security context and RBAC rules as `logweir.yaml`
 (`chart_lint_default_render_agrees_with_the_install_file`).
+
+## The installation policy (`checks.*`, `engine.*`, `evidence.*`)
+
+The chart renders one administrator-owned `ConfigMap`, `weirkeeper-policy`, in
+the release namespace. It is what tunes the check framework —
+`TopicDiscovery`, `Preflight` and evidence fetches — and it is the **only**
+place an operator cannot reach: writing it needs `create`/`update` on a
+ConfigMap in this namespace, and `logweir-operator` names no `configmaps` at
+all. [`docs/kubernetes.md`](../../docs/kubernetes.md) §22.2 is the field
+reference; this is what the values do.
+
+| value | default | what it decides |
+|---|---|---|
+| `checks.maxActivePerNamespace` | `4` | check Jobs running at once in one namespace. Over it a request is `Queued`, not failed |
+| `checks.maxActiveTotal` | `20` | and across the installation |
+| `checks.maxActiveDiscoveriesPerConnection` | `1` | concurrent inventories against one connection |
+| `checks.maxEvidenceFetchActivePerNamespace` | `4` | a **separate** pool, so verification is never starved by interactive checks |
+| `checks.discovery.freshSeconds` | `900` | after this an inventory reads *stale*, never *wrong* |
+| `checks.discovery.retentionSeconds` | `86400` | a terminal `TopicDiscovery` is collected after this |
+| `checks.discovery.keepPerConnection` | `5` | and never more than this many are kept per connection |
+| `checks.discovery.defaultMaxTopics` | `20000` | for a request that names none |
+| `checks.discovery.hardMaxTopics` | `50000` | the ceiling a request is clamped to. It only ever LOWERS a request |
+| `checks.discovery.visibilityAttestations` | `[]` | the **only** route to `visibility.state: attestedComplete` |
+| `checks.preflight.defaultTimeoutSeconds` | `120` | the default check budget |
+| `checks.preflight.retentionSeconds` | `3600` | a terminal `Preflight` is collected after this |
+| `engine.allowUnverifiedCustomCa` | `false` | whether a destination may carry a CA the archive engine cannot verify |
+| `evidence.controllerIdentityLocations` | `[]` | where the controller's own identity may read evidence from. An unlisted location is refused |
+
+**The two empty lists are the safe direction, not an oversight.** With no
+attestation nothing can ever be `attestedComplete`; with no allowlist an
+unlisted evidence location is refused with
+`ControllerIdentityNotAllowlisted`.
+
+**An attestation is nine fields and every one is required**, because a blank
+`clusterId` or `principal` matches nothing while *looking* like an attestation
+somebody can rely on. `values.schema.json` refuses a partial one at install
+time:
+
+```yaml
+checks:
+  discovery:
+    visibilityAttestations:
+      - id: att-orders-prod
+        namespace: team-a
+        kafkaCluster: source
+        clusterId: M29I2S7FQPyHBEX12Vx7XA   # the id the runner reads from the broker
+        principal: User:backup               # the principal Logweir presents
+        attestedBy: platform-admin@example.invalid
+        attestedAt: "2026-09-15T00:00:00Z"
+        expiresAt: "2026-12-15T00:00:00Z"
+        statement: >-
+          User:backup has DESCRIBE on literal Topic:* with no DENY;
+          reviewed ACL export 2026-09-14
+```
+
+It applies only on an exact match of all four identifiers, only before
+`expiresAt`, and only to a listing that was not truncated. **Logweir never
+verifies the statement** — the UI renders "attested by *X* at *T*; not verified
+by Logweir".
+
+`legacyArchiveAddressing` is not a value of its own: it is rendered from
+`archive.s3.*`, the same values the Deployment's `AWS_*` env comes from and
+behind the same "only when an endpoint is set" guard. An install with no
+endpoint publishes an empty block rather than `allowHttp: true`.
+
+## `admissionPolicy.enabled` — fencing the console's `create secrets`
+
+Off by default, for **one** reason: `admissionregistration.k8s.io/v1`
+`ValidatingAdmissionPolicy` is Kubernetes **1.30+** and this chart's floor is
+1.29, where the document is rejected with `no matches for kind`. It is not a
+security opinion — turn it on wherever the API server has the kind.
+
+```yaml
+admissionPolicy:
+  enabled: true
+  consoleServiceAccountName: logweir-api          # in the release namespace
+  extraPrincipals:                                 # full subjects, for other namespaces
+    - system:serviceaccount:team-a:logweir-api
+```
+
+It requires that a Secret the console creates carries one of the two Logweir
+credential types (`logweir.dev/object-store-credential`,
+`logweir.dev/kafka-sasl-password`) and the
+`app.kubernetes.io/managed-by: logweir` label — which closes the one thing an
+unfenced `create secrets` could otherwise do, minting a
+`kubernetes.io/service-account-token` for another ServiceAccount. Every other
+principal in the cluster is skipped by the policy's `matchConditions`, which is
+what makes `failurePolicy: Fail` safe. A cluster administrator can still delete
+the policy; see [`docs/kubernetes.md`](../../docs/kubernetes.md) §22.4 for what
+it does and does not prove, including the live check that has **not** been run.
 
 ## The three flags, in plain words
 
