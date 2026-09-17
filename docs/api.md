@@ -119,10 +119,10 @@ anything not listed is `404`.
 | `GET /api/v1/namespaces/{ns}/approvals/{name}/packet` | The raw approval document, only through this explicit route. |
 | `GET /api/v1/namespaces/{ns}/destinations` | `BackupDestination` rows: the canonical URL, the endpoint, the transport, the addressing and the controller's `Valid` verdict. |
 | `POST /api/v1/namespaces/{ns}/destinations` | Create a destination **under the name in the body**, because every schedule, backup and restore references it by that name. |
-| `GET /api/v1/namespaces/{ns}/destinations/{name}` | One destination, with the four grants as **references** and the last explicit access test. |
+| `GET /api/v1/namespaces/{ns}/destinations/{name}` | One destination, with the four grants as **references** and the last explicit access test. `lastTest.truncated` says the search for it hit its page bound. |
 | `POST /api/v1/namespaces/{ns}/destinations/{name}:update-access` | Rotate the four grants and the CA reference under `expectedGeneration`. It cannot name the location or the transport. |
 | `POST /api/v1/namespaces/{ns}/destinations/{name}:test` | Start a `DestinationAccess` `Preflight`; `202` with it. |
-| `POST /api/v1/namespaces/{ns}/destinations:from-legacy` | Derive a destination from a legacy `BackupSchedule` or `Backup`'s `archive.url`, or refuse with `legacy_location_unknown`. |
+| `POST /api/v1/namespaces/{ns}/destinations:from-legacy` | Adopt a legacy `BackupSchedule` or `Backup`'s location. **This build always refuses** — see below. |
 | `GET /api/v1/namespaces/{ns}/destinations/{name}/usage` | Schedules and backups labelled for this destination, at most 100 each, with the `basis` stated. |
 | `GET /api/v1/namespaces/{ns}/connections/{name}/topic-discoveries` | One page of discoveries for a connection; `?latest=true` answers `{latestAttempt, lastSuccessful}` instead. |
 | `POST /api/v1/namespaces/{ns}/connections/{name}/topic-discoveries` | Start a bounded inventory: `202`, or `200` with `reused: true` for a fresh identical result. |
@@ -161,6 +161,13 @@ written; cancelling a finished check is `200` with `alreadyTerminal: true`. An
 operator may cancel only the checks **it started**: the comparison is the
 `issuer#subject` recorded on the object when it was created, so two operators
 holding the same role in the same namespace still cannot stop each other's work.
+**An administrator of the namespace may cancel any check in it.** That is the
+one place a role overrides ownership, and it is deliberately narrow: D0's
+"cancel own checks" is written in the operator row, cancelling destroys nothing,
+and an administrator who could not stop a twenty-thousand-topic discovery an
+operator started before going home would have to wait out `timeoutSeconds` or
+reach for `kubectl`. The audit line records `cancelledAnotherActorsCheck` when
+that path is taken, so the two events are never confused.
 
 ### Saved destinations
 
@@ -175,11 +182,38 @@ destination_invalid` with one field error per rule broken (`bucket_invalid`,
 virtual-hosted say how a request names the bucket, and only the endpoint's
 scheme has to agree with `transport.security`.
 
+The namespace's **default** destination is marked with both the annotation D2
+§3.1 names and a label, and the at-most-one check is a single bounded label
+read; a second `default: true` is `409 state_conflict`. A default set by hand
+with only the annotation is still honoured on read, but is not seen by that
+check.
+
 `:update-access` carries `expectedGeneration`; a stale value is `412
 precondition_failed`, and a rotation the API server rejects as invalid is `409
 destination_location_immutable`. A CA bundle on a plaintext destination is `409
 transport_downgrade_forbidden`, because the transport can never be changed and a
 CA means nothing without TLS.
+
+**Adopting a legacy location needs a source that recorded it, and this build has
+none.** A legacy `archive.url` carries the bucket and the prefix. A destination
+also needs the endpoint, the region, the addressing and the transport — and an
+installation whose runs used MinIO over a custom endpoint with path-style
+addressing writes *exactly the same URL* as one that used AWS S3. The two places
+that record the difference are the frozen `execution-inputs.json` of a succeeded
+`Backup` (PLAT-06.1) and the installation's legacy addressing in the policy
+`ConfigMap` (D2 W11); the adapter reads a `ConfigMap` only when a **check** owns
+it, and neither of those is a check result. `locationDigest` — which restore
+selection and catalog indexing compare — is computed over exactly the fields
+that would have to be guessed, so a guess does not produce an approximate
+destination, it produces a different one that looks derived from facts.
+
+So `:from-legacy` takes D2 §3.12's third branch: it validates the request, reads
+the legacy object, and answers `404 legacy_location_unknown` naming the bucket
+and prefix it *did* recover so you can paste them into an explicit `POST
+.../destinations` with the endpoint your runs actually used. **Adoption from the
+installation config arrives with W11**, and `addressingSource` — the field that
+will say which source a derived location came from — is deliberately absent from
+the response until a route can fill it honestly.
 
 **Write-only credential entry.** A grant may carry a value once, in
 `access.<role>.secret.new`. It becomes a Secret named
@@ -188,9 +222,41 @@ labelled `logweir.dev/credential-for`, owned by the destination — and it is
 never read back. This service has no Secret read verb at all; the create
 response's `data` is dropped by the parser before anything can see it, and every
 response, log line and stored projection carries the Secret's **name** and the
-**key names** inside it, both of which are public references. Rotating the value
-inside an existing Secret is an administrator's or a secret manager's job: the
-API has `create` and nothing else.
+**key names** inside it, both of which are public references.
+
+**Entering a value twice for the same role is `409 state_conflict`, and nothing
+changes.** The Secret's name is a function of the destination and the role, so
+a second `secret.new` names an object that already exists — and this service
+holds `create` and nothing else: it cannot read the existing value to compare
+it, and it cannot overwrite it. Answering `200` there would let an operator
+responding to a leaked key record a rotation that did not happen while the
+leaked value stayed live, so the route **fails closed**: the refusal names the
+Secret, says the value was not written, and the destination is left exactly as
+it was (no patch is sent). To rotate, change the Secret's content out of band
+with `kubectl` or your secret manager, or point the grant at a different
+existing Secret with `secret.existing`. The same rule protects a create: a
+Secret already sitting under that name is never adopted in place of the value
+you just entered. A genuine **replay** — the same `Idempotency-Key` and the
+same body, after a lost response — is the one case that accepts it, because
+the existing object is then the one that request wrote; the audit line reports
+`credentialSecretsCreated` and `credentialSecretsReplayed` separately.
+
+**The retry contract.** A create writes the `BackupDestination` first and its
+credential Secrets second, because the Secrets are owned by the destination and
+an owner reference needs a UID. If the Secret write fails (a timeout, a refusal,
+Kubernetes unavailable) the destination already exists and names a Secret that
+does not. **Repeat the request with the same `Idempotency-Key`**: the replay
+returns the same destination and finishes the credential writes. Repeating with
+a *new* key does not — it is a different request against an existing name.
+
+**The request hash on the object is salted.** Every durable create records
+`api.logweir.dev/request-sha256`. For a destination that request contained an
+entered credential, so the hash is taken over the idempotency scope as well as
+the body: the scope is derived from your `Idempotency-Key`, which is never
+stored or published, and without it the annotation cannot be recomputed from the
+object's public projection. (An object created by an API build older than this
+one carries the unsalted hash and will replay as `409 idempotency_conflict`;
+nothing is deployed yet, so no such object exists outside a test.)
 
 ### Bounded, honest topic inventory
 
@@ -215,6 +281,13 @@ different inventory. **A successful list is never called complete**:
 connection, a changed principal — and a failed attempt never hides the last
 successful inventory: `?latest=true` returns both slots separately.
 
+A claim of completeness is checked before it is published: a controller that
+writes `visibility.state: attestedComplete` **without** an `attestation` is
+answered `unknown`, with `attestationMissing` recorded in `basis`. `limited` is
+passed through as the controller wrote it, because it is a claim about an
+authorization failure observed inside the check Job and the API has nothing to
+verify it against.
+
 ### Readiness that is a result about something
 
 Every preflight carries a `binding`: the plan hash and the digest over the
@@ -235,11 +308,42 @@ anything else.
 ## The Kubernetes boundary
 
 Every Kubernetes call is a method on one adapter, typed over a **sealed** set of
-five resources — `KafkaCluster`, `BackupSchedule`, `Backup`, `Restore` and
-`Approval`. No method takes a group, a version, a plural or a path, so no
-request can name a sixth kind. The only update is
-`BackupSchedule.spec.suspend`, sent as a merge patch whose body is built from a
-boolean and a `resourceVersion` here, never from a request.
+eight custom resources — `KafkaCluster`, `BackupSchedule`, `Backup`, `Restore`,
+`Approval`, `BackupDestination`, `TopicDiscovery` and `Preflight`. No method
+takes a group, a version, a plural or a path, so no request can name a ninth
+kind, and no method can reach a Pod, a log, an exec stream, a Job or a core
+`Namespace` at all. There is no delete, anywhere.
+
+**Two core objects are reached, each through exactly one verb and one
+hand-written type.** `ConfigMap` is a `get` and nothing else, used only for the
+chunk and detail documents a check owns, and every read is verified by owner
+UID, immutability and digest before a row is served. `Secret` is a `create` and
+nothing else — **there is no Secret read verb in this service**, so a stored
+credential cannot be read back by any route, any projection or any future
+refactor of one. `k8s-openapi`'s own `Secret` and `ConfigMap` types are
+deliberately not imported: a type that can hold a Secret's data is a type that
+can leak one. The credential type's `data` field is `skip_deserializing`, so the
+API server's create response — which echoes `data` — is parsed into a value
+whose `data` is empty.
+
+**`create` on Secrets is the widest grant this service asks for, and it is not
+yet fenced.** In a namespace it could in principle mint a
+`kubernetes.io/service-account-token` Secret for any ServiceAccount there. The
+credentials this API creates carry the distinct, immutable-after-create type
+`logweir.dev/object-store-credential` (and PLAT-07.1's carry
+`logweir.dev/kafka-sasl-password`) precisely so a ValidatingAdmissionPolicy
+scoped to the console ServiceAccount can require one of those two values.
+**That policy does not ship yet.** Until it does, the grant is wider than the
+route that uses it, and that is the single most important thing the RBAC stage
+owes.
+
+**There are three updates, and each is a merge patch built here from typed
+arguments**: `BackupSchedule.spec.suspend`, a destination's four grants and CA
+reference (`:update-access`), and a check's `spec.cancelRequested`
+(`:cancel`). Each carries `metadata.resourceVersion`, so each is a conditional
+write the API server refuses on a stale read, and none of them accepts a
+caller-supplied path or patch document. A destination's location and transport
+have no key in any of them.
 
 Every call carries a **10-second deadline**, and the client's own connect, read
 and write timeouts are set to the same bound. A timeout is `504
