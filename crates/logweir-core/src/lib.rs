@@ -15,9 +15,16 @@ pub mod execution_contract;
 pub mod guard;
 pub mod ids;
 pub mod outcome;
+/// PLAT-19.1 / decision D3 §4.3: the scope a standing rehearsal
+/// authorization signs over. Types only — the `plan ∈ scope` predicate is
+/// W7's, against W5's execution contract v2.
+pub mod rehearsal_scope;
 pub mod schema;
 pub mod scorecard;
 pub mod spec;
+/// PLAT-19.1 / decision D3 §7.4: the trust lifecycle — `decide`,
+/// `may_sign_new` and `claimed_signing_time`, with `now` always an argument.
+pub mod trust;
 
 #[cfg(test)]
 mod tests {
