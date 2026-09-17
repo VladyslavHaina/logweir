@@ -459,6 +459,72 @@ pub struct EvidenceClaim {
     /// The document's own latest pre-signature timestamp, absent when the
     /// document carries none or could not be read.
     pub signed_at: Option<DateTime<Utc>>,
+    /// **Why** it is absent, when it is. `None` when `signed_at` is present.
+    ///
+    /// A NAMED REASON, NOT JUST A MISSING VALUE. Every absence refuses under
+    /// [`decide`]'s fail-closed rule, and every one of them renders the same
+    /// [`UntrustReason::SignedOutsideValidity`] — which tells an operator
+    /// nothing about which of four very different things went wrong. This is
+    /// what the caller puts in `status.evidence.verification.detail`, so
+    /// "this scorecard recorded no phase" does not arrive as "signed outside
+    /// validity".
+    pub absence: Option<ClaimAbsence>,
+}
+
+/// Why a document carries no readable signing time.
+///
+/// The set is closed and each variant is a DIFFERENT operator action: an
+/// unknown payload type is a build that has not learned a document; an absent
+/// field is a document that is not what it says it is; an empty phase list is
+/// a run that recorded nothing; an unparseable value is a malformed instant.
+#[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClaimAbsence {
+    /// This build does not know where this media type keeps its signing time.
+    UnknownPayloadType,
+    /// The document does not carry the field this type's signing time lives in.
+    FieldAbsent,
+    /// A scorecard whose `phases` list is empty. **Schema-valid**: the
+    /// scorecard schema puts no `minItems` on `phases`, so a run that recorded
+    /// no phase produces a document with nothing to read.
+    EmptyPhases,
+    /// The field is present and is not an RFC 3339 instant.
+    Unparseable,
+}
+
+impl ClaimAbsence {
+    /// The wire spelling, for the verification `detail`.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::UnknownPayloadType => "UnknownPayloadType",
+            Self::FieldAbsent => "FieldAbsent",
+            Self::EmptyPhases => "EmptyPhases",
+            Self::Unparseable => "Unparseable",
+        }
+    }
+
+    /// A sentence an operator can act on.
+    #[must_use]
+    pub const fn detail(self) -> &'static str {
+        match self {
+            Self::UnknownPayloadType => {
+                "this build does not know where this payload type records its signing time, so \
+                 the key's validity window could not be checked"
+            }
+            Self::FieldAbsent => {
+                "the document carries no signing-time field for its payload type, so the key's \
+                 validity window could not be checked"
+            }
+            Self::EmptyPhases => {
+                "this scorecard records no phase, so it carries no signing time and the key's \
+                 validity window could not be checked"
+            }
+            Self::Unparseable => {
+                "the document's signing-time field is not an RFC 3339 instant, so the key's \
+                 validity window could not be checked"
+            }
+        }
+    }
 }
 
 impl EvidenceClaim {
@@ -467,15 +533,41 @@ impl EvidenceClaim {
     pub const fn at(signed_at: DateTime<Utc>) -> Self {
         Self {
             signed_at: Some(signed_at),
+            absence: None,
         }
     }
 
-    /// A document that claims no signing time. Every window check refuses it:
-    /// the claim is what the window is compared against, so its absence is not
-    /// "no constraint", it is "nothing to check".
+    /// A document that claims no signing time, for a named reason. Every
+    /// window check refuses it: the claim is what the window is compared
+    /// against, so its absence is not "no constraint", it is "nothing to
+    /// check".
+    #[must_use]
+    pub const fn absent(absence: ClaimAbsence) -> Self {
+        Self {
+            signed_at: None,
+            absence: Some(absence),
+        }
+    }
+
+    /// A document that claims no signing time and offers no reason. Test
+    /// shorthand; production callers use [`Self::from_document`], which always
+    /// names one.
     #[must_use]
     pub const fn unknown() -> Self {
-        Self { signed_at: None }
+        Self {
+            signed_at: None,
+            absence: None,
+        }
+    }
+
+    /// **The production constructor.** Reads the claim out of one document,
+    /// naming the reason when there is none.
+    #[must_use]
+    pub fn from_document(payload_type: &str, json: &Value) -> Self {
+        match read_claimed_signing_time(payload_type, json) {
+            Ok(at) => Self::at(at),
+            Err(absence) => Self::absent(absence),
+        }
     }
 }
 
@@ -726,19 +818,49 @@ pub fn decide(
     }
 
     // ---- every remaining row is a window question ------------------------
-    let Some(signed_at) = claim.signed_at else {
-        return Verdict::untrusted(
+    let refuse = || {
+        Verdict::untrusted(
             UntrustReason::SignedOutsideValidity,
             TrustBasis::None,
             key_state,
-        );
+        )
+    };
+    let Some(signed_at) = claim.signed_at else {
+        return refuse();
     };
     if signed_at < key.not_before {
-        return Verdict::untrusted(
-            UntrustReason::SignedOutsideValidity,
-            TrustBasis::None,
-            key_state,
-        );
+        return refuse();
+    }
+    // A CLAIM IN THE FUTURE IS NOT A CLAIM. A document cannot have been signed
+    // after the instant it is being asked about, and `signed_at` is a field the
+    // DOCUMENT controls: without this bound a signer may claim any instant up
+    // to `notAfter` and be trusted as `Current` today. Review finding F4.
+    if signed_at > now {
+        return refuse();
+    }
+    // A KEY WHOSE WINDOW HAS NOT OPENED VERIFIES NOTHING.
+    //
+    // SUBSUMED TODAY BY THE BOUND ABOVE, AND KEPT ANYWAY — measured, not
+    // assumed. `NotYetValid` means `now < notBefore`, and the window test
+    // already required `signed_at >= notBefore`, so any claim that reaches
+    // here against such a key is necessarily after `now` and the F4 bound
+    // refuses it first. Planting "drop this arm" as a mutant therefore does
+    // NOT kill: the recorded mutant is the realistic pair — relax the F4 bound
+    // for clock skew AND drop this arm — which is exactly how the hole would
+    // come back. Defence in depth on a fail-open that shipped once is worth
+    // more than a tidy mutation table.
+    //
+    // Review finding F3:
+    // §7.6 step 1 stages the successor key before the cutover, and staging it
+    // with a future `notBefore` is the natural way to do that — without this
+    // arm a document claiming a time inside the unopened window rendered
+    // `Valid`/`Current` and GREEN, while `status.keys[]` reported
+    // `usableForVerification: None` for the same key at the same instant. The
+    // badge and the console disagreed and the badge was the permissive one.
+    // `usable_for_verification` is the oracle the test compares against, so
+    // the two surfaces cannot drift apart again.
+    if matches!(effective_state(key, now), EffectiveState::NotYetValid) {
+        return refuse();
     }
     // An `Active` key inside its own window, signed inside that window, is the
     // only way to `Current`. The half-open comparison matches the
@@ -816,20 +938,44 @@ const CATALOG_POINT: &str = "application/vnd.logweir.catalog-point+json";
 /// the compromise rows.
 #[must_use]
 pub fn claimed_signing_time(payload_type: &str, json: &Value) -> Option<DateTime<Utc>> {
+    read_claimed_signing_time(payload_type, json).ok()
+}
+
+/// [`claimed_signing_time`], with the absence NAMED — review finding F7.
+///
+/// # Errors
+///
+/// A [`ClaimAbsence`] saying which of the four things went wrong. An
+/// **empty `phases`** is its own variant and not a missing field: the
+/// scorecard schema puts no `minItems` on `phases`, so a run that recorded no
+/// phase writes a schema-valid document with no signing time in it, and
+/// "this scorecard records no phase" is a different thing for an operator to
+/// read than "the field is absent".
+pub fn read_claimed_signing_time(
+    payload_type: &str,
+    json: &Value,
+) -> Result<DateTime<Utc>, ClaimAbsence> {
     let base = payload_type.split(';').next().unwrap_or("").trim();
     let value = match base {
         BACKUP_RECEIPT => json.get("finished_at"),
-        SCORECARD => json
-            .get("phases")
-            .and_then(Value::as_array)
-            .and_then(|phases| phases.last())
-            .and_then(|p| p.get("at")),
+        SCORECARD => {
+            let phases = json
+                .get("phases")
+                .and_then(Value::as_array)
+                .ok_or(ClaimAbsence::FieldAbsent)?;
+            let last = phases.last().ok_or(ClaimAbsence::EmptyPhases)?;
+            last.get("at")
+        }
         TEARDOWN => json.get("deleted_at"),
         APPROVAL => json.get("approved_at"),
         CATALOG_POINT => json.get("recorded_at"),
-        _ => None,
-    }?;
-    parse_rfc3339(value.as_str()?)
+        _ => return Err(ClaimAbsence::UnknownPayloadType),
+    };
+    let text = value
+        .ok_or(ClaimAbsence::FieldAbsent)?
+        .as_str()
+        .ok_or(ClaimAbsence::Unparseable)?;
+    parse_rfc3339(text).ok_or(ClaimAbsence::Unparseable)
 }
 
 /// One RFC 3339 instant, in UTC.
