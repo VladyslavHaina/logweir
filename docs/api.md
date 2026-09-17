@@ -227,6 +227,17 @@ Every `BackupSchedule.spec` field is editable **except `sourceRef`**: a
 schedule's identity is the cluster it protects, and one schedule's history must
 not mix two clusters.
 
+**`generation` is always emitted and declared optional.** `GET
+.../schedules[/{name}]` returns `generation` on every schedule this build
+serves — the API server sets `metadata.generation` on every object — but the
+published schema marks it optional, because `ui/contract.js`'s decoder drift
+test compares the schema's `required` set with a frozen console-side list, and
+moving a field into that set is a change that must land in the same commit as
+`ui/contract.js` and the console fixtures. **That commit is D1 W7's**, and it
+should make the field required. Until then: **a console that somehow sees
+`generation` absent must ask the person to reload, never default it.** Sending
+`expectedGeneration: 0` is a `412` nobody can explain.
+
 `PUT .../schedules/{name}` takes the **whole** policy — `expectedGeneration`,
 `schedule`, `timeZone?`, `topicSelection`, `archive` xor `destinationRef`,
 `concurrencyPolicy?`, `startingDeadlineSeconds?`, `catchUpPolicy?`, `retry?`,
@@ -238,6 +249,17 @@ rather than a stale one nobody can see and the scheduler still obeys.
 * **It changes the future and nothing else.** A `Backup` that already exists
   keeps its copied policy, its frozen execution inputs and its Job. The edit's
   entire footprint is one merge patch on one `BackupSchedule`.
+* **"Omitted is removed" covers the spec fields THIS BUILD knows.** The patch
+  names every mutable key of `BackupScheduleSpec` as this binary declares it,
+  so a key a *newer* CRD added is not in the patch and a merge patch leaves it
+  in place. That window is real and documented: the upgrade order is CRD →
+  controller → API (D1 §5.7), so between the CRD rollout and the API rollout an
+  operator editing through the old console **preserves** a newer CRD's fields
+  rather than removing them. This is deliberate — removing keys a build cannot
+  name would be far worse than keeping them — and the response reads the
+  patched object back, so a preserved field is *visible* rather than silently
+  retained. Finish the API rollout before relying on replace semantics for a
+  field the CRD has just gained.
 * **`expectedGeneration`, not `expectedResourceVersion`.** `metadata.generation`
   is what a person can see and reason about ("revision g7"), it moves only when
   the spec changes, and it is what a manual run records. A different current
@@ -259,8 +281,15 @@ rather than a stale one nobody can see and the scheduler still obeys.
   are the API server's to refuse — a second copy of a CEL rule drifts from the
   schema, and a stored object can break a rule this build has never heard of. The
   refusal comes back as `422 validation_failed` carrying the CRD's published
-  message on `topicSelection: selection_invalid` or `retry.maxRetries:
-  schedule_invalid`.
+  message — never the API server's text — on one of three field codes:
+  `topicSelection: selection_invalid`, `retry.maxRetries: schedule_invalid`, or
+  `destinationRef: destination_sentinel_mismatch` when `archive.url` and
+  `destinationRef` disagree. **The sentinel code is deliberately not
+  `field_immutable`**: it is a shape rule, and telling a person their
+  destination cannot be changed would contradict the line above. A refusal
+  whose message this build does not recognise stays a generic `422` whose
+  reason is in the service log — naming a rule it cannot identify would be a
+  guess.
 * **What *is* checked before the write** is what no rule can catch: an
   unparseable expression, an unknown zone, an empty selection, a glob in a topic
   name, a range. The cron parser and the zone table are the controller's own, so
@@ -644,6 +673,20 @@ validated names.
 Mutation bodies are strict: an unknown field is `422 validation_failed` naming
 the field, not a silently ignored key. So is an unknown or repeated query
 parameter (`400 malformed_request`). Bodies are capped at 1 MiB.
+
+**`errors[].field` is a path and nothing else** — `topics[2]`,
+`scheduleRef.name`, `access.archiveWrite.mode`, or a header or query-parameter
+name. It never carries a parenthetical or any other note a client would have to
+parse; what went wrong is `message`, which is a sentence. A console may match
+on it exactly.
+
+**One condition has one `errors[].code`, on every route that can produce it.**
+An expression the cadence engine cannot read is `schedule: schedule_invalid`
+from `POST .../schedules`, `PUT .../schedules/{name}` and
+`GET /api/v1/cadence-previews` alike; a zone it cannot resolve is `timeZone:
+timezone_unknown`. (`POST .../schedules` answered `invalid_cron` before D1 W6,
+which meant a console highlighting the cadence input worked on the edit form
+and the preview and silently did not on the create form, for the same typo.)
 
 **Every response** carries `X-Request-ID` — freshly minted; a client-supplied ID
 is ignored — a Content-Security-Policy, `X-Content-Type-Options: nosniff`,

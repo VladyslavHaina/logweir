@@ -254,9 +254,16 @@ impl Role {
     ///
     /// Read it as the matrix in D0 §"Application role and namespace matrix":
     /// Viewer never mutates; Operator never submits a governed approval and
-    /// never changes trust or policy; Approver cannot create an execution and
-    /// sees only what a governed approval needs; Administrator administers its
-    /// bound namespaces but is NOT an approver.
+    /// never changes trust or APPROVAL policy; Approver cannot create an
+    /// execution and sees only what a governed approval needs; Administrator
+    /// administers its bound namespaces but is NOT an approver.
+    ///
+    /// "APPROVAL POLICY", NOT "POLICY". An operator DOES change a
+    /// `BackupSchedule`'s policy — that is [`Action::EditSchedulePolicy`], ten
+    /// lines below — and a reader who took the looser word as the invariant
+    /// would "fix" the table by removing a row D1 §5.1 put there. What an
+    /// operator may never change is the trust roster and the approval policy
+    /// that decide who may authorise a restore.
     #[must_use]
     pub const fn allows(self, action: Action) -> bool {
         match self {
@@ -273,6 +280,8 @@ impl Role {
                     | Action::ReadOperations
                     | Action::StreamOperationEvents
             ),
+            // An operator edits a SCHEDULE's policy (D1 §5.1) and never an
+            // approval or trust policy; see the note above `allows`.
             Role::Operator => matches!(
                 action,
                 Action::ReadConnections
