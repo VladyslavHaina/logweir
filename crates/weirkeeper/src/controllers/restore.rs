@@ -133,6 +133,7 @@ use crate::crds::approval::Approval;
 use crate::crds::kafka_cluster::KafkaCluster;
 use crate::crds::restore::Restore;
 use crate::crds::trust_roster::TrustRoster;
+use crate::destination::{self, DestinationRole, ResolveError, ResolvedDestination};
 use crate::diagnostics;
 use crate::job::{
     self, ConfigMapMount, EnvFromSecret, RunnerJobSpec, RunnerOwner, SecretMount,
@@ -142,6 +143,7 @@ use crate::verification::{
     conditions_in, restore_badge, second_patch, stored_verification, verified_condition,
     EvidenceRef, VerifyOracle,
 };
+use logweir_core::check_contract::CheckCode;
 use logweir_core::ids::sha256_prefixed;
 use logweir_store::Store;
 
@@ -690,6 +692,35 @@ pub fn admit(
 /// [`RestoreError`] for an object with no namespace or UID — both unreachable
 /// from the API server, both named rather than unwrapped.
 pub fn plan_config_map(restore: &Restore) -> Result<ConfigMap, RestoreError> {
+    plan_config_map_with_destinations(restore, None)
+}
+
+/// [`plan_config_map`], with the two destinations' CA bundles beside the plan
+/// — D2 §3.5's "CA files" paragraph.
+///
+/// # THE BYTES ARE FROZEN HERE AND NEVER RE-READ AT JOB TIME
+///
+/// `LOGWEIR_ARCHIVE_CA_FILE` and `LOGWEIR_EVIDENCE_CA_FILE` point at keys in
+/// THIS immutable `ConfigMap`, not at the destination's own `caBundle`
+/// `ConfigMap`. Mounting the live one would mean a CA rotated while a restore
+/// runs changes what that run trusts, mid-run, with an approved plan that says
+/// nothing about it. Copying the bytes into the run's own immutable object is
+/// what makes "this run trusts this root" a property of the run.
+///
+/// **THE PLAN BYTES STAY VERBATIM.** `restore.yaml` is `spec.planBytes`
+/// `.clone()` and nothing else, at both arities: they are the bytes an
+/// approver signed, and a re-serialisation would change the hash the runner
+/// pins.
+///
+/// # Errors
+///
+/// [`RestoreError`] for an object with no namespace or UID, or a CA bundle
+/// that is not UTF-8 — a `ConfigMap`'s `data` values are strings, and
+/// replacement characters in a trust root are not a trust root.
+pub fn plan_config_map_with_destinations(
+    restore: &Restore,
+    destinations: Option<&RestoreDestinations>,
+) -> Result<ConfigMap, RestoreError> {
     let name = restore.name_any();
     let namespace = restore
         .namespace()
@@ -722,18 +753,334 @@ pub fn plan_config_map(restore: &Restore) -> Result<ConfigMap, RestoreError> {
             }]),
             ..ObjectMeta::default()
         },
-        data: Some(
-            [(
+        data: Some({
+            let mut data: std::collections::BTreeMap<String, String> = [(
                 PLAN_SPEC_KEY.to_string(),
                 // VERBATIM. `.clone()` and nothing else.
                 restore.spec.plan_bytes.clone(),
             )]
             .into_iter()
-            .collect(),
-        ),
+            .collect();
+            if let Some(pair) = destinations {
+                for (key, resolved) in [
+                    (destination::ARCHIVE_CA_PLAN_KEY, &pair.source),
+                    (destination::EVIDENCE_CA_PLAN_KEY, &pair.evidence),
+                ] {
+                    if let Some(pem) = resolved.ca_pem.as_ref() {
+                        data.insert(key.to_string(), ca_text(resolved, pem)?);
+                    }
+                }
+            }
+            data
+        }),
         immutable: Some(true),
         ..ConfigMap::default()
     })
+}
+
+/// One destination's CA bundle as `ConfigMap` text.
+///
+/// NOT `from_utf8_lossy`. A `ConfigMap`'s `data` values are strings, so bytes
+/// that are not UTF-8 would be replacement-charactered on the way in and the
+/// runner would build its store against a mangled trust root — silently, and
+/// only failing at the first TLS handshake. `destination::check_ca_bundle` has
+/// already refused anything that is not a PEM bundle; this is the second rail,
+/// and it names the object rather than the byte count.
+fn ca_text(resolved: &ResolvedDestination, pem: &[u8]) -> Result<String, RestoreError> {
+    String::from_utf8(pem.to_vec()).map_err(|_| {
+        RestoreError::Refused(
+            TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
+            format!(
+                "the CA bundle of BackupDestination {}/{} is not UTF-8, so it cannot be written                  into the immutable plan ConfigMap the runner mounts",
+                resolved.namespace, resolved.name
+            ),
+        )
+    })
+}
+
+// ---------------------------------------------------------------------------
+// Destination admission — D2 §3.6 checks 5-9
+// ---------------------------------------------------------------------------
+
+/// The two destinations a destination-backed `Restore` resolves.
+///
+/// # TWO, BECAUSE A RESTORE READS ONE STORE AND WRITES ANOTHER
+///
+/// The archive it reads is the source destination's, under `archiveRead`; the
+/// scorecard and offset report it writes are the evidence destination's, under
+/// `evidenceWrite`. They may be the same `BackupDestination` — that is the
+/// common case — and the run then carries one credential and
+/// `LOGWEIR_EVIDENCE_CREDENTIALS=archive`. They may be two, which is exactly
+/// what defect **UI-HTTPDOWNGRADE**'s second half is about: one endpoint,
+/// region and addressing applied to both stores because the wizard had only one
+/// set of fields. Here they are two independent resolutions and neither field
+/// of one reaches the other.
+#[derive(Debug)]
+pub struct RestoreDestinations {
+    /// `spec.sourceDestinationRef`, resolved for
+    /// [`DestinationRole::ArchiveRead`].
+    pub source: ResolvedDestination,
+    /// `spec.evidenceDestinationRef`, resolved for
+    /// [`DestinationRole::EvidenceWrite`].
+    pub evidence: ResolvedDestination,
+}
+
+/// What destination admission decided for one `Restore` — D2 §3.6 checks 5-9.
+#[derive(Debug)]
+pub enum RestoreDestinationAdmission {
+    /// The `Restore` names neither ref: a legacy inline-`sourceArchive` run,
+    /// unchanged in every respect.
+    NotRequested,
+    /// Both destinations resolved, and the approved plan bytes name exactly
+    /// their locations.
+    Resolved(Box<RestoreDestinations>),
+    /// One of them is absent or not yet `Valid`. HELD, never terminal: D2 §3.6
+    /// puts this with `ApprovalNotVerified`, because an operator who is still
+    /// creating the destination is in the same position as an approver who has
+    /// not signed yet, and a `Restore.spec` is CEL-immutable, so a terminal
+    /// refusal could never be repaired in place.
+    Holding {
+        /// The resolver's `CheckCode`, as a condition `reason`.
+        reason: &'static str,
+        /// What is wrong and what to do. Names objects, fields and locations —
+        /// never a credential.
+        message: String,
+    },
+}
+
+/// Resolve the two `BackupDestination`s a `Restore` names and check the
+/// approved plan against them — D2 §3.6 checks 5 through 9.
+///
+/// # THE ORDER, AND WHY THE PLAN IS CHECKED AFTER THE DESTINATIONS
+///
+/// 5. Both refs resolve and are `Valid` — a HOLD while they are not.
+/// 6. `spec.planBytes` parses as a `logweir_core::spec::RestoreSpec`. READ
+///    ONLY, and never re-emitted: those bytes are what an approver signed, and
+///    the plan `ConfigMap` still carries them verbatim.
+/// 7. `plan.source.storage` is the source destination's archive `StorageUrl`,
+///    exact on all six fields.
+/// 8. `plan.evidence` is the evidence destination's evidence `StorageUrl`.
+/// 9. The `archiveRead` and `evidenceWrite` grants resolve, and the two can be
+///    satisfied by ONE pod — one pod has one ServiceAccount.
+///
+/// Checks 7 and 8 are the ones that make a saved destination mean anything on
+/// this path. The runner reads the location out of the PLAN, not out of the
+/// destination, so a destination whose location differs from the approved plan
+/// would otherwise contribute its CREDENTIALS to a run that reads somewhere
+/// else — a credential pointed at a location nobody approved. Refusing here is
+/// terminal, and the message names fields rather than credentials.
+///
+/// **A DESTINATION EDIT NEVER INVALIDATES AN APPROVAL.** Location and transport
+/// are immutable on a `BackupDestination`, so the plan bytes an approver signed
+/// cannot go stale through an edit; only preflights do (D2 §6.6).
+///
+/// # Errors
+///
+/// [`RestoreError::Api`] for a failed read, or [`RestoreError::Refused`] with
+/// the terminal state named by checks 6 through 9.
+pub async fn admit_restore_destinations(
+    restore: &Restore,
+    client: &kube::Client,
+    namespace: &str,
+    now: DateTime<Utc>,
+) -> Result<RestoreDestinationAdmission, RestoreError> {
+    let source_ref = restore.spec.source_destination_ref.as_ref();
+    let evidence_ref = restore.spec.evidence_destination_ref.as_ref();
+    let (source_ref, evidence_ref) = match (source_ref, evidence_ref) {
+        (None, None) => return Ok(RestoreDestinationAdmission::NotRequested),
+        (Some(s), Some(e)) => (s, e),
+        // THE CEL RULE REFUSES THIS PAIR ON ADMISSION
+        // (`crds::restore::DESTINATION_PAIR_RULE`), and it is refused again
+        // here for the reason every re-validated rule in this crate exists: an
+        // object admitted by an OLDER CRD revision reaches this controller
+        // unchecked. Half a destination-backed restore would read from a saved
+        // destination and write its scorecard wherever the inline block says.
+        (present, _) => {
+            return Err(RestoreError::Refused(
+                CheckCode::DestinationRoleNotConfigured.as_str(),
+                format!(
+                    "spec.{} is set and its partner is not; a Restore reads its archive from one \
+                     destination and writes its evidence to another, so the two are set together \
+                     or neither is",
+                    if present.is_some() {
+                        "sourceDestinationRef"
+                    } else {
+                        "evidenceDestinationRef"
+                    }
+                ),
+            ))
+        }
+    };
+
+    let load = crate::check::policy::load(
+        client,
+        super::topic_discovery::configured_policy_ref().as_ref(),
+        &crate::check::policy::PolicyCache::new(),
+        now,
+    )
+    .await
+    .map_err(RestoreError::Api)?;
+    let policy = load.policy();
+
+    // CHECK 5.
+    let source = match destination::resolve_ref(
+        client,
+        namespace,
+        &source_ref.name,
+        DestinationRole::ArchiveRead,
+        policy,
+    )
+    .await
+    {
+        Ok(resolved) => resolved,
+        Err(ResolveError::Api(e)) => return Err(RestoreError::Api(e)),
+        Err(ResolveError::Refused(refusal)) => {
+            return destination_verdict(refusal);
+        }
+    };
+    let evidence = match destination::resolve_ref(
+        client,
+        namespace,
+        &evidence_ref.name,
+        DestinationRole::EvidenceWrite,
+        policy,
+    )
+    .await
+    {
+        Ok(resolved) => resolved,
+        Err(ResolveError::Api(e)) => return Err(RestoreError::Api(e)),
+        Err(ResolveError::Refused(refusal)) => {
+            return destination_verdict(refusal);
+        }
+    };
+    // The Job runs where both sets of references resolve, and nowhere else.
+    for resolved in [&source, &evidence] {
+        if let Err(refusal) = resolved.check_job_namespace(namespace) {
+            return Err(RestoreError::Refused(refusal.reason(), refusal.message));
+        }
+    }
+
+    // CHECK 6. READ ONLY. These bytes are never re-emitted: `plan_config_map`
+    // still writes `spec.planBytes` verbatim, because they are the bytes an
+    // approver signed and a re-serialisation would change the hash.
+    let plan: logweir_core::spec::RestoreSpec = serde_yaml::from_str(&restore.spec.plan_bytes)
+        .map_err(|e| {
+            RestoreError::Refused(
+                CheckCode::PlanUnparseable.as_str(),
+                format!(
+                    "spec.planBytes is not a readable restore plan ({e}), so the destinations this \
+                     Restore names cannot be compared with the location it was approved to read"
+                ),
+            )
+        })?;
+
+    // CHECK 7. EXACT, ON ALL SIX FIELDS. The runner reads the location out of
+    // the PLAN, so a destination whose location differs would contribute its
+    // credential to a run that reads somewhere else.
+    let expected_source = source.plan_storage();
+    if plan.source.storage != expected_source {
+        return Err(RestoreError::Refused(
+            CheckCode::PlanDestinationMismatch.as_str(),
+            format!(
+                "the approved plan reads {} and BackupDestination {}/{} is {}; the runner reads \
+                 the location the plan names, so this destination's credential would be presented \
+                 at a location nobody approved. Build a plan from this destination and approve it",
+                describe_storage(&plan.source.storage),
+                source.namespace,
+                source.name,
+                describe_storage(&expected_source)
+            ),
+        ));
+    }
+
+    // CHECK 8. The evidence root is Global Constraint 6's `logweir/` and the
+    // resolver imposes it, so this compares the BUCKET the scorecard lands in.
+    let expected_evidence = evidence.evidence_storage();
+    if plan.evidence != expected_evidence {
+        return Err(RestoreError::Refused(
+            CheckCode::PlanEvidenceDestinationMismatch.as_str(),
+            format!(
+                "the approved plan writes its scorecard to {} and BackupDestination {}/{} is {}; \
+                 the signed document would land outside the destination this Restore names",
+                describe_storage(&plan.evidence),
+                evidence.namespace,
+                evidence.name,
+                describe_storage(&expected_evidence)
+            ),
+        ));
+    }
+
+    // CHECK 9. ONE POD, ONE ServiceAccount. `evidence_env` is the one place
+    // that decides how two grants share a pod, and it refuses two different
+    // workload identities as `ExecutionContextConflict` — a fact about
+    // Kubernetes, not a policy.
+    if let Err(refusal) = evidence.evidence_env(&source) {
+        return Err(RestoreError::Refused(refusal.reason(), refusal.message));
+    }
+
+    Ok(RestoreDestinationAdmission::Resolved(Box::new(
+        RestoreDestinations { source, evidence },
+    )))
+}
+
+/// A resolver refusal as D2 §3.6's split: a hold for the two codes an operator
+/// can still fix by creating or repairing an object, a terminal refusal for
+/// every decision.
+///
+/// `DestinationNotFound` and `DestinationNotValid` are races — the ref and the
+/// object are two applies, and a `BackupDestination`'s own reconciler has to
+/// run before it carries a `Valid=True`. Everything else is a decision, and a
+/// decision retried forever is a decision nobody sees.
+fn destination_verdict(
+    refusal: Box<destination::DestinationRefusal>,
+) -> Result<RestoreDestinationAdmission, RestoreError> {
+    if refusal.is_hold() {
+        Ok(RestoreDestinationAdmission::Holding {
+            reason: refusal.reason(),
+            message: refusal.message,
+        })
+    } else {
+        Err(RestoreError::Refused(refusal.reason(), refusal.message))
+    }
+}
+
+/// A `StorageUrl` as an operator-readable location, with no credential in it.
+///
+/// `{:?}` WOULD HAVE DONE, AND IT IS THE WRONG SHAPE. A `PlanDestinationMismatch`
+/// message is read by somebody comparing two locations field by field, and
+/// `S3 { bucket: "a", prefix: "b", region: None, … }` twice on one line is a
+/// diff nobody can perform in their head. `StorageUrl` carries no credential at
+/// any variant, so nothing here needs redaction — the endpoint, bucket and
+/// prefix are exactly what the operator has to compare.
+fn describe_storage(url: &logweir_core::engine::StorageUrl) -> String {
+    use logweir_core::engine::StorageUrl as U;
+    match url {
+        U::S3 {
+            bucket,
+            prefix,
+            region,
+            endpoint,
+            path_style,
+            allow_http,
+        } => format!(
+            "s3://{bucket}/{prefix} (region {}, endpoint {}, {}, {})",
+            region.as_deref().unwrap_or("<unset>"),
+            endpoint.as_deref().unwrap_or("<default>"),
+            if *path_style {
+                "path-style"
+            } else {
+                "virtual-hosted"
+            },
+            if *allow_http { "http allowed" } else { "https" }
+        ),
+        U::Gcs { bucket, prefix } => format!("gs://{bucket}/{prefix}"),
+        U::Azure {
+            account_name,
+            container_name,
+            prefix,
+        } => format!("az://{account_name}/{container_name}/{prefix}"),
+        U::Filesystem { path } => format!("file://{}", path.display()),
+    }
 }
 
 /// Exact compatibility for a create-only plan ConfigMap retry.
@@ -1651,6 +1998,58 @@ pub fn runner_job_spec(
     trust: &crate::trust::ResolvedTrust,
     now: DateTime<Utc>,
 ) -> Result<RunnerJobSpec, RestoreError> {
+    runner_job_spec_with_destinations(
+        restore,
+        cluster,
+        approver_key_ids,
+        approval,
+        trust,
+        now,
+        None,
+    )
+}
+
+/// [`runner_job_spec`] for a destination-backed `Restore` — D2 §3.5's Restore
+/// paragraph.
+///
+/// # THE TWO STORES, AND WHY NEITHER SHADOWS THE OTHER
+///
+/// The engine reads the archive through `AWS_*`; that is the SOURCE
+/// destination's `archiveRead` grant, rendered by
+/// [`ResolvedDestination::job_env`] exactly as a backup's is. The scorecard is
+/// written through the EVIDENCE destination's `evidenceWrite` grant, and when
+/// that is a different Secret it arrives under `LOGWEIR_EVIDENCE_AWS_*` —
+/// separately named on purpose, because one `AWS_ACCESS_KEY_ID` in a pod is one
+/// credential and a restore may legitimately need two.
+/// [`ResolvedDestination::evidence_env`] owns the three cases and the one
+/// refusal; nothing here re-decides them.
+///
+/// # `archive_addressing_env` IS NOT FORWARDED HERE
+///
+/// Defect **SEC-ENVHTTP**: the controller's own `AWS_ENDPOINT_URL`,
+/// `AWS_REGION`, `AWS_ALLOW_HTTP` and `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` reach
+/// every legacy runner Job, and the engine's `from_env()` honours them over the
+/// approved plan. On this path the complete explicit set comes from the two
+/// destinations and the process contributes nothing — a planted
+/// `AWS_ALLOW_HTTP=true` cannot enable plaintext transport for a run whose
+/// destination declares TLS. The legacy arm keeps forwarding, deliberately:
+/// see [`desired_execution_inputs_for_destination`]'s note on the upgrade.
+///
+/// # Errors
+///
+/// Whatever [`runner_job_spec`] refuses, plus
+/// [`logweir_core::check_contract::CheckCode::ExecutionContextConflict`] when
+/// the two grants cannot share one pod.
+#[allow(clippy::too_many_arguments)]
+pub fn runner_job_spec_with_destinations(
+    restore: &Restore,
+    cluster: &KafkaCluster,
+    approver_key_ids: &[String],
+    approval: &Approval,
+    trust: &crate::trust::ResolvedTrust,
+    now: DateTime<Utc>,
+    destinations: Option<&RestoreDestinations>,
+) -> Result<RunnerJobSpec, RestoreError> {
     let name = restore.name_any();
     let namespace = restore
         .namespace()
@@ -1709,6 +2108,43 @@ pub fn runner_job_spec(
     // `scramSha512` connection with no reference at all.
     env_from_secret.extend(projection.env_from_secret);
 
+    // === THE TWO DESTINATIONS' CONTRIBUTION (D2 §3.5) ===
+    //
+    // `evidence_env` is called with the SOURCE resolution beside it, because
+    // whether the evidence grant needs its own projected credential at all is a
+    // question about the PAIR: the same Secret and keys means
+    // `LOGWEIR_EVIDENCE_CREDENTIALS=archive` and nothing further is projected.
+    let (archive_env, evidence_env) = match destinations {
+        None => (None, None),
+        Some(pair) => {
+            let evidence = pair
+                .evidence
+                .evidence_env(&pair.source)
+                .map_err(|refusal| RestoreError::Refused(refusal.reason(), refusal.message))?;
+            (Some(pair.source.job_env()), Some(evidence))
+        }
+    };
+    for env in [archive_env.as_ref(), evidence_env.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        env_from_secret.extend(env.from_secret.iter().cloned());
+    }
+    // ONE POD, ONE ServiceAccount. A workload-identity grant REPLACES the
+    // connection's runner ServiceAccount — the object store authenticates the
+    // pod's identity, and a pod has exactly one. `evidence_env` has already
+    // refused two DIFFERENT workload identities, so the two values here agree
+    // whenever both are present.
+    let service_account_name = archive_env
+        .as_ref()
+        .and_then(|env| env.service_account_name.clone())
+        .or_else(|| {
+            evidence_env
+                .as_ref()
+                .and_then(|env| env.service_account_name.clone())
+        })
+        .unwrap_or_else(|| connection.execution.service_account_name.clone());
+
     Ok(RunnerJobSpec {
         // THE JOB IS NAMED AFTER THE CR, VERBATIM — see `RunnerJobSpec::name`
         // for the 63-character argument, and step 0 of `reconcile_restore` for
@@ -1721,9 +2157,20 @@ pub fn runner_job_spec(
             name,
             uid,
         },
-        args: runner_argv(restore, approver_key_ids),
+        args: {
+            let mut argv = runner_argv(restore, approver_key_ids);
+            // THE VERSION-SKEW HANDSHAKE (D2 §3.5). An old runner image handed
+            // a destination-backed Job fails to parse this flag and exits
+            // before it dispatches, rather than building its stores out of
+            // whatever `AWS_*` happens to be in the pod.
+            if destinations.is_some() {
+                argv.push(destination::STORE_CONTRACT_VERSION_ARG.to_string());
+                argv.push(destination::STORE_CONTRACT_VERSION.to_string());
+            }
+            argv
+        },
         deadline_seconds: restore.spec.deadline_seconds,
-        service_account_name: connection.execution.service_account_name.clone(),
+        service_account_name,
         secret_mounts,
         config_map_mounts: {
             let mut mounts = vec![ConfigMapMount {
@@ -1758,7 +2205,17 @@ pub fn runner_job_spec(
         // unchanged. See `backup::ARCHIVE_ADDRESSING_ENV`.
         env_literal: {
             let mut env = vec![("RUST_LOG".to_string(), "info".to_string())];
-            env.extend(backup::archive_addressing_env());
+            match (archive_env.as_ref(), evidence_env.as_ref()) {
+                // THE COMPLETE EXPLICIT SET, AND NOTHING FROM THIS PROCESS.
+                (Some(archive), Some(evidence)) => {
+                    env.extend(archive.literals.iter().cloned());
+                    env.extend(evidence.literals.iter().cloned());
+                }
+                // The legacy inline-`sourceArchive` path, byte for byte as it
+                // was: the four forwarded variables, or none of them on a
+                // default install that sets none.
+                _ => env.extend(backup::archive_addressing_env()),
+            }
             env.extend(execution_contract_env(restore, approval, trust, now)?);
             env.extend(projection.env_literal);
             env
@@ -2195,6 +2652,38 @@ pub fn admission_hold_patch(
                 "False",
                 admission.reason(),
                 &admission.to_string(),
+                now,
+            )],
+        }
+    })
+}
+
+/// [`admission_hold_patch`] for a destination that is absent or not yet
+/// `Valid` — D2 §3.6 check 5.
+///
+/// The SAME SHAPE as the approval hold, on purpose: `phase: Pending`, the
+/// scalar `reason` the `REASON` column renders, and exactly one
+/// `Admitted=False` condition. Two hold shapes for two holds would make a
+/// console render the same situation two ways, and the `reason` is the
+/// resolver's own `CheckCode` — the same string the `BackupDestination`'s own
+/// `Valid` condition carries, so the two objects agree about the fault.
+#[must_use]
+pub fn destination_hold_patch(
+    restore: &Restore,
+    reason: &str,
+    message: &str,
+    now: DateTime<Utc>,
+) -> Value {
+    json!({
+        "status": {
+            "phase": PHASE_PENDING,
+            "reason": reason,
+            "conditions": [condition(
+                restore,
+                CONDITION_ADMITTED,
+                "False",
+                reason,
+                message,
                 now,
             )],
         }
@@ -2865,13 +3354,14 @@ async fn write_plan_config_map(
     restore: &Restore,
     client: &kube::Client,
     namespace: &str,
+    destinations: Option<&RestoreDestinations>,
 ) -> Result<(), RestoreError> {
     let name = restore.name_any();
     let cm_name = plan_config_map_name(&name);
     let uid = restore
         .uid()
         .ok_or_else(|| RestoreError::NoUid(name.clone()))?;
-    let desired = plan_config_map(restore)?;
+    let desired = plan_config_map_with_destinations(restore, destinations)?;
     let maps: Api<ConfigMap> = Api::namespaced(client.clone(), namespace);
 
     match maps.create(&PostParams::default(), &desired).await {
@@ -3361,6 +3851,47 @@ async fn reconcile_restore_inner(
                 "the admitted Approval disappeared before its bundle was materialized".to_string(),
             )
         })?;
+        // === THE DESTINATIONS, AFTER CHECKS 0-4 AND BEFORE THE FIRST POST ===
+        //
+        // AFTER, so today's reason precedence is unchanged: an unapproved plan
+        // is still `ApprovalNotVerified` and not a destination complaint. The
+        // hold here is the same 30-second hold the approval gets, for the same
+        // reason — an operator who is still creating the destination is in the
+        // position of an approver who has not signed yet — and it is not capped:
+        // a `Restore` waits for a human either way.
+        let destinations = match admit_restore_destinations(restore, client, &namespace, now)
+            .await?
+        {
+            RestoreDestinationAdmission::NotRequested => None,
+            RestoreDestinationAdmission::Resolved(pair) => Some(pair),
+            RestoreDestinationAdmission::Holding { reason, message } => {
+                info!(
+                    restore = %name,
+                    namespace = %namespace,
+                    reason,
+                    detail = %message,
+                    "no Job exists until both of this Restore's BackupDestinations resolve and                      report Valid=True; holding for {ADMISSION_REQUEUE_SECS}s"
+                );
+                patch_status_if_changed(
+                    &restores,
+                    restore,
+                    &name,
+                    destination_hold_patch(restore, reason, &message, now),
+                )
+                .await?;
+                return Ok(RestoreOutcome {
+                    job_name,
+                    created: false,
+                    admission: None,
+                    exit_code: None,
+                    terminal_state: None,
+                    keys: RestoreEvidenceKeys::default(),
+                    ttl_patched: false,
+                    requeue: Requeue::After(ADMISSION_REQUEUE_SECS),
+                });
+            }
+        };
+
         let trust = resolve_trust(client, &namespace).await?;
         let matched_key_id = approval
             .status
@@ -3374,7 +3905,15 @@ async fn reconcile_restore_inner(
         // One exact verified key, not every key the roster happens to contain.
         // The runner pins this id and verifies the detached signature again.
         let key_ids = vec![matched_key_id];
-        let mut spec = runner_job_spec(restore, &cluster, &key_ids, &approval, &trust, now)?;
+        let mut spec = runner_job_spec_with_destinations(
+            restore,
+            &cluster,
+            &key_ids,
+            &approval,
+            &trust,
+            now,
+            destinations.as_deref(),
+        )?;
         // THE TWO LINES THE OVERRIDES ARE (Task 33's image, Task 37's pull
         // policy). `None` in either leaves the compiled-in constant in place,
         // which is what every test that does not pass one sees.
@@ -3386,7 +3925,7 @@ async fn reconcile_restore_inner(
         // created first is a pod that stalls in `ContainerCreating` until its
         // deadline fires — measured live on the `Backup` path, and the reason
         // every scheduled backup was failing as an unexplained `NoExitCode`.
-        write_plan_config_map(restore, client, &namespace).await?;
+        write_plan_config_map(restore, client, &namespace, destinations.as_deref()).await?;
         write_approval_bundle_config_map(restore, &approval, &trust, now, client, &namespace)
             .await?;
 
