@@ -24,8 +24,9 @@ use kube::Api;
 use weirkeeper::conditions::CONDITION_HISTORY_RETAINED;
 use weirkeeper::controllers::backup_schedule::{reconcile_schedule, scheduled_backup};
 use weirkeeper::controllers::schedule_history::{
-    history_condition, inventory_due, may_use_label_selector, migration_patch, migration_refusal,
-    observe, MigrationRefusal, INVENTORY_PAGE_SIZE, MAX_INVENTORY_PAGES, MIGRATION_BLOCKED_SAMPLE,
+    blocked_reason_clears_itself, history_condition, inventory_due, may_use_label_selector,
+    migration_patch, migration_refusal, observe, MigrationRefusal, INVENTORY_PAGE_SIZE,
+    MAX_INVENTORY_PAGES, MAX_MIGRATIONS_PER_PASS, MIGRATION_BLOCKED_SAMPLE,
 };
 use weirkeeper::crds::backup::Backup;
 use weirkeeper::crds::backup_schedule::{
@@ -289,6 +290,7 @@ fn retained_status(inventoried_at: DateTime<Utc>, run_count: i64) -> serde_json:
             "estimatedBytes": 4096,
             "legacyOwnedRuns": 0,
             "legacyMigratableRuns": 0,
+            "ownershipScanComplete": true,
             "inventoriedAt": inventoried_at
         },
         "conditions": [{
@@ -574,6 +576,9 @@ fn history(
         legacy_owned_runs: owned,
         legacy_migratable_runs: migratable,
         migration_blocked: blocked,
+        // The arms below are about a walk that FINISHED. The arm about one that
+        // did not has its own row, `a_capped_namespace_wide_walk_…`.
+        ownership_scan_complete: true,
         inventoried_at: utc(2026, 9, 10, 0, 0),
     }
 }
@@ -698,6 +703,7 @@ fn the_inventory_is_due_only_for_the_four_recorded_reasons() {
         "history": {
             "runCount": 3, "runCountCapped": false, "estimatedBytes": 10,
             "legacyOwnedRuns": 0, "legacyMigratableRuns": 0,
+            "ownershipScanComplete": true,
             "inventoriedAt": now
         }
     }))
@@ -950,7 +956,10 @@ async fn a_422_legacy_object_reports_migration_blocked() {
     let name = "logweir-backup-hist-20260910-000000";
     let now = utc(2026, 9, 11, 0, 0);
 
-    for (code, reason) in [(422u16, "Invalid"), (403, "Forbidden")] {
+    for (code, reason, recorded) in [
+        (422u16, "Invalid", "ApiInvalid"),
+        (403, "Forbidden", "ApiForbidden"),
+    ] {
         let (client, _rec, _bodies) = mock_client_recording_bodies(vec![
             list_route(vec![legacy_backup(name, "hist", UID, "Succeeded")], None),
             patch_route(name, code, api_error(code, reason)),
@@ -965,7 +974,11 @@ async fn a_422_legacy_object_reports_migration_blocked() {
             .unwrap_or_default();
         assert_eq!(blocked.len(), 1, "{code}");
         assert_eq!(blocked[0].name, name, "{code}: the status NAMES the object");
-        assert_eq!(blocked[0].reason, code.to_string(), "{code}");
+        assert_eq!(
+            blocked[0].reason, recorded,
+            "{code}: ONE vocabulary. The field used to carry the bare digits beside the \
+             CamelCase `NoScheduleReference`, so a console could not branch on it."
+        );
         assert_eq!(
             observed.history.legacy_migratable_runs, 0,
             "{code}: a blocked run is NOT migratable, which is what keeps the next reconcile \
@@ -1756,5 +1769,489 @@ async fn the_reconciler_patches_only_status_and_the_migration_metadata() {
             .any(|(method, path)| method == "POST" && path.ends_with("/backups")),
         "and the slot still fires while the migration runs — a schedule that stopped \
          admitting during its upgrade would be an outage: {seen:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Fix round 1 — the review's findings, each with the row that would have caught it
+// ---------------------------------------------------------------------------
+
+/// **H-1 / L-1.** A walk that did not finish may not claim `Retained`, and may
+/// not narrow the next walk to a label the objects it is hunting do not carry.
+///
+/// # The latch, and why this needs its own row
+///
+/// The only capped-walk row in this file before fix round 1
+/// (`inventory_is_paginated_and_label_selected_after_migration`) is
+/// **label-selected**, and a capped label-selected walk is fine: every object
+/// past its bound carries this schedule's UID label, so none of them can be a
+/// pre-upgrade run. The dangerous walk is the **namespace-wide** one, and
+/// nothing exercised it. The reviewer's mutant — report `runCountCapped` as
+/// `capped = label_selected` — survived all 23 rows for exactly that reason.
+///
+/// What the latch did: a capped namespace-wide walk set `runCountCapped`, which
+/// the `HistoryLarge` arm turned into `HistoryRetained=True`, which unlocked the
+/// `logweir.dev/schedule-uid` selector — a label no unmigrated legacy object
+/// carries. Every later walk then looked only where the answer could not be,
+/// the condition stayed `True` forever, and D1 §6.9's upgrade gate ("wait for
+/// `HistoryRetained=True`") passed on a schedule whose history a
+/// default-propagation `kubectl delete` would still collect. D1 §6.6's own
+/// worst-case schedule — 35 040 runs a year — reaches it.
+#[tokio::test]
+async fn a_capped_namespace_wide_walk_never_claims_retained_and_never_latches_the_selector() {
+    let now = utc(2026, 9, 10, 12, 0);
+
+    // The first inventory: no stored status, so the walk is namespace-wide. The
+    // double answers every page with the same `continue` token, so it is
+    // capped. NOTHING IT SAW IS LEGACY-OWNED — the legacy runs are past the
+    // bound, which is the whole scenario.
+    let (client, _rec, bodies) = mock_client_recording_bodies(vec![list_route(
+        vec![retained_backup(
+            "logweir-backup-hist-20260910-000000",
+            "hist",
+            UID,
+            "Succeeded",
+        )],
+        Some("next-page"),
+    )]);
+    let observed = observe(&backups(&client), None, "hist", UID, None, now)
+        .await
+        .expect("an inventory is a decision");
+
+    let seen = bodies.lock().expect("readable").clone();
+    assert!(
+        !seen[0].uri.contains("labelSelector"),
+        "premise: the first walk is namespace-wide, because a legacy object carries no UID \
+         label: {}",
+        seen[0].uri
+    );
+    assert!(observed.history.run_count_capped, "premise: it is capped");
+    assert_eq!(
+        observed.history.legacy_owned_runs, 0,
+        "premise: it saw no legacy owner — the ones that exist are past the bound"
+    );
+
+    assert!(
+        !observed.history.ownership_scan_complete,
+        "THE FIX. A namespace-wide walk that stopped at a bound has not established that no \
+         run is owned by this schedule, and the status says so in a field a console can read."
+    );
+
+    let condition = history_condition(&observed.history, None, Some(4), now);
+    assert_eq!(
+        condition.status, "False",
+        "so the condition must NOT claim the history is retained: {condition:?}"
+    );
+    assert_eq!(
+        condition.reason.as_deref(),
+        Some("MigrationBlocked"),
+        "reported through §3.4's existing closed reason set — the machine-readable `why` is \
+         `status.history.ownershipScanComplete`, not a sixth condition reason"
+    );
+    let message = condition.message.clone().expect("a message");
+    assert!(
+        message.contains("--cascade=orphan"),
+        "and it names the spelling that is always safe: {message}"
+    );
+    assert!(
+        message.contains("ownershipScanComplete"),
+        "and the field to look at: {message}"
+    );
+
+    // THE LATCH ITSELF. This is the assertion the reviewer's reproduction made
+    // in the opposite direction, and it is the one that makes the defect
+    // permanent rather than merely wrong for one pass.
+    let next: BackupScheduleStatus = serde_json::from_value(serde_json::json!({
+        "activeRuns": [],
+        "history": serde_json::to_value(&observed.history).expect("serialises"),
+        "conditions": [serde_json::to_value(&condition).expect("serialises")],
+    }))
+    .expect("a status");
+    assert!(
+        !may_use_label_selector(Some(&next)),
+        "the next walk stays NAMESPACE-WIDE. Narrowing here is irreversible in practice: a \
+         selector that excludes the objects the migration is looking for guarantees the next \
+         walk finds none, which keeps the condition True, which keeps the selector on."
+    );
+
+    // AND BOTH HALVES OF THE GATE ARE REQUIRED. A stored `True` beside an
+    // incomplete scan must still not unlock it — that is precisely the state
+    // the old code produced and would produce again if either half were
+    // dropped.
+    let mut forged = serde_json::to_value(&next).expect("serialises");
+    forged["conditions"][0]["status"] = serde_json::json!("True");
+    forged["conditions"][0]["reason"] = serde_json::json!("HistoryLarge");
+    let forged: BackupScheduleStatus = serde_json::from_value(forged).expect("a status");
+    assert!(
+        !may_use_label_selector(Some(&forged)),
+        "`ownershipScanComplete` alone vetoes it"
+    );
+
+    // The complete-walk case still unlocks, or the selector would never be used
+    // at all and §6.7's whole point would be lost.
+    let mut complete = serde_json::to_value(&forged).expect("serialises");
+    complete["history"]["ownershipScanComplete"] = serde_json::json!(true);
+    let complete: BackupScheduleStatus = serde_json::from_value(complete).expect("a status");
+    assert!(
+        may_use_label_selector(Some(&complete)),
+        "a walk that finished AND concluded True is what the selector waits for"
+    );
+}
+
+/// **M-1.** The migration window costs a bounded number of LISTs, not one full
+/// namespace-wide walk every thirty seconds until it finishes.
+///
+/// # What it cost when it was wrong
+///
+/// The patches used to be sent after the WHOLE walk, under a per-pass budget,
+/// with `inventory_due` re-arming while work remained. So each pass listed the
+/// whole namespace and then patched at most two hundred objects, and the next
+/// pass thirty seconds later listed it all over again. Migrating 10 000 legacy
+/// runs was fifty passes × twenty pages × five hundred objects — about
+/// **500 000 object reads in twenty-five minutes**, the exact read cost D1 §6.7
+/// exists to remove, re-incurred at its maximum for the whole upgrade window,
+/// and satisfying L-05.2-6's "zero LIST requests except inventories at the
+/// documented interval" only by calling every one of them an inventory.
+///
+/// Patching inside the page loop means a pass migrates what it sees as it goes,
+/// so a migration that fits inside one budget is DONE after one pass and the
+/// 30 s re-arm stops immediately.
+#[tokio::test]
+async fn the_migration_window_is_bounded_in_lists_not_in_passes() {
+    let now = utc(2026, 9, 12, 0, 0);
+    let names: Vec<String> = (0..12)
+        .map(|i| format!("logweir-backup-hist-202609{:02}-000000", i + 1))
+        .collect();
+    let routes = || {
+        let mut routes = vec![list_route(
+            names
+                .iter()
+                .map(|n| legacy_backup(n, "hist", UID, "Succeeded"))
+                .collect(),
+            None,
+        )];
+        routes.extend(
+            names
+                .iter()
+                .map(|n| patch_route(n, 200, legacy_backup(n, "hist", UID, "Succeeded"))),
+        );
+        routes
+    };
+    let lists = |seen: &[SeenBody]| {
+        calls(seen)
+            .into_iter()
+            .filter(|(method, path)| method == "GET" && path.ends_with("/backups"))
+            .count()
+    };
+
+    // PASS 1 — one LIST, and every candidate on the page is detached in the
+    // same pass rather than two hundred of them.
+    let (client, _rec, bodies) = mock_client_recording_bodies(routes());
+    let first = observe(&backups(&client), None, "hist", UID, None, now)
+        .await
+        .expect("a migrating pass is a decision");
+    let seen = bodies.lock().expect("readable").clone();
+    assert_eq!(lists(&seen), 1, "{seen:?}");
+    assert_eq!(backup_patches(&seen).len(), 12, "all twelve, in one pass");
+    assert_eq!(
+        first.history.legacy_owned_runs, 0,
+        "so the migration is FINISHED after one pass"
+    );
+    assert!(first.history.ownership_scan_complete);
+
+    // PASS 2, thirty seconds later — and the whole point: ZERO lists, because
+    // there is nothing left to re-arm on. The old shape took a full
+    // namespace-wide walk here, and again every thirty seconds after it.
+    let migrated: Vec<serde_json::Value> = names
+        .iter()
+        .map(|n| {
+            let mut object = legacy_backup(n, "hist", UID, "Succeeded");
+            let patch = migration_patch(&typed(&object), "hist", UID).expect("the entry was there");
+            weirkeeper::conditions::apply_merge_patch(&mut object, &patch);
+            object
+        })
+        .collect();
+    let condition = history_condition(&first.history, None, Some(4), now);
+    let status: BackupScheduleStatus = serde_json::from_value(serde_json::json!({
+        "activeRuns": [],
+        "history": serde_json::to_value(&first.history).expect("serialises"),
+        "conditions": [serde_json::to_value(&condition).expect("serialises")],
+    }))
+    .expect("a status");
+    assert_eq!(condition.status, "True");
+    assert!(
+        !inventory_due(Some(&status), now + chrono::Duration::seconds(30)),
+        "nothing re-arms, so the next reconcile takes the O(active) branch"
+    );
+
+    // And when the hourly one does come round, it is ONE list and no patch.
+    let (client, _rec, bodies) = mock_client_recording_bodies(vec![list_route(migrated, None)]);
+    observe(
+        &backups(&client),
+        Some(&status),
+        "hist",
+        UID,
+        None,
+        now + chrono::Duration::hours(1),
+    )
+    .await
+    .expect("the hourly inventory is a decision");
+    let seen = bodies.lock().expect("readable").clone();
+    assert_eq!(lists(&seen), 1);
+    assert!(backup_patches(&seen).is_empty());
+    assert_eq!(
+        lists(&seen),
+        1,
+        "TWO lists for the whole migration and its confirmation, against fifty for the same \
+         work before this fix"
+    );
+}
+
+/// **M-1, the other half.** A pass whose detach budget IS spent stops the walk
+/// there, says its counts are floors, and re-arms the next reconcile — so a
+/// migration bigger than one budget costs ONE page per pass, not twenty.
+#[tokio::test]
+async fn a_pass_that_spends_its_detach_budget_stops_and_re_arms() {
+    let now = utc(2026, 9, 12, 0, 0);
+    // One more candidate than the budget allows, all on a single page, and the
+    // page carries a `continue` token so that a walk which did NOT stop would
+    // go on asking.
+    let names: Vec<String> = (0..=MAX_MIGRATIONS_PER_PASS)
+        .map(|i| format!("logweir-backup-hist-{i:08}-000000"))
+        .collect();
+    let mut routes = vec![list_route(
+        names
+            .iter()
+            .map(|n| legacy_backup(n, "hist", UID, "Succeeded"))
+            .collect(),
+        Some("page-2"),
+    )];
+    // One route for every name: they all end in `-000000`, and the double
+    // matches a route by path SUFFIX.
+    routes.push(Route {
+        method: "PATCH",
+        path_suffix: "-000000",
+        status: 200,
+        body: legacy_backup(&names[0], "hist", UID, "Succeeded").to_string(),
+    });
+    let (client, _rec, bodies) = mock_client_recording_bodies(routes);
+    let observed = observe(&backups(&client), None, "hist", UID, None, now)
+        .await
+        .expect("a budgeted pass is a decision");
+
+    let seen = bodies.lock().expect("readable").clone();
+    assert_eq!(
+        backup_patches(&seen).len(),
+        MAX_MIGRATIONS_PER_PASS,
+        "exactly the budget and not one more: a reconcile that sent 35 040 sequential PATCHes \
+         would hold this schedule's slot evaluation for minutes"
+    );
+    assert_eq!(
+        calls(&seen)
+            .into_iter()
+            .filter(|(m, p)| m == "GET" && p.ends_with("/backups"))
+            .count(),
+        1,
+        "and it did NOT page on to count objects it was not going to touch this pass"
+    );
+    // The budget is one page's worth on purpose, so a migration reads each
+    // object about once in total rather than once per pass.
+    assert_eq!(
+        MAX_MIGRATIONS_PER_PASS, INVENTORY_PAGE_SIZE as usize,
+        "the budget and the page size are one number; splitting them re-opens M-1 by degrees"
+    );
+    assert!(
+        observed.history.run_count_capped,
+        "the counts are floors, because the walk stopped early"
+    );
+    assert!(
+        !observed.history.ownership_scan_complete,
+        "and a pass that stopped early has established nothing about ownership — H-1's gate \
+         covers the budget case as well as the page-bound case"
+    );
+    assert!(
+        observed.history.legacy_migratable_runs > 0,
+        "so the very next reconcile continues, rather than waiting an hour"
+    );
+    let status: BackupScheduleStatus = serde_json::from_value(serde_json::json!({
+        "activeRuns": [],
+        "history": serde_json::to_value(&observed.history).expect("serialises")
+    }))
+    .expect("a status");
+    assert!(inventory_due(
+        Some(&status),
+        now + chrono::Duration::seconds(30)
+    ));
+    assert!(
+        !may_use_label_selector(Some(&status)),
+        "and it continues NAMESPACE-WIDE"
+    );
+}
+
+/// **M-2.** `NoScheduleReference` is terminal, and the condition says so and
+/// names the only two things that work.
+///
+/// `Backup.spec` carries `self == oldSelf`, so the `spec.scheduleRef` that
+/// would keep the run a member of this schedule ([`is_run_of_schedule`] rule 3)
+/// cannot be added to an object that already exists — by this controller, by an
+/// operator, by anyone. D1 §6.9 tells an operator to wait for
+/// `HistoryRetained=True` before deleting a schedule without
+/// `--cascade=orphan`; on a schedule holding one such run that wait never ends,
+/// and a message that reads like a transient refusal is what makes it a trap.
+#[tokio::test]
+async fn a_terminally_blocked_run_says_it_will_never_clear_and_names_the_remedies() {
+    let now = utc(2026, 9, 12, 0, 0);
+    let orphanable = "logweir-backup-hist-20260910-000000";
+    let mut mismatched = legacy_backup(orphanable, "hist", UID, "Succeeded");
+    mismatched["spec"]["scheduleRef"] = serde_json::json!({ "name": "somebody-else" });
+
+    let (client, _rec, bodies) =
+        mock_client_recording_bodies(vec![list_route(vec![mismatched], None)]);
+    let observed = observe(&backups(&client), None, "hist", UID, None, now)
+        .await
+        .expect("a terminal refusal is a condition, not an error");
+
+    assert!(
+        backup_patches(&bodies.lock().expect("readable")).is_empty(),
+        "it is never patched — detaching it would leave it a member of nothing"
+    );
+    let blocked = observed
+        .history
+        .migration_blocked
+        .as_deref()
+        .unwrap_or_default();
+    assert_eq!(blocked.len(), 1);
+    assert_eq!(blocked[0].name, orphanable);
+    assert_eq!(blocked[0].reason, "NoScheduleReference");
+
+    let condition = history_condition(&observed.history, None, Some(4), now);
+    assert_eq!(condition.status, "False");
+    assert_eq!(condition.reason.as_deref(), Some("MigrationBlocked"));
+    let message = condition.message.clone().expect("a message");
+    assert!(
+        message.contains("NEVER"),
+        "the operator is told this does not clear, rather than being left to wait: {message}"
+    );
+    assert!(
+        message.contains("--cascade=orphan"),
+        "remedy one: {message}"
+    );
+    assert!(
+        message.contains("deleting those runs"),
+        "remedy two: {message}"
+    );
+    assert!(
+        message.contains(orphanable),
+        "and it names the run: {message}"
+    );
+
+    // AND IT REALLY NEVER CLEARS: no interval retries it, because there is
+    // nothing to retry.
+    let status: BackupScheduleStatus = serde_json::from_value(serde_json::json!({
+        "activeRuns": [],
+        "history": serde_json::to_value(&observed.history).expect("serialises"),
+        "conditions": [serde_json::to_value(&condition).expect("serialises")],
+    }))
+    .expect("a status");
+    assert!(
+        !inventory_due(Some(&status), now + chrono::Duration::minutes(30)),
+        "half an hour later, nothing is re-attempted"
+    );
+    assert!(
+        !may_use_label_selector(Some(&status)),
+        "and the walk stays namespace-wide, because the run it cannot detach carries no UID \
+         label either"
+    );
+
+    // THE TWO SHAPES ARE DISTINGUISHED, not conflated. A `403` says NOT NOW.
+    assert!(!blocked_reason_clears_itself("NoScheduleReference"));
+    assert!(blocked_reason_clears_itself("ApiForbidden"));
+    assert!(blocked_reason_clears_itself("ApiInvalid"));
+    assert!(
+        !blocked_reason_clears_itself("SomethingAFutureVersionWrote"),
+        "and an unknown reason is read as terminal, which is the safe direction: the message \
+         then tells the operator to use `--cascade=orphan`, which is correct either way"
+    );
+
+    // A schedule blocked only on transient refusals gets the other sentence.
+    let transient = ScheduleHistory {
+        run_count: 1,
+        run_count_capped: false,
+        estimated_bytes: 4096,
+        legacy_owned_runs: 1,
+        legacy_migratable_runs: 0,
+        migration_blocked: Some(vec![MigrationBlocked {
+            name: "b".to_string(),
+            reason: "ApiForbidden".to_string(),
+        }]),
+        ownership_scan_complete: true,
+        inventoried_at: now,
+    };
+    let message = history_condition(&transient, None, Some(4), now)
+        .message
+        .expect("a message");
+    assert!(
+        message.contains("clear themselves"),
+        "a 403 is the API server saying NOT NOW: {message}"
+    );
+    assert!(
+        !message.contains("NEVER"),
+        "and must not be reported as permanent: {message}"
+    );
+}
+
+/// **L-2.** The blocked sample is sorted before it is truncated, so two passes
+/// over the same namespace report the same ten.
+#[tokio::test]
+async fn the_blocked_sample_is_deterministic_across_passes() {
+    let now = utc(2026, 9, 12, 0, 0);
+    let mut forward: Vec<String> = (0..25)
+        .map(|i| format!("logweir-backup-hist-b{i:02}"))
+        .collect();
+    let mut reverse = forward.clone();
+    reverse.reverse();
+
+    let mut samples = Vec::new();
+    for order in [&mut forward, &mut reverse] {
+        let mut routes = vec![list_route(
+            order
+                .iter()
+                .map(|n| legacy_backup(n, "hist", UID, "Succeeded"))
+                .collect(),
+            None,
+        )];
+        routes.extend(
+            order
+                .iter()
+                .map(|n| patch_route(n, 403, api_error(403, "Forbidden"))),
+        );
+        let (client, _rec, _bodies) = mock_client_recording_bodies(routes);
+        let observed = observe(&backups(&client), None, "hist", UID, None, now)
+            .await
+            .expect("an inventory is a decision");
+        assert_eq!(
+            observed.history.legacy_owned_runs, 25,
+            "the COUNT is all of them, whatever order the API server paged them in"
+        );
+        samples.push(
+            observed
+                .history
+                .migration_blocked
+                .unwrap_or_default()
+                .into_iter()
+                .map(|b| b.name)
+                .collect::<Vec<_>>(),
+        );
+    }
+    assert_eq!(samples[0].len(), MIGRATION_BLOCKED_SAMPLE);
+    assert_eq!(
+        samples[0], samples[1],
+        "the same ten, in the same order, from the same set in two different paging orders. \
+         The CRD used to promise `newest first` and deliver whichever ten came back first."
+    );
+    assert!(
+        samples[0].windows(2).all(|w| w[0] <= w[1]),
+        "sorted by name: {:?}",
+        samples[0]
     );
 }
