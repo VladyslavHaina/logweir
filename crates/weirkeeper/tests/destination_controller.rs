@@ -23,8 +23,8 @@
 //! Each was applied to the shipped source, measured, and reverted. The row that
 //! dies is named beside each.
 //!
-//! The unplanted tree is **35 passed / 0 failed** here and **48 / 0** in
-//! `tests/retention.rs`.
+//! The unplanted tree was **35 passed / 0 failed** here and **48 / 0** in
+//! `tests/retention.rs` when these six were measured.
 //!
 //! | # | Mutant | Measured | Dies in |
 //! |---|---|---|---|
@@ -34,6 +34,17 @@
 //! | M4 | `StoreCache::get_or_build` builds outside `spawn_blocking` | 47 / 1 | `retention::no_store_call_is_made_outside_spawn_blocking`, naming `evidence_store.rs:339` |
 //! | M5 | `StoreCache::record` drops the eviction loop | 34 / 1 | [`the_store_cache_is_bounded`] |
 //! | M6 | `retention_scope` returns `GlobalHandleApplies` unconditionally | 33 / 2 | [`retention_is_withheld_when_the_schedule_names_another_bucket`], [`a_destination_backed_schedule_gets_no_global_report`] |
+//!
+//! Review round (2026-09-17) added three more, for the three findings that were
+//! fixes rather than documentation:
+//!
+//! | # | Mutant | Measured | Dies in |
+//! |---|---|---|---|
+//! | M7 | `status_patch_with_preconditions` omits `metadata.resourceVersion` | 37 / 2 | [`the_status_patch_carries_its_resource_version_as_a_precondition`], [`a_valid_destination_publishes_its_url_digest_and_ca_digest`] |
+//! | M8 | `ResolvedGrant` loses `rename_all_fields = "camelCase"` | 38 / 1 | [`the_snapshot_key_spellings_are_pinned`] |
+//! | M9 | `read_ca_bundle` reads `data` only | 38 / 1 | [`a_ca_bundle_in_binary_data_is_read_and_refused_by_content`] |
+//!
+//! The unplanted tree is **39 / 0** after the review round.
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Once};
@@ -120,7 +131,14 @@ fn valid_status(generation: i64) -> Value {
 fn dest_a_value() -> Value {
     serde_json::json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupDestination",
-        "metadata": {"name": "dest-a", "namespace": NS, "uid": UID_A, "generation": 3},
+        // EVERY OBJECT FROM A WATCH OR A `get` CARRIES A `resourceVersion`, and
+        // the `/status` write uses it as its compare-and-set precondition
+        // (D-SEAMS S7), so a fixture without one is not a fixture of anything
+        // this reconciler ever sees.
+        "metadata": {
+            "name": "dest-a", "namespace": NS, "uid": UID_A,
+            "generation": 3, "resourceVersion": "1001"
+        },
         "spec": {
             "description": "Production archive (MinIO, private CA)",
             "storage": {
@@ -155,7 +173,10 @@ fn dest_a_value() -> Value {
 fn dest_b_value() -> Value {
     serde_json::json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupDestination",
-        "metadata": {"name": "dest-b", "namespace": NS, "uid": UID_B, "generation": 1},
+        "metadata": {
+            "name": "dest-b", "namespace": NS, "uid": UID_B,
+            "generation": 1, "resourceVersion": "2002"
+        },
         "spec": {
             "storage": {
                 "provider": "S3", "bucket": "lw-b", "prefix": "",
@@ -358,8 +379,17 @@ async fn a_valid_destination_publishes_its_url_digest_and_ca_digest() {
             parsed
                 .as_object()
                 .map(|o| o.keys().cloned().collect::<Vec<_>>()),
-            Some(vec!["status".to_string()]),
-            "the patch body carries `status` and nothing else: {parsed}"
+            Some(vec!["status".to_string(), "metadata".to_string()]),
+            "the patch body carries `status` and the S7 precondition, and NOTHING ELSE — no \
+             `spec` key, ever: {parsed}"
+        );
+        assert_eq!(
+            parsed["metadata"]
+                .as_object()
+                .map(|o| o.keys().cloned().collect::<Vec<_>>()),
+            Some(vec!["name".to_string(), "resourceVersion".to_string()]),
+            "and the metadata block is the precondition only — a name and a resourceVersion, \
+             never a label, an annotation or an ownerReference: {parsed}"
         );
     }
 }
@@ -1117,7 +1147,10 @@ fn allow_http_comes_from_transport_and_never_from_addressing() {
         }
         let value = serde_json::json!({
             "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupDestination",
-            "metadata": {"name": "d", "namespace": NS, "uid": UID_A, "generation": 1},
+            "metadata": {
+                "name": "d", "namespace": NS, "uid": UID_A,
+                "generation": 1, "resourceVersion": "1"
+            },
             "spec": {
                 "storage": storage,
                 "transport": {"security": transport},
@@ -1493,7 +1526,7 @@ fn controller_identity_destination(
         "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupDestination",
         "metadata": {
             "name": format!("d-{}", &uid[..8]), "namespace": NS,
-            "uid": uid, "generation": generation
+            "uid": uid, "generation": generation, "resourceVersion": "1"
         },
         "spec": {
             "storage": {
@@ -1738,6 +1771,230 @@ fn a_destination_backed_schedule_gets_no_global_report() {
 }
 
 // ===========================================================================
+// Seam S7 — the status write is a compare-and-set
+// ===========================================================================
+
+/// **M7.** The `/status` merge PATCH carries `metadata.resourceVersion`.
+///
+/// D-SEAMS **S7**: a status write is a merge patch carrying
+/// `metadata.resourceVersion` as the precondition. The API server applies a
+/// `resourceVersion` in a patch BODY as an update precondition and answers
+/// `409 Conflict` on a mismatch — which is how a merge PATCH gets a
+/// compare-and-set without the `update` verb this role grants on nothing.
+///
+/// Without it, two writers of this status (a second replica, or a future API
+/// path) lose one write silently: each computed its verdict from the object it
+/// read, and last-write-wins picks the stale one.
+#[tokio::test]
+async fn the_status_patch_carries_its_resource_version_as_a_precondition() {
+    let pem = ca_pem(0x33);
+    let mut value = dest_a_unreconciled();
+    value["metadata"]["resourceVersion"] = serde_json::json!("4711");
+    let (client, _rec, bodies) =
+        mock_client_recording_bodies(routes(Some(&configmap_body("ca.crt", &pem))));
+    reconcile_destination(&build(value), &client)
+        .await
+        .expect("the reconcile completes");
+
+    let sent = bodies.lock().expect("bodies").clone();
+    let patch = sent
+        .iter()
+        .find(|b| b.method == "PATCH")
+        .expect("the verdict was written");
+    let parsed: Value = serde_json::from_str(&patch.body).expect("JSON");
+    assert_eq!(
+        parsed["metadata"]["resourceVersion"], "4711",
+        "the patch body carries the resourceVersion the object was read at: {parsed}"
+    );
+    assert_eq!(
+        parsed["metadata"]["name"], "dest-a",
+        "…and the name, so the body is self-identifying and the precondition is tied to the \
+         object the request path names"
+    );
+    // STILL A PATCH, AND STILL ONLY /status. The precondition is the other half
+    // of S7, not a replacement for the first: no `replace_status` anywhere.
+    assert!(patch
+        .uri
+        .split('?')
+        .next()
+        .unwrap_or_default()
+        .ends_with("/status"));
+    assert_eq!(patch.method, "PATCH");
+}
+
+/// A 409 is the precondition working, not a reconcile failure.
+#[tokio::test]
+async fn a_conflicting_status_write_is_not_an_error() {
+    let pem = ca_pem(0x34);
+    let mut value = dest_a_unreconciled();
+    value["metadata"]["resourceVersion"] = serde_json::json!("1");
+    let client = weirkeeper::testing::mock_client(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/configmaps/minio-a-ca",
+            status: 200,
+            body: configmap_body("ca.crt", &pem),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/status",
+            status: 409,
+            body: r#"{"kind":"Status","apiVersion":"v1","status":"Failure","code":409,"reason":"Conflict","message":"the object has been modified"}"#
+                .to_string(),
+        },
+    ]);
+    let verdict = reconcile_destination(&build(value), &client)
+        .await
+        .expect("a 409 means something wrote this status first; the next pass reads it");
+    assert!(
+        verdict.valid,
+        "the verdict itself is unchanged: {verdict:?}"
+    );
+}
+
+// ===========================================================================
+// Seam S4 — the frozen key spellings
+// ===========================================================================
+
+/// **M8.** The snapshot's key spellings, pinned as literal bytes.
+///
+/// # Why a golden string and not a round-trip
+///
+/// A round-trip test is satisfied by any encoder that agrees with itself, so it
+/// would have passed the defect this row exists for: `#[serde(rename_all)]` on
+/// an ENUM renames the VARIANTS and leaves struct-variant FIELDS alone, so
+/// `ResolvedGrant` shipped `access_key_id_key` inside a document that is
+/// `locationDigest` and `archiveStorage` everywhere else.
+///
+/// W10 freezes this block into `execution-inputs.json`, whose structs are
+/// `deny_unknown_fields` and which is re-encoded and compared byte for byte on
+/// every later pass. After that, renaming one key turns every running `Backup`
+/// into a `PlanConfigMapConflict`. So the spellings are pinned here, now.
+#[test]
+fn the_snapshot_key_spellings_are_pinned() {
+    let resolved = destination::resolve(
+        &dest_a(),
+        DestinationRole::ArchiveWrite,
+        &Policy::defaults(),
+    )
+    .expect("resolves")
+    .with_ca(&CaObservation::Present(ca_pem(0xD0).into_bytes()))
+    .expect("usable");
+    let bytes = resolved.snapshot().canonical_bytes().expect("encodes");
+    let text = String::from_utf8(bytes).expect("UTF-8");
+    let parsed: Value = serde_json::from_str(&text).expect("JSON");
+
+    let top: Vec<&str> = parsed
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        top,
+        vec![
+            "name",
+            "uid",
+            "generation",
+            "locationDigest",
+            "archiveStorage",
+            "evidenceStorage",
+            "transport",
+            "addressing",
+            "caSha256",
+            "grant",
+        ],
+        "the frozen block's top-level keys, in the order `det_json` emits them — declaration \
+         order, because `serde_json`'s preserve_order feature keeps a struct's own field order \
+         and that is what the frozen bytes will carry"
+    );
+
+    let grant: Vec<&str> = parsed["grant"]
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        grant,
+        vec!["mode", "secret", "accessKeyIdKey", "secretAccessKeyKey"],
+        "THE DEFECT: `rename_all` on an enum renames variants, not struct-variant fields, so \
+         this block shipped `access_key_id_key` inside a camelCase document. \
+         `rename_all_fields` is the attribute that fixes it"
+    );
+    // NO snake_case IN THIS TYPE'S OWN KEYS. `archiveStorage` and
+    // `evidenceStorage` are `logweir_core::engine::StorageUrl`, whose
+    // `path_style` / `allow_http` spelling is the grammar the runner's
+    // `backup.yaml` already parses and is NOT this type's to rename — so the
+    // scan is over the block's own level and the `grant` block, which are the
+    // keys this change owns.
+    for key in top.iter().chain(grant.iter()) {
+        assert!(
+            !key.contains('_'),
+            "`{key}` is snake_case inside a camelCase document: {text}"
+        );
+    }
+    assert_eq!(
+        parsed["grant"]["mode"], "SecretKeys",
+        "the mode reads exactly as `spec.access.archiveWrite.mode` reads on the object it was \
+         resolved from — one vocabulary, one spelling"
+    );
+
+    // THE WHOLE DOCUMENT, VERBATIM. A key added without a decision changes this
+    // literal, which is the point.
+    let expected = serde_json::json!({
+        "addressing": "PathStyle",
+        "archiveStorage": {
+            "backend": "s3", "bucket": "lw-a", "prefix": "team-a/prod",
+            "region": "us-east-1", "endpoint": "https://minio-a.storage.svc:9000",
+            "path_style": true, "allow_http": false
+        },
+        "caSha256": resolved.ca_sha256,
+        "evidenceStorage": {
+            "backend": "s3", "bucket": "lw-a", "prefix": "logweir/",
+            "region": "us-east-1", "endpoint": "https://minio-a.storage.svc:9000",
+            "path_style": true, "allow_http": false
+        },
+        "generation": 3,
+        "grant": {
+            "mode": "SecretKeys", "secret": "lw-a-writer",
+            "accessKeyIdKey": "access-key-id", "secretAccessKeyKey": "secret-access-key"
+        },
+        "locationDigest": resolved.location_digest,
+        "name": "dest-a",
+        "transport": "TLS",
+        "uid": UID_A,
+    });
+    assert_eq!(
+        parsed, expected,
+        "the frozen block, field for field. `archiveStorage` and `evidenceStorage` are \
+         `logweir_core::engine::StorageUrl`, whose own spelling is snake_case and is NOT this \
+         type's to change: it is the grammar the runner's `backup.yaml` already parses"
+    );
+
+    // The workload-identity variant's field is renamed too.
+    let mut wi = dest_b_value();
+    wi["spec"]["access"]["archiveWrite"] = serde_json::json!({
+        "mode": "WorkloadIdentity",
+        "workloadIdentity": {"serviceAccountName": "lw-runner"}
+    });
+    let snapshot = destination::resolve(
+        &build(wi),
+        DestinationRole::ArchiveWrite,
+        &Policy::defaults(),
+    )
+    .expect("resolves")
+    .snapshot();
+    let grant: Value = serde_json::from_slice(&snapshot.canonical_bytes().expect("encodes"))
+        .map(|v: Value| v["grant"].clone())
+        .expect("JSON");
+    assert_eq!(
+        grant,
+        serde_json::json!({"mode": "WorkloadIdentity", "serviceAccountName": "lw-runner"})
+    );
+}
+
+// ===========================================================================
 // The CA parser
 // ===========================================================================
 
@@ -1765,6 +2022,13 @@ fn the_certificate_parser_table() {
             b"-----BEGIN CERTIFICATE-----\nMIIB".to_vec(),
             "no END marker",
         ),
+        // Padding outside the FINAL group is not base64. Counting `=` per group
+        // accepted this (review F8), which made `CaBundleInvalid` fire one layer
+        // later than it should — at `from_pem_bundle` or at the handshake.
+        (
+            b"-----BEGIN CERTIFICATE-----\nAA==AAAA\n-----END CERTIFICATE-----\n".to_vec(),
+            "padding in a non-final group",
+        ),
         // Valid base64 of something that is not a DER SEQUENCE.
         (
             b"-----BEGIN CERTIFICATE-----\nAAAA\n-----END CERTIFICATE-----\n".to_vec(),
@@ -1791,4 +2055,72 @@ fn the_certificate_parser_table() {
         destination::check_ca_bundle(one.as_bytes()),
         Ok(logweir_core::ids::sha256_prefixed(one.as_bytes()))
     );
+}
+
+/// **M9.** A CA bundle the API server put in `binaryData` is READ, and then
+/// refused on its CONTENT.
+///
+/// `kubectl create configmap ca --from-file=ca.crt=ca.der` lands in
+/// `binaryData`, because the value is not valid UTF-8. Reading `data` alone
+/// answered `CaBundleKeyMissing` — "that ConfigMap carries no such key" — for a
+/// key the operator can see in `kubectl get cm -o yaml`. The right answer names
+/// the real problem: a DER file is not a PEM bundle.
+#[tokio::test]
+async fn a_ca_bundle_in_binary_data_is_read_and_refused_by_content() {
+    // A raw DER certificate: a SEQUENCE, not PEM, and not UTF-8 either.
+    let der = [0x30u8, 0x82, 0x01, 0x00, 0xff, 0xfe];
+    let body = serde_json::json!({
+        "kind": "ConfigMap", "apiVersion": "v1",
+        "metadata": {"name": "minio-a-ca", "namespace": NS},
+        "binaryData": {"ca.crt": base64_encode(&der)},
+    })
+    .to_string();
+    let (client, _rec, bodies) = mock_client_recording_bodies(routes(Some(&body)));
+    let verdict = reconcile_destination(&build(dest_a_unreconciled()), &client)
+        .await
+        .expect("the reconcile completes");
+    assert_eq!(
+        verdict.reason,
+        CheckCode::CaBundleInvalid.as_str(),
+        "the bytes were READ and then refused on their content — not reported as a missing key"
+    );
+    assert!(
+        verdict.message.contains("no parseable PEM certificate"),
+        "the message names the real problem: {}",
+        verdict.message
+    );
+    let sent = bodies.lock().expect("bodies").clone();
+    assert!(sent.iter().any(|b| b.method == "PATCH"));
+
+    // …and a PEM bundle in `binaryData` (an operator who used `--from-file` on a
+    // file with a stray byte) is accepted on its content just the same.
+    let pem = ca_pem(0x77);
+    let body = serde_json::json!({
+        "kind": "ConfigMap", "apiVersion": "v1",
+        "metadata": {"name": "minio-a-ca", "namespace": NS},
+        "binaryData": {"ca.crt": base64_encode(pem.as_bytes())},
+    })
+    .to_string();
+    let (client, _rec, _bodies) = mock_client_recording_bodies(routes(Some(&body)));
+    let verdict = reconcile_destination(&build(dest_a_unreconciled()), &client)
+        .await
+        .expect("the reconcile completes");
+    assert!(verdict.valid, "{verdict:?}");
+    assert_eq!(
+        verdict.ca_bundle_sha256.as_deref(),
+        Some(logweir_core::ids::sha256_prefixed(pem.as_bytes()).as_str())
+    );
+
+    // A key in NEITHER map is still `CaBundleKeyMissing`.
+    let body = serde_json::json!({
+        "kind": "ConfigMap", "apiVersion": "v1",
+        "metadata": {"name": "minio-a-ca", "namespace": NS},
+        "data": {"tls.crt": "x"},
+    })
+    .to_string();
+    let (client, _rec, _bodies) = mock_client_recording_bodies(routes(Some(&body)));
+    let verdict = reconcile_destination(&build(dest_a_unreconciled()), &client)
+        .await
+        .expect("the reconcile completes");
+    assert_eq!(verdict.reason, CheckCode::CaBundleKeyMissing.as_str());
 }
