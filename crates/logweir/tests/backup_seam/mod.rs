@@ -78,6 +78,8 @@ impl Fixture {
         std::fs::write(&key_path, key.to_pkcs8_pem().unwrap()).unwrap();
         Self {
             args: BackupRunArgs {
+                // D2 §3.5: a seam invocation is not under the store contract.
+                store_contract_version: None,
                 spec,
                 allowed_clusters: allowed,
                 signing_key: key_path,
@@ -127,6 +129,8 @@ impl Fixture {
         // adding one to production code to serve a test fixture is the wrong
         // way round.
         let args = BackupRunArgs {
+            // D2 §3.5: a seam invocation is not under the store contract.
+            store_contract_version: None,
             spec: self.args.spec.clone(),
             allowed_clusters: self.args.allowed_clusters.clone(),
             signing_key: self.args.signing_key.clone(),

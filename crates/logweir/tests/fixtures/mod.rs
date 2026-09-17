@@ -1535,6 +1535,8 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
     let created_topics = client.created.clone();
     OrchestratorFixture {
         args: logweir::drill::RunArgs {
+            // D2 §3.5: a fixture invocation is not under the store contract.
+            store_contract_version: None,
             execution_contract_version: None,
             spec: spec_path,
             approval,

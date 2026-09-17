@@ -514,6 +514,14 @@ pub struct RestoreRunArgs {
     /// Omit only for an intentional legacy Job or standalone invocation.
     #[arg(long)]
     pub execution_contract_version: Option<String>,
+    /// **D2 §3.5's store-contract handshake.** Written by the controller for a
+    /// destination-backed Job and omitted for every legacy or standalone
+    /// invocation. Separate from `--execution-contract-version` because the
+    /// two answer different questions — that one is which plan grammar this
+    /// is, this one is where the stores come from — and coupling them would
+    /// have tied a destination rollout to a plan-grammar rollout.
+    #[arg(long)]
+    pub store_contract_version: Option<String>,
     #[arg(long)]
     pub spec: PathBuf,
     /// MANDATORY in v0.1: approval is unconditional (spec §9.3 phase 1).
@@ -601,6 +609,7 @@ impl From<RestoreRunArgs> for crate::drill::RunArgs {
     fn from(a: RestoreRunArgs) -> Self {
         crate::drill::RunArgs {
             execution_contract_version: a.execution_contract_version,
+            store_contract_version: a.store_contract_version,
             spec: a.spec,
             approval: a.approval,
             approver_key: a.approver_key,
@@ -634,6 +643,14 @@ pub enum BackupCmd {
     // than a bare `logweir backup` so Task 18's scheduler and a future
     // `backup verify` have somewhere to land without changing this one's argv.
     Run {
+        /// **D2 §3.5's store-contract handshake.** Written by the controller
+        /// for a destination-backed Job and omitted for every legacy or
+        /// standalone invocation. An older `logweir` does not know this flag
+        /// and exits on the parse error, which is the point: a new controller
+        /// can never drive an old runner into building its stores out of
+        /// whatever `AWS_*` happens to be in the pod.
+        #[arg(long)]
+        store_contract_version: Option<String>,
         #[arg(long)]
         spec: PathBuf,
         /// The restore-TARGET allowlist. Supplied as a SEPARATE file argument,

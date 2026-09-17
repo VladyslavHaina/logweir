@@ -129,6 +129,7 @@ fn main() -> std::process::ExitCode {
             check_contract_version,
         }),
         cli::Command::Backup(cli::BackupCmd::Run {
+            store_contract_version,
             spec,
             allowed_clusters,
             signing_key,
@@ -137,6 +138,7 @@ fn main() -> std::process::ExitCode {
             receipt_out,
             backup_id_override,
         }) => logweir::backup::run(&logweir::backup::BackupRunArgs {
+            store_contract_version,
             spec,
             allowed_clusters,
             signing_key,

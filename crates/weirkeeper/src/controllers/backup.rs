@@ -673,6 +673,55 @@ pub fn plan_config_map(backup: &Backup, cluster: &KafkaCluster) -> Result<Config
 // Destination admission — D2 §3.6
 // ---------------------------------------------------------------------------
 
+/// Whether the pinned engine has been PROVED to honour a destination's custom
+/// CA bundle — D2 §3.5's `[UNVERIFIED — U1]`.
+///
+/// # `false`, AND IT STAYS `false` UNTIL SOMEBODY MEASURES IT
+///
+/// The claim is that the engine honours `SSL_CERT_FILE` through
+/// rustls-platform-verifier on Linux. It is plausible, it is undemonstrated,
+/// and the failure mode if it is wrong is a Backup that dials a private-CA
+/// endpoint, fails its TLS handshake inside the engine child, and reports an
+/// opaque operational error with no mention of certificates. So a destination
+/// declaring `spec.transport.caBundle` is REFUSED for Backup and Restore
+/// admission with [`CheckCode::CaBundleUnsupportedByEngine`] — while
+/// Logweir-only paths (checks, verification, the evidence handle) support the
+/// CA today, because those build their own rustls client and no engine child
+/// is involved.
+///
+/// It is a COMPILED CONSTANT and not a field: flipping it is a claim about a
+/// recorded engine digest, which is a code change somebody reviews, not a
+/// cluster setting somebody flips. The administrator-governed escape hatch is
+/// the policy key `engine.allowUnverifiedCustomCa`, default `false`, which
+/// D2 §14 sets to run scenario S2b; the constant flips only after S2b passes,
+/// and the key returns to `false`.
+pub const ENGINE_CUSTOM_CA_VERIFIED: bool = false;
+
+/// Whether a destination's CA bundle may be handed to an ENGINE-driven run —
+/// [`ENGINE_CUSTOM_CA_VERIFIED`] or the administrator's opt-in.
+///
+/// The two are OR-ed and not AND-ed: the constant is "we proved it", the policy
+/// key is "an administrator accepts the risk for this installation". Either is
+/// sufficient; neither is implied by the other.
+#[must_use]
+pub fn engine_custom_ca_allowed(policy: &crate::check::policy::Policy) -> bool {
+    ENGINE_CUSTOM_CA_VERIFIED || policy.engine.allow_unverified_custom_ca
+}
+
+/// The refusal message an engine-driven run gets for an unverified custom CA.
+#[must_use]
+pub fn engine_custom_ca_refusal(namespace: &str, name: &str) -> String {
+    format!(
+        "BackupDestination {namespace}/{name} declares spec.transport.caBundle, and whether the \
+         pinned engine honours a custom CA has not been measured on a recorded engine digest \
+         (D2 §3.5 U1). A run whose TLS handshake fails inside the engine child reports an opaque \
+         operational error with no mention of certificates, so it is refused here instead. \
+         Checks, verification and the controller's own evidence reads DO support this CA. To \
+         accept the risk for this installation, an administrator sets \
+         engine.allowUnverifiedCustomCa in the installation policy ConfigMap"
+    )
+}
+
 /// The longest a `Backup` waits for its `BackupDestination` to exist and be
 /// `Valid` before the wait becomes the answer — D2 §3.6.
 ///
@@ -701,8 +750,7 @@ pub fn destination_hold_budget(backup: &Backup) -> i64 {
     backup
         .spec
         .deadline_seconds
-        .min(DESTINATION_HOLD_MAX_SECONDS)
-        .max(0)
+        .clamp(0, DESTINATION_HOLD_MAX_SECONDS)
 }
 
 /// Whether this `Backup` has held for its whole budget — D2 §3.6 step 1.
@@ -806,6 +854,16 @@ pub async fn admit_destination(
             // because the consequence is a silent credential substitution.
             if let Err(refusal) = resolved.check_job_namespace(namespace) {
                 return Err(BackupError::Refused(refusal.reason(), refusal.message));
+            }
+            // D2 §3.5's U1 gate. TERMINAL: `spec.transport.caBundle` is
+            // immutable on the destination, so a requeue would never succeed —
+            // the operator either drops the bundle, uses a public root, or an
+            // administrator opts the installation in.
+            if resolved.ca_bundle.is_some() && !engine_custom_ca_allowed(load.policy()) {
+                return Err(BackupError::Refused(
+                    logweir_core::check_contract::CheckCode::CaBundleUnsupportedByEngine.as_str(),
+                    engine_custom_ca_refusal(&resolved.namespace, &resolved.name),
+                ));
             }
             Ok(DestinationAdmission::Resolved(Box::new(resolved)))
         }

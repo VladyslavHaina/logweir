@@ -814,6 +814,8 @@ fn backup_fixture(auth_block: &str) -> BackupFixture {
     BackupFixture {
         _dir: dir,
         args: BackupRunArgs {
+            // D2 §3.5: a standalone invocation is not under the store contract.
+            store_contract_version: None,
             spec,
             allowed_clusters: allowed,
             signing_key: key_path,

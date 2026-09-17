@@ -103,6 +103,8 @@ fn fixture(spec: &str, allowed: &str) -> Fixture {
     Fixture {
         _dir: dir,
         args: BackupRunArgs {
+            // D2 §3.5: a standalone invocation is not under the store contract.
+            store_contract_version: None,
             spec: spec_path,
             allowed_clusters: allowed_path,
             signing_key: key_path,

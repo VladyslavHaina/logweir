@@ -935,7 +935,7 @@ pub async fn admit_restore_destinations(
         Ok(resolved) => resolved,
         Err(ResolveError::Api(e)) => return Err(RestoreError::Api(e)),
         Err(ResolveError::Refused(refusal)) => {
-            return destination_verdict(refusal);
+            return destination_verdict(&refusal);
         }
     };
     let evidence = match destination::resolve_ref(
@@ -950,13 +950,22 @@ pub async fn admit_restore_destinations(
         Ok(resolved) => resolved,
         Err(ResolveError::Api(e)) => return Err(RestoreError::Api(e)),
         Err(ResolveError::Refused(refusal)) => {
-            return destination_verdict(refusal);
+            return destination_verdict(&refusal);
         }
     };
     // The Job runs where both sets of references resolve, and nowhere else.
     for resolved in [&source, &evidence] {
         if let Err(refusal) = resolved.check_job_namespace(namespace) {
             return Err(RestoreError::Refused(refusal.reason(), refusal.message));
+        }
+        // D2 §3.5's U1 gate, on BOTH destinations: a restore drives the engine
+        // over the archive AND writes its scorecard, and the engine child is in
+        // the same pod either way. See `backup::ENGINE_CUSTOM_CA_VERIFIED`.
+        if resolved.ca_bundle.is_some() && !backup::engine_custom_ca_allowed(policy) {
+            return Err(RestoreError::Refused(
+                CheckCode::CaBundleUnsupportedByEngine.as_str(),
+                backup::engine_custom_ca_refusal(&resolved.namespace, &resolved.name),
+            ));
         }
     }
 
@@ -1032,15 +1041,18 @@ pub async fn admit_restore_destinations(
 /// run before it carries a `Valid=True`. Everything else is a decision, and a
 /// decision retried forever is a decision nobody sees.
 fn destination_verdict(
-    refusal: Box<destination::DestinationRefusal>,
+    refusal: &destination::DestinationRefusal,
 ) -> Result<RestoreDestinationAdmission, RestoreError> {
     if refusal.is_hold() {
         Ok(RestoreDestinationAdmission::Holding {
             reason: refusal.reason(),
-            message: refusal.message,
+            message: refusal.message.clone(),
         })
     } else {
-        Err(RestoreError::Refused(refusal.reason(), refusal.message))
+        Err(RestoreError::Refused(
+            refusal.reason(),
+            refusal.message.clone(),
+        ))
     }
 }
 

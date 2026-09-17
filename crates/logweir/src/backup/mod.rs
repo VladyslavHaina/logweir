@@ -70,6 +70,16 @@ use std::path::{Path, PathBuf};
 /// `logweir backup run`'s flag set. **I10** (`--backup-id-override`) is this
 /// task's; Task 18's `BackupSchedule` reconciler only passes it.
 pub struct BackupRunArgs {
+    /// **D2 §3.5's store-contract handshake.** `Some("1")` is a
+    /// destination-backed Job: every store setting arrives explicitly and the
+    /// ambient environment contributes no location, no addressing and no
+    /// transport. `None` is a legacy or standalone invocation, unchanged.
+    ///
+    /// An OLDER `logweir` binary does not know this flag at all and exits on
+    /// the clap parse error, which is the point: a new controller can never
+    /// drive an old runner into building its stores out of whatever `AWS_*`
+    /// happens to be in the pod.
+    pub store_contract_version: Option<String>,
     pub spec: PathBuf,
     pub allowed_clusters: PathBuf,
     /// The key the backup receipt is signed with (**I6**). Loaded, exercised
@@ -783,6 +793,16 @@ pub fn run(args: &BackupRunArgs) -> ExitCode {
         .try_init();
     let _span = tracing::info_span!("backup", run_id = %run_id).entered();
 
+    // THE STORE CONTRACT, BEFORE ANYTHING IS READ OR DIALLED — D2 §3.5. A
+    // version this build does not implement is exit 3 here, with no spec read,
+    // no signing key opened and no socket to the source cluster, for the reason
+    // `phase_minus1_admit::local` runs where it does: a run that cannot be
+    // executed as described must not touch the production cluster to say so.
+    let contract = match store_contract::admit(args.store_contract_version.as_deref()) {
+        Ok(contract) => contract,
+        Err(refusal) => return report(&run_id, Err(refusal.into())),
+    };
+
     // The two file arguments are read TWICE on the success path — once here to
     // learn where to point the two handles, once inside `execute_with` to
     // guard the exact bytes. That is deliberate and cheap: `execute_with` must
@@ -901,13 +921,37 @@ pub fn run(args: &BackupRunArgs) -> ExitCode {
     // because `Store` is not `Clone` and `OsoCliEngine` takes ownership of the
     // one it reads through while `phase_run` reads the manifest bytes through
     // the other. Both are read-only.
-    let store = match Store::read_only_from_url(&inputs.spec.storage) {
-        Ok(s) => s,
-        Err(e) => return report(&run_id, Err(BackupError::Operational(e.to_string()))),
-    };
-    let engine_archive = match Store::read_only_from_url(&inputs.spec.storage) {
-        Ok(s) => s,
-        Err(e) => return report(&run_id, Err(BackupError::Operational(e.to_string()))),
+    //
+    // UNDER THE STORE CONTRACT, EXPLICITLY (D2 §3.5). `read_only_with` takes
+    // the credential provider the controller NAMED and the CA it projected;
+    // location, region, endpoint, addressing and transport come from the plan's
+    // own `storage` block at both arities. `read_only_from_url` is the legacy
+    // constructor and still honours `AWS_ENDPOINT_URL` and friends — which is
+    // exactly why a destination-backed run does not use it.
+    let (store, engine_archive) = if contract {
+        let options = match store_contract::archive_options() {
+            Ok(options) => options,
+            Err(refusal) => return report(&run_id, Err(refusal.into())),
+        };
+        match (
+            Store::read_only_with(&inputs.spec.storage, &options),
+            Store::read_only_with(&inputs.spec.storage, &options),
+        ) {
+            (Ok(a), Ok(b)) => (a, b),
+            (Err(e), _) | (_, Err(e)) => {
+                return report(&run_id, Err(store_error(e)));
+            }
+        }
+    } else {
+        match (
+            Store::read_only_from_url(&inputs.spec.storage),
+            Store::read_only_from_url(&inputs.spec.storage),
+        ) {
+            (Ok(a), Ok(b)) => (a, b),
+            (Err(e), _) | (_, Err(e)) => {
+                return report(&run_id, Err(BackupError::Operational(e.to_string())))
+            }
+        }
     };
 
     let engine = match build_engine(engine_archive) {
@@ -927,9 +971,24 @@ pub fn run(args: &BackupRunArgs) -> ExitCode {
     // (`crates/logweir-store/src/lib.rs:194-205`), so the derivation cannot
     // point at the archive's own keys even by accident.
     let evidence_url = evidence_location(&inputs.spec.storage);
-    let evidence = match Store::from_url(&evidence_url) {
-        Ok(s) => s,
-        Err(e) => return report(&run_id, Err(BackupError::Operational(e.to_string()))),
+    let evidence = if contract {
+        let archive_options = match store_contract::archive_options() {
+            Ok(options) => options,
+            Err(refusal) => return report(&run_id, Err(refusal.into())),
+        };
+        let options = match store_contract::evidence_options(&archive_options) {
+            Ok(options) => options,
+            Err(refusal) => return report(&run_id, Err(refusal.into())),
+        };
+        match Store::from_url_with(&evidence_url, &options) {
+            Ok(s) => s,
+            Err(e) => return report(&run_id, Err(store_error(e))),
+        }
+    } else {
+        match Store::from_url(&evidence_url) {
+            Ok(s) => s,
+            Err(e) => return report(&run_id, Err(BackupError::Operational(e.to_string()))),
+        }
     };
 
     let outcome = execute_with_signer(
@@ -942,6 +1001,274 @@ pub fn run(args: &BackupRunArgs) -> ExitCode {
         Some(&signer),
     );
     report(&run_id, outcome)
+}
+
+// ---------------------------------------------------------------------------
+// The store contract — D2 §3.5's runner half
+// ---------------------------------------------------------------------------
+
+/// How a destination-backed Job tells this runner what its stores are, and how
+/// this runner refuses a contract it does not implement — D2 §3.5.
+///
+/// # THE NAMES ARE DECLARED TWICE ON PURPOSE
+///
+/// `weirkeeper::destination` declares the same constants. This crate must not
+/// depend on `weirkeeper` — the dependency runs the other way, and the
+/// `logweir` binary ships without a Kubernetes client at all — so the coupling
+/// is two declarations pinned by a test that hands a controller-built argv to
+/// this binary's real parser
+/// (`weirkeeper::tests::schedule_controller::the_backup_runner_argv_is_one_the_cli_accepts`
+/// and its destination-backed sibling). Erratum **E20** is why that shape is
+/// used rather than a literal compared against a literal in the same
+/// repository.
+///
+/// # What the contract actually promises
+///
+/// That EVERY store setting arrives explicitly: the location in the plan's own
+/// `storage` block, the credential named by `LOGWEIR_*_CREDENTIALS`, the CA by
+/// path. No `AmazonS3Builder::from_env()` sweep, no `AWS_ENDPOINT_URL`, no
+/// ambient `AWS_ALLOW_HTTP` — defect **SEC-ENVHTTP**, closed on this side by
+/// W2's `StoreOptions` and on the other side by the controller rendering the
+/// complete set. The version handshake is what stops a NEW controller from
+/// driving an OLD runner that would have improvised instead.
+pub mod store_contract {
+    use logweir_core::guard::GuardRefusal;
+    use logweir_engine_oso::storage::{CredentialSource, StoreOptions};
+
+    /// The one store-contract version this build implements.
+    pub const VERSION: &str = "1";
+    /// The argv flag the controller writes.
+    pub const VERSION_ARG: &str = "--store-contract-version";
+    /// The environment variable carrying the same value.
+    pub const VERSION_ENV: &str = "LOGWEIR_STORE_CONTRACT_VERSION";
+    /// Which provider the ARCHIVE store is built with.
+    pub const ARCHIVE_CREDENTIALS_ENV: &str = "LOGWEIR_ARCHIVE_CREDENTIALS";
+    /// Which provider the EVIDENCE store is built with.
+    pub const EVIDENCE_CREDENTIALS_ENV: &str = "LOGWEIR_EVIDENCE_CREDENTIALS";
+    /// `LOGWEIR_*_CREDENTIALS` for the three projected `AWS_*` variables.
+    pub const CREDENTIALS_STATIC: &str = "static";
+    /// `LOGWEIR_*_CREDENTIALS` for an injected workload identity.
+    pub const CREDENTIALS_WORKLOAD_IDENTITY: &str = "workloadIdentity";
+    /// `LOGWEIR_EVIDENCE_CREDENTIALS` when the evidence grant IS the archive's.
+    pub const CREDENTIALS_ARCHIVE: &str = "archive";
+    /// The archive store's extra trust root, as a path into the plan mount.
+    pub const ARCHIVE_CA_FILE_ENV: &str = "LOGWEIR_ARCHIVE_CA_FILE";
+    /// The evidence store's twin.
+    pub const EVIDENCE_CA_FILE_ENV: &str = "LOGWEIR_EVIDENCE_CA_FILE";
+    /// The three variables a `static` archive grant projects.
+    pub const EVIDENCE_ACCESS_KEY_ID_ENV: &str = "LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID";
+    /// See [`EVIDENCE_ACCESS_KEY_ID_ENV`].
+    pub const EVIDENCE_SECRET_ACCESS_KEY_ENV: &str = "LOGWEIR_EVIDENCE_AWS_SECRET_ACCESS_KEY";
+    /// See [`EVIDENCE_ACCESS_KEY_ID_ENV`].
+    pub const EVIDENCE_SESSION_TOKEN_ENV: &str = "LOGWEIR_EVIDENCE_AWS_SESSION_TOKEN";
+
+    /// Whether this invocation is driven under the store contract, and whether
+    /// this build implements the version it was handed.
+    ///
+    /// # THREE ANSWERS, AND THE MIDDLE ONE IS THE POINT
+    ///
+    /// * `Ok(false)` — no flag, no variable: a legacy or standalone
+    ///   invocation. Stores are built exactly as they were before destinations
+    ///   existed, from the plan's `storage` block and the ambient environment.
+    /// * `Ok(true)` — the flag and the variable both say `1`.
+    /// * `Err` — anything else. A version this build does not implement is
+    ///   REFUSED (exit 3) rather than approximated: the whole reason the
+    ///   handshake exists is that a runner improvising its store configuration
+    ///   is how an approved plan gets executed against a different bucket. A
+    ///   flag and a variable that DISAGREE are refused for the same reason —
+    ///   two sources of truth about which contract is in force is no contract.
+    ///
+    /// An UNKNOWN flag never reaches this function at all: clap refuses it and
+    /// the process exits before dispatch, which is what makes an OLD image
+    /// handed a destination-backed Job fail loudly instead of silently.
+    ///
+    /// # Errors
+    ///
+    /// [`GuardRefusal`], which the caller reports as exit 3.
+    pub fn admit(flag: Option<&str>) -> Result<bool, GuardRefusal> {
+        let from_env = std::env::var(VERSION_ENV).ok().filter(|v| !v.is_empty());
+        match (flag, from_env.as_deref()) {
+            (None, None) => Ok(false),
+            (Some(a), Some(b)) if a == b && a == VERSION => Ok(true),
+            (Some(a), None) if a == VERSION => Err(GuardRefusal(format!(
+                "{VERSION_ARG} {a} was passed and {VERSION_ENV} is unset; the controller sets \
+                 both, so one without the other is a Job this runner did not receive whole"
+            ))),
+            (None, Some(b)) => Err(GuardRefusal(format!(
+                "{VERSION_ENV} is {b} and no {VERSION_ARG} was passed; the controller writes both \
+                 and an argv without the flag is one an older controller built"
+            ))),
+            (Some(a), Some(b)) if a != b => Err(GuardRefusal(format!(
+                "{VERSION_ARG} is {a} and {VERSION_ENV} is {b}; two answers to which store \
+                 contract is in force is no contract, and nothing is built"
+            ))),
+            (Some(a), _) => Err(GuardRefusal(format!(
+                "store contract version {a} is not one this build implements (it implements \
+                 {VERSION}); the runner refuses rather than improvising a store configuration, \
+                 because an improvised one is how an approved plan reaches a different bucket"
+            ))),
+        }
+    }
+
+    /// The archive store's options, from the environment the controller
+    /// rendered — D2 §3.5.
+    ///
+    /// # `StaticFromEnv` AND NOT `Ambient`
+    ///
+    /// `Ambient` is object_store's whole chain over every `AWS_*` it finds.
+    /// `StaticFromEnv` is the three NAMED variables the kubelet projected from
+    /// the grant's Secret and nothing else — so a stray `AWS_ENDPOINT_URL` or
+    /// `AWS_PROFILE` in the image cannot contribute. The LOCATION never comes
+    /// from here at any variant: it is the plan's own `storage` block.
+    ///
+    /// # Errors
+    ///
+    /// [`GuardRefusal`] for a `LOGWEIR_ARCHIVE_CREDENTIALS` value this build
+    /// does not know, or a CA file it cannot read. Both are exit 3: a store
+    /// that cannot be built as the plan describes must not be built some other
+    /// way.
+    pub fn archive_options() -> Result<StoreOptions, GuardRefusal> {
+        let mode = std::env::var(ARCHIVE_CREDENTIALS_ENV).unwrap_or_default();
+        let credentials = match mode.as_str() {
+            CREDENTIALS_STATIC => CredentialSource::StaticFromEnv,
+            CREDENTIALS_WORKLOAD_IDENTITY => CredentialSource::WorkloadIdentity,
+            other => {
+                return Err(GuardRefusal(format!(
+                    "{ARCHIVE_CREDENTIALS_ENV} is `{other}`, and this build knows \
+                     `{CREDENTIALS_STATIC}` and `{CREDENTIALS_WORKLOAD_IDENTITY}`"
+                )))
+            }
+        };
+        with_ca(
+            StoreOptions {
+                credentials,
+                ..StoreOptions::default()
+            },
+            ARCHIVE_CA_FILE_ENV,
+        )
+    }
+
+    /// The evidence store's options — D2 §3.5's three cases.
+    ///
+    /// * `archive` — the same grant: the archive's own options, CA included.
+    ///   Nothing second is projected and nothing second is read.
+    /// * `static` — a DIFFERENT Secret, arriving under `LOGWEIR_EVIDENCE_AWS_*`
+    ///   so neither store's credential can shadow the other's.
+    ///   [`CredentialSource::Static`] with the values read here, because
+    ///   `StaticFromEnv` would read `AWS_*` — the ARCHIVE's.
+    /// * `workloadIdentity` beside a static archive grant — the identity ONLY.
+    ///   object_store's chain puts static keys first, so an `Ambient` source
+    ///   here would silently use the archive's keys for the evidence store
+    ///   (grounding **G16**).
+    ///
+    /// # Errors
+    ///
+    /// [`GuardRefusal`] for an unknown mode, a `static` mode missing one of its
+    /// two mandatory variables, or an unreadable CA file.
+    pub fn evidence_options(archive: &StoreOptions) -> Result<StoreOptions, GuardRefusal> {
+        let mode = std::env::var(EVIDENCE_CREDENTIALS_ENV).unwrap_or_default();
+        let options = match mode.as_str() {
+            CREDENTIALS_ARCHIVE => archive.clone(),
+            CREDENTIALS_WORKLOAD_IDENTITY => StoreOptions {
+                credentials: CredentialSource::WorkloadIdentity,
+                ..StoreOptions::default()
+            },
+            CREDENTIALS_STATIC => {
+                let access_key_id = required(EVIDENCE_ACCESS_KEY_ID_ENV)?;
+                let secret_access_key = required(EVIDENCE_SECRET_ACCESS_KEY_ENV)?;
+                StoreOptions {
+                    credentials: CredentialSource::Static {
+                        access_key_id,
+                        secret_access_key,
+                        session_token: std::env::var(EVIDENCE_SESSION_TOKEN_ENV)
+                            .ok()
+                            .filter(|v| !v.is_empty()),
+                    },
+                    ..StoreOptions::default()
+                }
+            }
+            other => {
+                return Err(GuardRefusal(format!(
+                    "{EVIDENCE_CREDENTIALS_ENV} is `{other}`, and this build knows \
+                     `{CREDENTIALS_ARCHIVE}`, `{CREDENTIALS_STATIC}` and \
+                     `{CREDENTIALS_WORKLOAD_IDENTITY}`"
+                )))
+            }
+        };
+        // THE `archive` CASE ALREADY CARRIES THE ARCHIVE'S ROOT. Adding the
+        // evidence CA on top of it is correct and not redundant: the two
+        // destinations may be different objects with different bundles even
+        // when the CREDENTIAL is shared.
+        with_ca(options, EVIDENCE_CA_FILE_ENV)
+    }
+
+    /// One mandatory projected value, named when it is absent.
+    fn required(name: &str) -> Result<String, GuardRefusal> {
+        std::env::var(name)
+            .ok()
+            .filter(|v| !v.is_empty())
+            .ok_or_else(|| {
+                // THE NAME AND NEVER THE VALUE. This function's whole subject
+                // is a credential.
+                GuardRefusal(format!(
+                    "CredentialNotRenderable: {name} is unset or empty, and the store contract \
+                     says a `static` evidence grant projects it"
+                ))
+            })
+    }
+
+    /// `options` with the PEM bundle at `$var`, when one was projected.
+    ///
+    /// An UNREADABLE path is a refusal and not a shrug: the controller sets the
+    /// variable only when the destination declares a bundle and the bytes were
+    /// frozen into the run's own plan `ConfigMap`, so a path that cannot be
+    /// read means the mount is not what the plan says it is — and building the
+    /// store against the platform trust store instead would quietly widen what
+    /// the run accepts.
+    fn with_ca(options: StoreOptions, var: &str) -> Result<StoreOptions, GuardRefusal> {
+        let Some(path) = std::env::var(var).ok().filter(|v| !v.is_empty()) else {
+            return Ok(options);
+        };
+        let pem = std::fs::read(&path).map_err(|e| {
+            GuardRefusal(format!(
+                "{var} names {path} and it cannot be read ({e}); the bundle is frozen into this \
+                 run's own plan ConfigMap, so an unreadable path means the mount is not what the \
+                 plan describes"
+            ))
+        })?;
+        Ok(options.with_root_certificate(pem))
+    }
+}
+
+/// A store that could not be BUILT as the plan describes.
+///
+/// # A MISSING WORKLOAD IDENTITY IS A REFUSAL, NOT AN OUTAGE
+///
+/// D2 §3.5: "the runner refuses with exit 3 and
+/// `refusal-reason=WorkloadIdentityNotInjected` unless `AWS_WEB_IDENTITY_TOKEN_FILE`
+/// plus `AWS_ROLE_ARN`, or `AWS_CONTAINER_CREDENTIALS_FULL_URI` plus its token
+/// file, is present". Exit 1 would say "retry me"; there is nothing to retry
+/// until an administrator wires the identity, and `AWS_METADATA_ENDPOINT` is
+/// pinned at a dead loopback precisely so the run cannot fall through to the
+/// node's instance role instead (**G16**).
+///
+/// Every other build failure is exit 1: a store that will not build because the
+/// endpoint is unresolvable says nothing about the plan.
+fn store_error(e: logweir_engine_oso::storage::StoreError) -> BackupError {
+    if logweir_engine_oso::storage::is_workload_identity_not_injected(&e) {
+        // THE STATE NAME OPENS THE MESSAGE. `logweir_core::guard::terminal_state`
+        // matches a prefix against its own closed list, which this state is not
+        // on, so the printed `refusal-reason=` is the generic `GuardRefused` —
+        // the specific name reaches the operator through the message. Adding it
+        // to that list is `logweir-core`'s to do.
+        return logweir_core::guard::GuardRefusal(format!(
+            "{}: the store contract asked for an injected workload identity and none is present \
+             in this pod ({e}); no fall-back to a node instance role is attempted",
+            logweir_engine_oso::storage::WORKLOAD_IDENTITY_NOT_INJECTED
+        ))
+        .into();
+    }
+    BackupError::Operational(e.to_string())
 }
 
 /// The archive's location, with the key prefix replaced by Global Constraint

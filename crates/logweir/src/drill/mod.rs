@@ -220,6 +220,18 @@ pub fn print_progress_phase(phase: i8, name: &str) {
 
 pub struct RunArgs {
     pub execution_contract_version: Option<String>,
+    /// **D2 §3.5's store-contract handshake.** `Some("1")` is a
+    /// destination-backed Job: the archive and evidence stores are built from
+    /// the plan's own `storage` / `evidence` blocks plus the credential and CA
+    /// the controller NAMED, and the ambient environment contributes no
+    /// location, addressing or transport. `None` is a legacy or standalone
+    /// invocation, unchanged.
+    ///
+    /// It is separate from `execution_contract_version` because the two answer
+    /// different questions: that one is "which plan grammar is this", this one
+    /// is "where do the stores come from". A single version would have coupled
+    /// a destination rollout to a plan-grammar rollout.
+    pub store_contract_version: Option<String>,
     pub spec: PathBuf,
     pub approval: PathBuf,
     pub approver_key: PathBuf,
@@ -1426,7 +1438,7 @@ pub struct Ctx {
     pub target_tls_ca_file: Option<String>,
 }
 
-fn context(spec_text: String, allowed_text: String) -> Result<Ctx, DrillError> {
+fn context(spec_text: String, allowed_text: String, contract: bool) -> Result<Ctx, DrillError> {
     let spec: DrillSpec = serde_yaml::from_str(&spec_text)
         .map_err(|e| DrillError::Operational(format!("drill spec does not parse: {e}")))?;
     let allowed: AllowedClusters = serde_json::from_str(&allowed_text)
@@ -1477,15 +1489,42 @@ fn context(spec_text: String, allowed_text: String) -> Result<Ctx, DrillError> {
         }
     };
 
-    let store =
-        Store::from_url(&spec.evidence).map_err(|e| DrillError::Operational(e.to_string()))?;
-    let archive = Store::read_only_from_url(&spec.source.storage)
-        .map_err(|e| DrillError::Operational(e.to_string()))?;
+    // === THE THREE HANDLES, UNDER THE STORE CONTRACT OR NOT (D2 §3.5) ===
+    //
     // A SECOND read-only handle over the same archive: `Store` is not `Clone`
     // and `OsoCliEngine` takes ownership of the one it reads through, while
     // phase 7 reads segment bytes through `Ctx::archive`. Both are read-only.
-    let engine_archive = Store::read_only_from_url(&spec.source.storage)
-        .map_err(|e| DrillError::Operational(e.to_string()))?;
+    //
+    // Under the contract, `*_with` takes the credential provider the controller
+    // NAMED and the CA it projected; the LOCATION still comes from the approved
+    // plan at both arities, and `from_url`/`read_only_from_url` are the legacy
+    // constructors that still honour `AWS_ENDPOINT_URL` and friends — which is
+    // exactly why a destination-backed run does not use them.
+    //
+    // THE EVIDENCE OPTIONS ARE DERIVED FROM THE ARCHIVE'S. `evidence_options`
+    // needs them: `LOGWEIR_EVIDENCE_CREDENTIALS=archive` means "the same grant",
+    // and the only honest way to say that is to hand it the archive's own
+    // options rather than re-deriving a second copy that could differ.
+    let (store, archive, engine_archive) = if contract {
+        let archive_options = crate::backup::store_contract::archive_options()?;
+        let evidence_options = crate::backup::store_contract::evidence_options(&archive_options)?;
+        (
+            Store::from_url_with(&spec.evidence, &evidence_options)
+                .map_err(|e| DrillError::Operational(e.to_string()))?,
+            Store::read_only_with(&spec.source.storage, &archive_options)
+                .map_err(|e| DrillError::Operational(e.to_string()))?,
+            Store::read_only_with(&spec.source.storage, &archive_options)
+                .map_err(|e| DrillError::Operational(e.to_string()))?,
+        )
+    } else {
+        (
+            Store::from_url(&spec.evidence).map_err(|e| DrillError::Operational(e.to_string()))?,
+            Store::read_only_from_url(&spec.source.storage)
+                .map_err(|e| DrillError::Operational(e.to_string()))?,
+            Store::read_only_from_url(&spec.source.storage)
+                .map_err(|e| DrillError::Operational(e.to_string()))?,
+        )
+    };
 
     // Engine identity. The binary is extracted at image build time from the
     // digest-pinned image; the version and digest describe THAT image and end
@@ -1839,6 +1878,17 @@ fn execute_for_reporting(
         Ok(contract) => contract,
         Err(error) => return (Err(error), None),
     };
+    // THE STORE CONTRACT, BEFORE ANY CLIENT AND BEFORE ANY FILE IS READ — D2
+    // §3.5. A version this build does not implement is exit 3 here, for the
+    // reason the pinned-approver guard was moved to this seam: `context`
+    // constructs the rdkafka reader, and construction alone opens bootstrap
+    // connections, so a refusal below it would have dialled the target before
+    // saying it refused.
+    let store_contract =
+        match crate::backup::store_contract::admit(args.store_contract_version.as_deref()) {
+            Ok(contract) => contract,
+            Err(refusal) => return (Err(refusal.into()), None),
+        };
     // **D3 §2.4's channel version, once, before the first phase line.** A
     // reader that knows which grammar follows can parse the `progress-phase=`
     // lines without guessing; a reader that sees no such line is talking to a
@@ -1915,7 +1965,7 @@ fn execute_for_reporting(
     if let Err(error) = check_v2_bindings(&startup, &authenticated_spec, contract.as_ref()) {
         return (Err(error), Some(authenticated_spec));
     }
-    let outcome = match context(startup.spec_text, startup.allowed_text) {
+    let outcome = match context(startup.spec_text, startup.allowed_text, store_contract) {
         Ok(c) => execute_with_prevalidated(args, run_id, &c, &signer, startup.approved),
         Err(error) => Err(error),
     };
@@ -3233,6 +3283,7 @@ mod tests {
     fn args_with(metrics_file: Option<PathBuf>) -> RunArgs {
         RunArgs {
             execution_contract_version: None,
+            store_contract_version: None,
             spec: PathBuf::from("drill.yaml"),
             approval: PathBuf::from("approval.json"),
             approver_key: PathBuf::from("approver.pem"),

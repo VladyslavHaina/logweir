@@ -6,8 +6,73 @@
 //! container runtime, no kubeconfig — which is what makes "does not require
 //! Kubernetes" true rather than aspirational.
 use logweir_core::engine::EngineError;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+
+/// The destination CA bundle the controller projected into the runner pod —
+/// D2 §3.5. Set only for a destination-backed run whose `BackupDestination`
+/// declares `spec.transport.caBundle`.
+///
+/// It is the CONTROLLER's variable name and this crate reads it rather than
+/// being handed a path, for one reason: `OsoCliEngine::new` is constructed in
+/// four places across two crates and a fifth parameter threaded through all of
+/// them would be `None` at every call site but one. The variable is set on the
+/// pod by `ResolvedDestination::job_env` and points into the run's own
+/// immutable plan `ConfigMap`.
+pub const ARCHIVE_CA_FILE_ENV: &str = "LOGWEIR_ARCHIVE_CA_FILE";
+
+/// The platform trust store a Debian-family runner image carries.
+///
+/// MERGED WITH, NOT REPLACED BY, the destination CA. `SSL_CERT_FILE` is a
+/// REPLACEMENT, not an addition: pointing it at a single private root would
+/// leave the engine child unable to verify any public certificate at all —
+/// including the source cluster's, on an installation where the archive is
+/// private and the brokers are not. The merged file is the destination's root
+/// APPENDED to this one.
+pub const SYSTEM_CA_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
+
+/// Where the merged bundle is written, inside the pod's own writable work
+/// directory.
+pub const ENGINE_TRUST_BUNDLE: &str = "/work/trust/archive-bundle.pem";
+
+/// The trust bundle this process hands the engine child, or `None` when no
+/// destination CA was projected — D2 §3.5's "engine trust bundle".
+///
+/// # Why a FILE and not a flag
+///
+/// The pinned engine takes no CA argument for its object-store client. What it
+/// does honour — [UNVERIFIED, D2 §3.5 U1] — is `SSL_CERT_FILE`, through
+/// rustls-platform-verifier on Linux. Until that is measured on a recorded
+/// engine digest the controller REFUSES a destination carrying a `caBundle`
+/// for engine-driven runs (`weirkeeper::controllers::backup::ENGINE_CUSTOM_CA_VERIFIED`),
+/// so this path is reachable only under the administrator's explicit
+/// `engine.allowUnverifiedCustomCa` opt-in — which is exactly how D2 §14's
+/// scenario S2b measures it.
+///
+/// # It is written, not cached
+///
+/// Rewritten on every engine invocation: a run makes a handful of them, the
+/// bundle is at most 64 KiB plus the platform store, and a cache keyed on
+/// nothing would serve a stale root after a rotation. A failure to read either
+/// half returns `None` WITH a line on the caller's log rather than an error —
+/// the engine then uses the platform store alone and fails its handshake with
+/// the engine's own message, which is no worse than not having tried.
+#[must_use]
+pub fn engine_trust_bundle() -> Option<PathBuf> {
+    let destination = std::env::var(ARCHIVE_CA_FILE_ENV)
+        .ok()
+        .filter(|v| !v.is_empty())?;
+    let extra = std::fs::read(&destination).ok()?;
+    let mut merged = std::fs::read(SYSTEM_CA_BUNDLE).unwrap_or_default();
+    if !merged.ends_with(b"\n") {
+        merged.push(b'\n');
+    }
+    merged.extend_from_slice(&extra);
+    let path = PathBuf::from(ENGINE_TRUST_BUNDLE);
+    std::fs::create_dir_all(path.parent()?).ok()?;
+    std::fs::write(&path, &merged).ok()?;
+    Some(path)
+}
 
 #[derive(Debug)]
 pub struct EngineRun {
@@ -72,12 +137,23 @@ pub fn run_engine(
     args: &[&str],
     on_line: &mut dyn FnMut(&str, &str),
 ) -> Result<EngineRun, EngineError> {
-    let out = Command::new(binary)
+    let mut command = Command::new(binary);
+    command
         .args(args)
         // `warn`, not `error`: the unknown-key readback depends on the
         // WARN-level line surviving, while everything at info level would
         // otherwise interleave with the JSON that `preflight()` parses.
-        .env("RUST_LOG", "warn")
+        .env("RUST_LOG", "warn");
+    // ON THIS SUBPROCESS ONLY — D2 §3.5. `SSL_CERT_FILE` is a process-wide
+    // replacement of the trust store, and Logweir's OWN rustls clients (the
+    // evidence store, the verifier, the check runner) already take the
+    // destination CA explicitly through `StoreOptions::with_root_certificate`.
+    // Setting it on this process would change what those clients trust as a
+    // side effect of running the engine.
+    if let Some(bundle) = engine_trust_bundle() {
+        command.env("SSL_CERT_FILE", &bundle);
+    }
+    let out = command
         .output()
         .map_err(|e| EngineError::Operational(format!("{}: {e}", binary.display())))?;
     let stdout = String::from_utf8_lossy(&out.stdout).into_owned();
