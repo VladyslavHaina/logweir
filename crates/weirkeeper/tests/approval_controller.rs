@@ -46,13 +46,17 @@ use kube::api::ObjectMeta;
 use logweir_core::ids::sha256_prefixed;
 use weirkeeper::conditions::apply_merge_patch;
 use weirkeeper::controllers::approval::{
-    self, evaluate, ApprovalOutcome, ApprovalRefusal, ReferentProblem, PAYLOAD_TYPE_APPROVAL,
+    self, ApprovalOutcome, ApprovalRefusal, ReferentProblem, Verified, PAYLOAD_TYPE_APPROVAL,
     ROSTER_NAME, ROSTER_NOT_FOUND_MESSAGE,
 };
 use weirkeeper::controllers::trust_roster;
 use weirkeeper::crds::approval::ApprovalStatus;
 use weirkeeper::crds::approval::{
     Approval, ApprovalSpec, SubjectKind, SubjectRef, VerifiedSubjectRef,
+};
+use weirkeeper::crds::trust_policy::{
+    KeyAlgorithm, KeyPrincipal, KeyState, KeyUsage as SpecUsage, RevocationReason, TrustPolicy,
+    TrustPolicySpec, TrustedKey as SpecKey,
 };
 use weirkeeper::crds::trust_roster::TrustRosterStatus;
 use weirkeeper::crds::trust_roster::{KeyEntry, TrustRoster, TrustRosterSpec};
@@ -140,6 +144,37 @@ fn key(key_id: &str, pem: &str, not_after: Option<DateTime<Utc>>) -> KeyEntry {
 /// The good approver key, unexpired.
 fn approver() -> KeyEntry {
     key(APPROVER_KEY_ID, APPROVER_PEM, None)
+}
+
+/// **`approval::evaluate`, given the trust a ROSTER-ONLY cluster resolves to.**
+///
+/// PLAT-19.1 moved `evaluate` from a `TrustRosterSpec` to the namespace's
+/// resolved trust (D3 §7.1). Every test below predates that and describes a
+/// cluster with no `TrustPolicy` at all — which is exactly what
+/// `weirkeeper::trust::synthesize_legacy` produces, and exactly what
+/// `approval::decide` reaches for such a cluster.
+///
+/// So this shim is not scaffolding to keep old tests compiling: it is what
+/// makes every one of them EVIDENCE FOR §7.5's byte-for-byte claim. Each
+/// assertion below was written against the roster walk and now runs through the
+/// resolution layer, unchanged, including the refusal messages — if the
+/// synthesis were not faithful, they would be the tests that said so.
+fn evaluate(
+    approval_bytes: &[u8],
+    sidecar_bytes: &[u8],
+    roster: &TrustRosterSpec,
+    now: DateTime<Utc>,
+    referent_kind: &str,
+    referent_plan_bytes: &[u8],
+) -> Result<Verified, ApprovalRefusal> {
+    approval::evaluate(
+        approval_bytes,
+        sidecar_bytes,
+        &weirkeeper::trust::synthesize_legacy(roster),
+        now,
+        referent_kind,
+        referent_plan_bytes,
+    )
 }
 
 fn roster_spec(approver_keys: Vec<KeyEntry>, signing_keys: Vec<KeyEntry>) -> TrustRosterSpec {
@@ -709,6 +744,7 @@ async fn a_correct_status_plan_hash_does_not_rescue_a_mutated_plan() {
     );
 
     let (client, recorder) = mock_client_recording(vec![
+        empty_policy_list_route(),
         Route {
             method: "GET",
             path_suffix: "/trustrosters/default",
@@ -956,6 +992,7 @@ fn a_matched_approver_key_that_is_also_a_signing_key_is_self_attested_risk() {
 #[tokio::test]
 async fn a_missing_roster_names_itself() {
     let (client, recorder) = mock_client_recording(vec![
+        empty_policy_list_route(),
         Route {
             method: "GET",
             path_suffix: "/trustrosters/default",
@@ -998,6 +1035,14 @@ async fn a_missing_roster_names_itself() {
     assert_eq!(
         calls,
         vec![
+            // PLAT-19.1: resolution asks "does a TrustPolicy claim this
+            // namespace" BEFORE the roster, because the roster is the
+            // FALLBACK (D3 §7.1) — and the namespace is read off the object,
+            // never supplied by it.
+            (
+                "GET".to_string(),
+                "/apis/logweir.dev/v1alpha1/trustpolicies".to_string()
+            ),
             (
                 "GET".to_string(),
                 format!("/apis/logweir.dev/v1alpha1/trustrosters/{ROSTER_NAME}")
@@ -1027,6 +1072,7 @@ async fn a_missing_roster_names_itself() {
 #[tokio::test]
 async fn approval_reconcile_patches_only_status() {
     let (client, recorder) = mock_client_recording(vec![
+        empty_policy_list_route(),
         Route {
             method: "GET",
             path_suffix: "/trustrosters/default",
@@ -1097,6 +1143,7 @@ async fn approval_reconcile_patches_only_status() {
 #[tokio::test]
 async fn a_recreated_subject_uid_does_not_rebind_an_existing_approval() {
     let (client, _recorder) = mock_client_recording(vec![
+        empty_policy_list_route(),
         Route {
             method: "GET",
             path_suffix: "/trustrosters/default",
@@ -1109,6 +1156,7 @@ async fn a_recreated_subject_uid_does_not_rebind_an_existing_approval() {
             status: 200,
             body: restore_body(PLAN_BYTES, PLAN_HASH),
         },
+        empty_policy_list_route(),
         Route {
             method: "GET",
             path_suffix: "/trustrosters/default",
@@ -1179,6 +1227,7 @@ async fn a_recreated_subject_uid_does_not_rebind_an_existing_approval() {
 #[tokio::test]
 async fn a_refused_approval_is_not_deleted() {
     let (client, recorder) = mock_client_recording(vec![
+        empty_policy_list_route(),
         Route {
             method: "GET",
             path_suffix: "/trustrosters/default",
@@ -1228,6 +1277,7 @@ async fn a_refused_approval_is_not_deleted() {
 #[tokio::test]
 async fn an_approval_whose_referent_is_absent_says_so() {
     let (client, _recorder) = mock_client_recording(vec![
+        empty_policy_list_route(),
         Route {
             method: "GET",
             path_suffix: "/trustrosters/default",
@@ -1273,6 +1323,7 @@ async fn an_approval_whose_referent_is_absent_says_so() {
 #[tokio::test]
 async fn a_backup_referent_carries_no_plan_bytes_in_tag_one() {
     let (client, _recorder) = mock_client_recording(vec![
+        empty_policy_list_route(),
         Route {
             method: "GET",
             path_suffix: "/trustrosters/default",
@@ -1503,12 +1554,15 @@ async fn load_roster_has_three_states_and_a_transport_error_is_not_a_verdict() {
     // ---- AND `decide` ROUTES THE THREE APART ---------------------------
     // A 404 reaches the object as a REFUSAL and the referent is never fetched.
     let approval = approval_object(APPROVAL_DOC, &good_sidecar(), SubjectKind::Restore);
-    let (client, recorder) = mock_client_recording(vec![Route {
-        method: "GET",
-        path_suffix: "/trustrosters/default",
-        status: 404,
-        body: not_found_body("not found"),
-    }]);
+    let (client, recorder) = mock_client_recording(vec![
+        empty_policy_list_route(),
+        Route {
+            method: "GET",
+            path_suffix: "/trustrosters/default",
+            status: 404,
+            body: not_found_body("not found"),
+        },
+    ]);
     assert_eq!(
         approval::decide(&approval, &client)
             .await
@@ -1517,19 +1571,26 @@ async fn load_roster_has_three_states_and_a_transport_error_is_not_a_verdict() {
     );
     assert_eq!(
         seen(&recorder).len(),
-        1,
+        // PLAT-19.1: TWO reads, not one — every `TrustPolicy` and then the
+        // roster. Neither is the referent, which is the property this arm
+        // asserts and which the resolution layer does not change.
+        2,
         "…and the referent is NEVER fetched: without a roster there is no set of keys any \
          signature could be checked against, so fetching it would be work performed to reach a \
          conclusion already known. Saw: {:?}",
         seen(&recorder)
     );
     // A transport error reaches `decide` as an Err — nothing is written.
-    let (client, _rec) = mock_client_recording(vec![Route {
-        method: "GET",
-        path_suffix: "/trustrosters/default",
-        status: 500,
-        body: r#"{"kind":"Status","apiVersion":"v1","status":"Failure","code":500}"#.to_string(),
-    }]);
+    let (client, _rec) = mock_client_recording(vec![
+        empty_policy_list_route(),
+        Route {
+            method: "GET",
+            path_suffix: "/trustrosters/default",
+            status: 500,
+            body: r#"{"kind":"Status","apiVersion":"v1","status":"Failure","code":500}"#
+                .to_string(),
+        },
+    ]);
     assert!(
         approval::decide(&approval, &client).await.is_err(),
         "a transport error is not a verdict, so `decide` returns an Err and the reconcile writes \
@@ -1869,6 +1930,7 @@ async fn a_roster_that_changes_is_patched_once_with_the_right_transition_time() 
 /// The three routes an `Approval` reconcile takes when its referent exists.
 fn approval_routes(referent: (u16, String)) -> Vec<Route> {
     vec![
+        empty_policy_list_route(),
         Route {
             method: "GET",
             path_suffix: "/trustrosters/default",
@@ -1920,6 +1982,10 @@ async fn a_steady_approval_issues_no_second_status_patch() {
     assert_eq!(
         seen(&calls),
         vec![
+            (
+                "GET".to_string(),
+                "/apis/logweir.dev/v1alpha1/trustpolicies".to_string()
+            ),
             (
                 "GET".to_string(),
                 format!("/apis/logweir.dev/v1alpha1/trustrosters/{ROSTER_NAME}")
@@ -1985,5 +2051,468 @@ async fn an_approval_whose_referent_appears_is_patched_once_with_a_new_transitio
         transition_time(&after[0]),
         stamped,
         "Verified=False/ReferentNotFound became Verified=True/Verified, which IS a transition"
+    );
+}
+
+// ===========================================================================
+// PLAT-19.1 — trust resolution in place of `load_roster` (D3 §7.1, §7.3, §7.4)
+//
+// Every test above this line describes a roster-only cluster and now runs
+// through `trust::synthesize_legacy` unchanged — which is §13's "upgrade from
+// the default roster" row, proved by the whole file rather than by one
+// assertion. What follows is what only a POLICY-governed namespace can show.
+// ===========================================================================
+
+/// One `TrustPolicy` key over the approver's PUBLIC half.
+fn policy_key(usages: Vec<SpecUsage>) -> SpecKey {
+    SpecKey {
+        key_id: APPROVER_KEY_ID.to_string(),
+        spki_pem: APPROVER_PEM.to_string(),
+        algorithm: KeyAlgorithm::Ed25519,
+        usages,
+        principal: KeyPrincipal {
+            id: format!("install:{APPROVER_KEY_ID}"),
+            display: None,
+        },
+        // The window straddles `now()` (2026-09-09T13:00:00Z), so "is this key
+        // current" is a question about the fixture and not about the year the
+        // suite happens to run in.
+        not_before: at("2026-01-01T00:00:00Z"),
+        not_after: at("2099-01-01T00:00:00Z"),
+        state: KeyState::Active,
+        retired_at: None,
+        revoked_at: None,
+        revocation_reason: None,
+        revocation_effective_from: None,
+    }
+}
+
+fn at(s: &str) -> DateTime<Utc> {
+    DateTime::parse_from_rfc3339(s)
+        .expect("a fixture instant")
+        .with_timezone(&Utc)
+}
+
+/// One edit to a policy key, as a table row carries it.
+type KeyMutation = Box<dyn Fn(&mut SpecKey)>;
+
+/// A cluster-scoped `TrustPolicy` governing [`NS`], carrying `keys`.
+fn trust_policy(name: &str, keys: Vec<SpecKey>) -> TrustPolicy {
+    TrustPolicy {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            uid: Some(format!("uid-{name}")),
+            generation: Some(2),
+            resource_version: Some("17".to_string()),
+            ..ObjectMeta::default()
+        },
+        spec: TrustPolicySpec {
+            default: false,
+            namespaces: Some(vec![NS.to_string()]),
+            allowed_target_cluster_ids: Some(vec!["scratch-cluster-id".to_string()]),
+            keys,
+        },
+        status: None,
+    }
+}
+
+/// The trust one policy resolves to, for a direct [`approval::evaluate`] call.
+fn policy_trust(keys: Vec<SpecKey>) -> weirkeeper::trust::ResolvedTrust {
+    weirkeeper::trust::from_policy(&trust_policy("org-default", keys))
+}
+
+/// `approval::evaluate` over a policy-governed namespace, with the good
+/// approval document and its real signature.
+fn evaluate_under(keys: Vec<SpecKey>) -> Result<Verified, ApprovalRefusal> {
+    approval::evaluate(
+        APPROVAL_DOC.as_bytes(),
+        good_sidecar().as_bytes(),
+        &policy_trust(keys),
+        now(),
+        "Restore",
+        PLAN_BYTES.as_bytes(),
+    )
+}
+
+/// **Admission is a NEW use (D3 §7.4).** A retired, revoked or not-yet-valid
+/// approver key authorises nothing — and each refusal says which, because they
+/// are three different things for an operator to do something about.
+///
+/// KILLS: "map every `SigningRefusal` to `KeyIdExpired`" — a compromised key
+/// would then be reported as an expiry and the operator would extend a
+/// `notAfter` instead of opening an investigation; "check only the validity
+/// window" — a `Retired` key's window is still open, so rows 2 and 3 would
+/// verify; "ask `decide` instead of `may_sign_new`" — a retired key verifies
+/// HISTORICALLY, which is the right answer for a stored archive and the wrong
+/// one for an approval arriving today.
+#[test]
+fn a_retired_or_revoked_approver_key_authorises_nothing_new() {
+    // The good key, Active, still authorises — the control that makes every
+    // row below about the lifecycle and nothing else.
+    let verified = evaluate_under(vec![policy_key(vec![SpecUsage::GovernedApproval])])
+        .expect("an Active GovernedApproval key authorises");
+    assert_eq!(verified.matched_key_id, APPROVER_KEY_ID);
+    assert_eq!(verified.trust_source, "org-default");
+
+    let cases: Vec<(&str, KeyMutation, &str)> = vec![
+        (
+            "retired",
+            Box::new(|k: &mut SpecKey| {
+                k.state = KeyState::Retired;
+                k.retired_at = Some(at("2026-09-01T00:00:00Z"));
+            }),
+            "KeyRetired",
+        ),
+        (
+            "revoked for compromise",
+            Box::new(|k: &mut SpecKey| {
+                k.state = KeyState::Revoked;
+                k.revoked_at = Some(at("2026-09-01T00:00:00Z"));
+                k.revocation_reason = Some(RevocationReason::KeyCompromise);
+                k.revocation_effective_from = Some(at("2026-09-01T00:00:00Z"));
+            }),
+            "KeyRevoked",
+        ),
+        (
+            "revoked as superseded",
+            Box::new(|k: &mut SpecKey| {
+                k.state = KeyState::Revoked;
+                k.revoked_at = Some(at("2026-09-01T00:00:00Z"));
+                k.revocation_reason = Some(RevocationReason::Superseded);
+                k.revocation_effective_from = Some(at("2026-09-01T00:00:00Z"));
+            }),
+            "KeyRevoked",
+        ),
+        (
+            "staged for a rotation that has not started",
+            Box::new(|k: &mut SpecKey| k.not_before = at("2099-01-01T00:00:00Z")),
+            "KeyNotYetValid",
+        ),
+        (
+            "past its notAfter",
+            Box::new(|k: &mut SpecKey| k.not_after = at("2026-09-01T00:00:00Z")),
+            "KeyIdExpired",
+        ),
+    ];
+    for (label, mutate, want_reason) in cases {
+        let mut key = policy_key(vec![SpecUsage::GovernedApproval]);
+        mutate(&mut key);
+        let refusal = evaluate_under(vec![key]).expect_err(label);
+        assert_eq!(
+            refusal.reason(),
+            want_reason,
+            "{label}: the refusal names WHICH lifecycle event refused it; got {refusal:?}"
+        );
+        let message = refusal.to_string();
+        assert!(
+            message.contains(APPROVER_KEY_ID),
+            "{label}: the message names the key; got {message}"
+        );
+        assert!(
+            message.len() > 40,
+            "{label}: the message explains itself; got {message}"
+        );
+    }
+
+    // …AND THE FOUR LIFECYCLE REFUSALS ARE FOUR DISTINCT REASONS, not four
+    // spellings of one. A consumer routing on `reason` has to be able to tell
+    // a revocation from an expiry.
+    let reasons = ["KeyIdExpired", "KeyRetired", "KeyRevoked", "KeyNotYetValid"];
+    let unique: std::collections::BTreeSet<&str> = reasons.into_iter().collect();
+    assert_eq!(unique.len(), reasons.len());
+}
+
+/// **Usage separation (§7.3).** The same key material, declared for evidence
+/// or for console confirmation, authorises no approval at all.
+///
+/// KILLS: "offer every resolved key to the approval verifier" — the material
+/// below is byte-identical in all three rows and genuinely signed the document,
+/// so a verifier that ignored `usages` would return `Verified` for each.
+#[test]
+fn an_evidence_key_never_authorises_an_approval() {
+    for usage in [SpecUsage::EvidenceSigning, SpecUsage::ConsoleConfirmation] {
+        let refusal = evaluate_under(vec![policy_key(vec![usage])])
+            .expect_err("a key declared for another usage authorises nothing");
+        assert_eq!(
+            refusal.reason(),
+            "KeyIdNotInRoster",
+            "{usage:?}: the key is not among this namespace's GovernedApproval keys, which is a \
+             statement about WHICH KEYS MAY AUTHORISE and never about the signature; got \
+             {refusal:?}"
+        );
+        let message = refusal.to_string();
+        assert!(
+            message.contains("GovernedApproval") && message.contains("org-default"),
+            "the refusal names the usage and the object to edit; got {message}"
+        );
+    }
+}
+
+/// **`selfAttestedRisk` is a LEGACY label, and G8 makes it structurally
+/// impossible under a policy (§7.3).**
+///
+/// KILLS: "drop the label when the roster path is replaced" — the first arm
+/// would stop reporting a genuine overlap on an unmigrated cluster; and
+/// "compare key ids instead of usages" — the second arm's policy carries the
+/// same id, so an id comparison would report a risk the CRD forbids.
+#[test]
+fn self_attested_risk_survives_for_the_roster_and_cannot_arise_under_a_policy() {
+    // LEGACY: the same key on both roster lists is one key with both usages.
+    let both = roster_spec(vec![approver()], vec![approver()]);
+    let verified = evaluate(
+        APPROVAL_DOC.as_bytes(),
+        good_sidecar().as_bytes(),
+        &both,
+        now(),
+        "Restore",
+        PLAN_BYTES.as_bytes(),
+    )
+    .expect("an overlap is LABELLED, never refused");
+    assert!(verified.self_attested_risk);
+    assert_eq!(verified.trust_source, "legacy-roster-v1");
+
+    // POLICY: G8 admits exactly one usage per key, so the overlap has nowhere
+    // to exist. The key below is the same id and the same material.
+    let verified = evaluate_under(vec![policy_key(vec![SpecUsage::GovernedApproval])])
+        .expect("a policy-governed approval verifies");
+    assert!(
+        !verified.self_attested_risk,
+        "under a TrustPolicy the separation is ENFORCED at admission (CEL G8), so the label has \
+         nothing left to warn about — that is §7.3's 'the label remains for legacy-roster \
+         namespaces'"
+    );
+}
+
+/// A namespace two policies claim refuses every approval in it, and the refusal
+/// names both policies.
+///
+/// KILLS: "resolve a contested namespace to the first policy" — the first
+/// policy below carries the good approver key, so picking it would VERIFY this
+/// approval and a disagreement about authority would silently resolve in favour
+/// of whichever object the API server listed first.
+#[tokio::test]
+async fn a_contested_namespace_refuses_every_approval() {
+    let a = trust_policy(
+        "org-default",
+        vec![policy_key(vec![SpecUsage::GovernedApproval])],
+    );
+    let b = trust_policy(
+        "team-local",
+        vec![policy_key(vec![SpecUsage::GovernedApproval])],
+    );
+    let list = serde_json::json!({
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "TrustPolicyList",
+        "metadata": {"resourceVersion": "1"},
+        "items": [a, b],
+    });
+    let (client, recorder) = mock_client_recording(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/trustpolicies",
+            status: 200,
+            body: list.to_string(),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/trustrosters/default",
+            status: 200,
+            body: roster_body(&approver_entry_json(), ""),
+        },
+    ]);
+    let approval = approval_object(APPROVAL_DOC, &good_sidecar(), SubjectKind::Restore);
+    let outcome = approval::decide(&approval, &client)
+        .await
+        .expect("a conflict is a verdict, not an error");
+    let ApprovalOutcome::Refused(refusal) = &outcome else {
+        panic!("a contested namespace refuses: {outcome:?}");
+    };
+    assert_eq!(refusal.reason(), "TrustPolicyConflict");
+    let message = refusal.to_string();
+    assert!(message.contains(NS), "{message}");
+    assert!(
+        message.contains("org-default") && message.contains("team-local"),
+        "both claimants are named, so the operator knows which two objects disagree; got {message}"
+    );
+    assert_eq!(
+        seen(&recorder).len(),
+        2,
+        "the referent is NEVER fetched: without a resolved key set there is nothing any signature \
+         could be checked against. Saw {:?}",
+        seen(&recorder)
+    );
+}
+
+/// A policy-governed namespace verifies under ITS policy, and the condition
+/// message names which trust answered.
+///
+/// D3 §15's L10 reads `trustSource=` off this message to tell a migrated
+/// cluster from an unmigrated one.
+///
+/// KILLS: "keep resolving `TrustRoster/default` for every namespace" — the
+/// roster below carries no approver key at all, so an approval that still
+/// consulted it would be refused; and "report the roster's name whatever
+/// resolved" — `trustSource` would say `legacy-roster-v1` for a policy-governed
+/// namespace and the migration would be invisible.
+#[tokio::test]
+async fn a_policy_governed_namespace_verifies_under_its_own_policy() {
+    let list = serde_json::json!({
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "TrustPolicyList",
+        "metadata": {"resourceVersion": "1"},
+        "items": [trust_policy("org-default", vec![policy_key(vec![SpecUsage::GovernedApproval])])],
+    });
+    let (client, _recorder) = mock_client_recording(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/trustpolicies",
+            status: 200,
+            body: list.to_string(),
+        },
+        // AN EMPTY ROSTER. Under the old code this alone refused every
+        // approval in the cluster; under §7.1 it is not consulted at all for a
+        // namespace a policy names.
+        Route {
+            method: "GET",
+            path_suffix: "/trustrosters/default",
+            status: 200,
+            body: roster_body("", ""),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/restores/r1",
+            status: 200,
+            body: restore_body(PLAN_BYTES, PLAN_HASH),
+        },
+    ]);
+    let approval = approval_object(APPROVAL_DOC, &good_sidecar(), SubjectKind::Restore);
+    let outcome = approval::decide(&approval, &client)
+        .await
+        .expect("the decision completes");
+    assert!(
+        outcome.is_verified(),
+        "the policy names this namespace and carries the approver key: {outcome:?}"
+    );
+    let message = outcome.message();
+    assert!(
+        message.contains("trustSource=org-default"),
+        "the condition says which trust answered, which is how an operator tells a migrated \
+         namespace from an unmigrated one; got {message}"
+    );
+    assert!(
+        message.contains(APPROVER_KEY_ID),
+        "…and which key: {message}"
+    );
+}
+
+/// The subject binding is untouched by this change.
+///
+/// PLAT-12.x's checks 7 and 8 are about the DOCUMENT and the REFERENT, not
+/// about the key, and replacing the roster walk with trust resolution must not
+/// weaken either. This asserts both halves against a policy-governed namespace
+/// — the path that did not exist before — so a refusal that used to come from
+/// the roster walk is not quietly lost with it.
+///
+/// KILLS: "return the verdict as soon as the signature verifies" — both arms
+/// below carry a genuine signature by a key the policy trusts.
+#[test]
+fn the_plan_and_subject_bindings_still_refuse_after_trust_resolution() {
+    let keys = vec![policy_key(vec![SpecUsage::GovernedApproval])];
+
+    // CHECK 8 — the approval binds `Restore` and the referent is a `Backup`.
+    let refusal = approval::evaluate(
+        APPROVAL_DOC.as_bytes(),
+        good_sidecar().as_bytes(),
+        &policy_trust(keys.clone()),
+        now(),
+        "Backup",
+        PLAN_BYTES.as_bytes(),
+    )
+    .expect_err("an approval for one kind never authorises another");
+    assert_eq!(refusal.reason(), "SubjectKindMismatch");
+
+    // CHECK 7 — the plan hash is recomputed from the referent's own bytes.
+    let refusal = approval::evaluate(
+        APPROVAL_DOC.as_bytes(),
+        good_sidecar().as_bytes(),
+        &policy_trust(keys),
+        now(),
+        "Restore",
+        b"different plan bytes",
+    )
+    .expect_err("an approval binds bytes, and these are different bytes");
+    assert_eq!(refusal.reason(), "PlanHashMismatch");
+}
+
+/// Every `ApprovalRefusal` reason is a valid `metav1.Condition` reason and
+/// explains itself.
+///
+/// THE SET GREW FROM SEVEN TO ELEVEN with PLAT-19.1, and the four new ones are
+/// interfaces the moment they reach a status. A table over the enum, so a
+/// twelfth cannot arrive as a `reason` nobody put on a list.
+#[test]
+fn every_approval_refusal_reason_is_a_condition_reason_that_explains_itself() {
+    let refusals = vec![
+        ApprovalRefusal::SignatureInvalid(
+            "spec.sidecarBytes is not a DSSE sidecar document: expected value at line 1"
+                .to_string(),
+        ),
+        ApprovalRefusal::KeyIdNotInRoster {
+            key_id: "the sidecar names [a] and the roster's keys are [b]".to_string(),
+        },
+        ApprovalRefusal::KeyIdExpired {
+            key_id: APPROVER_KEY_ID.to_string(),
+            not_after: "2026-01-01T00:00:00Z".to_string(),
+        },
+        ApprovalRefusal::KeyRetired {
+            key_id: APPROVER_KEY_ID.to_string(),
+            retired_at: Some("2026-01-01T00:00:00Z".to_string()),
+        },
+        ApprovalRefusal::KeyRevoked {
+            key_id: APPROVER_KEY_ID.to_string(),
+            reason: "KeyCompromise".to_string(),
+            effective_from: Some("2026-01-01T00:00:00Z".to_string()),
+        },
+        ApprovalRefusal::KeyNotYetValid {
+            key_id: APPROVER_KEY_ID.to_string(),
+            not_before: "2099-01-01T00:00:00Z".to_string(),
+        },
+        ApprovalRefusal::TrustPolicyConflict {
+            namespace: NS.to_string(),
+            policies: vec!["a".to_string(), "b".to_string()],
+        },
+        ApprovalRefusal::PayloadTypeMismatch {
+            got: "x".to_string(),
+            want: PAYLOAD_TYPE_APPROVAL.to_string(),
+        },
+        ApprovalRefusal::PlanHashMismatch {
+            got: "sha256:a".to_string(),
+            want: "sha256:b".to_string(),
+        },
+        ApprovalRefusal::SubjectKindMismatch {
+            approval_says: "Restore".to_string(),
+            referent_is: "Backup".to_string(),
+        },
+        ApprovalRefusal::RosterNotFound,
+    ];
+    let mut seen_reasons = std::collections::BTreeSet::new();
+    for refusal in &refusals {
+        let reason = refusal.reason();
+        assert!(
+            !reason.contains('-') && reason.starts_with(|c: char| c.is_ascii_uppercase()),
+            "`{reason}` is not a valid metav1.Condition reason"
+        );
+        assert!(
+            refusal.to_string().len() > 40,
+            "`{reason}`'s message is too short to explain itself: {refusal}"
+        );
+        assert!(seen_reasons.insert(reason), "`{reason}` is used twice");
+    }
+    assert_eq!(
+        refusals.len(),
+        11,
+        "PLAT-19.1 added KeyRetired, KeyRevoked, KeyNotYetValid and TrustPolicyConflict to the \
+         seven that were here. A twelfth variant must update this count AND \
+         docs/kubernetes.md §8, which is the one place they are all named."
     );
 }

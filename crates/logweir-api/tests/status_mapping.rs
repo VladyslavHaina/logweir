@@ -85,6 +85,10 @@ fn verdict(result: VerificationVerdict, payload_type: &str) -> VerificationResul
         payload_type: payload_type.to_string(),
         verified_at: now(),
         detail: (!matches!(result, VerificationVerdict::Valid)).then(|| "a reason".to_string()),
+        // PLAT-19.1: these fixtures model the three verdicts the API has
+        // always normalised. The trust projection is the signer's lifecycle,
+        // which this mapping does not read.
+        trust: None,
     }
 }
 

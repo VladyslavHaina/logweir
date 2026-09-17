@@ -3291,6 +3291,11 @@ fn valid_evidence_at(
                 payload_type: r.payload_type.to_string(),
                 verified_at: at,
                 detail: None,
+                // PLAT-19.1: this oracle stands in for a signature that
+                // verified under a key this fixture does not model, so there
+                // is no trust projection to carry and the verdict is the
+                // signature's alone.
+                trust: None,
             }
         })
     }
