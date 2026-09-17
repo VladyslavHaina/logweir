@@ -522,6 +522,124 @@ draws for `refusal-reason=`: a pod log is stdout and stderr merged in nondetermi
 every reader in this project scans a bounded tail and matches by key name
 (`KEY_SCAN_TAIL_LINES = 8`, `controllers::backup::evidence_keys`).
 
+### The runner progress channel is OPTIONAL, bounded and contract-versioned (D3 §2.4)
+
+Both runners announce where they are on stdout. The channel exists because a controller reading a
+pod log has no other way to tell "the engine is still running" from "the archive exists and the
+receipt is being signed": a `tracing` line is JSON on the same merged stream and is filtered by
+`RUST_LOG`, so it is not a contract anything can read.
+
+```
+progress-contract=2
+progress-phase=0:admit
+progress-phase=1:approval
+…
+progress-phase=9:teardown
+```
+
+`logweir backup run` has no numbered phases after admission, so every line it emits is at `-1`,
+over five named steps in this order:
+
+```
+progress-contract=2
+progress-phase=-1:admit
+progress-phase=-1:engine
+progress-phase=-1:readback
+progress-phase=-1:sign
+progress-phase=-1:upload
+```
+
+**`progress-contract=` is the version of the grammar that follows**, and it is the execution
+contract version (`logweir_core::execution_contract::VERSION`, `"2"` since decision D3's Amendment
+I). It is printed once, before the first phase line, so a reader learns the grammar before the
+first line written in it.
+
+**Absence is not an error.** A runner that predates the channel prints nothing; a controller that
+sees no progress line simply has no phase to report. That is also what happens when the channel
+declines to say something: the line is produced by a filter over a **closed vocabulary** — the ten
+restore phase names and the five backup step names, and nothing else is renderable at any phase
+number. A caller that reached the formatter with a projected password, a URL with userinfo, a
+broker error, a record's bytes or a string containing a newline gets silence rather than a
+sanitised half-truth, because a charset rule would not help: `hunter2` is lowercase alphanumeric.
+Every line the channel can produce is at most 96 bytes, so the optional channel can never push the
+mandatory evidence keys out of the controller's bounded tail.
+
+**Read it by key name, never by position.** Same rule as `refusal-reason=` and
+`offset-report-key=`, for the same reason (plan erratum E4).
+
+### `teardown-key=` is printed exactly when phase 9 attested, and it comes BEFORE interface I8's keys
+
+```
+teardown-key=logweir/drills/<run_id>.teardown.json
+scorecard-key=logweir/drills/<run_id>.json
+sidecar-key=logweir/drills/<run_id>.sig
+offset-report-key=logweir/drills/<run_id>.offsets.json
+```
+
+The line names the signed teardown attestation (`PAYLOAD_TYPE_TEARDOWN`), which is what says
+honestly which scratch topics were deleted and which the broker refused. It is **conditional in
+exactly the way `offset-report-key=` is**: it is printed when, and only when, phase 9's create-only
+put of that object succeeded. A teardown whose attestation could not be written prints no line at
+all — a line naming a key nothing was written to would be the worst possible output, and the
+warning on the log says what to do instead.
+
+**It goes in front of interface I8's three keys**, exactly as PLAT-15.1's `catalog-key=` goes in
+front of interface I7's two. I8's contract is "`scorecard-key=`, `sidecar-key=`,
+`offset-report-key=`, as the FINAL stdout lines of a successful run, with nothing after them", and
+that is unchanged.
+
+**It is not restricted to exit 0.** A restore that ran every phase and did not pass exits 2 and
+prints no evidence keys at all — and that is precisely the run whose leftover topics matter, since
+a rehearsal's leftovers block the next scheduled slot. The key is carried on the scorecard's
+phase-9 record, which is pushed after phase 8 froze and signed the document, so nothing that
+delivers it can reach the signed bytes.
+
+### Execution contract v2: what v1 still buys, and what it may no longer carry
+
+`logweir_core::execution_contract::VERSION` is `"2"` (decision D3 §8, Amendment I). The bump is the
+whole reason the version exists: v2 carries the recovery point binding, the standing rehearsal
+authorization and the two stdout lines above, so an old binary must refuse the new
+`--execution-contract-version` argument *before dispatch* rather than run a plan whose checks it
+does not implement.
+
+**v1 is still accepted, for already-created legacy Restores only.** A runner holds no cluster
+credential, so it cannot read a `Restore`'s creation timestamp and cannot ask anyone whether an
+object is "legacy". What it can see is whether the invocation carries v2 material — a `source.point`
+block, a standing rehearsal authorization, an approval-policy snapshot or a confirmation-issuer
+public key. **A v1 invocation carrying any of them is refused by name, exit 3**, because those are
+exactly the things a Restore created after the rollout has. Let the in-flight legacy Restore finish
+(or delete it) and create the new one; a legacy object is not upgraded in place.
+
+**Every v2 addition is additive and absent-tolerant**, and each is all-or-nothing as a block:
+
+| addition | where | absent means |
+|---|---|---|
+| `source.point` | the plan document | the archive set comes from `source.backup`; no binding is checked |
+| `LOGWEIR_EXECUTION_AUTHORIZATION_KIND` | Job environment | `approval` — the per-run `Approval`, tag 1's shape |
+| `LOGWEIR_EXECUTION_SCOPE_SHA256` + `…_REHEARSAL_SCHEDULE_UID` | Job environment | no standing authorization; a mounted scope with no pinned digest is **refused**, never ignored |
+| `LOGWEIR_EXECUTION_POLICY_SNAPSHOT_SHA256` | Job environment | the synthesized `legacy-governed-v1` policy |
+| `LOGWEIR_EXECUTION_CONFIRMATION_KEY_SHA256` | Job environment | the legacy single-key bundle |
+
+The three optional bundle members (`--rehearsal-scope`, `--policy-snapshot`, `--confirmation-key`)
+are digest-pinned in **both** directions: a pinned digest with nothing mounted is a lost bundle
+member, and a mounted member with no pinned digest is material the controller never committed to.
+Both are refused. Supplying any of them to a standalone invocation — one with no execution contract
+at all — is refused too, because nothing could make unpinned material trustworthy and silently
+ignoring it would let an operator believe a scope was enforced when nothing bound it to the run.
+
+**No new exit code.** Both new refusals live inside Global Constraint 11's existing four:
+
+| situation | code | `refusal-reason=` |
+|---|---|---|
+| a rendered plan outside the signed rehearsal scope | 3 | `GuardRefused`, message opens `RehearsalScopeViolation` |
+| a bound point whose receipt or manifest digest differs | 3 | `GuardRefused`, message opens `PointBindingMismatch` |
+| a bound point whose receipt or manifest is missing or unreadable | 1 | — (no refusal line; nothing about the plan was found wanting) |
+
+`logweir_core::guard::TERMINAL_STATES` is still the closed three-element list, so both refusals
+classify as the general `GuardRefused` and carry their state name in the message text. Promoting
+`PointBindingMismatch` and `RehearsalScopeViolation` to declared terminal states is a change to that
+list and to the controller's mapping, and is not made here.
+
 ### `logweir notify deliver`'s exit codes and its `notify-result=` lines (PLAT-14.2)
 
 `logweir notify deliver --event <path>` posts one protection event

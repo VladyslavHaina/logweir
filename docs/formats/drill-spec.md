@@ -1,8 +1,8 @@
-# The drill spec: `name` and `notifications`
+# The drill spec: `name`, `source.point` and `notifications`
 
-**This is not yet a complete drill-spec reference.** It documents exactly two
-things — the top-level `name` key and the `notifications` block — because those
-are what Task 14 created and changed. Every other key of a drill spec is
+**This is not yet a complete drill-spec reference.** It documents exactly three
+things — the top-level `name` key, `source.point`, and the `notifications`
+block — because those are what Task 14 and decision D3 created and changed. Every other key of a drill spec is
 described today only by the commented example at
 [`examples/drill.yaml`](../../examples/drill.yaml) and by
 [`crates/logweir-core/src/spec.rs`](../../crates/logweir-core/src/spec.rs). A
@@ -43,6 +43,62 @@ artifact-side drill identity is backlog **T1-8**, assigned to decision **O16**
 with default *not funded*; see
 [`docs/stability.md`](../stability.md#known-limitations-of-v01) for the
 residual.
+
+---
+
+## `source.point` (execution contract v2)
+
+```yaml
+source:
+  storage: {backend: s3, bucket: recovery, prefix: archive/}
+  backup: nightly-7
+  topics: [orders]
+  point:
+    point_id: lwp1-3f2a91c74b8e05d6a1f0c2b3948e7d15
+    receipt_key: logweir/backups/nightly-7/01J….receipt.json
+    receipt_sha256: sha256:…
+    manifest_sha256: sha256:…
+```
+
+Optional. **The recovery point this plan is bound to** (decision D3 §5.5).
+Absent means exactly what it meant before this block existed: the archive set
+is chosen by `source.backup` (`latestCompleted` or a pinned backup id) and no
+binding is checked. Every plan written before this block existed therefore
+still loads, still verifies byte for byte, and still runs unchanged.
+
+**Why it is in the plan and not in the Job's environment.** The environment is
+the controller's word for it; the plan is what the approver signed. Binding the
+point into plan bytes means the approval covers *which archive object this
+restore recovers from* — and the disaster path (PLAT-15.2: a fresh
+installation, no `Backup` CR anywhere, only a bucket) has nothing else to bind
+to.
+
+**What the runner does with it, before any data-plane work.** Before a broker
+client is constructed and before anything is written, the runner:
+
+1. reads `receipt_key` from `source.storage` through a **read-only** handle;
+2. checks `sha256(receipt bytes) == receipt_sha256`;
+3. re-derives the point identity from those bytes — `lwp1-` plus the first 32
+   lowercase hex characters of the same digest — and checks it equals
+   `point_id`. The identity is content-derived, so it is never *believed*: a
+   point id that had to be taken on trust would be a label anyone could
+   relabel;
+4. checks the receipt's own `archive.manifest_sha256` equals `manifest_sha256`;
+5. reads the manifest the receipt names and checks its bytes hash to the same
+   value. Steps 2–4 prove the plan and the receipt agree; this one proves the
+   *archive* does.
+
+Any mismatch is **exit 3**, with `PointBindingMismatch` at the start of the
+refusal message — the tampered-bundle case, moved to the archive. A receipt or
+manifest that is **missing or unreadable** is **exit 1**: the archive did not
+answer, and that may be a rotated credential or a briefly unavailable bucket,
+so telling an operator to change an approved document would be the wrong
+repair. See [`docs/stability.md`](../stability.md) for the whole stdout and
+exit contract.
+
+A plan carrying this block requires **execution contract v2**: a v1 invocation
+that carried it would be a post-rollout Restore wearing an old version number,
+and is refused.
 
 ---
 
