@@ -861,6 +861,176 @@ pub fn destination_hold_patch(
     })
 }
 
+// ---------------------------------------------------------------------------
+// Evidence observation for destination-backed runs — D2 §3.9, §3.10
+// ---------------------------------------------------------------------------
+
+/// The `detail` a `NotAttempted` carries when the destination declares no
+/// `evidenceRead` — D2 §3.9 step 2, verbatim.
+///
+/// # A DEFINED ANSWER, NOT A SILENCE
+///
+/// `evidenceRead` absent means nobody configured a reader, which is a truthful
+/// fact about the destination and NOT a green badge and NOT an error. The
+/// detail names the field to add and the command that verifies the receipt
+/// without a controller-held credential, so an operator who reads it knows
+/// both ways out.
+pub const EVIDENCE_READ_NOT_CONFIGURED_PREFIX: &str = "BackupDestination ";
+
+/// The rest of [`EVIDENCE_READ_NOT_CONFIGURED_PREFIX`]'s sentence.
+pub const EVIDENCE_READ_NOT_CONFIGURED_SUFFIX: &str =
+    " has no spec.access.evidenceRead; run the printed logweir drill verify command instead";
+
+/// Where this run's evidence is read from, for ONE reconcile pass.
+pub enum EvidenceSource {
+    /// A legacy inline-`archive` run: the controller's ONE global handle, as
+    /// it has always been. D2 §3.10 confines that handle to exactly this case.
+    GlobalHandle,
+    /// A destination-backed run whose `evidenceRead` is
+    /// [`crate::destination::ResolvedGrant::ControllerIdentity`] and whose
+    /// location the installation policy allowlists — D2 §3.8 option **E**. The
+    /// handle comes from [`crate::evidence_store::StoreCache`]: bucket, prefix,
+    /// region, endpoint, addressing and CA from the destination, and only the
+    /// CREDENTIAL from the controller's own environment.
+    Destination(Arc<Store>),
+    /// Nothing may read this run's evidence from here, and the reason is a
+    /// fact about the destination or about this build. `NotAttempted` with
+    /// this detail, never `Invalid`: a missing reader is not a bad document.
+    NotAttempted {
+        /// What is missing, and what to do about it. Never a credential.
+        detail: String,
+    },
+}
+
+/// Which handle this `Backup`'s evidence is read through — D2 §3.9.
+///
+/// # THE GLOBAL HANDLE IS FOR LEGACY OBJECTS AND NOTHING ELSE (D2 §3.10)
+///
+/// Grounding **G2**: the controller's one store takes its bucket, region,
+/// endpoint and credential from the controller's own process. On an
+/// installation with two destinations, reading the second one's evidence
+/// through it means the wrong bucket or the wrong principal — and the
+/// resulting `NotAttempted` reads as "no evidence" rather than "wrong bucket".
+/// So a `Backup` that names a `destinationRef` never reaches it.
+///
+/// # The three grants that are not `ControllerIdentity`
+///
+/// * **Absent** (`NotConfigured`): `NotAttempted` naming the field to add.
+/// * **`SecretKeys` / `WorkloadIdentity`**: D2 §3.9 reads these through an
+///   evidence-fetch JOB in the object's own namespace, because the controller
+///   holds no verb on `secrets` and must not — option **B** was rejected for
+///   exactly that (D2 §3.8). **THIS BUILD DOES NOT CREATE THAT JOB.** The
+///   answer is `NotAttempted` with a detail that says so, which is the honest
+///   report of a capability that is not here; what it must never be is a
+///   silent fall-back to the global handle, because that handle holds a
+///   different principal over a different bucket.
+/// * **Not allowlisted**: the resolver's own
+///   `ControllerIdentityNotAllowlisted`, so an operator cannot point the
+///   controller's principal at a location a cluster administrator did not list.
+///
+/// # Errors
+///
+/// [`kube::Error`] for a failed read. A destination that does not resolve at
+/// all is NOT an error here: this runs AFTER a Job has finished, and a
+/// destination edited or deleted in the meantime must not turn an observed run
+/// into a refusal. It is `NotAttempted` with the refusal's own message.
+pub async fn evidence_source(
+    backup: &Backup,
+    client: &kube::Client,
+    namespace: &str,
+    now: DateTime<Utc>,
+) -> Result<EvidenceSource, kube::Error> {
+    evidence_source_for(backup.spec.destination_ref.as_ref(), client, namespace, now).await
+}
+
+/// [`evidence_source`] for any object that names a destination whose
+/// `evidenceRead` grant is the one to use.
+///
+/// # WHICH REF THE CALLER PASSES IS THE WHOLE QUESTION ON THE RESTORE PATH
+///
+/// A `Restore` names TWO destinations, and its scorecard was written under the
+/// EVIDENCE destination's `evidenceWrite`. Reading it back through the SOURCE
+/// destination's bucket is the two-destination form of grounding **G2** — a
+/// read against the wrong store reported as "no document". The parameter is a
+/// ref rather than an object so the call site has to say which one it means.
+///
+/// # Errors
+///
+/// [`kube::Error`] for a failed read; see [`evidence_source`].
+pub async fn evidence_source_for(
+    reference: Option<&crate::crds::LocalRef>,
+    client: &kube::Client,
+    namespace: &str,
+    now: DateTime<Utc>,
+) -> Result<EvidenceSource, kube::Error> {
+    let Some(reference) = reference else {
+        return Ok(EvidenceSource::GlobalHandle);
+    };
+    let load = crate::check::policy::load(
+        client,
+        super::topic_discovery::configured_policy_ref().as_ref(),
+        &crate::check::policy::PolicyCache::new(),
+        now,
+    )
+    .await?;
+    let resolved = match destination::resolve_ref(
+        client,
+        namespace,
+        &reference.name,
+        DestinationRole::EvidenceRead,
+        load.policy(),
+    )
+    .await
+    {
+        Ok(resolved) => resolved,
+        Err(ResolveError::Api(e)) => return Err(e),
+        Err(ResolveError::Refused(refusal)) => {
+            return Ok(EvidenceSource::NotAttempted {
+                detail: refusal.to_string(),
+            })
+        }
+    };
+    match &resolved.grant {
+        crate::destination::ResolvedGrant::NotConfigured => Ok(EvidenceSource::NotAttempted {
+            detail: format!(
+                "{EVIDENCE_READ_NOT_CONFIGURED_PREFIX}{}{EVIDENCE_READ_NOT_CONFIGURED_SUFFIX}",
+                resolved.name
+            ),
+        }),
+        crate::destination::ResolvedGrant::SecretKeys { .. }
+        | crate::destination::ResolvedGrant::WorkloadIdentity { .. } => {
+            Ok(EvidenceSource::NotAttempted {
+                detail: format!(
+                    "BackupDestination {}/{} reads evidence with a grant only a pod may hold (D2 \
+                     §3.9's evidence-fetch Job), and this build does not create that Job. The \
+                     controller holds no verb on secrets and does not read this credential \
+                     itself; run the printed logweir drill verify command, or set \
+                     spec.access.evidenceRead.mode: ControllerIdentity for an allowlisted \
+                     location",
+                    resolved.namespace, resolved.name
+                ),
+            })
+        }
+        crate::destination::ResolvedGrant::ControllerIdentity => {
+            // ONE CACHE PER PROCESS, BOUNDED AT 32. Each handle owns a
+            // connection pool and a tokio runtime; the cache is keyed by
+            // destination UID, generation and CA digest, so an edit or a
+            // rotated root is a new handle by construction. `get_or_build`
+            // constructs inside `spawn_blocking` — interface I13's one
+            // sanctioned second construction site.
+            static CACHE: std::sync::OnceLock<crate::evidence_store::StoreCache> =
+                std::sync::OnceLock::new();
+            let cache = CACHE.get_or_init(crate::evidence_store::StoreCache::new);
+            match cache.get_or_build(&resolved, load.policy()).await {
+                Ok(store) => Ok(EvidenceSource::Destination(store)),
+                Err(refusal) => Ok(EvidenceSource::NotAttempted {
+                    detail: refusal.to_string(),
+                }),
+            }
+        }
+    }
+}
+
 /// The two evidence keys, as read off the log.
 ///
 /// Both `Option`, independently: a log carrying only one of the two lines
@@ -3317,11 +3487,41 @@ async fn reconcile_backup_inner(
     } else {
         None
     };
+    // WHICH HANDLE THIS RUN'S EVIDENCE IS READ THROUGH — D2 §3.9, §3.10. A
+    // legacy object takes the oracle it has always taken; a destination-backed
+    // one takes its OWN destination's read-only handle, or a `NotAttempted`
+    // naming why there is none. The global handle is never used for a
+    // destination-backed run: it holds a different principal over a different
+    // bucket, and an answer from it would read as "no evidence" rather than
+    // "wrong bucket" (grounding G2).
+    let evidence_from = evidence_source(backup, client, &namespace, now)
+        .await
+        .map_err(BackupError::Api)?;
+
     // STEP 5, and interface I22's window, off ONE observation. AWAITED: the
     // real oracle's two `Store` reads happen inside one `spawn_blocking`
     // (interface I13, see `ArchiveOracle`), so this is the one point in the
     // reconcile that yields to the runtime for the archive.
-    let observed = archive(keys.clone()).await;
+    let observed = match &evidence_from {
+        EvidenceSource::GlobalHandle => archive(keys.clone()).await,
+        EvidenceSource::Destination(store) => {
+            // THE SAME `observe_archive`, ON A DIFFERENT HANDLE. One reader of
+            // a receipt, one presence vocabulary, one window extraction — a
+            // second implementation for destination-backed runs would be a
+            // second answer to "what does this receipt say".
+            let handle = Arc::clone(store);
+            let keys = keys.clone();
+            tokio::task::spawn_blocking(move || observe_archive(&handle, &keys))
+                .await
+                .ok()
+                .flatten()
+        }
+        // NOTHING WAS READ, AND NOTHING IS GUESSED. No presence, so
+        // `orphan_state` gets `None` and no run is called an
+        // `OrphanedScorecard` for want of a reader; no `windowCovered`, because
+        // the window is the RECEIPT's and no receipt was fetched.
+        EvidenceSource::NotAttempted { .. } => None,
+    };
     let orphan = orphan_state(exit_code, observed.as_ref().map(|o| o.presence));
     let covered = observed.as_ref().and_then(|o| o.covered);
     let receipt_sha256 = observed.as_ref().and_then(|o| o.receipt_sha256.clone());
@@ -3408,7 +3608,7 @@ async fn reconcile_backup_inner(
         keys.sidecar.as_deref(),
         receipt_sha256.as_deref(),
     ) {
-        let result = verify(EvidenceRef {
+        let reference = EvidenceRef {
             // PLAT-19.1: trust is resolved PER NAMESPACE, and this is
             // `metadata.namespace` read off the object being reconciled —
             // never a name the subject supplied.
@@ -3417,8 +3617,28 @@ async fn reconcile_backup_inner(
             payload_sha256: digest.to_string(),
             sidecar_key: sidecar_key.to_string(),
             payload_type: logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT,
-        })
-        .await;
+        };
+        let result = match &evidence_from {
+            EvidenceSource::GlobalHandle => verify(reference).await,
+            // THE SAME VERIFIER, ON THE DESTINATION'S OWN HANDLE — D2 §3.9's
+            // "no second verification path". `verify_oracle` already takes the
+            // store it reads through, resolves this namespace's trust and runs
+            // `verify_resolved` inside one `spawn_blocking`; handing it another
+            // handle is the whole change. Digest, DSSE and the trust
+            // projection are D3 W10's and are not re-decided here.
+            EvidenceSource::Destination(store) => {
+                crate::verification::verify_oracle(Some(Arc::clone(store)), client.clone())(
+                    reference,
+                )
+                .await
+            }
+            EvidenceSource::NotAttempted { detail } => {
+                crate::verification::VerificationResult::not_attempted(
+                    reference.payload_type,
+                    detail.clone(),
+                )
+            }
+        };
         let current = backup
             .status
             .as_ref()

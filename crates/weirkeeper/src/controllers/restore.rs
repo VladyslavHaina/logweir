@@ -4188,9 +4188,45 @@ async fn reconcile_restore_inner(
     // oracle's `Store` read happens inside one `spawn_blocking` (interface
     // I13, see `ScorecardOracle`), so this is the one point in the reconcile
     // that yields to the runtime for the archive.
-    let observed = match keys.scorecard.as_ref() {
-        Some(key) => scorecard(key.clone()).await,
-        None => None,
+    //
+    // WHICH HANDLE, FIRST — D2 §3.9's Restore paragraph, §3.10. A legacy object
+    // takes the oracle it has always taken; a destination-backed one takes the
+    // EVIDENCE destination's own read-only handle, and never the controller's
+    // global one: that handle holds a different principal over a different
+    // bucket, and an answer from it would read as "no scorecard" rather than
+    // "wrong bucket" (grounding G2).
+    //
+    // THE EVIDENCE DESTINATION AND NOT THE SOURCE ONE. The scorecard was
+    // written under `evidenceWrite` of the evidence destination; reading it
+    // back from the source destination's bucket is the two-destination version
+    // of the same defect.
+    let evidence_from = backup::evidence_source_for(
+        restore.spec.evidence_destination_ref.as_ref(),
+        client,
+        &namespace,
+        now,
+    )
+    .await
+    .map_err(RestoreError::Api)?;
+    let observed = match (keys.scorecard.as_ref(), &evidence_from) {
+        (None, _) => None,
+        (Some(key), backup::EvidenceSource::GlobalHandle) => scorecard(key.clone()).await,
+        (Some(key), backup::EvidenceSource::Destination(store)) => {
+            // THE SAME `observe_scorecard`, ON A DIFFERENT HANDLE. One reader
+            // of a scorecard, one JSON-pointer extraction; a second one for
+            // destination-backed runs would be a second answer to "what does
+            // this document say".
+            let handle = Arc::clone(store);
+            let key = key.clone();
+            tokio::task::spawn_blocking(move || observe_scorecard(&handle, &key))
+                .await
+                .ok()
+                .flatten()
+        }
+        // NOTHING WAS READ AND NOTHING IS GUESSED: no `outcome`, no
+        // `objectives`, no `measured` block copied out of a document nobody
+        // fetched.
+        (Some(_), backup::EvidenceSource::NotAttempted { .. }) => None,
     };
     let topics = topic_mapping(restore);
     // GUARD **G-TS**, erratum **E10(c)**'s controller half: scanned by NAME
@@ -4275,7 +4311,7 @@ async fn reconcile_restore_inner(
             .as_ref()
             .and_then(|o| o.scorecard_sha256.as_deref()),
     ) {
-        let result = verify(EvidenceRef {
+        let reference = EvidenceRef {
             // PLAT-19.1: trust is resolved PER NAMESPACE, and this is
             // `metadata.namespace` read off the object being reconciled —
             // never a name the subject supplied.
@@ -4284,8 +4320,24 @@ async fn reconcile_restore_inner(
             payload_sha256: digest.to_string(),
             sidecar_key: sidecar_key.to_string(),
             payload_type: logweir_verify::PAYLOAD_TYPE_SCORECARD,
-        })
-        .await;
+        };
+        let result = match &evidence_from {
+            backup::EvidenceSource::GlobalHandle => verify(reference).await,
+            // THE SAME VERIFIER, ON THE EVIDENCE DESTINATION'S HANDLE — D2
+            // §3.9's "no second verification path".
+            backup::EvidenceSource::Destination(store) => {
+                crate::verification::verify_oracle(Some(Arc::clone(store)), client.clone())(
+                    reference,
+                )
+                .await
+            }
+            backup::EvidenceSource::NotAttempted { detail } => {
+                crate::verification::VerificationResult::not_attempted(
+                    reference.payload_type,
+                    detail.clone(),
+                )
+            }
+        };
         let current = restore
             .status
             .as_ref()
