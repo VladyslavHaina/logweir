@@ -51,6 +51,33 @@ pub fn check_selector() -> String {
     )
 }
 
+/// The selector that finds a `Backup`'s OWN per-run topic discovery Jobs
+/// (PLAT-09.2).
+///
+/// # Why they are a second listing and not a second label on the first
+///
+/// A run's discovery deliberately does not wear
+/// [`super::job::LABEL_COMPONENT`]`=`[`super::job::COMPONENT_CHECK`]: nothing
+/// admits it ([`admit`] is never called for it — D1 §7.2 defines no admission
+/// for work an operator already scheduled), so wearing that label would spend
+/// the interactive pool without ever being bounded by it, and a browser click
+/// would queue behind a nightly schedule. What it SHOULD spend is the
+/// per-connection ceiling, which exists to bound simultaneous connections to
+/// one broker — and that is a different question from "how many checks is this
+/// installation running".
+///
+/// A Kubernetes label selector ANDs its terms and cannot express "either key",
+/// so the two populations are two listings. [`check_jobs`] deliberately still
+/// makes exactly one — see [`run_discovery_jobs`].
+#[must_use]
+pub fn run_discovery_selector() -> String {
+    format!(
+        "{}={}",
+        crate::controllers::backup_selection::LABEL_PURPOSE,
+        crate::controllers::backup_selection::PURPOSE_TOPIC_DISCOVERY
+    )
+}
+
 /// Whether a check Job is still occupying a slot.
 ///
 /// The INVERSE of [`crate::controllers::backup::job_finished`], and it calls
@@ -87,6 +114,30 @@ pub fn count(jobs: &[Job], namespace: &str, connection_uid: Option<&str>) -> Act
     let mut counts = ActiveCounts::default();
     for job in jobs.iter().filter(|j| is_active(j)) {
         let labels = job.labels();
+        // A `Backup`'S OWN DISCOVERY SPENDS THE CONNECTION AND NOTHING ELSE.
+        // It is not an interactive check: nothing admits it, so counting it
+        // against `namespace`/`total` would let a nightly schedule queue a
+        // browser click without ever being queued itself. The ceiling it
+        // genuinely belongs to is the per-connection one, which bounds
+        // simultaneous dials at one broker — and eight dynamic schedules
+        // firing at 02:00 against one `KafkaCluster` is exactly what that
+        // ceiling is for. See `run_discovery_selector`.
+        if labels
+            .get(crate::controllers::backup_selection::LABEL_PURPOSE)
+            .map(String::as_str)
+            == Some(crate::controllers::backup_selection::PURPOSE_TOPIC_DISCOVERY)
+        {
+            if let Some(uid) = connection_uid {
+                if labels
+                    .get(super::job::LABEL_CHECK_CONNECTION_UID)
+                    .map(String::as_str)
+                    == Some(uid)
+                {
+                    counts.per_connection += 1;
+                }
+            }
+            continue;
+        }
         // `CheckPlanKind` has no `parse` — the closed-vocabulary macro is for
         // `CheckCode`/`CheckId` — so the label is matched against `ALL`'s own
         // spellings. A label this build does not recognise is `None`, which
@@ -193,6 +244,29 @@ pub async fn check_jobs(client: &kube::Client) -> Result<Vec<Job>, kube::Error> 
     let jobs: Api<Job> = Api::all(client.clone());
     let list = jobs
         .list(&ListParams::default().labels(&check_selector()))
+        .await?;
+    Ok(list.items)
+}
+
+/// Every per-run topic discovery Job in the installation, active or not —
+/// [`run_discovery_selector`]'s population.
+///
+/// **A SECOND LISTING, AND A SEPARATE FUNCTION ON PURPOSE.** [`check_jobs`]
+/// makes exactly one request and `check_framework`'s
+/// `the_active_count_lists_by_the_component_label_and_nothing_else` asserts
+/// that it does; a label selector cannot express "either key", so folding the
+/// two populations into one call is not available. A caller that wants the
+/// per-connection ceiling to see a `Backup`'s own discoveries concatenates the
+/// two lists before calling [`count`], which already attributes each population
+/// correctly.
+///
+/// # Errors
+///
+/// [`kube::Error`] from the `list`.
+pub async fn run_discovery_jobs(client: &kube::Client) -> Result<Vec<Job>, kube::Error> {
+    let jobs: Api<Job> = Api::all(client.clone());
+    let list = jobs
+        .list(&ListParams::default().labels(&run_discovery_selector()))
         .await?;
     Ok(list.items)
 }

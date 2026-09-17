@@ -1142,7 +1142,7 @@ spec:
                 nullable: true
                 type: string
               phase:
-                description: 'Where the run is: `Pending`, `Running`, `Succeeded`, `Failed`, `Refused`. A free-form string rather than an enum, because Task 17 owns the phase vocabulary and no agreement test in this plan binds it.'
+                description: 'Where the run is: `Pending`, `Resolving`, `Running`, `Succeeded`, `Failed`, `Refused`. `Resolving` is dynamic topic selection only — the run''s own discovery Job is deciding which topics it covers, and no runner Job exists yet. A free-form string rather than an enum, because Task 17 owns the phase vocabulary and no agreement test in this plan binds it; every terminal predicate treats an unrecognised phase as active, which is what makes adding one safe.'
                 nullable: true
                 type: string
               progress:

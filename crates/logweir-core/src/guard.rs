@@ -109,6 +109,61 @@ pub fn reject_glob_metacharacters(entries: &[String]) -> Result<(), String> {
     Ok(())
 }
 
+/// The longest name a Kafka broker accepts for a topic.
+///
+/// 249 and not 255: the broker reserves the remainder for the `-<partition>`
+/// suffix it appends when it names the topic's log directory on disk.
+pub const MAX_TOPIC_NAME_CHARS: usize = 249;
+
+/// Whether `name` is a name a Kafka broker would accept —
+/// `^[a-zA-Z0-9._-]{1,249}$`, the pattern
+/// `weirkeeper::crds::selection::TOPIC_NAME_PATTERN` puts on every CRD field
+/// that holds one.
+///
+/// # Why this is a second rail beside [`reject_glob_metacharacters`]
+///
+/// The two answer different questions. The glob rail asks "would the engine's
+/// selector read this as a PATTERN", and its six characters are the ones that
+/// silently widen one named entry into a set. This asks "is this a name at
+/// all" — and it is the rail that matters for a list produced by something
+/// other than a human typing into a CRD field. A drifted, older or hostile
+/// runner can relay `orders eu`, a 400-character name, or a name carrying a
+/// control character; every one of those passes the glob rail, freezes into an
+/// immutable plan, and then fails opaquely inside the engine instead of being
+/// refused by name.
+///
+/// Written as a character predicate and not a regex on purpose: this crate has
+/// no regex dependency, the grammar is four ASCII classes, and a hand-written
+/// predicate cannot be defeated by a `.` that matches a newline or by a
+/// multiline anchor.
+#[must_use]
+pub fn topic_name_is_kafka_legal(name: &str) -> bool {
+    // ASCII-only by construction: every accepted character is one byte, so a
+    // count of characters and a count of bytes are the same number and the
+    // broker's own limit applies either way.
+    !name.is_empty()
+        && name.len() <= MAX_TOPIC_NAME_CHARS
+        && name
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
+}
+
+/// The list rail: returns the FIRST entry that is not a Kafka-legal topic
+/// name, verbatim.
+///
+/// The same shape as [`reject_glob_metacharacters`] and for the same reason —
+/// the caller owns the wording, and the entry an operator has to go and fix is
+/// what has to come back. Callers that put the entry into a status message
+/// bound and redact it there; this function neither truncates nor quotes.
+pub fn reject_non_kafka_topic_names(entries: &[String]) -> Result<(), String> {
+    for entry in entries {
+        if !topic_name_is_kafka_legal(entry) {
+            return Err(entry.clone());
+        }
+    }
+    Ok(())
+}
+
 /// The five characters a projected password may not contain, and interface
 /// **I11**'s producer half.
 ///
@@ -340,6 +395,70 @@ target:
             scan_forbidden_keys(rendered).unwrap(),
             vec!["target.dry_run".to_string()]
         );
+    }
+
+    /// **A NAME THAT IS NOT A KAFKA NAME IS REFUSED BEFORE IT IS FROZEN** —
+    /// D1 §3.3's "Kafka-legal names `^[a-zA-Z0-9._-]{1,249}$` are re-validated
+    /// before freeze".
+    ///
+    /// The rail exists for the list that does NOT come from a CRD field: a
+    /// dynamic selection takes its names from a runner's stdout, and the glob
+    /// rail does not cover a space, a slash, a control character or a
+    /// 400-character name.
+    ///
+    /// KILLS: accepting a name with a space, a colon, a slash or a newline;
+    /// accepting an empty name; using a byte-count bound that admits 250
+    /// characters, or one that rejects exactly 249.
+    #[test]
+    fn the_kafka_name_predicate_admits_exactly_the_broker_grammar() {
+        for good in [
+            "orders",
+            "orders.v2",
+            "a-b_c",
+            "A1",
+            "_",
+            "-",
+            ".",
+            &"x".repeat(MAX_TOPIC_NAME_CHARS),
+        ] {
+            assert!(
+                topic_name_is_kafka_legal(good),
+                "`{good}` is a Kafka-legal topic name"
+            );
+        }
+        for bad in [
+            "",
+            "orders eu",
+            "orders/eu",
+            "orders:eu",
+            "orders\n",
+            "orders\u{7f}",
+            "ordërs",
+            "orders*",
+            &"x".repeat(MAX_TOPIC_NAME_CHARS + 1),
+        ] {
+            assert!(
+                !topic_name_is_kafka_legal(bad),
+                "`{}` is not a Kafka-legal topic name",
+                bad.escape_debug()
+            );
+        }
+
+        // The list rail reports the FIRST offender verbatim, and a clean
+        // prefix does not shadow a later one.
+        assert_eq!(
+            reject_non_kafka_topic_names(&["orders".into(), "pay ments".into(), "z\n".into()]),
+            Err("pay ments".to_string())
+        );
+        assert_eq!(
+            reject_non_kafka_topic_names(&["orders".into(), "payments".into()]),
+            Ok(())
+        );
+        assert_eq!(reject_non_kafka_topic_names(&[]), Ok(()));
+
+        // The two rails are INDEPENDENT: neither is a superset of the other.
+        assert!(reject_glob_metacharacters(&["orders eu".to_string()]).is_ok());
+        assert!(reject_non_kafka_topic_names(&["orders*".to_string()]).is_err());
     }
 
     /// The shared half of **G-GLOB**, pinned at its own home. Both renderers'

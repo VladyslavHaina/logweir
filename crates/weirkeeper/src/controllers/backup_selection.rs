@@ -358,11 +358,26 @@ pub fn coverage_for(state: VisibilityState, policy: IncompleteDiscovery) -> Opti
 /// `KafkaCluster` as `Discovery` and later as `BackupSource` digests to the
 /// same value, while a changed bootstrap list, a changed principal, a changed
 /// auth mode or a replaced cluster object does not.
+///
+/// # `status.clusterId` IS DELIBERATELY NOT IN HERE
+///
+/// It would look like the obvious thing to pin, and it is the one field that
+/// must not be: `KafkaCluster.status.clusterId` is written **asynchronously by
+/// another controller**, and `controllers::kafka_cluster` clears it to `None`
+/// on every probe pass that reports the cluster unreachable or whose output it
+/// could not read. It therefore flips `Some → None → Some` on ordinary probe
+/// churn, inside the ≤ 300 s a discovery Job runs — so hashing it would refuse
+/// a perfectly good run as `SourceChangedDuringResolution`, with a message
+/// saying the saved connection changed when nothing about it had. D1 §7.2 R1
+/// enumerates the digest's inputs as "clusterUid, bootstrapServers, auth,
+/// credential env, TLS refs", and the observed id is not among them. The
+/// repointed-endpoint case it would have caught is covered by
+/// [`source_unchanged`]'s explicit comparison, which fires only when the
+/// broker-reported id and the observed id are BOTH present and differ.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
 struct SourceFacts {
     cluster_uid: String,
-    observed_cluster_id: Option<String>,
     connection: ConnectionPlan,
 }
 
@@ -378,11 +393,6 @@ pub fn source_digest(
 ) -> Result<String, logweir_core::det_json::DetJsonError> {
     let facts = SourceFacts {
         cluster_uid: cluster.uid().unwrap_or_default(),
-        observed_cluster_id: cluster
-            .status
-            .as_ref()
-            .and_then(|s| s.cluster_id.clone())
-            .filter(|id| !id.is_empty()),
         connection: connection_plan(resolved),
     };
     Ok(logweir_core::ids::sha256_prefixed(
@@ -407,19 +417,46 @@ pub fn connection_plan(resolved: &ResolvedConnection) -> ConnectionPlan {
 // Pure: the plan and the Job
 // ---------------------------------------------------------------------------
 
-/// The runner's own budget for one discovery, in seconds.
+/// The least a runner may be given to list a catalogue, in seconds.
+///
+/// **THIRTY, AND IT IS A REFUSAL AND NOT A CLAMP.** The Job's
+/// `activeDeadlineSeconds` is D1 §7.2 R2's `min(300, spec.deadlineSeconds)`
+/// and [`cjob::DEADLINE_MARGIN_SECONDS`] of that is image pull, scheduling and
+/// container start — so a `Backup` whose own `deadlineSeconds` is 60 leaves the
+/// runner well under a second to connect, authenticate and list. Raising the
+/// Job's deadline to compensate would break R2's ceiling; silently dispatching
+/// a Job that cannot succeed produces `DiscoveryFailed` with nothing naming the
+/// deadline as the cause, which is the failure an operator cannot act on. So
+/// the run is refused up front, naming the field and this number.
+pub const MIN_DISCOVERY_BUDGET_SECONDS: i64 = 30;
+
+/// The smallest `spec.deadlineSeconds` that can fund a discovery at all —
+/// [`MIN_DISCOVERY_BUDGET_SECONDS`] plus the Job's start-up margin.
+pub const MIN_DYNAMIC_DEADLINE_SECONDS: i64 =
+    MIN_DISCOVERY_BUDGET_SECONDS + cjob::DEADLINE_MARGIN_SECONDS;
+
+/// The runner's own budget for one discovery, in seconds — **pure**.
 ///
 /// D1 §7.2 R2 caps the Job's `activeDeadlineSeconds` at
 /// `min(300, spec.deadlineSeconds)`; [`cjob::DEADLINE_MARGIN_SECONDS`] of that
 /// is image pull, scheduling and container start, which the runner cannot bound
 /// and must not be charged for. So the budget written into the PLAN is the
-/// Job's deadline minus that margin, and the plan's contract bound (1..=600) is
-/// the floor.
+/// Job's deadline minus that margin.
+///
+/// `None` when what is left is under [`MIN_DISCOVERY_BUDGET_SECONDS`]: there is
+/// no budget to write and the caller refuses rather than dispatching a Job that
+/// cannot finish.
 #[must_use]
-pub fn discovery_budget(deadline_seconds: i64) -> (i64, u32) {
-    let job_deadline = deadline_seconds.clamp(1, MAX_DISCOVERY_SECONDS);
-    let plan = (job_deadline - cjob::DEADLINE_MARGIN_SECONDS).clamp(1, 600);
-    (job_deadline, u32::try_from(plan).unwrap_or(1))
+pub fn discovery_budget(deadline_seconds: i64) -> Option<(i64, u32)> {
+    let job_deadline = deadline_seconds.min(MAX_DISCOVERY_SECONDS);
+    let plan = job_deadline - cjob::DEADLINE_MARGIN_SECONDS;
+    if plan < MIN_DISCOVERY_BUDGET_SECONDS {
+        return None;
+    }
+    // The check contract bounds `timeoutSeconds` at 1..=600; the ceiling above
+    // already keeps this under 210, and the clamp says so rather than relying
+    // on it.
+    Some((job_deadline, u32::try_from(plan.min(600)).unwrap_or(600)))
 }
 
 /// The `topicInventory` plan one run's discovery runs — **pure**.
@@ -585,6 +622,7 @@ pub struct Observed {
 /// # Errors
 ///
 /// The terminal state D1 §7.2 names, as `(state, message)`:
+/// `DiscoveryResultUnreadable` (R3, a name no Kafka broker would accept),
 /// `DiscoveryIncomplete` (R6, `Refuse`), `SelectionEmpty` (R7),
 /// `SelectionTooLarge` (R8, and for a truncated listing).
 pub fn resolved_selection(
@@ -613,6 +651,28 @@ pub fn resolved_selection(
                         logweir_core::check_contract::TruncationReason::RelayLimit =>
                             "the relay budget",
                     })
+            ),
+        ));
+    }
+
+    // R3: A NAME NO BROKER WOULD ACCEPT IS A RESULT THIS RUN DOES NOT ADOPT.
+    // Every name here came off a runner's stdout, not out of a CRD field the
+    // API server pattern-checked, and the glob rail two functions away covers
+    // six characters — not a space, a slash, a control character or a
+    // 250-character name. `DiscoveryResultUnreadable` and not
+    // `InvalidTopicSelection`, because nothing is wrong with the SELECTION the
+    // operator wrote: the runner's output is what did not verify, and that is
+    // the not-retryable class.
+    if let Err(entry) =
+        logweir_core::guard::reject_non_kafka_topic_names(&observed.classification.resolved)
+    {
+        return Err((
+            TERMINAL_STATE_DISCOVERY_RESULT_UNREADABLE,
+            format!(
+                "the discovery for {backup_name} relayed `{}`, which is not a name a Kafka \
+                 broker accepts (`^[a-zA-Z0-9._-]{{1,249}}$`); a listing carrying a name the \
+                 cluster could not hold is not a listing this run selects from",
+                crate::backup_execution::shown(&redact(&entry))
             ),
         ));
     }
@@ -903,7 +963,12 @@ pub async fn resolve(
     namespace: &str,
     now: DateTime<Utc>,
 ) -> Result<Resolution, BackupError> {
-    match resolve_inner(backup, client, namespace, now).await {
+    // THE NAME OF A FINISHED DISCOVERY JOB THIS PASS OBSERVED, for the TTL on
+    // the refusal path (L6). It stays `None` for a refusal raised before the
+    // Job exists or before it finished, where a TTL patch would be a 404 or
+    // would arm the collector against a pod still holding a relay.
+    let mut finished_job: Option<String> = None;
+    match resolve_inner(backup, client, namespace, now, &mut finished_job).await {
         Ok(Inner::Pending) => Ok(Resolution::Pending),
         Ok(Inner::Resolved(selection)) => Ok(Resolution::Resolved(selection)),
         Err(BackupError::Refused(state, message)) => {
@@ -926,7 +991,18 @@ pub async fn resolve(
             )}});
             let view = crate::controllers::backup::with_status_patch(backup, &carried);
             let patch = refused_status_patch(&view, state, &message, now);
-            write_status(&api, backup, patch).await?;
+            let committed = write_status(&api, backup, patch).await?;
+            // THE SAME ORDERING THE RESOLVED PATH USES, AND FOR THE SAME
+            // REASON. A refused run has reached its conclusion, so the relay on
+            // the discovery pod is no longer needed and the Job may be
+            // collected — but only once the terminal status is ON THE SERVER. A
+            // patch that answered 409 did not land, so the next pass has to
+            // read the relay again and the pod must outlive this one.
+            if committed {
+                if let Some(job_name) = finished_job.as_deref() {
+                    set_discovery_ttl(client, namespace, job_name).await?;
+                }
+            }
             Ok(Resolution::Refused { state })
         }
         Err(other) => Err(other),
@@ -940,6 +1016,7 @@ async fn resolve_inner(
     client: &kube::Client,
     namespace: &str,
     now: DateTime<Utc>,
+    finished_job: &mut Option<String>,
 ) -> Result<Inner, BackupError> {
     let name = backup.name_any();
     let uid = backup.uid().filter(|u| !u.is_empty()).ok_or_else(|| {
@@ -1015,6 +1092,11 @@ async fn resolve_inner(
         return Ok(Inner::Pending);
     }
 
+    // FROM HERE ON A REFUSAL MAY ARM THE JOB'S TTL: the Job has finished, so
+    // the relay is complete and the only reason to keep the pod is a status
+    // that has not landed yet.
+    *finished_job = Some(job_name.clone());
+
     observe(
         backup,
         client,
@@ -1082,7 +1164,30 @@ async fn start(
     now: DateTime<Utc>,
 ) -> Result<Inner, BackupError> {
     let name = backup.name_any();
-    let (job_deadline, plan_timeout) = discovery_budget(backup.spec.deadline_seconds);
+    // M3 / D1 §7.2 R2: REFUSE UP FRONT RATHER THAN DISPATCH A JOB THAT CANNOT
+    // FINISH. `spec.deadlineSeconds` has no `minimum` on the CRD, so a legal
+    // `deadlineSeconds: 60` would otherwise leave the runner under a second to
+    // connect, authenticate and list — and the run would die `DiscoveryFailed`
+    // with nothing naming the deadline as the cause. Raising the Job's own
+    // deadline instead would break R2's `min(300, spec.deadlineSeconds)`.
+    let Some((job_deadline, plan_timeout)) = discovery_budget(backup.spec.deadline_seconds) else {
+        return Err(BackupError::Refused(
+            crate::conditions::TERMINAL_STATE_EXECUTION_SPEC_INVALID,
+            format!(
+                "spec.deadlineSeconds is {} on {name}, which leaves {} second(s) for the topic \
+                 discovery this run needs: the discovery Job's deadline is \
+                 min({MAX_DISCOVERY_SECONDS}, spec.deadlineSeconds) and {} of that is image \
+                 pull, scheduling and container start. A dynamic selection needs at least \
+                 {MIN_DYNAMIC_DEADLINE_SECONDS} seconds ({MIN_DISCOVERY_BUDGET_SECONDS} for the \
+                 runner). Raise spec.deadlineSeconds, or name the topics explicitly",
+                backup.spec.deadline_seconds,
+                (backup.spec.deadline_seconds.min(MAX_DISCOVERY_SECONDS)
+                    - cjob::DEADLINE_MARGIN_SECONDS)
+                    .max(0),
+                cjob::DEADLINE_MARGIN_SECONDS,
+            ),
+        ));
+    };
     let owner = owner_of(backup, uid);
     let document = plan_document(resolved, uid, plan_timeout);
     let bytes = logweir_core::det_json::to_deterministic_json(&document).map_err(|e| {
@@ -1327,7 +1432,17 @@ async fn observe(
     let verdict = visibility(&signals, attestation, now);
 
     let observed = Observed {
-        observed_at: super::kafka_cluster::observed_at(job, pod.as_ref(), now),
+        observed_at: recorded_finish(job, pod.as_ref()).ok_or_else(|| {
+            BackupError::Refused(
+                TERMINAL_STATE_DISCOVERY_RESULT_UNREADABLE,
+                format!(
+                    "the topic discovery Job {job_name} for {name} reports no finish instant — no \
+                     terminated `runner` container, no completionTime and no terminal condition \
+                     timestamp — so there is no observedAt to freeze. A discovery whose \
+                     observation cannot be dated is not one this run may record the provenance of"
+                ),
+            )
+        })?,
         inventory,
         classification,
         visibility: verdict.state,
@@ -1477,6 +1592,34 @@ async fn expectations_for(
     })
 }
 
+/// The instant this discovery ACTUALLY finished, or `None` when the API server
+/// recorded none — **pure**.
+///
+/// # Why this refuses instead of reading a clock
+///
+/// [`super::kafka_cluster::observed_at`] takes three sources in order — the
+/// runner container's own `finishedAt`, the Job's `completionTime`, its
+/// terminal condition's `lastTransitionTime` — and falls back to `now`. That
+/// fallback is right for a `KafkaCluster` probe, whose `observedAt` is a status
+/// field, and wrong here, where the value goes into an **immutable frozen
+/// plan**: a pass that dies between the plan `POST` and the `status.execution`
+/// patch would re-render the document on the next pass with a different
+/// `selection.discovery.observedAt`, therefore a different digest, and
+/// `freeze_execution_inputs` would refuse the run as a terminal
+/// `PlanConfigMapConflict` — on a run that was fine, for no reason but the
+/// passage of time.
+///
+/// The sentinel is how the one implementation above is reused rather than
+/// copied: `observed_at` returns its `now` argument verbatim when it found
+/// nothing, and no Job carries a finish instant at the beginning of the
+/// representable range.
+#[must_use]
+pub fn recorded_finish(job: &Job, pod: Option<&Pod>) -> Option<DateTime<Utc>> {
+    let sentinel = DateTime::<Utc>::MIN_UTC;
+    let found = super::kafka_cluster::observed_at(job, pod, sentinel);
+    (found != sentinel).then_some(found)
+}
+
 /// Patch the finished discovery Job's TTL — **only ever after the freeze's
 /// status write landed**, D1 §7.2 R9 and D-SEAMS **S7**.
 ///
@@ -1497,4 +1640,39 @@ pub async fn set_discovery_ttl(
     check::set_ttl(client, namespace, job_name)
         .await
         .map_err(BackupError::Api)
+}
+
+/// D1 §7.2 R9's last two steps, in order: record `TopicsResolved=True` and then
+/// arm the discovery Job's TTL — **the one call `controllers::backup` makes
+/// after the freeze**.
+///
+/// `backup` is the object AS THE FREEZE LEFT IT (`status.execution` and
+/// `status.selection` applied), because the condition's message quotes the
+/// count the freeze recorded and because the merge patch has to carry the
+/// conditions that object holds.
+///
+/// Returns the patch it sent, so the caller can apply it to its own views —
+/// `{}` when the status already said this, which is not an error.
+///
+/// **The TTL is patched only when the status write landed** (D-SEAMS **S7**):
+/// the write is a `resourceVersion` compare-and-set, a 409 means the object
+/// moved under this pass, and the relay on the discovery pod still has to
+/// outlive the pass that will read the newer object.
+///
+/// # Errors
+///
+/// [`BackupError::Api`] for a transport failure.
+pub async fn record_resolved(
+    backup: &Backup,
+    client: &kube::Client,
+    namespace: &str,
+    job_name: &str,
+    now: DateTime<Utc>,
+) -> Result<Value, BackupError> {
+    let api: Api<Backup> = Api::namespaced(client.clone(), namespace);
+    let patch = resolved_status_patch(backup, now);
+    if write_status(&api, backup, patch.clone()).await? {
+        set_discovery_ttl(client, namespace, job_name).await?;
+    }
+    Ok(patch)
 }

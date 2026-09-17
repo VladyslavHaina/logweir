@@ -268,7 +268,11 @@ pub struct ExecutionIdentity {
 
 /// A `triggeredBy` value, bounded for a condition message. The field is spec
 /// text and not a credential, but it is unbounded.
-fn shown(value: &str) -> String {
+///
+/// `pub(crate)` because the same bound applies to a topic NAME a runner
+/// relayed, which `controllers::backup_selection` puts into a refusal message
+/// — one truncation rule, not two.
+pub(crate) fn shown(value: &str) -> String {
     const LIMIT: usize = 64;
     if value.chars().count() <= LIMIT {
         value.to_string()
@@ -1045,6 +1049,25 @@ pub fn resolve_inputs(
                  metacharacter; topics are a mandatory NAMED allowlist and a pattern is refused \
                  rather than expanded",
                 shown(&entry)
+            ),
+        ));
+    }
+    // D1 §3.3: "Kafka-legal names `^[a-zA-Z0-9._-]{249}$` are re-validated
+    // before freeze". THE SECOND RAIL, AND IT IS NOT THE GLOB RAIL AGAIN: a
+    // space, a slash, a control character or a 250-character name carries no
+    // glob metacharacter, so the check above admits every one of them. The
+    // list that needs this is the one W5 produces from a runner's stdout —
+    // `spec.topics` is pattern-checked by the CRD, and a runner's frames are
+    // not — and a name the broker cannot hold would otherwise be frozen into
+    // an immutable plan and fail opaquely inside the engine.
+    if let Err(entry) = logweir_core::guard::reject_non_kafka_topic_names(&selection.topics) {
+        return Err(ExecutionRefusal::new(
+            crate::conditions::TERMINAL_STATE_INVALID_TOPIC_SELECTION,
+            format!(
+                "the resolved topic selection for {name} names `{}`, which is not a name a Kafka \
+                 broker accepts (`^[a-zA-Z0-9._-]{{1,249}}$`); it is refused rather than frozen \
+                 into a plan the engine would fail on",
+                shown(&logweir_core::check_contract::redact(&entry))
             ),
         ));
     }

@@ -2621,11 +2621,11 @@ async fn reconcile_backup_inner(
         // Both are `?`-propagated, so a failed write leaves the reconcile
         // before the next line.
         if let Some(discovery) = discovery_job.as_deref() {
-            let resolved_patch = backup_selection::resolved_status_patch(&stored, now);
-            patch_status_if_changed(&backups, &stored, &name, resolved_patch.clone()).await?;
+            let resolved_patch =
+                backup_selection::record_resolved(&stored, client, &namespace, discovery, now)
+                    .await?;
             stored = with_status_patch(&stored, &resolved_patch);
             view = with_status_patch(&view, &resolved_patch);
-            backup_selection::set_discovery_ttl(client, &namespace, discovery).await?;
         }
 
         if let Some(annotation) = runner_argv_annotation(backup) {

@@ -351,9 +351,13 @@ pub struct BackupSpec {
 #[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct BackupStatus {
-    /// Where the run is: `Pending`, `Running`, `Succeeded`, `Failed`,
-    /// `Refused`. A free-form string rather than an enum, because Task 17
-    /// owns the phase vocabulary and no agreement test in this plan binds it.
+    /// Where the run is: `Pending`, `Resolving`, `Running`, `Succeeded`,
+    /// `Failed`, `Refused`. `Resolving` is dynamic topic selection only — the
+    /// run's own discovery Job is deciding which topics it covers, and no
+    /// runner Job exists yet. A free-form string rather than an enum, because
+    /// Task 17 owns the phase vocabulary and no agreement test in this plan
+    /// binds it; every terminal predicate treats an unrecognised phase as
+    /// active, which is what makes adding one safe.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
     /// The runner's exit code, lifted from
