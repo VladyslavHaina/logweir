@@ -860,6 +860,22 @@ windowed queries — an absent capability, never a fake stub.
 | `NotAttempted` | could not fetch or no trust material available |
 
 Ordinary restore selection requires `Available` ∧ (`Verified` | `VerifiedHistorical`).
+
+**Merging one point seen in several locations (amended 2026-09-17 at W8's
+integration, review `d3w8` F9).** One `backup_id` seen in two buckets is one
+entry with two `locations[]`. The entry's **availability is the best of its
+locations** — a point is recoverable if any location can serve it — and every
+`locations[]` element carries its own availability, with the degraded ones named
+in `remedy`; hiding a point that bucket A holds because bucket B lost its copy
+would contradict §5.1. The entry's **verification is the worst of its
+locations** — two copies that disagree under signature are a `Conflict`
+(`RecordMismatch`), because the catalog cannot say which copy is the record —
+and the signer key id follows the worse verdict. Both rules are order-independent.
+An entry with no `locations[]` keeps its own single verdict. The view's lifetime is
+`viewExpiresAt = finish + max(3 × intervalSeconds, 3600)` (§5.3's TTL, amended from a
+one-day floor at the same integration so that at most twelve generations coexist at
+the 300 s floor, which the CRD now enforces); a manual-only catalog (`intervalSeconds:
+0`) therefore keeps a view for an hour after each sync.
 Everything else is listed with its exact state and a remedy sentence; nothing is silently hidden
 and nothing unverified is presented as verified evidence.
 

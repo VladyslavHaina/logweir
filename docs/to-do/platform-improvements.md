@@ -141,7 +141,7 @@ Wave 2 resumes every branch in place with the prompts under
 | PLAT-17.1 (stages 1 and 3) | In progress (stages landed) | plat17-api-finish, plat17-api-review | Partial record under PLAT-17.1. Integrated into main as `4b571d1..de0207c`. Remaining for Done: console image and chart with the API's own RBAC (D0 stage 7), transient-check cancellation once PLAT-03/09.1 exist, `POST …/backups` (PLAT-06.2), SSE (PLAT-14.1), a browser journey through the API, and PLAT-17.2. |
 | PLAT-04.2, 05.x, 06.2, 09.2 | Contract decided | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. W1 (the pure cadence engine) landed in main as `6eedc0a..4b54a5c` after review; see the PLAT-04.2 partial record. W3a (the `Backup` run contract: `spec.trigger`, `spec.scheduleRef` with generation and `runPolicySha256`, the selection type with `allUserTopics` requiring `incompleteDiscovery`, `status.selection`, `src/identity.rs`, `src/policy.rs`, the §3.4 vocabulary) landed in `696c81a`/`b334a98` inside `crds-shapes`; a `Backup` naming both `topics` and `allUserTopics` is refused by CEL and, terminally, by admission. W3b (the reconciler consumes the contract; grammar `v2`) landed at `397e37d`; see the PLAT-04.2 partial record. W2, W4, W5, W6, W7, W8 remain. |
 | PLAT-03.x, 08.x, 09.1 | In progress (W1, W2, W3, W4, W5, W6a, W6b, W7, W8 landed) | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. W1 (pure check contract and destination model) and W2 (explicit store options) landed as `c13b0cc..56bd074` after review (ACCEPT after two high and three medium fixes: JSON-form redaction bypass, ambient credentials inheriting the environment). W3 (`logweir_kafka::inventory`: bounded targeted describe, broker count, validate-only `CreateTopics`, error classification where an observed authorization failure makes visibility `limited` and anything unknown is failure, with a real admin-client fault capture because rdkafka 0.36 never invokes `ClientContext::error` for a metadata-only workflow — D2 §4.2 `[VERIFY U5]` corrected) and W5 (`weirkeeper::check`: check Jobs mirroring the execution pod, pod selection by controller owner UID only, framed-stdout relay through the W1 decoder, the full waiting-code table, TTL, plan/chunk/limit modules, the installation policy loader failing closed) landed as `23cec50..b8e62d1` after review (ACCEPT after one high and three medium fixes; 19 mutants killed; the rebase over PLAT-07.1 then routed the inventory client through the reader's `client_config`, removing a drifted copy that could upgrade plaintext to TLS when a CA was present — re-checked ACCEPT; weirkeeper 435, kafka 57). RBAC still owed by W11: `events: list` plus its `manifest_lint` row, the three new kinds' verbs, and a decision on `gc.rs`'s deletes. The reviewers' SEC-PODLOG finding against `controllers::backup::select_job_pod` is closed by `secpodlog` (see the defects table). W6a and W6b (the three Amendment F kinds and the destination sentinel on existing kinds) landed in `46880a3`/`88232f5`/`b334a98` inside `crds-shapes`; W7 (destination resolver, controller, evidence store cache) landed as `27fb924..0b25e95` (see the PLAT-08.1 partial record); W4 (runner `logweir check run`) landed at `537657d` (see the PLAT-03 partial record); W8 (`TopicDiscovery` controller) and W12 (API routes) are in review or in progress. W9, W10, W11, W13, W14 remain. |
-| PLAT-14.x, 15.x, 16.x, 19.1 | In progress (W4 landed) | [D3](decisions/D3-status-catalog-retention-trust.md) | Operation states, protection freshness, rehearsals, durable catalog, retention enforcement boundary, trust lifecycle; fifteen worker tasks. W4 (`d3-notify`: the shared notification module and `logweir notify deliver`) landed after review (ACCEPT after two high fixes); W3 (`d3-catalog-writer`: signed catalog point records, `list_page`, `logweir catalog sync|list`) landed after review (see the PLAT-15.1 partial record); W0 (the five Amendment G kinds, additive run status, `Restore.spec` additions, the `Approval` enum) landed in `496451a`/`88232f5`/`b334a98` inside `crds-shapes`; W1 (trust lifecycle core, `TrustPolicy` controller, `trust export|migrate-roster`, G8) landed as `64fcd38..5fc1a72` (see the PLAT-19.1 partial record); W8 (`RecoveryCatalog` controller) in progress. W2, W5, W6, W7, W9, W10, W11, W12, W13, W14 remain. |
+| PLAT-14.x, 15.x, 16.x, 19.1 | In progress (W0, W1, W3, W4, W8 landed) | [D3](decisions/D3-status-catalog-retention-trust.md) | Operation states, protection freshness, rehearsals, durable catalog, retention enforcement boundary, trust lifecycle; fifteen worker tasks. W4 (`d3-notify`: the shared notification module and `logweir notify deliver`) landed after review (ACCEPT after two high fixes); W3 (`d3-catalog-writer`: signed catalog point records, `list_page`, `logweir catalog sync|list`) landed after review (see the PLAT-15.1 partial record); W0 (the five Amendment G kinds, additive run status, `Restore.spec` additions, the `Approval` enum) landed in `496451a`/`88232f5`/`b334a98` inside `crds-shapes`; W1 (trust lifecycle core, `TrustPolicy` controller, `trust export|migrate-roster`, G8) landed as `64fcd38..5fc1a72` (see the PLAT-19.1 partial record); W8 (`RecoveryCatalog` controller) in progress. W2, W5, W6, W7, W9, W10, W11, W12, W13, W14 remain. |
 
 ### Decision records
 
@@ -1461,6 +1461,62 @@ backfilled by `sync`; no reader of existing evidence changes. Limitations: the
 `execution` block is absent because a Backup Job's argv passes the runner no
 execution identity today; availability, verification state, tombstones,
 retention and disaster import are W8/W9/PLAT-15.2.
+
+**Partial record (2026-09-17) — PLAT-15.1 controller half: the `RecoveryCatalog`
+reconciler and the bounded Kubernetes view (D3 W8) landed; the task stays In
+progress until D2 lands the `catalogSync` plan kind in the runner, W11/W12
+expose the view, and W14 proves a sync live.** Landed in main as `3bcec20` (the
+controller, and a view that expires instead of lying), `857a2f5`/`48d96f4`
+(tests), `d35e6e6`/`4a296b7` (docs) and `16191c8` (review fixes) as the
+tenth controller. Contract (`docs/kubernetes.md` §7d; `catalog_view.rs`): a
+sync is one check Job per slot running D2's check runner with plan kind
+`catalogSync` (D-SEAMS S1 — the kind is D2's to add in `logweir-core`, and a
+local test flips the day it lands); the Job owns its plan ConfigMap and every
+page and index ConfigMap it materialises (`blockOwnerDeletion: false`), so Job
+TTL — `max(3 × intervalSeconds, 3600)`, at most twelve live generations at D3's
+300 s floor, which the CRD now enforces with CEL J3 (`intervalSeconds == 0 ||
+>= 300`, 0 meaning manual only) — is the only collector and the controller holds
+no `delete` verb (RBAC `recoverycatalogs: [list, watch]` + `/status: [patch]`,
+no `get`); the archive is read through the destination's `archiveRead` grant by
+`secretKeyRef` and nothing else; the pod is read only through the Job's owner
+UID (S6); every status write is a resourceVersion-preconditioned merge PATCH
+(S7). The view keeps availability and verification as two axes and materialises
+`selectable = Available ∧ (Verified | VerifiedHistorical)` once; `Unreadable ≠
+Missing`; a `RecordMismatch` is a `Conflict`; a duplicate identity under one
+`backup_id` is two points; an unsupported record major is per entry, never
+fatal; one point seen in several locations is one entry whose `locations[]`
+carry their own availability — the entry's availability is the BEST of them
+with degraded copies named in `remedy`, and its verification the WORST of them
+with the signer key id following the worse verdict (D3 §5.4 amended at this
+integration); `status.signers[].trusted` means accepted, so a `Revoked` key is
+`trusted: false` and `Revoked`/`VerifiedHistorical` points are named in the
+`Synced` message beside `Partial`. A failed sync keeps the previous view; a view
+whose Job has aged out is cleared (`pages`, `indexConfigMap`, `truncated` to
+`null`) on every status-writing path and reported `ViewExpired` without
+claiming the archive changed; `Ready` stays `True` across a sync and
+`SyncInProgress` lives on `Synced`; the fence pointer excludes and never proves.
+Runner-side result grammar the `catalogSync` kind must meet: a `catalog-format=1`
+line first (a higher major refused by name), a byte budget of 5 MB and at most
+`viewLimit` entries, `catalog-signers` capped at 64, `locations[]` capped at 16,
+a repeated `catalog-counts=`/`catalog-cursor=` line an error, the summary lines
+covered by the frame-stream digest, an oversized entry refused into
+`dropped_oversized` and named. Verified at `4a296b7` on main: weirkeeper 687/687
+(`catalog_controller` 70, `crd_shape` 41 with J3 in the shipped CRD), `linkage`
+17, `manifest_lint` 29, `chart_lint` 28, `doc_lint` 12, `crds-check`,
+`chart-check`, `render-install --check`, `check-no-archive-write` (36 055
+weirkeeper lines naming no write or delete), strict clippy and fmt; thirty-nine
+planted mutants killed (sixteen original, twenty-three from the fix round,
+including the review's surviving signature-merge mutant). Independent review
+`claude/d3w8.review.md`: ACCEPT-WITH-FIXES (three high — a plan ConfigMap per
+slot leaked forever, aged-out pages left listed on refusal paths, unbounded
+coexisting generations; four medium; six low) then ACCEPT. Live: none here —
+W14 owes a real sync against MinIO (a catalog larger than the view limit paging
+and saying so; a tampered relay writing no page; an impostor pod never read;
+expiry after the Job is collected). Gaps: `legacyArchive` sources are
+`Ready=False/LegacyArchiveUnsupported`; view ConfigMap names derive from
+`sha256(catalog UID)`; `counts` do not sum to `total` by design (documented).
+Migration: two additive RBAC grants and one additive CEL rule on a kind nothing
+had created yet; no existing object is affected.
 
 ## PLAT-16 — Make retention promises and destination scope accurate
 
