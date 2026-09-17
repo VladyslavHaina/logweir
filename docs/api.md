@@ -43,9 +43,11 @@ kubeconfig carries, which may be cluster-admin: the closed adapter is a
 A domain whose routes do not exist yet has **no route at all** — no stub and no
 `501`. `GET /api/v1/session` reports each one as `false` under `capabilities`,
 so a client learns what is unavailable instead of discovering it from an error.
-Today that is: connection tests, write-only credential input, topic discovery,
-preflight checks, saved destinations, manual backup creation, approval
-submission and operation event streams.
+Today that is: connection tests, manual backup creation, approval submission
+and operation event streams. Saved destinations, topic discovery, preflight
+checks and write-only credential input **do** have routes now (D2 W12); their
+three capability flags are the domain's READ floor, and whether the actor may
+also start or cancel is the role table each grant publishes in `roles`.
 
 ## Running it
 
@@ -115,7 +117,30 @@ anything not listed is `404`.
 | `POST /api/v1/namespaces/{ns}/restores` | Create a `Restore`, preserving the plan bytes exactly. |
 | `GET /api/v1/namespaces/{ns}/approvals[/{name}]` | Approval metadata and status. |
 | `GET /api/v1/namespaces/{ns}/approvals/{name}/packet` | The raw approval document, only through this explicit route. |
-| `GET /api/v1/namespaces/{ns}/operations/{kind}/{name}` | The normalized operation status; `kind` is the closed set `backup\|restore`. |
+| `GET /api/v1/namespaces/{ns}/destinations` | `BackupDestination` rows: the canonical URL, the endpoint, the transport, the addressing and the controller's `Valid` verdict. |
+| `POST /api/v1/namespaces/{ns}/destinations` | Create a destination **under the name in the body**, because every schedule, backup and restore references it by that name. |
+| `GET /api/v1/namespaces/{ns}/destinations/{name}` | One destination, with the four grants as **references** and the last explicit access test. |
+| `POST /api/v1/namespaces/{ns}/destinations/{name}:update-access` | Rotate the four grants and the CA reference under `expectedGeneration`. It cannot name the location or the transport. |
+| `POST /api/v1/namespaces/{ns}/destinations/{name}:test` | Start a `DestinationAccess` `Preflight`; `202` with it. |
+| `POST /api/v1/namespaces/{ns}/destinations:from-legacy` | Derive a destination from a legacy `BackupSchedule` or `Backup`'s `archive.url`, or refuse with `legacy_location_unknown`. |
+| `GET /api/v1/namespaces/{ns}/destinations/{name}/usage` | Schedules and backups labelled for this destination, at most 100 each, with the `basis` stated. |
+| `GET /api/v1/namespaces/{ns}/connections/{name}/topic-discoveries` | One page of discoveries for a connection; `?latest=true` answers `{latestAttempt, lastSuccessful}` instead. |
+| `POST /api/v1/namespaces/{ns}/connections/{name}/topic-discoveries` | Start a bounded inventory: `202`, or `200` with `reused: true` for a fresh identical result. |
+| `GET /api/v1/namespaces/{ns}/topic-discoveries/{id}` | One discovery, with `visibility`, `counts`, `truncated` and a `stale` recomputed per read. |
+| `GET /api/v1/namespaces/{ns}/topic-discoveries/{id}/topics` | One page of the stored inventory: `limit`, `cursor`, `q`, `prefix`, `internal`, `errored`. |
+| `POST /api/v1/namespaces/{ns}/topic-discoveries/{id}:cancel` | Ask an unfinished discovery **of one's own** to stop. |
+| `POST /api/v1/namespaces/{ns}/preflights` | Start a readiness check for a `Backup`, a `Restore` or a destination's grants. |
+| `GET /api/v1/namespaces/{ns}/preflights/{id}` | One result; `?planHash=` is the plan the caller is looking at now. |
+| `GET /api/v1/namespaces/{ns}/preflights/{id}/details` | One page of the check's detail document. |
+| `POST /api/v1/namespaces/{ns}/preflights/{id}:cancel` | Ask an unfinished preflight **of one's own** to stop. |
+| `GET /api/v1/namespaces/{ns}/operations/{kind}/{name}` | The normalized status; `kind` is the closed set `backup\|restore\|discovery\|preflight`. |
+
+`backup` and `restore` answer an `OperationResponse` — a result, evidence
+references and a verification verdict. `discovery` and `preflight` answer a
+`CheckOperationResponse`, which carries **none** of those fields: a transient
+check has no archive result and no signed evidence, and publishing an empty
+`verification` for one would invite a console to render a verdict that can never
+arrive.
 
 `schemas/logweir-api-v1.openapi.json` is the generated contract. `just schema`
 rewrites it and `just schema-check` fails on drift, as does
@@ -125,6 +150,87 @@ the generator in-process.
 There is no cancel and no delete for `Backup` or `Restore`: their external side
 effects and cleanup semantics are not defined yet. Aborting a read cancels only
 that HTTP and Kubernetes read; it never retracts an accepted mutation.
+
+**A transient check is the one thing that can be cancelled.** A discovery and a
+preflight own nothing but a Job, so `:cancel` raises `spec.cancelRequested` from
+`false` to `true` — the single transition the CRD permits — under a
+`resourceVersion` precondition, and the controller verifies the exact owned Job
+and UID before stopping anything. Cancellation deletes no archive byte, no Kafka
+topic, no durable run and no signed evidence. Repeating it is `200` with nothing
+written; cancelling a finished check is `200` with `alreadyTerminal: true`. An
+operator may cancel only the checks **it started**: the comparison is the
+`issuer#subject` recorded on the object when it was created, so two operators
+holding the same role in the same namespace still cannot stop each other's work.
+
+### Saved destinations
+
+`spec.storage` and `spec.transport.security` are immutable — a different
+location or transport is a different destination — so the create route
+evaluates D2 §3.2's rules *before* the object exists and answers `422
+destination_invalid` with one field error per rule broken (`bucket_invalid`,
+`endpoint_not_origin`, `transport_scheme_mismatch`,
+`insecure_http_requires_http_endpoint`, `ca_bundle_requires_tls`,
+`prefix_reserved`, `addressing_unsupported_by_engine`, `grant_mode_fields`).
+**Addressing is never a transport choice** in either direction: path-style and
+virtual-hosted say how a request names the bucket, and only the endpoint's
+scheme has to agree with `transport.security`.
+
+`:update-access` carries `expectedGeneration`; a stale value is `412
+precondition_failed`, and a rotation the API server rejects as invalid is `409
+destination_location_immutable`. A CA bundle on a plaintext destination is `409
+transport_downgrade_forbidden`, because the transport can never be changed and a
+CA means nothing without TLS.
+
+**Write-only credential entry.** A grant may carry a value once, in
+`access.<role>.secret.new`. It becomes a Secret named
+`lwd-<destination>-<role>`, of type `logweir.dev/object-store-credential`,
+labelled `logweir.dev/credential-for`, owned by the destination — and it is
+never read back. This service has no Secret read verb at all; the create
+response's `data` is dropped by the parser before anything can see it, and every
+response, log line and stored projection carries the Secret's **name** and the
+**key names** inside it, both of which are public references. Rotating the value
+inside an existing Secret is an administrator's or a secret manager's job: the
+API has `create` and nothing else.
+
+### Bounded, honest topic inventory
+
+The API reads the immutable `ConfigMap` chunks the controller committed; it
+never opens a broker connection and it never lists `ConfigMap`s — chunk names
+come from the discovery's own status, and the adapter has no list verb for them.
+Every chunk is verified before a row is served: owned by this discovery,
+`immutable: true`, and its annotated digest equal both to the digest the status
+indexes and to the SHA-256 of the bytes. Any mismatch is `409
+result_integrity_failed`, and the page is refused rather than served from bytes
+whose provenance did not hold.
+
+At most eight chunks are read per request, so a sparse `q` returns a short page
+with `scan.complete: false` and a cursor instead of reading the whole result.
+`page.snapshot` is `<uid>@<topicsSha256>`, so a continued page cannot land on a
+different inventory. **A successful list is never called complete**:
+`visibility.state` is `unknown` unless an authorization omission was observed
+(`limited`) or an administrator-governed attestation says otherwise
+(`attestedComplete`).
+
+`stale` is recomputed on every read — freshness expiry, a replaced or edited
+connection, a changed principal — and a failed attempt never hides the last
+successful inventory: `?latest=true` returns both slots separately.
+
+### Readiness that is a result about something
+
+Every preflight carries a `binding`: the plan hash and the digest over the
+objects it resolved. `applicable` and `stale` are recomputed on **every** read
+against the `?planHash=` the caller sends, so editing the plan, choosing another
+target or destination, or letting the result expire all make it inapplicable
+rather than quietly current. The aggregate is advisory: `ready` authorizes
+nothing, execution-time guards remain the authority, and `executionOnly` names
+the checks that can only be answered while the run executes. A blocking check
+that was skipped keeps the aggregate `unknown` — skipping a question is not
+answering it — and a `Completed` check with no recorded aggregate reads
+`unknown`, never `ready`.
+
+An actor bound **only** as Approver reads `Restore` readiness, because that is
+what an approval packet needs, and gets the nonexistent-resource answer for
+anything else.
 
 ## The Kubernetes boundary
 
@@ -386,7 +492,11 @@ Actor identity is exactly `(issuer, sub)`. Group claims and subjects map by
 | action | viewer | operator | approver | administrator |
 |---|:--:|:--:|:--:|:--:|
 | read connections / schedules | ✓ | ✓ | | ✓ |
-| create connection, test, credentials, discovery, preflight, destinations | | ✓ | | ✓ |
+| create connection, test, credentials | | ✓ | | ✓ |
+| read destinations / topic discoveries | ✓ | ✓ | | ✓ |
+| create destination, rotate access, test, adopt a legacy location | | ✓ | | ✓ |
+| start / cancel a discovery or a preflight | | ✓ | | ✓ |
+| read preflights | ✓ | ✓ | restore only | ✓ |
 | create schedule, set suspension | | ✓ | | ✓ |
 | read backups / restores / approvals / operations | ✓ | ✓ | ✓ | ✓ |
 | create manual backup, create restore | | ✓ | | ✓ |
@@ -451,6 +561,13 @@ can reach that do work, so they carry a per-peer limit of 20 requests a minute
 forwarded header: behind one ingress that makes it a global limit, which is the
 correct conservative behaviour for a service whose per-user limits live behind
 authentication.
+
+Starting a transient check is bounded per actor and namespace: six discoveries
+and twenty preflights a minute, `429` with `Retry-After`. The window is **per
+process**, so two console replicas each permit the configured rate; it is a
+politeness bound on how fast one operator can queue check Jobs, not a security
+control. The real ceiling on concurrent checks is the controller's
+`checks.maxActivePerNamespace`, which no API can talk past.
 
 There is no event stream yet: `capabilities.operationEvents` is `false` and no
 path serves one, authenticated or not. The per-actor, per-namespace connection
