@@ -541,6 +541,8 @@ fn every_granted_verb_has_a_caller() {
             "trustrosters" => "TrustRoster",
             // PLAT-19.1, the other direction of the same mapping.
             "trustpolicies" => "TrustPolicy",
+            // PLAT-14.2 (D3 W6).
+            "protectionpolicies" => "ProtectionPolicy",
             other => panic!(
                 "role.yaml grants a verb on `{other}`, which this test cannot map to an \
                  `Api<T>`. Add the mapping — a resource with no type is a grant nobody can \
@@ -750,6 +752,11 @@ fn every_call_site_has_a_grant() {
             // failure on an unmapped type, so a new `Api<T>` cannot reach a
             // release with its grant unchecked.
             "TrustPolicy" => ("logweir.dev", "trustpolicies"),
+            // PLAT-14.2 (D3 W6): `controllers/protection_policy.rs` reaches
+            // its own kind for the `Controller::new` watch and `patch_status`,
+            // and ONE named `RecoveryCatalog` for `get_opt`. Nothing else is
+            // granted and nothing else is called.
+            "ProtectionPolicy" => ("logweir.dev", "protectionpolicies"),
             "Job" => ("batch", "jobs"),
             "ConfigMap" => ("", "configmaps"),
             "Pod" => ("", "pods"),
@@ -914,15 +921,20 @@ fn the_four_cluster_roles_are_exactly_as_specified() {
             v(&["list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         ),
         // D3 W8 (PLAT-15.1): `Controller::new(api, …)` in
-        // `controllers/recovery_catalog.rs`, and NO `get` — that reconciler
-        // never reads a `RecoveryCatalog` by name. A SEPARATE rule for the same
+        // `controllers/recovery_catalog.rs`. A SEPARATE rule for the same
         // reason `backupdestinations` and `topicdiscoveries` have one: folding
         // a ninth kind into the six-kind list would silently widen
         // `logweir-viewer` in a diff that reads as a controller change.
+        //
+        // `get` WAS FOLDED IN BY D3 W6 (PLAT-14.2), not given a second rule on
+        // the same resource: `controllers/protection_policy.rs` `get_opt`s the
+        // ONE catalog a `ProtectionPolicy` names, to read its view's expiry and
+        // its page `ConfigMap` names. Two rules naming `recoverycatalogs` would
+        // invite a later edit to widen one of them with the other unexamined.
         (
             v(&["logweir.dev"]),
             v(&["recoverycatalogs"]),
-            v(&["list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+            v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         ),
         // D2 W9 (PLAT-03.1 / PLAT-03.2): the `Preflight` reconciler's
         // `Controller::new` watch, and nothing else. No `get` — a `Preflight`
@@ -1014,6 +1026,20 @@ fn the_four_cluster_roles_are_exactly_as_specified() {
         (
             v(&["logweir.dev"]),
             v(&["trustpolicies/status"]),
+            v(&["patch"]),
+        ),
+        // PLAT-14.2 (D3 W6) — the `ProtectionPolicy` reconciler's own rows.
+        // `list`/`watch` is `Controller::new`; there is NO `get` on the kind,
+        // because the reconciler never re-reads a policy it was handed by the
+        // watcher, and a granted verb with no caller is critique B M18.
+        (
+            v(&["logweir.dev"]),
+            v(&["protectionpolicies"]),
+            v(&["list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+        ),
+        (
+            v(&["logweir.dev"]),
+            v(&["protectionpolicies/status"]),
             v(&["patch"]),
         ),
     ];

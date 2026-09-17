@@ -7357,6 +7357,7 @@ rules:
   resources:
   - recoverycatalogs
   verbs:
+  - get
   - list
   - watch
 - apiGroups:
@@ -7453,6 +7454,19 @@ rules:
   - logweir.dev
   resources:
   - trustpolicies/status
+  verbs:
+  - patch
+- apiGroups:
+  - logweir.dev
+  resources:
+  - protectionpolicies
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - logweir.dev
+  resources:
+  - protectionpolicies/status
   verbs:
   - patch
 ---

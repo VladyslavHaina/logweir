@@ -6604,11 +6604,12 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["topicdiscoveries"]
     verbs: ["list", "watch"]
-  # D3 W8 (PLAT-15.1): the ninth kind. `list`/`watch` only — the reconciler
-  # never reads a catalog by name. See `config/rbac/role.yaml`.
+  # D3 W8 (PLAT-15.1): the ninth kind, `list`/`watch` for the catalog
+  # reconciler's own watch, plus the `get` D3 W6 needs to read the ONE catalog a
+  # `ProtectionPolicy` names. See `config/rbac/role.yaml`.
   - apiGroups: ["logweir.dev"]
     resources: ["recoverycatalogs"]
-    verbs: ["list", "watch"]
+    verbs: ["get", "list", "watch"]
   # D2 W9 (PLAT-03.1 / PLAT-03.2): the tenth kind, likewise in its own rules.
   # No `get`: nothing calls `Api<Preflight>::get`, and no execution path may
   # look one up (D2 §6.8). See `config/rbac/role.yaml` for the NOTE FOR W11.
@@ -6661,6 +6662,15 @@ rules:
     verbs: ["list", "watch"]
   - apiGroups: ["logweir.dev"]
     resources: ["trustpolicies/status"]
+    verbs: ["patch"]
+  # PLAT-14.2 (D3 W6): the `ProtectionPolicy` reconciler's `Controller::new`
+  # watch and its `Api::patch_status`. No `get` on the kind and no `update`
+  # anywhere. See `config/rbac/role.yaml`.
+  - apiGroups: ["logweir.dev"]
+    resources: ["protectionpolicies"]
+    verbs: ["list", "watch"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["protectionpolicies/status"]
     verbs: ["patch"]
 ---
 # Source: logweir/templates/human-roles.yaml

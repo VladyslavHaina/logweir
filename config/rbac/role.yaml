@@ -183,9 +183,20 @@ rules:
   # CEL-narrowed `syncRequest` patch). **NO `delete` ANYWHERE**: the view is
   # collected by the sync Job's TTL and by ownerReference garbage collection,
   # which is the whole reason the pages are owned by the Job (D3 §5.3).
+  #
+  # `get` WAS ADDED BY D3 W6 (PLAT-14.2), AND IT IS FOLDED INTO THIS RULE
+  # RATHER THAN GIVEN ONE OF ITS OWN. `controllers/protection_policy.rs`
+  # `get_opt`s the ONE `RecoveryCatalog` a `ProtectionPolicy` names in
+  # `spec.protects.catalogRef`, to learn whether the materialised view is still
+  # current and which page `ConfigMap`s carry its entries. One rule per
+  # resource is how every other kind in this file reads, and two rules naming
+  # `recoverycatalogs` would invite a later edit to widen one of them without
+  # the other being looked at. The alternative to this verb is `list` on
+  # `configmaps` cluster-wide — which the ConfigMap rule below refuses by name,
+  # and which is strictly wider than one `get` on one named object of one kind.
   - apiGroups: ["logweir.dev"]
     resources: ["recoverycatalogs"]
-    verbs: ["list", "watch"]
+    verbs: ["get", "list", "watch"]
   # THE TENTH KIND — D2 W9, PLAT-03.1 / PLAT-03.2. `list` and `watch` are
   # `Controller::new(api, …)` in `controllers/preflight.rs`, and that is the
   # whole of it.
@@ -371,4 +382,39 @@ rules:
   # `Api::replace`.
   - apiGroups: ["logweir.dev"]
     resources: ["trustpolicies/status"]
+    verbs: ["patch"]
+  # PLAT-14.2 / decision D3 §3 — THE `ProtectionPolicy` RECONCILER'S OWN ROWS,
+  # AND NOTHING MORE.
+  #
+  # Added here by the D3 wave-2 protection worker for the reason PLAT-19.1's
+  # trust worker recorded above: `manifest_lint.rs`'s
+  # `every_call_site_has_a_grant` is a HARD failure otherwise, and a call with
+  # no grant 403s in production while every route-table test stays green.
+  #
+  # `list` and `watch` are `Controller::new(api, …)` in
+  # `controllers/protection_policy.rs`. NO `get`: the reconciler never re-reads
+  # a policy — the watcher hands it the object and the verdict is computed from
+  # that object plus the runs it names — so a granted `get` would be a verb
+  # with no caller, which is the defect critique B M18 names.
+  #
+  # A SEPARATE RULE AND NOT A TENTH ENTRY IN THE SIX-KINDS LIST, for the reason
+  # every kind since the seventh has had its own: that list is shared verbatim
+  # with `viewer_role.yaml`, and whether an ordinary viewer may read a
+  # protection objective is the wave-4 RBAC worker's decision, not this one's.
+  - apiGroups: ["logweir.dev"]
+    resources: ["protectionpolicies"]
+    verbs: ["list", "watch"]
+  # The status subresource, `patch` and nothing else — seam S7. Every write is
+  # `Api::patch_status` with a `Patch::Merge` whose BODY carries
+  # `metadata.resourceVersion` as the API server's update precondition; there
+  # is no `replace_status` anywhere in this crate, so a literal `update` here
+  # would be a granted verb with no caller.
+  #
+  # AND THIS IS THE ONLY CUSTOM-RESOURCE STATUS THE PROTECTION PATH WRITES.
+  # D3 §3.4: "notification failure never rewrites a backup result". This
+  # controller holds `patch` on `protectionpolicies/status` and on nothing
+  # else new; `backups` stays `get/list/watch` + `create`, which is what the
+  # schedule path already had.
+  - apiGroups: ["logweir.dev"]
+    resources: ["protectionpolicies/status"]
     verbs: ["patch"]
