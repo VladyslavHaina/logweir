@@ -92,6 +92,7 @@ pub mod preflight;
 pub mod protection_policy;
 pub mod recovery_catalog;
 pub mod restore;
+pub mod schedule_history;
 pub mod topic_discovery;
 pub mod trust_policy;
 pub mod trust_roster;

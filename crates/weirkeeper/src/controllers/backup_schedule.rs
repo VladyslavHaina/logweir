@@ -78,8 +78,7 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Duration, Utc};
 use futures::StreamExt as _;
-use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
-use kube::api::{ListParams, ObjectMeta, Patch, PatchParams, PostParams};
+use kube::api::{ObjectMeta, Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
 use kube::runtime::{watcher, Controller};
 use kube::{Api, Resource, ResourceExt};
@@ -1561,14 +1560,21 @@ pub fn scheduled_run(schedule: &BackupSchedule, schedule_uid: &str, plan: &RunPl
                 .into_iter()
                 .collect(),
             ),
-            owner_references: Some(vec![OwnerReference {
-                api_version: BackupSchedule::api_version(&()).to_string(),
-                kind: BackupSchedule::kind(&()).to_string(),
-                name: schedule_name.clone(),
-                uid: schedule_uid.to_string(),
-                controller: Some(true),
-                block_owner_deletion: Some(true),
-            }]),
+            // NO ownerReference TO THE SCHEDULE — PLAT-05.2, D1 §6.1. It used
+            // to be `controller: true, blockOwnerDeletion: true`, which made
+            // every run a dependent: `kubectl delete backupschedule nightly`
+            // handed the run, its immutable plan ConfigMap and its Job to the
+            // garbage collector, and `docs/kubernetes.md` had to tell operators
+            // to keep dead schedules forever. Membership is now
+            // `spec.scheduleRef {name, uid}` plus the labels below
+            // ([`crate::identity::is_run_of_schedule`]), which survives the
+            // owner being deleted.
+            //
+            // THE RUN STILL OWNS ITS OWN CHILDREN. `backup.rs` puts a
+            // controller reference to the `Backup` on the plan ConfigMap and
+            // `job.rs` on the Job, so deleting a RUN still collects what that
+            // run made. What is decoupled is the schedule from its history, not
+            // a run from its plan.
             ..ObjectMeta::default()
         },
         spec: BackupSpec {
@@ -1897,6 +1903,7 @@ pub fn status_patch_with_retention(
     now: DateTime<Utc>,
 ) -> serde_json::Value {
     let work = Reconcile {
+        history: None,
         created: created.map(str::to_string),
         already_existed: false,
         fired_due: None,
@@ -2133,22 +2140,49 @@ fn status_patch_with_refs(
             message: Some(decision.message()),
         },
     )];
-    // THE `HistoryRetained` SLOT, AND IT IS A DOCUMENTED NO-OP HERE.
+    // THE `HistoryRetained` SLOT — PLAT-05.2 (W4), D1 §6.1/§6.3.
     //
     // A JSON merge patch REPLACES `status.conditions`, so a builder that emits
     // only the conditions it owns DELETES every condition somebody else wrote —
     // the same class of defect `verification::carry_verified` fixes on Backups.
-    // PLAT-05.2 (W4) owns `HistoryRetained` and the `schedule_history::observe`
-    // call that computes it; until that lands this reconciler must not invent
-    // one (claiming `Retained` while it still writes an ownerReference would be
-    // false), and must not drop one either. So it carries forward whatever is
-    // stored, unchanged, and W4 fills the slot by computing the condition here
-    // instead of copying it.
-    if let Some(retained) = current_condition(
+    // W2 left this slot carrying the stored condition forward unchanged, which
+    // was the right no-op while nothing computed it. It is the wrong steady
+    // state: a copied condition outlives the facts it was derived from, so a
+    // schedule whose last legacy run went terminal an hour ago would still read
+    // `ActiveLegacyRunsOwned` until something unrelated moved the status. The
+    // condition is therefore COMPUTED from `status.history` — this pass's block
+    // when it took an inventory, the stored one otherwise — by
+    // [`crate::controllers::schedule_history::history_condition`].
+    //
+    // AND THE STORED CONDITION IS STILL CARRIED WHEN THERE IS NO BLOCK AT ALL.
+    // A schedule the inventory has never reached has no facts to compute from,
+    // and inventing `Retained` for it would be a claim about garbage collection
+    // that nothing observed. The reconciler never reaches that arm — step 1
+    // always inventories when `history` is absent — but the public pure
+    // `status_patch` helpers can, and they must not invent one either.
+    let history = work
+        .history
+        .clone()
+        .or_else(|| schedule.status.as_ref().and_then(|s| s.history.clone()));
+    let stored_retained = current_condition(
         schedule.status.as_ref().and_then(|s| s.conditions.as_ref()),
         crate::conditions::CONDITION_HISTORY_RETAINED,
-    ) {
-        conditions.push(retained.clone());
+    );
+    match history {
+        Some(history) => {
+            conditions.push(crate::controllers::schedule_history::history_condition(
+                &history,
+                stored_retained,
+                schedule.metadata.generation,
+                now,
+            ));
+            status.insert("history".to_string(), json!(history));
+        }
+        None => {
+            if let Some(retained) = stored_retained {
+                conditions.push(retained.clone());
+            }
+        }
     }
     status.insert("conditions".to_string(), json!(conditions));
     json!({ "status": serde_json::Value::Object(status) })
@@ -2246,6 +2280,21 @@ impl std::error::Error for ScheduleError {
 impl From<kube::Error> for ScheduleError {
     fn from(e: kube::Error) -> Self {
         Self::Api(e)
+    }
+}
+
+/// PLAT-05.2's step 1 speaks its own two failures; this is where they rejoin
+/// the scheduler's. `ForeignBackup` keeps its meaning exactly — the reservation
+/// names an object this schedule does not own — so it maps to the variant that
+/// already existed for it rather than to a generic API error.
+impl From<crate::controllers::schedule_history::HistoryError> for ScheduleError {
+    fn from(e: crate::controllers::schedule_history::HistoryError) -> Self {
+        match e {
+            crate::controllers::schedule_history::HistoryError::Api(e) => Self::Api(e),
+            crate::controllers::schedule_history::HistoryError::ForeignBackup(name) => {
+                Self::ForeignBackup(name)
+            }
+        }
     }
 }
 
@@ -2358,6 +2407,7 @@ pub async fn reconcile_schedule_with_archive(
 
     let backups_api: Api<Backup> = Api::namespaced(client.clone(), &namespace);
     let mut work = Reconcile {
+        history: None,
         created: None,
         already_existed: false,
         fired_due: None,
@@ -2387,15 +2437,26 @@ pub async fn reconcile_schedule_with_archive(
     {
         work.pending = PendingRefUpdate::Clear;
     }
-    let observed = refresh_active_runs(
+    // D1 §4.5 step 1 and §6.7 — PLAT-05.2 (W4) REPLACED THE BOOTSTRAP LIST HERE.
+    // `schedule_history::observe` is the whole of step 1: it GETs the ≤ 10
+    // recorded names in steady state, and takes one paginated, `limit`ed,
+    // label-selected inventory when one is due — which also migrates legacy
+    // ownerReferences and produces the `status.history` block the
+    // `HistoryRetained` condition is computed from. The namespace-wide,
+    // unbounded `api.list(&ListParams::default())` this used to fall back to is
+    // gone; it was O(namespace) on every reconcile of any schedule whose
+    // `activeRuns` had not been written yet, including a suspended one.
+    let observed = crate::controllers::schedule_history::observe(
         &backups_api,
         stored,
         &name,
         &uid,
         reservation.as_ref().map(|r| r.name.as_str()),
+        now,
     )
     .await?;
     work.active = observed.active;
+    work.history = Some(observed.history);
 
     // ---- step 2: an accepted reservation whose child does not exist ------
     if let Some(reserved) = reservation.as_ref() {
@@ -2784,6 +2845,10 @@ const MISSED_NAME_UNAVAILABLE: &str = "NameUnavailable";
 /// every one of them writes the same status. Threading nine `let mut`s through
 /// ten early returns is how one of them comes to forget `activeRuns`.
 struct Reconcile {
+    /// What PLAT-05.2's step 1 recorded about this schedule's retained runs,
+    /// and `None` when this builder was reached through the pure `status_patch`
+    /// helpers, which observe nothing.
+    history: Option<crate::crds::backup_schedule::ScheduleHistory>,
     created: Option<String>,
     already_existed: bool,
     fired_due: Option<DateTime<Utc>>,
@@ -3075,107 +3140,6 @@ fn reserved_run(
         },
         due,
     })
-}
-
-/// Everything step 1 observed.
-struct ObservedRuns {
-    active: Vec<ActiveRun>,
-    pending_child: Option<Backup>,
-}
-
-/// D1 §4.5 step 1: refresh the active set.
-///
-/// # Two branches, and why the LIST one has to stay
-///
-/// The steady-state branch `GET`s the ≤ 10 names `status.activeRuns` records
-/// plus the reservation, which is O(active) and independent of how much history
-/// the schedule has. That is only correct once the block EXISTS, and a schedule
-/// reconciled by a controller that predates it has none — so an ABSENT
-/// `activeRuns` falls back to one namespace-wide LIST, exactly what this
-/// reconciler always did, and the block it then writes turns the next reconcile
-/// into the cheap branch. An absent list and an empty list are therefore
-/// different facts, which is why `activeRuns` is `Option<Vec<_>>` and why the
-/// final status always writes it, `[]` included.
-///
-/// **This is PLAT-05.2 (W4)'s seam.** `schedule_history::observe(…)` replaces
-/// the bootstrap LIST with a paginated, label-selected inventory that also
-/// repairs `activeRuns` on a schedule whose status was lost, and re-runs it
-/// every 60 minutes; until it lands the bootstrap below is that inventory's
-/// one-shot form. Nothing about admission correctness depends on either: every
-/// schedule-created run is recorded by a resourceVersion-conditional status
-/// write BEFORE it is created.
-async fn refresh_active_runs(
-    api: &Api<Backup>,
-    status: Option<&crate::crds::backup_schedule::BackupScheduleStatus>,
-    name: &str,
-    uid: &str,
-    pending: Option<&str>,
-) -> Result<ObservedRuns, ScheduleError> {
-    let mut active: Vec<ActiveRun> = Vec::new();
-    let mut pending_child: Option<Backup> = None;
-
-    match status.and_then(|s| s.active_runs.as_ref()) {
-        Some(recorded) => {
-            for entry in recorded.iter().take(MAX_ACTIVE_RUNS) {
-                if let Some(backup) = api.get_opt(&entry.name).await? {
-                    if participates_in_concurrency(&backup, name, uid)
-                        && !backup_is_terminal(&backup)
-                    {
-                        active.push(active_entry(&backup));
-                    }
-                    if Some(entry.name.as_str()) == pending {
-                        pending_child = Some(backup);
-                    }
-                }
-            }
-            if let Some(pending) = pending {
-                if pending_child.is_none() && !recorded.iter().any(|e| e.name == pending) {
-                    if let Some(backup) = api.get_opt(pending).await? {
-                        if !participates_in_concurrency(&backup, name, uid) {
-                            return Err(ScheduleError::ForeignBackup(pending.to_string()));
-                        }
-                        if !backup_is_terminal(&backup) {
-                            active.push(active_entry(&backup));
-                        }
-                        pending_child = Some(backup);
-                    }
-                }
-            }
-        }
-        None => {
-            let listed = api.list(&ListParams::default()).await?;
-            for backup in &listed.items {
-                let this = backup.name_any();
-                let member = participates_in_concurrency(backup, name, uid);
-                if Some(this.as_str()) == pending {
-                    if !member {
-                        return Err(ScheduleError::ForeignBackup(this));
-                    }
-                    pending_child = Some(backup.clone());
-                }
-                if member && !backup_is_terminal(backup) {
-                    active.push(active_entry(backup));
-                }
-            }
-        }
-    }
-    active.sort_by(|a, b| a.name.cmp(&b.name));
-    active.dedup_by(|a, b| a.name == b.name);
-    active.truncate(MAX_ACTIVE_RUNS);
-    Ok(ObservedRuns {
-        active,
-        pending_child,
-    })
-}
-
-/// One active run, as the status records it.
-fn active_entry(backup: &Backup) -> ActiveRun {
-    let (kind, attempt, _) = crate::identity::declared_trigger(backup);
-    ActiveRun {
-        name: backup.name_any(),
-        kind: format!("{kind:?}"),
-        attempt: i32::try_from(attempt).unwrap_or(0),
-    }
 }
 
 /// D1 §4.5 step 6: the attempt chain of one slot, by GET of deterministic

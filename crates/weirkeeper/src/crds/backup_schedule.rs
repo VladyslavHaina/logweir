@@ -683,6 +683,72 @@ pub struct ActiveRun {
     pub attempt: i32,
 }
 
+/// One `Backup` the §6.2 migration could not detach from its schedule, and why
+/// (D1 §6.2 step 4).
+///
+/// NAMED IN THE STATUS AND NOT ONLY IN A CONDITION MESSAGE, because the
+/// `HistoryRetained` condition is recomputed on EVERY reconcile and only an
+/// inventory pass observes a blocked patch. A condition whose message were the
+/// only record would lose its names on the next steady pass and then re-acquire
+/// them an hour later; a reader would see a schedule flap between "blocked, and
+/// here is what" and "blocked, and no idea what".
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct MigrationBlocked {
+    /// The `Backup`'s name.
+    pub name: String,
+    /// Why the patch could not be applied — an HTTP status the API server gave
+    /// (`403`, `422`), or a refusal this controller made for the object's own
+    /// safety.
+    pub reason: String,
+}
+
+/// What the §6.7 inventory found (D1 §4.8 `history`, §6.2, §6.6).
+///
+/// # This block is the whole input to `HistoryRetained`
+///
+/// The condition is a pure function of what is written here, recomputed on
+/// every reconcile rather than copied forward, so a status a human edited and a
+/// status the controller wrote produce the same condition. That is why the
+/// blocked runs and the two legacy counters are FIELDS and not only prose in a
+/// message.
+///
+/// # Three fields D1 §4.8 did not name, each load-bearing
+///
+/// * `runCountCapped` — the inventory follows a bounded number of pages, so
+///   `runCount` on a schedule with more history than that is a FLOOR. The same
+///   honesty [`MissedSlots::count_capped`] applies to the slot enumeration.
+/// * `legacyMigratableRuns` — how many of `legacyOwnedRuns` are terminal and
+///   could therefore be patched now. It is what separates "there is migration
+///   work left, come back on the next pass" from "the only owned runs left are
+///   still running, come back at the ordinary interval", which is D1 §6.2's
+///   "never retried faster than the inventory interval".
+/// * `migrationBlocked` — see [`MigrationBlocked`].
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleHistory {
+    /// How many `Backup`s of this schedule UID the last inventory saw,
+    /// terminal and active alike. A floor when `runCountCapped` is set.
+    pub run_count: i64,
+    /// Whether the inventory stopped at its page cap, so `run_count` and
+    /// `estimated_bytes` are floors rather than totals.
+    pub run_count_capped: bool,
+    /// D1 §6.6's estimate of the etcd bytes this history occupies:
+    /// Σ(serialized `Backup` length + 2048 + 2 × topic name bytes).
+    pub estimated_bytes: i64,
+    /// How many of those runs still carry this schedule's controller
+    /// ownerReference, so deleting the schedule would still collect them.
+    pub legacy_owned_runs: i64,
+    /// How many of `legacy_owned_runs` are terminal, and therefore migratable
+    /// on the next pass.
+    pub legacy_migratable_runs: i64,
+    /// The runs whose migration PATCH was refused, newest first, at most ten.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub migration_blocked: Option<Vec<MigrationBlocked>>,
+    /// When the inventory last ran.
+    pub inventoried_at: Time,
+}
+
 /// `BackupSchedule.status`.
 #[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -752,6 +818,13 @@ pub struct BackupScheduleStatus {
     /// [`RetentionReport`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retention_report: Option<RetentionReport>,
+    /// What the PLAT-05.2 inventory last found: how much history this schedule
+    /// has, and how much of it is still owned by the schedule object (D1 §6).
+    ///
+    /// An ABSENT block means the inventory has never run, which is what makes
+    /// the first reconcile after an upgrade take one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<ScheduleHistory>,
     /// `Ready`, and whatever else the controller reports.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Vec<Condition>>,

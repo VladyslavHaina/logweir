@@ -306,6 +306,64 @@ spec:
                   type: object
                 nullable: true
                 type: array
+              history:
+                description: |-
+                  What the PLAT-05.2 inventory last found: how much history this schedule has, and how much of it is still owned by the schedule object (D1 §6).
+
+                  An ABSENT block means the inventory has never run, which is what makes the first reconcile after an upgrade take one.
+                nullable: true
+                properties:
+                  estimatedBytes:
+                    description: 'D1 §6.6''s estimate of the etcd bytes this history occupies: Σ(serialized `Backup` length + 2048 + 2 × topic name bytes).'
+                    format: int64
+                    type: integer
+                  inventoriedAt:
+                    description: When the inventory last ran.
+                    format: date-time
+                    type: string
+                  legacyMigratableRuns:
+                    description: How many of `legacy_owned_runs` are terminal, and therefore migratable on the next pass.
+                    format: int64
+                    type: integer
+                  legacyOwnedRuns:
+                    description: How many of those runs still carry this schedule's controller ownerReference, so deleting the schedule would still collect them.
+                    format: int64
+                    type: integer
+                  migrationBlocked:
+                    description: The runs whose migration PATCH was refused, newest first, at most ten.
+                    items:
+                      description: |-
+                        One `Backup` the §6.2 migration could not detach from its schedule, and why (D1 §6.2 step 4).
+
+                        NAMED IN THE STATUS AND NOT ONLY IN A CONDITION MESSAGE, because the `HistoryRetained` condition is recomputed on EVERY reconcile and only an inventory pass observes a blocked patch. A condition whose message were the only record would lose its names on the next steady pass and then re-acquire them an hour later; a reader would see a schedule flap between "blocked, and here is what" and "blocked, and no idea what".
+                      properties:
+                        name:
+                          description: The `Backup`'s name.
+                          type: string
+                        reason:
+                          description: Why the patch could not be applied — an HTTP status the API server gave (`403`, `422`), or a refusal this controller made for the object's own safety.
+                          type: string
+                      required:
+                      - name
+                      - reason
+                      type: object
+                    nullable: true
+                    type: array
+                  runCount:
+                    description: How many `Backup`s of this schedule UID the last inventory saw, terminal and active alike. A floor when `runCountCapped` is set.
+                    format: int64
+                    type: integer
+                  runCountCapped:
+                    description: Whether the inventory stopped at its page cap, so `run_count` and `estimated_bytes` are floors rather than totals.
+                    type: boolean
+                required:
+                - estimatedBytes
+                - inventoriedAt
+                - legacyMigratableRuns
+                - legacyOwnedRuns
+                - runCount
+                - runCountCapped
+                type: object
               lastFireTime:
                 description: When this schedule last created a `Backup`.
                 format: date-time
