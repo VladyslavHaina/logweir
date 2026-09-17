@@ -8047,3 +8047,226 @@ async fn an_identity_is_never_taken_from_a_client_supplied_field() {
          spec.trigger.kind: {refusal:?}"
     );
 }
+
+/// **THE TWO RULES THAT USED TO BE COMPENSATIONS, THROUGH THE RECONCILER** —
+/// a slot that is not a date, and a legacy ownerReference for another schedule.
+///
+/// Both now live in `identity.rs` (D1 §3.1 rules 1 and 3) and are guarded there
+/// by `tests/run_identity.rs`. These two rows exist because the rows that LOOK
+/// like they cover them do not: `a_spec_that_states_no_runnable_identity_…`
+/// leaves `metadata.name` at `logweir-backup-nightly-20261109-031700` while
+/// changing `scheduleRef.name` or `spec.slot`, so rule 1 refuses on the
+/// composed name before either rule is reached. Here the name **composes**, so
+/// the only thing that can refuse is the rule under test — and the refusal is
+/// asserted where an operator meets it, on the object, with nothing created.
+///
+/// KILLS: disabling the calendar round-trip in `identity::valid_slot`;
+/// dropping the name equality from `identity::legacy_owner_uid`.
+#[tokio::test]
+async fn a_month_thirteen_slot_and_a_foreign_legacy_owner_are_refused_before_any_post() {
+    // (1) A slot that is fifteen digits and not a date. The name composes from
+    // it, so rule 1 is satisfied and only the calendar check can refuse.
+    const BAD_SLOT: &str = "20261309-031700";
+    const BAD_NAME: &str = "logweir-backup-nightly-20261309-031700";
+    assert_eq!(
+        weirkeeper::slot::scheduled_backup_name("nightly", BAD_SLOT).expect("it composes"),
+        BAD_NAME,
+        "the premise: this object's name IS the name its fields compose"
+    );
+    let mut v: Value = serde_json::to_value(d1_scheduled_backup()).expect("JSON");
+    v["metadata"]["name"] = serde_json::json!(BAD_NAME);
+    v["spec"]["slot"] = serde_json::json!(BAD_SLOT);
+    let month_thirteen: Backup = serde_json::from_value(v).expect("a Backup");
+
+    let mut routes = create_routes(201, existing_plan_config_map(UID));
+    routes.push(Route {
+        method: "GET",
+        path_suffix: "/jobs/logweir-backup-nightly-20261309-031700",
+        status: 404,
+        body: not_found_body("jobs.batch", BAD_NAME),
+    });
+    routes.push(Route {
+        method: "PATCH",
+        path_suffix: "/backups/logweir-backup-nightly-20261309-031700/status",
+        status: 200,
+        body: backup_json(),
+    });
+    let (terminal, bodies) = reconcile_with(&month_thirteen, routes).await;
+    assert_eq!(
+        terminal.as_deref(),
+        Some(TERMINAL_STATE_SCHEDULED_IDENTITY_MISMATCH),
+        "a slot naming a thirteenth month is not an instant, so there is no archive prefix to \
+         run under: {:?}",
+        calls(&bodies)
+    );
+    assert!(
+        !bodies.iter().any(|r| r.method == "POST"),
+        "nothing is created: {:?}",
+        calls(&bodies)
+    );
+
+    // (2) A legacy object — `scheduleRef {name}` with no uid — whose controller
+    // ownerReference names `hourly` while the run claims `nightly`. The name
+    // composes from `nightly`, so again only the rule under test can refuse.
+    let mut v: Value = serde_json::from_str(&backup_json()).expect("JSON");
+    v["spec"]["slot"] = serde_json::json!("20261109-031700");
+    v["spec"]["triggeredBy"] = serde_json::json!("schedule");
+    v["spec"]["scheduleRef"] = serde_json::json!({ "name": "nightly" });
+    v["metadata"]["ownerReferences"] = serde_json::json!([{
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "BackupSchedule",
+        "name": "hourly",
+        "uid": "9a8b7c6d-0000-4000-8000-0000000000ff",
+        "controller": true,
+        "blockOwnerDeletion": true,
+    }]);
+    let foreign_owner: Backup = serde_json::from_value(v).expect("a Backup");
+    assert_eq!(
+        foreign_owner.metadata.name.as_deref(),
+        Some(NAME),
+        "the premise: the object is named for `nightly`, the schedule it claims"
+    );
+
+    let (terminal, bodies) = reconcile_with(
+        &foreign_owner,
+        create_routes(201, existing_plan_config_map(UID)),
+    )
+    .await;
+    assert_eq!(
+        terminal.as_deref(),
+        Some(TERMINAL_STATE_SCHEDULED_IDENTITY_MISMATCH),
+        "an ownerReference to `hourly` must not become `nightly`'s archive prefix: {:?}",
+        calls(&bodies)
+    );
+    assert!(
+        !bodies.iter().any(|r| r.method == "POST"),
+        "nothing is created: {:?}",
+        calls(&bodies)
+    );
+
+    // The same object with the owner renamed runs, and under THAT owner's UID —
+    // which is the whole reason the name has to match.
+    let mut v: Value = serde_json::to_value(&foreign_owner).expect("JSON");
+    v["metadata"]["ownerReferences"][0]["name"] = serde_json::json!("nightly");
+    let matching: Backup = serde_json::from_value(v).expect("a Backup");
+    let (terminal, bodies) = reconcile_with(
+        &matching,
+        routes_with_schedule(
+            200,
+            backup_schedule_json("9a8b7c6d-0000-4000-8000-0000000000ff"),
+        ),
+    )
+    .await;
+    assert_eq!(terminal, None, "it runs: {:?}", calls(&bodies));
+    assert_eq!(
+        posted_snapshot(&bodies)["execution"]["id"],
+        weirkeeper::slot::backup_id_for("9a8b7c6d-0000-4000-8000-0000000000ff", "20261109-031700"),
+        "the legacy identity IS the owner's UID"
+    );
+}
+
+/// **A FROZEN RUN EXECUTES THE SELECTION IT WAS ADMITTED WITH, AND NEVER
+/// RESOLVES A SECOND ONE** — D1 §12's `a_frozen_dynamic_backup_never_reruns_discovery`,
+/// in the strongest form this build can state it.
+///
+/// # What makes this row real today
+///
+/// This build resolves no discovery, so a dynamic run cannot be frozen through
+/// the reconciler. What CAN be built is the state such a run leaves behind: a
+/// `v2` plan whose frozen `topics` and `selection` are **not** what a fresh
+/// resolution would produce — here `AllUserTopics` coverage over a list the
+/// spec does not name — plus the `status.execution` a freeze records. A
+/// Job-recreate pass over that state is exactly the pass W5's discovery would
+/// sit in, and the assertions are the ones that matter whether the second
+/// resolution would come from a discovery Job or from `spec.topics`: the Job is
+/// re-created **from the stored plan**, there is no `PlanConfigMapConflict`, and
+/// nothing resolves a selection again.
+///
+/// Without the gate, `desired` is built from `spec` (or, after W5, from a fresh
+/// discovery), the stored `topics`/`selection` no longer match it, and
+/// `verify_frozen_config_map` refuses the run terminally — on an archive that
+/// may be half written, for no reason but the passage of time.
+///
+/// KILLS: removing the `status.execution` gate from the W5 call site;
+/// resolving the selection before the gate; building `desired` from `spec`
+/// when a plan exists.
+#[tokio::test]
+async fn a_frozen_dynamic_backup_never_reruns_discovery() {
+    // A plan frozen for a selection the spec does not state: the resolved list
+    // is `audit`, not the spec's `orders`/`payments`, and the coverage is the
+    // dynamic one. Only a pass that READS this plan can agree with it.
+    let b = backup();
+    let mut inputs = desired_for(&b).inputs;
+    inputs.topics = vec!["audit".to_string()];
+    inputs.selection = Some(weirkeeper::backup_execution::SelectionInputs {
+        mode: SelectionMode::AllUserTopics,
+        coverage: Coverage::VisibleUserTopicsOnly,
+        resolved_topic_count: 1,
+        resolved_topic_bytes: 5,
+        exclude: None,
+        incomplete_discovery: Some(
+            weirkeeper::crds::selection::IncompleteDiscovery::BackUpVisibleTopics,
+        ),
+        discovery: None,
+    });
+    let frozen = FrozenInputs::freeze(inputs).expect("it freezes");
+    assert_ne!(
+        frozen.sha256,
+        desired_for(&b).sha256,
+        "the premise: the stored plan is NOT what a fresh resolution produces"
+    );
+
+    let existing = config_map_around(&frozen.canonical);
+    // …and the Backup as the freeze left it: status.execution recording THAT
+    // plan's digest, phase Running, its Job since collected.
+    let recorded = with_status_patch(&b, &execution_status_patch(&frozen));
+    let recorded = with_status_patch(
+        &recorded,
+        &running_status_patch(&recorded, NAME, utc(2026, 11, 9, 3, 17)),
+    );
+
+    let mut routes = create_routes(409, existing.to_string());
+    for route in &mut routes {
+        if route.method == "GET" && route.path_suffix.ends_with("-plan") {
+            route.status = 200;
+            route.body = existing.to_string();
+        }
+    }
+    let (terminal, bodies) = reconcile_with(&recorded, routes).await;
+
+    assert_eq!(
+        terminal,
+        None,
+        "a frozen run continues from the plan it was admitted with: {:?}",
+        calls(&bodies)
+    );
+    let job = posted_job(&bodies).expect("the Job is re-created");
+    assert_eq!(
+        job["metadata"]["annotations"][INPUTS_SHA256_ANNOTATION], frozen.sha256,
+        "and it is built from the STORED inputs, not from a fresh resolution"
+    );
+    assert!(
+        !rewrote_a_config_map(&bodies),
+        "the plan is read and verified, never re-rendered: {:?}",
+        calls(&bodies)
+    );
+
+    // Nothing resolved a selection a second time: no discovery Job, and the
+    // only Job POSTed is the runner's.
+    assert!(
+        !bodies.iter().any(|r| {
+            r.method == "POST" && path(&r.uri).ends_with("/jobs") && r.body.contains("lwd-")
+        }),
+        "no discovery Job is created for a run whose selection is already frozen: {:?}",
+        calls(&bodies)
+    );
+    assert_eq!(
+        bodies
+            .iter()
+            .filter(|r| r.method == "POST" && path(&r.uri).ends_with("/jobs"))
+            .count(),
+        1,
+        "exactly one Job, the runner's: {:?}",
+        calls(&bodies)
+    );
+}

@@ -665,3 +665,133 @@ fn the_identity_terminal_states_are_in_the_one_closed_list() {
          question and gets the same partial answer"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Rule 1, the other half: the slot is an INSTANT, and the legacy owner
+// reference has to name the schedule the run claims
+// ---------------------------------------------------------------------------
+
+/// **A SLOT THAT IS FIFTEEN DIGITS AND NOT A DATE IS REFUSED**, even when
+/// `metadata.name` composes from it perfectly.
+///
+/// The shape check — fifteen bytes, digits, a hyphen at 8 — admits
+/// `20261309-031700` (month 13), `20260230-000000` (30 February) and
+/// `20260915-256100` (hour 25). Each of those composes a name that rule 1
+/// accepts, so rule 1 does NOT catch them: the object is internally consistent
+/// and simply names an instant that never occurs. A slot is half of the archive
+/// prefix, so such a run takes a prefix no schedule can ever mint and no later
+/// run of that slot can collide with to reveal the mistake.
+///
+/// KILLS: replacing the `chrono` round-trip with a shape test; dropping the
+/// `format(...) == slot` comparison, which is what rejects the fields
+/// `parse_from_str` silently normalises.
+#[test]
+fn a_slot_that_is_not_a_calendar_instant_is_refused_even_when_the_name_composes() {
+    for bad in [
+        "20261309-031700", // month 13
+        "20260230-000000", // 30 February
+        "20260915-256100", // hour 25, minute 61
+        "00000000-000000", // month 0, day 0
+    ] {
+        let mut v = scheduled_json();
+        v["spec"]["slot"] = json!(bad);
+        v["metadata"]["name"] = json!(format!("logweir-backup-nightly-{bad}"));
+
+        // The premise: rule 1 is satisfied, so this case is ONLY about the date.
+        assert_eq!(
+            weirkeeper::slot::scheduled_backup_name("nightly", bad).expect("it composes"),
+            v["metadata"]["name"].as_str().expect("a name"),
+            "{bad}: the fixture's name composes, so a refusal here is the calendar check and \
+             not rule 1"
+        );
+
+        match identity_of(&v) {
+            Err(IdentityError::ScheduledIdentityMismatch { detail }) => assert!(
+                detail.contains(bad) && detail.contains("UTC instant"),
+                "{bad}: the refusal names the slot and says what is wrong with it: {detail}"
+            ),
+            other => panic!("{bad}: a slot that is not a date has no identity: {other:?}"),
+        }
+    }
+
+    // And the real instants around them still resolve.
+    for good in ["20280229-000000", "20260915-235959", "20261231-000000"] {
+        let mut v = scheduled_json();
+        v["spec"]["slot"] = json!(good);
+        v["metadata"]["name"] = json!(format!("logweir-backup-nightly-{good}"));
+        assert_eq!(
+            identity_of(&v)
+                .expect("a real instant resolves")
+                .slot
+                .as_deref(),
+            Some(good),
+            "{good} is a real instant (2028 is a leap year, 2026 is not) and must not be refused"
+        );
+    }
+}
+
+/// **A LEGACY OWNER REFERENCE SUPPLIES THE UID ONLY WHEN IT NAMES THE SCHEDULE
+/// `spec.scheduleRef` NAMES.**
+///
+/// The legacy identity IS the owner's UID. An object whose `spec.scheduleRef`
+/// says `nightly` while its controller ownerReference says `hourly` would, if
+/// the name were not part of the match, execute under `hourly`'s archive prefix
+/// — a run filed under a schedule that never asked for it, with two schedules'
+/// history mixed in one bucket. Rule 1 cannot catch it: the name composes from
+/// `scheduleRef.name`, which is the one this object states.
+///
+/// KILLS: matching the ownerReference on controller + kind + apiVersion alone;
+/// checking the name in a separate `any()` that could be satisfied by a
+/// different owner than the one the UID came from.
+#[test]
+fn a_legacy_owner_reference_for_another_schedule_supplies_no_identity() {
+    let other_uid = "9a8b7c6d-0000-4000-8000-0000000000ff";
+    let mut v = scheduled_json();
+    v["spec"]["scheduleRef"] = json!({ "name": "nightly" });
+    v["metadata"]["ownerReferences"] = json!([{
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "BackupSchedule",
+        "name": "hourly",
+        "uid": other_uid,
+        "controller": true,
+        "blockOwnerDeletion": true,
+    }]);
+
+    // The premise: the NAME composes, so rule 1 does not fire first.
+    assert_eq!(
+        weirkeeper::slot::scheduled_backup_name("nightly", SLOT).expect("it composes"),
+        v["metadata"]["name"].as_str().expect("a name"),
+        "the fixture is named for `nightly`, the schedule it claims"
+    );
+
+    match identity_of(&v) {
+        Err(IdentityError::ScheduledIdentityMismatch { detail }) => assert!(
+            detail.contains("nightly"),
+            "the refusal names the schedule whose reference is missing: {detail}"
+        ),
+        other => panic!(
+            "an ownerReference to `hourly` must not become `nightly`'s archive prefix: {other:?}"
+        ),
+    }
+
+    // The same object with the owner renamed resolves, and to that owner's UID.
+    let mut matching = v.clone();
+    matching["metadata"]["ownerReferences"][0]["name"] = json!("nightly");
+    let id = identity_of(&matching).expect("the owner now names the schedule");
+    assert_eq!(
+        id.schedule.expect("a schedule").uid,
+        other_uid,
+        "and the identity is that owner's UID, which is exactly why the name has to match"
+    );
+
+    // Membership asks the same question the same way.
+    assert!(
+        !identity::is_run_of_schedule(&backup(&v), "nightly", other_uid),
+        "a run owned by `hourly` is not a run of `nightly`, whatever UID is quoted"
+    );
+    assert!(identity::is_run_of_schedule(
+        &backup(&matching),
+        "nightly",
+        other_uid
+    ));
+}
