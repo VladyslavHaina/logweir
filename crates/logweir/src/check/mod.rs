@@ -345,6 +345,30 @@ pub const LONG_RUN_RULE: &str = "long-base64-or-hex-run";
 /// COULD carry one — every message, remedy and fact — still goes through the
 /// whole-string `redact`.
 ///
+/// # It does NOT cap, and that is the difference from [`redact`]
+///
+/// [`redact`] ends with a 512-CHARACTER truncation, which is right for a
+/// `message` (a sentence, bounded by `MESSAGE_MAX_CHARS`) and wrong for a
+/// value. `details_stream` applies this per LINE, and a line is JSON: cutting
+/// one at 512 characters emits an unparseable line into the `details` stream,
+/// which D2 §6.7 documents as JSON lines and the controller stores as such.
+/// Reviewer probe **R7** found it with an 888-character S3 key of short
+/// `/`-separated segments — no run reaches 40 characters, so nothing is
+/// redacted, and the line came back cut mid-key.
+///
+/// So the two bounds are applied where they belong and nowhere else:
+///
+/// * a MESSAGE is capped by `CheckOutcome::with_message` / `with_remedy`,
+///   which already call [`redact`];
+/// * a detail SAMPLE is capped as a VALUE by
+///   [`crate::check::kinds::readiness::detail`], which truncates the string
+///   and lets `serde_json` re-serialise it — so the JSON stays JSON;
+/// * the `details` STREAM is capped in bytes by
+///   `kinds::restore::details_stream`, which drops WHOLE lines and says it
+///   did.
+///
+/// [`redact`]: logweir_core::check_contract::redact
+///
 /// # Panics
 /// Never in practice: only if [`LONG_RUN_RULE`] names no rule, which
 /// `the_long_run_rule_is_the_only_one_applied_per_segment` fails on first.
@@ -370,13 +394,11 @@ pub fn redact_path(value: &str) -> String {
         long.len()
     );
     let whole = apply_rules(value, &shape);
-    logweir_core::check_contract::cap(
-        &whole
-            .split('/')
-            .map(|segment| apply_rules(segment, &long))
-            .collect::<Vec<_>>()
-            .join("/"),
-    )
+    whole
+        .split('/')
+        .map(|segment| apply_rules(segment, &long))
+        .collect::<Vec<_>>()
+        .join("/")
 }
 
 /// What one plan kind produced.

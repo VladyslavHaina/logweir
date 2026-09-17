@@ -159,13 +159,38 @@ pub fn detail(names: &[String]) -> serde_json::Value {
         "sample": names
             .iter()
             .take(DETAIL_SAMPLE)
-            .map(|n| crate::check::redact_path(n))
+            .map(|n| sample_value(n))
             .collect::<Vec<_>>(),
     })
 }
 
 /// How many names a bounded `detail` carries.
 pub const DETAIL_SAMPLE: usize = 10;
+
+/// How long one sampled name may be.
+///
+/// TWO HUNDRED AND FIFTY-SIX characters. A Kafka topic name is at most 249, so
+/// no topic is ever cut; an S3 object key may be 1,024 bytes, and ten of those
+/// would be a ten-kilobyte `detail` inside a record D2 §6.4 sizes at about
+/// 1.2 KiB. The cap is on the VALUE and the value is then re-serialised by
+/// `serde_json`, so the JSON stays parseable — which is the whole difference
+/// from capping the rendered line (reviewer finding **R-F3**).
+pub const DETAIL_VALUE_MAX_CHARS: usize = 256;
+
+/// One sampled name: redacted as a key path, then truncated as a VALUE.
+///
+/// The ellipsis says the name was cut, so a reader does not take a prefix for
+/// a whole key.
+#[must_use]
+fn sample_value(name: &str) -> String {
+    let redacted = crate::check::redact_path(name);
+    if redacted.chars().count() <= DETAIL_VALUE_MAX_CHARS {
+        return redacted;
+    }
+    let mut out: String = redacted.chars().take(DETAIL_VALUE_MAX_CHARS - 1).collect();
+    out.push('…');
+    out
+}
 
 /// Run one `operationReadiness`.
 #[must_use]
