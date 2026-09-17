@@ -980,6 +980,85 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
         );
     }
 
+    /// A keyring with TWO keys, where the one that signed is not the first.
+    ///
+    /// Every other fixture here pins exactly one key, which makes "the usage is
+    /// judged on the key that VERIFIED" unobservable: with a single entry, the
+    /// verifying key and `keys[0]` are the same object and a confused deputy
+    /// reading `keys[0]` behaves identically. These two rows are the ones that
+    /// tell them apart.
+    fn signed_by_second_of_two(
+        first_usages: Vec<KeyUsage>,
+        signer_usages: Vec<KeyUsage>,
+    ) -> Signed {
+        let document = document("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000", 1);
+        let bystander = SigningKey::generate_ed25519();
+        let signer = SigningKey::generate_ed25519();
+        let sidecar = serde_json::to_vec(
+            &sign_detached(
+                &signer,
+                wire::PAYLOAD_TYPE_STANDING_AUTHORIZATION,
+                &document,
+            )
+            .expect("sign"),
+        )
+        .expect("the sidecar serialises");
+        Signed {
+            document,
+            sidecar,
+            // ORDER MATTERS: the bystander is first, the signer second.
+            keys: keyring(vec![(&bystander, first_usages), (&signer, signer_usages)]),
+        }
+    }
+
+    /// **N1, half one.** `keys[0]` may not authorise; the key that actually
+    /// signed may. The run is ADMITTED, because the usage that matters is the
+    /// verifying key's.
+    ///
+    /// A confused deputy judging `keys[0]` refuses this — a perfectly good
+    /// rehearsal blocked by a key that had nothing to do with it, which is the
+    /// availability half of the same bug.
+    #[test]
+    fn the_usage_judged_is_the_verifying_keys_and_not_the_first_in_the_keyring() {
+        let signed = signed_by_second_of_two(
+            vec![KeyUsage::EvidenceSigning],
+            vec![KeyUsage::GovernedApproval],
+        );
+        verify(&signed, Some("uid-1")).expect(
+            "the key that SIGNED carries GovernedApproval; a wrong-usage bystander earlier in \
+             the keyring is not what authorises anything",
+        );
+    }
+
+    /// **N1, half two, and it is the one with teeth.** `keys[0]` may authorise
+    /// and the key that actually signed may not.
+    ///
+    /// A confused deputy judging `keys[0]` ADMITS this: a document signed by
+    /// the installation's own evidence key is accepted because some other,
+    /// unrelated key in the keyring is allowed to approve rehearsals. That is
+    /// precisely the key-usage separation D3 §7.3 exists to enforce, defeated
+    /// by list order.
+    #[test]
+    fn a_wrong_usage_signer_is_refused_even_when_another_keyring_entry_may_authorize() {
+        let signed = signed_by_second_of_two(
+            vec![KeyUsage::GovernedApproval],
+            vec![KeyUsage::EvidenceSigning],
+        );
+        let error = verify(&signed, Some("uid-1"))
+            .expect_err("the key that signed may not authorise, whatever else the keyring holds");
+        assert_eq!(error.exit_code(), crate::exit::ExitCode::GuardRefused);
+        let rendered = error.to_string();
+        assert!(rendered.contains("KeyUsageMismatch"), "{rendered}");
+        assert!(
+            rendered.contains("EvidenceSigning"),
+            "the refusal names the usages of the key that SIGNED, not another entry's: {rendered}"
+        );
+        assert!(
+            !rendered.contains("does not verify"),
+            "the signature is genuine; this is a usage fault: {rendered}"
+        );
+    }
+
     #[test]
     fn an_empty_keyring_anchors_in_nothing_and_is_refused() {
         let signed = signed_authorization();
