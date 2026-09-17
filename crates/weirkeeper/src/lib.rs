@@ -153,6 +153,7 @@ pub mod protection;
 /// inside. `controllers::rehearsal_schedule` is the thin half.
 pub mod rehearsal;
 pub mod retention;
+pub mod retention_plan;
 pub mod slot;
 pub mod testing;
 pub mod verification;

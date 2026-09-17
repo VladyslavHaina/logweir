@@ -1932,6 +1932,32 @@ dependencies = [
 ]
 
 [[package]]
+name = "logweir-reaper"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "futures",
+ "logweir-core",
+ "object_store",
+ "serde",
+ "serde_json",
+ "thiserror 1.0.69",
+ "tokio",
+]
+
+[[package]]
+name = "logweir-retention"
+version = "0.1.0"
+dependencies = [
+ "chrono",
+ "logweir-core",
+ "logweir-reaper",
+ "logweir-store",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "logweir-store"
 version = "0.1.0"
 dependencies = [

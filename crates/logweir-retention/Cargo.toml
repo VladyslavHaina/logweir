@@ -1,0 +1,37 @@
+[package]
+name = "logweir-retention"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# THE SEPARATE BINARY, AND NOT A `logweir` SUBCOMMAND (decision D3 §6.5, and
+# D-SEAMS S1's third recorded exception).
+#
+# S1 says there is ONE check runner and that `logweir check run` is it. This is
+# an exception with a reason that is not convenience: deletion linkage must not
+# be reachable from the everyday binary. A `logweir retention run` subcommand
+# would put `logweir-reaper` — and therefore an object-store delete — into the
+# same executable an operator runs to take a backup, verify a receipt or print a
+# scorecard, and `scripts/check-no-archive-write.sh` check 3 would have nothing
+# left to prove.
+#
+# It is the ONLY crate permitted to link `logweir-reaper`, which that gate
+# asserts from `cargo metadata`.
+[[bin]]
+name = "logweir-retention"
+path = "src/main.rs"
+
+[dependencies]
+# THE DELETER. This edge is the one the dependency walk expects to find, and
+# the only one.
+logweir-reaper = { path = "../logweir-reaper" }
+# The pure layer: `StorageUrl`, `DestinationLocation`, `sha256_prefixed`.
+logweir-core = { path = "../logweir-core" }
+# The create-only put under `logweir/` that the enforcement record and the
+# per-point tombstones need. `Store` cannot delete — that is the whole reason
+# the deleting lives in `logweir-reaper` and not here.
+logweir-store = { path = "../logweir-store" }
+chrono.workspace = true
+serde.workspace = true
+serde_json.workspace = true

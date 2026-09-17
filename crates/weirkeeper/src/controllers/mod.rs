@@ -99,6 +99,7 @@ pub mod recovery_catalog;
 /// verbatim out of the immutable `Approval` that transports them.
 pub mod rehearsal_schedule;
 pub mod restore;
+pub mod retention_policy;
 pub mod schedule_history;
 pub mod topic_discovery;
 pub mod trust_policy;

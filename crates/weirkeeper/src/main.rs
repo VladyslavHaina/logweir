@@ -452,14 +452,28 @@ fn run() -> ExitCode {
         // makes one line up). `tests/linkage.rs`'s controller count moved in
         // this same commit.
         //
-        // **ORDERING NOTE FOR THE INTEGRATOR.** D3 §14 sequences W9's
-        // `RetentionPolicy` as the thirteenth and this one as the FOURTEENTH.
-        // W9 had not merged when this branch was cut, so on this branch the
-        // count is thirteen and this is the thirteenth line; when W9 lands,
-        // this becomes the fourteenth and `tests/linkage.rs`'s number moves
-        // with it. The line itself does not change.
+        // **ORDERING NOTE, SETTLED AT W9's INTEGRATION.** D3 §14 sequences
+        // W9's `RetentionPolicy` as the thirteenth and this one as the
+        // fourteenth; the two landed the other way round, so this line is the
+        // THIRTEENTH and W9's below is the fourteenth. Nothing depends on the
+        // order — each reconciler watches its own kind and shares no state
+        // with the other — so the ordinals are a fact about the registration
+        // vector and not about the design. The line itself never changed.
         controllers.push(Box::pin(
             weirkeeper::controllers::rehearsal_schedule::controller(client.clone()),
+        ));
+        // D3 W9 pushes the FOURTEENTH — the `RetentionPolicy` reconciler that
+        // reports what WOULD be removed from one destination and, only when an
+        // administrator has both selected `Enforce` and approved the current
+        // plan digest, creates one Job that removes it. It takes the runner
+        // image (it creates a Job, running `logweir-retention` rather than
+        // `logweir`) and NO archive handle: this process neither reads nor
+        // deletes an object, and `scripts/check-no-archive-write.sh` proves the
+        // deleting crate is unreachable from here. `tests/linkage.rs`'s
+        // `"controllers":14` moved in this same commit (D3 W7's
+        // `rehearsal_schedule` took it to thirteen).
+        controllers.push(Box::pin(
+            weirkeeper::controllers::retention_policy::controller(client.clone(), runner.clone()),
         ));
 
         let registered = controllers.len();

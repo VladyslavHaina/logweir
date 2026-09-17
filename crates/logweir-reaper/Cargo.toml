@@ -1,0 +1,43 @@
+[package]
+name = "logweir-reaper"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+
+# THE ONE CRATE IN THIS WORKSPACE ALLOWED TO NAME AN OBJECT-STORE DELETE
+# (ADR 0008 Amendment H, decision D3 §6.5).
+#
+# It exists so that "Logweir can delete" is a LINK-TIME fact about exactly one
+# binary rather than a claim about a code path. `weirkeeper`, `logweir-store`,
+# `logweir` and `logweir-api` must not reach it, and
+# `scripts/check-no-archive-write.sh`'s check 3 walks `cargo metadata` to prove
+# the reaching set is exactly `{logweir-retention}`. Adding a dependency edge
+# from any other crate fails that gate; that is the mutant it exists to kill.
+#
+# It links NO Kubernetes client, NO signer and NO Kafka. It takes a plan
+# document, a credential-scoped handle and a clock, and it deletes exactly the
+# keys the plan names — or it refuses before it deletes anything.
+[dependencies]
+# The pure layer: `StorageUrl`, `sha256_prefixed`, `to_deterministic_json`.
+logweir-core = { path = "../logweir-core" }
+# Global Constraint 9: the same crate, version and feature set the store crate
+# and the engine use, so a bucket they can read this can delete from.
+object_store.workspace = true
+# The one runtime per handle — the same arrangement `logweir-store::Store` has,
+# and for the same reason: `block_on` from a thread already driving a runtime
+# panics.
+tokio.workspace = true
+# `StreamExt` over `ObjectStore::list`, for the leftover-segment sweep.
+futures.workspace = true
+# The plan's `evaluated_at` and the record's timestamps.
+chrono.workspace = true
+# The plan document and the enforcement record.
+serde.workspace = true
+serde_json.workspace = true
+# `DeleteError`'s derive.
+thiserror.workspace = true
+
+[dev-dependencies]
+# The fake clock's instants and the fixture plans.
+chrono.workspace = true

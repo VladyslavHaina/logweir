@@ -1882,6 +1882,9 @@ pub fn status_patch_with_retention(
 ) -> serde_json::Value {
     let work = Reconcile {
         history: None,
+        // A rendered status patch is not a reconcile: it evaluates nothing, so
+        // there is no handle whose location could disagree with anything.
+        controller_archive_url: None,
         created: created.map(str::to_string),
         already_existed: false,
         fired_due: None,
@@ -2351,6 +2354,35 @@ pub async fn reconcile_schedule_with_archive(
     archive: Option<&Arc<Store>>,
     now: DateTime<Utc>,
 ) -> Result<ScheduleOutcome, ScheduleError> {
+    // THE HANDLE'S OWN LOCATION, read here and compared in `finish` — D3 §6.3
+    // and defect RET-WRONGBUCKET. `main` built `archive` from exactly this
+    // variable; `Store` exposes no accessor for the URL it was built from, so
+    // the one read lives beside the one construction.
+    let configured =
+        crate::retention::configured_archive_url(std::env::var(crate::retention::ARCHIVE_URL_ENV));
+    reconcile_schedule_with_archive_at(schedule, client, archive, configured.as_deref(), now).await
+}
+
+/// [`reconcile_schedule_with_archive`] with the controller's archive LOCATION
+/// passed in rather than read from the environment.
+///
+/// Two entry points and not a fifth parameter on one, for the reason the pair
+/// above records: `reconcile_schedule_with_archive`'s four-argument shape is
+/// Task 19's tested contract and many of its tests name it. This is the same
+/// function with the location threaded through, and it is what the
+/// wrong-bucket rows call so that "the handle is over another destination" is a
+/// property a test can construct without touching process-global state.
+///
+/// # Errors
+///
+/// [`ScheduleError`] for anything that is not a decision.
+pub async fn reconcile_schedule_with_archive_at(
+    schedule: &BackupSchedule,
+    client: &kube::Client,
+    archive: Option<&Arc<Store>>,
+    controller_archive_url: Option<&str>,
+    now: DateTime<Utc>,
+) -> Result<ScheduleOutcome, ScheduleError> {
     let name = schedule.name_any();
     let namespace = schedule
         .namespace()
@@ -2386,6 +2418,7 @@ pub async fn reconcile_schedule_with_archive(
     let backups_api: Api<Backup> = Api::namespaced(client.clone(), &namespace);
     let mut work = Reconcile {
         history: None,
+        controller_archive_url: controller_archive_url.map(str::to_string),
         created: None,
         already_existed: false,
         fired_due: None,
@@ -2827,6 +2860,14 @@ struct Reconcile {
     /// and `None` when this builder was reached through the pure `status_patch`
     /// helpers, which observe nothing.
     history: Option<crate::crds::backup_schedule::ScheduleHistory>,
+    /// The location the controller's ONE archive handle is over —
+    /// `LOGWEIR_ARCHIVE_URL`, as `main` read it. **D3 W9 / RET-WRONGBUCKET.**
+    ///
+    /// Carried here rather than read inside [`finish`] so the decision is a
+    /// pure comparison a test can drive: a decision behind `std::env::var` in
+    /// an `async fn` is reachable from no test at all, which is the same ruling
+    /// `retention::configured_archive_url` already records.
+    controller_archive_url: Option<String>,
     created: Option<String>,
     already_existed: bool,
     fired_due: Option<DateTime<Utc>>,
@@ -3459,6 +3500,39 @@ async fn finish(
     // a runtime from within a runtime*.
     let retention_report = match archive {
         None => None,
+        // THE WRONG-BUCKET ARM (D3 §6.3, defect RET-WRONGBUCKET). The handle
+        // below is the controller's ONE read-only store, built from
+        // `LOGWEIR_ARCHIVE_URL`; the commands this report renders name
+        // `spec.archive.url`. When those are two different locations the
+        // evaluation would list one bucket's manifests and print the other
+        // bucket's `aws s3 rm` lines, which is the defect. It is replaced by a
+        // note and EMPTY set lists — "not evaluated" is a different claim from
+        // "nothing to remove", and the empty lists are what say so.
+        Some(_)
+            if !crate::retention_plan::legacy_report_applies(
+                &schedule.spec.archive.url,
+                work.controller_archive_url.as_deref(),
+            ) =>
+        {
+            warn!(
+                schedule = %name,
+                namespace = %namespace,
+                "the controller's archive handle is over a different location from this \
+                 schedule's archive URL; the retention report is replaced by a note and no \
+                 manifest is listed"
+            );
+            Some(RetentionReport {
+                evaluated_at: now,
+                keep_last: None,
+                keep_days: None,
+                sets_kept: Vec::new(),
+                sets_that_would_be_removed: Vec::new(),
+                aws_cli: Vec::new(),
+                mc_cli: Vec::new(),
+                skipped: Vec::new(),
+                note: Some(crate::retention_plan::LEGACY_DESTINATION_MISMATCH_NOTE.to_string()),
+            })
+        }
         Some(store) => {
             let store = Arc::clone(store);
             let archive_url = schedule.spec.archive.url.clone();
