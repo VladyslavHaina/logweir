@@ -172,6 +172,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `validate.js` | one set of checks and **one vocabulary of field paths**, so a disagreement from either server lands beside the field it is about. |
 | `workflow.js` | the state machines: named transitions, and a transition error for a move a state does not accept. |
 | `render.js` | DOM helpers. Sets text, never `innerHTML`. |
+| `select.js` | **the saved-cluster selector and the words a connection probe may be described with**. Identity (`{uid, name}`) resolution, the freshness judgement, the searchable control. Shared by the clusters page, the schedule form and both wizard sides -- see *Choosing a saved connection*. |
 | `plan.js` | the restore plan document, its sha256 and the two minted names. Refuses a non-secure context at module load. |
 | `lifecycle.js` | what lives and dies with one route (reads, listeners) and what deliberately does not: the in-memory drafts, the mutation records and the idempotent create. |
 | `pages/restore-wizard.js` | the recovery-point selector, the six wizard steps over the point somebody chose, the plan bytes, and the ONE guided submit that creates the Restore and opens what it needs next. |
@@ -188,6 +189,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `tests/contract.spec.js` | the decoders against `schemas/logweir-api-v1.openapi.json` itself: every console fixture is an instance of the published schema, and every decoder requires exactly what the schema requires. |
 | `tests/client.spec.js` | the mode probe, the two modes' reads and writes, the idempotency key, the field-error translation and the plan round trip -- driven through the real transport with the one platform call stubbed. |
 | `tests/workflow.spec.js` | the named transitions, the transition errors and the wizard's six steps as a machine. |
+| `tests/selector.spec.js` | the saved-cluster selector: identity, rename, delete-and-recreate, freshness, the two contract v1 references, and the same rules in both client modes. |
 | `tests/preview-server.js` | a development tool, never a test: serves this directory over the fixtures under `tests/fixtures/preview/`. See *Previewing with fixtures*. |
 
 **The design system** lives in `style.css` and nowhere else. It is written from
@@ -225,7 +227,7 @@ published over HTTP.
 
 ## Two modes, one page
 
-The same twenty files are served two ways, and **they decide which one they are
+The same twenty-one files are served two ways, and **they decide which one they are
 looking at exactly once**.
 
 **Legacy mode** is what ships today and what every section above describes:
@@ -288,7 +290,7 @@ the adapter records what it cannot supply on every object it projects, under
 
 | kind | absent in console mode |
 |---|---|
-| `KafkaCluster` | `status.conditions` (the reachability observation is projected; the condition list is not exposed) |
+| `KafkaCluster` | `status.conditions` (the reachability observation is projected; the condition list is not exposed); `spec.auth.secretRef.passwordKey` and `spec.auth.tlsCa` (connection contract v1's two references, which `ConnectionAuthView` does not carry) |
 | `BackupSchedule` | the per-manifest `status.retentionReport.skipped` entries (the API reports their **count**) |
 | `Backup` | `status.manifestSha256`, `status.jobRef` |
 | `Restore` | `status.integrity`, `status.jobRef` |
@@ -312,6 +314,14 @@ absences:
 The `TrustRoster` has **no product route at all**: it is cluster-scoped and
 admin-only, and the `#/keys` page says so by name in console mode instead of
 asking for a route that does not exist.
+
+A create that carries either of connection contract v1's two references is
+**refused by name** in console mode rather than sent without them:
+`CreateConnectionRequest` declares `additionalProperties: false` and has no
+field for either, so a request that dropped them would create a connection that
+projects a different entry of the Secret, or that dials without the private CA
+the form named. The refusal is `NoConsoleRoute` and it says which field and what
+to do instead (create it with `kubectl`, or use the legacy direct mode).
 
 ### The wizard machine is a test-time invariant
 
@@ -500,6 +510,121 @@ point's backup set and its covered window, so choosing another point changes the
 bytes, the sha256 on screen and both minted names -- and the reviewed-plan check
 (PLAT-13.2) refuses a submit whose prepared hash is not the hash that was
 displayed. An approval covers the point it was signed over, and nothing else.
+
+## Choosing a saved connection
+
+**A saved `KafkaCluster` is chosen by identity, not by name** (PLAT-07.2).
+`ui/select.js` is the one module that resolves a selection, and the three
+surfaces that need one -- the schedule form's source, the restore wizard's
+target, and the wizard's own statement of which connection a recovery point came
+from -- all read it. Before it, every one of those was a name in free text or a
+name in a `<select>`, and a name is not an identity: delete a connection and
+recreate it under the same name and each of those references silently follows a
+different set of brokers reached with a different credential.
+
+**The selection contract**, which PLAT-10.1 and PLAT-11.2 reuse:
+
+```
+selection = { uid, name }          // what a draft keeps, and what a form posts
+resolveClusterSelection(clusters, selection) -> {
+  state,          // "none" | "selected" | "recreated" | "missing"
+  cluster,        // the object, for "selected"; null otherwise
+  uid, name,      // the object's own identity for "selected"; what was asked
+                  // for otherwise
+  role,           // spec.role of the resolved object -- the capability label
+  pinned,         // a name-only selection that has just been given an identity
+  renamedFrom,    // the older name, when the object has since been renamed
+  recreatedUid,   // the uid now holding that name, for "recreated"
+}
+```
+
+* **`selected`** -- the UID answers. The `name` reported is the object's name
+  **now**, so a request body that spells `sourceRef.name` or
+  `target.clusterRef.name` sends the current one.
+* **A rename is not a refusal.** Same UID, same brokers, same credential; only
+  the label moved. The selection holds and the page says what it used to be
+  called.
+* **`recreated` is a refusal, and it names both UIDs.** The UID is gone and a
+  different object answers to the name. Nothing is selected, the forms refuse
+  before sending, and the wizard renders no plan -- the same rule PLAT-11.1
+  applies to a recovery point, for the same reason.
+* **`missing` is a refusal too**, with its own sentence: the connection is gone
+  and nothing took its name.
+* **A name-only selection still resolves**, and is **pinned** to the UID that
+  answered it. That is what keeps an existing `BackupSchedule.spec.sourceRef`
+  and a draft kept before PLAT-07.2 usable: it works, and from that moment it is
+  an identity.
+* **Every saved connection is offered, whatever its role.** `spec.role` is a
+  label the adopter picks and the controller reports (the CRD says so, and the
+  runner's own guard is the gate), so the selector **shows** the role on every
+  option and filters nothing out. It decides only which option is preselected.
+* **The search filters options and never removes them**, and never hides the
+  selected one. What the form would submit is the same before and after a
+  search.
+* **A namespace change clears the selection.** Drafts are keyed by
+  `{namespace, form}`, and the namespace picker rewrites the hash to
+  `#/<route>?ns=<name>` with no identity in it (PLAT-13.1).
+
+### `status.reachable` is a connection probe, never "ready"
+
+D2 section 9 fixes the noun and this page keeps it: the badge says **connection
+probe** and the word *ready* appears on no probe surface --
+`tests/selector.spec.js` asserts that against every one of them at once, matched
+as a bare word so `already` in a neighbouring sentence is not a false positive.
+
+| what the object says | what the page says |
+|---|---|
+| `reachable: true` | `connection probe: reachable`, with the cluster id the broker gave |
+| `reachable: false` | `connection probe: not reachable`, with `status.reason` |
+| absent, `reason` one of `ConnectionConfigInvalid`, `ConnectionReferenceInvalid`, `ConnectionFieldUnsupported`, `CredentialNotRenderable` | `connection probe: refused`, the controller's own reason **verbatim**, and a one-sentence gloss |
+| absent, `reason: ProbeRunning` | `connection probe: probing` -- and **not** stale: a probe in flight has observed nothing yet |
+| absent, some other `reason` | `connection probe: unknown` |
+| absent, no `reason` at all | `connection probe: never probed` |
+
+**Freshness is its own badge**, because "reachable, and nobody has checked in
+two hours" is two facts and a reader needs both. An observation older than
+**630 seconds** is labelled `stale` beside whatever it says. That budget is
+derived, not picked: `weirkeeper`'s `controllers::kafka_cluster::PROBE_TTL_SECONDS`
+is 300 and `RE_PROBE_SECS` is that plus a 15 s margin, so a healthy controller
+refreshes `status.observedAt` about every 315 s and twice that is the point at
+which a missed refresh is no longer jitter. An observation with **no**
+`observedAt`, or one more than a minute in the **future**, is stale too -- in
+the second case the arithmetic itself cannot be trusted, and an untrustworthy
+number presented as current is the same defect wearing a different hat.
+
+**"Test connection" is a read, and the control says so.** The page has no
+authority to make the controller dial anything: `KafkaCluster.spec` is
+immutable, this page's whole write surface is five creates and one suspend
+patch, and the re-probe cadence is the probe Job's own
+`ttlSecondsAfterFinished`. So the control **re-reads the object** and renders
+the newest observation the controller has recorded since -- which is what
+"test the connection" can honestly mean from a browser holding no execution
+authority. On the list each row's control re-reads **that** cluster and repaints
+**that** row's probe cell, after checking that the name still answers to the
+same UID; on the detail view it re-renders the panel. A read that answers after
+the route has left paints nothing (PLAT-13.1).
+
+### Connection contract v1 in the cluster form
+
+The create form takes contract v1's two references, and neither is a value:
+
+* **`spec.auth.secretRef.passwordKey`** -- which entry of the credential Secret
+  the controller projects. **Blank is left out of the request**, not sent as the
+  default: an object that omits it is byte-for-byte what every release before
+  contract v1 wrote, `spec` is immutable, and the frozen execution inputs record
+  what is there.
+* **`spec.auth.tlsCa`** -- exactly one key of a `Secret` or a `ConfigMap` in the
+  same namespace holding PEM CA certificate(s). One control picks which kind, so
+  the CRD's "exactly one of" rule cannot be broken from here.
+* **The `tls` switch is independent of the auth mode.** Contract v1 supports
+  `scramSha512` over TLS; `plaintext` with `tls: true` is **refused** by the
+  resolver rather than dialled in the clear, and the form says so beside the
+  box before a request is made.
+
+**There is no field a password could be typed into**, `CLUSTER_DRAFT_FIELDS`
+names none, and `FORBIDDEN_CLUSTER_FIELDS` holds the names that are forbidden as
+data so the guard is an exact list rather than a regex that cannot tell
+`passwordKey` -- the name of a data key -- from a credential.
 
 ## Addressing style never enables plaintext transport
 
