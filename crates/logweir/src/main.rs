@@ -88,6 +88,34 @@ fn main() -> std::process::ExitCode {
             max,
             days,
         }),
+        // PLAT-19.1 / decision D3 §7.1 and §7.5. Dispatched here for the
+        // structural reason the comment at the end of this match records: the
+        // arm list is exhaustive with no catch-all, so a `trust` subcommand
+        // added to `cli.rs` and not wired here is a COMPILE error rather than
+        // a runtime stub. `stdin` is a flag rather than a value, and clap's
+        // `required_unless_present`/`conflicts_with` pair makes exactly one of
+        // it and `--from` present — so `from` deciding the input here cannot
+        // silently ignore a `--stdin` the operator also passed.
+        cli::Command::Trust(cli::TrustCmd::Export {
+            policy,
+            stdin: _,
+            from,
+        }) => logweir::trust::run_export(&logweir::trust::ExportArgs {
+            policy,
+            input: from.map_or(logweir::trust::Input::Stdin, logweir::trust::Input::File),
+        }),
+        cli::Command::Trust(cli::TrustCmd::MigrateRoster {
+            name,
+            stdin: _,
+            from,
+            default,
+            namespace,
+        }) => logweir::trust::run_migrate(&logweir::trust::MigrateArgs {
+            name,
+            default,
+            namespaces: namespace,
+            input: from.map_or(logweir::trust::Input::Stdin, logweir::trust::Input::File),
+        }),
         cli::Command::Backup(cli::BackupCmd::Run {
             spec,
             allowed_clusters,

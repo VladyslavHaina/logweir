@@ -67,6 +67,18 @@ pub enum Command {
     /// evidence root.
     #[command(subcommand)]
     Catalog(CatalogCmd),
+    // PLAT-19.1 / decision D3 §7.1 and §7.5. A SUBCOMMAND GROUP, for the
+    // reason `Catalog` and `Notify` record for theirs: `trust show` and the
+    // PLAT-19.2 confirmation-key commands have somewhere to land without
+    // renaming either of these two argv surfaces.
+    //
+    // NEITHER LEAF DIALS KUBERNETES, and neither takes a key. Both read one
+    // object on stdin or from a file and write one document on stdout — see
+    // `crates/logweir/src/trust.rs`'s module header for why `kubectl` is the
+    // credential rather than this binary.
+    /// Back up and migrate the cluster's explicit trust policy.
+    #[command(subcommand)]
+    Trust(TrustCmd),
     // Chain L, Task 15c, interface I14. A PURPOSE-BUILT LIVENESS PROBE, and
     // not `doctor` with fewer flags: `doctor` takes two more MANDATORY paths,
     // cannot be told which auth to use, refuses unless the cluster is in a
@@ -171,6 +183,83 @@ pub enum NotifyCmd {
         /// projected at `/event/event.json`.
         #[arg(long)]
         event: PathBuf,
+    },
+}
+
+/// PLAT-19.1's two operator commands (decision D3 §7.1, §7.5).
+#[derive(Subcommand)]
+pub enum TrustCmd {
+    /// Write a `TrustPolicy`'s PUBLIC material as a reviewable, re-appliable
+    /// document — the documented backup of a cluster's trust.
+    ///
+    /// RBAC grants `delete` on `trustpolicies` to no Logweir role, but a
+    /// cluster-admin is outside the threat boundary (`docs/stability.md` O0),
+    /// so the object needs a backup that is not the cluster. This is it:
+    ///
+    ///   kubectl --context <ctx> get trustpolicy org-default -o json \
+    ///     | logweir trust export --policy org-default --stdin > trustpolicy.yaml
+    ///
+    /// The output carries `apiVersion`, `kind`, `metadata.name` and `spec`,
+    /// rebuilt field by field from the fields this build knows — never a
+    /// filtered copy — so nothing a future schema adds can be forwarded by
+    /// accident. `status`, `managedFields`, `resourceVersion` and `uid` are
+    /// absent, so the file re-applies cleanly onto any cluster. An input
+    /// carrying a private-key PEM is REFUSED and nothing is written.
+    Export {
+        /// The policy name the input object must carry. A mismatch is refused
+        /// rather than renamed.
+        #[arg(long)]
+        policy: String,
+        /// Read the object from standard input. Exactly one of `--stdin` and
+        /// `--from` is required.
+        #[arg(long, conflicts_with = "from", required_unless_present = "from")]
+        stdin: bool,
+        /// Read the object from this file instead of standard input.
+        #[arg(long)]
+        from: Option<PathBuf>,
+    },
+    /// Translate `TrustRoster/default` into a reviewable `TrustPolicy`
+    /// document. **It applies nothing and deletes nothing.**
+    ///
+    ///   kubectl --context <ctx> get trustroster default -o json \
+    ///     | logweir trust migrate-roster --stdin --name org-default --default \
+    ///     > trustpolicy.yaml
+    ///
+    /// `approverKeys` become `GovernedApproval`, `signingKeys` become
+    /// `EvidenceSigning`, a key on both lists becomes ONE entry with both
+    /// usages, `allowedClusterIds` becomes `allowedTargetClusterIds`,
+    /// `notAfter` is carried verbatim and every key is `Active`. No
+    /// `ConsoleConfirmation` key is ever synthesised (D3 §7.3), and no
+    /// retirement or revocation is invented. The roster is left in place so a
+    /// rollback still reads it.
+    ///
+    /// IDEMPOTENT: no clock is read and no name is generated, so two runs over
+    /// the same roster produce byte-identical output.
+    MigrateRoster {
+        /// `metadata.name` of the policy to emit.
+        #[arg(long)]
+        name: String,
+        /// Read the roster from standard input. Exactly one of `--stdin` and
+        /// `--from` is required.
+        #[arg(long, conflicts_with = "from", required_unless_present = "from")]
+        stdin: bool,
+        /// Read the roster from this file instead of standard input.
+        #[arg(long)]
+        from: Option<PathBuf>,
+        /// Set `spec.default: true` — the policy every namespace no other
+        /// policy names falls back to. At most one policy cluster-wide may set
+        /// it; a second one makes every fallback namespace a conflict that
+        /// resolves to NOTHING.
+        #[arg(long)]
+        default: bool,
+        /// A namespace this policy governs by exact name. REPEATABLE, one flag
+        /// per namespace.
+        //
+        // NO `value_delimiter`, for the reason `--approver-key-ids` records:
+        // one accepted shape means a comma-joined value is one namespace name,
+        // matches nothing, and is refused loudly instead of reinterpreted.
+        #[arg(long)]
+        namespace: Vec<String>,
     },
 }
 

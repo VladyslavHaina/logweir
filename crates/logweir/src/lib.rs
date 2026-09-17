@@ -41,4 +41,8 @@ pub mod signer;
 /// PLAT-07.1: the ONE read of a projected private-CA location, shared by
 /// every command that dials Kafka over TLS.
 pub mod tls_ca;
+/// PLAT-19.1 / decision D3 §7.1 and §7.5: `logweir trust export` and
+/// `logweir trust migrate-roster`. Two pure text transforms over one
+/// Kubernetes object each — no cluster client, no key, no signature.
+pub mod trust;
 pub mod verify;
