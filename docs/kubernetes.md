@@ -312,6 +312,97 @@ an alternative expression of the same property, at cluster scope rather than
 per-CRD, and it is not a substitute: nothing in the shipped install depends on
 it, and uncommenting it on a 1.29 API server would fail to apply.
 
+### 7a. What `VALID` means on a `BackupDestination`, and what it does not
+
+`kubectl get backupdestination` renders a `VALID` column. It is the reconciler's
+answer to the two questions CEL cannot reach, and it is **not** a reachability
+claim.
+
+```bash
+kubectl --context docker-desktop get backupdestination -n team-a
+# NAME     BUCKET   ENDPOINT                             TRANSPORT   VALID   AGE
+# primary  lw-a     https://minio-a.storage.svc:9000     TLS         True    4m
+```
+
+**There is no periodic health probe.** The reconciler dials no endpoint, lists
+no bucket and creates no Job; a destination is exercised by the operations that
+use it and by an explicit `Preflight` with `operation: DestinationAccess`. A
+`VALID` column that meant *reachable four minutes ago* is exactly the defect
+PLAT-03 is about, and this one does not mean that.
+
+What it does mean, in the order the controller checks it:
+
+| `status.reason` | What was wrong |
+|---|---|
+| `Valid` | Every check below passed. |
+| `DestinationNotValid` | The stored object does not satisfy the location rules this controller enforces — re-evaluated here, so an object admitted by an older CRD revision is reported rather than discovered by a run. The message names the field and the rule. |
+| `AddressingUnsupportedByEngine` | `storage.addressing: VirtualHosted` with a `storage.endpoint` set. The pinned engine forces path-style addressing whenever an endpoint is present, so that combination is refused rather than served as path-style behind your back. `VirtualHosted` with **no** endpoint is AWS S3's own default and is fine. |
+| `CaBundleNotFound` | `transport.caBundle` names a `ConfigMap` this namespace does not have. |
+| `CaBundleKeyMissing` | The `ConfigMap` exists and carries no such key. |
+| `CaBundleTooLarge` | Over 64 KiB. Every byte is copied into every run's immutable plan `ConfigMap`. |
+| `CaBundleInvalid` | No parseable `-----BEGIN CERTIFICATE-----` block. A private key, a raw `.der` file or a truncated paste is refused here rather than at the first TLS handshake of a run. |
+
+`status.canonicalUrl` and `status.locationDigest` are written on **every**
+verdict, including the refusals: an operator debugging a CA problem still needs
+to see which bucket they were pointing at. `status.caBundleSha256` is written
+only when bytes were readable, so its absence is *no digest*, never *empty
+bundle*. The reconcile requeues every 300 s, because rotating a private CA edits
+the `ConfigMap` and not the `BackupDestination`, and nothing else would notice.
+
+**It reads a `ConfigMap` and never a Secret.** A CA certificate is public
+material by construction, which is why `transport.caBundle` names a `ConfigMap`.
+The four access grants name Secrets, and the controller holds **no verb on
+`secrets`** — so it validates their SHAPE and their SPELLING (a DNS-1123 object
+name in this namespace, legal Secret data keys) and never their existence or
+their contents. A Secret that is genuinely missing is reported by the kubelet,
+to the pod that needed it, as `CredentialSecretNotFound`; a
+`<namespace>/<name>` spelling is refused by the controller with
+`DestinationRoleNotConfigured`, naming the rule, because that spelling is an
+attempt at a cross-namespace reference and "Secret not found" would send you
+looking for the wrong thing.
+
+### 7b. A destination-backed run carries a complete `AWS_*` set, and none of it is the controller's
+
+The controller's own environment reaches no destination-backed runner Job. That
+is not a convention — it is the defect the design closes. The legacy inline path
+forwards `AWS_ENDPOINT_URL`, `AWS_REGION`, `AWS_ALLOW_HTTP` and
+`AWS_VIRTUAL_HOSTED_STYLE_REQUEST` from the controller process, and the engine
+builds its object-store client from *every* `AWS_*` variable it finds — so a
+controller started with `AWS_ALLOW_HTTP=true` enables plaintext HTTP inside a
+runner whose approved plan says `allow_http: false`.
+
+A destination-backed Job instead carries a complete, explicit set computed from
+the `BackupDestination` alone:
+
+| Variable | Value |
+|---|---|
+| `LOGWEIR_STORE_CONTRACT_VERSION` | `1`, with the matching `--store-contract-version 1` argv. A runner that does not know the contract rejects the flag before dispatch, so a new controller can never drive an old runner into using ambient credentials. |
+| `AWS_ALLOW_HTTP` | `true` **only** when `transport.security` is `InsecureHTTP`, which itself requires an explicit `http://` endpoint. Always rendered, including the `false` case: an absent variable is one an ambient value in the pod could still answer. |
+| `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` | From `storage.addressing`, and from nothing else. **Addressing never changes transport, in either direction.** |
+| `AWS_METADATA_ENDPOINT` | A dead loopback (`http://127.0.0.1:1`), so a missing workload identity is a refusal and never a silent fall-back to the node's instance role. |
+| `AWS_REGION` | Only when `storage.region` is set. |
+| `LOGWEIR_ARCHIVE_CREDENTIALS` | `static` or `workloadIdentity`. |
+| `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | `valueFrom.secretKeyRef` into the grant's Secret and keys, resolved by the kubelet in the pod's own namespace. The session token only when the grant configures one. |
+| `LOGWEIR_ARCHIVE_CA_FILE` | Only with a `transport.caBundle`; the bytes are frozen into the run's own plan `ConfigMap`, so a rotation cannot change a run that already exists. |
+
+`AWS_ENDPOINT_URL` is **absent by construction**. The endpoint travels inside the
+plan's own `storage` block, which the runner reads explicitly, so there is no
+variable in the pod that could relocate the store.
+
+A restore whose evidence destination differs from its archive destination gets
+`LOGWEIR_EVIDENCE_CREDENTIALS` (`archive`, `static` or `workloadIdentity`) and,
+when the grant differs, the separately named `LOGWEIR_EVIDENCE_AWS_*` references
+— separately named so neither store's credential can shadow the other's. Two
+different workload-identity ServiceAccounts in one pod is refused as
+`ExecutionContextConflict`: a pod has exactly one ServiceAccount, which is a fact
+about Kubernetes and not a policy.
+
+The location a run executes against is **frozen** into that run's immutable
+execution inputs, with the destination's UID, generation, location digest and CA
+digest. Editing a destination afterwards — rotating a credential, rotating a CA —
+cannot change a run that already exists, and a destination deleted and recreated
+under the same name is a different input.
+
 ## 8. The approval flow
 
 An `Approval` object that exists is **not** an approval. An `Approval` whose
@@ -714,6 +805,30 @@ still fire, because a report is not a backup. An absent `retentionReport`
 block therefore means *no evaluation has happened*; an empty
 `setsThatWouldBeRemoved` means *the evaluation found nothing to remove*, and
 they are different answers.
+
+#### And the report is withheld when it would be about another bucket
+
+That one handle is the controller's, built from `LOGWEIR_ARCHIVE_URL`. A
+schedule's `archive.url` is the schedule's. On an installation where those name
+**different buckets**, listing through the handle while rendering `aws s3 rm`
+commands for the schedule's own URL produces a report about bucket A printed as
+though it described bucket B — with commands naming keys in B that were listed in
+A. An operator who runs them deletes the wrong objects, or nothing; either way
+the report was never about their catalogue.
+
+So the report is evaluated only when the schedule's bucket equals the handle's.
+Otherwise it is omitted and one INFO line names both buckets. A different
+**prefix** in the same bucket still reports, because the listing is prefix-scoped
+by the report itself; a different bucket cannot be.
+
+**A destination-backed schedule gets no retention report at all** through this
+path, even at the same bucket: the global handle's credential is not the
+destination's, and a report produced with the wrong principal under-reports
+whatever that principal cannot list. The per-destination replacement is the
+archive-inventory check kind, which is not in this build. An absent
+`retentionReport` on a destination-backed schedule is therefore the documented
+behaviour and not a failure.
+
 ## 10. The exit-code contract, as the `Backup` reconciler makes it visible
 
 §1 says the exit code is nearly invisible in Kubernetes and gives you the two

@@ -451,6 +451,47 @@ or a standalone manifest that explicitly mounts it. Do not delete it until
 those Jobs finish; then remove it after confirming no pod template still
 references the name.
 
+### 3.11 Object-store permissions, per destination role
+
+A `BackupDestination` names up to four grants, and they are separable on
+purpose: the principal that WRITES an archive should not be the principal that
+reads evidence back to verify it. The table is the minimum each role needs. It is
+written in S3 action names; the equivalent MinIO policy actions have the same
+spellings.
+
+| Role | Actions | Resources |
+|---|---|---|
+| `archiveWrite` | `s3:ListBucket` (condition `s3:prefix` in `<prefix>/*` and `logweir/*`), `s3:GetObject`, `s3:PutObject`, `s3:AbortMultipartUpload` | `arn:aws:s3:::<bucket>/<prefix>/*`, `arn:aws:s3:::<bucket>/logweir/*` |
+| `archiveRead` | `s3:ListBucket` (condition `s3:prefix` in `<prefix>/*`), `s3:GetObject` | `arn:aws:s3:::<bucket>/<prefix>/*` |
+| `evidenceWrite` | `s3:PutObject` (conditional create), `s3:GetObject` | `arn:aws:s3:::<bucket>/logweir/*` |
+| `evidenceRead` | `s3:GetObject`; optionally `s3:ListBucket` (condition `s3:prefix` in `logweir/*`) | `arn:aws:s3:::<bucket>/logweir/*` |
+| write probe (opt-in) | `s3:PutObject` | `arn:aws:s3:::<bucket>/logweir/readiness/*` |
+
+**No role is ever granted `s3:DeleteObject`.** Logweir prints the removal
+commands and an operator runs them; no component in this build holds a delete
+capability against object storage.
+
+**Grant `evidenceRead` its `s3:ListBucket` if you want "absent" to mean absent.**
+Without it, S3 answers `AccessDenied` for a key that is not there, so a missing
+receipt is indistinguishable from a denied read and verification reports
+`Unknown` presence rather than `Absent`.
+
+**`archiveRead` is what an `evidenceRead: ArchiveReadGrant` reuses**, and the CRD
+refuses that mode unless an explicit `spec.access.archiveRead` exists: a write
+grant is never reused to verify what it wrote.
+
+**Absent grants do not widen.** `archiveRead` and `evidenceWrite` absent mean
+`archiveWrite` is used; `evidenceRead` absent means verification is
+`NotAttempted`, with a detail naming the field.
+
+`evidenceRead: ControllerIdentity` is the one mode whose credential is the
+controller's own ambient chain rather than a Secret in your namespace, and it is
+**opt-in and administrator-gated**: the location has to appear in
+`evidence.controllerIdentityLocations` in the installation policy `ConfigMap` in
+the release namespace, matched on endpoint, region AND bucket. A namespace
+operator cannot add one. An unlisted location is refused with
+`ControllerIdentityNotAllowlisted` and verification is `NotAttempted`.
+
 ### 4. Runner namespace prerequisites: Helm-managed or low-level manifest
 
 On the supported Helm path, `identity.authorizedRunnerNamespaces` manages the
