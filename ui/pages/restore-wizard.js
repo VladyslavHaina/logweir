@@ -97,6 +97,7 @@ import {
   COPY_CAVEAT,
   RESTORE_IMMUTABLE_SENTENCE,
   UNVERIFIED,
+  badge,
   bucketOf,
   cell,
   copyBlock,
@@ -125,6 +126,7 @@ import {
   resolveClusterSelection,
 } from "../select.js";
 import { isObjectName, itemsOf } from "./clusters.js";
+import { renderPreflight } from "./destinations.js";
 import { approvalAuthorizes, restoreOperationRoute } from "./approvals.js";
 
 const PLURAL = "restores";
@@ -1003,22 +1005,96 @@ export function renderTargetStep(state) {
   );
 }
 
-/** Step 5 -- the target-topic preflight. The TARGET cluster's own most recent
- *  status, and the sentence naming what the run will do to it before the
- *  engine starts.
+/** What a restore readiness check is bound to, and what invalidates it. */
+export const READINESS_BINDING_SENTENCE =
+  "A readiness result is bound to the EXACT plan on screen. Edit the point in time, the target, " +
+  "the topic prefix or anything else that changes the document, and the hash changes with it -- " +
+  "so the result stops describing what you are about to submit and is shown as out of date " +
+  "rather than as a verdict. Run it again against the new plan.";
+
+/** Why a readiness result is not a promise about the run. */
+export const READINESS_CAVEAT_SENTENCE =
+  "A ready verdict says these checks passed when they ran. It is not a promise about the run: a " +
+  "credential can be rotated, a topic created and an ACL changed in the minute after it, and the " +
+  "execution-time guards remain the authority whatever this says.";
+
+/** Step 5 -- operation readiness for this exact plan.
  *
- *  It is the cluster's status and NOT `Restore.status.topicPreflight`: that
- *  field is written by the runner, after the run this wizard has not yet
- *  requested. */
-export function renderPreflightStep(state) {
+ *  WHAT CHANGED IN D2, AND WHY IT IS A DIFFERENT KIND OF THING. This step used
+ *  to show the TARGET CLUSTER'S probe status and one sentence about what the
+ *  run would attempt. Neither was a check of this restore: a probe is the
+ *  controller's own periodic dial of the brokers, and the sentence was a
+ *  description of an intention. An operator reading a step called "preflight"
+ *  and seeing "reachable: true" could reasonably have concluded that the
+ *  restore had been checked, and nothing had been.
+ *
+ *  Now the step carries a real `Preflight`, bound to this plan's hash, whose
+ *  verdict comes from a check Job's own recorded result. The cluster status
+ *  stays, because it is useful context, but it is labelled as what it is and
+ *  it is no longer the thing the step is about.
+ *
+ *  THE STALE BANNER IS COMPUTED HERE FROM THE HASH ON SCREEN, and it is the
+ *  SECOND of two guards. The first is the product API's: `GET
+ *  .../preflights/{id}?planHash=` recomputes `applicable` and `staleReasons`
+ *  server side against the plan the caller is looking at. This one exists
+ *  because the wizard changes the plan locally, without asking anything, and
+ *  an operator editing a field must see the result go stale on that keystroke
+ *  and not on the next round trip. */
+export function renderPreflightStep(state, prepared) {
   const s = state || {};
+  const p = prepared || {};
   const cluster = targetCluster(s);
   const status = (cluster || {}).status || {};
   const topics = (s.fields || {}).topics || [];
+  const readiness = s.readiness || {};
+  const result = readiness.preflight || null;
+  const record = readiness.state || {};
+  const pending = record.phase === "pending";
+  const currentHash = typeof p.hash === "string" ? p.hash : "";
+  // THE RESULT IS ABOUT THE PLAN IT WAS STARTED FOR, and `boundHash` is that
+  // plan's hash as this page recorded it when the check was started. The
+  // binding the server publishes is compared too -- either disagreeing with
+  // the plan on screen is staleness.
+  const boundHash = typeof readiness.boundHash === "string" ? readiness.boundHash : "";
+  const serverHash = ((result || {}).binding || {}).planHash;
+  const edited = result !== null && currentHash.length > 0 &&
+    ((boundHash.length > 0 && boundHash !== currentHash) ||
+      (typeof serverHash === "string" && serverHash.length > 0 && serverHash !== currentHash));
   return (
-    "<section class=\"step\" id=\"step-preflight\" tabindex=\"-1\"><h3>5. Target-topic preflight</h3>" +
-    "<p class=\"blurb\">The target cluster's own most recent status, and what the run will " +
-    "do to it before the engine starts.</p>" +
+    "<section class=\"step\" id=\"step-preflight\" tabindex=\"-1\"><h3>5. Operation readiness</h3>" +
+    "<p class=\"blurb\">A readiness check for THIS plan, plus the target cluster's own most " +
+    "recent probe as context.</p>" +
+    "<p class=\"note\">" + esc(READINESS_BINDING_SENTENCE) + "</p>" +
+    (readiness.unavailable === true
+      ? "<p class=\"note\" id=\"restore-readiness-unavailable\">" +
+        cell(readiness.unavailableReason) + "</p>"
+      : "<form id=\"restore-readiness-form\" novalidate" +
+        (pending ? " aria-busy=\"true\"" : "") + ">" +
+        "<fieldset class=\"form-body\"" + (pending ? " disabled" : "") + ">" +
+        "<div class=\"actions\">" +
+        "<button type=\"submit\" id=\"restore-readiness-start\">" +
+        (result === null ? "Check readiness" : "Check this plan again") + "</button>" +
+        (result !== null && result.terminal === false
+          ? "<button type=\"button\" id=\"restore-readiness-cancel\">Cancel</button>"
+          : "") +
+        "</div></fieldset>" +
+        "<div class=\"form-status\" id=\"restore-readiness-status\" tabindex=\"-1\">" +
+        mutationStatus(record, { kind: "Preflight", name: (result || {}).id || "" }, null) +
+        "</div></form>") +
+    (edited
+      ? "<div class=\"stale-banner\" id=\"readiness-stale\" role=\"alert\">" +
+        badge("unverified", "out of date: the plan changed") +
+        "<p class=\"note\">This result was produced for plan <code>" +
+        esc(boundHash.length > 0 ? boundHash : String(serverHash || "")) + "</code>. The plan on " +
+        "screen now hashes to <code>" + esc(currentHash) + "</code>, so the verdict below is " +
+        "about a document you are no longer about to submit. Run the check again.</p></div>"
+      : "") +
+    (result === null
+      ? "<p class=\"note\" id=\"readiness-none\">No readiness check has run for this plan. " +
+        "Nothing below claims this restore will work.</p>"
+      : renderPreflight(result)) +
+    "<p class=\"note\">" + esc(READINESS_CAVEAT_SENTENCE) + "</p>" +
+    "<h4>Target cluster probe (context, not a verdict)</h4>" +
     facts([
       ["target cluster", cell((((cluster || {}).metadata) || {}).name)],
       ["reachable", cell(status.reachable)],
@@ -1189,7 +1265,7 @@ export const STEPS = Object.freeze([
   { id: "step-backup-set", title: "Recovery point" },
   { id: "step-point-in-time", title: "Point in time" },
   { id: "step-target", title: "Target and naming" },
-  { id: "step-preflight", title: "Target-topic preflight" },
+  { id: "step-preflight", title: "Operation readiness" },
   { id: "step-plan", title: "Plan, hash and names" },
 ]);
 
@@ -1345,7 +1421,7 @@ export function renderPreparedWizard(state, prepared) {
     renderRecoveryPointStep(state) +
     renderPointInTimeStep(state) +
     renderTargetStep(state) +
-    renderPreflightStep(state) +
+    renderPreflightStep(state, prepared) +
     renderPlanStep(prepared, state)
   );
 }
@@ -2172,6 +2248,112 @@ function firstTarget(clusters) {
   return all.length > 0 ? all[0] : null;
 }
 
+/** The wizard's own readiness form identity. */
+export const RESTORE_READINESS_FORM = "restore-readiness";
+
+/** Step 5's control: start a restore `Preflight` bound to the EXACT bytes on
+ *  screen, and read it back against the same hash.
+ *
+ *  THE BYTES SENT ARE THE BYTES PREPARED, AND THE HASH IS THE PREPARED ONE.
+ *  `prepared` is the frozen document the review step is showing -- the same
+ *  object, not an equal one -- so the check is about the plan the operator is
+ *  looking at, and the service compares the hash against exactly those bytes
+ *  and answers `422 hash_mismatch` if they ever came apart. This page never
+ *  re-renders or re-hashes the plan to start a check.
+ *
+ *  A PLAN THAT COULD NOT BE RENDERED HAS NOTHING TO CHECK. `prepared.problem`
+ *  means the fields do not make a document the runner's grammar accepts, so
+ *  there is no hash, nothing to submit, and the button sends nothing. */
+function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
+  const form = node.querySelector("#restore-readiness-form");
+  if (form === null) {
+    return;
+  }
+  const key = formKey(state.ns, RESTORE_READINESS_FORM);
+  const mutation = mutationFor(key);
+  const p = prepared || {};
+
+  watchMutation(node, key, mutation, (record) => {
+    if (!active(lifecycle)) {
+      return;
+    }
+    state.readiness = Object.assign({}, state.readiness || {}, {
+      state: record,
+      preflight: record.phase === "succeeded"
+        ? (record.result || {}).item
+        : (state.readiness || {}).preflight || null,
+      boundHash: record.phase === "succeeded"
+        ? ((record.about || {}).planHash || "")
+        : ((state.readiness || {}).boundHash || ""),
+    });
+    renderAndWire(node, state, parse, api, lifecycle);
+  }, lifecycle);
+
+  listen(form, "submit", (event) => {
+    event.preventDefault();
+    if (!active(lifecycle) || mutation.pending()) {
+      return;
+    }
+    if (typeof p.bytes !== "string" || typeof p.hash !== "string") {
+      return;
+    }
+    const cluster = targetCluster(state);
+    const point = (state.point || {}).metadata || {};
+    const request = {
+      operation: "restore",
+      restore: {
+        planBytes: p.bytes,
+        planHash: p.hash,
+        target: ((cluster || {}).metadata || {}).name,
+      },
+    };
+    if (typeof point.name === "string" && point.name.length > 0) {
+      request.restore.recoveryPoint = { backupName: point.name };
+      if (typeof point.uid === "string" && point.uid.length > 0) {
+        request.restore.recoveryPoint.backupUid = point.uid;
+      }
+    }
+    // THE SOURCE ARCHIVE IS INLINE, BECAUSE THE RECOVERY POINT PUBLISHES NO
+    // DESTINATION. `Backup`'s product-API projection carries `archive` and no
+    // `destination`/`locationDigest`, so D2 §9's "take the source destination
+    // from the recovery point's frozen destination" has nothing to read on
+    // this build. The legacy inline archive is sent instead -- which is what
+    // the `Restore` this wizard creates would carry anyway -- and the step
+    // says so rather than offering a destination selector that would have to
+    // guess which destination that URL belongs to.
+    const url = ((state.point || {}).spec || {}).archive || {};
+    if (typeof url.url === "string" && url.url.length > 0) {
+      request.restore.legacySourceArchive = { url: url.url };
+      const secretName = String(state.archiveSecretName || "").trim();
+      if (secretName.length > 0) {
+        request.restore.legacySourceArchive.credentialRef = { name: secretName };
+      }
+    }
+    mutation.run(() => api.startPreflight(state.ns, request), { about: { planHash: p.hash } });
+  }, lifecycle);
+
+  const cancel = node.querySelector("#restore-readiness-cancel");
+  if (cancel !== null) {
+    listen(cancel, "click", () => {
+      const current = (state.readiness || {}).preflight;
+      if (!active(lifecycle) || current === null || current === undefined) {
+        return;
+      }
+      cancel.disabled = true;
+      api.cancelPreflight(state.ns, current.id).then(
+        () => {
+          if (active(lifecycle)) {
+            renderAndWire(node, state, parse, api, lifecycle);
+          }
+        },
+        () => {
+          cancel.disabled = false;
+        },
+      );
+    }, lifecycle);
+  }
+}
+
 function wire(node, state, parse, api, lifecycle, prepared) {
   const key = formKey(state.ns, WIZARD_FORM);
   const record = mutationFor(key);
@@ -2280,6 +2462,8 @@ function wire(node, state, parse, api, lifecycle, prepared) {
       listen(field, "change", refresh, lifecycle);
     }
   }
+
+  wireRestoreReadiness(node, state, parse, api, lifecycle, prepared);
 
   // The stepper: each entry scrolls its section into view and hands it focus,
   // so a keyboard reader lands where a pointer reader looks. Motion follows

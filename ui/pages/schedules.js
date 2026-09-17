@@ -39,7 +39,7 @@
 // cluster renamed since the draft was started is sent correctly rather than
 // under its old name.
 
-import { apiClient } from "../client.js";
+import { apiClient, mayOperate } from "../client.js";
 import {
   active,
   cancelled,
@@ -80,6 +80,7 @@ import {
   resolveClusterSelection,
 } from "../select.js";
 import { focusFirstProblem, isObjectName, itemsOf } from "./clusters.js";
+import { renderPreflight } from "./destinations.js";
 import { isRecoveryPoint, recoveryPoints, restorePointRoute } from "./restore-wizard.js";
 
 const PLURAL = "backupschedules";
@@ -300,6 +301,371 @@ export function renderRetentionPanel(object) {
   );
 }
 
+// ===========================================================================
+// D2: the destination, the coverage label, the topic picker and the readiness
+// panel
+// ===========================================================================
+//
+// WHAT LANDED HERE AND WHAT DID NOT, SAID PLAINLY AT THE TOP.
+//
+// D2 §9 asks this form to replace the archive URL and Secret inputs with a
+// destination selector. IT CANNOT, YET, AND THE FORM SAYS SO RATHER THAN
+// PRETENDING. The product API's `CreateScheduleRequest` REQUIRES an inline
+// `archive` and has no `destinationRef` field at all: a schedule created
+// through this page has nowhere to put a destination's name until PLAT-06.2
+// adds one. The two honest options were to leave the inline fields alone with
+// a disclosure, or to DERIVE an inline archive from the chosen destination --
+// and the second is exactly the failure a destination exists to prevent. A
+// destination carries an endpoint, a region, an addressing mode and a CA
+// bundle; a legacy inline archive carries a URL and a Secret name. Deriving
+// one from the other would silently drop four of those, and a schedule that
+// quietly wrote to AWS S3 instead of the MinIO endpoint the operator chose is
+// worse than a schedule that refused.
+//
+// SO THE SELECTOR IS REAL WHERE IT WORKS. `BackupPreflightRequest` DOES take a
+// destination, so the readiness panel below is a genuine, submittable use of
+// exactly the same control: choose the destination, choose the source, name
+// the topics, and the check runs against them. When `POST /schedules` grows a
+// `destinationRef`, this selector moves into the create form unchanged.
+//
+// THE COVERAGE LABELS ARE THE CONTROLLER'S OWN WORDS, VERBATIM.
+// `weirkeeper::crds::selection::Coverage::label()` renders three strings and
+// says why there is one function for them: "a second wording somewhere else is
+// how 'visible user topics only' becomes 'all topics' in the one place an
+// auditor reads." This page is one of those surfaces, so it copies the strings
+// and `ui/tests/pages.spec.js` holds the copies against nothing -- there is no
+// JavaScript link to a Rust constant -- which is why they are in ONE exported
+// table here and asserted character for character.
+
+/** The three coverage labels, VERBATIM from
+ *  `weirkeeper::crds::selection::Coverage::label()`. Exactly one of them means
+ *  "everything", and it is reachable only through an administrator
+ *  attestation, because Kafka cannot be asked. */
+export const COVERAGE_LABELS = Object.freeze({
+  NamedTopics: "Named topics",
+  AllUserTopicsAttested: "All user topics (attested complete)",
+  VisibleUserTopicsOnly: "Visible user topics only — completeness not established",
+});
+
+/** The only coverage that may be rendered as "all topics". One expression, for
+ *  the reason `Coverage::claims_whole_cluster` gives: a caller who asks the
+ *  question by hand is a caller who can get it wrong once. */
+export function claimsWholeCluster(coverage) {
+  return coverage === "AllUserTopicsAttested";
+}
+
+/** What a dynamic selection is, in words, for the operator reading the form. */
+export const DYNAMIC_SELECTION_SENTENCE =
+  "A dynamic selection resolves per run from a topic discovery, so what it covers is decided " +
+  "when the run starts and not when the schedule is written. What each run actually covered is " +
+  "recorded on that run, with a coverage label, and only an attested one ever means everything.";
+
+/** The sentence a schedule with an empty topic list carries when this build
+ *  cannot tell which of the two shapes it is.
+ *
+ *  THE PRODUCT API PUBLISHES NEITHER `allUserTopics` NOR `status.selection` ON
+ *  ITS `Schedule` DTO. D1 added dynamic selection to the CRD and the
+ *  controller; the console's own projection has not caught up, so in console
+ *  mode an empty `topics` is all this page is given. Guessing "all user topics"
+ *  from an empty list would be inventing the very claim the coverage labels
+ *  exist to bound, so the page says what it does not know. */
+export const SELECTION_UNKNOWN_SENTENCE =
+  "This schedule names no topic. That is the shape a dynamic (all user topics) selection has, " +
+  "and it is also the shape of an empty allowlist, which no run will back anything up under. " +
+  "This build's product API publishes neither the selection block nor the recorded coverage, so " +
+  "this page cannot tell you which it is -- read the object with kubectl.";
+
+/** The coverage label for one object, or the empty string.
+ *
+ *  READS THE OBJECT IT WAS GIVEN AND NEVER INFERS. In legacy mode the page
+ *  holds the custom resource and `status.selection.coverage` is there; in
+ *  console mode it holds a projection that carries neither, and the answer is
+ *  the empty string -- which the caller renders as "not published by this
+ *  build", never as a default label. */
+export function coverageOf(object) {
+  const status = (object || {}).status || {};
+  const selection = status.selection || {};
+  const coverage = selection.coverage;
+  return typeof coverage === "string" && COVERAGE_LABELS[coverage] !== undefined ? coverage : "";
+}
+
+/** The coverage line: the controller's own label, or the sentence that says
+ *  this build does not publish one. */
+export function renderCoverageLine(object) {
+  const o = object || {};
+  const spec = o.spec || {};
+  const topics = Array.isArray(spec.topics) ? spec.topics : [];
+  const coverage = coverageOf(o);
+  if (coverage.length > 0) {
+    return (
+      "<p class=\"coverage\" data-coverage=\"" + esc(coverage) + "\">" +
+      (claimsWholeCluster(coverage) ? badge("green", "coverage") : badge("pending", "coverage")) +
+      " " + esc(COVERAGE_LABELS[coverage]) + "</p>"
+    );
+  }
+  if (spec.allUserTopics !== undefined && spec.allUserTopics !== null) {
+    return (
+      "<p class=\"coverage\" data-coverage=\"dynamic\">" + badge("pending", "dynamic selection") +
+      " " + esc(DYNAMIC_SELECTION_SENTENCE) +
+      " On incomplete visibility this policy says: <code>" +
+      cell(spec.allUserTopics.incompleteDiscovery) + "</code>.</p>"
+    );
+  }
+  if (topics.length === 0) {
+    return "<p class=\"coverage\" data-coverage=\"unknown\">" + badge("pending", "selection") +
+      " " + esc(SELECTION_UNKNOWN_SENTENCE) + "</p>";
+  }
+  return "";
+}
+
+// ------------------------------------------------------- the destination selector
+
+/** The option a destination selector with nothing chosen opens on. */
+export const DESTINATION_EMPTY_OPTION =
+  "<option value=\"\" selected data-name=\"\">choose a saved destination</option>";
+
+/** Resolves a remembered `{uid, name}` against the destinations this page
+ *  actually read.
+ *
+ *  THE SAME CONTRACT `ui/select.js` HOLDS FOR CONNECTIONS, and for the same
+ *  reason: a destination deleted and recreated under one name is a DIFFERENT
+ *  archive location reached with a different credential, and a form that
+ *  followed the name onto it would run a readiness check against a place
+ *  nobody chose. States: `none`, `selected`, `recreated`, `missing`. */
+export function resolveDestinationSelection(destinations, selection) {
+  const all = Array.isArray(destinations) ? destinations : [];
+  const s = selection || {};
+  const uid = typeof s.uid === "string" ? s.uid.trim() : "";
+  const name = typeof s.name === "string" ? s.name.trim() : "";
+  if (uid.length === 0 && name.length === 0) {
+    return { state: "none" };
+  }
+  if (uid.length === 0) {
+    const byName = all.find((d) => d.name === name);
+    return byName === undefined
+      ? { state: "missing", uid: "", name: name }
+      : { state: "selected", uid: byName.uid, name: byName.name, pinned: true, item: byName };
+  }
+  const byUid = all.find((d) => d.uid === uid);
+  if (byUid !== undefined) {
+    return {
+      state: "selected", uid: byUid.uid, name: byUid.name, item: byUid,
+      renamedFrom: name.length > 0 && name !== byUid.name ? name : null,
+    };
+  }
+  const taken = all.find((d) => d.name === name);
+  return taken === undefined
+    ? { state: "missing", uid: uid, name: name }
+    : { state: "recreated", uid: uid, name: name, recreatedUid: taken.uid };
+}
+
+/** The namespace's default destination, or `null`.
+ *
+ *  TWO DEFAULTS ARE NO DEFAULT. The product API refuses a second one, but a
+ *  default set by hand with only the annotation carries no label and its 409
+ *  cannot see it -- so this returns `null` for a list with more than one, and
+ *  the selector says why rather than picking whichever sorted first. */
+export function defaultDestination(destinations) {
+  const flagged = (Array.isArray(destinations) ? destinations : []).filter((d) => d.default === true);
+  return flagged.length === 1 ? flagged[0] : null;
+}
+
+/** The destination selector. */
+export function renderDestinationSelector(view) {
+  const v = view || {};
+  const id = typeof v.id === "string" && v.id.length > 0 ? v.id : "destination-select";
+  const field = typeof v.name === "string" && v.name.length > 0 ? v.name : "destination";
+  const all = Array.isArray(v.destinations) ? v.destinations : [];
+  const resolved = resolveDestinationSelection(all, v.selection);
+  const fallback = resolved.state === "none" ? defaultDestination(all) : null;
+  const chosenUid = resolved.state === "selected"
+    ? resolved.uid
+    : (fallback === null ? "" : fallback.uid);
+  const refused = resolved.state === "recreated" || resolved.state === "missing";
+  return (
+    "<div class=\"field selector\" id=\"" + esc(id) + "-field\">" +
+    "<label for=\"" + esc(id) + "\">" + esc(v.label || "destination") + "</label>" +
+    (refused ? renderDestinationRefusal(id, resolved) : "") +
+    "<select id=\"" + esc(id) + "\" name=\"" + esc(field) + "\">" +
+    (refused || chosenUid.length === 0 ? DESTINATION_EMPTY_OPTION : "") +
+    all.map((d) =>
+      "<option value=\"" + esc(d.uid) + "\" data-name=\"" + esc(d.name) + "\"" +
+      (!refused && d.uid === chosenUid ? " selected" : "") + ">" +
+      esc(d.name) + (d.default === true ? " (namespace default)" : "") +
+      " -- " + esc(d.canonicalUrl) + ", " + esc(String(d.transport)) +
+      "</option>").join("") +
+    "</select>" +
+    "<input type=\"hidden\" id=\"" + esc(id) + "-name\" name=\"" + esc(field + "Name") +
+    "\" value=\"" + esc(resolved.state === "selected"
+      ? resolved.name
+      : (fallback === null ? "" : fallback.name)) + "\">" +
+    (all.length === 0
+      ? "<p class=\"note\" id=\"" + esc(id) + "-none\">No destination in this namespace. Create " +
+        "one on the Destinations page first.</p>"
+      : "") +
+    (resolved.state === "none" && fallback === null && all.length > 0
+      ? "<p class=\"note\" id=\"" + esc(id) + "-no-default\">No single destination in this " +
+        "namespace is marked default, so nothing is preselected. A namespace with two defaults " +
+        "has none.</p>"
+      : "") +
+    (fallback !== null
+      ? "<p class=\"note\" id=\"" + esc(id) + "-default\">Preselected: the namespace default " +
+        "<code>" + esc(fallback.name) + "</code>.</p>"
+      : "") +
+    (resolved.state === "selected" && resolved.renamedFrom
+      ? "<p class=\"note\" data-selection-renamed=\"true\">This destination has been renamed " +
+        "since it was chosen: it was <code>" + esc(resolved.renamedFrom) + "</code> and is now " +
+        "<code>" + esc(resolved.name) + "</code>. The selection did not move -- it is the same " +
+        "object, uid <code>" + esc(resolved.uid) + "</code>.</p>"
+      : "") +
+    "<p class=\"help\">" + esc(v.help || "") + "</p>" +
+    "</div>"
+  );
+}
+
+/** The refusal a destination selection whose UID is gone gets. */
+export function renderDestinationRefusal(id, resolved) {
+  const r = resolved || {};
+  const recreated = r.state === "recreated";
+  return (
+    "<div class=\"refusal-block\" id=\"" + esc(id) + "-refusal\" role=\"alert\">" +
+    (recreated
+      ? "<p class=\"refusal\">The destination this form had selected is gone, and a DIFFERENT " +
+        "object now answers to the name <code>" + esc(r.name) + "</code>. A recreated " +
+        "destination is a different archive location reached with a different credential, so " +
+        "the selection is refused rather than moved onto it.</p>"
+      : "<p class=\"refusal\">No destination in this namespace carries that uid, so the one " +
+        "this form had selected is gone. It was not replaced by another.</p>") +
+    "<p class=\"note\">Selected was: <code>" + esc(String(r.name || "")) + "</code>, uid <code>" +
+    esc(String(r.uid || "")) + "</code>." +
+    (recreated ? " The object now under that name has uid <code>" + esc(r.recreatedUid) +
+      "</code>." : "") +
+    "</p></div>"
+  );
+}
+
+// --------------------------------------------------------- the topic picker
+
+/** What a topic picker offers, and where the offer came from.
+ *
+ *  THE PICKER NEVER REPLACES THE TEXT FIELD. A discovery is an observation
+ *  with a date on it and a visibility state; the allowlist a schedule carries
+ *  is a decision. So the names are offered as a datalist beside the same
+ *  free-text input the form has always had -- typing a topic Kafka hid from
+ *  this principal is exactly what an operator with an ACL-limited principal
+ *  has to be able to do, and a picker that was the only way in would have made
+ *  that impossible. */
+export function renderTopicPicker(view) {
+  const v = view || {};
+  const discovery = v.lastSuccessful || null;
+  const attempt = v.latestAttempt || null;
+  const topics = Array.isArray(v.topics) ? v.topics : [];
+  if (discovery === null && attempt === null) {
+    return "<p class=\"note\" id=\"topic-picker-none\">No topic discovery has run for the " +
+      "selected connection, so there are no observed names to offer. Type them.</p>";
+  }
+  const stale = discovery !== null && discovery.stale === true;
+  const limited = discovery !== null && (discovery.visibility || {}).state === "limited";
+  const failed = attempt !== null && attempt.state === "failed";
+  return (
+    "<div class=\"topic-picker\" id=\"topic-picker\">" +
+    (discovery === null
+      ? "<p class=\"note\">The newest attempt produced no inventory, so nothing is offered.</p>"
+      : "<datalist id=\"topic-options\">" +
+        topics.map((t) => "<option value=\"" + esc(t.name) + "\"></option>").join("") +
+        "</datalist>") +
+    (failed
+      ? "<p class=\"note\" data-picker=\"failed\">" + badge("unverified", "latest attempt failed") +
+        " The newest discovery failed (" + cell((attempt.error || {}).code) + "). The names " +
+        "offered, if any, are from an older run.</p>"
+      : "") +
+    (stale
+      ? "<p class=\"note\" data-picker=\"stale\">" + badge("unverified", "stale inventory") +
+        " These names are past their freshness or their connection changed under them.</p>"
+      : "") +
+    (limited
+      ? "<p class=\"note\" data-picker=\"limited\">" + badge("unverified", "limited visibility") +
+        " An authorization omission was observed: this list is a subset, and Logweir cannot say " +
+        "how large a subset. Type any topic it does not offer.</p>"
+      : "") +
+    (discovery !== null && !limited && !stale
+      ? "<p class=\"note\" data-picker=\"unknown\">Offered from the inventory observed at " +
+        cell(discovery.observedAt) + ". A successful Kafka listing is not a complete one, so " +
+        "this list is an offer and never a bound.</p>"
+      : "") +
+    "</div>"
+  );
+}
+
+// ------------------------------------------------------- the readiness panel
+
+/** The identity of the readiness form in the draft and mutation registries. */
+export const READINESS_FORM = "backup-readiness";
+
+/** What a backup readiness check is, and what a ready verdict does not cover. */
+export const READINESS_SENTENCE =
+  "A readiness check starts a Preflight: a real Job that resolves the connection and the " +
+  "destination, projects their credentials, dials the broker and lists the archive prefix. The " +
+  "verdict below is that check's own recorded result. It is not a promise about the next run -- " +
+  "a credential can be rotated, a topic created and an ACL changed in the minute after it.";
+
+/** The readiness panel: choose a destination, a source and the topics, start a
+ *  `Preflight` of operation `backup`, and render what it recorded. */
+export function renderReadinessPanel(view) {
+  const v = view || {};
+  const state = v.state || {};
+  const pending = state.phase === "pending";
+  const result = v.preflight || null;
+  return (
+    "<section class=\"readiness\" id=\"backup-readiness\"><h3>Backup readiness</h3>" +
+    "<p class=\"note\">" + esc(READINESS_SENTENCE) + "</p>" +
+    (v.unavailable === true
+      ? "<p class=\"note\" id=\"readiness-unavailable\">" + cell(v.unavailableReason) + "</p>"
+      : (v.mayOperate === false
+        ? "<p class=\"note\">This session may read readiness results in this namespace and not " +
+          "start one.</p>"
+        : "<form id=\"readiness-form\" novalidate" + (pending ? " aria-busy=\"true\"" : "") + ">" +
+          "<fieldset class=\"form-body\"" + (pending ? " disabled" : "") + ">" +
+          renderClusterSelector({
+            id: "readiness-source",
+            name: "source",
+            label: "source KafkaCluster",
+            help: "The connection the check dials.",
+            prefer: "source",
+            clusters: v.clusters,
+            selection: { uid: "", name: "" },
+            now: v.now,
+            freshSeconds: v.freshSeconds,
+            errors: {},
+          }) +
+          renderDestinationSelector({
+            id: "readiness-destination",
+            name: "destination",
+            label: "destination",
+            help: "The archive location the check lists. Chosen by identity: a destination " +
+              "deleted and recreated under this name is refused, not followed.",
+            destinations: v.destinations,
+            selection: v.destinationSelection,
+          }) +
+          "<div class=\"field\"><label for=\"readiness-topics\">topics, comma separated</label>" +
+          "<input id=\"readiness-topics\" name=\"topics\" list=\"topic-options\" value=\"" +
+          esc(String(v.topics || "")) + "\">" +
+          "<p class=\"help\">The names the check asks the broker to describe. 1 to 1000.</p>" +
+          "</div>" +
+          renderTopicPicker(v.picker || {}) +
+          "<div class=\"actions\"><button type=\"submit\">Check readiness</button>" +
+          (result !== null && result.terminal === false
+            ? "<button type=\"button\" id=\"readiness-cancel\">Cancel</button>"
+            : "") +
+          "</div></fieldset>" +
+          "<div class=\"form-status\" id=\"readiness-status\" tabindex=\"-1\">" +
+          mutationStatus(state, { kind: "Preflight", name: (result || {}).id || "" }, null) +
+          "</div></form>")) +
+    (result === null ? "" : renderPreflight(result)) +
+    "</section>"
+  );
+}
+
 const SCHEDULE_DEFAULTS = Object.freeze({
   name: "", cron: "0 * * * *", source: "", sourceUid: "", topics: "", archive: "",
   archiveSecret: "logweir-s3", keepLast: "", keepDays: "",
@@ -412,6 +778,15 @@ export function renderScheduleForm(view) {
     field("schedule-topics", "topics") + ">" +
     "<p class=\"help\">An explicit allowlist. A wildcard is refused before anything runs.</p>" +
     line("schedule-topics", "topics") + "</div>" +
+    "<fieldset class=\"legacy-archive\" id=\"schedule-legacy-archive\">" +
+    "<legend>archive (inline)</legend>" +
+    "<p class=\"help\" id=\"schedule-destination-gap\">A saved destination cannot be named " +
+    "here yet: this build's <code>POST /schedules</code> takes an inline archive and has no " +
+    "destinationRef field (PLAT-06.2 adds one). The inline URL and Secret below are therefore " +
+    "the only way to write a schedule from this page, and they carry no endpoint, region, " +
+    "addressing mode or CA bundle -- which is what a destination exists to hold. Deriving one " +
+    "from the other would drop all four silently, so this page will not. Use the readiness " +
+    "panel to check a destination, and kubectl or the CLI to bind a schedule to one.</p>" +
     "<div class=\"field\"><label for=\"schedule-archive\">archive URL</label>" +
     "<input id=\"schedule-archive\" name=\"archive\" required value=\"" + esc(d.archive) + "\"" +
     field("schedule-archive", "archive") + ">" +
@@ -422,7 +797,7 @@ export function renderScheduleForm(view) {
     field("schedule-archive-secret", "archiveSecret") + ">" +
     "<p class=\"help\">An existing Secret in this namespace, with access-key-id and secret-access-key. " +
     "Only its name is sent. Leave blank only for anonymous or instance-role access.</p>" +
-    line("schedule-archive-secret", "archiveSecret") + "</div>" +
+    line("schedule-archive-secret", "archiveSecret") + "</div></fieldset>" +
     "<div class=\"field-row\">" +
     "<div class=\"field\"><label for=\"schedule-keeplast\">retention keepLast</label>" +
     "<input id=\"schedule-keeplast\" name=\"keepLast\" type=\"number\" min=\"0\" value=\"" +
@@ -618,6 +993,7 @@ export function renderScheduleCard(ns, object, backups) {
     "</div>" +
     "<div class=\"form-status\" data-suspend-status=\"" + esc(name) + "\" tabindex=\"-1\">" +
     renderSuspendStatus(object, state) + "</div>" +
+    renderCoverageLine(object) +
     renderRecoveryPoints(ns, object, backups) +
     renderRetentionPanel(object) +
     "</section>"
@@ -625,6 +1001,151 @@ export function renderScheduleCard(ns, object, backups) {
 }
 
 // --------------------------------------------------------------- mount half
+
+/** The destinations the readiness panel offers, or the reason there are none.
+ *  Never throws for anything but a cancellation: a console that cannot serve
+ *  destinations is a panel with a sentence, not a page with an error box. */
+async function readReadiness(api, ns, lifecycle, clusters) {
+  const base = { mayOperate: mayOperate(ns), clusters: clusters, preflight: null, picker: {} };
+  try {
+    const page = await api.destinations(ns, readOptions(lifecycle));
+    return Object.assign(base, { destinations: page.items });
+  } catch (error) {
+    if (cancelled(error, lifecycle)) {
+      throw error;
+    }
+    return Object.assign(base, {
+      destinations: [],
+      unavailable: true,
+      unavailableReason: error.message,
+    });
+  }
+}
+
+function readinessView(ns, readiness) {
+  return Object.assign({ state: mutationFor(formKey(ns, READINESS_FORM)).state }, readiness || {});
+}
+
+/** The readiness panel's controls: start a `Preflight` of operation `backup`
+ *  against the chosen connection, destination and topics, and offer the names
+ *  the newest inventory for that connection observed.
+ *
+ *  THE TOPIC OFFER IS READ WHEN THE CONNECTION IS CHOSEN, and not before: a
+ *  discovery is about ONE connection, and offering the names observed against
+ *  a different one would be worse than offering none. */
+function wireReadiness(node, ns, parse, lifecycle, api, readiness) {
+  const form = node.querySelector("#readiness-form");
+  if (form === null) {
+    return;
+  }
+  const key = formKey(ns, READINESS_FORM);
+  const mutation = mutationFor(key);
+  const repaint = (extra) => {
+    if (!active(lifecycle)) {
+      return;
+    }
+    const slot = node.querySelector("#readiness-slot");
+    if (slot === null) {
+      return;
+    }
+    const merged = Object.assign({}, readiness, extra || {});
+    replace(slot, parse(renderReadinessPanel(readinessView(ns, merged))));
+    wireReadiness(node, ns, parse, lifecycle, api, merged);
+  };
+
+  watchMutation(node, key, mutation, (state) => {
+    repaint(state.phase === "succeeded"
+      ? { preflight: (state.result || {}).item }
+      : {});
+  }, lifecycle);
+
+  const source = node.querySelector("#readiness-source");
+  if (source !== null) {
+    listen(source, "change", () => {
+      const selection = readClusterSelection(form, "readiness-source");
+      if (!active(lifecycle) || selection.name.length === 0) {
+        return;
+      }
+      api.latestDiscoveries(ns, selection.name, readOptions(lifecycle)).then(
+        (answer) => {
+          if (!active(lifecycle)) {
+            return;
+          }
+          const best = answer.lastSuccessful;
+          if (best === null || best === undefined) {
+            repaint({ picker: { latestAttempt: answer.latestAttempt, lastSuccessful: null } });
+            return;
+          }
+          api.discoveryTopics(ns, best.id, readOptions(lifecycle)).then(
+            (page) => {
+              if (active(lifecycle)) {
+                repaint({
+                  picker: {
+                    latestAttempt: answer.latestAttempt,
+                    lastSuccessful: best,
+                    topics: page.items,
+                  },
+                });
+              }
+            },
+            () => {
+              if (active(lifecycle)) {
+                repaint({
+                  picker: { latestAttempt: answer.latestAttempt, lastSuccessful: best, topics: [] },
+                });
+              }
+            },
+          );
+        },
+        () => {
+          // A connection with no discovery route reachable is a picker with no
+          // names, and the panel already says what that means.
+        },
+      );
+    }, lifecycle);
+  }
+
+  listen(form, "submit", (event) => {
+    event.preventDefault();
+    if (!active(lifecycle) || mutation.pending()) {
+      return;
+    }
+    const values = readScheduleValues(form);
+    const selection = readClusterSelection(form, "readiness-source");
+    const destination = node.querySelector("#readiness-destination-name");
+    const topics = String(values.topics || "")
+      .split(",").map((t) => t.trim()).filter((t) => t.length > 0);
+    const request = {
+      operation: "backup",
+      backup: {
+        sourceConnection: selection.name,
+        topics: topics,
+      },
+    };
+    const chosen = destination === null ? "" : String(destination.value || "").trim();
+    if (chosen.length > 0) {
+      request.backup.destination = chosen;
+    }
+    mutation.run(() => api.startPreflight(ns, request));
+  }, lifecycle);
+
+  const cancel = node.querySelector("#readiness-cancel");
+  if (cancel !== null) {
+    listen(cancel, "click", () => {
+      const current = readiness.preflight;
+      if (!active(lifecycle) || current === null || current === undefined) {
+        return;
+      }
+      cancel.disabled = true;
+      api.cancelPreflight(ns, current.id).then(
+        () => repaint({}),
+        () => {
+          cancel.disabled = false;
+        },
+      );
+    }, lifecycle);
+  }
+}
 
 export async function mountSchedules(node, ns, parse, lifecycle, deps) {
   const api = deps || API;
@@ -649,15 +1170,26 @@ export async function mountSchedules(node, ns, parse, lifecycle, deps) {
     const clusters = collections[2];
     const objects = itemsOf(collection);
     const panels = objects.map((object) => renderScheduleCard(ns, object, backups)).join("");
+    // THE DESTINATIONS ARE A FOURTH READ AND ITS FAILURE IS NOT THE PAGE'S.
+    // In legacy mode it is refused by name; the readiness panel then says so
+    // and the rest of this view -- the schedules, their runs, the create form
+    // -- renders exactly as it did before.
+    const readiness = await readReadiness(api, ns, lifecycle, clusters);
+    if (!active(lifecycle)) {
+      return;
+    }
     replace(
       node,
       parse(
         renderScheduleList(collection) + panels +
           "<div class=\"form-slot\" id=\"schedule-form-slot\">" +
-          renderScheduleForm(scheduleFormView(ns, clusters)) + "</div>",
+          renderScheduleForm(scheduleFormView(ns, clusters)) + "</div>" +
+          "<div class=\"readiness-slot\" id=\"readiness-slot\">" +
+          renderReadinessPanel(readinessView(ns, readiness)) + "</div>",
       ),
     );
     wire(node, ns, parse, lifecycle, api, objects, clusters);
+    wireReadiness(node, ns, parse, lifecycle, api, readiness);
   } catch (error) {
     if (!cancelled(error, lifecycle) && active(lifecycle)) {
       replace(node, errorBox(error));

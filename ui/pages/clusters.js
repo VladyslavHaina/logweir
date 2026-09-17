@@ -41,7 +41,7 @@
 // agree about what an observation means and about what is too old to present as
 // current.
 
-import { apiClient } from "../client.js";
+import { apiClient, mayOperate } from "../client.js";
 import {
   active,
   cancelled,
@@ -58,8 +58,12 @@ import {
   watchMutation,
 } from "../lifecycle.js";
 import {
+  ABSENT,
+  EMPTY_INVENTORY_SENTENCE,
+  badge,
   cell,
   detailLink,
+  errorBlock,
   errorBox,
   esc,
   facts,
@@ -67,8 +71,10 @@ import {
   invalidAttributes,
   listFooter,
   mutationStatus,
+  phaseBadge,
   replace,
   table,
+  visibilityLine,
 } from "../render.js";
 import {
   PROBE_SENTENCE,
@@ -281,7 +287,7 @@ export function renderClusterList(input, ns, now, freshSeconds) {
 /** One cluster, in full: its probe panel with the Test connection control, and
  *  then the saved connection contract v1 carries -- every reference by name,
  *  no value of anything. */
-export function renderClusterDetail(object, now, freshSeconds, pending) {
+export function renderClusterDetail(object, now, freshSeconds, pending, discovery) {
   const spec = (object && object.spec) || {};
   const status = (object && object.status) || {};
   const servers = Array.isArray(spec.bootstrapServers) ? spec.bootstrapServers : [];
@@ -309,7 +315,264 @@ export function renderClusterDetail(object, now, freshSeconds, pending) {
       ["probe reason", cell(status.reason)],
       ["probe freshness", esc(String(state.freshSeconds)) + "s budget"],
       ["uid", "<code id=\"cluster-uid\">" + esc(clusterUid(object)) + "</code>"],
-    ])
+    ]) +
+    // THE DISCOVERY PANEL IS PART OF THE DETAIL AND NOT A SECOND VIEW, because
+    // what it is about -- which principal, which cluster id, how fresh -- is
+    // the block directly above it, and a reader who had to change routes to
+    // compare them would be comparing from memory.
+    (discovery === undefined || discovery === null ? "" : renderDiscoveryPanel(discovery))
+  );
+}
+
+// ===========================================================================
+// THE TOPIC DISCOVERY PANEL (PLAT-09.1)
+// ===========================================================================
+//
+// WHAT A DISCOVERY IS, AND WHAT IT IS NOT. A `TopicDiscovery` is a bounded
+// inventory: a check Job dials this connection with this connection's own
+// credential, asks the broker for metadata, and stores what came back. It is
+// the only control on this page that makes anything DIAL -- the probe panel
+// above it re-reads a status the controller wrote on its own schedule, which
+// is why that one says "connection probe" and this one does not borrow the
+// word.
+//
+// AND A SUCCESSFUL LISTING IS NOT A COMPLETE ONE. An all-topics Metadata
+// request silently omits every topic the principal cannot DESCRIBE: no error,
+// no count, nothing to notice. So `visibility.state` is `unknown` for a
+// listing that worked perfectly, `unknown` is that field's HEALTHY default,
+// and the word "complete" appears on this page only inside
+// `attestedComplete` -- which is an administrator's claim, rendered with its
+// author and with "not verified by Logweir" attached.
+//
+// TWO SLOTS, NEVER ONE. `?latest=true` answers `{latestAttempt,
+// lastSuccessful}`. A failed attempt must not hide the last inventory that
+// worked, and a working inventory must not hide that the newest attempt
+// failed, so both are rendered and each says which it is.
+//
+// A SHORT PAGE IS NOT THE LAST PAGE. `scan.complete: false` means the eight-
+// chunk budget was spent before the end of the result -- which is exactly what
+// a sparse `q` over a large inventory looks like. Treating a short page as the
+// end would silently show an operator four topics out of five thousand. So the
+// control below follows `page.nextCursor` and says, in words, what it is
+// doing.
+
+/** The identity of the discovery form in the draft and mutation registries. */
+export const DISCOVERY_FORM = "topic-discovery";
+
+/** What a short page means, rendered beside one. */
+export const SCAN_INCOMPLETE_SENTENCE =
+  "This page stopped at its chunk budget, not at the end of the result. There is more to read: " +
+  "follow the cursor. A short page is not the last page, and a filter that matches little is " +
+  "exactly what makes a page short.";
+
+/** What a truncated discovery means. */
+export const TRUNCATION_SENTENCE =
+  "The inventory hit a ceiling before the cluster ran out of topics, so this is a prefix of what " +
+  "the broker listed and not the whole of it.";
+
+/** What "no visible topics" is not. */
+export const DISCOVERY_STALE_SENTENCE =
+  "This inventory is past its freshness or its connection changed under it. It is shown because " +
+  "an old fact with a date on it is more use than a blank, and it is labelled because an old " +
+  "fact presented as current is not.";
+
+/** One discovery's counts, freshness and error, as facts. */
+export function renderDiscoveryFacts(discovery) {
+  const d = discovery || {};
+  const counts = d.counts || {};
+  const expected = d.expected || {};
+  const connection = d.connection || {};
+  const error = d.error || {};
+  return facts([
+    ["id", "<code>" + cell(d.id) + "</code>"],
+    ["state", cell(d.state)],
+    ["reason", cell(d.reason)],
+    ["observed at", cell(d.observedAt)],
+    ["fresh until", cell(d.freshUntil)],
+    ["cluster id", cell(d.clusterId)],
+    ["principal", cell(connection.principal)],
+    ["listed / stored", cell(counts.listed) + " / " + cell(counts.returned)],
+    ["internal excluded", cell(counts.internalExcluded)],
+    ["entries whose metadata could not be read", cell(counts.errored)],
+    ["expected topics", cell(expected.requested) === ABSENT
+      ? ABSENT
+      : esc(String(expected.requested) + " asked, " + String(expected.visible) + " visible, " +
+        String(expected.notAuthorized) + " not authorized, " + String(expected.notFound) +
+        " not found, " + String(expected.unknown) + " unknown")],
+    ["error", cell(error.code) === ABSENT ? ABSENT : cell(error.code) + " " + cell(error.message)],
+  ]);
+}
+
+/** One discovery, with its visibility banner and its labels. `role` is
+ *  `latest` or `successful` and becomes part of the heading, because a reader
+ *  must never have to work out which of the two slots they are looking at. */
+export function renderDiscovery(discovery, role) {
+  const d = discovery || {};
+  const counts = d.counts || {};
+  const heading = role === "successful" ? "Last successful inventory" : "Latest attempt";
+  const empty = d.state === "succeeded" && counts.returned === 0;
+  return (
+    "<section class=\"discovery discovery-" + esc(String(role)) + "\" id=\"discovery-" +
+    esc(String(role)) + "\"><h4>" + esc(heading) + "</h4>" +
+    phaseBadge(d.state) +
+    (d.stale === true
+      ? " " + badge("unverified", "stale: " +
+        (Array.isArray(d.staleReasons) && d.staleReasons.length > 0
+          ? d.staleReasons.join(", ")
+          : "reason not recorded"))
+      : "") +
+    (d.truncated === true
+      ? " " + badge("unverified", "truncated: " + String(d.truncationReason || "unrecorded"))
+      : "") +
+    (d.stale === true ? "<p class=\"note\">" + esc(DISCOVERY_STALE_SENTENCE) + "</p>" : "") +
+    (d.truncated === true ? "<p class=\"note\">" + esc(TRUNCATION_SENTENCE) + "</p>" : "") +
+    visibilityLine(d.visibility) +
+    (empty
+      ? "<p class=\"note\" id=\"discovery-empty\">" + esc(EMPTY_INVENTORY_SENTENCE) + "</p>"
+      : "") +
+    renderDiscoveryFacts(d) +
+    "</section>"
+  );
+}
+
+/** The topic table: name, partitions, internal, expected, error code. */
+export function renderTopicTable(page) {
+  const p = page || {};
+  const items = Array.isArray(p.items) ? p.items : [];
+  const scan = p.scan || {};
+  const paging = p.page || {};
+  const rows = items.map((t) => [
+    "<code>" + cell(t.name) + "</code>",
+    cell(t.partitions),
+    t.internal === true ? "yes" : "no",
+    t.expected === true ? "yes" : "no",
+    cell(t.errorCode),
+  ]);
+  return (
+    table(
+      ["TOPIC", "PARTITIONS", "INTERNAL", "EXPECTED", "ERROR"],
+      rows,
+      "No topic on this page. That is a statement about this page and its filters, not about " +
+        "the cluster.",
+    ) +
+    "<p class=\"note\" id=\"topic-scan\">" +
+    (scan.complete === true
+      ? "The scan reached the end of the stored result (" + cell(scan.chunksScanned) +
+        " chunk(s) read)."
+      : esc(SCAN_INCOMPLETE_SENTENCE) + " (" + cell(scan.chunksScanned) + " chunk(s) read)") +
+    "</p>" +
+    (typeof paging.nextCursor === "string" && paging.nextCursor.length > 0
+      ? "<div class=\"actions\"><button type=\"button\" id=\"topics-more\" " +
+        "data-cursor=\"" + esc(paging.nextCursor) + "\">Read the next page</button></div>"
+      : "<p class=\"note\">No cursor: this is the end of the result.</p>") +
+    "<p class=\"note\">snapshot " + cell(paging.snapshot) + "</p>"
+  );
+}
+
+/** The whole panel: the controls, the two slots, and the topic table. */
+export function renderDiscoveryPanel(view) {
+  const v = view || {};
+  const may = v.mayOperate !== false;
+  const latest = v.latestAttempt || null;
+  const successful = v.lastSuccessful || null;
+  const filters = v.filters || {};
+  const state = v.state || {};
+  const pending = state.phase === "pending";
+  const running = latest !== null && latest.terminal === false;
+  return (
+    "<section class=\"discover\" id=\"cluster-discovery\"><h3>Discover topics</h3>" +
+    "<p class=\"note\">A discovery starts a check Job that dials this connection with its own " +
+    "credential and asks the broker for metadata. It is the only control on this page that " +
+    "makes anything dial; the connection probe above re-reads what the controller already " +
+    "recorded.</p>" +
+    (v.unavailable === true
+      ? "<p class=\"note\" id=\"discovery-unavailable\">" + cell(v.unavailableReason) + "</p>"
+      : "") +
+    (may && v.unavailable !== true
+      ? "<form id=\"discovery-form\" novalidate" + (pending ? " aria-busy=\"true\"" : "") + ">" +
+        "<fieldset class=\"form-body\"" + (pending ? " disabled" : "") + ">" +
+        "<label class=\"inline\" for=\"discovery-internal\">" +
+        "<input type=\"checkbox\" id=\"discovery-internal\" name=\"includeInternal\"" +
+        (filters.includeInternal === true ? " checked" : "") +
+        "> include Kafka internal topics (__-prefixed)</label>" +
+        "<div class=\"field\"><label for=\"discovery-expected\">expected topics, comma " +
+        "separated</label>" +
+        "<input id=\"discovery-expected\" name=\"expectedTopics\" value=\"" +
+        esc(String(filters.expectedTopics || "")) + "\">" +
+        "<p class=\"help\">Named topics the check asks about EXPLICITLY. A broker returns " +
+        "TOPIC_AUTHORIZATION_FAILED for a name this principal cannot describe whether or not " +
+        "it exists, which is the only way a listing's silence becomes visible.</p></div>" +
+        "<div class=\"actions\">" +
+        "<button type=\"submit\" id=\"discovery-start\">Discover topics</button>" +
+        (running
+          ? "<button type=\"button\" id=\"discovery-cancel\">Cancel</button>"
+          : "") +
+        "</div></fieldset>" +
+        "<div class=\"form-status\" id=\"discovery-status\" tabindex=\"-1\">" +
+        mutationStatus(state, { kind: "TopicDiscovery", name: (latest || {}).id || "" }, null) +
+        "</div></form>"
+      : (v.unavailable === true ? "" :
+        "<p class=\"note\">This session may read topic discoveries in this namespace and not " +
+        "start one.</p>")) +
+    (v.reused === true
+      ? "<p class=\"note\" id=\"discovery-reused\">A fresh identical inventory already existed, " +
+        "so no second check was started. This is that result.</p>"
+      : "") +
+    (latest === null && successful === null
+      ? "<p class=\"note\" id=\"discovery-none\">No topic discovery has run for this connection. " +
+        "Nothing below claims anything about its topics.</p>"
+      : "") +
+    (latest === null ? "" : renderDiscovery(latest, "latest")) +
+    (successful === null
+      ? (latest === null
+        ? ""
+        : "<p class=\"note\" id=\"no-successful\">No discovery for this connection has ever " +
+          "produced an inventory.</p>")
+      : (latest !== null && latest.id === successful.id
+        ? "<p class=\"note\" id=\"same-discovery\">The latest attempt is also the last " +
+          "successful inventory.</p>"
+        : renderDiscovery(successful, "successful"))) +
+    renderTopicFilters(filters) +
+    (v.topics === null || v.topics === undefined
+      ? ""
+      : "<div id=\"topics-slot\">" + renderTopicTable(v.topics) + "</div>") +
+    (v.topicsError === null || v.topicsError === undefined
+      ? ""
+      : "<p class=\"note\" id=\"topics-error\">The stored inventory could not be read: " +
+        cell(v.topicsError.message) + "</p>") +
+    "</section>"
+  );
+}
+
+/** The search, prefix and internal filters over a stored inventory. */
+export function renderTopicFilters(filters) {
+  const f = filters || {};
+  return (
+    "<form id=\"topic-filters\" novalidate><fieldset><legend>search the stored inventory" +
+    "</legend>" +
+    "<p class=\"help\">These filter what the SERVICE reads out of the stored result. They " +
+    "change nothing about the cluster and start no check.</p>" +
+    "<div class=\"field-row\">" +
+    "<div class=\"field\"><label for=\"topic-q\">contains</label>" +
+    "<input id=\"topic-q\" name=\"q\" value=\"" + esc(String(f.q || "")) + "\"></div>" +
+    "<div class=\"field\"><label for=\"topic-prefix\">prefix</label>" +
+    "<input id=\"topic-prefix\" name=\"prefix\" value=\"" + esc(String(f.prefix || "")) +
+    "\"></div>" +
+    "<div class=\"field\"><label for=\"topic-internal\">internal</label>" +
+    "<select id=\"topic-internal\" name=\"internal\">" +
+    "<option value=\"exclude\"" + (f.internal === "include" ? "" : " selected") + ">exclude" +
+    "</option>" +
+    "<option value=\"include\"" + (f.internal === "include" ? " selected" : "") + ">include" +
+    "</option></select></div>" +
+    "<div class=\"field\"><label for=\"topic-errored\">unreadable entries</label>" +
+    "<select id=\"topic-errored\" name=\"errored\">" +
+    ["include", "exclude", "only"].map((o) =>
+      "<option value=\"" + esc(o) + "\"" + (f.errored === o ? " selected" : "") + ">" + esc(o) +
+      "</option>").join("") +
+    "</select></div>" +
+    "</div>" +
+    "<div class=\"actions\"><button type=\"submit\">Search</button></div>" +
+    "</fieldset></form>"
   );
 }
 
@@ -620,7 +883,13 @@ export async function mountClusters(node, ns, parse, lifecycle, deps) {
 }
 
 /** Reads one cluster and renders its detail, with the Test connection control
- *  wired to a re-read of the same object. */
+ *  wired to a re-read of the same object and the discovery panel wired to the
+ *  product API's own check routes.
+ *
+ *  THE DISCOVERY READ IS SEPARATE AND ITS FAILURE IS NOT THE PAGE'S. In legacy
+ *  mode it is refused by name -- `kubectl proxy` does not serve these routes --
+ *  and the panel says so instead of the whole detail view disappearing behind
+ *  an error box for a connection whose own facts read perfectly well. */
 export async function mountClusterDetail(node, ns, name, parse, lifecycle, deps) {
   const api = deps || API;
   try {
@@ -628,14 +897,186 @@ export async function mountClusterDetail(node, ns, name, parse, lifecycle, deps)
     if (!active(lifecycle)) {
       return;
     }
-    replace(node, parse(renderClusterDetail(object)));
-    wireDetailProbe(node, ns, name, parse, lifecycle, api);
+    const discovery = await readDiscoveries(api, ns, name, lifecycle);
+    if (!active(lifecycle)) {
+      return;
+    }
+    paintClusterDetail(node, ns, name, parse, lifecycle, api, object, discovery);
   } catch (error) {
     if (!cancelled(error, lifecycle) && active(lifecycle)) {
       replace(node, errorBox(error));
     }
   }
 }
+
+/** The two slots for this connection, or the reason there are none. */
+async function readDiscoveries(api, ns, name, lifecycle) {
+  const base = {
+    mayOperate: mayOperate(ns),
+    filters: Object.create(null),
+    topics: null,
+    topicsError: null,
+  };
+  try {
+    const answer = await api.latestDiscoveries(ns, name, readOptions(lifecycle));
+    return Object.assign(base, {
+      latestAttempt: answer.latestAttempt,
+      lastSuccessful: answer.lastSuccessful,
+    });
+  } catch (error) {
+    if (cancelled(error, lifecycle)) {
+      throw error;
+    }
+    return Object.assign(base, {
+      latestAttempt: null,
+      lastSuccessful: null,
+      unavailable: true,
+      unavailableReason: error.message,
+    });
+  }
+}
+
+function paintClusterDetail(node, ns, name, parse, lifecycle, api, object, discovery) {
+  const key = formKey(ns, DISCOVERY_FORM, name);
+  const view = Object.assign({ state: mutationFor(key).state }, discovery || {});
+  replace(node, parse(renderClusterDetail(object, undefined, undefined, undefined, view)));
+  wireDetailProbe(node, ns, name, parse, lifecycle, api, view);
+  wireDiscovery(node, ns, name, parse, lifecycle, api, object, view);
+}
+
+/** The discovery panel's three controls: start, cancel, and read a page of the
+ *  stored inventory (with the filters, and following the cursor).
+ *
+ *  NOTHING HERE POLLS. A started check is read again when the reader asks --
+ *  by clicking again, or by reloading the view. A timer would keep reading a
+ *  namespace after its reader stopped looking, and this page has no way to
+ *  know that they have. */
+function wireDiscovery(node, ns, name, parse, lifecycle, api, object, view) {
+  const key = formKey(ns, DISCOVERY_FORM, name);
+  const mutation = mutationFor(key);
+  const form = node.querySelector("#discovery-form");
+  if (form !== null) {
+    watchMutation(node, key, mutation, (state) => {
+      if (!active(lifecycle)) {
+        return;
+      }
+      if (state.phase === "succeeded") {
+        const made = state.result || {};
+        paintClusterDetail(node, ns, name, parse, lifecycle, api, object, Object.assign(
+          {}, view,
+          {
+            latestAttempt: made.item || view.latestAttempt,
+            reused: made.reused === true,
+          },
+        ));
+        return;
+      }
+      paintClusterDetail(node, ns, name, parse, lifecycle, api, object, view);
+    }, lifecycle);
+
+    listen(form, "submit", (event) => {
+      event.preventDefault();
+      if (!active(lifecycle) || mutation.pending()) {
+        return;
+      }
+      const values = readClusterValues(form);
+      const request = {};
+      if (values.includeInternal === true) {
+        request.includeInternal = true;
+      }
+      const expected = String(values.expectedTopics || "")
+        .split(",").map((t) => t.trim()).filter((t) => t.length > 0);
+      if (expected.length > 0) {
+        request.expectedTopics = expected;
+      }
+      mutation.run(() => api.startDiscovery(ns, name, request));
+    }, lifecycle);
+
+    const cancel = node.querySelector("#discovery-cancel");
+    if (cancel !== null) {
+      listen(cancel, "click", () => {
+        const latest = view.latestAttempt;
+        if (!active(lifecycle) || latest === null || latest === undefined) {
+          return;
+        }
+        cancel.disabled = true;
+        api.cancelDiscovery(ns, latest.id).then(
+          () => {
+            if (active(lifecycle)) {
+              mountClusterDetail(node, ns, name, parse, lifecycle, api);
+            }
+          },
+          (error) => {
+            if (cancelled(error, lifecycle) || !active(lifecycle)) {
+              return;
+            }
+            const status = node.querySelector("#discovery-status");
+            if (status !== null) {
+              replace(status, parse(errorBlock(error)));
+            }
+            cancel.disabled = false;
+          },
+        );
+      }, lifecycle);
+    }
+  }
+
+  const filters = node.querySelector("#topic-filters");
+  if (filters !== null) {
+    listen(filters, "submit", (event) => {
+      event.preventDefault();
+      readTopics(node, ns, name, parse, lifecycle, api, object, view,
+        readClusterValues(filters), null);
+    }, lifecycle);
+  }
+  const more = node.querySelector("#topics-more");
+  if (more !== null) {
+    listen(more, "click", () => {
+      readTopics(node, ns, name, parse, lifecycle, api, object, view,
+        view.filters || {}, more.getAttribute("data-cursor"));
+    }, lifecycle);
+  }
+}
+
+/** Reads one page of a stored inventory. THE DISCOVERY IT READS IS THE LAST
+ *  SUCCESSFUL ONE, and never the latest attempt: an attempt that failed has no
+ *  stored result, and a filter run against it would answer 404 for a reason
+ *  that has nothing to do with the filter. */
+function readTopics(node, ns, name, parse, lifecycle, api, object, view, filters, cursor) {
+  const source = view.lastSuccessful || null;
+  if (source === null) {
+    return;
+  }
+  const options = Object.assign({}, readOptions(lifecycle));
+  for (const key of ["q", "prefix", "internal", "errored"]) {
+    const value = filters[key];
+    if (typeof value === "string" && value.length > 0) {
+      options[key] = value;
+    }
+  }
+  if (typeof cursor === "string" && cursor.length > 0) {
+    options.cursor = cursor;
+  }
+  api.discoveryTopics(ns, source.id, options).then(
+    (page) => {
+      if (!active(lifecycle)) {
+        return;
+      }
+      paintClusterDetail(node, ns, name, parse, lifecycle, api, object, Object.assign(
+        {}, view, { filters: filters, topics: page, topicsError: null },
+      ));
+    },
+    (error) => {
+      if (cancelled(error, lifecycle) || !active(lifecycle)) {
+        return;
+      }
+      paintClusterDetail(node, ns, name, parse, lifecycle, api, object, Object.assign(
+        {}, view, { filters: filters, topics: null, topicsError: error },
+      ));
+    },
+  );
+}
+
 
 /** THE "TEST CONNECTION" CONTROL, ON THE DETAIL VIEW.
  *
@@ -649,7 +1090,7 @@ export async function mountClusterDetail(node, ns, name, parse, lifecycle, deps)
  *  IT IS BOUND TO THE ROUTE'S LIFETIME LIKE EVERY OTHER READ (PLAT-13.1): the
  *  answer is dropped when the view is gone, so a slow re-read cannot paint a
  *  probe from namespace A over namespace B. */
-function wireDetailProbe(node, ns, name, parse, lifecycle, api) {
+function wireDetailProbe(node, ns, name, parse, lifecycle, api, discovery) {
   const form = node.querySelector("form.probe-test");
   if (form === null) {
     return;
@@ -671,8 +1112,7 @@ function wireDetailProbe(node, ns, name, parse, lifecycle, api) {
         if (!active(lifecycle)) {
           return;
         }
-        replace(node, parse(renderClusterDetail(object)));
-        wireDetailProbe(node, ns, name, parse, lifecycle, api);
+        paintClusterDetail(node, ns, name, parse, lifecycle, api, object, discovery);
       },
       (error) => {
         reading = false;
