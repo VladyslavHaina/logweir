@@ -18,6 +18,20 @@ license.workspace = true
 #
 # It is the ONLY crate permitted to link `logweir-reaper`, which that gate
 # asserts from `cargo metadata`.
+# A LIBRARY BESIDE THE BINARY (review `d3w9` H6). No crate can link a `[[bin]]`,
+# so with only a binary target `cargo test -p logweir-retention` ran zero tests
+# against the one executable in this product that deletes archive data — and the
+# reviewer proved the cost by flipping `--dry-run` to mean "delete for real" and
+# watching every suite in the workspace stay green.
+#
+# It does NOT widen the deletion boundary: `scripts/check-no-archive-write.sh`
+# check 3 walks PACKAGE edges, so a crate that linked this one to reach the
+# reaper is caught transitively (the reviewer planted exactly that and it was
+# killed, naming `logweir-api`).
+[lib]
+name = "logweir_retention"
+path = "src/lib.rs"
+
 [[bin]]
 name = "logweir-retention"
 path = "src/main.rs"
@@ -35,3 +49,9 @@ logweir-store = { path = "../logweir-store" }
 chrono.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# `Refusal`'s derive.
+thiserror.workspace = true
+
+[dev-dependencies]
+# The fake clock's instants in the table rows.
+chrono.workspace = true

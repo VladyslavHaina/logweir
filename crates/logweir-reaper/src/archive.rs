@@ -88,6 +88,21 @@ pub enum BuildError {
     /// The runtime could not be built.
     #[error("the reaper's runtime could not be built: {0}")]
     Runtime(String),
+    /// A provider this crate has no EXPLICIT-credential path for.
+    ///
+    /// Review `d3w9` M7. The S3 arm is written with `AmazonS3Builder::new()`
+    /// precisely so that no ambient variable can relocate a deletion (D-SEAMS
+    /// **S5**); the Azure and GCS builders have no equivalent explicit path in
+    /// this shape, and the first landing reached for `from_env()` on both —
+    /// putting the process environment, rather than the frozen `StorageUrl`, in
+    /// charge of where a delete lands. Refusing is the only honest answer until
+    /// an explicit path exists: neither provider is advertised for enforcement,
+    /// and a `RetentionPolicy` over one is usable in `Report` and
+    /// `ExternalLifecycle` exactly as before.
+    #[error(
+        "the retention worker has no explicit-credential path for {0}, and it will not build a          DELETE-capable handle from ambient process environment (D-SEAMS S5). Use `mode: Report`          or `mode: ExternalLifecycle` for this destination."
+    )]
+    UnsupportedProvider(&'static str),
 }
 
 /// A handle that can remove an object, and do nothing else.
@@ -171,23 +186,9 @@ fn build(
                 b.build().map_err(|e| BuildError::Backend(e.to_string()))?,
             ))
         }
-        StorageUrl::Azure {
-            account_name,
-            container_name,
-            ..
-        } => Ok(Arc::new(
-            object_store::azure::MicrosoftAzureBuilder::from_env()
-                .with_account(account_name)
-                .with_container_name(container_name)
-                .build()
-                .map_err(|e| BuildError::Backend(e.to_string()))?,
-        )),
-        StorageUrl::Gcs { bucket, .. } => Ok(Arc::new(
-            object_store::gcp::GoogleCloudStorageBuilder::from_env()
-                .with_bucket_name(bucket)
-                .build()
-                .map_err(|e| BuildError::Backend(e.to_string()))?,
-        )),
+        // NO `from_env()` IN THE DELETER, ON ANY PROVIDER (review `d3w9` M7).
+        StorageUrl::Azure { .. } => Err(BuildError::UnsupportedProvider("Azure Blob Storage")),
+        StorageUrl::Gcs { .. } => Err(BuildError::UnsupportedProvider("Google Cloud Storage")),
         StorageUrl::Filesystem { path } => Ok(Arc::new(
             object_store::local::LocalFileSystem::new_with_prefix(path)
                 .map_err(|e| BuildError::Backend(e.to_string()))?,
@@ -197,12 +198,47 @@ fn build(
 
 impl Deleter for ArchiveReaper {
     /// **The one object-store delete in this workspace.**
+    ///
+    /// The key is checked against its own NORMALISED form first — review
+    /// `d3w9` M8. `object_store::path::Path::from` drops empty segments and
+    /// percent-encodes `.`, `..`, `%`, `#`, `<`, `>`, `?`, `*` and the control
+    /// set, so the string every rail above validated is not necessarily the
+    /// path this would delete. Two consequences, both closed here:
+    ///
+    /// * a key like `/logweir/x` normalises to `logweir/x`, i.e. INTO the
+    ///   evidence root that `validate_plan` proved it was outside of;
+    /// * a key legitimately containing `?`, `#` or `%` is encoded into a
+    ///   different object, the delete hits nothing, the backend answers
+    ///   `NotFound`, and `attempt` treats that as success — reporting a point
+    ///   `Deleted` with its objects still in the bucket.
+    ///
+    /// A key whose normalised form differs from the plan's is therefore a
+    /// **refusal**, not a delete of the normalised one.
     fn delete_exact(&self, key: &str) -> Result<(), DeleteError> {
-        let path = object_store::path::Path::from(key);
+        let path = normalise(key)?;
         self.rt
             .block_on(async { self.inner.delete(&path).await })
             .map_err(|e| classify(&e))
     }
+}
+
+/// The key as the object store will address it, or a refusal.
+///
+/// # Errors
+///
+/// [`DeleteError::Unclassified`] when normalisation would change the key, or
+/// when the normalised form reaches the evidence root. Both are "this worker
+/// will not act on a path it did not validate", which is a refusal and not a
+/// transport failure, so neither is retried.
+pub fn normalise(key: &str) -> Result<object_store::path::Path, DeleteError> {
+    let path = object_store::path::Path::from(key);
+    if path.as_ref() != key {
+        return Err(DeleteError::Unclassified);
+    }
+    if path.as_ref().starts_with(crate::EVIDENCE_ROOT) {
+        return Err(DeleteError::Unclassified);
+    }
+    Ok(path)
 }
 
 /// An `object_store::Error` in the closed vocabulary D3 §6.5 names.

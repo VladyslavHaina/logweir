@@ -72,7 +72,13 @@ pub const EVIDENCE_ROOT: &str = "logweir/";
 /// The per-key attempt ceiling — D3 §6.5's bounded retry.
 pub const MAX_ATTEMPTS: u32 = 3;
 
-/// The backoff between attempts, in order: 1 s, 4 s, 16 s.
+/// The waits BETWEEN attempts: 1 s, then 4 s.
+///
+/// **Two waits, because three attempts have two gaps** (review `d3w9` L1).
+/// D3 §6.5 writes the backoff as "1 s/4 s/16 s", which reads as three numbers;
+/// with [`MAX_ATTEMPTS`] at 3 the third would be a wait after the last attempt,
+/// i.e. sixteen seconds of holding a Job open to learn nothing. The consistent
+/// reading of §6.5 is the two gaps, and this is them.
 pub const BACKOFF_SECONDS: [u64; 2] = [1, 4];
 
 // ---------------------------------------------------------------------------
@@ -129,7 +135,20 @@ pub struct PlanLine {
     pub object_keys: Vec<String>,
 }
 
-/// The plan document.
+/// The plan document, as the worker reads it.
+///
+/// **Field for field with `weirkeeper::retention_plan::PlanDocument`**, and
+/// both carry `deny_unknown_fields`, so drift between them is total rather than
+/// partial: one added field on the writer would make every plan
+/// `Refusal::Unreadable` and every run exit 3, discovered at 04:17. The two
+/// types cannot be one type — the crates must not link each other, which is the
+/// whole point of `scripts/check-no-archive-write.sh` check 3 — so the
+/// agreement is asserted instead, by
+/// `crates/logweir/tests/retention_plan_wire.rs`, which is in a crate that may
+/// read both files (review `d3w9` L6).
+///
+/// **It carries no instant and no generation.** See `PlanDocument`'s own note:
+/// a digest that moves on its own can never be approved (review `d3w9` C1).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct Plan {
@@ -143,8 +162,6 @@ pub struct Plan {
     pub policy_name: String,
     /// The policy's UID.
     pub policy_uid: String,
-    /// The generation it was computed from.
-    pub policy_generation: i64,
     /// The destination's location id.
     pub location_id: String,
     /// The immutable scope prefix. Every key is re-checked against it here.
@@ -155,10 +172,6 @@ pub struct Plan {
     pub keep_days: Option<i64>,
     /// `minUsablePoints`, as applied.
     pub min_usable_points: i64,
-    /// When the evaluation ran.
-    pub evaluated_at: DateTime<Utc>,
-    /// How many points were considered.
-    pub points_evaluated: i64,
     /// The lines.
     pub lines: Vec<PlanLine>,
 }
@@ -311,8 +324,6 @@ pub fn parse_plan(bytes: &[u8], approved_sha256: &str) -> Result<Plan, Refusal> 
 pub struct RunBinding {
     /// The policy UID the Job was created for.
     pub policy_uid: String,
-    /// The generation.
-    pub policy_generation: i64,
     /// `spec.scope.prefix`, as the Job was told it, INDEPENDENTLY of the plan.
     ///
     /// A worker that took the scope from the plan alone would accept a plan
@@ -331,11 +342,14 @@ pub struct RunBinding {
 ///
 /// [`Refusal`] — nothing has been deleted when this returns one.
 pub fn validate_plan(plan: &Plan, binding: &RunBinding) -> Result<(), Refusal> {
-    if plan.policy_uid != binding.policy_uid || plan.policy_generation != binding.policy_generation
-    {
+    // THE UID AND NOT A GENERATION. The generation is not in the plan bytes
+    // (review `d3w9` C1) and could not be compared here if it were wanted: what
+    // binds this plan to this run is the policy's identity, its scope and the
+    // approved digest `parse_plan` already checked over the exact bytes.
+    if plan.policy_uid != binding.policy_uid {
         return Err(Refusal::PolicyMismatch {
-            found: format!("{}@{}", plan.policy_uid, plan.policy_generation),
-            expected: format!("{}@{}", binding.policy_uid, binding.policy_generation),
+            found: plan.policy_uid.clone(),
+            expected: binding.policy_uid.clone(),
         });
     }
     // THE SCOPE IS THE JOB'S, NOT THE PLAN'S. Compared after trimming a
@@ -449,6 +463,16 @@ pub enum DeleteError {
     ServerError,
     /// A timeout or a transport failure. **Retried.**
     Timeout,
+    /// The run reached its own `maxObjectsPerRun` ceiling with keys still to
+    /// go. **Not a failure of anything** (review `d3w9` M2): it is the bound
+    /// working, the leftovers are named, and the next run completes them.
+    ///
+    /// It has its own code so that
+    /// `status.lastEnforcement.failed[].code` can be read as "this needs
+    /// attention" everywhere else, and so the controller can decline to count
+    /// it toward `consecutiveRunFailures` — three bounded runs on a large
+    /// archive used to set `EnforcementDegraded` and stop scheduling for good.
+    BudgetExhausted,
     /// Anything else. **Not retried**: an unclassified failure repeated three
     /// times is still unclassified, and the run should stop and be looked at.
     Unclassified,
@@ -465,6 +489,7 @@ impl DeleteError {
             Self::NotFound => "NotFound",
             Self::ServerError => "ServerError",
             Self::Timeout => "Timeout",
+            Self::BudgetExhausted => "BudgetExhausted",
             Self::Unclassified => "Unclassified",
         }
     }
@@ -737,6 +762,22 @@ impl Outcome {
             .iter()
             .all(|p| p.state == PointState::Deleted.as_str())
     }
+
+    /// Whether the ONLY thing that stopped this run was its own object ceiling
+    /// — review `d3w9` M2.
+    ///
+    /// A run like that exits 1 (work remains) and must **not** count toward
+    /// `consecutiveRunFailures`: three bounded runs on a large archive would
+    /// otherwise set `EnforcementDegraded` and stop retention for good.
+    #[must_use]
+    pub fn bounded_only(&self) -> bool {
+        !self.complete()
+            && self
+                .points
+                .iter()
+                .filter(|p| p.state != PointState::Deleted.as_str())
+                .all(|p| p.code.as_deref() == Some(DeleteError::BudgetExhausted.as_str()))
+    }
 }
 
 /// How one run is bounded.
@@ -783,11 +824,21 @@ pub fn execute<D: Deleter, S: Sleeper, T: TombstoneSink, L: Lister>(
     };
     for line in &plan.lines {
         if limits.dry_run {
+            // THE PREVIEW ENUMERATES (review `d3w9` M1). A plan this build
+            // writes names the manifest and the set's bound, so the plan's own
+            // key list is 1 while the run removes everything under the bound.
+            // A preview that printed 1 is how an administrator approves a
+            // three-object removal and gets three thousand. Listing is a
+            // separate IAM verb from deleting and the run needs it anyway, so
+            // the dry run asks for it — and `NoListing` falls back to the
+            // plan's own keys, which is the honest answer for a caller that
+            // holds no list grant.
+            let keys = resolve_keys(line, lister).unwrap_or_else(|_| line.object_keys.clone());
             out.points.push(PointOutcome {
                 point_id: line.point_id.clone(),
                 state: PointState::Kept.as_str().to_string(),
                 objects_deleted: 0,
-                remaining_keys: line.object_keys.clone(),
+                remaining_keys: keys,
                 code: Some("DryRun".to_string()),
             });
             continue;
@@ -798,7 +849,7 @@ pub fn execute<D: Deleter, S: Sleeper, T: TombstoneSink, L: Lister>(
                 state: PointState::Kept.as_str().to_string(),
                 objects_deleted: 0,
                 remaining_keys: line.object_keys.clone(),
-                code: Some("ObjectBudgetExhausted".to_string()),
+                code: Some(DeleteError::BudgetExhausted.as_str().to_string()),
             });
             continue;
         }
@@ -856,7 +907,11 @@ pub fn execute<D: Deleter, S: Sleeper, T: TombstoneSink, L: Lister>(
         for key in keys.iter().skip(1) {
             if out.objects_deleted >= limits.max_objects {
                 remaining.push(key.clone());
-                code.get_or_insert(DeleteError::Unclassified);
+                // NAMED, not `Unclassified` (review `d3w9` M2). A run that
+                // stopped on its own ceiling and a run that could not read the
+                // bucket are different findings and are fixed in different
+                // places.
+                code.get_or_insert(DeleteError::BudgetExhausted);
                 continue;
             }
             let (ok, why) = attempt(deleter, sleeper, key, &mut out);
@@ -1087,6 +1142,13 @@ pub struct Record {
 pub struct RecordContext {
     /// The run id.
     pub run_id: String,
+    /// The policy generation this run was created at.
+    ///
+    /// It comes from the Job's environment and NOT from the plan: the plan
+    /// carries no generation, because approving one bumps it (review `d3w9`
+    /// C1). The record wants it anyway — it is a fact about the run, and an
+    /// auditor asking "which revision of the policy authorised this" needs it.
+    pub policy_generation: i64,
     /// The approver reference, or `"unattended"`.
     pub approver: String,
     /// The plan digest.
@@ -1109,7 +1171,7 @@ pub fn record(plan: &Plan, outcome: &Outcome, ctx: &RecordContext) -> Record {
         policy_namespace: plan.policy_namespace.clone(),
         policy_name: plan.policy_name.clone(),
         policy_uid: plan.policy_uid.clone(),
-        policy_generation: plan.policy_generation,
+        policy_generation: ctx.policy_generation,
         plan_sha256: ctx.plan_sha256.clone(),
         approver: ctx.approver.clone(),
         location_id: plan.location_id.clone(),

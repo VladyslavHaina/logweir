@@ -19,16 +19,35 @@
 //!    publishes and creates nothing.
 //! 2. `spec.enforcement.approvedPlanSha256` must equal
 //!    `status.lastEvaluation.planSha256`, and the plan must be younger than
-//!    `planMaxAgeSeconds`. A rules edit bumps `metadata.generation`, which is
-//!    inside the plan bytes, which changes the digest — so a policy change
-//!    invalidates an approval without anything having to remember to.
-//! 3. A lease is written with a resourceVersion-preconditioned patch and THEN a
-//!    consistent, non-cached, cluster-wide list of `Restore`s is made. A
-//!    restore that arrived after the lease cannot slip past the list, because
-//!    the list happens second.
-//! 4. The worker itself re-validates every key, refuses the whole plan on the
-//!    first one outside `<scope>/<backupId>/`, and writes the attributable
-//!    record before it deletes.
+//!    `planMaxAgeSeconds` — both halves, and the second one is enforced here
+//!    rather than only declared (review `d3w9` H4). **The digest is a function
+//!    of what would be deleted and of nothing that moves on its own**: no
+//!    instant, no generation, no counter (review `d3w9` C1). A rules edit, a
+//!    `holds` edit or a new backup changes the CONTENT, and that is what
+//!    invalidates an approval.
+//! 3. A lease is written with a resourceVersion-preconditioned patch **and it
+//!    must land** — a 409 aborts the pass before any Job exists (review `d3w9`
+//!    C3) — and THEN a consistent, non-cached, cluster-wide list of `Restore`s
+//!    is made. A restore that arrived after the lease cannot slip past the
+//!    list, because the list happens second; and because the restore-side
+//!    admission hold is still a hand-off to whoever owns `controllers/restore.rs`,
+//!    this list **fails closed on the whole destination**: any nonterminal
+//!    restore reading it stops the run.
+//! 4. Each point's **intent tombstone** is written, create-only under
+//!    `logweir/`, before that point's first delete, and a point whose intent
+//!    cannot be written is not deleted (review `d3w9` L7). The run's own record
+//!    carries the outcome and so is necessarily written after it. The worker
+//!    also re-validates every key and refuses the whole plan on the first one
+//!    outside `<scope>/<backupId>/`.
+//!
+//! # This controller does not function live until W13 lands (review `d3w9` L5)
+//!
+//! Every Job it builds requests the [`SERVICE_ACCOUNT`] ServiceAccount, and
+//! nothing on this branch creates it — W13 owns it together with the
+//! `retention.enabled` chart value. An `Enforce` policy here produces a Job
+//! whose pods the API server will not admit, which is correctly fail-closed and
+//! is a **merge-ordering constraint**, not a runtime surprise to discover at
+//! the live acceptance.
 //!
 //! # And the evaluation names the right destination
 //!
@@ -124,6 +143,17 @@ pub const REASON_PLAN_SUPERSEDED: &str = "PlanSuperseded";
 pub const REASON_PLAN_EXPIRED: &str = "PlanExpired";
 /// `Enforced=False`: a nonterminal restore references a leased point.
 pub const REASON_ACTIVE_RESTORE: &str = "ActiveRestore";
+/// `Enforced=False`: `spec.enforcement.schedule` is not a UTC cron expression.
+///
+/// A refusal and not a fall-back to "every reconcile" (review `d3w9` M5): a
+/// retention cadence this build cannot read is a cadence nobody configured.
+pub const REASON_UNSUPPORTED_SCHEDULE: &str = "UnsupportedSchedule";
+/// `Enforced=False`: the lease PATCH did not land, so nothing holds these
+/// points and no Job may start (review `d3w9` C3).
+pub const REASON_LEASE_NOT_HELD: &str = "LeaseNotHeld";
+/// `Enforced=False`: an object already holds the plan `ConfigMap`'s name and is
+/// not this plan (review `d3w9` M6).
+pub const REASON_PLAN_CONFIG_MAP_CONFLICT: &str = "PlanConfigMapConflict";
 /// `Enforced=True`: a run is in flight.
 pub const REASON_RUN_IN_PROGRESS: &str = "RunInProgress";
 /// `Enforced=True`: the last run completed.
@@ -165,6 +195,9 @@ pub const CONDITION_REASONS: &[&str] = &[
     REASON_PLAN_SUPERSEDED,
     REASON_PLAN_EXPIRED,
     REASON_ACTIVE_RESTORE,
+    REASON_UNSUPPORTED_SCHEDULE,
+    REASON_LEASE_NOT_HELD,
+    REASON_PLAN_CONFIG_MAP_CONFLICT,
     REASON_RUN_IN_PROGRESS,
     REASON_RUN_COMPLETE,
     REASON_RUN_FAILED,
@@ -394,6 +427,19 @@ pub async fn reconcile_policy(
         return Ok(refused(REASON_DESTINATION_UNUSABLE));
     };
     let mut pass = Pass {
+        resource_version: std::sync::Mutex::new(
+            policy
+                .metadata
+                .resource_version
+                .clone()
+                .filter(|v| !v.is_empty()),
+        ),
+        observed_status: std::sync::Mutex::new(
+            policy
+                .status
+                .as_ref()
+                .and_then(|s| serde_json::to_value(s).ok()),
+        ),
         policy,
         name,
         namespace,
@@ -409,6 +455,57 @@ struct Pass<'a> {
     namespace: String,
     uid: String,
     ctx: &'a PolicyContext<'a>,
+    /// The `metadata.resourceVersion` the NEXT status PATCH will use as its
+    /// precondition — review `d3w9` **C3**.
+    ///
+    /// # Why this is threaded rather than read from the object each time
+    ///
+    /// The first landing took the version from `self.policy`, the object the
+    /// watcher delivered, on every patch. An enforcing pass patches three
+    /// times: the evaluation, then the lease, then `lastEnforcement`. The first
+    /// succeeds and advances the object's version; the second and third then
+    /// carry a version the API server has already superseded, 409, and — worse
+    /// — the 409 was mapped to `Ok(())`. The lease was therefore **never
+    /// written**, the Job was created anyway, the run was never tracked or
+    /// harvested, `consecutiveRunFailures` never moved, and sixty seconds later
+    /// the next pass computed a new run id and created a **second deletion
+    /// Job**.
+    ///
+    /// This reconciler holds no `get` on its own kind, so it cannot re-read the
+    /// object; the version each successful PATCH returns is the only fresh one
+    /// available, and it is what the next patch uses.
+    ///
+    /// A `Mutex` and not a `RefCell`: the arms take `&self`, `kube`'s
+    /// `Controller` requires the reconcile future to be `Send`, and `RefCell`
+    /// is not `Sync`. It is uncontended by construction — one pass, one thread
+    /// — and **no guard is ever held across an `await`**, which is the other
+    /// way a lock makes a future non-`Send`.
+    resource_version: std::sync::Mutex<Option<String>>,
+    /// The status as this pass believes it now stands, for the
+    /// "nothing changed, send nothing" comparison.
+    ///
+    /// Threaded for the same reason as the version: after the evaluation patch
+    /// the object in hand is stale, and comparing the lease against the stale
+    /// copy would send a patch that is already there — or skip one that is not.
+    observed_status: std::sync::Mutex<Option<Value>>,
+}
+
+/// What one status PATCH did.
+///
+/// A three-way answer and not a `Result<(), _>`, because "nothing needed
+/// writing" and "somebody else wrote first" are different facts and exactly one
+/// of them may be swallowed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PatchOutcome {
+    /// The API server accepted it and the version cursor moved.
+    Applied,
+    /// The computed status equalled the stored one; nothing was sent.
+    Unchanged,
+    /// The precondition failed. **The caller decides.** For an evaluation this
+    /// is "the next pass reads it"; for the LEASE it is "abort before creating
+    /// a Job", because a run whose lease did not land is a run nothing is
+    /// holding points for.
+    Conflict,
 }
 
 impl Pass<'_> {
@@ -426,17 +523,33 @@ impl Pass<'_> {
     }
 
     fn stem(&self) -> String {
-        format!(
-            "{NAME_PREFIX}{}",
-            &logweir_core::ids::sha256_hex(self.uid.as_bytes())[..20]
-        )
+        plan::config_map_stem(&self.uid)
     }
 
-    fn status_value(&self) -> Option<Value> {
-        self.policy
-            .status
-            .as_ref()
-            .and_then(|s| serde_json::to_value(s).ok())
+    /// The enforcement slot `spec.enforcement.schedule` names, at `now`.
+    ///
+    /// Review `d3w9` **M5** and **Q1**. The first landing read the cron field
+    /// nowhere and used `now / 60` as the run id's slot, so an operator who
+    /// wrote `"17 4 * * *"` expecting one nightly run had nothing bounding how
+    /// often an approved plan could start one, and the deterministic-name
+    /// protection against a duplicate reconcile held for exactly one minute.
+    ///
+    /// The slot is now the cron's own latest due firing, and it is BOTH the
+    /// cadence gate and the run id's slot — which is what makes "one run per
+    /// slot" a property of the name rather than of the clock.
+    ///
+    /// `Err` is an unparseable expression, which is a refusal and not a
+    /// silently-hourly cadence.
+    fn enforcement_slot(&self) -> Result<Option<DateTime<Utc>>, String> {
+        let Some(enforcement) = self.policy.spec.enforcement.as_ref() else {
+            return Ok(None);
+        };
+        // UTC and no time zone: D3 §6.2 says "UTC cron", and a retention
+        // cadence that moved with a zone's DST would run twice or not at all on
+        // two nights a year.
+        let cadence = crate::cadence::Cadence::parse(&enforcement.schedule, None)
+            .map_err(|e| format!("spec.enforcement.schedule is not a UTC cron expression: {e}"))?;
+        Ok(cadence.latest_due_slot(self.ctx.now))
     }
 
     fn rules(&self) -> plan::Rules {
@@ -642,7 +755,9 @@ impl Pass<'_> {
             // The Job is gone and the run was never harvested — its TTL fired
             // between passes, or it was removed. The RECORD in object storage
             // is the durable answer; the status says the run did not report.
-            return Ok(Some(self.harvest(&run_id, None, None).await?));
+            return Ok(Some(
+                self.harvest(&run_id, None, &RunReport::default()).await?,
+            ));
         };
         // D-SEAMS S6, applied to a Job: a Job wearing this run's name is not
         // thereby this policy's Job.
@@ -662,15 +777,39 @@ impl Pass<'_> {
         if !super::backup::job_finished(&job) {
             return Ok(Some(self.report_running(&run_id, &job_name).await?));
         }
-        let exit_code = self.exit_code_of(&job).await?;
-        Ok(Some(self.harvest(&run_id, Some(&job), exit_code).await?))
+        let report = self.harvest_run(&job).await?;
+        Ok(Some(self.harvest(&run_id, Some(&job), &report).await?))
     }
 
-    /// The exit code, through the pod's OWNER UID and never through a label
-    /// (D-SEAMS **S6**, defect SEC-PODLOG).
-    async fn exit_code_of(&self, job: &Job) -> Result<Option<i32>, ReconcileError> {
-        let pod = check::pod::find_owned_pod(self.ctx.client, &self.namespace, job).await?;
-        Ok(pod.and_then(|p| super::backup::terminated_exit_code(&p)))
+    /// The exit code AND the run's own key lines, through the pod's OWNER UID
+    /// and never through a label (D-SEAMS **S6**, defect SEC-PODLOG).
+    ///
+    /// Review `d3w9` **H2**. The first landing read the exit code and stopped,
+    /// so `status.lastEnforcement.{deleted, failed, objectsDeleted, recordKey,
+    /// recordSha256}` — all five declared in the CRD — were never written. The
+    /// consequence was not cosmetic: `previously_refused()` reads `failed[]`,
+    /// so D3 §6.5's "a provider refusal is recorded, kept, and **excluded from
+    /// the next plan** until the reason clears" never fired, and every run
+    /// re-attempted the locked point.
+    async fn harvest_run(&self, job: &Job) -> Result<RunReport, ReconcileError> {
+        let Some(pod) = check::pod::find_owned_pod(self.ctx.client, &self.namespace, job).await?
+        else {
+            return Ok(RunReport::default());
+        };
+        let exit_code = super::backup::terminated_exit_code(&pod);
+        let pods: Api<k8s_openapi::api::core::v1::Pod> =
+            Api::namespaced(self.ctx.client.clone(), &self.namespace);
+        let log = match pods
+            .logs(&pod.name_any(), &check::relay::log_params())
+            .await
+        {
+            Ok(log) => log,
+            // A pod whose log is gone is a run whose durable answer is the
+            // record in object storage; it is not a reconcile failure.
+            Err(e) if check::is_log_absent(&e) => String::new(),
+            Err(e) => return Err(ReconcileError::Api(e)),
+        };
+        Ok(parse_run_lines(&log, exit_code))
     }
 
     async fn report_running(
@@ -724,8 +863,9 @@ impl Pass<'_> {
         &self,
         run_id: &str,
         job: Option<&Job>,
-        exit_code: Option<i32>,
+        report: &RunReport,
     ) -> Result<Outcome, ReconcileError> {
+        let exit_code = report.exit_code;
         let failed = exit_code != Some(0);
         let previous = self
             .policy
@@ -733,7 +873,18 @@ impl Pass<'_> {
             .as_ref()
             .and_then(|s| s.consecutive_run_failures)
             .unwrap_or(0);
-        let failures = if failed { previous + 1 } else { 0 };
+        // A RUN THAT STOPPED ON ITS OWN CEILING IS NOT A FAILED RUN (review
+        // `d3w9` M2). It exits 1 because work remains, and counting it would
+        // make three ordinary bounded runs on a large archive set
+        // `EnforcementDegraded` and stop retention for good.
+        let bounded = report.bounded_only();
+        let failures = if failed && !bounded {
+            previous + 1
+        } else if failed {
+            previous
+        } else {
+            0
+        };
         let degraded = failures >= DEGRADED_AFTER_FAILURES;
         let reason = if failed {
             REASON_RUN_FAILED
@@ -746,13 +897,20 @@ impl Pass<'_> {
                 "retention run {run_id} REFUSED its plan before deleting anything (exit 3); the \
                  archive is untouched"
             ),
+            Some(code) if bounded => format!(
+                "retention run {run_id} exited {code} having reached its own \
+                 maxObjectsPerRun; the leftovers are named and the next run completes them. \
+                 This is not counted as a failure."
+            ),
             Some(code) => format!(
-                "retention run {run_id} exited {code}: at least one point did not complete. The \
-                 signed-key record under logweir/retention/ names which."
+                "retention run {run_id} exited {code}: {} point(s) did not complete. The \
+                 create-only, unsigned record under logweir/retention/ names which.",
+                report.failed.len()
             ),
             None => format!(
                 "retention run {run_id} produced no exit code: its pod is gone or was never \
-                 readable. The record under logweir/retention/ is the durable answer."
+                 readable. The create-only, unsigned record under logweir/retention/ is the \
+                 durable answer."
             ),
         };
         let conditions = self.conditions(&[
@@ -789,10 +947,24 @@ impl Pass<'_> {
         self.patch_status(json!({
             "observedGeneration": self.generation(),
             "enforcement": ENFORCEMENT_LOGWEIR_WORKER,
+            // THE FIVE FIELDS THE CRD DECLARES AND THE FIRST LANDING NEVER
+            // WROTE (review `d3w9` H2). `failed[]` is the input
+            // `previously_refused()` reads, so without it D3 §6.5's "a provider
+            // refusal is recorded, kept and excluded from the next plan" could
+            // not fire at all.
             "lastEnforcement": {
                 "runId": run_id,
                 "finishedAt": self.ctx.now,
                 "exitCode": exit_code,
+                "deleted": report.deleted,
+                "failed": report
+                    .failed
+                    .iter()
+                    .map(|(point_id, code)| json!({"pointId": point_id, "code": code}))
+                    .collect::<Vec<Value>>(),
+                "objectsDeleted": report.objects_deleted,
+                "recordKey": report.record_key,
+                "recordSha256": report.record_sha256,
             },
             // RFC 7386: `null` DELETES the key. The lease exists only while a
             // run holds it, and a lease left behind would hold restore
@@ -880,7 +1052,15 @@ impl Pass<'_> {
         // plan a bound the destination's credential could still reach.
         let dest_prefix = resolved.location.prefix.trim_end_matches('/');
         let scope = self.policy.spec.scope.prefix.trim_end_matches('/');
-        if !scope.starts_with(dest_prefix) {
+        // ON A SEGMENT BOUNDARY (review `d3w9` M3). A bare `starts_with` lets
+        // `…/team-ab` — a sibling tenant's prefix — pass a guard whose stated
+        // purpose is that a scope may only ever NARROW the destination it
+        // covers. The destination's own prefix may legitimately be empty, in
+        // which case every scope is under it.
+        let narrows = dest_prefix.is_empty()
+            || scope == dest_prefix
+            || scope.starts_with(&format!("{dest_prefix}/"));
+        if !narrows {
             return self
                 .publish_refusal(
                     REASON_DESTINATION_UNUSABLE,
@@ -937,11 +1117,10 @@ impl Pass<'_> {
             max_deletions_per_run: max_deletions,
         });
 
-        let document =
-            match plan::plan_document(&self.identity(), &dest, rules, &evaluation, self.ctx.now) {
-                Ok(d) => d,
-                Err(e) => return self.publish_plan_refusal(&e.to_string()).await,
-            };
+        let document = match plan::plan_document(&self.identity(), &dest, rules, &evaluation) {
+            Ok(d) => d,
+            Err(e) => return self.publish_plan_refusal(&e.to_string()).await,
+        };
         let (plan_bytes, plan_sha256) = match plan::plan_bytes(&document) {
             Ok(pair) => pair,
             Err(e) => return self.publish_plan_refusal(&e.to_string()).await,
@@ -952,10 +1131,10 @@ impl Pass<'_> {
             .enforcement
             .as_ref()
             .map_or(3600, |e| i64::from(e.plan_max_age_seconds));
-        let expires_at = self.ctx.now + chrono::Duration::seconds(plan_max_age);
+        let window = self.plan_window(&plan_sha256, plan_max_age);
 
         // ENFORCE, OR NOT.
-        let decision = self.enforcement_decision(&plan_sha256, &evaluation);
+        let decision = self.enforcement_decision(&plan_sha256, &evaluation, &window);
         let mut outcome = Outcome {
             phase: RetentionPhase::Evaluated,
             ready: "True",
@@ -971,25 +1150,105 @@ impl Pass<'_> {
             deletes_performed: 0,
         };
 
-        self.publish_evaluation(&evaluation, &plan_sha256, expires_at, &decision)
+        // THE REAL OBJECT COUNT IS NOT KNOWN HERE (review `d3w9` M1). The
+        // catalog view carries no segment keys, so every candidate's `objects`
+        // is `None` — "not observed" — rather than the misleading `1` the first
+        // landing published, and the `Evaluated` condition says so.
+        self.publish_evaluation(&evaluation, &plan_sha256, &window, &decision, &points)
             .await?;
 
         if decision.start {
+            // The slot the decision already validated; `start_run` names the
+            // run after it, so the two cannot disagree.
+            let slot = self
+                .enforcement_slot()
+                .ok()
+                .flatten()
+                .unwrap_or(self.ctx.now);
             match self
-                .start_run(&resolved, &plan_bytes, &plan_sha256, &evaluation.candidates)
+                .start_run(
+                    &resolved,
+                    &plan_bytes,
+                    &plan_sha256,
+                    &evaluation.candidates,
+                    slot,
+                )
                 .await?
             {
-                Some(job_name) => {
+                StartOutcome::Started(job_name) => {
                     outcome.phase = RetentionPhase::Started;
                     outcome.job_name = Some(job_name);
                     outcome.enforced_reason = REASON_RUN_IN_PROGRESS;
                 }
-                None => {
+                StartOutcome::ActiveRestore => {
                     outcome.enforced_reason = REASON_ACTIVE_RESTORE;
+                    self.publish_enforcement_refusal(
+                        REASON_ACTIVE_RESTORE,
+                        "a nonterminal Restore is reading this destination; no retention Job is \
+                         created while one is. Retention fails closed on the whole destination \
+                         until the restore-side admission hold lands (D3 §6.5).",
+                    )
+                    .await?;
+                }
+                StartOutcome::LeaseNotHeld => {
+                    outcome.enforced_reason = REASON_LEASE_NOT_HELD;
+                }
+                StartOutcome::PlanConfigMapConflict(message) => {
+                    outcome.enforced_reason = REASON_PLAN_CONFIG_MAP_CONFLICT;
+                    self.publish_enforcement_refusal(REASON_PLAN_CONFIG_MAP_CONFLICT, &message)
+                        .await?;
                 }
             }
         }
         Ok(outcome)
+    }
+
+    /// When this plan's approval window opened and when it closes — review
+    /// `d3w9` **H4**, and the other half of **C1**.
+    ///
+    /// # The anchor is the DIGEST, not the pass
+    ///
+    /// `planExpiresAt` recomputed from `now` on every pass would never expire;
+    /// anchored to an instant inside the digested bytes it would change the
+    /// digest, which is C1. So it is anchored to the first pass that SAW this
+    /// digest: while `status.lastEvaluation.planSha256` still equals what this
+    /// pass computed, the stored `planExpiresAt` stands.
+    ///
+    /// # And a lapsed window re-anchors, once, refusing that pass
+    ///
+    /// A digest that never changes is an archive that has not moved, so the
+    /// plan still describes exactly what it described — but D3 §6.5 makes the
+    /// age a gate in its own terms ("the plan is younger than
+    /// `planMaxAgeSeconds`"), and an approval left lying for a week must not
+    /// silently authorise today's run. The pass that observes the lapse
+    /// therefore **refuses** with [`REASON_PLAN_EXPIRED`] and re-anchors the
+    /// window, so the administrator's next look sees a fresh preview of the
+    /// same plan rather than a policy wedged forever.
+    fn plan_window(&self, plan_sha256: &str, max_age_seconds: i64) -> PlanWindow {
+        let stored = self
+            .policy
+            .status
+            .as_ref()
+            .and_then(|s| s.last_evaluation.as_ref());
+        let same_plan = stored
+            .and_then(|e| e.plan_sha256.as_deref())
+            .is_some_and(|d| d == plan_sha256);
+        let stored_expiry = stored.and_then(|e| e.plan_expires_at);
+        match (same_plan, stored_expiry) {
+            (true, Some(expires_at)) if self.ctx.now <= expires_at => PlanWindow {
+                expires_at,
+                expired: false,
+            },
+            (true, Some(_)) => PlanWindow {
+                // Re-anchored by this pass, which refuses.
+                expires_at: self.ctx.now + chrono::Duration::seconds(max_age_seconds),
+                expired: true,
+            },
+            _ => PlanWindow {
+                expires_at: self.ctx.now + chrono::Duration::seconds(max_age_seconds),
+                expired: false,
+            },
+        }
     }
 
     fn identity(&self) -> plan::PlanIdentity {
@@ -1066,19 +1325,29 @@ impl Pass<'_> {
                     view::PAGE_DATA_KEY
                 )));
             };
-            // THE PAGE DIGEST, CHECKED. `status.pages[].sha256` is over exactly
-            // these bytes, so a page that changed under the reader is caught
-            // here rather than turned into a plan.
-            if let Some(expected) = page.sha256.as_deref() {
-                let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
-                let found = view::page_digest(&lines);
-                if found != expected {
-                    return Ok(Err(format!(
-                        "catalog page {} digests to {found} and the catalog published \
-                         {expected}; the view is not what the catalog says it is",
-                        page.config_map_name
-                    )));
-                }
+            // THE PAGE DIGEST, CHECKED, AND ITS ABSENCE IS A FAILURE (review
+            // `d3w9` M4). `status.pages[].sha256` is over exactly these bytes,
+            // so a page that changed under the reader is caught here rather
+            // than turned into a plan — and a page the catalog published no
+            // digest for is a page nothing can check. The same function already
+            // refuses an INCOMPLETE view; accepting an UNVERIFIED one would be
+            // the same defect through the other door.
+            let Some(expected) = page.sha256.as_deref() else {
+                return Ok(Err(format!(
+                    "catalog page {} carries no `status.pages[].sha256`, so its bytes cannot be \
+                     checked against what the catalog published; an unverified view never \
+                     authorises a deletion",
+                    page.config_map_name
+                )));
+            };
+            let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
+            let found = view::page_digest(&lines);
+            if found != expected {
+                return Ok(Err(format!(
+                    "catalog page {} digests to {found} and the catalog published \
+                     {expected}; the view is not what the catalog says it is",
+                    page.config_map_name
+                )));
             }
             for line in body.lines().filter(|l| !l.trim().is_empty()) {
                 match serde_json::from_str::<ViewEntry>(line) {
@@ -1118,7 +1387,12 @@ impl Pass<'_> {
             if is_terminal_restore(restore) {
                 continue;
             }
-            if !restore_touches(restore, location_id, &self.namespace) {
+            if !restore_touches(
+                restore,
+                &self.policy.spec.destination_ref.name,
+                location_id,
+                &self.namespace,
+            ) {
                 continue;
             }
             active_sets.insert(restore.spec.backup_set_ref.clone());
@@ -1177,12 +1451,23 @@ impl Pass<'_> {
         plan_bytes: &[u8],
         plan_sha256: &str,
         candidates: &[plan::Candidate],
-    ) -> Result<Option<String>, ReconcileError> {
+        slot: DateTime<Utc>,
+    ) -> Result<StartOutcome, ReconcileError> {
         let leased: Vec<String> = candidates.iter().map(|c| c.point_id.clone()).collect();
-        let slot = self.ctx.now.timestamp() / 60;
-        let run_id = plan::run_id(&self.uid, plan_sha256, slot);
+        // THE SLOT IS THE CRON'S, NOT THE MINUTE'S (review `d3w9` M5/Q1). The
+        // run id is a pure function of it, so "one run per slot" is a property
+        // of the NAME — a duplicate reconcile inside a slot gets 409
+        // `AlreadyExists` from the API server — rather than of the clock.
+        let run_id = plan::run_id(&self.uid, plan_sha256, slot.timestamp());
 
-        // (a) THE LEASE, with a resourceVersion-preconditioned patch.
+        // (a) THE LEASE, with a resourceVersion-preconditioned patch, AND IT
+        //     MUST LAND (review `d3w9` C3). The first landing swallowed the
+        //     409 this patch got every enforcing pass — the evaluation patch
+        //     had already advanced the object's version — so the Job was
+        //     created with no lease recorded, the run was never tracked or
+        //     harvested, and sixty seconds later a second deletion Job
+        //     followed. A run nothing is holding points for is a run that must
+        //     not start.
         let expires_at = self.ctx.now
             + chrono::Duration::seconds(
                 self.policy
@@ -1192,43 +1477,58 @@ impl Pass<'_> {
                     .map_or(1800, |e| i64::from(e.deadline_seconds))
                     + LEASE_MARGIN_SECONDS,
             );
-        self.patch_status(json!({
-            "lease": {
-                "runId": run_id,
-                "pointIds": leased.clone(),
-                "acquiredAt": self.ctx.now,
-                "expiresAt": expires_at,
-            },
-        }))
-        .await?;
+        let lease = self
+            .patch_status(json!({
+                "lease": {
+                    "runId": run_id,
+                    "pointIds": leased.clone(),
+                    "acquiredAt": self.ctx.now,
+                    "expiresAt": expires_at,
+                },
+            }))
+            .await?;
+        if lease != PatchOutcome::Applied {
+            warn!(
+                policy = %self.name, namespace = %self.namespace, run = %run_id,
+                "the retention lease did not land ({lease:?}); this pass creates no Job and the \
+                 next one re-evaluates from the status that did land"
+            );
+            return Ok(StartOutcome::LeaseNotHeld);
+        }
 
         // (b) AND THEN the consistent re-list. The ORDER is the whole property:
-        //     a restore that arrives after (a) is seen by (b); a restore that
-        //     arrives after (b) is held by restore admission, which refuses
-        //     while a matching lease exists.
+        //     a restore that arrives after (a) is seen by (b).
+        //
+        //     **FAIL CLOSED ON THE WHOLE DESTINATION**, not only on the leased
+        //     points. The restore-side admission hold D3 §6.5 calls for lives
+        //     in `controllers/restore.rs`, which is another worker's file and a
+        //     recorded hand-off; until it lands, the only guard that exists is
+        //     this one, and a `Restore` reading ANY set at this destination is
+        //     enough to stop the run. A run refused for a restore it would not
+        //     have touched costs one cadence slot; the other way costs the set.
         let active_sets = self.active_restore_sets(&resolved.canonical_url).await?;
-        let contested: Vec<&str> = candidates
-            .iter()
-            .filter(|c| active_sets.contains(&c.backup_id))
-            .map(|c| c.point_id.as_str())
-            .collect();
-        if !contested.is_empty() {
+        if !active_sets.is_empty() {
             warn!(
                 policy = %self.name, namespace = %self.namespace,
-                points = contested.len(),
-                "a nonterminal Restore references a leased point; no retention Job is created"
+                sets = active_sets.len(),
+                "a nonterminal Restore reads this destination; no retention Job is created"
             );
-            return Ok(None);
+            return Ok(StartOutcome::ActiveRestore);
         }
 
         // The plan `ConfigMap`, immutable and owned by the policy.
-        let plan_name = format!(
-            "{}-plan-{}",
-            self.stem(),
-            &plan_sha256.trim_start_matches("sha256:")[..12]
-        );
-        self.ensure_plan_config_map(&plan_name, plan_bytes, plan_sha256)
-            .await?;
+        let plan_name = plan::plan_config_map_name(&self.uid, plan_sha256);
+        if let Err(message) = self
+            .ensure_plan_config_map(&plan_name, plan_bytes, plan_sha256)
+            .await?
+        {
+            warn!(
+                policy = %self.name, namespace = %self.namespace,
+                config_map = %plan_name,
+                "the plan ConfigMap is not this plan's; no Job is created"
+            );
+            return Ok(StartOutcome::PlanConfigMapConflict(message));
+        }
 
         let job_name = self.job_name(&run_id);
         let job = self.build_job(&job_name, &run_id, &plan_name, plan_sha256, resolved);
@@ -1255,22 +1555,59 @@ impl Pass<'_> {
                 "startedAt": self.ctx.now,
                 "planSha256": plan_sha256,
             },
+            // THE PLAN'S NAME, PUBLISHED (review `d3w9` M9). The contract says
+            // "read the names from status; never compute one", and the first
+            // landing never wrote this one — leaving W11's `/preview` told to
+            // read a field that was always absent.
+            "lastEvaluation": { "planRef": { "name": plan_name } },
         }))
         .await?;
-        Ok(Some(job_name))
+        Ok(StartOutcome::Started(job_name))
     }
 
+    #[allow(clippy::type_complexity)]
     async fn ensure_plan_config_map(
         &self,
         name: &str,
         bytes: &[u8],
         digest: &str,
-    ) -> Result<(), ReconcileError> {
+    ) -> Result<Result<(), String>, ReconcileError> {
         let maps: Api<ConfigMap> = Api::namespaced(self.ctx.client.clone(), &self.namespace);
-        if maps.get_opt(name).await?.is_some() {
-            // IMMUTABLE AND CONTENT-NAMED, so an existing object at this name
-            // holds exactly these bytes; there is nothing to reconcile.
-            return Ok(());
+        if let Some(existing) = maps.get_opt(name).await? {
+            // AN OBJECT AT THIS NAME IS NOT THEREBY THIS PLAN (review `d3w9`
+            // M6). The name is `<stem>-plan-<12 hex of digest>` and the stem is
+            // derived from the policy UID, so it is predictable to anyone who
+            // can read the status — and a namespace tenant with `create
+            // configmaps` can squat it with different bytes and
+            // `immutable: true`. The worker's own digest check would turn that
+            // into a permanent exit 3, which is safe and is still a denial of
+            // service the controller cannot repair, holding no `delete` verb.
+            // Refusing here says which object and why.
+            let found = existing
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get(plan::PLAN_DIGEST_ANNOTATION))
+                .map(String::as_str);
+            let body = existing
+                .data
+                .as_ref()
+                .and_then(|d| d.get(plan::PLAN_DATA_KEY))
+                .map(String::as_str)
+                .unwrap_or_default();
+            let actual = logweir_core::ids::sha256_prefixed(body.as_bytes());
+            if found != Some(digest) || actual != digest {
+                return Ok(Err(format!(
+                    "ConfigMap {}/{name} exists carrying digest {} (its bytes digest to \
+                     {actual}) and this pass rendered {digest}; the plan an administrator \
+                     approved is not the plan at that name, so no Job is created. Remove the \
+                     object to unblock — this controller holds no delete verb.",
+                    self.namespace,
+                    found.unwrap_or("<none>")
+                )));
+            }
+            // Same name, same annotation, same bytes: there is nothing to do.
+            return Ok(Ok(()));
         }
         let cm = ConfigMap {
             metadata: kube::api::ObjectMeta {
@@ -1315,7 +1652,9 @@ impl Pass<'_> {
             binary_data: None,
         };
         match maps.create(&PostParams::default(), &cm).await {
-            Ok(_) | Err(kube::Error::Api(kube::core::ErrorResponse { code: 409, .. })) => Ok(()),
+            Ok(_) | Err(kube::Error::Api(kube::core::ErrorResponse { code: 409, .. })) => {
+                Ok(Ok(()))
+            }
             Err(e) => Err(ReconcileError::Api(e)),
         }
     }
@@ -1532,6 +1871,7 @@ impl Pass<'_> {
         &self,
         plan_sha256: &str,
         evaluation: &plan::Evaluation,
+        window: &PlanWindow,
     ) -> EnforcementDecision {
         if self.policy.spec.mode != RetentionMode::Enforce {
             return EnforcementDecision {
@@ -1596,6 +1936,77 @@ impl Pass<'_> {
                     .to_string(),
             };
         }
+        // THE CADENCE, WHICH IS ALSO THE RUN ID'S SLOT (review `d3w9` M5/Q1).
+        // An unparseable expression is a refusal: a retention policy whose cron
+        // this build cannot read must not fall back to "every reconcile".
+        let slot = match self.enforcement_slot() {
+            // A SLOT OLDER THAN THE PLAN WINDOW IS NOT ACTED ON. `latest_due_slot`
+            // answers "the most recent firing at or before now", which for any
+            // cron is almost always Some — a controller that started nine months
+            // after a yearly schedule's firing would otherwise treat it as due.
+            // The bound is `planMaxAgeSeconds`, deliberately the same one that
+            // bounds an approval: a slot no approval could still be valid for is
+            // a slot to wait past, not to catch up on.
+            Ok(Some(slot))
+                if self.ctx.now - slot
+                    <= chrono::Duration::seconds(i64::from(enforcement.plan_max_age_seconds)) =>
+            {
+                slot
+            }
+            Ok(Some(slot)) => {
+                return EnforcementDecision {
+                    start: false,
+                    enforcement: ENFORCEMENT_LOGWEIR_WORKER,
+                    reason: REASON_NOTHING_TO_DO,
+                    message: format!(
+                        "the last firing of spec.enforcement.schedule was {}, longer ago than \
+                         planMaxAgeSeconds; the next run is its next firing",
+                        slot.to_rfc3339()
+                    ),
+                }
+            }
+            Ok(None) => {
+                return EnforcementDecision {
+                    start: false,
+                    enforcement: ENFORCEMENT_LOGWEIR_WORKER,
+                    reason: REASON_NOTHING_TO_DO,
+                    message: "spec.enforcement.schedule has not come due yet".to_string(),
+                }
+            }
+            Err(message) => {
+                return EnforcementDecision {
+                    start: false,
+                    enforcement: ENFORCEMENT_RECOMMENDATION_ONLY,
+                    reason: REASON_UNSUPPORTED_SCHEDULE,
+                    message,
+                }
+            }
+        };
+        // ONE RUN PER SLOT. The run id is a pure function of the slot, so a
+        // second pass inside one slot recomputes the same name and gets 409
+        // `AlreadyExists` — but a pass that has already RECORDED a run for this
+        // slot should not even try, or every reconcile would POST a Job it
+        // knows is there.
+        let last_run = self
+            .policy
+            .status
+            .as_ref()
+            .and_then(|s| s.last_enforcement.as_ref())
+            .and_then(|r| r.run_id.clone());
+        if last_run.as_deref()
+            == Some(plan::run_id(&self.uid, plan_sha256, slot.timestamp()).as_str())
+        {
+            return EnforcementDecision {
+                start: false,
+                enforcement: ENFORCEMENT_LOGWEIR_WORKER,
+                reason: REASON_NOTHING_TO_DO,
+                message: format!(
+                    "this plan has already run in the slot beginning {}; the next run is the \
+                     next firing of spec.enforcement.schedule",
+                    slot.to_rfc3339()
+                ),
+            };
+        }
         let Some(approved) = enforcement.approved_plan_sha256.as_deref() else {
             return EnforcementDecision {
                 start: false,
@@ -1619,6 +2030,24 @@ impl Pass<'_> {
                 ),
             };
         }
+        // THE AGE GATE, WHICH THE FIRST LANDING DECLARED AND NEVER ENFORCED
+        // (review `d3w9` H4). `planMaxAgeSeconds` is one of D3 §6.5's four
+        // gates and the CRD bounds it 300..86400 as if it meant something;
+        // `REASON_PLAN_EXPIRED` sat in the closed reason set with nothing
+        // emitting it.
+        if window.expired {
+            return EnforcementDecision {
+                start: false,
+                enforcement: ENFORCEMENT_LOGWEIR_WORKER,
+                reason: REASON_PLAN_EXPIRED,
+                message: format!(
+                    "the approved plan {plan_sha256} was previewed more than \
+                     spec.enforcement.planMaxAgeSeconds ago; it is re-previewed rather than \
+                     executed, and the window reopens at {}",
+                    window.expires_at.to_rfc3339()
+                ),
+            };
+        }
         EnforcementDecision {
             start: true,
             enforcement: ENFORCEMENT_LOGWEIR_WORKER,
@@ -1635,9 +2064,10 @@ impl Pass<'_> {
         &self,
         evaluation: &plan::Evaluation,
         plan_sha256: &str,
-        expires_at: DateTime<Utc>,
+        window: &PlanWindow,
         decision: &EnforcementDecision,
-    ) -> Result<(), ReconcileError> {
+        points: &[PointFacts],
+    ) -> Result<PatchOutcome, ReconcileError> {
         let candidates: Vec<Value> = evaluation
             .candidates
             .iter()
@@ -1649,6 +2079,11 @@ impl Pass<'_> {
                         DateTime::from_timestamp_millis(c.recovery_point_at_ms)
                             .unwrap_or(self.ctx.now),
                     ),
+                    // ABSENT WHEN THIS BUILD CANNOT SAY (review `d3w9` M1).
+                    // `skip_serializing_if` on the CRD field makes `null` and
+                    // absent the same thing on the wire; absent is D3 §12's
+                    // "not observed", and it is the honest answer while the
+                    // view carries no segment keys.
                     "objects": c.objects(),
                     "bytes": c.bytes,
                 })
@@ -1664,6 +2099,19 @@ impl Pass<'_> {
             .iter()
             .map(|s| json!({"pointId": s.point_id, "reason": s.reason.as_str()}))
             .collect();
+        // `sharedSegments` REPORTS WHAT IS TRUE (review `d3w9` H1). The
+        // guarantee is "a segment two points share is not removed with one of
+        // them", and `evaluate` can only make it when a point carries its
+        // segment keys. `point_facts` cannot supply them — the catalog view
+        // entry has no segment field at all — so on every view this build reads
+        // the honest answer is `NotEnforced`, and the first landing wrote
+        // `LogweirEnforced` unconditionally. That is the withdrawn-guarantee
+        // defect class on a status field.
+        //
+        // Derived from the POINTS rather than from a constant, so the day a
+        // view entry carries its segment keys the value changes with no other
+        // edit, and a test that goes through `point_facts` is what observes it.
+        let segments_visible = points.iter().any(|p| !p.segment_keys.is_empty());
         let guarantees = json!({
             "ageExpiry": if decision.enforcement == ENFORCEMENT_LOGWEIR_WORKER {
                 GUARANTEE_LOGWEIR
@@ -1672,7 +2120,11 @@ impl Pass<'_> {
             },
             "minUsablePoints": GUARANTEE_LOGWEIR,
             "activeRestoreProtection": GUARANTEE_LOGWEIR,
-            "sharedSegments": GUARANTEE_LOGWEIR,
+            "sharedSegments": if segments_visible {
+                GUARANTEE_LOGWEIR
+            } else {
+                GUARANTEE_NOT_ENFORCED
+            },
             // NOT `LogweirEnforced`: `object_store` exposes no WORM readback, so
             // "legal hold respected" means "a provider refusal is authoritative
             // and recorded", never "Logweir knows the hold exists" (D3 §16).
@@ -1691,12 +2143,29 @@ impl Pass<'_> {
                 REASON_EVALUATION_COMPLETE,
                 format!(
                     "{} point(s) evaluated at this destination: {} kept, {} candidate(s), {} \
-                     protected, {} skipped",
+                     protected, {} skipped.{}{}",
                     evaluation.points_evaluated,
                     evaluation.kept.len(),
                     evaluation.candidates.len(),
                     evaluation.protected.len(),
-                    evaluation.skipped.len()
+                    evaluation.skipped.len(),
+                    if segments_visible {
+                        ""
+                    } else {
+                        // SAID ON THE OBJECT, not only in a Rust doc comment
+                        // (review `d3w9` H1 and M1).
+                        " This catalog view carries no segment keys, so shared-segment                          protection is NotEnforced and the plan names each set's key prefix                          rather than its objects:"
+                    },
+                    if segments_visible {
+                        String::new()
+                    } else {
+                        format!(
+                            " candidates[].objects is omitted rather than guessed, and \
+                             `logweir-retention --dry-run` enumerates the real count. \
+                             {} point(s) would be removed.",
+                            evaluation.candidates.len()
+                        )
+                    }
                 ),
             ),
             (
@@ -1725,11 +2194,25 @@ impl Pass<'_> {
                 "protected": protected,
                 "skipped": skipped,
                 "planSha256": plan_sha256,
-                "planExpiresAt": expires_at,
+                "planExpiresAt": window.expires_at,
             },
             "conditions": conditions,
         }))
         .await
+    }
+
+    /// Rewrite `Enforced` alone, after the evaluation has already been
+    /// published, when the run was refused between the two.
+    async fn publish_enforcement_refusal(
+        &self,
+        reason: &'static str,
+        message: &str,
+    ) -> Result<(), ReconcileError> {
+        let conditions =
+            self.conditions(&[(CONDITION_ENFORCED, "False", reason, message.to_string())]);
+        self.patch_status(json!({ "conditions": conditions }))
+            .await?;
+        Ok(())
     }
 
     async fn publish_view_failure(&self, message: &str) -> Result<Outcome, ReconcileError> {
@@ -1847,30 +2330,50 @@ impl Pass<'_> {
 
     /// Every status write is a resourceVersion-preconditioned merge PATCH —
     /// D-SEAMS **S7**, in both halves.
-    async fn patch_status(&self, status: Value) -> Result<(), ReconcileError> {
+    /// The version the next patch will precondition on.
+    fn version(&self) -> Option<String> {
+        self.resource_version
+            .lock()
+            .expect("the version cursor is uncontended")
+            .clone()
+    }
+
+    fn set_version(&self, next: Option<String>) {
+        *self
+            .resource_version
+            .lock()
+            .expect("the version cursor is uncontended") = next;
+    }
+
+    /// The status as this pass believes it now stands.
+    fn observed(&self) -> Option<Value> {
+        self.observed_status
+            .lock()
+            .expect("the status cursor is uncontended")
+            .clone()
+    }
+
+    async fn patch_status(&self, status: Value) -> Result<PatchOutcome, ReconcileError> {
         let patch = json!({ "status": status });
-        if status_unchanged(self.status_value().as_ref(), &patch) {
+        // CLONED OUT BEFORE THE AWAIT. A guard alive across an `.await` makes
+        // the reconcile future non-`Send`, which `kube`'s `Controller` refuses.
+        let observed = self.observed().clone();
+        if status_unchanged(observed.as_ref(), &patch) {
             debug!(
                 policy = %self.name, namespace = %self.namespace,
-                "the computed status equals the one on the object; no patch is sent"
+                "the computed status equals the one this pass has written; no patch is sent"
             );
-            return Ok(());
+            return Ok(PatchOutcome::Unchanged);
         }
-        let Some(resource_version) = self
-            .policy
-            .metadata
-            .resource_version
-            .clone()
-            .filter(|v| !v.is_empty())
-        else {
+        let Some(resource_version) = self.version() else {
             warn!(
                 policy = %self.name, namespace = %self.namespace,
                 "RetentionPolicy carries no metadata.resourceVersion, which a /status \
                  compare-and-set needs (D-SEAMS S7); no patch is sent"
             );
-            return Ok(());
+            return Ok(PatchOutcome::Conflict);
         };
-        let mut body = patch;
+        let mut body = patch.clone();
         body.as_object_mut()
             .expect("a status patch is always a JSON object")
             .insert(
@@ -1882,19 +2385,171 @@ impl Pass<'_> {
             .patch_status(&self.name, &PatchParams::default(), &Patch::Merge(body))
             .await
         {
-            Ok(_) => Ok(()),
+            Ok(applied) => {
+                // THE CURSOR MOVES. This is the only fresh version available to
+                // a reconciler that holds no `get` on its own kind, and the
+                // next patch of this pass needs it (review `d3w9` C3).
+                self.set_version(
+                    applied
+                        .metadata
+                        .resource_version
+                        .clone()
+                        .filter(|v| !v.is_empty()),
+                );
+                let mut merged = observed.unwrap_or(Value::Null);
+                if let Some(next) = patch.get("status") {
+                    crate::conditions::apply_merge_patch(&mut merged, next);
+                }
+                *self
+                    .observed_status
+                    .lock()
+                    .expect("the status cursor is uncontended") = Some(merged);
+                Ok(PatchOutcome::Applied)
+            }
             // A 409 IS THE PRECONDITION WORKING: something wrote this status
             // between the read and the write, so the object in hand is stale.
+            // **It is returned, not swallowed** — see `PatchOutcome::Conflict`.
             Err(kube::Error::Api(e)) if e.code == 409 => {
                 debug!(
                     policy = %self.name, namespace = %self.namespace,
                     "the status changed under this reconcile (409); the next pass reads it"
                 );
-                Ok(())
+                // The cursor is now unknowable: clearing it makes every later
+                // patch in this pass a no-op rather than a blind write.
+                self.set_version(None);
+                Ok(PatchOutcome::Conflict)
             }
             Err(e) => Err(ReconcileError::Api(e)),
         }
     }
+}
+
+/// What a finished retention run reported about itself.
+///
+/// Parsed from the worker's `retention-point=` / `retention-record=` /
+/// `retention-result=` key lines — **by name and never by position**, the rule
+/// `notify-result=` and `refusal-reason=` already follow, because a pod log is
+/// stdout and stderr merged in nondeterministic order.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct RunReport {
+    /// The process exit code, from the pod's terminated state.
+    pub exit_code: Option<i32>,
+    /// The points it removed entirely.
+    pub deleted: Vec<String>,
+    /// The points it could not, with their closed codes.
+    pub failed: Vec<(String, String)>,
+    /// How many object keys went.
+    pub objects_deleted: i64,
+    /// Where the attributable record landed.
+    pub record_key: Option<String>,
+    /// That record's digest.
+    pub record_sha256: Option<String>,
+}
+
+impl RunReport {
+    /// Whether the only thing that stopped this run was its own object ceiling
+    /// — review `d3w9` **M2**.
+    ///
+    /// Such a run exits 1 (work remains) and must **not** count toward
+    /// `consecutiveRunFailures`: three bounded runs on a large archive would
+    /// otherwise set `EnforcementDegraded` and stop retention for good.
+    #[must_use]
+    pub fn bounded_only(&self) -> bool {
+        !self.failed.is_empty()
+            && self
+                .failed
+                .iter()
+                .all(|(_, code)| code == BUDGET_EXHAUSTED_CODE)
+    }
+}
+
+/// The worker's code for "I stopped on my own ceiling".
+pub const BUDGET_EXHAUSTED_CODE: &str = "BudgetExhausted";
+
+/// Read a retention Job's key lines — **pure**.
+///
+/// Bounded by construction: it reads only lines carrying one of the three
+/// prefixes, and a value it cannot parse is skipped rather than guessed.
+#[must_use]
+pub fn parse_run_lines(log: &str, exit_code: Option<i32>) -> RunReport {
+    let mut report = RunReport {
+        exit_code,
+        ..RunReport::default()
+    };
+    for line in log.lines() {
+        let line = line.trim();
+        if let Some(rest) = line.strip_prefix("retention-point=") {
+            let mut fields = rest.split_whitespace();
+            let Some(point_id) = fields.next() else {
+                continue;
+            };
+            let mut state = None;
+            let mut code = None;
+            for field in fields {
+                if let Some(v) = field.strip_prefix("state=") {
+                    state = Some(v.to_string());
+                } else if let Some(v) = field.strip_prefix("code=") {
+                    code = Some(v.to_string());
+                }
+            }
+            match state.as_deref() {
+                Some("Deleted") => report.deleted.push(point_id.to_string()),
+                Some(_) => report.failed.push((
+                    point_id.to_string(),
+                    code.unwrap_or_else(|| "Unknown".to_string()),
+                )),
+                None => {}
+            }
+        } else if let Some(rest) = line.strip_prefix("retention-record=") {
+            let mut fields = rest.split_whitespace();
+            report.record_key = fields.next().map(str::to_string);
+            for field in fields {
+                if let Some(v) = field.strip_prefix("sha256=") {
+                    report.record_sha256 = Some(v.to_string());
+                }
+            }
+        } else if let Some(rest) = line.strip_prefix("retention-result=") {
+            for field in rest.split_whitespace() {
+                if let Some(v) = field.strip_prefix("objects=") {
+                    if let Ok(n) = v.parse::<i64>() {
+                        report.objects_deleted = n;
+                    }
+                }
+            }
+        }
+    }
+    report
+}
+
+/// What `start_run` did, and why it did not do more.
+///
+/// A named enum rather than `Option<String>`: "the lease did not land", "a
+/// restore is reading this destination" and "something else owns the plan
+/// ConfigMap's name" are three different findings that an operator fixes in
+/// three different places, and the first landing collapsed them into `None`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StartOutcome {
+    /// The Job was created (or already existed at its deterministic name).
+    Started(String),
+    /// The lease PATCH did not land, so nothing is holding these points.
+    LeaseNotHeld,
+    /// A nonterminal `Restore` reads this destination.
+    ActiveRestore,
+    /// An object already holds the plan `ConfigMap`'s name and is not this
+    /// plan.
+    PlanConfigMapConflict(String),
+}
+
+/// How long the current plan stays approvable — review `d3w9` H4.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct PlanWindow {
+    /// When the window closes. Published as
+    /// `status.lastEvaluation.planExpiresAt`.
+    pub expires_at: DateTime<Utc>,
+    /// Whether THIS pass observed the previous window lapse. A pass that did
+    /// starts no run and re-anchors the window, so the administrator's next
+    /// look sees a fresh preview of the same plan rather than a wedged policy.
+    pub expired: bool,
 }
 
 /// Whether the policy may start a Job, and what to say about it.
@@ -1956,14 +2611,39 @@ pub fn is_terminal_restore(restore: &Restore) -> bool {
 
 /// Whether this `Restore` reads from the destination under evaluation.
 ///
-/// Matched on the destination REFERENCE when the restore names one, and on the
-/// archive URL otherwise. A restore in another namespace naming a destination of
-/// the same name is NOT this destination: a `destinationRef` is namespace-local.
+/// # BY IDENTITY, NEVER BY SUBSTRING (review `d3w9` **C2**)
+///
+/// The first landing asked `location_id.contains(reference.name)`.
+/// `location_id` is the destination's canonical URL — `s3://<bucket>/<prefix>`
+/// — which does not contain the `BackupDestination` OBJECT's name, and
+/// `crds/restore.rs`'s CEL rule forces `sourceArchive.url` to the sentinel
+/// `logweir-destination://<name>` whenever `sourceDestinationRef` is set, so
+/// the URL fallback could not rescue it either. A nonterminal `Restore` that
+/// named its destination by reference — the path the whole D2/D3 design steers
+/// toward — was therefore **not seen at all**: no `ActiveRestore` protection,
+/// nothing in the consistent re-list, and the reaper free to delete the
+/// manifest and segments of a set a live restore was reading. Whether it
+/// misfired was a coincidence of spelling: a destination named `kafka` *would*
+/// have matched `s3://lw/kafka-backups/…`.
+///
+/// So: when the restore names a destination, compare the two NAMES and require
+/// the same namespace — a `destinationRef` is namespace-local, so the same name
+/// elsewhere is a different object. This is the comparison
+/// `controllers/protection_policy.rs` already makes. The URL equality stays,
+/// and only for the case it was written for: a legacy restore that names no
+/// destination at all.
+///
+/// `destination_name` is the policy's own `spec.destinationRef.name`.
 #[must_use]
-pub fn restore_touches(restore: &Restore, location_id: &str, namespace: &str) -> bool {
+pub fn restore_touches(
+    restore: &Restore,
+    destination_name: &str,
+    location_id: &str,
+    namespace: &str,
+) -> bool {
     if let Some(reference) = restore.spec.source_destination_ref.as_ref() {
         return restore.namespace().as_deref() == Some(namespace)
-            && location_id.contains(reference.name.as_str());
+            && reference.name == destination_name;
     }
     let url = restore.spec.source_archive.url.trim_end_matches('/');
     url == location_id.trim_end_matches('/')

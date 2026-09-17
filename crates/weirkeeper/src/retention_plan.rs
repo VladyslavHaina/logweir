@@ -295,15 +295,29 @@ pub struct Candidate {
 }
 
 impl Candidate {
-    /// How many object keys removing this point means.
+    /// How many object keys removing this point means, **or `None` when this
+    /// build cannot say** (review `d3w9` M1).
+    ///
+    /// The catalog view carries a point's `manifestKey` and no segment list, so
+    /// for every plan this build writes the honest answer is "not observed".
+    /// The first landing published `1` — the manifest, and nothing else — which
+    /// an administrator approving a three-line plan would read as "this run
+    /// removes three objects" while the run removed several thousand.
+    ///
+    /// **Absent means not observed, never zero and never a floor dressed as a
+    /// total**, which is D3 §12's rule everywhere else. `status.lastEvaluation
+    /// .candidates[].objects` is therefore omitted rather than wrong, the
+    /// `Evaluated` condition says the plan does not enumerate, and
+    /// `logweir-retention --dry-run` — which holds the list grant the run needs
+    /// anyway — prints the real count per point.
     #[must_use]
-    pub fn objects(&self) -> i64 {
-        // The manifest plus its segments. `saturating_add` rather than `+`
-        // because a manifest naming i64::MAX segments is a parse bug, not a
-        // panic site.
+    pub fn objects(&self) -> Option<i64> {
+        if self.segment_keys.is_empty() {
+            return None;
+        }
         i64::try_from(self.segment_keys.len())
-            .unwrap_or(i64::MAX)
-            .saturating_add(1)
+            .ok()
+            .map(|n| n.saturating_add(1))
     }
 }
 
@@ -693,10 +707,15 @@ pub struct PlanIdentity {
     pub name: String,
     /// The policy's `metadata.uid`.
     pub uid: String,
-    /// The `metadata.generation` this plan was computed from. **A rules change
-    /// bumps the generation, which changes these bytes, which changes
-    /// `planSha256` — which is how a policy edit invalidates an approval
-    /// without anything having to remember to.**
+    /// The `metadata.generation` this plan was computed from.
+    ///
+    /// **It does NOT reach the digested bytes** (review `d3w9` C1): approving a
+    /// plan is a spec patch, a spec patch bumps the generation, and a digest
+    /// that the act of approving changes can never be approved. What
+    /// invalidates an approval is the CONTENT — the rules as applied and the
+    /// exact lines — and both are in the bytes. This value is published on
+    /// `status.lastEvaluation` and recorded in the enforcement record, where it
+    /// is a fact about the pass rather than about the deletion.
     pub generation: i64,
 }
 
@@ -743,6 +762,37 @@ pub struct PlanLine {
 /// Serialised with `logweir_core::det_json::to_deterministic_json`, so the
 /// bytes are a pure function of the fields in declaration order and
 /// `planSha256` is reproducible by anyone holding the same inputs.
+///
+/// # WHAT IS DELIBERATELY *NOT* IN HERE, AND WHY (review `d3w9` C1)
+///
+/// Three fields were in the first landing and are gone: `evaluated_at`,
+/// `policy_generation` and `points_evaluated`. Each of them moves without what
+/// would be deleted moving, and **a digest that changes on its own can never be
+/// approved**:
+///
+/// * `evaluated_at` was `ctx.now`, and the reconciler requeues every 60 s. Two
+///   renderings of one archive three seconds apart digested differently, so an
+///   administrator who copied `status.lastEvaluation.planSha256` onto
+///   `spec.enforcement.approvedPlanSha256` was always copying a value that had
+///   already expired. **No Job could ever be created.**
+/// * `policy_generation` is worse, and is the same defect wearing a different
+///   hat: `approvedPlanSha256` is a SPEC field, so the very act of approving
+///   bumps `metadata.generation`, which would change the digest the approval
+///   names. Approval was circularly impossible.
+/// * `points_evaluated` counts skipped points too, so a newly-arrived
+///   `Unreadable` point invalidated an approval without changing one key.
+///
+/// All three are on `status.lastEvaluation` (and in the enforcement record),
+/// which is where a reader wants them; none is a fact about what the run
+/// removes.
+///
+/// **What still invalidates an approval is content, not a counter.** A rules
+/// edit changes `keep_last` / `keep_days` / `min_usable_points` AND the
+/// candidate set; a `holds` edit changes the protected set and therefore the
+/// lines; a new backup shifts ranks and therefore the lines. `policy_uid`,
+/// `location_id` and `scope_prefix` pin *where*. The digest covers exactly
+/// "these keys, at this location, under these rules" — which is what an
+/// administrator is being asked to approve.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields, rename_all = "snake_case")]
 pub struct PlanDocument {
@@ -757,8 +807,6 @@ pub struct PlanDocument {
     /// The policy's UID. A deleted-and-recreated policy of the same name is a
     /// different policy and its old plan does not apply.
     pub policy_uid: String,
-    /// The generation the plan was computed from.
-    pub policy_generation: i64,
     /// The destination's location id — `s3://bucket/prefix`.
     pub location_id: String,
     /// The immutable scope prefix. The worker re-derives every key bound from
@@ -770,10 +818,6 @@ pub struct PlanDocument {
     pub keep_days: Option<i64>,
     /// `minUsablePoints`, as applied.
     pub min_usable_points: i64,
-    /// The instant the evaluation ran, RFC 3339.
-    pub evaluated_at: DateTime<Utc>,
-    /// How many points at this destination were considered.
-    pub points_evaluated: i64,
     /// The lines. Empty is a legitimate plan: it deletes nothing.
     pub lines: Vec<PlanLine>,
 }
@@ -816,6 +860,10 @@ impl std::error::Error for PlanError {}
 /// plan, and this returns `Err` rather than emitting a document an
 /// administrator could approve.
 ///
+/// **It takes no clock.** See [`PlanDocument`]'s own note: an instant in the
+/// digested bytes is what made the first landing's approval gate unreachable,
+/// and the surest way not to put one back is to have none to put.
+///
 /// # Errors
 ///
 /// [`PlanError::Scope`] if any key escapes `<scope_prefix>/<backup_id>/` or
@@ -826,7 +874,6 @@ pub fn plan_document(
     destination: &Destination,
     rules: Rules,
     evaluation: &Evaluation,
-    now: DateTime<Utc>,
 ) -> Result<PlanDocument, PlanError> {
     let mut lines = Vec::with_capacity(evaluation.candidates.len());
     for candidate in &evaluation.candidates {
@@ -864,14 +911,11 @@ pub fn plan_document(
         policy_namespace: identity.namespace.clone(),
         policy_name: identity.name.clone(),
         policy_uid: identity.uid.clone(),
-        policy_generation: identity.generation,
         location_id: destination.location_id.clone(),
         scope_prefix: destination.scope_prefix.clone(),
         keep_last: rules.keep_last,
         keep_days: rules.keep_days,
         min_usable_points: rules.min_usable_points,
-        evaluated_at: now,
-        points_evaluated: evaluation.points_evaluated,
         lines,
     })
 }
@@ -888,27 +932,44 @@ pub fn plan_bytes(document: &PlanDocument) -> Result<(Vec<u8>, String), PlanErro
     Ok((bytes, digest))
 }
 
-/// The plan `ConfigMap`'s name — `<policy>-plan-<generation>`, D3 §6.4 step 6.
+/// The plan `ConfigMap`'s name — **the one implementation, and the one the
+/// controller calls** (review `d3w9` L3).
 ///
-/// Immutable and owned by the policy, so a second pass at the same generation
-/// gets 409 `AlreadyExists` rather than rewriting the bytes under an
-/// administrator who is reading them.
+/// `<stem>-plan-<12 hex of planSha256>`, where the stem is
+/// [`config_map_stem`] over the policy's UID. CONTENT-NAMED rather than
+/// generation-named, because a generation-named object collides the moment the
+/// archive moves under an unchanged spec, which is the normal case; and
+/// UID-stemmed rather than name-stemmed, because `metadata.name` is a
+/// 253-character DNS subdomain and a policy name may already use all of it.
 ///
-/// **BOUNDED.** `metadata.name` is a 253-character DNS subdomain and a policy
-/// name is already at most 253, so the suffix has to be able to displace the
-/// stem: a name longer than the budget is replaced by a digest of itself. The
-/// controller publishes the real name in `status.lastEvaluation.planRef`, so no
-/// reader ever recomputes it.
+/// The `ConfigMap` is immutable and owned by the policy, so a second pass at the
+/// same digest gets 409 `AlreadyExists` rather than rewriting bytes under an
+/// administrator who is reading them. **The controller publishes the result in
+/// `status.lastEvaluation.planRef`** (finding M9), so no reader ever recomputes
+/// it — but this is the function it would recompute it with, and it is short
+/// enough to be checkable.
 #[must_use]
-pub fn plan_config_map_name(policy_name: &str, generation: i64) -> String {
-    let suffix = format!("-plan-{generation}");
-    const MAX: usize = 253;
-    if policy_name.len() + suffix.len() <= MAX {
-        return format!("{policy_name}{suffix}");
-    }
-    let stem = &logweir_core::ids::sha256_hex(policy_name.as_bytes())[..20];
-    format!("lwr-{stem}{suffix}")
+pub fn plan_config_map_name(policy_uid: &str, plan_sha256: &str) -> String {
+    let digest = plan_sha256.trim_start_matches("sha256:");
+    let tail: String = digest.chars().take(12).collect();
+    format!("{}-plan-{tail}", config_map_stem(policy_uid))
 }
+
+/// The per-policy object-name stem: `lwr-<20 hex of sha256(uid)>`.
+///
+/// From the UID and never the name, for the reason
+/// [`plan_config_map_name`] gives, and 20 hex characters because that is what
+/// the catalog view's own names use (`catalog_view::OWNER_UID_HEX_CHARS`).
+#[must_use]
+pub fn config_map_stem(policy_uid: &str) -> String {
+    format!(
+        "{NAME_PREFIX}{}",
+        &logweir_core::ids::sha256_hex(policy_uid.as_bytes())[..20]
+    )
+}
+
+/// The prefix every object this controller creates wears.
+pub const NAME_PREFIX: &str = "lwr-";
 
 /// The plan `ConfigMap`'s one data key.
 pub const PLAN_DATA_KEY: &str = "plan.json";
