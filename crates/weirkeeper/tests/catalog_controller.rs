@@ -1,0 +1,2274 @@
+//! The `RecoveryCatalog` reconciler and the bounded Kubernetes view — D3 §5.3,
+//! §5.4, PLAT-15.1's controller half.
+//!
+//! EVERY TEST HERE IS A PURE-FUNCTION TEST, A `mock_client` TEST OR A
+//! SOURCE-READING TEST. Nothing dials a socket, nothing waits on a Job and
+//! nothing runs `kubectl`. The double PANICS on a request it was not given a
+//! route for, which is what makes a ZERO COUNT — no `DELETE` anywhere, no
+//! `pods/log` read for a pod this Job does not own, no `POST` on a refused path
+//! — mean "the reconciler did not ask" rather than "the table forgot a route".
+//!
+//! READ `the_two_axes_are_never_merged` AND
+//! `a_403_on_part_of_the_archive_is_unreadable_and_never_missing` FIRST. They
+//! are the two properties this whole module exists for: a point is offered for
+//! restore only when it is readable AND verifies under trusted key material,
+//! and "this credential could not tell" is never reported as "the archive does
+//! not hold it".
+//!
+//! **The live proof is owed to W14.** D2's `catalogSync` plan kind is not in
+//! the runner yet (see `the_catalog_sync_kind_is_not_yet_in_the_closed_vocabulary`),
+//! so every sync here is exercised against the check framework's own fakes. The
+//! docker-desktop scenario is D3 §15's and belongs to W14.
+
+use std::collections::BTreeMap;
+
+use chrono::{DateTime, TimeZone as _, Utc};
+use serde_json::{json, Value};
+
+use logweir_core::check_contract::{
+    frames, CheckPlanKind, FrameExpectations, Stream, CHECK_CONTRACT_VERSION, CHECK_PLAN_CONTRACT,
+};
+use weirkeeper::catalog_view as view;
+use weirkeeper::catalog_view::{
+    Availability, RunnerCounts, RunnerEntry, RunnerSigner, SignatureCounts, SignatureVerdict,
+    SyncTrigger, TrustKey, TrustKeyState, TrustView, Verification, ViewLimits,
+};
+use weirkeeper::check;
+use weirkeeper::conditions::apply_merge_patch;
+use weirkeeper::controllers::recovery_catalog as ctrl;
+use weirkeeper::crds::recovery_catalog::{RecoveryCatalog, SignerSummary};
+use weirkeeper::job::RunnerImage;
+use weirkeeper::testing::{mock_client_recording_bodies, Recorder, Route, SeenBody};
+
+// ===========================================================================
+// Fixtures
+// ===========================================================================
+
+/// This task's namespace (STANDING RULE 13).
+const NS: &str = "logweir-d3w8";
+const NAME: &str = "primary";
+const UID: &str = "c47a1f00-0000-4000-8000-0000000000c1";
+const DEST: &str = "archive";
+const DEST_UID: &str = "d0d0d0d0-0000-4000-8000-0000000000d1";
+const JOB_UID: &str = "1b1b1b1b-0000-4000-8000-0000000000b7";
+
+/// The key this installation's roster lists.
+const TRUSTED_KEY: &str = "aa11bb22cc33dd44ee55ff6600778899aabbccddeeff00112233445566778899";
+/// A key it does not — a fresh installation's, or another installation's.
+const STRANGER_KEY: &str = "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff";
+
+fn now() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2026, 9, 16, 12, 0, 0)
+        .single()
+        .expect("a real instant")
+}
+
+fn spki(marker: u8) -> String {
+    format!(
+        "-----BEGIN PUBLIC KEY-----\nMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE{marker:02x}\n\
+         -----END PUBLIC KEY-----\n"
+    )
+}
+
+fn roster_body() -> String {
+    json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "TrustRoster",
+        "metadata": {"name": "default", "uid": "r0", "generation": 2, "resourceVersion": "9"},
+        "spec": {
+            "approverKeys": [],
+            "signingKeys": [{"keyId": TRUSTED_KEY, "spkiPem": spki(0xA1), "subject": "runner"}],
+            "allowedClusterIds": []
+        }
+    })
+    .to_string()
+}
+
+fn empty_roster_body() -> String {
+    json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "TrustRoster",
+        "metadata": {"name": "default", "uid": "r0", "generation": 1, "resourceVersion": "9"},
+        "spec": {"approverKeys": [], "signingKeys": [], "allowedClusterIds": []}
+    })
+    .to_string()
+}
+
+fn destination_body() -> String {
+    json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupDestination",
+        "metadata": {
+            "name": DEST, "namespace": NS, "uid": DEST_UID,
+            "generation": 1, "resourceVersion": "77"
+        },
+        "spec": {
+            "storage": {
+                "provider": "S3", "bucket": "lw-archive", "prefix": "team-a",
+                "region": "us-east-1", "endpoint": "http://minio.storage.svc:9000",
+                "addressing": "PathStyle"
+            },
+            "transport": {"security": "InsecureHTTP"},
+            "access": {
+                "archiveWrite": {"mode": "SecretKeys", "secret": {
+                    "name": "lw-writer", "accessKeyIdKey": "id", "secretAccessKeyKey": "key"
+                }},
+                "archiveRead": {"mode": "SecretKeys", "secret": {
+                    "name": "lw-reader", "accessKeyIdKey": "id", "secretAccessKeyKey": "key"
+                }}
+            }
+        },
+        "status": {
+            "observedGeneration": 1, "reason": "Valid",
+            "conditions": [{"type": "Valid", "status": "True", "reason": "Valid",
+                            "observedGeneration": 1}]
+        }
+    })
+    .to_string()
+}
+
+fn catalog_value(spec_extra: Value, status: Value) -> Value {
+    let mut spec = json!({
+        "destinationRef": {"name": DEST},
+        "sync": {
+            "intervalSeconds": 3600, "mode": "Index", "maxObjectsPerRun": 100000,
+            "deepCheck": "ManifestDigest", "viewLimit": 2000
+        }
+    });
+    if let Some(extra) = spec_extra.as_object() {
+        for (k, v) in extra {
+            spec[k] = v.clone();
+        }
+    }
+    json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "RecoveryCatalog",
+        // EVERY OBJECT FROM A WATCH CARRIES A `resourceVersion`, and the
+        // `/status` write uses it as its compare-and-set precondition (seam S7),
+        // so a fixture without one is not a fixture of anything this reconciler
+        // ever sees.
+        "metadata": {
+            "name": NAME, "namespace": NS, "uid": UID,
+            "generation": 1, "resourceVersion": "4242"
+        },
+        "spec": spec,
+        "status": status
+    })
+}
+
+fn catalog(spec_extra: Value, status: Value) -> RecoveryCatalog {
+    serde_json::from_value(catalog_value(spec_extra, status))
+        .expect("the fixture is a RecoveryCatalog")
+}
+
+/// The Job name this catalog's periodic sync computes at [`now`].
+fn periodic_stem() -> String {
+    let slot = view::periodic_slot(now(), 3600).expect("an hourly catalog has slots");
+    view::sync_stem(UID, &SyncTrigger::Periodic(slot).token())
+}
+
+fn job_body(name: &str, finished: bool, plan_sha: &str, owner_uid: &str) -> String {
+    let status = if finished {
+        json!({
+            "startTime": "2026-09-16T11:50:00Z",
+            "completionTime": "2026-09-16T11:55:00Z",
+            "conditions": [{"type": "Complete", "status": "True"}]
+        })
+    } else {
+        json!({"startTime": "2026-09-16T11:59:00Z", "active": 1})
+    };
+    json!({
+        "apiVersion": "batch/v1", "kind": "Job",
+        "metadata": {
+            "name": name, "namespace": NS, "uid": JOB_UID, "resourceVersion": "555",
+            "ownerReferences": [{
+                "apiVersion": "logweir.dev/v1alpha1", "kind": "RecoveryCatalog",
+                "name": NAME, "uid": owner_uid, "controller": true,
+                "blockOwnerDeletion": true
+            }]
+        },
+        "spec": {"template": {"spec": {"containers": [{
+            "name": "runner",
+            "env": [{"name": check::job::PLAN_SHA256_ENV, "value": plan_sha}]
+        }]}}},
+        "status": status
+    })
+    .to_string()
+}
+
+fn pod_list_body(owner_uid: &str) -> String {
+    json!({
+        "apiVersion": "v1", "kind": "PodList", "metadata": {},
+        "items": [{
+            "apiVersion": "v1", "kind": "Pod",
+            "metadata": {
+                "name": "sync-pod-abcde", "namespace": NS, "uid": "p1",
+                "ownerReferences": [{
+                    "apiVersion": "batch/v1", "kind": "Job", "name": "job",
+                    "uid": owner_uid, "controller": true, "blockOwnerDeletion": true
+                }]
+            },
+            "status": {"phase": "Succeeded", "containerStatuses": [{
+                "name": "runner", "ready": false, "restartCount": 0, "image": "i",
+                "imageID": "i",
+                "state": {"terminated": {"exitCode": 0, "reason": "Completed"}}
+            }]}
+        }]
+    })
+    .to_string()
+}
+
+// ---------------------------------------------------------------------------
+// Result-body builders — the `catalogSync` wire format this controller reads
+// ---------------------------------------------------------------------------
+
+fn entry_value(point: &str, at_ms: i64, availability: &str, signature: &str, key: &str) -> Value {
+    json!({
+        "pointId": point,
+        "backupId": "sched-1-20260916-030000",
+        "runId": "run-1",
+        "recoveryPointAtMs": at_ms,
+        "coveredFromMs": at_ms - 3_600_000,
+        "coveredToMs": at_ms,
+        "locations": ["s3://lw-archive/team-a"],
+        "receiptKey": format!("logweir/backups/sched-1/{point}.receipt.json"),
+        "receiptSha256": format!("sha256:{}", "0".repeat(64)),
+        "manifestKey": "logweir/backups/sched-1/manifest.json",
+        "manifestSha256": format!("sha256:{}", "1".repeat(64)),
+        "availability": availability,
+        "signature": signature,
+        "signerKeyId": key
+    })
+}
+
+fn ok_entry(point: &str, at_ms: i64) -> Value {
+    entry_value(point, at_ms, "Available", "verified", TRUSTED_KEY)
+}
+
+/// One `catalog-page=` header plus its `catalog-entry=` lines, with the digest
+/// computed the way the controller recomputes it.
+fn page_block(index: u32, of: u32, entries: &[Value]) -> String {
+    let bodies: Vec<String> = entries
+        .iter()
+        .map(|e| serde_json::to_string(e).expect("an entry serialises"))
+        .collect();
+    let refs: Vec<&str> = bodies.iter().map(String::as_str).collect();
+    let mut out = format!(
+        "{}{index}/{of} count={} sha256={}\n",
+        view::PAGE_LINE_PREFIX,
+        entries.len(),
+        view::page_digest(&refs)
+    );
+    for body in &bodies {
+        out.push_str(view::ENTRY_LINE_PREFIX);
+        out.push_str(body);
+        out.push('\n');
+    }
+    out
+}
+
+fn counts_value(total: i64, available: i64) -> Value {
+    json!({
+        "total": total, "available": available, "missing": 0, "unreadable": 0,
+        "deleted": 0, "conflict": 0, "unsupportedFormat": 0, "partial": 0,
+        "signature": {"verified": available, "invalid": 0, "noEvidence": 0, "notAttempted": 0},
+        "byDay": [{"day": "2026-09-16", "points": available}]
+    })
+}
+
+fn body_for(pages: &[Vec<Value>], counts: Value, signers: Value, complete: bool) -> String {
+    let mut out = String::new();
+    let of = u32::try_from(pages.len()).expect("a small page count");
+    for (i, entries) in pages.iter().enumerate() {
+        out.push_str(&page_block(
+            u32::try_from(i + 1).expect("small"),
+            of,
+            entries,
+        ));
+    }
+    out.push_str(&format!("{}{counts}\n", view::COUNTS_LINE_PREFIX));
+    out.push_str(&format!(
+        "{}{}\n",
+        view::CURSOR_LINE_PREFIX,
+        json!({"indexShard": "2026/09/16", "complete": complete})
+    ));
+    out.push_str(&format!("{}{signers}\n", view::SIGNERS_LINE_PREFIX));
+    out
+}
+
+/// The default happy body: one page, two available points, one trusted signer.
+fn happy_body() -> String {
+    body_for(
+        &[vec![
+            ok_entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1_758_000_000_000),
+            ok_entry("lwp1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 1_757_900_000_000),
+        ]],
+        counts_value(2, 2),
+        json!([{"keyId": TRUSTED_KEY, "points": 2, "principalHint": "runner"}]),
+        true,
+    )
+}
+
+/// D2's frames around a result body, as the runner would print them.
+fn framed(plan_sha: &str, subject_uid: &str, body: &str) -> String {
+    let payload = body.as_bytes().to_vec();
+    let parts = frames::write_parts(Stream::Details, &payload).expect("parts fit the frame bound");
+    let mut streams: BTreeMap<Stream, (Vec<u8>, usize)> = BTreeMap::new();
+    streams.insert(Stream::Details, (payload, parts.len()));
+    let end = frames::end_frame(plan_sha, subject_uid, &streams, None);
+    let mut out = parts.join("\n");
+    out.push('\n');
+    out.push_str(&frames::write_end(&end).expect("an end frame"));
+    out.push('\n');
+    out
+}
+
+// ---------------------------------------------------------------------------
+// The route table
+// ---------------------------------------------------------------------------
+
+struct Fixture {
+    client: kube::Client,
+    recorder: Recorder,
+    bodies: std::sync::Arc<std::sync::Mutex<Vec<SeenBody>>>,
+}
+
+impl Fixture {
+    fn seen(&self) -> Vec<(String, String)> {
+        self.recorder
+            .lock()
+            .expect("the recorder")
+            .iter()
+            .map(|r| (r.method.clone(), r.uri.clone()))
+            .collect()
+    }
+
+    fn patched_status(&self) -> Value {
+        let bodies = self.bodies.lock().expect("the body recorder");
+        let patch = bodies
+            .iter()
+            .find(|b| b.method == "PATCH" && b.uri.contains("/recoverycatalogs/"))
+            .unwrap_or_else(|| panic!("no /status PATCH was sent; requests: {:?}", self.seen()));
+        serde_json::from_str(&patch.body).expect("the patch body is JSON")
+    }
+
+    fn status_patches(&self) -> Vec<Value> {
+        self.bodies
+            .lock()
+            .expect("the body recorder")
+            .iter()
+            .filter(|b| b.method == "PATCH" && b.uri.contains("/recoverycatalogs/"))
+            .map(|b| serde_json::from_str(&b.body).expect("JSON"))
+            .collect()
+    }
+
+    fn posted(&self, fragment: &str) -> Vec<Value> {
+        self.bodies
+            .lock()
+            .expect("the body recorder")
+            .iter()
+            .filter(|b| b.method == "POST" && b.uri.contains(fragment))
+            .map(|b| serde_json::from_str(&b.body).expect("JSON"))
+            .collect()
+    }
+}
+
+fn fixture(routes: Vec<Route>) -> Fixture {
+    let (client, recorder, bodies) = mock_client_recording_bodies(routes);
+    Fixture {
+        client,
+        recorder,
+        bodies,
+    }
+}
+
+fn route(method: &'static str, path_suffix: &'static str, body: String) -> Route {
+    Route {
+        method,
+        path_suffix,
+        status: 200,
+        body,
+    }
+}
+
+async fn run(fixture: &Fixture, catalog: &RecoveryCatalog) -> ctrl::Outcome {
+    run_at(fixture, catalog, now()).await
+}
+
+async fn run_at(fixture: &Fixture, catalog: &RecoveryCatalog, at: DateTime<Utc>) -> ctrl::Outcome {
+    let policy = check::policy::Policy::defaults();
+    let image = RunnerImage::default();
+    ctrl::reconcile_catalog(
+        catalog,
+        &ctrl::SyncContext {
+            client: &fixture.client,
+            policy: &policy,
+            runner_image: &image,
+            now: at,
+        },
+    )
+    .await
+    .expect("the reconcile reaches a verdict")
+}
+
+/// The table for a pass that HARVESTS a finished sync Job.
+fn harvest_routes(plan_sha: &str, log: String, job_owner_uid: &str) -> Vec<Route> {
+    let stem: &'static str = Box::leak(periodic_stem().into_boxed_str());
+    let job_path: &'static str = Box::leak(format!("/jobs/{stem}").into_boxed_str());
+    vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        route(
+            "GET",
+            job_path,
+            job_body(stem, true, plan_sha, job_owner_uid),
+        ),
+        route("GET", "/pods", pod_list_body(JOB_UID)),
+        route("GET", "/log", log),
+        route("POST", "/configmaps", empty_config_map()),
+        route(
+            "PATCH",
+            "/recoverycatalogs/primary/status",
+            patched_catalog(),
+        ),
+    ]
+}
+
+/// A minimal but WELL-FORMED answer: `kube` deserialises every response into
+/// the typed object, so a `{}` body fails as a transport error and would hide
+/// whatever the reconciler actually did.
+fn empty_config_map() -> String {
+    json!({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {}}).to_string()
+}
+
+fn empty_job() -> String {
+    json!({"apiVersion": "batch/v1", "kind": "Job", "metadata": {}}).to_string()
+}
+
+fn patched_catalog() -> String {
+    catalog_value(json!({}), json!({})).to_string()
+}
+
+/// A status that says "a sync Job is tracked and has not been harvested yet".
+fn tracked_status(stem: &str) -> Value {
+    json!({
+        "observedGeneration": 1,
+        "lastSyncJob": {"name": stem},
+        "conditions": [{"type": "Synced", "status": "Unknown", "reason": "SyncInProgress"}]
+    })
+}
+
+// ===========================================================================
+// 1. The seam D2 has not landed yet
+// ===========================================================================
+
+/// `catalogSync` is NOT in D2's closed plan-kind vocabulary, and this test is
+/// the alarm that fires when it lands.
+///
+/// D-SEAMS **S1** makes the catalog sync a plan kind of the ONE check runner.
+/// D2 W4's runner is in its fix round and its own
+/// `an_unknown_plan_kind_is_refused` uses `{"catalogSync": …}` as the example of
+/// a kind serde does not know. So the spelling lives in `catalog_view` until it
+/// can be deleted, and the day `CheckPlanKind::CatalogSync` exists this fails
+/// and the constants go.
+#[test]
+fn the_catalog_sync_kind_is_not_yet_in_the_closed_vocabulary() {
+    assert!(
+        !CheckPlanKind::ALL
+            .iter()
+            .any(|k| k.as_str() == view::PLAN_KIND),
+        "`{}` is now a CheckPlanKind. Delete `catalog_view::PLAN_KIND` and \
+         `catalog_view::JOB_DISCRIMINATOR`, name the enum everywhere they were used, and give \
+         the sync Job the framework's own `CheckJobSpec`. The seam was always meant to close.",
+        view::PLAN_KIND
+    );
+}
+
+/// The Job-name discriminator collides with none of the five that landed: two
+/// kinds sharing one would give two checks of one subject the same Job name.
+#[test]
+fn the_job_discriminator_collides_with_no_landed_kind() {
+    for kind in CheckPlanKind::ALL {
+        assert_ne!(
+            kind.job_discriminator(),
+            view::JOB_DISCRIMINATOR,
+            "`{}` already uses the discriminator `{}`",
+            kind.as_str(),
+            view::JOB_DISCRIMINATOR
+        );
+    }
+}
+
+/// The plan document carries D2's own field names, so the runner's `CheckPlan`
+/// will deserialise it the day the request variant exists.
+#[test]
+fn the_plan_document_carries_d2s_field_names() {
+    let request = sync_request();
+    let bytes = view::plan_document(UID, 900, Some("sha256:deadbeef"), &request)
+        .expect("the plan serialises");
+    let doc: Value = serde_json::from_slice(&bytes).expect("JSON");
+    assert_eq!(doc["contract"], CHECK_PLAN_CONTRACT);
+    assert_eq!(doc["contractVersion"], CHECK_CONTRACT_VERSION);
+    assert_eq!(doc["subjectUid"], UID);
+    assert_eq!(doc["timeoutSeconds"], 900);
+    assert_eq!(doc["policyDigest"], "sha256:deadbeef");
+    assert!(
+        doc["request"][view::PLAN_KIND].is_object(),
+        "the request is externally tagged by the plan kind: {doc}"
+    );
+    // The credential never travels in the plan: only the MODE does.
+    let rendered = doc.to_string();
+    assert!(
+        !rendered.contains("AWS_SECRET_ACCESS_KEY") && !rendered.contains("secret-access-key"),
+        "a plan document carries no credential value or key name: {rendered}"
+    );
+}
+
+fn sync_request() -> view::CatalogSyncRequest {
+    view::CatalogSyncRequest {
+        destination: logweir_core::check_contract::DestinationPlan {
+            name: DEST.to_string(),
+            uid: DEST_UID.to_string(),
+            location: logweir_core::destination::DestinationLocation {
+                provider: logweir_core::destination::StorageProvider::S3,
+                bucket: "lw-archive".to_string(),
+                prefix: "team-a".to_string(),
+                region: Some("us-east-1".to_string()),
+                endpoint: Some("http://minio.storage.svc:9000".to_string()),
+                addressing: logweir_core::destination::Addressing::PathStyle,
+                transport: logweir_core::destination::TransportSecurity::InsecureHttp,
+            },
+            location_digest: format!("sha256:{}", "2".repeat(64)),
+            ca_file: None,
+            credentials: logweir_core::check_contract::CredentialMode::Static,
+        },
+        mode: weirkeeper::crds::recovery_catalog::SyncMode::Index,
+        deep_check: weirkeeper::crds::recovery_catalog::DeepCheck::ManifestDigest,
+        max_objects_per_run: 100_000,
+        view_limit: 2000,
+        index_shard: None,
+        rescan_start_after: None,
+        trust_bundle_file: Some("/check/trust/trust-bundle.pem".to_string()),
+    }
+}
+
+// ===========================================================================
+// 2. The two axes
+// ===========================================================================
+
+/// **THE PROPERTY THIS MODULE EXISTS FOR.** Availability and verification are
+/// separate axes and a point is offered only when BOTH allow it. Every one of
+/// the 49 combinations is stated, so a future "healthy" boolean over the two
+/// cannot quietly widen the set.
+#[test]
+fn the_two_axes_are_never_merged() {
+    let mut offered = Vec::new();
+    for a in Availability::ALL {
+        for v in Verification::ALL {
+            if view::selectable(*a, *v) {
+                offered.push((a.as_str(), v.as_str()));
+            }
+        }
+    }
+    assert_eq!(
+        offered,
+        vec![
+            ("Available", "Verified"),
+            ("Available", "VerifiedHistorical"),
+        ],
+        "D3 §5.4: ordinary restore selection requires `Available` AND (`Verified` | \
+         `VerifiedHistorical`). Everything else is listed with its exact state and a remedy \
+         sentence; nothing unverified is presented as verified evidence."
+    );
+    assert_eq!(Availability::ALL.len() * Verification::ALL.len(), 49);
+}
+
+/// A signature verdict that did not verify is `Invalid` whatever the trust
+/// source says, and trust is asked about SECOND.
+#[test]
+fn trust_cannot_rescue_a_signature_that_did_not_verify() {
+    let trust = trust_with(TRUSTED_KEY, TrustKeyState::Active, None);
+    assert_eq!(
+        view::classify_verification(
+            SignatureVerdict::Invalid,
+            Some(TRUSTED_KEY),
+            Some(now()),
+            &trust,
+            now()
+        ),
+        Verification::Invalid
+    );
+}
+
+/// A verified signature under a key this installation does not list is
+/// `UntrustedSigner` — never upgraded by proximity (`docs/keys.md`).
+#[test]
+fn a_verified_signature_under_an_unlisted_key_is_untrusted_and_never_verified() {
+    let trust = trust_with(TRUSTED_KEY, TrustKeyState::Active, None);
+    assert_eq!(
+        view::classify_verification(
+            SignatureVerdict::Verified,
+            Some(STRANGER_KEY),
+            Some(now()),
+            &trust,
+            now()
+        ),
+        Verification::UntrustedSigner,
+        "a fresh installation reading somebody else's archive must say so"
+    );
+    assert!(!view::selectable(
+        Availability::Available,
+        Verification::UntrustedSigner
+    ));
+}
+
+/// With no trust material at all, nothing is `Invalid` and nothing is
+/// `UntrustedSigner`: an installation that holds no key has not disproved
+/// anything.
+#[test]
+fn no_trust_material_is_not_attempted_and_not_a_refutation() {
+    let trust = TrustView::default();
+    assert_eq!(
+        view::classify_verification(
+            SignatureVerdict::Verified,
+            Some(TRUSTED_KEY),
+            Some(now()),
+            &trust,
+            now()
+        ),
+        Verification::NotAttempted
+    );
+}
+
+/// **The `TrustPolicy` seam, tested before it exists.** A retired key verifies
+/// what it signed while it was valid, and nothing newer.
+#[test]
+fn a_retired_key_verifies_evidence_it_signed_while_valid() {
+    let expiry = now() - chrono::Duration::days(10);
+    let trust = trust_with(TRUSTED_KEY, TrustKeyState::Active, Some(expiry));
+    let before = expiry - chrono::Duration::days(1);
+    let after = expiry + chrono::Duration::days(1);
+    assert_eq!(
+        view::classify_verification(
+            SignatureVerdict::Verified,
+            Some(TRUSTED_KEY),
+            Some(before),
+            &trust,
+            now()
+        ),
+        Verification::VerifiedHistorical,
+        "D3 §7.4: a rotation must not make every archive the old key signed unverifiable"
+    );
+    assert_eq!(
+        view::classify_verification(
+            SignatureVerdict::Verified,
+            Some(TRUSTED_KEY),
+            Some(after),
+            &trust,
+            now()
+        ),
+        Verification::Invalid,
+        "signed after the key stopped being accepted: there is nothing to place it inside the \
+         validity window"
+    );
+    // And a revoked key is neither.
+    let revoked = trust_with(TRUSTED_KEY, TrustKeyState::Revoked, None);
+    assert_eq!(
+        view::classify_verification(
+            SignatureVerdict::Verified,
+            Some(TRUSTED_KEY),
+            Some(before),
+            &revoked,
+            now()
+        ),
+        Verification::Revoked
+    );
+}
+
+fn trust_with(key_id: &str, state: TrustKeyState, not_after: Option<DateTime<Utc>>) -> TrustView {
+    TrustView {
+        keys: vec![TrustKey {
+            key_id: key_id.to_string(),
+            spki_pem: spki(0xA1),
+            subject: Some("runner".to_string()),
+            not_after,
+            state,
+        }],
+        source: view::TRUST_SOURCE_ROSTER.to_string(),
+    }
+}
+
+/// The roster is projected as the trust source in use, signing keys only.
+#[test]
+fn the_roster_projects_its_signing_keys_and_not_its_approver_keys() {
+    let spec: weirkeeper::crds::trust_roster::TrustRosterSpec = serde_json::from_value(json!({
+        "approverKeys": [{"keyId": STRANGER_KEY, "spkiPem": spki(0xB2)}],
+        "signingKeys": [{"keyId": TRUSTED_KEY, "spkiPem": spki(0xA1)}],
+        "allowedClusterIds": []
+    }))
+    .expect("a roster spec");
+    let trust = TrustView::from_roster(&spec);
+    assert_eq!(trust.keys.len(), 1);
+    assert!(trust.key(TRUSTED_KEY).is_some());
+    assert!(
+        trust.key(STRANGER_KEY).is_none(),
+        "D3 §7.3: a key that may AUTHORISE a restore is not thereby a key that may ATTEST to one"
+    );
+}
+
+// ===========================================================================
+// 3. The result-body grammar
+// ===========================================================================
+
+#[test]
+fn a_page_whose_digest_does_not_match_is_refused_and_no_page_is_written_from_it() {
+    let entries = vec![ok_entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1)];
+    let good = page_block(1, 1, &entries);
+    let tampered = good.replace(
+        "\"availability\":\"Available\"",
+        "\"availability\":\"Deleted\"",
+    );
+    assert_ne!(good, tampered, "the fixture really was changed");
+    match view::parse_body(&tampered) {
+        Err(view::BodyError::PageDigestMismatch { index }) => assert_eq!(index, 1),
+        other => panic!("a tampered page must be refused, got {other:?}"),
+    }
+    // The control: the untouched page parses.
+    assert_eq!(
+        view::parse_body(&good)
+            .expect("the untouched page parses")
+            .pages[0]
+            .entries
+            .len(),
+        1
+    );
+}
+
+#[test]
+fn a_malformed_entry_is_skipped_and_counted_and_never_fatal() {
+    let good = ok_entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 5);
+    let good_body = serde_json::to_string(&good).expect("json");
+    let broken = r#"{"pointId":"lwp1-zzzz","availability":"NotAThing"}"#;
+    let lines = vec![good_body.as_str(), broken];
+    let mut body = format!(
+        "{}1/1 count=2 sha256={}\n",
+        view::PAGE_LINE_PREFIX,
+        view::page_digest(&lines)
+    );
+    for line in &lines {
+        body.push_str(view::ENTRY_LINE_PREFIX);
+        body.push_str(line);
+        body.push('\n');
+    }
+    let parsed = view::parse_body(&body).expect("one broken entry is not a broken sync");
+    assert_eq!(parsed.pages[0].entries.len(), 1);
+    assert_eq!(parsed.skipped_entries, 1);
+}
+
+#[test]
+fn page_headers_must_be_one_to_n_in_order_each_exactly_once() {
+    let e = vec![ok_entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1)];
+    let body = format!("{}{}", page_block(2, 2, &e), page_block(1, 2, &e));
+    assert_eq!(view::parse_body(&body), Err(view::BodyError::PageSequence));
+}
+
+#[test]
+fn an_entry_line_before_any_page_header_is_refused() {
+    let body = format!(
+        "{}{}\n",
+        view::ENTRY_LINE_PREFIX,
+        ok_entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1)
+    );
+    assert_eq!(
+        view::parse_body(&body),
+        Err(view::BodyError::EntryBeforePage)
+    );
+}
+
+#[test]
+fn every_body_error_is_d2s_one_closed_code() {
+    for e in [
+        view::BodyError::MalformedPageHeader,
+        view::BodyError::EntryBeforePage,
+        view::BodyError::PageDigestMismatch { index: 1 },
+        view::BodyError::PageSequence,
+        view::BodyError::TooManyEntries,
+        view::BodyError::NotUtf8,
+    ] {
+        assert_eq!(
+            e.code(),
+            logweir_core::check_contract::CheckCode::ResultUnreadable,
+            "D-SEAMS S1: failures use D2's closed error-code vocabulary and never a new string"
+        );
+        assert!(!e.to_string().is_empty());
+    }
+}
+
+/// Lines the body does not own are ignored, exactly as D2's own frame decoder
+/// ignores them — a runner's stderr shares the stream.
+#[test]
+fn unrelated_lines_are_ignored() {
+    let e = vec![ok_entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 1)];
+    let body = format!("noise\n{}{{\"level\":\"warn\"}}\n", page_block(1, 1, &e));
+    assert_eq!(
+        view::parse_body(&body)
+            .expect("noise does not break a body")
+            .pages[0]
+            .entries
+            .len(),
+        1
+    );
+}
+
+// ===========================================================================
+// 4. Duplicate identity — D3 §5.1, defect RECEIPT-DUP
+// ===========================================================================
+
+/// **Defect RECEIPT-DUP's answer, asserted.** Two receipts under ONE
+/// `backupId` have different content-derived point ids and are TWO points; the
+/// SAME receipt found in two buckets is ONE point in two places.
+#[test]
+fn two_receipts_under_one_backup_id_are_two_points_and_one_copied_archive_is_one() {
+    let a = entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 20, "s3://one/p");
+    let mut b = entry("lwp1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 10, "s3://one/p");
+    b.run_id = "run-2".to_string();
+    assert_eq!(a.backup_id, b.backup_id, "one archive set");
+    let merged = view::merge_entries(vec![a.clone(), b.clone()]);
+    assert_eq!(merged.len(), 2, "two receipts, two recovery points");
+
+    let copy = entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 20, "s3://two/p");
+    let merged = view::merge_entries(vec![a, copy]);
+    assert_eq!(merged.len(), 1, "one receipt, one point");
+    assert_eq!(
+        merged[0].locations,
+        vec!["s3://one/p".to_string(), "s3://two/p".to_string()],
+        "an archive copied to a second bucket is ONE point with TWO locations (D3 §5.1)"
+    );
+    assert_eq!(merged[0].availability, Availability::Available);
+}
+
+/// Two records of one identity that disagree about a RECEIPT-DERIVED fact are
+/// `Conflict` — D3 §5.2 rule 3's `RecordMismatch`. Neither is preferred.
+#[test]
+fn a_record_mismatch_is_a_conflict_and_an_informational_difference_is_not() {
+    let a = entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 20, "s3://one/p");
+
+    let mut mismatch = a.clone();
+    mismatch.manifest_sha256 = Some(format!("sha256:{}", "9".repeat(64)));
+    let merged = view::merge_entries(vec![a.clone(), mismatch]);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(
+        merged[0].availability,
+        Availability::Conflict,
+        "D3 §5.4: two records disagreeing for one identity is `Conflict`, not a silent pick"
+    );
+    assert!(!view::selectable(
+        merged[0].availability,
+        Verification::Verified
+    ));
+
+    // The control: an INFORMATIONAL difference is one point in two places.
+    let mut informational = a.clone();
+    informational.locations = vec!["s3://two/p".to_string()];
+    informational.recorded_at = Some(now());
+    informational.remedy = Some("ignored".to_string());
+    let merged = view::merge_entries(vec![a, informational]);
+    assert_eq!(merged.len(), 1);
+    assert_eq!(
+        merged[0].availability,
+        Availability::Available,
+        "D3 §5.2 rule 3: everything but the receipt-derived facts is informational"
+    );
+}
+
+/// The merge keeps the WORSE availability, so a point readable in one place and
+/// missing in another is not advertised as simply available.
+#[test]
+fn the_worse_state_wins_a_merge() {
+    let a = entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 20, "s3://one/p");
+    let mut missing = a.clone();
+    missing.availability = Availability::Missing;
+    missing.locations = vec!["s3://two/p".to_string()];
+    let merged = view::merge_entries(vec![a, missing]);
+    assert_eq!(merged[0].availability, Availability::Missing);
+}
+
+/// The view order is total and reproducible: newest recovery point first, point
+/// id as the tie-break.
+#[test]
+fn the_view_is_newest_first_with_a_total_order() {
+    let a = entry("lwp1-cccccccccccccccccccccccccccccccc", 10, "s3://one/p");
+    let b = entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 10, "s3://one/p");
+    let c = entry("lwp1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", 99, "s3://one/p");
+    let merged = view::merge_entries(vec![a, b, c]);
+    let ids: Vec<&str> = merged.iter().map(|e| e.point_id.as_str()).collect();
+    assert_eq!(
+        ids,
+        vec![
+            "lwp1-bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "lwp1-cccccccccccccccccccccccccccccccc",
+        ]
+    );
+}
+
+fn entry(point: &str, at_ms: i64, location: &str) -> RunnerEntry {
+    let mut e: RunnerEntry =
+        serde_json::from_value(ok_entry(point, at_ms)).expect("an entry parses");
+    e.locations = vec![location.to_string()];
+    e
+}
+
+// ===========================================================================
+// 5. Bounds — the large catalog
+// ===========================================================================
+
+/// **The "large catalog" row.** 5 001 points page into two `ConfigMap`s, the
+/// newest `viewLimit` are materialised, `truncated` is true and the counts stay
+/// exact.
+#[test]
+fn a_catalog_larger_than_the_view_limit_pages_and_says_so() {
+    let trust = trust_with(TRUSTED_KEY, TrustKeyState::Active, None);
+    let entries: Vec<RunnerEntry> = (0..5001)
+        .map(|i| {
+            entry(
+                &format!("lwp1-{i:032x}"),
+                1_000_000 + i64::from(i),
+                "s3://b/p",
+            )
+        })
+        .collect();
+    let limits = ViewLimits {
+        view_limit: view::MAX_VIEW_ENTRIES,
+        page_max_bytes: view::PAGE_MAX_BYTES,
+        max_pages: view::MAX_PAGES,
+    };
+    let built = view::materialise(entries, 5001, &trust, &limits, now());
+    assert_eq!(built.entries, 5000, "the newest viewLimit points");
+    assert!(
+        built.pages.len() <= view::MAX_PAGES,
+        "the CRD's `status.pages` maxItems is {}; got {} pages",
+        view::MAX_PAGES,
+        built.pages.len()
+    );
+    // D3 §5.3 ESTIMATES ~350 B an entry and therefore two pages. The real
+    // entry is larger — two `sha256:` digests are 71 characters each and a key
+    // id is 64 — so the bound that matters is the one asserted here: every page
+    // is inside the byte budget and the page count is inside the CRD's
+    // `maxItems`. The estimate is recorded as an estimate rather than made true
+    // by trimming the binding out of the view.
+    let per_entry = built.pages[0].body.len() / built.pages[0].entries.len();
+    assert!(
+        (350..=1200).contains(&per_entry),
+        "one view entry is {per_entry} bytes; D3 §5.3 estimates ~350 and the page arithmetic \
+         above assumes under 1200"
+    );
+    assert!(built.truncated, "5001 > 5000");
+    assert_eq!(built.dropped_for_space, 0);
+    for page in &built.pages {
+        assert!(
+            page.body.len() <= view::PAGE_MAX_BYTES,
+            "a page over the byte budget is rejected at CREATE with a message about etcd"
+        );
+    }
+    // The newest point is first on page 0 and the oldest is last on the last.
+    assert_eq!(built.pages[0].entries[0].recovery_point_at_ms, 1_005_000);
+    let last = built.pages.last().expect("a page");
+    assert_eq!(
+        last.entries.last().expect("an entry").recovery_point_at_ms,
+        1_000_001,
+        "the OLDEST of the window, not of the archive"
+    );
+}
+
+/// The `viewLimit` is clamped to what this build supports, whatever the spec
+/// says.
+#[test]
+fn the_view_limit_is_clamped_to_five_thousand() {
+    let sync = weirkeeper::crds::recovery_catalog::SyncSettings {
+        interval_seconds: 3600,
+        mode: weirkeeper::crds::recovery_catalog::SyncMode::Index,
+        max_objects_per_run: 100_000,
+        deep_check: weirkeeper::crds::recovery_catalog::DeepCheck::ManifestDigest,
+        view_limit: 99_999,
+    };
+    assert_eq!(
+        ViewLimits::from_settings(&sync).view_limit,
+        view::MAX_VIEW_ENTRIES
+    );
+}
+
+/// The fence pointer EXCLUDES pages and never proves one holds anything, and it
+/// is tight on the axis the view is ordered by.
+#[test]
+fn the_fence_pointer_bounds_both_axes() {
+    let trust = trust_with(TRUSTED_KEY, TrustKeyState::Active, None);
+    let entries: Vec<RunnerEntry> = (0..40)
+        .map(|i| entry(&format!("lwp1-{i:032x}"), 1_000 + i64::from(i), "s3://b/p"))
+        .collect();
+    let limits = ViewLimits {
+        view_limit: 100,
+        page_max_bytes: 2000,
+        max_pages: view::MAX_PAGES,
+    };
+    let built = view::materialise(entries, 40, &trust, &limits, now());
+    assert!(built.pages.len() > 1, "the small budget forces paging");
+    let names: Vec<String> = (0..built.pages.len())
+        .map(|i| view::page_config_map_name("stem", i))
+        .collect();
+    let document = view::index_document("stem", &limits, &built, &names);
+    assert_eq!(document.pages.len(), built.pages.len());
+    for (i, fence) in document.pages.iter().enumerate() {
+        assert_eq!(fence.index, i as i64);
+        assert_eq!(fence.config_map_name, names[i]);
+        assert!(fence.min_point_id <= fence.max_point_id);
+        assert!(
+            fence.newest_ms >= fence.oldest_ms,
+            "the view is ordered newest first"
+        );
+        let page = &built.pages[i];
+        for e in &page.entries {
+            assert!(
+                e.point_id >= fence.min_point_id && e.point_id <= fence.max_point_id,
+                "no false negatives: every id in the page is inside the fence"
+            );
+        }
+    }
+    // Consecutive pages do not overlap on the ordered axis.
+    for w in document.pages.windows(2) {
+        assert!(w[0].oldest_ms >= w[1].newest_ms);
+    }
+}
+
+// ===========================================================================
+// 6. The ten counters
+// ===========================================================================
+
+/// `untrustedSigner` is computed from the SIGNER SUMMARY, which covers the whole
+/// walk, and `unverified` folds `notAttempted` and `noEvidence`. The states the
+/// ten fields cannot carry are returned rather than dropped.
+#[test]
+fn the_counters_are_a_projection_and_the_residue_is_named() {
+    let counts = RunnerCounts {
+        total: 100,
+        available: 80,
+        missing: 5,
+        unreadable: 4,
+        deleted: 3,
+        conflict: 2,
+        unsupported_format: 1,
+        partial: 5,
+        signature: SignatureCounts {
+            verified: 90,
+            invalid: 4,
+            no_evidence: 3,
+            not_attempted: 3,
+        },
+        by_day: vec![],
+    };
+    let signers = vec![
+        SignerSummary {
+            key_id: TRUSTED_KEY.to_string(),
+            principal_hint: None,
+            points: Some(70),
+            trusted: Some(true),
+        },
+        SignerSummary {
+            key_id: STRANGER_KEY.to_string(),
+            principal_hint: None,
+            points: Some(20),
+            trusted: Some(false),
+        },
+    ];
+    let tally = view::tally(&counts, &signers);
+    assert_eq!(tally.counts.total, Some(100));
+    assert_eq!(tally.counts.available, Some(80));
+    assert_eq!(
+        tally.counts.untrusted_signer,
+        Some(20),
+        "summed over signers the trust source does not list — the whole walk, not the window"
+    );
+    assert_eq!(
+        tally.counts.unverified,
+        Some(6),
+        "notAttempted + noEvidence"
+    );
+    assert_eq!(tally.counts.invalid, Some(4));
+    assert_eq!(
+        tally.unrepresented,
+        vec![("Partial", 5)],
+        "the v1alpha1 status has no `counts.partial`; it is NAMED rather than dropped (NOTE FOR \
+         W13)"
+    );
+}
+
+/// The signer summary puts UNTRUSTED keys first and is bounded, so the one row
+/// PLAT-15.2 asks an administrator to act on cannot be the one that is dropped.
+#[test]
+fn the_signer_summary_lists_the_unknown_key_first_and_is_bounded() {
+    let trust = trust_with(TRUSTED_KEY, TrustKeyState::Active, None);
+    let mut signers = vec![RunnerSigner {
+        key_id: TRUSTED_KEY.to_string(),
+        principal_hint: Some("runner".to_string()),
+        points: 9999,
+    }];
+    for i in 0..20 {
+        signers.push(RunnerSigner {
+            key_id: format!("{i:064x}"),
+            principal_hint: None,
+            points: 1,
+        });
+    }
+    let rows = view::signer_summaries(&signers, &trust);
+    assert_eq!(rows.len(), view::MAX_SIGNERS);
+    assert_eq!(rows[0].trusted, Some(false));
+    assert!(
+        rows.iter().all(|r| r.trusted.is_some()),
+        "`trusted` is never absent: an absent value reads as `not known yet` on the surface \
+         whose whole job is to say whether an unknown key signed these points"
+    );
+    assert!(
+        !rows.iter().any(|r| r.key_id == TRUSTED_KEY),
+        "the trusted key with 9999 points is dropped before any untrusted one"
+    );
+}
+
+#[test]
+fn the_histogram_is_newest_day_first_deduplicated_and_bounded() {
+    let mut by_day: Vec<view::DayCount> = (0..500)
+        .map(|i| view::DayCount {
+            day: format!("2026-{:02}-{:02}", (i % 12) + 1, (i % 28) + 1),
+            points: i64::from(i),
+        })
+        .collect();
+    by_day.push(view::DayCount {
+        day: "not-a-day".to_string(),
+        points: 1,
+    });
+    let counts = RunnerCounts {
+        by_day,
+        ..RunnerCounts::default()
+    };
+    let out = view::histogram(&counts);
+    assert!(out.len() <= view::MAX_HISTOGRAM_DAYS);
+    assert!(
+        !out.iter().any(|b| b.day == "not-a-day"),
+        "a malformed day is dropped, never rendered"
+    );
+    for w in out.windows(2) {
+        assert!(w[0].day > w[1].day, "newest first");
+    }
+}
+
+// ===========================================================================
+// 7. Names, tokens, TTL and staleness
+// ===========================================================================
+
+/// The name is a pure function of the catalog UID and the trigger, so a
+/// duplicate reconcile gets 409 rather than running a second walk — and no
+/// catalog can be NAMED in a way that makes its sync unschedulable.
+#[test]
+fn every_name_is_derived_from_the_uid_and_is_bounded() {
+    let long = "a".repeat(240);
+    let stem = view::sync_stem(UID, &SyncTrigger::Requested(long.clone()).token());
+    assert!(
+        stem.len() <= 63,
+        "a Job name becomes the `batch.kubernetes.io/job-name` LABEL value, capped at 63: {stem}"
+    );
+    assert!(view::page_config_map_name(&stem, 7).len() <= 253);
+    assert!(view::index_config_map_name(&stem).len() <= 253);
+    assert!(view::trust_config_map_name(UID, 9_999_999).len() <= 253);
+    assert_eq!(
+        stem,
+        view::sync_stem(UID, &SyncTrigger::Requested(long).token()),
+        "deterministic: two reconciles of one trigger compute one name"
+    );
+    assert_ne!(
+        stem,
+        view::sync_stem(UID, &SyncTrigger::Requested("other".to_string()).token()),
+        "a genuinely new request is distinguishable from a retry"
+    );
+    assert!(stem.starts_with(&format!("{}{}", view::NAME_PREFIX, "")));
+}
+
+/// `intervalSeconds: 0` is manual only: no slots, and never stale by the clock.
+#[test]
+fn a_manual_only_catalog_has_no_slots_and_is_never_stale() {
+    assert_eq!(view::periodic_slot(now(), 0), None);
+    assert!(!view::is_stale(
+        now() + chrono::Duration::days(400),
+        Some(now()),
+        0
+    ));
+}
+
+/// `Stale` after two intervals, and not before — D3's test matrix.
+#[test]
+fn the_view_is_stale_after_two_intervals() {
+    let synced = now();
+    assert!(!view::is_stale(
+        synced + chrono::Duration::seconds(7200),
+        Some(synced),
+        3600
+    ));
+    assert!(view::is_stale(
+        synced + chrono::Duration::seconds(7201),
+        Some(synced),
+        3600
+    ));
+    assert!(
+        !view::is_stale(synced + chrono::Duration::days(9), None, 3600),
+        "a catalog that never synced is `NeverSynced`, not `Stale`"
+    );
+}
+
+/// The TTL is `max(3 × interval, 86400)` and it is the ONLY thing that removes
+/// a page.
+#[test]
+fn the_ttl_outlives_three_intervals_and_never_falls_below_a_day() {
+    assert_eq!(view::ttl_seconds(3600), 86_400);
+    assert_eq!(view::ttl_seconds(86_400), 259_200);
+    assert_eq!(view::ttl_seconds(0), view::TTL_FLOOR_SECONDS);
+    assert_eq!(
+        view::view_expires_at(now(), 3600),
+        now() + chrono::Duration::seconds(86_400)
+    );
+}
+
+// ===========================================================================
+// 8. The objects the controller writes
+// ===========================================================================
+
+/// Pages are IMMUTABLE, owned by the sync Job, and do NOT block its deletion —
+/// which is what makes Job TTL the garbage collector.
+#[test]
+fn a_page_is_immutable_and_owned_by_the_job_without_blocking_its_deletion() {
+    let trust = trust_with(TRUSTED_KEY, TrustKeyState::Active, None);
+    let built = view::materialise(
+        vec![entry(
+            "lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            1,
+            "s3://b/p",
+        )],
+        1,
+        &trust,
+        &ViewLimits {
+            view_limit: 10,
+            page_max_bytes: view::PAGE_MAX_BYTES,
+            max_pages: 8,
+        },
+        now(),
+    );
+    let owner = weirkeeper::job::RunnerOwner {
+        api_version: "batch/v1".to_string(),
+        kind: "Job".to_string(),
+        name: "sync".to_string(),
+        uid: JOB_UID.to_string(),
+    };
+    let cm = view::page_config_map("p0", NS, &owner, &built.pages[0], 0);
+    assert_eq!(cm.immutable, Some(true));
+    let refs = cm.metadata.owner_references.expect("owned");
+    assert_eq!(refs.len(), 1);
+    assert_eq!(refs[0].uid, JOB_UID);
+    assert_eq!(refs[0].kind, "Job");
+    assert_eq!(refs[0].controller, Some(true));
+    assert_eq!(
+        refs[0].block_owner_deletion,
+        Some(false),
+        "D3 §5.3: `blockOwnerDeletion: false`. `true` asks for `update` on the owner's \
+         finalizers, which this ClusterRole grants on nothing — and blocking the deletion of a \
+         Job whose TTL fired is the opposite of the design."
+    );
+    assert!(cm
+        .metadata
+        .annotations
+        .expect("annotated")
+        .contains_key(view::PAGE_DIGEST_ANNOTATION));
+}
+
+/// **A page name taken by a foreign object is NEVER adopted**, whatever it
+/// contains — adopting it would publish somebody else's bytes as this catalog's
+/// view.
+#[test]
+fn a_foreign_owned_page_is_never_adopted() {
+    let mine = k8s_openapi::api::core::v1::ConfigMap {
+        metadata: kube::api::ObjectMeta {
+            name: Some("p0".to_string()),
+            annotations: Some(BTreeMap::from([(
+                view::PAGE_DIGEST_ANNOTATION.to_string(),
+                "sha256:abc".to_string(),
+            )])),
+            owner_references: Some(vec![
+                k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
+                    uid: JOB_UID.to_string(),
+                    controller: Some(true),
+                    ..Default::default()
+                },
+            ]),
+            ..Default::default()
+        },
+        immutable: Some(true),
+        ..Default::default()
+    };
+    assert!(view::accepts_existing_page(&mine, JOB_UID, "sha256:abc").is_ok());
+
+    // (a) another owner
+    let mut foreign = mine.clone();
+    foreign.metadata.owner_references = Some(vec![
+        k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference {
+            uid: "somebody-else".to_string(),
+            controller: Some(true),
+            ..Default::default()
+        },
+    ]);
+    let err = view::accepts_existing_page(&foreign, JOB_UID, "sha256:abc")
+        .expect_err("a foreign owner is refused");
+    assert!(err.to_string().contains("never adopted across owners"));
+
+    // (b) not immutable
+    let mut mutable = mine.clone();
+    mutable.immutable = None;
+    assert!(view::accepts_existing_page(&mutable, JOB_UID, "sha256:abc").is_err());
+
+    // (c) a different digest — two views want one name
+    assert!(view::accepts_existing_page(&mine, JOB_UID, "sha256:different").is_err());
+
+    // (d) no owner reference at all
+    let mut orphan = mine;
+    orphan.metadata.owner_references = None;
+    assert!(view::accepts_existing_page(&orphan, JOB_UID, "sha256:abc").is_err());
+}
+
+/// The trust `ConfigMap` carries PUBLIC material only, is immutable, and is
+/// owned by the CATALOG so it is reused across syncs.
+#[test]
+fn the_trust_bundle_is_public_material_owned_by_the_catalog() {
+    let trust = trust_with(TRUSTED_KEY, TrustKeyState::Active, None);
+    let owner = weirkeeper::job::RunnerOwner {
+        api_version: "logweir.dev/v1alpha1".to_string(),
+        kind: "RecoveryCatalog".to_string(),
+        name: NAME.to_string(),
+        uid: UID.to_string(),
+    };
+    let cm = view::trust_config_map("t", NS, &owner, &trust);
+    assert_eq!(cm.immutable, Some(true));
+    assert_eq!(
+        cm.metadata.owner_references.expect("owned")[0].kind,
+        "RecoveryCatalog"
+    );
+    let data = cm.data.expect("data");
+    assert!(data[view::TRUST_BUNDLE_KEY].contains("BEGIN PUBLIC KEY"));
+    assert!(
+        !data[view::TRUST_BUNDLE_KEY].contains("PRIVATE"),
+        "never a private key in a ConfigMap"
+    );
+    assert_eq!(data[view::TRUST_KEY_IDS_KEY], TRUSTED_KEY);
+}
+
+/// The sync Job carries its TTL AT CREATION — unlike every other check Job in
+/// this tree, and for a stated reason.
+#[test]
+fn the_sync_job_carries_its_ttl_at_creation_and_mounts_no_secret() {
+    let job = view::build_sync_job(&sync_job_spec());
+    let spec = job.spec.expect("a Job spec");
+    assert_eq!(spec.ttl_seconds_after_finished, Some(86_400));
+    assert_eq!(spec.backoff_limit, Some(0));
+    let pod = spec.template.spec.expect("a pod spec");
+    assert_eq!(pod.automount_service_account_token, Some(false));
+    assert_eq!(pod.service_account_name.as_deref(), Some("logweir-runner"));
+    let container = &pod.containers[0];
+    assert_eq!(container.name, "runner");
+    assert_eq!(
+        container.args.as_ref().expect("argv"),
+        &check::job::runner_argv(),
+        "D-SEAMS S1: the SAME argv every other check runs"
+    );
+    // The trust bundle is a ConfigMap volume; nothing is a Secret volume.
+    assert!(
+        pod.volumes
+            .expect("volumes")
+            .iter()
+            .all(|v| v.secret.is_none()),
+        "a catalog sync mounts no Secret volume; its credential arrives by secretKeyRef"
+    );
+    let labels = job.metadata.labels.expect("labels");
+    assert_eq!(
+        labels[check::job::LABEL_CHECK_KIND],
+        view::PLAN_KIND,
+        "the Job is discoverable as the check kind it runs"
+    );
+    assert_eq!(labels[check::job::LABEL_CHECK_OWNER_UID], UID);
+}
+
+fn sync_job_spec() -> view::SyncJobSpec {
+    view::SyncJobSpec {
+        name: periodic_stem(),
+        namespace: NS.to_string(),
+        owner: weirkeeper::job::RunnerOwner {
+            api_version: "logweir.dev/v1alpha1".to_string(),
+            kind: "RecoveryCatalog".to_string(),
+            name: NAME.to_string(),
+            uid: UID.to_string(),
+        },
+        plan_config_map: "plan".to_string(),
+        plan_sha256: format!("sha256:{}", "3".repeat(64)),
+        subject_uid: UID.to_string(),
+        timeout_seconds: 900,
+        ttl_seconds: view::ttl_seconds(3600),
+        service_account_name: "logweir-runner".to_string(),
+        trust_config_map: Some("trust".to_string()),
+        env_literal: vec![("AWS_ALLOW_HTTP".to_string(), "false".to_string())],
+        env_from_secret: vec![],
+        image: None,
+        image_pull_policy: None,
+    }
+}
+
+// ===========================================================================
+// 9. The reconciler, over a route table
+// ===========================================================================
+
+/// The first pass on a fresh catalog: the destination is resolved, the plan and
+/// the trust bundle are created, ONE Job is created, and the status says a sync
+/// is running. **No DELETE is sent, on anything.**
+#[tokio::test]
+async fn a_first_pass_creates_one_sync_job_and_deletes_nothing() {
+    let f = fixture(vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/backupdestinations/archive", destination_body()),
+        route("POST", "/configmaps", empty_config_map()),
+        route("POST", "/jobs", empty_job()),
+        route(
+            "PATCH",
+            "/recoverycatalogs/primary/status",
+            patched_catalog(),
+        ),
+    ]);
+    let outcome = run(&f, &catalog(json!({}), json!({}))).await;
+    assert_eq!(outcome.phase, ctrl::CatalogPhase::Started);
+    assert_eq!(outcome.ready, "Unknown");
+    assert_eq!(outcome.ready_reason, ctrl::REASON_SYNC_IN_PROGRESS);
+    assert_eq!(outcome.job_name.as_deref(), Some(periodic_stem().as_str()));
+
+    let jobs = f.posted("/jobs");
+    assert_eq!(jobs.len(), 1, "exactly one sync Job per trigger");
+    assert_eq!(jobs[0]["metadata"]["name"], periodic_stem());
+    assert_eq!(
+        jobs[0]["spec"]["ttlSecondsAfterFinished"], 86400,
+        "the TTL is the only garbage collector this design has"
+    );
+
+    assert_no_delete(&f);
+    // The status names the Job and carries the S7 precondition.
+    let patch = f.patched_status();
+    assert_eq!(patch["status"]["lastSyncJob"]["name"], periodic_stem());
+    assert_eq!(patch["metadata"]["resourceVersion"], "4242");
+}
+
+/// **D-SEAMS S5.** The Job carries the destination's COMPLETE, EXPLICIT
+/// environment and its credential by `secretKeyRef`; no credential VALUE
+/// appears in the Job at all.
+#[tokio::test]
+async fn the_sync_job_carries_the_destinations_explicit_environment_and_no_credential_value() {
+    let f = fixture(vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/backupdestinations/archive", destination_body()),
+        route("POST", "/configmaps", empty_config_map()),
+        route("POST", "/jobs", empty_job()),
+        route(
+            "PATCH",
+            "/recoverycatalogs/primary/status",
+            patched_catalog(),
+        ),
+    ]);
+    run(&f, &catalog(json!({}), json!({}))).await;
+    let job = f.posted("/jobs").remove(0);
+    let env = job["spec"]["template"]["spec"]["containers"][0]["env"]
+        .as_array()
+        .expect("env")
+        .clone();
+    let names: Vec<&str> = env
+        .iter()
+        .map(|e| e["name"].as_str().expect("a name"))
+        .collect();
+    for required in [
+        "AWS_ALLOW_HTTP",
+        "AWS_VIRTUAL_HOSTED_STYLE_REQUEST",
+        "AWS_METADATA_ENDPOINT",
+        "AWS_REGION",
+        "LOGWEIR_STORE_CONTRACT_VERSION",
+        "LOGWEIR_ARCHIVE_CREDENTIALS",
+        "AWS_ACCESS_KEY_ID",
+        "AWS_SECRET_ACCESS_KEY",
+        check::job::PLAN_SHA256_ENV,
+        check::job::SUBJECT_UID_ENV,
+    ] {
+        assert!(
+            names.contains(&required),
+            "{required} is absent from {names:?}"
+        );
+    }
+    for credential in ["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"] {
+        let e = env
+            .iter()
+            .find(|e| e["name"] == credential)
+            .expect("the variable");
+        assert!(
+            e.get("value").is_none() && e["valueFrom"]["secretKeyRef"]["name"] == "lw-reader",
+            "a credential reaches the runner by secretKeyRef and never as a literal: {e}"
+        );
+    }
+    assert!(
+        !names.contains(&"AWS_ENDPOINT_URL"),
+        "absent by construction (D2 §3.5)"
+    );
+    // The read-only grant, not the write one.
+    assert_eq!(
+        env.iter()
+            .find(|e| e["name"] == "AWS_ACCESS_KEY_ID")
+            .expect("id")["valueFrom"]["secretKeyRef"]["name"],
+        "lw-reader"
+    );
+}
+
+/// **The happy path end to end.** A finished Job's relay becomes pages, a fence
+/// pointer, counts, a histogram and a signer summary — and still no DELETE.
+#[tokio::test]
+async fn a_finished_sync_publishes_a_bounded_view() {
+    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let log = framed(&plan_sha, UID, &happy_body());
+    let f = fixture(harvest_routes(&plan_sha, log, UID));
+    let outcome = run(&f, &catalog(json!({}), tracked_status(&periodic_stem()))).await;
+
+    assert_eq!(outcome.phase, ctrl::CatalogPhase::Published);
+    assert_eq!(outcome.ready, "True");
+    assert_eq!(outcome.ready_reason, ctrl::REASON_VIEW_READY);
+    assert_eq!(outcome.synced_reason, ctrl::REASON_SUCCEEDED);
+    assert_eq!(outcome.pages, 1);
+    assert_eq!(outcome.entries, 2);
+    assert!(!outcome.truncated);
+    assert_no_delete(&f);
+
+    let posted = f.posted("/configmaps");
+    assert_eq!(posted.len(), 2, "one page and one fence pointer");
+    let page = &posted[0];
+    assert_eq!(page["immutable"], true);
+    assert_eq!(page["metadata"]["ownerReferences"][0]["uid"], JOB_UID);
+    assert_eq!(page["metadata"]["ownerReferences"][0]["kind"], "Job");
+    assert_eq!(
+        page["metadata"]["ownerReferences"][0]["blockOwnerDeletion"],
+        false
+    );
+    let lines: Vec<&str> = page["data"][view::PAGE_DATA_KEY]
+        .as_str()
+        .expect("entries")
+        .lines()
+        .collect();
+    assert_eq!(lines.len(), 2);
+    let first: Value = serde_json::from_str(lines[0]).expect("an entry");
+    assert_eq!(first["verification"], "Verified");
+    assert_eq!(first["selectable"], true);
+
+    let status = f.patched_status()["status"].clone();
+    assert_eq!(status["counts"]["total"], 2);
+    assert_eq!(status["counts"]["available"], 2);
+    assert_eq!(status["counts"]["untrustedSigner"], 0);
+    assert_eq!(status["truncated"], false);
+    assert_eq!(status["pages"][0]["count"], 2);
+    assert_eq!(status["pages"][0]["index"], 0);
+    assert!(status["indexConfigMap"].is_string());
+    assert_eq!(status["histogram"][0]["day"], "2026-09-16");
+    assert_eq!(status["signers"][0]["trusted"], true);
+    assert_eq!(status["syncedAt"], "2026-09-16T11:55:00Z");
+    assert_eq!(
+        status["viewExpiresAt"], "2026-09-17T11:55:00Z",
+        "finish + max(3 × interval, one day)"
+    );
+    assert_eq!(status["cursor"]["indexShard"], "2026/09/16");
+    assert_eq!(status["cursor"]["complete"], true);
+    assert_condition(&status, ctrl::CONDITION_TRUST_AVAILABLE, "True");
+    assert_condition(&status, ctrl::CONDITION_STALE, "False");
+}
+
+/// **The partial-access row.** A 403 on part of the archive yields `Unreadable`
+/// entries and `Synced=False/PartialScan`, and NEVER `Missing`.
+#[tokio::test]
+async fn a_403_on_part_of_the_archive_is_unreadable_and_never_missing() {
+    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let mut counts = counts_value(3, 2);
+    counts["unreadable"] = json!(1);
+    counts["available"] = json!(2);
+    let body = body_for(
+        &[vec![
+            ok_entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 30),
+            entry_value(
+                "lwp1-cccccccccccccccccccccccccccccccc",
+                20,
+                "Unreadable",
+                "notAttempted",
+                TRUSTED_KEY,
+            ),
+        ]],
+        counts,
+        json!([{"keyId": TRUSTED_KEY, "points": 2}]),
+        true,
+    );
+    let f = fixture(harvest_routes(
+        &plan_sha,
+        framed(&plan_sha, UID, &body),
+        UID,
+    ));
+    let outcome = run(&f, &catalog(json!({}), tracked_status(&periodic_stem()))).await;
+
+    assert_eq!(outcome.synced_reason, ctrl::REASON_PARTIAL_SCAN);
+    let status = f.patched_status()["status"].clone();
+    assert_eq!(status["counts"]["unreadable"], 1);
+    assert_eq!(
+        status["counts"]["missing"], 0,
+        "a permission failure is NOT an absence; reporting it as one is how an operator comes to \
+         believe an outage deleted their backups"
+    );
+    assert_condition(&status, ctrl::CONDITION_SYNCED, "False");
+    let page = f.posted("/configmaps").remove(0);
+    let entries: Vec<Value> = page["data"][view::PAGE_DATA_KEY]
+        .as_str()
+        .expect("entries")
+        .lines()
+        .map(|l| serde_json::from_str(l).expect("json"))
+        .collect();
+    let unreadable = entries
+        .iter()
+        .find(|e| e["availability"] == "Unreadable")
+        .expect("the unreadable row is listed, not hidden");
+    assert_eq!(unreadable["selectable"], false);
+    assert_eq!(unreadable["verification"], "NotAttempted");
+}
+
+/// **The unsupported-major row.** A record this build does not understand is
+/// ONE entry's state; the sync still completes.
+#[tokio::test]
+async fn a_record_from_a_future_major_is_one_unsupported_entry_and_not_a_failed_sync() {
+    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let mut future = entry_value(
+        "lwp1-dddddddddddddddddddddddddddddddd",
+        10,
+        "UnsupportedFormat",
+        "notAttempted",
+        TRUSTED_KEY,
+    );
+    future["formatVersion"] = json!("2.0.0");
+    future["remedy"] = json!("this record was written by a newer Logweir; upgrade to read it");
+    let mut counts = counts_value(2, 1);
+    counts["unsupportedFormat"] = json!(1);
+    counts["available"] = json!(1);
+    let body = body_for(
+        &[vec![
+            ok_entry("lwp1-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", 30),
+            future,
+        ]],
+        counts,
+        json!([{"keyId": TRUSTED_KEY, "points": 1}]),
+        true,
+    );
+    let f = fixture(harvest_routes(
+        &plan_sha,
+        framed(&plan_sha, UID, &body),
+        UID,
+    ));
+    let outcome = run(&f, &catalog(json!({}), tracked_status(&periodic_stem()))).await;
+    assert_eq!(
+        outcome.phase,
+        ctrl::CatalogPhase::Published,
+        "D3 §5.2 rule 1: a higher major makes the ENTRY unsupported, never the sync fatal"
+    );
+    let status = f.patched_status()["status"].clone();
+    assert_eq!(status["counts"]["unsupportedFormat"], 1);
+    assert_condition(&status, ctrl::CONDITION_SYNCED, "True");
+}
+
+/// **The untrusted-signer row.** A point signed by a key this installation does
+/// not list is listed with its exact state, is not selectable, and the signer
+/// summary names the key id an administrator has to act on.
+#[tokio::test]
+async fn an_unknown_signer_is_untrusted_and_never_offered() {
+    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let body = body_for(
+        &[vec![entry_value(
+            "lwp1-eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+            30,
+            "Available",
+            "verified",
+            STRANGER_KEY,
+        )]],
+        counts_value(1, 1),
+        json!([{"keyId": STRANGER_KEY, "points": 1, "principalHint": "another installation"}]),
+        true,
+    );
+    let f = fixture(harvest_routes(
+        &plan_sha,
+        framed(&plan_sha, UID, &body),
+        UID,
+    ));
+    run(&f, &catalog(json!({}), tracked_status(&periodic_stem()))).await;
+
+    let page = f.posted("/configmaps").remove(0);
+    let entry: Value = serde_json::from_str(
+        page["data"][view::PAGE_DATA_KEY]
+            .as_str()
+            .expect("entries")
+            .lines()
+            .next()
+            .expect("one entry"),
+    )
+    .expect("json");
+    assert_eq!(entry["availability"], "Available");
+    assert_eq!(entry["verification"], "UntrustedSigner");
+    assert_eq!(entry["selectable"], false);
+    assert_eq!(entry["signerKeyId"], STRANGER_KEY);
+
+    let status = f.patched_status()["status"].clone();
+    assert_eq!(status["counts"]["untrustedSigner"], 1);
+    assert_eq!(status["signers"][0]["keyId"], STRANGER_KEY);
+    assert_eq!(status["signers"][0]["trusted"], false);
+}
+
+/// With NO trust material the whole view is `NotAttempted`, `TrustAvailable` is
+/// `False`, and nothing is presented as verified evidence.
+#[tokio::test]
+async fn with_no_trust_material_nothing_is_offered_and_the_condition_says_why() {
+    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let mut routes = harvest_routes(&plan_sha, framed(&plan_sha, UID, &happy_body()), UID);
+    routes[0] = route("GET", "/trustrosters/default", empty_roster_body());
+    let f = fixture(routes);
+    run(&f, &catalog(json!({}), tracked_status(&periodic_stem()))).await;
+
+    let page = f.posted("/configmaps").remove(0);
+    for line in page["data"][view::PAGE_DATA_KEY]
+        .as_str()
+        .expect("entries")
+        .lines()
+    {
+        let e: Value = serde_json::from_str(line).expect("json");
+        assert_eq!(e["verification"], "NotAttempted");
+        assert_eq!(e["selectable"], false);
+    }
+    let status = f.patched_status()["status"].clone();
+    assert_condition(&status, ctrl::CONDITION_TRUST_AVAILABLE, "False");
+    // And NO trust ConfigMap was ever written: an empty bundle would make the
+    // runner configure a trust store with nothing in it.
+    assert_eq!(
+        f.posted("/configmaps").len(),
+        2,
+        "one page and one fence pointer, and no trust bundle"
+    );
+}
+
+/// **The impostor pod.** A pod carrying the Job's LABEL but owned by something
+/// else is never read, and the sync reports `ResultUnreadable` rather than the
+/// impostor's output. D-SEAMS **S6**, defect `SEC-PODLOG`.
+#[tokio::test]
+async fn an_impostor_pod_is_never_read() {
+    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let mut routes = harvest_routes(&plan_sha, framed(&plan_sha, UID, &happy_body()), UID);
+    // The listing answers with a pod whose controller owner is NOT this Job.
+    routes[2] = route("GET", "/pods", pod_list_body("some-other-job-uid"));
+    // The log route is REMOVED: if the reconciler reads it, the double panics.
+    routes.retain(|r| r.path_suffix != "/log");
+    let f = fixture(routes);
+    let outcome = run(&f, &catalog(json!({}), tracked_status(&periodic_stem()))).await;
+
+    assert_eq!(outcome.phase, ctrl::CatalogPhase::Failed);
+    assert_eq!(outcome.synced_reason, "ResultUnreadable");
+    // `contains("/log")` would match `/apis/logweir.dev/…`; the PATH is what
+    // matters, so the query string is stripped first.
+    let read_a_log = |uri: &str| uri.split('?').next().unwrap_or(uri).ends_with("/log");
+    assert!(
+        f.seen()
+            .iter()
+            .any(|(m, u)| m == "GET" && u.split('?').next().unwrap_or(u).ends_with("/pods")),
+        "the test is not vacuous: the reconciler DID list pods"
+    );
+    assert!(
+        !f.seen().iter().any(|(m, u)| m == "GET" && read_a_log(u)),
+        "a `pods/log` read for a pod this Job does not own is a read of somebody else's output \
+         (defect SEC-PODLOG): {:?}",
+        f.seen()
+    );
+    assert!(
+        f.posted("/configmaps").is_empty(),
+        "no page is written from a relay that was never read"
+    );
+}
+
+/// A Job carrying this sync's NAME but controlled by something else is refused
+/// and nothing is read from it — a name is not an identity.
+#[tokio::test]
+async fn a_job_owned_by_something_else_is_refused_and_never_read() {
+    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let stem: &'static str = Box::leak(periodic_stem().into_boxed_str());
+    let job_path: &'static str = Box::leak(format!("/jobs/{stem}").into_boxed_str());
+    let f = fixture(vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        route(
+            "GET",
+            job_path,
+            job_body(stem, true, &plan_sha, "not-this-catalog"),
+        ),
+        route(
+            "PATCH",
+            "/recoverycatalogs/primary/status",
+            patched_catalog(),
+        ),
+    ]);
+    let outcome = run(&f, &catalog(json!({}), tracked_status(stem))).await;
+    assert_eq!(outcome.phase, ctrl::CatalogPhase::Refused);
+    assert_eq!(outcome.ready_reason, ctrl::REASON_JOB_NAME_CONFLICT);
+    assert!(
+        !f.seen().iter().any(|(_, u)| u.contains("/pods")),
+        "nothing is listed for a Job this catalog does not control"
+    );
+}
+
+/// **A page whose digest does not verify writes nothing**, and the previous
+/// view is retained.
+#[tokio::test]
+async fn a_tampered_relay_writes_no_page_and_keeps_the_previous_view() {
+    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let body = happy_body().replace(
+        "\"availability\":\"Available\"",
+        "\"availability\":\"Missing\"",
+    );
+    let f = fixture(harvest_routes(
+        &plan_sha,
+        framed(&plan_sha, UID, &body),
+        UID,
+    ));
+    let mut status = tracked_status(&periodic_stem());
+    status["pages"] = json!([{"configMapName": "old-p0", "index": 0, "count": 9}]);
+    let outcome = run(&f, &catalog(json!({}), status)).await;
+
+    assert_eq!(outcome.phase, ctrl::CatalogPhase::Failed);
+    assert_eq!(outcome.synced_reason, "ResultUnreadable");
+    assert!(f.posted("/configmaps").is_empty());
+    let patch = f.patched_status();
+    assert!(
+        patch["status"].get("pages").is_none(),
+        "a merge patch that omits `pages` leaves the previous view, which is still true until \
+         its Job's TTL fires: {patch}"
+    );
+    assert_eq!(outcome.ready_reason, ctrl::REASON_VIEW_READY);
+}
+
+/// **The stale-index rows.** `Stale` after two intervals; `ViewExpired` once the
+/// Job — and with it the pages — has been garbage-collected.
+#[tokio::test]
+async fn a_view_whose_job_is_gone_reports_view_expired_and_stops_listing_its_pages() {
+    let stem: &'static str = Box::leak(periodic_stem().into_boxed_str());
+    let job_path: &'static str = Box::leak(format!("/jobs/{stem}").into_boxed_str());
+    let f = fixture(vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        Route {
+            method: "GET",
+            path_suffix: job_path,
+            status: 404,
+            body: json!({"kind": "Status", "code": 404, "reason": "NotFound",
+                         "message": "jobs not found", "status": "Failure"})
+            .to_string(),
+        },
+        route(
+            "PATCH",
+            "/recoverycatalogs/primary/status",
+            patched_catalog(),
+        ),
+    ]);
+    let status = json!({
+        "observedGeneration": 1,
+        "syncedAt": "2026-09-14T00:00:00Z",
+        "viewExpiresAt": "2026-09-15T00:00:00Z",
+        "observedSyncRequest": "t1",
+        "truncated": false,
+        "pages": [{"configMapName": "old-p0", "index": 0, "count": 4}],
+        "indexConfigMap": "old-index",
+        "lastSyncJob": {"name": stem, "finishedAt": "2026-09-14T00:00:00Z"},
+        "conditions": [{"type": "Synced", "status": "True", "reason": "Succeeded"}]
+    });
+    // `syncRequest` equals what was observed and the slot has moved on, so the
+    // trigger is the periodic one — whose stem IS the tracked name, so this pass
+    // is idle and only reports.
+    let outcome = run(&f, &catalog(json!({"syncRequest": "t1"}), status)).await;
+    assert_eq!(outcome.phase, ctrl::CatalogPhase::Idle);
+    assert_eq!(outcome.ready_reason, ctrl::REASON_VIEW_EXPIRED);
+    let patch = f.patched_status()["status"].clone();
+    // `.get(…) == Some(&Null)` and NOT `["pages"].is_null()`: indexing a
+    // missing key also yields `Null`, so the weaker form passes for a patch
+    // that simply forgot to clear the pages — which is the mutant this row
+    // exists to kill.
+    assert_eq!(
+        patch.get("pages"),
+        Some(&Value::Null),
+        "`null` DELETES the key: a status.pages[] naming a ConfigMap the API server no longer \
+         has is a link to a 404, and a reader cannot tell it from a page it has not fetched: \
+         {patch}"
+    );
+    assert_eq!(patch.get("indexConfigMap"), Some(&Value::Null));
+    assert_eq!(patch.get("truncated"), Some(&Value::Null));
+    assert_condition(&patch, ctrl::CONDITION_STALE, "True");
+    assert_condition(&patch, ctrl::CONDITION_READY, "False");
+    assert_no_delete(&f);
+}
+
+/// **`syncRequest` is idempotent.** A request the controller has already acted
+/// on starts nothing; a genuinely new one does.
+#[tokio::test]
+async fn a_repeated_sync_request_starts_nothing_and_a_new_one_starts_one_job() {
+    // (a) already observed, and the periodic slot's Job is the tracked one.
+    let stem: &'static str = Box::leak(periodic_stem().into_boxed_str());
+    let job_path: &'static str = Box::leak(format!("/jobs/{stem}").into_boxed_str());
+    let f = fixture(vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        route("GET", job_path, job_body(stem, true, "sha256:x", UID)),
+        route(
+            "PATCH",
+            "/recoverycatalogs/primary/status",
+            patched_catalog(),
+        ),
+    ]);
+    let status = json!({
+        "observedGeneration": 1,
+        "observedSyncRequest": "token-1",
+        "syncedAt": "2026-09-16T11:55:00Z",
+        "viewExpiresAt": "2026-09-17T11:55:00Z",
+        "pages": [{"configMapName": "p0", "index": 0, "count": 1}],
+        "lastSyncJob": {"name": stem, "finishedAt": "2026-09-16T11:55:00Z"},
+        "conditions": [{"type": "Synced", "status": "True", "reason": "Succeeded"}]
+    });
+    let outcome = run(
+        &f,
+        &catalog(json!({"syncRequest": "token-1"}), status.clone()),
+    )
+    .await;
+    assert_eq!(outcome.phase, ctrl::CatalogPhase::Idle);
+    assert!(
+        f.posted("/jobs").is_empty(),
+        "a retried request is not a second walk"
+    );
+
+    // (b) a new token: exactly one Job, named after that token and not the slot.
+    let f = fixture(vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        route("GET", job_path, job_body(stem, true, "sha256:x", UID)),
+        route("GET", "/backupdestinations/archive", destination_body()),
+        route("POST", "/configmaps", empty_config_map()),
+        route("POST", "/jobs", empty_job()),
+        route(
+            "PATCH",
+            "/recoverycatalogs/primary/status",
+            patched_catalog(),
+        ),
+    ]);
+    let outcome = run(&f, &catalog(json!({"syncRequest": "token-2"}), status)).await;
+    assert_eq!(outcome.phase, ctrl::CatalogPhase::Started);
+    let jobs = f.posted("/jobs");
+    assert_eq!(jobs.len(), 1);
+    let expected = view::sync_stem(UID, &SyncTrigger::Requested("token-2".to_string()).token());
+    assert_eq!(jobs[0]["metadata"]["name"], expected);
+    assert_eq!(
+        f.patched_status()["status"]["observedSyncRequest"],
+        "token-2",
+        "the token is recorded when the controller ACTS on it, so a crash mid-sync does not \
+         start a second walk for the same request"
+    );
+}
+
+/// A sync that is already running is watched, not duplicated.
+#[tokio::test]
+async fn a_running_sync_is_watched_and_never_duplicated() {
+    let stem: &'static str = Box::leak(periodic_stem().into_boxed_str());
+    let job_path: &'static str = Box::leak(format!("/jobs/{stem}").into_boxed_str());
+    let f = fixture(vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        route("GET", job_path, job_body(stem, false, "sha256:x", UID)),
+        route(
+            "GET",
+            "/pods",
+            json!({"apiVersion":"v1","kind":"PodList","metadata":{},"items":[]}).to_string(),
+        ),
+        route(
+            "PATCH",
+            "/recoverycatalogs/primary/status",
+            patched_catalog(),
+        ),
+    ]);
+    let outcome = run(
+        &f,
+        &catalog(json!({"syncRequest": "brand-new"}), tracked_status(stem)),
+    )
+    .await;
+    assert_eq!(outcome.phase, ctrl::CatalogPhase::Running);
+    assert!(
+        f.posted("/jobs").is_empty(),
+        "a syncRequest arriving mid-sync waits for the running one to finish"
+    );
+    assert_no_delete(&f);
+}
+
+/// A destination that is not usable creates NOTHING — no ConfigMap, no Job.
+#[tokio::test]
+async fn an_unusable_destination_creates_nothing() {
+    let mut body: Value = serde_json::from_str(&destination_body()).expect("json");
+    body["status"]["conditions"][0]["status"] = json!("False");
+    let f = fixture(vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        route("GET", "/backupdestinations/archive", body.to_string()),
+        route(
+            "PATCH",
+            "/recoverycatalogs/primary/status",
+            patched_catalog(),
+        ),
+    ]);
+    let outcome = run(&f, &catalog(json!({}), json!({}))).await;
+    assert_eq!(outcome.phase, ctrl::CatalogPhase::Refused);
+    assert_eq!(outcome.ready_reason, ctrl::REASON_DESTINATION_UNUSABLE);
+    assert!(f.posted("/configmaps").is_empty());
+    assert!(f.posted("/jobs").is_empty());
+}
+
+/// `spec.legacyArchive` is an ABSENT CAPABILITY, named — never a fake stub, and
+/// never a Job it cannot address.
+#[tokio::test]
+async fn a_legacy_archive_catalog_is_refused_by_name_and_creates_no_job() {
+    let f = fixture(vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        route(
+            "PATCH",
+            "/recoverycatalogs/primary/status",
+            patched_catalog(),
+        ),
+    ]);
+    let mut value = catalog_value(json!({}), json!({}));
+    value["spec"]
+        .as_object_mut()
+        .expect("a spec")
+        .remove("destinationRef");
+    value["spec"]["legacyArchive"] = json!({"url": "s3://old-archive"});
+    let catalog: RecoveryCatalog = serde_json::from_value(value).expect("a catalog");
+    let outcome = run(&f, &catalog).await;
+    assert_eq!(
+        outcome.ready_reason,
+        ctrl::REASON_LEGACY_ARCHIVE_UNSUPPORTED
+    );
+    assert!(f.posted("/jobs").is_empty());
+}
+
+/// A foreign page name refuses the whole publish rather than adopting it.
+#[tokio::test]
+async fn a_page_name_taken_by_a_foreign_object_refuses_the_publish() {
+    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let stem = periodic_stem();
+    let job_path: &'static str = Box::leak(format!("/jobs/{stem}").into_boxed_str());
+    let page_path: &'static str =
+        Box::leak(format!("/configmaps/{}", view::page_config_map_name(&stem, 0)).into_boxed_str());
+    let f = fixture(vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        route("GET", job_path, job_body(&stem, true, &plan_sha, UID)),
+        route("GET", "/pods", pod_list_body(JOB_UID)),
+        route("GET", "/log", framed(&plan_sha, UID, &happy_body())),
+        Route {
+            method: "POST",
+            path_suffix: "/configmaps",
+            status: 409,
+            body: json!({"kind": "Status", "code": 409, "reason": "AlreadyExists",
+                         "status": "Failure", "message": "exists"})
+            .to_string(),
+        },
+        route(
+            "GET",
+            page_path,
+            json!({
+                "apiVersion": "v1", "kind": "ConfigMap",
+                "metadata": {
+                    "name": view::page_config_map_name(&stem, 0), "namespace": NS,
+                    "ownerReferences": [{"apiVersion": "batch/v1", "kind": "Job",
+                                         "name": "someone-elses", "uid": "another-job",
+                                         "controller": true}]
+                },
+                "immutable": true,
+                "data": {view::PAGE_DATA_KEY: "{}"}
+            })
+            .to_string(),
+        ),
+        route(
+            "PATCH",
+            "/recoverycatalogs/primary/status",
+            patched_catalog(),
+        ),
+    ]);
+    let outcome = run(&f, &catalog(json!({}), tracked_status(&stem))).await;
+    assert_eq!(outcome.phase, ctrl::CatalogPhase::Refused);
+    assert_eq!(outcome.ready_reason, ctrl::REASON_PAGE_CONFLICT);
+    assert_no_delete(&f);
+}
+
+/// **Seam S7 in both halves, on every status write this reconciler makes.**
+#[tokio::test]
+async fn every_status_write_is_a_conditional_merge_patch() {
+    let plan_sha = format!("sha256:{}", "4".repeat(64));
+    let f = fixture(harvest_routes(
+        &plan_sha,
+        framed(&plan_sha, UID, &happy_body()),
+        UID,
+    ));
+    run(&f, &catalog(json!({}), tracked_status(&periodic_stem()))).await;
+    let patches = f.status_patches();
+    assert!(!patches.is_empty());
+    for patch in &patches {
+        assert_eq!(
+            patch["metadata"]["resourceVersion"], "4242",
+            "the body carries metadata.resourceVersion as the API server's update precondition"
+        );
+        assert_eq!(patch["metadata"]["name"], NAME);
+    }
+    // And NO `PUT`: `replace_status` is authorised as `update`, which this role
+    // grants on nothing.
+    assert!(
+        !f.seen().iter().any(|(m, _)| m == "PUT"),
+        "no reconciler in this crate calls Api::replace_status: {:?}",
+        f.seen()
+    );
+}
+
+/// A status that would not change sends NO PATCH AT ALL — erratum E11(d), the
+/// reconcile loop that a status write of its own wakes.
+#[tokio::test]
+async fn an_unchanged_status_sends_no_patch() {
+    let stem: &'static str = Box::leak(periodic_stem().into_boxed_str());
+    let job_path: &'static str = Box::leak(format!("/jobs/{stem}").into_boxed_str());
+    // Two passes: the first writes, the second is handed back what it wrote.
+    let f = fixture(vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        route("GET", job_path, job_body(stem, true, "sha256:x", UID)),
+        route(
+            "PATCH",
+            "/recoverycatalogs/primary/status",
+            patched_catalog(),
+        ),
+    ]);
+    let status = json!({
+        "observedGeneration": 1,
+        "observedSyncRequest": "t",
+        "syncedAt": "2026-09-16T11:55:00Z",
+        "viewExpiresAt": "2026-09-17T11:55:00Z",
+        "pages": [{"configMapName": "p0", "index": 0, "count": 1}],
+        "lastSyncJob": {"name": stem, "finishedAt": "2026-09-16T11:55:00Z"},
+        "conditions": []
+    });
+    let catalog_object = catalog(json!({"syncRequest": "t"}), status);
+    run(&f, &catalog_object).await;
+    let first = f.status_patches();
+    assert_eq!(first.len(), 1, "the first pass writes the four conditions");
+
+    // Feed the written status back and run again: nothing changes.
+    let mut merged = serde_json::to_value(catalog_object.status.as_ref().expect("a status"))
+        .expect("serialises");
+    apply_merge_patch(&mut merged, &first[0]["status"]);
+    let mut value = catalog_value(json!({"syncRequest": "t"}), merged);
+    value["metadata"]["resourceVersion"] = json!("4243");
+    let settled: RecoveryCatalog = serde_json::from_value(value).expect("a catalog");
+    let f2 = fixture(vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        route("GET", job_path, job_body(stem, true, "sha256:x", UID)),
+    ]);
+    run(&f2, &settled).await;
+    assert!(
+        f2.status_patches().is_empty(),
+        "a patch that would change nothing is not sent: this reconciler's own status write is \
+         what wakes it, and a patch that moved only the clock spins the loop"
+    );
+}
+
+// ===========================================================================
+// 10. Guards over the source itself
+// ===========================================================================
+
+/// **No `delete` verb, anywhere in this task's source.** The `ClusterRole`
+/// grants it on nothing and the whole garbage-collection design depends on that
+/// staying true.
+#[test]
+fn this_tasks_source_calls_no_delete_and_names_no_delete_verb() {
+    for file in ["src/catalog_view.rs", "src/controllers/recovery_catalog.rs"] {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join(file);
+        let src = std::fs::read_to_string(&path).expect("a readable source file");
+        for needle in [".delete(", ".delete_opt(", "DeleteParams"] {
+            assert!(
+                !src.contains(needle),
+                "{file} contains `{needle}`. D3 §5.3 and §9: this decision adds NO delete \
+                 permission anywhere — the view is collected by the sync Job's TTL and by \
+                 ownerReference garbage collection, which is the entire reason the pages are \
+                 owned by the Job."
+            );
+        }
+    }
+}
+
+/// Every condition reason this reconciler writes is a valid
+/// `metav1.Condition.reason`.
+#[test]
+fn every_condition_reason_is_a_valid_metav1_reason() {
+    for reason in ctrl::CONDITION_REASONS {
+        assert!(
+            !reason.is_empty()
+                && reason
+                    .chars()
+                    .next()
+                    .expect("non-empty")
+                    .is_ascii_alphabetic()
+                && reason
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | ',' | ':')),
+            "`{reason}` is not `^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$`, which the API server \
+             validates a condition reason against"
+        );
+    }
+    // The four types, and no duplicates.
+    let mut types = ctrl::CONDITION_TYPES.to_vec();
+    types.sort_unstable();
+    types.dedup();
+    assert_eq!(types.len(), 4);
+}
+
+// ===========================================================================
+// Helpers
+// ===========================================================================
+
+fn assert_no_delete(f: &Fixture) {
+    let seen = f.seen();
+    assert!(
+        !seen.iter().any(|(m, _)| m == "DELETE"),
+        "this controller deletes nothing: {seen:?}"
+    );
+}
+
+fn assert_condition(status: &Value, r#type: &str, want: &str) {
+    let conditions = status["conditions"]
+        .as_array()
+        .unwrap_or_else(|| panic!("no conditions in {status}"));
+    let got = conditions
+        .iter()
+        .find(|c| c["type"] == r#type)
+        .unwrap_or_else(|| panic!("no `{type}` condition in {status}"));
+    assert_eq!(
+        got["status"], want,
+        "`{}` is {} and not {want}: {got}",
+        r#type, got["status"]
+    );
+}
+
+/// The frame expectations are read off the JOB, so the relay is verified
+/// against the plan that actually ran.
+#[test]
+fn the_frame_expectations_come_from_the_job_that_ran() {
+    let job: k8s_openapi::api::batch::v1::Job =
+        serde_json::from_str(&job_body("j", true, "sha256:pinned", UID)).expect("a Job");
+    assert_eq!(
+        ctrl::frame_expectations(&job, UID),
+        FrameExpectations {
+            plan_sha256: "sha256:pinned".to_string(),
+            subject_uid: UID.to_string(),
+        }
+    );
+}
