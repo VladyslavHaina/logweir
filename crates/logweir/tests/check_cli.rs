@@ -43,6 +43,7 @@ use logweir::check::kinds::{self, Wiring};
 use logweir::check::store::{ObjectAccess, StoreFailure};
 use logweir::check::{self, CheckRunArgs, Loaded};
 use logweir::exit::ExitCode;
+use logweir_core::backup_receipt::BackupReceipt;
 use logweir_core::check_contract::{
     frames::Decoder, CheckCode, CheckId, CheckPlan, CheckRelay, CheckRequest, CheckResult,
     CheckState, ConnectionPlan, CredentialMode, DestinationAccessRequest, DestinationPlan,
@@ -268,7 +269,19 @@ impl ObjectAccess for FakeObjects {
             .ok_or_else(|| StoreError::NotFound(key.to_string()))
     }
 
-    fn list_bounded(&self, prefix: &str, max: usize) -> Result<Vec<String>, StoreError> {
+    /// `Store::list_page`'s contract, in memory: ascending keys under
+    /// `prefix`, strictly after `start_after`, at most `max` of them.
+    ///
+    /// The exclusivity and the ordering are asserted here rather than assumed
+    /// because a `catalogSync`'s `Full` rescan resumes from the cursor this
+    /// returns, and a fake that repeated its last row would hide a walk that
+    /// never advances.
+    fn list_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        max: usize,
+    ) -> Result<Vec<String>, StoreError> {
         let s = self.state.lock().unwrap();
         if let Some(f) = &s.list_fault {
             return Err(f.to_error(prefix));
@@ -276,6 +289,7 @@ impl ObjectAccess for FakeObjects {
         Ok(s.objects
             .keys()
             .filter(|k| k.starts_with(prefix))
+            .filter(|k| start_after.is_none_or(|after| k.as_str() > after))
             .take(max)
             .cloned()
             .collect())
@@ -786,18 +800,33 @@ fn a_malformed_plan_sha_env_is_refused() {
 }
 
 /// An unknown kind is a PARSE error, which D2 §4.2 step 4 wants: the request
-/// enum is externally tagged, so `{"catalogSync": …}` names a variant serde
-/// does not know.
+/// enum is externally tagged, so a tag this build does not know names a variant
+/// serde cannot construct.
+///
+/// **The example used to be `{"catalogSync": …}`**, which has landed as the
+/// sixth kind. It is now `retentionSweep` — D3 §6's, and not this build's — so
+/// the row still asserts what it was written to assert. The second half of the
+/// row is the one that would have gone quiet otherwise: a KNOWN tag carrying
+/// the WRONG body is refused too, because every variant keeps its own
+/// `deny_unknown_fields`.
 #[test]
 fn an_unknown_plan_kind_is_refused() {
     let m = mount(&inventory_plan(100, 1 << 20));
     let mut doc: serde_json::Value = serde_json::from_slice(&m.bytes).unwrap();
     let inner = doc["request"]["topicInventory"].take();
-    doc["request"] = serde_json::json!({ "catalogSync": inner });
+    doc["request"] = serde_json::json!({ "retentionSweep": inner.clone() });
     let bytes = serde_json::to_vec(&doc).unwrap();
     let sha = logweir_core::ids::sha256_prefixed(&bytes);
     let env = good_env(&sha);
     let err = load_with(&bytes, &as_pairs(&env), 1).expect_err("an unknown kind is refused");
+    assert!(err.detail.contains("does not parse"), "{}", err.detail);
+
+    // A known tag with a body that is not its own is refused just as hard.
+    doc["request"] = serde_json::json!({ "catalogSync": inner });
+    let bytes = serde_json::to_vec(&doc).unwrap();
+    let sha = logweir_core::ids::sha256_prefixed(&bytes);
+    let env = good_env(&sha);
+    let err = load_with(&bytes, &as_pairs(&env), 1).expect_err("a wrong body is refused");
     assert!(err.detail.contains("does not parse"), "{}", err.detail);
 }
 
@@ -3702,6 +3731,157 @@ mod live {
         );
     }
 
+    /// `catalogSync` against REAL MinIO.
+    ///
+    /// # What a server shows that a `BTreeMap` cannot
+    ///
+    /// The in-memory fake answers `list_page` with `starts_with` over a sorted
+    /// map. A real backend does neither: `ObjectStore::list` matches a prefix
+    /// on a PATH SEGMENT basis and contracts **no ordering at all**, and
+    /// `list_with_offset` pushes the cursor down into the request. Three of
+    /// this kind's claims rest on exactly those behaviours — the day-shard
+    /// listing, the `Full` rescan's resume, and `NotFound` being a different
+    /// answer from every other storage error — and none of them is worth
+    /// making against a double.
+    ///
+    /// It also proves the one thing a unit test cannot: the walk runs through
+    /// `kinds::Live`, i.e. `Store::read_only_with`, a handle that physically
+    /// cannot put.
+    #[test]
+    fn a_catalog_sync_walks_a_real_archive_and_writes_nothing() {
+        std::env::set_var("AWS_ACCESS_KEY_ID", MINIO_USER);
+        std::env::set_var(MINIO_PASSWORD_VAR, "minioadmin");
+        std::env::set_var("AWS_REGION", "us-east-1");
+
+        // A FRESH id per run. Every key under `logweir/` is create-only and
+        // the compose volume persists, so a fixed id would pass once and
+        // `AlreadyExists` forever after.
+        let stamp = Utc::now().timestamp_millis();
+        let backup_id = format!("e2e-cs-{stamp}");
+        let mut receipt = catalog_receipt(&backup_id, "run-a", &Utc::now().to_rfc3339());
+        // The manifest lives under `logweir/` for this fixture, because the ONE
+        // writable handle Logweir can build is rooted there (Global Constraint
+        // 6) and the runner reads whatever key the signed receipt names.
+        receipt.archive.manifest_key = format!("logweir/e2e-catalog/{backup_id}/manifest.json");
+        let f = catalog_fixture(
+            &receipt,
+            "s3://kafka-backups/mvp-demo",
+            &claimed_sidecar(CATALOG_CLAIMED_KEY_ID),
+            CATALOG_CLAIMED_KEY_ID,
+        );
+
+        // Seed through a WRITABLE handle this test builds for itself. The
+        // runner holds none.
+        let url = logweir_core::engine::StorageUrl::S3 {
+            bucket: "kafka-backups".to_string(),
+            prefix: "logweir/".to_string(),
+            region: Some("us-east-1".to_string()),
+            endpoint: Some(s3_endpoint()),
+            path_style: true,
+            allow_http: true,
+        };
+        let opts = logweir_engine_oso::storage::StoreOptions::static_from_env()
+            .with_request_timeout(std::time::Duration::from_secs(20));
+        let writer = logweir_engine_oso::storage::Store::from_url_with(&url, &opts)
+            .expect("a writable evidence handle over the compose MinIO");
+        for (key, bytes) in [
+            (&f.log_key, &f.log_bytes),
+            (&f.record_key, &f.record_bytes),
+            (&f.receipt_key, &f.receipt_bytes),
+            (&f.sidecar_key, &f.sidecar_bytes),
+            (&f.manifest_key, &CATALOG_MANIFEST.to_vec()),
+        ] {
+            writer
+                .put_create_only(key, bytes)
+                .unwrap_or_else(|e| panic!("seeding `{key}`: {e}"));
+        }
+
+        let before = writer
+            .list_page(
+                &format!("logweir/catalog/v1/points/{}/", f.point.point_id),
+                None,
+                10,
+            )
+            .expect("the seeded point lists")
+            .0;
+        assert_eq!(
+            before,
+            vec![f.record_key.clone()],
+            "the record, and nothing else under the point prefix: this fixture writes no \
+             `record.sig`, because the runner verifies the RECEIPT and a record signature is \
+             not the verification root (D3 §5.2 rule 3)"
+        );
+
+        let plan = CheckPlan {
+            timeout_seconds: 300,
+            ..plan_of(CheckRequest::CatalogSync(Box::new(
+                logweir_core::check_contract::CatalogSyncRequest {
+                    destination: minio_destination("mvp-demo"),
+                    ..sync_request()
+                },
+            )))
+        };
+        let m = mount(&plan);
+        let run = drive_live(&m);
+        assert_eq!(run.code, ExitCode::Ok, "stdout:\n{}", run.stdout);
+        let body = body_of(&run);
+        let entries = entries_of(&body);
+        let mine = entries
+            .iter()
+            .find(|e| e["pointId"] == f.point.point_id.as_str())
+            .unwrap_or_else(|| panic!("the seeded point is not in the body:\n{body}"));
+        assert_eq!(
+            mine["availability"], "Available",
+            "receipt, sidecar and manifest all read, and the manifest digest is the receipt's"
+        );
+        assert_eq!(
+            mine["signature"], "notAttempted",
+            "no trust bundle is mounted"
+        );
+        assert_eq!(mine["receiptSha256"], f.point.receipt.sha256);
+        assert_eq!(
+            run.row(CheckId::DestinationArchiveListable).code,
+            CheckCode::ArchiveListable
+        );
+
+        // A `Full` rescan over the same archive, with the cursor pushed down
+        // into the request rather than filtered after the fact.
+        let full = CheckPlan {
+            timeout_seconds: 300,
+            ..plan_of(CheckRequest::CatalogSync(Box::new(
+                logweir_core::check_contract::CatalogSyncRequest {
+                    destination: minio_destination("mvp-demo"),
+                    mode: logweir_core::check_contract::CatalogSyncMode::Full,
+                    ..sync_request()
+                },
+            )))
+        };
+        let rescan = drive_live(&mount(&full));
+        let rescan_body = body_of(&rescan);
+        assert!(
+            entries_of(&rescan_body)
+                .iter()
+                .any(|e| e["pointId"] == f.point.point_id.as_str()),
+            "a Full rescan finds the same point:\n{rescan_body}"
+        );
+
+        // AND IT WROTE NOTHING. The point prefix holds exactly what this test
+        // put there.
+        let after = writer
+            .list_page(
+                &format!("logweir/catalog/v1/points/{}/", f.point.point_id),
+                None,
+                10,
+            )
+            .expect("the point still lists")
+            .0;
+        assert_eq!(
+            after, before,
+            "a catalog sync writes nothing at all — not even the create-only readiness marker a \
+             destinationAccess may write"
+        );
+    }
+
     /// An `evidenceFetch` of a receipt a REAL `logweir backup run` wrote.
     #[test]
     fn an_evidence_fetch_relays_a_receipt_a_real_backup_wrote() {
@@ -4575,5 +4755,1183 @@ fn a_connection_ca_is_an_opaque_in_pod_path() {
             .expect_err("a CA on a clear connection is refused")
             .code,
         CheckCode::AuthenticationFailed
+    );
+}
+
+// ===========================================================================
+// 12. `catalogSync` — D3 §5.3's bounded walk, and the body §7d specifies
+// ===========================================================================
+//
+// THE CONTROLLER'S PARSER IS THE ORACLE HERE, and it lives in a crate this one
+// does not link. So the pinning runs in both directions:
+//
+//   * `the_grammar_this_runner_writes_is_the_grammar_the_controller_parses`
+//     reads `crates/weirkeeper/src/catalog_view.rs` and asserts every prefix
+//     and every cap this runner writes equals the controller's constant;
+//   * [`PINNED_SYNC_BODY`] is the EXACT body the emitter produces for a fixed
+//     fixture, and `crates/weirkeeper/tests/catalog_controller.rs`'s
+//     `the_runners_pinned_body_is_one_this_parser_reads` extracts it from THIS
+//     file and runs `view::parse_body` over it.
+//
+// Either side moving breaks a test, and neither crate gained a dependency
+// edge — which is the pattern D2 W9 used for the expected-row set, for the
+// same reason.
+
+/// The signer key id the pinned fixture's sidecar CLAIMS.
+///
+/// A claim and nothing more: the pinned body is produced with NO trust bundle,
+/// so the runner reports `notAttempted` and echoes the id the sidecar names.
+/// That is what puts a stranger's key into `catalog-signers` — and therefore
+/// into `status.counts.untrustedSigner` — without any entry claiming a verdict
+/// nobody could reach.
+const CATALOG_CLAIMED_KEY_ID: &str =
+    "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0";
+
+/// The manifest body every catalog fixture writes.
+const CATALOG_MANIFEST: &[u8] = br#"{"topics":[]}"#;
+
+fn catalog_ts(s: &str) -> DateTime<Utc> {
+    s.parse().expect("an RFC 3339 instant")
+}
+
+/// A receipt as `logweir backup run` writes one, with a manifest digest that
+/// matches [`CATALOG_MANIFEST`].
+fn catalog_receipt(backup_id: &str, run_id: &str, started: &str) -> BackupReceipt {
+    let started_at = catalog_ts(started);
+    BackupReceipt {
+        format_version: "1.0.0".to_string(),
+        run_id: run_id.to_string(),
+        backup_id: backup_id.to_string(),
+        requested_at: started_at - chrono::Duration::minutes(1),
+        started_at,
+        finished_at: started_at + chrono::Duration::minutes(4),
+        exit_code: 0,
+        triggered_by: "schedule".to_string(),
+        source: logweir_core::backup_receipt::ReceiptSource {
+            cluster_id: "SOURCE-CLUSTER-000001".to_string(),
+            bootstrap_servers: vec!["kafka-source:9092".to_string()],
+            auth: logweir_core::backup_receipt::ReceiptAuth {
+                mode: "scramSha512".to_string(),
+                username: Some("logweir".to_string()),
+            },
+            topics: vec!["orders".to_string()],
+        },
+        engine: logweir_core::backup_receipt::ReceiptEngine {
+            id: "oso".to_string(),
+            version: "0.21.0".to_string(),
+            digest: format!("sha256:{}", "d".repeat(64)),
+        },
+        archive: logweir_core::backup_receipt::ReceiptArchive {
+            manifest_key: format!("kafka-backups/{backup_id}/manifest.json"),
+            manifest_sha256: logweir_core::ids::sha256_prefixed(CATALOG_MANIFEST),
+            prefix: "kafka-backups".to_string(),
+        },
+        records: BTreeMap::from([("orders".to_string(), 1234u64)]),
+        covered: logweir_core::backup_receipt::ReceiptCovered {
+            from_ms: started_at.timestamp_millis() - 3_600_000,
+            to_ms: started_at.timestamp_millis(),
+        },
+    }
+}
+
+/// One point's four objects, ready to place in a [`FakeObjects`].
+struct CatalogFixture {
+    point: logweir::catalog::CatalogPoint,
+    record_key: String,
+    record_bytes: Vec<u8>,
+    log_key: String,
+    log_bytes: Vec<u8>,
+    receipt_key: String,
+    receipt_bytes: Vec<u8>,
+    sidecar_key: String,
+    sidecar_bytes: Vec<u8>,
+    manifest_key: String,
+}
+
+/// Build one point from a receipt, its location and the sidecar to publish
+/// beside it.
+fn catalog_fixture(
+    receipt: &BackupReceipt,
+    location_id: &str,
+    sidecar: &logweir_evidence::Sidecar,
+    installation_key_id: &str,
+) -> CatalogFixture {
+    let receipt_bytes =
+        logweir_core::det_json::to_deterministic_json(receipt).expect("the receipt serialises");
+    let keys = logweir::backup::phase_run::receipt_keys(&receipt.backup_id, &receipt.run_id);
+    let inputs = logweir::catalog::writer::RecordInputs {
+        receipt_key: keys.receipt_key.clone(),
+        sidecar_key: keys.sidecar_key.clone(),
+        location_id: location_id.to_string(),
+        recorded_at: catalog_ts("2026-09-16T06:00:00Z"),
+        signing: logweir::catalog::RecordSigning {
+            key_id: installation_key_id.to_string(),
+            algorithm: "ecdsa-p256-sha256".to_string(),
+        },
+        installation: Some(logweir::catalog::RecordInstallation {
+            key_id: installation_key_id.to_string(),
+        }),
+        execution: None,
+    };
+    let point = logweir::catalog::writer::from_receipt(receipt, &receipt_bytes, &inputs)
+        .expect("the record derives from the receipt");
+    let log_entry = logweir::catalog::CatalogLogEntry::of(&point);
+    CatalogFixture {
+        record_key: logweir::catalog::record::record_key(&point.point_id),
+        record_bytes: point.canonical_bytes().expect("the record serialises"),
+        log_key: point.log_key(),
+        log_bytes: log_entry
+            .canonical_bytes()
+            .expect("the index entry serialises"),
+        receipt_key: keys.receipt_key,
+        receipt_bytes,
+        sidecar_key: keys.sidecar_key,
+        sidecar_bytes: serde_json::to_vec(sidecar).expect("the sidecar serialises"),
+        manifest_key: point.archive.manifest_key.clone(),
+        point,
+    }
+}
+
+/// A sidecar that names `key_id` and carries a signature nothing can verify.
+///
+/// Used only where the fixture has NO trust material: with no key to try, the
+/// runner reports `notAttempted` and the bytes are never examined, so a real
+/// signature would prove nothing the deterministic fixture needs.
+fn claimed_sidecar(key_id: &str) -> logweir_evidence::Sidecar {
+    logweir_evidence::Sidecar {
+        payload_type: logweir_evidence::PAYLOAD_TYPE_BACKUP_RECEIPT.to_string(),
+        signatures: vec![logweir_evidence::Signature {
+            keyid: key_id.to_string(),
+            sig: "AA==".to_string(),
+        }],
+    }
+}
+
+/// Place one fixture's four objects.
+fn place(objects: FakeObjects, f: &CatalogFixture) -> FakeObjects {
+    objects
+        .with_object(&f.log_key, &f.log_bytes)
+        .with_object(&f.record_key, &f.record_bytes)
+        .with_object(&f.receipt_key, &f.receipt_bytes)
+        .with_object(&f.sidecar_key, &f.sidecar_bytes)
+        .with_object(&f.manifest_key, CATALOG_MANIFEST)
+}
+
+fn catalog_plan(request: logweir_core::check_contract::CatalogSyncRequest) -> CheckPlan {
+    CheckPlan {
+        timeout_seconds: 900,
+        ..plan_of(CheckRequest::CatalogSync(Box::new(request)))
+    }
+}
+
+fn sync_request() -> logweir_core::check_contract::CatalogSyncRequest {
+    logweir_core::check_contract::CatalogSyncRequest {
+        destination: destination(),
+        mode: logweir_core::check_contract::CatalogSyncMode::Index,
+        deep_check: logweir_core::check_contract::CatalogDeepCheck::ManifestDigest,
+        max_objects_per_run: 100_000,
+        view_limit: 2000,
+        index_shard: None,
+        rescan_start_after: None,
+        trust_bundle_file: None,
+    }
+}
+
+/// The `details` body a run relayed, as text.
+fn body_of(run: &Run) -> String {
+    let relay = run.relay.as_ref().expect("the relay decodes");
+    String::from_utf8(
+        relay
+            .stream(Stream::Details)
+            .expect("a catalog sync relays a details body")
+            .to_vec(),
+    )
+    .expect("the body is UTF-8")
+}
+
+/// Every `catalog-entry=` line's parsed JSON, in body order.
+fn entries_of(body: &str) -> Vec<serde_json::Value> {
+    body.lines()
+        .filter_map(|l| l.strip_prefix("catalog-entry="))
+        .map(|l| serde_json::from_str(l).expect("an entry line is JSON"))
+        .collect()
+}
+
+fn summary_of(body: &str, prefix: &str) -> serde_json::Value {
+    let mut found = body.lines().filter_map(|l| l.strip_prefix(prefix));
+    let first = found.next().unwrap_or_else(|| panic!("no `{prefix}` line"));
+    assert!(
+        found.next().is_none(),
+        "`{prefix}` was written twice; a summary that could be overwritten is a summary nobody \
+         can attribute"
+    );
+    serde_json::from_str(first).expect("a summary line is JSON")
+}
+
+/// The two-point fixture every row below starts from: one point on the day the
+/// clock says, one the day before.
+fn two_point_objects() -> (FakeObjects, CatalogFixture, CatalogFixture) {
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let newer = catalog_fixture(
+        &catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z"),
+        "s3://lw-archive/kafka-backups",
+        &sidecar,
+        CATALOG_CLAIMED_KEY_ID,
+    );
+    let older = catalog_fixture(
+        &catalog_receipt("set-b", "run-b", "2026-09-15T03:00:00Z"),
+        "s3://lw-archive/kafka-backups",
+        &sidecar,
+        CATALOG_CLAIMED_KEY_ID,
+    );
+    let objects = place(place(FakeObjects::new(), &newer), &older);
+    (objects, newer, older)
+}
+
+fn drive_sync(
+    request: logweir_core::check_contract::CatalogSyncRequest,
+    wiring: &FakeWiring,
+) -> Run {
+    drive(&mount(&catalog_plan(request)), wiring)
+}
+
+/// The happy path: the grammar, in order, with the fence last.
+#[test]
+fn a_catalog_sync_relays_the_body_the_grammar_specifies() {
+    let (objects, newer, older) = two_point_objects();
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects.clone()),
+    );
+    assert_eq!(run.code, ExitCode::Ok);
+    let body = body_of(&run);
+    let lines: Vec<&str> = body.lines().collect();
+
+    assert_eq!(
+        lines[0], "catalog-format=1",
+        "the version line is first and required: {body}"
+    );
+    assert!(
+        lines[1].starts_with("catalog-page=1/1 count=2 sha256="),
+        "one page of two entries: {body}"
+    );
+    assert!(
+        lines.last().expect("a body").starts_with("catalog-cursor="),
+        "THE FENCE IS LAST, so a truncated read cannot end with a cursor claiming a walk that \
+         did not happen: {body}"
+    );
+
+    // Newest recovery point first.
+    let entries = entries_of(&body);
+    assert_eq!(entries.len(), 2);
+    assert_eq!(entries[0]["pointId"], newer.point.point_id);
+    assert_eq!(entries[1]["pointId"], older.point.point_id);
+
+    // Both axes, and the binding.
+    assert_eq!(entries[0]["availability"], "Available");
+    assert_eq!(entries[0]["signature"], "notAttempted");
+    assert_eq!(entries[0]["signerKeyId"], CATALOG_CLAIMED_KEY_ID);
+    assert_eq!(entries[0]["receiptSha256"], newer.point.receipt.sha256);
+    assert_eq!(
+        entries[0]["manifestSha256"],
+        newer.point.archive.manifest_sha256
+    );
+    assert_eq!(entries[0]["recordedAt"], "2026-09-16T06:00:00Z");
+
+    // The page digest covers the page's own entry lines and nothing else.
+    let raw: Vec<&str> = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("catalog-entry="))
+        .collect();
+    assert!(
+        lines[1].ends_with(&logweir::check::kinds::catalog_sync::page_digest(&raw)),
+        "the header's digest is over the raw entry lines: {body}"
+    );
+
+    let counts = summary_of(&body, "catalog-counts=");
+    assert_eq!(counts["total"], 2);
+    assert_eq!(counts["available"], 2);
+    assert_eq!(counts["signature"]["notAttempted"], 2);
+    assert_eq!(
+        counts["byDay"],
+        serde_json::json!([
+            {"day": "2026-09-16", "points": 1},
+            {"day": "2026-09-15", "points": 1}
+        ]),
+        "the histogram is newest day first"
+    );
+
+    let signers = summary_of(&body, "catalog-signers=");
+    assert_eq!(signers[0]["keyId"], CATALOG_CLAIMED_KEY_ID);
+    assert_eq!(signers[0]["points"], 2);
+    assert!(
+        signers[0].get("principalHint").is_none(),
+        "a record carries no principal, so no hint is invented: {signers}"
+    );
+
+    let cursor = summary_of(&body, "catalog-cursor=");
+    assert_eq!(cursor["complete"], true);
+    assert_eq!(cursor["indexShard"], "2025-08-12");
+
+    // And the check row says what the walk did, with no credential in it.
+    let row = run.row(CheckId::DestinationArchiveListable);
+    assert_eq!(row.state, CheckState::Ready);
+    assert_eq!(row.code, CheckCode::ArchiveListable);
+    assert_eq!(row.facts["catalogPoints"], "2");
+    assert_eq!(row.facts["catalogEntries"], "2");
+    assert_eq!(row.facts["catalogTrustKeys"], "0");
+    assert_eq!(row.facts["catalogTrustNote"], "noTrustMaterial");
+    assert!(run.has(CheckId::RunnerContract));
+
+    // NOTHING WAS WRITTEN. `put_create_only` is the only write a check may make
+    // and a catalog sync may not make even that one.
+    assert!(
+        objects.puts().is_empty(),
+        "a catalog sync writes nothing at all: {:?}",
+        objects.puts()
+    );
+}
+
+/// An entry names ONE location — the record's own — with that location's own
+/// verdict, so the controller's best-of merge has a verdict to merge.
+#[test]
+fn an_entry_carries_one_location_with_its_own_verdict() {
+    let (objects, newer, older) = two_point_objects();
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
+    );
+    let entries = entries_of(&body_of(&run));
+    assert_eq!(
+        entries[0]["locations"],
+        serde_json::json!([{
+            "locationId": newer.point.archive.location_id,
+            "availability": "Available"
+        }]),
+        "one sync reads one destination, and the location carries its OWN verdict rather than \
+         making the reader re-apply an inheritance rule"
+    );
+
+    // And a DEGRADED observation says so at the location too: a location row
+    // that always read `Available` would make the controller's best-of merge
+    // return `Available` for a point neither copy holds.
+    let degraded = place(FakeObjects::new(), &older)
+        .with_object(&newer.log_key, &newer.log_bytes)
+        .with_object(&newer.record_key, &newer.record_bytes)
+        .with_object(&newer.receipt_key, &newer.receipt_bytes)
+        .with_object(&newer.sidecar_key, &newer.sidecar_bytes);
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, degraded),
+    );
+    let entries = entries_of(&body_of(&run));
+    assert_eq!(entries[0]["availability"], "Missing");
+    assert_eq!(
+        entries[0]["locations"][0]["availability"], "Missing",
+        "the location carries the observation's verdict, not a constant: {}",
+        entries[0]
+    );
+}
+
+/// A manifest with no receipt sidecar beside it is `noEvidence` — a fact about
+/// the ARCHIVE — and never `notAttempted`, which is a fact about this run.
+#[test]
+fn a_point_with_no_sidecar_is_no_evidence_and_not_merely_unattempted() {
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let f = catalog_fixture(
+        &catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z"),
+        "s3://lw-archive/kafka-backups",
+        &sidecar,
+        CATALOG_CLAIMED_KEY_ID,
+    );
+    // Everything but the sidecar.
+    let objects = FakeObjects::new()
+        .with_object(&f.log_key, &f.log_bytes)
+        .with_object(&f.record_key, &f.record_bytes)
+        .with_object(&f.receipt_key, &f.receipt_bytes)
+        .with_object(&f.manifest_key, CATALOG_MANIFEST);
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
+    );
+    let body = body_of(&run);
+    let entries = entries_of(&body);
+    assert_eq!(entries[0]["signature"], "noEvidence");
+    assert!(
+        entries[0].get("signerKeyId").is_none(),
+        "there is no key to name: {}",
+        entries[0]
+    );
+    assert_eq!(
+        summary_of(&body, "catalog-counts=")["signature"]["noEvidence"],
+        1
+    );
+    assert_eq!(
+        summary_of(&body, "catalog-signers="),
+        serde_json::json!([]),
+        "an unsigned point contributes no signer row: {body}"
+    );
+    assert_eq!(
+        entries[0]["availability"], "Available",
+        "the BYTES are all there; it is the evidence that is not, and the two axes never merge"
+    );
+    assert!(entries[0]["remedy"]
+        .as_str()
+        .expect("a noEvidence point names a remedy")
+        .contains("no signed receipt"));
+}
+
+/// A tampered receipt: a key this installation HOLDS signed the sidecar and the
+/// signature does not verify over the bytes in the bucket.
+#[test]
+fn a_tampered_receipt_is_invalid_and_never_merely_unverified() {
+    let key = logweir_evidence::keys::SigningKey::generate_p256();
+    let key_id = key.verifying_key().key_id();
+    let pem = key
+        .verifying_key()
+        .to_public_key_pem()
+        .expect("a public key renders");
+
+    let receipt = catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z");
+    let receipt_bytes =
+        logweir_core::det_json::to_deterministic_json(&receipt).expect("the receipt serialises");
+    let sidecar = logweir_evidence::sign::sign_detached(
+        &key,
+        logweir_evidence::PAYLOAD_TYPE_BACKUP_RECEIPT,
+        &receipt_bytes,
+    )
+    .expect("the sidecar signs");
+    let f = catalog_fixture(&receipt, "s3://lw-archive/kafka-backups", &sidecar, &key_id);
+
+    // The CONTROL: untouched bytes verify under the mounted key.
+    let good = place(FakeObjects::new(), &f);
+    let wiring = FakeWiring::default()
+        .with_role(DestinationRole::ArchiveRead, good)
+        .with_file("/check/trust/trust-bundle.pem", pem.as_bytes());
+    let request = logweir_core::check_contract::CatalogSyncRequest {
+        trust_bundle_file: Some("/check/trust/trust-bundle.pem".to_string()),
+        ..sync_request()
+    };
+    let entries = entries_of(&body_of(&drive_sync(request.clone(), &wiring)));
+    assert_eq!(entries[0]["signature"], "verified");
+    assert_eq!(entries[0]["signerKeyId"], key_id);
+    assert!(
+        entries[0].get("remedy").is_none(),
+        "a selectable point needs no remedy: {}",
+        entries[0]
+    );
+
+    // THE MUTATION: the receipt is edited after it was signed, in a way that
+    // keeps it a receipt. A mangled BYTE would make it unparseable, which is
+    // `Unreadable` and a different fact; this one still deserialises, so both
+    // axes get to answer.
+    let tampered = String::from_utf8(f.receipt_bytes.clone())
+        .expect("the receipt is UTF-8")
+        .replace("\"schedule\"", "\"scheduIe\"");
+    assert_ne!(tampered.as_bytes(), f.receipt_bytes.as_slice());
+    let bad = place(FakeObjects::new(), &f).with_object(&f.receipt_key, tampered.as_bytes());
+    let wiring = FakeWiring::default()
+        .with_role(DestinationRole::ArchiveRead, bad)
+        .with_file("/check/trust/trust-bundle.pem", pem.as_bytes());
+    let entries = entries_of(&body_of(&drive_sync(request, &wiring)));
+    assert_eq!(
+        entries[0]["signature"], "invalid",
+        "bytes that do not match their signature are a definite negative, not a missing verdict"
+    );
+    assert_eq!(entries[0]["signerKeyId"], key_id);
+    assert_eq!(
+        entries[0]["availability"], "Conflict",
+        "the record names a receipt whose digest is not the one it claims, so the two documents \
+         are about different bytes"
+    );
+    assert!(entries[0]["remedy"]
+        .as_str()
+        .expect("a Conflict names a remedy")
+        .contains("contradicts the signed receipt"));
+}
+
+/// A sidecar naming a key this pod does not hold is `notAttempted` WITH the
+/// claimed id — never `invalid`, and never `verified`.
+#[test]
+fn a_signature_by_a_key_this_pod_does_not_hold_is_not_attempted() {
+    let ours = logweir_evidence::keys::SigningKey::generate_p256();
+    let pem = ours
+        .verifying_key()
+        .to_public_key_pem()
+        .expect("a public key renders");
+    let (objects, _, _) = two_point_objects();
+    let request = logweir_core::check_contract::CatalogSyncRequest {
+        trust_bundle_file: Some("/check/trust/trust-bundle.pem".to_string()),
+        ..sync_request()
+    };
+    let run = drive_sync(
+        request,
+        &FakeWiring::default()
+            .with_role(DestinationRole::ArchiveRead, objects)
+            .with_file("/check/trust/trust-bundle.pem", pem.as_bytes()),
+    );
+    let body = body_of(&run);
+    let entries = entries_of(&body);
+    assert_eq!(entries[0]["signature"], "notAttempted");
+    assert_eq!(
+        entries[0]["signerKeyId"], CATALOG_CLAIMED_KEY_ID,
+        "the stranger's key id is reported so `status.counts.untrustedSigner` can be exact"
+    );
+    assert_eq!(
+        summary_of(&body, "catalog-signers=")[0]["keyId"],
+        CATALOG_CLAIMED_KEY_ID
+    );
+    assert_eq!(
+        run.row(CheckId::DestinationArchiveListable).facts["catalogTrustKeys"],
+        "1"
+    );
+}
+
+/// No trust bundle at all: nothing is verified and nothing is disproved.
+#[test]
+fn no_trust_material_verifies_nothing_and_says_so() {
+    let key = logweir_evidence::keys::SigningKey::generate_p256();
+    let receipt = catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z");
+    let receipt_bytes =
+        logweir_core::det_json::to_deterministic_json(&receipt).expect("the receipt serialises");
+    let sidecar = logweir_evidence::sign::sign_detached(
+        &key,
+        logweir_evidence::PAYLOAD_TYPE_BACKUP_RECEIPT,
+        &receipt_bytes,
+    )
+    .expect("the sidecar signs");
+    let f = catalog_fixture(
+        &receipt,
+        "s3://lw-archive/kafka-backups",
+        &sidecar,
+        &key.verifying_key().key_id(),
+    );
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default()
+            .with_role(DestinationRole::ArchiveRead, place(FakeObjects::new(), &f)),
+    );
+    let body = body_of(&run);
+    let entries = entries_of(&body);
+    assert_eq!(
+        entries[0]["signature"], "notAttempted",
+        "a genuinely valid signature is still NOT verified when this installation holds no key"
+    );
+    assert_eq!(
+        summary_of(&body, "catalog-counts=")["signature"]["notAttempted"],
+        1
+    );
+    assert_eq!(
+        run.row(CheckId::DestinationArchiveListable).facts["catalogTrustNote"],
+        "noTrustMaterial"
+    );
+}
+
+/// A manifest the archive does not hold is `Missing`; an object that could not
+/// be read is `Unreadable`. **They are different answers.**
+#[test]
+fn a_missing_manifest_is_missing_and_an_unreadable_one_is_not() {
+    let (objects, newer, older) = two_point_objects();
+
+    // MISSING: every object but the manifest.
+    let missing = place(FakeObjects::new(), &older)
+        .with_object(&newer.log_key, &newer.log_bytes)
+        .with_object(&newer.record_key, &newer.record_bytes)
+        .with_object(&newer.receipt_key, &newer.receipt_bytes)
+        .with_object(&newer.sidecar_key, &newer.sidecar_bytes);
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, missing),
+    );
+    let body = body_of(&run);
+    let entries = entries_of(&body);
+    assert_eq!(entries[0]["availability"], "Missing");
+    assert!(
+        entries[0]["remedy"]
+            .as_str()
+            .expect("a Missing point names a remedy")
+            .contains("does not hold"),
+        "{}",
+        entries[0]
+    );
+    assert_eq!(summary_of(&body, "catalog-counts=")["missing"], 1);
+
+    // UNREADABLE: the same shape of failure, from a denial rather than an
+    // absence. A 403 that reported `Missing` is how an operator comes to
+    // believe an outage deleted their backups.
+    let denied = objects.clone().failing_get(Fault::Io(
+        "Generic S3 error: Error performing GET: response error \"<Error><Code>AccessDenied\
+         </Code></Error>\", status: 403 Forbidden"
+            .to_string(),
+    ));
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, denied),
+    );
+    let body = body_of(&run);
+    let counts = summary_of(&body, "catalog-counts=");
+    assert_eq!(counts["unreadable"], 2, "{body}");
+    assert_eq!(
+        counts["missing"], 0,
+        "`Unreadable` is never `Missing`: {body}"
+    );
+    assert_eq!(
+        counts["total"], 2,
+        "the walk still SAW both points — the shard listing is what establishes that"
+    );
+    assert!(
+        entries_of(&body).is_empty(),
+        "a point whose record could not be read has no receipt-derived facts to publish, so it \
+         is counted and not listed: {body}"
+    );
+}
+
+/// A record that contradicts the receipt it names is a `Conflict`, and so is a
+/// manifest whose bytes are not the ones the signed receipt describes.
+#[test]
+fn a_record_that_contradicts_its_receipt_is_a_conflict() {
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let f = catalog_fixture(
+        &catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z"),
+        "s3://lw-archive/kafka-backups",
+        &sidecar,
+        CATALOG_CLAIMED_KEY_ID,
+    );
+
+    // The record says one window; the receipt it names says another.
+    let mut doc: serde_json::Value =
+        serde_json::from_slice(&f.record_bytes).expect("the record is JSON");
+    doc["covered"]["to_ms"] = serde_json::json!(1i64);
+    let contradicting = serde_json::to_vec(&doc).expect("JSON");
+    let objects = place(FakeObjects::new(), &f).with_object(&f.record_key, &contradicting);
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
+    );
+    let entries = entries_of(&body_of(&run));
+    assert_eq!(entries[0]["availability"], "Conflict");
+
+    // And the archive contradicting the signed receipt is the same verdict:
+    // the receipt is the authority and the bytes in the bucket are not it.
+    let objects = place(FakeObjects::new(), &f).with_object(&f.manifest_key, b"{\"topics\":[1]}");
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
+    );
+    let body = body_of(&run);
+    assert_eq!(entries_of(&body)[0]["availability"], "Conflict");
+    assert_eq!(summary_of(&body, "catalog-counts=")["conflict"], 1);
+}
+
+/// A record written by a newer Logweir is `UnsupportedFormat` — per entry, and
+/// never fatal for the walk (D3 §5.2 rule 1).
+#[test]
+fn a_record_from_a_future_major_is_unsupported_and_not_fatal() {
+    let (objects, newer, _) = two_point_objects();
+    let mut doc: serde_json::Value =
+        serde_json::from_slice(&newer.record_bytes).expect("the record is JSON");
+    doc["format_version"] = serde_json::json!("2.0.0");
+    let objects = objects.with_object(&newer.record_key, &serde_json::to_vec(&doc).expect("JSON"));
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
+    );
+    let body = body_of(&run);
+    let counts = summary_of(&body, "catalog-counts=");
+    assert_eq!(counts["unsupportedFormat"], 1);
+    assert_eq!(
+        counts["available"], 1,
+        "the other point still lists: {body}"
+    );
+    assert_eq!(entries_of(&body).len(), 1);
+}
+
+/// The window is the plan's `viewLimit`; everything beyond it is COUNTED.
+#[test]
+fn the_body_is_bounded_by_the_view_limit_and_counts_the_rest() {
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let mut objects = FakeObjects::new();
+    for i in 0..12 {
+        let f = catalog_fixture(
+            &catalog_receipt(
+                &format!("set-{i:02}"),
+                "run-a",
+                &format!("2026-09-16T{i:02}:00:00Z"),
+            ),
+            "s3://lw-archive/kafka-backups",
+            &sidecar,
+            CATALOG_CLAIMED_KEY_ID,
+        );
+        objects = place(objects, &f);
+    }
+    // FIVE, driven straight at the emitter. `CheckPlan::validate` refuses a
+    // `viewLimit` below 100 in a real plan (asserted below), and the emitter
+    // honours whatever bound it is handed rather than carrying a second one.
+    let request = logweir_core::check_contract::CatalogSyncRequest {
+        view_limit: 5,
+        ..sync_request()
+    };
+    let run = drive_sync(
+        request,
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects.clone()),
+    );
+    let body = body_of(&run);
+    assert_eq!(
+        entries_of(&body).len(),
+        5,
+        "the window is the viewLimit: {body}"
+    );
+    let counts = summary_of(&body, "catalog-counts=");
+    assert_eq!(
+        counts["total"], 12,
+        "EVERY point the walk saw is counted, which is what makes `truncated` a fact about the \
+         archive and not about the page set: {body}"
+    );
+    assert_eq!(
+        counts["available"], 5,
+        "the buckets cover what was EXAMINED, and a bucket number for a point nothing fetched \
+         would be a fiction: {body}"
+    );
+    assert_eq!(
+        counts["byDay"][0]["points"], 12,
+        "the histogram covers the whole walk: {body}"
+    );
+
+    // And the object budget is the other bound. One object buys one shard
+    // listing and nothing else.
+    let request = logweir_core::check_contract::CatalogSyncRequest {
+        max_objects_per_run: 1,
+        ..sync_request()
+    };
+    let run = drive_sync(
+        request,
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
+    );
+    let body = body_of(&run);
+    assert!(entries_of(&body).is_empty(), "{body}");
+    let cursor = summary_of(&body, "catalog-cursor=");
+    assert_eq!(
+        cursor["complete"], false,
+        "a budgeted walk that continues is not a failure, and the cursor is what says so: {body}"
+    );
+}
+
+/// The plan's own bounds, refused on the READ side: a declared bound is not a
+/// bound.
+#[test]
+fn a_catalog_plan_outside_its_bounds_is_refused_before_any_client() {
+    for (view_limit, max_objects, timeout, field) in [
+        (99i64, 100_000i64, 900u32, "viewLimit"),
+        (5_001, 100_000, 900, "viewLimit"),
+        (2_000, 999, 900, "maxObjectsPerRun"),
+        (2_000, 1_000_001, 900, "maxObjectsPerRun"),
+        (2_000, 100_000, 1_801, "timeoutSeconds"),
+        (2_000, 100_000, 0, "timeoutSeconds"),
+    ] {
+        let plan = CheckPlan {
+            timeout_seconds: timeout,
+            ..plan_of(CheckRequest::CatalogSync(Box::new(
+                logweir_core::check_contract::CatalogSyncRequest {
+                    view_limit,
+                    max_objects_per_run: max_objects,
+                    ..sync_request()
+                },
+            )))
+        };
+        let err = plan
+            .validate()
+            .expect_err("`{field}` outside its range is refused");
+        assert!(
+            err.to_string().contains(field),
+            "expected `{field}` in `{err}`"
+        );
+    }
+
+    // An index cursor that is not a UTC day would silently become a key prefix
+    // that lists nothing, and a sync that walked nothing would publish an
+    // empty view of a full archive.
+    let plan = catalog_plan(logweir_core::check_contract::CatalogSyncRequest {
+        index_shard: Some("2026-9-16".to_string()),
+        ..sync_request()
+    });
+    assert!(plan
+        .validate()
+        .expect_err("a malformed index cursor is refused")
+        .to_string()
+        .contains("indexShard"));
+
+    // And the one that a single 600-second ceiling would have refused: the
+    // controller's own `SYNC_TIMEOUT_SECONDS` is 900.
+    catalog_plan(sync_request())
+        .validate()
+        .expect("a 900-second catalog sync is inside the catalog ceiling");
+}
+
+/// A page is as full as the ceiling allows — splitting buys nothing and costs
+/// a header and a digest each time.
+#[test]
+fn the_page_count_never_exceeds_eight_at_any_window_size() {
+    use logweir::check::kinds::catalog_sync as cs;
+    for entries in [1usize, 2, 20, 999, 1_000, 1_001, 5_000, 40_000] {
+        let per_page = cs::entries_per_page(entries);
+        let pages = entries.div_ceil(per_page);
+        assert!(
+            pages <= cs::MAX_BODY_PAGES,
+            "{entries} entries would need {pages} pages and the parser refuses above {}",
+            cs::MAX_BODY_PAGES
+        );
+    }
+    assert_eq!(
+        cs::entries_per_page(2).min(2),
+        2,
+        "two entries are ONE page: a body that split them would declare two headers and two \
+         digests for no reason"
+    );
+    assert_eq!(cs::entries_per_page(5_000), 1_000);
+}
+
+/// The pages are `1..=n`, in order, `n <= 8`, and each declares its own digest.
+#[test]
+fn the_body_never_declares_more_than_eight_pages() {
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let mut objects = FakeObjects::new();
+    for i in 0..20 {
+        let f = catalog_fixture(
+            &catalog_receipt(
+                &format!("set-{i:02}"),
+                "run-a",
+                &format!("2026-09-16T{:02}:{:02}:00Z", i / 4, (i % 4) * 15),
+            ),
+            "s3://lw-archive/kafka-backups",
+            &sidecar,
+            CATALOG_CLAIMED_KEY_ID,
+        );
+        objects = place(objects, &f);
+    }
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
+    );
+    let body = body_of(&run);
+    let headers: Vec<&str> = body
+        .lines()
+        .filter_map(|l| l.strip_prefix("catalog-page="))
+        .collect();
+    assert!(headers.len() <= 8, "{} pages: {body}", headers.len());
+    assert_eq!(headers.len(), 1, "twenty entries are one page: {body}");
+    let mut counted = 0usize;
+    for (i, h) in headers.iter().enumerate() {
+        let want = format!("{}/{} count=", i + 1, headers.len());
+        assert!(h.starts_with(&want), "header {i} is `{h}`, not `{want}…`");
+        let count: usize = h
+            .split_whitespace()
+            .nth(1)
+            .and_then(|c| c.strip_prefix("count="))
+            .and_then(|c| c.parse().ok())
+            .expect("a count");
+        counted += count;
+    }
+    assert_eq!(counted, 20, "every entry is on exactly one page: {body}");
+}
+
+/// A destination that will not open, and a listing that is denied, both emit
+/// NO body — and say which code it was.
+#[test]
+fn a_walk_that_never_started_emits_no_body() {
+    // The handle will not build.
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().role_fails(
+            DestinationRole::ArchiveRead,
+            CheckCode::InvalidCredentials,
+            "the archiveRead credential is not valid",
+        ),
+    );
+    assert_eq!(run.code, ExitCode::Ok);
+    let relay = run.relay.as_ref().expect("the relay decodes");
+    assert!(
+        relay.stream(Stream::Details).is_none(),
+        "a body that parses is a body the controller PUBLISHES, and there is nothing here to \
+         publish"
+    );
+    let row = run.row(CheckId::DestinationArchiveListable);
+    assert_eq!(row.state, CheckState::NotReady);
+    assert_eq!(row.code, CheckCode::InvalidCredentials);
+    assert!(!row.remedy.is_empty());
+
+    // The FIRST listing is denied.
+    let denied = FakeObjects::new().failing_list(Fault::Io(
+        "Generic S3 error: Error performing LIST: response error \"<Error><Code>AccessDenied\
+         </Code></Error>\", status: 403 Forbidden"
+            .to_string(),
+    ));
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, denied),
+    );
+    assert!(run
+        .relay
+        .as_ref()
+        .expect("the relay decodes")
+        .stream(Stream::Details)
+        .is_none());
+    assert_eq!(
+        run.row(CheckId::DestinationArchiveListable).code,
+        CheckCode::AccessDenied
+    );
+}
+
+/// A `Full` rescan resumes strictly after its cursor and reports where it got
+/// to.
+#[test]
+fn a_full_rescan_resumes_after_its_cursor() {
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let mut objects = FakeObjects::new();
+    let mut record_keys: Vec<String> = Vec::new();
+    for i in 0..4 {
+        let f = catalog_fixture(
+            &catalog_receipt(
+                &format!("set-{i}"),
+                "run-a",
+                &format!("2026-09-16T0{i}:00:00Z"),
+            ),
+            "s3://lw-archive/kafka-backups",
+            &sidecar,
+            CATALOG_CLAIMED_KEY_ID,
+        );
+        record_keys.push(f.record_key.clone());
+        objects = place(objects, &f);
+    }
+    record_keys.sort();
+
+    let full = logweir_core::check_contract::CatalogSyncRequest {
+        mode: logweir_core::check_contract::CatalogSyncMode::Full,
+        ..sync_request()
+    };
+    let run = drive_sync(
+        full.clone(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects.clone()),
+    );
+    let body = body_of(&run);
+    let counts = summary_of(&body, "catalog-counts=");
+    assert_eq!(counts["total"], 4);
+    assert_eq!(
+        counts["byDay"],
+        serde_json::json!([{"day": "2026-09-16", "points": 4}]),
+        "A RESCAN'S KEYS CARRY NO INSTANT, so its histogram is built from the records it read \
+         rather than from the key names an Index walk dates for free: {body}"
+    );
+    let cursor = summary_of(&body, "catalog-cursor=");
+    assert_eq!(cursor["complete"], true);
+    assert!(
+        cursor.get("rescanStartAfter").is_none(),
+        "A COMPLETE RESCAN REPORTS NO CURSOR: resuming past the whole archive would publish an \
+         empty view of a full one. {cursor}"
+    );
+
+    // Resumed after the second record, only the tail is walked.
+    let resumed = logweir_core::check_contract::CatalogSyncRequest {
+        rescan_start_after: Some(record_keys[1].clone()),
+        ..full
+    };
+    let run = drive_sync(
+        resumed,
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
+    );
+    let body = body_of(&run);
+    assert_eq!(
+        summary_of(&body, "catalog-counts=")["total"],
+        2,
+        "the cursor is EXCLUSIVE: {body}"
+    );
+}
+
+/// The `Index` cursor is a FLOOR and never the start: the window stays
+/// newest-first however far back the previous walk reached.
+#[test]
+fn the_index_cursor_bounds_the_walk_and_never_moves_the_window() {
+    let (objects, newer, older) = two_point_objects();
+    let request = logweir_core::check_contract::CatalogSyncRequest {
+        index_shard: Some("2026-09-16".to_string()),
+        ..sync_request()
+    };
+    let run = drive_sync(
+        request,
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
+    );
+    let body = body_of(&run);
+    let entries = entries_of(&body);
+    assert_eq!(
+        entries[0]["pointId"], newer.point.point_id,
+        "the newest point is still first: {body}"
+    );
+    assert_eq!(
+        entries.len(),
+        2,
+        "the floor is the cursor MINUS one day of overlap, so yesterday's point is still seen: \
+         {body}"
+    );
+    assert_eq!(entries[1]["pointId"], older.point.point_id);
+    let cursor = summary_of(&body, "catalog-cursor=");
+    assert_eq!(cursor["indexShard"], "2026-09-15");
+    assert_eq!(cursor["complete"], true);
+}
+
+/// A credential planted in every adopter-controlled field of a record is
+/// redacted, and the three fields the controller binds on survive intact.
+#[test]
+fn a_credential_planted_in_a_record_is_redacted_and_the_binding_survives() {
+    let (objects, newer, _) = two_point_objects();
+    let mut doc: serde_json::Value =
+        serde_json::from_slice(&newer.record_bytes).expect("the record is JSON");
+    doc["archive"]["location_id"] = serde_json::json!(PLANTED_USERINFO);
+    doc["run_id"] = serde_json::json!(PLANTED_KEY_ID);
+    doc["backup_id"] = serde_json::json!(PLANTED_SECRET);
+    let objects = objects.with_object(&newer.record_key, &serde_json::to_vec(&doc).expect("JSON"));
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
+    );
+    let everything = run.everything();
+    for planted in [
+        PLANTED_KEY_ID,
+        "hunter2",
+        "ZZfakefakefakefakefakefakefakefake01",
+    ] {
+        assert!(
+            !everything.contains(planted),
+            "`{planted}` survived into the relay: {everything}"
+        );
+    }
+    // ...and the long-run rule did NOT eat the binding.
+    let entries = entries_of(&body_of(&run));
+    let bound = entries
+        .iter()
+        .find(|e| e["receiptSha256"] == newer.point.receipt.sha256.as_str())
+        .expect("the receipt digest is emitted verbatim");
+    assert_eq!(bound["signerKeyId"], CATALOG_CLAIMED_KEY_ID);
+}
+
+/// The one redaction rule an archive reference must not pass is named once.
+#[test]
+fn the_long_run_rule_is_named_once() {
+    assert_eq!(
+        logweir::check::kinds::catalog_sync::LONG_RUN_RULE,
+        check::LONG_RUN_RULE,
+        "two names for one rule is how one of them stops being applied"
+    );
+    assert_eq!(
+        logweir_core::check_contract::redaction_rules()
+            .iter()
+            .filter(|r| r.name == check::LONG_RUN_RULE)
+            .count(),
+        1
+    );
+}
+
+/// **THE CROSS-CRATE GUARD, half one.** Every prefix and every cap this runner
+/// writes is the controller's own constant, read out of its source.
+#[test]
+fn the_grammar_this_runner_writes_is_the_grammar_the_controller_parses() {
+    use logweir::check::kinds::catalog_sync as cs;
+    let path = repo_root().join("crates/weirkeeper/src/catalog_view.rs");
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()));
+
+    let string_const = |name: &str| -> String {
+        let at = source
+            .find(&format!("pub const {name}: &str = "))
+            .unwrap_or_else(|| panic!("`{name}` is gone from {}", path.display()));
+        let rest = &source[at..];
+        let open = rest.find('"').expect("an opening quote");
+        let close = rest[open + 1..].find('"').expect("a closing quote");
+        rest[open + 1..open + 1 + close].to_string()
+    };
+    let usize_const = |name: &str| -> usize {
+        let at = source
+            .find(&format!("pub const {name}: usize = "))
+            .unwrap_or_else(|| panic!("`{name}` is gone from {}", path.display()));
+        let rest = &source[at..];
+        let expr = &rest[rest.find('=').expect("an =") + 1..rest.find(';').expect("a ;")];
+        // `5 * 1024 * 1024` and `64` are the two shapes the file uses.
+        expr.split('*')
+            .map(|t| t.trim().parse::<usize>().expect("a literal factor"))
+            .product()
+    };
+
+    let pairs: [(&str, &str, &str); 6] = [
+        (
+            "FORMAT_LINE_PREFIX",
+            cs::FORMAT_LINE_PREFIX,
+            "the version line",
+        ),
+        ("PAGE_LINE_PREFIX", cs::PAGE_LINE_PREFIX, "a page header"),
+        ("ENTRY_LINE_PREFIX", cs::ENTRY_LINE_PREFIX, "an entry"),
+        ("COUNTS_LINE_PREFIX", cs::COUNTS_LINE_PREFIX, "the counts"),
+        ("CURSOR_LINE_PREFIX", cs::CURSOR_LINE_PREFIX, "the cursor"),
+        (
+            "SIGNERS_LINE_PREFIX",
+            cs::SIGNERS_LINE_PREFIX,
+            "the signers",
+        ),
+    ];
+    for (name, ours, what) in pairs {
+        assert_eq!(
+            string_const(name),
+            ours,
+            "{what}: the controller parses `{}` and this runner writes `{ours}`",
+            string_const(name)
+        );
+    }
+    assert_eq!(usize_const("MAX_BODY_BYTES"), cs::MAX_BODY_BYTES);
+    assert_eq!(usize_const("MAX_BODY_SIGNERS"), cs::MAX_BODY_SIGNERS);
+    assert_eq!(usize_const("MAX_ENTRY_LOCATIONS"), cs::MAX_ENTRY_LOCATIONS);
+    assert_eq!(usize_const("MAX_BODY_PAGES"), cs::MAX_BODY_PAGES);
+    assert_eq!(usize_const("MAX_HISTOGRAM_DAYS"), cs::MAX_HISTOGRAM_DAYS);
+    assert!(
+        source.contains("pub const BODY_FORMAT_VERSION: u32 = 1;"),
+        "the controller reads grammar version 1 and this runner writes {}",
+        cs::BODY_FORMAT_VERSION
+    );
+}
+
+/// **THE CROSS-CRATE GUARD, half two.** The EXACT body the emitter produces for
+/// the fixture below.
+///
+/// `the_runners_pinned_body_is_one_this_parser_reads` in
+/// `crates/weirkeeper/tests/catalog_controller.rs` extracts this literal from
+/// this file and runs the controller's own `parse_body` over it. The runner
+/// test pins runner ⟷ literal; the controller test pins literal ⟷ parser; and
+/// neither crate had to grow a dependency on the other.
+const PINNED_SYNC_BODY: &str = r#"catalog-format=1
+catalog-page=1/1 count=1 sha256=9198b1b1f3c4a77fd1788aa8ec661b8c1b2fbf585405d84c80210b484eb52376
+catalog-entry={"pointId":"lwp1-0e02dc33bf63349ec262a62043d9bd04","backupId":"set-a","runId":"run-a","recoveryPointAtMs":1789527600000,"coveredFromMs":1789524000000,"coveredToMs":1789527600000,"locations":[{"locationId":"s3://lw-archive/kafka-backups","availability":"Available"}],"receiptKey":"logweir/backups/set-a/run-a.receipt.json","receiptSha256":"sha256:0e02dc33bf63349ec262a62043d9bd0441fb867c72aa2d5b4ce8a085b05469db","manifestKey":"kafka-backups/set-a/manifest.json","manifestSha256":"sha256:d5eea23a2f7ca3f36d2a5dbf3ab2532a3de3a797ded388afb816068c2863a152","recordedAt":"2026-09-16T06:00:00Z","formatVersion":"1.0.0","availability":"Available","signature":"notAttempted","signerKeyId":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0","remedy":"No signature verdict was reached: this installation holds no key that signed this point. Add the signing key to the trust source if you accept evidence from it."}
+catalog-counts={"total":1,"available":1,"missing":0,"unreadable":0,"deleted":0,"conflict":0,"unsupportedFormat":0,"partial":0,"signature":{"verified":0,"invalid":0,"noEvidence":0,"notAttempted":1},"byDay":[{"day":"2026-09-16","points":1}]}
+catalog-signers=[{"keyId":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0","points":1}]
+catalog-cursor={"indexShard":"2025-08-12","complete":true}
+"#;
+
+/// The emitter produces [`PINNED_SYNC_BODY`], byte for byte.
+#[test]
+fn the_catalog_sync_body_is_pinned_for_the_controllers_parser() {
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let f = catalog_fixture(
+        &catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z"),
+        "s3://lw-archive/kafka-backups",
+        &sidecar,
+        CATALOG_CLAIMED_KEY_ID,
+    );
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default()
+            .with_role(DestinationRole::ArchiveRead, place(FakeObjects::new(), &f)),
+    );
+    assert_eq!(
+        body_of(&run),
+        PINNED_SYNC_BODY,
+        "the emitted body moved. If the change is intended, paste the left-hand side into \
+         `PINNED_SYNC_BODY` AND check that `crates/weirkeeper/tests/catalog_controller.rs`'s \
+         `the_runners_pinned_body_is_one_this_parser_reads` still passes — the two are one \
+         contract."
     );
 }

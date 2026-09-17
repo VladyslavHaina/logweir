@@ -482,33 +482,40 @@ fn tracked_status(stem: &str) -> Value {
 // 1. The seam D2 has not landed yet
 // ===========================================================================
 
-/// `catalogSync` is NOT in D2's closed plan-kind vocabulary, and this test is
-/// the alarm that fires when it lands.
+/// **THE ALARM FIRED AND THE SEAM IS CLOSED.**
 ///
-/// D-SEAMS **S1** makes the catalog sync a plan kind of the ONE check runner.
-/// D2 W4's runner is in its fix round and its own
-/// `an_unknown_plan_kind_is_refused` uses `{"catalogSync": …}` as the example of
-/// a kind serde does not know. So the spelling lives in `catalog_view` until it
-/// can be deleted, and the day `CheckPlanKind::CatalogSync` exists this fails
-/// and the constants go.
+/// This was `the_catalog_sync_kind_is_not_yet_in_the_closed_vocabulary`: while
+/// `CheckPlanKind` was a closed FIVE-member vocabulary it asserted that
+/// `catalogSync` was NOT in it, so the day D2 landed the kind the suite would
+/// fail and say what to do about it. D2 has landed it, so the assertion is
+/// INVERTED rather than deleted — a guard that only ever fires once is a guard
+/// that stops guarding, and what matters from here on is that the controller's
+/// two constants are the enum's own strings and not a second spelling of them.
 #[test]
-fn the_catalog_sync_kind_is_not_yet_in_the_closed_vocabulary() {
+fn the_catalog_sync_kind_is_the_closed_vocabularys_own() {
     assert!(
-        !CheckPlanKind::ALL
+        CheckPlanKind::ALL
             .iter()
             .any(|k| k.as_str() == view::PLAN_KIND),
-        "`{}` is now a CheckPlanKind. Delete `catalog_view::PLAN_KIND` and \
-         `catalog_view::JOB_DISCRIMINATOR`, name the enum everywhere they were used, and give \
-         the sync Job the framework's own `CheckJobSpec`. The seam was always meant to close.",
+        "`{}` is not a CheckPlanKind; the controller is naming a kind the one runner does not \
+         dispatch and every sync Job would exit 3 with CheckContractMismatch",
         view::PLAN_KIND
+    );
+    assert_eq!(view::PLAN_KIND, CheckPlanKind::CatalogSync.as_str());
+    assert_eq!(
+        view::JOB_DISCRIMINATOR,
+        CheckPlanKind::CatalogSync.job_discriminator()
     );
 }
 
-/// The Job-name discriminator collides with none of the five that landed: two
-/// kinds sharing one would give two checks of one subject the same Job name.
+/// The Job-name discriminator collides with none of the other five: two kinds
+/// sharing one would give two checks of one subject the same Job name.
 #[test]
 fn the_job_discriminator_collides_with_no_landed_kind() {
     for kind in CheckPlanKind::ALL {
+        if kind == CheckPlanKind::CatalogSync {
+            continue;
+        }
         assert_ne!(
             kind.job_discriminator(),
             view::JOB_DISCRIMINATOR,
@@ -520,7 +527,7 @@ fn the_job_discriminator_collides_with_no_landed_kind() {
 }
 
 /// The plan document carries D2's own field names, so the runner's `CheckPlan`
-/// will deserialise it the day the request variant exists.
+/// deserialises it.
 #[test]
 fn the_plan_document_carries_d2s_field_names() {
     let request = sync_request();
@@ -562,8 +569,8 @@ fn sync_request() -> view::CatalogSyncRequest {
             ca_file: None,
             credentials: logweir_core::check_contract::CredentialMode::Static,
         },
-        mode: weirkeeper::crds::recovery_catalog::SyncMode::Index,
-        deep_check: weirkeeper::crds::recovery_catalog::DeepCheck::ManifestDigest,
+        mode: weirkeeper::crds::recovery_catalog::SyncMode::Index.into(),
+        deep_check: weirkeeper::crds::recovery_catalog::DeepCheck::ManifestDigest.into(),
         max_objects_per_run: 100_000,
         view_limit: 2000,
         index_shard: None,
@@ -3057,4 +3064,246 @@ fn the_frame_expectations_come_from_the_job_that_ran() {
             subject_uid: UID.to_string(),
         }
     );
+}
+
+// ===========================================================================
+// 12. The D2 seam: the runner's bytes, read by this parser
+// ===========================================================================
+//
+// `weirkeeper` and `logweir` share no dependency edge — this crate links
+// `logweir-core` and `logweir-verify`, never the runner — and adding one so a
+// test could call the emitter would be a dependency decision, not a test. What
+// the two crates DO share is a file: `crates/logweir/tests/check_cli.rs`'s
+// `the_catalog_sync_body_is_pinned_for_the_controllers_parser` asserts the
+// emitter produces `PINNED_SYNC_BODY` byte for byte, so that literal is a
+// pinned statement of the runner's behaviour. Reading it here closes the loop —
+// the runner test pins runner <-> literal, and this one pins literal <-> parser
+// — and it is the pattern D2 W9 used against the same file for the expected
+// row set.
+
+/// The runner's pinned body, read out of `crates/logweir/tests/check_cli.rs`.
+fn runner_pinned_body() -> String {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("the repository root")
+        .join("crates/logweir/tests/check_cli.rs");
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()));
+    const OPEN: &str = "const PINNED_SYNC_BODY: &str = r#\"";
+    let at = source.find(OPEN).unwrap_or_else(|| {
+        panic!(
+            "`PINNED_SYNC_BODY` is gone from {}; the runner no longer pins the body this parser \
+             is the oracle for",
+            path.display()
+        )
+    });
+    let rest = &source[at + OPEN.len()..];
+    let end = rest.find("\"#;").expect("the raw literal closes");
+    let body = rest[..end].to_string();
+    assert!(
+        body.lines().count() >= 6 && body.starts_with("catalog-format="),
+        "the extracted literal is not a body; this guard would pass vacuously: {body:?}"
+    );
+    body
+}
+
+/// **THE CROSS-CRATE GUARD.** The bytes D2's runner emits are bytes this
+/// parser reads, and it reads the two axes out of them as the states the
+/// controller then classifies.
+#[test]
+fn the_runners_pinned_body_is_one_this_parser_reads() {
+    let body = runner_pinned_body();
+    let parsed = view::parse_body(&body, 2000).unwrap_or_else(|e| {
+        panic!("the runner's own pinned body does not parse here: {e}\n{body}")
+    });
+
+    assert_eq!(parsed.pages.len(), 1);
+    assert_eq!(
+        parsed.skipped_entries, 0,
+        "no entry line was skipped: {body}"
+    );
+    let entries = parsed.entries();
+    assert_eq!(entries.len(), 1);
+    let entry = &entries[0];
+    assert_eq!(entry.availability, Availability::Available);
+    assert_eq!(
+        entry.signature,
+        SignatureVerdict::NotAttempted,
+        "the runner reports a verdict and never a trust decision"
+    );
+    assert!(entry.point_id.starts_with("lwp1-"));
+    assert!(entry.receipt_sha256.starts_with("sha256:"));
+    assert_eq!(
+        entry.receipt_sha256.len(),
+        "sha256:".len() + 64,
+        "THE BINDING SURVIVED THE RUNNER'S REDACTOR. `redact`'s long-run rule eats any 40-plus \
+         character hex run, so a digest that came through as `[redacted]` would make the body \
+         parse and mean nothing: {entry:?}"
+    );
+    assert_eq!(entry.locations.len(), 1);
+    assert_eq!(
+        entry.locations[0].availability,
+        Some(Availability::Available),
+        "a location carries its OWN verdict"
+    );
+    assert!(
+        entry.recorded_at.is_some(),
+        "the record instant round-trips into `Time`"
+    );
+    assert!(entry.remedy.is_some());
+
+    let counts = parsed.counts.expect("a counts line");
+    assert_eq!(counts.total, 1);
+    assert_eq!(counts.available, 1);
+    assert_eq!(counts.signature.not_attempted, 1);
+    assert_eq!(counts.by_day.len(), 1);
+
+    assert_eq!(parsed.signers.len(), 1);
+    assert_eq!(parsed.signers[0].points, 1);
+    assert!(
+        view::MAX_BODY_SIGNERS >= parsed.signers.len(),
+        "the signer list is inside the cap"
+    );
+
+    let cursor = parsed.cursor.expect("a cursor line");
+    assert!(cursor.complete);
+    assert!(cursor.index_shard.is_some());
+
+    // And the whole pipeline the controller runs over it produces a page.
+    let trust = TrustView::default();
+    let view = view::materialise(
+        entries,
+        counts.total,
+        &trust,
+        &ViewLimits::from_settings(&catalog(json!({}), json!({})).spec.sync),
+        now(),
+    );
+    assert_eq!(view.entries, 1);
+    assert_eq!(view.pages.len(), 1);
+    let published = &view.pages[0].entries[0];
+    assert_eq!(
+        published.verification,
+        Verification::NotAttempted,
+        "with no trust material an installation has not disproved anything"
+    );
+    assert!(!published.selectable);
+}
+
+/// The same body, seen at a SECOND location: one entry, both locations, and
+/// availability merged BEST-of.
+#[test]
+fn the_runners_entry_merges_with_a_second_location_into_one_row() {
+    let body = runner_pinned_body();
+    let parsed = view::parse_body(&body, 2000).expect("the pinned body parses");
+    let here = parsed.entries().remove(0);
+    let mut copy = here.clone();
+    copy.locations = vec![EntryLocation {
+        location_id: "s3://lw-archive-dr/kafka-backups".to_string(),
+        availability: None,
+    }];
+    copy.availability = Availability::Missing;
+
+    let merged = view::merge_entries(vec![here.clone(), copy]);
+    assert_eq!(merged.len(), 1, "one receipt in two buckets is ONE point");
+    assert_eq!(
+        merged[0].availability,
+        Availability::Available,
+        "availability merges BEST-of: hiding a recoverable point because a second copy went \
+         missing is the opposite of what a second copy is for"
+    );
+    let ids: Vec<&str> = merged[0]
+        .locations
+        .iter()
+        .map(|l| l.location_id.as_str())
+        .collect();
+    assert_eq!(
+        ids,
+        vec![
+            "s3://lw-archive-dr/kafka-backups",
+            here.locations[0].location_id.as_str()
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect::<Vec<_>>(),
+        "both places are named: {:?}",
+        merged[0].locations
+    );
+    assert!(
+        merged[0]
+            .remedy
+            .as_deref()
+            .is_some_and(|r| r.contains("s3://lw-archive-dr/kafka-backups")),
+        "the degraded copy is NAMED, so a best-of answer never costs the knowledge of which \
+         bucket to repair: {:?}",
+        merged[0].remedy
+    );
+}
+
+/// **THE OTHER HALF OF THE SEAM.** The plan this controller renders is one the
+/// runner's own `CheckPlan::parse_and_verify` accepts, at the timeout this
+/// controller actually uses.
+///
+/// It is a REAL guard and not a formality: `SYNC_TIMEOUT_SECONDS` is 900 and
+/// the contract's ceiling was a flat 600 for every kind, so every sync Job on
+/// every cadence would have been refused at startup step 4 with
+/// `CheckContractMismatch` — before a credential was read, with no frame
+/// printed, and reported as `ResultUnreadable` with no way to say why.
+#[test]
+fn the_controllers_sync_plan_is_one_the_runner_accepts() {
+    let request = sync_request();
+    let bytes = view::plan_document(
+        UID,
+        u32::try_from(ctrl::SYNC_TIMEOUT_SECONDS).expect("the sync timeout fits a u32"),
+        Some("sha256:deadbeef"),
+        &request,
+    )
+    .expect("the plan serialises");
+    let digest = logweir_core::ids::sha256_prefixed(&bytes);
+    let plan = logweir_core::check_contract::CheckPlan::parse_and_verify(&bytes, &digest, UID)
+        .unwrap_or_else(|e| {
+            panic!(
+                "the runner refuses the plan this controller writes: {e}\n{}",
+                String::from_utf8_lossy(&bytes)
+            )
+        });
+    assert_eq!(plan.kind(), CheckPlanKind::CatalogSync);
+    let logweir_core::check_contract::CheckRequest::CatalogSync(got) = plan.request else {
+        panic!("the plan carries a `catalogSync` request");
+    };
+    assert_eq!(*got, request, "every field round-trips");
+}
+
+/// The CRD's two enums and the plan's two enums spell the same strings.
+///
+/// The controller keeps its own `SyncMode`/`DeepCheck` because they carry
+/// `JsonSchema` and the published CRD is generated from them; the `From` impls
+/// are the whole translation, and a rename on either side that changed a wire
+/// spelling would make an operator's `spec.sync.mode: Full` arrive at the
+/// runner as something else.
+#[test]
+fn the_crd_and_the_plan_spell_the_two_enums_identically() {
+    use logweir_core::check_contract::{CatalogDeepCheck, CatalogSyncMode};
+    use weirkeeper::crds::recovery_catalog::{DeepCheck, SyncMode};
+    for mode in [SyncMode::Index, SyncMode::Full] {
+        let plan: CatalogSyncMode = mode.into();
+        assert_eq!(
+            serde_json::to_value(mode).expect("the CRD enum serialises"),
+            serde_json::to_value(plan).expect("the plan enum serialises"),
+            "`{mode:?}` is spelled two ways"
+        );
+    }
+    for deep in [
+        DeepCheck::None,
+        DeepCheck::ManifestDigest,
+        DeepCheck::SegmentSample,
+    ] {
+        let plan: CatalogDeepCheck = deep.into();
+        assert_eq!(
+            serde_json::to_value(deep).expect("the CRD enum serialises"),
+            serde_json::to_value(plan).expect("the plan enum serialises"),
+            "`{deep:?}` is spelled two ways"
+        );
+    }
 }
