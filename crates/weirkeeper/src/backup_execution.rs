@@ -67,14 +67,16 @@ use serde::{Deserialize, Serialize};
 use crate::conditions::{
     TERMINAL_STATE_ARCHIVE_URL_UNREADABLE, TERMINAL_STATE_CREDENTIAL_NOT_RENDERABLE,
     TERMINAL_STATE_EXECUTION_SPEC_INVALID, TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
-    TERMINAL_STATE_REFERENT_NOT_FOUND,
+    TERMINAL_STATE_REFERENT_NOT_FOUND, TERMINAL_STATE_SCHEDULED_IDENTITY_MISMATCH,
 };
 use crate::connection::ConnectionUse;
 use crate::controllers::backup::{plan_config_map_name, PLAN_ALLOWED_CLUSTERS_KEY, PLAN_SPEC_KEY};
-use crate::crds::backup::{Backup, BackupExecution};
+use crate::crds::backup::{Backup, BackupExecution, BackupSpec as BackupCrdSpec, TriggerKind};
 use crate::crds::backup_schedule::BackupSchedule;
 use crate::crds::kafka_cluster::KafkaCluster;
+use crate::crds::selection::{Coverage, IncompleteDiscovery, SelectionMode, SelectionStatus};
 use crate::crds::LocalRef;
+use crate::destination::ResolvedDestinationSnapshot;
 use logweir_core::engine::StorageUrl;
 use logweir_core::ids::sha256_prefixed;
 use logweir_core::spec::{AllowedClusters, AuthSpec, BackupSettings, BackupSourceSpec, BackupSpec};
@@ -118,9 +120,31 @@ pub const RUNNER_ARGV_ANNOTATION: &str = "logweir.dev/runner-argv";
 /// The plan ConfigMap key carrying the canonical typed input snapshot.
 pub const INPUTS_KEY: &str = "execution-inputs.json";
 
-/// The snapshot grammar this controller writes and reads. A snapshot naming
-/// any other version is a conflict, never a best-effort parse.
-pub const INPUTS_VERSION: &str = "logweir.dev/backup-execution-inputs/v1";
+/// PLAT-06.1's snapshot grammar: identity, source, topics, archive, runner.
+///
+/// STILL READ, STILL EXECUTED, NEVER REWRITTEN. Every `Backup` frozen by a
+/// controller that predates D1 carries this version, and a run in flight at
+/// upgrade time must keep executing the bytes it was admitted with — so this
+/// constant is not "the old one", it is one of the two grammars
+/// [`verify_frozen_config_map`] admits. See [`INPUTS_VERSIONS_READ`].
+pub const INPUTS_VERSION_V1: &str = "logweir.dev/backup-execution-inputs/v1";
+
+/// D1 §3.3's grammar: [`INPUTS_VERSION_V1`] **plus** the trigger, the schedule
+/// revision, the run policy digest, the frozen selection and the reserved
+/// destination block.
+///
+/// ADDITIVE, AND THE ADDITIONS ARE ALL OPTIONAL. A `v1` document deserialises
+/// into the same type with every `v2` field absent and re-encodes to the exact
+/// bytes it was stored as, which is what keeps a frozen `v1` plan verifiable
+/// after the upgrade (D-SEAMS **S4**).
+pub const INPUTS_VERSION_V2: &str = "logweir.dev/backup-execution-inputs/v2";
+
+/// The snapshot grammar this controller WRITES.
+pub const INPUTS_VERSION: &str = INPUTS_VERSION_V2;
+
+/// Every snapshot grammar this controller READS, newest first. A snapshot
+/// naming any other version is a conflict, never a best-effort parse.
+pub const INPUTS_VERSIONS_READ: [&str; 2] = [INPUTS_VERSION_V2, INPUTS_VERSION_V1];
 
 /// The annotation, on the plan ConfigMap and on the runner Job and its pod
 /// template, carrying [`FrozenInputs::sha256`].
@@ -254,7 +278,9 @@ fn shown(value: &str) -> String {
     }
 }
 
-/// Whether `slot` is a canonical `yyyymmdd-hhmmss` instant.
+/// Whether `slot` is a canonical `yyyymmdd-hhmmss` instant that EXISTS on the
+/// calendar — `20261309-031700` is fifteen characters of digits and a hyphen,
+/// and is not a date.
 fn valid_slot(slot: &str) -> bool {
     const FORMAT: &str = "%Y%m%d-%H%M%S";
     slot.len() == 15
@@ -264,13 +290,51 @@ fn valid_slot(slot: &str) -> bool {
 
 /// Derive the run identity from the typed spec and server-generated metadata.
 ///
+/// # ONE DERIVATION, IN [`crate::identity`], AND THIS IS ITS EXECUTION-SIDE
+/// PROJECTION
+///
+/// PLAT-06.1 derived the identity here, from `spec.triggeredBy` plus the
+/// `BackupSchedule` controller owner reference. D1 §3.1 moves the derivation
+/// into [`crate::identity::run_identity`], which reads the object and nothing
+/// else and knows all four trigger kinds — so a retry named `-r1` cannot be
+/// minted by the scheduler and adopted as attempt 0 here. This function calls
+/// that one derivation and projects it into the `execution` block of the
+/// frozen grammar.
+///
+/// **EVERY PLAT-06.1 OBJECT IS STILL ADMITTED, BYTE FOR BYTE.** A scheduled
+/// `Backup` created before `spec.trigger` existed carries `triggeredBy:
+/// schedule`, a `spec.scheduleRef` without a `uid` and the controller owner
+/// reference; D1 §3.1 rule 4 reads it as `Scheduled`/attempt 0 and rule 3's
+/// last clause takes the UID from that owner reference, so its execution id is
+/// `<owner uid>-<slot>` — exactly what PLAT-06.1 computed. Nothing is
+/// converted and no write happens on upgrade.
+///
+/// # What this adds on top of the one derivation
+///
+/// Two checks that belong to the EXECUTION contract and not to identity:
+///
+/// 1. **`spec.triggeredBy` is still a two-value vocabulary.** The value becomes
+///    the signed receipt's `triggered_by`, so an unknown one is
+///    [`TERMINAL_STATE_EXECUTION_SPEC_INVALID`] exactly as it was — and it must
+///    AGREE with `spec.trigger.kind`, or a `Manual` run would sign a receipt
+///    saying `schedule`.
+/// 2. **A legacy owner reference must name the schedule `spec.scheduleRef`
+///    names.** `run_identity` takes the UID from the first complete
+///    `BackupSchedule` controller owner; PLAT-06.1 additionally required that
+///    owner's NAME to equal `scheduleRef.name`, and dropping that would let a
+///    `Backup` naming schedule `a` execute under schedule `b`'s archive prefix.
+///
 /// # Errors
 ///
-/// [`TERMINAL_STATE_EXECUTION_SPEC_INVALID`] naming the field when the spec
-/// states no runnable trigger, or a `schedule` trigger that is not the complete
-/// `BackupSchedule` controller identity. A hand-written `Backup` that claims to
-/// be a scheduled run is refused rather than silently re-labelled: its signed
-/// receipt would otherwise say `schedule` about a run no schedule created.
+/// [`TERMINAL_STATE_EXECUTION_SPEC_INVALID`] for a missing namespace or UID and
+/// for an unknown `spec.triggeredBy`;
+/// [`crate::conditions::TERMINAL_STATE_SCHEDULED_IDENTITY_MISMATCH`] for a
+/// `triggeredBy` that contradicts `spec.trigger.kind` and for every identity
+/// [`crate::identity::run_identity`] refuses;
+/// [`crate::conditions::TERMINAL_STATE_NAME_TOO_LONG`] for a composed name that
+/// does not fit. A hand-written `Backup` that claims to be a scheduled run is
+/// refused rather than silently re-labelled: its signed receipt would otherwise
+/// say `schedule` about a run no schedule created.
 pub fn execution_identity(backup: &Backup) -> Result<ExecutionIdentity, ExecutionRefusal> {
     let name = backup.name_any();
     let namespace = backup
@@ -285,100 +349,99 @@ pub fn execution_identity(backup: &Backup) -> Result<ExecutionIdentity, Executio
     let object = ObjectIdentity {
         namespace,
         name: name.clone(),
-        uid: uid.clone(),
+        uid,
     };
-    match backup.spec.triggered_by.as_str() {
-        TRIGGER_MANUAL => {
-            if let Some(slot) = backup.spec.slot.as_deref() {
-                return Err(ExecutionRefusal::spec(format!(
-                    "spec.triggeredBy is `manual` but spec.slot is `{}`; a slot names one \
-                     BackupSchedule run, while a manual Backup runs under its own \
-                     server-generated UID. Create the manual Backup without spec.slot",
-                    shown(slot)
-                )));
-            }
-            Ok(ExecutionIdentity {
-                id: uid,
-                trigger: ExecutionTrigger::Manual,
-                backup: object,
-                schedule: None,
-            })
-        }
-        TRIGGER_SCHEDULE => {
-            let schedule = backup
-                .spec
-                .schedule_ref
-                .as_ref()
-                .filter(|reference| !reference.name.is_empty())
-                .ok_or_else(|| {
-                    ExecutionRefusal::spec(
-                        "spec.triggeredBy is `schedule` but spec.scheduleRef is absent; only the \
-                         BackupSchedule controller creates scheduled runs, and a Backup created \
-                         by hand or by a client is `manual`",
-                    )
-                })?;
-            let slot = backup.spec.slot.as_deref().ok_or_else(|| {
-                ExecutionRefusal::spec(
-                    "spec.triggeredBy is `schedule` but spec.slot is absent, so no scheduled run \
-                     identity exists",
-                )
-            })?;
-            if !valid_slot(slot) {
-                return Err(ExecutionRefusal::spec(format!(
-                    "spec.slot `{}` is not a UTC slot in yyyymmdd-hhmmss form",
-                    shown(slot)
-                )));
-            }
-            let owner = backup
-                .owner_references()
-                .iter()
-                .find(|owner| owner.controller == Some(true))
-                .filter(|owner| {
-                    owner.api_version == BackupSchedule::api_version(&())
-                        && owner.kind == BackupSchedule::kind(&())
-                        && owner.name == schedule.name
-                        && !owner.uid.is_empty()
-                })
-                .ok_or_else(|| {
-                    ExecutionRefusal::spec(format!(
-                        "spec.triggeredBy is `schedule` but the Backup has no controller owner \
-                         reference to BackupSchedule `{}`; the scheduled run identity is \
-                         derived from that owner's UID and is never supplied by a client",
-                        shown(&schedule.name)
-                    ))
-                })?;
-            match crate::slot::scheduled_backup_name(&schedule.name, slot) {
-                Ok(expected) if expected == name => {}
-                Ok(expected) => {
-                    return Err(ExecutionRefusal::spec(format!(
-                        "spec.triggeredBy is `schedule` but the object is named `{name}`; the \
-                         BackupSchedule controller names slot {slot}'s run `{expected}`, and one \
-                         deterministic name is what makes a duplicate slot an AlreadyExists"
-                    )))
-                }
-                Err(error) => {
-                    return Err(ExecutionRefusal::spec(format!(
-                        "spec.scheduleRef and spec.slot cannot name a scheduled Backup: {error}"
-                    )))
-                }
-            }
-            Ok(ExecutionIdentity {
-                id: crate::slot::backup_id_for(&owner.uid, slot),
-                trigger: ExecutionTrigger::Schedule,
-                backup: object,
-                schedule: Some(ScheduleTrigger {
-                    name: schedule.name.clone(),
-                    uid: owner.uid.clone(),
-                    slot: slot.to_string(),
-                }),
-            })
-        }
-        other => Err(ExecutionRefusal::spec(format!(
+
+    // (1) THE RECEIPT'S OWN VOCABULARY, UNCHANGED.
+    let declared = backup.spec.triggered_by.as_str();
+    if declared != TRIGGER_MANUAL && declared != TRIGGER_SCHEDULE {
+        return Err(ExecutionRefusal::spec(format!(
             "spec.triggeredBy is `{}`; this controller runs `manual` and `schedule` Backups \
              only, and the value becomes the signed receipt's triggered_by",
-            shown(other)
-        ))),
+            shown(declared)
+        )));
     }
+
+    let run = crate::identity::run_identity(backup)
+        .map_err(|error| ExecutionRefusal::new(error.terminal_state(), error.to_string()))?;
+
+    let trigger = match run.kind {
+        TriggerKind::Manual => ExecutionTrigger::Manual,
+        TriggerKind::Scheduled | TriggerKind::CatchUp | TriggerKind::Retry => {
+            ExecutionTrigger::Schedule
+        }
+    };
+    if trigger.as_str() != declared {
+        return Err(ExecutionRefusal::new(
+            TERMINAL_STATE_SCHEDULED_IDENTITY_MISMATCH,
+            format!(
+                "spec.trigger.kind is {:?} but spec.triggeredBy is `{}`; the two-value field is \
+                 what the signed receipt carries, so a {} run may not sign a receipt saying \
+                 `{}`",
+                run.kind,
+                shown(declared),
+                trigger.as_str(),
+                shown(declared)
+            ),
+        ));
+    }
+
+    // PLAT-06.1's CALENDAR check on the slot, kept. `identity::run_identity`
+    // checks the SHAPE — fifteen characters, digits and one hyphen — which
+    // admits `20261309-031700`, a thirteenth month. A slot is a UTC instant and
+    // an object named after one that does not exist would take an archive
+    // prefix no schedule can ever produce.
+    if let Some(slot) = run.slot.as_deref() {
+        if !valid_slot(slot) {
+            return Err(ExecutionRefusal::new(
+                TERMINAL_STATE_SCHEDULED_IDENTITY_MISMATCH,
+                format!(
+                    "spec.slot `{}` is not a UTC instant in yyyymmdd-hhmmss form",
+                    shown(slot)
+                ),
+            ));
+        }
+    }
+
+    let schedule = match run.schedule {
+        None => None,
+        Some(schedule) => {
+            // (2) PLAT-06.1's owner-NAME check, kept.
+            if schedule.from_owner_reference {
+                let named = backup.owner_references().iter().any(|owner| {
+                    owner.controller == Some(true)
+                        && owner.api_version == BackupSchedule::api_version(&())
+                        && owner.kind == BackupSchedule::kind(&())
+                        && owner.name == schedule.name
+                        && owner.uid == schedule.uid
+                });
+                if !named {
+                    return Err(ExecutionRefusal::new(
+                        TERMINAL_STATE_SCHEDULED_IDENTITY_MISMATCH,
+                        format!(
+                            "spec.scheduleRef names `{}` and carries no uid, and this Backup's \
+                             BackupSchedule controller owner reference names a different \
+                             schedule; the legacy identity is that owner's UID, so the run would \
+                             execute under another schedule's archive prefix",
+                            shown(&schedule.name)
+                        ),
+                    ));
+                }
+            }
+            Some(ScheduleTrigger {
+                name: schedule.name,
+                uid: schedule.uid,
+                slot: run.slot.clone().unwrap_or_default(),
+            })
+        }
+    };
+
+    Ok(ExecutionIdentity {
+        id: run.execution_id,
+        trigger,
+        backup: object,
+        schedule,
+    })
 }
 
 /// The backup id controllers before PLAT-06.1 reported: the first controller
@@ -552,28 +615,311 @@ pub struct RunnerInputs {
     pub settings: RunnerSettings,
 }
 
+// ---------------------------------------------------------------------------
+// Grammar v2 (D1 §3.3): the trigger, the revision, the selection, the
+// reserved destination block
+// ---------------------------------------------------------------------------
+
+/// `false` as a serde skip predicate, for a `bool` that is absent when unset.
+fn is_false(value: &bool) -> bool {
+    !*value
+}
+
+/// The `trigger` block: WHICH KIND of run this is, and where in its slot's
+/// attempt chain it sits (D1 §3.1).
+///
+/// # Why this is frozen beside `execution`, and is not `execution`
+///
+/// [`ExecutionIdentity`] is `v1`'s and its bytes are load-bearing: it is
+/// compared field for field against a fresh derivation on every later pass, and
+/// every `Backup` frozen before D1 carries it. Adding `kind` and `attempt` to
+/// it would have changed the bytes of every stored snapshot. This block carries
+/// the finer trigger additively, and `execution.id` — which already encodes the
+/// attempt through `slot::backup_id_for_attempt`'s `-r<k>` suffix — stays the
+/// one identity the runner is handed.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RunInputs {
+    /// `Scheduled`, `CatchUp`, `Retry` or `Manual`.
+    pub kind: TriggerKind,
+    /// `0` for everything but a retry.
+    pub attempt: u32,
+    /// `metadata.name` of the attempt this one retries.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_of: Option<String>,
+    /// The IANA zone the slot was computed in. INFORMATIONAL: the slot itself
+    /// is a UTC instant, and this records the zone so a history row keeps its
+    /// local time after somebody edits the schedule's `timeZone`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub time_zone: Option<String>,
+}
+
+/// The `scheduleRef` block: which `BackupSchedule` revision this run copied
+/// (D1 §5.3).
+///
+/// **IT SURVIVES THE SCHEDULE.** PLAT-05.2 stops deleting a schedule from
+/// deleting its history, so the revision a run executed has to be recorded
+/// somewhere that outlives the object — and the frozen inputs are the only
+/// immutable place a run has.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ScheduleRefInputs {
+    /// The `BackupSchedule` name, in this namespace.
+    pub name: String,
+    /// Its UID. Absent only for an ad-hoc `Backup` that names a schedule
+    /// without one — a hand-written object, never one the API or the scheduler
+    /// creates.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub uid: Option<String>,
+    /// Its `metadata.generation` when this run was admitted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub generation: Option<i64>,
+    /// The run policy digest COPIED from the schedule at that generation.
+    ///
+    /// Beside [`BackupExecutionInputs::run_policy_sha256`], which is the digest
+    /// this run's OWN fields produce. D1 §3.1 rule 5 requires the two to be
+    /// equal, and [`crate::identity::check_run_policy_digest`] is what refuses
+    /// the run when they are not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_policy_sha256: Option<String>,
+}
+
+/// The exclusions a dynamic selection applied, canonicalised.
+///
+/// SORTED AND DEDUPLICATED, like the run policy digest's copy, so two runs that
+/// applied the same exclusions freeze the same bytes.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ExclusionsInputs {
+    /// Exact names.
+    pub topics: Vec<String>,
+    /// Literal prefixes, never patterns.
+    pub prefixes: Vec<String>,
+}
+
+/// A bounded set of names discovery removed, with the count it was cut from.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DiscoveryNames {
+    /// How many there were.
+    pub count: i64,
+    /// Up to the first `count` of them, byte-sorted. BOUNDED: a plan
+    /// `ConfigMap` is one MiB and a cluster may hold thousands of topics.
+    pub names: Vec<String>,
+    /// Whether `names` was cut short.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub truncated: bool,
+}
+
+/// What the per-run discovery observed — D1 §3.3's `selection.discovery`.
+///
+/// **RESERVED FOR D1 W5 (PLAT-09.2), AND NOTHING WRITES IT YET.** The grammar
+/// declares it here, inside PLAT-06.1's one frozen document (D-SEAMS **S4**),
+/// so the worker that resolves dynamic selection extends this validation rather
+/// than adding a parallel freeze.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DiscoveryInputs {
+    /// When the runner observed the cluster, RFC 3339.
+    pub observed_at: String,
+    /// The broker-reported cluster id the listing came from.
+    pub cluster_id: String,
+    /// `unknown`, `limited` or `attestedComplete` — D-SEAMS **S3**. A
+    /// successful listing ALONE is `unknown`.
+    pub visibility: String,
+    /// How the listing was obtained. `metadata-list` today.
+    pub basis: String,
+    /// `sha256:<hex>` over the canonical discovery result the run parsed.
+    pub result_sha256: String,
+    /// How many topics the principal could see.
+    pub visible_topic_count: i64,
+    /// The internal topics excluded.
+    pub internal_excluded: DiscoveryNames,
+    /// The topics the exclusion rules removed.
+    pub excluded_by_rule: DiscoveryNames,
+    /// How many the broker refused to describe.
+    pub limited_topic_count: i64,
+    /// The discovery Job this result was read from.
+    pub discovery_job: String,
+}
+
+/// The `selection` block: HOW this run chose its topics, and what it may
+/// honestly claim to have covered (D1 §3.3, §7.4).
+///
+/// # The names are NOT repeated here
+///
+/// D1 §3.3 sketches a `selection.topics`. This grammar does not carry one:
+/// `v1`'s top-level [`BackupExecutionInputs::topics`] IS the exact frozen list
+/// — the bytes `backup.yaml` is rendered from and the bytes a later pass
+/// compares — and a second copy inside this block would be a third copy of a
+/// list D1 §7.2 R8 bounds at 256 KiB of names, in a `ConfigMap` bounded at one
+/// MiB, with two places for one answer to drift. The count and the byte size
+/// are recorded instead, and [`BackupExecutionInputs::selection`] is the
+/// PROVENANCE of `topics`, never a second statement of it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct SelectionInputs {
+    /// `SelectedTopics` or `AllUserTopics`.
+    pub mode: SelectionMode,
+    /// What this run may claim to have covered. Only
+    /// [`Coverage::AllUserTopicsAttested`] ever means "everything".
+    pub coverage: Coverage,
+    /// How many topics [`BackupExecutionInputs::topics`] holds.
+    pub resolved_topic_count: i64,
+    /// How many bytes those names take.
+    pub resolved_topic_bytes: i64,
+    /// The exclusions, in dynamic mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub exclude: Option<ExclusionsInputs>,
+    /// The policy's answer to incomplete visibility, in dynamic mode.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub incomplete_discovery: Option<IncompleteDiscovery>,
+    /// What discovery observed. Reserved for D1 W5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub discovery: Option<DiscoveryInputs>,
+}
+
+impl SelectionInputs {
+    /// The `status.selection` projection of this block.
+    ///
+    /// ONE PROJECTION, SO THE STATUS AND THE FROZEN DOCUMENT CANNOT DISAGREE.
+    /// A reader comparing `status.selection.resolvedTopicCount` against the
+    /// plan is comparing two renderings of the same value, not two counts.
+    #[must_use]
+    pub fn status(&self) -> SelectionStatus {
+        let discovery = self.discovery.as_ref();
+        SelectionStatus {
+            mode: self.mode,
+            coverage: self.coverage,
+            visibility: discovery.map(|d| d.visibility.clone()),
+            resolved_topic_count: self.resolved_topic_count,
+            resolved_topic_bytes: Some(self.resolved_topic_bytes),
+            internal_excluded_count: discovery.map(|d| d.internal_excluded.count),
+            excluded_by_rule_count: discovery.map(|d| d.excluded_by_rule.count),
+            limited_topic_count: discovery.map(|d| d.limited_topic_count),
+            discovery_observed_at: discovery.and_then(|d| {
+                chrono::DateTime::parse_from_rfc3339(&d.observed_at)
+                    .ok()
+                    .map(|t| t.with_timezone(&chrono::Utc))
+            }),
+            discovery_sha256: discovery.map(|d| d.result_sha256.clone()),
+        }
+    }
+}
+
+/// What a run's topic resolution decided: the exact frozen list and the
+/// provenance block that explains it.
+///
+/// # THE SEAM D1 W5 PLUGS INTO
+///
+/// [`resolve_inputs`] takes one of these and never computes a selection of its
+/// own. Today the only producer is [`ResolvedSelection::named`], the named
+/// allowlist. W5 (PLAT-09.2) adds a second producer — the discovery result —
+/// and passes it to the same function, so the dynamic path freezes through the
+/// same code, the same canonical encoding and the same
+/// [`verify_frozen_config_map`] comparison as the named one.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResolvedSelection {
+    /// The exact names handed to `backup.yaml`, in the order they are handed.
+    pub topics: Vec<String>,
+    /// Where those names came from.
+    pub selection: SelectionInputs,
+}
+
+impl ResolvedSelection {
+    /// The named allowlist: `spec.topics` VERBATIM, coverage
+    /// [`Coverage::NamedTopics`].
+    ///
+    /// VERBATIM AND NOT SORTED. `Backup.spec.topics` keeps the user's order all
+    /// the way to the engine — only [`crate::policy::run_policy_sha256`]
+    /// canonicalises — and reordering here would change the frozen bytes of
+    /// every run whose list is not already sorted.
+    #[must_use]
+    pub fn named(spec: &BackupCrdSpec) -> Self {
+        let topics = spec.topics.clone();
+        Self {
+            selection: SelectionInputs {
+                mode: SelectionMode::SelectedTopics,
+                coverage: Coverage::NamedTopics,
+                resolved_topic_count: i64::try_from(topics.len()).unwrap_or(i64::MAX),
+                resolved_topic_bytes: i64::try_from(topics.iter().map(String::len).sum::<usize>())
+                    .unwrap_or(i64::MAX),
+                exclude: None,
+                incomplete_discovery: None,
+                discovery: None,
+            },
+            topics,
+        }
+    }
+}
+
 /// The canonical typed snapshot of everything one run executes — the
 /// `execution-inputs.json` document.
 ///
 /// VERSIONED AND CLOSED. Every struct denies unknown fields and the controller
 /// re-encodes a stored snapshot and requires the same bytes, so a snapshot
-/// written by a later grammar is a conflict and never a partial read. Later
-/// tasks that freeze more (a schedule revision, a resolved dynamic topic set)
-/// extend this type under a new [`INPUTS_VERSION`].
+/// written by a later grammar is a conflict and never a partial read.
+///
+/// # `v1` and `v2` are ONE TYPE, and that is what makes the upgrade free
+///
+/// D-SEAMS **S4**: this document is the single frozen grammar and every worker
+/// that freezes more adds a BLOCK to it. So `v2` is `v1` plus five optional
+/// fields, and a `v1` document deserialises with all five absent. Because each
+/// one is `skip_serializing_if = "Option::is_none"` and
+/// `logweir_core::det_json` emits struct fields in DECLARATION order, that
+/// document re-encodes to the exact bytes it was stored as — which is the
+/// property [`verify_frozen_config_map`] rests on, and the reason a `Backup`
+/// frozen by a PLAT-06.1 controller keeps running across the upgrade instead of
+/// turning into a `PlanConfigMapConflict`.
+///
+/// **THE ORDER OF THESE FIELDS IS THE WIRE FORMAT.** Reordering them re-encodes
+/// every stored snapshot differently and turns every running `Backup` terminal.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BackupExecutionInputs {
-    /// [`INPUTS_VERSION`].
+    /// [`INPUTS_VERSION_V1`] or [`INPUTS_VERSION_V2`]; newly frozen documents
+    /// carry [`INPUTS_VERSION`].
     pub version: String,
-    /// The run identity.
+    /// The run identity. `v1`.
     pub execution: ExecutionIdentity,
-    /// The source connection.
+    /// Which kind of run, and where in its attempt chain. `v2`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<RunInputs>,
+    /// The `BackupSchedule` revision this run copied. `v2`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub schedule_ref: Option<ScheduleRefInputs>,
+    /// The digest of THIS run's own policy fields (D1 §3.2). `v2`.
+    ///
+    /// Recorded for every run, including an ad-hoc manual one that copied no
+    /// schedule — so a console can compare what a run was asked to do against
+    /// what a schedule asks for now, without a schedule having been involved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_policy_sha256: Option<String>,
+    /// The source connection. `v1`.
     pub source: SourceInputs,
-    /// `Backup.spec.topics`, verbatim.
+    /// **The exact topic list this run executes**, in the order
+    /// `backup.yaml` carries it. `v1`.
+    ///
+    /// `Backup.spec.topics` verbatim in `SelectedTopics` mode; the byte-sorted
+    /// resolved names in `AllUserTopics` mode. Never empty and never a pattern
+    /// — see [`ResolvedSelection`].
     pub topics: Vec<String>,
-    /// The archive.
+    /// Where [`BackupExecutionInputs::topics`] came from, and what this run may
+    /// claim to have covered. `v2`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selection: Option<SelectionInputs>,
+    /// The resolved `BackupDestination` this run writes to — D2 §3.7, seam
+    /// **S4**. `v2`.
+    ///
+    /// **RESERVED. NOTHING WRITES IT YET.** D2 W10 wires destination-backed
+    /// execution; the block is declared here so that when it does, it lands in
+    /// PLAT-06.1's one document under a grammar that already loads, verifies
+    /// and compares it — not in a second freeze.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<ResolvedDestinationSnapshot>,
+    /// The archive. `v1`.
     pub archive: ArchiveInputs,
-    /// The container argv, deadline and tunables.
+    /// The container argv, deadline and tunables. `v1`.
     pub runner: RunnerInputs,
 }
 
@@ -584,6 +930,34 @@ impl BackupExecutionInputs {
     pub fn executable(&self) -> Self {
         let mut view = self.clone();
         view.source.observed_cluster_id = None;
+        view
+    }
+
+    /// This snapshot as grammar [`INPUTS_VERSION_V1`] states it: every `v2`
+    /// block dropped.
+    ///
+    /// # Why a downgraded VIEW rather than a version-blind comparison
+    ///
+    /// A `Backup` frozen before D1 holds a `v1` plan, and the fresh resolution
+    /// made for it now is a `v2` one. Comparing them whole would find five
+    /// added blocks and refuse the run as a `PlanConfigMapConflict` — every
+    /// in-flight `Backup` in the cluster, at the moment the new controller
+    /// starts. Comparing the stored `v1` document against this view of the
+    /// fresh resolution asks the only question a `v1` plan can answer: are the
+    /// fields it actually froze still the fields this run resolves?
+    ///
+    /// It is deliberately NOT used the other way round. A `v2` plan is compared
+    /// whole, so a changed trigger, revision, policy digest, selection or
+    /// destination is a conflict.
+    #[must_use]
+    pub fn as_version_v1(&self) -> Self {
+        let mut view = self.clone();
+        view.version = INPUTS_VERSION_V1.to_string();
+        view.trigger = None;
+        view.schedule_ref = None;
+        view.run_policy_sha256 = None;
+        view.selection = None;
+        view.destination = None;
         view
     }
 }
@@ -607,6 +981,7 @@ pub fn resolve_inputs(
     identity: ExecutionIdentity,
     cluster: &KafkaCluster,
     addressing_env: &[(String, String)],
+    selection: &ResolvedSelection,
 ) -> Result<BackupExecutionInputs, ExecutionRefusal> {
     let name = backup.name_any();
     let cluster_name = cluster.name_any();
@@ -661,9 +1036,44 @@ pub fn resolve_inputs(
             format!("spec.archive.secretRef on {name} names no Secret"),
         ));
     }
+    // THE LIST THAT REACHES THE ENGINE, RE-CHECKED AT THE FREEZE BOUNDARY.
+    // `reconcile_backup`'s step 0b already refuses a glob in `spec.topics` and
+    // its step 0b' refuses a selection that is neither D1 §7.1 shape — but
+    // W5's dynamic path produces this list from a runner's stdout rather than
+    // from the spec, and the last place to refuse an empty or patterned
+    // allowlist is the one every producer goes through. An empty list handed
+    // to `backup.yaml` is the "no allowlist means everything" shape guard
+    // G-GLOB exists for.
+    if selection.topics.is_empty() {
+        return Err(ExecutionRefusal::new(
+            crate::conditions::TERMINAL_STATE_SELECTION_EMPTY,
+            format!(
+                "the resolved topic selection for {name} is empty; a mandatory allowlist whose \
+                 absence means `all topics` is not an allowlist (guard G-GLOB), so no runner Job \
+                 is created"
+            ),
+        ));
+    }
+    if let Err(entry) = logweir_core::guard::reject_glob_metacharacters(&selection.topics) {
+        return Err(ExecutionRefusal::new(
+            crate::conditions::TERMINAL_STATE_INVALID_TOPIC_SELECTION,
+            format!(
+                "the resolved topic selection for {name} names `{}`, which carries a glob \
+                 metacharacter; topics are a mandatory NAMED allowlist and a pattern is refused \
+                 rather than expanded",
+                shown(&entry)
+            ),
+        ));
+    }
+
     let args = runner_argv(identity.trigger, &identity.id);
     Ok(BackupExecutionInputs {
         version: INPUTS_VERSION.to_string(),
+        trigger: Some(run_inputs(backup)),
+        schedule_ref: schedule_ref_inputs(backup),
+        run_policy_sha256: Some(crate::policy::run_policy_sha256(&backup.spec)),
+        selection: Some(selection.selection.clone()),
+        destination: None,
         source: SourceInputs {
             cluster: ObjectIdentity {
                 namespace: cluster
@@ -681,7 +1091,7 @@ pub fn resolve_inputs(
                 .and_then(|status| status.cluster_id.clone())
                 .filter(|id| !id.is_empty()),
         },
-        topics: backup.spec.topics.clone(),
+        topics: selection.topics.clone(),
         archive: ArchiveInputs {
             url: backup.spec.archive.url.clone(),
             storage,
@@ -699,6 +1109,47 @@ pub fn resolve_inputs(
             settings: RunnerSettings::from(&BackupSettings::default()),
         },
         execution: identity,
+    })
+}
+
+/// The `trigger` block for this `Backup`, read the way D1 §3.1 reads it.
+///
+/// PURE, AND THE SAME READ [`crate::identity::run_identity`] MAKES. A `Backup`
+/// created before `spec.trigger` existed has none, and rule 4 says what it is:
+/// `Scheduled`/0 when `triggeredBy` is `schedule`, `Manual` otherwise. That is
+/// exactly what the controller that created it did, so freezing the derived
+/// value converts nothing and loses nothing.
+fn run_inputs(backup: &Backup) -> RunInputs {
+    let (kind, attempt, retry_of) = crate::identity::declared_trigger(backup);
+    RunInputs {
+        kind,
+        attempt,
+        retry_of: retry_of.map(|r| r.name.clone()),
+        time_zone: backup
+            .spec
+            .trigger
+            .as_ref()
+            .and_then(|t| t.time_zone.clone())
+            .filter(|zone| !zone.is_empty()),
+    }
+}
+
+/// The `scheduleRef` block for this `Backup`, or `None` for an ad-hoc run.
+///
+/// COPIED, NOT RESOLVED. Whatever `spec.scheduleRef` states is what the run
+/// executed under; the schedule is never re-read to fill this in, because a
+/// schedule edited between the admission and the freeze must not change what a
+/// created run records (D1 §5.4).
+fn schedule_ref_inputs(backup: &Backup) -> Option<ScheduleRefInputs> {
+    let reference = backup.spec.schedule_ref.as_ref()?;
+    if reference.name.is_empty() {
+        return None;
+    }
+    Some(ScheduleRefInputs {
+        name: reference.name.clone(),
+        uid: reference.uid.clone().filter(|uid| !uid.is_empty()),
+        generation: reference.generation,
+        run_policy_sha256: reference.run_policy_sha256.clone(),
     })
 }
 
@@ -979,9 +1430,16 @@ pub fn verify_frozen_config_map(
                 .and_then(|v| v.as_str())
                 .map(str::to_string)
         });
-    if version.as_deref() != Some(INPUTS_VERSION) {
+    // BOTH GRAMMARS ARE READ, AND ONLY ONE IS WRITTEN (D-SEAMS S4). A `v1`
+    // plan is a run a PLAT-06.1 controller admitted and a runner may already
+    // have mounted; refusing it on the version string alone would make the
+    // upgrade terminate every `Backup` in flight.
+    if !version
+        .as_deref()
+        .is_some_and(|v| INPUTS_VERSIONS_READ.contains(&v))
+    {
         return refuse(format!(
-            "{INPUTS_KEY} names grammar {:?}, and this controller reads {INPUTS_VERSION}",
+            "{INPUTS_KEY} names grammar {:?}, and this controller reads {INPUTS_VERSIONS_READ:?}",
             version.as_deref().unwrap_or("<none>")
         ));
     }
@@ -1026,7 +1484,17 @@ pub fn verify_frozen_config_map(
             ));
         }
     }
-    if frozen.inputs.execution != desired.inputs.execution {
+    // THE COMPARISON IS MADE AT THE STORED DOCUMENT'S OWN GRAMMAR. A `v1` plan
+    // is asked only what a `v1` plan states; a `v2` plan is compared whole, so
+    // every block D1 added is a conflict when it differs.
+    let stored_is_v1 = frozen.inputs.version == INPUTS_VERSION_V1;
+    let expected = if stored_is_v1 {
+        desired.inputs.as_version_v1()
+    } else {
+        desired.inputs.clone()
+    };
+
+    if frozen.inputs.execution != expected.execution {
         return refuse(format!(
             "its snapshot binds execution {} of {}/{} (uid {}), and this Backup derives execution \
              {}",
@@ -1034,10 +1502,54 @@ pub fn verify_frozen_config_map(
             frozen.inputs.execution.backup.namespace,
             frozen.inputs.execution.backup.name,
             frozen.inputs.execution.backup.uid,
-            desired.inputs.execution.id
+            expected.execution.id
         ));
     }
-    if frozen.inputs.executable() != desired.inputs.executable() {
+    // THE `v2` BLOCKS, EACH NAMED SEPARATELY. The whole-snapshot comparison
+    // below would catch all of these, with a message that says only "the
+    // inputs differ" — and "which of the nine blocks" is the first thing an
+    // operator reading a terminal `PlanConfigMapConflict` needs.
+    if frozen.inputs.trigger != expected.trigger {
+        return refuse(format!(
+            "its snapshot froze trigger {:?} and this Backup declares {:?}; a run's kind and \
+             attempt decide its archive prefix and are never re-decided after the freeze",
+            frozen.inputs.trigger, expected.trigger
+        ));
+    }
+    if frozen.inputs.schedule_ref != expected.schedule_ref {
+        return refuse(format!(
+            "its snapshot froze the BackupSchedule revision {:?} and this Backup records {:?}; \
+             an edited schedule changes the NEXT admission and never a created run",
+            frozen.inputs.schedule_ref, expected.schedule_ref
+        ));
+    }
+    if frozen.inputs.run_policy_sha256 != expected.run_policy_sha256 {
+        return refuse(format!(
+            "its snapshot froze run policy {} and this Backup's fields digest to {}",
+            frozen
+                .inputs
+                .run_policy_sha256
+                .as_deref()
+                .unwrap_or("<none>"),
+            expected.run_policy_sha256.as_deref().unwrap_or("<none>")
+        ));
+    }
+    if frozen.inputs.selection != expected.selection {
+        return refuse(
+            "its snapshot froze a different topic selection than this Backup resolves now; a \
+             frozen run covers the set it was admitted with and a coverage claim is never \
+             re-decided"
+                .to_string(),
+        );
+    }
+    if frozen.inputs.destination != expected.destination {
+        return refuse(
+            "its snapshot froze a different resolved BackupDestination than this Backup resolves \
+             now"
+            .to_string(),
+        );
+    }
+    if frozen.inputs.executable() != expected.executable() {
         return refuse(
             "its snapshot differs from the inputs resolved now from spec, the referenced \
              KafkaCluster and the controller's archive addressing, so frozen plan bytes would be \

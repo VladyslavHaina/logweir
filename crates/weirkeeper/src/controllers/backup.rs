@@ -79,7 +79,8 @@ use crate::backup_execution::{
     self, annotate_runner_job, compatible_backup_job, derived_runner_argv, execution_identity,
     has_exact_backup_owner, inputs_config_map, job_provenance, resolve_inputs,
     runner_argv_annotation, verify_frozen_config_map, ExecutionRefusal, FrozenInputs,
-    JobProvenance, RunnerArgvAnnotation, INPUTS_SHA256_ANNOTATION, RUNNER_ARGV_ANNOTATION,
+    JobProvenance, ResolvedSelection, RunnerArgvAnnotation, INPUTS_SHA256_ANNOTATION,
+    RUNNER_ARGV_ANNOTATION,
 };
 use crate::check;
 use crate::conditions::{
@@ -94,12 +95,14 @@ use crate::conditions::{
     TERMINAL_STATE_JOB_NAME_CONFLICT, TERMINAL_STATE_NAME_TOO_LONG, TERMINAL_STATE_NO_EXIT_CODE,
     TERMINAL_STATE_ORPHANED_SCORECARD, TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
     TERMINAL_STATE_POD_OWNERSHIP_CONTESTED, TERMINAL_STATE_POD_UNSCHEDULABLE,
-    TERMINAL_STATE_REFERENT_NOT_FOUND,
+    TERMINAL_STATE_REFERENT_NOT_FOUND, TERMINAL_STATE_SCHEDULE_NOT_FOUND,
 };
 use crate::crds::backup::Backup;
+use crate::crds::backup_schedule::BackupSchedule;
 use crate::crds::kafka_cluster::KafkaCluster;
 use crate::crds::Condition;
 use crate::job::{self, EnvFromSecret, RunnerJobSpec, RunnerOwner, SecretMount, CONTAINER_NAME};
+use crate::policy::SelectionShape;
 use crate::verification::{
     backup_badge, conditions_in, second_patch, stored_verification, verified_condition,
     EvidenceRef, VerifyOracle,
@@ -338,10 +341,106 @@ pub fn desired_execution_inputs(
     backup: &Backup,
     cluster: &KafkaCluster,
 ) -> Result<FrozenInputs, BackupError> {
+    desired_execution_inputs_for(backup, cluster, &resolved_selection(backup)?)
+}
+
+/// [`desired_execution_inputs`] for a selection that has ALREADY been resolved.
+///
+/// # THE ENTRY POINT D1 W5 (PLAT-09.2) CALLS
+///
+/// The dynamic path resolves its topic list from a discovery Job — an async,
+/// multi-pass affair that cannot live inside a pure resolver — and then freezes
+/// through exactly this function, so a dynamic run and a named one share one
+/// canonical encoding, one `status.execution` write and one
+/// [`verify_frozen_config_map`] comparison. See
+/// [`backup_execution::ResolvedSelection`].
+///
+/// # Errors
+///
+/// [`BackupError::Refused`] with the terminal state
+/// [`backup_execution::resolve_inputs`] or [`execution_identity`] names.
+pub fn desired_execution_inputs_for(
+    backup: &Backup,
+    cluster: &KafkaCluster,
+    selection: &ResolvedSelection,
+) -> Result<FrozenInputs, BackupError> {
     let identity = execution_identity(backup).map_err(refused)?;
-    let inputs =
-        resolve_inputs(backup, identity, cluster, &archive_addressing_env()).map_err(refused)?;
+    let inputs = resolve_inputs(
+        backup,
+        identity,
+        cluster,
+        &archive_addressing_env(),
+        selection,
+    )
+    .map_err(refused)?;
     FrozenInputs::freeze(inputs).map_err(refused)
+}
+
+/// Which of D1 §7.1's two selection shapes this `Backup` declares — the check
+/// that runs before ANY read and before any `POST`.
+///
+/// # Errors
+///
+/// [`TERMINAL_STATE_INVALID_TOPIC_SELECTION`], naming every field-level reason,
+/// for a spec that declares neither shape. TERMINAL, because `Backup.spec` is
+/// CEL-immutable and a requeue over a shape that cannot be edited would never
+/// succeed.
+pub fn declared_selection_shape(backup: &Backup) -> Result<SelectionShape, BackupError> {
+    crate::policy::validate_topic_selection(&backup.spec).map_err(|errors| {
+        let detail = errors
+            .iter()
+            .map(|e| format!("{}: {}", e.field, e.message))
+            .collect::<Vec<_>>()
+            .join("; ");
+        BackupError::Refused(
+            TERMINAL_STATE_INVALID_TOPIC_SELECTION,
+            format!(
+                "spec.topics and spec.allUserTopics do not form one of the two selection shapes \
+                 D1 §7.1 admits (a non-empty named allowlist with no allUserTopics, or \
+                 `topics: []` with one): {detail}"
+            ),
+        )
+    })
+}
+
+/// The topic list this run freezes, and where it came from.
+///
+/// # THE ONE CALL SITE D1 W5 (PLAT-09.2) REPLACES
+///
+/// The `SelectedTopics` arm is complete and final: the named allowlist,
+/// verbatim, coverage `NamedTopics`. The `AllUserTopics` arm REFUSES the run
+/// terminally, because this build resolves no discovery — and the alternative
+/// is the one outcome D1 §7.7 and guard G-GLOB exist to prevent, an empty
+/// `spec.topics` rendered into `backup.yaml` as "no allowlist" and handed to
+/// the engine. W5 replaces that arm with
+/// `backup_selection::resolve(backup, client, namespace, now).await`, which
+/// returns the same [`ResolvedSelection`] and freezes through
+/// [`desired_execution_inputs_for`]; nothing else on this path changes.
+///
+/// # Errors
+///
+/// [`TERMINAL_STATE_INVALID_TOPIC_SELECTION`] for a spec that declares neither
+/// shape, and for a dynamic selection this controller cannot resolve.
+pub fn resolved_selection(backup: &Backup) -> Result<ResolvedSelection, BackupError> {
+    match declared_selection_shape(backup)? {
+        SelectionShape::SelectedTopics => Ok(ResolvedSelection::named(&backup.spec)),
+        SelectionShape::AllUserTopics => Err(dynamic_selection_unsupported()),
+    }
+}
+
+/// The terminal refusal a dynamic selection gets from a build that resolves no
+/// discovery. **D1 W5 deletes this function.**
+fn dynamic_selection_unsupported() -> BackupError {
+    BackupError::Refused(
+        TERMINAL_STATE_INVALID_TOPIC_SELECTION,
+        "spec.allUserTopics asks this run to cover every user topic its principal can see, and \
+         this controller build resolves no topic discovery (PLAT-09.2 / D1 W5). The run is \
+         refused rather than started: `spec.topics` is empty in this mode, and an empty \
+         allowlist rendered into backup.yaml is the `no allowlist means everything` shape guard \
+         G-GLOB exists to prevent. Name the topics explicitly, or run a controller that resolves \
+         dynamic selection"
+            .to_string(),
+    )
 }
 
 /// The typed `BackupSpec` the runner's `--spec` file carries, rendered from
@@ -1211,13 +1310,26 @@ pub fn carry_conditions(
 }
 
 /// The `/status` merge patch that records frozen inputs: `status.execution`,
-/// and nothing else.
+/// `status.selection`, and nothing else.
 ///
-/// SENT BEFORE THE JOB IS CREATED, and a merge of one object key: it replaces
-/// no array and so cannot drop a condition another writer owns.
+/// SENT BEFORE THE JOB IS CREATED, and a merge of object keys: it replaces no
+/// array and so cannot drop a condition another writer owns.
+///
+/// **`status.selection` IS WRITTEN AT THE FREEZE** (D1 §7.6), in this same
+/// patch and not a later one. It says what the run may claim to have covered,
+/// and a coverage label that appeared only after the Job finished would be
+/// absent for exactly the window in which somebody is watching the run. It is
+/// absent for a `Backup` frozen under grammar `v1`, which is the documented
+/// absent-field behaviour and not a degraded state.
 #[must_use]
 pub fn execution_status_patch(frozen: &FrozenInputs) -> Value {
-    json!({ "status": { "execution": frozen.status() } })
+    match frozen.inputs.selection.as_ref() {
+        Some(selection) => json!({ "status": {
+            "execution": frozen.status(),
+            "selection": selection.status(),
+        }}),
+        None => json!({ "status": { "execution": frozen.status() } }),
+    }
 }
 
 /// Whether, and how, this pass observed the runner Job.
@@ -1773,6 +1885,68 @@ async fn plan_source_cluster(
         })
 }
 
+/// D1 §3.1 rule 2: a scheduled-kind run needs its `BackupSchedule` to exist,
+/// with the UID its identity was derived from, **before the freeze**.
+///
+/// # Why a run has to say this itself now
+///
+/// Until PLAT-05.2 a scheduled `Backup` carried a controller ownerReference to
+/// its schedule, so deleting the schedule garbage-collected every run of it and
+/// the question never arose. D1 §5.2 removes that reference to KEEP the
+/// history, which means an unfrozen run of a deleted schedule would otherwise
+/// go on and start a Job under a policy nobody can look up any more. "Deleting
+/// a schedule stops future work" is the rule, and this is where it is enforced.
+///
+/// **A recreated schedule is a different schedule.** A UID that does not match
+/// is `ScheduleNotFound` and not an adoption: two same-named schedules' runs
+/// sharing an archive prefix is exactly what the UID is in the reference for.
+///
+/// **Manual runs never reach here**, even when they copied a schedule's policy
+/// (D1 §8.3): a manual run is "run this policy now", and it stays runnable
+/// after the schedule it was copied from is gone.
+///
+/// # Errors
+///
+/// [`crate::conditions::TERMINAL_STATE_SCHEDULE_NOT_FOUND`] when the schedule
+/// is absent or carries another UID; [`BackupError::Api`] when the API server
+/// could not be asked, which IS transient and IS a requeue.
+async fn require_schedule_for_scheduled_run(
+    identity: &backup_execution::ExecutionIdentity,
+    client: &kube::Client,
+    namespace: &str,
+) -> Result<(), BackupError> {
+    let Some(schedule) = identity.schedule.as_ref() else {
+        return Ok(());
+    };
+    let schedules: Api<BackupSchedule> = Api::namespaced(client.clone(), namespace);
+    let found = schedules
+        .get_opt(&schedule.name)
+        .await
+        .map_err(BackupError::Api)?;
+    match found.as_ref().and_then(kube::ResourceExt::uid) {
+        Some(uid) if uid == schedule.uid => Ok(()),
+        Some(uid) => Err(BackupError::Refused(
+            TERMINAL_STATE_SCHEDULE_NOT_FOUND,
+            format!(
+                "this run's identity is derived from BackupSchedule `{}` UID {}, and the \
+                 BackupSchedule of that name in namespace {namespace} has UID {uid}; a schedule \
+                 deleted and recreated under the same name is a different schedule and does not \
+                 adopt this run",
+                schedule.name, schedule.uid
+            ),
+        )),
+        None => Err(BackupError::Refused(
+            TERMINAL_STATE_SCHEDULE_NOT_FOUND,
+            format!(
+                "spec.scheduleRef names the BackupSchedule `{}`, which does not exist in \
+                 namespace {namespace}; deleting a schedule stops future work, and this run's \
+                 inputs were never frozen. A run whose inputs ARE frozen is not re-checked",
+                schedule.name
+            ),
+        )),
+    }
+}
+
 /// Freeze this run's inputs in the plan ConfigMap, or admit the frozen inputs
 /// already there — and return the inputs the Job must be built from.
 ///
@@ -2193,19 +2367,23 @@ async fn reconcile_backup_inner(
     //
     // TERMINAL, because `spec` is CEL-immutable: a requeue over a shape that
     // cannot be edited would never succeed.
-    if let Err(errors) = crate::policy::validate_topic_selection(&backup.spec) {
-        let detail = errors
-            .iter()
-            .map(|e| format!("{}: {}", e.field, e.message))
-            .collect::<Vec<_>>()
-            .join("; ");
+    //
+    // THE SHAPE ONLY, HERE. Which topics a dynamic selection RESOLVES to is a
+    // question with a cluster read in it, so it is asked at the freeze
+    // boundary below — `resolved_selection` — and not in front of the Job
+    // read, where a run whose plan is already frozen would be asked it again.
+    let shape = declared_selection_shape(backup)?;
+
+    // STEP 0b''. THE RUN POLICY DIGEST THE OBJECT CARRIES MUST BE THE ONE ITS
+    // OWN FIELDS PRODUCE — D1 §3.1 rule 5. AN INTEGRITY CHECK AGAINST BUGS AND
+    // NOT A SECURITY BOUNDARY (D1 §8.7): `Backup.spec` is CEL-immutable and
+    // this recomputes the digest from the same object, so a mismatch means the
+    // control plane copied a schedule's policy and then wrote different
+    // fields. Terminal, because nothing can fix it in place.
+    if let Err(error) = crate::identity::check_run_policy_digest(backup) {
         return Err(BackupError::Refused(
-            TERMINAL_STATE_INVALID_TOPIC_SELECTION,
-            format!(
-                "spec.topics and spec.allUserTopics do not form one of the two selection shapes \
-                 D1 §7.1 admits (a non-empty named allowlist with no allUserTopics, or \
-                 `topics: []` with one): {detail}"
-            ),
+            error.terminal_state(),
+            error.to_string(),
         ));
     }
 
@@ -2262,15 +2440,50 @@ async fn reconcile_backup_inner(
         let view = observed_view(backup, JobObservation::Absent, now);
 
         // THE RUN IDENTITY, FROM THE TYPED SPEC AND SERVER METADATA ONLY — no
-        // annotation, before any referent is read.
+        // annotation, before any referent is read. D1 §3.1's one derivation,
+        // which knows all four trigger kinds.
         let identity = execution_identity(backup).map_err(refused)?;
+
+        // D1 §3.1 RULE 2, AND ONLY BEFORE THE FREEZE. A scheduled-kind run
+        // needs the `BackupSchedule` its `scheduleRef` names to exist in this
+        // namespace with that UID: PLAT-05.2 stops a deleted schedule from
+        // garbage-collecting its runs, so "deleting a schedule stops future
+        // work" has to be said by the run itself. AFTER the freeze nothing is
+        // re-checked — a frozen run executes the policy it copied, and a
+        // schedule deleted while its Job runs does not change what that Job is
+        // doing. A MANUAL run never requires the schedule, even when it copied
+        // one (D1 §8.3): that is the difference between "run this policy now"
+        // and "this is the schedule's run".
+        if backup
+            .status
+            .as_ref()
+            .and_then(|s| s.execution.as_ref())
+            .is_none()
+        {
+            require_schedule_for_scheduled_run(&identity, client, &namespace).await?;
+        }
+
+        // === THE D1 W5 (PLAT-09.2) CALL SITE ===
+        // The named allowlist, or a terminal refusal for the dynamic mode this
+        // build does not resolve. W5 replaces the dynamic arm with its
+        // discovery pass; everything below is already shape-agnostic.
+        let selection = match shape {
+            SelectionShape::SelectedTopics => ResolvedSelection::named(&backup.spec),
+            SelectionShape::AllUserTopics => return Err(dynamic_selection_unsupported()),
+        };
 
         // Resolve once: the plan and credential must describe the same
         // KafkaCluster used by the connection probe, including its Secret.
         let cluster = plan_source_cluster(backup, client, &namespace).await?;
         let desired = FrozenInputs::freeze(
-            resolve_inputs(backup, identity, &cluster, &archive_addressing_env())
-                .map_err(refused)?,
+            resolve_inputs(
+                backup,
+                identity,
+                &cluster,
+                &archive_addressing_env(),
+                &selection,
+            )
+            .map_err(refused)?,
         )
         .map_err(refused)?;
 

@@ -245,11 +245,35 @@ fn kafka_cluster_json() -> String {
     )
 }
 
+/// The `BackupSchedule` [`scheduled_backup`] belongs to, as the API server
+/// would hand it over — D1 §3.1 rule 2's referent.
+fn backup_schedule_json(uid: &str) -> String {
+    format!(
+        r#"{{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "BackupSchedule",
+  "metadata": {{ "name": "nightly", "namespace": "{NS}", "uid": "{uid}", "generation": 7 }},
+  "spec": {{
+    "schedule": "0 3 * * *",
+    "sourceRef": {{ "name": "prod" }},
+    "topics": ["orders", "payments"],
+    "archive": {{ "url": "s3://kafka-backups/logweir", "secretRef": {{ "name": "logweir-s3" }} }}
+  }}
+}}"#
+    )
+}
+
 /// The routes a CREATE pass needs: the absent Job, the source `KafkaCluster`,
-/// the plan ConfigMap `POST`, the Job `POST`, and the status patch.
+/// the `BackupSchedule` a scheduled run's identity names, the plan ConfigMap
+/// `POST`, the Job `POST`, and the status patch.
 ///
 /// `configmap_status` is the ConfigMap `POST`'s answer, so one helper serves
 /// the 201 case and the two 409 cases.
+///
+/// THE SCHEDULE ROUTE IS UNUSED BY EVERY MANUAL ROW, and that is the point: a
+/// manual `Backup` must not read a `BackupSchedule` at all (D1 §8.3), and
+/// `manual_runs_never_read_a_backup_schedule` asserts the absence against this
+/// very table — an answer that exists and is not asked for.
 fn create_routes(configmap_status: u16, existing_configmap: String) -> Vec<Route> {
     vec![
         Route {
@@ -257,6 +281,12 @@ fn create_routes(configmap_status: u16, existing_configmap: String) -> Vec<Route
             path_suffix: "/jobs/logweir-backup-nightly-20261109-031700",
             status: 404,
             body: not_found_body("jobs.batch", NAME),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/backupschedules/nightly",
+            status: 200,
+            body: backup_schedule_json(SCHEDULE_UID),
         },
         Route {
             method: "GET",
@@ -5178,17 +5208,19 @@ async fn a_steady_backup_issues_no_second_status_patch() {
 
 use weirkeeper::backup_execution::{
     canonical_inputs, execution_identity, BackupExecutionInputs, FrozenInputs,
-    EXECUTION_ID_ANNOTATION, INPUTS_KEY, INPUTS_VERSION, RUNNER_ARGV_ANNOTATION,
+    EXECUTION_ID_ANNOTATION, INPUTS_KEY, INPUTS_VERSION, INPUTS_VERSIONS_READ, INPUTS_VERSION_V1,
+    INPUTS_VERSION_V2, RUNNER_ARGV_ANNOTATION,
 };
 use weirkeeper::conditions::{
     CONDITION_EXECUTION_INPUTS_UNVERIFIED, CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED,
     REASON_JOB_INPUTS_MISMATCH, REASON_LEGACY_EXECUTION, REASON_RUNNER_ARGV_ANNOTATION_IGNORED,
     REASON_RUNNER_ARGV_ANNOTATION_MALFORMED, TERMINAL_STATE_EXECUTION_SPEC_INVALID,
     TERMINAL_STATE_JOB_NAME_CONFLICT, TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
+    TERMINAL_STATE_SCHEDULED_IDENTITY_MISMATCH,
 };
 use weirkeeper::controllers::backup::{
-    desired_execution_inputs, plan_config_map, runner_job, runner_job_spec_from_inputs,
-    running_status_patch, with_status_patch,
+    desired_execution_inputs, execution_status_patch, plan_config_map, runner_job,
+    runner_job_spec_from_inputs, running_status_patch, with_status_patch,
 };
 use weirkeeper::crds::kafka_cluster::KafkaCluster;
 
@@ -5207,10 +5239,7 @@ fn desired_for(b: &Backup) -> FrozenInputs {
 /// starts from.
 fn running_after_freeze(b: &Backup) -> Backup {
     let frozen = desired_for(b);
-    let mut recorded = with_status_patch(
-        b,
-        &serde_json::json!({ "status": { "execution": frozen.status() } }),
-    );
+    let mut recorded = with_status_patch(b, &execution_status_patch(&frozen));
     let running = running_status_patch(&recorded, NAME, utc(2026, 11, 9, 3, 17));
     recorded = with_status_patch(&recorded, &running);
     recorded
@@ -5405,7 +5434,10 @@ async fn a_manual_backup_without_an_annotation_freezes_its_inputs_then_runs_them
         );
     }
 
-    // STATUS.EXECUTION, exactly, and in a patch of its own that replaces no array.
+    // STATUS.EXECUTION AND STATUS.SELECTION, exactly, and in a patch of its own
+    // that replaces no array. D1 §7.6: the coverage label is written AT THE
+    // FREEZE, so it is on the object for the whole time a run is watched, not
+    // only once it finishes.
     let statuses = patched_statuses(&bodies);
     assert_eq!(
         statuses[0],
@@ -5414,9 +5446,16 @@ async fn a_manual_backup_without_an_annotation_freezes_its_inputs_then_runs_them
                 "id": UID,
                 "inputsRef": { "name": plan_config_map_name(NAME) },
                 "inputsSha256": digest,
+            },
+            "selection": {
+                "mode": "SelectedTopics",
+                "coverage": "NamedTopics",
+                "resolvedTopicCount": 2,
+                "resolvedTopicBytes": 14,
             }
         }),
-        "the first status write records the frozen inputs and nothing else"
+        "the first status write records the frozen inputs and the frozen selection, and nothing \
+         else"
     );
 
     // THE JOB: the frozen argv, stamped with the recorded digest and identity.
@@ -5531,11 +5570,14 @@ fn identical_resolved_inputs_are_identical_bytes_and_only_identity_separates_tri
         "the encoding round-trips"
     );
 
-    // Manual vs scheduled: mask the identity and the argv; nothing else differs.
+    // Manual vs scheduled: mask the identity, the trigger, the schedule
+    // reference and the argv; nothing else differs.
     let scheduled = desired_for(&scheduled_backup());
     let masked = |f: &FrozenInputs| {
         let mut v: Value = serde_json::from_str(&f.canonical).unwrap();
         v["execution"] = Value::Null;
+        v["trigger"] = Value::Null;
+        v["scheduleRef"] = Value::Null;
         v["runner"]["args"] = Value::Null;
         v
     };
@@ -5749,7 +5791,7 @@ async fn a_nonterminal_backup_whose_job_is_gone_recreates_it_from_the_frozen_inp
 type PlanCase = (&'static str, Box<dyn Fn(&mut Value)>, bool, &'static str);
 
 /// One mutation of a `Backup` spec: `(what it is, how to make it)`.
-type SpecCase = (&'static str, Box<dyn Fn(&mut Value)>);
+type SpecCase = (&'static str, &'static str, Box<dyn Fn(&mut Value)>);
 
 /// **AN EXISTING PLAN THAT IS NOT EXACTLY THIS BACKUP'S FROZEN INPUTS IS REFUSED
 /// AND NEVER REWRITTEN** — on a `409` retry and on a restart that recorded
@@ -6347,13 +6389,26 @@ async fn a_job_that_does_not_carry_the_recorded_inputs_is_reported() {
 /// non-positive deadline are refused before anything is created — and a
 /// hostile annotation on such a Backup is still surfaced.
 ///
+/// **THE TERMINAL STATE IS PER ROW, AND THE VOCABULARY MOVED (D1 §3.4).**
+/// PLAT-06.1 answered every one of these `ExecutionSpecInvalid`; D1 §3.1 gives
+/// a run's IDENTITY its own refusal, `ScheduledIdentityMismatch`, and keeps
+/// `ExecutionSpecInvalid` for what is wrong with the spec as an EXECUTION
+/// request — an unknown `triggeredBy`, a deadline a Job cannot carry. An
+/// operator reading `ScheduledIdentityMismatch` is told the object's own fields
+/// do not compose the run it claims to be; one reading `ExecutionSpecInvalid`
+/// is told a value is out of range. Every row is still terminal and still
+/// refused before any `POST`, which is the property that matters.
+///
 /// KILLS: silently running a false `schedule` claim as manual (its receipt
-/// would say `schedule`); a scheduled identity from a non-schedule owner.
+/// would say `schedule`); a scheduled identity from a non-schedule owner;
+/// accepting a slot that is fifteen digits and not a date; letting an unknown
+/// `triggeredBy` through as manual now that the trigger kind is a field.
 #[tokio::test]
 async fn a_spec_that_states_no_runnable_identity_is_refused_before_any_post() {
     let mutations: Vec<SpecCase> = vec![
         (
             "schedule trigger without an owner",
+            TERMINAL_STATE_SCHEDULED_IDENTITY_MISMATCH,
             Box::new(|v| {
                 v["spec"]["triggeredBy"] = "schedule".into();
                 v["spec"]["scheduleRef"] = serde_json::json!({"name": "nightly"});
@@ -6362,6 +6417,7 @@ async fn a_spec_that_states_no_runnable_identity_is_refused_before_any_post() {
         ),
         (
             "schedule owner of another kind",
+            TERMINAL_STATE_SCHEDULED_IDENTITY_MISMATCH,
             Box::new(|v| {
                 v["spec"]["triggeredBy"] = "schedule".into();
                 v["spec"]["scheduleRef"] = serde_json::json!({"name": "nightly"});
@@ -6374,6 +6430,7 @@ async fn a_spec_that_states_no_runnable_identity_is_refused_before_any_post() {
         ),
         (
             "schedule under another name",
+            TERMINAL_STATE_SCHEDULED_IDENTITY_MISMATCH,
             Box::new(|v| {
                 v["spec"]["triggeredBy"] = "schedule".into();
                 v["spec"]["scheduleRef"] = serde_json::json!({"name": "hourly"});
@@ -6386,6 +6443,7 @@ async fn a_spec_that_states_no_runnable_identity_is_refused_before_any_post() {
         ),
         (
             "schedule with a malformed slot",
+            TERMINAL_STATE_SCHEDULED_IDENTITY_MISMATCH,
             Box::new(|v| {
                 v["spec"]["triggeredBy"] = "schedule".into();
                 v["spec"]["scheduleRef"] = serde_json::json!({"name": "nightly"});
@@ -6398,24 +6456,27 @@ async fn a_spec_that_states_no_runnable_identity_is_refused_before_any_post() {
         ),
         (
             "manual with a slot",
+            TERMINAL_STATE_SCHEDULED_IDENTITY_MISMATCH,
             Box::new(|v| {
                 v["spec"]["slot"] = "20261109-031700".into();
             }),
         ),
         (
             "an unknown trigger",
+            TERMINAL_STATE_EXECUTION_SPEC_INVALID,
             Box::new(|v| {
                 v["spec"]["triggeredBy"] = "--spec".into();
             }),
         ),
         (
             "a zero deadline",
+            TERMINAL_STATE_EXECUTION_SPEC_INVALID,
             Box::new(|v| {
                 v["spec"]["deadlineSeconds"] = 0.into();
             }),
         ),
     ];
-    for (label, mutate) in mutations {
+    for (label, expected, mutate) in mutations {
         let mut v: Value = serde_json::from_str(&backup_json()).unwrap();
         mutate(&mut v);
         v["metadata"]["annotations"] =
@@ -6439,7 +6500,7 @@ async fn a_spec_that_states_no_runnable_identity_is_refused_before_any_post() {
         let bodies = bodies.lock().unwrap().clone();
         assert_eq!(
             outcome.terminal_state.as_deref(),
-            Some(TERMINAL_STATE_EXECUTION_SPEC_INVALID),
+            Some(expected),
             "{label}: {:?}",
             calls(&bodies)
         );
@@ -6840,10 +6901,21 @@ async fn reconcile_against(
 /// controller's snapshot parses, re-encodes to ITSELF, renders the same two
 /// runner documents, and the run continues into its Job.
 ///
+/// **AND IT IS THE `v1` GRAMMAR, WHICH `v2` DID NOT REPLACE** — D1 §3.3,
+/// D-SEAMS **S4**. The same fixture is the `v1` compatibility row: a document
+/// written under `logweir.dev/backup-execution-inputs/v1` loads, re-encodes to
+/// its own bytes, verifies against a fresh `v2` resolution through
+/// [`BackupExecutionInputs::as_version_v1`], and its run continues into its
+/// Job. THE MUTANT THIS KILLS IS THE CHEAP ONE: dropping `v1` from the
+/// accepted grammars, or comparing a stored `v1` document against an
+/// undowngraded `v2` resolution, turns every `Backup` in flight at the upgrade
+/// into a terminal `PlanConfigMapConflict` at its next pass — silently, and
+/// for the whole cluster at once.
+///
 /// KILLS: bumping the grammar version for an additive optional field;
-/// serialising `tlsCa: null` into a no-CA snapshot (either would make every
-/// in-flight `Backup` on an upgraded controller terminal
-/// `PlanConfigMapConflict` at its next pass).
+/// serialising `tlsCa: null` into a no-CA snapshot; reading only the grammar
+/// this controller writes; comparing a `v1` plan against `v2` fields it could
+/// not have carried.
 #[tokio::test]
 async fn a_plan_frozen_before_the_connection_contract_is_still_admitted() {
     // The fixture really is the older grammar: no CA key at all.
@@ -6853,7 +6925,18 @@ async fn a_plan_frozen_before_the_connection_contract_is_still_admitted() {
     );
     let parsed: BackupExecutionInputs = serde_json::from_str(PRE_CONTRACT_INPUTS)
         .expect("the older snapshot parses under the merged grammar");
-    assert_eq!(parsed.version, INPUTS_VERSION, "the grammar did not fork");
+    assert_eq!(
+        parsed.version, INPUTS_VERSION_V1,
+        "the fixture is the v1 grammar, and v1 is still one of the two this controller READS"
+    );
+    assert!(
+        INPUTS_VERSIONS_READ.contains(&INPUTS_VERSION_V1),
+        "v1 is accepted: {INPUTS_VERSIONS_READ:?}"
+    );
+    assert_eq!(
+        INPUTS_VERSION, INPUTS_VERSION_V2,
+        "and v2 is the one it WRITES"
+    );
     assert_eq!(
         FrozenInputs::freeze(parsed).expect("it freezes").canonical,
         PRE_CONTRACT_INPUTS,
@@ -6861,11 +6944,19 @@ async fn a_plan_frozen_before_the_connection_contract_is_still_admitted() {
          is a digest that no longer matches its annotation and a run that cannot continue"
     );
 
-    // And it is byte-identical to what this controller freezes now.
+    // And the v1 VIEW of what this controller freezes now is byte-identical to
+    // it: every v2 block is additive, so the fields a v1 plan actually froze
+    // are exactly the fields this resolution still produces.
+    let now = desired_for(&backup());
     assert_eq!(
-        desired_for(&backup()).canonical,
+        canonical_inputs(&now.inputs.as_version_v1()).expect("the v1 view encodes"),
         PRE_CONTRACT_INPUTS,
-        "a connection that names no CA freezes exactly what it froze before PLAT-07.1"
+        "a connection that names no CA freezes exactly what it froze before PLAT-07.1, and the \
+         v2 blocks are additions and not rewrites"
+    );
+    assert_ne!(
+        now.inputs.version, INPUTS_VERSION_V1,
+        "the resolution itself is v2"
     );
 
     // The whole pass: the older object is admitted and the Job is created.
