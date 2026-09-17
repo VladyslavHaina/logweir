@@ -29,15 +29,16 @@ use logweir_core::check_contract::{
     frames, Authority, CheckCode, CheckId, CheckOutcome, CheckPlanKind, CheckResult, CheckState,
     EndFrame, Gating, OverallState, Stream,
 };
-use logweir_core::check_contract::{Referent, RosterRef, StaleReason};
+use logweir_core::check_contract::{CheckRequest, Referent, RosterRef, StaleReason};
+use logweir_core::destination::DestinationRole;
 use serde_json::{json, Value};
 
 use weirkeeper::check::{self, Projections, Waiting};
 use weirkeeper::controllers::preflight::{
     self as pf, assemble, cluster_identity_row, connection_row, controller_rows, destination_row,
     entry_of, job_rows, plan_bindings_row, plan_names_row, plan_parse_row, pod_outcomes,
-    recovery_point_row, result_for, signer_rostered_row, stale_against_status, ApprovalFacts,
-    BindingFacts, Inputs, PlanFacts, RecoveryPointFacts, RosterFacts,
+    recovery_point_row, result_for, signer_rostered_row, stale_against_status, unrendered_job_rows,
+    ApprovalFacts, BindingFacts, Inputs, PlanFacts, RecoveryPointFacts, RosterFacts,
 };
 use weirkeeper::controllers::Context;
 use weirkeeper::crds::preflight::{Preflight, PreflightOperation};
@@ -338,7 +339,7 @@ fn every_controller_row_has_a_catalogue_entry() {
         let ids: BTreeSet<CheckId> = rows.iter().map(|r| r.id).collect();
         assert_eq!(ids.len(), rows.len(), "{operation:?} lists an id twice");
         // And no controller row is also a Job row.
-        for id in job_rows(operation) {
+        for id in unrendered_job_rows(operation) {
             assert!(
                 !ids.contains(&id),
                 "{id} is claimed by both the controller and the check Job for {operation:?}"
@@ -1221,8 +1222,8 @@ fn a_blocked_pod_makes_every_job_sourced_row_unknown() {
         None,
         now(),
     );
+    let expected = unrendered_job_rows(PreflightOperation::Backup);
     let checks = assemble(
-        PreflightOperation::Backup,
         pod,
         vec![runner_row(
             CheckId::ConnectionAuthenticated,
@@ -1231,10 +1232,11 @@ fn a_blocked_pod_makes_every_job_sourced_row_unknown() {
             Gating::Blocking,
         )],
         blocked,
+        &expected,
         &BTreeSet::new(),
         now(),
     );
-    for id in job_rows(PreflightOperation::Backup) {
+    for id in expected.iter().copied() {
         let row = checks
             .iter()
             .find(|c| c.id == id)
@@ -1260,15 +1262,16 @@ fn a_blocked_pod_makes_every_job_sourced_row_unknown() {
 
 #[test]
 fn a_row_nobody_answered_is_blocking_and_never_absent() {
+    let expected = unrendered_job_rows(PreflightOperation::Restore);
     let checks = assemble(
-        PreflightOperation::Restore,
         Vec::new(),
         Vec::new(),
         true,
+        &expected,
         &BTreeSet::new(),
         now(),
     );
-    for id in job_rows(PreflightOperation::Restore) {
+    for id in expected.iter().copied() {
         let row = checks.iter().find(|c| c.id == id).unwrap();
         assert_eq!(row.gating, Gating::Blocking);
     }
@@ -1282,8 +1285,10 @@ fn a_row_nobody_answered_is_blocking_and_never_absent() {
 #[test]
 fn a_skipped_row_is_present_skipped_and_keeps_the_verdict_unknown() {
     let skip: BTreeSet<CheckId> = [CheckId::ArchiveSegments].into_iter().collect();
-    let relayed: Vec<CheckOutcome> = job_rows(PreflightOperation::Restore)
-        .into_iter()
+    let expected = unrendered_job_rows(PreflightOperation::Restore);
+    let relayed: Vec<CheckOutcome> = expected
+        .iter()
+        .copied()
         .filter(|id| !skip.contains(id))
         .map(|id| {
             runner_row(
@@ -1294,14 +1299,7 @@ fn a_skipped_row_is_present_skipped_and_keeps_the_verdict_unknown() {
             )
         })
         .collect();
-    let checks = assemble(
-        PreflightOperation::Restore,
-        Vec::new(),
-        relayed,
-        false,
-        &skip,
-        now(),
-    );
+    let checks = assemble(Vec::new(), relayed, false, &expected, &skip, now());
     let row = checks
         .iter()
         .find(|c| c.id == CheckId::ArchiveSegments)
@@ -1327,10 +1325,10 @@ fn the_controller_answers_a_row_the_runner_also_reported_exactly_once() {
         Gating::Blocking,
     )];
     let checks = assemble(
-        PreflightOperation::Restore,
         controller,
         relayed,
         false,
+        &unrendered_job_rows(PreflightOperation::Restore),
         &BTreeSet::new(),
         now(),
     );
@@ -1365,7 +1363,7 @@ fn the_aggregate_expiry_is_the_soonest_row_and_bytes_rows_do_not_pull_it() {
     soon.expires_at = Some(now() + Duration::minutes(5));
     let bytes = plan_parse_row(&plan_facts("restore-", "s3-bucket", None), now());
     assert_eq!(bytes.expires_at, None);
-    let result = result_for(&[soon, bytes], None);
+    let (result, _) = result_for(&[soon, bytes], None);
     assert_eq!(result.expires_at, Some(now() + Duration::minutes(5)));
 }
 
@@ -1395,7 +1393,7 @@ fn a_facts_bearing_row_keeps_its_facts_in_the_message() {
 
 #[test]
 fn an_empty_check_set_is_unknown_and_never_ready() {
-    assert_eq!(result_for(&[], None).state, "unknown");
+    assert_eq!(result_for(&[], None).0.state, "unknown");
 }
 
 /// PLAT-03.2's "plan edits": editing the plan changes the hash, and the stored
@@ -1652,22 +1650,9 @@ async fn a_relayed_backup_readiness_publishes_a_verdict_with_codes_and_scopes() 
     // controller cannot read the signing Secret or dial the broker, so
     // `signer.rostered` and `connection.clusterIdentity` are answered from what
     // the pod reported and from the objects only the controller can see.
-    let relayed: Vec<CheckOutcome> = job_rows(PreflightOperation::Backup)
-        .into_iter()
-        .map(|id| {
-            let row = runner_row(
-                id,
-                CheckState::Ready,
-                CheckCode::Succeeded,
-                Gating::Blocking,
-            );
-            match id {
-                CheckId::SignerPrivateKeyUsable => row.with_fact("signerKeyId", "runner-key-1"),
-                CheckId::ConnectionAuthenticated => row.with_fact("clusterId", "prod-id"),
-                _ => row,
-            }
-        })
-        .collect();
+    let relayed = relay_from(&runner_pinned_ids(
+        "a_readiness_check_reports_every_row_it_owns",
+    ));
     let log = relay_log(PLAN_DIGEST, relayed, None);
 
     let mut routes = referent_routes(Some("prod-id"), vec![]);
@@ -2582,31 +2567,76 @@ async fn no_status_or_config_map_body_carries_a_credential() {
 /// D2 §6.8(a): **no execution path reads a `Preflight` or a `TopicDiscovery`.**
 ///
 /// A green preview cannot bypass a later collision, and this is the only way to
-/// say so about code that does not exist. The planted mutant is an `import` of
-/// `Preflight` into `controllers/restore.rs`.
+/// say so about code that does not exist. The planted mutants are an `import`
+/// of `Preflight` into `controllers/restore.rs` and one into
+/// `backup_execution.rs`.
+///
+/// # It globs, and the exclusion list is the whole argument
+///
+/// Reviewer finding **F5**: it used to name four reconcilers and two runner
+/// directories. `crates/weirkeeper/src/backup_execution.rs` — where W10 works —
+/// was not scanned, nor were `verification.rs`, `retention.rs`, `slot.rs`,
+/// `cadence.rs` or `controllers/kafka_cluster.rs`, and a file added in any of
+/// them could have consulted a `Preflight` with the guard still green. So the
+/// scan now covers **everything** under `crates/weirkeeper/src/` and
+/// `crates/logweir/src/`, and the exclusions are enumerated here rather than
+/// implied:
+///
+/// * `controllers/preflight.rs` — the controller itself;
+/// * `crates/weirkeeper/src/check/` and `crates/logweir/src/check/` — the
+///   shared check framework and the runner's own `check run`, which are what a
+///   `Preflight` is EXECUTED BY and not what it is read from;
+/// * `crates/weirkeeper/src/crds/` — the kind's own type has to be declarable.
+///
+/// The module path `preflight` is forbidden too, not only the type name: a
+/// re-export (`pub type Pf = preflight::Preflight;`) would otherwise reach the
+/// kind through a name the old list did not carry.
 #[test]
 fn no_execution_path_reads_preflight_or_discovery() {
-    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .expect("crates/")
-        .parent()
-        .expect("the repository root");
-    let mut files: Vec<std::path::PathBuf> = [
+    let root = repo_root();
+    let mut files = rust_files_under(&root.join("crates/weirkeeper/src"));
+    files.extend(rust_files_under(&root.join("crates/logweir/src")));
+    let excluded = |p: &std::path::Path| {
+        let text = p.to_string_lossy().replace('\\', "/");
+        text.ends_with("crates/weirkeeper/src/controllers/preflight.rs")
+            || text.contains("crates/weirkeeper/src/check/")
+            || text.contains("crates/weirkeeper/src/crds/")
+            || text.contains("crates/logweir/src/check/")
+            // The REGISTRATION POINT and the module declarations. `main.rs`
+            // pushes the reconciler and `controllers/mod.rs` / `lib.rs` declare
+            // it; neither is an execution path, and a controller that could not
+            // be registered could not exist.
+            || text.ends_with("crates/weirkeeper/src/main.rs")
+            || text.ends_with("crates/weirkeeper/src/controllers/mod.rs")
+            || text.ends_with("crates/weirkeeper/src/lib.rs")
+            // The `TopicDiscovery` reconciler is not an execution path either
+            // — it is the OTHER interactive check controller, and D-SEAMS S2
+            // is about a RUN reading a discovery result, not about the
+            // controller that produces one.
+            || text.ends_with("crates/weirkeeper/src/controllers/topic_discovery.rs")
+    };
+    let scanned: Vec<std::path::PathBuf> = files.into_iter().filter(|p| !excluded(p)).collect();
+    assert!(
+        scanned.len() >= 40,
+        "the scan found only {} files; it has gone quiet and would pass vacuously",
+        scanned.len()
+    );
+    // The four files the old guard named, by name, so a refactor that moved
+    // them out from under the glob is a failure rather than a silent pass.
+    for must in [
+        "crates/weirkeeper/src/controllers/restore.rs",
         "crates/weirkeeper/src/controllers/backup.rs",
         "crates/weirkeeper/src/controllers/backup_schedule.rs",
-        "crates/weirkeeper/src/controllers/restore.rs",
         "crates/weirkeeper/src/controllers/approval.rs",
-    ]
-    .iter()
-    .map(|p| root.join(p))
-    .collect();
-    files.extend(rust_files_under(&root.join("crates/logweir/src/backup")));
-    files.extend(rust_files_under(&root.join("crates/logweir/src/drill")));
-    assert!(
-        files.len() >= 8,
-        "the scan found only {} files; it has gone quiet and would pass vacuously",
-        files.len()
-    );
+        "crates/weirkeeper/src/backup_execution.rs",
+    ] {
+        assert!(
+            scanned
+                .iter()
+                .any(|p| p.to_string_lossy().replace('\\', "/").ends_with(must)),
+            "{must} is not in the scan"
+        );
+    }
 
     const FORBIDDEN: [&str; 4] = [
         "Preflight",
@@ -2614,16 +2644,14 @@ fn no_execution_path_reads_preflight_or_discovery() {
         "preflights",
         "topicdiscoveries",
     ];
-    for file in &files {
+    for file in &scanned {
         let text = std::fs::read_to_string(file)
             .unwrap_or_else(|e| panic!("could not read {}: {e}", file.display()));
         for (n, line) in text.lines().enumerate() {
-            // The word may appear in PROSE — an execution path is allowed to
-            // explain why it does not consult one — so only code lines count.
-            let code = line.split("//").next().unwrap_or("");
+            let code = code_of(line);
             for needle in FORBIDDEN {
                 assert!(
-                    !names_word(code, needle),
+                    !names_word(&code, needle),
                     "{}:{} names `{needle}` in code: {line}\n\
                      D2 §6.8: the preflight replaces no execution-time guard, and an execution \
                      path that could read one is an execution path a green preview could bypass.",
@@ -2631,8 +2659,92 @@ fn no_execution_path_reads_preflight_or_discovery() {
                     n + 1
                 );
             }
+            // The MODULE PATH, so a re-export cannot smuggle the type in under
+            // another name (`pub type Pf = preflight::Preflight;` then
+            // `crds::Pf` at the call site). As a PATH SEGMENT and not a word:
+            // `controllers/restore.rs` carries `TOPIC_PREFLIGHT_KEY_PREFIX =
+            // "topic-preflight="`, phase 0's broker-config observation, which
+            // has nothing to do with this kind.
+            assert!(
+                !names_module_path(&code, "preflight"),
+                "{}:{} reaches the `preflight` MODULE: {line}",
+                file.display(),
+                n + 1
+            );
         }
     }
+}
+
+/// A line with its trailing `//` comment removed — and never a string's
+/// contents mistaken for one.
+///
+/// `line.split("//").next()` blanked everything after a `//` INSIDE a string
+/// literal, which is a hole a forbidden name could sit in
+/// (`let s = "https://x"; use crate::crds::preflight::Preflight;` on one line).
+/// This walks the line and only treats `//` as a comment when it is outside a
+/// double-quoted run.
+fn code_of(line: &str) -> String {
+    let bytes: Vec<char> = line.chars().collect();
+    let mut out = String::new();
+    let mut in_string = false;
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i];
+        if in_string {
+            if c == '\\' {
+                out.push(c);
+                if i + 1 < bytes.len() {
+                    out.push(bytes[i + 1]);
+                    i += 2;
+                    continue;
+                }
+            } else if c == '"' {
+                in_string = false;
+            }
+            out.push(c);
+        } else if c == '"' {
+            in_string = true;
+            out.push(c);
+        } else if c == '/' && i + 1 < bytes.len() && bytes[i + 1] == '/' {
+            break;
+        } else {
+            out.push(c);
+        }
+        i += 1;
+    }
+    out
+}
+
+/// Whether `code` reaches a Rust module by path — `…preflight::`,
+/// `use …preflight;` or `use …preflight as alias;`.
+///
+/// The third form is not decoration: `use crate::crds::preflight as pf;` then
+/// `pf::Preflight` at the call site reaches the kind through two names the
+/// word scan does not carry, and it SURVIVED the first version of this guard.
+fn names_module_path(code: &str, module: &str) -> bool {
+    let bytes: Vec<char> = code.chars().collect();
+    let mut from = 0usize;
+    while let Some(at) = code[from..].find(module) {
+        let start = from + at;
+        let end = start + module.len();
+        let before = start == 0 || !(is_ident(bytes[start - 1]) || bytes[start - 1] == '-');
+        let tail = &code[end..];
+        let after =
+            tail.starts_with("::") || tail.starts_with(';') || tail.trim_start().starts_with("as ");
+        if before && after {
+            return true;
+        }
+        from = start + 1;
+    }
+    false
+}
+
+fn repo_root() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("the repository root")
+        .to_path_buf()
 }
 
 /// D-SEAMS **S2** / PLAT-03.2's "stale inventory": a preflight discovers
@@ -2644,10 +2756,10 @@ fn preflight_controller_never_reads_topicdiscovery() {
     )
     .expect("the controller source is readable");
     for (n, line) in source.lines().enumerate() {
-        let code = line.split("//").next().unwrap_or("");
+        let code = code_of(line);
         for needle in ["TopicDiscovery", "topicdiscoveries"] {
             assert!(
-                !names_word(code, needle),
+                !names_word(&code, needle),
                 "preflight.rs:{} names `{needle}` in code. D-SEAMS S2: a discovery result is \
                  never an input to anything that runs.",
                 n + 1
@@ -2843,5 +2955,825 @@ fn each_operation_runs_its_own_plan_kind() {
     assert_eq!(
         pf::plan_kind(PreflightOperation::DestinationAccess),
         CheckPlanKind::DestinationAccess
+    );
+}
+
+// ===========================================================================
+// 10. F1 — the expected row set is the RUNNER's row set for the same plan
+// ===========================================================================
+
+/// The runner's own pinned expectation, read out of `crates/logweir/tests/check_cli.rs`.
+///
+/// # Why this reads another crate's SOURCE instead of calling it
+///
+/// `weirkeeper` and `logweir` share no dependency edge — the controller crate
+/// links `logweir-core` and `logweir-verify`, never the runner — and adding one
+/// to test a row set would be a dependency decision, not a test. What the two
+/// crates DO share is this file: `a_readiness_check_reports_every_row_it_owns`
+/// and `a_healthy_restore_preflight_reports_every_row_it_owns` each assert that
+/// the runner emits **exactly** the ids in their `want` literal, so the literal
+/// is a pinned statement of the runner's behaviour. Reading it here closes the
+/// loop: the runner test pins runner ⟷ literal, and this one pins literal ⟷
+/// [`job_rows`].
+///
+/// It is not a copy. A copied constant is what reviewer finding **F1** was: the
+/// controller's idea of the runner's rows drifted from the runner's and nothing
+/// could see it. Either side moving now breaks a test.
+fn runner_pinned_ids(test_fn: &str) -> BTreeSet<String> {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .and_then(std::path::Path::parent)
+        .expect("the repository root")
+        .join("crates/logweir/tests/check_cli.rs");
+    let source = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("could not read {}: {e}", path.display()));
+    let at = source
+        .find(&format!("fn {test_fn}("))
+        .unwrap_or_else(|| panic!("`{test_fn}` is gone from {}", path.display()));
+    let rest = &source[at..];
+    let want_at = rest
+        .find("let want: BTreeSet<&str> = [")
+        .unwrap_or_else(|| panic!("`{test_fn}` no longer pins a `want` id set"));
+    let body = &rest[want_at..];
+    let end = body.find(']').expect("the `want` literal closes");
+    let ids: BTreeSet<String> = body[..end]
+        .split('"')
+        .filter(|t| t.contains('.') && !t.contains(' ') && !t.contains('['))
+        .map(ToString::to_string)
+        .collect();
+    assert!(
+        ids.len() >= 8,
+        "only {} ids were extracted from `{test_fn}`; the literal's shape changed and this \
+         guard would pass vacuously: {ids:?}",
+        ids.len()
+    );
+    ids
+}
+
+fn ids_of(set: &BTreeSet<CheckId>) -> BTreeSet<String> {
+    set.iter().map(|i| i.as_str().to_string()).collect()
+}
+
+/// The `readiness_plan` fixture `crates/logweir/tests/check_cli.rs` drives its
+/// `a_readiness_check_reports_every_row_it_owns` with, as a `CheckRequest`.
+fn runner_readiness_request() -> CheckRequest {
+    CheckRequest::OperationReadiness(Box::new(
+        logweir_core::check_contract::OperationReadinessRequest {
+            operation: logweir_core::check_contract::CheckOperation::Backup,
+            connection: fixture_connection_plan(),
+            destination: Some(fixture_destination_plan()),
+            roles: vec![
+                DestinationRole::ArchiveRead,
+                DestinationRole::EvidenceWrite,
+                DestinationRole::EvidenceRead,
+            ],
+            topics: vec!["orders".to_string()],
+            signer_path: Some("/signing/key.pem".to_string()),
+            write_probe: true,
+            skip_checks: Vec::new(),
+        },
+    ))
+}
+
+/// The `restore_plan` fixture the runner's healthy-restore test drives, as a
+/// `CheckRequest`. `evidence_destination: None`, target mode `scratch`.
+fn runner_restore_request(evidence: Option<()>) -> CheckRequest {
+    CheckRequest::RestorePreflight(Box::new(
+        logweir_core::check_contract::RestorePreflightRequest {
+            plan_file: "/check/plan.yaml".to_string(),
+            plan_sha256: PLAN_DIGEST.to_string(),
+            target: fixture_connection_plan(),
+            source_destination: fixture_destination_plan(),
+            evidence_destination: evidence.map(|()| fixture_destination_plan()),
+            backup_id: "bk-1".to_string(),
+            manifest_key: "bk-1/manifest.json".to_string(),
+            checks: Vec::new(),
+            skip_checks: Vec::new(),
+        },
+    ))
+}
+
+fn fixture_connection_plan() -> logweir_core::check_contract::ConnectionPlan {
+    logweir_core::check_contract::ConnectionPlan {
+        bootstrap_servers: vec!["broker:9092".to_string()],
+        auth_mode: "scramSha512".to_string(),
+        username: Some("backup".to_string()),
+        password_env: Some("LOGWEIR_SOURCE_PASSWORD".to_string()),
+        tls: Some(true),
+        ca_file: None,
+        principal: "User:backup".to_string(),
+    }
+}
+
+fn fixture_destination_plan() -> logweir_core::check_contract::DestinationPlan {
+    logweir_core::check_contract::DestinationPlan {
+        name: "primary".to_string(),
+        uid: DEST_UID.to_string(),
+        location: logweir_core::destination::DestinationLocation {
+            provider: logweir_core::destination::StorageProvider::S3,
+            bucket: "s3-bucket".to_string(),
+            prefix: String::new(),
+            region: None,
+            endpoint: None,
+            addressing: logweir_core::destination::Addressing::PathStyle,
+            transport: logweir_core::destination::TransportSecurity::Tls,
+        },
+        location_digest: "sha256:aa".to_string(),
+        ca_file: None,
+        credentials: logweir_core::check_contract::CredentialMode::Static,
+    }
+}
+
+/// **The guard finding F1 asks for.** The ids [`job_rows`] expects for a plan
+/// are the ids the runner emits for that same plan.
+#[test]
+fn the_expected_rows_are_the_rows_the_runner_emits() {
+    assert_eq!(
+        ids_of(&job_rows(&runner_readiness_request(), false)),
+        runner_pinned_ids("a_readiness_check_reports_every_row_it_owns"),
+        "`job_rows` and the runner disagree about an `operationReadiness` plan. This is the \
+         defect F1 named: every id in the difference becomes a BLOCKING `unknown` row reading \
+         \"the check Job did not report this row\", and no Preflight can ever be `ready`."
+    );
+    assert_eq!(
+        ids_of(&job_rows(&runner_restore_request(None), true)),
+        runner_pinned_ids("a_healthy_restore_preflight_reports_every_row_it_owns"),
+        "`job_rows` and the runner disagree about a `restorePreflight` plan"
+    );
+}
+
+/// The two rows whose presence depends on the plan and not on the operation,
+/// each derived from the runner source line that decides it.
+#[test]
+fn the_expected_rows_follow_the_plan_and_not_the_operation() {
+    let base = job_rows(&runner_restore_request(None), true);
+    // `restore.rs` pushes `destination.evidenceWritable` when, and only when,
+    // the request names an evidence destination.
+    let with_evidence = job_rows(&runner_restore_request(Some(())), true);
+    assert_eq!(
+        with_evidence
+            .difference(&base)
+            .copied()
+            .collect::<BTreeSet<CheckId>>(),
+        [CheckId::DestinationEvidenceWritable].into_iter().collect(),
+        "naming an evidence destination adds exactly one row"
+    );
+    // `target.scratchMarker` is the one row decided by the mounted PLAN BYTES,
+    // which is why `job_rows` takes the flag.
+    let new_topic = job_rows(&runner_restore_request(None), false);
+    assert!(!new_topic.contains(&CheckId::TargetScratchMarker));
+    assert!(base.contains(&CheckId::TargetScratchMarker));
+
+    // A readiness plan with no signer path emits no signer row...
+    let CheckRequest::OperationReadiness(mut r) = runner_readiness_request() else {
+        unreachable!()
+    };
+    r.signer_path = None;
+    let rows = job_rows(&CheckRequest::OperationReadiness(r.clone()), false);
+    assert!(!rows.contains(&CheckId::SignerPrivateKeyUsable));
+    // ...and a role that is not requested produces no row for it.
+    r.roles = vec![DestinationRole::ArchiveRead];
+    let rows = job_rows(&CheckRequest::OperationReadiness(r), false);
+    assert!(rows.contains(&CheckId::DestinationArchiveListable));
+    assert!(!rows.contains(&CheckId::DestinationEvidenceWritable));
+    assert!(!rows.contains(&CheckId::DestinationEvidenceReadable));
+}
+
+/// The role→row table is the runner's `access.rs` match, and all four roles are
+/// distinct.
+#[test]
+fn every_destination_role_maps_to_its_own_row() {
+    let rows: BTreeSet<CheckId> = DestinationRole::ALL
+        .iter()
+        .map(|r| pf::destination_row_for(*r))
+        .collect();
+    assert_eq!(rows.len(), DestinationRole::ALL.len());
+    assert_eq!(
+        pf::destination_row_for(DestinationRole::ArchiveRead),
+        CheckId::DestinationArchiveListable,
+        "the BLOCKING archive row comes from the READ grant; requesting only ArchiveWrite is \
+         what made it unanswerable (F1)"
+    );
+}
+
+/// The controller's own rendered backup plan requests the roles whose rows D2
+/// §6.3's Backup catalogue gates on.
+#[test]
+fn the_rendered_backup_plan_requests_the_blocking_destination_rows() {
+    let shape = rendered_backup_shape(true);
+    let rows = job_rows(&shape.plan.request, false);
+    for id in [
+        CheckId::DestinationArchiveListable,
+        CheckId::DestinationEvidenceWritable,
+        CheckId::DestinationEvidenceReadable,
+        CheckId::ConnectionAuthenticated,
+        CheckId::ConnectionTopicsDescribable,
+        CheckId::SignerPrivateKeyUsable,
+        CheckId::RunnerContract,
+    ] {
+        assert!(rows.contains(&id), "the rendered plan cannot answer {id}");
+    }
+}
+
+// ===========================================================================
+// 11. Fix round 1: the rows the review's mutants asked for
+// ===========================================================================
+
+/// A destination that configures the evidence-read grant AND opts in to the
+/// create-only readiness marker — the two spec facts the rendered plan reads.
+fn rich_destination(name: &str) -> Value {
+    let mut object = backup_destination(name);
+    let spec = object["spec"].as_object_mut().expect("spec");
+    spec["access"].as_object_mut().expect("access").insert(
+        "evidenceRead".to_string(),
+        json!({
+            "mode": "SecretKeys",
+            "secret": {
+                "name": "logweir-s3",
+                "accessKeyIdKey": "AWS_ACCESS_KEY_ID",
+                "secretAccessKeyKey": "AWS_SECRET_ACCESS_KEY"
+            }
+        }),
+    );
+    spec.insert(
+        "readiness".to_string(),
+        json!({"writeProbe": "CreateOnlyMarker"}),
+    );
+    object
+}
+
+/// The `Inputs` a healthy backup readiness pass resolves to, built from the
+/// REAL resolver over the fixtures.
+fn backup_inputs(rich: bool) -> Inputs {
+    let cluster: weirkeeper::crds::kafka_cluster::KafkaCluster =
+        serde_json::from_value(kafka_cluster("source", Some("prod-id"))).expect("fixture");
+    let object: weirkeeper::crds::backup_destination::BackupDestination =
+        serde_json::from_value(if rich {
+            rich_destination("primary")
+        } else {
+            backup_destination("primary")
+        })
+        .expect("fixture");
+    let policy = weirkeeper::check::policy::Policy::defaults();
+    let mut roles = vec![DestinationRole::ArchiveRead, DestinationRole::EvidenceWrite];
+    let evidence_read_configured = !matches!(
+        weirkeeper::destination::resolve(&object, DestinationRole::EvidenceRead, &policy)
+            .map(|d| d.grant),
+        Ok(weirkeeper::destination::ResolvedGrant::NotConfigured) | Err(_)
+    );
+    if evidence_read_configured {
+        roles.push(DestinationRole::EvidenceRead);
+    }
+    Inputs {
+        operation: PreflightOperation::Backup,
+        namespace: NS.to_string(),
+        timeout_seconds: 120,
+        policy_digest: policy.digest(),
+        cluster_uid: Some(CLUSTER_UID.to_string()),
+        connection: Some(weirkeeper::connection::resolve(
+            &cluster,
+            weirkeeper::connection::ConnectionUse::PreflightSource,
+        )),
+        archive_name: Some("primary".to_string()),
+        archive: Some(weirkeeper::destination::resolve(
+            &object,
+            DestinationRole::ArchiveWrite,
+            &policy,
+        )),
+        roles,
+        write_probe: weirkeeper::destination::write_probe_enabled(&object),
+        topics: vec!["orders".to_string()],
+        ..Inputs::default()
+    }
+}
+
+fn rendered_backup_shape(rich: bool) -> weirkeeper::controllers::preflight::JobShape {
+    weirkeeper::controllers::preflight::build_job_shape(
+        &backup_inputs(rich),
+        &weirkeeper::job::RunnerOwner {
+            api_version: "logweir.dev/v1alpha1".to_string(),
+            kind: "Preflight".to_string(),
+            name: "pf-1".to_string(),
+            uid: PF_UID.to_string(),
+        },
+        &weirkeeper::job::RunnerImage::default(),
+    )
+    .expect("the shape renders")
+}
+
+/// **F3.** `spec.readiness.writeProbe: CreateOnlyMarker` is a shipped,
+/// user-settable field. It used to be hard-`false` in every rendered plan, so
+/// an operator who opted in got `WriteNotProbed` with a message that was FALSE
+/// about their own object — the UI-FAKEPREFLIGHT pattern with a new spelling.
+#[test]
+fn an_opted_in_destination_gets_the_create_only_write_probe() {
+    let CheckRequest::OperationReadiness(r) = rendered_backup_shape(true).plan.request else {
+        panic!("a backup readiness plan")
+    };
+    assert!(
+        r.write_probe,
+        "`readiness.writeProbe: CreateOnlyMarker` must reach the plan; without it the runner \
+         answers `WriteNotProbed` and says the destination configures no probe, which is false"
+    );
+    let CheckRequest::OperationReadiness(r) = rendered_backup_shape(false).plan.request else {
+        panic!("a backup readiness plan")
+    };
+    assert!(
+        !r.write_probe,
+        "and a destination that did NOT opt in still writes nothing — Global Constraint 6's \
+         create-only boundary is opt-in and stays so"
+    );
+}
+
+/// The resolver's own half of F3, over the three spellings of the field.
+#[test]
+fn the_write_probe_is_read_from_the_spec_and_defaults_closed() {
+    let of = |readiness: Option<Value>| {
+        let mut object = backup_destination("primary");
+        if let Some(r) = readiness {
+            object["spec"]
+                .as_object_mut()
+                .expect("spec")
+                .insert("readiness".to_string(), r);
+        }
+        let dest: weirkeeper::crds::backup_destination::BackupDestination =
+            serde_json::from_value(object).expect("fixture");
+        weirkeeper::destination::write_probe_enabled(&dest)
+    };
+    assert!(!of(None), "absent `readiness` is Disabled");
+    assert!(!of(Some(json!({}))), "absent `writeProbe` is Disabled");
+    assert!(!of(Some(json!({"writeProbe": "Disabled"}))));
+    assert!(of(Some(json!({"writeProbe": "CreateOnlyMarker"}))));
+}
+
+/// **F2(a).** An unanswered BLOCKING row holds the verdict back. The mutant is
+/// `result_for` filtering `unknown` rows out of the set it aggregates.
+#[test]
+fn a_blocking_unknown_or_skipped_row_keeps_the_verdict_unknown() {
+    let ready = runner_row(
+        CheckId::RunnerContract,
+        CheckState::Ready,
+        CheckCode::ContractSupported,
+        Gating::Blocking,
+    );
+    let unanswered = CheckOutcome::new(
+        CheckId::ArchiveSegments,
+        CheckState::Unknown,
+        Gating::Blocking,
+        Authority::CheckJob,
+        CheckCode::BlockedByPrerequisite,
+    );
+    assert_eq!(
+        result_for(&[ready.clone(), unanswered], None).0.state,
+        "unknown",
+        "a blocking row nobody answered must not be filtered out of the aggregate: that is \
+         UI-FAKEPREFLIGHT rewritten in the one function that decides the published verdict"
+    );
+    let skipped = CheckOutcome::new(
+        CheckId::ArchiveSegments,
+        CheckState::Skipped,
+        Gating::Blocking,
+        Authority::Controller,
+        CheckCode::BlockedByPrerequisite,
+    );
+    assert_eq!(
+        result_for(&[ready.clone(), skipped], None).0.state,
+        "unknown",
+        "skipping a question is not answering it (D2 §6.2)"
+    );
+    // And the control: every blocking row ready IS ready, so the two rows above
+    // are the difference and not a test that can only ever say `unknown`.
+    assert_eq!(result_for(&[ready], None).0.state, "ready");
+}
+
+/// **F8.** The published list is capped at the CRD's own `maxItems`, and the
+/// verdict is computed over every row, so producing more rows can never turn a
+/// verdict green.
+#[test]
+fn the_published_rows_are_capped_and_the_cap_cannot_change_the_verdict() {
+    let mut checks: Vec<CheckOutcome> = (0..70)
+        .map(|i| {
+            let id = CheckId::ALL[i % CheckId::ALL.len()];
+            runner_row(
+                id,
+                CheckState::Ready,
+                CheckCode::Succeeded,
+                Gating::Blocking,
+            )
+        })
+        .collect();
+    // The one row that decides the verdict, LAST — so a cap that took the first
+    // N would drop it.
+    checks.push(
+        CheckOutcome::new(
+            CheckId::ArchiveSegments,
+            CheckState::NotReady,
+            Gating::Blocking,
+            Authority::CheckJob,
+            CheckCode::SegmentMissing,
+        )
+        .with_message("a segment is missing"),
+    );
+    let (result, dropped) = result_for(&checks, None);
+    let published = result.checks.as_ref().expect("checks");
+    assert!(
+        published.len() <= pf::MAX_PUBLISHED_CHECKS,
+        "the shipped CRD declares maxItems: {}; a longer list is a 422 the reconciler can only \
+         requeue on, and the verdict is then never published at all",
+        pf::MAX_PUBLISHED_CHECKS
+    );
+    assert!(dropped > 0, "this fixture is over the cap on purpose");
+    assert_eq!(
+        result.state, "notReady",
+        "the verdict is computed over ALL rows"
+    );
+    assert!(
+        published.iter().any(|c| c.id == "archive.segments"),
+        "the rows that EXPLAIN the verdict are the ones kept"
+    );
+}
+
+/// **F9.** A restore whose EVIDENCE destination does not resolve gets the cause
+/// and the remedy for that destination, scoped to it — not a green row about
+/// the archive.
+#[test]
+fn the_destination_row_reports_whichever_destination_refused() {
+    let ok = weirkeeper::destination::resolve(
+        &serde_json::from_value::<weirkeeper::crds::backup_destination::BackupDestination>(
+            backup_destination("primary"),
+        )
+        .expect("fixture"),
+        DestinationRole::ArchiveRead,
+        &weirkeeper::check::policy::Policy::defaults(),
+    );
+    let refused = Err(weirkeeper::destination::DestinationRefusal {
+        code: CheckCode::CaBundleNotFound,
+        field: "spec.transport.caBundle".to_string(),
+        message: "the CA ConfigMap does not exist".to_string(),
+    });
+    let inputs = Inputs {
+        operation: PreflightOperation::Restore,
+        archive_name: Some("primary".to_string()),
+        archive: Some(ok),
+        evidence_name: Some("evidence".to_string()),
+        evidence: Some(refused),
+        ..Inputs::default()
+    };
+    let row = inputs
+        .destination_verdict_row(now())
+        .expect("a restore names destinations");
+    assert_eq!(row.code, CheckCode::CaBundleNotFound);
+    assert_eq!(
+        row.scope.as_ref().map(|s| s.name.as_str()),
+        Some("evidence"),
+        "the scope names the object that actually failed"
+    );
+    assert!(!row.remedy.is_empty());
+    assert!(
+        !inputs.plan_blockers(&[row]).is_empty(),
+        "and it blocks the plan, so no check Job is created against a destination that did not \
+         resolve"
+    );
+}
+
+/// **F7.** A topic name long enough to be illegal is a topic name long enough
+/// for the redaction chokepoint to eat, so it goes on `scope`, which
+/// `entry_of` copies verbatim.
+#[test]
+fn the_offending_topic_name_survives_redaction_on_the_scope() {
+    let long = "x".repeat(250);
+    let facts = PlanFacts::of(plan_yaml(&long, "s3-bucket").as_bytes(), None);
+    let row = plan_names_row(&facts, now());
+    assert_eq!(row.code, CheckCode::MappedTopicNameIllegal);
+    let entry = entry_of(&row);
+    let named = entry
+        .scope
+        .as_ref()
+        .and_then(|s| s.name.clone())
+        .unwrap_or_default();
+    assert!(
+        named.starts_with(&long),
+        "the operator is told a name is illegal in exactly the case the name is long enough to \
+         be redacted out of the prose; `scope` is where it survives. Got {named:?}"
+    );
+    assert_eq!(
+        entry.scope.as_ref().and_then(|s| s.kind.clone()).as_deref(),
+        Some("Topic")
+    );
+    // And the same for the bindings row's "the first being `…`".
+    let short_plan = PlanFacts::of(plan_yaml("restore-", "s3-bucket").as_bytes(), None);
+    let bindings = BindingFacts {
+        recovery_point_topics: Some(vec!["payments".to_string()]),
+        ..BindingFacts::default()
+    };
+    let row = plan_bindings_row(&short_plan, &bindings, now());
+    assert_eq!(row.code, CheckCode::PlanTopicsNotInRecoveryPoint);
+    assert_eq!(row.scope.as_ref().map(|s| s.name.as_str()), Some("orders"));
+}
+
+/// **Q1.** A verified relay is never discarded, whatever the pod is waiting for.
+#[test]
+fn a_verified_relay_is_never_discarded_for_a_waiting_state() {
+    let (_, blocked) = pod_outcomes(
+        PreflightOperation::Backup,
+        Some(&waiting(CheckCode::DisruptedMidCheck, None)),
+        &projections(),
+        true,
+        None,
+        now(),
+    );
+    assert!(
+        !blocked,
+        "`blocked` is exactly `drop every relayed row`; a result that exists is worth more than \
+         the placeholders that would replace it"
+    );
+    let (_, blocked) = pod_outcomes(
+        PreflightOperation::Backup,
+        Some(&waiting(CheckCode::DisruptedMidCheck, None)),
+        &projections(),
+        false,
+        None,
+        now(),
+    );
+    assert!(blocked, "and with no relay there is nothing to keep");
+}
+
+// ===========================================================================
+// 12. Fix round 1: the happy paths, built from the RUNNER's own row set
+// ===========================================================================
+
+/// Turn the runner's pinned id set into a relay, with the two facts the J+C
+/// rows need. **Never `job_rows`**: a fixture defined as the expectation is
+/// what hid reviewer finding F1.
+fn relay_from(ids: &BTreeSet<String>) -> Vec<CheckOutcome> {
+    ids.iter()
+        .map(|s| {
+            let id = CheckId::parse(s).unwrap_or_else(|| panic!("`{s}` is not a CheckId"));
+            let row = runner_row(
+                id,
+                CheckState::Ready,
+                CheckCode::Succeeded,
+                Gating::Blocking,
+            );
+            match id {
+                CheckId::SignerPrivateKeyUsable => row.with_fact("signerKeyId", "runner-key-1"),
+                CheckId::ConnectionAuthenticated | CheckId::TargetAuthenticated => {
+                    row.with_fact("clusterId", "prod-id")
+                }
+                _ => row,
+            }
+        })
+        .collect()
+}
+
+/// **F1, the backup half.** A healthy backup readiness check reports `ready`.
+#[tokio::test]
+async fn a_healthy_backup_readiness_reports_ready() {
+    let job = job_name(CheckPlanKind::OperationReadiness);
+    let ids = runner_pinned_ids("a_readiness_check_reports_every_row_it_owns");
+    let log = relay_log(PLAN_DIGEST, relay_from(&ids), None);
+
+    let mut routes = vec![
+        route(
+            "GET",
+            "/trustrosters/default",
+            roster("runner-key-1", vec![]).to_string(),
+        ),
+        route(
+            "GET",
+            "/kafkaclusters/source",
+            kafka_cluster("source", Some("prod-id")).to_string(),
+        ),
+        route(
+            "GET",
+            "/backupdestinations/primary",
+            rich_destination("primary").to_string(),
+        ),
+    ];
+    routes.push(route(
+        "GET",
+        leak(job.clone()),
+        finished_job(&job).to_string(),
+    ));
+    routes.extend(observation_routes(
+        leak(job.clone()),
+        owned_pod(&job, terminated(0)),
+        log,
+    ));
+    let (status, _) = reconcile_with(&preflight(backup_request()), routes).await;
+
+    let not_ready: Vec<&Value> = status["result"]["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .filter(|c| c["state"] != "ready")
+        .collect();
+    assert_eq!(
+        status["result"]["state"], "ready",
+        "PLAT-03.1's whole point. Rows that are not ready: {not_ready:#?}"
+    );
+    assert_eq!(status["phase"], "Completed");
+    assert_eq!(
+        check_entry(&status, "destination.archiveListable")["state"],
+        "ready",
+        "the BLOCKING archive row is answered because the plan requests the ArchiveRead grant"
+    );
+    assert_eq!(
+        check_entry(&status, "signer.rostered")["code"],
+        "SignerRostered"
+    );
+    assert_eq!(
+        check_entry(&status, "connection.clusterIdentity")["code"],
+        "ClusterIdentityMatches"
+    );
+    // Every row the runner reported is in the verdict, and none is a
+    // `BlockedByPrerequisite` placeholder.
+    for id in &ids {
+        let row = check_entry(&status, id);
+        assert_ne!(
+            row["code"], "BlockedByPrerequisite",
+            "{id} was relayed and must not be replaced by a placeholder"
+        );
+    }
+}
+
+/// **F1, the restore half.** A healthy restore preflight over an approved
+/// `Restore` reports `ready`.
+#[tokio::test]
+async fn a_healthy_restore_preflight_reports_ready() {
+    let job = job_name(CheckPlanKind::RestorePreflight);
+    let mut ids = runner_pinned_ids("a_healthy_restore_preflight_reports_every_row_it_owns");
+    // The one id the fixture plan cannot carry: `restore.rs` pushes
+    // `destination.evidenceWritable` when — and only when — the request names
+    // an evidence destination, which the runner's own fixture leaves `None` and
+    // this controller always sets. `the_expected_rows_follow_the_plan_and_not_the_operation`
+    // is the row that proves that is the ONLY difference.
+    ids.insert(CheckId::DestinationEvidenceWritable.as_str().to_string());
+    let log = relay_log(PLAN_DIGEST, relay_from(&ids), None);
+
+    let plan = plan_yaml("restore-", "s3-bucket");
+    let plan_hash = logweir_core::ids::sha256_prefixed(plan.as_bytes());
+    let restore_object = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
+        "metadata": {"name": "r-1", "namespace": NS, "uid": "restore-uid", "generation": 1},
+        "spec": {
+            "planBytes": plan,
+            "approvalRef": {"name": "ap-1"},
+            "sourceArchive": {"url": "logweir-destination://primary"},
+            "sourceDestinationRef": {"name": "primary"},
+            "evidenceDestinationRef": {"name": "evidence"},
+            "backupSetRef": "bk-1",
+            "pointInTime": "2026-09-15T00:00:00Z",
+            "target": {
+                "clusterRef": {"name": "target"}, "mode": "scratch",
+                "topicNaming": {"prefix": "restore-"}
+            },
+            "deadlineSeconds": 3600
+        }
+    });
+    let approval = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "Approval",
+        "metadata": {"name": "ap-1", "namespace": NS, "uid": "ap-uid", "resourceVersion": "9"},
+        "spec": {
+            "subjectRef": {"kind": "Restore", "name": "r-1"},
+            "planHash": plan_hash,
+            "approvalBytes": json!({"plan_hash": plan_hash}).to_string(),
+            "sidecarBytes": "{}"
+        },
+        "status": {"verified": true, "matchedKeyId": "approver-1"}
+    });
+
+    let mut routes = vec![
+        route(
+            "GET",
+            "/trustrosters/default",
+            roster("runner-key-1", vec!["prod-id"]).to_string(),
+        ),
+        route("GET", "/restores/r-1", restore_object.to_string()),
+        route("GET", "/approvals/ap-1", approval.to_string()),
+        route(
+            "GET",
+            "/kafkaclusters/target",
+            kafka_cluster("target", Some("prod-id")).to_string(),
+        ),
+        route(
+            "GET",
+            "/backupdestinations/primary",
+            backup_destination("primary").to_string(),
+        ),
+        route(
+            "GET",
+            "/backupdestinations/evidence",
+            backup_destination("evidence").to_string(),
+        ),
+    ];
+    routes.push(route(
+        "GET",
+        leak(job.clone()),
+        finished_job(&job).to_string(),
+    ));
+    routes.extend(observation_routes(
+        leak(job.clone()),
+        owned_pod(&job, terminated(0)),
+        log,
+    ));
+
+    let request = json!({"operation": "Restore", "restore": {
+        "restoreRef": {"name": "r-1"},
+        "sourceDestinationRef": {"name": "primary"},
+        "evidenceDestinationRef": {"name": "evidence"}
+    }, "timeoutSeconds": 120});
+    let (status, _) = reconcile_with(&preflight(request), routes).await;
+
+    let not_ready: Vec<&Value> = status["result"]["checks"]
+        .as_array()
+        .expect("checks")
+        .iter()
+        .filter(|c| c["state"] != "ready")
+        .collect();
+    assert_eq!(
+        status["result"]["state"], "ready",
+        "PLAT-03.2's whole point. Rows that are not ready: {not_ready:#?}"
+    );
+    assert_eq!(
+        check_entry(&status, "approval.state")["code"],
+        "ApprovalVerified"
+    );
+    assert_eq!(
+        check_entry(&status, "target.clusterIdentity")["code"],
+        "TargetAllowed"
+    );
+    assert_eq!(
+        check_entry(&status, "signer.rostered")["gating"],
+        "executionOnly",
+        "a restore check plan projects no signing key, so the row says so rather than blocking \
+         on an answer nobody can give"
+    );
+    assert_eq!(check_entry(&status, "archive.segments")["state"], "ready");
+}
+
+/// **F2(b).** The binding is recorded BEFORE the Job. The mutant is moving the
+/// `Pending` status patch after `check_plan::ensure` / `check::create_job`.
+#[tokio::test]
+async fn the_binding_is_recorded_before_the_plan_and_the_job_are_created() {
+    let job = job_name(CheckPlanKind::OperationReadiness);
+    let routes = vec![
+        route(
+            "GET",
+            "/trustrosters/default",
+            roster("runner-key-1", vec![]).to_string(),
+        ),
+        route(
+            "GET",
+            "/kafkaclusters/source",
+            kafka_cluster("source", Some("prod-id")).to_string(),
+        ),
+        route(
+            "GET",
+            "/backupdestinations/primary",
+            rich_destination("primary").to_string(),
+        ),
+        not_found("GET", leak(job.clone())),
+        route("GET", "/apis/batch/v1/jobs", list_of(vec![])),
+        route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")),
+        route("POST", "/configmaps", echo("ConfigMap", "plan")),
+        route("POST", "/jobs", echo("Job", &job)),
+    ];
+    let (client, recorder, bodies) = mock_client_recording_bodies(routes);
+    let ctx = context(client);
+    let cache = weirkeeper::check::policy::PolicyCache::new();
+    pf::reconcile_preflight(&preflight(backup_request()), &ctx, &cache, now())
+        .await
+        .expect("the reconcile completes");
+
+    let seen = recorder.lock().expect("recorder");
+    let index =
+        |pred: &dyn Fn(&weirkeeper::testing::SeenRequest) -> bool| seen.iter().position(pred);
+    let status_at = index(&|r| r.method == "PATCH" && r.uri.contains("/preflights/pf-1/status"))
+        .expect("the binding was written");
+    let plan_at = index(&|r| r.method == "POST" && r.uri.contains("/configmaps"))
+        .expect("the plan ConfigMap was created");
+    let job_at =
+        index(&|r| r.method == "POST" && r.uri.contains("/jobs")).expect("the Job was created");
+    assert!(
+        status_at < plan_at && status_at < job_at,
+        "D2 §6.6: the binding is recorded BEFORE the Job. A verdict whose binding was written \
+         afterwards cannot be told apart from a verdict about whatever the objects became in \
+         between. Order seen: {:?}",
+        seen.iter()
+            .map(|r| format!("{} {}", r.method, r.uri))
+            .collect::<Vec<_>>()
+    );
+    let first = bodies
+        .lock()
+        .expect("bodies")
+        .iter()
+        .find(|b| b.method == "PATCH" && b.uri.contains("/preflights/pf-1/status"))
+        .expect("the first status patch")
+        .body
+        .clone();
+    assert!(
+        first.contains("\"inputsDigest\""),
+        "and that first patch carries the binding, not just a phase: {first}"
     );
 }
