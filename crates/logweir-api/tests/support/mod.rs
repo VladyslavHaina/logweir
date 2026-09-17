@@ -402,6 +402,23 @@ fn core_answer(s: &mut State, recorded: &Recorded, rest: &str) -> (Option<Durati
                     ),
                 );
             }
+            // `dryRun=All` RUNS THE CONFLICT CHECK AND DISCARDS THE WRITE,
+            // exactly as the API server does. The conflict arm above is
+            // deliberately BEFORE this one, so a dry run against a taken name
+            // still answers `AlreadyExists` — which is the whole point of the
+            // probe.
+            let dry_run = serde_urlencoded::from_str::<BTreeMap<String, String>>(&recorded.query)
+                .unwrap_or_default()
+                .get("dryRun")
+                .is_some_and(|v| v == "All");
+            if dry_run {
+                let meta = object["metadata"].as_object_mut().unwrap();
+                meta.insert("namespace".into(), json!(namespace));
+                meta.insert("uid".into(), json!("00000000-0000-4000-9000-dryrun000000"));
+                object["apiVersion"] = json!("v1");
+                object["kind"] = json!("Secret");
+                return (None, 201, object.to_string());
+            }
             s.next_rv += 1;
             s.next_uid += 1;
             let uid = format!("00000000-0000-4000-9000-{:012}", s.next_uid);

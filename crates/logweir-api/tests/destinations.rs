@@ -292,8 +292,9 @@ async fn a_credential_value_is_created_once_and_never_comes_back() {
         "lwd-primary-archive-read"
     );
 
-    // EXACTLY ONE SECRET VERB WAS USED, AND IT WAS A CREATE. No GET, no LIST,
-    // no PATCH on `secrets` anywhere in the exchange.
+    // ONE SECRET VERB WAS USED, AND IT WAS A CREATE. No GET, no LIST, no PATCH
+    // on `secrets` anywhere in the exchange — the name check is a dry-run
+    // create, which is the same verb.
     let secret_calls: Vec<String> = app
         .fake
         .requests()
@@ -301,10 +302,26 @@ async fn a_credential_value_is_created_once_and_never_comes_back() {
         .filter(|r| r.path.contains("/secrets"))
         .map(|r| format!("{} {}", r.method, r.path))
         .collect();
-    assert_eq!(
-        secret_calls,
-        vec![format!("POST /api/v1/namespaces/{NS_A}/secrets")]
+    assert!(
+        secret_calls
+            .iter()
+            .all(|c| c == &format!("POST /api/v1/namespaces/{NS_A}/secrets")),
+        "a Secret verb other than create was used: {secret_calls:?}"
     );
+    // Two calls: the dry-run probe, then the real write.
+    assert_eq!(secret_calls.len(), 2, "{secret_calls:?}");
+    let recorded = app.fake.requests();
+    let posts: Vec<&support::Recorded> = recorded
+        .iter()
+        .filter(|r| r.method == "POST" && r.path.ends_with("/secrets"))
+        .collect();
+    // THE PROBE CARRIES NO CREDENTIAL. Name uniqueness is decided by the name,
+    // so the entered value does not travel before the decision to write it.
+    assert!(posts[0].query.contains("dryRun=All"), "{}", posts[0].query);
+    let probe: Value = serde_json::from_str(&posts[0].body).unwrap();
+    assert_eq!(probe["data"], json!({}), "the dry-run probe carried data");
+    assert!(!posts[0].body.contains(SECRET_ACCESS_KEY));
+    assert!(!posts[1].query.contains("dryRun"), "{}", posts[1].query);
     app.fake.assert_strict();
 }
 
@@ -334,7 +351,10 @@ async fn the_credential_echo_is_dropped_before_any_route_sees_it() {
         .fake
         .requests()
         .into_iter()
-        .find(|r| r.method == "POST" && r.path.ends_with("/secrets"))
+        .filter(|r| r.method == "POST" && r.path.ends_with("/secrets"))
+        // The first POST is the dry-run name probe, which carries no data;
+        // the real write is the second.
+        .find(|r| !r.query.contains("dryRun"))
         .expect("a credential Secret was created");
     let sent: Value = serde_json::from_str(&create.body).expect("the body is JSON");
     let encoded = sent["data"]["secret-access-key"].as_str().unwrap();
@@ -890,51 +910,182 @@ async fn a_rotation_into_a_role_with_no_secret_yet_is_written_and_lands() {
     app.fake.assert_strict();
 }
 
-/// **A fresh create never adopts a Secret it did not write, and a replay does.**
+/// **THE REVIEWER'S REPRODUCTION: a planted Secret is refused on attempt 1 AND
+/// on the retry the documentation prescribes.**
 ///
-/// The mirror of the rotation case: a stale or planted `lwd-…` Secret under
-/// the deterministic name would otherwise be adopted IN PLACE OF the value the
-/// operator just entered. A genuine replay — the same key and the same body,
-/// after a lost response — must still succeed, because the existing object is
-/// then the one this very request wrote.
+/// Round 1 chose the replay policy from `created.replayed` — "a destination
+/// already existed under this scope" — and the destination was written BEFORE
+/// the credentials. So the first attempt refused the planted Secret but left a
+/// destination behind, and `docs/api.md`'s own advice ("repeat with the same
+/// `Idempotency-Key`") then came back a replay and adopted the foreign value.
+/// The operator's credential was never written anywhere, and the destination's
+/// read grant pointed at a Secret whose contents they did not control.
+///
+/// The names are now checked before anything at all is written, so there is no
+/// destination for a retry to look like a replay of.
 #[tokio::test]
-async fn a_create_refuses_a_foreign_credential_secret_and_accepts_its_own_replay() {
+async fn a_planted_credential_secret_is_refused_on_the_first_attempt_and_on_the_retry() {
     let app = TestApp::new();
-    // Someone else already holds the name.
+    let foreign = "a-foreign-value-this-operator-does-not-control";
+    app.fake.seed(
+        "secrets",
+        NS_A,
+        json!({
+            "metadata": {"name": "lwd-primary-archive-read"},
+            "type": "Opaque",
+            "data": {"secret-access-key": "Zm9yZWlnbg=="}
+        }),
+    );
+    let request = support::destination_body_with_new_credential("primary");
+    let path = format!("/api/v1/namespaces/{NS_A}/destinations");
+
+    // Attempt 1.
+    let first = app
+        .post(&path, Some("planted-secret-0001"), &request.to_string())
+        .await;
+    first.assert_problem(409, "state_conflict");
+    assert!(first.json()["detail"]
+        .as_str()
+        .unwrap()
+        .contains("lwd-primary-archive-read"));
+    // NOTHING AT ALL WAS CREATED — that is what makes the retry safe.
+    assert_eq!(
+        app.fake.count("backupdestinations", NS_A),
+        0,
+        "the refused attempt left a destination behind"
+    );
+
+    // The retry the documentation prescribes: same key, same body.
+    let retry = app
+        .post(&path, Some("planted-secret-0001"), &request.to_string())
+        .await;
+    retry.assert_problem(409, "state_conflict");
+    assert_eq!(app.fake.count("backupdestinations", NS_A), 0);
+
+    // The planted Secret is untouched, and the operator's value went nowhere.
+    let planted = app
+        .fake
+        .object("secrets", NS_A, "lwd-primary-archive-read")
+        .unwrap();
+    assert_eq!(planted["data"]["secret-access-key"], "Zm9yZWlnbg==");
+    assert_eq!(planted["type"], "Opaque");
+    for body in [first.text(), retry.text()] {
+        assert!(!body.contains(SECRET_ACCESS_KEY));
+        assert!(!body.contains(foreign));
+    }
+    app.fake.assert_strict();
+}
+
+/// **Two roles, the second name taken: neither is written.**
+///
+/// Round 1 wrote role by role and returned on the first conflict, so an
+/// earlier role's credential was already live when a later one refused — under
+/// a message that said nothing had changed. Every name is now checked before
+/// any of them is written.
+#[tokio::test]
+async fn a_taken_name_for_a_later_role_leaves_the_earlier_role_unwritten() {
+    let app = TestApp::new();
+    seed_destination(&app.fake, NS_A, "primary");
+    // `archiveWrite` has no Secret; `archiveRead` does.
     app.fake.seed(
         "secrets",
         NS_A,
         json!({"metadata": {"name": "lwd-primary-archive-read"}, "type": "Opaque"}),
     );
-    let request = support::destination_body_with_new_credential("primary");
+    let rotation = json!({
+        "expectedGeneration": 3,
+        "access": {
+            "archiveWrite": {"mode": "secretKeys", "secret": {"new": {"accessKeyId": "AKIAFIRST", "secretAccessKey": "the-earlier-role-value"}}},
+            "archiveRead": {"mode": "secretKeys", "secret": {"new": {"accessKeyId": "AKIASECOND", "secretAccessKey": "the-later-role-value"}}}
+        }
+    });
     let response = app
         .post(
-            &format!("/api/v1/namespaces/{NS_A}/destinations"),
-            Some("create-foreign-0001"),
-            &request.to_string(),
+            &format!("/api/v1/namespaces/{NS_A}/destinations/primary:update-access"),
+            None,
+            &rotation.to_string(),
         )
         .await;
     response.assert_problem(409, "state_conflict");
-    assert!(response.json()["detail"]
-        .as_str()
-        .unwrap()
-        .contains("lwd-primary-archive-read"));
-    assert!(!response.text().contains(SECRET_ACCESS_KEY));
 
-    // Now the replay path, on a clean cluster: the first attempt writes both
-    // the destination and the Secret, and the second finds them and says so.
+    // THE EARLIER ROLE WAS NOT WRITTEN, and the message says so truthfully.
+    assert!(
+        app.fake
+            .object("secrets", NS_A, "lwd-primary-archive-write")
+            .is_none(),
+        "the earlier role's credential was created before the later one refused"
+    );
+    let detail = response.json()["detail"].as_str().unwrap().to_string();
+    assert!(detail.contains("lwd-primary-archive-read"), "{detail}");
+    assert!(detail.contains("nothing at all was created"), "{detail}");
+    assert!(!response.text().contains("the-earlier-role-value"));
+    assert!(!app.fake.requests().iter().any(|r| r.method == "PATCH"));
+    app.fake.assert_strict();
+}
+
+/// **Every taken name is reported, not the first.** An operator fixing one
+/// conflict should not discover the next one on the retry.
+#[tokio::test]
+async fn the_refusal_names_every_credential_name_that_is_already_taken() {
     let app = TestApp::new();
+    seed_destination(&app.fake, NS_A, "primary");
+    for role in ["archive-write", "archive-read"] {
+        app.fake.seed(
+            "secrets",
+            NS_A,
+            json!({"metadata": {"name": format!("lwd-primary-{role}")}, "type": "Opaque"}),
+        );
+    }
+    let rotation = json!({
+        "expectedGeneration": 3,
+        "access": {
+            "archiveWrite": {"mode": "secretKeys", "secret": {"new": {"accessKeyId": "A1", "secretAccessKey": "v1"}}},
+            "archiveRead": {"mode": "secretKeys", "secret": {"new": {"accessKeyId": "A2", "secretAccessKey": "v2"}}}
+        }
+    });
+    let response = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/destinations/primary:update-access"),
+            None,
+            &rotation.to_string(),
+        )
+        .await;
+    response.assert_problem(409, "state_conflict");
+    let detail = response.json()["detail"].as_str().unwrap().to_string();
+    assert!(detail.contains("lwd-primary-archive-write"), "{detail}");
+    assert!(detail.contains("lwd-primary-archive-read"), "{detail}");
+    app.fake.assert_strict();
+}
+
+/// A genuine replay — the same key and body, after a first attempt that really
+/// did write — still finishes, and is recognised ONLY from this service's
+/// idempotency record. This is the retry contract `docs/api.md` promises.
+#[tokio::test]
+async fn a_genuine_replay_finishes_the_credential_writes_it_started() {
+    let app = TestApp::new();
+    let request = support::destination_body_with_new_credential("primary");
     let path = format!("/api/v1/namespaces/{NS_A}/destinations");
     let first = app
-        .post(&path, Some("create-replay-0001"), &request.to_string())
+        .post(&path, Some("genuine-replay-0001"), &request.to_string())
         .await;
     assert_eq!(first.status.as_u16(), 201, "{}", first.text());
+    assert_eq!(app.fake.count("secrets", NS_A), 1);
+
     let replay = app
-        .post(&path, Some("create-replay-0001"), &request.to_string())
+        .post(&path, Some("genuine-replay-0001"), &request.to_string())
         .await;
     assert_eq!(replay.status.as_u16(), 200, "{}", replay.text());
     assert_eq!(replay.json()["replayed"], true);
+    assert_eq!(replay.json()["item"]["uid"], first.json()["item"]["uid"]);
     assert_eq!(app.fake.count("secrets", NS_A), 1);
+
+    // THE RECORD, NOT THE SECRET, IS WHAT MADE IT A REPLAY: a request with a
+    // DIFFERENT key against the same destination name is refused, even though
+    // the Secret it would write is sitting right there.
+    let other = app
+        .post(&path, Some("genuine-replay-0002"), &request.to_string())
+        .await;
+    other.assert_problem(409, "state_conflict");
     app.fake.assert_strict();
 }
 
