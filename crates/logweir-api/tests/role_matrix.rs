@@ -721,6 +721,115 @@ async fn the_matrix_holds_over_http_in_two_namespaces() {
     app.app.fake.assert_strict();
 }
 
+/// **The cadence preview is a product feature, not a public calculator.**
+///
+/// D1 §4.4 says "viewer role and above". `GET /api/v1/cadence-previews` has no
+/// `{ns}` — it reads nothing, so there is no namespace to scope it to — which
+/// is why the probe table above cannot reach it and why it needs its own row
+/// per role here.
+///
+/// THE APPROVER IS THE ROW THAT MATTERS. An approver is BOUND to the namespace
+/// and is deliberately granted no schedule surface at all: no
+/// `schedule.read`, no cadence, no topic inventory. A guard written as "is this
+/// actor bound anywhere" would admit it and still pass every other test in this
+/// crate, which is exactly the weakening the reviewer planted and the whole
+/// suite survived. These four rows are what kill it.
+///
+/// KILLS: `authorize_any` relaxed to `!authorizer.namespaces(actor).is_empty()`
+/// (the approver arm answers 200 and this fails); the `ReadSchedules` check
+/// renamed or dropped in a refactor; the route registered outside the
+/// authenticated router (the unauthenticated arm answers 200).
+#[tokio::test]
+async fn the_cadence_preview_needs_permission_to_read_schedules_somewhere() {
+    let app = SharedApp::new(
+        FakeKube::new(),
+        support::idp::MockIdp::new(ISSUER, &[]),
+        SharedOptions {
+            bindings: support::RoleBindings {
+                revision: "preview-1".into(),
+                bindings: vec![
+                    support::binding(Role::Viewer, NS_A, &["lw-a-viewers"]),
+                    support::binding(Role::Operator, NS_A, &["lw-a-operators"]),
+                    support::binding(Role::Approver, NS_A, &["lw-a-approvers"]),
+                    support::binding(Role::Administrator, NS_A, &["lw-a-admins"]),
+                ],
+            },
+            ..SharedOptions::default()
+        },
+    );
+    const PATH: &str = "/api/v1/cadence-previews?schedule=0%202%20*%20*%20*&count=1";
+
+    for (role, subject, group) in [
+        (Role::Viewer, "u-viewer", "lw-a-viewers"),
+        (Role::Operator, "u-operator", "lw-a-operators"),
+        (Role::Approver, "u-approver", "lw-a-approvers"),
+        (Role::Administrator, "u-admin", "lw-a-admins"),
+    ] {
+        let cookie = app.session_cookie(subject, &[group]);
+        let response = app.get(PATH, &cookie).await;
+        if role.allows(Action::ReadSchedules) {
+            assert_eq!(
+                response.status.as_u16(),
+                200,
+                "{role:?} may read schedules and was refused a preview: {}",
+                String::from_utf8_lossy(&response.body)
+            );
+            assert_eq!(response.json()["runs"].as_array().unwrap().len(), 1);
+        } else {
+            assert_eq!(
+                (response.status.as_u16(), response.code().as_str()),
+                (403, "forbidden"),
+                "{role:?} has no schedule surface anywhere and still got an evaluator"
+            );
+            assert!(
+                response.json().get("runs").is_none(),
+                "{role:?} was refused and still got firings"
+            );
+        }
+    }
+
+    // Bound to a namespace the route can never name is still a grant that
+    // carries `schedule.read`, so the rule really is about the ACTION.
+    let elsewhere = SharedApp::new(
+        FakeKube::new(),
+        support::idp::MockIdp::new(ISSUER, &[]),
+        SharedOptions {
+            bindings: support::RoleBindings {
+                revision: "preview-2".into(),
+                bindings: vec![support::binding(Role::Viewer, NS_B, &["lw-b-viewers"])],
+            },
+            ..SharedOptions::default()
+        },
+    );
+    let cookie = elsewhere.session_cookie("u-b-viewer", &["lw-b-viewers"]);
+    assert_eq!(elsewhere.get(PATH, &cookie).await.status.as_u16(), 200);
+
+    // An actor with a session and NO binding at all: refused.
+    let unbound = elsewhere.session_cookie("u-nobody", &["not-a-bound-group"]);
+    elsewhere
+        .get(PATH, &unbound)
+        .await
+        .assert_problem(403, "forbidden");
+
+    // And an unauthenticated caller never reaches the evaluator either.
+    let anonymous = app
+        .app
+        .send(
+            Request::builder()
+                .method("GET")
+                .uri(PATH)
+                .header("host", SHARED_HOST)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    anonymous.assert_problem(401, "unauthenticated");
+
+    // Nothing above reached Kubernetes: a preview is pure, refused or not.
+    assert!(app.app.fake.requests().is_empty());
+    app.app.fake.assert_strict();
+}
+
 /// **An unbound namespace and a nonexistent object are the same answer, byte
 /// for byte apart from the request id.**
 #[tokio::test]

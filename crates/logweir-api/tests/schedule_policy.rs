@@ -413,6 +413,110 @@ async fn the_rules_the_api_does_not_pre_empt_are_mapped_from_the_refusal() {
     app.fake.assert_strict();
 }
 
+/// **Every CEL rule the CRDs in this binary publish is one this build can
+/// name.**
+///
+/// `SpecRule::ALL` is hand-maintained, and the cost of a gap is invisible: a
+/// rule nobody mapped answers the generic `422` whose reason exists only in
+/// the service log, and no test fails. So the map is checked against the CRD
+/// modules' OWN rule lists rather than against a second hand-written list
+/// here.
+///
+/// `SPEC_IMMUTABLE_MESSAGE` is exempt on purpose: it is a transition rule on
+/// `Backup.spec`, which this API only ever CREATES, so no route can provoke it.
+///
+/// KILLS: a fourth CEL rule added to `BackupSchedule` or `Backup` without a
+/// `SpecRule` arm — the exact regression the reviewer described.
+#[test]
+fn every_published_cel_rule_is_one_this_build_can_name() {
+    use logweir_api::kube::SpecRule;
+    use weirkeeper::crds;
+
+    let exempt = crds::SPEC_IMMUTABLE_MESSAGE;
+    let mut checked = 0usize;
+    for (kind, rules) in [
+        ("BackupSchedule", &crds::backup_schedule::SPEC_RULES[..]),
+        ("Backup", &crds::backup::SPEC_RULES[..]),
+    ] {
+        for rule in rules {
+            if rule.message == exempt {
+                continue;
+            }
+            checked += 1;
+            // The API server wraps the message; the classifier must find it
+            // inside that wrapping, which is what `contains` is for.
+            let wrapped = format!(
+                "{kind}.logweir.dev \"x\" is invalid: spec: Invalid value: \"object\": {}",
+                rule.message
+            );
+            assert!(
+                SpecRule::classify(&wrapped).is_some(),
+                "{kind} publishes a CEL rule this build cannot name, so a console hitting it \
+                 gets a generic 422 whose reason is only in the service log: {}",
+                rule.message
+            );
+        }
+    }
+    // The root rule, which is not on a `.spec` list because only the schema
+    // root may read `self.metadata.name`.
+    checked += 1;
+    assert!(SpecRule::classify(&format!(
+        "BackupSchedule.logweir.dev \"x\" is invalid: <nil>: Invalid value: \"object\": {}",
+        crds::backup_schedule::RETRY_NAME_BUDGET_MESSAGE
+    ))
+    .is_some());
+    assert!(checked >= 4, "the CRD rule lists shrank unexpectedly");
+
+    // A message this build has never heard of stays unnamed rather than being
+    // guessed at — which is what the pre-D1-W2 CRD on the lab produces live.
+    assert!(SpecRule::classify(
+        "BackupSchedule.logweir.dev \"x\" is invalid: spec: Invalid value: \"object\": only \
+         spec.suspend is mutable; create a new BackupSchedule instead"
+    )
+    .is_none());
+
+    // And each rule this build names reaches the wire as a 422 naming its own
+    // field, with a code that says what KIND of wrong it is and the CRD's own
+    // sentence — the compiled-in constant, never the API server's text.
+    //
+    // The sentinel is a SHAPE rule. Calling it `field_immutable`, as this
+    // build once did, tells the person their destination cannot be changed,
+    // which is the opposite of what D1 §5.1 as amended says.
+    for (rule, field, code) in [
+        (
+            SpecRule::ScheduleSourceRefImmutable,
+            "sourceRef",
+            "field_immutable",
+        ),
+        (
+            SpecRule::SelectionShape,
+            "topicSelection",
+            "selection_invalid",
+        ),
+        (
+            SpecRule::ScheduleRetryNameBudget,
+            "retry.maxRetries",
+            "schedule_invalid",
+        ),
+        (
+            SpecRule::DestinationSentinel,
+            "destinationRef",
+            "destination_sentinel_mismatch",
+        ),
+    ] {
+        assert_eq!(rule.field(), (field, code), "{rule:?}");
+        let error = logweir_api::kube::KubeFailure::RuleRefused(rule).into_api_error();
+        assert_eq!(
+            error.code,
+            logweir_api::problem::ProblemCode::ValidationFailed
+        );
+        assert_eq!(error.errors.len(), 1, "{rule:?}");
+        assert_eq!(error.errors[0].field, field);
+        assert_eq!(error.errors[0].code, code);
+        assert_eq!(error.errors[0].message, rule.message(), "{rule:?}");
+    }
+}
+
 /// **A cadence the scheduler would refuse never reaches the cluster.**
 ///
 /// An expression this API accepts and the controller refuses leaves
@@ -487,6 +591,113 @@ async fn an_invalid_cadence_is_refused_before_any_write() {
         "a refused edit reached Kubernetes: {:#?}",
         app.fake.requests()
     );
+}
+
+/// **One typo, one field code, on all three cadence routes.**
+///
+/// A console branches on `errors[].code` to highlight the cadence input. This
+/// used to hold on the edit form and the preview and silently fail on the
+/// create form, because `POST .../schedules` answered `invalid_cron` while the
+/// other two answered `schedule_invalid` — the code D1 §0.2 fixes and
+/// `docs/api.md` publishes. There is no field-code registry to catch that, so
+/// this is the registry.
+///
+/// KILLS: a route reintroducing its own spelling; a route that stops naming
+/// `schedule` as the field; the unknown-zone code drifting the same way.
+#[tokio::test]
+async fn the_three_cadence_routes_answer_one_code() {
+    let app = TestApp::new();
+    seed_legacy(&app.fake, "nightly");
+
+    let mut create = json!({
+        "schedule": "61 * * * *",
+        "sourceRef": {"name": "source"},
+        "topics": ["orders"],
+        "archive": {"url": "s3://kafka-backups/logweir"},
+        "suspended": false
+    });
+    let mut edit_body = edit();
+    edit_body["schedule"] = json!("61 * * * *");
+
+    let answers = [
+        (
+            "POST .../schedules",
+            app.post(
+                &format!("/api/v1/namespaces/{NS_A}/schedules"),
+                Some("one-code-probe-01"),
+                &create.to_string(),
+            )
+            .await,
+        ),
+        (
+            "PUT .../schedules/{name}",
+            app.put(
+                &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+                &edit_body.to_string(),
+            )
+            .await,
+        ),
+        (
+            "GET /api/v1/cadence-previews",
+            app.get("/api/v1/cadence-previews?schedule=61%20*%20*%20*%20*")
+                .await,
+        ),
+    ];
+    for (route, response) in answers {
+        response.assert_problem(422, "validation_failed");
+        let error = &response.json()["errors"][0];
+        assert_eq!(error["field"], "schedule", "{route}");
+        assert_eq!(
+            error["code"], "schedule_invalid",
+            "{route} spells the cadence failure differently from the others"
+        );
+    }
+
+    // The zone half of the same rule, on the two routes that take a zone.
+    // `POST .../schedules` has no `timeZone` field yet; when it grows one it
+    // must use this code, and the constant is shared so it will.
+    edit_body["schedule"] = json!("0 2 * * *");
+    edit_body["timeZone"] = json!("Mars/Olympus");
+    for (route, response) in [
+        (
+            "PUT",
+            app.put(
+                &format!("/api/v1/namespaces/{NS_A}/schedules/nightly"),
+                &edit_body.to_string(),
+            )
+            .await,
+        ),
+        (
+            "preview",
+            app.get("/api/v1/cadence-previews?schedule=0%202%20*%20*%20*&timeZone=Mars/Olympus")
+                .await,
+        ),
+    ] {
+        let error = &response.json()["errors"][0];
+        assert_eq!(error["field"], "timeZone", "{route}");
+        assert_eq!(error["code"], "timezone_unknown", "{route}");
+    }
+
+    // A control: a VALID expression is accepted by the create route, so the
+    // rows above are not passing because every create is refused.
+    create["schedule"] = json!("0 2 * * *");
+    create["name"] = json!(null);
+    let ok = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/schedules"),
+            Some("one-code-probe-02"),
+            &json!({
+                "schedule": "0 2 * * *",
+                "sourceRef": {"name": "source"},
+                "topics": ["orders"],
+                "archive": {"url": "s3://kafka-backups/logweir"},
+                "suspended": false
+            })
+            .to_string(),
+        )
+        .await;
+    assert_eq!(ok.status, 201, "{}", ok.text());
+    app.fake.assert_strict();
 }
 
 /// **A pre-PLAT-05.1 schedule needs no rewrite, and an edit adds only what was

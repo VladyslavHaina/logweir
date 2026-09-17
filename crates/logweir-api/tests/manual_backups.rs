@@ -447,6 +447,80 @@ async fn the_copied_policy_digest_equals_the_schedules_own() {
     );
 }
 
+/// **A schedule whose stored policy cannot run is refused with a CLEAN field
+/// path.**
+///
+/// A schedule can be stored in a shape this build refuses — an older CRD, a
+/// hand edit, `topics: []` with no `allUserTopics`. Copying it and only then
+/// validating is what makes the answer a 422 about the RUN rather than a run
+/// that dies at the guard rail.
+///
+/// `FieldError.field` IS A PATH. It used to be `"scheduleRef.name (topics)"`
+/// — a path with a parenthetical glued on — and `ui/contract.js` types the
+/// field as a plain string with no parser, so a console matching
+/// `e.field === "scheduleRef.name"` to highlight the schedule picker found
+/// nothing. The schedule's own offending field belongs in the message.
+///
+/// KILLS: decorating the path again; dropping the schedule field from the
+/// message, which would leave the person a 422 that names the picker and not
+/// the problem.
+#[tokio::test]
+async fn a_schedule_whose_policy_cannot_run_is_refused_by_a_clean_path() {
+    let app = TestApp::new();
+    app.fake.seed(
+        "backupschedules",
+        NS_A,
+        json!({
+            "metadata": {"name": "empty", "generation": 1},
+            "spec": {
+                "schedule": "0 2 * * *",
+                "sourceRef": {"name": "source"},
+                "topics": [],
+                "archive": {"url": "s3://kafka-backups/logweir"},
+                "suspend": false
+            }
+        }),
+    );
+    let response = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            Some(KEY),
+            &json!({"scheduleRef": {"name": "empty"}}).to_string(),
+        )
+        .await;
+    response.assert_problem(422, "validation_failed");
+    let error = &response.json()["errors"][0];
+    assert_eq!(
+        error["field"], "scheduleRef.name",
+        "the field is a path a console can match on, not a path with a note glued to it"
+    );
+    assert_eq!(error["code"], "selection_invalid");
+    let message = error["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("spec.topics"),
+        "the schedule's own offending field is in the message: {message}"
+    );
+    assert_eq!(app.fake.count("backups", NS_A), 0);
+
+    // The ad-hoc form keeps its OWN paths, because those inputs are on the
+    // form the person is looking at.
+    let ad_hoc = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            Some("back-up-now-7777"),
+            &json!({
+                "sourceRef": {"name": "source"},
+                "topicSelection": {"topics": []},
+                "legacyArchive": {"url": "s3://b/p"}
+            })
+            .to_string(),
+        )
+        .await;
+    ad_hoc.assert_problem(422, "validation_failed");
+    assert_eq!(ad_hoc.json()["errors"][0]["field"], "topicSelection");
+    app.fake.assert_strict();
+}
+
 /// **A schedule that moved on is `409 policy_changed`, with the revision it
 /// moved TO.**
 ///
@@ -694,52 +768,127 @@ async fn dynamic_selection_is_copied_whole() {
     app.fake.assert_strict();
 }
 
-/// **The shipped sample is the object this route creates.**
+/// **The shipped sample is the object this route creates — driven through the
+/// route and compared byte for byte.**
 ///
-/// D1 §8.1 promises ONE CR path. `config/samples/backup-manual.yaml` is the
-/// `kubectl` spelling of it, and this is what keeps the promise true: the
-/// sample parses as a `Backup`, its identity fields are the ones this route
-/// writes, and its recorded `runPolicySha256` is the digest of its OWN policy
-/// fields — which is exactly what the Backup controller recomputes and refuses
-/// the run on (D1 §3.1 rule 5). A sample carrying a stale digest would fail
-/// terminally for anyone who applied it.
-#[test]
-fn the_shipped_sample_is_what_this_route_creates() {
+/// D1 §8.1 promises ONE CR path, and the sample's own header says the API
+/// produces "exactly this shape". A test that only checked the file was
+/// internally well-formed would let the two drift apart while still passing
+/// under a name that promises a comparison — which is what the reviewer found:
+/// the sample carried a decorative `app.kubernetes.io/name` label the route
+/// never writes.
+///
+/// So this drives `POST .../backups` against a schedule seeded with the
+/// sample's own copied policy, UID and generation, and asserts that the object
+/// the fake API server STORED equals the sample's `metadata.labels` and `spec`
+/// exactly. Only the name differs, and only because the route mints its own
+/// deterministic one; the sample's name is a placeholder of the same shape.
+///
+/// KILLS: a label on either side the other does not have; a copied field that
+/// drifts (the resolved `deadlineSeconds`, `allUserTopics`, the archive's
+/// `secretRef`); a `trigger` block that stops being `{kind: Manual, attempt:
+/// 0}`; a stale `runPolicySha256` in the sample, which
+/// `identity::check_run_policy_digest` would refuse the run for.
+#[tokio::test]
+async fn the_shipped_sample_is_what_this_route_creates() {
     let path = support::repo_root().join("config/samples/backup-manual.yaml");
     let text = std::fs::read_to_string(&path).expect("the sample exists");
     let sample: weirkeeper::crds::backup::Backup =
         serde_yaml::from_str(&text).expect("the sample is a Backup");
-
-    assert_eq!(sample.spec.triggered_by, "manual");
-    let trigger = sample.spec.trigger.as_ref().expect("it carries a trigger");
-    assert_eq!(trigger.kind, weirkeeper::crds::backup::TriggerKind::Manual);
-    assert_eq!(trigger.attempt, 0);
-    assert!(sample.spec.slot.is_none(), "a manual run has no slot");
-    let name = sample.metadata.name.as_deref().unwrap_or_default();
-    assert!(
-        name.starts_with("logweir-manual-") && name.len() == 41,
-        "the sample shows D1 §8.1's deterministic name: {name}"
-    );
-    let labels = sample.metadata.labels.as_ref().expect("labels");
-    assert_eq!(labels["logweir.dev/trigger"], "manual");
-    assert_eq!(labels["logweir.dev/attempt"], "0");
-
+    let sample_value: Value = serde_json::to_value(&sample).expect("a Backup serialises");
     let reference = sample
         .spec
         .schedule_ref
         .as_ref()
         .expect("the sample shows the copy");
-    assert_eq!(labels["logweir.dev/schedule"], reference.name);
-    assert_eq!(
-        labels["logweir.dev/schedule-uid"],
-        *reference.uid.as_ref().expect("a uid")
+
+    // The schedule the sample says it copied: the same UID, the same
+    // generation, and the policy fields the sample carries. `FakeKube::seed`
+    // keeps a `uid` that is already in the metadata, so the copy can be
+    // compared literally rather than after a substitution.
+    let app = TestApp::new();
+    app.fake.seed(
+        "backupschedules",
+        NS_A,
+        json!({
+            "metadata": {
+                "name": reference.name,
+                "uid": reference.uid,
+                "generation": reference.generation,
+            },
+            "spec": {
+                "schedule": "0 2 * * *",
+                "sourceRef": sample.spec.source_ref,
+                "topics": sample.spec.topics,
+                "archive": sample.spec.archive,
+                "activeDeadlineSeconds": sample.spec.deadline_seconds,
+                "suspend": false
+            }
+        }),
     );
+    let response = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/backups"),
+            Some(KEY),
+            &json!({"scheduleRef": {"name": reference.name}}).to_string(),
+        )
+        .await;
+    assert_eq!(response.status, 201, "{}", response.text());
+    let name = response.json()["item"]["name"]
+        .as_str()
+        .expect("a name")
+        .to_string();
+    let stored = app
+        .fake
+        .object("backups", NS_A, &name)
+        .expect("the route stored it");
+
+    // THE COMPARISON. The spec is the whole policy and the whole identity.
     assert_eq!(
-        reference.run_policy_sha256.as_deref(),
-        Some(weirkeeper::policy::run_policy_sha256(&sample.spec).as_str()),
-        "the sample's recorded digest is not the digest of its own policy fields; \
-         `weirkeeper::identity::check_run_policy_digest` would refuse this run terminally"
+        stored["spec"], sample_value["spec"],
+        "config/samples/backup-manual.yaml and POST .../backups disagree about the spec"
     );
-    // The identity module agrees it is a well-formed manual run.
+    // The labels are compared WHOLE, not as a subset: a decorative label on
+    // either side is a claim about the other that is not true.
+    assert_eq!(
+        stored["metadata"]["labels"], sample_value["metadata"]["labels"],
+        "the sample's labels are not the ones the route writes"
+    );
+
+    // The name differs only because the route mints its own from the
+    // idempotency scope; both are the same 41-character shape.
+    let sample_name = sample.metadata.name.as_deref().unwrap_or_default();
+    assert_ne!(sample_name, name, "the sample's name is a placeholder");
+    for candidate in [sample_name, name.as_str()] {
+        assert!(
+            candidate.starts_with("logweir-manual-") && candidate.len() == 41,
+            "D1 §8.1's deterministic name: {candidate}"
+        );
+    }
+
+    // And the identity module agrees: the digest the SHIPPED FILE carries is
+    // the digest of its own policy fields — the check the Backup controller
+    // recomputes and refuses the run terminally on (D1 §3.1 rule 5) — and the
+    // object the ROUTE created resolves to a manual identity that is its own
+    // UID and holds no scheduled identity at all.
+    //
+    // The digest check runs on the file and the identity check on the stored
+    // object, because a manual run's identity IS `metadata.uid` and a YAML
+    // sample has none until an API server assigns one.
     weirkeeper::identity::check_run_policy_digest(&sample).expect("the digest checks out");
+    let created: weirkeeper::crds::backup::Backup =
+        serde_json::from_value(stored.clone()).expect("the stored object is a Backup");
+    weirkeeper::identity::check_run_policy_digest(&created)
+        .expect("the created run's digest checks out");
+    let identity = weirkeeper::identity::run_identity(&created).expect("a manual identity");
+    assert!(
+        identity.schedule.is_none(),
+        "a manual run holds no SCHEDULED identity, whatever schedule it copied"
+    );
+    assert_eq!(
+        identity.execution_id,
+        created.metadata.uid.clone().unwrap_or_default(),
+        "a manual run's execution id is its own UID"
+    );
+    app.fake.assert_strict();
 }
