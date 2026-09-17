@@ -597,7 +597,21 @@ kubectl --context docker-desktop get recoverycatalog -n team-a
 **What a sync is.** A short-lived check Job — the same `logweir check run` every
 other check uses, with the `catalogSync` plan kind — reads the catalog with the
 destination's own credential, projected by `secretKeyRef`, and prints its result
-through the ordinary result frames. The controller reads that Job's stdout from
+through the ordinary result frames. **The Job is created before its plan `ConfigMap`, and the plan is owned by the
+Job.** Every object one sync produces — the plan, the pages, the fence pointer —
+is owned by that Job, so the Job's TTL is the one thing that removes any of
+them. An `ownerReference` needs the owner's UID and a Job's UID exists only once
+the API server has created it, so the order inverts, and the consequence is
+worth knowing: **there is a window in which the Job exists and its plan does
+not**, and a pod scheduled inside it sits `ContainerCreating` on the missing
+volume. The kubelet retries that mount indefinitely, so the ordinary case
+resolves in milliseconds. A controller that crashed inside the window leaves a
+pod pending until the Job's `activeDeadlineSeconds` fires — and nothing is
+recorded in `status.lastSyncJob` until both objects exist, so the next reconcile
+computes the same name, gets `AlreadyExists` on the Job, and creates the plan
+the pod is waiting for.
+
+The controller reads that Job's stdout from
 the pod it can prove the Job owns, verifies each page's digest over the page's
 own entry lines, and writes the result. It runs on `spec.sync.intervalSeconds`,
 or immediately when `spec.syncRequest` changes — that token is the **only mutable
@@ -615,15 +629,31 @@ mistaken for a retry.
 | `status.histogram` | at most 400 days | Points per day over the whole walk, not only the window. |
 | `status.signers[]` | at most 16 | Untrusted keys first, so the row an administrator has to act on is never the one that is dropped. |
 
-**How the view is collected, with no `delete` permission anywhere.** Every page
-and the fence pointer are owned by the **sync Job**, with
-`blockOwnerDeletion: false`. The Job carries
-`ttlSecondsAfterFinished = max(3 × intervalSeconds, 86400)`; when Kubernetes
-removes the Job, garbage collection removes its pages. Each successful sync
-publishes a new set and the previous one ages out. If syncing stops for longer
+**How the view is collected, with no `delete` permission anywhere.** Every page,
+the fence pointer and the plan are owned by the **sync Job**, with
+`blockOwnerDeletion: false` (`true` would ask for `update` on `jobs/finalizers`
+under the `OwnerReferencesPermissionEnforcement` admission plugin, which this
+`ClusterRole` grants on nothing). The Job carries
+`ttlSecondsAfterFinished = max(3 × intervalSeconds, 3600)`; when Kubernetes
+removes the Job, garbage collection removes everything it owns. Each successful
+sync publishes a new set and the previous one ages out.
+
+**How many generations coexist, exactly.** One Job lives per slot, so the number
+alive at once is `ttl / intervalSeconds` — **three** at an hourly cadence, and
+**twelve** at `spec.sync.intervalSeconds: 300`, which a CEL rule on the CRD
+enforces as the floor (`intervalSeconds` is `0`, meaning manual only, or at
+least 300). The worst case per catalog is therefore 12 generations × (≤ 8 page
+`ConfigMap`s + 1 fence pointer + 1 plan) = **at most 120 `ConfigMap`s and 12
+Jobs**, and at the default hourly cadence 30 and 3. That bound is the reason the
+floor exists: an hour's TTL with a one-second cadence would be 3 600 live
+generations. If syncing stops for longer
 than the TTL the view disappears and the object reports `Stale` and then
-`Ready=False/ViewExpired`, and `status.pages` is cleared rather than left naming
-objects that are gone. **The archive is untouched by any of this**: the
+`Ready=False/ViewExpired`. **`status.pages`, `status.indexConfigMap` and
+`status.truncated` are cleared on every path that writes a status** — the idle
+one, a running sync, a sync whose result did not read, and a refusal about
+something else entirely, such as a destination that went invalid meanwhile. A
+`status.pages[]` naming a `ConfigMap` the API server no longer has is a link to
+a 404, and a reader cannot tell it from a page it simply has not fetched. **The archive is untouched by any of this**: the
 controller holds no `delete` verb on anything, and `logweir catalog list` still
 reads the durable catalog.
 
@@ -655,13 +685,29 @@ A point is offered for an ordinary restore only when it is `Available` **and**
 state and a remedy sentence; nothing is hidden and nothing unverified is
 presented as verified evidence.
 
+**The two axes merge in opposite directions across a point's locations.** D3 §5.1
+makes one archive copied to a second bucket ONE point in TWO places, so
+**availability merges best-of**: a point present in bucket A and absent from
+bucket B is still fully recoverable from A, and hiding it because the second copy
+went missing is the opposite of what a second copy is for. Each entry's
+`locations[]` carries its own `availability`, and every degraded copy is **named
+in `remedy`**, so a best-of answer never costs you the knowledge of which bucket
+to repair. The **signature merges worst-of**, with the signer key id following
+the worse verdict: bytes that fail verification in one place are evidence about
+the point and not about the place. A receipt-derived disagreement between two
+records overrides both and is `Conflict`.
+
 **What a sync does NOT verify.** It does not decide trust. The Job is handed this
 installation's **public** signing keys in an immutable `ConfigMap` (public
 material only — nothing private ever reaches a `ConfigMap`) and reports whether a
 signature verified and under which key id. Whether that key is one this
 installation accepts, has retired or has revoked is decided by the controller
 against the trust source, once, and applied to both the entries and
-`status.counts.untrustedSigner`. A public key found beside an archive is a
+`status.counts.untrustedSigner` — which is summed over **every** signer the walk
+saw, not over the sixteen `status.signers` can display. `signers[].trusted`
+answers *does this installation accept evidence from this key*, not *is it
+listed*: a key the trust source lists with `state: Revoked` is reported
+`trusted: false`, because its private half is in someone else's hands. A public key found beside an archive is a
 **claim**: it is displayed with its fingerprint and is never trusted by proximity
 (`docs/keys.md`). With no trust material at all, `TrustAvailable=False` and every
 point is `NotAttempted` — an installation that holds no key has not disproved
@@ -676,7 +722,33 @@ index onto evidence.
 `status.counts` has ten fields across the two seven-state axes.
 `counts.unverified` folds `NotAttempted` and `NoEvidence`; `Partial`, `Revoked`
 and `VerifiedHistorical` have no field of their own and are named in the `Synced`
-condition's message instead.
+condition's message instead, each with the scope it is known for — `Partial` over
+the whole archive, the other two over the materialised view, because the
+verification axis is re-decided here and only for the entries this controller
+re-classified.
+
+**What the sync Job must print, and what bounds it.** The result body travels in
+the `details` relay stream and is read line by line:
+
+```
+catalog-format=1                                     # required; a higher major is refused
+catalog-page=<i>/<n> count=<c> sha256=<64 hex>       # 1..=n in order, n <= 8
+catalog-entry=<compact json>                         # exactly <c> per page
+catalog-counts=<json>   catalog-cursor=<json>   catalog-signers=<json>
+```
+
+The page digest covers **that page's raw entry lines and nothing else** — the
+three summary lines are covered by the relay's own frame-stream digest, which
+D2's decoder verifies first, and a second digest over them would be a second
+answer to a settled question. The bounds are **bytes and points, never line
+counts**: at most 5 MB of `details` (the relay's own budget is about 5.9 MB of
+raw bytes after base64 part-frame expansion, so this sits inside it), at most
+`spec.sync.viewLimit` entry lines, at most 64 `catalog-signers` rows and at most
+16 `locations[]` on one point. A summary line that arrives **twice is an error**,
+not last-wins: two `catalog-counts=` lines mean the runner disagreed with itself
+about the walk. A malformed entry is skipped and counted; a malformed page is
+fatal for the sync, and every failure is reported with D2's closed
+`ResultUnreadable` code and none of the body's content.
 
 **Conditions.** `Ready` (a usable view exists now), `Synced` (what the last sync
 did — `Succeeded`, `PartialScan` when part of the archive could not be read,
