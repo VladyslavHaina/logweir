@@ -88,6 +88,21 @@ which `logweir-operator`'s `update` does not grant), and it creates
 approvals, which `logweir-operator` deliberately excludes. Binding the shipped
 roles would have granted `watch` and `update` the page never issues and
 refused the `patch` it does.
+
+D2 §7.4 — THE THREE NEW KINDS, `get`/`list` AND NOTHING ELSE. A legacy page
+that could not see a `BackupDestination` would render a destination-backed
+schedule as though its archive were unconfigured, and a `Preflight` summary is
+what makes a restore's readiness legible. **No `create`, no `patch`, no
+`delete`**: `ui/api.js`'s `WRITABLE_PLURALS` is unchanged, the page has no
+form for any of the three, and the new flows are console-only (D0: this proxy
+is `legacyLocalAdminProxy`, it gets no Ingress, and it is not shared-console
+mode). A read verb on a summary is the most this identity ever needs, because
+anyone who reaches the Service holds it.
+
+AND NO VERB ON `configmaps`, so the page cannot page through an inventory: the
+chunk documents a `TopicDiscovery` owns are ConfigMaps, and reading them is
+the console API's job with its own owner-UID/immutability/digest checks (D2
+§5.6). The page sees `status.counts` and stops there.
 */}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -104,6 +119,14 @@ rules:
       - backupschedules
       - kafkaclusters
       - restores
+    verbs: ["get", "list"]
+  # D2 §7.4: the three kinds Amendment F added, READ ONLY. Summaries; no
+  # create, no patch. See this file's header.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - backupdestinations
+      - preflights
+      - topicdiscoveries
     verbs: ["get", "list"]
   - apiGroups: ["logweir.dev"]
     resources:

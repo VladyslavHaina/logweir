@@ -148,6 +148,22 @@ pub const ERROR_REQUEUE_SECONDS: u64 = 30;
 /// sub-second interval and spin the loop; a check whose expiry has already
 /// passed is downgraded on this very pass and never requeued at all.
 pub const MIN_REVALIDATE_SECS: u64 = 30;
+/// How long a terminal check waits before the collector looks at it again —
+/// D2 §4.3's `gc.rs`.
+///
+/// ONE HOUR, the same pace `controllers::topic_discovery` uses, and it is the
+/// backstop rather than the mechanism: a check whose verdict can still go
+/// stale is requeued much sooner by [`revalidation_action`], and this is what
+/// wakes the one whose verdict cannot — a `notReady` or `unknown` result that
+/// would otherwise sit forever with `Action::await_change()`.
+pub const REQUEUE_TERMINAL_SECS: u64 = 3600;
+/// The most objects ONE garbage-collection pass may delete — D2 §4.3.
+///
+/// See `controllers::topic_discovery::GC_MAX_DELETES_PER_PASS`: a bound on the
+/// blast radius and on the API server, not on the total.
+pub const GC_MAX_DELETES_PER_PASS: usize = 20;
+/// The page size one garbage-collection pass lists.
+pub const GC_LIST_LIMIT: u32 = 500;
 
 // ---------------------------------------------------------------------------
 // The controller's half of D2 §6.3's catalogue
@@ -3709,8 +3725,32 @@ pub async fn reconcile_preflight(
         return Ok(Action::await_change());
     }
 
-    // --- 2. A terminal check is REVALIDATED, never re-run --------------------
+    // --- 2. A terminal check is REVALIDATED, never re-run, and COLLECTED -----
+    //
+    // D2 §4.3's `gc.rs` runs FIRST and on the same pass, because it is the only
+    // other work a terminal check has. An absent policy is the documented
+    // default (one hour) and not an error. The collector's answer never
+    // changes the revalidation verdict: a check this pass deleted is simply
+    // gone, and a `revalidate` that then writes its status gets a 404 the
+    // reconciler already handles as any other API answer.
     if terminal {
+        // THE SAME REFERENCE `resolve` READS, and from the same pure decision
+        // (`check_policy::configured_ref`), so a terminal pass and a running
+        // one cannot disagree about which document is in force.
+        let policy_ref = check_policy::configured_ref(
+            std::env::var(check_policy::POLICY_CONFIGMAP_ENV)
+                .ok()
+                .as_deref(),
+            std::env::var(check_policy::INSTALLATION_NAMESPACE_ENV)
+                .ok()
+                .as_deref(),
+        );
+        let policy = check_policy::load(client, policy_ref.as_ref(), cache, now)
+            .await
+            .map_err(ReconcileError::Api)?;
+        let retention = policy.policy().preflight.retention_seconds;
+        let api: Api<Preflight> = Api::namespaced(client.clone(), &namespace);
+        collect_expired(&api, &namespace, retention, now).await?;
         return revalidate(pf, ctx, cache, &namespace, now).await;
     }
 
@@ -4158,6 +4198,143 @@ async fn mounted_plan_digest(
 /// recomputes: `status.result.state` is a printer column
 /// (`kubectl get preflights`) and a UI field, and leaving it `ready` after the
 /// referents moved is defect UI-FAKEPREFLIGHT with a new spelling.
+/// One terminal preflight, as [`expired_terminal`] reads it.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalPreflight {
+    /// `metadata.name`.
+    pub name: String,
+    /// `metadata.uid` — the DELETE precondition, not the name.
+    pub uid: String,
+    /// The instant retention counts from: `status.result.expiresAt` when the
+    /// check produced a verdict with an expiry, else when it was observed.
+    pub basis: DateTime<Utc>,
+}
+
+/// Which terminal preflights are collectable — **pure**, D2 §4.3's `gc.rs`.
+///
+/// ONE RULE, AND IT IS NOT THE DISCOVERY'S. `now > basis + retentionSeconds`,
+/// where the basis is `result.expiresAt` for a check that produced a verdict
+/// and the observation time for one that never did (D2 §4.3: "or
+/// `observedAt + …` if never ready"). There is no keep-last-N cohort here,
+/// deliberately: a `Preflight` is about ONE plan of ONE operation, so there is
+/// no "the newest five for this connection" to be outside of, and inventing a
+/// cohort would delete the only readiness verdict a restore has.
+///
+/// The order is newest-first by basis with the UID as the tie-break, so two
+/// passes over the same input agree.
+#[must_use]
+pub fn expired_terminal(
+    preflights: &[TerminalPreflight],
+    retention_seconds: u32,
+    now: DateTime<Utc>,
+) -> Vec<String> {
+    let mut sorted: Vec<&TerminalPreflight> = preflights.iter().collect();
+    sorted.sort_by(|a, b| b.basis.cmp(&a.basis).then_with(|| a.uid.cmp(&b.uid)));
+    let retention = chrono::Duration::seconds(i64::from(retention_seconds));
+    sorted
+        .into_iter()
+        .filter(|p| now > p.basis + retention)
+        .map(|p| p.uid.clone())
+        .collect()
+}
+
+/// One listed object as [`expired_terminal`] reads it, or `None` when it is not
+/// a collectable terminal preflight.
+fn gc_row(pf: &Preflight) -> Option<TerminalPreflight> {
+    let phase = pf.status.as_ref().and_then(|s| s.phase.as_deref())?;
+    // THE GUARD THAT MATTERS. A non-terminal check is still running, and its
+    // pod holds the only copy of a relay nobody has read.
+    if !matches!(phase, PHASE_COMPLETED | PHASE_FAILED | PHASE_CANCELLED) {
+        return None;
+    }
+    if pf.metadata.deletion_timestamp.is_some() {
+        return None;
+    }
+    let status = pf.status.as_ref()?;
+    let basis = status
+        .result
+        .as_ref()
+        .and_then(|r| r.expires_at)
+        .or(status.observed_at)
+        .or_else(|| {
+            status
+                .conditions
+                .as_ref()
+                .and_then(|c| c.iter().find(|c| c.r#type == CONDITION_COMPLETE))
+                .and_then(|c| c.last_transition_time)
+        })
+        .or(pf.metadata.creation_timestamp.as_ref().map(|t| t.0))?;
+    Some(TerminalPreflight {
+        name: pf.name_any(),
+        uid: pf.uid().filter(|u| !u.is_empty())?,
+        basis,
+    })
+}
+
+/// D2 §4.3's `gc.rs` for this kind: collect the namespace's expired terminal
+/// checks.
+///
+/// The same four bounds as `controllers::topic_discovery::collect_expired`:
+/// one kind, terminal only, UID preconditions, and at most
+/// [`GC_MAX_DELETES_PER_PASS`] per pass. The details `ConfigMap` and the check
+/// Job go by ownerReference cascade.
+///
+/// # Errors
+///
+/// [`ReconcileError::Api`] only when the LIST fails; a failed DELETE is logged
+/// and the pass continues.
+async fn collect_expired(
+    api: &Api<Preflight>,
+    namespace: &str,
+    retention_seconds: u32,
+    now: DateTime<Utc>,
+) -> Result<usize, ReconcileError> {
+    let page = api
+        .list(&kube::api::ListParams::default().limit(GC_LIST_LIMIT))
+        .await
+        .map_err(ReconcileError::Api)?;
+    let rows: Vec<TerminalPreflight> = page.items.iter().filter_map(gc_row).collect();
+    let doomed = expired_terminal(&rows, retention_seconds, now);
+    let mut collected = 0usize;
+    for uid in doomed.iter().take(GC_MAX_DELETES_PER_PASS) {
+        let Some(row) = rows.iter().find(|r| &r.uid == uid) else {
+            continue;
+        };
+        let params = kube::api::DeleteParams {
+            preconditions: Some(kube::api::Preconditions {
+                uid: Some(uid.clone()),
+                resource_version: None,
+            }),
+            ..kube::api::DeleteParams::default()
+        };
+        // `api.delete(` — see `controllers::topic_discovery::collect_expired`
+        // for why the receiver is spelled this way and not aliased.
+        match api.delete(&row.name, &params).await {
+            Ok(_) => {
+                collected += 1;
+                info!(
+                    namespace = %namespace,
+                    preflight = %row.name,
+                    "a terminal Preflight past its retention window was collected"
+                );
+            }
+            Err(e) => warn!(
+                namespace = %namespace,
+                preflight = %row.name,
+                error = %e,
+                "a terminal Preflight could not be collected; the next pass tries again"
+            ),
+        }
+    }
+    Ok(collected)
+}
+
+/// EVERY EXIT REQUEUES AT [`REQUEUE_TERMINAL_SECS`] RATHER THAN
+/// `await_change()`, and that is what keeps the collector alive. A `notReady`
+/// or `unknown` verdict cannot go stale, so this function has nothing more to
+/// say about it — but `reconcile_preflight`'s terminal branch runs the GC on
+/// the same pass, and an object parked on `await_change()` never has another
+/// pass. The cost is one list per terminal check per hour per namespace.
 async fn revalidate(
     pf: &Preflight,
     ctx: &Context,
@@ -4166,15 +4343,15 @@ async fn revalidate(
     now: DateTime<Utc>,
 ) -> Result<Action, ReconcileError> {
     let Some(status) = pf.status.as_ref() else {
-        return Ok(Action::await_change());
+        return Ok(Action::requeue(Duration::from_secs(REQUEUE_TERMINAL_SECS)));
     };
     let (Some(result), Some(recorded)) = (status.result.as_ref(), status.binding.as_ref()) else {
-        return Ok(Action::await_change());
+        return Ok(Action::requeue(Duration::from_secs(REQUEUE_TERMINAL_SECS)));
     };
     if result.state != state_str(OverallState::Ready) {
         // Nothing to downgrade: `notReady` and `unknown` do not get better by
         // going stale.
-        return Ok(Action::await_change());
+        return Ok(Action::requeue(Duration::from_secs(REQUEUE_TERMINAL_SECS)));
     }
     // THE CLOCK FIRST, AND IT COSTS NO API CALL. An expired verdict is stale
     // whatever the referents say, so a check that has simply run out of time is
@@ -4211,7 +4388,7 @@ async fn revalidate(
         now,
     );
     patch_status(&ctx.client, pf, namespace, &next).await?;
-    Ok(Action::await_change())
+    Ok(Action::requeue(Duration::from_secs(REQUEUE_TERMINAL_SECS)))
 }
 
 /// The `kube::runtime` reconcile entry point.

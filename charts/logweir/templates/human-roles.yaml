@@ -1,7 +1,7 @@
 {{- /*
-The three human roles — `config/rbac/{viewer,operator,approver}_role.yaml`,
+The four human roles — `config/rbac/{viewer,operator,approver,trust_admin}_role.yaml`,
 rule for rule, SHIPPED UNBOUND exactly as `logweir.yaml` ships them. Who may
-view, operate or approve in which namespace is your decision:
+view, operate, approve or administer trust in which namespace is your decision:
 
     kubectl create rolebinding logweir-approver \
       --clusterrole=logweir-approver --user=<someone-else> -n <namespace>
@@ -14,6 +14,19 @@ rule — `spec.sourceRef` is immutable and everything else is editable policy �
 applied to every subject, cluster-admin included. `patch` is there because
 `kubectl edit` and `kubectl apply` send one, so `update` alone cannot edit a
 schedule at all.
+
+D2 W11 added the fourteen-kind read (two rules, the original six kept byte-
+identical to the controller's so a widening of that list is visible), the
+operator's `create`/`patch` on the three D2 check kinds, the approver's
+read-only `preflights` rule (approval context; a `Preflight` status is redacted
+by construction and authorizes nothing on its own), and a FOURTH role.
+
+`logweir-trust-admin` IS CLUSTER-SCOPED AND NEEDS A ClusterRoleBinding. It is
+the only holder of a write verb on `TrustPolicy`, which is what decides whose
+keys may sign an approval; bind it to somebody who does NOT hold
+`logweir-operator`, or `self_attested: false` buys nothing. It carries no
+`delete`: deleting a policy sends every namespace it bound back to the legacy
+roster, which is a widening dressed as a cleanup.
 */ -}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -31,6 +44,19 @@ rules:
       - kafkaclusters
       - restores
       - trustrosters
+    verbs: ["get", "list", "watch"]
+  # The eight kinds Amendments F and G added. Read only. See
+  # `config/rbac/viewer_role.yaml`.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - backupdestinations
+      - preflights
+      - protectionpolicies
+      - recoverycatalogs
+      - rehearsalschedules
+      - retentionpolicies
+      - topicdiscoveries
+      - trustpolicies
     verbs: ["get", "list", "watch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -51,6 +77,21 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["backupschedules"]
     verbs: ["update", "patch"]
+  # D2 §7.2. `patch` and NOT `update`: a destination's access grants and a
+  # check's `cancelRequested` are merge patches, and what may change is the
+  # CRD's own CEL rule.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - backupdestinations
+      - preflights
+      - topicdiscoveries
+    verbs: ["create"]
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - backupdestinations
+      - preflights
+      - topicdiscoveries
+    verbs: ["patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -63,3 +104,19 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["approvals"]
     verbs: ["create"]
+  # D2 §7.2 — approval context, read only.
+  - apiGroups: ["logweir.dev"]
+    resources: ["preflights"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: logweir-trust-admin
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: human-role
+rules:
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]

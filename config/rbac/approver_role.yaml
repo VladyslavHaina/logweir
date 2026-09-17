@@ -1,8 +1,23 @@
-# `logweir-approver` — `create` on `approvals`, and nothing else.
+# `logweir-approver` — `create` on `approvals`, READ on `preflights`, nothing else.
 #
-# ONE RULE, ONE RESOURCE, ONE VERB (`design-operator.md:402-405`, spec §9). The
-# whole role is the sentence "this person may hand in a signed approval". It
-# carries no `get`, no `list`, no `update`, no `patch` and no `delete`:
+# TWO RULES SINCE D2 §7.2, AND THE SECOND ONE IS APPROVAL CONTEXT. An approver
+# is asked to authorise a restore; `get`/`list` on `preflights` is how they can
+# see whether the readiness check for that plan said `ready`, `notReady` or
+# `unknown` before signing. It is READ ONLY, and it is deliberately not
+# `logweir-viewer`: this role still cannot read a `Restore`, a `Backup` or a
+# `KafkaCluster`, and an approver who should also read those gets
+# `logweir-viewer` as a second, visible binding.
+#
+# A `Preflight` IS SAFE TO SHOW. Its status is redacted by construction (D2
+# §6.5 — no credential value, no broker error body, no URL carrying userinfo),
+# it references no Secret, and a `ready` verdict authorizes nothing on its own
+# (D2 §6.8: the execution-time guards are what decide). Reading one cannot
+# approve anything.
+#
+# THE `approvals` RULE IS UNCHANGED: one resource, one verb
+# (`design-operator.md:402-405`, spec §9). "This person may hand in a signed
+# approval". It carries no `get`, no `list`, no `update`, no `patch` and no
+# `delete` on approvals:
 #
 # * An approval is a signed document. `update` on one would let the approver
 #   swap the bytes under a `Verified` status that was computed from different
@@ -32,3 +47,7 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["approvals"]
     verbs: ["create"]
+  # D2 §7.2 — approval context, read only.
+  - apiGroups: ["logweir.dev"]
+    resources: ["preflights"]
+    verbs: ["get", "list"]

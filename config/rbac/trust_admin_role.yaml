@@ -1,0 +1,52 @@
+# `logweir-trust-admin` — the ONLY holder of a write verb on `TrustPolicy`.
+#
+# ---------------------------------------------------------------------------
+# WHY A FIFTH ROLE AND NOT A RULE ON `logweir-operator`
+# ---------------------------------------------------------------------------
+# D3 §9. A `TrustPolicy` is what decides WHICH KEYS may sign an approval, for
+# every namespace it binds. An operator who could edit one could add their own
+# key and then approve their own restore, which is the single separation
+# `self_attested: false` exists to make possible — so the write lives in a role
+# of its own, bound to somebody who does not hold `logweir-operator`. The
+# controller holds none of it either: `role.yaml` grants `list`/`watch` and
+# `patch` on the STATUS and no write to any spec.
+#
+# CLUSTER-SCOPED, AND THAT IS THE KIND'S OWN SHAPE. `TrustPolicy` is a
+# cluster-scoped resource (D3 §7.1: a namespace never names its own trust —
+# the policy names the namespaces it binds), so this role is only useful
+# through a `ClusterRoleBinding`. There is no per-namespace version of it and
+# pretending otherwise with a `RoleBinding` grants nothing at all, silently.
+#
+#     kubectl --context docker-desktop create clusterrolebinding logweir-trust-admin \
+#       --clusterrole=logweir-trust-admin --user=<security-owner>
+#
+# ---------------------------------------------------------------------------
+# THE VERBS, AND THE TWO THAT ARE DELIBERATELY ABSENT
+# ---------------------------------------------------------------------------
+# `get`/`list`/`watch` so the holder can read what they are about to change;
+# `create` and `update` (D3 §9's pair) so a policy can be written and rotated;
+# `patch` beside `update` for the same reason `logweir-operator` has it —
+# `kubectl edit` and `kubectl apply` send a PATCH, and an `update`-only grant
+# leaves the administrator unable to perform the edit the role exists for.
+#
+# **NO `delete`**, by D3 §9's own words. Deleting a policy does not retire a
+# key; it removes the binding that governs a namespace, which silently sends
+# every namespace it bound back to `legacy-roster-v1` — a widening dressed as
+# a cleanup. Withdrawing trust is an EDIT (remove the key), and removing a
+# policy outright is a cluster-administrator act with its own audit line.
+#
+# **NO VERB ON `trustrosters`**, which is a different kind with a different
+# lifecycle: the legacy roster is edited through `logweir-operator`'s existing
+# path and D3 §7.5 is the migration.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: logweir-trust-admin
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/component: human-role
+rules:
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]

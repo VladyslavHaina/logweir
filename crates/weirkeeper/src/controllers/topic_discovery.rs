@@ -49,21 +49,26 @@
 //!
 //! # What this file deliberately does NOT do
 //!
-//! * **It deletes nothing.** D2 §4.3's `gc.rs` — retention, keep-last-N per
-//!   connection, and `DeleteParams { preconditions: { uid } }` — needs a
-//!   `delete` verb that `config/rbac/role.yaml` grants on nothing and that
-//!   `crates/logweir/tests/manifest_lint.rs` asserts twice is granted nowhere
-//!   and called nowhere. Narrowing that tested claim is a deliberate RBAC
-//!   decision and belongs to W11. The PURE half is here and tested —
-//!   [`expired_terminal`] — so the wiring is a grant plus a call and not a
-//!   design. Owned `ConfigMap`s and the check Job go by owner cascade either
-//!   way, which is why a collected `TopicDiscovery` leaves nothing behind.
+//! * **It deletes exactly one thing, and only its own kind.** D2 §4.3's
+//!   `gc.rs` is wired: [`collect_expired`] runs on the TERMINAL guard, lists
+//!   this namespace's discoveries, asks the pure [`expired_terminal`] which of
+//!   them are past `observedAt + retentionSeconds` or outside the newest
+//!   `keepPerConnection` for their connection UID, and deletes up to
+//!   [`GC_MAX_DELETES_PER_PASS`] of them with
+//!   `DeleteParams { preconditions: { uid } }`. It deletes no Job, no
+//!   `ConfigMap`, no `Backup` and nothing in object storage — the owned
+//!   `ConfigMap`s and the check Job go by owner cascade, which is why a
+//!   collected `TopicDiscovery` leaves nothing behind. The grant is
+//!   `config/rbac/role.yaml`'s one `delete` rule, on `topicdiscoveries` and
+//!   `preflights` and nothing else.
 //! * **It builds no `Api<Event>`.** D2 §4.3's event-sourced waiting codes
 //!   (`RunnerServiceAccountMissing`, `PodCreateRejected`, `SigningKeyMissing`,
-//!   `VolumeMountFailed`) need `events: list`, which W11 grants. Until then the
-//!   classifier is handed an EMPTY fact slice: every pod-status-sourced code
-//!   still works, and the four event-sourced ones report as the more general
-//!   state rather than as a fabricated one.
+//!   `VolumeMountFailed`) need `events: list`, which the role now grants for
+//!   `controllers/preflight.rs`. Wiring them HERE is a change to what this
+//!   reconciler observes rather than to what it may do, and it stays W8's
+//!   file: the classifier is still handed an EMPTY fact slice, every
+//!   pod-status-sourced code still works, and the four event-sourced ones
+//!   report as the more general state rather than as a fabricated one.
 
 use std::sync::Arc;
 
@@ -137,10 +142,31 @@ pub const REQUEUE_RUNNING_SECS: u64 = 10;
 
 /// How long a terminal object waits before it is looked at again.
 ///
-/// One hour, and it exists for the `gc.rs` W11 will wire ([`expired_terminal`]).
-/// Until then it is the cheapest possible no-op: the reconcile returns at the
-/// terminal guard before it reads anything.
+/// One hour, and it is what paces the GC ([`collect_expired`]): a terminal
+/// object's only remaining work is to notice that it, or one of its cohort,
+/// has aged out.
 pub const REQUEUE_TERMINAL_SECS: u64 = 3600;
+
+/// The most objects ONE garbage-collection pass may delete — D2 §4.3.
+///
+/// A BOUND ON THE BLAST RADIUS AND ON THE API SERVER, not on the total. A
+/// namespace that has accumulated ten thousand expired discoveries is drained
+/// over many passes an hour apart rather than in one burst of ten thousand
+/// DELETEs against the API server, and a rule that has gone wrong removes
+/// twenty objects before anybody has to notice rather than all of them.
+pub const GC_MAX_DELETES_PER_PASS: usize = 20;
+
+/// The page size one garbage-collection pass lists.
+///
+/// AND THE REASON THE COHORT RULE IS SKIPPED ON A TRUNCATED PAGE. The API
+/// server returns items in NAME order, not in `observedAt` order, so a partial
+/// page is not the newest anything: "outside the newest five for this
+/// connection" computed over one page of a truncated listing could delete the
+/// newest observation a namespace has. The AGE rule is per-object and is
+/// unaffected, so a truncated pass applies that one alone and says so in a
+/// log line; the next pass, after the age rule has thinned the namespace,
+/// usually fits.
+pub const GC_LIST_LIMIT: u32 = 500;
 
 /// How long a reconcile that ERRORED waits.
 pub const ERROR_REQUEUE_SECONDS: u64 = 30;
@@ -700,10 +726,12 @@ pub struct TerminalDiscovery {
 /// The order is newest-first by `observedAt` with the UID as the tie-break, so
 /// the answer is a total order and two passes over the same input agree.
 ///
-/// **NOTHING CALLS THIS YET.** The `delete` verb it implies is granted nowhere
-/// and asserted absent twice in `crates/logweir/tests/manifest_lint.rs`;
-/// narrowing that claim is W11's RBAC decision. The rule is here, and tested,
-/// so that decision is a grant and a call site rather than a design.
+/// **ITS ONE CALLER IS [`collect_expired`]**, on the terminal guard of this
+/// file's own reconcile. The `delete` verb it implies is granted on
+/// `topicdiscoveries` and `preflights` and on nothing else
+/// (`config/rbac/role.yaml`), and
+/// `crates/logweir/tests/manifest_lint.rs::every_granted_verb_has_a_caller`
+/// holds both halves of that to exactly this shape.
 #[must_use]
 pub fn expired_terminal(
     discoveries: &[TerminalDiscovery],
@@ -735,6 +763,167 @@ pub fn expired_terminal(
         }
     }
     out
+}
+
+/// The age basis of one terminal discovery, in the order D2 §4.3 reads it.
+///
+/// `observedAt` is the observation's own instant and is what retention is
+/// about. A discovery that FAILED before it observed anything has none, and
+/// falling back to the `Complete` condition's transition time and then to
+/// `metadata.creationTimestamp` is what keeps such an object collectable at
+/// all: an object with no basis is never collected, which would be an
+/// accumulation nobody could clear.
+fn gc_basis(discovery: &TopicDiscovery) -> Option<Time> {
+    let status = discovery.status.as_ref();
+    status
+        .and_then(|s| s.observed_at)
+        .or_else(|| {
+            status
+                .and_then(|s| s.conditions.as_ref())
+                .and_then(|c| c.iter().find(|c| c.r#type == CONDITION_COMPLETE))
+                .and_then(|c| c.last_transition_time)
+        })
+        .or(discovery.metadata.creation_timestamp.as_ref().map(|t| t.0))
+}
+
+/// One listed object as [`expired_terminal`] reads it, or `None` when it is not
+/// a collectable terminal discovery.
+fn gc_row(discovery: &TopicDiscovery) -> Option<(TerminalDiscovery, String)> {
+    let phase = discovery.status.as_ref().and_then(|s| s.phase.as_deref())?;
+    // THE GUARD THAT MATTERS. A non-terminal object is still running, or is
+    // still waiting to run, and its Job's pod holds the only copy of a relay
+    // nobody has read yet.
+    if !TERMINAL_PHASES.contains(&phase) {
+        return None;
+    }
+    // AN OBJECT BEING DELETED IS NOT COLLECTED AGAIN: a second DELETE on a
+    // terminating object is a wasted call and a confusing audit line.
+    if discovery.metadata.deletion_timestamp.is_some() {
+        return None;
+    }
+    let name = discovery.name_any();
+    let uid = discovery.uid().filter(|u| !u.is_empty())?;
+    let observed_at = gc_basis(discovery)?;
+    Some((
+        TerminalDiscovery {
+            name: name.clone(),
+            uid,
+            connection_uid: discovery
+                .status
+                .as_ref()
+                .and_then(|s| s.binding.as_ref())
+                .and_then(|b| b.connection_uid.clone())
+                .filter(|u| !u.is_empty()),
+            observed_at,
+        },
+        name,
+    ))
+}
+
+/// D2 §4.3's `gc.rs`, wired: collect this namespace's expired terminal
+/// discoveries.
+///
+/// # What it will and will not delete
+///
+/// * **Only `TopicDiscovery` objects**, through an `Api<TopicDiscovery>` that
+///   cannot name another kind, in ONE namespace.
+/// * **Only TERMINAL ones** — [`gc_row`] drops everything else before the rule
+///   is even asked, so a `Running` discovery whose relay has not been read
+///   cannot be collected by any combination of policy values.
+/// * **Only by UID.** `DeleteParams { preconditions: { uid } }` means a
+///   same-named replacement created between the list and the delete is a 409
+///   and not a casualty. A 409 or a 404 here is the object already being gone,
+///   which is success.
+/// * **At most [`GC_MAX_DELETES_PER_PASS`] per pass.**
+///
+/// The owned result `ConfigMap`s and the check Job go by ownerReference
+/// cascade, so a collected discovery leaves nothing behind.
+///
+/// # Errors
+///
+/// [`ReconcileError::Api`] only when the LIST itself fails. A failed DELETE is
+/// logged and the pass continues: garbage collection is never the reason an
+/// object's reconcile reports an error.
+async fn collect_expired(
+    api: &Api<TopicDiscovery>,
+    namespace: &str,
+    retention_seconds: u32,
+    keep_per_connection: u32,
+    now: Time,
+) -> Result<usize, ReconcileError> {
+    let page = api
+        .list(&kube::api::ListParams::default().limit(GC_LIST_LIMIT))
+        .await
+        .map_err(ReconcileError::Api)?;
+    let truncated = page
+        .metadata
+        .continue_
+        .as_deref()
+        .is_some_and(|c| !c.is_empty());
+    let rows: Vec<(TerminalDiscovery, String)> = page.items.iter().filter_map(gc_row).collect();
+    let terminal: Vec<TerminalDiscovery> = rows.iter().map(|(t, _)| t.clone()).collect();
+    // A TRUNCATED PAGE IS NOT THE NEWEST ANYTHING — see [`GC_LIST_LIMIT`]. The
+    // cohort rule is disabled by making the cohort unreachably large rather
+    // than by a second code path, so both passes run the same pure function.
+    let keep = if truncated {
+        u32::MAX
+    } else {
+        keep_per_connection
+    };
+    if truncated {
+        debug!(
+            namespace = %namespace,
+            limit = GC_LIST_LIMIT,
+            "the discovery listing was truncated; this GC pass applies the retention window only"
+        );
+    }
+    let doomed = expired_terminal(&terminal, retention_seconds, keep, now);
+    let mut collected = 0usize;
+    for uid in doomed.iter().take(GC_MAX_DELETES_PER_PASS) {
+        let Some((_, name)) = rows.iter().find(|(t, _)| &t.uid == uid) else {
+            continue;
+        };
+        let params = kube::api::DeleteParams {
+            preconditions: Some(kube::api::Preconditions {
+                uid: Some(uid.clone()),
+                resource_version: None,
+            }),
+            ..kube::api::DeleteParams::default()
+        };
+        // `api.delete(` — the receiver spelling `scripts/check-no-archive-write.sh`
+        // names in its own header as the LEGITIMATE one: its control-plane
+        // delete token is anchored to store-shaped identifiers
+        // (`store`/`archive`/`inner`/`handle`/`blob`/`bucket`/`obj`, or the
+        // bare `s`/`st`), and `api` is none of them. It is also the spelling
+        // `manifest_lint::every_granted_verb_has_a_caller` can SEE: that scan
+        // binds a method to the `Api<T>` handle it was called on by walking
+        // that declaration's own region, so a delete issued through an alias
+        // would be a call the verb/caller lint cannot pair with its grant.
+        match api.delete(name, &params).await {
+            Ok(_) => {
+                collected += 1;
+                info!(
+                    namespace = %namespace,
+                    discovery = %name,
+                    "a terminal TopicDiscovery past its retention window was collected"
+                );
+            }
+            Err(e) => warn!(
+                namespace = %namespace,
+                discovery = %name,
+                error = %e,
+                "a terminal TopicDiscovery could not be collected; the next pass tries again"
+            ),
+        }
+    }
+    if doomed.len() > GC_MAX_DELETES_PER_PASS {
+        debug!(
+            namespace = %namespace,
+            remaining = doomed.len() - GC_MAX_DELETES_PER_PASS,
+            "more expired discoveries than one pass may collect; the rest wait for the next pass"
+        );
+    }
+    Ok(collected)
 }
 
 // ---------------------------------------------------------------------------
@@ -786,6 +975,10 @@ pub struct Outcome {
     pub ttl_patched: bool,
     /// How long until the next pass.
     pub requeue_seconds: u64,
+    /// How many EXPIRED TERMINAL discoveries this pass collected — D2 §4.3's
+    /// `gc.rs`. Non-zero only on the terminal guard, and never more than
+    /// [`GC_MAX_DELETES_PER_PASS`].
+    pub collected: usize,
 }
 
 impl Outcome {
@@ -798,6 +991,7 @@ impl Outcome {
             committed: false,
             ttl_patched: false,
             requeue_seconds,
+            collected: 0,
         }
     }
 
@@ -1036,8 +1230,26 @@ pub async fn reconcile_discovery(
             .and_then(|s| s.reason.as_deref())
             .unwrap_or_default()
             .to_string();
+        // D2 §4.3 `gc.rs`, §5.8 retention — the ONLY work a terminal discovery
+        // still has. The policy read is cached for 30 s, and an ABSENT policy
+        // is the documented defaults (24 h, keep five), never an error: a
+        // namespace does not accumulate for want of a ConfigMap.
+        let policy = policy::load(&ctx.client, ctx.policy_ref.as_ref(), &ctx.policy_cache, now)
+            .await
+            .map_err(ReconcileError::Api)?;
+        let discovery_policy = &policy.policy().discovery;
+        let api: Api<TopicDiscovery> = Api::namespaced(ctx.client.clone(), &namespace);
+        let collected = collect_expired(
+            &api,
+            &namespace,
+            discovery_policy.retention_seconds,
+            discovery_policy.keep_per_connection,
+            now,
+        )
+        .await?;
         return Ok(Outcome {
             reason,
+            collected,
             ..Outcome::new(phase, "", REQUEUE_TERMINAL_SECS)
         });
     }

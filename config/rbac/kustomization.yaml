@@ -1,4 +1,9 @@
-# The RBAC base: one ServiceAccount, four ClusterRoles, one ClusterRoleBinding.
+# The RBAC base: one ServiceAccount, five ClusterRoles, one ClusterRoleBinding.
+#
+# FIVE SINCE D2 W11: `weirkeeper` (the controller), the three human roles, and
+# `logweir-trust-admin` — D3 §9's cluster-scoped `TrustPolicy` writer, which is
+# a role of its own precisely so it is not held by whoever holds
+# `logweir-operator`.
 #
 # ---------------------------------------------------------------------------
 # TWO FILES IN THIS DIRECTORY ARE DELIBERATELY NOT LISTED
@@ -27,3 +32,4 @@ resources:
   - viewer_role.yaml
   - operator_role.yaml
   - approver_role.yaml
+  - trust_admin_role.yaml

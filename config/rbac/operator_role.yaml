@@ -39,6 +39,26 @@
 #     kubectl --context docker-desktop create rolebinding logweir-operator \
 #       --clusterrole=logweir-operator --user=<user> -n <namespace>
 #
+# THE THREE D2 KINDS (§7.2): `create`, AND `patch` WITHOUT `update`.
+# `BackupDestination`, `TopicDiscovery` and `Preflight` are created by an
+# operator and then edited in exactly two ways: a destination's access grants
+# and CA reference change (its location and transport are sealed by CEL), and a
+# check is CANCELLED by flipping `spec.cancelRequested` false → true, which the
+# CRD's own rule is what permits. Both are merge patches, and `kubectl edit`,
+# `kubectl apply` and the console all send a PATCH — so `patch` is the verb
+# that does the work and `update` would be a grant nobody uses. Same story as
+# `backupschedules` above: what may change is the CRD's CEL, not this file.
+#
+# NO `delete`. A terminal check is collected by the controller's own GC (D2
+# §5.8) and a destination is removed by a cluster administrator; an operator
+# who could delete a `BackupDestination` could remove the object a running
+# Backup froze its location from.
+#
+# NOTHING FROM D3 HERE. `protectionpolicies`, `rehearsalschedules`,
+# `recoverycatalogs` and `retentionpolicies` get their operator verbs from
+# D3 §9's own RBAC pass; this file gives the operator READ on them through
+# `logweir-viewer` and no write at all.
+#
 # NO `approvals` HERE. Creating a restore and approving one are different
 # people on purpose (`logweir-approver`); an operator who could do both makes
 # `self_attested: false` unachievable in this namespace.
@@ -65,3 +85,18 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["backupschedules"]
     verbs: ["update", "patch"]
+  # D2 §7.2 — start a destination, an inventory or a readiness check.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - backupdestinations
+      - preflights
+      - topicdiscoveries
+    verbs: ["create"]
+  # …and edit the two things their CRDs let anybody edit: a destination's
+  # access grants and CA, and a check's `cancelRequested`.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - backupdestinations
+      - preflights
+      - topicdiscoveries
+    verbs: ["patch"]

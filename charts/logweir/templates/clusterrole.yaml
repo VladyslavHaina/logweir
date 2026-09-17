@@ -2,9 +2,11 @@
 The `weirkeeper` ClusterRole — `config/rbac/role.yaml`, rule for rule. Every
 granted verb has a caller (`manifest_lint.rs::every_granted_verb_has_a_caller`
 over the source manifest; `chart_lint.rs::chart_lint_default_render_agrees_with_the_install_file`
-holds this copy to it as a set of rules). No verb on `secrets`, no `delete` on
-anything, one rule naming `pods/log` with `get`, nothing naming `pods/exec` or
-`pods/attach`. The reasoning is in the source file and is not repeated here.
+holds this copy to it as a set of rules). No verb on `secrets`; `delete` on
+EXACTLY the two transient check kinds and nothing else (D2 §4.3 `gc.rs`, §5.8
+retention — the whole reasoning is in `config/rbac/role.yaml`'s header); one
+rule naming `pods/log` with `get`; nothing naming `pods/exec` or `pods/attach`.
+The reasoning is in the source file and is not repeated here.
 */ -}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -74,6 +76,13 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["preflights/status"]
     verbs: ["patch"]
+  # D2 W11 (§4.3 `gc.rs`, §5.8): the ONE `delete` rule, on the two TRANSIENT
+  # check kinds and nothing else. `collect_expired` in each of the two
+  # reconcilers, with `DeleteParams { preconditions: { uid } }` and a
+  # per-pass cap. See `config/rbac/role.yaml`.
+  - apiGroups: ["logweir.dev"]
+    resources: ["topicdiscoveries", "preflights"]
+    verbs: ["delete"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "patch"]

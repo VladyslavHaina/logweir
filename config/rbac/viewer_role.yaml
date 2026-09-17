@@ -1,4 +1,23 @@
-# `logweir-viewer` — read the six kinds, and nothing else.
+# `logweir-viewer` — read the fourteen kinds, and nothing else.
+#
+# FOURTEEN, IN TWO RULES. The first is the original six (ADR 0008 Amendment A)
+# and is shared VERBATIM with the `weirkeeper` ClusterRole's own first rule;
+# the second is the eight kinds Amendments F and G added —
+# `backupdestinations`, `topicdiscoveries`, `preflights` (D2 §7.2),
+# `protectionpolicies`, `rehearsalschedules`, `recoverycatalogs`,
+# `retentionpolicies` and `trustpolicies` (D3 §9). They are a SEPARATE rule so
+# the six-kind list stays byte-identical to the controller's, which is what
+# makes a widening of it visible in a diff.
+#
+# READ IS THE WHOLE OF IT. No `create`, no `patch`, no `delete` — and no verb
+# on `configmaps` or `secrets`, which is why browsing a topic INVENTORY (whose
+# pages are ConfigMaps) needs the console API and not this role. A kubectl
+# viewer sees the summary every one of these kinds publishes on its status.
+#
+# `trustpolicies` IS CLUSTER-SCOPED, so a `RoleBinding` of this ClusterRole in
+# one namespace does NOT convey it: a viewer who should also read trust needs a
+# `ClusterRoleBinding`, which is a separate, visible decision. The rule is here
+# so that binding is possible without inventing a second role.
 #
 # NO `/status` RESOURCE IS NAMED IN THIS FILE, AND THAT IS NOT AN OMISSION.
 # `get` on `backups` returns the WHOLE object, `status` included: the status
@@ -34,4 +53,17 @@ rules:
       - kafkaclusters
       - restores
       - trustrosters
+    verbs: ["get", "list", "watch"]
+  # THE EIGHT KINDS Amendment F (D2) AND Amendment G (D3) ADDED. Read only,
+  # in ONE rule, in the plural order `config/crd/` lists them.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - backupdestinations
+      - preflights
+      - protectionpolicies
+      - recoverycatalogs
+      - rehearsalschedules
+      - retentionpolicies
+      - topicdiscoveries
+      - trustpolicies
     verbs: ["get", "list", "watch"]

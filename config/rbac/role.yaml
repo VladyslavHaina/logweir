@@ -41,13 +41,54 @@
 # calls: every status write in this crate is `Api::patch_status` — a merge
 # patch, so an absent key means "leave it alone" — and no reconciler anywhere
 # calls `Api::replace`, so a literal `update` would be a granted verb with no
-# caller, which is the exact defect M18 names. `delete` is the same story: "Job
-# CRUD"'s D is done by the API server's TTL controller after this controller
-# patches `ttlSecondsAfterFinished`, and by ownerReference garbage collection
-# for the plan ConfigMap and the probe Job. **`delete` appears in no rule in
-# this file, on any resource.** Where §9 instead names an RBAC-shaped triple —
-# `get/list/watch` on Pods, `get` on `pods/log`, no verb on Secrets — it is
-# taken literally and verbatim.
+# caller, which is the exact defect M18 names. Where §9 instead names an
+# RBAC-shaped triple — `get/list/watch` on Pods, `get` on `pods/log`, no verb
+# on Secrets — it is taken literally and verbatim.
+#
+# ---------------------------------------------------------------------------
+# `delete` — EXACTLY TWO RESOURCES, AND THE CLAIM THAT USED TO BE HERE
+# ---------------------------------------------------------------------------
+# This file used to say, in capitals, "**`delete` appears in no rule in this
+# file, on any resource**", and `manifest_lint.rs` asserted it twice: no rule
+# grants the verb, and `Api::delete`/`delete_opt` is called nowhere under
+# `crates/weirkeeper/src/`. **W11 narrowed both claims deliberately** (D2 §4.3
+# `gc.rs`, §5.8), and this is the record of why.
+#
+# WHAT CHANGED, AND WHAT DID NOT. `delete` is granted on `topicdiscoveries` and
+# `preflights` and ON NOTHING ELSE. Those two are the TRANSIENT CHECK KINDS: a
+# `TopicDiscovery` is one observation with an immutable spec, a `Preflight` is
+# one verdict about one plan, neither is an execution input (D-SEAMS S2), and
+# D2 §5.8 gives each a retention window (24 h) with keep-last-five per
+# connection for discoveries. Without the verb a namespace that refreshes an
+# inventory every minute fills etcd, and the objects that accumulate are
+# EXACTLY the ones a fresh check replaces.
+#
+# STILL NO `delete`, anywhere, ON: `backups`, `restores`, `approvals`,
+# `backupschedules`, `kafkaclusters`, `backupdestinations`, `trustrosters`,
+# `trustpolicies`, `recoverycatalogs`, `jobs`, `configmaps`, `pods` or
+# `events`. "Job CRUD"'s D is still done by the API server's TTL controller
+# after this controller patches `ttlSecondsAfterFinished`, and the plan/result
+# ConfigMaps and the check Job still go by ownerReference garbage collection —
+# which is why collecting a `TopicDiscovery` leaves nothing behind.
+#
+# THE CALL IS AS NARROW AS THE GRANT. The two call sites are
+# `controllers::topic_discovery::collect_expired` and
+# `controllers::preflight::collect_expired`; each lists only its own kind in
+# its own namespace, considers only TERMINAL objects, and issues
+# `DeleteParams { preconditions: { uid } }` so a same-named replacement created
+# between the list and the delete is never the object removed. Each pass is
+# capped (`GC_MAX_DELETES_PER_PASS`), so a namespace with ten thousand expired
+# objects is drained over many passes rather than in one burst against the API
+# server. `manifest_lint.rs::every_granted_verb_has_a_caller` now asserts the
+# NARROWED form — delete on exactly these two resources, called from exactly
+# those two functions — which is a claim a diff can break.
+#
+# AND THE ARCHIVE GATE IS UNTOUCHED. `scripts/check-no-archive-write.sh`
+# anchors its delete token to STORE-shaped receivers (`store.`, `archive.`,
+# `inner.`, `obj.`, `s.`, `st.`); `discoveries.delete(` and `preflights.delete(`
+# match none of them, and they are Kubernetes deletes on Kubernetes objects.
+# **No Logweir component in tag 1 holds any delete capability against object
+# storage**, and nothing here weakens that.
 #
 # ---------------------------------------------------------------------------
 # NO VERB ON `secrets`, AT ALL, ANYWHERE IN THIS FILE
@@ -152,15 +193,17 @@ rules:
   # (§7.3), which is a DIFFERENT role, and `gc.rs` — see the `delete` note in
   # this file's header.
   #
-  # NOTE FOR W11 (D2 §13.2): these two rules are W11's to own. They are here
-  # because the reverse lint `every_call_site_has_a_grant` fails the moment
-  # `Api<TopicDiscovery>` appears under `crates/weirkeeper/src/`, and a call
-  # with no grant 403s in production while every route-table test stays green.
-  # W11 folds them into its own RBAC pass together with `backupdestinations`
-  # and `preflights`, and adds `events: [list]` — which
-  # `controllers/topic_discovery.rs` deliberately does not use yet, passing the
-  # waiting classifier an EMPTY fact slice rather than building an `Api<Event>`
-  # this role cannot authorise.
+  # W11 ANSWERED THE NOTE THAT USED TO BE HERE, and the answer is still NO
+  # `get`. W8 asked W11 for three things: `topicdiscoveries: get` "with a
+  # caller", `events: [list]`, and the `delete` decision. `events: [list]` is
+  # granted below (W9 added it for `controllers/preflight.rs`); `delete` is
+  # granted in its own rule, for the GC, with the header's reasoning. `get` is
+  # NOT granted, because the caller never turned up: the GC pass LISTS this
+  # kind — it is looking for every terminal object in a namespace, not for one
+  # by name — and `Api<TopicDiscovery>::get`/`get_opt` appears nowhere under
+  # `crates/weirkeeper/src/`. The console API's `get` (D2 §7.3) is a different
+  # ServiceAccount and a different role. Granting it here to match a sketch
+  # would be exactly the verb-with-no-caller this file refuses.
   - apiGroups: ["logweir.dev"]
     resources: ["topicdiscoveries"]
     verbs: ["list", "watch"]
@@ -209,9 +252,10 @@ rules:
   # is the source scan that keeps it true. A `get` here would be a granted verb
   # with no caller (critique B M18).
   #
-  # NOTE FOR W11 (D2 §13.2): these two rules are W11's to own, with the
-  # `events` rule below. W11 folds all three into its own RBAC pass together
-  # with `backupdestinations`, `topicdiscoveries` and `recoverycatalogs`.
+  # W11 FOLDED THESE IN, and left the shape W9 chose: no `get`. The GC pass
+  # `controllers::preflight::collect_expired` LISTS terminal preflights; it
+  # never reads one by name, and no other object references a `Preflight` at
+  # all (D2 §6.8).
   - apiGroups: ["logweir.dev"]
     resources: ["preflights"]
     verbs: ["list", "watch"]
@@ -297,6 +341,23 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["preflights/status"]
     verbs: ["patch"]
+  # THE ONE `delete` RULE IN THIS FILE — D2 §4.3 `gc.rs`, §5.8 retention.
+  # TWO RESOURCES, both of them transient check requests, and the whole
+  # reasoning is in this file's header. `controllers::topic_discovery::collect_expired`
+  # removes a terminal `TopicDiscovery` past `observedAt + retentionSeconds` or
+  # outside the newest five for its connection UID;
+  # `controllers::preflight::collect_expired` removes a terminal `Preflight`
+  # past `expiresAt + retentionSeconds` (or `observedAt + …` when it never
+  # became ready). Both use `DeleteParams { preconditions: { uid } }` and both
+  # cap one pass.
+  #
+  # NOT ADDED TO THE TWO RULES ABOVE. A kind's `list`/`watch` is what the
+  # controller needs to RUN; `delete` is what it needs to COLLECT, and keeping
+  # them apart means the diff that widens a check kind to a destructive verb
+  # cannot read as a watch being registered.
+  - apiGroups: ["logweir.dev"]
+    resources: ["topicdiscoveries", "preflights"]
+    verbs: ["delete"]
   # THE RUNNER JOBS. `create` in `controllers/{backup,kafka_cluster,restore}.rs`
   # (`jobs.create(&PostParams::default(), &job::build(&spec))`); `get` is each
   # later pass deciding whether its Job already exists (`jobs.get_opt`); `list`
@@ -304,9 +365,11 @@ rules:
   # controllers; `patch` is `ttlSecondsAfterFinished`, written after the status
   # patch carrying the exit code.
   #
-  # NO `delete`. The TTL controller removes a finished Job, and the probe Job
-  # and plan ConfigMap are removed by ownerReference garbage collection. No
-  # `Api::delete` exists anywhere under `crates/weirkeeper/src/`.
+  # NO `delete` ON JOBS. The TTL controller removes a finished Job, and the
+  # probe Job and plan ConfigMap are removed by ownerReference garbage
+  # collection. The only `Api::delete` under `crates/weirkeeper/src/` is the
+  # check GC's, on the two transient check kinds — see this file's header — and
+  # it never names a Job.
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "patch"]
@@ -357,8 +420,23 @@ rules:
   # classifier handed somebody else's event would CANCEL a healthy check Job.
   # A field selector is not an RBAC boundary and this comment does not claim it
   # is; the grant is namespace-wide `list` on a resource that carries no
-  # credential. REVIEWER QUESTION Q2, recorded for W11: whether a
-  # namespace-scoped `Role` per watched namespace is wanted instead.
+  # credential.
+  #
+  # REVIEWER QUESTION Q2, ANSWERED BY W11: **no**, a namespace-scoped `Role`
+  # per watched namespace is NOT adopted here, and the reason is that it would
+  # be a change to how the WHOLE controller is bound rather than to this rule.
+  # `weirkeeper` is bound by one `ClusterRoleBinding` (`role_binding.yaml`) and
+  # watches every namespace; replacing that with per-namespace `Role`s and
+  # `RoleBinding`s means the controller can only ever reconcile namespaces
+  # somebody remembered to bind, and a missing binding is a SILENT failure —
+  # objects simply never reconcile. That work is real and is already owned:
+  # D0 §10 stage 5 "controller authority isolation" (and D2 §13.2's W14a
+  # `LOGWEIR_WATCH_NAMESPACES`) replaces the cluster-wide binding with explicit
+  # execution namespaces, at which point `events` narrows with everything else
+  # in one reviewable change. Narrowing this ONE resource to a `Role` today
+  # would split the binding model in two and buy nothing: `events` carry no
+  # credential, and the field selector already means the classifier only ever
+  # sees events for a Job or pod this check owns.
   - apiGroups: [""]
     resources: ["events"]
     verbs: ["list"]
