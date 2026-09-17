@@ -7,14 +7,26 @@
 // where it lands, the standalone approvals page, and every way a subject can
 // be made to disagree with what was submitted.
 //
+// PLAT-07.2 added four more, about the saved-cluster selector: the selector
+// picks a connection by UID and survives a rename, a connection deleted and
+// recreated under the same name is refused, a probe the controller refused
+// shows the controller's own reason, and a credential rotation followed by a
+// fresh probe moves the observed time the page shows.
+//
 // EVERY POSITIVE CASE IS REAL. The page is the worktree's own `ui/`, served by
 // `kubectl proxy` on the loopback address; every object is created by the page
 // against the real API server and read back with `kubectl`, by name and by
-// UID. Two cases inject a FAULT into the transport and say so in the result:
+// UID. Three cases inject a FAULT into the transport and say so in the result:
 // the double-click case DELAYS the real response (the request and its answer
-// are the API server's own), and the lost-response case fetches the real
-// response and then aborts it, which is what a dropped connection does to a
-// create that already happened. No response body is ever fabricated.
+// are the API server's own), the lost-response case fetches the real response
+// and then aborts it, which is what a dropped connection does to a create that
+// already happened, and the RENAME case rewrites `metadata.name` in a real list
+// response while keeping the real UID -- because Kubernetes object names are
+// immutable and a rename cannot be performed against the API server at all.
+// No response body is ever fabricated: each of the three starts from the API
+// server's own answer. Everything else -- the recreation, the refused probes
+// and the rotation -- is done with `kubectl` against real objects and the real
+// controller, with no interception of any kind.
 //
 // Dependencies: Node.js, kubectl, and Playwright with Chromium installed.
 // Resolve Playwright without a machine-specific path, for example:
@@ -253,6 +265,21 @@ const rfc = (ms) => new Date(ms).toISOString().replace(".000Z", "Z");
 const points = {};
 
 function seedFixtures() {
+  // THE SERVICE ACCOUNT THE CONTROLLER'S PROBE POD RUNS AS. `weirkeeper`
+  // builds every runner Job -- a probe included -- with
+  // `serviceAccountName: logweir-runner`, and the chart creates it per
+  // installation namespace. A namespace this harness made itself has none, and
+  // without it the Job controller answers `FailedCreate ... serviceaccount
+  // "logweir-runner" not found`, no pod is ever created, and the Job dies of
+  // its own `activeDeadlineSeconds` with nothing to read. It holds no RBAC: a
+  // probe pod dials a broker and prints one line, and reads no API object.
+  const account = apply({
+    apiVersion: "v1",
+    kind: "ServiceAccount",
+    metadata: { name: "logweir-runner", namespace: namespace, labels: LABELS },
+  });
+  result.created.push({ kind: "ServiceAccount", name: "logweir-runner", uid: account.metadata.uid });
+
   for (const [name, role] of [[sourceCluster, "source"], [targetCluster, "target"]]) {
     const created = apply({
       apiVersion: "logweir.dev/v1alpha1",
@@ -1115,6 +1142,426 @@ async function pathStyleDoesNotEnableHttp(browser, base) {
   }
 }
 
+// ---------------------------------------------- PLAT-07.2: the selector
+
+/** The names PLAT-07.2's journeys use. Each is well under the probe Job's own
+ *  name budget (`logweir-probe-` plus the cluster name must fit a 63-character
+ *  pod label), so a refusal here is always about the connection and never
+ *  about the name's length. */
+const selectorNames = {
+  recreated: NAMESPACE_PREFIX + "recre-" + suffix,
+  configInvalid: NAMESPACE_PREFIX + "cfg-" + suffix,
+  noCredential: NAMESPACE_PREFIX + "cred-" + suffix,
+  rotation: NAMESPACE_PREFIX + "rot-" + suffix,
+  rotationSecret: NAMESPACE_PREFIX + "rot-secret-" + suffix,
+  schedule: NAMESPACE_PREFIX + "sel-sched-" + suffix,
+};
+
+/** Creates one `KafkaCluster` and records it. `spec` is merged over a
+ *  deliberately unreachable plaintext connection, so nothing a journey creates
+ *  can reach a real broker. */
+function seedCluster(name, spec) {
+  const created = apply({
+    apiVersion: "logweir.dev/v1alpha1",
+    kind: "KafkaCluster",
+    metadata: { name: name, namespace: namespace, labels: LABELS },
+    spec: Object.assign({
+      bootstrapServers: ["fixture.invalid:9092"],
+      auth: { mode: "plaintext", tls: false },
+      role: "source",
+      markerTopic: "logweir.scratch",
+    }, spec || {}),
+  });
+  result.created.push({ kind: "KafkaCluster", name: name, uid: created.metadata.uid });
+  return { name: name, uid: created.metadata.uid };
+}
+
+/** The selected option of one selector, read out of the live DOM. */
+async function selection(page, id) {
+  return page.evaluate((selectorId) => {
+    const select = document.querySelector("#" + selectorId);
+    const option = select === null ? null : select.options[select.selectedIndex];
+    return {
+      uid: select === null ? null : select.value,
+      caption: option === null || option === undefined ? null : option.textContent,
+      hiddenUid: (document.querySelector("#" + selectorId + "-uid") || {}).value,
+      hiddenName: (document.querySelector("#" + selectorId + "-name") || {}).value,
+      hiddenOptions: select === null
+        ? []
+        : Array.from(select.options).filter((o) => o.hidden).map((o) => o.getAttribute("data-name")),
+      probeLine: (document.querySelector("#" + selectorId + "-probe") || {}).textContent,
+    };
+  }, id);
+}
+
+async function selectorPicksByUidAndSurvivesARename(browser, base) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1100 } });
+  const posts = collectPosts(page);
+  try {
+    await page.goto(base + "#/schedules?ns=" + namespace);
+    await page.waitForSelector("#schedule-source");
+    // Both fixture connections are offered, whatever their role, and each
+    // option's VALUE is the object's UID.
+    const offered = await page.evaluate(() => Array.from(
+      document.querySelectorAll("#schedule-source option"),
+    ).map((o) => ({ value: o.value, name: o.getAttribute("data-name"), role: o.getAttribute("data-role") })));
+    const source = offered.find((o) => o.name === sourceCluster);
+    const target = offered.find((o) => o.name === targetCluster);
+    check(source !== undefined && target !== undefined,
+      "both saved connections must be offered whatever their role: " + JSON.stringify(offered));
+    const sourceUid = kubeJson(["-n", namespace, "get", "kafkacluster", sourceCluster]).metadata.uid;
+    check(source.value === sourceUid, "the option's value is the object's UID, not its name");
+
+    await page.selectOption("#schedule-source", sourceUid);
+    const picked = await selection(page, "schedule-source");
+    check(picked.hiddenUid === sourceUid && picked.hiddenName === sourceCluster,
+      "the identity and the name travel together: " + JSON.stringify(picked));
+    check(picked.caption.includes("role: source") && picked.caption.includes("connection probe:"),
+      "the option says what the connection is and what its probe said: " + picked.caption);
+    check(!/\bready\b/i.test(picked.caption), "a probe is never described as ready: " + picked.caption);
+    await shot(page, "selector-picked-by-uid");
+
+    // THE SEARCH FILTERS AND NEVER CHANGES THE ANSWER: a query matching only
+    // the other connection hides it, and the selected one stays selected.
+    await page.fill("#schedule-source-search", "target");
+    await pause(200);
+    const searched = await selection(page, "schedule-source");
+    check(searched.hiddenUid === sourceUid, "a search must not change the selection");
+    check(searched.hiddenOptions.length === 0 || !searched.hiddenOptions.includes(sourceCluster),
+      "the SELECTED option is never hidden: " + JSON.stringify(searched));
+    await page.fill("#schedule-source-search", "");
+
+    // The schedule is created against the connection that was chosen.
+    await page.fill("#schedule-name", selectorNames.schedule);
+    await page.fill("#schedule-topics", "orders");
+    await page.fill("#schedule-archive", archiveUrl);
+    await page.click("#schedule-form button[type=submit]");
+    await page.waitForSelector(".mutation-succeeded", { timeout: 20000 });
+    const stored = kubeJson(["-n", namespace, "get", "backupschedule", selectorNames.schedule]);
+    result.created.push({ kind: "BackupSchedule", name: selectorNames.schedule, uid: stored.metadata.uid });
+    check(stored.spec.sourceRef.name === sourceCluster,
+      "the created schedule names the connection that was chosen: " + JSON.stringify(stored.spec.sourceRef));
+
+    // THE RENAME, injected. Kubernetes object names are immutable, so this is
+    // the only way to present the page with the same UID under another name;
+    // the response is the API server's own, with one field rewritten.
+    const renamedTo = sourceCluster + "-renamed";
+    let rewritten = 0;
+    await page.route("**" + apiPath("kafkaclusters"), async (route) => {
+      if (route.request().method() !== "GET") {
+        await route.continue();
+        return;
+      }
+      const response = await route.fetch();
+      const body = await response.text();
+      // `content-length` is the ORIGINAL body's, and the rewritten name is
+      // longer; forwarding it would truncate the answer. Everything else --
+      // the status and every other header -- is the API server's own.
+      const headers = Object.assign({}, response.headers());
+      delete headers["content-length"];
+      rewritten += 1;
+      await route.fulfill({
+        status: response.status(),
+        headers: headers,
+        body: body.split("\"" + sourceCluster + "\"").join("\"" + renamedTo + "\""),
+      });
+    });
+    result.faultInjection.push({
+      journey: "selector picks by UID and survives a rename",
+      what: "one field of a real GET response is rewritten: metadata.name " + sourceCluster +
+        " -> " + renamedTo + ", with the object's real UID left alone",
+      why: "a Kubernetes object name is immutable, so a rename cannot be performed against the " +
+        "API server; every other object and field in the response is the API server's own",
+    });
+    // THE SELECTION IS MADE AGAIN -- the successful create consumed the draft
+    // -- so the page is holding `{uid, old name}` when the rename lands.
+    await page.selectOption("#schedule-source", sourceUid);
+    const held = await selection(page, "schedule-source");
+    check(held.hiddenUid === sourceUid && held.hiddenName === sourceCluster,
+      "the draft holds the pair the rename has to be told apart from: " + JSON.stringify(held));
+
+    // A ROUTE CHANGE AND BACK, not a reload: a draft lives in page memory and
+    // survives a route change by design, and it is the draft carrying the OLD
+    // name beside the uid that makes a rename visible at all. A reload would
+    // start from an empty draft and the page would simply preselect.
+    await page.goto(base + "#/clusters?ns=" + namespace);
+    await page.waitForSelector("#cluster-form");
+    await page.goto(base + "#/schedules?ns=" + namespace);
+    await page.waitForSelector("#schedule-source");
+    check(rewritten > 0, "the rename fault never fired; the page read no connection list");
+    const afterRename = await selection(page, "schedule-source");
+    check(afterRename.hiddenUid === sourceUid,
+      "the selection did not move: same uid, new label: " + JSON.stringify(afterRename));
+    check(afterRename.hiddenName === renamedTo,
+      "and the NAME the form would send is the current one: " + JSON.stringify(afterRename));
+    check(afterRename.caption.includes(renamedTo), "the option shows the new name: " + afterRename.caption);
+    const renameNote = await page.locator("[data-selection-renamed]").count();
+    check(renameNote > 0, "the page says the connection was renamed rather than doing it silently");
+    const renameText = await page.locator("[data-selection-renamed]").innerText();
+    check(renameText.includes(sourceCluster) && renameText.includes(renamedTo) &&
+      renameText.includes(sourceUid),
+      "and the note names the old name, the new one and the uid that did not change: " + renameText);
+    await shot(page, "selector-survives-rename");
+    await page.unroute("**" + apiPath("kafkaclusters"));
+    record("selector picks by UID and survives a rename", {
+      offered: offered.map((o) => o.name),
+      chosen: { uid: sourceUid, name: sourceCluster },
+      schedule: { name: selectorNames.schedule, uid: stored.metadata.uid, sourceRef: stored.spec.sourceRef },
+      afterRename: afterRename,
+      renameNoteRendered: renameNote,
+      renameNote: renameText,
+      listResponsesRewritten: rewritten,
+      postsInThisJourney: posts.length,
+    });
+  } finally {
+    await page.close();
+  }
+}
+
+async function aRecreatedClusterIsRefused(browser, base) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1100 } });
+  const posts = collectPosts(page);
+  const scheduleName2 = NAMESPACE_PREFIX + "refused-" + suffix;
+  try {
+    const first = seedCluster(selectorNames.recreated, { role: "source" });
+    await page.goto(base + "#/schedules?ns=" + namespace);
+    await page.waitForSelector("#schedule-source");
+    await page.selectOption("#schedule-source", first.uid);
+    await page.fill("#schedule-name", scheduleName2);
+    await page.fill("#schedule-topics", "orders");
+    await page.fill("#schedule-archive", archiveUrl);
+    const chosen = await selection(page, "schedule-source");
+    check(chosen.hiddenUid === first.uid, "the draft holds the first object's uid");
+
+    // DELETED AND RECREATED UNDER THE SAME NAME, while the form sits open.
+    kube(["-n", namespace, "delete", "kafkacluster", selectorNames.recreated, "--wait=true"],
+      { timeout: 60000 });
+    const second = seedCluster(selectorNames.recreated, {
+      role: "source",
+      bootstrapServers: ["somewhere-else.fixture.invalid:9092"],
+    });
+    check(second.uid !== first.uid, "the recreated object must have a different uid");
+
+    const postsBefore = posts.length;
+    await page.click("#schedule-form button[type=submit]");
+    await page.waitForSelector(".mutation-failed, #schedule-source-error", { timeout: 20000 });
+    await pause(500);
+    const shown = await page.locator("#schedule-form").innerText();
+    check(shown.includes(first.uid) && shown.includes(second.uid),
+      "the refusal must name BOTH uids: " + shown.slice(0, 900));
+    check(posts.length === postsBefore, "a refused submit must send nothing: " + posts.join(", "));
+    const none = kube(["-n", namespace, "get", "backupschedule", scheduleName2,
+      "--ignore-not-found=true", "-o", "name"]).stdout.trim();
+    check(none === "", "no BackupSchedule was created: " + none);
+    const draftKept = await page.inputValue("#schedule-topics");
+    check(draftKept === "orders", "and the draft is kept: " + draftKept);
+    await shot(page, "selector-recreated-refused");
+    record("a recreated cluster is refused", {
+      before: first,
+      after: second,
+      postsDuringTheRefusal: posts.length - postsBefore,
+      scheduleCreated: none === "" ? null : none,
+      draftKept: { topics: draftKept },
+    });
+  } finally {
+    await page.close();
+  }
+}
+
+async function aFailedProbeShowsTheControllersReason(browser, base) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1100 } });
+  try {
+    // TWO CONNECTIONS THE RESOLVER REFUSES BEFORE ANY PROBE JOB EXISTS
+    // (PLAT-07.1). Neither produces a Job, so what the page renders is the
+    // controller's own refusal and not a dial that failed.
+    const configInvalid = seedCluster(selectorNames.configInvalid, {
+      auth: { mode: "plaintext", tls: true },
+    });
+    const noCredential = seedCluster(selectorNames.noCredential, {
+      auth: { mode: "scramSha512", tls: false },
+    });
+    const wanted = {};
+    for (const [name, reason] of [
+      [selectorNames.configInvalid, "ConnectionConfigInvalid"],
+      [selectorNames.noCredential, "CredentialNotRenderable"],
+    ]) {
+      const status = await until(
+        "the controller records its refusal for " + name,
+        async () => (kubeJson(["-n", namespace, "get", "kafkacluster", name]).status || {}),
+        (st) => typeof st.reason === "string" && st.reason.length > 0,
+        60,
+      );
+      check(status.reason === reason,
+        name + ": expected the controller to write " + reason + ", it wrote " + status.reason);
+      check(status.reachable === undefined,
+        "a refused connection has no reachability at all: " + JSON.stringify(status));
+      wanted[name] = status;
+    }
+    const jobs = kubeJson(["-n", namespace, "get", "jobs"]).items || [];
+    check(jobs.every((j) => !j.metadata.name.includes(selectorNames.configInvalid) &&
+      !j.metadata.name.includes(selectorNames.noCredential)),
+      "a refused connection must produce no probe Job: " + jobs.map((j) => j.metadata.name).join(", "));
+
+    await page.goto(base + "#/clusters?ns=" + namespace);
+    await page.waitForSelector("table.grid");
+    const rows = await page.evaluate(() => Array.from(
+      document.querySelectorAll("tr[data-cluster-uid]"),
+    ).map((tr) => ({
+      uid: tr.getAttribute("data-cluster-uid"),
+      text: tr.innerText,
+    })));
+    for (const [name, reason] of [
+      [selectorNames.configInvalid, "ConnectionConfigInvalid"],
+      [selectorNames.noCredential, "CredentialNotRenderable"],
+    ]) {
+      const uid = kubeJson(["-n", namespace, "get", "kafkacluster", name]).metadata.uid;
+      const row = rows.find((r) => r.uid === uid);
+      check(row !== undefined, "the list has a row for " + name);
+      check(row.text.includes(reason),
+        "the row must carry the CONTROLLER'S OWN reason verbatim: " + row.text);
+      check(row.text.includes("connection probe: refused"),
+        "and say the probe was refused: " + row.text);
+      check(!/\bready\b/i.test(row.text), "and never say ready: " + row.text);
+    }
+    await shot(page, "probe-refused-list");
+
+    // The DETAIL view says the same thing, with the gloss and the control.
+    await page.goto(base + "#/clusters?ns=" + namespace + "&name=" + selectorNames.configInvalid);
+    await page.waitForSelector("#cluster-probe");
+    const panel = await page.locator("#cluster-probe").innerText();
+    check(panel.includes("ConnectionConfigInvalid"), "the detail panel names the reason: " + panel);
+    check(panel.includes("Test connection"), "and offers the re-read control: " + panel);
+    check(!/\bready\b/i.test(panel), "and never says ready: " + panel);
+    await shot(page, "probe-refused-detail");
+    record("a failed probe shows the controller's reason", {
+      clusters: [
+        { name: selectorNames.configInvalid, uid: configInvalid.uid, status: wanted[selectorNames.configInvalid] },
+        { name: selectorNames.noCredential, uid: noCredential.uid, status: wanted[selectorNames.noCredential] },
+      ],
+      probeJobsForThem: 0,
+    });
+  } finally {
+    await page.close();
+  }
+}
+
+async function aRotationRefreshesTheObservedTime(browser, base) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1100 } });
+  try {
+    // A CONNECTION THE CONTROLLER ACTUALLY PROBES: a resolvable SCRAM
+    // connection whose credential lives in a Secret, with a non-default data
+    // key -- connection contract v1's `passwordKey`. The brokers are
+    // unreachable on purpose, so the probe RUNS and reports `reachable=false`;
+    // what this journey is about is the observed TIME, not the verdict.
+    apply({
+      apiVersion: "v1",
+      kind: "Secret",
+      metadata: { name: selectorNames.rotationSecret, namespace: namespace, labels: LABELS },
+      type: "Opaque",
+      stringData: { "sasl-pw": "before-rotation-" + suffix },
+    });
+    result.created.push({ kind: "Secret", name: selectorNames.rotationSecret });
+    const rotation = seedCluster(selectorNames.rotation, {
+      auth: {
+        mode: "scramSha512",
+        username: "logweir-reader",
+        tls: false,
+        secretRef: { name: selectorNames.rotationSecret, passwordKey: "sasl-pw" },
+      },
+    });
+
+    const firstProbe = await until(
+      "the controller records a first observation for " + selectorNames.rotation,
+      async () => (kubeJson(["-n", namespace, "get", "kafkacluster", selectorNames.rotation]).status || {}),
+      (st) => typeof st.observedAt === "string" && st.observedAt.length > 0,
+      180,
+    );
+
+    await page.goto(base + "#/clusters?ns=" + namespace + "&name=" + selectorNames.rotation);
+    await page.waitForSelector("#cluster-probe-line");
+    const before = await page.locator("#cluster-probe-line").innerText();
+    check(before.includes(firstProbe.observedAt),
+      "the page shows the observed instant the controller recorded: " + before);
+    check(before.includes("connection probe:"), "labelled as a probe: " + before);
+    await shot(page, "rotation-before");
+
+    // THE ROTATION: the Secret's data changes and the KafkaCluster does not --
+    // `spec` is immutable and the controller resolves the reference at run
+    // time, which is the whole point of a saved connection.
+    kube(["-n", namespace, "patch", "secret", selectorNames.rotationSecret, "--type=merge",
+      "-p", JSON.stringify({ stringData: { "sasl-pw": "after-rotation-" + suffix } })]);
+    const specBefore = kubeJson(["-n", namespace, "get", "kafkacluster", selectorNames.rotation]).spec;
+
+    // THE RE-PROBE. The controller re-probes when the finished probe Job is
+    // collected by its own `ttlSecondsAfterFinished` (300 s); deleting the
+    // finished Job is that same event, five minutes sooner, and it is a Job in
+    // this run's own namespace that this run's own controller created.
+    const probeJob = "logweir-probe-" + selectorNames.rotation;
+    // A finished Job is read off its CONDITIONS, not off `succeeded`/`failed`:
+    // a Job whose pod failed carries `Failed=True` while both counters are
+    // still 0 and its pods sit in `uncountedTerminatedPods`.
+    const jobConditions = await until("the first probe Job finishes", async () => {
+      const got = kube(["-n", namespace, "get", "job", probeJob, "-o", "json"], { expected: [0, 1] });
+      if (got.status !== 0) {
+        return "collected";
+      }
+      return ((JSON.parse(got.stdout).status || {}).conditions) || [];
+    }, (st) => st === "collected" || st.some(
+      (c) => (c.type === "Complete" || c.type === "Failed") && c.status === "True",
+    ), 240);
+    // `--ignore-not-found`: its own `ttlSecondsAfterFinished` may have
+    // collected it already, which is the same event this delete is standing in
+    // for, five minutes sooner.
+    kube(["-n", namespace, "delete", "job", probeJob, "--ignore-not-found=true", "--wait=true"],
+      { timeout: 120000 });
+
+    const secondProbe = await until(
+      "the controller records a fresh observation after the rotation",
+      async () => (kubeJson(["-n", namespace, "get", "kafkacluster", selectorNames.rotation]).status || {}),
+      (st) => typeof st.observedAt === "string" && st.observedAt !== firstProbe.observedAt,
+      240,
+    );
+
+    // THE PAGE'S OWN "Test connection": a re-read, which is what it says it is.
+    const reads = [];
+    page.on("request", (request) => {
+      if (request.method() === "GET" && request.url().includes("/kafkaclusters/")) {
+        reads.push(new URL(request.url()).pathname);
+      }
+    });
+    const readsBefore = reads.length;
+    await page.click("form.probe-test button[type=submit]");
+    await page.waitForFunction(
+      (instant) => document.querySelector("#cluster-probe-line").innerText.includes(instant),
+      secondProbe.observedAt, { timeout: 20000 });
+    const after = await page.locator("#cluster-probe-line").innerText();
+    check(reads.length > readsBefore, "Test connection re-read the object");
+    check(!after.includes(firstProbe.observedAt),
+      "and the stale instant is gone from the panel: " + after);
+    const specAfter = kubeJson(["-n", namespace, "get", "kafkacluster", selectorNames.rotation]).spec;
+    check(JSON.stringify(specBefore) === JSON.stringify(specAfter),
+      "a rotation edits the Secret and never the KafkaCluster's spec");
+    check(specAfter.auth.secretRef.passwordKey === "sasl-pw",
+      "and contract v1's data key is still the one the object names");
+    await shot(page, "rotation-after");
+    record("a rotation refreshes the observed time", {
+      cluster: rotation,
+      secret: selectorNames.rotationSecret,
+      observedAtBefore: firstProbe.observedAt,
+      observedAtAfter: secondProbe.observedAt,
+      reasonBefore: firstProbe.reason,
+      reasonAfter: secondProbe.reason,
+      firstProbeJobEndedWith: jobConditions === "collected"
+        ? "collected by its own ttlSecondsAfterFinished"
+        : jobConditions.filter((c) => c.status === "True").map((c) => c.type + "/" + c.reason),
+      specUnchanged: true,
+      reReadsIssuedByTestConnection: reads.length - readsBefore,
+    });
+  } finally {
+    await page.close();
+  }
+}
+
 // ------------------------------------------------------------------ driver
 
 let proxy = null;
@@ -1167,6 +1614,13 @@ try {
   // selector journey counted and nothing after it reads that fixture.
   await missingPointIsRefused(browser, url);
   await serverRefusesAForgedSubjectBinding(browser, url);
+  // PLAT-07.2. Last, because the rotation journey waits on a real probe Job
+  // and the recreation journey deletes a fixture connection; nothing above
+  // reads either afterwards.
+  await selectorPicksByUidAndSurvivesARename(browser, url);
+  await aRecreatedClusterIsRefused(browser, url);
+  await aFailedProbeShowsTheControllersReason(browser, url);
+  await aRotationRefreshesTheObservedTime(browser, url);
 } catch (error) {
   failure = error;
   result.failure = errorText(error);
