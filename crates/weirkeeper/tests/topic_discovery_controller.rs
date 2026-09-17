@@ -1948,6 +1948,334 @@ async fn observed_at_is_the_runners_own_instant_and_not_a_clock_read() {
 }
 
 // ---------------------------------------------------------------------------
+// The schema bound on the chunk index (review M1)
+// ---------------------------------------------------------------------------
+
+/// **The reviewer's measured case.** A runner that honours its relay budget but
+/// not its plan's `maxTopics` relays 165,000 frames — 5,115,000 bytes, inside
+/// the plan's own 6 MiB budget, inside the decoder's budget and inside the 8 MiB
+/// `pods/log` read. Split unbounded that is **66** chunks, three over the CRD's
+/// `maxItems: 64`, so 66 `ConfigMap`s land in etcd and then the `/status` PATCH
+/// is refused 422: the object never reaches a terminal phase, the Job's TTL is
+/// never set, and `error_policy` requeues the same doomed pass every thirty
+/// seconds forever.
+///
+/// The entries are cut to the plan's ceiling BEFORE anything is written, so the
+/// chunks, the index and `topicsSha256` are one set and the API's §5.6
+/// integrity triple still holds.
+///
+/// MUTANT: split `relay.topics` instead of the clamped slice. The chunk count,
+/// the `truncated` flag and the digest each fail.
+#[tokio::test]
+async fn a_relay_that_ignores_its_plan_is_cut_to_what_the_status_can_index() {
+    let entries: Vec<TopicEntry> = (0..165_000)
+        .map(|i| TopicEntry::new(&format!("bulk-{i:06}"), 3))
+        .collect();
+    let inventory = inventory_of(&entries, counts_for(&entries, 0));
+    let (client, _r, bodies) = mock_client_recording_bodies(finished_routes(
+        relay_log(&entries, &inventory),
+        vec![Route {
+            method: "POST",
+            path_suffix: "/configmaps",
+            status: 201,
+            body: "{}".to_string(),
+        }],
+    ));
+    let outcome = td::reconcile_discovery(&running(), &context(client, None))
+        .await
+        .expect("the reconcile answers");
+
+    // The request's `maxTopics` is 20,000, so 20,000 entries and eight chunks.
+    assert_eq!(outcome.phase, PHASE_SUCCEEDED);
+    assert_eq!(outcome.chunks_written, 8);
+    assert!(
+        outcome.chunks_written <= td::MAX_STATUS_CHUNKS,
+        "a status can index at most {} chunks",
+        td::MAX_STATUS_CHUNKS
+    );
+
+    let written = bodies_of(&bodies, "POST", "/configmaps");
+    assert_eq!(written.len(), 8, "no ConfigMap is written past the bound");
+
+    let status = status_of(&bodies);
+    assert_eq!(status["result"]["counts"]["returned"], json!(20_000));
+    assert_eq!(
+        status["result"]["counts"]["listed"],
+        json!(165_000),
+        "what the broker listed is unchanged; only what is STORED was cut"
+    );
+    assert_eq!(status["result"]["truncated"], json!(true));
+    assert_eq!(status["result"]["truncationReason"], json!("MaxTopics"));
+    assert_eq!(
+        status["result"]["chunks"]
+            .as_array()
+            .expect("an index")
+            .len(),
+        8
+    );
+    assert_eq!(
+        status["result"]["topicsSha256"],
+        json!(topic_tsv_sha256(&entries[..20_000])),
+        "the digest is over the entries that were STORED, so a reader that fetches the chunks \
+         reproduces it"
+    );
+    assert!(
+        status["message"]
+            .as_str()
+            .is_some_and(|m| m.contains("165000") && m.contains("truncated")),
+        "the message names what happened: {status}"
+    );
+}
+
+/// The bound, at the boundary, without an API server.
+#[test]
+fn the_chunk_index_can_never_exceed_the_schemas_max_items() {
+    // The plan ceiling binds at the contract's own maximum: 50,000 entries is
+    // twenty chunks, nowhere near the schema bound.
+    assert_eq!(td::storable_entry_ceiling(50_000), 50_000);
+    // And the schema backstop binds only if a policy ever raised `hardMaxTopics`
+    // past it.
+    assert_eq!(
+        td::storable_entry_ceiling(500_000),
+        td::MAX_STATUS_CHUNKS * chunks::MAX_CHUNK_LINES
+    );
+    assert_eq!(td::storable_entry_ceiling(500_000), 160_000);
+
+    for count in [0usize, 1, 2_500, 2_501, 160_000, 165_000] {
+        let entries: Vec<TopicEntry> = (0..count)
+            .map(|i| TopicEntry::new(&format!("t-{i:06}"), 1))
+            .collect();
+        let inventory = inventory_of(&entries, counts_for(&entries, 0));
+        let ceiling = td::storable_entry_ceiling(50_000);
+        let (clamped, stored) = td::clamp_to_storable(&inventory, &entries, ceiling);
+        let split = chunks::split(stored);
+        let index = td::chunk_index(stored, &split, "lwc-td-x");
+        assert!(
+            index.len() <= td::MAX_STATUS_CHUNKS,
+            "{count} entries produced {} chunks",
+            index.len()
+        );
+        assert_eq!(index.len(), split.len(), "the index describes the chunks");
+        assert_eq!(
+            clamped.counts.returned as usize,
+            stored.len(),
+            "the published count is what was stored"
+        );
+        assert_eq!(clamped.truncated, count > ceiling);
+    }
+}
+
+/// Clamping cuts the ENTRIES, never the index alone: a truncated result's
+/// digest is still reproducible from the chunks that exist.
+#[test]
+fn clamping_keeps_the_chunks_the_index_and_the_digest_one_set() {
+    let entries: Vec<TopicEntry> = (0..10)
+        .map(|i| TopicEntry::new(&format!("t-{i}"), 1))
+        .collect();
+    let inventory = inventory_of(&entries, counts_for(&entries, 0));
+    let (clamped, stored) = td::clamp_to_storable(&inventory, &entries, 4);
+    assert_eq!(stored.len(), 4);
+    assert_eq!(clamped.counts.returned, 4);
+    assert_eq!(clamped.counts.listed, 10, "the broker's own count is kept");
+    assert!(clamped.truncated);
+    assert_eq!(clamped.truncation_reason, Some(TruncationReason::MaxTopics));
+    assert_eq!(clamped.topics_sha256, topic_tsv_sha256(stored));
+
+    // A reason the RUNNER supplied is the more specific fact and is kept.
+    let mut relayed = inventory.clone();
+    relayed.truncated = true;
+    relayed.truncation_reason = Some(TruncationReason::RelayLimit);
+    let (kept, _) = td::clamp_to_storable(&relayed, &entries, 4);
+    assert_eq!(kept.truncation_reason, Some(TruncationReason::RelayLimit));
+
+    // Inside the ceiling nothing moves.
+    let (untouched, all) = td::clamp_to_storable(&inventory, &entries, 10);
+    assert_eq!(all.len(), 10);
+    assert!(!untouched.truncated);
+}
+
+// ---------------------------------------------------------------------------
+// The TTL on the Failed path (review M2)
+// ---------------------------------------------------------------------------
+
+/// **A terminal status that 409'd did not land**, so this pass's conclusion is
+/// not on the server and the pod that still holds the relay must stay alive for
+/// the pass that reads the newer object. The route table holds no `PATCH` for
+/// the Job, so the double panics if the TTL were set.
+///
+/// The scenario is two replicas: A classifies `Failed/DeadlineExceeded`, its
+/// commit 409s against B's stale `Running`, and if A sets the TTL the TTL
+/// controller deletes the Job **and its pod together** 600 s later, taking the
+/// relay — and the reason the operator has to act on — with them.
+///
+/// MUTANT: call `finish_job` unconditionally on the `Failed` arm, which is what
+/// the code did before this fix.
+#[tokio::test]
+async fn a_failed_status_conflict_never_patches_the_ttl() {
+    let job = json!({
+        "apiVersion": "batch/v1", "kind": "Job",
+        "metadata": {"name": JOB, "namespace": NS, "uid": JOB_UID,
+                     "creationTimestamp": "2026-09-16T11:58:30Z",
+                     "ownerReferences": [{"apiVersion": "logweir.dev/v1alpha1",
+                         "kind": "TopicDiscovery", "name": NAME, "uid": UID,
+                         "controller": true, "blockOwnerDeletion": true}]},
+        "spec": {"template": {"spec": {"containers": [], "restartPolicy": "Never"}}},
+        "status": {"conditions": [{"type": "Failed", "status": "True",
+                    "reason": "DeadlineExceeded",
+                    "lastProbeTime": "2026-09-16T11:59:30Z",
+                    "lastTransitionTime": "2026-09-16T11:59:30Z"}]}
+    });
+    let routes = vec![
+        Route {
+            method: "GET",
+            path_suffix: JOB_PATH,
+            status: 200,
+            body: job.to_string(),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/pods",
+            status: 200,
+            body: pod_list(vec![]),
+        },
+        Route {
+            method: "GET",
+            path_suffix: PLAN_PATH,
+            status: 200,
+            body: plan_config_map(UID, true, PLAN_SHA),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: STATUS_PATH,
+            status: 409,
+            body: r#"{"kind":"Status","apiVersion":"v1","status":"Failure","message":"conflict","reason":"Conflict","code":409}"#.to_string(),
+        },
+    ];
+    let (client, recorder, _b) = mock_client_recording_bodies(routes);
+    let outcome = td::reconcile_discovery(&running(), &context(client, None))
+        .await
+        .expect("a 409 is not an error");
+
+    assert_eq!(outcome.phase, PHASE_FAILED);
+    assert!(!outcome.committed, "the terminal status did not land");
+    assert!(!outcome.ttl_patched);
+    assert!(
+        !calls(&recorder)
+            .iter()
+            .any(|c| c.starts_with("PATCH") && c.contains(JOB_PATH)),
+        "no TTL before a commit, on the Failed path as on the Succeeded one: {:?}",
+        calls(&recorder)
+    );
+}
+
+/// The same path with a 200: the TTL IS patched, so the test above is about the
+/// conflict and not about the branch never running.
+#[tokio::test]
+async fn a_failed_status_that_lands_does_patch_the_ttl() {
+    let mut routes = finished_routes(String::new(), vec![]);
+    routes[1].body = pod_list(vec![]);
+    routes.remove(2);
+    let (client, _r, _b) = mock_client_recording_bodies(routes);
+    let outcome = td::reconcile_discovery(&running(), &context(client, None))
+        .await
+        .expect("the reconcile answers");
+    assert_eq!(outcome.phase, PHASE_FAILED);
+    assert!(outcome.committed);
+    assert!(outcome.ttl_patched);
+}
+
+// ---------------------------------------------------------------------------
+// The attestation fails closed on an absent value (review L1)
+// ---------------------------------------------------------------------------
+
+/// **An unknown principal is not a wildcard.** The binding's principal reaches
+/// the policy matcher as `""` when no binding was ever recorded — reachable
+/// when the start-path status patch 409'd — and `""` compares EQUAL to an
+/// attestation whose own `principal` is empty. That is a false
+/// `attestedComplete` produced by two values being unknown.
+///
+/// MUTANT: call `attestation_for` instead of `attestation_candidate`.
+#[tokio::test]
+async fn an_attestation_with_an_empty_principal_never_matches_an_unknown_one() {
+    // A discovery whose start-path status patch never landed: no binding.
+    let no_binding = discovery(
+        json!({"phase": PHASE_RUNNING, "reason": "PodNotStarted", "jobRef": {"name": JOB}}),
+        json!({}),
+    );
+    let entries = vec![TopicEntry::new("orders", 6)];
+    let inventory = inventory_of(&entries, counts_for(&entries, 0));
+    let blank = json!({
+        "id": "att-blank", "namespace": NS, "kafkaCluster": "source",
+        "clusterId": CLUSTER_ID, "principal": "",
+        "attestedBy": "platform-admin@example.invalid",
+        "attestedAt": "2026-09-15T00:00:00Z", "expiresAt": "2026-12-15T00:00:00Z",
+        "statement": "an attestation an administrator left half-written"
+    });
+    let (client, _r, bodies) = mock_client_recording_bodies(finished_routes(
+        relay_log(&entries, &inventory),
+        vec![
+            Route {
+                method: "POST",
+                path_suffix: "/configmaps",
+                status: 201,
+                body: "{}".to_string(),
+            },
+            Route {
+                method: "GET",
+                path_suffix: "/configmaps/weirkeeper-policy",
+                status: 200,
+                body: policy_body(json!([blank])),
+            },
+        ],
+    ));
+    td::reconcile_discovery(
+        &no_binding,
+        &context(
+            client,
+            Some((
+                "logweir-system".to_string(),
+                "weirkeeper-policy".to_string(),
+            )),
+        ),
+    )
+    .await
+    .expect("the reconcile answers");
+
+    let status = status_of(&bodies);
+    assert_eq!(
+        status["result"]["visibility"]["state"],
+        json!("unknown"),
+        "an unknown principal must never attest: {status}"
+    );
+    assert_eq!(status["result"]["visibility"]["attestation"], Value::Null);
+}
+
+/// The same rule, at the boundary, without an API server.
+#[test]
+fn an_attestation_candidate_needs_every_value_on_both_sides() {
+    let good: Vec<logweir_core::check_contract::Attestation> =
+        serde_json::from_value(json!([attestation(
+            PRINCIPAL,
+            CLUSTER_ID,
+            "2026-12-15T00:00:00Z"
+        )]))
+        .expect("attestations parse");
+    assert!(td::attestation_candidate(&good, NS, "source", PRINCIPAL, CLUSTER_ID).is_some());
+    // An absent observation value on either side is not a match.
+    assert!(td::attestation_candidate(&good, NS, "source", "", CLUSTER_ID).is_none());
+    assert!(td::attestation_candidate(&good, NS, "source", PRINCIPAL, "").is_none());
+    assert!(td::attestation_candidate(&good, NS, "source", "  ", CLUSTER_ID).is_none());
+    assert!(td::attestation_candidate(&good, "", "source", PRINCIPAL, CLUSTER_ID).is_none());
+
+    // And an attestation that names neither is not a candidate for anything.
+    let blank: Vec<logweir_core::check_contract::Attestation> =
+        serde_json::from_value(json!([attestation("", "", "2026-12-15T00:00:00Z")]))
+            .expect("attestations parse");
+    assert!(td::attestation_candidate(&blank, NS, "source", PRINCIPAL, CLUSTER_ID).is_none());
+    assert!(td::attestation_candidate(&blank, NS, "source", "", "").is_none());
+}
+
+// ---------------------------------------------------------------------------
 // Pure functions
 // ---------------------------------------------------------------------------
 
