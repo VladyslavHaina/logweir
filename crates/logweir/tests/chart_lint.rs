@@ -1538,12 +1538,51 @@ fn chart_lint_ui_renders_the_proxy_with_its_paths_and_a_narrow_role() {
             vec!["backupschedules".into()],
             vec!["patch".into()],
         ),
+        // D2 §7.4 — the three kinds Amendment F added, READ ONLY. No
+        // `create`, no `patch`: `ui/api.js`'s `WRITABLE_PLURALS` is unchanged
+        // and the page has no form for any of them; the new flows are
+        // console-only. Without the read a destination-backed schedule renders
+        // as though its archive were unconfigured.
+        (
+            vec!["logweir.dev".into()],
+            vec![
+                "backupdestinations".into(),
+                "preflights".into(),
+                "topicdiscoveries".into(),
+            ],
+            vec!["get".into(), "list".into()], // engine-token-ok: an RBAC verb the page issues, never an engine subcommand
+        ),
     ]);
     assert_eq!(
         want,
         rules_of(role),
         "the page's ClusterRole carries exactly the measured verbs"
     );
+    // AND NO WRITE VERB ON THE THREE NEW KINDS, asserted separately so the
+    // table above cannot be widened in a diff that reads as a reformatting.
+    for (_, resources, verbs) in rules_of(role) {
+        if resources
+            .iter()
+            .any(|r| r == "backupdestinations" || r == "topicdiscoveries" || r == "preflights")
+        {
+            assert_eq!(
+                verbs,
+                vec!["get".to_string(), "list".to_string()], // engine-token-ok: an RBAC verb the page issues, never an engine subcommand
+                "the legacy proxy reads the three new kinds and writes none of them (D2 §7.4): \
+                 {resources:?} carries {verbs:?}"
+            );
+        }
+    }
+    // AND NO VERB ON `configmaps`, which is what keeps the page out of an
+    // inventory's pages: the chunk documents a `TopicDiscovery` owns are
+    // ConfigMaps, and reading them is the console API's job with its own
+    // owner-UID, immutability and digest checks (D2 §5.6).
+    for (groups, resources, _) in rules_of(role) {
+        assert!(
+            !(groups.iter().any(|g| g.is_empty()) && resources.iter().any(|r| r == "configmaps")),
+            "the legacy proxy must hold no verb on `configmaps`"
+        );
+    }
     let roster = find(&docs, "ClusterRole", "logweir-ui-trustrosters");
     assert_eq!(
         BTreeSet::from([(
@@ -1796,6 +1835,572 @@ fn chart_lint_values_schema_types_the_four_flags_as_booleans() {
     );
 }
 
+// ============================================ D2 §4.4 — the installation policy
+
+/// The `policy.json` document one rendered file carries, parsed.
+fn policy_json(render: &str) -> serde_json::Value {
+    let docs = rendered(render);
+    let cm = find(&docs, "ConfigMap", "weirkeeper-policy");
+    assert_eq!(
+        Some("logweir-system"),
+        cm.value["metadata"]["namespace"].as_str(),
+        "the policy lives in the RELEASE namespace, not in a tenant's: who may write THIS \
+         ConfigMap is the whole of what makes an attestation an administrator statement"
+    );
+    let raw = cm.value["data"]["policy.json"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{render}: weirkeeper-policy carries no `policy.json` key"));
+    serde_json::from_str(raw)
+        .unwrap_or_else(|e| panic!("{render}: `policy.json` is not JSON: {e}\n{raw}"))
+}
+
+/// **The policy `ConfigMap` is rendered, it is the values file, and the
+/// Deployment points at it** — D2 §4.4, §10.
+///
+/// THE KEY SET IS ASSERTED EXACTLY, and that is not pedantry:
+/// `weirkeeper::check::policy` parses this document with
+/// `deny_unknown_fields`, so a key this template invents makes the whole
+/// policy `Unreadable` — which fails CLOSED (no attestations, no evidence
+/// allowlist) and reports itself only as one advisory row on a `Preflight`
+/// nobody may be looking at. A missing key inside `checks`, `discovery` or
+/// `preflight` does the same, because those three structs carry no per-field
+/// `serde(default)`.
+///
+/// MUTANT: rename any key below — `maxActiveTotal` to `maxTotal`, say — and
+/// the install still succeeds, the controller still starts, and every
+/// completeness verdict silently becomes `unknown`. This test is what fails
+/// instead.
+#[test]
+fn chart_lint_the_policy_config_map_is_the_values_file_and_the_deployment_points_at_it() {
+    let policy = policy_json("default");
+    let top: BTreeSet<String> = policy
+        .as_object()
+        .expect("policy.json is an object")
+        .keys()
+        .cloned()
+        .collect();
+    assert_eq!(
+        top,
+        BTreeSet::from([
+            "version".to_string(),
+            "checks".to_string(),
+            "discovery".to_string(),
+            "preflight".to_string(),
+            "engine".to_string(),
+            "evidence".to_string(),
+            "legacyArchiveAddressing".to_string(),
+        ]),
+        "policy.json's top-level keys are `weirkeeper::check::policy::Policy`'s field set, \
+         exactly: it is parsed with deny_unknown_fields"
+    );
+    assert_eq!(policy["version"], 1, "POLICY_VERSION");
+    assert_eq!(
+        policy["checks"]
+            .as_object()
+            .expect("a checks object")
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<String>>(),
+        BTreeSet::from([
+            "maxActivePerNamespace".to_string(),
+            "maxActiveTotal".to_string(),
+            "maxActiveDiscoveriesPerConnection".to_string(),
+            "maxEvidenceFetchActivePerNamespace".to_string(),
+        ])
+    );
+    assert_eq!(
+        policy["discovery"]
+            .as_object()
+            .expect("a discovery object")
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<String>>(),
+        BTreeSet::from([
+            "freshSeconds".to_string(),
+            "retentionSeconds".to_string(),
+            "keepPerConnection".to_string(),
+            "defaultMaxTopics".to_string(),
+            "hardMaxTopics".to_string(),
+            "visibilityAttestations".to_string(),
+        ])
+    );
+    assert_eq!(
+        policy["preflight"]
+            .as_object()
+            .expect("a preflight object")
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<String>>(),
+        BTreeSet::from([
+            "defaultTimeoutSeconds".to_string(),
+            "retentionSeconds".to_string(),
+        ])
+    );
+
+    // AND EVERY NUMBER IS THE VALUES FILE'S, so the document cannot drift from
+    // the knob an adopter turns.
+    let values: Value =
+        serde_yaml::from_str(&read("charts/logweir/values.yaml")).expect("values.yaml parses");
+    for (json_path, yaml_path) in [
+        (
+            "checks.maxActivePerNamespace",
+            "checks.maxActivePerNamespace",
+        ),
+        ("checks.maxActiveTotal", "checks.maxActiveTotal"),
+        (
+            "checks.maxActiveDiscoveriesPerConnection",
+            "checks.maxActiveDiscoveriesPerConnection",
+        ),
+        (
+            "checks.maxEvidenceFetchActivePerNamespace",
+            "checks.maxEvidenceFetchActivePerNamespace",
+        ),
+        ("discovery.freshSeconds", "checks.discovery.freshSeconds"),
+        (
+            "discovery.retentionSeconds",
+            "checks.discovery.retentionSeconds",
+        ),
+        (
+            "discovery.keepPerConnection",
+            "checks.discovery.keepPerConnection",
+        ),
+        (
+            "discovery.defaultMaxTopics",
+            "checks.discovery.defaultMaxTopics",
+        ),
+        ("discovery.hardMaxTopics", "checks.discovery.hardMaxTopics"),
+        (
+            "preflight.defaultTimeoutSeconds",
+            "checks.preflight.defaultTimeoutSeconds",
+        ),
+        (
+            "preflight.retentionSeconds",
+            "checks.preflight.retentionSeconds",
+        ),
+    ] {
+        let mut j = &policy;
+        for seg in json_path.split('.') {
+            j = &j[seg];
+        }
+        let mut y = &values;
+        for seg in yaml_path.split('.') {
+            y = &y[seg];
+        }
+        assert_eq!(
+            j.as_u64(),
+            y.as_u64(),
+            "policy.json's `{json_path}` is not values.yaml's `{yaml_path}`"
+        );
+        assert!(
+            j.is_u64(),
+            "policy.json's `{json_path}` must be a JSON INTEGER; a float or a string is a \
+             `deny_unknown_fields` parse failure that fails closed"
+        );
+    }
+    // THE TWO COLLECTIONS ARE EMPTY BY DEFAULT — with no attestation nothing
+    // can be `attestedComplete`, and with no allowlist an unlisted evidence
+    // location is refused.
+    assert_eq!(
+        Some(0),
+        policy["discovery"]["visibilityAttestations"]
+            .as_array()
+            .map(Vec::len)
+    );
+    assert_eq!(
+        Some(0),
+        policy["evidence"]["controllerIdentityLocations"]
+            .as_array()
+            .map(Vec::len)
+    );
+    assert_eq!(policy["engine"]["allowUnverifiedCustomCa"], false);
+
+    // AND THE DEPLOYMENT POINTS AT IT. The override ships EMPTY and the
+    // namespace comes from the pod's own `metadata.namespace`, which is the
+    // pair `check::policy::configured_ref` resolves: an explicit
+    // `<ns>/<name>`, else `weirkeeper-policy` in the installation namespace,
+    // else nothing.
+    let docs = rendered("default");
+    let env = env_of(container(find(&docs, "Deployment", "weirkeeper")));
+    assert_eq!(
+        env.get("LOGWEIR_POLICY_CONFIGMAP")
+            .and_then(|v| v["value"].as_str()),
+        Some(""),
+        "the explicit override ships empty; the namespace below is what resolves the document"
+    );
+    assert_eq!(
+        env.get("LOGWEIR_INSTALLATION_NAMESPACE")
+            .and_then(|v| v["valueFrom"]["fieldRef"]["fieldPath"].as_str()),
+        Some("metadata.namespace"),
+        "a namespace STRING in a manifest is one an operator has to keep in step with \
+         `helm -n`; the downward API cannot drift"
+    );
+
+    // NO CREDENTIAL REACHES THIS DOCUMENT. Every value in it comes from
+    // values.yaml and none of them is a secret; this is the assertion that
+    // makes that checkable rather than merely intended.
+    let raw = find(&docs, "ConfigMap", "weirkeeper-policy").value["data"]["policy.json"]
+        .as_str()
+        .unwrap_or_default()
+        .to_lowercase();
+    for needle in [
+        "password",
+        "secretkeyref",
+        "accesskey",
+        "secret-access-key",
+        "-----begin",
+        "minioadmin",
+    ] {
+        assert!(
+            !raw.contains(needle),
+            "the policy ConfigMap names `{needle}`. Nothing secret may reach a ConfigMap, and \
+             nothing in this document's inputs is secret"
+        );
+    }
+}
+
+/// **The `legacyArchiveAddressing` block is the Deployment's own addressing
+/// env, and it is ABSENT-SHAPED when the Deployment forwards none** — D2
+/// §3.12 (b).
+///
+/// WHY THIS PAIRING IS THE WHOLE POINT. `destinations:from-legacy` may label a
+/// derived location `installationConfig` only when it has actually read the
+/// installation's addressing; before this template existed the route could not
+/// read it and therefore never emitted that provenance. A block that said
+/// something the Deployment does not is worse than no block at all — it is a
+/// provenance label naming a source that was never read.
+///
+/// MUTANT: copy `deployment.yaml`'s bare `ternary .Values.archive.s3.allowHttp
+/// true $explicit` out of its `{{ if $endpoint }}` guard. An install with no
+/// endpoint (plain Amazon S3, the DEFAULT render) then publishes
+/// `allowHttp: true` — a plaintext-HTTP fact nobody configured — and the first
+/// assertion below fails. That is D-SEAMS S5, transport security is never
+/// derived, in the one direction that matters.
+#[test]
+fn chart_lint_the_policy_legacy_addressing_is_the_deployments_own_addressing() {
+    // (a) THE DEFAULT RENDER FORWARDS NOTHING, so the block is empty-shaped.
+    let policy = policy_json("default");
+    let env = env_of(container(find(
+        &rendered("default"),
+        "Deployment",
+        "weirkeeper",
+    )));
+    assert!(
+        !env.contains_key("AWS_ENDPOINT_URL") && !env.contains_key("AWS_ALLOW_HTTP"),
+        "the default render forwards no addressing env"
+    );
+    assert_eq!(policy["legacyArchiveAddressing"]["endpoint"], "");
+    assert_eq!(
+        policy["legacyArchiveAddressing"]["allowHttp"], false,
+        "an install that forwards no addressing does not have `allowHttp: true` — it has no \
+         allowHttp at all, and `false` is the only honest rendering of that"
+    );
+    assert_eq!(
+        policy["legacyArchiveAddressing"]["virtualHostedStyle"],
+        false
+    );
+
+    // (b) A RENDER THAT DOES FORWARD IT AGREES, VALUE FOR VALUE.
+    let demo = policy_json("demo");
+    let demo_env = env_of(container(find(
+        &rendered("demo"),
+        "Deployment",
+        "weirkeeper",
+    )));
+    let block = &demo["legacyArchiveAddressing"];
+    assert_eq!(
+        block["endpoint"].as_str(),
+        demo_env["AWS_ENDPOINT_URL"]["value"].as_str(),
+        "the endpoint the policy publishes is the one the controller forwards"
+    );
+    assert_eq!(
+        block["allowHttp"].as_bool().map(|b| b.to_string()),
+        demo_env["AWS_ALLOW_HTTP"]["value"]
+            .as_str()
+            .map(str::to_string),
+        "`allowHttp` is the AWS_ALLOW_HTTP the same render sets"
+    );
+    assert_eq!(
+        block["virtualHostedStyle"].as_bool().map(|b| b.to_string()),
+        demo_env["AWS_VIRTUAL_HOSTED_STYLE_REQUEST"]["value"]
+            .as_str()
+            .map(str::to_string)
+    );
+    assert_eq!(
+        block["region"].as_str(),
+        demo_env["AWS_REGION"]["value"].as_str()
+    );
+    assert!(
+        block["endpoint"].as_str().is_some_and(|e| !e.is_empty()),
+        "this arm proves nothing unless the demo render really does forward an endpoint"
+    );
+}
+
+/// **An administrator's attestation and evidence allowlist reach the document
+/// whole** — the one route to `attestedComplete` (D2 §5.4).
+#[test]
+fn chart_lint_an_attestation_reaches_the_policy_document_with_every_field() {
+    let policy = policy_json("admission-policy");
+    let attestations = policy["discovery"]["visibilityAttestations"]
+        .as_array()
+        .expect("an attestation array");
+    assert_eq!(attestations.len(), 1);
+    let a = &attestations[0];
+    assert_eq!(
+        a.as_object()
+            .expect("an attestation object")
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<String>>(),
+        BTreeSet::from([
+            "id".to_string(),
+            "namespace".to_string(),
+            "kafkaCluster".to_string(),
+            "clusterId".to_string(),
+            "principal".to_string(),
+            "attestedBy".to_string(),
+            "attestedAt".to_string(),
+            "expiresAt".to_string(),
+            "statement".to_string(),
+        ]),
+        "`logweir_core::check_contract::Attestation` has nine fields, all required, and the \
+         document is parsed with deny_unknown_fields"
+    );
+    for field in ["namespace", "kafkaCluster", "clusterId", "principal"] {
+        assert!(
+            a[field].as_str().is_some_and(|v| !v.trim().is_empty()),
+            "`{field}` must be non-blank: `attestation_candidate` fails closed on a blank one, \
+             so a blank field is an attestation that matches nothing while LOOKING like one an \
+             operator can rely on"
+        );
+    }
+    let locations = policy["evidence"]["controllerIdentityLocations"]
+        .as_array()
+        .expect("an allowlist array");
+    assert_eq!(locations.len(), 1);
+    assert_eq!(
+        locations[0]
+            .as_object()
+            .expect("a location object")
+            .keys()
+            .cloned()
+            .collect::<BTreeSet<String>>(),
+        BTreeSet::from([
+            "endpoint".to_string(),
+            "region".to_string(),
+            "bucket".to_string(),
+        ])
+    );
+}
+
+// ======================================= D2 §7.3 — the console admission policy
+
+/// **The ValidatingAdmissionPolicy renders only when it is asked for, and when
+/// it does it fences the console's `create secrets` to the two Logweir
+/// credential types.**
+///
+/// OFF BY DEFAULT FOR ONE REASON, and it is not a security opinion:
+/// `admissionregistration.k8s.io/v1` ValidatingAdmissionPolicy is Kubernetes
+/// 1.30+ and this chart's floor is 1.29 (Global Constraint 25), where the
+/// document is rejected with `no matches for kind` and the whole install
+/// fails.
+///
+/// MUTANTS: (a) drop `matchConditions` — the policy then applies to EVERY
+/// subject in the cluster and, with `failurePolicy: Fail`, breaks
+/// `kubernetes.io/service-account-token` creation cluster-wide; (b) change
+/// `validationActions` to `["Warn"]` — the grant stays exactly as wide as it
+/// is today while reading, on an audit surface, as though it did not; (c) drop
+/// the owner-label validation — a console that creates a Secret of the right
+/// type but somebody else's label is no longer distinguishable from one that
+/// owns it.
+#[test]
+fn chart_lint_the_admission_policy_renders_only_when_enabled_and_names_both_credential_types() {
+    // (a) NOT IN ANY OTHER RENDER.
+    for name in [
+        "default",
+        "minimal",
+        "demo",
+        "author-only",
+        "msk",
+        "identity-external",
+        "identity-multinamespace",
+    ] {
+        let docs = rendered(name);
+        assert!(
+            !docs
+                .iter()
+                .any(|d| d.kind.starts_with("ValidatingAdmissionPolicy")),
+            "`{name}` renders a ValidatingAdmissionPolicy; the kind is Kubernetes 1.30+ and \
+             this chart's floor is 1.29, so it must be reached only through \
+             `admissionPolicy.enabled`"
+        );
+    }
+
+    // (b) AND EXACTLY WHAT IT IS WHEN IT IS ON.
+    let docs = rendered("admission-policy");
+    let policy = find(
+        &docs,
+        "ValidatingAdmissionPolicy",
+        "logweir-console-credentials-only",
+    );
+    assert_eq!(
+        Some("admissionregistration.k8s.io/v1"),
+        policy.value["apiVersion"].as_str()
+    );
+    assert_eq!(
+        Some("Fail"),
+        policy.value["spec"]["failurePolicy"].as_str(),
+        "fail CLOSED — which is safe precisely because matchConditions skips every other \
+         subject in the cluster"
+    );
+    let rules = policy.value["spec"]["matchConstraints"]["resourceRules"]
+        .as_sequence()
+        .expect("resourceRules");
+    assert_eq!(rules.len(), 1);
+    assert_eq!(
+        rules[0]["operations"]
+            .as_sequence()
+            .expect("operations")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>(),
+        vec!["CREATE"],
+        "CREATE and nothing else: `logweir-api` holds no update, no delete and no read verb \
+         on Secrets, so there is no other operation to fence"
+    );
+    assert_eq!(
+        rules[0]["resources"]
+            .as_sequence()
+            .expect("resources")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>(),
+        vec!["secrets"]
+    );
+
+    // THE SUBJECT TEST, and both principals the example configures.
+    let conditions = policy.value["spec"]["matchConditions"]
+        .as_sequence()
+        .expect("the policy must carry matchConditions");
+    assert_eq!(conditions.len(), 1);
+    let expression = conditions[0]["expression"].as_str().expect("an expression");
+    assert!(
+        expression.contains("request.userInfo.username"),
+        "the subject test reads the requesting username: {expression}"
+    );
+    for principal in [
+        "system:serviceaccount:logweir-system:logweir-api",
+        "system:serviceaccount:team-a:logweir-api",
+    ] {
+        assert!(
+            expression.contains(principal),
+            "the release-namespace account and every `extraPrincipals` entry are in the \
+             subject list; `{principal}` is not: {expression}"
+        );
+    }
+
+    // THE TWO VALIDATIONS: the credential type, and the owner label.
+    let validations = policy.value["spec"]["validations"]
+        .as_sequence()
+        .expect("validations");
+    assert_eq!(validations.len(), 2);
+    let all: String = validations
+        .iter()
+        .filter_map(|v| v["expression"].as_str())
+        .collect::<Vec<_>>()
+        .join(" ");
+    for needle in [
+        "logweir.dev/object-store-credential",
+        "logweir.dev/kafka-sasl-password",
+        "app.kubernetes.io/managed-by",
+        "has(object.type)",
+    ] {
+        assert!(
+            all.contains(needle),
+            "the policy must require `{needle}`; the two credential types are exactly the \
+             values `logweir-api`'s destination builder and PLAT-07.1's connection builder \
+             stamp, and the label is what both of them set: {all}"
+        );
+    }
+    for v in validations {
+        assert_eq!(
+            Some("Forbidden"),
+            v["reason"].as_str(),
+            "a refusal reason an operator can read in the API server's answer"
+        );
+        assert!(
+            v["message"].as_str().is_some_and(|m| m.len() > 40),
+            "every validation carries a message naming what is required"
+        );
+    }
+
+    // THE BINDING DENIES.
+    let binding = find(
+        &docs,
+        "ValidatingAdmissionPolicyBinding",
+        "logweir-console-credentials-only",
+    );
+    assert_eq!(
+        binding.value["spec"]["policyName"].as_str(),
+        Some("logweir-console-credentials-only")
+    );
+    assert_eq!(
+        binding.value["spec"]["validationActions"]
+            .as_sequence()
+            .expect("validationActions")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect::<Vec<_>>(),
+        vec!["Deny"],
+        "`Warn` or `Audit` would leave the grant exactly as wide as it is today"
+    );
+}
+
+/// **The `config/` copy of the admission policy carries the same two documents
+/// and is reachable from no kustomization** — the kustomize half of D2 §7.3.
+#[test]
+fn chart_lint_the_config_copy_of_the_admission_policy_is_applied_by_hand() {
+    let sample = read("config/samples/console-credential-admission-policy.yaml");
+    for needle in [
+        "kind: ValidatingAdmissionPolicy",
+        "kind: ValidatingAdmissionPolicyBinding",
+        "logweir.dev/object-store-credential",
+        "logweir.dev/kafka-sasl-password",
+        "app.kubernetes.io/managed-by",
+        "request.userInfo.username",
+        "[UNVERIFIED",
+    ] {
+        assert!(
+            sample.contains(needle),
+            "config/samples/console-credential-admission-policy.yaml must carry `{needle}`"
+        );
+    }
+    // IT IS NOT IN THE INSTALL FILE, and it cannot be: a
+    // ValidatingAdmissionPolicy applied to a 1.29 cluster is rejected with
+    // `no matches for kind`, and `logweir.yaml` has to apply unedited on the
+    // stated floor (spec §16 clause 1).
+    let root: Value = serde_yaml::from_str(&read("config/kustomization.yaml"))
+        .expect("the install root's kustomization parses");
+    let resources: Vec<String> = root["resources"]
+        .as_sequence()
+        .expect("a resources list")
+        .iter()
+        .filter_map(|v| v.as_str().map(str::to_string))
+        .collect();
+    assert!(
+        !resources.iter().any(|r| r.contains("samples")),
+        "config/samples/ is reachable from no kustomization; the install root names \
+         {resources:?}"
+    );
+    assert!(
+        !std::path::Path::new(&repo().join("config/samples/kustomization.yaml")).exists(),
+        "config/samples/ has no kustomization of its own either"
+    );
+    assert!(
+        !read("logweir.yaml").contains("ValidatingAdmissionPolicy"),
+        "logweir.yaml must carry no ValidatingAdmissionPolicy: minimum Kubernetes is 1.29"
+    );
+}
+
 // ==================================================== the scripts and the docs
 
 /// **`scripts/check-chart.sh` carries every arm the ruling names, and refuses
@@ -1834,6 +2439,12 @@ fn chart_lint_the_gate_script_carries_every_arm() {
         "UI_IMAGE_NAME=\"logweir-ui\"",
         "ui_repo=\"${runner_repo%/*}/$UI_IMAGE_NAME\"",
         "$ui_repo:$LOGWEIR_TAG",
+        // D2 W11: the installation policy's own schema refusals. A policy
+        // document `weirkeeper::check::policy` refuses fails CLOSED and
+        // SILENTLY, so the schema has to refuse the same values at install
+        // time, where the operator is still looking.
+        "--set 'checks.discovery.keepPerConnection=0'",
+        "--set-string 'checks.discovery.visibilityAttestations[0].id=att-partial'",
     ] {
         assert!(
             script.contains(needle),
@@ -2052,11 +2663,21 @@ fn chart_lint_values_pin_the_identity_bootstrap_to_a_runner_digest() {
 fn chart_lint_values_yaml_is_short_and_shows_every_option() {
     let text = read("charts/logweir/values.yaml");
     let lines = text.lines().count();
+    // RAISED FROM 130 TO 170 BY D2 W11, and the reason is written here rather
+    // than in a commit message. The installation policy (D2 §4.4) is FOUR
+    // nested blocks an adopter genuinely sets — the check-pool ceilings, the
+    // two retention windows the collector acts on, the discovery bounds, and
+    // the completeness attestations that are the only route to
+    // `attestedComplete` — plus the admission policy's three keys. The owner's
+    // rule is unchanged and is what the rest of this test enforces: ONE SHORT
+    // LINE PER KEY, no paragraphs, every explanation in
+    // `charts/logweir/README.md`. The budget moved because the number of
+    // OPTIONS moved, not because the prose did.
     assert!(
-        lines <= 130,
+        lines <= 170,
         "charts/logweir/values.yaml is {lines} lines. The owner asked for a values file that is \
-         read, not skimmed past (~120 lines): one short line per key, no paragraphs, and every \
-         explanation in charts/logweir/README.md"
+         read, not skimmed past: one short line per key, no paragraphs, and every explanation \
+         in charts/logweir/README.md"
     );
     let values: Value = serde_yaml::from_str(&text).expect("values.yaml parses");
     // EVERY option the chart supports, INCLUDING the empty ones. A missing key
@@ -2135,6 +2756,26 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         "ui.nodeSelector",
         "ui.tolerations",
         "ui.affinity",
+        // D2 §4.4 / §10 — the installation policy, rendered by
+        // `templates/policy.yaml` into the `weirkeeper-policy` ConfigMap.
+        "checks.maxActivePerNamespace",
+        "checks.maxActiveTotal",
+        "checks.maxActiveDiscoveriesPerConnection",
+        "checks.maxEvidenceFetchActivePerNamespace",
+        "checks.discovery.freshSeconds",
+        "checks.discovery.retentionSeconds",
+        "checks.discovery.keepPerConnection",
+        "checks.discovery.defaultMaxTopics",
+        "checks.discovery.hardMaxTopics",
+        "checks.discovery.visibilityAttestations",
+        "checks.preflight.defaultTimeoutSeconds",
+        "checks.preflight.retentionSeconds",
+        "engine.allowUnverifiedCustomCa",
+        "evidence.controllerIdentityLocations",
+        // D2 §7.3 — the console credential admission policy.
+        "admissionPolicy.enabled",
+        "admissionPolicy.consoleServiceAccountName",
+        "admissionPolicy.extraPrincipals",
     ] {
         let mut node = &values;
         for segment in path.split('.') {
@@ -2150,6 +2791,59 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
     assert_eq!(Some(""), values["environment"].as_str());
     assert_eq!(Some(""), values["kubernetes"]["namespace"].as_str());
     assert_eq!(Some(false), values["kafka"]["enabled"].as_bool());
+    // THE ADMISSION POLICY SHIPS OFF, and the ONE reason is that
+    // `admissionregistration.k8s.io/v1` ValidatingAdmissionPolicy is
+    // Kubernetes 1.30+ while this chart's floor is 1.29 (Global Constraint
+    // 25), where the document is rejected with `no matches for kind`. It is
+    // not a security opinion, and `charts/logweir/README.md` says so where an
+    // adopter reads it.
+    assert_eq!(Some(false), values["admissionPolicy"]["enabled"].as_bool());
+    // AND THE POLICY DEFAULTS ARE THE DECISION'S OWN NUMBERS (D2 §4.4), so a
+    // silent drift between the document and the controller's compiled-in
+    // `Policy::defaults()` is a diff here.
+    for (path, want) in [
+        ("checks.maxActivePerNamespace", 4u64),
+        ("checks.maxActiveTotal", 20),
+        ("checks.maxActiveDiscoveriesPerConnection", 1),
+        ("checks.maxEvidenceFetchActivePerNamespace", 4),
+        ("checks.discovery.freshSeconds", 900),
+        ("checks.discovery.retentionSeconds", 86_400),
+        ("checks.discovery.keepPerConnection", 5),
+        ("checks.discovery.defaultMaxTopics", 20_000),
+        ("checks.discovery.hardMaxTopics", 50_000),
+        ("checks.preflight.defaultTimeoutSeconds", 120),
+        ("checks.preflight.retentionSeconds", 3_600),
+    ] {
+        let mut node = &values;
+        for segment in path.split('.') {
+            node = &node[segment];
+        }
+        assert_eq!(
+            node.as_u64(),
+            Some(want),
+            "values.yaml's `{path}` is not D2 §4.4's default"
+        );
+    }
+    assert_eq!(
+        Some(0),
+        values["checks"]["discovery"]["visibilityAttestations"]
+            .as_sequence()
+            .map(Vec::len),
+        "EMPTY, and that is the safe direction: with no attestation nothing can ever be \
+         `attestedComplete`"
+    );
+    assert_eq!(
+        Some(0),
+        values["evidence"]["controllerIdentityLocations"]
+            .as_sequence()
+            .map(Vec::len),
+        "EMPTY, and that is the closed direction: an unlisted location is refused with \
+         `ControllerIdentityNotAllowlisted`"
+    );
+    assert_eq!(
+        Some(false),
+        values["engine"]["allowUnverifiedCustomCa"].as_bool()
+    );
     assert_eq!(Some(true), values["identity"]["enabled"].as_bool());
     assert_eq!(
         Some(0),

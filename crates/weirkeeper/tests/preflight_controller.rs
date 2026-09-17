@@ -1535,6 +1535,43 @@ fn route(method: &'static str, path_suffix: &'static str, body: String) -> Route
     }
 }
 
+/// One terminal `Preflight` in the LIST the collector issues — D2 §4.3's
+/// `gc.rs`. `basis` is the instant retention counts from: `result.expiresAt`
+/// when the check produced a verdict, else `observedAt`.
+fn listed_preflight(name: &str, uid: &str, phase: &str, basis: DateTime<Utc>) -> Value {
+    json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "Preflight",
+        "metadata": {"name": name, "namespace": NS, "uid": uid, "resourceVersion": "9"},
+        "spec": {"request": backup_request()},
+        "status": {
+            "phase": phase, "reason": "Valid",
+            "observedAt": basis.to_rfc3339(),
+            "result": {"state": "ready", "expiresAt": basis.to_rfc3339(), "checks": []}
+        }
+    })
+}
+
+/// The `GET …/preflights` route every TERMINAL pass now hits, because the
+/// terminal branch runs the collector before it revalidates.
+fn gc_list(items: Vec<Value>) -> Route {
+    Route {
+        method: "GET",
+        path_suffix: "/preflights",
+        status: 200,
+        body: json!({
+            "apiVersion": "logweir.dev/v1alpha1", "kind": "PreflightList",
+            "metadata": {"resourceVersion": "9"}, "items": items
+        })
+        .to_string(),
+    }
+}
+
+/// The collector's listing with nothing collectable in it — what a test about
+/// something OTHER than garbage collection wants.
+fn gc_list_empty() -> Route {
+    gc_list(vec![listed_preflight("pf-1", PF_UID, "Completed", now())])
+}
+
 /// The body a write must answer with.
 ///
 /// `kube` DESERIALISES the response of a `patch`/`create` into the typed object,
@@ -1991,9 +2028,15 @@ async fn an_expired_ready_verdict_is_downgraded_without_re_resolving_anything() 
         }))
         .expect("the status fixture parses"),
     );
-    // THE ONLY ROUTE. A revalidation that re-read the cluster would make an
-    // expired verdict cost a full resolution pass; the clock is enough.
-    let routes = vec![route("PATCH", "/pf-1/status", echo("Preflight", "pf-1"))];
+    // TWO ROUTES, AND THAT IS THE WHOLE COST. The collector's listing (D2
+    // §4.3's `gc.rs`, which every terminal pass runs) and the status patch. A
+    // revalidation that RE-RESOLVED the cluster would make an expired verdict
+    // cost a full resolution pass — the `KafkaCluster`, the destination, the
+    // roster — and the clock is enough; the double panics on any of them.
+    let routes = vec![
+        gc_list_empty(),
+        route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")),
+    ];
     let (status, recorder) = reconcile_with(&object, routes).await;
     assert_eq!(status["result"]["state"], "unknown");
     assert!(
@@ -2003,7 +2046,17 @@ async fn an_expired_ready_verdict_is_downgraded_without_re_resolving_anything() 
             .contains("expired"),
         "a stale flag with no reason is the defect PLAT-03.2 is about"
     );
-    assert_eq!(recorder.lock().expect("recorder").len(), 1);
+    let seen = recorder.lock().expect("recorder");
+    assert_eq!(
+        seen.len(),
+        2,
+        "the GC listing and the status patch: {seen:?}"
+    );
+    assert!(
+        seen.iter()
+            .any(|r| r.method == "GET" && r.uri.contains("/preflights")),
+        "the first call is the collector's listing: {seen:?}"
+    );
 }
 
 /// PLAT-03.2's "new target conflict after a green preview", from the binding's
@@ -2045,6 +2098,7 @@ async fn a_ready_verdict_is_downgraded_when_a_referent_moves_under_it() {
         .expect("the status fixture parses"),
     );
     let mut routes = referent_routes(None, vec![]);
+    routes.push(gc_list_empty());
     routes.push(route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")));
     let (status, _) = reconcile_with(&object, routes).await;
     assert_eq!(status["result"]["state"], "unknown");
@@ -2052,6 +2106,207 @@ async fn a_ready_verdict_is_downgraded_when_a_referent_moves_under_it() {
     assert!(
         message.contains("referentChanged:BackupDestination/primary"),
         "the reason names the object that moved; got {message}"
+    );
+}
+
+// ===========================================================================
+// D2 §4.3 `gc.rs` / §6.x retention — the collector, wired by W11
+// ===========================================================================
+
+/// A terminal `Preflight` that is only there to make the reconcile reach the
+/// terminal branch. Its own verdict is `notReady`, which nothing revalidates,
+/// so the ONLY calls a pass makes are the collector's.
+fn terminal_preflight() -> Preflight {
+    let mut object = preflight(backup_request());
+    object.status = Some(
+        serde_json::from_value(json!({
+            "phase": "Completed",
+            "reason": "NotReady",
+            "binding": {"inputsDigest": "sha256:aa", "referents": []},
+            "result": {"state": "notReady", "checks": []}
+        }))
+        .expect("the status fixture parses"),
+    );
+    object
+}
+
+/// **The age rule, and the UID precondition.** A terminal `Preflight` past
+/// `expiresAt + retentionSeconds` (one hour by default) is deleted; one inside
+/// the window is not; a `Running` one is not, however old it is.
+///
+/// NO COHORT RULE HERE, and that is deliberate: a `Preflight` is about ONE plan
+/// of ONE operation, so there is no "newest five for this connection" to be
+/// outside of, and inventing one would delete the only readiness verdict a
+/// restore has.
+///
+/// MUTANTS: (a) drop the terminal guard in `gc_row` and the ancient `Running`
+/// object goes; (b) drop `preconditions` from `DeleteParams` and the body
+/// assertion fails; (c) use `observedAt` in preference to `result.expiresAt`
+/// and the object that expired two hours ago but was observed three hours ago
+/// is collected on the wrong basis.
+#[tokio::test]
+async fn the_collector_deletes_only_expired_terminal_preflights_and_names_their_uid() {
+    let routes = vec![
+        gc_list(vec![
+            // Expired at `now - 2 h`: past the default 3 600 s window.
+            listed_preflight("pf-old", "uid-old", "Completed", now() - Duration::hours(2)),
+            // Expired a minute ago: INSIDE the window.
+            listed_preflight("pf-1", PF_UID, "Completed", now() - Duration::minutes(1)),
+            // A day old and still RUNNING. Its pod holds the only copy of a
+            // relay nobody has read.
+            listed_preflight(
+                "pf-running",
+                "uid-running",
+                "Running",
+                now() - Duration::hours(24),
+            ),
+        ]),
+        Route {
+            method: "DELETE",
+            path_suffix: "/preflights/pf-old",
+            status: 200,
+            body: json!({"kind": "Status", "status": "Success"}).to_string(),
+        },
+        route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")),
+    ];
+    let (client, recorder, bodies) = mock_client_recording_bodies(routes);
+    let ctx = context(client);
+    let cache = weirkeeper::check::policy::PolicyCache::new();
+    pf::reconcile_preflight(&terminal_preflight(), &ctx, &cache, now())
+        .await
+        .expect("the reconcile completes");
+
+    let deletes: Vec<String> = recorder
+        .lock()
+        .expect("recorder")
+        .iter()
+        .filter(|r| r.method == "DELETE")
+        .map(|r| r.uri.clone())
+        .collect();
+    assert_eq!(
+        deletes.len(),
+        1,
+        "the in-window verdict and the RUNNING check are untouched: {deletes:?}"
+    );
+    assert!(deletes[0].contains("/preflights/pf-old"));
+    let body: Value = bodies
+        .lock()
+        .expect("bodies")
+        .iter()
+        .find(|b| b.method == "DELETE")
+        .and_then(|b| serde_json::from_str(&b.body).ok())
+        .unwrap_or_else(|| panic!("the DELETE carried a body"));
+    assert_eq!(
+        body["preconditions"]["uid"], "uid-old",
+        "a name is not an identity: without the UID precondition a same-named replacement \
+         created between the LIST and the DELETE is what goes. body={body}"
+    );
+}
+
+/// **The per-pass cap.** Twenty-five expired checks, one pass, twenty deletes.
+///
+/// MUTANT: remove the `.take(GC_MAX_DELETES_PER_PASS)` and the twenty-first
+/// DELETE has no route, so the double panics.
+#[tokio::test]
+async fn one_preflight_collection_pass_is_capped() {
+    let mut items = Vec::new();
+    let mut routes = Vec::new();
+    for i in 0..25u32 {
+        items.push(listed_preflight(
+            &format!("pf-{i:02}"),
+            &format!("uid-{i:02}"),
+            "Completed",
+            now() - Duration::hours(2) - Duration::minutes(i64::from(i)),
+        ));
+        routes.push(Route {
+            method: "DELETE",
+            path_suffix: leak(format!("/preflights/pf-{i:02}")),
+            status: 200,
+            body: json!({"kind": "Status", "status": "Success"}).to_string(),
+        });
+    }
+    routes.insert(0, gc_list(items));
+    routes.push(route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")));
+    let (client, recorder, _b) = mock_client_recording_bodies(routes);
+    let ctx = context(client);
+    let cache = weirkeeper::check::policy::PolicyCache::new();
+    pf::reconcile_preflight(&terminal_preflight(), &ctx, &cache, now())
+        .await
+        .expect("the reconcile completes");
+    let deletes = recorder
+        .lock()
+        .expect("recorder")
+        .iter()
+        .filter(|r| r.method == "DELETE")
+        .count();
+    assert_eq!(
+        deletes,
+        pf::GC_MAX_DELETES_PER_PASS,
+        "one pass deletes at most twenty"
+    );
+}
+
+/// **A refused DELETE is not a reconcile error.** Garbage collection is never
+/// the reason a check's own reconcile fails: a 409 (the UID precondition
+/// refusing a replacement) or a 404 (somebody got there first) is logged and
+/// the pass continues.
+#[tokio::test]
+async fn a_refused_preflight_collection_is_not_a_reconcile_error() {
+    let routes = vec![
+        gc_list(vec![listed_preflight(
+            "pf-old",
+            "uid-old",
+            "Completed",
+            now() - Duration::hours(2),
+        )]),
+        Route {
+            method: "DELETE",
+            path_suffix: "/preflights/pf-old",
+            status: 409,
+            body: json!({"kind": "Status", "status": "Failure", "code": 409,
+                         "message": "the UID in the precondition does not match"})
+            .to_string(),
+        },
+    ];
+    let (client, _r, _b) = mock_client_recording_bodies(routes);
+    let ctx = context(client);
+    let cache = weirkeeper::check::policy::PolicyCache::new();
+    pf::reconcile_preflight(&terminal_preflight(), &ctx, &cache, now())
+        .await
+        .expect("a refused delete is not a reconcile error");
+}
+
+/// **The pure rule, on its own.** Both bounds of `expired_terminal`, and the
+/// total order two passes over the same input have to agree on.
+#[test]
+fn expired_terminal_preflights_are_exactly_the_ones_past_the_window() {
+    let row = |name: &str, uid: &str, age: Duration| pf::TerminalPreflight {
+        name: name.to_string(),
+        uid: uid.to_string(),
+        basis: now() - age,
+    };
+    let all = vec![
+        row("a", "uid-a", Duration::hours(2)),
+        row("b", "uid-b", Duration::minutes(59)),
+        row("c", "uid-c", Duration::hours(9)),
+    ];
+    assert_eq!(
+        pf::expired_terminal(&all, 3600, now()),
+        vec!["uid-a".to_string(), "uid-c".to_string()],
+        "newest-first over the ones past the window (`a` expired 2 h ago, `c` 9 h ago), and \
+         `b` is inside it"
+    );
+    // A window wide enough keeps everything — the rule is the window and not
+    // the sort.
+    assert!(pf::expired_terminal(&all, 86_400, now()).is_empty());
+    // And the order is total: equal instants tie-break on the UID.
+    let tied = vec![
+        row("z", "uid-z", Duration::hours(2)),
+        row("y", "uid-y", Duration::hours(2)),
+    ];
+    assert_eq!(
+        pf::expired_terminal(&tied, 3600, now()),
+        vec!["uid-y".to_string(), "uid-z".to_string()]
     );
 }
 

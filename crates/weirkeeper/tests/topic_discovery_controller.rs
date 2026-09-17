@@ -1295,12 +1295,58 @@ async fn internal_topics_are_excluded_by_default_and_counted() {
     );
 }
 
-/// **Refresh.** A refresh is a new object; the previous one is terminal and is
-/// not touched. The route table holds NOTHING for it, so the double panics if
-/// the reconciler read or wrote it.
-#[tokio::test]
-async fn a_terminal_discovery_is_never_reconciled_again() {
-    let done = discovery(
+// ---------------------------------------------------------------------------
+// D2 §4.3 `gc.rs` / §5.8 retention — the collector, wired by W11
+// ---------------------------------------------------------------------------
+
+/// One terminal discovery in a LIST answer, dated RELATIVE TO THE REAL CLOCK.
+///
+/// `reconcile_discovery` takes its instant from `Utc::now()` — the one clock
+/// read `the_reconciler_reads_one_clock_in_one_place` asserts — so a fixture
+/// dated with an absolute literal would be collected or not depending on what
+/// day the suite runs. Every age below is an offset from the same `Utc::now()`
+/// the reconciler will read microseconds later.
+fn listed(
+    name: &str,
+    uid: &str,
+    connection_uid: Option<&str>,
+    age: chrono::Duration,
+    phase: &str,
+) -> Value {
+    let observed = (Utc::now() - age).to_rfc3339();
+    let mut status = json!({"phase": phase, "reason": "Succeeded", "observedAt": observed});
+    if let Some(c) = connection_uid {
+        status["binding"] = json!({"connectionUid": c});
+    }
+    json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "TopicDiscovery",
+        "metadata": {"name": name, "namespace": NS, "uid": uid, "resourceVersion": "9"},
+        "spec": {"request": {"connectionRef": {"name": "source"}, "maxTopics": 20000,
+                             "timeoutSeconds": 60}},
+        "status": status
+    })
+}
+
+/// The `GET …/topicdiscoveries` route the collector's LIST hits.
+fn list_route(items: Vec<Value>, continue_token: Option<&str>) -> Route {
+    let mut meta = json!({"resourceVersion": "9"});
+    if let Some(t) = continue_token {
+        meta["continue"] = json!(t);
+    }
+    let body = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "TopicDiscoveryList",
+        "metadata": meta, "items": items
+    });
+    Route {
+        method: "GET",
+        path_suffix: "/topicdiscoveries",
+        status: 200,
+        body: body.to_string(),
+    }
+}
+
+fn terminal_subject() -> TopicDiscovery {
+    discovery(
         json!({
             "phase": PHASE_SUCCEEDED, "reason": "Succeeded",
             "observedAt": "2026-09-16T11:59:00Z",
@@ -1309,20 +1355,281 @@ async fn a_terminal_discovery_is_never_reconciled_again() {
                        "visibility": {"state": "unknown"}}
         }),
         json!({}),
-    );
-    // AN EMPTY ROUTE TABLE. Any call at all panics.
-    let (client, recorder, _b) = mock_client_recording_bodies(vec![]);
+    )
+}
+
+/// **Refresh.** A refresh is a new object; the previous one is terminal and is
+/// never re-read or re-written. Since W11 wired the collector it costs exactly
+/// ONE call — the GC's listing — and the table holds nothing else, so the
+/// double panics if the reconciler touched this object, its Job, its plan or
+/// its chunks.
+#[tokio::test]
+async fn a_terminal_discovery_is_never_reconciled_again() {
+    let done = terminal_subject();
+    // NOTHING IS EXPIRED: one fresh terminal object, and no DELETE route at
+    // all, so a collector that got the rule wrong panics rather than passing.
+    let routes = vec![list_route(
+        vec![listed(
+            NAME,
+            UID,
+            Some(CLUSTER_UID),
+            chrono::Duration::seconds(30),
+            PHASE_SUCCEEDED,
+        )],
+        None,
+    )];
+    let (client, recorder, _b) = mock_client_recording_bodies(routes);
     let outcome = td::reconcile_discovery(&done, &context(client, None))
         .await
         .expect("the reconcile answers");
 
     assert_eq!(outcome.phase, PHASE_SUCCEEDED);
     assert!(outcome.is_terminal());
-    assert!(
-        calls(&recorder).is_empty(),
-        "a terminal discovery costs one guard and no API call: {:?}",
-        calls(&recorder)
+    assert_eq!(
+        outcome.collected, 0,
+        "nothing was past its retention window"
     );
+    let seen = calls(&recorder);
+    assert_eq!(
+        seen.len(),
+        1,
+        "a terminal discovery costs the GC listing and nothing else: {seen:?}"
+    );
+    assert!(
+        seen[0].starts_with("GET ") && seen[0].contains("/topicdiscoveries"),
+        "the one call is the collector's listing: {seen:?}"
+    );
+}
+
+/// **The age rule, and the UID precondition.** A terminal discovery past
+/// `observedAt + retentionSeconds` is deleted; a fresh one is not; a
+/// NON-TERMINAL one is not, however old it is.
+///
+/// MUTANTS: (a) drop the `TERMINAL_PHASES` guard in `gc_row` — the ancient
+/// `Running` object is deleted and this test names it; (b) drop the
+/// `preconditions` from `DeleteParams` — the body assertion below fails;
+/// (c) compare with `>=` on the wrong side, or use `creationTimestamp` in
+/// preference to `observedAt` — the fresh object goes.
+#[tokio::test]
+async fn the_collector_deletes_only_expired_terminal_discoveries_and_names_their_uid() {
+    let done = terminal_subject();
+    let day = chrono::Duration::hours(24);
+    let routes = vec![
+        list_route(
+            vec![
+                // Two days old and terminal: past the default 86 400 s window.
+                listed(
+                    "td-old",
+                    "uid-old",
+                    Some(CLUSTER_UID),
+                    day * 2,
+                    PHASE_SUCCEEDED,
+                ),
+                // Thirty seconds old and terminal: inside it.
+                listed(
+                    NAME,
+                    UID,
+                    Some(CLUSTER_UID),
+                    chrono::Duration::seconds(30),
+                    PHASE_SUCCEEDED,
+                ),
+                // A WEEK old and STILL RUNNING. Its pod holds the only copy of
+                // a relay nobody has read; retention is not what ends it.
+                listed(
+                    "td-running",
+                    "uid-running",
+                    Some(CLUSTER_UID),
+                    day * 7,
+                    "Running",
+                ),
+            ],
+            None,
+        ),
+        Route {
+            method: "DELETE",
+            path_suffix: "/topicdiscoveries/td-old",
+            status: 200,
+            body: json!({"kind": "Status", "status": "Success"}).to_string(),
+        },
+    ];
+    let (client, recorder, bodies) = mock_client_recording_bodies(routes);
+    let outcome = td::reconcile_discovery(&done, &context(client, None))
+        .await
+        .expect("the reconcile answers");
+
+    assert_eq!(outcome.collected, 1, "exactly one object was collectable");
+    let deletes: Vec<String> = calls(&recorder)
+        .into_iter()
+        .filter(|c| c.starts_with("DELETE "))
+        .collect();
+    assert_eq!(
+        deletes.len(),
+        1,
+        "the fresh object and the RUNNING one are untouched: {deletes:?}"
+    );
+    assert!(deletes[0].contains("/topicdiscoveries/td-old"));
+    // THE PRECONDITION IS IN THE DELETE BODY: kube sends `DeleteOptions` there.
+    let body = body_of(&bodies, "DELETE", "/topicdiscoveries/td-old");
+    assert_eq!(
+        body["preconditions"]["uid"], "uid-old",
+        "a name is not an identity: without the UID precondition a same-named \
+         replacement created between the LIST and the DELETE is what goes. body={body}"
+    );
+}
+
+/// **Keep-last-five per connection**, and the per-pass cap.
+///
+/// Eight terminal discoveries against ONE connection UID, all of them INSIDE
+/// the retention window. The newest five stay; the other three go — which is
+/// what keeps a namespace refreshing an inventory every minute from filling
+/// etcd long before 24 h have passed.
+///
+/// MUTANT: replace `keep_per_connection` with `u32::MAX` in the wiring (which
+/// is what a truncated page does on purpose) and nothing is deleted at all.
+#[tokio::test]
+async fn the_collector_keeps_the_newest_five_per_connection() {
+    let done = terminal_subject();
+    let mut items = Vec::new();
+    for i in 0..8u32 {
+        items.push(listed(
+            &format!("td-{i}"),
+            &format!("uid-{i}"),
+            Some(CLUSTER_UID),
+            chrono::Duration::minutes(i64::from(i) + 1),
+            PHASE_SUCCEEDED,
+        ));
+    }
+    let mut routes = vec![list_route(items, None)];
+    // The three OLDEST of the eight — `td-5`, `td-6`, `td-7`.
+    for i in 5..8u32 {
+        routes.push(Route {
+            method: "DELETE",
+            path_suffix: Box::leak(format!("/topicdiscoveries/td-{i}").into_boxed_str()),
+            status: 200,
+            body: json!({"kind": "Status", "status": "Success"}).to_string(),
+        });
+    }
+    let (client, recorder, _b) = mock_client_recording_bodies(routes);
+    let outcome = td::reconcile_discovery(&done, &context(client, None))
+        .await
+        .expect("the reconcile answers");
+
+    assert_eq!(outcome.collected, 3, "eight minus the newest five");
+    let mut deleted: Vec<String> = calls(&recorder)
+        .into_iter()
+        .filter(|c| c.starts_with("DELETE "))
+        .map(|c| c.rsplit('/').next().unwrap_or_default().to_string())
+        .collect();
+    deleted.sort();
+    assert_eq!(deleted, vec!["td-5", "td-6", "td-7"]);
+}
+
+/// **A truncated listing applies the retention window ALONE.**
+///
+/// The API server returns items in NAME order, not in `observedAt` order, so
+/// one page of a truncated listing is not "the newest" anything: applying the
+/// cohort rule to it could delete the newest observation a namespace has. The
+/// eight objects below are all inside the window, the page carries a
+/// `continue` token, and NOTHING is deleted — the route table holds no DELETE,
+/// so a collector that applied the cohort rule anyway panics.
+///
+/// MUTANT: drop the `truncated` branch and three objects are deleted.
+#[tokio::test]
+async fn a_truncated_listing_never_applies_the_cohort_rule() {
+    let done = terminal_subject();
+    let mut items = Vec::new();
+    for i in 0..8u32 {
+        items.push(listed(
+            &format!("td-{i}"),
+            &format!("uid-{i}"),
+            Some(CLUSTER_UID),
+            chrono::Duration::minutes(i64::from(i) + 1),
+            PHASE_SUCCEEDED,
+        ));
+    }
+    let (client, _r, _b) = mock_client_recording_bodies(vec![list_route(items, Some("next-page"))]);
+    let outcome = td::reconcile_discovery(&done, &context(client, None))
+        .await
+        .expect("the reconcile answers");
+    assert_eq!(outcome.collected, 0);
+}
+
+/// **The per-pass cap.** Twenty-five expired objects, one pass, twenty
+/// deletes — a namespace that has accumulated thousands is drained over many
+/// passes rather than in one burst against the API server.
+///
+/// MUTANT: remove the `.take(GC_MAX_DELETES_PER_PASS)` and the twenty-first
+/// DELETE has no route, so the double panics.
+#[tokio::test]
+async fn one_collection_pass_is_capped() {
+    let done = terminal_subject();
+    let day = chrono::Duration::hours(24);
+    let mut items = Vec::new();
+    let mut routes = Vec::new();
+    for i in 0..25u32 {
+        // All of them two days old, and all with DIFFERENT instants so the
+        // total order the rule promises is exercised rather than tie-broken.
+        items.push(listed(
+            &format!("td-{i:02}"),
+            &format!("uid-{i:02}"),
+            None,
+            day * 2 + chrono::Duration::minutes(i64::from(i)),
+            PHASE_SUCCEEDED,
+        ));
+        routes.push(Route {
+            method: "DELETE",
+            path_suffix: Box::leak(format!("/topicdiscoveries/td-{i:02}").into_boxed_str()),
+            status: 200,
+            body: json!({"kind": "Status", "status": "Success"}).to_string(),
+        });
+    }
+    routes.insert(0, list_route(items, None));
+    let (client, recorder, _b) = mock_client_recording_bodies(routes);
+    let outcome = td::reconcile_discovery(&done, &context(client, None))
+        .await
+        .expect("the reconcile answers");
+
+    assert_eq!(outcome.collected, td::GC_MAX_DELETES_PER_PASS);
+    let deletes = calls(&recorder)
+        .into_iter()
+        .filter(|c| c.starts_with("DELETE "))
+        .count();
+    assert_eq!(deletes, 20, "one pass deletes at most twenty");
+}
+
+/// **A DELETE that fails is not a reconcile error.** Garbage collection is
+/// never the reason an object's own reconcile reports a failure: a 409 (the
+/// UID precondition refusing a replacement) or a 404 (somebody got there
+/// first) is logged and the pass continues.
+#[tokio::test]
+async fn a_refused_collection_is_logged_and_the_pass_still_succeeds() {
+    let done = terminal_subject();
+    let routes = vec![
+        list_route(
+            vec![listed(
+                "td-old",
+                "uid-old",
+                None,
+                chrono::Duration::hours(48),
+                PHASE_SUCCEEDED,
+            )],
+            None,
+        ),
+        Route {
+            method: "DELETE",
+            path_suffix: "/topicdiscoveries/td-old",
+            status: 409,
+            body: json!({"kind": "Status", "status": "Failure", "code": 409,
+                         "message": "the UID in the precondition does not match"})
+            .to_string(),
+        },
+    ];
+    let (client, _r, _b) = mock_client_recording_bodies(routes);
+    let outcome = td::reconcile_discovery(&done, &context(client, None))
+        .await
+        .expect("a refused delete is not a reconcile error");
+    assert_eq!(outcome.collected, 0, "nothing was actually collected");
+    assert_eq!(outcome.phase, PHASE_SUCCEEDED);
 }
 
 /// **Refresh, the other half.** While a NEW observation is running, its own
@@ -2435,22 +2742,29 @@ fn code_only(src: &str) -> String {
         .join("\n")
 }
 
-/// **The reconciler reads no Secret, deletes nothing, and builds no
-/// `Api<Event>`.**
+/// **The reconciler reads no Secret and builds no `Api<Event>`, and the ONE
+/// destructive call it makes is the collector's.**
 ///
-/// Each of the three is a grant this role does not hold: `secrets` at any verb,
-/// `delete` on anything, and `events: list`. A call added before its grant 403s
-/// in production while every route-table test above stays green — which is the
-/// exact shape of the `replace_status` P0.
+/// NARROWED BY D2 W11, DELIBERATELY, AND THIS IS THE RECORD. `.delete(`,
+/// `.delete_opt(` and `DeleteParams` used to be in the forbidden list beside
+/// `Api<Secret>`, because `config/rbac/role.yaml` granted `delete` on nothing.
+/// The role now grants it on `topicdiscoveries` and `preflights` — the two
+/// TRANSIENT check kinds, D2 §4.3's `gc.rs` and §5.8's retention — so the
+/// claim this test can honestly make changed shape: not "there is no delete"
+/// but "there is exactly one, it is `Api<TopicDiscovery>`'s, it carries a UID
+/// precondition, and it is inside `collect_expired`". The three things still
+/// absent — `Api<Secret>`, `Api<Event>`, `replace_status` — are unchanged
+/// grants this role does not hold.
+///
+/// MUTANT: delete the `preconditions:` line, or move the `.delete(` call out
+/// of `collect_expired`, or add a second one. Each fails an assertion below.
 #[test]
 fn the_reconciler_names_no_grant_this_role_does_not_hold() {
     let code = code_only(&source());
     for forbidden in [
         "Api<Secret>",
         "Api<Event>",
-        ".delete(",
         ".delete_opt(",
-        "DeleteParams",
         "replace_status",
         "Patch::Apply",
     ] {
@@ -2460,6 +2774,44 @@ fn the_reconciler_names_no_grant_this_role_does_not_hold() {
              grants nothing for"
         );
     }
+
+    // EXACTLY ONE DELETE CALL, and it is not a general capability.
+    assert_eq!(
+        code.matches(".delete(").count(),
+        1,
+        "this file makes EXACTLY ONE delete call — the check GC's. A second one is a second \
+         capability nobody reviewed"
+    );
+    // IT IS INSIDE `collect_expired`, and nowhere else. The region is the
+    // function's own body, bounded by the next item at column 0.
+    let from = code
+        .find("async fn collect_expired(")
+        .expect("the collector is in this file");
+    let region = &code[from..];
+    let to = region[1..].find("\n}").map_or(region.len(), |r| r + 2);
+    let body = &region[..to];
+    assert!(
+        body.contains(".delete("),
+        "the one delete call moved out of `collect_expired`"
+    );
+    // AND IT CARRIES A UID PRECONDITION. Without it a same-named replacement
+    // created between the LIST and the DELETE is what gets removed.
+    assert!(
+        body.contains("preconditions:") && body.contains("uid: Some(uid.clone())"),
+        "the collector's delete must carry `DeleteParams {{ preconditions: {{ uid }} }}` — a \
+         name is not an identity"
+    );
+    // AND THE RECEIVER IS THE TYPED HANDLE ITSELF, spelled `api`. Two gates
+    // depend on that: `scripts/check-no-archive-write.sh`'s control-plane
+    // delete token is anchored to store-shaped identifiers and `api` is not
+    // one, and `manifest_lint::every_granted_verb_has_a_caller` pairs a method
+    // with the `Api<T>` declaration it was called on — a delete issued through
+    // an alias is a call that lint cannot see at all.
+    assert!(
+        body.contains("api.delete("),
+        "the collector's receiver is the `Api<TopicDiscovery>` handle itself; an alias hides \
+         the call from the verb/caller lint"
+    );
 }
 
 /// The reconciler takes its instant ONCE, from `Utc::now()` in

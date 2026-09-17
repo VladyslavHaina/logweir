@@ -218,6 +218,24 @@ const SIX_KINDS: [&str; 6] = [
     "trustrosters",
 ];
 
+/// The eight kinds ADR 0008's Amendments F (D2) and G (D3) added, in the plural
+/// order `config/crd/` lists them. `logweir-viewer` reads all eight in ONE
+/// rule; the controller's grants are per kind, in rules of their own, because
+/// each one has a different caller to name.
+const EIGHT_NEW_KINDS: [&str; 8] = [
+    "backupdestinations",
+    "preflights",
+    "protectionpolicies",
+    "recoverycatalogs",
+    "rehearsalschedules",
+    "retentionpolicies",
+    "topicdiscoveries",
+    "trustpolicies",
+];
+
+/// The three kinds D2 §7.2 gives `logweir-operator` `create` and `patch` on.
+const THREE_CHECK_KINDS: [&str; 3] = ["backupdestinations", "preflights", "topicdiscoveries"];
+
 fn v(items: &[&str]) -> Vec<String> {
     let mut out: Vec<String> = items.iter().map(|s| s.to_string()).collect();
     out.sort();
@@ -595,26 +613,105 @@ fn every_granted_verb_has_a_caller() {
     let rules = rules_of("config/rbac/role.yaml", "weirkeeper");
     assert!(!rules.is_empty(), "role.yaml granted no verb at all");
 
-    // THE NAMED ONE. `delete` must appear in no rule, on any resource: the API
-    // server's TTL controller removes a finished Job (this controller patches
-    // `ttlSecondsAfterFinished` after the status write) and ownerReference
-    // garbage collection removes the plan ConfigMap and the probe Job.
+    // ----------------------------------------------------------------------
+    // THE NAMED ONE: `delete`, ON EXACTLY TWO RESOURCES, WITH ITS CALLER
+    // ----------------------------------------------------------------------
+    //
+    // WHAT THIS ASSERTION USED TO SAY, AND WHY IT CHANGED. Until D2 W11 it was
+    // two claims: `delete` appears in NO rule on ANY resource, and
+    // `Api::delete`/`delete_opt` is called NOWHERE under
+    // `crates/weirkeeper/src/`. Both were true and both were load-bearing —
+    // "Job CRUD"'s D is done by the API server's TTL controller and by
+    // ownerReference garbage collection, so the controller needed no delete at
+    // all.
+    //
+    // D2 §4.3's `gc.rs` and §5.8's retention are the one case that does not
+    // fit. A `TopicDiscovery` is ONE observation with an immutable spec and a
+    // `Preflight` is ONE verdict about ONE plan; neither is an execution input
+    // (D-SEAMS S2), and a namespace that refreshes an inventory every minute
+    // fills etcd with objects a fresh check has already replaced. Nothing else
+    // can collect them: they are not owned by anything, so no cascade reaches
+    // them, and a TTL on a custom resource does not exist.
+    //
+    // SO THE CLAIM IS NARROWED RATHER THAN DROPPED, and the narrowing is what
+    // this test now enforces, in three parts:
+    //
+    //   (a) the ONLY resources carrying `delete` are `topicdiscoveries` and
+    //       `preflights` — a rule that grew the verb on `backups`, `jobs`,
+    //       `configmaps` or anything else fails here, naming it;
+    //   (b) the ONLY types whose handles are deleted through are
+    //       `TopicDiscovery` and `Preflight`;
+    //   (c) `delete_opt` — the "delete if it is there" shape, which cannot
+    //       carry the `DeleteParams` a UID precondition lives in — is called
+    //       NOWHERE.
+    //
+    // The UID precondition itself, the per-pass cap and the terminal-only rule
+    // are asserted where they can be observed, against the route-table double:
+    // `topic_discovery_controller::the_collector_deletes_only_expired_terminal_discoveries_and_names_their_uid`
+    // and `preflight_controller::the_collector_deletes_only_expired_terminal_preflights_and_names_their_uid`.
+    //
+    // AND GLOBAL CONSTRAINT 6 IS UNTOUCHED. That constraint is about OBJECT
+    // STORAGE — "Logweir writes only under its own `logweir/` prefix,
+    // `PutMode::Create` everywhere", and no component holding any delete
+    // capability against a bucket. These are Kubernetes objects.
+    // `scripts/check-no-archive-write.sh` anchors its control-plane delete
+    // token to store-shaped receivers, so `discoveries.delete(` and
+    // `preflights.delete(` are outside it by construction and the gate is
+    // green on the same run as this test.
+    const DELETABLE: [&str; 2] = ["preflights", "topicdiscoveries"];
+    let mut delete_rules = 0usize;
     for (groups, resources, verbs) in &rules {
-        assert!(
-            !verbs.iter().any(|x| x == "delete"),
-            "the weirkeeper ClusterRole grants `delete` on {resources:?} (apiGroups {groups:?}); \
-             no reconciler calls `Api::delete` anywhere"
+        if !verbs.iter().any(|x| x == "delete") {
+            continue;
+        }
+        delete_rules += 1;
+        let mut named = resources.clone();
+        named.sort();
+        assert_eq!(
+            named,
+            v(&DELETABLE),
+            "the weirkeeper ClusterRole grants `delete` on {resources:?} (apiGroups \
+             {groups:?}). It may name EXACTLY the two transient check kinds — D2 §4.3's \
+             `gc.rs` — and nothing else: a delete on a Backup, a Job or a ConfigMap is a \
+             capability no reconciler has a caller for and no decision records"
+        );
+        assert_eq!(
+            groups,
+            &v(&["logweir.dev"]),
+            "the delete rule names the Logweir API group and no other"
         );
     }
-    for called in callers.values() {
-        for forbidden in ["delete", "delete_opt"] {
+    assert_eq!(
+        delete_rules, 1,
+        "there is EXACTLY ONE rule carrying `delete`, so widening it is a one-line diff a \
+         reviewer sees"
+    );
+    for (ty, called) in &callers {
+        if called.contains("delete") {
             assert!(
-                !called.contains(forbidden),
-                "`Api::{forbidden}` is now called under crates/weirkeeper/src/ — a reconciler \
-                 deletes something, and this test's premise (and Global Constraint 6) has \
-                 changed"
+                ty == "TopicDiscovery" || ty == "Preflight",
+                "`Api<{ty}>::delete` is called under crates/weirkeeper/src/. Only the two \
+                 transient check kinds may be deleted (D2 §4.3); anything else needs its own \
+                 recorded decision and its own grant"
             );
         }
+        assert!(
+            !called.contains("delete_opt"),
+            "`Api<{ty}>::delete_opt` is called under crates/weirkeeper/src/. The collector \
+             uses `delete` with `DeleteParams {{ preconditions: {{ uid }} }}`; `delete_opt` \
+             takes no params, so a delete written that way has NO UID precondition and can \
+             remove a same-named replacement"
+        );
+    }
+    // AND THE CALLERS EXIST. A grant whose caller was refactored away is the
+    // defect this whole test is about, in the other direction.
+    for ty in ["TopicDiscovery", "Preflight"] {
+        assert!(
+            callers.get(ty).is_some_and(|c| c.contains("delete")),
+            "`config/rbac/role.yaml` grants `delete` on this kind and nothing under \
+             crates/weirkeeper/src/ calls `Api<{ty}>::delete`. Remove the grant, or restore \
+             the collector"
+        );
     }
 
     let mut checked = 0usize;
@@ -879,11 +976,17 @@ fn every_call_site_has_a_grant() {
     );
 }
 
-/// The four ClusterRoles, verb for verb.
+/// The five ClusterRoles, verb for verb.
 ///
-/// A table test and not four assertions, because the property is the WHOLE rule
+/// A table test and not five assertions, because the property is the WHOLE rule
 /// set of each role: an extra rule is as much a defect as a wrong verb, and a
 /// per-rule assertion cannot see one.
+///
+/// FIVE SINCE D2 W11. `logweir-trust-admin` (D3 §9) is the cluster-scoped
+/// `TrustPolicy` writer, and it is a role of its own precisely so it is not
+/// held by whoever holds `logweir-operator`: an operator who could edit a trust
+/// policy could add their own key and then approve their own restore. The name
+/// of this function keeps the word "four" nowhere.
 #[test]
 fn the_four_cluster_roles_are_exactly_as_specified() {
     // --- `weirkeeper` (interface I28) -------------------------------------
@@ -1006,6 +1109,17 @@ fn the_four_cluster_roles_are_exactly_as_specified() {
             v(&["preflights/status"]),
             v(&["patch"]),
         ),
+        // D2 W11 (§4.3 `gc.rs`, §5.8): the ONE `delete` rule in the install,
+        // on the two TRANSIENT check kinds and nothing else. Its callers are
+        // `controllers::{topic_discovery,preflight}::collect_expired`, which
+        // list only terminal objects, delete with a UID precondition and cap
+        // one pass. `every_granted_verb_has_a_caller` above carries the whole
+        // reasoning and the three narrowed assertions.
+        (
+            v(&["logweir.dev"]),
+            v(&["topicdiscoveries", "preflights"]),
+            v(&["delete"]),
+        ),
         (
             v(&["batch"]),
             v(&["jobs"]),
@@ -1093,11 +1207,24 @@ fn the_four_cluster_roles_are_exactly_as_specified() {
     // One rule. NO `/status` resource is named: `get` on the object already
     // returns its status, and naming the subresource here would read to an
     // auditor as though a viewer could write one.
-    let viewer = vec![(
-        v(&["logweir.dev"]),
-        v(&SIX_KINDS),
-        v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
-    )];
+    let viewer = vec![
+        (
+            v(&["logweir.dev"]),
+            v(&SIX_KINDS),
+            v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+        ),
+        // D2 §7.2 and D3 §9 — the eight kinds Amendments F and G added, read
+        // only, in a SEPARATE rule so the six-kind list stays byte-identical
+        // to the controller's own first rule. `trustpolicies` is
+        // cluster-scoped, so a `RoleBinding` of this role does not convey it;
+        // a viewer who should read trust needs a `ClusterRoleBinding`, which
+        // is a separate and visible decision.
+        (
+            v(&["logweir.dev"]),
+            v(&EIGHT_NEW_KINDS),
+            v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+        ),
+    ];
     let got = rules_of("config/rbac/viewer_role.yaml", "logweir-viewer");
     assert_eq!(
         got, viewer,
@@ -1130,6 +1257,15 @@ fn the_four_cluster_roles_are_exactly_as_specified() {
             v(&["backupschedules"]),
             v(&["update", "patch"]),
         ),
+        // D2 §7.2 — start a destination, an inventory or a readiness check…
+        (v(&["logweir.dev"]), v(&THREE_CHECK_KINDS), v(&["create"])),
+        // …and edit the two things their CRDs let anybody edit: a
+        // destination's access grants and CA, and a check's
+        // `cancelRequested`. `patch` WITHOUT `update`, because both are merge
+        // patches and what may change is the CRD's own CEL rule, exactly as
+        // `the_schedule_edit_restriction_is_cel_not_rbac` records for
+        // `backupschedules`.
+        (v(&["logweir.dev"]), v(&THREE_CHECK_KINDS), v(&["patch"])),
     ];
     assert_eq!(
         rules_of("config/rbac/operator_role.yaml", "logweir-operator"),
@@ -1144,16 +1280,89 @@ fn the_four_cluster_roles_are_exactly_as_specified() {
     // authorisation a `Restore` already ran against).
     let approver = rules_of("config/rbac/approver_role.yaml", "logweir-approver");
     assert_eq!(
-        approver.len(),
-        1,
-        "`logweir-approver` must have EXACTLY ONE rule; it has {}",
-        approver.len()
-    );
-    assert_eq!(
         approver,
-        vec![(v(&["logweir.dev"]), v(&["approvals"]), v(&["create"]))],
-        "`logweir-approver` is `create` on `approvals` and nothing else"
+        vec![
+            (v(&["logweir.dev"]), v(&["approvals"]), v(&["create"])),
+            // D2 §7.2 — approval context, READ ONLY. An approver is asked to
+            // authorise a restore, and whether the readiness check for that
+            // plan said `ready` is part of the question. A `Preflight` status
+            // is redacted by construction (D2 §6.5), references no Secret, and
+            // authorizes nothing on its own (§6.8), so reading one cannot
+            // approve anything.
+            (
+                v(&["logweir.dev"]),
+                v(&["preflights"]),
+                v(&["get", "list"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+            ),
+        ],
+        "`logweir-approver` is `create` on `approvals` plus read on `preflights`, and \
+         nothing else"
     );
+    for (_, resources, verbs) in &approver {
+        assert!(
+            !verbs
+                .iter()
+                .any(|x| x == "update" || x == "patch" || x == "delete"),
+            "`logweir-approver` may not write anything: `{resources:?}` carries {verbs:?}. \
+             `update` on an approval would let the bytes be swapped under a `Verified` status \
+             computed from different bytes, and `delete` would erase an authorisation a \
+             `Restore` already ran against"
+        );
+    }
+
+    // --- `logweir-trust-admin` (D3 §9) ------------------------------------
+    // ONE RULE. The only holder of a write verb on `TrustPolicy`, which is what
+    // decides whose keys may sign an approval.
+    //
+    // `patch` BESIDE `update`, for the reason `logweir-operator`'s header
+    // records: `kubectl edit` and `kubectl apply` send a PATCH, so an
+    // `update`-only grant leaves the administrator unable to perform the edit
+    // the role exists for.
+    //
+    // **NO `delete`**, by D3 §9's own words, and it is asserted rather than
+    // merely absent: deleting a policy does not retire a key, it removes the
+    // binding that governs a namespace and silently sends every namespace it
+    // bound back to `legacy-roster-v1` — a widening dressed as a cleanup.
+    //
+    // **NO VERB ON `trustrosters`**: a different kind with a different
+    // lifecycle.
+    let trust_admin = rules_of("config/rbac/trust_admin_role.yaml", "logweir-trust-admin");
+    assert_eq!(
+        trust_admin,
+        vec![(
+            v(&["logweir.dev"]),
+            v(&["trustpolicies"]),
+            v(&["get", "list", "watch", "create", "update", "patch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+        )],
+        "`logweir-trust-admin` reads and writes `trustpolicies`, and names no other resource"
+    );
+    for (_, resources, verbs) in &trust_admin {
+        assert!(
+            !verbs.iter().any(|x| x == "delete"),
+            "`logweir-trust-admin` carries `delete` on {resources:?}; D3 §9 says it does not"
+        );
+    }
+
+    // --- AND THE OPERATOR IS NOT THE TRUST ADMIN --------------------------
+    // The separation is the whole reason the fifth role exists, so it is
+    // asserted here rather than left to the reader of two files.
+    for (file, role) in [
+        ("config/rbac/operator_role.yaml", "logweir-operator"),
+        ("config/rbac/approver_role.yaml", "logweir-approver"),
+        ("config/rbac/viewer_role.yaml", "logweir-viewer"),
+    ] {
+        for (_, resources, verbs) in rules_of(file, role) {
+            if resources.iter().any(|r| r == "trustpolicies") {
+                assert_eq!(
+                    verbs,
+                    v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+                    "`{role}` may READ `trustpolicies` and never write one: only \
+                     `logweir-trust-admin` holds a write verb on the kind that decides whose \
+                     keys may sign an approval"
+                );
+            }
+        }
+    }
 }
 
 /// What an operator may change on a `BackupSchedule` is the CRD's CEL rule, and
@@ -1507,12 +1716,13 @@ fn manifest_lint_selects_by_parsed_api_version_and_kind() {
     );
 
     // And the install file's exact shape: 1 Namespace + 14 CRDs + 1
-    // ServiceAccount + 4 ClusterRoles + 1 ClusterRoleBinding + 1 Deployment +
+    // ServiceAccount + 5 ClusterRoles + 1 ClusterRoleBinding + 1 Deployment +
     // 1 NetworkPolicy. The CRD count is ADR 0008's kind list — Amendment A's
     // six, Amendment F's three and Amendment G's five — and a kind that
     // reaches `config/crd/` without reaching
     // `config/crd/kustomization.yaml` shows up here as a count that did not
-    // move.
+    // move. FIVE ClusterRoles since D2 W11: `weirkeeper`, the three human
+    // roles, and `logweir-trust-admin`.
     let docs = install_file();
     let mut by_kind: BTreeMap<String, usize> = BTreeMap::new();
     for m in &docs {
@@ -1524,7 +1734,7 @@ fn manifest_lint_selects_by_parsed_api_version_and_kind() {
             ("Namespace".to_string(), 1),
             ("CustomResourceDefinition".to_string(), 14),
             ("ServiceAccount".to_string(), 1),
-            ("ClusterRole".to_string(), 4),
+            ("ClusterRole".to_string(), 5),
             ("ClusterRoleBinding".to_string(), 1),
             ("Deployment".to_string(), 1),
             ("NetworkPolicy".to_string(), 1),
@@ -1533,8 +1743,8 @@ fn manifest_lint_selects_by_parsed_api_version_and_kind() {
     );
     assert_eq!(
         docs.len(),
-        23,
-        "logweir.yaml must hold exactly 23 documents"
+        24,
+        "logweir.yaml must hold exactly 24 documents"
     );
 }
 
