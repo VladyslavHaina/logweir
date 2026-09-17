@@ -641,21 +641,37 @@ pub async fn observe(
     pending: Option<&str>,
     now: DateTime<Utc>,
 ) -> Result<Observation, HistoryError> {
-    if inventory_due(stored, now) {
-        inventory(api, stored, schedule_name, schedule_uid, pending, now).await
-    } else {
-        steady_state(api, stored, schedule_name, schedule_uid, pending, now).await
+    // THE STEADY BRANCH TAKES THE BLOCK AS A VALUE, so it has no "what if there
+    // is no history" case to get wrong. There never is one — [`inventory_due`]
+    // returns `true` for an absent block precisely so that the first pass
+    // observes rather than assumes — and expressing that here rather than with
+    // a fallback inside the branch is what stops a future edit from inventing
+    // an empty block whose `ownershipScanComplete` would claim a scan nothing
+    // ever ran. (Fix round 1: that fallback existed, was unreachable, and a
+    // planted mutant on it therefore could not be killed by any test.)
+    match stored.and_then(|status| status.history.clone()) {
+        Some(history) if !inventory_due(stored, now) => {
+            steady_state(api, stored, history, schedule_name, schedule_uid, pending).await
+        }
+        _ => inventory(api, stored, schedule_name, schedule_uid, pending, now).await,
     }
 }
 
 /// The O(active) branch: GET what the status already names.
+///
+/// NO CLOCK REACHES THIS FUNCTION, and that is the shape rather than an
+/// accident: a steady pass observes nothing new, so there is no instant for it
+/// to stamp. `inventoriedAt` is a fact about the last INVENTORY and is carried
+/// through untouched — a pass that refreshed it would re-arm its own 60-minute
+/// timer forever and the hourly inventory would never run.
+#[allow(clippy::too_many_arguments)]
 async fn steady_state(
     api: &Api<Backup>,
     stored: Option<&BackupScheduleStatus>,
+    history: ScheduleHistory,
     schedule_name: &str,
     schedule_uid: &str,
     pending: Option<&str>,
-    now: DateTime<Utc>,
 ) -> Result<Observation, HistoryError> {
     let recorded = stored
         .and_then(|s| s.active_runs.as_deref())
@@ -697,9 +713,6 @@ async fn steady_state(
     // keeps `status_unchanged` true and the schedule unpatched. The condition
     // is then recomputed FROM these facts, which is why a human who edits this
     // block sees the condition follow.
-    let history = stored
-        .and_then(|s| s.history.clone())
-        .unwrap_or_else(|| empty_history(now));
     Ok(Observation {
         active: bounded(active),
         pending_child,
@@ -957,27 +970,6 @@ async fn migrate_one(
             );
             MigrationOutcome::Retry
         }
-    }
-}
-
-/// The block a schedule has before its first inventory, so that the condition
-/// is computable on a status this controller has not written yet.
-fn empty_history(now: DateTime<Utc>) -> ScheduleHistory {
-    ScheduleHistory {
-        run_count: 0,
-        run_count_capped: false,
-        estimated_bytes: 0,
-        legacy_owned_runs: 0,
-        legacy_migratable_runs: 0,
-        migration_blocked: None,
-        // `false`, AND NOT `true`. This block stands in for "nothing has ever
-        // been observed", and the one thing a schedule in that state must not
-        // do is claim that no run is owned by it. It is unreachable from the
-        // reconciler — step 1 always inventories when the block is absent — and
-        // reachable from the pure `status_patch` helpers, which must not invent
-        // the claim either.
-        ownership_scan_complete: false,
-        inventoried_at: now,
     }
 }
 
