@@ -1010,3 +1010,49 @@ fn collect_fields_equal_to(value: &Value, path: &str, needle: &str, out: &mut Ve
         _ => {}
     }
 }
+
+/// **PLAT-19.1, review finding F8.** The fourth verdict reaches this API as
+/// `Unknown`, and that is the fail-closed answer — asserted, not assumed.
+///
+/// `weirkeeper` now writes `result: Untrusted` for a signature that verified
+/// under a key this installation will not accept (D3 §7.4). This crate has no
+/// vocabulary for it, so the `Some(_)` arm maps it to
+/// [`VerificationState::Unknown`] — never `Valid`, which is the property that
+/// matters. **The console then renders it as `unverified`**: `ui/client.js`'s
+/// `VERIFICATION_OF` has no `unknown` key, so in shared mode the distinction
+/// between "we did not check" and "we checked and will not accept the signer"
+/// is lost. That is a gap owed to W11/W12, and this row is the guard that stops
+/// a future `Some(_) => Valid` from being worse than a lost distinction.
+///
+/// KILLS: `Some(_) => VerificationState::Valid`, and any arm that adds
+/// `"Untrusted"` to the `Valid` match.
+#[test]
+fn an_untrusted_verdict_is_never_valid_on_this_api() {
+    for spelling in ["Untrusted", "SomethingAVersionAheadWroteHere"] {
+        let mut block = verdict(
+            VerificationVerdict::Valid,
+            "application/vnd.logweir.backup-receipt+json",
+        )
+        .to_status_value(None);
+        block["result"] = serde_json::json!(spelling);
+        let status = serde_json::json!({
+            "phase": "Succeeded",
+            "exitCode": 0,
+            "evidence": { "verification": block },
+        });
+        let (object, _) = patched::<Backup>(base_backup(), &serde_json::json!({"status": status}));
+        let op = backup_operation(&backup_of(&object));
+        assert_ne!(
+            op.verification.state,
+            VerificationState::Valid,
+            "{spelling}: a result this build does not know is NEVER Valid — every reader that \
+             predates a verdict must fail closed on it"
+        );
+        assert_eq!(
+            op.verification.state,
+            VerificationState::Unknown,
+            "{spelling}: and it is `Unknown`, not `NotAttempted`: a verdict WAS reached and this \
+             build cannot name it, which is a different thing from nothing having been checked"
+        );
+    }
+}

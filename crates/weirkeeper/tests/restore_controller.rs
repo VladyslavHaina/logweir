@@ -405,6 +405,18 @@ fn roster() -> weirkeeper::crds::trust_roster::TrustRoster {
     serde_json::from_str(&roster_json()).expect("the fixture is a TrustRoster")
 }
 
+/// The trust a ROSTER-ONLY cluster resolves to.
+///
+/// PLAT-19.1 moved the approval bundle from `TrustRoster/default` to the
+/// namespace's resolved trust (D3 §7.1), and `synthesize_legacy` is exactly
+/// what `reconcile_restore` reaches for a cluster with no `TrustPolicy`. Every
+/// bundle assertion below predates that and describes such a cluster, so
+/// routing them through the synthesis is what makes them evidence that the
+/// legacy path still renders the same bytes.
+fn legacy_trust() -> weirkeeper::trust::ResolvedTrust {
+    weirkeeper::trust::synthesize_legacy(&roster().spec)
+}
+
 /// A 404 `Status`, the shape `Api::get_opt` reads as "absent".
 fn not_found_body(kind: &str, name: &str) -> String {
     format!(
@@ -543,6 +555,18 @@ fn admission_routes(
             status: cluster_status,
             body: cluster_body,
         },
+        // PLAT-19.1: materialization resolves the NAMESPACE's trust (D3 §7.1),
+        // so the policy list is read before the roster it falls back to. An
+        // empty list is a cluster that has not migrated, which is what every
+        // fixture below describes.
+        Route {
+            method: "GET",
+            path_suffix: "/trustpolicies",
+            status: 200,
+            body: r#"{"apiVersion":"logweir.dev/v1alpha1","kind":"TrustPolicyList",
+                      "metadata":{"resourceVersion":"1"},"items":[]}"#
+                .to_string(),
+        },
         Route {
             method: "GET",
             path_suffix: "/trustrosters/default",
@@ -595,8 +619,9 @@ fn existing_plan_config_map(owner_uid: &str) -> String {
 }
 
 fn existing_approval_bundle(owner_uid: &str) -> String {
-    let mut bundle = approval_bundle_config_map(&restore(), &approval(true), &roster())
-        .expect("the fixture materializes an approval bundle");
+    let mut bundle =
+        approval_bundle_config_map(&restore(), &approval(true), &legacy_trust(), now())
+            .expect("the fixture materializes an approval bundle");
     bundle.metadata.owner_references.as_mut().unwrap()[0].uid = owner_uid.to_string();
     serde_json::to_string(&bundle).expect("the approval bundle serializes")
 }
@@ -1630,7 +1655,7 @@ fn the_plan_bytes_fixture_is_a_document_the_runner_parses() {
 fn the_approval_bundle_is_immutable_exact_and_bound_to_the_restore() {
     let restore = restore();
     let approval = approval(true);
-    let bundle = approval_bundle_config_map(&restore, &approval, &roster())
+    let bundle = approval_bundle_config_map(&restore, &approval, &legacy_trust(), now())
         .expect("verified inputs materialize");
 
     assert_eq!(bundle.immutable, Some(true));
@@ -1696,7 +1721,8 @@ fn the_approval_bundle_is_immutable_exact_and_bound_to_the_restore() {
 
 #[test]
 fn an_existing_bundle_must_match_owner_bindings_immutability_and_every_byte() {
-    let desired = approval_bundle_config_map(&restore(), &approval(true), &roster()).unwrap();
+    let desired =
+        approval_bundle_config_map(&restore(), &approval(true), &legacy_trust(), now()).unwrap();
     assert!(compatible_approval_bundle(&desired, &desired, UID));
 
     let mut changed = desired.clone();
@@ -1802,7 +1828,8 @@ fn a_pre_job_legacy_plan_is_accepted_only_with_exact_bytes_and_complete_owner() 
 #[test]
 fn distinct_restores_get_distinct_bundle_names_and_bindings() {
     let first_restore = restore();
-    let first = approval_bundle_config_map(&first_restore, &approval(true), &roster()).unwrap();
+    let first = approval_bundle_config_map(&first_restore, &approval(true), &legacy_trust(), now())
+        .unwrap();
 
     let mut second_restore = restore();
     second_restore.metadata.name = Some("logweir-restore-incident-4472".to_string());
@@ -1810,7 +1837,9 @@ fn distinct_restores_get_distinct_bundle_names_and_bindings() {
     let mut second_approval = approval(true);
     second_approval.metadata.name = Some("a2".to_string());
     second_approval.metadata.uid = Some("aaaaaaaa-0000-4000-8000-00000000000b".to_string());
-    let second = approval_bundle_config_map(&second_restore, &second_approval, &roster()).unwrap();
+    let second =
+        approval_bundle_config_map(&second_restore, &second_approval, &legacy_trust(), now())
+            .unwrap();
 
     assert_ne!(first.metadata.name, second.metadata.name);
     assert_ne!(
@@ -1947,10 +1976,21 @@ async fn a_bundle_materialization_failure_is_visible_and_starts_no_job() {
         Some("ApprovalBundleMaterializationFailed")
     );
     assert_eq!(statuses[0]["phase"].as_str(), Some("Pending"));
-    assert!(statuses[0]["conditions"][0]["message"]
-        .as_str()
-        .unwrap()
-        .contains("absent from the TrustRoster"));
+    // PLAT-19.1: the message names the object an operator would actually EDIT.
+    // This fixture is a roster-only cluster, so that is still the roster — but
+    // the sentence is now rendered from the RESOLVED source, which is the whole
+    // point of review finding F1: a namespace governed by a `TrustPolicy` is
+    // told to edit the policy, not an object D3 §7.2 says no longer decides
+    // anything for it.
+    let message = statuses[0]["conditions"][0]["message"].as_str().unwrap();
+    assert!(
+        message.contains("the TrustRoster 'default' does not carry"),
+        "the refusal names the resolved trust source; got {message}"
+    );
+    assert!(
+        message.contains(KEY_ID_LIVE),
+        "…and the key it could not find: {message}"
+    );
 }
 
 #[tokio::test]
@@ -2101,6 +2141,13 @@ async fn a_concurrent_job_create_is_accepted_only_after_owner_uid_revalidation()
                 (200, approval_json(true, &plan_hash(), &plan_hash()))
             } else if method == "GET" && path.ends_with("/kafkaclusters/scratch") {
                 (200, cluster_json(true, PLAINTEXT_AUTH))
+            } else if method == "GET" && path.ends_with("/trustpolicies") {
+                (
+                    200,
+                    r#"{"apiVersion":"logweir.dev/v1alpha1","kind":"TrustPolicyList",
+                        "metadata":{"resourceVersion":"1"},"items":[]}"#
+                        .to_string(),
+                )
             } else if method == "GET" && path.ends_with("/trustrosters/default") {
                 (200, roster_json())
             } else if method == "POST" && path.ends_with("/configmaps") {
@@ -2366,7 +2413,8 @@ fn the_restore_job_mounts_the_plan_the_approval_bundle_and_the_signing_key() {
         &cluster(true),
         &[KEY_ID_LIVE.to_string()],
         &approval(true),
-        &roster(),
+        &legacy_trust(),
+        now(),
     )
     .expect("the fixture builds a job spec");
     let built = job::build(&spec);
@@ -2461,7 +2509,8 @@ fn the_restore_job_mounts_the_plan_the_approval_bundle_and_the_signing_key() {
         env[logweir_core::execution_contract::PLAN_SHA256_ENV],
         plan_hash()
     );
-    let bundle = approval_bundle_config_map(&restore(), &approval(true), &roster()).unwrap();
+    let bundle =
+        approval_bundle_config_map(&restore(), &approval(true), &legacy_trust(), now()).unwrap();
     let data = bundle.data.unwrap();
     assert_eq!(
         env[logweir_core::execution_contract::ALLOWED_CLUSTERS_SHA256_ENV],
@@ -2476,8 +2525,15 @@ fn a_scram_target_password_is_projected_by_reference_and_never_read() {
     let scram: weirkeeper::crds::kafka_cluster::KafkaCluster =
         serde_json::from_str(&cluster_json(true, SCRAM_AUTH)).expect("the fixture is a cluster");
     let (scram_restore, scram_approval) = scram_restore();
-    let spec = runner_job_spec(&scram_restore, &scram, &[], &scram_approval, &roster())
-        .expect("the job spec builds");
+    let spec = runner_job_spec(
+        &scram_restore,
+        &scram,
+        &[],
+        &scram_approval,
+        &legacy_trust(),
+        now(),
+    )
+    .expect("the job spec builds");
     let built = job::build(&spec);
     let env = built
         .spec
@@ -2503,8 +2559,15 @@ fn a_scram_target_password_is_projected_by_reference_and_never_read() {
     assert_eq!(key_ref.key, TARGET_PASSWORD_SECRET_KEY);
 
     // A plaintext target projects NO password variable at all.
-    let plain = runner_job_spec(&restore(), &cluster(true), &[], &approval(true), &roster())
-        .expect("the job spec builds");
+    let plain = runner_job_spec(
+        &restore(),
+        &cluster(true),
+        &[],
+        &approval(true),
+        &legacy_trust(),
+        now(),
+    )
+    .expect("the job spec builds");
     assert!(
         !job::build(&plain)
             .spec
@@ -2528,8 +2591,15 @@ fn a_scram_target_password_is_projected_by_reference_and_never_read() {
         .remove("secretRef");
     let no_secret: weirkeeper::crds::kafka_cluster::KafkaCluster =
         serde_json::from_value(value).expect("the mutated fixture is a cluster");
-    let refusal = runner_job_spec(&scram_restore, &no_secret, &[], &scram_approval, &roster())
-        .expect_err("no reference, no Job (PLAT-07.1)");
+    let refusal = runner_job_spec(
+        &scram_restore,
+        &no_secret,
+        &[],
+        &scram_approval,
+        &legacy_trust(),
+        now(),
+    )
+    .expect_err("no reference, no Job (PLAT-07.1)");
     assert!(
         refusal
             .to_string()
@@ -2556,8 +2626,15 @@ fn a_plan_naming_another_target_than_the_saved_connection_is_refused() {
     let scram: weirkeeper::crds::kafka_cluster::KafkaCluster =
         serde_json::from_str(&cluster_json(true, SCRAM_AUTH)).expect("the fixture is a cluster");
     // The plan says plaintext; the connection says SCRAM over TLS.
-    let refusal = runner_job_spec(&restore(), &scram, &[], &approval(true), &roster())
-        .expect_err("a plaintext plan may not spend a SCRAM connection's credential");
+    let refusal = runner_job_spec(
+        &restore(),
+        &scram,
+        &[],
+        &approval(true),
+        &legacy_trust(),
+        now(),
+    )
+    .expect_err("a plaintext plan may not spend a SCRAM connection's credential");
     assert!(
         refusal
             .to_string()
@@ -2569,8 +2646,15 @@ fn a_plan_naming_another_target_than_the_saved_connection_is_refused() {
     let (mut elsewhere, elsewhere_approval) = scram_restore();
     elsewhere.spec.plan_bytes =
         scram_plan_bytes().replace("scratch-0.logweir-t20:9092", "elsewhere.example:9092");
-    let refusal = runner_job_spec(&elsewhere, &scram, &[], &elsewhere_approval, &roster())
-        .expect_err("a plan may not point the connection's credential elsewhere");
+    let refusal = runner_job_spec(
+        &elsewhere,
+        &scram,
+        &[],
+        &elsewhere_approval,
+        &legacy_trust(),
+        now(),
+    )
+    .expect_err("a plan may not point the connection's credential elsewhere");
     let text = refusal.to_string();
     assert!(
         text.contains(weirkeeper::conditions::TERMINAL_STATE_CONNECTION_PLAN_MISMATCH)
@@ -2580,8 +2664,15 @@ fn a_plan_naming_another_target_than_the_saved_connection_is_refused() {
 
     // And a plan built from the saved connection builds a Job.
     let (matching, matching_approval) = scram_restore();
-    runner_job_spec(&matching, &scram, &[], &matching_approval, &roster())
-        .expect("a plan built from the saved connection builds a Job");
+    runner_job_spec(
+        &matching,
+        &scram,
+        &[],
+        &matching_approval,
+        &legacy_trust(),
+        now(),
+    )
+    .expect("a plan built from the saved connection builds a Job");
 }
 
 // ===========================================================================
@@ -4985,4 +5076,228 @@ fn scratch_dir(tag: &str) -> PathBuf {
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::create_dir_all(&dir).expect("a scratch directory under the temp dir");
     dir
+}
+
+// ===========================================================================
+// PLAT-19.1 fix round 1 — the approval bundle is resolved trust, not the roster
+// (review finding F1)
+// ===========================================================================
+
+/// The public half the policy fixtures carry — the same opaque string the
+/// roster fixture uses, so the ONLY difference between the two paths is where
+/// the key was found.
+const POLICY_KEY_PEM: &str = "-----BEGIN PUBLIC KEY-----\nA\n-----END PUBLIC KEY-----\n";
+
+/// A `TrustPolicy` governing this namespace, carrying one `GovernedApproval`
+/// key.
+fn governing_policy(
+    key: weirkeeper::crds::trust_policy::TrustedKey,
+) -> weirkeeper::trust::ResolvedTrust {
+    use weirkeeper::crds::trust_policy::{TrustPolicy, TrustPolicySpec};
+    weirkeeper::trust::from_policy(&TrustPolicy {
+        metadata: kube::api::ObjectMeta {
+            name: Some("org-default".to_string()),
+            uid: Some("uid-org-default".to_string()),
+            generation: Some(3),
+            ..kube::api::ObjectMeta::default()
+        },
+        spec: TrustPolicySpec {
+            default: false,
+            namespaces: Some(vec![NS.to_string()]),
+            // DELIBERATELY DIFFERENT from the roster's, so the bundle's
+            // allowlist proves WHICH source it came from.
+            allowed_target_cluster_ids: Some(vec!["POLICY000000000000001".to_string()]),
+            keys: vec![key],
+        },
+        status: None,
+    })
+}
+
+/// One edit to a policy key, as a table row carries it.
+type PolicyKeyMutation = Box<dyn Fn(&mut weirkeeper::crds::trust_policy::TrustedKey)>;
+
+/// One policy key over [`POLICY_KEY_PEM`].
+fn policy_approver_key() -> weirkeeper::crds::trust_policy::TrustedKey {
+    use weirkeeper::crds::trust_policy::{KeyAlgorithm, KeyPrincipal, KeyState, KeyUsage};
+    weirkeeper::crds::trust_policy::TrustedKey {
+        key_id: KEY_ID_LIVE.to_string(),
+        spki_pem: POLICY_KEY_PEM.to_string(),
+        algorithm: KeyAlgorithm::Ed25519,
+        usages: vec![KeyUsage::GovernedApproval],
+        principal: KeyPrincipal {
+            id: format!("install:{KEY_ID_LIVE}"),
+            display: None,
+        },
+        not_before: utc(2026, 1, 1, 0, 0),
+        not_after: utc(2099, 1, 1, 0, 0),
+        state: KeyState::Active,
+        retired_at: None,
+        revoked_at: None,
+        revocation_reason: None,
+        revocation_effective_from: None,
+    }
+}
+
+/// **F1.** A `GovernedApproval` key that exists only in a `TrustPolicy`
+/// materialises the bundle.
+///
+/// # The split this closes
+///
+/// PLAT-19.1 wired ADMISSION to the resolved policy and left materialization
+/// reading `TrustRoster/default`. D3 §7.6 step 1 stages a successor approver
+/// key on the policy, and §15's L7 namespace B has no roster at all — so
+/// `approval::decide` wrote `Verified=True` and the `Restore` then sat for ever
+/// in a NON-TERMINAL `ApprovalBundleMaterializationFailed` hold, pointing the
+/// operator at an object §7.2 says no longer decides anything for their
+/// namespace. Fail-closed, and a permanent restore hold on the one rotation
+/// procedure the decision documents.
+///
+/// KILLS: "read the key material from `TrustRoster.spec.approverKeys`" — the
+/// roster this namespace resolves away from does not carry the key, so the
+/// bundle refuses; and "render the allowlist from `TrustRoster.allowedClusterIds`"
+/// — the second assertion names the policy's own list.
+#[test]
+fn a_policy_only_approver_key_materializes_the_bundle() {
+    let trust = governing_policy(policy_approver_key());
+
+    let bundle = approval_bundle_config_map(&restore(), &approval(true), &trust, now())
+        .expect("a key the resolved policy carries materialises, and admission already said so");
+    let data = bundle
+        .data
+        .expect("the bundle carries its four public members");
+    assert_eq!(
+        data.get(APPROVER_KEY_FILE).map(String::as_str),
+        Some(POLICY_KEY_PEM),
+        "the approver's public half comes from the policy entry the verdict named"
+    );
+    let allowed: serde_json::Value =
+        serde_json::from_str(&data[ALLOWED_CLUSTERS_FILE]).expect("runner allowlist grammar");
+    assert_eq!(
+        allowed["allowed_cluster_ids"],
+        serde_json::json!(["POLICY000000000000001"]),
+        "`allowedTargetClusterIds` REPLACES the roster's `allowedClusterIds` (D3 §7.2), and the \
+         two fixtures carry different values precisely so this cannot pass against the wrong one"
+    );
+}
+
+/// **F1, the expiry half.** The bundle's re-check is `may_sign_new`, not the
+/// roster's `status.expiredKeyIds`.
+///
+/// A bundle is the last thing written before a runner executes under that key,
+/// so the question is D3 §7.4's first one — *may this key authorise something
+/// new* — which is false for a `Retired` or `Revoked` key whose `notAfter` has
+/// not arrived and which `expiredKeyIds` cannot express at all.
+///
+/// KILLS: "check `roster.status.expiredKeyIds`" — every key below is unexpired
+/// by that measure, so all four would materialise.
+#[test]
+fn a_withdrawn_approver_key_writes_no_bundle() {
+    use weirkeeper::crds::trust_policy::{KeyState, RevocationReason};
+    let cases: Vec<(&str, PolicyKeyMutation)> = vec![
+        (
+            "retired",
+            Box::new(|k: &mut weirkeeper::crds::trust_policy::TrustedKey| {
+                k.state = KeyState::Retired;
+                k.retired_at = Some(utc(2026, 9, 1, 0, 0));
+            }),
+        ),
+        (
+            "revoked for compromise",
+            Box::new(|k: &mut weirkeeper::crds::trust_policy::TrustedKey| {
+                k.state = KeyState::Revoked;
+                k.revoked_at = Some(utc(2026, 9, 1, 0, 0));
+                k.revocation_reason = Some(RevocationReason::KeyCompromise);
+                k.revocation_effective_from = Some(utc(2026, 9, 1, 0, 0));
+            }),
+        ),
+        (
+            "past its notAfter",
+            Box::new(|k: &mut weirkeeper::crds::trust_policy::TrustedKey| {
+                k.not_after = utc(2026, 9, 1, 0, 0);
+            }),
+        ),
+        (
+            "staged for a rotation that has not started",
+            Box::new(|k: &mut weirkeeper::crds::trust_policy::TrustedKey| {
+                k.not_before = utc(2099, 1, 1, 0, 0);
+            }),
+        ),
+    ];
+    for (label, mutate) in cases {
+        let mut key = policy_approver_key();
+        mutate(&mut key);
+        let error =
+            approval_bundle_config_map(&restore(), &approval(true), &governing_policy(key), now())
+                .expect_err(label);
+        let message = error.to_string();
+        assert!(
+            message.contains("no longer accepts for a new authorisation"),
+            "{label}: the refusal says the key may not authorise something NEW; got {message}"
+        );
+        assert!(
+            message.contains("the TrustPolicy 'org-default'"),
+            "{label}: …and names the object an operator would edit, which for a policy-governed \
+             namespace is the policy; got {message}"
+        );
+        assert!(
+            message.contains(KEY_ID_LIVE),
+            "{label}: …and the key; got {message}"
+        );
+    }
+
+    // THE ACTIVE CONTROL. The same fixture with an untouched key materialises,
+    // so every row above is about the lifecycle and nothing else.
+    assert!(approval_bundle_config_map(
+        &restore(),
+        &approval(true),
+        &governing_policy(policy_approver_key()),
+        now()
+    )
+    .is_ok());
+}
+
+/// **F1.** A key the resolved trust does not carry refuses, and the message
+/// names the RESOLVED source rather than always the roster.
+///
+/// KILLS: the pre-fix message `"absent from the TrustRoster"` — for a
+/// policy-governed namespace it sends the operator to the wrong object.
+#[test]
+fn a_bundle_refusal_names_the_object_an_operator_would_edit() {
+    let mut stranger = policy_approver_key();
+    stranger.key_id =
+        "sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string();
+    let error = approval_bundle_config_map(
+        &restore(),
+        &approval(true),
+        &governing_policy(stranger),
+        now(),
+    )
+    .expect_err("the policy carries no key with the id the verdict named");
+    let message = error.to_string();
+    assert!(
+        message.contains("the TrustPolicy 'org-default' does not carry"),
+        "got {message}"
+    );
+    assert!(
+        message.contains("no longer resolves to"),
+        "the sentence says WHY the roster is the wrong place to add it; got {message}"
+    );
+
+    // AND THE LEGACY PATH STILL SAYS `TrustRoster`, because for a roster-only
+    // cluster that IS the object to edit.
+    let mut legacy_roster = roster();
+    legacy_roster.spec.approver_keys.clear();
+    let error = approval_bundle_config_map(
+        &restore(),
+        &approval(true),
+        &weirkeeper::trust::synthesize_legacy(&legacy_roster.spec),
+        now(),
+    )
+    .expect_err("an empty roster carries no approver key either");
+    assert!(
+        error
+            .to_string()
+            .contains("the TrustRoster 'default' does not carry"),
+        "got {error}"
+    );
 }

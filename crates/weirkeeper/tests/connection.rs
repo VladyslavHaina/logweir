@@ -218,6 +218,24 @@ fn roster() -> TrustRoster {
     .expect("the fixture is a TrustRoster")
 }
 
+/// The trust a ROSTER-ONLY cluster resolves to — PLAT-19.1 moved the approval
+/// bundle from `TrustRoster/default` to the namespace's resolved trust, and
+/// `synthesize_legacy` is what the controller reaches for a cluster with no
+/// `TrustPolicy`. These goldens describe exactly such a cluster, so they must
+/// render byte-identically through it.
+fn legacy_trust() -> weirkeeper::trust::ResolvedTrust {
+    weirkeeper::trust::synthesize_legacy(&roster().spec)
+}
+
+/// A fixed instant for the bundle's "may this key authorise something new"
+/// re-check. The fixture key has no `notAfter`, so the synthesis gives it one
+/// in 9999 and this cannot drift.
+fn bundle_now() -> chrono::DateTime<chrono::Utc> {
+    chrono::DateTime::parse_from_rfc3339("2026-09-09T13:00:00Z")
+        .expect("a fixture instant")
+        .with_timezone(&chrono::Utc)
+}
+
 /// The three Jobs one `KafkaCluster` produces, as rendered Kubernetes objects.
 fn three_jobs(cluster: &KafkaCluster) -> (Value, Value, Value) {
     let probe = job::build(&kafka_cluster::runner_job_spec(cluster).expect("probe spec"));
@@ -230,7 +248,8 @@ fn three_jobs(cluster: &KafkaCluster) -> (Value, Value, Value) {
             cluster,
             &[KEY_ID.to_string()],
             &approval_for(&plan),
-            &roster(),
+            &legacy_trust(),
+            bundle_now(),
         )
         .expect("restore spec"),
     );
@@ -972,7 +991,8 @@ fn legacy_objects_build_the_jobs_they_always_did() {
             &cluster,
             &[KEY_ID.to_string()],
             &approval_for(&plan_bytes),
-            &roster(),
+            &legacy_trust(),
+            bundle_now(),
         )
         .expect("restore spec");
         assert_eq!(

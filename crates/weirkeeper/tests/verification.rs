@@ -183,6 +183,19 @@ fn entry(key_id: &str, spki_pem: &str) -> KeyEntry {
     }
 }
 
+/// One signing key entry with a `notAfter` — the ONLY roster shape PLAT-19.1
+/// changes the behaviour of, and the one [`entry`] cannot express.
+fn entry_expiring(key_id: &str, spki_pem: &str, not_after: &str) -> KeyEntry {
+    KeyEntry {
+        not_after: Some(
+            chrono::DateTime::parse_from_rfc3339(not_after)
+                .expect("a fixture instant")
+                .with_timezone(&Utc),
+        ),
+        ..entry(key_id, spki_pem)
+    }
+}
+
 /// A `status` block shaped the way a UI renders one.
 fn renderable(verification: Value, extra: Value) -> Value {
     let mut status = json!({ "evidence": { "verification": verification } });
@@ -2393,6 +2406,45 @@ fn the_legacy_synthesis_reaches_the_pre_change_verdicts() {
                 "detail": WRONG_KEY_DETAIL,
             }),
         ),
+        // ---- THE ONE ROSTER THIS CHANGE ALTERS (review finding F3) --------
+        //
+        // Every row above uses an entry with NO `notAfter`, which synthesises
+        // to 9999 — so none of them can see the tightening the report records:
+        // `verify_evidence` never consulted a signing key's `notAfter`, and
+        // under §7.4 it now does. A roster that SETS one is therefore both the
+        // only roster whose verdict moves and the only roster the byte-for-byte
+        // fixture could not observe, which is the definition of an uncompared
+        // behaviour change.
+        //
+        // Signed BEFORE the expiry: still a pass, on a `Historical` basis.
+        (
+            "a signing key whose notAfter is after the signing time",
+            vec![entry_expiring(
+                FIXTURE_KEY_ID,
+                &runner_public_key(),
+                "2026-09-10T00:00:00Z",
+            )],
+            json!({
+                "result": "Valid",
+                "matchedKeyId": FIXTURE_KEY_ID,
+                "payloadType": logweir_verify::PAYLOAD_TYPE_SCORECARD,
+            }),
+        ),
+        // Signed AFTER it: the deliberate tightening, and it is `Untrusted`
+        // rather than `Invalid` because the bytes are exactly what they claim.
+        (
+            "a signing key whose notAfter is BEFORE the signing time",
+            vec![entry_expiring(
+                FIXTURE_KEY_ID,
+                &runner_public_key(),
+                "2026-08-01T00:00:00Z",
+            )],
+            json!({
+                "result": "Untrusted",
+                "matchedKeyId": FIXTURE_KEY_ID,
+                "payloadType": logweir_verify::PAYLOAD_TYPE_SCORECARD,
+            }),
+        ),
     ];
 
     for (label, keys, want) in rows {
@@ -2404,7 +2456,7 @@ fn the_legacy_synthesis_reaches_the_pre_change_verdicts() {
             );
         }
         for field in ["result", "matchedKeyId", "payloadType", "detail"] {
-            if want.get(field).is_none() {
+            if want.get(field).is_none() && block["result"] != json!("Untrusted") {
                 assert!(
                     block[field].is_null(),
                     "{label}: `{field}` was absent before this change and must stay absent; got \
@@ -2423,7 +2475,55 @@ fn the_legacy_synthesis_reaches_the_pre_change_verdicts() {
                 block["trust"]["policy"]["uid"].is_null(),
                 "{label}: the synthesised policy is not an object, so it has no uid to name"
             );
-            assert_eq!(block["trust"]["basis"], json!("Current"), "{label}");
+        }
+        // THE BADGE, AND NOT ONLY THE BLOCK. The doc comment above claims the
+        // badge is identical; until finding F3 no badge was computed here at
+        // all, so the claim rested on nothing.
+        let badge = backup_badge(&renderable(block.clone(), json!({"exitCode": 0})));
+        assert_eq!(
+            badge.green,
+            block["result"] == json!("Valid"),
+            "{label}: green is `Valid` and the kind's own field, and nothing else; got {badge:?}"
+        );
+        match label {
+            "a signing key whose notAfter is after the signing time" => {
+                assert_eq!(
+                    block["trust"]["basis"],
+                    json!("Historical"),
+                    "signed while the key was valid and the window has since closed — a pass"
+                );
+                assert!(
+                    badge.label.contains("signed before that key was retired"),
+                    "a Historical badge carries its qualifier; got {}",
+                    badge.label
+                );
+            }
+            "a signing key whose notAfter is BEFORE the signing time" => {
+                assert_eq!(block["trust"]["basis"], json!("None"));
+                assert_eq!(badge.reason, "VerificationUntrusted");
+                let detail = block["detail"].as_str().unwrap_or_default();
+                assert!(
+                    detail.contains("SignedOutsideValidity"),
+                    "THE ONE RECORDED DEVIATION FROM §7.5's byte-for-byte claim: today's \
+                     `verify_evidence` never consulted a signing key's notAfter, so this \
+                     document used to render Valid and now renders Untrusted. It is the \
+                     intended §7.4 behaviour and it is the only row where 'byte-for-byte' is \
+                     not literally true. Got {detail}"
+                );
+            }
+            // Every other row either verified under an unexpired key (Current)
+            // or never reached a key at all (no `trust` block, which is what an
+            // `Invalid` and a `NotAttempted` carry).
+            _ if block["result"] == json!("Valid") => assert_eq!(
+                block["trust"]["basis"],
+                json!("Current"),
+                "{label}: an unexpired roster key is Current"
+            ),
+            _ => assert!(
+                block["trust"].is_null(),
+                "{label}: no signature matched, so there is no signer to have an opinion about; \
+                 got {block}"
+            ),
         }
     }
 }
@@ -2678,15 +2778,23 @@ fn a_revocation_after_approval_downgrades_the_verdict_and_nothing_else() {
     );
 
     // …AND A SECOND PASS OVER THE PATCHED OBJECT IS A NO-OP, which is only true
-    // because `verifiedAt` did not move.
+    // because `verifiedAt` did not move. The object it runs against is the one
+    // the patch produced: the new block AND the new condition, because the
+    // comparison is over both (review finding F6).
     let mut patched = status.clone();
     patched["evidence"]["verification"] = r.verification.clone();
+    let patched_conditions: Vec<weirkeeper::crds::Condition> = existing
+        .iter()
+        .filter(|c| c.r#type != CONDITION_VERIFIED)
+        .cloned()
+        .chain(std::iter::once(r.verified.clone()))
+        .collect();
     assert!(
         weirkeeper::verification::retrust(
             &patched,
             &resolution,
             backup_badge,
-            Some(&existing),
+            Some(&patched_conditions),
             Some(1),
             at("2026-09-13T08:00:00Z"),
         )
@@ -2739,19 +2847,24 @@ fn a_key_added_after_an_untrusted_verdict_is_re_granted_with_a_reason() {
         "the reason names the row: {}",
         untrusted.verification["detail"]
     );
+    let catalog = weirkeeper::verification::catalog_verification(
+        VerificationVerdict::Untrusted,
+        Some(&logweir_core::trust::decide(
+            None,
+            logweir_core::trust::KeyUsage::EvidenceSigning,
+            &logweir_core::trust::EvidenceClaim::at(at(SCORECARD_SIGNED_AT)),
+            &logweir_core::trust::IndependentObservation::none(),
+            at("2026-09-12T08:00:00Z"),
+        )),
+    );
     assert_eq!(
-        weirkeeper::verification::catalog_verification(
-            VerificationVerdict::Untrusted,
-            Some(&logweir_core::trust::decide(
-                None,
-                logweir_core::trust::KeyUsage::EvidenceSigning,
-                &logweir_core::trust::EvidenceClaim::at(at(SCORECARD_SIGNED_AT)),
-                &logweir_core::trust::IndependentObservation::none(),
-                at("2026-09-12T08:00:00Z"),
-            )),
-        ),
-        "UntrustedSigner",
+        catalog.state, "UntrustedSigner",
         "D3 §5.4's word for this row, so the catalog and the badge cannot disagree"
+    );
+    assert_eq!(
+        catalog.reason,
+        Some(logweir_core::trust::UntrustReason::UntrustedSigner),
+        "…and the ROW travels with the word, so L7's remedy sentence can be the right one"
     );
 
     // ARM 2 — the administrator adds the key, Retired, with a window that
@@ -2886,15 +2999,17 @@ fn a_policy_edit_that_changes_no_verdict_sends_nothing() {
     assert_eq!(r.verification["trust"]["policy"]["generation"], json!(9));
     assert_eq!(r.verification["verifiedAt"], json!("2026-09-04T00:00:00Z"));
 
-    // AND RE-RUNNING AGAINST THE SAME POLICY IS A TRUE NO-OP.
+    // AND RE-RUNNING AGAINST THE SAME POLICY IS A TRUE NO-OP — over the block
+    // AND the condition the first pass wrote (review finding F6).
     let mut patched = status.clone();
     patched["evidence"]["verification"] = r.verification.clone();
+    let patched_conditions = vec![r.verified.clone()];
     assert!(
         weirkeeper::verification::retrust(
             &patched,
             &resolution,
             backup_badge,
-            None,
+            Some(&patched_conditions),
             Some(1),
             at("2026-09-30T08:00:00Z"),
         )
@@ -3016,11 +3131,8 @@ fn the_catalog_vocabulary_is_the_same_verdict_in_other_words() {
         (VerificationVerdict::NotAttempted, None, "NotAttempted"),
     ];
     for (result, verdict, want) in cases {
-        assert_eq!(
-            weirkeeper::verification::catalog_verification(result, verdict.as_ref()),
-            want,
-            "{result:?} / {verdict:?}"
-        );
+        let catalog = weirkeeper::verification::catalog_verification(result, verdict.as_ref());
+        assert_eq!(catalog.state, want, "{result:?} / {verdict:?}");
         // A GREEN BADGE AND A CATALOG `Verified` ARE THE SAME ANSWER.
         let green = verdict.as_ref().is_some_and(Verdict::may_render_green);
         assert_eq!(
@@ -3028,7 +3140,44 @@ fn the_catalog_vocabulary_is_the_same_verdict_in_other_words() {
             want.starts_with("Verified"),
             "{result:?} / {verdict:?}: the badge rule and §5.4's vocabulary must not diverge"
         );
+        // …AND THE ROW SURVIVES THE FLATTENING (review finding F4). Three rows
+        // become `UntrustedSigner` and two become `Revoked`; §5.4's definitions
+        // are true of only one of each, so the remedy an operator is handed can
+        // only be right if the reason travels beside the word.
+        assert_eq!(
+            catalog.reason,
+            verdict.as_ref().and_then(|v| v.reason),
+            "{result:?} / {verdict:?}: the row that decided is carried verbatim"
+        );
+        assert_eq!(catalog.basis, verdict.as_ref().map(|v| v.basis));
     }
+
+    // THE TWO LOSSY PAIRS, NAMED. A consumer that renders §5.4's own remedy
+    // sentence from `state` alone tells an operator to add a key that is
+    // already there, or that nothing was observed when something was.
+    let lossy = [
+        (UntrustReason::UntrustedSigner, "UntrustedSigner"),
+        (UntrustReason::KeyUsageMismatch, "UntrustedSigner"),
+        (UntrustReason::SignedOutsideValidity, "UntrustedSigner"),
+        (UntrustReason::Revoked, "Revoked"),
+        (UntrustReason::RecordedBeforeRevocation, "Revoked"),
+    ];
+    let mut by_word: std::collections::BTreeMap<&str, usize> = std::collections::BTreeMap::new();
+    for (reason, word) in lossy {
+        let c = weirkeeper::verification::catalog_verification(
+            VerificationVerdict::Untrusted,
+            Some(&untrusted(reason)),
+        );
+        assert_eq!(c.state, word);
+        assert_eq!(c.reason, Some(reason));
+        *by_word.entry(word).or_default() += 1;
+    }
+    assert_eq!(
+        by_word.get("UntrustedSigner").copied(),
+        Some(3),
+        "three distinct rows flatten into one word, which is why the word is not enough"
+    );
+    assert_eq!(by_word.get("Revoked").copied(), Some(2));
 }
 
 /// `carry_conditions` carries every type it is given, in order, and never
@@ -3144,4 +3293,266 @@ fn an_untrusted_verdict_is_not_a_verification_that_did_not_happen() {
         "verifiedAt": "2026-09-11T03:20:00Z",
     });
     assert!(backup_badge(&renderable(old, json!({"exitCode": 0}))).green);
+}
+
+// ===========================================================================
+// Fix round 1 — the review's findings, each with the row that would have
+// caught it
+// ===========================================================================
+
+/// **F5.** A stored `verifiedAt` is an observation only when a SIGNATURE
+/// produced it.
+///
+/// Every verdict carries a `verifiedAt`, including the ones that never read the
+/// document — a `NotAttempted` written because no credential was configured,
+/// because the object could not be fetched, or because two policies contest the
+/// namespace; an `Invalid` written because the digest did not match. D3 §7.4's
+/// compromise rule rests on "this installation recorded having SEEN this
+/// document", and none of those did.
+///
+/// KILLS: "accept any stored `verifiedAt`" — the pre-fix rule. Under it the
+/// first three rows below render `RecordedBeforeRevocation` and put a false
+/// provenance sentence in front of an operator about a compromised key.
+#[test]
+fn a_stored_instant_is_an_observation_only_if_a_signature_produced_it() {
+    let signed = Signed::scorecard("observation-provenance");
+    let effective = at("2026-09-10T00:00:00Z");
+    let mut key = evidence_key();
+    key.state = KeyState::Revoked;
+    key.revoked_at = Some(effective);
+    key.revocation_reason = Some(RevocationReason::KeyCompromise);
+    key.revocation_effective_from = Some(effective);
+    let result = signed.verify(&resolved(&policy("org-default", &[], vec![key])));
+
+    // An early instant on a block that never read the document.
+    let early = "2026-09-04T00:00:00Z";
+    let not_observations = [
+        json!({"result": "NotAttempted", "payloadType": "p", "detail": NO_CREDENTIAL_DETAIL,
+               "verifiedAt": early}),
+        json!({"result": "Invalid", "payloadType": "p", "detail": "digest mismatch",
+               "verifiedAt": early}),
+        // `Valid` with NO matched key is not a shape this controller writes —
+        // and it is the shape a hand-edited status could carry, so it is
+        // refused rather than trusted.
+        json!({"result": "Valid", "payloadType": "p", "verifiedAt": early}),
+        json!({"result": "Valid", "matchedKeyId": "", "payloadType": "p", "verifiedAt": early}),
+    ];
+    for stored in not_observations {
+        let block = result.to_status_value(Some(&stored));
+        assert_eq!(
+            block["result"],
+            json!("Untrusted"),
+            "a compromise-revoked signer is never trusted: {block}"
+        );
+        assert_eq!(
+            block["trust"]["basis"],
+            json!("None"),
+            "{stored}: this block is not a record of having seen the document, so it corroborates \
+             nothing — the verdict is the fail-closed `Revoked`, not `RecordedBeforeRevocation`"
+        );
+        assert_eq!(
+            weirkeeper::verification::VerificationResult::observation(Some(&stored)),
+            logweir_core::trust::IndependentObservation::none(),
+            "{stored}: and the seam itself says so, not only the verdict"
+        );
+    }
+
+    // …AND THE ONE THAT IS. Same instant, same key, a block a signature wrote.
+    let observation = json!({
+        "result": "Valid",
+        "matchedKeyId": FIXTURE_KEY_ID,
+        "payloadType": logweir_verify::PAYLOAD_TYPE_SCORECARD,
+        "verifiedAt": early,
+    });
+    assert_eq!(
+        result.to_status_value(Some(&observation))["trust"]["basis"],
+        json!("RecordedBeforeRevocation"),
+        "the ONLY difference between this and the rows above is that a signature produced it"
+    );
+}
+
+/// **F6.** A `Verified` condition inconsistent with an already-correct
+/// verification block is repaired.
+///
+/// The header always claimed the comparison was over the rendered block AND the
+/// rendered condition; the code compared the block alone. A condition clobbered
+/// by another builder writing the array, or left behind by a partially applied
+/// patch, was therefore never repaired — `retrust` saw an unchanged block and
+/// sent nothing.
+///
+/// KILLS: `if &verification == stored { return None; }` (the pre-fix form).
+#[test]
+fn the_retrust_pass_repairs_a_condition_that_contradicts_its_own_block() {
+    // The block is ALREADY what the policy says: an `Untrusted` verdict with
+    // the right basis. Only the condition is wrong.
+    let mut status = verified_status("2026-09-04T00:00:00Z");
+    let effective = at("2026-09-10T00:00:00Z");
+    let mut key = evidence_key();
+    key.state = KeyState::Revoked;
+    key.revoked_at = Some(effective);
+    key.revocation_reason = Some(RevocationReason::KeyCompromise);
+    key.revocation_effective_from = Some(effective);
+    let resolution = Resolution::Trust(Box::new(resolved(&policy("org-default", &[], vec![key]))));
+    let now = at("2026-09-12T08:00:00Z");
+
+    // One pass to reach the settled block.
+    let settled =
+        weirkeeper::verification::retrust(&status, &resolution, backup_badge, None, Some(1), now)
+            .expect("the revocation changes the verdict");
+    status["evidence"]["verification"] = settled.verification.clone();
+
+    // With the condition the pass itself produced, a second pass is a no-op.
+    let matching = vec![settled.verified.clone()];
+    assert!(
+        weirkeeper::verification::retrust(
+            &status,
+            &resolution,
+            backup_badge,
+            Some(&matching),
+            Some(1),
+            at("2026-09-13T08:00:00Z"),
+        )
+        .is_none(),
+        "block and condition both agree with the policy, so nothing is sent (E11(d))"
+    );
+
+    // With a STALE condition beside the same correct block, it is repaired.
+    let stale = vec![weirkeeper::crds::Condition {
+        r#type: CONDITION_VERIFIED.to_string(),
+        status: "True".to_string(),
+        observed_generation: Some(1),
+        last_transition_time: Some(at("2026-09-04T00:00:00Z")),
+        reason: Some(REASON_VERIFIED.to_string()),
+        message: Some("verified by weirkeeper".to_string()),
+    }];
+    let repair = weirkeeper::verification::retrust(
+        &status,
+        &resolution,
+        backup_badge,
+        Some(&stale),
+        Some(1),
+        at("2026-09-13T08:00:00Z"),
+    )
+    .expect(
+        "a green condition beside an Untrusted block is the silent-revocation failure this whole \
+         task exists to prevent, and leaving it is not an option",
+    );
+    assert_eq!(repair.verified.status, "False");
+    assert_eq!(
+        repair.verified.reason.as_deref(),
+        Some("VerificationUntrusted")
+    );
+    assert_eq!(
+        repair.verification, settled.verification,
+        "…and the block is untouched, because it was already right"
+    );
+    assert_eq!(
+        repair.from, repair.to,
+        "the RESULT did not move; the condition did"
+    );
+}
+
+/// **F7.** A `trust` block this build cannot read is not green.
+///
+/// Two states were folded together: "no `trust` key at all", which is an object
+/// written before PLAT-19.1 and is correctly green, and "a `trust` key with no
+/// readable `basis`", which is malformed. This module argues at length for
+/// reading the basis clause BECAUSE one-field badge rules rot; the arm that
+/// keeps the old rule must not swallow a shape the old rule never had.
+///
+/// KILLS: `Some(TRUST_BASIS_CURRENT) | None => false` (the pre-fix form).
+#[test]
+fn a_trust_block_this_build_cannot_read_is_not_green() {
+    let base = |trust: Option<Value>| {
+        let mut block = json!({
+            "result": "Valid",
+            "matchedKeyId": FIXTURE_KEY_ID,
+            "payloadType": logweir_verify::PAYLOAD_TYPE_SCORECARD,
+            "verifiedAt": "2026-09-11T03:20:00Z",
+        });
+        if let Some(t) = trust {
+            block["trust"] = t;
+        }
+        renderable(block, json!({"exitCode": 0}))
+    };
+
+    // ADDITIVE COMPATIBILITY — an older controller wrote this. Still green.
+    assert!(
+        backup_badge(&base(None)).green,
+        "an object that predates the trust block is not downgraded by its absence"
+    );
+
+    // MALFORMED — present and unreadable, in four shapes.
+    for malformed in [
+        json!({"keyState": "Active"}),
+        json!({"basis": null, "keyState": "Active"}),
+        json!({"basis": 7}),
+        json!(null),
+    ] {
+        let badge = backup_badge(&base(Some(malformed.clone())));
+        assert!(
+            !badge.green,
+            "{malformed}: a trust block this build cannot read is not a licence to render the \
+             old rule; got {badge:?}"
+        );
+        assert_eq!(badge.reason, "VerificationUntrusted");
+    }
+
+    // …AND THE TWO IT CAN READ still decide as they did.
+    assert!(backup_badge(&base(Some(json!({"basis": "Current"})))).green);
+    let historical = backup_badge(&base(Some(json!({"basis": "Historical"}))));
+    assert!(historical.green);
+    assert!(historical
+        .label
+        .contains("signed before that key was retired"));
+}
+
+/// **F2.** The re-trust trigger maps a policy event to the objects that policy
+/// could govern, out of the controller's OWN store — no LIST at all.
+///
+/// KILLS: "return every object whatever the policy names" (row 2 would enqueue
+/// the unbound object) and "return nothing for a `default: true` policy" (row 3
+/// would leave a revoked key green in every namespace no policy names, which is
+/// most of them).
+#[test]
+fn a_policy_event_enqueues_the_objects_it_could_govern_and_no_others() {
+    use weirkeeper::trust::may_govern;
+
+    let explicit = policy("team-a", &["team-a", "team-b"], vec![evidence_key()]);
+    assert!(may_govern(&explicit, "team-a"));
+    assert!(may_govern(&explicit, "team-b"));
+    assert!(
+        !may_govern(&explicit, "team-c"),
+        "a policy that names its namespaces claims no others, so an event on it touches nothing \
+         in team-c"
+    );
+
+    // A `default: true` policy claims every namespace HERE, although resolution
+    // would hand an explicitly-named one to its own policy. Over-approximating
+    // costs a re-derivation that writes nothing; under-approximating leaves a
+    // revoked key green until something else happens to reconcile.
+    let fallback = policy("org-default", &[], vec![evidence_key()]);
+    assert!(
+        fallback.spec.default,
+        "the builder makes an unnamed policy the default"
+    );
+    for namespace in ["team-a", "team-c", "anything-at-all"] {
+        assert!(
+            may_govern(&fallback, namespace),
+            "the default is the fallback for every namespace no policy names, and the trigger \
+             cannot tell which those are from one object"
+        );
+    }
+
+    // AND THE GUARD IN FRONT OF THE EXPENSIVE HALF. An object with no verdict
+    // has nothing to re-decide, and must not pay for an API read to find out.
+    use weirkeeper::verification::has_trust_verdict;
+    assert!(!has_trust_verdict(None));
+    assert!(!has_trust_verdict(Some(&json!({"phase": "Running"}))));
+    assert!(!has_trust_verdict(Some(&json!({
+        "evidence": {"verification": {"result": "NotAttempted", "payloadType": "p"}}
+    }))));
+    assert!(has_trust_verdict(Some(&verified_status(
+        "2026-09-04T00:00:00Z"
+    ))));
 }
