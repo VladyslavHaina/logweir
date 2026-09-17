@@ -138,6 +138,32 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["backupdestinations"]
     verbs: ["get", "list", "watch"]
+  # THE EIGHTH KIND — D2 W8, PLAT-09.1. `list` and `watch` are
+  # `Controller::new(api, …)` in `controllers/topic_discovery.rs`, and that is
+  # the WHOLE of it.
+  #
+  # NO `get`, AND THAT IS NOT AN OVERSIGHT. D2 §7.1 sketches
+  # `get/list/watch` for all three new kinds; this controller calls
+  # `Api::<TopicDiscovery>::get_opt` NOWHERE — a discovery's spec is immutable
+  # and the reconciler is handed the object by the watch, so there is nothing
+  # to re-read. `every_granted_verb_has_a_caller` is this file's governing rule
+  # (critique B M18), and a `get` here would be a granted verb with no caller.
+  # The callers D2 §7.1 anticipated are the console API's ServiceAccount
+  # (§7.3), which is a DIFFERENT role, and `gc.rs` — see the `delete` note in
+  # this file's header.
+  #
+  # NOTE FOR W11 (D2 §13.2): these two rules are W11's to own. They are here
+  # because the reverse lint `every_call_site_has_a_grant` fails the moment
+  # `Api<TopicDiscovery>` appears under `crates/weirkeeper/src/`, and a call
+  # with no grant 403s in production while every route-table test stays green.
+  # W11 folds them into its own RBAC pass together with `backupdestinations`
+  # and `preflights`, and adds `events: [list]` — which
+  # `controllers/topic_discovery.rs` deliberately does not use yet, passing the
+  # waiting classifier an EMPTY fact slice rather than building an `Api<Event>`
+  # this role cannot authorise.
+  - apiGroups: ["logweir.dev"]
+    resources: ["topicdiscoveries"]
+    verbs: ["list", "watch"]
   # THE ONE WRITE TO A CUSTOM RESOURCE THAT IS NOT A STATUS, AND ITS CALLER.
   # `controllers/backup_schedule.rs` creates one `Backup` per due slot. A
   # schedule that could not create a backup is a schedule that does nothing.
@@ -175,6 +201,15 @@ rules:
   # literal `update` here would be a granted verb with no caller.
   - apiGroups: ["logweir.dev"]
     resources: ["backupdestinations/status"]
+    verbs: ["patch"]
+  # AND THE EIGHTH KIND'S STATUS SUBRESOURCE, `patch` and nothing else — seam
+  # S7. `controllers/topic_discovery.rs` writes every phase, the binding, the
+  # chunk index and the completeness verdict with `Api::patch_status` and a
+  # `Patch::Merge` whose BODY carries `metadata.resourceVersion` as the update
+  # precondition. There is no `replace_status` anywhere in this crate, so a
+  # literal `update` here would be a granted verb with no caller.
+  - apiGroups: ["logweir.dev"]
+    resources: ["topicdiscoveries/status"]
     verbs: ["patch"]
   # THE RUNNER JOBS. `create` in `controllers/{backup,kafka_cluster,restore}.rs`
   # (`jobs.create(&PostParams::default(), &job::build(&spec))`); `get` is each

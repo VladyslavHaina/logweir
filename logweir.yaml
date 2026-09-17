@@ -7002,6 +7002,13 @@ rules:
 - apiGroups:
   - logweir.dev
   resources:
+  - topicdiscoveries
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - logweir.dev
+  resources:
   - backups
   verbs:
   - create
@@ -7020,6 +7027,12 @@ rules:
   - logweir.dev
   resources:
   - backupdestinations/status
+  verbs:
+  - patch
+- apiGroups:
+  - logweir.dev
+  resources:
+  - topicdiscoveries/status
   verbs:
   - patch
 - apiGroups:

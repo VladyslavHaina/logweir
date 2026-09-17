@@ -527,6 +527,7 @@ fn every_granted_verb_has_a_caller() {
             "configmaps" => "ConfigMap",
             "approvals" => "Approval",
             "backupdestinations" => "BackupDestination",
+            "topicdiscoveries" => "TopicDiscovery",
             "backups" => "Backup",
             "backupschedules" => "BackupSchedule",
             "kafkaclusters" => "KafkaCluster",
@@ -720,6 +721,10 @@ fn every_call_site_has_a_grant() {
             // `config/rbac/role.yaml` beside the six-kind list rather than
             // inside it, so the `logweir-viewer` role is untouched.
             "BackupDestination" => ("logweir.dev", "backupdestinations"),
+            // D2 W8 (PLAT-09.1): the eighth kind. `controllers/topic_discovery.rs`
+            // reaches it for exactly two things — the `Controller::new` watch and
+            // `patch_status` — and `config/rbac/role.yaml` grants exactly those.
+            "TopicDiscovery" => ("logweir.dev", "topicdiscoveries"),
             "BackupSchedule" => ("logweir.dev", "backupschedules"),
             "KafkaCluster" => ("logweir.dev", "kafkaclusters"),
             "Restore" => ("logweir.dev", "restores"),
@@ -884,6 +889,14 @@ fn the_four_cluster_roles_are_exactly_as_specified() {
             v(&["backupdestinations"]),
             v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         ),
+        // D2 W8 (PLAT-09.1): the `TopicDiscovery` reconciler's `Controller::new`
+        // watch, and NOTHING else. No `get`: the reconciler never re-reads a
+        // discovery, and a granted verb with no caller is critique B M18.
+        (
+            v(&["logweir.dev"]),
+            v(&["topicdiscoveries"]),
+            v(&["list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+        ),
         (v(&["logweir.dev"]), v(&["backups"]), v(&["create"])),
         (
             v(&["logweir.dev"]),
@@ -902,6 +915,13 @@ fn the_four_cluster_roles_are_exactly_as_specified() {
         (
             v(&["logweir.dev"]),
             v(&["backupdestinations/status"]),
+            v(&["patch"]),
+        ),
+        // D2 W8: `controllers/topic_discovery.rs`'s `Api::patch_status`, a merge
+        // PATCH carrying `metadata.resourceVersion` — seam S7.
+        (
+            v(&["logweir.dev"]),
+            v(&["topicdiscoveries/status"]),
             v(&["patch"]),
         ),
         (

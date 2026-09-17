@@ -6416,6 +6416,12 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["backupdestinations"]
     verbs: ["get", "list", "watch"]
+  # D2 W8 (PLAT-09.1): the eighth kind. `list`/`watch` only — the reconciler
+  # never re-reads a discovery, and every granted verb here has a caller. See
+  # `config/rbac/role.yaml`.
+  - apiGroups: ["logweir.dev"]
+    resources: ["topicdiscoveries"]
+    verbs: ["list", "watch"]
   - apiGroups: ["logweir.dev"]
     resources: ["backups"]
     verbs: ["create"]
@@ -6430,6 +6436,9 @@ rules:
     verbs: ["patch"]
   - apiGroups: ["logweir.dev"]
     resources: ["backupdestinations/status"]
+    verbs: ["patch"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["topicdiscoveries/status"]
     verbs: ["patch"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
