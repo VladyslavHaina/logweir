@@ -407,6 +407,17 @@ fn run() -> ExitCode {
                 weirkeeper::controllers::topic_discovery::configured_policy_ref(),
             ),
         ));
+        // D3 W8 pushes the TENTH — the `RecoveryCatalog` reconciler that runs a
+        // bounded `catalogSync` check Job and materialises its result as an
+        // immutable, Job-owned, TTL-collected view. It takes the runner image
+        // (it creates a Job) and NO archive handle: the sync reads object
+        // storage with the destination's own credential inside that Job, never
+        // from this process. `tests/linkage.rs`'s `"controllers":10` moved in
+        // this same commit (PLAT-19.1's `trust_policy` took it to eight and
+        // D2 W8's `topic_discovery` to nine).
+        controllers.push(Box::pin(
+            weirkeeper::controllers::recovery_catalog::controller(client.clone(), runner.clone()),
+        ));
 
         let registered = controllers.len();
         info!(

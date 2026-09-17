@@ -76,6 +76,7 @@ pub mod backup;
 pub mod backup_destination;
 pub mod backup_schedule;
 pub mod kafka_cluster;
+pub mod recovery_catalog;
 pub mod restore;
 pub mod topic_discovery;
 pub mod trust_policy;

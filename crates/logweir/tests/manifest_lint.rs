@@ -531,6 +531,7 @@ fn every_granted_verb_has_a_caller() {
             "backups" => "Backup",
             "backupschedules" => "BackupSchedule",
             "kafkaclusters" => "KafkaCluster",
+            "recoverycatalogs" => "RecoveryCatalog",
             "restores" => "Restore",
             "trustrosters" => "TrustRoster",
             // PLAT-19.1, the other direction of the same mapping.
@@ -726,6 +727,10 @@ fn every_call_site_has_a_grant() {
             // `patch_status` — and `config/rbac/role.yaml` grants exactly those.
             "TopicDiscovery" => ("logweir.dev", "topicdiscoveries"),
             "BackupSchedule" => ("logweir.dev", "backupschedules"),
+            // D3 W8 (PLAT-15.1): the eighth kind. Its two rules are in
+            // `config/rbac/role.yaml` beside the six-kind list, with a NOTE FOR
+            // W13 that folds them into D3's own RBAC pass.
+            "RecoveryCatalog" => ("logweir.dev", "recoverycatalogs"),
             "KafkaCluster" => ("logweir.dev", "kafkaclusters"),
             "Restore" => ("logweir.dev", "restores"),
             "TrustRoster" => ("logweir.dev", "trustrosters"),
@@ -897,6 +902,17 @@ fn the_four_cluster_roles_are_exactly_as_specified() {
             v(&["topicdiscoveries"]),
             v(&["list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         ),
+        // D3 W8 (PLAT-15.1): `Controller::new(api, …)` in
+        // `controllers/recovery_catalog.rs`, and NO `get` — that reconciler
+        // never reads a `RecoveryCatalog` by name. A SEPARATE rule for the same
+        // reason `backupdestinations` and `topicdiscoveries` have one: folding
+        // a ninth kind into the six-kind list would silently widen
+        // `logweir-viewer` in a diff that reads as a controller change.
+        (
+            v(&["logweir.dev"]),
+            v(&["recoverycatalogs"]),
+            v(&["list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+        ),
         (v(&["logweir.dev"]), v(&["backups"]), v(&["create"])),
         (
             v(&["logweir.dev"]),
@@ -922,6 +938,13 @@ fn the_four_cluster_roles_are_exactly_as_specified() {
         (
             v(&["logweir.dev"]),
             v(&["topicdiscoveries/status"]),
+            v(&["patch"]),
+        ),
+        // D3 W8: `controllers/recovery_catalog.rs`'s `Api::patch_status`, a
+        // merge PATCH carrying `metadata.resourceVersion` — seam S7.
+        (
+            v(&["logweir.dev"]),
+            v(&["recoverycatalogs/status"]),
             v(&["patch"]),
         ),
         (

@@ -1,0 +1,2121 @@
+//! The bounded Kubernetes view of a durable recovery catalog — D3 §5.3, §5.4.
+//!
+//! # What lives here and why it is pure
+//!
+//! Everything in this module is a function of bytes and values: the grammar of
+//! the `catalogSync` result body, the two classification axes, the trust
+//! re-evaluation, the page and fence-pointer materialisation, the ten status
+//! counters and the names of every object the controller creates. Nothing here
+//! reads a clock, a socket or an API server —
+//! [`crate::controllers::recovery_catalog`] does that and hands the bytes over.
+//!
+//! That split is the reason a whole view can be asserted over a table instead
+//! of over a route table: "5 001 points page as 2 ConfigMaps, the newest 5 000
+//! are materialised and `truncated` is true" is a property of arithmetic, and a
+//! test that had to stand up a fake Job to state it would be testing the fake.
+//!
+//! # The durable truth is in object storage, and this is a window onto it
+//!
+//! D3 §5.3: the catalog itself is `logweir/catalog/v1/` in the destination.
+//! Kubernetes carries the **newest ≤ 5 000 points**, the counts, the histogram
+//! and the signer summary, in immutable `ConfigMap` pages **owned by the sync
+//! Job**. When the Job's TTL fires, Kubernetes garbage collection takes the
+//! pages with it and the catalog reports `ViewExpired` — which is honest, and
+//! is why **this decision adds no `delete` verb anywhere**.
+//!
+//! # Two axes, and nothing merges them
+//!
+//! [`Availability`] answers *can these bytes be read*, [`Verification`] answers
+//! *does the evidence verify under trusted key material*. A point is selectable
+//! for an ordinary restore only when it is `Available` **and**
+//! (`Verified` | `VerifiedHistorical`); everything else is listed with its exact
+//! state. A single "healthy" boolean over the two is precisely how a console
+//! comes to offer recovery from an archive whose manifest does not parse.
+//!
+//! # Who decides what
+//!
+//! The sync Job reads the archive, so it decides [`Availability`] and the
+//! **signature** verdict ([`SignatureVerdict`]) — did these bytes verify under
+//! the key material this controller mounted for it. It does NOT decide trust:
+//! whether a key is one this installation accepts, whether it is retired or
+//! revoked, is a question about the trust source and the controller is what
+//! holds that. [`classify_verification`] is the one place the two meet, and
+//! [`TrustView`] is the seam D3 W1/W10 replaces when `TrustPolicy` resolution
+//! lands (today it is synthesised from the `TrustRoster`, the trust source in
+//! use).
+
+use std::collections::{BTreeMap, BTreeSet};
+
+use chrono::{DateTime, TimeZone as _, Utc};
+use k8s_openapi::api::batch::v1::Job;
+use k8s_openapi::api::core::v1::ConfigMap;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
+use kube::api::ObjectMeta;
+use kube::ResourceExt as _;
+use serde::{Deserialize, Serialize};
+use serde_json::{json, Value};
+
+use crate::crds::recovery_catalog::{
+    CatalogCounts, CatalogPage, DeepCheck, HistogramBucket, SignerSummary, SyncMode, SyncSettings,
+};
+use crate::crds::{trust_roster::TrustRosterSpec, Time};
+use crate::job::{ConfigMapMount, EnvFromSecret, RunnerJobSpec, RunnerOwner};
+
+// ===========================================================================
+// The plan kind, and the one thing this module could not take from D2 yet
+// ===========================================================================
+
+/// The plan kind a `RecoveryCatalog` sync runs — D-SEAMS **S1**.
+///
+/// # WHY A STRING HERE AND NOT `CheckPlanKind::CatalogSync`
+///
+/// D2's [`logweir_core::check_contract::CheckPlanKind`] is a CLOSED five-member
+/// vocabulary and `catalogSync` is not in it: D2 W4's runner is in its fix
+/// round and its own test
+/// (`crates/logweir/tests/check_cli.rs::an_unknown_plan_kind_is_refused`) uses
+/// `{"catalogSync": …}` as its example of a kind serde does NOT know. The kind
+/// is D2's to add, in D2's crate, together with the `CheckRequest` variant the
+/// runner dispatches on; adding a sixth variant from here would be this task
+/// editing `logweir-core` and two other workers' test files to make a controller
+/// compile.
+///
+/// So the spelling lives here, ONCE, beside the discriminator, and
+/// `the_catalog_sync_kind_is_not_yet_in_the_closed_vocabulary` is the test that
+/// fails the day D2 lands it — at which point this constant and
+/// [`JOB_DISCRIMINATOR`] are deleted and every use becomes
+/// `CheckPlanKind::CatalogSync`. Everything else about the Job — the argv, the
+/// mount path, the three pinned environment variables, the deadline margin, the
+/// labels, `automountServiceAccountToken: false`, the plan `ConfigMap` and its
+/// 409 rule — is taken from [`crate::check`] and is not re-decided here.
+pub const PLAN_KIND: &str = "catalogSync";
+
+/// The two-letter Job-name discriminator for [`PLAN_KIND`], in the shape
+/// [`logweir_core::check_contract::CheckPlanKind::job_discriminator`] gives the
+/// other five (`td`, `rd`, `rp`, `da`, `ev`).
+///
+/// `cs`, and `the_job_discriminator_collides_with_no_landed_kind` asserts it is
+/// none of theirs: two kinds sharing a discriminator would give two different
+/// checks of one subject the same Job name, and the second would 409 forever.
+pub const JOB_DISCRIMINATOR: &str = "cs";
+
+/// The contract string a check plan carries, re-exported so this module names
+/// D2's spelling and never a second one.
+pub use logweir_core::check_contract::CHECK_PLAN_CONTRACT;
+
+// ===========================================================================
+// The two axes
+// ===========================================================================
+
+macro_rules! view_vocabulary {
+    ($(#[$meta:meta])* $name:ident { $($variant:ident => $text:literal),+ $(,)? }) => {
+        $(#[$meta])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
+        pub enum $name {
+            $($variant),+
+        }
+
+        impl $name {
+            /// The wire spelling, as it appears in a page entry and in a status
+            /// field.
+            #[must_use]
+            pub fn as_str(self) -> &'static str {
+                match self {
+                    $(Self::$variant => $text),+
+                }
+            }
+
+            /// Every member, in declaration order.
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+
+            /// The wire spelling back to a member.
+            ///
+            /// `None` for anything not in the table, and never a fallback
+            /// member: "this build does not know that state" and "this specific
+            /// state happened" are different facts, and collapsing them is how
+            /// a newer runner's `Partial` would be read as `Available`.
+            #[must_use]
+            pub fn parse(s: &str) -> Option<Self> {
+                match s {
+                    $($text => Some(Self::$variant),)+
+                    _ => None,
+                }
+            }
+        }
+
+        impl std::fmt::Display for $name {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                f.write_str(self.as_str())
+            }
+        }
+
+        impl Serialize for $name {
+            fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+                s.serialize_str(self.as_str())
+            }
+        }
+
+        impl<'de> Deserialize<'de> for $name {
+            fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+                let s = String::deserialize(d)?;
+                Self::parse(&s).ok_or_else(|| {
+                    serde::de::Error::custom(format!(
+                        concat!("`{}` is not a ", stringify!($name)),
+                        s
+                    ))
+                })
+            }
+        }
+    };
+}
+
+view_vocabulary! {
+    /// Can these bytes be read — D3 §5.4's first table.
+    ///
+    /// `Missing` and `Unreadable` are DIFFERENT ANSWERS and the difference is
+    /// the whole reason there are seven of these: a `NotFound` is "the archive
+    /// does not hold this", a 403 or a timeout is "this credential could not
+    /// tell", and reporting the second as the first is how an operator comes to
+    /// believe an outage deleted their backups.
+    Availability {
+        Available => "Available",
+        Missing => "Missing",
+        Unreadable => "Unreadable",
+        Deleted => "Deleted",
+        Conflict => "Conflict",
+        UnsupportedFormat => "UnsupportedFormat",
+        Partial => "Partial",
+    }
+}
+
+impl Availability {
+    /// Whether a point in this state may be offered for an ordinary restore —
+    /// the first half of D3 §5.4's selection rule.
+    #[must_use]
+    pub fn selectable(self) -> bool {
+        self == Self::Available
+    }
+}
+
+view_vocabulary! {
+    /// What the sync Job could say about a signature, and nothing about trust.
+    ///
+    /// The Job holds the key material this controller mounted and the bytes it
+    /// read; it can say "this DSSE verifies under key K" or "it does not". It
+    /// cannot say whether K is a key this installation accepts, is retired, or
+    /// was revoked for compromise — those are facts about the trust source,
+    /// which lives in the cluster and not in the archive.
+    SignatureVerdict {
+        Verified => "verified",
+        Invalid => "invalid",
+        NoEvidence => "noEvidence",
+        NotAttempted => "notAttempted",
+    }
+}
+
+view_vocabulary! {
+    /// Does the evidence verify under trusted key material — D3 §5.4's second
+    /// table. Produced by [`classify_verification`] and by nothing else.
+    Verification {
+        Verified => "Verified",
+        VerifiedHistorical => "VerifiedHistorical",
+        UntrustedSigner => "UntrustedSigner",
+        Revoked => "Revoked",
+        Invalid => "Invalid",
+        NoEvidence => "NoEvidence",
+        NotAttempted => "NotAttempted",
+    }
+}
+
+impl Verification {
+    /// Whether a point in this state may be offered for an ordinary restore —
+    /// the second half of D3 §5.4's selection rule.
+    #[must_use]
+    pub fn selectable(self) -> bool {
+        matches!(self, Self::Verified | Self::VerifiedHistorical)
+    }
+}
+
+/// D3 §5.4's selection rule, in one function so no surface writes its own.
+#[must_use]
+pub fn selectable(availability: Availability, verification: Verification) -> bool {
+    availability.selectable() && verification.selectable()
+}
+
+// ===========================================================================
+// The trust seam
+// ===========================================================================
+
+/// What a trust source says about one key.
+///
+/// `Retired` and `Revoked` are the two D3 §7.4 states a `TrustRoster` cannot
+/// express, which is exactly why `TrustPolicy` exists. They are declared here
+/// so the classification below is complete TODAY and the day W1/W10 land only
+/// [`TrustView::from_roster`] changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TrustKeyState {
+    /// Accepted for new evidence and for old.
+    Active,
+    /// Accepted for evidence signed while it was valid, and for nothing new.
+    Retired,
+    /// Compromised. Nothing it signed verifies without an independent
+    /// pre-revocation observation, which this view does not have.
+    Revoked,
+}
+
+/// One key the trust source lists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TrustKey {
+    /// `sha256(DER SPKI)` in lowercase hex — the same number `openssl` prints.
+    pub key_id: String,
+    /// The PUBLIC key, SubjectPublicKeyInfo in PEM. It is carried here so the
+    /// bundle the sync Job mounts and the ids this controller classifies
+    /// against come from ONE read of the trust source: two reads could observe
+    /// two different rosters and mount a bundle the classification does not
+    /// describe.
+    pub spki_pem: String,
+    /// Who the source says it belongs to. Display only, never authority.
+    pub subject: Option<String>,
+    /// When it stops being accepted for NEW evidence.
+    pub not_after: Option<Time>,
+    /// Its lifecycle state.
+    pub state: TrustKeyState,
+}
+
+/// The trust source, projected into the one shape this view needs.
+///
+/// # THE SEAM D3 W1/W10 OWNS
+///
+/// Today this is synthesised from the cluster-scoped `TrustRoster` —
+/// [`TrustView::from_roster`] — because that is the trust source in use. When
+/// `TrustPolicy` resolution lands, a second constructor takes the bound policy
+/// and nothing else in this file moves: `state` stops being `Active` for every
+/// key, and `Retired`/`Revoked` start being produced. The classification below
+/// already handles all three, and
+/// `a_retired_key_verifies_evidence_it_signed_while_valid` already asserts the
+/// behaviour, so the seam has a test before it has an implementation.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct TrustView {
+    /// The keys, in the source's own order.
+    pub keys: Vec<TrustKey>,
+    /// Which source produced this — for a status message, never for a decision.
+    pub source: String,
+}
+
+impl TrustView {
+    /// The `TrustRoster`'s signing keys, every one of them `Active`.
+    ///
+    /// `signingKeys` AND NOT `approverKeys`: D3 §7.3's usage split says a key
+    /// that may AUTHORISE a restore is not thereby a key that may ATTEST to
+    /// one. The roster's `approverKeys` are the authorisation half and are not
+    /// consulted here.
+    ///
+    /// Every entry is `Active` because the roster has no lifecycle field to
+    /// read — that absence is the defect `TrustPolicy` was designed to fix, and
+    /// inventing a state from `notAfter` alone would make a key that simply
+    /// expired indistinguishable from one that was retired on purpose.
+    /// `notAfter` IS carried, and [`classify_verification`] uses it.
+    #[must_use]
+    pub fn from_roster(spec: &TrustRosterSpec) -> Self {
+        Self {
+            keys: spec
+                .signing_keys
+                .iter()
+                .map(|k| TrustKey {
+                    key_id: k.key_id.clone(),
+                    spki_pem: k.spki_pem.clone(),
+                    subject: k.subject.clone(),
+                    not_after: k.not_after,
+                    state: TrustKeyState::Active,
+                })
+                .collect(),
+            source: TRUST_SOURCE_ROSTER.to_string(),
+        }
+    }
+
+    /// The key with this id, if the source lists one.
+    #[must_use]
+    pub fn key(&self, key_id: &str) -> Option<&TrustKey> {
+        self.keys.iter().find(|k| k.key_id == key_id)
+    }
+
+    /// Whether the source holds any key material at all.
+    ///
+    /// `false` is what makes every verdict [`Verification::NotAttempted`] and
+    /// `TrustAvailable=False`, and it is a DIFFERENT fact from "the signature
+    /// did not verify" — an installation with no trust material has not
+    /// disproved anything.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.keys.is_empty()
+    }
+}
+
+/// [`TrustView::source`] for the legacy roster.
+pub const TRUST_SOURCE_ROSTER: &str = "TrustRoster/default";
+
+/// Turn a signature verdict into a verification state, under a trust source.
+///
+/// # The order, and why each step is where it is
+///
+/// 1. **A signature that did not verify is [`Verification::Invalid`] whatever
+///    the trust source says.** Trust cannot rescue bytes that do not match
+///    their signature, and asking the roster first would let an unlisted key
+///    turn a forgery into a mere `UntrustedSigner`.
+/// 2. **No evidence and not-attempted pass through.** "There is no receipt" and
+///    "nothing could be fetched" are facts about the archive and the run, not
+///    about trust.
+/// 3. **No trust material at all is `NotAttempted`.** An installation that
+///    holds no key has not disproved a signature; reporting `UntrustedSigner`
+///    would name the archive as the problem when the cluster is.
+/// 4. **A verified signature under a key the source does not list is
+///    [`Verification::UntrustedSigner`]** — D3 §5.5's "fresh installation"
+///    case. It is never upgraded by proximity: a public key found beside an
+///    archive is a claim (`docs/keys.md`).
+/// 5. **Revoked wins over everything else the key could be**, because a
+///    revocation is a statement that the private half is in someone else's
+///    hands.
+/// 6. **An expired or retired key still verifies what it signed while it was
+///    valid** — [`Verification::VerifiedHistorical`], D3 §7.4. Evidence signed
+///    AFTER `notAfter` is [`Verification::Invalid`]: the key was not accepted
+///    then either.
+///
+/// `signed_at` is the point's own recorded instant, and `now` is this pass's.
+#[must_use]
+pub fn classify_verification(
+    signature: SignatureVerdict,
+    key_id: Option<&str>,
+    signed_at: Option<DateTime<Utc>>,
+    trust: &TrustView,
+    now: DateTime<Utc>,
+) -> Verification {
+    match signature {
+        SignatureVerdict::Invalid => return Verification::Invalid,
+        SignatureVerdict::NoEvidence => return Verification::NoEvidence,
+        SignatureVerdict::NotAttempted => return Verification::NotAttempted,
+        SignatureVerdict::Verified => {}
+    }
+    if trust.is_empty() {
+        return Verification::NotAttempted;
+    }
+    let Some(key_id) = key_id.filter(|k| !k.trim().is_empty()) else {
+        // A "verified" verdict that names no key cannot be attributed to one,
+        // and a verdict nobody can attribute is not a verdict.
+        return Verification::NotAttempted;
+    };
+    let Some(key) = trust.key(key_id) else {
+        return Verification::UntrustedSigner;
+    };
+    if key.state == TrustKeyState::Revoked {
+        return Verification::Revoked;
+    }
+    match key.not_after {
+        // Still inside its validity, whatever its declared state: a key that is
+        // retired but not yet past `notAfter` is accepted for what it signed.
+        Some(not_after) if now <= not_after => match key.state {
+            TrustKeyState::Retired => Verification::VerifiedHistorical,
+            _ => Verification::Verified,
+        },
+        Some(not_after) => match signed_at {
+            Some(signed) if signed <= not_after => Verification::VerifiedHistorical,
+            // Signed after the key stopped being accepted, or with no instant to
+            // place it by: not historical, because there is nothing to say it
+            // was inside the validity window.
+            _ => Verification::Invalid,
+        },
+        None => match key.state {
+            TrustKeyState::Retired => Verification::VerifiedHistorical,
+            _ => Verification::Verified,
+        },
+    }
+}
+
+// ===========================================================================
+// The `catalogSync` result body — the grammar
+// ===========================================================================
+
+/// `catalog-page=<i>/<n> count=<c> sha256=<hex>`.
+pub const PAGE_LINE_PREFIX: &str = "catalog-page=";
+/// `catalog-entry=<compact json>`.
+pub const ENTRY_LINE_PREFIX: &str = "catalog-entry=";
+/// `catalog-counts=<json>`.
+pub const COUNTS_LINE_PREFIX: &str = "catalog-counts=";
+/// `catalog-cursor=<json>`.
+pub const CURSOR_LINE_PREFIX: &str = "catalog-cursor=";
+/// `catalog-signers=<json>`.
+pub const SIGNERS_LINE_PREFIX: &str = "catalog-signers=";
+
+/// The most entries one body may declare, whatever it says — five times the
+/// `viewLimit` ceiling, so a runner may report more than is materialised
+/// without being able to exhaust the controller.
+pub const MAX_BODY_ENTRIES: usize = 25_000;
+
+/// The most pages a body may declare. Eight is the CRD's `status.pages`
+/// `maxItems`; a body that declares more is refused rather than truncated,
+/// because a truncated page set would silently drop points.
+pub const MAX_BODY_PAGES: usize = 8;
+
+/// One point, as the sync Job reports it.
+///
+/// **The receipt-derived facts are the binding** (D3 §5.2 rule 3): the point
+/// id, the receipt digest and the manifest digest are what a later restore
+/// re-checks. Everything else here is for display and for selection.
+///
+/// `topics` is deliberately ABSENT: a view entry is ~350 bytes so that 5 000 of
+/// them fit in two `ConfigMap`s, and a topic list is unbounded. The topics of a
+/// point live in its signed record in object storage, which is where PLAT-15.2's
+/// wizard reads them from.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunnerEntry {
+    /// `lwp1-<32 hex>` — content-derived from the receipt bytes (D3 §5.1).
+    pub point_id: String,
+    /// The archive SET identifier. Two receipts under one `backupId` are two
+    /// points, which is defect **RECEIPT-DUP**'s answer.
+    pub backup_id: String,
+    /// The run that wrote the receipt.
+    pub run_id: String,
+    /// The recovery point, in epoch milliseconds — the record's
+    /// `capture.started_at`.
+    pub recovery_point_at_ms: i64,
+    /// The covered window's start, in epoch milliseconds.
+    pub covered_from_ms: i64,
+    /// The covered window's end, EXCLUSIVE (invariant I22).
+    pub covered_to_ms: i64,
+    /// Where the bytes could be read from — one entry per location holding the
+    /// same receipt. An archive copied to a second bucket is ONE point in TWO
+    /// places (D3 §5.1).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub locations: Vec<String>,
+    /// The receipt's key under `logweir/`.
+    pub receipt_key: String,
+    /// `sha256:<hex>` of the receipt bytes — the binding the short id displays.
+    pub receipt_sha256: String,
+    /// The manifest's key, when the record names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_key: Option<String>,
+    /// `sha256:<hex>` of the manifest, when the record names one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_sha256: Option<String>,
+    /// When the record was written. Absent means unknown, never zero.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recorded_at: Option<Time>,
+    /// The record's `format_version`, when it parsed far enough to carry one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_version: Option<String>,
+    /// What the Job could read.
+    pub availability: Availability,
+    /// What the Job could say about the signature — NOT about trust.
+    pub signature: SignatureVerdict,
+    /// The key the signature verified under, or the key the record claims.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key_id: Option<String>,
+    /// A one-sentence remedy for a state that is not selectable. Never a
+    /// credential, a principal or log content.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remedy: Option<String>,
+}
+
+impl RunnerEntry {
+    /// The receipt-derived facts two records of one identity must agree on —
+    /// D3 §5.2 rule 3's set, minus the fields that are informational.
+    ///
+    /// `locations`, `recordedAt`, `signature`, `signerKeyId` and `remedy` are
+    /// deliberately OUT: two records differing only in where they were found
+    /// are one point in two places, which is the whole point of a
+    /// content-derived identity.
+    fn facts(&self) -> (i64, i64, i64, &str, &str, &str, Option<&str>, Option<&str>) {
+        (
+            self.recovery_point_at_ms,
+            self.covered_from_ms,
+            self.covered_to_ms,
+            &self.backup_id,
+            &self.run_id,
+            &self.receipt_sha256,
+            self.manifest_key.as_deref(),
+            self.manifest_sha256.as_deref(),
+        )
+    }
+}
+
+/// One point as it is written into a page — the runner's entry with the
+/// controller's [`Verification`] in place of the Job's [`SignatureVerdict`].
+///
+/// **`selectable` is materialised and not derived by the reader.** D3 §5.4's
+/// rule is one conjunction, and a UI that recomputed it from two enums it had
+/// to parse would be a second implementation of the rule that matters most.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ViewEntry {
+    /// See [`RunnerEntry::point_id`].
+    pub point_id: String,
+    /// See [`RunnerEntry::backup_id`].
+    pub backup_id: String,
+    /// See [`RunnerEntry::run_id`].
+    pub run_id: String,
+    /// See [`RunnerEntry::recovery_point_at_ms`].
+    pub recovery_point_at_ms: i64,
+    /// See [`RunnerEntry::covered_from_ms`].
+    pub covered_from_ms: i64,
+    /// See [`RunnerEntry::covered_to_ms`].
+    pub covered_to_ms: i64,
+    /// See [`RunnerEntry::locations`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub locations: Vec<String>,
+    /// See [`RunnerEntry::receipt_key`].
+    pub receipt_key: String,
+    /// See [`RunnerEntry::receipt_sha256`].
+    pub receipt_sha256: String,
+    /// See [`RunnerEntry::manifest_key`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_key: Option<String>,
+    /// See [`RunnerEntry::manifest_sha256`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub manifest_sha256: Option<String>,
+    /// See [`RunnerEntry::format_version`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub format_version: Option<String>,
+    /// D3 §5.4's first axis.
+    pub availability: Availability,
+    /// D3 §5.4's second axis, after the controller's trust re-evaluation.
+    pub verification: Verification,
+    /// See [`RunnerEntry::signer_key_id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signer_key_id: Option<String>,
+    /// `availability.selectable() && verification.selectable()`.
+    pub selectable: bool,
+    /// See [`RunnerEntry::remedy`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remedy: Option<String>,
+}
+
+/// What the sync counted over the WHOLE walk, not only over the window.
+///
+/// The window is the newest `viewLimit` points; these numbers cover everything
+/// the walk saw, which is what makes `truncated` meaningful and what lets the
+/// histogram describe the archive rather than the page set.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunnerCounts {
+    /// Every point the walk saw.
+    pub total: i64,
+    /// Availability buckets, over the whole walk.
+    #[serde(default)]
+    pub available: i64,
+    /// See [`Availability::Missing`].
+    #[serde(default)]
+    pub missing: i64,
+    /// See [`Availability::Unreadable`].
+    #[serde(default)]
+    pub unreadable: i64,
+    /// See [`Availability::Deleted`].
+    #[serde(default)]
+    pub deleted: i64,
+    /// See [`Availability::Conflict`].
+    #[serde(default)]
+    pub conflict: i64,
+    /// See [`Availability::UnsupportedFormat`].
+    #[serde(default)]
+    pub unsupported_format: i64,
+    /// See [`Availability::Partial`].
+    #[serde(default)]
+    pub partial: i64,
+    /// Signature buckets, over the whole walk.
+    #[serde(default)]
+    pub signature: SignatureCounts,
+    /// Points per day, newest day first. Bounded by [`MAX_HISTOGRAM_DAYS`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub by_day: Vec<DayCount>,
+}
+
+/// The signature half of [`RunnerCounts`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SignatureCounts {
+    /// Verified under the mounted key material.
+    #[serde(default)]
+    pub verified: i64,
+    /// Did not verify.
+    #[serde(default)]
+    pub invalid: i64,
+    /// A manifest with no receipt at all.
+    #[serde(default)]
+    pub no_evidence: i64,
+    /// No verdict was reached.
+    #[serde(default)]
+    pub not_attempted: i64,
+}
+
+/// One day of the histogram, as the runner reports it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DayCount {
+    /// `YYYY-MM-DD`, UTC.
+    pub day: String,
+    /// How many points.
+    pub points: i64,
+}
+
+/// Who signed the points in this archive, over the whole walk.
+///
+/// `trusted` is deliberately ABSENT: the Job does not decide trust. The
+/// controller adds it in [`signer_summaries`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RunnerSigner {
+    /// `sha256(DER SPKI)` in lowercase hex.
+    pub key_id: String,
+    /// What the record said the principal was. A HINT: it is unsigned metadata
+    /// and is never authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub principal_hint: Option<String>,
+    /// How many points it signed.
+    #[serde(default)]
+    pub points: i64,
+}
+
+/// Where the walk got to.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CursorReport {
+    /// The day shard the next `Index` sync resumes from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_shard: Option<String>,
+    /// The key the next `Full` rescan continues after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rescan_start_after: Option<String>,
+    /// Whether the walk finished. `false` is a budgeted walk that continues,
+    /// never a failure.
+    #[serde(default)]
+    pub complete: bool,
+}
+
+/// One page as the runner declared and filled it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ParsedPage {
+    /// Its 1-based index within the body.
+    pub index: u32,
+    /// How many pages the body declares.
+    pub of: u32,
+    /// How many entries the header declared.
+    pub declared_count: u32,
+    /// The digest the header declared, lowercase hex, no `sha256:` prefix.
+    pub declared_sha256: String,
+    /// The entries that parsed.
+    pub entries: Vec<RunnerEntry>,
+    /// How many entry lines did not parse and were skipped.
+    pub skipped: u32,
+}
+
+/// Everything one `catalogSync` result body carried.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct SyncBody {
+    /// The pages, in the order they arrived.
+    pub pages: Vec<ParsedPage>,
+    /// The whole-walk counts, when the body carried them.
+    pub counts: Option<RunnerCounts>,
+    /// Where the walk got to, when the body said.
+    pub cursor: Option<CursorReport>,
+    /// Who signed, over the whole walk.
+    pub signers: Vec<RunnerSigner>,
+    /// How many entry lines in the whole body did not parse.
+    pub skipped_entries: u32,
+}
+
+impl SyncBody {
+    /// Every entry from every page, in arrival order.
+    #[must_use]
+    pub fn entries(&self) -> Vec<RunnerEntry> {
+        self.pages.iter().flat_map(|p| p.entries.clone()).collect()
+    }
+}
+
+/// Why a `catalogSync` result body could not be read.
+///
+/// Every variant is a fact about the BODY and carries no log content: a body
+/// that does not decode is exactly the input nobody should paste into a status
+/// field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BodyError {
+    /// A `catalog-page=` header did not parse.
+    MalformedPageHeader,
+    /// An entry line arrived before any page header.
+    EntryBeforePage,
+    /// A page's entry lines do not hash to the digest its header declared.
+    PageDigestMismatch {
+        /// The page's 1-based index.
+        index: u32,
+    },
+    /// A page carried a different number of entry lines from the one it
+    /// declared.
+    PageCountMismatch {
+        /// The page's 1-based index.
+        index: u32,
+        /// What the header said.
+        declared: u32,
+        /// What arrived.
+        got: u32,
+    },
+    /// The body declared more pages than [`MAX_BODY_PAGES`].
+    TooManyPages {
+        /// What the body declared.
+        declared: u32,
+    },
+    /// The body carried more entry lines than [`MAX_BODY_ENTRIES`].
+    TooManyEntries,
+    /// Page indices were not `1..=n`, in order, each exactly once.
+    PageSequence,
+    /// A `catalog-counts=`, `catalog-cursor=` or `catalog-signers=` line did
+    /// not parse. The field names which.
+    MalformedSummary(&'static str),
+    /// The result body was not UTF-8.
+    NotUtf8,
+}
+
+impl std::fmt::Display for BodyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::MalformedPageHeader => write!(
+                f,
+                "a `{PAGE_LINE_PREFIX}` header is not `<i>/<n> count=<c> sha256=<hex>`"
+            ),
+            Self::EntryBeforePage => write!(
+                f,
+                "a `{ENTRY_LINE_PREFIX}` line arrived before any `{PAGE_LINE_PREFIX}` header, so \
+                 there is no page to attribute it to"
+            ),
+            Self::PageDigestMismatch { index } => write!(
+                f,
+                "page {index}'s entry lines do not hash to the digest its header declared; the \
+                 log read is not intact and no page is written from it"
+            ),
+            Self::PageCountMismatch {
+                index,
+                declared,
+                got,
+            } => write!(
+                f,
+                "page {index} declared {declared} entries and {got} arrived"
+            ),
+            Self::TooManyPages { declared } => write!(
+                f,
+                "the body declares {declared} pages and at most {MAX_BODY_PAGES} are readable"
+            ),
+            Self::TooManyEntries => write!(
+                f,
+                "the body carries more than {MAX_BODY_ENTRIES} entry lines"
+            ),
+            Self::PageSequence => {
+                write!(f, "page headers are not 1..=n in order, each exactly once")
+            }
+            Self::MalformedSummary(which) => {
+                write!(f, "the `{which}` line is not the JSON document it must be")
+            }
+            Self::NotUtf8 => write!(f, "the result body is not UTF-8"),
+        }
+    }
+}
+
+impl std::error::Error for BodyError {}
+
+impl BodyError {
+    /// The closed D2 code this is reported as.
+    ///
+    /// ALWAYS [`logweir_core::check_contract::CheckCode::ResultUnreadable`] —
+    /// D-SEAMS **S1**: failures use D2's closed error-code vocabulary rather
+    /// than new strings, and from a consumer's side "the sync's output did not
+    /// read" is one fact whatever the sub-cause. The sub-cause is the
+    /// [`Display`] above.
+    #[must_use]
+    pub fn code(&self) -> logweir_core::check_contract::CheckCode {
+        logweir_core::check_contract::CheckCode::ResultUnreadable
+    }
+}
+
+/// The digest a page header declares, over the page's own entry lines.
+///
+/// **Over the RAW line bodies, each followed by `\n`** — the JSON after
+/// `catalog-entry=`, byte for byte as it arrived, and never a re-serialisation.
+/// A digest over reparsed values would verify nothing: the point of the check is
+/// that the bytes this controller read are the bytes the Job wrote, which is
+/// transport integrity and explicitly NOT authorization (D3 §5.3). The
+/// receipt's own signature is the verification root.
+#[must_use]
+pub fn page_digest(entry_lines: &[&str]) -> String {
+    let mut buf = String::new();
+    for line in entry_lines {
+        buf.push_str(line);
+        buf.push('\n');
+    }
+    logweir_core::ids::sha256_hex(buf.as_bytes())
+}
+
+/// Parse a `catalogSync` result body — **pure**.
+///
+/// # Errors
+///
+/// [`BodyError`], naming which rule failed and carrying no body content.
+pub fn parse_body(text: &str) -> Result<SyncBody, BodyError> {
+    let mut out = SyncBody::default();
+    let mut headers: Vec<(u32, u32, u32, String)> = Vec::new();
+    let mut raw_pages: Vec<Vec<&str>> = Vec::new();
+    let mut entry_lines = 0usize;
+
+    for line in text.lines() {
+        let line = line.trim_end_matches('\r');
+        if let Some(rest) = line.strip_prefix(PAGE_LINE_PREFIX) {
+            let header = parse_page_header(rest).ok_or(BodyError::MalformedPageHeader)?;
+            if header.1 as usize > MAX_BODY_PAGES {
+                return Err(BodyError::TooManyPages { declared: header.1 });
+            }
+            headers.push(header);
+            raw_pages.push(Vec::new());
+        } else if let Some(rest) = line.strip_prefix(ENTRY_LINE_PREFIX) {
+            let page = raw_pages.last_mut().ok_or(BodyError::EntryBeforePage)?;
+            entry_lines += 1;
+            if entry_lines > MAX_BODY_ENTRIES {
+                return Err(BodyError::TooManyEntries);
+            }
+            page.push(rest);
+        } else if let Some(rest) = line.strip_prefix(COUNTS_LINE_PREFIX) {
+            out.counts = Some(
+                serde_json::from_str(rest)
+                    .map_err(|_| BodyError::MalformedSummary(COUNTS_LINE_PREFIX))?,
+            );
+        } else if let Some(rest) = line.strip_prefix(CURSOR_LINE_PREFIX) {
+            out.cursor = Some(
+                serde_json::from_str(rest)
+                    .map_err(|_| BodyError::MalformedSummary(CURSOR_LINE_PREFIX))?,
+            );
+        } else if let Some(rest) = line.strip_prefix(SIGNERS_LINE_PREFIX) {
+            out.signers = serde_json::from_str(rest)
+                .map_err(|_| BodyError::MalformedSummary(SIGNERS_LINE_PREFIX))?;
+        }
+        // Anything else is ignored: a result body shares the stream with
+        // whatever else the runner wrote, exactly as D2's frame decoder does.
+    }
+
+    if headers.len() > MAX_BODY_PAGES {
+        return Err(BodyError::TooManyPages {
+            declared: u32::try_from(headers.len()).unwrap_or(u32::MAX),
+        });
+    }
+    // 1..=n, in order, each exactly once — and every header agreeing on `n`.
+    let total = u32::try_from(headers.len()).unwrap_or(u32::MAX);
+    for (i, (index, of, _, _)) in headers.iter().enumerate() {
+        let want = u32::try_from(i + 1).unwrap_or(u32::MAX);
+        if *index != want || *of != total {
+            return Err(BodyError::PageSequence);
+        }
+    }
+
+    for ((index, _, declared_count, declared_sha256), raw) in headers.into_iter().zip(raw_pages) {
+        let got = u32::try_from(raw.len()).unwrap_or(u32::MAX);
+        if got != declared_count {
+            return Err(BodyError::PageCountMismatch {
+                index,
+                declared: declared_count,
+                got,
+            });
+        }
+        // THE DIGEST BEFORE THE PARSE. A page whose bytes did not survive the
+        // log read is refused as a page; deciding that after parsing would let
+        // a truncated read contribute the entries that happened to be whole.
+        if page_digest(&raw) != declared_sha256 {
+            return Err(BodyError::PageDigestMismatch { index });
+        }
+        let mut entries = Vec::with_capacity(raw.len());
+        let mut skipped = 0u32;
+        for body in &raw {
+            match serde_json::from_str::<RunnerEntry>(body) {
+                Ok(entry) => entries.push(entry),
+                // SKIPPED AND COUNTED, NEVER FATAL — D3 §5.2's reading rules:
+                // a malformed entry is one point this build cannot show, not a
+                // sync that failed. The count reaches the status message.
+                Err(_) => skipped = skipped.saturating_add(1),
+            }
+        }
+        out.skipped_entries = out.skipped_entries.saturating_add(skipped);
+        out.pages.push(ParsedPage {
+            index,
+            of: total,
+            declared_count,
+            declared_sha256,
+            entries,
+            skipped,
+        });
+    }
+    Ok(out)
+}
+
+/// `<i>/<n> count=<c> sha256=<hex>`.
+fn parse_page_header(rest: &str) -> Option<(u32, u32, u32, String)> {
+    let mut parts = rest.split_whitespace();
+    let (index, of) = parts.next()?.split_once('/')?;
+    let index: u32 = index.parse().ok()?;
+    let of: u32 = of.parse().ok()?;
+    if index == 0 || of == 0 || index > of {
+        return None;
+    }
+    let count: u32 = parts.next()?.strip_prefix("count=")?.parse().ok()?;
+    let sha = parts.next()?.strip_prefix("sha256=")?.to_ascii_lowercase();
+    if parts.next().is_some() {
+        return None;
+    }
+    if sha.len() != 64 || !sha.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return None;
+    }
+    Some((index, of, count, sha))
+}
+
+// ===========================================================================
+// Duplicate identity, ordering, and the window
+// ===========================================================================
+
+/// Collapse entries that share one point id — D3 §5.1 and §5.2 rule 4.
+///
+/// * **The same receipt found in two locations is ONE point with TWO
+///   locations.** Identity is `sha256(receipt bytes)`, so a copied archive
+///   yields the same id by construction; producing two rows would tell an
+///   operator they have two recovery points when they have one, in two places.
+/// * **Two records of one identity that disagree about a receipt-derived fact
+///   are a [`Availability::Conflict`]**, on the merged row, with the union of
+///   their locations. Neither is preferred: `logweir/` objects are never
+///   rewritten, so a disagreement means something wrote a second record, and
+///   picking one would be picking a side.
+/// * Two receipts under one `backupId` have DIFFERENT point ids and are two
+///   rows — defect **RECEIPT-DUP**.
+///
+/// The output is sorted newest recovery point first, with the point id as the
+/// tie-break so the order is total and the page set is reproducible.
+#[must_use]
+pub fn merge_entries(entries: Vec<RunnerEntry>) -> Vec<RunnerEntry> {
+    let mut by_id: BTreeMap<String, RunnerEntry> = BTreeMap::new();
+    let mut conflicted: BTreeSet<String> = BTreeSet::new();
+    for entry in entries {
+        match by_id.get_mut(&entry.point_id) {
+            None => {
+                by_id.insert(entry.point_id.clone(), entry);
+            }
+            Some(kept) => {
+                if kept.facts() != entry.facts() {
+                    conflicted.insert(entry.point_id.clone());
+                }
+                for location in entry.locations {
+                    if !kept.locations.contains(&location) {
+                        kept.locations.push(location);
+                    }
+                }
+                kept.locations.sort();
+                // The WORSE of the two availabilities is kept, so a point that
+                // is readable in one place and missing in another is not
+                // advertised as simply available.
+                if worse(entry.availability, kept.availability) {
+                    kept.availability = entry.availability;
+                }
+                if worse_signature(entry.signature, kept.signature) {
+                    kept.signature = entry.signature;
+                    kept.signer_key_id = entry.signer_key_id;
+                }
+            }
+        }
+    }
+    let mut out: Vec<RunnerEntry> = by_id.into_values().collect();
+    for entry in &mut out {
+        if conflicted.contains(&entry.point_id) {
+            entry.availability = Availability::Conflict;
+        }
+    }
+    out.sort_by(|a, b| {
+        b.recovery_point_at_ms
+            .cmp(&a.recovery_point_at_ms)
+            .then_with(|| a.point_id.cmp(&b.point_id))
+    });
+    out
+}
+
+/// A total order on "how bad is this availability", worst first.
+fn availability_rank(a: Availability) -> u8 {
+    match a {
+        Availability::Conflict => 0,
+        Availability::Missing => 1,
+        Availability::Partial => 2,
+        Availability::Unreadable => 3,
+        Availability::UnsupportedFormat => 4,
+        Availability::Deleted => 5,
+        Availability::Available => 6,
+    }
+}
+
+fn worse(candidate: Availability, kept: Availability) -> bool {
+    availability_rank(candidate) < availability_rank(kept)
+}
+
+fn signature_rank(s: SignatureVerdict) -> u8 {
+    match s {
+        SignatureVerdict::Invalid => 0,
+        SignatureVerdict::NoEvidence => 1,
+        SignatureVerdict::NotAttempted => 2,
+        SignatureVerdict::Verified => 3,
+    }
+}
+
+fn worse_signature(candidate: SignatureVerdict, kept: SignatureVerdict) -> bool {
+    signature_rank(candidate) < signature_rank(kept)
+}
+
+// ===========================================================================
+// Pages and the fence pointer
+// ===========================================================================
+
+/// The hard ceiling on `sync.viewLimit`, whatever the spec says — D3 §5.3.
+pub const MAX_VIEW_ENTRIES: usize = 5000;
+
+/// Entry bytes one page `ConfigMap` may carry.
+///
+/// 768 KiB against the API server's 1 MiB object limit: the remainder carries
+/// the object's own metadata, its annotations and the second data key. A page
+/// that overflowed would be rejected at CREATE with a message about etcd, which
+/// is not a message about a catalog.
+pub const PAGE_MAX_BYTES: usize = 768 * 1024;
+
+/// The most pages a view may have — the CRD's `status.pages` `maxItems`.
+pub const MAX_PAGES: usize = 8;
+
+/// The most days `status.histogram` may carry — the CRD's `maxItems`.
+pub const MAX_HISTOGRAM_DAYS: usize = 400;
+
+/// The most signers `status.signers` may carry — the CRD's `maxItems`.
+pub const MAX_SIGNERS: usize = 16;
+
+/// The `ConfigMap` key holding one page's entries, one compact JSON per line.
+pub const PAGE_DATA_KEY: &str = "entries.jsonl";
+
+/// The `ConfigMap` key holding the fence-pointer document.
+pub const INDEX_DATA_KEY: &str = "index.json";
+
+/// `sha256:<hex>` over a page's `entries.jsonl`, on the page object itself.
+pub const PAGE_DIGEST_ANNOTATION: &str = "logweir.dev/catalog-page-sha256";
+
+/// The point-id range and time range of one page — the fence pointer.
+///
+/// # A fence pointer EXCLUDES pages; it never proves one holds anything
+///
+/// `minPointId`/`maxPointId` bound the ids in a page, so a lookup for an id
+/// outside `[min, max]` may skip that page. Inside the range the page may still
+/// not hold it: entries are ordered by recovery point and not by id, so the
+/// range is not dense. That is the classic LSM fence-pointer contract — no
+/// false negatives, false positives allowed — and stating it is what stops a
+/// later reader treating a hit as an existence proof.
+///
+/// `newestMs`/`oldestMs` are the same idea on the axis the view is actually
+/// ordered by, and there the bound IS tight.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PageFence {
+    /// The page's 0-based index, matching `status.pages[].index`.
+    pub index: i64,
+    /// The `ConfigMap` holding it.
+    pub config_map_name: String,
+    /// How many entries it carries.
+    pub count: i64,
+    /// The first entry's point id, in view order.
+    pub first_point_id: String,
+    /// The last entry's point id, in view order.
+    pub last_point_id: String,
+    /// The lexicographically smallest point id in the page.
+    pub min_point_id: String,
+    /// The lexicographically largest point id in the page.
+    pub max_point_id: String,
+    /// The newest recovery point in the page, epoch milliseconds.
+    pub newest_ms: i64,
+    /// The oldest recovery point in the page, epoch milliseconds.
+    pub oldest_ms: i64,
+    /// `sha256:<hex>` over the page's `entries.jsonl`.
+    pub sha256: String,
+}
+
+/// The document in the fence-pointer `ConfigMap`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct IndexDocument {
+    /// The generation token every object of this view shares.
+    pub generation: String,
+    /// The `viewLimit` this view was materialised under.
+    pub view_limit: i64,
+    /// Whether the archive holds more points than the view carries.
+    pub truncated: bool,
+    /// How many entries the view carries in total.
+    pub entries: i64,
+    /// The pages, in view order.
+    pub pages: Vec<PageFence>,
+}
+
+/// One page, rendered and ready to become a `ConfigMap`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageDraft {
+    /// Its 0-based index.
+    pub index: usize,
+    /// Its entries, in view order.
+    pub entries: Vec<ViewEntry>,
+    /// `entries.jsonl` — one compact JSON per line, each line newline
+    /// terminated.
+    pub body: String,
+    /// `sha256:<hex>` over [`PageDraft::body`].
+    pub sha256: String,
+}
+
+impl PageDraft {
+    /// The fence pointer for this page, given its `ConfigMap` name.
+    ///
+    /// # Panics
+    ///
+    /// Never: [`materialise`] produces no empty page, and the `expect` names
+    /// that invariant rather than hiding it behind a default.
+    #[must_use]
+    pub fn fence(&self, config_map_name: &str) -> PageFence {
+        let first = self.entries.first().expect("a page draft is never empty");
+        let last = self.entries.last().expect("a page draft is never empty");
+        let mut ids: Vec<&str> = self.entries.iter().map(|e| e.point_id.as_str()).collect();
+        ids.sort_unstable();
+        PageFence {
+            index: i64::try_from(self.index).unwrap_or(i64::MAX),
+            config_map_name: config_map_name.to_string(),
+            count: i64::try_from(self.entries.len()).unwrap_or(i64::MAX),
+            first_point_id: first.point_id.clone(),
+            last_point_id: last.point_id.clone(),
+            min_point_id: (*ids.first().expect("a page draft is never empty")).to_string(),
+            max_point_id: (*ids.last().expect("a page draft is never empty")).to_string(),
+            newest_ms: first.recovery_point_at_ms,
+            oldest_ms: last.recovery_point_at_ms,
+            sha256: self.sha256.clone(),
+        }
+    }
+
+    /// `status.pages[]`'s row for this page.
+    #[must_use]
+    pub fn status_row(&self, config_map_name: &str) -> CatalogPage {
+        let fence = self.fence(config_map_name);
+        CatalogPage {
+            config_map_name: fence.config_map_name,
+            index: fence.index,
+            count: fence.count,
+            first_point_id: Some(fence.first_point_id),
+            last_point_id: Some(fence.last_point_id),
+            sha256: Some(fence.sha256),
+        }
+    }
+}
+
+/// The whole materialised view.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct View {
+    /// The pages, in view order.
+    pub pages: Vec<PageDraft>,
+    /// How many entries were materialised.
+    pub entries: usize,
+    /// Whether the archive holds more points than the view carries.
+    pub truncated: bool,
+    /// How many entries were dropped because the page budget ran out, as
+    /// opposed to because of `viewLimit`. Reported so "the view is a window"
+    /// and "this build could not fit the window" stay distinguishable.
+    pub dropped_for_space: usize,
+}
+
+/// The bounds a view is materialised under.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ViewLimits {
+    /// `spec.sync.viewLimit`, clamped to [`MAX_VIEW_ENTRIES`].
+    pub view_limit: usize,
+    /// Entry bytes per page — [`PAGE_MAX_BYTES`] in production, smaller in a
+    /// test that wants to reach the second page without 700 KiB of fixture.
+    pub page_max_bytes: usize,
+    /// The most pages — [`MAX_PAGES`].
+    pub max_pages: usize,
+}
+
+impl ViewLimits {
+    /// The bounds `spec.sync` asks for, clamped to what this build supports.
+    #[must_use]
+    pub fn from_settings(sync: &SyncSettings) -> Self {
+        Self {
+            view_limit: usize::try_from(sync.view_limit)
+                .unwrap_or(MAX_VIEW_ENTRIES)
+                .min(MAX_VIEW_ENTRIES),
+            page_max_bytes: PAGE_MAX_BYTES,
+            max_pages: MAX_PAGES,
+        }
+    }
+}
+
+/// Turn the walk's entries into pages — **pure**, and the function every
+/// "large catalog" property is stated over.
+///
+/// The entries are merged ([`merge_entries`]), the newest `viewLimit` are
+/// kept, each is re-classified against the trust source and rendered, and the
+/// renderings are packed into pages by byte budget. `total` is the whole walk's
+/// count, which is what decides `truncated`.
+#[must_use]
+pub fn materialise(
+    entries: Vec<RunnerEntry>,
+    total: i64,
+    trust: &TrustView,
+    limits: &ViewLimits,
+    now: DateTime<Utc>,
+) -> View {
+    let merged = merge_entries(entries);
+    let merged_len = merged.len();
+    let window: Vec<ViewEntry> = merged
+        .into_iter()
+        .take(limits.view_limit)
+        .map(|e| view_entry(e, trust, now))
+        .collect();
+
+    let mut pages: Vec<PageDraft> = Vec::new();
+    let mut current: Vec<ViewEntry> = Vec::new();
+    let mut current_bytes = 0usize;
+    let mut placed = 0usize;
+    let mut dropped_for_space = 0usize;
+
+    for entry in window {
+        let line = serde_json::to_string(&entry).unwrap_or_default();
+        let cost = line.len() + 1;
+        if !current.is_empty() && current_bytes + cost > limits.page_max_bytes {
+            pages.push(seal(std::mem::take(&mut current)));
+            current_bytes = 0;
+        }
+        if pages.len() >= limits.max_pages && current.is_empty() {
+            dropped_for_space += 1;
+            continue;
+        }
+        current_bytes += cost;
+        current.push(entry);
+        placed += 1;
+    }
+    if !current.is_empty() {
+        pages.push(seal(current));
+    }
+
+    View {
+        pages,
+        entries: placed,
+        // TRUNCATED IS ABOUT THE ARCHIVE AND NOT ABOUT THE PAGES. `total` is
+        // what the walk saw; `merged_len` is what survived de-duplication. The
+        // view is a window whenever either exceeds what was placed.
+        truncated: total > i64::try_from(placed).unwrap_or(i64::MAX)
+            || merged_len > placed
+            || dropped_for_space > 0,
+        dropped_for_space,
+    }
+}
+
+fn seal(entries: Vec<ViewEntry>) -> PageDraft {
+    let mut body = String::new();
+    for entry in &entries {
+        body.push_str(&serde_json::to_string(entry).unwrap_or_default());
+        body.push('\n');
+    }
+    PageDraft {
+        index: 0,
+        sha256: logweir_core::ids::sha256_prefixed(body.as_bytes()),
+        body,
+        entries,
+    }
+}
+
+/// One runner entry, re-classified against the trust source.
+#[must_use]
+pub fn view_entry(entry: RunnerEntry, trust: &TrustView, now: DateTime<Utc>) -> ViewEntry {
+    let signed_at = entry.recorded_at.or_else(|| {
+        Utc.timestamp_millis_opt(entry.recovery_point_at_ms)
+            .single()
+    });
+    let verification = classify_verification(
+        entry.signature,
+        entry.signer_key_id.as_deref(),
+        signed_at,
+        trust,
+        now,
+    );
+    ViewEntry {
+        selectable: selectable(entry.availability, verification),
+        point_id: entry.point_id,
+        backup_id: entry.backup_id,
+        run_id: entry.run_id,
+        recovery_point_at_ms: entry.recovery_point_at_ms,
+        covered_from_ms: entry.covered_from_ms,
+        covered_to_ms: entry.covered_to_ms,
+        locations: entry.locations,
+        receipt_key: entry.receipt_key,
+        receipt_sha256: entry.receipt_sha256,
+        manifest_key: entry.manifest_key,
+        manifest_sha256: entry.manifest_sha256,
+        format_version: entry.format_version,
+        availability: entry.availability,
+        verification,
+        signer_key_id: entry.signer_key_id,
+        remedy: entry.remedy,
+    }
+}
+
+/// Number the pages and build the fence-pointer document.
+#[must_use]
+pub fn index_document(
+    generation: &str,
+    limits: &ViewLimits,
+    view: &View,
+    names: &[String],
+) -> IndexDocument {
+    IndexDocument {
+        generation: generation.to_string(),
+        view_limit: i64::try_from(limits.view_limit).unwrap_or(i64::MAX),
+        truncated: view.truncated,
+        entries: i64::try_from(view.entries).unwrap_or(i64::MAX),
+        pages: view
+            .pages
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let mut numbered = p.clone();
+                numbered.index = i;
+                numbered.fence(names.get(i).map_or("", String::as_str))
+            })
+            .collect(),
+    }
+}
+
+// ===========================================================================
+// The ten status counters
+// ===========================================================================
+
+/// The counters, plus the states the v1alpha1 status has no field for.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Tally {
+    /// What goes on `status.counts`.
+    pub counts: CatalogCounts,
+    /// `(state, count)` for every state the ten fields cannot carry, in a
+    /// stable order. Named in the `Synced` condition message rather than
+    /// dropped.
+    pub unrepresented: Vec<(&'static str, i64)>,
+}
+
+/// Project the walk's counts and signer summary onto the CRD's ten counters.
+///
+/// # The ten fields are a PROJECTION and not a partition
+///
+/// D3 §5.4 has seven availability states and seven verification states;
+/// `status.counts` has ten fields across both axes. Three consequences, all of
+/// them stated rather than smoothed over:
+///
+/// * **`untrustedSigner` is computed here and not by the Job.** The Job holds
+///   the key material this controller mounted; whether a key is one this
+///   installation ACCEPTS is a fact about the trust source. Summing
+///   `signers[].points` over untrusted keys is what makes the number cover the
+///   whole walk rather than only the window.
+/// * **`unverified` is `notAttempted` plus `noEvidence`.** Both mean "no
+///   signature verdict was reached"; the CRD has one field for them.
+/// * **`Partial`, `Revoked` and `VerifiedHistorical` have no field.** They are
+///   returned in [`Tally::unrepresented`] so the condition message can name
+///   them, and they are the reason the availability fields do not sum to
+///   `total`. **NOTE FOR W13:** `status.counts.partial` and
+///   `status.counts.verifiedHistorical` are the two fields this would want.
+#[must_use]
+pub fn tally(counts: &RunnerCounts, signers: &[SignerSummary]) -> Tally {
+    let untrusted: i64 = signers
+        .iter()
+        .filter(|s| s.trusted == Some(false))
+        .map(|s| s.points.unwrap_or(0))
+        .sum();
+    let mut unrepresented = Vec::new();
+    if counts.partial > 0 {
+        unrepresented.push((Availability::Partial.as_str(), counts.partial));
+    }
+    Tally {
+        counts: CatalogCounts {
+            total: Some(counts.total),
+            available: Some(counts.available),
+            missing: Some(counts.missing),
+            unreadable: Some(counts.unreadable),
+            unverified: Some(
+                counts
+                    .signature
+                    .not_attempted
+                    .saturating_add(counts.signature.no_evidence),
+            ),
+            untrusted_signer: Some(untrusted),
+            invalid: Some(counts.signature.invalid),
+            conflict: Some(counts.conflict),
+            deleted: Some(counts.deleted),
+            unsupported_format: Some(counts.unsupported_format),
+        },
+        unrepresented,
+    }
+}
+
+/// `status.signers[]`, with the trust decision this controller made.
+///
+/// Bounded to [`MAX_SIGNERS`], **untrusted keys first**: a summary that dropped
+/// the unknown signer to stay inside the bound would hide the one row PLAT-15.2
+/// asks an administrator to act on. Within each group the order is by point
+/// count, descending, then by key id, so the list is stable across passes.
+#[must_use]
+pub fn signer_summaries(signers: &[RunnerSigner], trust: &TrustView) -> Vec<SignerSummary> {
+    let mut rows: Vec<SignerSummary> = signers
+        .iter()
+        .map(|s| SignerSummary {
+            key_id: s.key_id.clone(),
+            principal_hint: s.principal_hint.clone(),
+            points: Some(s.points),
+            // NEVER `None`. An absent `trusted` would read as "not known yet"
+            // on a surface whose whole job is to say whether an unknown key
+            // signed these points; with no trust material every key is
+            // untrusted, and the `TrustAvailable` condition is what says why.
+            trusted: Some(trust.key(&s.key_id).is_some()),
+        })
+        .collect();
+    rows.sort_by(|a, b| {
+        a.trusted
+            .cmp(&b.trusted)
+            .then_with(|| b.points.cmp(&a.points))
+            .then_with(|| a.key_id.cmp(&b.key_id))
+    });
+    rows.truncate(MAX_SIGNERS);
+    rows
+}
+
+/// `status.histogram`, bounded and newest day first.
+#[must_use]
+pub fn histogram(counts: &RunnerCounts) -> Vec<HistogramBucket> {
+    let mut days: Vec<HistogramBucket> = counts
+        .by_day
+        .iter()
+        .filter(|d| is_iso_day(&d.day))
+        .map(|d| HistogramBucket {
+            day: d.day.clone(),
+            points: d.points,
+        })
+        .collect();
+    days.sort_by(|a, b| b.day.cmp(&a.day));
+    days.dedup_by(|a, b| a.day == b.day);
+    days.truncate(MAX_HISTOGRAM_DAYS);
+    days
+}
+
+fn is_iso_day(day: &str) -> bool {
+    day.len() == 10
+        && day.as_bytes()[4] == b'-'
+        && day.as_bytes()[7] == b'-'
+        && day
+            .bytes()
+            .enumerate()
+            .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit())
+}
+
+// ===========================================================================
+// Names, tokens and the TTL
+// ===========================================================================
+
+/// How many hex characters of `sha256(catalog uid)` every name below carries.
+///
+/// Twenty, exactly as [`crate::check::job::OWNER_UID_HEX_CHARS`], and for the
+/// same reason: a name derived from the OBJECT's name can be made
+/// unschedulable by naming the object badly, and D3 §5.3's illustrative
+/// `<catalog>-g<generation>-p<index>` would overflow the 63-character
+/// `batch.kubernetes.io/job-name` label at a catalog name of 40 characters.
+/// The real names are published in `status.pages[].configMapName` and
+/// `status.indexConfigMap`, so no consumer ever computes one.
+pub const OWNER_UID_HEX_CHARS: usize = 20;
+
+/// The prefix of every object this view creates.
+pub const NAME_PREFIX: &str = "lwc-cs-";
+
+/// Why a sync is running.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SyncTrigger {
+    /// `spec.syncRequest` changed. The token is the spec's, verbatim.
+    Requested(String),
+    /// The interval elapsed. The number is the slot index.
+    Periodic(i64),
+}
+
+impl SyncTrigger {
+    /// The generation token this trigger produces — short, deterministic and
+    /// DNS-label safe.
+    ///
+    /// Deterministic is the whole property: two reconciles of one trigger
+    /// compute one name, so the second gets **409 `AlreadyExists`** from the
+    /// API server rather than creating a second sync Job. That is the same
+    /// mechanism [`crate::slot`] uses for scheduled backups, and it is what
+    /// makes `syncRequest` idempotent without a lock.
+    #[must_use]
+    pub fn token(&self) -> String {
+        match self {
+            Self::Requested(token) => {
+                let digest = logweir_core::ids::sha256_hex(token.as_bytes());
+                format!("r{}", &digest[..8])
+            }
+            Self::Periodic(slot) => format!("s{:x}", slot.max(&0)),
+        }
+    }
+}
+
+/// Which slot `now` falls in, for an interval in seconds.
+///
+/// `None` when the interval is zero — `sync.intervalSeconds: 0` is "manual
+/// only", and a manual-only catalog has no slots at all.
+#[must_use]
+pub fn periodic_slot(now: DateTime<Utc>, interval_seconds: i32) -> Option<i64> {
+    let interval = i64::from(interval_seconds);
+    if interval <= 0 {
+        return None;
+    }
+    Some(now.timestamp().div_euclid(interval))
+}
+
+/// The stem every object of one sync shares: `lwc-cs-<20 hex>-<token>`.
+#[must_use]
+pub fn sync_stem(catalog_uid: &str, token: &str) -> String {
+    let digest = logweir_core::ids::sha256_hex(catalog_uid.as_bytes());
+    format!("{NAME_PREFIX}{}-{token}", &digest[..OWNER_UID_HEX_CHARS])
+}
+
+/// The sync Job's name — [`sync_stem`].
+#[must_use]
+pub fn sync_job_name(catalog_uid: &str, token: &str) -> String {
+    sync_stem(catalog_uid, token)
+}
+
+/// Page `i`'s `ConfigMap` name: `<stem>-p<i>`, zero-based.
+#[must_use]
+pub fn page_config_map_name(stem: &str, index: usize) -> String {
+    format!("{stem}-p{index}")
+}
+
+/// The fence-pointer `ConfigMap`'s name: `<stem>-index`.
+#[must_use]
+pub fn index_config_map_name(stem: &str) -> String {
+    format!("{stem}-index")
+}
+
+/// The trust-material `ConfigMap`'s name: `lwc-cs-<20 hex>-trust-g<gen>`.
+///
+/// Owned by the **`RecoveryCatalog`** and not by the sync Job, deliberately: it
+/// is reused by every sync while the trust source's generation is unchanged, so
+/// tying it to a Job's TTL would make each sync render it again under a new
+/// owner and get a 409 it could not adopt. It carries only PUBLIC key material
+/// — a `ConfigMap` is the right object for that and a Secret would be the wrong
+/// one — and it is collected with the catalog, so nothing deletes it.
+#[must_use]
+pub fn trust_config_map_name(catalog_uid: &str, policy_generation: i64) -> String {
+    let digest = logweir_core::ids::sha256_hex(catalog_uid.as_bytes());
+    format!(
+        "{NAME_PREFIX}{}-trust-g{policy_generation}",
+        &digest[..OWNER_UID_HEX_CHARS]
+    )
+}
+
+/// Where the trust bundle is mounted inside the sync pod.
+pub const TRUST_MOUNT_PATH: &str = "/check/trust";
+/// The volume name for [`TRUST_MOUNT_PATH`].
+pub const TRUST_VOLUME: &str = "catalog-trust";
+/// The `ConfigMap` key holding the concatenated PEM bundle.
+pub const TRUST_BUNDLE_KEY: &str = "trust-bundle.pem";
+/// The `ConfigMap` key holding the key ids, one per line, in bundle order.
+pub const TRUST_KEY_IDS_KEY: &str = "key-ids.txt";
+
+/// The floor on a sync Job's `ttlSecondsAfterFinished` — D3 §5.3's one day.
+pub const TTL_FLOOR_SECONDS: i32 = 86_400;
+
+/// `ttlSecondsAfterFinished` for a sync Job: `max(3 × interval, 86400)`.
+///
+/// THREE INTERVALS, so a view outlives two missed syncs and the page set does
+/// not blink out between them; a day at minimum, so a manual-only catalog
+/// (`intervalSeconds: 0`) still keeps its view for a working day. The TTL is
+/// the ONLY thing that removes a page — `delete` is granted on nothing.
+#[must_use]
+pub fn ttl_seconds(interval_seconds: i32) -> i32 {
+    interval_seconds.saturating_mul(3).max(TTL_FLOOR_SECONDS)
+}
+
+/// When the view ages out: the Job's finish plus its TTL.
+#[must_use]
+pub fn view_expires_at(finished_at: DateTime<Utc>, interval_seconds: i32) -> DateTime<Utc> {
+    finished_at + chrono::Duration::seconds(i64::from(ttl_seconds(interval_seconds)))
+}
+
+/// Whether the view is stale — D3's test matrix: `2 × interval`.
+///
+/// A manual-only catalog is NEVER stale by the clock: nothing was promised
+/// about when it would sync, and reporting `Stale` for a catalog whose owner
+/// asked for manual syncs would be reporting the configuration as a fault.
+#[must_use]
+pub fn is_stale(
+    now: DateTime<Utc>,
+    synced_at: Option<DateTime<Utc>>,
+    interval_seconds: i32,
+) -> bool {
+    if interval_seconds <= 0 {
+        return false;
+    }
+    let Some(synced_at) = synced_at else {
+        return false;
+    };
+    now > synced_at + chrono::Duration::seconds(i64::from(interval_seconds) * 2)
+}
+
+// ===========================================================================
+// The objects the controller creates
+// ===========================================================================
+
+/// An owner reference that does NOT block deletion — D3 §5.3.
+///
+/// `blockOwnerDeletion: false` on every page, on the fence pointer and on the
+/// trust bundle. `true` asks the API server for `update` on the owner's
+/// `finalizers` subresource under the `OwnerReferencesPermissionEnforcement`
+/// admission plugin, which this `ClusterRole` grants on nothing; and blocking
+/// the deletion of a Job whose TTL has fired is the opposite of what the
+/// garbage-collection design wants.
+fn owner_reference(owner: &RunnerOwner) -> OwnerReference {
+    OwnerReference {
+        api_version: owner.api_version.clone(),
+        kind: owner.kind.clone(),
+        name: owner.name.clone(),
+        uid: owner.uid.clone(),
+        controller: Some(true),
+        block_owner_deletion: Some(false),
+    }
+}
+
+/// One immutable page `ConfigMap`, owned by the sync Job.
+#[must_use]
+pub fn page_config_map(
+    name: &str,
+    namespace: &str,
+    job_owner: &RunnerOwner,
+    draft: &PageDraft,
+    index: usize,
+) -> ConfigMap {
+    ConfigMap {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(namespace.to_string()),
+            labels: Some(BTreeMap::from([
+                (
+                    crate::check::job::LABEL_MANAGED_BY.to_string(),
+                    crate::check::job::MANAGED_BY.to_string(),
+                ),
+                (
+                    LABEL_COMPONENT.to_string(),
+                    COMPONENT_CATALOG_PAGE.to_string(),
+                ),
+                (LABEL_CATALOG_UID.to_string(), job_owner.uid.clone()),
+                (LABEL_PAGE_INDEX.to_string(), index.to_string()),
+            ])),
+            annotations: Some(BTreeMap::from([(
+                PAGE_DIGEST_ANNOTATION.to_string(),
+                draft.sha256.clone(),
+            )])),
+            owner_references: Some(vec![owner_reference(job_owner)]),
+            ..ObjectMeta::default()
+        },
+        // A VIEW A SECOND PASS COULD REWRITE IS NOT A VIEW. Immutability is
+        // what makes `status.pages[].sha256` mean something to a reader that
+        // fetched the page a minute later.
+        immutable: Some(true),
+        data: Some(BTreeMap::from([(
+            PAGE_DATA_KEY.to_string(),
+            draft.body.clone(),
+        )])),
+        binary_data: None,
+    }
+}
+
+/// The immutable fence-pointer `ConfigMap`, owned by the sync Job.
+///
+/// # Errors
+///
+/// [`serde_json::Error`] if the document does not serialise, which it always
+/// does; named rather than unwrapped.
+pub fn index_config_map(
+    name: &str,
+    namespace: &str,
+    job_owner: &RunnerOwner,
+    document: &IndexDocument,
+) -> Result<ConfigMap, serde_json::Error> {
+    let body = serde_json::to_string(document)?;
+    Ok(ConfigMap {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(namespace.to_string()),
+            labels: Some(BTreeMap::from([
+                (
+                    crate::check::job::LABEL_MANAGED_BY.to_string(),
+                    crate::check::job::MANAGED_BY.to_string(),
+                ),
+                (
+                    LABEL_COMPONENT.to_string(),
+                    COMPONENT_CATALOG_INDEX.to_string(),
+                ),
+                (LABEL_CATALOG_UID.to_string(), job_owner.uid.clone()),
+            ])),
+            annotations: Some(BTreeMap::from([(
+                PAGE_DIGEST_ANNOTATION.to_string(),
+                logweir_core::ids::sha256_prefixed(body.as_bytes()),
+            )])),
+            owner_references: Some(vec![owner_reference(job_owner)]),
+            ..ObjectMeta::default()
+        },
+        immutable: Some(true),
+        data: Some(BTreeMap::from([(INDEX_DATA_KEY.to_string(), body)])),
+        binary_data: None,
+    })
+}
+
+/// The immutable trust-material `ConfigMap`, owned by the `RecoveryCatalog`.
+#[must_use]
+pub fn trust_config_map(
+    name: &str,
+    namespace: &str,
+    catalog_owner: &RunnerOwner,
+    trust: &TrustView,
+) -> ConfigMap {
+    let bundle = trust
+        .keys
+        .iter()
+        .map(|k| k.spki_pem.trim_end().to_string())
+        .collect::<Vec<_>>()
+        .join("\n");
+    let key_ids = trust
+        .keys
+        .iter()
+        .map(|k| k.key_id.clone())
+        .collect::<Vec<_>>()
+        .join("\n");
+    ConfigMap {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(namespace.to_string()),
+            labels: Some(BTreeMap::from([
+                (
+                    crate::check::job::LABEL_MANAGED_BY.to_string(),
+                    crate::check::job::MANAGED_BY.to_string(),
+                ),
+                (
+                    LABEL_COMPONENT.to_string(),
+                    COMPONENT_CATALOG_TRUST.to_string(),
+                ),
+                (LABEL_CATALOG_UID.to_string(), catalog_owner.uid.clone()),
+            ])),
+            owner_references: Some(vec![owner_reference(catalog_owner)]),
+            ..ObjectMeta::default()
+        },
+        immutable: Some(true),
+        // PUBLIC MATERIAL ONLY. `spkiPem` is a SubjectPublicKeyInfo; nothing
+        // private is ever placed in a ConfigMap, and the one-signer gate
+        // (`scripts/check-one-signer.sh`) is why this crate cannot even reach a
+        // private key type.
+        data: Some(BTreeMap::from([
+            (TRUST_BUNDLE_KEY.to_string(), bundle),
+            (TRUST_KEY_IDS_KEY.to_string(), key_ids),
+        ])),
+        binary_data: None,
+    }
+}
+
+/// `app.kubernetes.io/component` on every object this view creates.
+pub const LABEL_COMPONENT: &str = "app.kubernetes.io/component";
+/// The component value on a page `ConfigMap`.
+pub const COMPONENT_CATALOG_PAGE: &str = "catalog-page";
+/// The component value on the fence-pointer `ConfigMap`.
+pub const COMPONENT_CATALOG_INDEX: &str = "catalog-index";
+/// The component value on the trust `ConfigMap`.
+pub const COMPONENT_CATALOG_TRUST: &str = "catalog-trust";
+/// The `RecoveryCatalog` UID, as a label. **A label and never an identity** —
+/// ownership is decided by `ownerReferences`, exactly as D-SEAMS **S6** requires
+/// for pods.
+pub const LABEL_CATALOG_UID: &str = "logweir.dev/catalog-uid";
+/// A page's index, as a label, so an operator can `kubectl get cm -l`.
+pub const LABEL_PAGE_INDEX: &str = "logweir.dev/catalog-page-index";
+
+/// Whether an object already at a page's name IS this sync's page.
+///
+/// The same three questions [`crate::check::plan::accepts_existing`] asks, for
+/// the same reasons, and a fourth: the digest annotation must match, so a page
+/// left by a sync that computed a different view is refused rather than
+/// adopted. **A foreign-owned object is never adopted**, whatever it contains:
+/// adopting it would publish somebody else's bytes as this catalog's view.
+///
+/// # Errors
+///
+/// [`PageConflict`], naming which of the four failed and naming no content.
+pub fn accepts_existing_page(
+    existing: &ConfigMap,
+    owner_uid: &str,
+    digest: &str,
+) -> Result<(), PageConflict> {
+    let owned = existing
+        .metadata
+        .owner_references
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .any(|o| o.uid == owner_uid && o.controller == Some(true));
+    if !owned {
+        return Err(PageConflict(format!(
+            "ConfigMap {} exists and is not controlled by this sync Job; a catalog page is never \
+             adopted across owners",
+            existing.name_any()
+        )));
+    }
+    if existing.immutable != Some(true) {
+        return Err(PageConflict(format!(
+            "ConfigMap {} exists without `immutable: true`, so its content could change under a \
+             reader; it is not adopted",
+            existing.name_any()
+        )));
+    }
+    let found = existing
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(PAGE_DIGEST_ANNOTATION))
+        .map(String::as_str);
+    if found != Some(digest) {
+        return Err(PageConflict(format!(
+            "ConfigMap {} exists carrying digest {} and this pass rendered {digest}; two \
+             different views want one name",
+            existing.name_any(),
+            found.unwrap_or("<none>")
+        )));
+    }
+    Ok(())
+}
+
+/// A page name that is taken by something this sync did not write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PageConflict(pub String);
+
+impl std::fmt::Display for PageConflict {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for PageConflict {}
+
+// ===========================================================================
+// The sync Job and its plan
+// ===========================================================================
+
+/// The `catalogSync` request, as the plan carries it.
+///
+/// **NOTE FOR D2's runner:** this is the shape `CheckRequest::CatalogSync`
+/// takes when the kind lands in `logweir-core`; the struct moves there
+/// unchanged and this declaration is deleted. It carries no credential and no
+/// endpoint of its own: the destination block is D2's
+/// [`logweir_core::check_contract::DestinationPlan`], rendered from the
+/// resolved destination, and every `AWS_*` variable is projected onto the Job
+/// by [`crate::destination::ResolvedDestination::job_env`] (D-SEAMS **S5**).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CatalogSyncRequest {
+    /// Where the catalog is.
+    pub destination: logweir_core::check_contract::DestinationPlan,
+    /// `Index` or `Full`.
+    pub mode: SyncMode,
+    /// How hard to check each point.
+    pub deep_check: DeepCheck,
+    /// The object budget for one run.
+    pub max_objects_per_run: i64,
+    /// How many newest points to relay.
+    pub view_limit: i64,
+    /// The day shard an `Index` walk resumes from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_shard: Option<String>,
+    /// The key a `Full` rescan continues after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rescan_start_after: Option<String>,
+    /// Where the PEM bundle of trusted signing keys is mounted, or `None` when
+    /// this installation holds no trust material at all.
+    ///
+    /// `None` is a real answer and not an omission: with no bundle the runner
+    /// reports [`SignatureVerdict::NotAttempted`] for every point, which is how
+    /// `unverified` ends up equal to `total` and `TrustAvailable=False` ends up
+    /// on the status. A runner that silently verified against nothing would
+    /// report `verified` for a forgery.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_bundle_file: Option<String>,
+}
+
+/// The plan document — the same field names D2's [`CheckPlan`] carries.
+///
+/// A `serde_json::Value` and not a typed `CheckPlan` for exactly the reason
+/// [`PLAN_KIND`] gives: `CheckRequest` is a closed enum and `catalogSync` is
+/// not yet a variant, so a typed value cannot be constructed. The field
+/// spellings are taken from the type's own `serde` attributes, and
+/// `the_plan_document_carries_d2s_field_names` asserts they match what
+/// `CheckPlan` deserialises.
+///
+/// [`CheckPlan`]: logweir_core::check_contract::CheckPlan
+///
+/// # Errors
+///
+/// [`serde_json::Error`] if the request does not serialise.
+pub fn plan_document(
+    subject_uid: &str,
+    timeout_seconds: u32,
+    policy_digest: Option<&str>,
+    request: &CatalogSyncRequest,
+) -> Result<Vec<u8>, serde_json::Error> {
+    let mut doc = json!({
+        "contract": CHECK_PLAN_CONTRACT,
+        "contractVersion": logweir_core::check_contract::CHECK_CONTRACT_VERSION,
+        "subjectUid": subject_uid,
+        "timeoutSeconds": timeout_seconds,
+        "request": { PLAN_KIND: serde_json::to_value(request)? },
+    });
+    if let Some(digest) = policy_digest {
+        doc.as_object_mut()
+            .expect("a plan document is a JSON object")
+            .insert(
+                "policyDigest".to_string(),
+                Value::String(digest.to_string()),
+            );
+    }
+    serde_json::to_vec(&doc)
+}
+
+/// Everything one sync Job needs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SyncJobSpec {
+    /// The Job's name — [`sync_job_name`].
+    pub name: String,
+    /// The namespace: the catalog's, which is the destination's.
+    pub namespace: String,
+    /// The `RecoveryCatalog` that owns the Job.
+    pub owner: RunnerOwner,
+    /// The plan `ConfigMap`'s name.
+    pub plan_config_map: String,
+    /// `sha256:<hex>` of the plan document.
+    pub plan_sha256: String,
+    /// The catalog's UID, pinned into the environment.
+    pub subject_uid: String,
+    /// The plan's own budget; the Job's deadline is this plus
+    /// [`crate::check::job::DEADLINE_MARGIN_SECONDS`].
+    pub timeout_seconds: i64,
+    /// `ttlSecondsAfterFinished` — [`ttl_seconds`].
+    pub ttl_seconds: i32,
+    /// The ServiceAccount: `logweir-runner`.
+    pub service_account_name: String,
+    /// The trust `ConfigMap` to mount, when there is trust material.
+    pub trust_config_map: Option<String>,
+    /// The destination's complete, explicit environment.
+    pub env_literal: Vec<(String, String)>,
+    /// The destination's credential, by `secretKeyRef`.
+    pub env_from_secret: Vec<EnvFromSecret>,
+    /// The runner image, or `None` for the pin.
+    pub image: Option<String>,
+    /// The pull policy, or `None` for the compiled-in.
+    pub image_pull_policy: Option<String>,
+}
+
+/// The sync Job.
+///
+/// # What is taken from the check framework and what is decided here
+///
+/// The argv, the `/check` mount, the plan key, the three pinned environment
+/// variables, `RUST_LOG=warn`, the deadline margin and every property
+/// [`crate::job::build`] holds — container name, `restartPolicy: Never`,
+/// `backoffLimit: 0`, `automountServiceAccountToken: false`, the security
+/// context — are the framework's and are not re-decided.
+///
+/// Two things are this function's, and only two:
+///
+/// 1. The Job name and the `logweir.dev/check-kind` label carry [`PLAN_KIND`],
+///    because the closed enum cannot spell it yet.
+/// 2. **`ttlSecondsAfterFinished` IS SET AT CREATION**, unlike every other
+///    check Job in this tree. The framework patches a TTL on only after the
+///    status commit because a check's relay lives on the pod and the TTL
+///    controller removes Jobs and pods together. A sync Job's TTL is at least a
+///    DAY ([`TTL_FLOOR_SECONDS`]), so it cannot race a read in the same
+///    reconcile — and it is load-bearing in a way the ten-minute one is not:
+///    the TTL is the ONLY thing that ever removes a page, so a Job that
+///    finished without one would pin its pages forever if the controller died
+///    before it could patch. Setting it at creation is what makes the "no
+///    `delete` verb" design safe against a crash.
+#[must_use]
+pub fn build_sync_job(spec: &SyncJobSpec) -> Job {
+    let mut config_map_mounts = vec![ConfigMapMount {
+        volume: crate::check::job::CHECK_VOLUME.to_string(),
+        config_map_name: spec.plan_config_map.clone(),
+        mount_path: crate::check::job::CHECK_MOUNT_PATH.to_string(),
+        items: Vec::new(),
+    }];
+    if let Some(trust) = spec.trust_config_map.as_ref() {
+        config_map_mounts.push(ConfigMapMount {
+            volume: TRUST_VOLUME.to_string(),
+            config_map_name: trust.clone(),
+            mount_path: TRUST_MOUNT_PATH.to_string(),
+            items: Vec::new(),
+        });
+    }
+
+    let mut env_literal = vec![
+        (
+            crate::check::job::CONTRACT_VERSION_ENV.to_string(),
+            logweir_core::check_contract::CHECK_CONTRACT_VERSION.to_string(),
+        ),
+        (
+            crate::check::job::PLAN_SHA256_ENV.to_string(),
+            spec.plan_sha256.clone(),
+        ),
+        (
+            crate::check::job::SUBJECT_UID_ENV.to_string(),
+            spec.subject_uid.clone(),
+        ),
+        ("RUST_LOG".to_string(), "warn".to_string()),
+    ];
+    env_literal.extend(spec.env_literal.iter().cloned());
+
+    let mut job = crate::job::build(&RunnerJobSpec {
+        name: spec.name.clone(),
+        namespace: spec.namespace.clone(),
+        owner: spec.owner.clone(),
+        args: crate::check::job::runner_argv(),
+        deadline_seconds: spec.timeout_seconds + crate::check::job::DEADLINE_MARGIN_SECONDS,
+        service_account_name: spec.service_account_name.clone(),
+        secret_mounts: Vec::new(),
+        config_map_mounts,
+        env_from_secret: spec.env_from_secret.clone(),
+        env_literal,
+        plan_config_map: None,
+        image: spec.image.clone(),
+        image_pull_policy: spec.image_pull_policy.clone(),
+    });
+
+    let labels = BTreeMap::from([
+        (
+            crate::check::job::LABEL_MANAGED_BY.to_string(),
+            crate::check::job::MANAGED_BY.to_string(),
+        ),
+        (
+            crate::check::job::LABEL_COMPONENT.to_string(),
+            crate::check::job::COMPONENT_CHECK.to_string(),
+        ),
+        (
+            crate::check::job::LABEL_CHECK_KIND.to_string(),
+            PLAN_KIND.to_string(),
+        ),
+        (
+            crate::check::job::LABEL_CHECK_OWNER_UID.to_string(),
+            spec.owner.uid.clone(),
+        ),
+    ]);
+    job.metadata.labels = Some(labels.clone());
+    if let Some(job_spec) = job.spec.as_mut() {
+        job_spec.ttl_seconds_after_finished = Some(spec.ttl_seconds);
+        let mut meta = job_spec.template.metadata.take().unwrap_or_default();
+        meta.labels = Some(labels);
+        job_spec.template.metadata = Some(meta);
+    }
+    job
+}

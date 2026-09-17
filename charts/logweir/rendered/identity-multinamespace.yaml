@@ -6422,6 +6422,11 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["topicdiscoveries"]
     verbs: ["list", "watch"]
+  # D3 W8 (PLAT-15.1): the ninth kind. `list`/`watch` only — the reconciler
+  # never reads a catalog by name. See `config/rbac/role.yaml`.
+  - apiGroups: ["logweir.dev"]
+    resources: ["recoverycatalogs"]
+    verbs: ["list", "watch"]
   - apiGroups: ["logweir.dev"]
     resources: ["backups"]
     verbs: ["create"]
@@ -6439,6 +6444,9 @@ rules:
     verbs: ["patch"]
   - apiGroups: ["logweir.dev"]
     resources: ["topicdiscoveries/status"]
+    verbs: ["patch"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["recoverycatalogs/status"]
     verbs: ["patch"]
   - apiGroups: ["batch"]
     resources: ["jobs"]

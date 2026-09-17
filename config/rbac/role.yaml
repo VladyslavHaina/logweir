@@ -164,6 +164,28 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["topicdiscoveries"]
     verbs: ["list", "watch"]
+  # THE NINTH KIND, IN ITS OWN RULE — D3 W8, PLAT-15.1. `list` and `watch` are
+  # `Controller::new(api, …)` in `controllers/recovery_catalog.rs`, and they are
+  # the WHOLE grant: `get` is NOT here, because that reconciler never reads a
+  # `RecoveryCatalog` by name — the watcher hands it the object and it patches
+  # that object's `/status`. Every granted verb has a caller (critique B M18),
+  # and this is the first kind for which the uniform `get/list/watch` shape
+  # would have been a grant with none — the same call this file already makes
+  # for `topicdiscoveries` just above.
+  #
+  # NOTE FOR W13 (D3 §14): these two rules are W13's to own. They are here
+  # because the reverse lint `every_call_site_has_a_grant` fails the moment
+  # `Api<RecoveryCatalog>` appears under `crates/weirkeeper/src/`, and a call
+  # with no grant 403s in production while every route-table test stays green.
+  # W13 folds them into its own RBAC pass together with `protectionpolicies`,
+  # `rehearsalschedules`, `retentionpolicies` and `trustpolicies`, and adds the
+  # matching human-role rows (viewer get/list/watch; operator create plus the
+  # CEL-narrowed `syncRequest` patch). **NO `delete` ANYWHERE**: the view is
+  # collected by the sync Job's TTL and by ownerReference garbage collection,
+  # which is the whole reason the pages are owned by the Job (D3 §5.3).
+  - apiGroups: ["logweir.dev"]
+    resources: ["recoverycatalogs"]
+    verbs: ["list", "watch"]
   # THE ONE WRITE TO A CUSTOM RESOURCE THAT IS NOT A STATUS, AND ITS CALLER.
   # `controllers/backup_schedule.rs` creates one `Backup` per due slot. A
   # schedule that could not create a backup is a schedule that does nothing.
@@ -210,6 +232,14 @@ rules:
   # literal `update` here would be a granted verb with no caller.
   - apiGroups: ["logweir.dev"]
     resources: ["topicdiscoveries/status"]
+    verbs: ["patch"]
+  # AND ITS STATUS SUBRESOURCE, `patch` and nothing else — seam S7.
+  # `controllers/recovery_catalog.rs` writes the generation, the counts, the
+  # histogram, the signer summary, the page list and the fence pointer with
+  # `Api::patch_status` and a `Patch::Merge` carrying `metadata.resourceVersion`
+  # as the update precondition. NOTE FOR W13, as above.
+  - apiGroups: ["logweir.dev"]
+    resources: ["recoverycatalogs/status"]
     verbs: ["patch"]
   # THE RUNNER JOBS. `create` in `controllers/{backup,kafka_cluster,restore}.rs`
   # (`jobs.create(&PostParams::default(), &job::build(&spec))`); `get` is each
