@@ -294,7 +294,11 @@ pub async fn command(
     };
     check_name(name)?;
     crate::http::parse_query(uri.query(), &[])?;
-    IdempotencyKey::refuse_on(&headers, ROUTE_SET_SUSPENSION)?;
+    IdempotencyKey::refuse_on(
+        &headers,
+        ROUTE_SET_SUSPENSION,
+        Some("expectedResourceVersion"),
+    )?;
     let request: SetSuspensionRequest = read_json(body, MAX_JSON_BODY).await?;
     if validate::check_single_line(&request.expected_resource_version, 128).is_err() {
         return Err(ApiError::validation(vec![FieldError::new(

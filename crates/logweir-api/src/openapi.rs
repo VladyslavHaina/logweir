@@ -506,11 +506,11 @@ fn paths() -> Value {
             vec![Op {
                 method: "post",
                 operation_id: "createDestinationFromLegacy",
-                summary: "Adopt the location of a legacy BackupSchedule or Backup as a BackupDestination, deriving the storage block from facts and refusing with legacy_location_unknown when the facts are not there. Existing objects are never mutated.",
+                summary: "Adopt the location of a legacy BackupSchedule or Backup as a BackupDestination. THIS BUILD ALWAYS REFUSES with legacy_location_unknown: a legacy archive.url carries the bucket and the prefix and nothing else, and the two sources that record the endpoint, region, addressing and transport — the frozen execution inputs of a succeeded Backup and the installation policy ConfigMap — are not readable here. Guessing them would move the location, and locationDigest is computed over exactly those fields. Create the destination explicitly until W11 lands. Existing objects are never mutated.",
                 parameters: vec![ns(), idempotency_key(), origin()],
                 request: Some("DestinationFromLegacyRequest"),
                 success: vec![
-                    ("201", "Created; addressingSource names what it was derived from.", "DestinationResponse"),
+                    ("201", "Created. No source this build can read produces one yet; see the summary.", "DestinationResponse"),
                     ("200", "Replayed an identical earlier request.", "DestinationResponse"),
                 ],
                 problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, CREATE, DESTINATION, &[ProblemCode::LegacyLocationUnknown, ProblemCode::LegacyLocationMismatch, ProblemCode::NotFound]]),
@@ -518,21 +518,34 @@ fn paths() -> Value {
         ),
         (
             "/api/v1/namespaces/{ns}/destinations/{name}",
-            vec![
-                get_one("getDestination", "One destination, with the last explicit access test.", "DestinationResponse"),
-                Op {
-                    method: "post",
-                    operation_id: "destinationCommand",
-                    summary: "The command routes, addressed as `<name>:update-access` and `<name>:test`. `:update-access` rotates the four grants and the CA reference under an expectedGeneration precondition and refuses any change to the location or the transport; `:test` starts a DestinationAccess Preflight and answers 202 with it. Idempotency-Key is refused on `:update-access` and required on `:test`.",
-                    parameters: vec![ns(), name(), origin()],
-                    request: Some("UpdateDestinationAccessRequest"),
-                    success: vec![
-                        ("200", "The rotated destination (`:update-access`).", "DestinationResponse"),
-                        ("202", "The started test (`:test`).", "PreflightResponse"),
-                    ],
-                    problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, COMMAND, CREATE, DESTINATION]),
-                },
-            ],
+            vec![get_one("getDestination", "One destination, with the last explicit access test.", "DestinationResponse")],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/destinations/{name}:update-access",
+            vec![Op {
+                method: "post",
+                operation_id: "updateDestinationAccess",
+                summary: "Rotate the four grants and the CA reference under an expectedGeneration precondition. It cannot name the location or the transport, and it refuses Idempotency-Key. A grant carrying a credential VALUE whose deterministic Secret already exists is state_conflict: this service holds `create` on Secrets and nothing else, so the value was NOT written and nothing was changed.",
+                parameters: vec![ns(), name(), origin()],
+                request: Some("UpdateDestinationAccessRequest"),
+                success: vec![("200", "The rotated destination.", "DestinationResponse")],
+                problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, COMMAND, DESTINATION, &[ProblemCode::StateConflict]]),
+            }],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/destinations/{name}:test",
+            vec![Op {
+                method: "post",
+                operation_id: "testDestination",
+                summary: "Start a DestinationAccess Preflight for this destination and answer 202 with it. Absent roles means every role the destination configures.",
+                parameters: vec![ns(), name(), idempotency_key(), origin()],
+                request: Some("TestDestinationRequest"),
+                success: vec![
+                    ("202", "The started test.", "PreflightResponse"),
+                    ("200", "Replayed an identical earlier request.", "PreflightResponse"),
+                ],
+                problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, CREATE, CHECK]),
+            }],
         ),
         (
             "/api/v1/namespaces/{ns}/destinations/{name}/usage",
@@ -591,16 +604,19 @@ fn paths() -> Value {
                     success: vec![("200", "The discovery.", "TopicDiscoveryResponse")],
                     problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),
                 },
-                Op {
-                    method: "post",
-                    operation_id: "cancelTopicDiscovery",
-                    summary: "Ask an unfinished discovery of one's own to stop, addressed as `<id>:cancel`. Idempotent: repeating it is 200, and cancelling a finished check is 200 with alreadyTerminal. An operator may cancel only the checks it started. Nothing is deleted.",
-                    parameters: vec![ns(), id(), origin()],
-                    request: None,
-                    success: vec![("200", "The state after the request.", "CancelResponse")],
-                    problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, COMMAND, &[ProblemCode::StateConflict]]),
-                },
             ],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/topic-discoveries/{id}:cancel",
+            vec![Op {
+                method: "post",
+                operation_id: "cancelTopicDiscovery",
+                summary: "Ask an unfinished discovery to stop. Idempotent: repeating it is 200, and cancelling a finished check is 200 with alreadyTerminal. An operator may cancel only the checks it started; an administrator of the namespace may cancel any. Nothing is deleted. Idempotency-Key is refused.",
+                parameters: vec![ns(), id(), origin()],
+                request: None,
+                success: vec![("200", "The state after the request.", "CancelResponse")],
+                problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, COMMAND, &[ProblemCode::StateConflict]]),
+            }],
         ),
         (
             "/api/v1/namespaces/{ns}/topic-discoveries/{id}/topics",
@@ -654,16 +670,19 @@ fn paths() -> Value {
                     success: vec![("200", "The result.", "PreflightResponse")],
                     problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET, &[ProblemCode::ValidationFailed]]),
                 },
-                Op {
-                    method: "post",
-                    operation_id: "cancelPreflight",
-                    summary: "Ask an unfinished preflight of one's own to stop, addressed as `<id>:cancel`. Same rules as a discovery cancel.",
-                    parameters: vec![ns(), id(), origin()],
-                    request: None,
-                    success: vec![("200", "The state after the request.", "CancelResponse")],
-                    problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, COMMAND, &[ProblemCode::StateConflict]]),
-                },
             ],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/preflights/{id}:cancel",
+            vec![Op {
+                method: "post",
+                operation_id: "cancelPreflight",
+                summary: "Ask an unfinished preflight to stop. Same rules as a discovery cancel.",
+                parameters: vec![ns(), id(), origin()],
+                request: None,
+                success: vec![("200", "The state after the request.", "CancelResponse")],
+                problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, COMMAND, &[ProblemCode::StateConflict]]),
+            }],
         ),
         (
             "/api/v1/namespaces/{ns}/preflights/{id}/details",

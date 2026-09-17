@@ -665,6 +665,24 @@ pub fn created_by<K: ProductResource>(object: &K, actor: &Actor) -> bool {
         .is_some_and(|recorded| recorded == &actor.id())
 }
 
+/// Whether `actor` administers `namespace`.
+///
+/// THE ONE EXCEPTION TO OWNERSHIP, AND ONLY FOR CANCEL. D0's "cancel own
+/// checks" is written in the OPERATOR row; an administrator who cannot stop a
+/// twenty-thousand-topic discovery an operator started before going home has
+/// to wait out `timeoutSeconds` or reach for `kubectl`, which is the outcome
+/// the console exists to avoid. It stays narrow: cancelling deletes no archive
+/// byte, no Kafka topic, no durable run and no signed evidence, the audit line
+/// records who actually did it, and nothing else in this crate consults the
+/// role for an ownership decision.
+#[must_use]
+pub fn administers(state: &AppState, actor: &Actor, namespace: &str) -> bool {
+    state
+        .authorizer()
+        .roles(actor, namespace)
+        .contains(&crate::authz::Role::Administrator)
+}
+
 /// Ask one transient check to stop, after the caller has authorized it.
 ///
 /// IDEMPOTENT IN BOTH DIRECTIONS. A check that has already finished is
@@ -691,14 +709,22 @@ where
     for _ in 0..2 {
         let object = get_object::<K>(state, actor, namespace, name).await?;
         if !created_by(&object, actor) {
-            // The AUDIT line already names the object and the actor; the
-            // response says what the rule is without saying who owns it.
-            actor.audit.set_failure("forbidden");
-            return Err(ApiError::new(
-                ProblemCode::Forbidden,
-                "This check was started by another actor. An operator may cancel only the \
-                 checks it started.",
-            ));
+            if administers(state, actor, namespace) {
+                // WHO ACTUALLY DID IT IS RECORDED. An administrator stopping
+                // someone else's check is a different event from an operator
+                // stopping its own, and the audit reader should not have to
+                // infer which one happened.
+                actor.audit.note("cancelledAnotherActorsCheck", "true");
+            } else {
+                // The AUDIT line already names the object and the actor; the
+                // response says what the rule is without saying who owns it.
+                actor.audit.set_failure("forbidden");
+                return Err(ApiError::new(
+                    ProblemCode::Forbidden,
+                    "This check was started by another actor. An operator may cancel only the \
+                     checks it started; an administrator of this namespace may cancel any.",
+                ));
+            }
         }
         if terminal(&object) {
             return Ok((object, true));

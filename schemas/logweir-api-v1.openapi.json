@@ -1657,7 +1657,7 @@
     "/api/v1/namespaces/{ns}/destinations:from-legacy": {
       "post": {
         "operationId": "createDestinationFromLegacy",
-        "summary": "Adopt the location of a legacy BackupSchedule or Backup as a BackupDestination, deriving the storage block from facts and refusing with legacy_location_unknown when the facts are not there. Existing objects are never mutated.",
+        "summary": "Adopt the location of a legacy BackupSchedule or Backup as a BackupDestination. THIS BUILD ALWAYS REFUSES with legacy_location_unknown: a legacy archive.url carries the bucket and the prefix and nothing else, and the two sources that record the endpoint, region, addressing and transport — the frozen execution inputs of a succeeded Backup and the installation policy ConfigMap — are not readable here. Guessing them would move the location, and locationDigest is computed over exactly those fields. Create the destination explicitly until W11 lands. Existing objects are never mutated.",
         "parameters": [
           {
             "name": "ns",
@@ -1701,7 +1701,7 @@
         },
         "responses": {
           "201": {
-            "description": "Created; addressingSource names what it was derived from.",
+            "description": "Created. No source this build can read produces one yet; see the summary.",
             "content": {
               "application/json": {
                 "schema": {
@@ -1822,10 +1822,12 @@
           "unauthenticated",
           "upstream_timeout"
         ]
-      },
+      }
+    },
+    "/api/v1/namespaces/{ns}/destinations/{name}:update-access": {
       "post": {
-        "operationId": "destinationCommand",
-        "summary": "The command routes, addressed as `<name>:update-access` and `<name>:test`. `:update-access` rotates the four grants and the CA reference under an expectedGeneration precondition and refuses any change to the location or the transport; `:test` starts a DestinationAccess Preflight and answers 202 with it. Idempotency-Key is refused on `:update-access` and required on `:test`.",
+        "operationId": "updateDestinationAccess",
+        "summary": "Rotate the four grants and the CA reference under an expectedGeneration precondition. It cannot name the location or the transport, and it refuses Idempotency-Key. A grant carrying a credential VALUE whose deterministic Secret already exists is state_conflict: this service holds `create` on Secrets and nothing else, so the value was NOT written and nothing was changed.",
         "parameters": [
           {
             "name": "ns",
@@ -1867,21 +1869,11 @@
         },
         "responses": {
           "200": {
-            "description": "The rotated destination (`:update-access`).",
+            "description": "The rotated destination.",
             "content": {
               "application/json": {
                 "schema": {
                   "$ref": "#/components/schemas/DestinationResponse"
-                }
-              }
-            }
-          },
-          "202": {
-            "description": "The started test (`:test`).",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/PreflightResponse"
                 }
               }
             }
@@ -1902,9 +1894,7 @@
           "destination_location_immutable",
           "forbidden",
           "header_not_allowed",
-          "idempotency_conflict",
           "idempotency_key_invalid",
-          "idempotency_key_required",
           "internal_error",
           "kubernetes_unavailable",
           "malformed_request",
@@ -1919,6 +1909,117 @@
           "session_expired",
           "state_conflict",
           "transport_downgrade_forbidden",
+          "unauthenticated",
+          "unsupported_media_type",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/destinations/{name}:test": {
+      "post": {
+        "operationId": "testDestination",
+        "summary": "Start a DestinationAccess Preflight for this destination and answer 202 with it. Absent roles means every role the destination configures.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/TestDestinationRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "202": {
+            "description": "The started test.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreflightResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Replayed an identical earlier request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PreflightResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "idempotency_conflict",
+          "idempotency_key_invalid",
+          "idempotency_key_required",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "origin_mismatch",
+          "payload_too_large",
+          "rate_limited",
+          "session_expired",
+          "state_conflict",
           "unauthenticated",
           "unsupported_media_type",
           "upstream_timeout",
@@ -2264,10 +2365,12 @@
           "unauthenticated",
           "upstream_timeout"
         ]
-      },
+      }
+    },
+    "/api/v1/namespaces/{ns}/topic-discoveries/{id}:cancel": {
       "post": {
         "operationId": "cancelTopicDiscovery",
-        "summary": "Ask an unfinished discovery of one's own to stop, addressed as `<id>:cancel`. Idempotent: repeating it is 200, and cancelling a finished check is 200 with alreadyTerminal. An operator may cancel only the checks it started. Nothing is deleted.",
+        "summary": "Ask an unfinished discovery to stop. Idempotent: repeating it is 200, and cancelling a finished check is 200 with alreadyTerminal. An operator may cancel only the checks it started; an administrator of the namespace may cancel any. Nothing is deleted. Idempotency-Key is refused.",
         "parameters": [
           {
             "name": "ns",
@@ -2649,10 +2752,12 @@
           "upstream_timeout",
           "validation_failed"
         ]
-      },
+      }
+    },
+    "/api/v1/namespaces/{ns}/preflights/{id}:cancel": {
       "post": {
         "operationId": "cancelPreflight",
-        "summary": "Ask an unfinished preflight of one's own to stop, addressed as `<id>:cancel`. Same rules as a discovery cancel.",
+        "summary": "Ask an unfinished preflight to stop. Same rules as a discovery cancel.",
         "parameters": [
           {
             "name": "ns",
@@ -4786,21 +4891,9 @@
           "requestId"
         ],
         "properties": {
-          "addressingSource": {
-            "description": "How the storage block was derived, on `:from-legacy` only.",
-            "type": "string",
-            "nullable": true
-          },
           "item": {
             "description": "The item.",
             "$ref": "#/components/schemas/Destination"
-          },
-          "notes": {
-            "description": "Advisory notes from `:from-legacy`, e.g. that a legacy `allowHttp` was a no-op against an `https://` endpoint.",
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
           },
           "replayed": {
             "description": "On a durable create: whether this replays an earlier identical request.",
@@ -5268,7 +5361,8 @@
         "required": [
           "preflightId",
           "stale",
-          "state"
+          "state",
+          "truncated"
         ],
         "properties": {
           "observedAt": {
@@ -5288,6 +5382,10 @@
           "state": {
             "description": "Its aggregate state.",
             "$ref": "#/components/schemas/PreflightState"
+          },
+          "truncated": {
+            "description": "Whether the search for the newest test hit its page bound, so this may not be the newest one. A \"last test\" that might not be last is worse than none, so the caller is told rather than reassured.",
+            "type": "boolean"
           }
         }
       },

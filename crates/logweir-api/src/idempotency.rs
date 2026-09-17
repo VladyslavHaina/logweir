@@ -92,16 +92,33 @@ impl IdempotencyKey {
 
     /// Refuse the header on a route that does not accept it.
     ///
+    /// `precondition` names the field this route uses instead, or `None` for a
+    /// command that has no precondition at all. THE ROUTE'S OWN FIELD, because
+    /// a fixed sentence about `expectedResourceVersion` sends a client looking
+    /// for a field that does not exist on `:update-access` (which takes
+    /// `expectedGeneration`) or on either `:cancel` (which take neither, and
+    /// are idempotent instead).
+    ///
     /// # Errors
     ///
     /// `idempotency_key_invalid` when the header is present.
-    pub fn refuse_on(headers: &HeaderMap, route: &str) -> Result<(), ApiError> {
+    pub fn refuse_on(
+        headers: &HeaderMap,
+        route: &str,
+        precondition: Option<&str>,
+    ) -> Result<(), ApiError> {
         if headers.contains_key(HEADER) {
+            let instead = match precondition {
+                Some(field) => format!("Use {field}."),
+                None => {
+                    "It is idempotent: repeating it changes nothing and answers 200.".to_string()
+                }
+            };
             return Err(ApiError::new(
                 ProblemCode::IdempotencyKeyInvalid,
                 format!(
-                    "{route} does not accept Idempotency-Key: it is a precondition-guarded \
-                     command, not a durable create. Use expectedResourceVersion."
+                    "{route} does not accept Idempotency-Key: it is a command, not a durable \
+                     create. {instead}"
                 ),
             ));
         }
@@ -147,8 +164,25 @@ pub fn identity(
     push_field(&mut scope, &key.0);
     let scope_digest = Sha256::digest(&scope);
 
-    let mut request = b"logweir-api/request/v1\n".to_vec();
+    // THE SCOPE DIGEST IS MIXED IN, AND THAT IS WHAT MAKES THE PUBLISHED HASH
+    // USELESS AS AN ORACLE. A destination create's canonical request contains
+    // an ENTERED CREDENTIAL (`access.<role>.secret.new`), and the resulting
+    // hash is written onto the object as `api.logweir.dev/request-sha256` —
+    // which anyone who may `get backupdestinations` can read, while every
+    // other field of that request is published by `GET /destinations/{name}`.
+    // Unsalted, that is an offline confirmation oracle: rebuild the request
+    // from the public projection, guess the key pair, hash, compare. The scope
+    // digest is derived from the client-chosen `Idempotency-Key`, which is
+    // never stored or published in any form, so the hash cannot be recomputed
+    // from the object alone.
+    //
+    // THE REPLAY SEMANTICS ARE UNCHANGED. Both the name and this hash are
+    // taken under the SAME scope, so two requests being compared always share
+    // it: same key + same request still replays, and same key + different
+    // request is still `idempotency_conflict`.
+    let mut request = b"logweir-api/request/v2\n".to_vec();
     push_field(&mut request, route);
+    request.extend_from_slice(&scope_digest);
     request.extend_from_slice(canonical_request);
 
     CreateIdentity {
@@ -311,6 +345,63 @@ mod tests {
         assert_eq!(
             IdempotencyKey::from_headers(&h).unwrap_err().code,
             ProblemCode::IdempotencyKeyInvalid
+        );
+    }
+
+    /// **The published request hash is not reconstructable from the object.**
+    ///
+    /// A destination create's canonical request carries an ENTERED CREDENTIAL,
+    /// and the hash of it is written onto the object as
+    /// `api.logweir.dev/request-sha256` — readable by anyone who may `get
+    /// backupdestinations`, while every other field of that request is
+    /// published by `GET /destinations/{name}`. Unsalted, that is an offline
+    /// confirmation oracle for the credential: rebuild the request from the
+    /// public projection, guess the key pair, hash, compare. Mixing the scope
+    /// digest in defeats it, because the scope is derived from the
+    /// client-chosen `Idempotency-Key`, which is never stored or published in
+    /// any form.
+    #[test]
+    fn the_request_hash_cannot_be_recomputed_from_the_published_body() {
+        let body = br#"{"name":"primary","access":{"secretAccessKey":"guessed"}}"#;
+        let route = "POST /api/v1/namespaces/{ns}/destinations";
+        let published = identity(&actor("a"), "ns", route, "", &key("key-00001"), body);
+
+        // THE ORACLE, ATTEMPTED. Everything an attacker holds — the actor, the
+        // namespace, the route and the whole body — reproduces nothing,
+        // because the key is the one input the object does not carry.
+        let guessed = identity(&actor("a"), "ns", route, "", &key("key-99999"), body);
+        assert_ne!(
+            guessed.request_hash, published.request_hash,
+            "the request hash is a function of the body alone, so the published annotation \
+             confirms a guessed credential"
+        );
+
+        // AND THE REPLAY SEMANTICS ARE UNCHANGED, because both sides of a
+        // comparison always share the scope: the name and the hash are taken
+        // under the same one.
+        assert_eq!(
+            identity(&actor("a"), "ns", route, "", &key("key-00001"), body).request_hash,
+            published.request_hash
+        );
+        let changed = identity(
+            &actor("a"),
+            "ns",
+            route,
+            "",
+            &key("key-00001"),
+            br#"{"name":"primary","access":{"secretAccessKey":"other"}}"#,
+        );
+        assert_eq!(
+            changed.name, published.name,
+            "the same key names the same object"
+        );
+        assert_ne!(
+            changed.request_hash, published.request_hash,
+            "same key, different request must still be idempotency_conflict"
+        );
+        assert_eq!(
+            compare(Some(&annotations(&published, "req", &actor("a"))), &changed),
+            ReplayVerdict::DifferentRequest
         );
     }
 

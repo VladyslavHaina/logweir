@@ -627,6 +627,13 @@ fn labels_for(request: &CreatePreflightRequest) -> BTreeMap<String, String> {
             super::destinations::DESTINATION_LABEL.to_string(),
             access.destination.clone(),
         );
+        // A SECOND LABEL ONLY AN ACCESS TEST CARRIES, so `lastTest` selects on
+        // it alone and never competes with the Backup readiness checks that
+        // share the first one.
+        labels.insert(
+            super::destinations::DESTINATION_TEST_LABEL.to_string(),
+            access.destination.clone(),
+        );
     }
     if let Some(backup) = &request.backup {
         if let Some(destination) = &backup.destination {
@@ -1000,7 +1007,7 @@ pub async fn cancel(
     };
     check_name(id)?;
     crate::http::parse_query(uri.query(), &[])?;
-    IdempotencyKey::refuse_on(&headers, ROUTE_CANCEL)?;
+    IdempotencyKey::refuse_on(&headers, ROUTE_CANCEL, None)?;
     let (object, already_terminal) = cancel_check::<PreflightCr>(
         &state,
         &actor,

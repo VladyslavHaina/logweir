@@ -1422,6 +1422,10 @@ pub struct LastTestView {
     /// Whether the result has expired or its inputs changed. A stale test is
     /// never rendered as health.
     pub stale: bool,
+    /// Whether the search for the newest test hit its page bound, so this may
+    /// not be the newest one. A "last test" that might not be last is worse
+    /// than none, so the caller is told rather than reassured.
+    pub truncated: bool,
 }
 
 /// A saved destination.
@@ -1549,13 +1553,18 @@ pub struct DestinationResponse {
     /// On a durable create: whether this replays an earlier identical request.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub replayed: Option<bool>,
-    /// How the storage block was derived, on `:from-legacy` only.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub addressing_source: Option<String>,
-    /// Advisory notes from `:from-legacy`, e.g. that a legacy `allowHttp` was
-    /// a no-op against an `https://` endpoint.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub notes: Vec<String>,
+    //
+    // THERE IS NO `addressingSource` AND NO `notes` HERE, DELIBERATELY. D2
+    // §3.12 defines both for the legacy adoption: `addressingSource` names
+    // WHICH source the storage block was derived from (`frozenExecution` or
+    // `installationConfig`), and `notes` carries the confirmations that
+    // derivation owes the operator. Neither source is readable in this build,
+    // so `:from-legacy` refuses instead of deriving (see
+    // `routes::destinations`), and a field nothing can fill is a field a
+    // console would render as "derived from nothing".
+    //
+    // Adding a field later is a MINOR change to this document; removing one is
+    // MAJOR. So they wait for W11, which is the task that can populate them.
     /// The item.
     pub item: Destination,
 }

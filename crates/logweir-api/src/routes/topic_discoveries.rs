@@ -40,6 +40,7 @@ use kube::Resource as _;
 use weirkeeper::crds::kafka_cluster::KafkaCluster;
 use weirkeeper::crds::topic_discovery::{
     TopicDiscovery as TopicDiscoveryCr, TopicDiscoveryRequest, TopicDiscoverySpec,
+    TopicInventoryResult,
 };
 use weirkeeper::crds::LocalRef;
 
@@ -110,6 +111,10 @@ pub const SHA256_ANNOTATION: &str = "logweir.dev/result-sha256";
 /// The most discoveries the per-connection list scans for the two slots.
 pub const LATEST_SCAN: u32 = 50;
 
+/// The `basis` entry recorded when a claim of completeness arrives without the
+/// attestation that would justify it, and is therefore published as `unknown`.
+pub const ATTESTATION_MISSING_BASIS: &str = "attestationMissing";
+
 // ======================================================================
 // Projection
 // ======================================================================
@@ -132,13 +137,42 @@ fn lifecycle_of(object: &TopicDiscoveryCr) -> CheckLifecycle {
     }
 }
 
-fn visibility_of(state: &str) -> VisibilityState {
-    match state {
+/// The visibility the API publishes, which is not always the one the status
+/// carries.
+///
+/// THE API IS THE LAST HONEST BOUNDARY BEFORE THE CONSOLE. D2 §5.4 and
+/// D-SEAMS S3 say a claim of completeness needs an explicit,
+/// administrator-governed attestation — so `attestedComplete` WITHOUT one is
+/// downgraded to `unknown` here, with the downgrade written into `basis` so
+/// nobody has to guess why the console stopped saying "all topics". A
+/// controller that writes the state and forgets the attestation is a bug this
+/// refuses to render rather than a bug the operator finds out about during a
+/// restore.
+///
+/// `limited` is passed through as the controller wrote it. It is a claim about
+/// an authorization failure OBSERVED inside the check Job — a fact the API
+/// never sees — so there is nothing here to verify it against, and downgrading
+/// it would replace the controller's honest "I saw an omission" with a weaker
+/// answer that is also less true.
+fn visibility_view(result: &TopicInventoryResult) -> VisibilityView {
+    let declared = result.visibility.state.as_str();
+    let mut basis = result.visibility.basis.clone().unwrap_or_default();
+    let attestation = result.visibility.attestation.clone();
+    let state = match declared {
         "limited" => VisibilityState::Limited,
-        "attestedComplete" => VisibilityState::AttestedComplete,
+        "attestedComplete" if attestation.is_some() => VisibilityState::AttestedComplete,
+        "attestedComplete" => {
+            basis.push(ATTESTATION_MISSING_BASIS.to_string());
+            VisibilityState::Unknown
+        }
         // ANYTHING ELSE IS `unknown`. A spelling this build does not recognise
         // is not a claim of completeness.
         _ => VisibilityState::Unknown,
+    };
+    VisibilityView {
+        state,
+        basis,
+        attestation,
     }
 }
 
@@ -224,11 +258,7 @@ pub fn project(
         }),
         truncated: result.is_some_and(|r| r.truncated),
         truncation_reason: result.and_then(|r| r.truncation_reason.clone()),
-        visibility: result.map(|r| VisibilityView {
-            state: visibility_of(&r.visibility.state),
-            basis: r.visibility.basis.clone().unwrap_or_default(),
-            attestation: r.visibility.attestation.clone(),
-        }),
+        visibility: result.map(visibility_view),
         expected: result
             .and_then(|r| r.expected.as_ref())
             .map(|e| ExpectedTopicsView {
@@ -965,7 +995,7 @@ pub async fn cancel(
     };
     check_name(id)?;
     crate::http::parse_query(uri.query(), &[])?;
-    IdempotencyKey::refuse_on(&headers, ROUTE_CANCEL)?;
+    IdempotencyKey::refuse_on(&headers, ROUTE_CANCEL, None)?;
     let (object, already_terminal) = cancel_check::<TopicDiscoveryCr>(
         &state,
         &actor,

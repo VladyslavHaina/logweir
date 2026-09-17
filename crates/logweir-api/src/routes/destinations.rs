@@ -93,8 +93,30 @@ pub const FROM_LEGACY: &str = "destinations:from-legacy";
 pub const DEFAULT_ANNOTATION: &str = "logweir.dev/default-destination";
 
 /// The label every object the API creates for a destination carries, so
-/// `usage` and `lastTest` are label reads and never unbounded scans.
+/// `usage` is a label read and never an unbounded scan.
 pub const DESTINATION_LABEL: &str = "logweir.dev/destination";
+
+/// The label ONLY `:test` sets, and the one `lastTest` selects on.
+///
+/// A SECOND LABEL, BECAUSE THE FIRST ONE IS SHARED. A Backup readiness check
+/// against this destination also carries [`DESTINATION_LABEL`], so selecting on
+/// it alone returns a mixture and the newest access test can sit behind any
+/// number of backup checks — in NAME order, which for hashed names is
+/// arbitrary. Selecting on a label only the access test carries keeps the
+/// query to one selector and the answer to the objects it is about.
+pub const DESTINATION_TEST_LABEL: &str = "logweir.dev/destination-test";
+
+/// The label the API's own default destination carries, so the at-most-one
+/// check is a bounded selector read rather than a scan of every destination in
+/// the namespace.
+///
+/// The ANNOTATION D2 §3.1 names is written too, and [`is_default`] honours
+/// either, so a default set by hand with `kubectl` still reads as one.
+pub const DEFAULT_LABEL: &str = "logweir.dev/default-destination";
+
+/// The most list pages any bounded read here follows before it reports
+/// `truncated` instead of continuing.
+pub const MAX_PAGES: usize = 8;
 
 /// The label on a Secret this service created for a destination role.
 pub const CREDENTIAL_FOR_LABEL: &str = "logweir.dev/credential-for";
@@ -272,13 +294,21 @@ fn status_view(object: &BackupDestination) -> DestinationStatusView {
     }
 }
 
+/// EITHER SPELLING IS HONOURED. The API writes both the annotation D2 §3.1
+/// names (what a human reads in `kubectl get -o yaml`) and the label the
+/// at-most-one check selects on; an object marked by hand with only the
+/// annotation still reads as the default here.
 fn is_default(object: &BackupDestination) -> bool {
-    object
-        .meta()
-        .annotations
+    let meta = object.meta();
+    meta.annotations
         .as_ref()
         .and_then(|a| a.get(DEFAULT_ANNOTATION))
         .is_some_and(|v| v == "true")
+        || meta
+            .labels
+            .as_ref()
+            .and_then(|l| l.get(DEFAULT_LABEL))
+            .is_some_and(|v| v == "true")
 }
 
 fn storage_view(spec: &BackupDestinationSpec) -> StorageView {
@@ -905,14 +935,17 @@ pub fn build(
     mut annotations: BTreeMap<String, String>,
     request: &CreateDestinationRequest,
 ) -> BackupDestination {
+    let mut labels = BTreeMap::new();
     if request.default == Some(true) {
         annotations.insert(DEFAULT_ANNOTATION.to_string(), "true".to_string());
+        labels.insert(DEFAULT_LABEL.to_string(), "true".to_string());
     }
     BackupDestination {
         metadata: ObjectMeta {
             name: Some(name),
             namespace: Some(namespace.to_string()),
             annotations: Some(annotations),
+            labels: Some(labels),
             ..ObjectMeta::default()
         },
         spec: BackupDestinationSpec {
@@ -1005,23 +1038,56 @@ fn build_credential_secret(
     }
 }
 
+/// What an existing Secret under the deterministic name means for this call.
+///
+/// THE NAME IS A FUNCTION OF THE DESTINATION AND THE ROLE, so "it is already
+/// there" is ambiguous in exactly one direction: on a CREATE it may be the
+/// object an earlier attempt of THIS request wrote, and on a rotation it can
+/// only be an object holding some OTHER value. This service cannot read a
+/// Secret, so it cannot tell the two apart by looking — the caller states
+/// which case it is in, and the ambiguous one fails closed.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ExistingCredential {
+    /// This request scope created the destination on an earlier attempt, so a
+    /// Secret under the deterministic name is the one that attempt wrote.
+    /// Accept it, and report it as replayed rather than as created.
+    AcceptAsReplay,
+    /// Anything else. The value in the request was NOT written, and saying
+    /// otherwise would let an operator record a rotation that did not happen.
+    Refuse,
+}
+
+/// What a credential write actually did.
+///
+/// TWO LISTS, NOT ONE. A name that was already there is not a name this call
+/// wrote, and the previous shape put both into one `created` vector — which is
+/// how a rotation that rotated nothing came to answer 200.
+#[derive(Debug, Default)]
+struct CredentialOutcome {
+    /// Secrets this call created.
+    created: Vec<String>,
+    /// Secrets an earlier attempt of this same request had already created.
+    replayed: Vec<String>,
+}
+
 /// Create every `secret.new` value the request entered, after the destination
 /// exists so the Secrets can be owned by it.
 ///
-/// AN EXISTING NAME IS ACCEPTED, NOT COMPARED. This service cannot read a
-/// Secret, so it cannot tell whether an existing `lwd-…` Secret holds the same
-/// bytes — and it never tries. A replay of the same request is the only way to
-/// reach this twice (a DIFFERENT request under the same key was already
-/// refused as `idempotency_conflict`), so the existing object is the one this
-/// request created.
+/// # Errors
+///
+/// `state_conflict` when a Secret under the deterministic name already exists
+/// and `on_existing` is [`ExistingCredential::Refuse`], or the adapter's
+/// failure.
 async fn create_new_credentials(
     state: &AppState,
     namespace: &str,
     destination: &BackupDestination,
     access: &AccessRequest,
     request_id: &str,
-) -> Result<Vec<String>, ApiError> {
-    let mut created = Vec::new();
+    on_existing: ExistingCredential,
+) -> Result<CredentialOutcome, ApiError> {
+    let mut outcome = CredentialOutcome::default();
+    let destination_name = destination.meta().name.clone().unwrap_or_default();
     let grants: [(DestinationRoleDto, Option<&AccessGrantRequest>); 4] = [
         (
             DestinationRoleDto::ArchiveWrite,
@@ -1057,18 +1123,52 @@ async fn create_new_credentials(
                     role = role_slug(role),
                     "credential secret created"
                 );
-                created.push(reference.name);
+                outcome.created.push(reference.name);
             }
             Err(KubeFailure::AlreadyExists) => {
-                created.push(credential_secret_name(
-                    &destination.meta().name.clone().unwrap_or_default(),
-                    role,
-                ));
+                let name = credential_secret_name(&destination_name, role);
+                match on_existing {
+                    ExistingCredential::AcceptAsReplay => outcome.replayed.push(name),
+                    ExistingCredential::Refuse => {
+                        tracing::warn!(
+                            namespace,
+                            secret = %name,
+                            role = role_slug(role),
+                            "credential secret already exists; the entered value was NOT written"
+                        );
+                        return Err(ApiError::new(
+                            ProblemCode::StateConflict,
+                            format!(
+                                "The Secret `{name}` already exists, so the credential you \
+                                 entered was NOT written and nothing was changed. This service \
+                                 holds `create` on Secrets and nothing else: it cannot read the \
+                                 existing value to compare it, and it cannot overwrite it. \
+                                 Rotate `{name}`'s content out of band (kubectl, or your secret \
+                                 manager), or point this grant at a different existing Secret \
+                                 with `secret.existing`."
+                            ),
+                        ));
+                    }
+                }
             }
             Err(other) => return Err(other.into_api_error()),
         }
     }
-    Ok(created)
+    Ok(outcome)
+}
+
+/// Record on the audit line which Secrets a call wrote, and which it found.
+fn note_credentials(actor: &Actor, outcome: &CredentialOutcome) {
+    if !outcome.created.is_empty() {
+        actor
+            .audit
+            .note("credentialSecretsCreated", &outcome.created.join(","));
+    }
+    if !outcome.replayed.is_empty() {
+        actor
+            .audit
+            .note("credentialSecretsReplayed", &outcome.replayed.join(","));
+    }
 }
 
 // ======================================================================
@@ -1097,31 +1197,50 @@ pub async fn list(
     ))
 }
 
-/// The newest `DestinationAccess` preflight for one destination, by label.
+/// The newest `DestinationAccess` preflight for one destination.
+///
+/// ONE SELECTOR, PAGED TO EXHAUSTION, BOUNDED. The selector is
+/// [`DESTINATION_TEST_LABEL`], which only `:test` sets, so every object the
+/// pages return is an access test for this destination; the loop follows the
+/// continue token so a namespace with many tests cannot hide the newest one
+/// behind a first page in name order; and [`MAX_PAGES`] caps the work, with
+/// the cap REPORTED rather than swallowed — a `lastTest` that might not be the
+/// last is worse than none, so the caller is told.
 async fn last_test(
     state: &AppState,
     namespace: &str,
     name: &str,
 ) -> Result<Option<LastTestView>, ApiError> {
-    let page = PageRequest {
-        limit: 20,
-        continue_token: None,
-        label_selector: Some(format!("{DESTINATION_LABEL}={name}")),
-    };
-    let list = state
-        .kube()
-        .list::<PreflightCr>(namespace, &page)
-        .await
-        .map_err(KubeFailure::into_api_error)?;
+    let selector = format!("{DESTINATION_TEST_LABEL}={name}");
+    let mut continue_token = None;
+    let mut newest: Option<PreflightCr> = None;
+    let mut truncated = true;
+    for _ in 0..MAX_PAGES {
+        let page = PageRequest {
+            limit: MAX_LIMIT,
+            continue_token: continue_token.clone(),
+            label_selector: Some(selector.clone()),
+        };
+        let list = state
+            .kube()
+            .list::<PreflightCr>(namespace, &page)
+            .await
+            .map_err(KubeFailure::into_api_error)?;
+        for item in list.items {
+            let newer = newest.as_ref().is_none_or(|current| {
+                item.meta().creation_timestamp > current.meta().creation_timestamp
+            });
+            if newer {
+                newest = Some(item);
+            }
+        }
+        continue_token = list.metadata.continue_.filter(|token| !token.is_empty());
+        if continue_token.is_none() {
+            truncated = false;
+            break;
+        }
+    }
     let now = state.now();
-    let newest = list
-        .items
-        .into_iter()
-        .filter(|p| {
-            p.spec.request.operation
-                == weirkeeper::crds::preflight::PreflightOperation::DestinationAccess
-        })
-        .max_by_key(|p| p.meta().creation_timestamp.as_ref().map(|t| t.0));
     Ok(newest.map(|p| {
         let projected = super::preflights::project(&p, now, None);
         LastTestView {
@@ -1129,6 +1248,7 @@ async fn last_test(
             state: projected.state,
             observed_at: projected.observed_at,
             stale: projected.stale,
+            truncated,
         }
     }))
 }
@@ -1150,8 +1270,6 @@ pub async fn get_one(
         &DestinationResponse {
             request_id,
             replayed: None,
-            addressing_source: None,
-            notes: Vec::new(),
             item: project(&object, test),
         },
     ))
@@ -1265,24 +1383,52 @@ pub async fn create(
         |name, annotations| build(&ns, name, annotations, &request),
     )
     .await?;
-    let names =
-        create_new_credentials(&state, &ns, &created.object, &request.access, &request_id).await?;
-    if !names.is_empty() {
-        actor.audit.note("credentialSecrets", &names.join(","));
-    }
+    // A REPLAY MAY ADOPT THE SECRET IT WROTE; A FRESH CREATE MAY NOT. If this
+    // call created the destination, a Secret already sitting under the
+    // deterministic name is not one this request wrote — it is stale, or it
+    // was planted — and adopting it would silently put the operator's new
+    // value nowhere while the destination names someone else's.
+    let outcome = create_new_credentials(
+        &state,
+        &ns,
+        &created.object,
+        &request.access,
+        &request_id,
+        if created.replayed {
+            ExistingCredential::AcceptAsReplay
+        } else {
+            ExistingCredential::Refuse
+        },
+    )
+    .await?;
+    note_credentials(&actor, &outcome);
     Ok(json(
         created.status(),
         &DestinationResponse {
             request_id,
             replayed: Some(created.replayed),
-            addressing_source: None,
-            notes: Vec::new(),
             item: project(&created.object, None),
         },
     ))
 }
 
-/// At most one destination per namespace holds the default annotation.
+/// At most one destination per namespace is the default.
+///
+/// ONE BOUNDED SELECTOR READ. The previous shape listed a single 200-object
+/// page with no continuation and searched it for an annotation, so a namespace
+/// with more than 200 destinations could accept a second default — precisely
+/// the state the refusal below calls impossible. Selecting on
+/// [`DEFAULT_LABEL`] returns only the holders, of which there is at most one
+/// in a namespace this API has managed alone.
+///
+/// THE RESIDUAL, STATED: a default set by hand with only the annotation D2
+/// §3.1 names carries no label, so this check does not see it. It still reads
+/// as the default in every projection ([`is_default`] honours either
+/// spelling), and `docs/api.md` says so.
+///
+/// # Errors
+///
+/// `state_conflict` naming the destination that already holds it.
 async fn refuse_second_default(
     state: &AppState,
     namespace: &str,
@@ -1291,7 +1437,7 @@ async fn refuse_second_default(
     let page = PageRequest {
         limit: MAX_LIMIT,
         continue_token: None,
-        label_selector: None,
+        label_selector: Some(format!("{DEFAULT_LABEL}=true")),
     };
     let list = state
         .kube()
@@ -1301,7 +1447,7 @@ async fn refuse_second_default(
     let holder = list
         .items
         .iter()
-        .find(|d| is_default(d) && d.meta().name.as_deref() != Some(name));
+        .find(|d| d.meta().name.as_deref() != Some(name));
     if let Some(holder) = holder {
         return Err(ApiError::new(
             ProblemCode::StateConflict,
@@ -1348,7 +1494,7 @@ pub async fn update_access(
     authorize(&state, &actor, &ns, Action::ManageDestinations)?;
     check_name(&name)?;
     crate::http::parse_query(uri.query(), &[])?;
-    IdempotencyKey::refuse_on(&headers, ROUTE_UPDATE_ACCESS)?;
+    IdempotencyKey::refuse_on(&headers, ROUTE_UPDATE_ACCESS, Some("expectedGeneration"))?;
     let request: UpdateDestinationAccessRequest = read_json(body, MAX_JSON_BODY).await?;
     let mut errors = Vec::new();
     validate_access(&request.access, &mut errors);
@@ -1397,9 +1543,20 @@ pub async fn update_access(
              immutable: a plaintext destination cannot be given trust material.",
         ));
     }
-    let created_names =
-        create_new_credentials_for_update(&state, &ns, &object, &request.access, &request_id)
-            .await?;
+    // BEFORE THE PATCH, AND FAILING CLOSED. A rotation that cannot write the
+    // value must change nothing at all: if the credential write is refused
+    // below, the destination still names whatever it named before, and the
+    // operator gets a 409 rather than a 200 that records a rotation which did
+    // not happen.
+    let outcome = create_new_credentials(
+        &state,
+        &ns,
+        &object,
+        &request.access,
+        &request_id,
+        ExistingCredential::Refuse,
+    )
+    .await?;
     let access = build_access(&name, &request.access);
     let access_json = serde_json::json!({
         "archiveWrite": access.archive_write,
@@ -1430,11 +1587,7 @@ pub async fn update_access(
             ),
             other => other.into_api_error(),
         })?;
-    if !created_names.is_empty() {
-        actor
-            .audit
-            .note("credentialSecrets", &created_names.join(","));
-    }
+    note_credentials(&actor, &outcome);
     tracing::info!(
         namespace = %ns,
         name = %name,
@@ -1446,28 +1599,9 @@ pub async fn update_access(
         &DestinationResponse {
             request_id,
             replayed: None,
-            addressing_source: None,
-            notes: Vec::new(),
             item: project(&updated, None),
         },
     ))
-}
-
-async fn create_new_credentials_for_update(
-    state: &AppState,
-    namespace: &str,
-    destination: &BackupDestination,
-    access: &AccessRequest,
-    request_id: &str,
-) -> Result<Vec<String>, ApiError> {
-    // ROTATION MINTS A NEW NAME, BECAUSE THIS SERVICE CANNOT UPDATE A SECRET.
-    // It has `create` and nothing else, so rotating a value into the SAME
-    // object is impossible by construction. A rotation therefore names
-    // `lwd-<destination>-<role>`; if that object already exists the create is
-    // an `AlreadyExists` and the reference is left pointing at it, and the
-    // response says which Secret the destination now names so an operator can
-    // rotate its CONTENT with `kubectl` or a secret manager.
-    create_new_credentials(state, namespace, destination, access, request_id).await
 }
 
 /// `POST .../destinations/{name}:test`.
@@ -1542,34 +1676,46 @@ fn configured_roles(object: &BackupDestination) -> Vec<DestinationRoleDto> {
 // Legacy adoption (D2 §3.12)
 // ======================================================================
 
-/// What a derived storage block was derived FROM.
+/// D2 §3.12 STEP 2 HAS THREE BRANCHES, AND THIS ROUTE IS ON (c).
 ///
-/// STATED, NEVER GUESSED. D2 §3.12 permits exactly two sources, and the second
-/// requires the operator to confirm because the installation's legacy
-/// addressing is a global setting rather than a fact about this archive.
+/// (a) is the PLAT-06.1 frozen `execution-inputs.json` of the newest succeeded
+/// `Backup` — the one place that records the exact bucket, prefix, endpoint,
+/// region, `path_style` and `allow_http` a runner actually used. (b) is the
+/// `archive.url` plus the installation's legacy addressing, published in the
+/// policy `ConfigMap` W11 renders, and it requires the operator to confirm
+/// because a global setting is not a fact about this archive.
+///
+/// NEITHER IS READABLE HERE. Both live in `ConfigMap`s, and the sealed adapter
+/// reads a `ConfigMap` only when a CHECK owns it (owner UID, immutability and
+/// digest all verified); an execution input and a policy document are owned by
+/// neither. So this route takes (c) and refuses.
+///
+/// WHY REFUSING BEATS DERIVING. A legacy `archive.url` carries the bucket and
+/// the prefix and nothing else. An installation whose runs used MinIO
+/// (`endpoint: https://minio…:9000`, path-style) and one that used AWS S3
+/// produce the SAME url, so any endpoint, region, addressing or transport this
+/// route filled in would be a guess — and `locationDigest`, which restore
+/// selection and catalog indexing compare, is computed over exactly those
+/// fields. A destination adopted at the wrong location is worse than no
+/// destination: it is a location that looks derived from facts.
+///
+/// [`SOURCE_FROZEN_EXECUTION`] and [`SOURCE_INSTALLATION_CONFIG`] are the two
+/// provenance values `addressingSource` will carry when (a) and (b) land. No
+/// route emits either today, and a provenance label naming a source that was
+/// not read is the defect this replaced.
 pub const SOURCE_FROZEN_EXECUTION: &str = "frozenExecution";
-/// The legacy `archive.url` plus the installation's published addressing.
+/// See [`SOURCE_FROZEN_EXECUTION`].
 pub const SOURCE_INSTALLATION_CONFIG: &str = "installationConfig";
 
-struct DerivedLocation {
-    storage: StorageRequest,
-    transport: TransportRequest,
-    source: &'static str,
-    notes: Vec<String>,
-}
-
-/// Derive a storage block from a legacy `archive.url`.
+/// The bucket and the prefix — the only two facts a legacy `archive.url`
+/// carries — checked so that the refusal below is about the missing SOURCE and
+/// not about an unreadable URL.
 ///
-/// ONLY (a) AND (c) OF D2 §3.12 ARE REACHABLE HERE. Source (a) needs the
-/// PLAT-06.1 frozen `execution-inputs.json` of the newest succeeded `Backup`,
-/// which this service cannot read: the inputs live in a `ConfigMap` this
-/// service may only read when a CHECK owns it, and no check owns an execution
-/// input. Source (b) needs the installation policy `ConfigMap`, which W11
-/// renders and which is likewise not a check result. So this route derives the
-/// bucket and prefix — facts carried by the URL itself — and REFUSES with
-/// `legacy_location_unknown` when the URL alone cannot say what the endpoint,
-/// the addressing and the transport were. It never guesses them.
-fn derive_from_url(url: &str) -> Result<DerivedLocation, ApiError> {
+/// # Errors
+///
+/// `legacy_location_unknown` for a scheme this adoption cannot describe or a
+/// URL that names no bucket.
+fn legacy_location_facts(url: &str) -> Result<(String, String), ApiError> {
     let Some(rest) = url.strip_prefix("s3://") else {
         return Err(ApiError::new(
             ProblemCode::LegacyLocationUnknown,
@@ -1590,36 +1736,37 @@ fn derive_from_url(url: &str) -> Result<DerivedLocation, ApiError> {
             "The legacy archive URL names no bucket.",
         ));
     }
-    Ok(DerivedLocation {
-        storage: StorageRequest {
-            provider: StorageProviderDto::S3,
-            bucket,
-            prefix: Some(prefix),
-            region: None,
-            endpoint: None,
-            // AWS S3 WITH NO ENDPOINT IS THE ONLY SHAPE A URL ALONE PROVES.
-            // Virtual-hosted is S3's own default there, and the pinned engine
-            // honours it because there is no endpoint to force path-style.
-            addressing: AddressingDto::VirtualHosted,
-        },
-        transport: TransportRequest {
-            security: TransportSecurityDto::Tls,
-            ca_bundle: None,
-        },
-        source: SOURCE_INSTALLATION_CONFIG,
-        notes: vec![
-            "The endpoint, region and addressing were not recovered from a frozen execution: \
-             this archive is read as AWS S3 over TLS, which is what the URL alone proves. If the \
-             runs used a custom endpoint, create the destination explicitly instead."
-                .to_string(),
-        ],
-    })
+    Ok((bucket, prefix))
+}
+
+/// The refusal, with the bucket and prefix that WERE recovered named in it, so
+/// an operator can paste them straight into `POST .../destinations`.
+fn refuse_until_a_source_is_readable(bucket: &str, prefix: &str) -> ApiError {
+    let location = if prefix.is_empty() {
+        format!("s3://{bucket}")
+    } else {
+        format!("s3://{bucket}/{prefix}")
+    };
+    ApiError::new(
+        ProblemCode::LegacyLocationUnknown,
+        format!(
+            "The legacy archive at `{location}` gives its bucket and prefix and nothing else. A \
+             BackupDestination also needs the endpoint, the region, the addressing and the \
+             transport, and this build can read neither source that records them: the frozen \
+             execution inputs of a succeeded Backup (PLAT-06.1) nor the installation's legacy \
+             addressing in the policy ConfigMap (D2 W11). Those are facts about how the runs \
+             actually reached the store, and guessing them would move the location. Create the \
+             destination explicitly with `POST /api/v1/namespaces/{{ns}}/destinations`, naming \
+             this bucket and prefix and the endpoint your runs used; adoption from the \
+             installation config arrives with W11."
+        ),
+    )
 }
 
 /// `POST .../destinations:from-legacy`.
 pub async fn from_legacy(
     State(state): State<AppState>,
-    RequestId(request_id): RequestId,
+    RequestId(_request_id): RequestId,
     actor: Actor,
     ApiPath(ns): ApiPath<String>,
     uri: Uri,
@@ -1628,7 +1775,10 @@ pub async fn from_legacy(
 ) -> Result<Response, ApiError> {
     authorize(&state, &actor, &ns, Action::ManageDestinations)?;
     crate::http::parse_query(uri.query(), &[])?;
-    let key = IdempotencyKey::from_headers(&headers)?;
+    // THE KEY IS STILL REQUIRED AND STILL VALIDATED. This is a durable POST by
+    // contract; a client that forgets the header learns that here rather than
+    // discovering it after W11 makes the route create something.
+    let _key = IdempotencyKey::from_headers(&headers)?;
     let request: DestinationFromLegacyRequest = read_json(body, MAX_JSON_BODY).await?;
     let mut errors = Vec::new();
     if !validate::is_dns_subdomain(&request.name) || request.name.len() > 63 {
@@ -1661,52 +1811,13 @@ pub async fn from_legacy(
         let object = get_object::<BackupCr>(&state, &actor, &ns, &name).await?;
         object.spec.archive.url.clone()
     };
-    let derived = derive_from_url(&legacy_url)?;
-    let create_request = CreateDestinationRequest {
-        name: request.name.clone(),
-        description: request.description.clone(),
-        storage: derived.storage,
-        transport: derived.transport,
-        access: request.access.clone(),
-        readiness: Some(crate::contract::ReadinessRequest {
-            write_probe: Some(WriteProbeDto::CreateOnlyMarker),
-        }),
-        default: Some(false),
-    };
-    validate_create(&create_request)?;
-    let created = create_named_idempotent(
-        &state,
-        &actor,
-        &ns,
-        ROUTE_FROM_LEGACY,
-        &create_request.name,
-        &key,
-        &request_id,
-        &create_request,
-        |name, annotations| build(&ns, name, annotations, &create_request),
-    )
-    .await?;
-    let names = create_new_credentials(
-        &state,
-        &ns,
-        &created.object,
-        &create_request.access,
-        &request_id,
-    )
-    .await?;
-    if !names.is_empty() {
-        actor.audit.note("credentialSecrets", &names.join(","));
-    }
-    Ok(json(
-        created.status(),
-        &DestinationResponse {
-            request_id,
-            replayed: Some(created.replayed),
-            addressing_source: Some(derived.source.to_string()),
-            notes: derived.notes,
-            item: project(&created.object, None),
-        },
-    ))
+    let (bucket, prefix) = legacy_location_facts(&legacy_url)?;
+    // NOTHING IS CREATED. The idempotency key was validated, the legacy object
+    // was read and the grants were checked — so the operator learns the
+    // request itself is well formed — and then the route refuses, because the
+    // one thing it would have to invent is the one thing that decides where
+    // the archive is.
+    Err(refuse_until_a_source_is_readable(&bucket, &prefix))
 }
 
 /// The command dispatcher for `POST .../destinations/{target}`, where `target`

@@ -780,6 +780,54 @@ pub fn refuse_impersonation(
 mod tests {
     use super::*;
 
+    /// **THE PARSER DROPS A CREDENTIAL, AND THIS IS THE ONLY TEST THAT SAYS
+    /// SO.**
+    ///
+    /// The API server echoes `data` on a Secret create. The whole reason
+    /// [`WriteOnlyCredential::data`] is `skip_deserializing` is that the echo
+    /// must not become a value inside this process — not "must not be
+    /// returned", which is `create_credential`'s narrowing, but must not
+    /// EXIST. An integration test that only checks what a route returns
+    /// survives removing the attribute; this one does not, which is what makes
+    /// the module header's "even in principle" a claim rather than a hope.
+    #[test]
+    fn an_api_server_create_response_cannot_carry_a_credential_into_this_process() {
+        let echoed = serde_json::json!({
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": "lwd-primary-archive-read", "namespace": "team-a", "uid": "u-1"},
+            "type": CREDENTIAL_TYPE_FOR_TEST,
+            "data": {
+                "access-key-id": "QUtJQUVYQU1QTEU=",
+                "secret-access-key": "c0VjUmVULWFDY0VzUy1rRXk="
+            }
+        });
+        // The fixture really does carry an encoded value, so an empty `data`
+        // below is the parser's doing and not an empty input.
+        assert!(echoed["data"]["secret-access-key"].is_string());
+
+        let parsed: WriteOnlyCredential =
+            serde_json::from_value(echoed).expect("an API-server create response parses");
+        assert!(
+            parsed.data.is_empty(),
+            "the create response's `data` survived deserialization: {:?}",
+            parsed.data.keys().collect::<Vec<_>>()
+        );
+        assert_eq!(
+            parsed.metadata.name.as_deref(),
+            Some("lwd-primary-archive-read")
+        );
+        assert_eq!(parsed.metadata.uid.as_deref(), Some("u-1"));
+
+        // And nothing the type can serialize afterwards reconstructs it.
+        let round_tripped = serde_json::to_string(&parsed).expect("it serializes");
+        assert!(!round_tripped.contains("c0VjUmVULWFDY0VzUy1rRXk="));
+    }
+
+    /// The `type` the API's own credentials carry, duplicated here rather than
+    /// imported so this unit test does not depend on a route module.
+    const CREDENTIAL_TYPE_FOR_TEST: &str = "logweir.dev/object-store-credential";
+
     #[test]
     fn redaction_removes_tokens_and_userinfo_and_bounds_length() {
         let jwt = format!("eyJ{}", "a".repeat(40));
