@@ -192,8 +192,113 @@ pub fn classify(e: &StoreError) -> CheckCode {
     if is_workload_identity_not_injected(e) {
         return CheckCode::WorkloadIdentityNotInjected;
     }
-    CheckCode::parse(StoreErrorClass::classify(e).as_str())
-        .unwrap_or(CheckCode::StoreErrorUnclassified)
+    // THE RETRY PREAMBLE IS STRIPPED FIRST, and it is this module's own fault
+    // that it has to be. See `strip_retry_noise`.
+    let cleaned = match e {
+        StoreError::Io(m) => StoreError::Io(strip_retry_noise(m)),
+        StoreError::Backend(m) => StoreError::Backend(strip_retry_noise(m)),
+        other => StoreError::Io(other.to_string()),
+    };
+    let class = match e {
+        // `NotFound`, `AlreadyExists`, `ReadOnly` and `NotAManifest` are
+        // STRUCTURAL variants, not text: classify them as they are rather than
+        // round-tripping them through `to_string`.
+        StoreError::Io(_) | StoreError::Backend(_) => StoreErrorClass::classify(&cleaned),
+        other => StoreErrorClass::classify(other),
+    };
+    CheckCode::parse(class.as_str()).unwrap_or(CheckCode::StoreErrorUnclassified)
+}
+
+/// Remove object_store's retry bookkeeping from an error's text before it is
+/// classified.
+///
+/// # Why this exists, and why it belongs here rather than in the classifier
+///
+/// `StoreErrorClass::classify` is a token scan, and its `TIMEOUT` list
+/// (`"timeout"`, `"timed out"`, …) is tested BEFORE its `UNREACHABLE` list
+/// (`"error sending request"`, `"connection refused"`, …). That order is right:
+/// a call that really timed out and then reported a transport symptom is a
+/// timeout.
+///
+/// But [`options_for`] sets `retry_timeout`, and object_store renders its retry
+/// configuration into the error text —
+/// `… after 2 retries, max_retries: 2, retry_timeout: 5s - HTTP error: error
+/// sending request …`. The literal `retry_timeout:` matches `"timeout"`, so
+/// **every transport failure under a check classified as `Timeout`**: a blocked
+/// NetworkPolicy, a wrong port and a DNS failure all came back `unknown` /
+/// `Timeout` with the remedy "raise the check timeout" instead of `notReady` /
+/// `EndpointUnreachable` with "check the URL and port, and that egress to it is
+/// allowed". It also downgraded a BLOCKING `notReady` to a non-blocking
+/// `unknown`, so the aggregate said `unknown` where it should have said
+/// `notReady`.
+///
+/// `crates/logweir-store/tests/options.rs` asserts `EndpointUnreachable` for
+/// the same failure built WITHOUT these options, so it was this module's own
+/// settings that shadowed it — which is why the removal is here, next to the
+/// settings that cause it, and not in the shared classifier.
+///
+/// Three patterns and no more, each anchored on a literal object_store writes:
+/// `after <n> retries`, `max_retries: <n>` and `retry_timeout: <n><unit>`. A
+/// GENUINE timeout survives: "timed out", "operation timed out" and "deadline
+/// has elapsed" are untouched, and `a_genuine_timeout_survives_the_strip`
+/// asserts it.
+#[must_use]
+pub fn strip_retry_noise(text: &str) -> String {
+    /// `(marker, must be followed by digits, trailing word to swallow)`
+    const NOISE: [(&str, Option<&str>); 3] = [
+        ("after ", Some("retries")),
+        ("max_retries:", None),
+        ("retry_timeout:", None),
+    ];
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    'outer: loop {
+        let Some((at, marker, tail_word)) = NOISE
+            .iter()
+            .filter_map(|(m, w)| rest.find(m).map(|i| (i, *m, *w)))
+            .min_by_key(|(i, _, _)| *i)
+        else {
+            out.push_str(rest);
+            break;
+        };
+        let after = &rest[at + marker.len()..];
+        // The value: optional spaces, then digits, then an optional unit
+        // (`s`, `ms`) — nothing else, so a sentence that merely begins "after "
+        // is left alone.
+        let bytes = after.as_bytes();
+        let mut i = 0usize;
+        while i < bytes.len() && bytes[i] == b' ' {
+            i += 1;
+        }
+        let digits_from = i;
+        while i < bytes.len() && bytes[i].is_ascii_digit() {
+            i += 1;
+        }
+        if i == digits_from {
+            // Not the shape this is about. Emit the marker and carry on past it.
+            out.push_str(&rest[..at + marker.len()]);
+            rest = after;
+            continue 'outer;
+        }
+        while i < bytes.len() && bytes[i].is_ascii_alphabetic() && tail_word.is_none() {
+            i += 1;
+        }
+        if let Some(word) = tail_word {
+            let mut j = i;
+            while j < bytes.len() && bytes[j] == b' ' {
+                j += 1;
+            }
+            if !after[j..].starts_with(word) {
+                out.push_str(&rest[..at + marker.len()]);
+                rest = after;
+                continue 'outer;
+            }
+            i = j + word.len();
+        }
+        out.push_str(&rest[..at]);
+        rest = &after[i..];
+    }
+    out
 }
 
 /// The `StorageUrl` one role reads or writes through.
@@ -330,8 +435,23 @@ pub fn open_evidence_write(
 /// What a marker put proved.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum MarkerOutcome {
-    /// The object was created by this check.
+    /// The object was created by this check, with `PutMode::Create` REALLY
+    /// enforced by the backend.
     Written,
+    /// The object was created, but the backend answered `NotSupported` /
+    /// `NotImplemented` to `PutMode::Create` and `put_create_only` fell back to
+    /// HEAD-then-PUT — a real, non-conditional write with a TOCTOU window.
+    ///
+    /// Reviewer question **Q1**. The grant is proved either way, so the code is
+    /// the same; what differs is whether D2 §4.2's guarantee — spelled
+    /// "create-only" — actually held for this put. The marker body is
+    /// deterministic, so an overwrite is a no-op in CONTENT, but a row that
+    /// said `MarkerWritten` for a best-effort write would be claiming a
+    /// property the backend declined to provide. `PutOutcome::
+    /// create_only_enforced` is recorded honestly by `logweir-store` for
+    /// exactly this reason ("never assumed true"), and this arm is the one
+    /// caller in the check runner that reads it.
+    WrittenUnconditionally,
     /// The object was already there, and the backend authorised the write
     /// before it evaluated the precondition — so the grant is proved.
     AlreadyPresent,
@@ -339,12 +459,27 @@ pub enum MarkerOutcome {
 
 impl MarkerOutcome {
     /// [`CheckCode::MarkerWritten`] or [`CheckCode::MarkerAlreadyPresent`].
+    ///
+    /// [`MarkerOutcome::WrittenUnconditionally`] is `MarkerWritten` too: the
+    /// closed vocabulary has no third spelling, the question it answers ("may
+    /// this principal write here?") has the same answer, and inventing a code
+    /// would put an unreviewed `metav1.Condition.reason` into a UI. The
+    /// difference travels as a FACT — see [`MarkerOutcome::create_only_enforced`].
     #[must_use]
     pub fn code(self) -> CheckCode {
         match self {
-            Self::Written => CheckCode::MarkerWritten,
+            Self::Written | Self::WrittenUnconditionally => CheckCode::MarkerWritten,
             Self::AlreadyPresent => CheckCode::MarkerAlreadyPresent,
         }
+    }
+
+    /// Whether `PutMode::Create` was enforced by the backend for this put.
+    ///
+    /// `true` for an object that was already there: the precondition is what
+    /// refused it, so it was evaluated.
+    #[must_use]
+    pub fn create_only_enforced(self) -> bool {
+        !matches!(self, Self::WrittenUnconditionally)
     }
 }
 
@@ -359,14 +494,21 @@ pub fn put_marker(
 ) -> Result<MarkerOutcome, StoreFailure> {
     let key = marker_key(destination_uid);
     match access.put_create_only(&key, &marker_body(destination_uid)) {
-        Ok(_) => Ok(MarkerOutcome::Written),
+        Ok(o) if o.create_only_enforced => Ok(MarkerOutcome::Written),
+        // Reviewer question Q1: the backend declined the precondition and the
+        // store fell back to HEAD-then-PUT. Reported as a written marker with a
+        // fact that says so, never as an unqualified create-only write.
+        Ok(_) => Ok(MarkerOutcome::WrittenUnconditionally),
         // D2 §4.2 `[VERIFY U7]`: AUTHORISED. Turning this arm into a failure
         // is mutant M5's twin — it would report a healthy destination as
         // unwritable on every check after the first.
         Err(StoreError::AlreadyExists(_)) => Ok(MarkerOutcome::AlreadyPresent),
         Err(e) => Err(StoreFailure::new(
             classify(&e),
-            format!("the create-only readiness marker `{key}` could not be written"),
+            format!(
+                "the create-only readiness marker for this destination, under `{MARKER_PREFIX}`, \
+                 could not be written"
+            ),
         )),
     }
 }

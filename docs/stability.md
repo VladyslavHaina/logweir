@@ -644,6 +644,12 @@ compares their SHA-256 against `$LOGWEIR_CHECK_PLAN_SHA256`, parses strictly wit
 executed against the wrong object, and a plan a newer controller wrote with a field this runner
 does not understand is refused rather than partly honoured.
 
+**An `evidenceFetch` object may name only `evidence.payload` or `evidence.sidecar`, and no two
+objects may name the same one.** A stream is one ordered run of part frames whose digest the end
+frame declares once, so an object on `result` or `details` — the two streams the runner writes
+itself — would make the relay unreadable with no way to say why. Both shapes are a named refusal
+at exit 3 rather than a silent `ResultUnreadable`.
+
 **Stdout is the machine contract and carries frames only.** `logweir-check-topic=` lines,
 `logweir-check-part=` lines, and one final `logweir-check-end=` line, each at most 4,096 bytes
 including its newline. The end line declares, per stream, how many parts were printed and their
@@ -685,10 +691,21 @@ in the environment: a rollout that upgraded one and not the other is refused rat
 * It **never creates, alters or deletes a topic.** The restore preflight's collision answer is
   targeted metadata plus a `CreateTopics` with `validate_only = true`; the execution path's probe
   topic has no counterpart here.
-* It **never prints a credential.** Every message, remedy and fact passes
-  `logweir_core::check_contract::redact` and a 512-character cap, and no broker or object-store
-  error string is ever interpolated into a frame — the code carries the classification and the
-  message names the operation, the object and the key.
+* It **never prints a credential.** Every message, remedy, fact, scope, bounded detail sample and
+  `details` line passes `logweir_core::check_contract::redact` and a 512-character cap, and no
+  broker or object-store error string is ever interpolated into a frame — the code carries the
+  classification and the message names the operation and the object. A value that is a KEY PATH
+  (an archive object key, a topic name) has every *shape* rule applied over the whole string and
+  the *long-run* rule applied per `/` segment, because `/`, `-`, `=` and the digits are all in the
+  base64 alphabet and an ordinary archive key is one 70-character run: redacting it whole protects
+  nothing and deletes the only fact the line carried. **Exactly one field is written verbatim** —
+  an `evidenceFetch` result's `key`, which is the plan's own key echoed back so the controller can
+  tell three answers apart.
+* It **never dials TLS without SASL.** `auth.mode: plaintext` with `tls: true` is a shape the
+  saved-connection contract does not support, and it is **refused rather than dialled in the
+  clear** — the same refusal `logweir cluster-probe` and the controller already make (PLAT-07.1).
+  A check's broker configuration carries no private copy: `security.protocol`, `sasl.*`, the
+  hostname pin and the trust anchor all come from the one implementation the drill reader shares.
 * **Every network call is time-bounded** by the plan's own `timeoutSeconds`: per-call timeouts on
   the broker side, `request_timeout` plus a retry cap on the object-store side.
 

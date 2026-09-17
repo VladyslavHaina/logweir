@@ -149,8 +149,9 @@ pub fn topics_describable(
 /// The redaction is the same chokepoint argument
 /// [`crate::check::catalogue::scope`] records: `CheckOutcome::with_detail`
 /// does not redact, and a rule with two exceptions is a rule a reader has to
-/// remember. `redact` fires only on credential shapes, so an ordinary topic
-/// name reaches the UI unchanged.
+/// remember. It is [`crate::check::redact_path`] rather than the whole-string
+/// form, because a sample is a segment key or a topic name and the long-run
+/// rule would eat an ordinary key entire (reviewer finding F7).
 #[must_use]
 pub fn detail(names: &[String]) -> serde_json::Value {
     serde_json::json!({
@@ -158,7 +159,7 @@ pub fn detail(names: &[String]) -> serde_json::Value {
         "sample": names
             .iter()
             .take(DETAIL_SAMPLE)
-            .map(|n| logweir_core::check_contract::redact(n))
+            .map(|n| crate::check::redact_path(n))
             .collect::<Vec<_>>(),
     })
 }

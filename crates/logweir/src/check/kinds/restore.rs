@@ -923,22 +923,39 @@ fn block_rest(
     }
 }
 
-/// The `details` stream: JSON lines, capped, with a final count line when the
-/// cap bit.
+/// The `details` stream: JSON lines, **redacted**, capped, with a final count
+/// line when the cap bit.
 ///
 /// The cap is enforced HERE and not by the caller, so every producer of a
 /// detail line is bounded by one rule. A truncated stream says so rather than
 /// simply ending: a consumer that could not tell would render "3 missing
 /// segments" for a set missing three thousand.
+///
+/// # The redaction, and why it is at this line and not at the push sites
+///
+/// A details line carries adopter identifiers — a segment key, a mapped topic
+/// name — and the controller writes the stream VERBATIM into an immutable
+/// `<job>-details` `ConfigMap` (D2 §6.7). `CheckOutcome`'s own builders redact
+/// `message`, `remedy` and `facts`, and `catalogue::scope` and
+/// `readiness::detail` were made to redact for the same reason; this stream was
+/// the third exception to a rule the code, `docs/stability.md` and the report
+/// all state has exactly one. It has one now.
+///
+/// It is applied HERE because this function is the ONE place the stream is
+/// assembled, so a new producer of a detail line cannot forget — which is the
+/// property a per-push-site redaction would not have. `redact` is idempotent
+/// and fires only on credential shapes, so an ordinary key or topic name is
+/// unchanged, and it never emits a quote, so a JSON line stays a JSON line.
 #[must_use]
 pub fn details_stream(lines: &[String]) -> Vec<u8> {
     let mut out = String::new();
     let mut kept = 0usize;
     for line in lines {
+        let line = crate::check::redact_path(line);
         if out.len() + line.len() + 1 > DETAILS_MAX_BYTES {
             break;
         }
-        out.push_str(line);
+        out.push_str(&line);
         out.push('\n');
         kept += 1;
     }

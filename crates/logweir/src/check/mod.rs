@@ -232,27 +232,47 @@ pub fn load(args: &CheckRunArgs, env: &dyn Fn(&str) -> Option<String>) -> Result
     })
 }
 
-/// One bound the pure contract does not state and this runner needs — still
+/// The relay streams an `evidenceFetch` object may name.
+///
+/// `result` and `details` are the RUNNER's own streams: it writes the result
+/// document to the first on every kind, and the restore preflight writes its
+/// bounded detail lines to the second.
+pub const EVIDENCE_STREAMS: [Stream; 2] = [Stream::EvidencePayload, Stream::EvidenceSidecar];
+
+/// Two bounds the pure contract does not state and this runner needs — still
 /// step 4, still before any client.
 ///
-/// **An `evidenceFetch` must name a DISTINCT stream per object.** A stream is
-/// relayed as one ordered run of part frames whose count and digest the end
-/// frame declares once, so two objects sharing a stream would either
-/// concatenate into bytes neither of them is, or leave the end frame declaring
-/// one of the two — and `weirkeeper::check::relay` would report the whole
-/// relay as `ResultUnreadable` with no way to say why.
+/// **An `evidenceFetch` object may name only an EVIDENCE stream, and no two
+/// objects may name the same one.** A stream is relayed as one ordered run of
+/// part frames whose count and digest the end frame declares once. Two objects
+/// on one stream, or an object on a stream the runner also writes, break in
+/// exactly the same way: the bytes are printed to that stream, the runner's own
+/// document is printed to it again, the end frame declares one of the two, and
+/// the controller's decoder answers `DuplicatePart` — which
+/// `weirkeeper::check::relay` reports as `ResultUnreadable` **with no way to
+/// say why**.
 ///
-/// It is a REFUSAL rather than a silent skip because the plan is written by
-/// the controller: a duplicate stream is a controller bug, and a runner that
-/// quietly relayed one object of a two-object fetch would report a receipt as
-/// absent when it was merely not asked for properly.
+/// Both are REFUSALS rather than silent skips because the plan is written by
+/// the controller: either shape is a controller bug, and a runner that quietly
+/// relayed one object of a two-object fetch would report a receipt as absent
+/// when it was merely not asked for properly. A NAMED refusal at exit 3 sends
+/// the operator to the plan; `ResultUnreadable` sends them to the pod log.
 ///
 /// # Errors
 /// [`Refusal`] — exit 3, no frames.
 pub fn runner_bounds(plan: &CheckPlan) -> Result<(), Refusal> {
     if let logweir_core::check_contract::CheckRequest::EvidenceFetch(r) = &plan.request {
         let mut seen: std::collections::BTreeSet<Stream> = std::collections::BTreeSet::new();
-        for o in &r.objects {
+        for (i, o) in r.objects.iter().enumerate() {
+            if !EVIDENCE_STREAMS.contains(&o.stream) {
+                return Err(Refusal::new(format!(
+                    "request.evidenceFetch.objects[{i}] names the relay stream `{}`, which the \
+                     runner writes itself; an evidence object may name only `{}` or `{}`",
+                    o.stream.as_str(),
+                    Stream::EvidencePayload.as_str(),
+                    Stream::EvidenceSidecar.as_str()
+                )));
+            }
             if !seen.insert(o.stream) {
                 return Err(Refusal::new(format!(
                     "two evidenceFetch objects name the relay stream `{}`; one stream carries \
@@ -275,6 +295,87 @@ pub fn print_refusal_to<W: Write>(w: &mut W) -> std::io::Result<()> {
         w,
         "{REFUSAL_REASON_PREFIX}{}",
         CheckCode::CheckContractMismatch
+    )
+}
+
+/// The name of the one redaction rule that is applied per PATH SEGMENT rather
+/// than over the whole string.
+///
+/// Read out of `check_contract::redaction_rules()` BY NAME and asserted to
+/// match exactly one rule, so a rename in the pure layer is a failing test
+/// rather than a silently disabled clause.
+pub const LONG_RUN_RULE: &str = "long-base64-or-hex-run";
+
+/// [`logweir_core::check_contract::redact`] for a value that is a KEY PATH.
+///
+/// # Why a key path needs a different application of the same rules
+///
+/// `redact`'s last rule removes base64-or-hex runs of 40 characters or more,
+/// and `/`, `-`, `=` and the digits are all in the base64 alphabet — so an
+/// ordinary archive key,
+/// `kafka-backups/20260915T030000Z/topics/orders/partition=0/segment-1.bin`,
+/// is ONE 70-character run and comes back as `[redacted]`. Applying it whole
+/// therefore protects nothing and deletes the only fact the line carried: a
+/// `<job>-details` `ConfigMap` reporting "3 missing segments: [redacted],
+/// [redacted], [redacted]" is one nobody can act on. That is reviewer finding
+/// **F7** arriving inside the fix for **F2**.
+///
+/// # And why it is NOT simply "split and redact"
+///
+/// The first version split on `/` and ran the whole rule set over each piece,
+/// which broke the URL-userinfo rule: `https://root:hunter2@host` splits into
+/// `https:`, `` and `root:hunter2@host`, and that rule is anchored on `://`,
+/// so the password survived. A test caught it; the shape of the mistake —
+/// weakening a rule while claiming not to — is the one this finding is about.
+///
+/// So the two halves are applied differently, deliberately:
+///
+/// * **every SHAPE rule over the WHOLE string**, exactly as `redact` applies
+///   it: PEM blocks, S3 XML bodies, URL userinfo, `secret…=value` forms and
+///   `AKIA`/`ASIA` key ids. None of them is weakened at all.
+/// * **the long-run rule per segment**, which is the only one that cannot tell
+///   an archive key from a secret.
+///
+/// **What that gives up, stated rather than implied:** a base64 secret that
+/// happens to contain `/` — base64's 64th character — is split into pieces
+/// shorter than 40 and the long-run rule no longer sees it. The values this is
+/// applied to are archive object keys and Kafka topic names: a topic name
+/// cannot contain `/` at all, and an object key is adopter-chosen structure,
+/// not a place a credential is carried. Everything the runner writes that
+/// COULD carry one — every message, remedy and fact — still goes through the
+/// whole-string `redact`.
+///
+/// # Panics
+/// Never in practice: only if [`LONG_RUN_RULE`] names no rule, which
+/// `the_long_run_rule_is_the_only_one_applied_per_segment` fails on first.
+#[must_use]
+pub fn redact_path(value: &str) -> String {
+    use logweir_core::check_contract::{apply_rules, redaction_rules};
+    let all = redaction_rules();
+    let shape: Vec<_> = all
+        .iter()
+        .filter(|r| r.name != LONG_RUN_RULE)
+        .copied()
+        .collect();
+    let long: Vec<_> = all
+        .iter()
+        .filter(|r| r.name == LONG_RUN_RULE)
+        .copied()
+        .collect();
+    assert_eq!(
+        long.len(),
+        1,
+        "`{LONG_RUN_RULE}` names {} redaction rules, not one; the per-segment clause is \
+         applying the wrong thing",
+        long.len()
+    );
+    let whole = apply_rules(value, &shape);
+    logweir_core::check_contract::cap(
+        &whole
+            .split('/')
+            .map(|segment| apply_rules(segment, &long))
+            .collect::<Vec<_>>()
+            .join("/"),
     )
 }
 

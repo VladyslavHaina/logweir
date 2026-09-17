@@ -54,12 +54,18 @@ use crate::check::{Deadline, Emission};
 pub fn run(req: &EvidenceFetchRequest, wiring: &dyn Wiring, deadline: Deadline) -> Emission {
     let mut result = CheckResult::new(CheckPlanKind::EvidenceFetch);
     let mut extra: Vec<(logweir_core::check_contract::Stream, Vec<u8>)> = Vec::new();
-    let objects = req.objects.len().max(1) as u32;
 
-    // ONE handle for the whole fetch: every object of an `evidenceFetch` is
-    // read with the `evidenceRead` grant (`CheckPlan::validate` refuses any
-    // other role), so a second handle would be a second credential evaluation
-    // for the same principal.
+    // ONE handle for the whole fetch, built with the WHOLE remaining budget:
+    // every object is read with the `evidenceRead` grant (`CheckPlan::validate`
+    // refuses any other role), so a second handle would be a second credential
+    // evaluation for the same principal.
+    //
+    // The request timeout is a property of the HANDLE and not of a call, so
+    // there is no per-object slice to take; the loop is bounded by
+    // `Deadline::has_room` instead, over at most three objects of at most
+    // 1 MiB each. An earlier draft carried an unused `objects` binding that
+    // implied a per-object slice this code never took (reviewer finding F6);
+    // it is gone rather than half-implemented.
     let access = match wiring.objects(
         &req.destination,
         DestinationRole::EvidenceRead,
@@ -95,7 +101,6 @@ pub fn run(req: &EvidenceFetchRequest, wiring: &dyn Wiring, deadline: Deadline) 
             });
             continue;
         }
-        let _ = objects;
         match access.get(&o.key) {
             Ok(bytes) => {
                 let truncated = bytes.len() as u64 > o.max_bytes;

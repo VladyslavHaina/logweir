@@ -20,6 +20,27 @@
 //! `secretKeyRef` to an empty key is not a credential, and reporting it as one
 //! would send an operator to the broker's ACLs instead of to the Secret.
 //!
+//! # TLS WITHOUT SASL IS REFUSED, NOT DOWNGRADED (PLAT-07.1)
+//!
+//! `logweir_core::spec::AuthSpec::Plaintext` carries no `tls` field, so a
+//! mapping that answers `Plaintext` for `authMode: plaintext` DISCARDS
+//! [`ConnectionPlan::tls`] — and a plan saying `tls: true` is then dialled in
+//! the clear against a listener the operator believes is encrypted. That arm
+//! existed in `crate::probe` until PLAT-07.1 removed it ("this is the runner's
+//! half"), and `weirkeeper::connection` refuses the same shape before any Job
+//! is created. This is the CHECK runner's half of the same refusal, and it is
+//! here rather than in `client_config` because by the time an `AuthConfig`
+//! exists the fact has already been thrown away.
+//!
+//! **There is no private client configuration here.** `KafkaInventory::connect`
+//! derives `security.protocol`, `sasl.*`,
+//! `ssl.endpoint.identification.algorithm` and `ssl.ca.location` from
+//! `RdKafkaReader::client_config` — the ONE implementation the drill reader and
+//! the check client share — overriding only `client.id`, which is not a
+//! control. `the_check_client_shares_the_readers_client_config` asserts that
+//! delegation still exists, because a private copy is a second place the
+//! hostname pin and the trust anchor can drift.
+//!
 //! # A mode this build cannot dial is an authentication answer, not a crash
 //!
 //! `logweir_core::spec::AuthSpec` has two arms — `plaintext` and
@@ -51,6 +72,23 @@ pub const AUTH_MODE_SCRAM_SHA_512: &str = "scramSha512";
 /// [`CheckFailure`] with [`CheckCode::AuthenticationFailed`].
 pub fn auth_spec(plan: &ConnectionPlan) -> Result<AuthSpec, CheckFailure> {
     match plan.auth_mode.as_str() {
+        // THE DOWNGRADE ARM, CLOSED. See the module header: `AuthSpec` has no
+        // plaintext-with-TLS shape, so accepting this plan would silently drop
+        // the transport the controller asked for (D-SEAMS S5).
+        //
+        // `AuthenticationFailed` and not `TlsHandshakeFailed`: no handshake was
+        // attempted, and a code claiming one would send an operator to the
+        // broker's certificate instead of to the connection's own auth block.
+        // Nothing was unreachable either, so it is not `BrokerUnreachable`.
+        AUTH_MODE_PLAINTEXT if plan.tls == Some(true) => Err(CheckFailure::new(
+            CheckCode::AuthenticationFailed,
+            format!(
+                "the connection asks for auth mode `{AUTH_MODE_PLAINTEXT}` with `tls: true` \
+                 (TLS without SASL), which this contract does not support; it is refused rather \
+                 than dialled in the clear. Use `{AUTH_MODE_SCRAM_SHA_512}` over TLS, or set \
+                 `tls: false` for a plaintext listener"
+            ),
+        )),
         AUTH_MODE_PLAINTEXT => Ok(AuthSpec::Plaintext),
         AUTH_MODE_SCRAM_SHA_512 => match plan.username.as_deref().filter(|u| !u.is_empty()) {
             Some(username) => Ok(AuthSpec::ScramSha512 {

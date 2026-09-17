@@ -145,11 +145,21 @@ pub fn destination_checks(
                                 "the evidence root on destination `{}` is readable",
                                 dest.name
                             )),
+                            // THE KEY FAMILY, NOT THE KEY (reviewer finding
+                            // F7). `logweir/readiness/<uid>.absent-probe` is
+                            // one long run of the base64 alphabet — `/`, `-`
+                            // and a UUID's hex all belong to it — so `redact`
+                            // eats it whole and the operator loses the one fact
+                            // the message carried. The family is fixed and
+                            // public, the UID is already on `scope.uid`, and
+                            // neither is credential-shaped.
                             Err(e) => super::catalogue_outcome_for_store(
                                 CheckId::DestinationEvidenceReadable,
                                 store::classify(&e),
                                 &format!(
-                                    "reading `{key}` on destination `{}` was refused",
+                                    "reading an absent probe key under `{}` on destination `{}` \
+                                     was refused",
+                                    store::MARKER_PREFIX,
                                     dest.name
                                 ),
                                 now,
@@ -182,13 +192,29 @@ pub fn destination_checks(
                     Err(f) => from_store_failure(CheckId::DestinationEvidenceWritable, &f, now),
                     Ok(access) => match store::put_marker(access.as_ref(), &dest.uid) {
                         Ok(outcome) => {
+                            // The key FAMILY, not the key — see the
+                            // evidence-read arm above for why (finding F7).
                             ready(CheckId::DestinationEvidenceWritable, outcome.code(), now)
                                 .with_message(&format!(
-                                    "the create-only readiness marker `{}` on destination `{}` is \
-                             write-authorised",
-                                    store::marker_key(&dest.uid),
+                                    "the create-only readiness marker for this destination, \
+                                     under `{}`, is write-authorised on destination `{}`",
+                                    store::MARKER_PREFIX,
                                     dest.name
                                 ))
+                                // Reviewer question Q1: whether `PutMode::Create`
+                                // was really enforced, or the backend declined it
+                                // and the store fell back to HEAD-then-PUT. The
+                                // grant is proved either way, so the CODE is the
+                                // same; a reader that cares about the create-only
+                                // guarantee reads this.
+                                .with_fact(
+                                    "createOnlyEnforced",
+                                    if outcome.create_only_enforced() {
+                                        "true"
+                                    } else {
+                                        "false"
+                                    },
+                                )
                         }
                         Err(f) => from_store_failure(CheckId::DestinationEvidenceWritable, &f, now),
                     },
