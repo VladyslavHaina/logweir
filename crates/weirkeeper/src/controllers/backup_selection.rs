@@ -117,6 +117,21 @@ pub const LABEL_PURPOSE: &str = "logweir.dev/purpose";
 /// The value of [`LABEL_PURPOSE`].
 pub const PURPOSE_TOPIC_DISCOVERY: &str = "topic-discovery";
 
+/// `app.kubernetes.io/component` on the discovery Job and its pod.
+///
+/// **`run-discovery`, AND DELIBERATELY NOT [`cjob::COMPONENT_CHECK`].** The two
+/// values are how one `list` finds both populations while the two ceilings stay
+/// separate: [`crate::check::limits::active_selector`] selects
+/// `component in (check, run-discovery)` so a run's discovery is counted
+/// against the per-connection ceiling that bounds simultaneous dials at one
+/// broker, and [`crate::check::limits::check_selector`] — the console pool's
+/// own membership — still selects `check` alone, so a nightly schedule cannot
+/// queue a browser click. Nothing calls `limits::admit` for a run's discovery
+/// (D1 §7.2 defines no admission for work an operator already scheduled), so
+/// wearing `check` would have spent the interactive pool without ever being
+/// bounded by it.
+pub const COMPONENT_RUN_DISCOVERY: &str = "run-discovery";
+
 /// The annotation carrying the digest of the source resolution the discovery
 /// Job was dispatched against — D1 §7.2 R1 and R4.
 ///
@@ -162,6 +177,23 @@ pub const MAX_INTERNAL_NAMES: usize = 50;
 
 /// How many rule-excluded names it records — D1 §3.3.
 pub const MAX_EXCLUDED_NAMES: usize = 200;
+
+/// The most bytes of NAMES the frozen `selection.discovery` block may carry —
+/// `internalExcluded.names` and `excludedByRule.names` together.
+///
+/// **SIXTEEN KIBIBYTES, SHARED, AND A BYTE BOUND BESIDE THE COUNT BOUNDS.**
+/// [`MAX_INTERNAL_NAMES`] and [`MAX_EXCLUDED_NAMES`] bound how MANY names are
+/// recorded; on their own they admit 250 names of 249 bytes each — about 61 KiB
+/// of provenance beside a topic list already bounded at
+/// [`MAX_RESOLVED_TOPIC_BYTES`], in a `ConfigMap` bounded at one MiB. These
+/// lists are a SAMPLE an operator reads to answer "which ones?", not a store:
+/// the counts are exact whatever happens to the names, and `truncated` says
+/// when the sample was cut. Sixteen KiB is roughly 250 names at a typical
+/// length and leaves the plan's budget to the thing the run actually executes.
+///
+/// The budget is spent in a fixed order — internal first, then rule-excluded —
+/// so two runs that observed the same cluster freeze the same bytes.
+pub const MAX_PROVENANCE_NAME_BYTES: usize = 16 * 1024;
 
 /// `selection.discovery.basis` — how the listing was obtained.
 pub const DISCOVERY_BASIS: &str = "metadata-list";
@@ -311,11 +343,27 @@ pub fn classify(entries: &[TopicEntry], exclusions: &Exclusions) -> Classificati
 }
 
 /// A bounded name list for the frozen block.
-fn bounded(names: &[String], cap: usize) -> DiscoveryNames {
+/// A bounded SAMPLE of `names` for the frozen provenance block — by count and
+/// by bytes, spending from a shared `budget`.
+///
+/// **THE COUNT IS ALWAYS EXACT.** Only the sample is cut, and `truncated` says
+/// so; a reader that needs the number reads `count`, and a reader that needs
+/// every name reads the plan's own `topics` or asks the cluster. Both bounds
+/// are needed: the count bound alone admits 249-byte names, and a byte bound
+/// alone would admit a hundred thousand one-character ones.
+fn bounded(names: &[String], cap: usize, budget: &mut usize) -> DiscoveryNames {
+    let mut kept: Vec<String> = Vec::new();
+    for name in names.iter().take(cap) {
+        if name.len() > *budget {
+            break;
+        }
+        *budget -= name.len();
+        kept.push(name.clone());
+    }
     DiscoveryNames {
         count: i64::try_from(names.len()).unwrap_or(i64::MAX),
-        names: names.iter().take(cap).cloned().collect(),
-        truncated: names.len() > cap,
+        truncated: kept.len() < names.len(),
+        names: kept,
     }
 }
 
@@ -512,17 +560,13 @@ pub fn owner_of(backup: &Backup, uid: &str) -> RunnerOwner {
 
 /// The labels on the discovery Job and on its pod template.
 ///
-/// # `app.kubernetes.io/component=check` is deliberately ABSENT
+/// # `app.kubernetes.io/component` is `run-discovery`, not `check`
 ///
-/// That label is the selector [`crate::check::limits`] counts D2 §4.4's
-/// interactive-check ceilings with. A run's own discovery is not an interactive
-/// check: it is dispatched by the control plane for work an operator already
-/// scheduled, and it cannot be queued (D1 §7.2 defines no admission for it, and
-/// a run that waited for a browser-driven ceiling to clear would miss its
-/// slot). Wearing the label would therefore not bound THIS Job — nothing here
-/// calls `limits::admit` — it would only spend the interactive pool and starve
-/// the console. See the module's gaps: bounding per-run discovery is a
-/// follow-up, not something this label would have achieved.
+/// See [`COMPONENT_RUN_DISCOVERY`]. The two values let ONE `list` find both
+/// populations — which is what puts a run's discovery inside the per-connection
+/// ceiling — while the console pool's own membership stays `check` alone, so a
+/// nightly schedule cannot queue a browser click over a bound nothing here is
+/// subject to.
 #[must_use]
 pub fn labels(
     backup_uid: &str,
@@ -532,6 +576,10 @@ pub fn labels(
         (
             cjob::LABEL_MANAGED_BY.to_string(),
             cjob::MANAGED_BY.to_string(),
+        ),
+        (
+            cjob::LABEL_COMPONENT.to_string(),
+            COMPONENT_RUN_DISCOVERY.to_string(),
         ),
         (
             LABEL_PURPOSE.to_string(),
@@ -729,6 +777,20 @@ pub fn resolved_selection(
         ));
     }
 
+    // ONE SHARED BYTE BUDGET, SPENT IN A FIXED ORDER, so two runs that observed
+    // the same cluster freeze the same bytes. See `MAX_PROVENANCE_NAME_BYTES`.
+    let mut name_budget = MAX_PROVENANCE_NAME_BYTES;
+    let internal_names = bounded(
+        &observed.classification.internal,
+        MAX_INTERNAL_NAMES,
+        &mut name_budget,
+    );
+    let excluded_names = bounded(
+        &observed.classification.excluded,
+        MAX_EXCLUDED_NAMES,
+        &mut name_budget,
+    );
+
     let discovery = DiscoveryInputs {
         observed_at: observed
             .observed_at
@@ -743,8 +805,8 @@ pub fn resolved_selection(
         // the OBSERVATION this selection came from.
         result_sha256: observed.inventory.topics_sha256.clone(),
         visible_topic_count: i64::try_from(observed.classification.visible).unwrap_or(i64::MAX),
-        internal_excluded: bounded(&observed.classification.internal, MAX_INTERNAL_NAMES),
-        excluded_by_rule: bounded(&observed.classification.excluded, MAX_EXCLUDED_NAMES),
+        internal_excluded: internal_names,
+        excluded_by_rule: excluded_names,
         limited_topic_count: i64::try_from(observed.classification.limited.len())
             .unwrap_or(i64::MAX),
         discovery_job: observed.job_name.clone(),

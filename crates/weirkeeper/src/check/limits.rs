@@ -16,12 +16,19 @@
 //! whose status patch failed as finished. The Job is the API server's record of
 //! the same fact, and it is the object the quota is actually spent on.
 //!
-//! They are found by the label [`super::job::LABEL_COMPONENT`] =
-//! [`super::job::COMPONENT_CHECK`], which [`super::job::labels`] writes on
-//! every check Job. **A label is the right tool HERE and the wrong tool for pod
-//! identity** (see [`super::pod`]): counting is an approximation whose worst
-//! outcome is a queued check, while reading a pod's stdout is a trust decision
-//! whose worst outcome is publishing somebody else's output.
+//! They are found by [`super::job::LABEL_COMPONENT`], which
+//! [`super::job::labels`] writes on every check Job — and which a `Backup`'s
+//! own per-run topic discovery Job wears with the OTHER value
+//! (`run-discovery`, PLAT-09.2). One set-based [`active_selector`] therefore
+//! finds both populations in one request, and [`count`] attributes each from
+//! the same label: an interactive check spends the namespace and installation
+//! pools, a run's discovery spends only the per-connection ceiling, because
+//! nothing admits it and a Job counted against a pool it is never queued by
+//! spends somebody else's budget for free. **A label is the right tool HERE
+//! and the wrong tool for pod identity** (see [`super::pod`]): counting is an
+//! approximation whose worst outcome is a queued check, while reading a pod's
+//! stdout is a trust decision whose worst outcome is publishing somebody
+//! else's output.
 //!
 //! # The overshoot is accepted and written down
 //!
@@ -41,7 +48,12 @@ use super::policy::ChecksPolicy;
 /// How long a queued check waits before it is looked at again — D2 §4.3.
 pub const QUEUED_REQUEUE_SECS: u64 = 10;
 
-/// The selector every active-check count is taken with.
+/// The INTERACTIVE pool's own membership: `app.kubernetes.io/component=check`.
+///
+/// This is what a check Job wears and what the namespace and installation
+/// ceilings are about. It is NOT what [`check_jobs`] lists with — see
+/// [`active_selector`], which widens the same key to find a `Backup`'s own
+/// per-run discoveries as well.
 #[must_use]
 pub fn check_selector() -> String {
     format!(
@@ -51,30 +63,33 @@ pub fn check_selector() -> String {
     )
 }
 
-/// The selector that finds a `Backup`'s OWN per-run topic discovery Jobs
-/// (PLAT-09.2).
+/// The selector [`check_jobs`] actually lists with — **both populations, one
+/// request**.
 ///
-/// # Why they are a second listing and not a second label on the first
+/// `app.kubernetes.io/component in (check, run-discovery)`, a SET-BASED
+/// selector. A label selector ANDs its terms and cannot express "either key",
+/// which is why the two populations share one key with two values rather than
+/// carrying two different keys: one `list` then finds an interactive check and
+/// a `Backup`'s own per-run topic discovery alike, and [`count`] tells them
+/// apart from the label it already has in hand.
 ///
-/// A run's discovery deliberately does not wear
-/// [`super::job::LABEL_COMPONENT`]`=`[`super::job::COMPONENT_CHECK`]: nothing
-/// admits it ([`admit`] is never called for it — D1 §7.2 defines no admission
-/// for work an operator already scheduled), so wearing that label would spend
-/// the interactive pool without ever being bounded by it, and a browser click
-/// would queue behind a nightly schedule. What it SHOULD spend is the
-/// per-connection ceiling, which exists to bound simultaneous connections to
-/// one broker — and that is a different question from "how many checks is this
-/// installation running".
+/// # Why they are not simply both `check`
 ///
-/// A Kubernetes label selector ANDs its terms and cannot express "either key",
-/// so the two populations are two listings. [`check_jobs`] deliberately still
-/// makes exactly one — see [`run_discovery_jobs`].
+/// Nothing calls [`admit`] for a run's discovery — D1 §7.2 defines no admission
+/// for work an operator already scheduled, and a run that waited for a
+/// browser-driven ceiling to clear would miss its slot. A Job that is counted
+/// against a pool but never admitted by it is a Job that spends somebody else's
+/// budget for free, so a run's discovery spends the ONE ceiling it genuinely
+/// belongs to (the per-connection one, which bounds simultaneous dials at a
+/// broker) and neither of the interactive pools. [`check_selector`] stays the
+/// console pool's own membership for exactly that reason.
 #[must_use]
-pub fn run_discovery_selector() -> String {
+pub fn active_selector() -> String {
     format!(
-        "{}={}",
-        crate::controllers::backup_selection::LABEL_PURPOSE,
-        crate::controllers::backup_selection::PURPOSE_TOPIC_DISCOVERY
+        "{} in ({},{})",
+        super::job::LABEL_COMPONENT,
+        super::job::COMPONENT_CHECK,
+        crate::controllers::backup_selection::COMPONENT_RUN_DISCOVERY
     )
 }
 
@@ -121,11 +136,15 @@ pub fn count(jobs: &[Job], namespace: &str, connection_uid: Option<&str>) -> Act
         // genuinely belongs to is the per-connection one, which bounds
         // simultaneous dials at one broker — and eight dynamic schedules
         // firing at 02:00 against one `KafkaCluster` is exactly what that
-        // ceiling is for. See `run_discovery_selector`.
-        if labels
-            .get(crate::controllers::backup_selection::LABEL_PURPOSE)
-            .map(String::as_str)
-            == Some(crate::controllers::backup_selection::PURPOSE_TOPIC_DISCOVERY)
+        // ceiling is for. See `active_selector`.
+        //
+        // TOLD APART BY `app.kubernetes.io/component`, the same key the
+        // listing selects on, so the population a request returned and the
+        // population this function attributes cannot drift.
+        // `logweir.dev/purpose` stays on the Job as the handle an operator
+        // types into `kubectl get jobs -l`.
+        if labels.get(super::job::LABEL_COMPONENT).map(String::as_str)
+            == Some(crate::controllers::backup_selection::COMPONENT_RUN_DISCOVERY)
         {
             if let Some(uid) = connection_uid {
                 if labels
@@ -243,30 +262,7 @@ pub fn admit(counts: &ActiveCounts, policy: &ChecksPolicy, kind: CheckPlanKind) 
 pub async fn check_jobs(client: &kube::Client) -> Result<Vec<Job>, kube::Error> {
     let jobs: Api<Job> = Api::all(client.clone());
     let list = jobs
-        .list(&ListParams::default().labels(&check_selector()))
-        .await?;
-    Ok(list.items)
-}
-
-/// Every per-run topic discovery Job in the installation, active or not —
-/// [`run_discovery_selector`]'s population.
-///
-/// **A SECOND LISTING, AND A SEPARATE FUNCTION ON PURPOSE.** [`check_jobs`]
-/// makes exactly one request and `check_framework`'s
-/// `the_active_count_lists_by_the_component_label_and_nothing_else` asserts
-/// that it does; a label selector cannot express "either key", so folding the
-/// two populations into one call is not available. A caller that wants the
-/// per-connection ceiling to see a `Backup`'s own discoveries concatenates the
-/// two lists before calling [`count`], which already attributes each population
-/// correctly.
-///
-/// # Errors
-///
-/// [`kube::Error`] from the `list`.
-pub async fn run_discovery_jobs(client: &kube::Client) -> Result<Vec<Job>, kube::Error> {
-    let jobs: Api<Job> = Api::all(client.clone());
-    let list = jobs
-        .list(&ListParams::default().labels(&run_discovery_selector()))
+        .list(&ListParams::default().labels(&active_selector()))
         .await?;
     Ok(list.items)
 }

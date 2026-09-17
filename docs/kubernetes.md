@@ -1911,12 +1911,31 @@ never written.** The two reachable labels are `VisibleUserTopicsOnly` (with
 `NamedTopics`.
 
 **What the frozen plan records.** `topics` is the exact list handed to
-`backup.yaml`; `selection.discovery` is its provenance —
-`observedAt`, `clusterId`, `visibility`, `basis`, `resultSha256`,
-`visibleTopicCount`, `internalExcluded` and `excludedByRule` (counts, plus up
-to 50 and 200 names with a `truncated` flag), `limitedTopicCount` and
+`backup.yaml`; `selection.discovery` is its provenance — `observedAt`,
+`clusterId`, `visibility`, `basis`, `resultSha256`, `visibleTopicCount`,
+`internalExcluded` and `excludedByRule`, `limitedTopicCount` and
 `discoveryJob`. The names are recorded once, in the plan; `status.selection`
 carries only counts, because a status is not a store.
+
+`internalExcluded.names` and `excludedByRule.names` are a **bounded sample**,
+not the whole list: at most 50 and 200 names, and **at most 16 KiB of names
+between them**, spent in that order. `truncated` says when a sample was cut.
+The `count` beside each one is always exact — a reader that needs the number
+reads `count`, and a reader that needs every name reads the plan's own `topics`
+or asks the cluster. Both bounds are there because either alone is escapable:
+the count bound admits 250 names of 249 bytes, and a byte bound alone admits a
+hundred thousand one-character ones. The plan `ConfigMap` a run mounts is one
+MiB, and the topic list already has 256 KiB of it.
+
+**The discovery Job's labels.** `app.kubernetes.io/component=run-discovery`
+(not `check`) and `logweir.dev/purpose=topic-discovery`. The shared component
+key is what lets the controller's single installation-wide `list` see
+interactive checks and per-run discoveries together, so a run's discovery counts
+against `maxActiveDiscoveriesPerConnection` — the ceiling that bounds
+simultaneous dials at one broker. The distinct **value** is what keeps it out of
+the interactive namespace and installation pools: nothing queues a run's
+discovery (an operator already scheduled the work), and a Job counted against a
+pool it is never queued by would spend the console's budget for free.
 
 **Upgrade and rollback.** `spec.allUserTopics` is an additive CRD field, and a
 named schedule or `Backup` behaves exactly as before — no discovery Job, no
