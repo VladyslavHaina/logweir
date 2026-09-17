@@ -137,7 +137,7 @@ Actor identity is exactly `(OIDC issuer, sub)`. Group claims map by exact string
 | Session and explicitly granted namespaces | read | read | read | read |
 | Connections/destinations summaries and health | read in bound namespaces | read/create/test in bound namespaces | read only when separately granted viewer | all bound namespaces |
 | Topic discovery and readiness | read | start/read/cancel own checks | read only when needed for the approval packet | all bound namespaces, including cancelling any check in an administered namespace (amended 2026-09-17 at D2 W12's integration: an operator's cancel is exact-owner; an administrator's is namespace-wide, because a cancel is transient, idempotent and leaves the object and its evidence in place) |
-| Schedules | read | create and set suspension | read only with viewer | all bound namespaces |
+| Schedules | read | create, set suspension, and edit future policy (amended 2026-09-17 at D1 W6's integration: editing a schedule's future policy — PLAT-05.1's `PUT …/schedules/{name}` under `expectedGeneration` — carries the same authority as creating one; every run keeps its own frozen snapshot, so an edit never reaches a running Backup) | read only with viewer | all bound namespaces |
 | Backups/Restores/status/evidence metadata | read | create manual backup/restore and read | read exact governed approval subject/plan | all bound namespaces |
 | Ordinary confirmation | none | confirm own operation where bound policy is Ordinary | none | may operate, but is still the requester |
 | Governed approval submission | none | none | submit only in approver-bound namespaces | permitted only if separately bound; cannot approve own request when policy requires independence |

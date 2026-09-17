@@ -139,7 +139,7 @@ Wave 2 resumes every branch in place with the prompts under
 | PLAT-12.1 (immediate slice), PLAT-12.2 (subject slice) | In progress (slices landed) | ui-correct | The guided submit, idempotent durable Restore and subject binding landed with PLAT-13.2 (records under each task); remaining: PLAT-11.2/13.2-backed selection flow and PLAT-19.2 policy routing for 12.1, retry identity for 12.2. |
 | PLAT-17.2 (stage 2) | In progress (stage landed) | plat17-2-authz, plat17-2-authz-review | Partial record under PLAT-17.2. Integrated into main as `24752f4..90ecd0c`. Shared mode is implemented and live-verified locally but not deployable or declarable secure until D0 stages 5 and 7. |
 | PLAT-17.1 (stages 1 and 3) | In progress (stages landed) | plat17-api-finish, plat17-api-review | Partial record under PLAT-17.1. Integrated into main as `4b571d1..de0207c`. Remaining for Done: console image and chart with the API's own RBAC (D0 stage 7), transient-check cancellation once PLAT-03/09.1 exist, `POST …/backups` (PLAT-06.2), SSE (PLAT-14.1), a browser journey through the API, and PLAT-17.2. |
-| PLAT-04.2, 05.x, 06.2, 09.2 | Contract decided | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. W1 (the pure cadence engine) landed in main as `6eedc0a..4b54a5c` after review; see the PLAT-04.2 partial record. W3a (the `Backup` run contract: `spec.trigger`, `spec.scheduleRef` with generation and `runPolicySha256`, the selection type with `allUserTopics` requiring `incompleteDiscovery`, `status.selection`, `src/identity.rs`, `src/policy.rs`, the §3.4 vocabulary) landed in `696c81a`/`b334a98` inside `crds-shapes`; a `Backup` naming both `topics` and `allUserTopics` is refused by CEL and, terminally, by admission. W3b (the reconciler consumes the contract; grammar `v2`) landed at `397e37d`; see the PLAT-04.2 partial record. W2 (editable policy, the §4.5 scheduler; `destinationRef` editable) landed at `98257f8`; see the PLAT-05.1/04.2 partial record. W5 (dynamic selection per run through the check runner) landed at `7072b9d`; see the PLAT-09.2 partial record. W4, W6, W7, W8 remain. |
+| PLAT-04.2, 05.x, 06.2, 09.2 | Contract decided | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. W1 (the pure cadence engine) landed in main as `6eedc0a..4b54a5c` after review; see the PLAT-04.2 partial record. W3a (the `Backup` run contract: `spec.trigger`, `spec.scheduleRef` with generation and `runPolicySha256`, the selection type with `allUserTopics` requiring `incompleteDiscovery`, `status.selection`, `src/identity.rs`, `src/policy.rs`, the §3.4 vocabulary) landed in `696c81a`/`b334a98` inside `crds-shapes`; a `Backup` naming both `topics` and `allUserTopics` is refused by CEL and, terminally, by admission. W3b (the reconciler consumes the contract; grammar `v2`) landed at `397e37d`; see the PLAT-04.2 partial record. W2 (editable policy, the §4.5 scheduler; `destinationRef` editable) landed at `98257f8`; see the PLAT-05.1/04.2 partial record. W5 (dynamic selection per run through the check runner) landed at `7072b9d`; see the PLAT-09.2 partial record. W6 (cadence previews, `PUT schedules`, `POST backups`) landed at `72751ab`; see the PLAT-06.2 partial record. W4, W7, W8 remain. |
 | PLAT-03.x, 08.x, 09.1 | In progress (W1, W2, W3, W4, W5, W6a, W6b, W7, W8, W9, W12 landed) | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. W1 (pure check contract and destination model) and W2 (explicit store options) landed as `c13b0cc..56bd074` after review (ACCEPT after two high and three medium fixes: JSON-form redaction bypass, ambient credentials inheriting the environment). W3 (`logweir_kafka::inventory`: bounded targeted describe, broker count, validate-only `CreateTopics`, error classification where an observed authorization failure makes visibility `limited` and anything unknown is failure, with a real admin-client fault capture because rdkafka 0.36 never invokes `ClientContext::error` for a metadata-only workflow — D2 §4.2 `[VERIFY U5]` corrected) and W5 (`weirkeeper::check`: check Jobs mirroring the execution pod, pod selection by controller owner UID only, framed-stdout relay through the W1 decoder, the full waiting-code table, TTL, plan/chunk/limit modules, the installation policy loader failing closed) landed as `23cec50..b8e62d1` after review (ACCEPT after one high and three medium fixes; 19 mutants killed; the rebase over PLAT-07.1 then routed the inventory client through the reader's `client_config`, removing a drifted copy that could upgrade plaintext to TLS when a CA was present — re-checked ACCEPT; weirkeeper 435, kafka 57). RBAC still owed by W11: `events: list` plus its `manifest_lint` row, the three new kinds' verbs, and a decision on `gc.rs`'s deletes. The reviewers' SEC-PODLOG finding against `controllers::backup::select_job_pod` is closed by `secpodlog` (see the defects table). W6a and W6b (the three Amendment F kinds and the destination sentinel on existing kinds) landed in `46880a3`/`88232f5`/`b334a98` inside `crds-shapes`; W7 (destination resolver, controller, evidence store cache) landed as `27fb924..0b25e95` (see the PLAT-08.1 partial record); W4 (runner `logweir check run`) landed at `537657d` (see the PLAT-03 partial record); W8 (`TopicDiscovery` controller) and W12 (API routes) are in review or in progress. W9, W10, W11, W13, W14 remain. |
 | PLAT-14.x, 15.x, 16.x, 19.1 | In progress (W0, W1, W3, W4, W8, W5 landed) | [D3](decisions/D3-status-catalog-retention-trust.md) | Operation states, protection freshness, rehearsals, durable catalog, retention enforcement boundary, trust lifecycle; fifteen worker tasks. W4 (`d3-notify`: the shared notification module and `logweir notify deliver`) landed after review (ACCEPT after two high fixes); W3 (`d3-catalog-writer`: signed catalog point records, `list_page`, `logweir catalog sync|list`) landed after review (see the PLAT-15.1 partial record); W0 (the five Amendment G kinds, additive run status, `Restore.spec` additions, the `Approval` enum) landed in `496451a`/`88232f5`/`b334a98` inside `crds-shapes`; W1 (trust lifecycle core, `TrustPolicy` controller, `trust export|migrate-roster`, G8) landed as `64fcd38..5fc1a72` (see the PLAT-19.1 partial record); W8 (`RecoveryCatalog` controller) in progress. W2, W5, W6, W7, W9, W10, W11, W12, W13, W14 remain. |
 
@@ -856,6 +856,49 @@ RECEIPT-DUP finding is recorded in the defects table for D3.
 **Priority P1 · Proposed.** SCRAM reference reuse is already fixed; extend the
 same model to registration, discovery, preflight and restoration without
 reintroducing separate credentials.
+
+**Partial record (2026-09-17) — PLAT-06.2 API half, with PLAT-04.2's previews and
+PLAT-05.1's policy edit: D1 W6 landed; the tasks stay In progress until W7 (UI) and
+W8 (live) land.** Landed in main as `` (three route families), `89bba9e`/
+`c101b54` (tests), `da9a757`/`b55c269` (docs) and `3968ecf` (review fixes) on the
+PLAT-17.1 skeleton. Contract for W7 (`docs/api.md`): `GET /api/v1/cadence-previews`
+(D1 §4.4's path) compiles a preset or cron in a zone through `weirkeeper::cadence`
+with no cluster read — next runs with local time and DST adjustment, an invalid cron or
+zone refused as `schedule_invalid` naming the field, the same code the other routes
+use for the same condition; `PUT …/schedules/{name}` edits FUTURE policy as a typed
+merge PATCH under `expectedGeneration` (412 on mismatch; `sourceRef` immutable before
+the call; the sentinel rule reported as `destination_sentinel_mismatch`; CEL refusals
+from the API server mapped by rule; running runs keep their frozen snapshot) — the
+verb stays `patch`, so no new console-ServiceAccount grant; `POST …/backups` creates
+the canonical manual `Backup` (D1 §8.1 — `spec.trigger.kind: Manual`, `triggeredBy:
+manual`, the deterministic `logweir-manual-<26 base32>` name from the request scope,
+`scheduleRef` and the policy snapshot copied from one read when created from a
+schedule) for "Back up now" and "Run first backup now", with same key + same body ⇒ 200
+and the existing uid, same key + different body ⇒ 409 `idempotency_conflict`, a lost
+response replayed safely, a suspended or busy schedule never blocking a manual run
+(§8.3), and the §8.4 preflight seam stated honestly; `config/samples/backup-manual.yaml`
+ships and a test creates through the route and compares labels and spec byte for
+byte. Authorisation: every route probed across the four roles — an Operator may edit
+a schedule's future policy with the authority it has to create one (D0 matrix amended
+at this integration), the cadence preview needs permission to read schedules
+somewhere (the review's untested guard now has a killing row: an approver bound
+without a schedule surface is refused), every mutation audited. Verified at `72751ab`
+on main: logweir-api 308/308, strict clippy and fmt, `schema-check`, one-signer,
+no-oso, the five repo lint suites, `node --test ui/tests/contract.spec.js` 18/18 with
+`ui/` byte-unchanged; twelve planted mutants killed (two real defects — nested
+merge-patch nulls, the sample digest — found during development, plus the review's
+surviving authorisation mutant). Live on docker-desktop (isolated labelled namespaces,
+deleted after owner-label and UID checks): both DST previews, a manual run from a
+suspended schedule, replay with the same UID, an idempotency conflict, `409
+policy_changed`, `412` on a stale generation; a SUCCESSFUL edit could not be observed
+because the lab's `backupschedules` CRD predates D1 W2 and the API fails closed against
+it (422, the message logged, not returned) — the lab refresh and W8 owe that row.
+Independent review `claude/d1w6.review.md`: ACCEPT-WITH-FIXES (one medium: the
+preview authorisation guard had no killing test; eight low) then ACCEPT. Deviations:
+merge PATCH + `expectedGeneration` instead of §5.6's `replace` (keeps the verb at
+`patch`); `Schedule.generation` optional in the schema — W7 tightens it. Gaps: W7's UI,
+W8's live rows, the `omitted ⇒ removed` semantics under a CRD-ahead window
+(documented). Migration: none — additive routes; the manual-run sample is new.
 
 ### PLAT-07.1 — Complete the saved-connection contract
 
