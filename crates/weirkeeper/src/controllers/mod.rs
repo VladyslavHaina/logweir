@@ -71,11 +71,23 @@
 //! material and a credential value is not the controller's to hold (D2 §3.8
 //! option B, rejected).
 
+//! WHAT A RECONCILER IN THIS DIRECTORY MAY DO WHEN ITS WHOLE OUTPUT IS
+//! ADVISORY (D2 W9). [`preflight`] is the first reconciler that creates a Job
+//! whose result AUTHORISES NOTHING. Every execution-time guard still runs and
+//! none of them reads a `Preflight` (D2 §6.8) — `no_execution_path_reads_
+//! preflight_or_discovery` is the source scan that says so, over
+//! `controllers/{backup,backup_schedule,restore,approval}.rs` and both runner
+//! paths. It also performs NO WRITE against a subject's target: the
+//! validate-only `CreateTopics` D2 §6.7 calls for happens inside the check pod,
+//! and this controller patches its own `/status`, its own Job's TTL, and
+//! nothing else.
+
 pub mod approval;
 pub mod backup;
 pub mod backup_destination;
 pub mod backup_schedule;
 pub mod kafka_cluster;
+pub mod preflight;
 pub mod recovery_catalog;
 pub mod restore;
 pub mod topic_discovery;

@@ -418,6 +418,18 @@ fn run() -> ExitCode {
         controllers.push(Box::pin(
             weirkeeper::controllers::recovery_catalog::controller(client.clone(), runner.clone()),
         ));
+        // D2 W9 pushes the ELEVENTH — the `Preflight` reconciler that turns a
+        // readiness question into one isolated check Job and publishes what it
+        // found as codes with remedies. It takes the runner image, because it
+        // creates a Job in the execution pod's own shape; it takes NO archive
+        // handle, because every archive read a preflight makes happens inside
+        // that pod with the destination's own credential. Its verdict
+        // AUTHORISES NOTHING (D2 §6.8). `tests/linkage.rs`'s `"controllers":11`
+        // moved in this same commit (D3 W8's `recovery_catalog` took it to ten).
+        controllers.push(Box::pin(weirkeeper::controllers::preflight::controller(
+            client.clone(),
+            runner.clone(),
+        )));
 
         let registered = controllers.len();
         info!(
