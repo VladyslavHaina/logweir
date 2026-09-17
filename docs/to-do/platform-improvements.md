@@ -497,10 +497,18 @@ assert `ready`); the backup plan requests `ArchiveRead`/`EvidenceWrite` (and
 honoured, never silently `false` (UI-FAKEPREFLIGHT's defect class). `binding`
 (recomputed `planHash`, `inputsDigest`, referents with UID and generation,
 `policyDigest`) is written BEFORE the Job — asserted by route order — and W12
-decides applicability with `check_contract::stale_reasons`; the four reasons the
-controller emits that W12's DTO lacked (`referentChanged:<Kind>/<name>`,
-`caBundleChanged`, `policyChanged`, `inputsDigestChanged`) are widened into the
-API by the `d2w12b` follow-up. Seams: S1 (the plan through `check::plan::build`
+decides applicability with `check_contract::stale_reasons`; the API's stale-reason
+vocabulary was reconciled by the `d2w12b` follow-up (landed as `9b45a39..8f3165c`):
+the API never parses `status.message` — a source-scan test bans it — but
+recomputes staleness with `check_contract::stale_reasons` over `binding.referents[]`
+read back through the sealed adapter, closes its enum over exactly what core
+renders plus one API-side `unverifiable` (a referent it cannot read, a kind
+outside the sealed set, a missing binding — always `applicable: false`, never
+fail-open), and states the policy-digest comparison as a `staleBasis` line
+naming the controller; `cancelRequested` is dropped because the controller
+never emits it. Follow-up owed to the controller: `status.observedInputsDigest`
++ `observedAt` on `Preflight`, so `inputsDigestChanged` has a real producer and
+the policy comparison stops overclaiming for non-ready verdicts. Seams: S1 (the plan through `check::plan::build`
 and `logweir check run`), S2 (`no_execution_path_reads_preflight_or_discovery`
 now globs both `src` trees and catches `as` aliases), S6 (pod by owner UID), S7
 (every status write resourceVersion-preconditioned). RBAC: `preflights: [list,
