@@ -127,28 +127,39 @@ Cadence, time zone, deadlines, catch-up, retry, concurrency, retention and suspe
 
 ### 3.3 Execution inputs grammar `v2` (extends PLAT-06.1's `execution-inputs.json`)
 
-Written once at freeze, canonical JSON, inside the same immutable `<backup>-plan` ConfigMap. `v1` objects frozen by an earlier controller are still loaded and executed unchanged. The block below is an annotated shape sketch (`| null` alternatives, `//` comments, `N` placeholders), not literal JSON.
+Written once at freeze, canonical JSON, inside the same immutable `<backup>-plan` ConfigMap. `v1` objects frozen by an earlier controller are still loaded and executed unchanged (S4).
+
+**Amended 2026-09-16 at W3b's integration** (review `d1w3b`, both grammar deviations ratified). The landed grammar is `crates/weirkeeper/src/backup_execution.rs` `BackupExecutionInputs`, whose field declaration order IS the wire order (`logweir_core::det_json` emits struct fields in declaration order), and the sketch below is rewritten from it. The earlier sketch showed top-level `executionId`, `run`, `schedule`, `triggeredBy` and `deadlineSeconds` and a `selection.topics` list; none of those exist. `v2` is exactly `v1` plus five optional blocks — `trigger`, `scheduleRef`, `runPolicySha256`, `selection`, `destination` — each omitted (never `null`) when absent, so a `v1` document re-encodes to its own bytes. The run block is named `trigger` and the schedule block `scheduleRef` because each is a verbatim copy of `spec.trigger` / `spec.scheduleRef` (copied, never re-resolved), and because `v1` already spends `schedule` on `execution.schedule = {name, uid, slot}`. The topic list is the single top-level `topics` that `v1` defined — the exact list handed to `backup.yaml` — and `selection` carries its provenance and counts, never a second copy (one answer, one place; §7.2 R8 bounds the list at 256 KiB inside a 1 MiB ConfigMap). The block below is an annotated shape sketch in wire order (`| absent` alternatives, `//` comments, `N` placeholders), not literal JSON.
 
 ```json
-{"version":"v2",
- "executionId":"3f0c…-20260915-020000-r1",
- "run":{"kind":"Retry","slot":"20260915-020000","attempt":1,"retryOf":"logweir-backup-nightly-20260915-020000","timeZone":"Europe/Berlin"},
- "schedule":{"name":"nightly","uid":"3f0c…","generation":7,"runPolicySha256":"sha256:…"} | null,
- "source":{ /* PLAT-06.1 ResolvedBackupSource: clusterRef, clusterUid, bootstrapServers, auth, passwordSecretRef, observedClusterId */ },
- "selection":{
-   "mode":"SelectedTopics|AllUserTopics",
-   "coverage":"NamedTopics|AllUserTopicsAttested|VisibleUserTopicsOnly",
-   "topics":["…"],                       // exact names handed to backup.yaml; spec order (named) or byte-sorted (dynamic)
-   "exclude":{"topics":[…],"prefixes":[…]} | null,
-   "incompleteDiscovery":"Refuse|BackUpVisibleTopics" | null,
-   "discovery":null | {"observedAt":"…","clusterId":"…","visibility":"unknown|limited|attestedComplete",
-                        "basis":"metadata-list","resultSha256":"sha256:…","visibleTopicCount":N,
-                        "internalExcluded":{"count":N,"names":[≤50]},"excludedByRule":{"count":N,"names":[≤200],"truncated":bool},
-                        "limitedTopicCount":N,"discoveryJob":"lwd-<backup-uid>"}},
- "archive":{…}, "triggeredBy":"schedule|manual", "deadlineSeconds":3600}
+{"version":"logweir.dev/backup-execution-inputs/v2",
+ "execution":{"id":"3f0c…-20260915-020000-r1",                    // v1 — <scheduleUID>-<slot>[-r<k>], or the Backup's UID (§3.1)
+              "trigger":"manual|schedule",                          // v1 — spec.triggeredBy, unchanged
+              "backup":{"namespace":"…","name":"…","uid":"…"},
+              "schedule":{"name":"nightly","uid":"3f0c…","slot":"20260915-020000"} | absent},
+ "trigger":{"kind":"Scheduled|CatchUp|Retry|Manual","attempt":N,
+            "retryOf":"logweir-backup-nightly-20260915-020000" | absent,
+            "timeZone":"Europe/Berlin" | absent},                   // v2 — spec.trigger, copied
+ "scheduleRef":{"name":"nightly","uid":"3f0c…","generation":7,
+                "runPolicySha256":"sha256:…"} | absent,             // v2 — spec.scheduleRef, copied; absent for an ad-hoc manual run
+ "runPolicySha256":"sha256:…",                                      // v2 — §3.2 digest of THIS run's own policy fields, recorded for every run
+ "source":{ /* PLAT-06.1 ResolvedBackupSource: clusterRef, clusterUid, bootstrapServers, auth, passwordSecretRef, observedClusterId */ },   // v1
+ "topics":["…"],                                                    // v1 — THE exact names handed to backup.yaml; spec order (SelectedTopics) or byte-sorted (AllUserTopics)
+ "selection":{"mode":"SelectedTopics|AllUserTopics",
+              "coverage":"NamedTopics|AllUserTopicsAttested|VisibleUserTopicsOnly",
+              "resolvedTopicCount":N,"resolvedTopicBytes":N,
+              "exclude":{"topics":[…],"prefixes":[…]} | absent,
+              "incompleteDiscovery":"Refuse|BackUpVisibleTopics" | absent,
+              "discovery":{"observedAt":"…","clusterId":"…","visibility":"unknown|limited|attestedComplete",
+                           "basis":"metadata-list","resultSha256":"sha256:…","visibleTopicCount":N,
+                           "internalExcluded":{"count":N,"names":[≤50]},"excludedByRule":{"count":N,"names":[≤200],"truncated":bool},
+                           "limitedTopicCount":N,"discoveryJob":"lwd-<backup-uid>"} | absent},   // v2 — the provenance of `topics`
+ "destination":{…} | absent,                                        // v2 — reserved; D2 W10 writes the resolved BackupDestination snapshot (D2 §3.7)
+ "archive":{…},                                                     // v1
+ "runner":{"args":[…],"deadlineSeconds":3600,"settings":{…}}}       // v1 — the argv, the deadline and the tunables
 ```
 
-PLAT-06.1's `validate_inputs_for_backup` must compare `selection.topics` with `spec.topics` only in `SelectedTopics` mode; in `AllUserTopics` mode it checks `spec.topics == []`, `spec.allUserTopics` equals the frozen policy, and the discovery summary is present. `selection.topics` never contains a glob metacharacter or `${` (Kafka-legal names `^[a-zA-Z0-9._-]{1,249}$` are re-validated before freeze) and is never empty.
+A stored `v1` plan is compared against the fresh resolution's `v1` view (the five blocks dropped, `as_version_v1`); a stored `v2` plan is compared whole, and each block refuses by name before the generic executable-equality refusal. PLAT-06.1's `validate_inputs_for_backup` must compare the top-level `topics` with `spec.topics` only in `SelectedTopics` mode; in `AllUserTopics` mode the frozen `topics` deliberately differs from `spec.topics`, and it checks `spec.topics == []`, `spec.allUserTopics` equals the frozen policy, and `selection.discovery` is present. `topics` never contains a glob metacharacter or `${` (Kafka-legal names `^[a-zA-Z0-9._-]{1,249}$` are re-validated before freeze) and is never empty; both rails are enforced at the freeze boundary (`resolve_inputs`) for every producer, including W5's runner-derived list. A `v1` plan carries none of the `v2` provenance by construction; a `v1` plan under a controller that writes `v2` is worth an operator's attention but is never refused (S4).
 
 ### 3.4 Condition and reason vocabulary (added to `crates/weirkeeper/src/conditions.rs`)
 

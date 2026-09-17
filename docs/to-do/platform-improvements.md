@@ -138,7 +138,7 @@ Wave 2 resumes every branch in place with the prompts under
 | PLAT-12.1 (immediate slice), PLAT-12.2 (subject slice) | In progress (slices landed) | ui-correct | The guided submit, idempotent durable Restore and subject binding landed with PLAT-13.2 (records under each task); remaining: PLAT-11.2/13.2-backed selection flow and PLAT-19.2 policy routing for 12.1, retry identity for 12.2. |
 | PLAT-17.2 (stage 2) | In progress (stage landed) | plat17-2-authz, plat17-2-authz-review | Partial record under PLAT-17.2. Integrated into main as `24752f4..90ecd0c`. Shared mode is implemented and live-verified locally but not deployable or declarable secure until D0 stages 5 and 7. |
 | PLAT-17.1 (stages 1 and 3) | In progress (stages landed) | plat17-api-finish, plat17-api-review | Partial record under PLAT-17.1. Integrated into main as `4b571d1..de0207c`. Remaining for Done: console image and chart with the API's own RBAC (D0 stage 7), transient-check cancellation once PLAT-03/09.1 exist, `POST …/backups` (PLAT-06.2), SSE (PLAT-14.1), a browser journey through the API, and PLAT-17.2. |
-| PLAT-04.2, 05.x, 06.2, 09.2 | Contract decided | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. W1 (the pure cadence engine) landed in main as `6eedc0a..4b54a5c` after review; see the PLAT-04.2 partial record. W3a (the `Backup` run contract: `spec.trigger`, `spec.scheduleRef` with generation and `runPolicySha256`, the selection type with `allUserTopics` requiring `incompleteDiscovery`, `status.selection`, `src/identity.rs`, `src/policy.rs`, the §3.4 vocabulary) landed in `696c81a`/`b334a98` inside `crds-shapes`; a `Backup` naming both `topics` and `allUserTopics` is refused by CEL and, terminally, by admission. W2, W3b, W4, W5, W6, W7, W8 remain. |
+| PLAT-04.2, 05.x, 06.2, 09.2 | Contract decided | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. W1 (the pure cadence engine) landed in main as `6eedc0a..4b54a5c` after review; see the PLAT-04.2 partial record. W3a (the `Backup` run contract: `spec.trigger`, `spec.scheduleRef` with generation and `runPolicySha256`, the selection type with `allUserTopics` requiring `incompleteDiscovery`, `status.selection`, `src/identity.rs`, `src/policy.rs`, the §3.4 vocabulary) landed in `696c81a`/`b334a98` inside `crds-shapes`; a `Backup` naming both `topics` and `allUserTopics` is refused by CEL and, terminally, by admission. W3b (the reconciler consumes the contract; grammar `v2`) landed at `397e37d`; see the PLAT-04.2 partial record. W2, W4, W5, W6, W7, W8 remain. |
 | PLAT-03.x, 08.x, 09.1 | In progress (W1, W2, W3, W4, W5, W6a, W6b, W7, W8 landed) | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. W1 (pure check contract and destination model) and W2 (explicit store options) landed as `c13b0cc..56bd074` after review (ACCEPT after two high and three medium fixes: JSON-form redaction bypass, ambient credentials inheriting the environment). W3 (`logweir_kafka::inventory`: bounded targeted describe, broker count, validate-only `CreateTopics`, error classification where an observed authorization failure makes visibility `limited` and anything unknown is failure, with a real admin-client fault capture because rdkafka 0.36 never invokes `ClientContext::error` for a metadata-only workflow — D2 §4.2 `[VERIFY U5]` corrected) and W5 (`weirkeeper::check`: check Jobs mirroring the execution pod, pod selection by controller owner UID only, framed-stdout relay through the W1 decoder, the full waiting-code table, TTL, plan/chunk/limit modules, the installation policy loader failing closed) landed as `23cec50..b8e62d1` after review (ACCEPT after one high and three medium fixes; 19 mutants killed; the rebase over PLAT-07.1 then routed the inventory client through the reader's `client_config`, removing a drifted copy that could upgrade plaintext to TLS when a CA was present — re-checked ACCEPT; weirkeeper 435, kafka 57). RBAC still owed by W11: `events: list` plus its `manifest_lint` row, the three new kinds' verbs, and a decision on `gc.rs`'s deletes. The reviewers' SEC-PODLOG finding against `controllers::backup::select_job_pod` is closed by `secpodlog` (see the defects table). W6a and W6b (the three Amendment F kinds and the destination sentinel on existing kinds) landed in `46880a3`/`88232f5`/`b334a98` inside `crds-shapes`; W7 (destination resolver, controller, evidence store cache) landed as `27fb924..0b25e95` (see the PLAT-08.1 partial record); W4 (runner `logweir check run`) landed at `537657d` (see the PLAT-03 partial record); W8 (`TopicDiscovery` controller) and W12 (API routes) are in review or in progress. W9, W10, W11, W13, W14 remain. |
 | PLAT-14.x, 15.x, 16.x, 19.1 | In progress (W4 landed) | [D3](decisions/D3-status-catalog-retention-trust.md) | Operation states, protection freshness, rehearsals, durable catalog, retention enforcement boundary, trust lifecycle; fifteen worker tasks. W4 (`d3-notify`: the shared notification module and `logweir notify deliver`) landed after review (ACCEPT after two high fixes); W3 (`d3-catalog-writer`: signed catalog point records, `list_page`, `logweir catalog sync|list`) landed after review (see the PLAT-15.1 partial record); W0 (the five Amendment G kinds, additive run status, `Restore.spec` additions, the `Approval` enum) landed in `496451a`/`88232f5`/`b334a98` inside `crds-shapes`; W1 (trust lifecycle core, `TrustPolicy` controller, `trust export|migrate-roster`, G8) landed as `64fcd38..5fc1a72` (see the PLAT-19.1 partial record); W8 (`RecoveryCatalog` controller) in progress. W2, W5, W6, W7, W9, W10, W11, W12, W13, W14 remain. |
 
@@ -528,6 +528,58 @@ pinned by the 1867 America/Sitka day, the tautological delegation test) and
 the earlier UTC preview-horizon bug the worker found and fixed. Independent
 review `claude/d1w1-cadence.review.md`: ACCEPT-WITH-FIXES then ACCEPT. No CRD
 or controller change yet; migration is none until W2 adds the fields.
+
+**Partial record (2026-09-17) — PLAT-04.2 and PLAT-06.2: D1 W3b, the `Backup`
+reconciler consumes the run contract and freezes inputs grammar `v2`; both
+tasks stay In progress until W2 (scheduler cadence), W5 (dynamic selection), W6
+(API) and W8 (live) land.** Landed in main as `88ecec5` (the four trigger kinds,
+grammar `v2`, the frozen schedule revision and `status.selection`),
+`1af58b1`/`3e062ba` (tests), `ff3ab94`/`397e37d` (docs) and `369a6e0` (review
+fixes) on top of W3a's types. Contract: every run's identity is derived through
+`identity::run_identity` for `Scheduled`, `CatchUp`, `Retry` and `Manual` — the
+composed name `logweir-backup-<schedule>-<slot>[-r<k>]` and the archive prefix
+`<scheduleUID>-<slot>[-r<k>]` for scheduled kinds, the object's own API-server
+UID for a manual run — and never from a client-supplied field (an invented
+`scheduleRef.uid` is `ScheduleNotFound` with no POST; a name the trigger does
+not compose is `ScheduledIdentityMismatch` and is never re-read as manual;
+`triggeredBy` and `trigger.kind` must agree); the calendar-slot check (a real
+UTC instant, so month 13 is refused) and the legacy owner-NAME equality check
+live in `identity.rs` with rows in `tests/run_identity.rs` (15) — the review
+found both had been compensated by hand in the reconciler without a killing
+test, and the fix moved them where D1 §3.1 says they belong. `execution-inputs.json`
+is grammar `logweir.dev/backup-execution-inputs/v2` = `v1` plus five optional
+blocks (`trigger`, `scheduleRef`, `runPolicySha256`, `selection`, `destination`
+— the last reserved for D2 W10) inserted in declaration order so a `v1` document
+re-encodes to its own bytes (S4; the pre-contract fixture captured at `7cf50c1`
+is untouched and still admitted end to end); a stored `v1` plan is compared
+through the `v1` view, a stored `v2` plan whole with each block refusing by
+name. The schedule's revision and policy digest are copied at the freeze, never
+re-resolved; a manual run never reads a `BackupSchedule` (the route table proves
+no `/backupschedules/` call), so a suspended, busy or deleted schedule cannot
+touch it (§8.1/§8.3); `status.selection` is written in the same merge patch as
+`status.execution` before the Job POST; `allUserTopics` is refused terminally as
+`InvalidTopicSelection` naming PLAT-09.2/W5 until dynamic selection lands, and
+the two freeze-boundary rails (never empty, never a glob) sit in `resolve_inputs`
+so W5's runner-derived list meets them too; the W5 seam is gated on
+`status.execution` so a frozen run re-reads its stored selection and never
+re-runs discovery (`a_frozen_dynamic_backup_never_reruns_discovery`). PLAT-06.1's
+plan ordering, ownership and SEC-PODLOG pod selection are untouched. Verified at
+`397e37d` on main: weirkeeper 568/568 (`backup_controller` 85, `run_identity` 15),
+`manifest_lint` 29, `doc_lint` 12, strict clippy and fmt; twelve planted mutants
+killed (nine original, three from the fix round — including the reviewer's two
+survivors and the seam gate). Independent review `claude/d1w3b.review.md`:
+ACCEPT-WITH-FIXES (two medium: the unguarded compensations; the seam that would
+have re-run discovery after the freeze; six low) then ACCEPT. Decision recorded:
+D1 §3.3 amended at this integration to the landed grammar (`trigger`/`scheduleRef`
+blocks, the single top-level `topics`, no top-level `executionId`/`triggeredBy`/
+`deadlineSeconds`). Notes for W2: `concurrencyPolicy` accounting must filter on
+`is_run_of_schedule && declared_trigger ∈ {Scheduled, CatchUp, Retry}` (a manual
+run carrying `scheduleRef` is a member for history but never occupies a Forbid
+slot), and a manual object squatting a deterministic scheduled name is a foreign
+occupant of that slot. Gaps: `config/samples/backup-manual.yaml` (D1 §8.1) is
+not shipped yet (W6); live proof is W8's. Migration: none — every `Backup`
+created under PLAT-06.1 keeps running unchanged, and a `Backup` refused for
+dynamic selection before W5 must be recreated after it (docs §10).
 
 **Completion record — Done (2026-09-16), PLAT-04.1.** Scheduler source and
 live acceptance were closed at `4956785` (closure verification
