@@ -269,12 +269,12 @@ pub async fn preview(
         |e| match e {
             CadenceError::UnknownTimeZone { .. } => ApiError::validation(vec![FieldError::new(
                 "timeZone",
-                "timezone_unknown",
+                super::schedules::TIMEZONE_UNKNOWN,
                 crate::validate::bounded(&e.to_string(), 256),
             )]),
             CadenceError::Schedule(_) => ApiError::validation(vec![FieldError::new(
                 "schedule",
-                "schedule_invalid",
+                super::schedules::SCHEDULE_INVALID,
                 crate::validate::bounded(&e.to_string(), 256),
             )]),
         },

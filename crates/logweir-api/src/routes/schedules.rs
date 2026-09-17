@@ -48,6 +48,16 @@ pub const ROUTE_SET_SUSPENSION: &str =
     "POST /api/v1/namespaces/{ns}/schedules/{name}:set-suspension";
 /// The command suffix.
 pub const SET_SUSPENSION: &str = ":set-suspension";
+/// The field-error code for an expression the cadence engine cannot read.
+///
+/// D1 §0.2 fixes this spelling, and `create`, `update` and
+/// `routes::cadence_previews` all use THIS constant so that one condition
+/// cannot acquire two codes again.
+pub const SCHEDULE_INVALID: &str = "schedule_invalid";
+
+/// The field-error code for a zone the compiled-in database does not have.
+pub const TIMEZONE_UNKNOWN: &str = "timezone_unknown";
+
 /// The deterministic name prefix. `sch-` plus 26 characters is 30, inside
 /// the 32-character schedule-name budget the scheduled Backup name leaves
 /// (`logweir-backup-<schedule>-<yyyymmdd-hhmmss>` within 63).
@@ -133,10 +143,19 @@ pub fn validate_create(request: &CreateScheduleRequest) -> Result<(), ApiError> 
             "a cron expression is required",
         )),
         Ok(()) => {
-            if let Err(e) = weirkeeper::slot::Cron::parse(&request.schedule) {
+            // ONE CONDITION, ONE CODE, ON EVERY ROUTE. This used to answer
+            // `invalid_cron` while the edit route and the preview answered
+            // `schedule_invalid` — the code D1 §0.2 fixes and `docs/api.md`
+            // publishes — so a console branching on `errors[].code` to
+            // highlight the cadence input highlighted on two forms out of
+            // three for the same typo. `Cadence::parse` is also strictly
+            // stronger than the bare cron parser: it validates the zone as
+            // well, which this DTO does not carry yet but the next one will.
+            // `schedules::the_three_cadence_routes_answer_one_code` pins it.
+            if let Err(e) = Cadence::parse(&request.schedule, None) {
                 errors.push(FieldError::new(
                     "schedule",
-                    "invalid_cron",
+                    SCHEDULE_INVALID,
                     validate::bounded(&e.to_string(), 256),
                 ));
             }
@@ -567,8 +586,8 @@ pub fn validate_update(request: &UpdateSchedulePolicyRequest) -> Result<(), ApiE
             // would leave `Ready=False` on an object the console said was fine.
             if let Err(e) = Cadence::parse(&request.schedule, request.time_zone.as_deref()) {
                 let (field, code) = match e {
-                    CadenceError::UnknownTimeZone { .. } => ("timeZone", "timezone_unknown"),
-                    CadenceError::Schedule(_) => ("schedule", "schedule_invalid"),
+                    CadenceError::UnknownTimeZone { .. } => ("timeZone", TIMEZONE_UNKNOWN),
+                    CadenceError::Schedule(_) => ("schedule", SCHEDULE_INVALID),
                 };
                 errors.push(FieldError::new(
                     field,

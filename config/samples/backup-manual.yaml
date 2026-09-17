@@ -69,8 +69,14 @@ metadata:
   # the idempotency scope; by hand, any DNS-1123 name that is not already taken
   # will do.
   name: logweir-manual-2v4qk7bhq8nwz3xr9fcm5td6ea
+  # EXACTLY THE FOUR LABELS THE ROUTE WRITES, AND NO OTHERS. The sibling
+  # samples carry `app.kubernetes.io/name: logweir`; this one deliberately does
+  # not, because it is the only sample with a machine counterpart that produces
+  # the object field for field, and `manual_backups.rs::the_shipped_sample_is_\
+  # what_this_route_creates` drives `POST .../backups` and compares the stored
+  # object's metadata and spec with this file byte for byte. A decorative label
+  # here would be a claim about the route that is not true.
   labels:
-    app.kubernetes.io/name: logweir
     logweir.dev/trigger: manual
     logweir.dev/attempt: "0"
     # Both label the run as this schedule's, for selection only.

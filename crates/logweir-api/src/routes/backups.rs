@@ -430,7 +430,10 @@ pub async fn create(
                         FieldError::new(
                             field_for(&e.field, from.is_some()),
                             "selection_invalid",
-                            validate::bounded(&e.message, 256),
+                            validate::bounded(
+                                &message_for(&e.field, &e.message, from.is_some()),
+                                384,
+                            ),
                         )
                     })
                     .collect(),
@@ -493,16 +496,37 @@ pub async fn create(
 
 /// Map a `weirkeeper::policy` field path onto the REQUEST's own field names,
 /// so a console can highlight the input the person typed.
+///
+/// `FieldError.field` IS A PATH AND NOTHING ELSE. It used to return
+/// `"scheduleRef.name (topics)"` for a from-schedule run, which is a path with
+/// a parenthetical glued on: `ui/contract.js` types the field as a plain
+/// string with no parser, so a console doing
+/// `errors.find(e => e.field === "scheduleRef.name")` to highlight the
+/// schedule picker found nothing and fell back to an unhighlighted generic
+/// 422. The offending schedule field belongs in the MESSAGE, which is already
+/// a sentence.
 fn field_for(field: &str, from_schedule: bool) -> String {
     if from_schedule {
-        // The person typed a schedule name; the offending field is the
-        // schedule's, and saying `topicSelection.topics` would point at an
-        // input that is not on the form.
-        return format!("scheduleRef.name ({field})");
+        // The person typed a schedule name; the input to highlight is the
+        // picker, not `topicSelection.topics`, which is not on that form.
+        return "scheduleRef.name".to_string();
     }
     match field {
         "topics" => "topicSelection.topics".to_string(),
         "allUserTopics" => "topicSelection.allUserTopics".to_string(),
         other => other.to_string(),
+    }
+}
+
+/// The sentence a from-schedule refusal carries: which of the SCHEDULE's own
+/// fields is the problem, said in words rather than smuggled into the path.
+fn message_for(field: &str, message: &str, from_schedule: bool) -> String {
+    if from_schedule {
+        format!(
+            "the schedule's policy cannot run as it stands (spec.{field}): {message}. Edit the \
+             schedule, or send an ad-hoc request with its own selection."
+        )
+    } else {
+        message.to_string()
     }
 }

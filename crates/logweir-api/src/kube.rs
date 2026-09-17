@@ -354,13 +354,23 @@ impl SpecRule {
     }
 
     /// The request field the rule is about, and the stable field code.
+    ///
+    /// EACH CODE SAYS WHAT KIND OF WRONG IT IS, because a console renders a
+    /// different sentence for each. `field_immutable` means "this cannot be
+    /// changed at all, create a new object"; `selection_invalid` and
+    /// `schedule_invalid` mean "this combination is not a policy". The
+    /// destination sentinel is a SHAPE rule — `archive.url` and
+    /// `destinationRef` must agree — and calling it `field_immutable` would
+    /// tell the person their destination cannot be changed, which is the
+    /// opposite of D1 §5.1 as amended. It has its own code, published in
+    /// `docs/api.md` beside the other two.
     #[must_use]
     pub const fn field(self) -> (&'static str, &'static str) {
         match self {
             SpecRule::ScheduleSourceRefImmutable => ("sourceRef", "field_immutable"),
             SpecRule::SelectionShape => ("topicSelection", "selection_invalid"),
             SpecRule::ScheduleRetryNameBudget => ("retry.maxRetries", "schedule_invalid"),
-            SpecRule::DestinationSentinel => ("destinationRef", "field_immutable"),
+            SpecRule::DestinationSentinel => ("destinationRef", "destination_sentinel_mismatch"),
         }
     }
 
