@@ -344,6 +344,15 @@ pub struct BackupSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub trigger: Option<Trigger>,
     /// The Job's `activeDeadlineSeconds`.
+    ///
+    /// **A DYNAMIC SELECTION NEEDS AT LEAST 120.** With `allUserTopics`, this
+    /// run first dispatches a topic discovery Job whose own
+    /// `activeDeadlineSeconds` is `min(300, deadlineSeconds)`, of which ninety
+    /// seconds are image pull, scheduling and container start — so anything
+    /// under 120 leaves the runner less than the thirty seconds it needs to
+    /// connect, authenticate and list, and the run is refused terminally
+    /// (`ExecutionSpecInvalid`) before any Job exists rather than dispatched to
+    /// fail. A named `topics` allowlist has no such floor.
     pub deadline_seconds: i64,
 }
 
