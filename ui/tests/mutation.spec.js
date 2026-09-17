@@ -851,6 +851,88 @@ test("the_wizard_double_click_sends_one_create_and_success_navigates_to_awaiting
   }
 });
 
+test("the_wizard_submit_reads_the_connections_again_before_it_creates", async () => {
+  // REVIEW FINDING F3: A GUARD WITHOUT A MUTANT. `confirmClusters` was proved
+  // by a row that CALLED IT DIRECTLY, so deleting `await confirmClusters(state,
+  // api);` from the submit handler left every gate green -- and a restore could
+  // then be written into a cluster deleted and recreated under the same name
+  // between reviewing the plan and submitting it. This row drives the real
+  // mount and asserts the CALL SITE: the list read happens, and it happens
+  // BEFORE the create.
+  const ns = "wizard-reread-ns";
+  const k8s = wizardKubernetes(ns);
+  const view = fakeView();
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { hash: "#/restore?ns=" + ns } };
+  try {
+    await mountRestoreWizard(view.root, ns, k8s.point, parse, k8s, createRouteLifecycle().begin());
+    // The mount's own reads are behind us; everything after this mark belongs
+    // to the submit.
+    const mark = k8s.calls.length;
+    await view.find("#create-restore").dispatch("click");
+    await settled(12);
+    const during = k8s.calls.slice(mark);
+    const listAt = during.findIndex((c) => c.verb === "list" && c.plural === "kafkaclusters");
+    const createAt = during.findIndex((c) => c.verb === "create" && c.plural === "restores");
+    assert.ok(listAt !== -1, "the submit re-read the namespace's connections: " + JSON.stringify(during));
+    assert.ok(createAt !== -1, "and it created the Restore");
+    assert.ok(
+      listAt < createAt,
+      "the re-read happens BEFORE the create, or it is not a guard: " + JSON.stringify(during),
+    );
+    assert.equal(k8s.count(ns, "restores"), 1);
+  } finally {
+    globalThis.window = originalWindow;
+  }
+});
+
+test("a_target_recreated_mid_wizard_is_refused_by_the_submit_and_creates_nothing", async () => {
+  // The other half of F3, on the same call site: the object the plan was
+  // reviewed against is deleted and recreated under its own name WHILE THE
+  // WIZARD IS OPEN, so only the re-read can see it. Nothing is created.
+  const ns = "wizard-recreated-ns";
+  const k8s = wizardKubernetes(ns);
+  const view = fakeView();
+  const originalWindow = globalThis.window;
+  globalThis.window = { location: { hash: "#/restore?ns=" + ns } };
+  try {
+    await mountRestoreWizard(view.root, ns, k8s.point, parse, k8s, createRouteLifecycle().begin());
+    assert.ok(view.html().includes("id=\"plan-bytes\""), "the plan reviewed before anything changed");
+
+    // Delete and recreate the chosen target under the same name: the store
+    // mints a new uid, exactly as the API server does.
+    const target = Array.from(k8s.objects.entries())
+      .filter(([key]) => key.startsWith(ns + "/kafkaclusters/"))
+      .map(([, value]) => value)
+      .find((object) => object.spec.role === "target");
+    assert.ok(target !== undefined, "the fixture has a role: target cluster");
+    const wasUid = target.metadata.uid;
+    k8s.objects.delete(k8s.key(ns, "kafkaclusters", target.metadata.name));
+    const now = k8s.put(ns, "kafkaclusters", {
+      apiVersion: target.apiVersion, kind: target.kind,
+      metadata: { name: target.metadata.name },
+      spec: target.spec,
+    });
+    assert.notEqual(now.metadata.uid, wasUid, "the recreated object has a different uid");
+
+    const before = k8s.creates("restores").length;
+    await view.find("#create-restore").dispatch("click");
+    await settled(12);
+    assert.equal(
+      k8s.creates("restores").length,
+      before,
+      "a restore must not be written into a connection nobody chose",
+    );
+    assert.equal(k8s.count(ns, "restores"), 0);
+    assert.ok(
+      view.html().includes(wasUid) && view.html().includes(now.metadata.uid),
+      "and the refusal names both uids: " + view.html().slice(0, 1200),
+    );
+  } finally {
+    globalThis.window = originalWindow;
+  }
+});
+
 test("a_rejected_restore_keeps_every_wizard_edit_and_marks_the_field", async () => {
   const ns = "wizard-422-ns";
   const k8s = wizardKubernetes(ns);

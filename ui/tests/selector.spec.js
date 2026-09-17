@@ -21,6 +21,7 @@ import { readFileSync } from "node:fs";
 
 import {
   CONNECTION_REFUSAL_REASONS,
+  EMPTY_OPTION,
   FORBIDDEN_PROBE_WORD,
   PROBE_FRESH_SECONDS,
   PROBE_NOUN,
@@ -32,6 +33,7 @@ import {
   preferredCluster,
   probeBadge,
   probeLine,
+  observedBadge,
   probeState,
   readClusterSelection,
   renderClusterSelector,
@@ -63,6 +65,7 @@ import {
   scheduleBody,
   sourceRefusal,
   submitSchedule,
+  validateSchedule,
 } from "../pages/schedules.js";
 import {
   confirmClusters,
@@ -327,8 +330,40 @@ test("every_absent_reachable_case_gets_its_own_words_and_the_controllers_own_rea
   }
   // A probe in flight is not stale: there is no observation to be old.
   assert.equal(probeState(cluster({ status: { reason: "ProbeRunning" } }), NOW).stale, false);
-  // But an unreachable verdict with no instant at all is: nothing says when.
-  assert.equal(probeState(cluster({ status: { reachable: false } }), NOW).stale, true);
+  // AND NEITHER IS A CONNECTION THAT WAS NEVER OBSERVED (review finding F2).
+  // `stale` means "this reading describes the past" and is a statement ABOUT an
+  // observation; with no `observedAt` there is none for it to be about, and
+  // labelling it stale said two contradictory things at once and told an
+  // operator to wait for a refresh that a refused connection never gets.
+  for (const status of [
+    { reachable: false },
+    { reason: "ConnectionConfigInvalid" },
+    { reason: "ProbeOutputUnreadable" },
+  ]) {
+    const state = probeState(cluster({ status: status }), NOW);
+    assert.equal(state.stale, false, "never observed is not stale: " + JSON.stringify(status));
+    assert.equal(state.observed, false, "and it says so: " + JSON.stringify(status));
+    const line = probeLine(state);
+    assert.match(line, /never observed/, "with its own word: " + line);
+    assert.equal(
+      line.indexOf("older than the"),
+      -1,
+      "and NOT the freshness clause, which is about an observation that exists: " + line,
+    );
+    assert.equal(staleBadge(state), "", "and no stale badge");
+    assert.match(line, /no observation recorded/);
+  }
+  // The `never probed` verdict already carries the words, so the badge does not
+  // repeat them; a probe in flight has not observed anything YET, which is not
+  // the same statement.
+  assert.equal(observedBadge(probeState(cluster({ status: {} }), NOW)), "");
+  assert.equal(observedBadge(probeState(cluster({ status: { reason: "ProbeRunning" } }), NOW)), "");
+  // And an observation that EXISTS and is old is still stale, with the clause.
+  const old = probeState(cluster({}), NOW + 3600 * 1000);
+  assert.equal(old.stale, true);
+  assert.equal(old.observed, true);
+  assert.equal(observedBadge(old), "", "the two badges are exclusive");
+  assert.match(probeLine(old), /older than the 630s freshness budget/);
 });
 
 test("no_probe_surface_anywhere_says_ready", () => {
@@ -1012,5 +1047,146 @@ test("both_submits_read_the_connections_again_and_refuse_what_changed_under_them
       assert.match(error.fields.targetCluster, /could not be read again/);
       return true;
     },
+  );
+});
+
+// ===========================================================================
+// 9. A REFUSAL SELECTS NOTHING (review finding F1).
+// ===========================================================================
+
+test("a_refused_selector_selects_nothing_and_a_further_create_click_sends_nothing", async () => {
+  // THE DEFECT THIS ROW IS ABOUT. In the two refusal states the selector
+  // marked no option `selected` while filling the hidden inputs from
+  // `preferredCluster` -- which can be a THIRD cluster. A browser defaults an
+  // unselected `<select>` to its first option, so one more click on Create,
+  // without touching anything, submitted against whatever sorted first. A form
+  // that has just said "the connection you chose is gone" must not be one click
+  // from creating against a connection nobody chose.
+  const clusters = [
+    cluster({ uid: "uid-A", name: "aaa-target", role: "target" }),
+    cluster({ uid: "uid-B", name: "zzz-source", role: "source" }),
+  ];
+  for (const [label, selection, expectName] of [
+    ["recreated", { uid: "uid-gone", name: "aaa-target" }, "aaa-target"],
+    ["missing", { uid: "uid-gone", name: "nowhere-at-all" }, "nowhere-at-all"],
+  ]) {
+    const html = renderClusterSelector({
+      id: "schedule-source", name: "source", clusters: clusters, selection: selection,
+      prefer: "source", now: NOW,
+    });
+    const resolved = resolveClusterSelection(clusters, selection);
+    assert.equal(resolved.state, label);
+    assert.ok(html.includes(EMPTY_OPTION), label + ": the empty option is rendered selected: " + html);
+    // COUNTED OVER `<option>` TAGS, not over the word: the surrounding prose
+    // says "selected" three times and a bare count would pass on anything.
+    const marked = html.match(/<option [^>]*\sselected[^>]*>/g) || [];
+    assert.equal(marked.length, 1, label + ": exactly one option is marked selected: " + html);
+    assert.ok(
+      marked[0].includes("value=\"\""),
+      label + ": and it is the empty one: " + marked[0],
+    );
+    assert.equal(
+      html.indexOf("value=\"uid-A\" selected"),
+      -1,
+      label + ": the first option by name is NOT preselected under a refusal",
+    );
+    assert.equal(html.indexOf("value=\"uid-B\" selected"), -1, label + ": nor the preferred role");
+    // THE HIDDEN PAIR IS THE REFUSED PAIR -- what the refusal is about -- and
+    // never a third cluster's identity.
+    assert.ok(
+      html.includes("id=\"schedule-source-uid\" name=\"sourceUid\" value=\"uid-gone\""),
+      label + ": the hidden uid is the refused one: " + html,
+    );
+    assert.ok(
+      html.includes("id=\"schedule-source-name\" name=\"sourceName\" value=\"" + expectName + "\""),
+      label + ": and the hidden name is the refused one: " + html,
+    );
+    assert.equal(html.indexOf("uid-B\">"), -1, label + ": the fallback's uid is nowhere in a hidden input");
+    assert.ok(
+      html.includes("id=\"schedule-source-probe\">no saved connection is selected."),
+      label + ": and no third cluster's probe is presented as the selection's: " + html,
+    );
+  }
+
+  // THE EMPTY VALUE IS WHAT THE SELECT READS BACK, and both forms refuse it.
+  const empty = { querySelector: () => null };
+  assert.deepEqual(readClusterSelection(empty, "schedule-source"), { uid: "", name: "" });
+  const refusedValues = {
+    name: "hourly", cron: "0 * * * *", source: "", sourceUid: "",
+    topics: "orders", archive: "s3://b/p", archiveSecret: "logweir-s3",
+    keepLast: "", keepDays: "",
+  };
+  assert.match(
+    validateSchedule(refusedValues).source,
+    /nothing is selected/,
+    "the schedule form refuses the empty selection by name",
+  );
+  const sent = [];
+  await assert.rejects(
+    () => confirmThenCreate("team-a", refusedValues, {
+      list: async () => ({ items: clusters }),
+      create: async (...a) => { sent.push(a); },
+    }),
+    (error) => {
+      assert.equal(error.kind, "invalid");
+      assert.match(error.fields.source, /nothing is selected/);
+      return true;
+    },
+  );
+  assert.equal(sent.length, 0, "a further Create click under a standing refusal sends NOTHING");
+
+  // AND THE SAME ON THE WIZARD'S SIDE. Picking the empty option clears the
+  // NAME as well as the uid: leaving the refused name behind would let the
+  // selection resolve BY NAME onto the very object the refusal is about.
+  const backups = fixture("wizard-backups.json");
+  const point = { uid: recoveryPoints(backups)[0].metadata.uid, backup: "" };
+  const wizard = initialState("logweir-t27", { items: clusters }, backups, point);
+  wizard.targetClusterUid = "uid-gone";
+  wizard.targetClusterName = "aaa-target";
+  assert.equal(resolveTarget(wizard).state, "recreated");
+  const step = renderTargetStep(wizard);
+  assert.ok(step.includes(EMPTY_OPTION), "step 4's selector opens on the empty option: " + step);
+  selectTarget(wizard, "", "");
+  assert.equal(wizard.targetClusterUid, "");
+  assert.equal(wizard.targetClusterName, "", "the refused NAME is cleared with the uid");
+  assert.equal(resolveTarget(wizard).state, "none", "so nothing resolves by name onto the impostor");
+  assert.match(validateRestore(wizard).targetCluster, /nothing is selected/);
+  const nothing = [];
+  await assert.rejects(
+    () => submitRestore(wizard, { create: async (...a) => { nothing.push(a); } }),
+    (error) => error.kind === "invalid",
+  );
+  assert.equal(nothing.length, 0, "and the wizard sends nothing either");
+});
+
+test("the_re_read_before_a_restore_submit_follows_a_rename_into_the_create_body", async () => {
+  // REVIEW FINDING F4. `restoreBody` spells `target.clusterRef.name` from the
+  // state, and `confirmClusters` used to refresh only `state.clusters` -- so a
+  // connection renamed between opening the wizard and submitting it was sent
+  // under the name it no longer has. This row NEVER CALLS `selectTarget`,
+  // because the submit path does not: the guard has to hold on the product's
+  // own sequence.
+  const backups = fixture("wizard-backups.json");
+  const point = { uid: recoveryPoints(backups)[0].metadata.uid, backup: "" };
+  const before = { items: [cluster({ uid: "uid-t", name: "old-target", role: "target" })] };
+  const after = { items: [cluster({ uid: "uid-t", name: "new-target", role: "target" })] };
+  const state = initialState("logweir-t27", before, backups, point);
+  assert.equal(state.targetClusterName, "old-target");
+
+  const fields = JSON.stringify(state.fields);
+  await confirmClusters(state, { list: async () => after });
+  assert.equal(state.targetClusterName, "new-target", "the label follows the identity");
+  assert.equal(state.targetClusterUid, "uid-t", "and the identity did not move");
+  assert.equal(JSON.stringify(state.fields), fields, "no field of the plan moved");
+
+  const bodies = [];
+  await submitRestore(state, {
+    create: async (ns, plural, body) => { bodies.push(body); return { metadata: { name: body.metadata.name, uid: "r" } }; },
+    get: async () => { throw new Error("no approval"); },
+  });
+  assert.equal(
+    bodies[0].spec.target.clusterRef.name,
+    "new-target",
+    "the create body spells the name the chosen object carries NOW",
   );
 });

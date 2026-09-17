@@ -7,11 +7,12 @@
 // where it lands, the standalone approvals page, and every way a subject can
 // be made to disagree with what was submitted.
 //
-// PLAT-07.2 added four more, about the saved-cluster selector: the selector
+// PLAT-07.2 added five more, about the saved-cluster selector: the selector
 // picks a connection by UID and survives a rename, a connection deleted and
-// recreated under the same name is refused, a probe the controller refused
-// shows the controller's own reason, and a credential rotation followed by a
-// fresh probe moves the observed time the page shows.
+// recreated under the same name is refused, a target deleted and recreated
+// while a reviewed plan sits on screen is refused before the create, a probe
+// the controller refused shows the controller's own reason, and a credential
+// rotation followed by a fresh probe moves the observed time the page shows.
 //
 // EVERY POSITIVE CASE IS REAL. The page is the worktree's own `ui/`, served by
 // `kubectl proxy` on the loopback address; every object is created by the page
@@ -1562,6 +1563,63 @@ async function aRotationRefreshesTheObservedTime(browser, base) {
   }
 }
 
+async function aTargetRecreatedMidWizardIsRefused(browser, base) {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 1200 } });
+  const posts = collectPosts(page);
+  const name = NAMESPACE_PREFIX + "midwiz-" + suffix;
+  try {
+    // A TARGET OF THIS RUN'S OWN, so deleting it disturbs nothing else.
+    const first = seedCluster(name, { role: "target" });
+    await page.goto(base + pointRoute(points.old));
+    await page.waitForSelector("#create-restore");
+    await page.selectOption("#target-cluster", first.uid);
+    await page.waitForFunction(
+      (uid) => (document.querySelector("#target-cluster-uid") || {}).value === uid,
+      first.uid, { timeout: 10000 });
+    const bound = await selection(page, "target-cluster");
+    check(bound.hiddenUid === first.uid, "the wizard is bound to it: " + JSON.stringify(bound));
+    const reviewed = (await page.locator("#plan-hash-value").innerText()).trim();
+    check(reviewed.startsWith("sha256:"), "a plan was reviewed: " + reviewed);
+    await shot(page, "midwizard-target-bound");
+
+    // DELETED AND RECREATED UNDER THE SAME NAME, while the plan sits reviewed
+    // on screen. Only the re-read the submit makes can see this.
+    kube(["-n", namespace, "delete", "kafkacluster", name, "--wait=true"], { timeout: 60000 });
+    const second = seedCluster(name, {
+      role: "target",
+      bootstrapServers: ["somewhere-else.fixture.invalid:9092"],
+    });
+    check(second.uid !== first.uid, "the recreated object must have a different uid");
+
+    const postsBefore = posts.length;
+    await page.click("#create-restore");
+    await page.waitForSelector("#target-cluster-error, .mutation-failed", { timeout: 20000 });
+    await pause(800);
+    check(posts.length === postsBefore,
+      "A RESTORE MUST NOT BE WRITTEN INTO A CONNECTION NOBODY CHOSE: " + posts.join(", "));
+    const restores = kubeJson(["-n", namespace, "get", "restores"]).items || [];
+    const mine = restores.filter((r) => (r.spec.target || {}).clusterRef &&
+      r.spec.target.clusterRef.name === name);
+    check(mine.length === 0, "and no Restore names it: " + mine.map((r) => r.metadata.name).join(", "));
+    const shown = await page.locator("#step-target").innerText();
+    check(shown.includes(first.uid) && shown.includes(second.uid),
+      "the refusal names both uids: " + shown.slice(0, 900));
+    const stillThere = (await page.locator("#plan-hash-value").count()) > 0 ||
+      (await page.locator("#plan-problem").count()) > 0;
+    check(stillThere, "and the wizard is still standing rather than replaced by an error box");
+    await shot(page, "midwizard-target-recreated-refused");
+    record("a target recreated mid-wizard is refused before the create", {
+      before: first,
+      after: second,
+      reviewedHash: reviewed,
+      postsDuringTheRefusal: posts.length - postsBefore,
+      restoresNamingIt: mine.length,
+    });
+  } finally {
+    await page.close();
+  }
+}
+
 // ------------------------------------------------------------------ driver
 
 let proxy = null;
@@ -1620,6 +1678,7 @@ try {
   await selectorPicksByUidAndSurvivesARename(browser, url);
   await aRecreatedClusterIsRefused(browser, url);
   await aFailedProbeShowsTheControllersReason(browser, url);
+  await aTargetRecreatedMidWizardIsRefused(browser, url);
   await aRotationRefreshesTheObservedTime(browser, url);
 } catch (error) {
   failure = error;
