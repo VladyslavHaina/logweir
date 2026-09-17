@@ -1626,6 +1626,46 @@ pub async fn fail_fast(
     Ok(Some(state))
 }
 
+/// Whether this Job is one whose missing TTL may be repaired — D3 §2.7's three
+/// conditions, as a PURE predicate.
+///
+/// Separate from [`repair_ttl`] because it is the whole of the rule, and a
+/// rule inside an `async fn` that needs a `kube::Client` is a rule whose only
+/// test is a route table. A route table can prove the patch was not sent; it
+/// cannot easily prove WHICH of the three conditions stopped it, and on the
+/// reconcile path the compatibility guard refuses a foreign Job before this is
+/// ever reached — so the belt would hide whether the braces exist at all.
+///
+/// 1. **Finished.** An unfinished Job with a TTL is a Job with a deadline it
+///    did not ask for.
+/// 2. **No TTL already.** Re-sending the same value every reconcile is the
+///    write loop E11(d) is about.
+/// 3. **Controlled by exactly this object.** A Job named after the CR proves
+///    nothing — the name is derived, not owned. Patching a stranger's Job with
+///    a TTL is deleting somebody else's work on a timer.
+#[must_use]
+pub fn needs_ttl_repair(job: &Job, owner_uid: &str) -> bool {
+    if !crate::controllers::backup::job_finished(job) {
+        return false;
+    }
+    if job
+        .spec
+        .as_ref()
+        .and_then(|s| s.ttl_seconds_after_finished)
+        .is_some()
+    {
+        return false;
+    }
+    !owner_uid.is_empty()
+        && job
+            .meta()
+            .owner_references
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .any(|o| o.uid == owner_uid && o.controller == Some(true))
+}
+
 /// Patch a finished Job's missing `ttlSecondsAfterFinished` — D3 §2.7's
 /// repair.
 ///
@@ -1646,28 +1686,7 @@ pub async fn repair_ttl(
     job: &Job,
     owner_uid: &str,
 ) -> Result<bool, kube::Error> {
-    if !crate::controllers::backup::job_finished(job) {
-        return Ok(false);
-    }
-    if job
-        .spec
-        .as_ref()
-        .and_then(|s| s.ttl_seconds_after_finished)
-        .is_some()
-    {
-        return Ok(false);
-    }
-    // EXACTLY THIS OBJECT'S OWNER. A Job named after the CR proves nothing;
-    // patching a stranger's Job with a TTL is deleting somebody else's work on
-    // a timer.
-    let owned = job
-        .meta()
-        .owner_references
-        .as_deref()
-        .unwrap_or_default()
-        .iter()
-        .any(|o| o.uid == owner_uid && o.controller == Some(true));
-    if !owned {
+    if !needs_ttl_repair(job, owner_uid) {
         return Ok(false);
     }
     let jobs: kube::Api<Job> = kube::Api::namespaced(client.clone(), namespace);

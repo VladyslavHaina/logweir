@@ -981,6 +981,94 @@ fn the_configured_bounds_clamp_rather_than_refuse() {
 }
 
 // ===========================================================================
+// The TTL repair — D3 §2.7
+// ===========================================================================
+
+/// A finished Job with `ttl` and `owners` as given.
+fn finished_job(ttl: Option<i32>, owners: Value) -> Job {
+    let mut spec = json!({"template": {"spec": {"containers": [], "restartPolicy": "Never"}}});
+    if let Some(ttl) = ttl {
+        spec["ttlSecondsAfterFinished"] = json!(ttl);
+    }
+    serde_json::from_value(json!({
+        "apiVersion": "batch/v1", "kind": "Job",
+        "metadata": {"name": JOB, "namespace": NS, "uid": JOB_UID,
+                     "ownerReferences": owners},
+        "spec": spec,
+        "status": {"conditions": [{"type": "Complete", "status": "True",
+                                   "lastTransitionTime": "2026-11-09T03:05:00Z"}]},
+    }))
+    .expect("the Job fixture parses")
+}
+
+const OWNER_UID: &str = "backup-uid-2222";
+
+fn owned() -> Value {
+    json!([{"apiVersion": "logweir.dev/v1alpha1", "kind": "Backup", "name": "b",
+            "uid": OWNER_UID, "controller": true, "blockOwnerDeletion": true}])
+}
+
+/// D3 §2.7's three conditions, each one on its own.
+///
+/// MUTANT (M8): dropping the owner check. On the reconcile path the
+/// compatibility guard refuses a foreign Job BEFORE the repair is reached, so
+/// a route-table row alone cannot tell whether this check exists — the belt
+/// hides the braces. This is the braces.
+#[test]
+fn the_ttl_repair_needs_all_three_of_its_conditions() {
+    assert!(
+        weirkeeper::diagnostics::needs_ttl_repair(&finished_job(None, owned()), OWNER_UID),
+        "finished, no TTL, controlled by this object"
+    );
+    assert!(
+        !weirkeeper::diagnostics::needs_ttl_repair(
+            &finished_job(Some(604_800), owned()),
+            OWNER_UID
+        ),
+        "a Job that already has one is not repaired — re-sending the same value every reconcile \
+         is the write loop E11(d) is about"
+    );
+    assert!(
+        !weirkeeper::diagnostics::needs_ttl_repair(&job(), OWNER_UID),
+        "an UNFINISHED Job gets no TTL: that would be a deadline it did not ask for"
+    );
+    assert!(
+        !weirkeeper::diagnostics::needs_ttl_repair(
+            &finished_job(
+                None,
+                json!([{"apiVersion": "logweir.dev/v1alpha1", "kind": "Backup",
+                                        "name": "b", "uid": "somebody-elses-uid",
+                                        "controller": true, "blockOwnerDeletion": true}])
+            ),
+            OWNER_UID
+        ),
+        "MUTANT: a Job's NAME proves nothing — it is derived, not owned. Patching a stranger's \
+         Job with a TTL is deleting somebody else's work on a timer"
+    );
+    assert!(
+        !weirkeeper::diagnostics::needs_ttl_repair(
+            &finished_job(
+                None,
+                json!([{"apiVersion": "logweir.dev/v1alpha1", "kind": "Backup",
+                                        "name": "b", "uid": OWNER_UID,
+                                        "controller": false, "blockOwnerDeletion": true}])
+            ),
+            OWNER_UID
+        ),
+        "a NON-CONTROLLER owner reference is a reference, not control"
+    );
+    assert!(
+        !weirkeeper::diagnostics::needs_ttl_repair(&finished_job(None, json!([])), OWNER_UID),
+        "an ownerless Job is nobody's to collect"
+    );
+    assert!(
+        !weirkeeper::diagnostics::needs_ttl_repair(&finished_job(None, owned()), ""),
+        "and an object with no UID of its own proves nothing about anything — an empty owner \
+         must never match an owner reference that also carries an empty uid"
+    );
+}
+
+// ===========================================================================
 // The status write — D3 §2.2
 // ===========================================================================
 
@@ -1199,11 +1287,22 @@ fn a_terminal_patch_finishes_the_progress_block_and_clears_the_heartbeat() {
         "the progress block cannot disagree with the condition it is about: the reason is read \
          out of the patch's own terminal condition"
     );
+    // AN EXPLICIT null, NOT AN OMISSION — and the assertion has to say so by
+    // looking the key UP, because `value["absent"]` is itself `Null` in
+    // `serde_json` and an `is_null()` check alone passes for a key that was
+    // never written. A merge patch that omitted this key would leave `last
+    // observed at 03:02` on a run that is over, and D3 §2.5's staleness row
+    // would then call a finished run `unknown` five minutes later.
+    let block = out["status"]["progress"]
+        .as_object()
+        .expect("the progress block is an object");
     assert!(
-        out["status"]["progress"]["lastObservedTime"].is_null(),
-        "an EXPLICIT null, not an omission. A merge patch that omitted the key would leave \
-         `last observed at 03:02` on a run that is over, and D3 §2.5's staleness row would \
-         then call a finished run `unknown` five minutes later"
+        block.contains_key("lastObservedTime"),
+        "the key is PRESENT in the patch: {block:?}"
+    );
+    assert!(
+        block["lastObservedTime"].is_null(),
+        "…and its value is null, which is RFC 7386 for `delete this field`: {block:?}"
     );
     assert!(
         out["status"]["progress"].get("runner").is_none()
