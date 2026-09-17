@@ -1291,7 +1291,10 @@ with `spec.allUserTopics` is the **dynamic** shape: this controller build does
 not resolve topic discovery and refuses such a run terminally with
 `InvalidTopicSelection`, naming the reason. It is never started with an empty
 allowlist — an empty `source.topics` in `backup.yaml` is the "no allowlist means
-everything" shape the mandatory allowlist exists to make impossible.
+everything" shape the mandatory allowlist exists to make impossible. **Such a
+`Backup` is `Failed` for good** — `spec` is immutable and a terminal run is
+never retried — so after installing a controller that resolves discovery you
+must **create a new `Backup`**; the refused one does not start by itself.
 
 **`status.selection` is written at the freeze**, in the same patch as
 `status.execution`, and says what the run may honestly claim to have covered:
@@ -1436,6 +1439,18 @@ can answer, "are the fields it actually froze still the fields this run
 resolves?". Without that rule every `Backup` in flight at the moment an
 upgraded controller starts would become a terminal `PlanConfigMapConflict` at
 its next pass, for no reason but an added optional block.
+
+The cost of that rule, stated plainly: **a `v1` plan carries no provenance and
+none is compared.** The trigger, the schedule revision, the policy digest and
+the selection are simply not in the document, so a run executing one records no
+`status.selection` and no revision — nothing executable is weakened (the source,
+the topic list, the archive and the runner argv including the execution id are
+all still compared), but the answer to "which policy did this run?" is absent by
+construction. That is correct and unavoidable for a run frozen before the
+upgrade. It also means **a `v1` plan appearing under a controller that writes
+`v2` is worth an operator's attention**: every freeze this controller performs
+writes `v2`, so a `v1` plan on a `Backup` created after the rollout was not
+written by it.
 
 One difference is informational and deliberate: a newly observed
 `KafkaCluster.status.clusterId` changes the snapshot's bytes but not its
@@ -2997,7 +3012,9 @@ another object or another key, a changed address list, a changed username or a
 flipped TLS switch is terminal `PlanConfigMapConflict`, and the frozen plan
 bytes are never executed against it. A snapshot frozen before `tlsCa` existed
 carries no `tlsCa` key, re-encodes to the same bytes and is still admitted
-under grammar `logweir.dev/backup-execution-inputs/v1`.
+under grammar `logweir.dev/backup-execution-inputs/v1`, which this controller
+still reads beside the `logweir.dev/backup-execution-inputs/v2` it writes
+(§10).
 
 ### 20.7 Redaction: no credential value leaves the Secret
 
