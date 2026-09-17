@@ -1751,3 +1751,52 @@ where
     .await?;
     Ok(Some(result))
 }
+
+/// The objects a `TrustPolicy` event should enqueue: those in the namespaces
+/// the event could have changed the resolution of.
+///
+/// # No LIST, and that is the whole design
+///
+/// `objects` is the controller's OWN reflector snapshot
+/// (`Controller::store()`). This controller already runs a watch over every
+/// object of its kind — that is what `Controller::new` is — so the store is the
+/// same index, already paid for, and cannot be staler than the event being
+/// mapped. The trigger therefore costs **zero** API calls and is bounded by the
+/// objects this controller holds rather than by the cluster.
+///
+/// # It over-approximates on purpose
+///
+/// `scope` is the UNION of what the policy bound before the event and what it
+/// binds after ([`crate::trust::PolicyScopeMemory`]), and a `default: true`
+/// policy on either side covers every namespace. Enqueuing an object a policy
+/// does not govern costs one re-derivation that writes nothing ([`retrust`]
+/// returns `None` for an unchanged block, erratum **E11(d)**); failing to
+/// enqueue one leaves a revoked key green until something else happens to
+/// reconcile it — and for a terminal `Restore`, which parks on
+/// `Action::await_change()`, nothing else does. The two errors are not
+/// symmetric and this rounds the safe way.
+///
+/// Generic, and taking a `Vec` rather than a `Store`, so the mapping is
+/// testable without a running watch: the property under test is which objects
+/// come out, not how the snapshot was obtained.
+#[must_use]
+pub fn targets_in_scope<K>(
+    objects: Vec<std::sync::Arc<K>>,
+    scope: &crate::trust::PolicyScope,
+) -> Vec<kube::runtime::reflector::ObjectRef<K>>
+where
+    K: kube::Resource,
+    <K as kube::Resource>::DynamicType: Default + Clone + std::hash::Hash + Eq,
+{
+    objects
+        .into_iter()
+        .filter(|object| {
+            object
+                .meta()
+                .namespace
+                .as_deref()
+                .is_some_and(|ns| scope.covers(ns))
+        })
+        .map(|object| kube::runtime::reflector::ObjectRef::from_obj(&*object))
+        .collect()
+}

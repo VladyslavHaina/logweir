@@ -722,11 +722,32 @@ pub async fn resolve_with(
     client: &kube::Client,
     namespace: &str,
 ) -> Result<Resolution, kube::Error> {
-    let roster = match crate::controllers::approval::load_roster(client).await? {
-        crate::controllers::approval::RosterLoad::Found(roster) => Some(roster.spec),
-        crate::controllers::approval::RosterLoad::NotFound => None,
-    };
-    Ok(resolve_in(namespace, policies, roster.as_ref()))
+    // ---- THE ROSTER IS THE FALLBACK, SO IT IS READ LAST AND OFTEN NOT AT ALL
+    //
+    // `resolve_in` reaches step 3 only after an explicit `spec.namespaces`
+    // match and the single `default: true` policy have both missed, so running
+    // it once with NO roster answers "would a roster even be consulted?" —
+    // using the same function, so the two can never disagree about the order.
+    // A namespace a policy governs, and a contested one, are decided from the
+    // reflector snapshot alone and cost nothing.
+    //
+    // This matters because the re-trust pass runs on every reconcile of every
+    // verdict-carrying object: without it, a cluster that HAS migrated still
+    // paid one `GET trustrosters/default` per object per requeue for an
+    // answer the roster has no part in. It does not remove the read for a
+    // roster-only cluster, where the roster IS the answer; that would need a
+    // second watch for one cluster-scoped object, and is recorded rather than
+    // taken.
+    match resolve_in(namespace, policies, None) {
+        Resolution::Unconfigured => {
+            let roster = match crate::controllers::approval::load_roster(client).await? {
+                crate::controllers::approval::RosterLoad::Found(roster) => Some(roster.spec),
+                crate::controllers::approval::RosterLoad::NotFound => None,
+            };
+            Ok(resolve_in(namespace, policies, roster.as_ref()))
+        }
+        answered => Ok(answered),
+    }
 }
 
 /// Whether a `TrustPolicy` event could change what `namespace` resolves to —
@@ -747,10 +768,120 @@ pub async fn resolve_with(
 /// wrong in the other direction is the failure this function exists to prevent.
 #[must_use]
 pub fn may_govern(policy: &TrustPolicy, namespace: &str) -> bool {
-    policy.spec.default
-        || policy
+    declared_scope(policy).covers(namespace)
+}
+
+/// The namespaces one `TrustPolicy` event could have changed the resolution of.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PolicyScope {
+    /// Exactly these namespaces.
+    Namespaces(BTreeSet<String>),
+    /// Every namespace. A `default: true` policy is the fallback for every
+    /// namespace no other policy names, which is unbounded and includes
+    /// namespaces that do not exist yet — the same reason
+    /// [`bound_namespaces`] does not enumerate it.
+    Everything,
+}
+
+impl PolicyScope {
+    /// Whether this scope covers `namespace`.
+    #[must_use]
+    pub fn covers(&self, namespace: &str) -> bool {
+        match self {
+            Self::Everything => true,
+            Self::Namespaces(names) => names.contains(namespace),
+        }
+    }
+
+    /// The union of two scopes. [`Self::Everything`] absorbs.
+    #[must_use]
+    pub fn union(self, other: Self) -> Self {
+        match (self, other) {
+            (Self::Everything, _) | (_, Self::Everything) => Self::Everything,
+            (Self::Namespaces(mut a), Self::Namespaces(b)) => {
+                a.extend(b);
+                Self::Namespaces(a)
+            }
+        }
+    }
+
+    /// Whether this scope covers nothing at all.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        matches!(self, Self::Namespaces(names) if names.is_empty())
+    }
+}
+
+/// The scope one policy object declares **right now**, with no history.
+#[must_use]
+pub fn declared_scope(policy: &TrustPolicy) -> PolicyScope {
+    if policy.spec.default {
+        return PolicyScope::Everything;
+    }
+    PolicyScope::Namespaces(
+        policy
             .spec
             .namespaces
-            .as_ref()
-            .is_some_and(|ns| ns.iter().any(|n| n == namespace))
+            .iter()
+            .flatten()
+            .cloned()
+            .collect::<BTreeSet<String>>(),
+    )
+}
+
+/// What each policy bound the last time it was seen — so an edit that
+/// **narrows** still wakes what it stopped governing.
+///
+/// # The fail-open this closes
+///
+/// A `watches` mapper receives only the NEW object. Removing `team-a` from
+/// `spec.namespaces`, or clearing `spec.default`, makes [`declared_scope`]
+/// false for `team-a` and enqueues nothing there — although that edit is
+/// exactly what changed `team-a`'s resolution. A terminal `Backup` self-heals
+/// within its requeue; a terminal `Restore` returns `Action::await_change()`
+/// and nothing wakes it at all, so if the namespace's new fallback does not
+/// carry the signing key the correct verdict is `UntrustedSigner` and the
+/// object keeps a **green** badge indefinitely. That is the same asymmetry the
+/// trigger's own note argues against, one edit away.
+///
+/// So the mapper enqueues the UNION of the scope before the change and the
+/// scope after it. This type is the "before" half: the mapper is the only
+/// writer, so the remembered value cannot race the reflector that feeds
+/// resolution — which is why the previous scope is kept here rather than read
+/// back out of a `Store` that a different watch updates.
+///
+/// A policy this process has never seen has no "before", and its first event
+/// is treated as pure widening — correct, because a controller that has just
+/// started re-derives everything it reconciles anyway.
+///
+/// A `Delete` event carries the last-known object, so the deleted policy's own
+/// namespaces are still enqueued. The remembered entry is left behind: it is
+/// one small set per policy name, and keeping it means a delete followed by a
+/// re-create under the same name still unions correctly.
+#[derive(Debug, Default)]
+pub struct PolicyScopeMemory {
+    seen: std::sync::Mutex<BTreeMap<String, PolicyScope>>,
+}
+
+impl PolicyScopeMemory {
+    /// Record `policy`'s current scope and return the union with the previous
+    /// one — every namespace this event could have changed.
+    #[must_use]
+    pub fn observe(&self, policy: &TrustPolicy) -> PolicyScope {
+        let now = declared_scope(policy);
+        let name = policy.name_any();
+        let mut seen = match self.seen.lock() {
+            Ok(guard) => guard,
+            // A POISONED LOCK MUST NOT NARROW THE SCOPE. The only thing this
+            // mutex guards is a widening hint; if a previous mapper panicked
+            // while holding it, the safe answer is "everything could have
+            // changed", never "only what the new object names".
+            Err(_) => return PolicyScope::Everything,
+        };
+        let before = seen.insert(name, now.clone());
+        match before {
+            Some(before) => now.union(before),
+            None => now,
+        }
+    }
 }

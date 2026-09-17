@@ -3051,22 +3051,16 @@ fn error_policy(backup: Arc<Backup>, err: &BackupError, _ctx: Arc<Context>) -> A
 /// something else happens to reconcile it. The two errors are not symmetric.
 fn policy_targets(
     objects: &reflector::Store<Backup>,
+    scopes: &crate::trust::PolicyScopeMemory,
     policy: &crate::crds::trust_policy::TrustPolicy,
 ) -> Vec<ObjectRef<Backup>> {
-    {
-        objects
-            .state()
-            .into_iter()
-            .filter(|object| {
-                {
-                    object
-                        .namespace()
-                        .is_some_and(|ns| crate::trust::may_govern(policy, &ns))
-                }
-            })
-            .map(|object| ObjectRef::from_obj(&*object))
-            .collect()
-    }
+    // THE UNION OF BEFORE AND AFTER. A `watches` mapper is handed only the
+    // NEW object, so an edit that NARROWS — a namespace removed, `default`
+    // cleared — would otherwise enqueue nothing in the namespace it just
+    // stopped governing, which is the one edit that certainly changed that
+    // namespace's resolution. See `trust::PolicyScopeMemory`.
+    let scope = scopes.observe(policy);
+    crate::verification::targets_in_scope(objects.state(), &scope)
 }
 
 /// [`reconcile`], with the re-trust pass in front of it.
@@ -3093,38 +3087,28 @@ async fn reconcile_with_trust(
     policies: reflector::Store<crate::crds::trust_policy::TrustPolicy>,
     synced: Arc<AtomicBool>,
 ) -> Result<Action, BackupError> {
-    {
-        if synced.load(Ordering::Relaxed) {
-            {
-                let value = serde_json::to_value(&*backup).ok();
-                let status = value.as_ref().and_then(|v| v.get("status"));
-                if crate::verification::has_trust_verdict(status) {
-                    {
-                        if let Some(namespace) = backup.namespace() {
-                            {
-                                let snapshot: Vec<crate::crds::trust_policy::TrustPolicy> =
-                                    policies.state().into_iter().map(|p| (*p).clone()).collect();
-                                let resolution =
-                                    crate::trust::resolve_with(&snapshot, &ctx.client, &namespace)
-                                        .await?;
-                                let api: Api<Backup> =
-                                    Api::namespaced(ctx.client.clone(), &namespace);
-                                crate::verification::apply_retrust(
-                                    &api,
-                                    &*backup,
-                                    &resolution,
-                                    crate::verification::backup_badge,
-                                    Utc::now(),
-                                )
-                                .await?;
-                            }
-                        }
-                    }
-                }
+    if synced.load(Ordering::Relaxed) {
+        let value = serde_json::to_value(&*backup).ok();
+        let status = value.as_ref().and_then(|v| v.get("status"));
+        if crate::verification::has_trust_verdict(status) {
+            if let Some(namespace) = backup.namespace() {
+                let snapshot: Vec<crate::crds::trust_policy::TrustPolicy> =
+                    policies.state().into_iter().map(|p| (*p).clone()).collect();
+                let resolution =
+                    crate::trust::resolve_with(&snapshot, &ctx.client, &namespace).await?;
+                let api: Api<Backup> = Api::namespaced(ctx.client.clone(), &namespace);
+                crate::verification::apply_retrust(
+                    &api,
+                    &*backup,
+                    &resolution,
+                    crate::verification::backup_badge,
+                    Utc::now(),
+                )
+                .await?;
             }
         }
-        reconcile(backup, ctx).await
     }
+    reconcile(backup, ctx).await
 }
 
 /// Run the `Backup` controller until the process ends.
@@ -3168,6 +3152,8 @@ pub fn controller(
     let (policies, policy_writer) = reflector::store::<crate::crds::trust_policy::TrustPolicy>();
     let policy_api: Api<crate::crds::trust_policy::TrustPolicy> = Api::all(client_for_watch);
     let synced = Arc::new(AtomicBool::new(false));
+    // ONE memory of what each policy bound last, owned by the mapper.
+    let scopes = Arc::new(crate::trust::PolicyScopeMemory::default());
     async move {
         // NOT `wait_until_ready().await` BEFORE STARTING. A cluster whose
         // `trustpolicies` CRD is not installed never syncs, and awaiting here
@@ -3198,7 +3184,7 @@ pub fn controller(
             // this controller already holds in the namespaces that policy could
             // govern — see `policy_targets`.
             .watches(policy_api, watcher::Config::default(), move |policy| {
-                policy_targets(&objects, &policy)
+                policy_targets(&objects, &scopes, &policy)
             })
             .run(
                 move |object, context| {
