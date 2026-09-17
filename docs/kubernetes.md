@@ -1786,14 +1786,12 @@ hand-written object may not claim `schedule`: its signed receipt would say
 metacharacter in it is terminal `GuardRefused`. `spec.allUserTopics` beside a
 non-empty `spec.topics` is two answers to one question and is refused by
 admission and by the controller alike (`InvalidTopicSelection`). `topics: []`
-with `spec.allUserTopics` is the **dynamic** shape: this controller build does
-not resolve topic discovery and refuses such a run terminally with
-`InvalidTopicSelection`, naming the reason. It is never started with an empty
-allowlist — an empty `source.topics` in `backup.yaml` is the "no allowlist means
-everything" shape the mandatory allowlist exists to make impossible. **Such a
-`Backup` is `Failed` for good** — `spec` is immutable and a terminal run is
-never retried — so after installing a controller that resolves discovery you
-must **create a new `Backup`**; the refused one does not start by itself.
+with `spec.allUserTopics` is the **dynamic** shape, resolved per run by a
+topic discovery Job — see "Dynamic selection" below. What never happens in
+either shape is an empty `source.topics` in `backup.yaml`: that is the "no
+allowlist means everything" shape the mandatory allowlist exists to make
+impossible, and the freeze boundary refuses an empty or patterned resolved list
+whatever produced it.
 
 **`status.selection` is written at the freeze**, in the same patch as
 `status.execution`, and says what the run may honestly claim to have covered:
@@ -1806,6 +1804,97 @@ Only `coverage: AllUserTopicsAttested` may ever be rendered as "all topics".
 A named allowlist is `NamedTopics` and claims nothing about the cluster. The
 block is **absent** on a `Backup` frozen by a controller that predates it,
 which is the documented absent-field behaviour and not a degraded state.
+
+### Dynamic selection: one discovery Job per run
+
+`spec.allUserTopics` means "every user topic this run's principal can see,
+minus the exclusions". It is resolved **per run**, in the run's own Job, and
+frozen into the run's own immutable plan — never read from a `TopicDiscovery`,
+which is an interactive observation and never an execution input.
+
+```yaml
+spec:
+  topics: []                      # required, and empty in this mode
+  allUserTopics:
+    exclude:
+      topics: ["payments"]        # exact names
+      prefixes: ["tmp-"]          # LITERAL prefixes, never patterns
+    incompleteDiscovery: BackUpVisibleTopics   # or Refuse. REQUIRED, no default
+```
+
+**What the controller does, in order.**
+
+1. Resolves `spec.sourceRef` once with the saved-connection resolver and
+   records the digest of that resolution.
+2. Creates `lwd-<backup uid>` — a `topicInventory` check Job, running
+   `logweir check run --plan /check/check-plan.json --check-contract-version 1`
+   as the runner ServiceAccount with **no** Kubernetes token, **no** signing key
+   and **no** archive credential — plus its immutable plan ConfigMap
+   `lwd-<backup uid>-plan`. Both are owned by the `Backup` with
+   `controller: true`, so deleting the `Backup` collects them; the Job carries
+   `logweir.dev/purpose=topic-discovery` and
+   `activeDeadlineSeconds: min(300, spec.deadlineSeconds)`. The phase becomes
+   `Resolving` with `TopicsResolved=False/DiscoveryRunning`, and the reconcile
+   requeues.
+3. When the Job finishes, reads the **full** stdout of the pod whose controller
+   owner reference is that Job — a label match is never enough — verifies the
+   relay's frames against the digest the plan ConfigMap pinned, and holds the
+   runner's result document to the frames it travelled with.
+4. Classifies: internal is `entry.internal` **or** a `__` prefix; a topic the
+   broker refused to describe is `limited`; an exact or prefix rule hit is
+   `excludedByRule`; the rest is the resolved list, byte-sorted and
+   deduplicated.
+5. Freezes it through exactly the path a named allowlist takes, records
+   `status.selection`, writes `TopicsResolved=True/Resolved`, and only then
+   patches the discovery Job's `ttlSecondsAfterFinished`.
+
+**The terminal states, and which of them a new `Backup` could survive.** All of
+them are `Failed=True`, `exitReason: operational`, with no `exitCode`, and none
+of them starts a runner Job.
+
+| Reason | When | A new `Backup` could succeed |
+|---|---|---|
+| `DiscoveryFailed` | The check Job did not produce a usable result: an unreachable broker, a pod that never started, a deadline | yes |
+| `DiscoveryResultUnreadable` | It produced output that did not verify — frames that do not decode, a result document whose counts or digest the frames do not support, a missing plan ConfigMap | no, not without fixing the runner |
+| `DiscoveryIncomplete` | Visibility was not established and the policy is `Refuse` | only with more permission, or an attestation |
+| `SelectionEmpty` | Nothing was left after internal topics, exclusions and the topics the broker would not describe | only if the cluster changes |
+| `SelectionTooLarge` | Over 5,000 names, over 256 KiB of names, or a listing the runner had to truncate | only with more exclusions |
+| `SourceChangedDuringResolution` | The broker's `clusterId` is not the one the `KafkaCluster` observed, or the saved connection changed while the discovery ran | yes |
+| `JobNameConflict` | Something else owns `lwd-<backup uid>` | remove it first |
+
+`spec` is CEL-immutable and a terminal run is never restarted, so "retryable"
+always means **a new `Backup`** — which discovers afresh, in its own Job. That
+is also why a topic created between two dynamic runs is in the second run's
+frozen list and in nothing the first run recorded.
+
+**Completeness is never assumed.** Kafka silently omits topics a principal
+cannot describe, so a successful listing alone is `visibility: unknown` and
+never proof. `limited` requires an observed authorization failure.
+`attestedComplete` requires an administrator attestation in the installation
+policy ConfigMap naming the namespace, the `KafkaCluster`, the principal and the
+observed cluster id, and not expired — a blank principal or cluster id fails
+closed. **Today no chart renders that policy reference, so
+`attestedComplete` is unreachable and `coverage: AllUserTopicsAttested` is
+never written.** The two reachable labels are `VisibleUserTopicsOnly` (with
+`incompleteDiscovery: BackUpVisibleTopics`) and, for a named allowlist,
+`NamedTopics`.
+
+**What the frozen plan records.** `topics` is the exact list handed to
+`backup.yaml`; `selection.discovery` is its provenance —
+`observedAt`, `clusterId`, `visibility`, `basis`, `resultSha256`,
+`visibleTopicCount`, `internalExcluded` and `excludedByRule` (counts, plus up
+to 50 and 200 names with a `truncated` flag), `limitedTopicCount` and
+`discoveryJob`. The names are recorded once, in the plan; `status.selection`
+carries only counts, because a status is not a store.
+
+**Upgrade and rollback.** `spec.allUserTopics` is an additive CRD field, and a
+named schedule or `Backup` behaves exactly as before — no discovery Job, no
+`TopicsResolved` condition, `coverage: NamedTopics`. An **older** controller
+handed a dynamic `Backup` deserialises it (because `topics` stays present),
+renders `topics: []`, and the runner refuses with exit 3 before it contacts the
+engine; it never creates a discovery Job. Roll back by suspending dynamic
+schedules first: a dynamic `Backup` that is created but not yet frozen must be
+allowed to fail or be deleted.
 
 **A manual run from a schedule.** "Back up now" copies the schedule's current
 policy into an ordinary `Backup` and records which revision it copied:
@@ -2055,7 +2144,7 @@ and unconverted. Nothing is rewritten and no write happens on upgrade.
 | No `spec.trigger` and `triggeredBy: manual` | `Manual` |
 | `spec.scheduleRef: {name}` with no `uid`, plus the `BackupSchedule` controller owner reference | The UID comes from that owner reference, so the execution id is `<owner uid>-<slot>`, the value PLAT-06.1 computed. The owner's **name** must still equal `scheduleRef.name` |
 | `spec.scheduleRef` with a `uid` and **no** owner reference (what a D1 schedule writes) | The UID comes from the reference. This is the shape that lets deleting a schedule keep its history |
-| No `spec.allUserTopics` | Named mode, coverage `NamedTopics`. Existing allowlists are unaffected |
+| No `spec.allUserTopics` | Named mode, coverage `NamedTopics`. Existing allowlists are unaffected: no discovery Job, and no `TopicsResolved` condition |
 | A `v1` plan ConfigMap | Read, verified, re-encoded to its own bytes and executed. See the comparison rule above |
 | No `status.selection` | Absent, and stays absent: the block is written at the freeze and this run was frozen before it existed |
 | A `logweir.dev/runner-argv` annotation | Observed, never executed, surfaced as `RunnerArgvAnnotationIgnored` — as before |
