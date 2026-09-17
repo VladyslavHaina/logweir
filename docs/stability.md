@@ -814,11 +814,26 @@ most 30 s — inside the delivery Job's `activeDeadlineSeconds: 120`.
 ### `logweir check run`'s exit codes, its frames and the one key it may write (D2 §4.2)
 
 `logweir check run --plan <path> --check-contract-version 1` is the **one** check runner
-(decision D2 §4.2, seam ruling S1). Five plan kinds — `topicInventory`, `operationReadiness`,
-`restorePreflight`, `destinationAccess`, `evidenceFetch` — share one argv surface, one frame
-format and one closed error vocabulary, because a second runner would be a second place the
-contract could drift from what the controller parses. There is deliberately no
-`logweir topics discover` and no per-kind subcommand.
+(decision D2 §4.2, seam ruling S1). Six plan kinds — `topicInventory`, `operationReadiness`,
+`restorePreflight`, `destinationAccess`, `evidenceFetch`, `catalogSync` — share one argv surface,
+one frame format and one closed error vocabulary, because a second runner would be a second place
+the contract could drift from what the controller parses. There is deliberately no
+`logweir topics discover`, no `logweir catalog controller-sync` and no per-kind subcommand.
+
+**`timeoutSeconds` has two ceilings, and that is the one bound that is not uniform.** Five of the
+kinds are bounded probes and may ask for at most **600** seconds; a `catalogSync` is a paged walk
+of an adopter's own bucket, whose cost is set by how many recovery points they hold, and may ask
+for at most **1800**. The `RecoveryCatalog` controller asks for 900. A single 600-second ceiling
+refused every sync plan at startup step 4, before a credential was read, and
+`the_controllers_sync_plan_is_one_the_runner_accepts` is the guard that now holds the two sides
+together.
+
+**`catalogSync` writes nothing at all** — not even the create-only readiness marker a
+`destinationAccess` may write. It reads the durable catalog through the destination's `archiveRead`
+grant, reports a signature verdict and a signer key id **and never a trust decision**, and relays
+the result as the `details` body `docs/kubernetes.md` §7d specifies. A walk that could not start
+relays **no body**, because a body that parses is a body the controller publishes in place of the
+view it already has.
 
 **The invocation.** The controller writes it (`weirkeeper::check::job::runner_argv` and
 `runner_job_spec`); nothing else may:

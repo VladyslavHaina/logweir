@@ -810,6 +810,63 @@ about the walk. A malformed entry is skipped and counted; a malformed page is
 fatal for the sync, and every failure is reported with D2's closed
 `ResultUnreadable` code and none of the body's content.
 
+**What the runner walks, and what each number covers.** `catalogSync` is the
+sixth plan kind of the one check runner (`docs/stability.md`). An `Index` sync
+walks day shards of `logweir/catalog/v1/log/` **newest first, always starting at
+today**: the view is rebuilt from this body on every sync, so a walk that
+resumed at an old cursor would publish a window of old points and call it the
+catalog. `status.cursor.indexShard` is therefore read as a **floor** — the
+oldest day the previous walk reached, minus one day of overlap — and never as a
+start; with no cursor the floor is 400 days back. A `Full` rescan pages
+`logweir/catalog/v1/points/` and *does* resume strictly after
+`status.cursor.rescanStartAfter`, and reports no cursor at all once it finishes.
+
+`catalog-counts.total` counts every point the walk **saw** — one listing per day
+shard establishes it, at no cost per point — while the availability and
+signature buckets count every point the walk **examined**, which costs two to
+four `get`s each and is bounded by `viewLimit`, by `spec.sync.maxObjectsPerRun`
+and by the check's own clock. On a complete walk the two are equal; on a
+budgeted one the buckets sum to less than `total`, `catalog-cursor` says
+`complete: false`, the `Synced` condition reads `ScanIncomplete` and the view
+reports `truncated: true`. Inventing bucket numbers for points nothing fetched
+would be the only worse answer.
+
+**A point whose record could not be read is counted and not listed.** An entry
+line's required fields are the receipt-derived facts, and there is no honest
+value for any of them when the record is `Missing` or `Unreadable`; the counts
+carry the fact and a row of zeroes would carry a fiction.
+
+**`deepCheck: SegmentSample` is admitted and not implemented.** A plan naming it
+is honoured as `ManifestDigest` and the check result says so
+(`catalogSegmentSample: notImplemented`), rather than reporting a sample nobody
+took.
+
+**`deepCheck: None` weakens what `Available` means, and does so on purpose.**
+The table above defines `Available` as receipt, sidecar and manifest readable
+with the manifest digest equal to the receipt's; `None` is an operator's
+explicit "existence only", and under it a point is `Available` once the record
+and the receipt read. The check result publishes `catalogDeepCheck` so which
+reading produced a row is never a guess. `ManifestDigest` is the default because
+it is the check that distinguishes "the object is there" from "the object is the
+one this receipt describes".
+
+**`UntrustedSigner` cannot come from the Job, and does not need to.** That state
+is "the signature verifies under a key this installation does not list", and a
+Job holding only this installation's keys cannot verify under a key it does not
+hold. A sidecar naming a key the pod does not have is reported `notAttempted`
+with the **claimed** key id, which is what puts the stranger's key into
+`catalog-signers` — and therefore into `status.counts.untrustedSigner` and
+`status.signers[].trusted: false` — without any entry claiming a verdict nobody
+could reach. The controller reaches `UntrustedSigner` when its trust source is
+narrower than the bundle it mounted.
+
+**A walk that never started relays no body at all.** A body that parses is a
+body this controller publishes in place of the view it has, so a destination
+whose handle would not build, or whose first listing was denied, relays the
+failure in the check result's `destination.archiveListable` row and nothing in
+`details`. The controller reads the absence as `ResultUnreadable`, keeps the
+previous view, and the pod log carries the code.
+
 **Conditions.** `Ready` (a usable view exists now), `Synced` (what the last sync
 did — `Succeeded`, `PartialScan` when part of the archive could not be read,
 `ScanIncomplete` when the object budget ran out and the cursor was recorded, or a
