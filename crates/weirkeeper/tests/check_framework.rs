@@ -1931,7 +1931,10 @@ fn a_run_discovery_counts_against_the_connection_and_not_the_interactive_pools()
     let run_discovery = |connection: Option<&str>| -> Job {
         let mut j = labelled_job(NS, "topicInventory", connection, false);
         let labels = j.metadata.labels.get_or_insert_with(Default::default);
-        labels.remove("app.kubernetes.io/component");
+        labels.insert(
+            "app.kubernetes.io/component".to_string(),
+            "run-discovery".to_string(),
+        );
         labels.insert(
             "logweir.dev/purpose".to_string(),
             "topic-discovery".to_string(),
@@ -1977,13 +1980,39 @@ fn a_run_discovery_counts_against_the_connection_and_not_the_interactive_pools()
         limits::ActiveCounts::default()
     );
 
-    // The selector that finds them is its own, because a label selector ANDs
-    // its terms and cannot express "either key".
+    // AND THE INTERACTIVE ADMISSION STILL IGNORES THEM. Four run discoveries in
+    // this namespace — more than `maxActivePerNamespace` — admit an interactive
+    // check against another connection, because they spend neither pool.
+    let crowd: Vec<Job> = (0..4)
+        .map(|i| {
+            let mut j = run_discovery(Some(CONNECTION_UID));
+            j.metadata.name = Some(format!("lwd-{i}"));
+            j
+        })
+        .collect();
+    let counts = limits::count(&crowd, NS, Some(OTHER_JOB_UID));
+    assert_eq!(counts, limits::ActiveCounts::default());
+    assert!(limits::admit(
+        &counts,
+        &policy::ChecksPolicy::default(),
+        CheckPlanKind::TopicInventory
+    )
+    .is_admitted());
+    assert!(limits::admit(
+        &counts,
+        &policy::ChecksPolicy::default(),
+        CheckPlanKind::OperationReadiness
+    )
+    .is_admitted());
+
+    // An INTERACTIVE check, by contrast, spends both pools and not the
+    // connection unless it is a discovery — the rule this one is beside.
+    let interactive = labelled_job(NS, "operationReadiness", Some(CONNECTION_UID), false);
+    let counts = limits::count(&[interactive], NS, Some(CONNECTION_UID));
     assert_eq!(
-        limits::run_discovery_selector(),
-        "logweir.dev/purpose=topic-discovery"
+        (counts.namespace, counts.total, counts.per_connection),
+        (1, 1, 0)
     );
-    assert_ne!(limits::run_discovery_selector(), limits::check_selector());
 }
 
 /// D2 §12's framework row `limits::queues_over_namespace_cap`.
@@ -2163,13 +2192,36 @@ async fn the_active_count_lists_by_the_component_label_and_nothing_else() {
     let jobs = limits::check_jobs(&client).await.expect("listed");
     assert_eq!(jobs.len(), 1);
     let seen = recorder.lock().unwrap();
-    assert_eq!(seen.len(), 1);
+    assert_eq!(
+        seen.len(),
+        1,
+        "ONE request, whatever the selector says: a count that costs two \
+         installation-wide LISTs per pass is a count nobody can afford"
+    );
+    // The SET form, since PLAT-09.2: one key, two values, so the same request
+    // finds an interactive check and a `Backup`'s own per-run discovery. A
+    // selector ANDs its terms and cannot express "either key", which is why the
+    // two populations share `app.kubernetes.io/component`.
+    let decoded = seen[0].uri.replace("%2F", "/").replace("%2C", ",");
     assert!(
-        seen[0]
-            .uri
-            .contains("labelSelector=app.kubernetes.io%2Fcomponent%3Dcheck"),
+        decoded.contains("app.kubernetes.io/component") && decoded.contains("check"),
         "the count must not list every Job in the cluster: {}",
         seen[0].uri
+    );
+    assert!(
+        decoded.contains("run-discovery"),
+        "and it must see a run's own discovery, or the per-connection ceiling \
+         does not bound the thing it exists to bound: {}",
+        seen[0].uri
+    );
+    assert_eq!(
+        limits::active_selector(),
+        "app.kubernetes.io/component in (check,run-discovery)"
+    );
+    assert_eq!(
+        limits::check_selector(),
+        "app.kubernetes.io/component=check",
+        "the console pool's own membership is unchanged"
     );
     assert!(
         !seen[0].uri.contains("/namespaces/"),

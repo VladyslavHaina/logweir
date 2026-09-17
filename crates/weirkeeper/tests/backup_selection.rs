@@ -1167,9 +1167,21 @@ fn the_discovery_job_is_the_check_job_shape_named_after_the_backup() {
         value["spec"]["template"]["metadata"]["labels"][sel::LABEL_PURPOSE],
         json!(sel::PURPOSE_TOPIC_DISCOVERY)
     );
-    assert!(
-        value["metadata"]["labels"]["app.kubernetes.io/component"].is_null(),
+    assert_eq!(
+        value["metadata"]["labels"]["app.kubernetes.io/component"],
+        json!(sel::COMPONENT_RUN_DISCOVERY),
+        "the component key is shared with interactive checks so ONE listing \
+         finds both; the VALUE is what keeps the two ceilings apart"
+    );
+    assert_ne!(
+        value["metadata"]["labels"]["app.kubernetes.io/component"],
+        json!("check"),
         "a run's own discovery does not spend the interactive check pool"
+    );
+    assert_eq!(
+        value["spec"]["template"]["metadata"]["labels"]["app.kubernetes.io/component"],
+        json!(sel::COMPONENT_RUN_DISCOVERY),
+        "and the pod wears the same map, so one `kubectl get pods -l` finds it"
     );
     assert_eq!(
         value["metadata"]["annotations"][sel::SOURCE_SHA256_ANNOTATION],
@@ -1408,6 +1420,112 @@ async fn a_deadline_too_small_to_fund_a_discovery_is_refused_before_any_job() {
     let (terminal, bodies) = reconcile_with(&b, start_routes()).await;
     assert_eq!(terminal, None, "{:?}", calls(&bodies));
     assert_eq!(posted_jobs(&bodies).len(), 1);
+}
+
+/// **THE PROVENANCE NAMES ARE BOUNDED IN BYTES AS WELL AS IN COUNT** — D1 §3.3,
+/// and the plan `ConfigMap`'s one-MiB ceiling.
+///
+/// `internalExcluded.names` and `excludedByRule.names` are a SAMPLE an operator
+/// reads to answer "which ones?", not a store. The count bounds alone (50 and
+/// 200) admit 250 names of 249 bytes — about 61 KiB of provenance beside a
+/// topic list already bounded at 256 KiB, inside a `ConfigMap` bounded at one
+/// MiB. The two lists therefore share one 16 KiB budget, spent in a fixed
+/// order, and `truncated` says when the sample was cut.
+///
+/// **The counts stay exact whatever the sample does.** That is the property a
+/// reader depends on, and the one a byte cap must not damage.
+///
+/// KILLS: dropping the byte bound; dropping the count bound (a byte bound alone
+/// admits a hundred thousand one-character names); cutting the COUNT instead of
+/// the sample; forgetting `truncated`; spending the budget in an order two runs
+/// could disagree about.
+#[test]
+fn the_provenance_name_lists_are_bounded_in_bytes_and_in_count() {
+    let long = "x".repeat(200);
+    let exclusions = sel::Exclusions {
+        topics: Vec::new(),
+        prefixes: vec![long.clone()],
+    };
+    let mut entries = vec![entry("orders", 6)];
+    // 40 internal names of 200 bytes = 8,000 bytes, inside both bounds.
+    for i in 0..40 {
+        entries.push(internal_entry(&format!("__{}{i:03}", "y".repeat(195))));
+    }
+    // 200 rule-excluded names of 203 bytes each = 40,600 bytes, far over the
+    // shared budget's remainder.
+    for i in 0..200 {
+        entries.push(entry(&format!("{long}{i:03}"), 1));
+    }
+    let o = observed(&entries, &exclusions, VisibilityState::Unknown);
+    let resolved = sel::resolved_selection(
+        &o,
+        &exclusions,
+        IncompleteDiscovery::BackUpVisibleTopics,
+        NAME,
+    )
+    .expect("it resolves");
+    let d = resolved.selection.discovery.as_ref().expect("provenance");
+
+    // THE COUNTS ARE EXACT.
+    assert_eq!(d.internal_excluded.count, 40);
+    assert_eq!(d.excluded_by_rule.count, 200);
+
+    // THE SAMPLES ARE NOT, AND SAY SO.
+    let internal_bytes: usize = d.internal_excluded.names.iter().map(String::len).sum();
+    let excluded_bytes: usize = d.excluded_by_rule.names.iter().map(String::len).sum();
+    assert!(
+        internal_bytes + excluded_bytes <= sel::MAX_PROVENANCE_NAME_BYTES,
+        "the two lists share one budget: {internal_bytes} + {excluded_bytes}"
+    );
+    assert!(
+        d.excluded_by_rule.truncated,
+        "the sample that ran out of budget says so: {} of 200 names",
+        d.excluded_by_rule.names.len()
+    );
+    assert!(
+        !d.internal_excluded.names.is_empty(),
+        "and the first list still gets its share"
+    );
+
+    // DETERMINISTIC: the same observation freezes the same bytes, because the
+    // budget is spent in a fixed order.
+    let again = sel::resolved_selection(
+        &observed(&entries, &exclusions, VisibilityState::Unknown),
+        &exclusions,
+        IncompleteDiscovery::BackUpVisibleTopics,
+        NAME,
+    )
+    .expect("it resolves");
+    assert_eq!(resolved.selection, again.selection);
+
+    // AND THE COUNT BOUND IS STILL THERE: many short names are cut at 50/200,
+    // not at the byte budget.
+    let mut short = vec![entry("orders", 6)];
+    for i in 0..300 {
+        short.push(internal_entry(&format!("__i{i:03}")));
+    }
+    for i in 0..900 {
+        short.push(entry(&format!("tmp-{i:03}"), 1));
+    }
+    let short_exclusions = sel::Exclusions {
+        topics: Vec::new(),
+        prefixes: vec!["tmp-".to_string()],
+    };
+    let d = sel::resolved_selection(
+        &observed(&short, &short_exclusions, VisibilityState::Unknown),
+        &short_exclusions,
+        IncompleteDiscovery::BackUpVisibleTopics,
+        NAME,
+    )
+    .expect("it resolves")
+    .selection
+    .discovery
+    .expect("provenance");
+    assert_eq!(d.internal_excluded.names.len(), sel::MAX_INTERNAL_NAMES);
+    assert_eq!(d.excluded_by_rule.names.len(), sel::MAX_EXCLUDED_NAMES);
+    assert_eq!(d.internal_excluded.count, 300);
+    assert_eq!(d.excluded_by_rule.count, 900);
+    assert!(d.internal_excluded.truncated && d.excluded_by_rule.truncated);
 }
 
 // ===========================================================================
