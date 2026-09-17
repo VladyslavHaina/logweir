@@ -372,6 +372,15 @@ fn run() -> ExitCode {
         controllers.push(Box::pin(
             weirkeeper::controllers::kafka_cluster::controller(client.clone(), runner.clone()),
         ));
+        // D2 W7 pushes the SEVENTH — the `BackupDestination` reconciler that
+        // publishes each saved destination's `Valid` condition, canonical URL
+        // and two digests. It takes NEITHER the archive handle NOR the runner
+        // image: it creates no Job and reads no archive, so a client is all its
+        // context needs. `tests/linkage.rs`'s `"controllers":7` moved in this
+        // same commit (D2 §13.4: W8 and W9 take it to 8 and 9).
+        controllers.push(Box::pin(
+            weirkeeper::controllers::backup_destination::controller(client.clone()),
+        ));
 
         let registered = controllers.len();
         info!(

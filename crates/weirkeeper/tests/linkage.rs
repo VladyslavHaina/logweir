@@ -949,13 +949,15 @@ fn the_no_argv_binary_starts_and_exits_zero_on_sigterm() {
          11), so a non-empty stderr is a panic or a missing subscriber. Got: {stderr:?}"
     );
     assert!(
-        stdout.contains("\"controllers\":6"),
+        stdout.contains("\"controllers\":7"),
         "the startup line names the registered controller count. It was 0 until Task 16, which \
          registered TWO — `controllers::trust_roster` and `controllers::approval`, in that \
          order — Task 18 registered the THIRD, `controllers::backup_schedule`, Task 17 the \
-         FOURTH, `controllers::backup`, Task 20 the FIFTH, `controllers::restore`, and Task 15c \
-         the SIXTH, `controllers::kafka_cluster`. A count that is not 6 means `main`'s \
-         registration point lost a `controllers.push(…)` line. Got: {stdout:?}"
+         FOURTH, `controllers::backup`, Task 20 the FIFTH, `controllers::restore`, Task 15c \
+         the SIXTH, `controllers::kafka_cluster`, and D2 W7 the SEVENTH, \
+         `controllers::backup_destination` (D2 §13.4: W8 and W9 take it to 8 and 9). A count \
+         that is not 7 means `main`'s registration point lost a `controllers.push(…)` line. \
+         Got: {stdout:?}"
     );
 
     // SIGTERM through the shell's builtin rather than a `kill` binary, which is

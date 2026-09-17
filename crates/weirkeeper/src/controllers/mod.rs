@@ -58,8 +58,22 @@
 //! (interface **I19**), which is what makes a `Restore` and its `Approval`
 //! creatable in either order.
 
+//! WHAT A RECONCILER IN THIS DIRECTORY MAY DO WHEN IT IS THE ONLY THING THAT
+//! CAN ANSWER (D2 W7). [`backup_destination`] is the first reconciler whose
+//! whole output is a VERDICT ABOUT ANOTHER OBJECT'S USABILITY, and it is here
+//! because CEL cannot reach either half of the question: whether the pinned
+//! engine can honour the declared addressing depends on the ENGINE VERSION, and
+//! whether the declared CA bundle exists, carries its key and holds
+//! certificates depends on a `ConfigMap` a CEL rule may not read. It creates
+//! nothing, dials nothing and probes nothing on a timer — a `VALID` column that
+//! meant "reachable four minutes ago" is the defect PLAT-03 names — and it
+//! reads a `ConfigMap` and never a Secret, because a CA certificate is public
+//! material and a credential value is not the controller's to hold (D2 §3.8
+//! option B, rejected).
+
 pub mod approval;
 pub mod backup;
+pub mod backup_destination;
 pub mod backup_schedule;
 pub mod kafka_cluster;
 pub mod restore;

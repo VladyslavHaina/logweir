@@ -115,6 +115,21 @@
 //! write-only credential-entry contract a product API builds its create-only
 //! Secret with — a library the controller itself never calls.
 
+//!
+//! WHAT D2 W7 ADDED. [`destination`] — the controller half of a saved
+//! `BackupDestination`: the resolver that turns one into the COMPLETE, explicit
+//! `AWS_*` set and plan storage block one operation needs, the frozen
+//! [`destination::ResolvedDestinationSnapshot`] a run records (seam **S4**), and
+//! the G14 retention guard. Not one function in it reads `std::env::var`, which
+//! is what closes defect SEC-ENVHTTP: the controller's own `AWS_ALLOW_HTTP` can
+//! no longer reach a runner Job and enable plaintext transport for a plan that
+//! forbids it (D-SEAMS **S5**). [`evidence_store`] holds the bounded,
+//! allowlisted `ControllerIdentity` handles of D2 §3.10 — the SECOND and last
+//! place in this crate that constructs a `Store`, inside `spawn_blocking`
+//! (interface **I13**), and [`controllers::backup_destination`] is the
+//! reconciler that publishes each destination's `Valid` condition, canonical
+//! URL and two digests.
+
 pub mod backup_execution;
 pub mod cadence;
 pub mod check;
@@ -122,6 +137,8 @@ pub mod conditions;
 pub mod connection;
 pub mod controllers;
 pub mod crds;
+pub mod destination;
+pub mod evidence_store;
 pub mod identity;
 pub mod job;
 pub mod policy;

@@ -867,14 +867,27 @@ fn a_negative_retention_bound_is_not_applied_and_the_report_says_so() {
 /// Every source file that touches the archive from a reconciler, and the two
 /// properties interface **I13** is.
 ///
-/// FIVE FILES ARE NAMED; the ones that do not exist at this slot are skipped
+/// SIX FILES ARE NAMED; the ones that do not exist at this slot are skipped
 /// and counted, so the scan cannot silently shrink to nothing.
-const I13_FILES: [&str; 5] = [
+///
+/// # `evidence_store.rs` IS THE SIXTH, AND IT IS THE ONE THAT CONSTRUCTS
+///
+/// D2 §3.10's amendment. `crate::evidence_store::StoreCache::get_or_build`
+/// builds a read-only handle per allowlisted `ControllerIdentity` destination,
+/// which makes it the SECOND `Store` construction site in this crate after
+/// `main.rs` — and a constructor is exactly where `Store` builds and drives its
+/// own current-thread runtime, so it is the shape this guard exists for. It is
+/// named here so the async-region walk covers the file, and
+/// [`no_store_call_is_made_outside_spawn_blocking`]'s second assertion admits
+/// EXACTLY ONE `Store::read_only_with(` site, in this file, beside the one
+/// `Store::read_only_from_url(` site in `main.rs`.
+const I13_FILES: [&str; 6] = [
     "crates/weirkeeper/src/retention.rs",
     "crates/weirkeeper/src/controllers/backup_schedule.rs",
     "crates/weirkeeper/src/controllers/backup.rs",
     "crates/weirkeeper/src/controllers/restore.rs",
     "crates/weirkeeper/src/verification.rs",
+    "crates/weirkeeper/src/evidence_store.rs",
 ];
 
 /// Tokens that mean "this line calls into `Store`".
@@ -1064,13 +1077,24 @@ fn no_store_call_is_made_outside_spawn_blocking() {
     // reconcile AND reintroduces the nested-runtime panic, because a
     // constructor is where `Store` builds and drives its runtime.
     let mut construction_sites: Vec<String> = Vec::new();
+    let mut sanctioned_sites: Vec<String> = Vec::new();
     let mut writable_sites: Vec<String> = Vec::new();
     for (relative, raw) in weirkeeper_sources() {
         let text = sanitize(&raw);
         for at in occurrences(&text, "Store::read_only_from_url(") {
             construction_sites.push(format!("{relative}:{}", line_of(&text, at)));
         }
+        // D2 §3.10's amendment: the EXPLICIT read-only constructor, which the
+        // `ControllerIdentity` evidence cache needs because its whole point is
+        // that neither addressing nor transport nor credentials come from this
+        // process's environment.
+        for at in occurrences(&text, "Store::read_only_with(") {
+            sanctioned_sites.push(format!("{relative}:{}", line_of(&text, at)));
+        }
         for at in occurrences(&text, "Store::from_url(") {
+            writable_sites.push(format!("{relative}:{}", line_of(&text, at)));
+        }
+        for at in occurrences(&text, "Store::from_url_with(") {
             writable_sites.push(format!("{relative}:{}", line_of(&text, at)));
         }
     }
@@ -1086,10 +1110,36 @@ fn no_store_call_is_made_outside_spawn_blocking() {
         "the one construction site must be `main.rs` — a handle built anywhere else is a \
          handle built per reconcile. Found: {construction_sites:?}"
     );
+    // ---- THE ONE SANCTIONED SECOND SITE (D2 §3.10, W7) --------------------
+    //
+    // `main.rs` builds the global handle before the runtime exists. The
+    // evidence cache cannot: its handles are per-DESTINATION, and a destination
+    // is an object that arrives long after `main` returned. So it constructs
+    // inside `spawn_blocking`, which the FIRST assertion above already
+    // requires of it (the file is in `I13_FILES`), and this assertion pins the
+    // site to exactly one function in exactly one file.
+    //
+    // A SECOND ENTRY HERE IS A REVIEWABLE EVENT AND NOT A CONVENIENCE. Every
+    // such site is a tokio runtime and a connection pool built per call unless
+    // something caches it; the cache is the reason this one is admitted.
+    assert_eq!(
+        sanctioned_sites.len(),
+        1,
+        "the EXPLICIT read-only constructor `Store::read_only_with` is called from exactly one \
+         place in this crate — `evidence_store::StoreCache::get_or_build`, inside \
+         `spawn_blocking` — because every call to it builds a tokio runtime and a connection \
+         pool that only that cache keeps. Found: {sanctioned_sites:?}"
+    );
+    assert!(
+        sanctioned_sites[0].starts_with("crates/weirkeeper/src/evidence_store.rs:"),
+        "the one sanctioned `Store::read_only_with` site is `evidence_store.rs`. Found: \
+         {sanctioned_sites:?}"
+    );
     assert!(
         writable_sites.is_empty(),
-        "guard G-RET: this crate must never name the WRITABLE constructor. Found: \
-         {writable_sites:?}"
+        "guard G-RET: this crate must never name the WRITABLE constructor, in either its \
+         environment-reading (`Store::from_url`) or its explicit (`Store::from_url_with`) \
+         form. Found: {writable_sites:?}"
     );
 }
 
