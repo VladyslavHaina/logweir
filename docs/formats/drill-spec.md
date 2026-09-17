@@ -96,9 +96,11 @@ so telling an operator to change an approved document would be the wrong
 repair. See [`docs/stability.md`](../stability.md) for the whole stdout and
 exit contract.
 
-A plan carrying this block requires **execution contract v2**: a v1 invocation
-that carried it would be a post-rollout Restore wearing an old version number,
-and is refused.
+A plan carrying this block requires **execution contract v2**, and that is
+enforced: a v1 invocation carrying `source.point` is a post-rollout Restore
+wearing an old version number, and it is refused by name with exit 3 before any
+data-plane work. Let the in-flight legacy Restore finish (or delete it) and
+create the new one; a legacy object is not upgraded in place.
 
 ---
 

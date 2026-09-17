@@ -549,10 +549,16 @@ progress-phase=-1:sign
 progress-phase=-1:upload
 ```
 
-**`progress-contract=` is the version of the grammar that follows**, and it is the execution
-contract version (`logweir_core::execution_contract::VERSION`, `"2"` since decision D3's Amendment
-I). It is printed once, before the first phase line, so a reader learns the grammar before the
-first line written in it.
+**`progress-contract=<version>` is the version of the progress grammar that follows. It equals
+the execution contract version when one is stamped, and the version the binary implements
+otherwise. It is printed once, before the first `progress-phase=` line. Absence is not an error.**
+
+Both readings occur, and the difference is worth naming. `logweir restore run` under a controller
+prints the version the controller stamped — so a v1 invocation prints `progress-contract=1`.
+`logweir backup run` prints the version this BINARY implements, because a Backup Job carries no
+execution-contract environment at all on this build and there is nothing else it could truthfully
+say; the same is true of `logweir restore run` invoked standalone. The value is
+`logweir_core::execution_contract::VERSION`, `"2"` since decision D3's Amendment I.
 
 **Absence is not an error.** A runner that predates the channel prints nothing; a controller that
 sees no progress line simply has no phase to report. That is also what happens when the channel
@@ -614,31 +620,101 @@ exactly the things a Restore created after the rollout has. Let the in-flight le
 
 | addition | where | absent means |
 |---|---|---|
-| `source.point` | the plan document | the archive set comes from `source.backup`; no binding is checked |
+| `source.point` | the plan document | the archive set comes from `source.backup`; no binding is checked. Under a **v1** contract a plan carrying it is refused by name, exit 3 — it is v2 material like the rest |
 | `LOGWEIR_EXECUTION_AUTHORIZATION_KIND` | Job environment | `approval` — the per-run `Approval`, tag 1's shape |
-| `LOGWEIR_EXECUTION_SCOPE_SHA256` + `…_REHEARSAL_SCHEDULE_UID` | Job environment | no standing authorization; a mounted scope with no pinned digest is **refused**, never ignored |
+| `LOGWEIR_EXECUTION_AUTHORIZATION_SHA256`, `…_AUTHORIZATION_SIDECAR_SHA256`, `…_AUTHORIZATION_KEYS_SHA256`, `…_REHEARSAL_SCHEDULE_UID` | Job environment | no standing authorization; mounted material with no pinned digest is **refused**, never ignored |
 | `LOGWEIR_EXECUTION_POLICY_SNAPSHOT_SHA256` | Job environment | the synthesized `legacy-governed-v1` policy |
 | `LOGWEIR_EXECUTION_CONFIRMATION_KEY_SHA256` | Job environment | the legacy single-key bundle |
 
-The three optional bundle members (`--rehearsal-scope`, `--policy-snapshot`, `--confirmation-key`)
-are digest-pinned in **both** directions: a pinned digest with nothing mounted is a lost bundle
-member, and a mounted member with no pinned digest is material the controller never committed to.
-Both are refused. Supplying any of them to a standalone invocation — one with no execution contract
-at all — is refused too, because nothing could make unpinned material trustworthy and silently
-ignoring it would let an operator believe a scope was enforced when nothing bound it to the run.
+The five optional bundle members (`--standing-authorization` and its derived `.sig` sidecar,
+`--authorization-keys`, `--policy-snapshot`, `--confirmation-key`) are digest-pinned in **both**
+directions: a pinned digest with nothing mounted is a lost bundle member, and a mounted member with
+no pinned digest is material the controller never committed to. Both are refused. Supplying any of
+them to a standalone invocation — one with no execution contract at all — is refused too, because
+nothing could make unpinned material trustworthy and silently ignoring it would let an operator
+believe an authorization was enforced when nothing bound it to the run.
+
+### The standing rehearsal authorization is SIGNED, and the runner checks the signature
+
+D3 §4.3(e) says the bundle carries "the authorization document, its signatures, the trusted public
+keys, the scope and the rendered plan". All five are mounted, and the runner verifies them before
+any data-plane work — because §4.3's own first sentence names the adversary this exists for: *a
+controller that could mint its own authorization*. A scope pinned only by a digest the controller
+set would prove nothing against exactly that adversary.
+
+```
+--standing-authorization <path>   the signed document; its DSSE sidecar is read from
+                                  <path> with the extension replaced by .sig, the same
+                                  convention --approval already uses
+--authorization-keys <path>       the trusted public keys the signature anchors in
+```
+
+The document is canonical JSON with the DSSE payload type
+`application/vnd.logweir.standing-rehearsal-authorization+json;version=1.0.0`:
+
+```json
+{
+  "formatVersion": "1.0.0",
+  "kind": "StandingRehearsalAuthorization",
+  "subjectRef": {"apiVersion": "logweir.dev/v1alpha1", "kind": "RehearsalSchedule",
+                 "namespace": "team-a", "name": "weekly-orders", "uid": "…"},
+  "scope": { …D3 §4.3's RehearsalScope, camelCase… },
+  "issuedAt": "2026-06-01T00:00:00Z",
+  "expiresAt": "2026-07-01T00:00:00Z"
+}
+```
+
+Unknown fields are ignored on read, so a document PLAT-19.2 later enriches with `policy`,
+`requester` or a second signature still verifies against this build. A higher `formatVersion` major
+is refused.
+
+**The runner's order, and what each step buys.** The signature is checked over the envelope bytes
+*before* they are parsed, so nothing read out of the document is believed until those exact bytes
+are known to be signed. The key that verified is then judged on its **usage**: a rehearsal may be
+authorised only by a key carrying `GovernedApproval` or `ConsoleConfirmation`. A key carrying only
+`EvidenceSigning` is refused even when its signature is perfectly good — the installation's own
+evidence identity must never be able to authorise its own rehearsals (D3 §7.3), and that fault is
+reported as `KeyUsageMismatch` and never as a bad signature, because an operator told "bad
+signature" about a genuinely signed document goes looking at the wrong thing.
+
+**`…_REHEARSAL_SCHEDULE_UID` is a verified binding.** The environment says which schedule this run
+claims to be; the signed document's `subjectRef.uid` says which schedule the human authorised; the
+runner requires them to agree. What the runner does **not** check is `scope.templateDigest` —
+whether the scope matches the schedule's sealed spec. That is recomputed from the
+`RehearsalSchedule`'s own spec and is the controller's each-slot check (D3 §4.3(a)); a runner
+holding no cluster credential cannot read that spec at all.
+
+**The expiry is checked, against the node's clock, as a second line of defence.** `issuedAt` must
+not be in the future, `expiresAt` must not have passed, and `expiresAt - issuedAt` must not exceed
+the 90 days D3 §4.3 permits. A Job's node clock is not a trusted time source, so this does not
+replace the controller's each-slot expiry check — but it does refuse a bundle replayed weeks later,
+which nothing else would. An expired document refuses under `AuthorizationExpired`; every other
+authorization fault refuses under `AuthorizationInvalid`. Both are D3 §4.3's own controller skip
+reasons, reused so the controller's `status.lastSkipped.reason` and the runner's refusal say the
+same word about the same fault.
+
+**Key lifecycle stays the controller's.** The mounted keyring carries `{keyId, publicKeyPem,
+usages}` and no lifecycle: `state`, `notBefore`/`notAfter` and revocation are `TrustPolicy`
+resolution's to evaluate (`logweir_core::trust::decide`), and they are evaluated before the keyring
+is written. The runner re-checks what it can — that the signature verifies under a key the
+controller pinned, and that the key may authorise.
 
 **No new exit code.** Both new refusals live inside Global Constraint 11's existing four:
 
 | situation | code | `refusal-reason=` |
 |---|---|---|
 | a rendered plan outside the signed rehearsal scope | 3 | `GuardRefused`, message opens `RehearsalScopeViolation` |
+| a standing authorization that is unsigned, signed by an unpinned key, signed by a wrong-usage key, for another schedule, or malformed | 3 | `GuardRefused`, message opens `AuthorizationInvalid` |
+| a standing authorization outside its validity window | 3 | `GuardRefused`, message opens `AuthorizationExpired` |
+| a mounted keyring or sidecar that does not parse | 1 | — (structural corruption of a file, not a statement about authorisation) |
 | a bound point whose receipt or manifest digest differs | 3 | `GuardRefused`, message opens `PointBindingMismatch` |
 | a bound point whose receipt or manifest is missing or unreadable | 1 | — (no refusal line; nothing about the plan was found wanting) |
 
-`logweir_core::guard::TERMINAL_STATES` is still the closed three-element list, so both refusals
-classify as the general `GuardRefused` and carry their state name in the message text. Promoting
-`PointBindingMismatch` and `RehearsalScopeViolation` to declared terminal states is a change to that
-list and to the controller's mapping, and is not made here.
+`logweir_core::guard::TERMINAL_STATES` is still the closed three-element list, so every refusal
+above classifies as the general `GuardRefused` and carries its state name as the first token of the
+message. Promoting `PointBindingMismatch`, `RehearsalScopeViolation`, `AuthorizationInvalid` and
+`AuthorizationExpired` to declared terminal states is a change to that list and to the controller's
+mapping, and is not made here.
 
 ### `logweir notify deliver`'s exit codes and its `notify-result=` lines (PLAT-14.2)
 
