@@ -455,9 +455,17 @@ references the name.
 
 A `BackupDestination` names up to four grants, and they are separable on
 purpose: the principal that WRITES an archive should not be the principal that
-reads evidence back to verify it. The table is the minimum each role needs. It is
-written in S3 action names; the equivalent MinIO policy actions have the same
-spellings.
+reads evidence back to verify it. It is written in S3 action names; the
+equivalent MinIO policy actions have the same spellings.
+
+**The table below is the INTENDED minimum and has not been measured.** It is
+derived from what the code and the pinned engine are expected to call, not from
+a run that was denied everything else and observed to succeed. The engine's
+write path in particular does multipart uploads and checkpoint reads whose exact
+action set is measured against a deny-by-default MinIO policy in the live
+acceptance, and this table is corrected from that measurement. Until then, treat
+it as a starting policy to tighten from — not as a set to lock down to — and
+expect an omission to surface as a mid-operation 403.
 
 | Role | Actions | Resources |
 |---|---|---|

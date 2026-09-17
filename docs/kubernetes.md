@@ -355,13 +355,31 @@ The four access grants name Secrets, and the controller holds **no verb on
 `secrets`** — so it validates their SHAPE and their SPELLING (a DNS-1123 object
 name in this namespace, legal Secret data keys) and never their existence or
 their contents. A Secret that is genuinely missing is reported by the kubelet,
-to the pod that needed it, as `CredentialSecretNotFound`; a
-`<namespace>/<name>` spelling is refused by the controller with
-`DestinationRoleNotConfigured`, naming the rule, because that spelling is an
-attempt at a cross-namespace reference and "Secret not found" would send you
-looking for the wrong thing.
+to the pod that needed it; a `<namespace>/<name>` spelling is refused by the
+controller with `DestinationRoleNotConfigured`, naming the rule, because that
+spelling is an attempt at a cross-namespace reference and "Secret not found"
+would send you looking for the wrong thing.
+
+**How legible that kubelet answer is depends on a wiring that is not in this
+build.** The friendly code — `CredentialSecretNotFound`, naming the Secret and
+the key — comes from the check framework's pod-waiting classification, which
+reaches the `Backup` and `Restore` controllers only with the execution wiring
+§7b describes. Until then an absent Secret surfaces as a pod that never starts
+and a Job that ends at its `activeDeadlineSeconds`. The pre-flight answer that
+*does* work today is a `Preflight` with `operation: DestinationAccess`, which
+runs a pod in the object's own namespace and reports what the kubelet said.
 
 ### 7b. A destination-backed run carries a complete `AWS_*` set, and none of it is the controller's
+
+**NOT IN THIS BUILD.** The resolver, the environment below and the frozen
+snapshot exist and are tested; nothing calls them yet. No `Backup`, `Restore` or
+`BackupSchedule` in this release reads a `destinationRef`, so an object that
+carries one gets the legacy inline path — and, because `archive.url` must then
+be the `logweir-destination://` sentinel, that path refuses it terminally with
+`ArchiveUrlUnreadable` rather than writing anywhere. This section describes the
+contract the execution wiring will keep, so that the shape is reviewable before
+it is load-bearing; until it lands, `AWS_ALLOW_HTTP` on a runner Job is still
+whatever the legacy path forwards.
 
 The controller's own environment reaches no destination-backed runner Job. That
 is not a convention — it is the defect the design closes. The legacy inline path
