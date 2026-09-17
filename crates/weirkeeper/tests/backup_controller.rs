@@ -5215,8 +5215,9 @@ use weirkeeper::conditions::{
     CONDITION_EXECUTION_INPUTS_UNVERIFIED, CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED,
     REASON_JOB_INPUTS_MISMATCH, REASON_LEGACY_EXECUTION, REASON_RUNNER_ARGV_ANNOTATION_IGNORED,
     REASON_RUNNER_ARGV_ANNOTATION_MALFORMED, TERMINAL_STATE_EXECUTION_SPEC_INVALID,
-    TERMINAL_STATE_JOB_NAME_CONFLICT, TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
-    TERMINAL_STATE_SCHEDULED_IDENTITY_MISMATCH,
+    TERMINAL_STATE_INVALID_TOPIC_SELECTION, TERMINAL_STATE_JOB_NAME_CONFLICT,
+    TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT, TERMINAL_STATE_RUN_POLICY_DIGEST_MISMATCH,
+    TERMINAL_STATE_SCHEDULED_IDENTITY_MISMATCH, TERMINAL_STATE_SCHEDULE_NOT_FOUND,
 };
 use weirkeeper::controllers::backup::{
     desired_execution_inputs, execution_status_patch, plan_config_map, runner_job,
@@ -7136,5 +7137,913 @@ async fn a_source_cluster_with_a_private_ca_freezes_its_reference_and_a_change_i
     assert_eq!(
         terminal.as_deref(),
         Some(TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT)
+    );
+}
+
+// ===========================================================================
+// D1 W3b — the run contract: identity for four trigger kinds, grammar v2, the
+// frozen revision, `status.selection`, and manual runs
+// ===========================================================================
+
+use weirkeeper::backup_execution::{ResolvedSelection, ScheduleRefInputs};
+use weirkeeper::crds::backup::{ScheduleRef, Trigger, TriggerKind};
+use weirkeeper::crds::selection::{Coverage, SelectionMode};
+use weirkeeper::identity::{declared_trigger, is_run_of_schedule, run_identity};
+
+/// The run policy digest [`backup`]'s own fields produce — the value a
+/// `scheduleRef.runPolicySha256` that was honestly copied must equal.
+fn policy_digest_of(b: &Backup) -> String {
+    weirkeeper::policy::run_policy_sha256(&b.spec)
+}
+
+/// [`scheduled_backup`] as **D1** creates one: no owner reference (PLAT-05.2
+/// keeps the history when the schedule is deleted), the full `scheduleRef`
+/// with the schedule's UID, generation and copied policy digest, and the
+/// explicit `spec.trigger`.
+fn d1_scheduled_backup() -> Backup {
+    let mut value: Value = serde_json::from_str(&backup_json()).expect("the fixture is JSON");
+    value["spec"]["slot"] = serde_json::json!("20261109-031700");
+    value["spec"]["triggeredBy"] = serde_json::json!("schedule");
+    value["spec"]["trigger"] = serde_json::json!({ "kind": "Scheduled", "attempt": 0 });
+    let mut b: Backup = serde_json::from_value(value).expect("the mutated fixture is a Backup");
+    let digest = policy_digest_of(&b);
+    b.spec.schedule_ref = Some(ScheduleRef {
+        name: "nightly".to_string(),
+        uid: Some(SCHEDULE_UID.to_string()),
+        generation: Some(7),
+        run_policy_sha256: Some(digest),
+    });
+    b
+}
+
+/// The routes a create pass needs, with the `BackupSchedule` GET answering
+/// `(status, body)` instead of the live schedule.
+fn routes_with_schedule(status: u16, body: String) -> Vec<Route> {
+    let mut routes = create_routes(201, existing_plan_config_map(UID));
+    for route in &mut routes {
+        if route.path_suffix == "/backupschedules/nightly" {
+            route.status = status;
+            route.body = body.clone();
+        }
+    }
+    routes
+}
+
+/// Reconcile `b` against `routes` and return `(terminal state, bodies)`.
+async fn reconcile_with(b: &Backup, routes: Vec<Route>) -> (Option<String>, Vec<SeenBody>) {
+    let (client, _seen, bodies) = mock_client_recording_bodies(routes);
+    let outcome = reconcile_backup(
+        b,
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 17),
+    )
+    .await
+    .expect("a refusal is an outcome, not an error");
+    let bodies = bodies.lock().expect("readable").clone();
+    (outcome.terminal_state, bodies)
+}
+
+/// The `execution-inputs.json` a create pass POSTed, as JSON.
+fn posted_snapshot(bodies: &[SeenBody]) -> Value {
+    let cm = posted_config_map(bodies);
+    serde_json::from_str(cm["data"][INPUTS_KEY].as_str().expect("the snapshot key"))
+        .expect("the snapshot is JSON")
+}
+
+/// **GRAMMAR `v2` IS GRAMMAR `v1` PLUS FIVE OPTIONAL BLOCKS, AND THE `v1`
+/// FIELDS ARE UNTOUCHED** — D1 §3.3, D-SEAMS **S4**.
+///
+/// The key set is asserted whole, in order, because `logweir_core::det_json`
+/// emits struct fields in DECLARATION order and this document's bytes are
+/// re-encoded and compared on every later pass: reordering a field is not a
+/// refactor, it is a cluster-wide `PlanConfigMapConflict`.
+///
+/// KILLS: renaming or reordering a `v1` key; making a `v2` block required (a
+/// `v1` document would stop parsing); serialising a `v2` block as `null`
+/// rather than omitting it (a `v1` document would stop re-encoding to itself).
+#[test]
+fn the_v2_grammar_is_v1_plus_five_optional_blocks() {
+    let frozen = desired_for(&d1_scheduled_backup());
+    let snapshot: Value = serde_json::from_str(&frozen.canonical).expect("JSON");
+    let keys: Vec<&str> = snapshot
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        keys,
+        vec![
+            // v1, in the order PLAT-06.1 wrote them
+            "version",
+            "execution",
+            // v2
+            "trigger",
+            "scheduleRef",
+            "runPolicySha256",
+            // v1
+            "source",
+            "topics",
+            // v2
+            "selection",
+            // v1
+            "archive",
+            "runner",
+        ],
+        "the v2 document is the v1 document with blocks inserted, in declaration order: {}",
+        frozen.canonical
+    );
+    assert_eq!(snapshot["version"], INPUTS_VERSION_V2);
+    assert!(
+        snapshot.get("destination").is_none(),
+        "the reserved destination block is OMITTED, never written as null: {}",
+        frozen.canonical
+    );
+
+    // The v1 view drops exactly the v2 blocks and nothing else.
+    let v1 = frozen.inputs.as_version_v1();
+    let v1_value: Value =
+        serde_json::from_str(&canonical_inputs(&v1).expect("it encodes")).expect("JSON");
+    let v1_keys: Vec<&str> = v1_value
+        .as_object()
+        .expect("an object")
+        .keys()
+        .map(String::as_str)
+        .collect();
+    assert_eq!(
+        v1_keys,
+        vec![
+            "version",
+            "execution",
+            "source",
+            "topics",
+            "archive",
+            "runner"
+        ],
+        "the v1 view is exactly PLAT-06.1's document"
+    );
+    for (key, value) in v1_value.as_object().expect("an object") {
+        if key == "version" {
+            continue;
+        }
+        assert_eq!(
+            value, &snapshot[key],
+            "the v1 fields are IDENTICAL in both views; `{key}` differs"
+        );
+    }
+
+    // And the document round-trips through the typed grammar.
+    let reparsed: BackupExecutionInputs =
+        serde_json::from_str(&frozen.canonical).expect("v2 parses");
+    assert_eq!(
+        canonical_inputs(&reparsed).expect("it re-encodes"),
+        frozen.canonical
+    );
+}
+
+/// **THE FROZEN DOCUMENT RECORDS WHICH SCHEDULE REVISION THE RUN COPIED** —
+/// D1 §5.3. `scheduleRef {name, uid, generation, runPolicySha256}` and the
+/// run's own `runPolicySha256`, in the immutable plan, so the revision
+/// survives the schedule's deletion.
+///
+/// KILLS: dropping `generation` or the copied digest from the freeze (the
+/// answer to "which policy did this archive run under?" would die with the
+/// schedule); recomputing the copied digest from the live schedule instead of
+/// copying what the object states (an edit between admission and freeze would
+/// rewrite history).
+#[tokio::test]
+async fn the_frozen_inputs_record_the_schedule_revision_the_run_copied() {
+    let b = d1_scheduled_backup();
+    let digest = policy_digest_of(&b);
+    let (terminal, bodies) =
+        reconcile_with(&b, create_routes(201, existing_plan_config_map(UID))).await;
+    assert_eq!(terminal, None, "it runs: {:?}", calls(&bodies));
+    let snapshot = posted_snapshot(&bodies);
+    assert_eq!(
+        snapshot["scheduleRef"],
+        serde_json::json!({
+            "name": "nightly",
+            "uid": SCHEDULE_UID,
+            "generation": 7,
+            "runPolicySha256": digest,
+        }),
+        "the revision is frozen whole: {snapshot}"
+    );
+    assert_eq!(
+        snapshot["runPolicySha256"], digest,
+        "and the run records the digest of its OWN fields beside the copied one"
+    );
+    assert_eq!(
+        snapshot["trigger"],
+        serde_json::json!({ "kind": "Scheduled", "attempt": 0 })
+    );
+    assert_eq!(
+        snapshot["execution"]["id"],
+        weirkeeper::slot::backup_id_for(SCHEDULE_UID, "20261109-031700"),
+        "a D1 scheduled run has no owner reference and still derives the slot identity, from \
+         spec.scheduleRef.uid"
+    );
+
+    // A DIFFERENT REVISION IS DIFFERENT BYTES. Same policy, later generation.
+    let mut later = b.clone();
+    later.spec.schedule_ref.as_mut().expect("a ref").generation = Some(9);
+    assert_ne!(
+        desired_for(&later).sha256,
+        desired_for(&b).sha256,
+        "the generation is inside the digested document, so `which revision ran` is part of what \
+         the plan's digest names"
+    );
+}
+
+/// **A COPIED POLICY DIGEST THAT IS NOT THIS OBJECT'S OWN IS TERMINAL** — D1
+/// §3.1 rule 5, before any read and before any `POST`.
+///
+/// An integrity check against control-plane bugs, not a security boundary (D1
+/// §8.7): the digest is recomputed from the same CEL-immutable spec, so a
+/// mismatch means the copy and the fields disagree.
+///
+/// KILLS: trusting `scheduleRef.runPolicySha256` as the run's policy digest
+/// (a client-supplied field would then decide what the run claims to be); and
+/// taking the digest from the schedule at freeze time rather than from the
+/// object.
+#[tokio::test]
+async fn a_copied_policy_digest_that_is_not_this_objects_own_is_terminal() {
+    let mut b = d1_scheduled_backup();
+    b.spec
+        .schedule_ref
+        .as_mut()
+        .expect("a ref")
+        .run_policy_sha256 =
+        Some("sha256:0000000000000000000000000000000000000000000000000000000000000000".to_string());
+    let (terminal, bodies) =
+        reconcile_with(&b, create_routes(201, existing_plan_config_map(UID))).await;
+    assert_eq!(
+        terminal.as_deref(),
+        Some(TERMINAL_STATE_RUN_POLICY_DIGEST_MISMATCH),
+        "{:?}",
+        calls(&bodies)
+    );
+    assert!(
+        !bodies.iter().any(|r| r.method == "POST"),
+        "nothing is created: {:?}",
+        calls(&bodies)
+    );
+    assert_eq!(
+        calls(&bodies).iter().filter(|(m, _)| m == "GET").count(),
+        0,
+        "and nothing is READ either — the check is on the object's own fields: {:?}",
+        calls(&bodies)
+    );
+}
+
+/// **A SCHEDULED RUN WHOSE SCHEDULE IS GONE IS `ScheduleNotFound`, BEFORE THE
+/// FREEZE** — D1 §3.1 rule 2, §12's PLAT-05.2 row.
+///
+/// PLAT-05.2 removes the controller ownerReference so that deleting a schedule
+/// KEEPS its history instead of collecting it. The cost is that an unfrozen run
+/// of a deleted schedule would otherwise start a Job under a policy nobody can
+/// look up; "deleting a schedule stops future work" is said here instead.
+///
+/// KILLS: skipping the referent check once the ownerReference is gone;
+/// adopting a same-named schedule with a new UID (two schedules' runs would
+/// share an archive prefix); requeueing instead of refusing.
+#[tokio::test]
+async fn an_unfrozen_scheduled_run_whose_schedule_is_gone_is_schedule_not_found() {
+    for (label, status, body) in [
+        (
+            "deleted",
+            404,
+            not_found_body("backupschedules.logweir.dev", "nightly"),
+        ),
+        (
+            "recreated under a new UID",
+            200,
+            backup_schedule_json("11111111-0000-4000-8000-000000000999"),
+        ),
+    ] {
+        let (terminal, bodies) =
+            reconcile_with(&d1_scheduled_backup(), routes_with_schedule(status, body)).await;
+        assert_eq!(
+            terminal.as_deref(),
+            Some(TERMINAL_STATE_SCHEDULE_NOT_FOUND),
+            "{label}: {:?}",
+            calls(&bodies)
+        );
+        assert!(
+            !bodies.iter().any(|r| r.method == "POST"),
+            "{label}: no plan and no Job: {:?}",
+            calls(&bodies)
+        );
+        let refused = patched_statuses(&bodies)
+            .pop()
+            .expect("the refusal is written");
+        assert_eq!(refused["phase"], "Failed", "{label}: {refused}");
+    }
+}
+
+/// **A FROZEN RUN IS NEVER RE-CHECKED AGAINST ITS SCHEDULE** — the other half
+/// of D1 §3.1 rule 2, and §12's `a_frozen_run_is_not_rechecked_after_schedule_deletion`.
+///
+/// A run whose inputs are frozen executes the policy it copied. Deleting the
+/// schedule while its Job runs must not turn a running archive into a terminal
+/// failure, and a Job that has to be re-created from those same frozen inputs
+/// must not start asking about an object the run no longer depends on.
+///
+/// KILLS: moving the referent check outside the `status.execution.is_none()`
+/// gate — every re-create pass after a schedule deletion would then refuse a
+/// run whose archive is half written.
+#[tokio::test]
+async fn a_frozen_run_is_not_rechecked_after_schedule_deletion() {
+    let b = d1_scheduled_backup();
+    let frozen = running_after_freeze(&b);
+    let mut routes = routes_with_schedule(
+        404,
+        not_found_body("backupschedules.logweir.dev", "nightly"),
+    );
+    // The plan is already there and is read back, not re-POSTed.
+    for route in &mut routes {
+        if route.method == "POST" && route.path_suffix == "/configmaps" {
+            route.status = 409;
+            route.body = r#"{"kind":"Status","apiVersion":"v1","status":"Failure",
+                "message":"already exists","reason":"AlreadyExists","code":409}"#
+                .to_string();
+        }
+        if route.method == "GET" && route.path_suffix.ends_with("-plan") {
+            route.status = 200;
+            route.body = frozen_config_map(&b).to_string();
+        }
+    }
+    let (terminal, bodies) = reconcile_with(&frozen, routes).await;
+    assert_eq!(
+        terminal,
+        None,
+        "the frozen run continues although its schedule is gone: {:?}",
+        calls(&bodies)
+    );
+    assert!(
+        !calls(&bodies)
+            .iter()
+            .any(|(_, p)| p.contains("/backupschedules/")),
+        "and it does not ask about the schedule at all: {:?}",
+        calls(&bodies)
+    );
+    assert!(
+        posted_job(&bodies).is_some(),
+        "the Job is re-created from the frozen inputs: {:?}",
+        calls(&bodies)
+    );
+}
+
+/// The canonical manual `Backup` of D1 §8.1, named by the API from the
+/// idempotency scope.
+const MANUAL_NAME: &str = "logweir-manual-2v4qk7bhq8nwz3xr9fcm5td6ea";
+
+/// [`backup`] as the PLAT-06.2 API route creates it: the deterministic name,
+/// `trigger.kind: Manual`, and the schedule revision it copied.
+fn canonical_manual_backup() -> Backup {
+    let mut value: Value = serde_json::from_str(&backup_json()).expect("the fixture is JSON");
+    value["metadata"]["name"] = serde_json::json!(MANUAL_NAME);
+    value["metadata"]["labels"] = serde_json::json!({
+        "logweir.dev/schedule": "nightly",
+        "logweir.dev/schedule-uid": SCHEDULE_UID,
+        "logweir.dev/trigger": "manual",
+        "logweir.dev/attempt": "0",
+    });
+    value["spec"]["trigger"] = serde_json::json!({ "kind": "Manual", "attempt": 0 });
+    let mut b: Backup = serde_json::from_value(value).expect("the mutated fixture is a Backup");
+    let digest = policy_digest_of(&b);
+    b.spec.schedule_ref = Some(ScheduleRef {
+        name: "nightly".to_string(),
+        uid: Some(SCHEDULE_UID.to_string()),
+        generation: Some(7),
+        run_policy_sha256: Some(digest),
+    });
+    b
+}
+
+/// The route table for [`canonical_manual_backup`]. **It carries an answer for
+/// the `BackupSchedule` GET that must never be asked for.**
+fn manual_routes() -> Vec<Route> {
+    vec![
+        Route {
+            method: "GET",
+            path_suffix: "/jobs/logweir-manual-2v4qk7bhq8nwz3xr9fcm5td6ea",
+            status: 404,
+            body: not_found_body("jobs.batch", MANUAL_NAME),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/backupschedules/nightly",
+            status: 404,
+            body: not_found_body("backupschedules.logweir.dev", "nightly"),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/kafkaclusters/prod",
+            status: 200,
+            body: kafka_cluster_json(),
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/configmaps",
+            status: 201,
+            body: serde_json::to_string(
+                &plan_config_map(&canonical_manual_backup(), &prod_cluster())
+                    .expect("the manual plan renders"),
+            )
+            .expect("a ConfigMap serialises"),
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/jobs",
+            status: 201,
+            body: manual_running_job_body(),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/status",
+            status: 200,
+            body: backup_json(),
+        },
+    ]
+}
+
+/// [`running_job_body`] for [`MANUAL_NAME`]: a Job that exists, has not
+/// finished, and is controlled by exactly that `Backup`.
+fn manual_running_job_body() -> String {
+    running_job_body().replace(NAME, MANUAL_NAME)
+}
+
+/// **THE CANONICAL MANUAL BACKUP RUNS, RECORDS THE REVISION IT COPIED, AND
+/// NEVER READS A `BackupSchedule`** — D1 §8.1 and §8.3.
+///
+/// A manual run is "run this policy now". It is allowed while the schedule is
+/// suspended, it is allowed while a scheduled run is active, and it survives
+/// the schedule being deleted between the request and the freeze — so the
+/// controller must not make the schedule a precondition of it. The route table
+/// answers `404` for the schedule and the pass must never ask.
+///
+/// KILLS: applying D1 §3.1 rule 2 to a manual run (a "Back up now" pressed a
+/// second after a schedule delete would fail); dropping the copied revision
+/// from a manual run's frozen inputs (the console could no longer say which
+/// policy the button ran); taking a manual run's identity from its
+/// `scheduleRef` rather than its own UID.
+#[tokio::test]
+async fn the_canonical_manual_backup_runs_and_records_its_schedules_revision() {
+    let b = canonical_manual_backup();
+    let digest = policy_digest_of(&b);
+    let (terminal, bodies) = reconcile_with(&b, manual_routes()).await;
+    assert_eq!(terminal, None, "it runs: {:?}", calls(&bodies));
+    assert!(
+        !calls(&bodies)
+            .iter()
+            .any(|(_, p)| p.contains("/backupschedules/")),
+        "a manual run never reads a BackupSchedule, so a suspended, blocked or DELETED schedule \
+         cannot stop it: {:?}",
+        calls(&bodies)
+    );
+    let snapshot = posted_snapshot(&bodies);
+    assert_eq!(
+        snapshot["execution"]["id"], UID,
+        "a manual run IS its own UID, whatever schedule it copied: {snapshot}"
+    );
+    assert_eq!(snapshot["execution"]["trigger"], "manual");
+    assert!(
+        snapshot["execution"].get("schedule").is_none(),
+        "and it holds no scheduled identity"
+    );
+    assert_eq!(
+        snapshot["trigger"],
+        serde_json::json!({ "kind": "Manual", "attempt": 0 })
+    );
+    assert_eq!(
+        snapshot["scheduleRef"],
+        serde_json::json!({
+            "name": "nightly",
+            "uid": SCHEDULE_UID,
+            "generation": 7,
+            "runPolicySha256": digest,
+        }),
+        "the revision the button copied is recorded, and it is a RECORD and not an identity"
+    );
+    assert_eq!(
+        snapshot["runner"]["args"],
+        serde_json::json!(runner_argv(ExecutionTrigger::Manual, UID)),
+        "the receipt this run signs says `manual`"
+    );
+}
+
+/// **A MANUAL RUN IS A MEMBER OF ITS SCHEDULE AND IS NOT ONE OF ITS RUNS** —
+/// D1 §2 and §8.3, stated here because the trap is one line away in the two
+/// files that will consume it.
+///
+/// PLAT-05.2 moves membership from the controller ownerReference to
+/// `identity::is_run_of_schedule`, which matches on `spec.scheduleRef.uid` —
+/// and a manual `Backup` created from a schedule carries exactly that. So the
+/// moment the schedule controller's `Forbid` accounting switches to the new
+/// membership test, **a manual run starts blocking scheduled slots** unless the
+/// filter also reads `spec.trigger.kind`. D1 §2 is explicit: only
+/// `Scheduled`, `CatchUp` and `Retry` participate in `concurrencyPolicy`.
+///
+/// KILLS: a `concurrencyPolicy` filter written as membership alone (D1 W2/W4).
+#[test]
+fn a_manual_run_is_a_member_of_its_schedule_but_not_a_scheduled_run() {
+    let manual = canonical_manual_backup();
+    assert!(
+        is_run_of_schedule(&manual, "nightly", SCHEDULE_UID),
+        "membership is `spec.scheduleRef`, and a manual run from a schedule HAS one"
+    );
+    let (kind, attempt, _) = declared_trigger(&manual);
+    assert_eq!(kind, TriggerKind::Manual);
+    assert_eq!(attempt, 0);
+    assert_eq!(
+        run_identity(&manual).expect("it has an identity").kind,
+        TriggerKind::Manual,
+        "and the derivation agrees: this is not one of the schedule's runs, so it is neither \
+         counted by concurrencyPolicy nor blocked by it"
+    );
+
+    let scheduled = d1_scheduled_backup();
+    assert!(is_run_of_schedule(&scheduled, "nightly", SCHEDULE_UID));
+    assert_eq!(declared_trigger(&scheduled).0, TriggerKind::Scheduled);
+}
+
+/// **A RETRY IS A NEW EXECUTION ID, AND A CATCH-UP IS THE SAME SLOT** — D1
+/// §3.1's identity table, through the freeze.
+///
+/// KILLS: giving a catch-up an identity of its own (a restart would write a
+/// second archive of one window); reusing attempt 0's `backup_id` for a retry
+/// (attempt `k+1` would append into attempt `k`'s partial prefix).
+#[test]
+fn a_retry_freezes_a_new_execution_id_and_a_catch_up_reuses_the_slots() {
+    let base = d1_scheduled_backup();
+    let slot = "20261109-031700";
+
+    let mut catch_up = base.clone();
+    catch_up.spec.trigger = Some(Trigger {
+        kind: TriggerKind::CatchUp,
+        attempt: 0,
+        retry_of: None,
+        time_zone: Some("Europe/Berlin".to_string()),
+    });
+    let frozen = desired_for(&catch_up);
+    assert_eq!(
+        frozen.inputs.execution.id,
+        weirkeeper::slot::backup_id_for(SCHEDULE_UID, slot),
+        "a catch-up IS slot S, started late"
+    );
+    assert_eq!(
+        frozen
+            .inputs
+            .trigger
+            .as_ref()
+            .expect("a trigger block")
+            .kind,
+        TriggerKind::CatchUp
+    );
+    assert_eq!(
+        frozen
+            .inputs
+            .trigger
+            .as_ref()
+            .expect("a trigger block")
+            .time_zone
+            .as_deref(),
+        Some("Europe/Berlin"),
+        "the zone the slot was computed in is frozen with the run, so a later timeZone edit does \
+         not relabel this row's local time"
+    );
+
+    let mut retry: Value = serde_json::to_value(&base).expect("a Backup serialises");
+    retry["metadata"]["name"] = serde_json::json!(format!("logweir-backup-nightly-{slot}-r1"));
+    retry["spec"]["trigger"] = serde_json::json!({
+        "kind": "Retry", "attempt": 1,
+        "retryOf": { "name": format!("logweir-backup-nightly-{slot}") }
+    });
+    let retry: Backup = serde_json::from_value(retry).expect("a Backup");
+    let frozen = desired_for(&retry);
+    assert_eq!(
+        frozen.inputs.execution.id,
+        weirkeeper::slot::backup_id_for_attempt(SCHEDULE_UID, slot, 1),
+        "a retry writes under its OWN prefix; attempt 0's archive may be half written"
+    );
+    assert_ne!(
+        frozen.inputs.execution.id,
+        weirkeeper::slot::backup_id_for(SCHEDULE_UID, slot)
+    );
+    assert_eq!(
+        frozen.inputs.trigger,
+        Some(weirkeeper::backup_execution::RunInputs {
+            kind: TriggerKind::Retry,
+            attempt: 1,
+            retry_of: Some(format!("logweir-backup-nightly-{slot}")),
+            time_zone: None,
+        })
+    );
+}
+
+/// **A DYNAMIC SELECTION IS REFUSED TERMINALLY, AND NO EMPTY ALLOWLIST EVER
+/// REACHES THE ENGINE** — D1 §7.1, guard **G-GLOB**, until W5 lands.
+///
+/// `spec.allUserTopics` with `topics: []` is a VALID D1 §7.1 shape that this
+/// build cannot resolve. The only two things it may do are refuse the run or
+/// resolve it; what it must never do is render `spec.topics` — empty, in this
+/// mode — into `backup.yaml`, which is precisely the "no allowlist means
+/// everything" shape the mandatory allowlist exists to make impossible.
+///
+/// KILLS: falling through to the freeze with an empty list; treating the
+/// dynamic shape as the third (invalid) shape and thereby refusing it for the
+/// wrong reason in a way W5 would have to unpick; requeueing forever on a
+/// CEL-immutable spec.
+#[tokio::test]
+async fn a_dynamic_selection_is_refused_and_no_empty_allowlist_reaches_the_engine() {
+    let mut value: Value = serde_json::from_str(&backup_json()).expect("JSON");
+    value["spec"]["topics"] = serde_json::json!([]);
+    value["spec"]["allUserTopics"] =
+        serde_json::json!({ "incompleteDiscovery": "BackUpVisibleTopics" });
+    let b: Backup = serde_json::from_value(value).expect("a Backup");
+
+    let (terminal, bodies) =
+        reconcile_with(&b, create_routes(201, existing_plan_config_map(UID))).await;
+    assert_eq!(
+        terminal.as_deref(),
+        Some(TERMINAL_STATE_INVALID_TOPIC_SELECTION),
+        "{:?}",
+        calls(&bodies)
+    );
+    assert!(
+        !bodies.iter().any(|r| r.method == "POST"),
+        "no plan ConfigMap and no Job: {:?}",
+        calls(&bodies)
+    );
+    let refused = patched_statuses(&bodies)
+        .pop()
+        .expect("the refusal is written");
+    assert!(
+        refused["conditions"]
+            .as_array()
+            .expect("conditions")
+            .iter()
+            .any(|c| c["message"].as_str().is_some_and(|m| m.contains("G-GLOB"))),
+        "the message says WHY it is a refusal and not an empty run: {refused}"
+    );
+
+    // AND THE FREEZE BOUNDARY ITSELF REFUSES AN EMPTY OR PATTERNED LIST,
+    // whatever produced it. W5's resolver is the second producer of a
+    // `ResolvedSelection`, and this is the rail it will be behind.
+    let cluster = prod_cluster();
+    let mut empty = ResolvedSelection::named(&backup().spec);
+    empty.topics.clear();
+    let refusal =
+        weirkeeper::controllers::backup::desired_execution_inputs_for(&backup(), &cluster, &empty)
+            .expect_err("an empty resolved list never freezes");
+    assert!(
+        matches!(
+            refusal,
+            weirkeeper::controllers::backup::BackupError::Refused(
+                weirkeeper::conditions::TERMINAL_STATE_SELECTION_EMPTY,
+                _
+            )
+        ),
+        "an empty resolved selection is SelectionEmpty: {refusal}"
+    );
+
+    let mut globbed = ResolvedSelection::named(&backup().spec);
+    globbed.topics = vec!["orders*".to_string()];
+    let refusal = weirkeeper::controllers::backup::desired_execution_inputs_for(
+        &backup(),
+        &cluster,
+        &globbed,
+    )
+    .expect_err("a pattern never freezes");
+    assert!(
+        matches!(
+            refusal,
+            weirkeeper::controllers::backup::BackupError::Refused(
+                TERMINAL_STATE_INVALID_TOPIC_SELECTION,
+                _
+            )
+        ),
+        "a glob in a RESOLVED list is refused at the freeze, not expanded: {refusal}"
+    );
+}
+
+/// **`status.selection` IS WRITTEN AT THE FREEZE, AND IT IS THE FROZEN
+/// DOCUMENT'S OWN PROJECTION** — D1 §7.6, §7.4.
+///
+/// KILLS: writing the coverage label only when a run finishes; computing the
+/// status counts separately from the frozen ones; rendering a named allowlist
+/// as anything but `NamedTopics` (only `AllUserTopicsAttested` may ever be read
+/// as "all topics").
+#[tokio::test]
+async fn the_frozen_selection_reaches_the_status_at_the_freeze() {
+    let (terminal, bodies) = reconcile_with(
+        &d1_scheduled_backup(),
+        create_routes(201, existing_plan_config_map(UID)),
+    )
+    .await;
+    assert_eq!(terminal, None, "{:?}", calls(&bodies));
+    let snapshot = posted_snapshot(&bodies);
+    assert_eq!(
+        snapshot["selection"],
+        serde_json::json!({
+            "mode": "SelectedTopics",
+            "coverage": "NamedTopics",
+            "resolvedTopicCount": 2,
+            "resolvedTopicBytes": 14,
+        }),
+        "the provenance of `topics` is frozen beside it: {snapshot}"
+    );
+    assert_eq!(
+        snapshot["topics"],
+        serde_json::json!(["orders", "payments"]),
+        "and the NAMES live once, in the v1 field the engine document is rendered from"
+    );
+
+    let statuses = patched_statuses(&bodies);
+    assert_eq!(
+        statuses[0]["selection"],
+        serde_json::to_value(
+            weirkeeper::backup_execution::SelectionInputs {
+                mode: SelectionMode::SelectedTopics,
+                coverage: Coverage::NamedTopics,
+                resolved_topic_count: 2,
+                resolved_topic_bytes: 14,
+                exclude: None,
+                incomplete_discovery: None,
+                discovery: None,
+            }
+            .status()
+        )
+        .expect("it serialises"),
+        "the status is the frozen block's own projection, written in the SAME patch as \
+         status.execution: {}",
+        statuses[0]
+    );
+    assert!(
+        !Coverage::NamedTopics.claims_whole_cluster(),
+        "a named allowlist never claims the cluster"
+    );
+}
+
+/// One row of [`every_v2_block_is_compared_when_a_stored_plan_is_admitted`]:
+/// the block's name, the edit that moves it in the STORED snapshot, and a
+/// fragment the refusal message must name.
+type BlockCase = (
+    &'static str,
+    Box<dyn Fn(&mut BackupExecutionInputs)>,
+    &'static str,
+);
+
+/// **A STORED `v2` PLAN IS COMPARED WHOLE: EVERY BLOCK D1 ADDED IS A
+/// CONFLICT WHEN IT DIFFERS** — and each refusal NAMES the block.
+///
+/// The generic "the inputs differ" message was enough while the document held
+/// a connection and a topic list. It is not enough now: an operator reading a
+/// terminal `PlanConfigMapConflict` needs to know whether the trigger, the
+/// revision, the policy, the selection or the destination moved.
+///
+/// KILLS: leaving a `v2` block out of the comparison (a plan frozen for one
+/// revision could be executed for another); comparing a `v2` plan through the
+/// `v1` downgrade (the same hole, reached the other way).
+#[tokio::test]
+async fn every_v2_block_is_compared_when_a_stored_plan_is_admitted() {
+    let b = d1_scheduled_backup();
+    let frozen = desired_for(&b);
+
+    let mutate = |f: &dyn Fn(&mut BackupExecutionInputs)| -> Value {
+        let mut inputs = frozen.inputs.clone();
+        f(&mut inputs);
+        let refrozen = FrozenInputs::freeze(inputs).expect("it freezes");
+        let mut cm = frozen_config_map(&b);
+        cm["metadata"]["ownerReferences"][0]["name"] = serde_json::json!(NAME);
+        cm["data"] = serde_json::to_value(refrozen.documents().expect("documents render")).unwrap();
+        cm["metadata"]["annotations"][INPUTS_SHA256_ANNOTATION] =
+            serde_json::json!(refrozen.sha256);
+        cm["metadata"]["annotations"][EXECUTION_ID_ANNOTATION] =
+            serde_json::json!(refrozen.inputs.execution.id);
+        cm
+    };
+
+    let cases: Vec<BlockCase> = vec![
+        (
+            "trigger",
+            Box::new(|i: &mut BackupExecutionInputs| {
+                i.trigger.as_mut().expect("a trigger").kind = TriggerKind::CatchUp;
+            }),
+            "froze trigger",
+        ),
+        (
+            "scheduleRef",
+            Box::new(|i: &mut BackupExecutionInputs| {
+                i.schedule_ref = Some(ScheduleRefInputs {
+                    name: "nightly".to_string(),
+                    uid: Some(SCHEDULE_UID.to_string()),
+                    generation: Some(9),
+                    run_policy_sha256: None,
+                });
+            }),
+            "BackupSchedule revision",
+        ),
+        (
+            "runPolicySha256",
+            Box::new(|i: &mut BackupExecutionInputs| {
+                i.run_policy_sha256 = Some("sha256:beef".to_string());
+            }),
+            "froze run policy",
+        ),
+        (
+            "selection",
+            Box::new(|i: &mut BackupExecutionInputs| {
+                i.selection.as_mut().expect("a selection").coverage =
+                    Coverage::VisibleUserTopicsOnly;
+            }),
+            "different topic selection",
+        ),
+    ];
+
+    for (label, mutation, needle) in cases {
+        let existing = mutate(mutation.as_ref());
+        let mut routes = create_routes(409, existing.to_string());
+        for route in &mut routes {
+            if route.method == "GET" && route.path_suffix.ends_with("-plan") {
+                route.status = 200;
+                route.body = existing.to_string();
+            }
+        }
+        let (terminal, bodies) = reconcile_with(&b, routes).await;
+        assert_eq!(
+            terminal.as_deref(),
+            Some(TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT),
+            "{label}: a changed {label} is a conflict: {:?}",
+            calls(&bodies)
+        );
+        assert!(posted_job(&bodies).is_none(), "{label}: no Job");
+        assert!(!rewrote_a_config_map(&bodies), "{label}: nothing rewritten");
+        let refused = patched_statuses(&bodies)
+            .pop()
+            .expect("the refusal is written");
+        let message = refused["conditions"][0]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .to_string();
+        assert!(
+            message.contains(needle),
+            "{label}: the refusal names the block that moved, not just `the inputs differ`: \
+             {message}"
+        );
+    }
+}
+
+/// **AN IDENTITY IS NEVER TAKEN FROM A CLIENT-SUPPLIED FIELD** — D1 §3.1
+/// rules 1, 2 and 5 together, from the reconciler's side.
+///
+/// The three fields a client controls that LOOK like identity are
+/// `spec.scheduleRef.uid`, `spec.scheduleRef.runPolicySha256` and
+/// `metadata.name`. Each is CHECKED against something the client does not
+/// control: the schedule object, the object's own policy fields, and the name
+/// the trigger composes.
+///
+/// KILLS: trusting `scheduleRef.uid` as the archive prefix without reading the
+/// schedule; re-labelling a failed scheduled claim as a manual run (its receipt
+/// would say `schedule` about a run no schedule created).
+#[tokio::test]
+async fn an_identity_is_never_taken_from_a_client_supplied_field() {
+    // (1) A UID no BackupSchedule has.
+    let mut invented = d1_scheduled_backup();
+    invented.spec.schedule_ref.as_mut().expect("a ref").uid =
+        Some("deadbeef-0000-4000-8000-00000000dead".to_string());
+    let (terminal, bodies) =
+        reconcile_with(&invented, create_routes(201, existing_plan_config_map(UID))).await;
+    assert_eq!(
+        terminal.as_deref(),
+        Some(TERMINAL_STATE_SCHEDULE_NOT_FOUND),
+        "an invented schedule UID does not become an archive prefix: {:?}",
+        calls(&bodies)
+    );
+    assert!(!bodies.iter().any(|r| r.method == "POST"));
+
+    // (2) A name that is not the one the trigger composes.
+    let mut renamed: Value = serde_json::to_value(d1_scheduled_backup()).expect("JSON");
+    renamed["metadata"]["name"] = serde_json::json!("logweir-backup-nightly-20261109-031701");
+    let renamed: Backup = serde_json::from_value(renamed).expect("a Backup");
+    let refusal = run_identity(&renamed).expect_err("the name does not compose");
+    assert_eq!(
+        refusal.terminal_state(),
+        TERMINAL_STATE_SCHEDULED_IDENTITY_MISMATCH,
+        "and it is never re-read as a manual run: {refusal}"
+    );
+
+    // (3) The scheduled claim survives neither as manual nor as scheduled.
+    let mut half: Value = serde_json::to_value(d1_scheduled_backup()).expect("JSON");
+    half["spec"]["triggeredBy"] = serde_json::json!("manual");
+    let half: Backup = serde_json::from_value(half).expect("a Backup");
+    let refusal = execution_identity(&half).expect_err("the two fields contradict each other");
+    assert_eq!(
+        refusal.state, TERMINAL_STATE_SCHEDULED_IDENTITY_MISMATCH,
+        "spec.triggeredBy is what the SIGNED RECEIPT carries, so it may not contradict \
+         spec.trigger.kind: {refusal:?}"
     );
 }
