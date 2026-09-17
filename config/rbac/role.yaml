@@ -186,6 +186,24 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["recoverycatalogs"]
     verbs: ["list", "watch"]
+  # THE TENTH KIND — D2 W9, PLAT-03.1 / PLAT-03.2. `list` and `watch` are
+  # `Controller::new(api, …)` in `controllers/preflight.rs`, and that is the
+  # whole of it.
+  #
+  # NO `get`, FOR THE SAME REASON AS THE EIGHTH AND ONE MORE. Nothing in this
+  # crate calls `Api<Preflight>::get`: a `Preflight` reaches its reconciler
+  # from that controller's own watcher and from nowhere else, because NO OTHER
+  # OBJECT REFERENCES ONE — D2 §6.8's whole point is that no execution path may
+  # look one up, and `preflight_controller::no_execution_path_reads_preflight_or_discovery`
+  # is the source scan that keeps it true. A `get` here would be a granted verb
+  # with no caller (critique B M18).
+  #
+  # NOTE FOR W11 (D2 §13.2): these two rules are W11's to own, with the
+  # `events` rule below. W11 folds all three into its own RBAC pass together
+  # with `backupdestinations`, `topicdiscoveries` and `recoverycatalogs`.
+  - apiGroups: ["logweir.dev"]
+    resources: ["preflights"]
+    verbs: ["list", "watch"]
   # THE ONE WRITE TO A CUSTOM RESOURCE THAT IS NOT A STATUS, AND ITS CALLER.
   # `controllers/backup_schedule.rs` creates one `Backup` per due slot. A
   # schedule that could not create a backup is a schedule that does nothing.
@@ -241,6 +259,14 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["recoverycatalogs/status"]
     verbs: ["patch"]
+  # AND THE TENTH KIND'S STATUS SUBRESOURCE, `patch` and nothing else — seam
+  # S7. `controllers/preflight.rs` writes every phase, the binding it recorded
+  # before the Job existed, and the aggregated verdict with `Api::patch_status`
+  # and a `Patch::Merge` whose BODY carries `metadata.resourceVersion` as the
+  # update precondition.
+  - apiGroups: ["logweir.dev"]
+    resources: ["preflights/status"]
+    verbs: ["patch"]
   # THE RUNNER JOBS. `create` in `controllers/{backup,kafka_cluster,restore}.rs`
   # (`jobs.create(&PostParams::default(), &job::build(&spec))`); `get` is each
   # later pass deciding whether its Job already exists (`jobs.get_opt`); `list`
@@ -284,6 +310,28 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
+  # THE EVENTS BEHIND A CHECK POD THAT NEVER STARTED — D2 §7.1, §4.3's waiting
+  # table, added by W9 and USED by `controllers/preflight.rs`.
+  # `controllers/topic_discovery.rs` still passes the classifier an empty fact
+  # slice; W11 may switch it over now that the grant exists.
+  #
+  # `FailedCreate` on the Job says the ServiceAccount does not exist;
+  # `FailedMount` on the pod says the signing key volume did not mount. Neither
+  # fact is anywhere else, and without them `runner.pod` could report only two
+  # of its four refusals and `signer.privateKeyUsable` could never report
+  # `SigningKeyMissing` at all.
+  #
+  # `list` AND NOTHING ELSE, and every call carries an
+  # `involvedObject.uid=<uid>` field selector for a Job or pod this check owns:
+  # `FailedCreate` is a common event in a namespace with a ResourceQuota, and a
+  # classifier handed somebody else's event would CANCEL a healthy check Job.
+  # A field selector is not an RBAC boundary and this comment does not claim it
+  # is; the grant is namespace-wide `list` on a resource that carries no
+  # credential. REVIEWER QUESTION Q2, recorded for W11: whether a
+  # namespace-scoped `Role` per watched namespace is wanted instead.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list"]
   # THE PLAN ConfigMap THE RUNNER MOUNTS AT `/plan` — plan erratum **E5a**.
   # `create` writes it, before the Job and in the same reconcile pass
   # (`controllers/backup.rs`, `controllers/restore.rs`: `maps.create(…)`);

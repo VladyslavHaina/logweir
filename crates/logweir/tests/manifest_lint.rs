@@ -532,6 +532,11 @@ fn every_granted_verb_has_a_caller() {
             "backupschedules" => "BackupSchedule",
             "kafkaclusters" => "KafkaCluster",
             "recoverycatalogs" => "RecoveryCatalog",
+            // D2 W9 (PLAT-03.1/03.2): the `Preflight` reconciler, and the
+            // cluster Events its waiting classification reads by
+            // `involvedObject.uid`.
+            "preflights" => "Preflight",
+            "events" => "Event",
             "restores" => "Restore",
             "trustrosters" => "TrustRoster",
             // PLAT-19.1, the other direction of the same mapping.
@@ -731,6 +736,12 @@ fn every_call_site_has_a_grant() {
             // `config/rbac/role.yaml` beside the six-kind list, with a NOTE FOR
             // W13 that folds them into D3's own RBAC pass.
             "RecoveryCatalog" => ("logweir.dev", "recoverycatalogs"),
+            // D2 W9. `Preflight` is the tenth kind; `Event` is the first core
+            // resource this crate reads that is not a pod, a Job or a
+            // ConfigMap, and it exists so a check pod that never started can
+            // say WHY.
+            "Preflight" => ("logweir.dev", "preflights"),
+            "Event" => ("", "events"),
             "KafkaCluster" => ("logweir.dev", "kafkaclusters"),
             "Restore" => ("logweir.dev", "restores"),
             "TrustRoster" => ("logweir.dev", "trustrosters"),
@@ -913,6 +924,15 @@ fn the_four_cluster_roles_are_exactly_as_specified() {
             v(&["recoverycatalogs"]),
             v(&["list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         ),
+        // D2 W9 (PLAT-03.1 / PLAT-03.2): the `Preflight` reconciler's
+        // `Controller::new` watch, and nothing else. No `get` — a `Preflight`
+        // is referenced by no other object and D2 §6.8 forbids any execution
+        // path from looking one up, so a granted `get` would have no caller.
+        (
+            v(&["logweir.dev"]),
+            v(&["preflights"]),
+            v(&["list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+        ),
         (v(&["logweir.dev"]), v(&["backups"]), v(&["create"])),
         (
             v(&["logweir.dev"]),
@@ -947,6 +967,13 @@ fn the_four_cluster_roles_are_exactly_as_specified() {
             v(&["recoverycatalogs/status"]),
             v(&["patch"]),
         ),
+        // D2 W9: `controllers/preflight.rs`'s `Api::patch_status`, a merge
+        // PATCH carrying `metadata.resourceVersion` — seam S7.
+        (
+            v(&["logweir.dev"]),
+            v(&["preflights/status"]),
+            v(&["patch"]),
+        ),
         (
             v(&["batch"]),
             v(&["jobs"]),
@@ -957,6 +984,9 @@ fn the_four_cluster_roles_are_exactly_as_specified() {
         // — spec §9's shape, carried verbatim by Task 21 — had no caller.
         (v(&[""]), v(&["pods"]), v(&["list"])), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         (v(&[""]), v(&["pods/log"]), v(&["get"])),
+        // D2 §7.1 / W9: `FailedCreate` and `FailedMount` for the check Jobs
+        // and pods the preflight controller owns. `list` and nothing else.
+        (v(&[""]), v(&["events"]), v(&["list"])), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
         (v(&[""]), v(&["configmaps"]), v(&["create", "get"])),
         // PLAT-19.1 — the `TrustPolicy` reconciler's own two rows, added by the
         // wave-1 trust worker because `every_call_site_has_a_grant` above is a

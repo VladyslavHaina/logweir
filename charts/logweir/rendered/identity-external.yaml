@@ -6606,6 +6606,12 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["recoverycatalogs"]
     verbs: ["list", "watch"]
+  # D2 W9 (PLAT-03.1 / PLAT-03.2): the tenth kind, likewise in its own rules.
+  # No `get`: nothing calls `Api<Preflight>::get`, and no execution path may
+  # look one up (D2 §6.8). See `config/rbac/role.yaml` for the NOTE FOR W11.
+  - apiGroups: ["logweir.dev"]
+    resources: ["preflights"]
+    verbs: ["list", "watch"]
   - apiGroups: ["logweir.dev"]
     resources: ["backups"]
     verbs: ["create"]
@@ -6627,6 +6633,9 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["recoverycatalogs/status"]
     verbs: ["patch"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["preflights/status"]
+    verbs: ["patch"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "patch"]
@@ -6636,6 +6645,11 @@ rules:
   - apiGroups: [""]
     resources: ["pods/log"]
     verbs: ["get"]
+  # D2 §7.1: `FailedCreate` and `FailedMount` for the check Jobs and pods the
+  # preflight controller owns, by `involvedObject.uid`. `list` and nothing else.
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["list"]
   - apiGroups: [""]
     resources: ["configmaps"]
     verbs: ["create", "get"]

@@ -7356,6 +7356,13 @@ rules:
 - apiGroups:
   - logweir.dev
   resources:
+  - preflights
+  verbs:
+  - list
+  - watch
+- apiGroups:
+  - logweir.dev
+  resources:
   - backups
   verbs:
   - create
@@ -7389,6 +7396,12 @@ rules:
   verbs:
   - patch
 - apiGroups:
+  - logweir.dev
+  resources:
+  - preflights/status
+  verbs:
+  - patch
+- apiGroups:
   - batch
   resources:
   - jobs
@@ -7410,6 +7423,12 @@ rules:
   - pods/log
   verbs:
   - get
+- apiGroups:
+  - ""
+  resources:
+  - events
+  verbs:
+  - list
 - apiGroups:
   - ""
   resources:
