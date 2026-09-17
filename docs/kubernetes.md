@@ -1053,16 +1053,14 @@ does not share with the controller.
 
 ### Trust resolution: which keys govern a namespace
 
-> **WIRED, with one exception named at the end of this section.** Every
-> `Approval` admission and every evidence verification now resolves trust as
-> below: `approval::decide` asks which trust governs the `Approval`'s own
-> namespace instead of loading `TrustRoster/default`, and the evidence verifier
-> asks the same question about the `Backup` or `Restore` it is verifying. **A
-> key revoked on a `TrustPolicy` IS withdrawn** — a fresh verification and a
-> fresh approval both refuse it. The exception is *already-terminal* objects:
-> a revocation does not by itself rewrite a `Backup` that finished last week,
-> because nothing yet watches `TrustPolicy` to enqueue them. See
-> [What a revocation changes, and when](#what-a-revocation-changes-and-when).
+> **WIRED.** Every `Approval` admission, every evidence verification and every
+> governed-restore bundle now resolves trust as below: each asks which trust
+> governs the object's own namespace instead of loading `TrustRoster/default`.
+> **A key revoked on a `TrustPolicy` IS withdrawn** — a fresh approval refuses
+> it, a fresh verification refuses it, no runner Job is given its public half,
+> and an object that already finished has its verdict re-derived when the
+> policy changes. See
+> [What a revocation changes, and when](#152b-what-a-revocation-changes-and-when).
 
 `TrustRoster/default` is the **fallback**, not the only answer. A cluster may
 carry cluster-scoped `TrustPolicy` objects (PLAT-19.1), and each one names the
@@ -3306,13 +3304,26 @@ write as corroboration on the next pass — flipping a
 instant moves only when the *signature* changes: a different key, or a
 different media type.
 
-**Not yet shipped:** nothing watches `TrustPolicy` to enqueue terminal objects,
-so re-derivation happens when something else reconciles them. Until that
-watch lands, the supported way to make a revocation visible on an archive that
-already finished is to look at the `TrustPolicy` itself —
-`kubectl --context <ctx> get trustpolicy <name> -o yaml` reports every key's
-`effectiveState` and `usableForVerification` — and to treat a `Revoked` key
-there as authoritative over any badge written before the revocation.
+**What triggers it.** The `Backup` and `Restore` controllers watch
+`TrustPolicy`. An event on one maps to the objects those controllers already
+hold in the namespaces that policy could govern — out of the controller's own
+watch cache, so the trigger costs **no** additional API calls and is bounded by
+the objects the controller holds rather than by the cluster. The mapping
+deliberately over-approximates: a `default: true` policy claims every namespace
+there, although resolution would hand an explicitly-named namespace to its own
+policy. Enqueuing an object a policy does not govern costs one re-derivation
+that writes nothing; failing to enqueue one would leave a revoked key green,
+and the two errors are not symmetric.
+
+The re-derivation runs for objects that already carry a `matchedKeyId` and only
+once the policy cache has synced. A cluster whose `trustpolicies` CRD is not
+installed never syncs and simply never re-derives — it does not stop the
+controllers from reconciling anything else.
+
+`kubectl --context <ctx> get trustpolicy <name> -o yaml` remains the direct
+answer for "what does this cluster think of this key now": it reports every
+key's `effectiveState` and `usableForVerification` without waiting for a
+reconcile.
 
 ### 15.3 What the controller actually checks, in order
 
@@ -3345,6 +3356,16 @@ there as authoritative over any badge written before the revocation.
    in the cluster for one missing line in one cluster-scoped object. A
    namespace two policies claim is `NotAttempted` naming
    `TrustPolicyConflict` and both claimants.
+
+   **`matchedKeyId` is the id the policy DECLARES, not one recomputed from the
+   key material.** It is the string an operator can grep for in the object they
+   edit, and it is what the roster path has always reported. An entry whose
+   declared `keyId` is not the sha256 of its own `spkiPem` is therefore still
+   offered to the verifier and still reported under the id it declares — and
+   the same fault is reported independently on the policy's own status as
+   `Loaded=False` with reason `KeyIdMismatch`, which is where a disagreement
+   between the two shows up. (The approval path is stricter: an entry that
+   disagrees with its own material refuses every approval, `KeyIdNotInRoster`.)
 5. **Ask whether that key is still trusted** — §15.2a. A key that is retired,
    expired, revoked or was used outside its window gives `Untrusted`, never
    `Invalid`: the bytes are exactly what they claim to be.
