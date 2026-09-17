@@ -939,13 +939,27 @@ fn the_name_never_reads_a_reconcile_clock_or_a_status() {
     // after it — is asserted over the body that now holds it, and the
     // delegation is PINNED below so the three-argument form cannot quietly
     // grow a second implementation.
-    let reconcile_body = fn_body(&src, "pub async fn reconcile_schedule_with_archive(");
+    // D3 W9 MOVED IT AGAIN, AND THE NEEDLE FOLLOWED IT AGAIN. The
+    // API-server-facing half is now `reconcile_schedule_with_archive_at`, which
+    // takes the controller's own archive LOCATION beside its handle so that
+    // "the handle points at a different destination" (D3 §6.3, defect
+    // RET-WRONGBUCKET) is a comparison a test can construct rather than a
+    // `std::env::var` behind an `async fn`. Both shorter forms are pinned below
+    // as pure delegations, so the ordering this test asserts cannot come to hold
+    // in only one of three implementations.
+    let reconcile_body = fn_body(&src, "pub async fn reconcile_schedule_with_archive_at(");
     let delegating_body = fn_body(&src, "pub async fn reconcile_schedule(");
     assert!(
         delegating_body.contains("reconcile_schedule_with_archive(schedule, client, None, now)"),
         "`reconcile_schedule` must be `reconcile_schedule_with_archive` with no archive handle \
          and nothing else: two implementations of one reconcile is how the ordering this test \
          asserts comes to hold in only one of them. Got:\n{delegating_body}"
+    );
+    let archive_body = fn_body(&src, "pub async fn reconcile_schedule_with_archive(");
+    assert!(
+        archive_body.contains("reconcile_schedule_with_archive_at(schedule, client, archive,"),
+        "`reconcile_schedule_with_archive` must be `…_at` with the configured location read \
+         once and nothing else. Got:\n{archive_body}"
     );
     assert!(
         !reconcile_body.contains("Utc::now()"),

@@ -972,13 +972,28 @@ pub const LEGACY_DESTINATION_MISMATCH_NOTE: &str =
 /// Compared on the CONTAINER AND THE PREFIX after
 /// [`crate::retention::bucket_and_prefix`] has normalised both, so
 /// `s3://b/p` and `s3://b/p/` are one location and `s3://b/p` and `s3://b/pp`
-/// are two. An unknown controller URL — the field is unset, or it did not parse
-/// — answers `false`: "I could not tell" and "they match" are different facts,
-/// and the safe one here is the one that reports nothing.
+/// are two.
+///
+/// # An UNKNOWN controller location answers `true`, and here is why
+///
+/// `None` means the caller could not say where the handle points. In the
+/// SHIPPED BINARY that pairing cannot occur: `main` builds the handle only when
+/// [`crate::retention::configured_archive_url`] returned `Some`, and the
+/// schedule reconciler re-reads the same process variable, which cannot change
+/// under a running process. So `Some(handle)` with `None` location is reachable
+/// only from a test that constructs the two inconsistently — an in-memory
+/// `Store` with no `LOGWEIR_ARCHIVE_URL` — and answering `false` there would
+/// replace a REPORT that a landed test asserts with a mismatch note about a
+/// mismatch nobody can be in.
+///
+/// The polarity is therefore "evaluate, as before, unless the two locations are
+/// both known and differ". `the_legacy_report_is_replaced_when_the_handle_is_
+/// elsewhere` is the row that drives the real mismatch, with both locations
+/// named.
 #[must_use]
 pub fn legacy_report_applies(schedule_url: &str, controller_url: Option<&str>) -> bool {
     let Some(controller_url) = controller_url.filter(|u| !u.is_empty()) else {
-        return false;
+        return true;
     };
     let scheme_of = |u: &str| u.split_once("://").map(|(s, _)| s.to_string());
     if scheme_of(schedule_url) != scheme_of(controller_url) {

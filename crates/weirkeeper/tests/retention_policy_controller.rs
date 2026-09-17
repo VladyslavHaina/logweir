@@ -770,13 +770,116 @@ fn the_legacy_report_applies_only_at_the_same_location() {
     }
 }
 
-/// An UNKNOWN controller location answers "no". "I could not tell" and "they
-/// match" are different facts, and the safe one here is the one that reports
-/// nothing.
+/// An UNKNOWN controller location evaluates as before.
+///
+/// `Some(handle)` with `None` location cannot occur in the shipped binary —
+/// `main` builds the handle only when the same variable this reads returned
+/// `Some`, and process environment does not change under a running process — so
+/// the only caller that can produce it is a test pairing an in-memory `Store`
+/// with an unset `LOGWEIR_ARCHIVE_URL`. Answering "mismatch" there would replace
+/// a report with a note about a mismatch nobody can be in. The rule is
+/// therefore: evaluate, unless the two locations are both KNOWN and differ.
 #[test]
-fn an_unknown_controller_location_does_not_apply() {
-    assert!(!plan::legacy_report_applies("s3://b/p", None));
-    assert!(!plan::legacy_report_applies("s3://b/p", Some("")));
+fn an_unknown_controller_location_evaluates_as_before() {
+    assert!(plan::legacy_report_applies("s3://b/p", None));
+    assert!(plan::legacy_report_applies("s3://b/p", Some("")));
+}
+
+/// And the real mismatch, through the shipped reconciler: the report is
+/// REPLACED by the note, with every set list empty.
+///
+/// **The `Store` and the runtime are built in this order on purpose.** `Store`
+/// drives its own current-thread runtime, so constructing one inside an
+/// `async` context — or dropping one there — panics (*Cannot drop a runtime in
+/// a context where blocking is not allowed*). The handle is therefore built
+/// first, on a thread driving nothing, exactly as `main` builds the real one,
+/// and the reconcile runs inside a runtime this test owns.
+#[test]
+fn the_legacy_report_is_replaced_when_the_handle_is_elsewhere() {
+    use weirkeeper::controllers::backup_schedule as schedule;
+    use weirkeeper::crds::backup_schedule::BackupSchedule;
+
+    let schedule_value = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupSchedule",
+        "metadata": {
+            "name": "nightly", "namespace": NS, "uid": "s1",
+            "generation": 1, "resourceVersion": "7"
+        },
+        "spec": {
+            "sourceRef": {"name": "src"},
+            "schedule": "0 3 * * *",
+            "topics": ["orders"],
+            "archive": {"url": "s3://tenant-a/backups"},
+            "retention": {"keepLast": 2},
+            "suspend": true
+        },
+        "status": {}
+    });
+    let object: BackupSchedule =
+        serde_json::from_value(schedule_value.clone()).expect("the fixture is a schedule");
+    let routes = vec![
+        route("GET", "/backups", empty_list("Backup")),
+        route(
+            "PATCH",
+            "/backupschedules/nightly/status",
+            schedule_value.to_string(),
+        ),
+    ];
+    // OUTSIDE THE RUNTIME BUILT BELOW — see the note above.
+    let store = std::sync::Arc::new(logweir_store::Store::in_memory("logweir/"));
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("the test runtime builds");
+    let f = rt.block_on(async {
+        let f = fixture(routes);
+        schedule::reconcile_schedule_with_archive_at(
+            &object,
+            &f.client,
+            Some(&store),
+            // The controller's ONE handle is over a DIFFERENT bucket — which
+            // since D1 W2 made `destinationRef` editable is reachable by an
+            // edit between runs, not only by creating a schedule elsewhere.
+            Some("s3://tenant-b/backups"),
+            now(),
+        )
+        .await
+        .expect("a suspended schedule still reports");
+        f
+    });
+
+    let patch = f
+        .bodies
+        .lock()
+        .expect("bodies")
+        .iter()
+        .find(|b| b.method == "PATCH" && b.uri.contains("/backupschedules/"))
+        .map(|b| serde_json::from_str::<Value>(&b.body).expect("JSON"))
+        .expect("a status patch");
+    let report = &patch["status"]["retentionReport"];
+    assert_eq!(
+        report["note"],
+        plan::LEGACY_DESTINATION_MISMATCH_NOTE,
+        "the report is REPLACED, not corrected: {report}"
+    );
+    for empty in [
+        "setsKept",
+        "setsThatWouldBeRemoved",
+        "awsCli",
+        "mcCli",
+        "skipped",
+    ] {
+        assert_eq!(
+            report[empty],
+            json!([]),
+            "`{empty}` must be empty — \"not evaluated\" and \"nothing to remove\" are \
+             different claims and the empty lists are what say so. Report: {report}"
+        );
+    }
+    assert!(
+        f.seen().iter().all(|(m, _)| m != "DELETE"),
+        "and nothing was removed, here or anywhere"
+    );
 }
 
 /// The note names the remedy.

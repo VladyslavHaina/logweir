@@ -115,7 +115,7 @@ const DIAL_TOKENS: [&str; 17] = [
 /// Relative to the workspace root, `/`-separated. Production modules whose
 /// job IS to dial come first; the rest are files where the token is a string
 /// fed to a double, never a client.
-const ALLOWED: [(&str, &str); 27] = [
+const ALLOWED: [(&str, &str); 28] = [
     (
         "crates/logweir/src/check/kafka.rs",
         "production: D2 §4.2's check runner dials BY DESIGN, and this module is the one \
@@ -146,6 +146,17 @@ const ALLOWED: [(&str, &str); 27] = [
     (
         "crates/logweir-kafka/src/rdkafka_reader.rs",
         "the broker client itself — this is where connecting to Kafka lives",
+    ),
+    (
+        "crates/logweir-retention/src/main.rs",
+        "production: D3 §6.5's retention worker dials BY DESIGN, and this is the whole binary. \
+         It builds ONE handle here — `Store::from_url_with`, the EXPLICIT constructor (D2 W2) \
+         over the destination's frozen `evidence_storage_url()` — for the create-only puts that \
+         make a deletion attributable. The DELETING handle is not built here at all: it lives \
+         in `crates/logweir-reaper`, which `scripts/check-no-archive-write.sh` check 3 proves \
+         is reachable from this crate and from no other. `ALLOWED_BUT_FORBIDDEN` below keeps \
+         the environment-reading constructors out of it, for the same D-SEAMS S5 reason \
+         `crates/logweir/src/check/store.rs` has that rule",
     ),
     (
         "crates/logweir/src/doctor.rs",
@@ -313,15 +324,29 @@ const ALLOWED: [(&str, &str); 27] = [
 /// So an allow-listed path may also carry a NARROWER rule. The reason column
 /// says what the file is allowed to do, and the token column says what it is
 /// still not.
-const ALLOWED_BUT_FORBIDDEN: [(&str, &[&str], &str); 1] = [(
-    "crates/logweir/src/check/store.rs",
-    &["Store::from_url(", "Store::read_only_from_url("],
-    "D2 §4.2's check runner builds destination-backed handles, so it is allow-listed for the \
-     EXPLICIT constructors (D2 W2) — and only those. `from_url` / `read_only_from_url` evaluate \
-     every `AWS_*` variable in the process environment, so a check would take its endpoint, its \
-     addressing and its `allow_http` from whatever the Job inherited instead of from the \
-     approved destination (D-SEAMS S5, defect SEC-ENVHTTP)",
-)];
+const ALLOWED_BUT_FORBIDDEN: [(&str, &[&str], &str); 2] = [
+    (
+        "crates/logweir/src/check/store.rs",
+        &["Store::from_url(", "Store::read_only_from_url("],
+        "D2 §4.2's check runner builds destination-backed handles, so it is allow-listed for \
+         the EXPLICIT constructors (D2 W2) — and only those. `from_url` / \
+         `read_only_from_url` evaluate every `AWS_*` variable in the process environment, so a \
+         check would take its endpoint, its addressing and its `allow_http` from whatever the \
+         Job inherited instead of from the approved destination (D-SEAMS S5, defect \
+         SEC-ENVHTTP)",
+    ),
+    (
+        "crates/logweir-retention/src/main.rs",
+        &["Store::from_url(", "Store::read_only_from_url("],
+        "D3 §6.5's retention worker is allow-listed for the EXPLICIT constructors (D2 W2) and \
+         only those. `from_url` / `read_only_from_url` evaluate the whole `AWS_*` environment, \
+         and this pod's environment holds TWO credentials on purpose — the delete-capable one \
+         on `AWS_*` and the destination's `evidenceWrite` grant on `LOGWEIR_EVIDENCE_AWS_*`. An \
+         environment-reading constructor here would build the record sink with the DELETE \
+         credential, which is exactly the aggregation the two-credential design exists to \
+         prevent",
+    ),
+];
 
 /// A file whose first lines carry `#![cfg(feature = "e2e")]` is out of the
 /// default set entirely and may dial as much as it likes — that is what the

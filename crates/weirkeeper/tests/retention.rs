@@ -1274,9 +1274,19 @@ fn the_gate_has_no_path_exemptions() {
         }
         if let Some((lhs, _)) = trimmed.split_once('=') {
             let name = lhs.trim().trim_start_matches("export ").trim();
-            let looks_like_an_exemption = name
-                .chars()
-                .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
+            // A CRATE ALLOWLIST IS NOT A PATH EXEMPTION, and D3 W9's check 3
+            // needs one. `ALLOWED_REAPER_LINK` names the workspace crates that
+            // may LINK `logweir-reaper` — it cannot make the greps above skip a
+            // file, it is compared in BOTH directions so a stale name fails the
+            // gate too, and `retention_policy_controller.rs::
+            // the_reaper_allowlist_holds_exactly_one_binary` pins it to exactly
+            // one name. The property this loop is about is that no PATH is
+            // excused from a scan, and a `*_LINK` allowlist excuses no path.
+            let is_a_link_allowlist = name.ends_with("_LINK");
+            let looks_like_an_exemption = !is_a_link_allowlist
+                && name
+                    .chars()
+                    .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())
                 && ["ALLOW", "EXEMPT", "SKIP", "IGNORE", "EXCLUDE"]
                     .iter()
                     .any(|w| name.contains(w));
