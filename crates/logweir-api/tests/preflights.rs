@@ -3,6 +3,7 @@
 
 mod support;
 
+use logweir_api::contract::StaleReasonKind;
 use serde_json::{json, Value};
 use support::{
     seed_preflight, seed_running_preflight, TestApp, ACTOR_ANNOTATION, LOCAL_ADMIN_ACTOR, NS_A,
@@ -262,6 +263,12 @@ async fn applicability_is_recomputed_against_the_callers_current_plan() {
         Some(&bound),
         Some(LOCAL_ADMIN_ACTOR),
     );
+    // The binding names `KafkaCluster/target` at uid-target/generation 1, and
+    // the API now READS it back — so the fixture has to be internally
+    // consistent to be applicable at all. That is the point of the
+    // recomputation: a verdict about objects that are not there is not
+    // applicable.
+    seed_bound_referent(&app, "uid-target", 1);
 
     // Bound to the plan the caller is looking at: applicable.
     let same = app
@@ -511,28 +518,38 @@ fn field_names(problem: &Value) -> Vec<String> {
 }
 
 // ======================================================================
-// The stale-reason vocabulary
+// The stale-reason vocabulary, and the recomputation that produces it
 // ======================================================================
 
-/// **The DTO's reasons are exactly the controller's reasons.**
+/// Seed the `KafkaCluster/target` that `seed_preflight`'s binding records, at
+/// the revision it records.
+fn seed_bound_referent(app: &TestApp, uid: &str, generation: i64) {
+    app.fake.seed(
+        "kafkaclusters",
+        NS_A,
+        json!({
+            "metadata": {"name": "target", "uid": uid, "generation": generation},
+            "spec": {"bootstrapServers": ["kafka:9096"], "auth": {"mode": "plaintext", "tls": false}, "role": "target"}
+        }),
+    );
+}
+
+/// **The DTO's reasons are core's vocabulary, plus exactly one of ours.**
 ///
-/// Two components render the same six spellings: `logweir-core`'s
-/// `check_contract::StaleReason` (which the preflight controller uses and
-/// writes into `status.message`) and this API's `StaleReasonKind`. Nothing but
-/// a test holds them together, and the first cut of the DTO carried three of
-/// the six plus a seventh the controller never emits.
+/// Renamed from `…is_the_controllers_reason_set`, which is what it never was:
+/// it pins the DTO against `logweir_core::check_contract::StaleReason`, the
+/// VOCABULARY type, and the controller emits a strict subset of that. Saying
+/// so in the name is the difference between a test a reader can trust and one
+/// whose title promises coverage it does not have.
 ///
-/// THE `match` HAS NO WILDCARD. That is the half of this test that survives
-/// someone adding a variant: a seventh `StaleReason` in `logweir-core` stops
-/// this file compiling, rather than arriving at runtime as a token the API
-/// silently drops. The published enum is read out of the checked-in OpenAPI
-/// document, so the wire spellings are compared and not just the Rust names.
+/// The `match` has NO WILDCARD, so a seventh reason in `logweir-core` stops
+/// this file compiling. Both the LIVE Rust enum and the checked-in document
+/// are compared: an earlier cut read only the document, and a reviewer's
+/// variant-drop mutant passed this test while `just schema-check` caught it.
 #[test]
-fn the_dto_reason_set_is_the_controllers_reason_set() {
+fn the_dto_reason_set_is_the_core_vocabulary_plus_unverifiable() {
     use logweir_core::check_contract::StaleReason;
 
-    // Every variant, constructed. Adding one to `logweir-core` fails to
-    // compile here until it is listed.
     let all = [
         StaleReason::Expired,
         StaleReason::PlanHashChanged,
@@ -541,7 +558,6 @@ fn the_dto_reason_set_is_the_controllers_reason_set() {
         StaleReason::PolicyChanged,
         StaleReason::InputsDigestChanged,
     ];
-    // The exhaustiveness proof: no `_` arm.
     for reason in &all {
         let _: &str = match reason {
             StaleReason::Expired => "expired",
@@ -552,9 +568,7 @@ fn the_dto_reason_set_is_the_controllers_reason_set() {
             StaleReason::InputsDigestChanged => "inputsDigestChanged",
         };
     }
-
-    // What the CONTROLLER writes, as the token before any `:` subject.
-    let mut emitted: Vec<String> = all
+    let mut expected: Vec<String> = all
         .iter()
         .map(|r| {
             let rendered = r.to_string();
@@ -563,10 +577,39 @@ fn the_dto_reason_set_is_the_controllers_reason_set() {
                 .map_or(rendered.clone(), |(head, _)| head.to_string())
         })
         .collect();
-    emitted.sort();
-    emitted.dedup();
+    // THE ONE VARIANT THAT IS NOT CORE'S, and the reason it exists: core has
+    // no spelling for "I could not compare this".
+    expected.push("unverifiable".to_string());
+    expected.sort();
+    expected.dedup();
 
-    // What the API PUBLISHES, read from the checked-in document.
+    // The LIVE enum, through the serialization every response uses.
+    let live: Vec<String> = [
+        StaleReasonKind::Expired,
+        StaleReasonKind::PlanHashChanged,
+        StaleReasonKind::ReferentChanged,
+        StaleReasonKind::CaBundleChanged,
+        StaleReasonKind::PolicyChanged,
+        StaleReasonKind::InputsDigestChanged,
+        StaleReasonKind::Unverifiable,
+    ]
+    .iter()
+    .map(|k| {
+        serde_json::to_value(k)
+            .unwrap()
+            .as_str()
+            .unwrap()
+            .to_string()
+    })
+    .collect();
+    let mut live_sorted = live.clone();
+    live_sorted.sort();
+    assert_eq!(
+        live_sorted, expected,
+        "the live enum is not core's set plus one"
+    );
+
+    // And the PUBLISHED enum, so the wire names are held too.
     let document: serde_json::Value =
         serde_json::from_str(include_str!("../../../schemas/logweir-api-v1.openapi.json"))
             .expect("the document is JSON");
@@ -574,82 +617,290 @@ fn the_dto_reason_set_is_the_controllers_reason_set() {
         .as_array()
         .expect("StaleReasonKind is an enumeration in the document")
         .iter()
-        .flat_map(|option| {
-            option["enum"]
-                .as_array()
-                .cloned()
-                .unwrap_or_default()
-                .into_iter()
-        })
+        .flat_map(|option| option["enum"].as_array().cloned().unwrap_or_default())
         .map(|v| v.as_str().unwrap_or_default().to_string())
         .collect();
     published.sort();
-    published.dedup();
-
     assert_eq!(
-        published, emitted,
-        "the reasons this API can carry are not the reasons the controller emits. A reason the \
-         DTO lacks reaches a console as prose it has to parse; a reason the DTO invents is one \
-         nothing will ever send."
+        published, expected,
+        "the published enum drifted from the live one"
     );
-    // And `cancelRequested` is on neither list: a cancelled check has no
-    // verdict to be stale.
     assert!(!published.iter().any(|r| r == "cancelRequested"));
 }
 
-/// **Each of the four reasons the controller alone can compute survives the
-/// projection, typed.**
+/// **Two reasons the controller can emit have no producer, and are published
+/// as reserved rather than as live.**
 ///
-/// The `Preflight` CRD has no field for them: the reconciler renders them into
-/// `status.message` when it downgrades a verdict that stopped applying. The
-/// API recovers them there, splits `referentChanged:<Kind>/<name>` into
-/// structured fields once, and hands W13 something it does not have to parse.
+/// `caBundleChanged` needs the CA bundle list, and `inputsDigestChanged` needs
+/// a digest taken over a wider document than `status.binding` records — so
+/// neither the controller's `stale_against_status` nor this service can emit
+/// either. Publishing them without saying so invited W13 to branch on a value
+/// it will never receive; the doc comments and `docs/api.md` now say it, and
+/// this test holds the claim by driving every reachable difference and
+/// asserting neither appears.
 #[tokio::test]
-async fn the_four_controller_reasons_are_projected_as_typed_subjects() {
+async fn the_two_reserved_reasons_are_never_emitted_by_any_reachable_path() {
     let app = TestApp::new();
     seed_preflight(
         &app.fake,
         NS_A,
-        "pf-stale",
+        "pf-res",
         "Restore",
         None,
         Some(LOCAL_ADMIN_ACTOR),
     );
-    let mut object = app.fake.object("preflights", NS_A, "pf-stale").unwrap();
-    object["status"]["message"] = json!(
-        "this result no longer applies (referentChanged:BackupDestination/primary,          caBundleChanged, policyChanged, inputsDigestChanged); create a new Preflight for the          current objects"
-    );
-    // Not expired and no draft hash, so every reason below is the
-    // controller's and none is this service's own.
-    object["status"]["result"]["expiresAt"] = json!("2099-01-01T00:00:00Z");
-    app.fake.seed("preflights", NS_A, object);
-
+    // Every difference this build can produce at once: a replaced referent, a
+    // passed expiry and a changed plan hash.
+    seed_bound_referent(&app, "a-different-uid", 9);
+    app.clock.advance(3600);
     let response = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/preflights/pf-stale"))
+        .get(&format!(
+            "/api/v1/namespaces/{NS_A}/preflights/pf-res?planHash=sha256:{}",
+            "c".repeat(64)
+        ))
         .await;
-    assert_eq!(response.status.as_u16(), 200, "{}", response.text());
-    let item = &response.json()["item"];
-    assert_eq!(item["stale"], true);
-    assert_eq!(item["applicable"], false);
-    assert_eq!(
-        item["staleReasons"],
-        json!([
-            {"reason": "referentChanged", "kind": "BackupDestination", "name": "primary"},
-            {"reason": "caBundleChanged"},
-            {"reason": "policyChanged"},
-            {"reason": "inputsDigestChanged"},
-        ]),
-        "the four reasons did not survive the projection"
+    let text = response.text();
+    assert!(!text.contains("caBundleChanged"), "{text}");
+    assert!(!text.contains("inputsDigestChanged"), "{text}");
+}
+
+/// **A referent whose revision moved is named, typed, from structured fields.**
+#[tokio::test]
+async fn a_referent_whose_revision_moved_is_reported_with_its_kind_and_name() {
+    // The recorded binding says `KafkaCluster/target` at uid-target,
+    // generation 1.
+    for (uid, generation, why) in [
+        ("uid-target", 2, "an edit bumped its generation"),
+        ("a-new-uid", 1, "it was deleted and recreated"),
+    ] {
+        let app = TestApp::new();
+        seed_preflight(
+            &app.fake,
+            NS_A,
+            "pf-ref",
+            "Restore",
+            None,
+            Some(LOCAL_ADMIN_ACTOR),
+        );
+        seed_bound_referent(&app, uid, generation);
+        let response = app
+            .get(&format!("/api/v1/namespaces/{NS_A}/preflights/pf-ref"))
+            .await;
+        let item = response.json()["item"].clone();
+        assert_eq!(item["stale"], true, "{why}");
+        assert_eq!(item["applicable"], false, "{why}");
+        assert!(
+            item["staleReasons"].as_array().unwrap().iter().any(|r| {
+                r["reason"] == "referentChanged"
+                    && r["kind"] == "KafkaCluster"
+                    && r["name"] == "target"
+            }),
+            "{why}: {}",
+            item["staleReasons"]
+        );
+        // The comparison says what it covered.
+        assert!(item["staleBasis"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|b| b.as_str().unwrap().starts_with("referents:")));
+        app.fake.assert_strict();
+    }
+}
+
+/// A referent that was DELETED is a change too, and is named the same way.
+#[tokio::test]
+async fn a_referent_that_vanished_is_reported_as_changed() {
+    let app = TestApp::new();
+    seed_preflight(
+        &app.fake,
+        NS_A,
+        "pf-gone",
+        "Restore",
+        None,
+        Some(LOCAL_ADMIN_ACTOR),
     );
-    // A reason with no subject carries no empty strings for one.
-    assert!(item["staleReasons"][1].get("kind").is_none());
+    // The `KafkaCluster/target` the binding names is never seeded.
+    let response = app
+        .get(&format!("/api/v1/namespaces/{NS_A}/preflights/pf-gone"))
+        .await;
+    let reasons = response.json()["item"]["staleReasons"].clone();
+    assert!(
+        reasons
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| { r["reason"] == "referentChanged" && r["name"] == "target" }),
+        "{reasons}"
+    );
     app.fake.assert_strict();
 }
 
-/// The API's own two reasons and the controller's are one list, deduplicated,
-/// and an unrecognised token is dropped rather than guessed at.
+/// **A referent that could not be READ is `unverifiable`, never "unchanged".**
+///
+/// This is the fail-closed rule. A transient Kubernetes failure, or a kind
+/// outside the sealed adapter, must not read as "I compared it and it
+/// matches": that is `applicable: true` for a verdict nobody re-checked.
 #[tokio::test]
-async fn the_two_sources_merge_and_an_unknown_token_is_never_invented() {
+async fn a_referent_that_cannot_be_read_fails_closed() {
+    // (a) the read fails.
+    let app = TestApp::new();
+    seed_preflight(
+        &app.fake,
+        NS_A,
+        "pf-unread",
+        "Restore",
+        None,
+        Some(LOCAL_ADMIN_ACTOR),
+    );
+    seed_bound_referent(&app, "uid-target", 1);
+    app.fake.inject(support::Fault {
+        method: "GET",
+        path_contains: "/kafkaclusters/target".to_string(),
+        status: 500,
+        reason: "InternalError",
+        delay: None,
+        remaining: 1,
+    });
+    let response = app
+        .get(&format!("/api/v1/namespaces/{NS_A}/preflights/pf-unread"))
+        .await;
+    let item = response.json()["item"].clone();
+    assert_eq!(item["stale"], true);
+    assert_eq!(
+        item["applicable"], false,
+        "an unreadable referent failed OPEN"
+    );
+    let unverifiable: Vec<&serde_json::Value> = item["staleReasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|r| r["reason"] == "unverifiable")
+        .collect();
+    assert!(
+        unverifiable
+            .iter()
+            .any(|r| r["kind"] == "KafkaCluster" && r["name"] == "target"),
+        "{:?}",
+        item["staleReasons"]
+    );
+    // A refusal to answer always says what it could not check.
+    for reason in &unverifiable {
+        assert!(reason["basis"].is_string(), "{reason}");
+    }
+
+    // (b) a kind the sealed adapter has no verb for. `TrustRoster` is
+    // cluster-scoped and deliberately outside the product set.
+    let app = TestApp::new();
+    seed_preflight(
+        &app.fake,
+        NS_A,
+        "pf-roster",
+        "Restore",
+        None,
+        Some(LOCAL_ADMIN_ACTOR),
+    );
+    let mut object = app.fake.object("preflights", NS_A, "pf-roster").unwrap();
+    object["status"]["binding"]["referents"] = json!([
+        {"kind": "TrustRoster", "name": "logweir-trust", "uid": "uid-roster", "generation": 1}
+    ]);
+    app.fake.seed("preflights", NS_A, object);
+    let response = app
+        .get(&format!("/api/v1/namespaces/{NS_A}/preflights/pf-roster"))
+        .await;
+    let item = response.json()["item"].clone();
+    assert_eq!(item["applicable"], false);
+    assert!(item["staleReasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|r| { r["reason"] == "unverifiable" && r["kind"] == "TrustRoster" }));
+    app.fake.assert_strict();
+}
+
+/// A completed verdict with no recorded binding cannot be compared with
+/// anything, and says so rather than passing.
+#[tokio::test]
+async fn a_result_with_no_binding_is_unverifiable() {
+    let app = TestApp::new();
+    seed_preflight(
+        &app.fake,
+        NS_A,
+        "pf-nobind",
+        "Restore",
+        None,
+        Some(LOCAL_ADMIN_ACTOR),
+    );
+    let mut object = app.fake.object("preflights", NS_A, "pf-nobind").unwrap();
+    object["status"].as_object_mut().unwrap().remove("binding");
+    app.fake.seed("preflights", NS_A, object);
+    let response = app
+        .get(&format!("/api/v1/namespaces/{NS_A}/preflights/pf-nobind"))
+        .await;
+    let item = response.json()["item"].clone();
+    assert_eq!(item["stale"], true);
+    assert_eq!(item["applicable"], false);
+    assert_eq!(item["staleReasons"][0]["reason"], "unverifiable");
+    assert!(item["staleReasons"][0]["basis"]
+        .as_str()
+        .unwrap()
+        .contains("no binding"));
+}
+
+/// **No code path reads `status.message` to decide staleness.**
+///
+/// The first cut recovered the reasons from the controller's prose. That prose
+/// is redacted and capped at 512 characters, so a long referent list lost its
+/// closing bracket and the parse returned NOTHING — reporting a downgraded
+/// verdict as `applicable: true`. It failed OPEN, which is the one direction a
+/// staleness check may never fail. The recomputation replaced it; this is the
+/// row that stops it coming back.
+#[test]
+fn staleness_is_computed_from_structured_fields_and_never_from_a_message() {
+    let source = include_str!("../src/routes/preflights.rs");
+    let code: Vec<&str> = source
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !t.starts_with("//") && !t.starts_with("/*") && !t.starts_with('*')
+        })
+        .collect();
+    let staleness_at = code
+        .iter()
+        .position(|l| l.contains("fn staleness("))
+        .expect("`staleness` exists");
+    let end = code[staleness_at..]
+        .iter()
+        .position(|l| l.trim_end() == "}")
+        .map_or(code.len(), |n| staleness_at + n);
+    let body = code[staleness_at..end].join("\n");
+    assert!(
+        !body.contains("message"),
+        "`staleness` reads a message again:\n{body}"
+    );
+    // And nothing anywhere in the module parses the controller's sentence.
+    for banned in [
+        "no longer applies",
+        "recorded_reasons",
+        "reason_from_token",
+        "DOWNGRADE_MESSAGE_PREFIX",
+    ] {
+        assert!(
+            !code.join("\n").contains(banned),
+            "the message recovery is back: `{banned}`"
+        );
+    }
+    // The comparison is core's, not a second implementation of it.
+    assert!(
+        code.join("\n").contains("stale_reasons("),
+        "staleness no longer calls `check_contract::stale_reasons`"
+    );
+}
+
+/// The API's own two reasons and the recomputed ones are one list, in order,
+/// and `staleBasis` names what was compared.
+#[tokio::test]
+async fn the_expiry_the_plan_hash_and_the_referents_are_one_list() {
     let app = TestApp::new();
     let bound = format!("sha256:{}", "a".repeat(64));
     seed_preflight(
@@ -660,13 +911,7 @@ async fn the_two_sources_merge_and_an_unknown_token_is_never_invented() {
         Some(&bound),
         Some(LOCAL_ADMIN_ACTOR),
     );
-    let mut object = app.fake.object("preflights", NS_A, "pf-merge").unwrap();
-    object["status"]["message"] = json!(
-        "this result no longer applies (expired, somethingNewer, policyChanged); create a new          Preflight for the current objects"
-    );
-    app.fake.seed("preflights", NS_A, object);
-
-    // The clock is past the recorded expiry, so BOTH sides say `expired`.
+    seed_bound_referent(&app, "a-replacement-uid", 1);
     app.clock.advance(3600);
     let response = app
         .get(&format!(
@@ -674,40 +919,91 @@ async fn the_two_sources_merge_and_an_unknown_token_is_never_invented() {
             "c".repeat(64)
         ))
         .await;
-    let reasons = response.json()["item"]["staleReasons"].clone();
+    let item = response.json()["item"].clone();
+    let reasons: Vec<String> = item["staleReasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["reason"].as_str().unwrap().to_string())
+        .collect();
     assert_eq!(
         reasons,
-        json!([
-            {"reason": "expired"},
-            {"reason": "planHashChanged"},
-            {"reason": "policyChanged"},
-        ]),
-        "the two sources did not merge cleanly"
+        vec!["expired", "planHashChanged", "referentChanged"],
+        "{}",
+        item["staleReasons"]
     );
-    assert!(!response.text().contains("somethingNewer"));
+    let basis: Vec<String> = item["staleBasis"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(basis.len(), 4, "{basis:?}");
+    assert_eq!(basis[0], "expiry");
+    assert_eq!(basis[1], "referents:1");
+    // THE POLICY IS NAMED, AND SO IS WHO COMPARED IT. An empty
+    // `staleReasons` must not be mistakeable for "nothing was checked".
+    assert!(
+        basis[2].starts_with("policyDigest:byController"),
+        "{basis:?}"
+    );
+    assert_eq!(basis[3], "planHash");
 }
 
-/// A message this build does not recognise yields no reason at all.
+/// A verdict whose every comparable input still matches reports **no** named
+/// change — only the honest gap. This is the arm that would catch a
+/// recomputation that reported drift where there was none.
 #[tokio::test]
-async fn prose_that_is_not_the_downgrade_sentence_produces_no_reasons() {
+async fn a_verdict_whose_inputs_still_match_reports_no_change() {
     let app = TestApp::new();
+    let bound = format!("sha256:{}", "a".repeat(64));
     seed_preflight(
         &app.fake,
         NS_A,
-        "pf-prose",
+        "pf-same",
         "Restore",
-        None,
+        Some(&bound),
         Some(LOCAL_ADMIN_ACTOR),
     );
-    let mut object = app.fake.object("preflights", NS_A, "pf-prose").unwrap();
-    object["status"]["message"] = json!("the check job was evicted (policyChanged was not why)");
-    object["status"]["result"]["expiresAt"] = json!("2099-01-01T00:00:00Z");
-    app.fake.seed("preflights", NS_A, object);
+    seed_bound_referent(&app, "uid-target", 1);
     let response = app
-        .get(&format!("/api/v1/namespaces/{NS_A}/preflights/pf-prose"))
+        .get(&format!(
+            "/api/v1/namespaces/{NS_A}/preflights/pf-same?planHash={bound}"
+        ))
         .await;
-    assert_eq!(response.json()["item"]["staleReasons"], json!([]));
-    assert_eq!(response.json()["item"]["stale"], false);
+    let item = response.json()["item"].clone();
+    let reasons: Vec<String> = item["staleReasons"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|r| r["reason"].as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(
+        reasons,
+        Vec::<String>::new(),
+        "the recomputation invented a change: {}",
+        item["staleReasons"]
+    );
+    assert_eq!(item["stale"], false);
+    assert_eq!(
+        item["applicable"], true,
+        "a verdict whose inputs all match is applicable"
+    );
+    // AND THE BASIS SAYS WHAT THAT VERDICT RESTS ON, so an empty reason list
+    // cannot be read as "nothing was compared".
+    let basis: Vec<String> = item["staleBasis"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|b| b.as_str().unwrap().to_string())
+        .collect();
+    assert!(basis.contains(&"expiry".to_string()), "{basis:?}");
+    assert!(basis.contains(&"referents:1".to_string()), "{basis:?}");
+    assert!(
+        basis.iter().any(|b| b.starts_with("policyDigest:")),
+        "{basis:?}"
+    );
+    app.fake.assert_strict();
 }
 
 /// A cancelled check reports no stale reason: its verdict is absent, not out
@@ -726,6 +1022,7 @@ async fn a_cancel_request_is_not_a_stale_reason() {
         .await;
     let item = &response.json()["item"];
     assert_eq!(item["staleReasons"], json!([]));
+    assert_eq!(item["staleBasis"], json!([]));
     assert_eq!(item["stale"], false);
     assert_eq!(
         item["applicable"], false,
