@@ -915,3 +915,64 @@ async fn every_transport_refusal_names_itself_in_the_audit_record() {
     }
     assert_eq!(app.app.fake.count("backupschedules", NS_A), 0);
 }
+
+/// **A credential typed once appears in no log line, at the most verbose
+/// setting an operator can ask for.**
+///
+/// The capture uses `audit::log_filter_from("debug")` — the production filter
+/// at its loosest — so a `tracing` field, a dependency's debug print or a
+/// redaction that missed a shape fails here rather than in an incident. The
+/// MUTANT that makes this arm real is asserted first: the same bytes DO reach
+/// the log when something deliberately writes them, so an empty capture can
+/// never be mistaken for a pass.
+#[tokio::test]
+async fn a_credential_entered_once_reaches_no_log_line() {
+    let (log, _guard) = capture();
+    let app = app_with(FakeKube::new());
+    let cookie = app.session_cookie("u-op", &["lw-a-operators"]);
+    let body = support::destination_body_with_new_credential("primary").to_string();
+
+    let response = app
+        .post(
+            "/api/v1/namespaces/team-a/destinations",
+            &cookie,
+            Some(&app.csrf_for("u-op")),
+            Some("credential-log-0001"),
+            &body,
+        )
+        .await;
+    assert_eq!(
+        response.status.as_u16(),
+        201,
+        "{}",
+        String::from_utf8_lossy(&response.body)
+    );
+
+    let text = log.text();
+    assert!(!text.is_empty(), "the capture caught nothing at all");
+    for value in [support::SECRET_ACCESS_KEY, support::ACCESS_KEY_ID] {
+        assert!(
+            !text.contains(value),
+            "a credential value reached the log:\n{text}"
+        );
+    }
+    // What IS recorded is the reference: which Secret now holds it, and that
+    // the request also needed `credential.write` — under the route's own
+    // product action, not instead of it.
+    let record = log.record(&request_id(&response));
+    assert_eq!(record["action"], "destination.manage");
+    assert_eq!(record["decision"], "allow");
+    assert!(
+        text.contains("lwd-primary-archive-read") && text.contains("credential.write"),
+        "the audit notes named neither the Secret nor the extra action:\n{text}"
+    );
+
+    // THE MUTANT. The same capture, the same filter, one deliberate write:
+    // if this did not appear, the assertions above would be vacuous.
+    tracing::info!(planted = %support::SECRET_ACCESS_KEY, "a deliberate leak");
+    assert!(
+        log.text().contains(support::SECRET_ACCESS_KEY),
+        "the capture cannot see a credential even when one is written to it, so the assertions \
+         above prove nothing"
+    );
+}

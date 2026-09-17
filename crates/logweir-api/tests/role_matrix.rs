@@ -31,14 +31,22 @@ use support::{
 /// table edited to match a wrong implementation still fails.
 #[test]
 fn the_decision_table_is_exactly_this() {
-    let expected: [(Action, [bool; 4]); 19] = [
+    let expected: [(Action, [bool; 4]); 24] = [
         //                                     V      O      A     Adm
         (Action::ReadConnections, [true, true, false, true]),
         (Action::CreateConnection, [false, true, false, true]),
         (Action::TestConnection, [false, true, false, true]),
         (Action::WriteCredential, [false, true, false, true]),
+        // D2 W12: a domain's READ is the viewer's floor; starting and
+        // cancelling are the operator's, and an approver sees readiness only
+        // because an approval packet needs it.
+        (Action::ReadTopicDiscoveries, [true, true, false, true]),
         (Action::DiscoverTopics, [false, true, false, true]),
+        (Action::CancelTopicDiscovery, [false, true, false, true]),
+        (Action::ReadPreflights, [true, true, true, true]),
         (Action::RunPreflight, [false, true, false, true]),
+        (Action::CancelPreflight, [false, true, false, true]),
+        (Action::ReadDestinations, [true, true, false, true]),
         (Action::ManageDestinations, [false, true, false, true]),
         (Action::ReadSchedules, [true, true, false, true]),
         (Action::CreateSchedule, [false, true, false, true]),
@@ -66,7 +74,9 @@ fn the_decision_table_is_exactly_this() {
         Action::TestConnection,
         Action::WriteCredential,
         Action::DiscoverTopics,
+        Action::CancelTopicDiscovery,
         Action::RunPreflight,
+        Action::CancelPreflight,
         Action::ManageDestinations,
         Action::CreateSchedule,
         Action::SetScheduleSuspension,
@@ -87,6 +97,15 @@ fn the_decision_table_is_exactly_this() {
         Action::CreateRestore,
         Action::CreateManualBackup,
         Action::SetScheduleSuspension,
+        // An approver READS readiness for the packet; it never STARTS one, and
+        // it never sees a connection, a destination or a topic inventory.
+        Action::RunPreflight,
+        Action::CancelPreflight,
+        Action::DiscoverTopics,
+        Action::CancelTopicDiscovery,
+        Action::ReadTopicDiscoveries,
+        Action::ReadDestinations,
+        Action::ManageDestinations,
     ] {
         assert!(
             !Role::Approver.allows(action),
@@ -244,7 +263,153 @@ fn probes() -> Vec<Probe> {
             body: nothing,
             action: Action::ReadOperations,
         },
+        // ------------------------------------------------------ D2 W12
+        Probe {
+            label: "list destinations",
+            method: "GET",
+            path: "/destinations",
+            body: nothing,
+            action: Action::ReadDestinations,
+        },
+        Probe {
+            label: "get destination",
+            method: "GET",
+            path: "/destinations/dest-1",
+            body: nothing,
+            action: Action::ReadDestinations,
+        },
+        Probe {
+            label: "destination usage",
+            method: "GET",
+            path: "/destinations/dest-1/usage",
+            body: nothing,
+            action: Action::ReadDestinations,
+        },
+        Probe {
+            label: "create destination",
+            method: "POST",
+            path: "/destinations",
+            body: destination,
+            action: Action::ManageDestinations,
+        },
+        Probe {
+            label: "rotate destination access",
+            method: "POST",
+            path: "/destinations/dest-1:update-access",
+            body: rotation,
+            action: Action::ManageDestinations,
+        },
+        Probe {
+            label: "test destination",
+            method: "POST",
+            path: "/destinations/dest-1:test",
+            body: nothing_object,
+            action: Action::ManageDestinations,
+        },
+        Probe {
+            label: "adopt a legacy location",
+            method: "POST",
+            path: "/destinations:from-legacy",
+            body: from_legacy,
+            action: Action::ManageDestinations,
+        },
+        Probe {
+            label: "list discoveries",
+            method: "GET",
+            path: "/connections/conn-1/topic-discoveries",
+            body: nothing,
+            action: Action::ReadTopicDiscoveries,
+        },
+        Probe {
+            label: "get discovery",
+            method: "GET",
+            path: "/topic-discoveries/td-1",
+            body: nothing,
+            action: Action::ReadTopicDiscoveries,
+        },
+        Probe {
+            label: "page discovered topics",
+            method: "GET",
+            path: "/topic-discoveries/td-1/topics",
+            body: nothing,
+            action: Action::ReadTopicDiscoveries,
+        },
+        Probe {
+            label: "start discovery",
+            method: "POST",
+            path: "/connections/conn-1/topic-discoveries",
+            body: nothing_object,
+            action: Action::DiscoverTopics,
+        },
+        Probe {
+            label: "cancel discovery",
+            method: "POST",
+            path: "/topic-discoveries/td-1:cancel",
+            body: nothing_object,
+            action: Action::CancelTopicDiscovery,
+        },
+        Probe {
+            label: "get preflight",
+            method: "GET",
+            path: "/preflights/pf-1",
+            body: nothing,
+            action: Action::ReadPreflights,
+        },
+        Probe {
+            label: "page preflight details",
+            method: "GET",
+            path: "/preflights/pf-1/details",
+            body: nothing,
+            action: Action::ReadPreflights,
+        },
+        Probe {
+            label: "start preflight",
+            method: "POST",
+            path: "/preflights",
+            body: preflight,
+            action: Action::RunPreflight,
+        },
+        Probe {
+            label: "cancel preflight",
+            method: "POST",
+            path: "/preflights/pf-1:cancel",
+            body: nothing_object,
+            action: Action::CancelPreflight,
+        },
     ]
+}
+
+fn nothing_object() -> String {
+    "{}".to_string()
+}
+
+fn destination() -> String {
+    support::destination_body("dest-2").to_string()
+}
+
+fn rotation() -> String {
+    serde_json::json!({
+        "expectedGeneration": 1,
+        "access": {"archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "logweir-s3"}}}}
+    })
+    .to_string()
+}
+
+fn from_legacy() -> String {
+    serde_json::json!({
+        "name": "adopted-1",
+        "sourceSchedule": "sched-1",
+        "access": {"archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "logweir-s3"}}}}
+    })
+    .to_string()
+}
+
+fn preflight() -> String {
+    serde_json::json!({
+        "operation": "backup",
+        "backup": {"sourceConnection": "conn-1", "destination": "dest-1", "topics": ["orders"]}
+    })
+    .to_string()
 }
 
 async fn drive(
@@ -318,6 +483,33 @@ fn seeded() -> FakeKube {
                 "metadata": {"name": "approval-1"},
                 "spec": {"subjectRef": {"kind": "Restore", "name": "restore-1"}, "document": "e30=", "sidecar": "e30="},
             }),
+        );
+        support::seed_destination(&fake, namespace, "dest-1");
+        support::seed_discovery(
+            &fake,
+            namespace,
+            "td-1",
+            "conn-1",
+            Some("urn:test#someone-else"),
+            &[vec![support::topic_line("orders", 3, "-")]],
+        );
+        // A RESTORE PREFLIGHT, because that is the one an approver may read;
+        // the approver arm below also drives a Backup one and must NOT see it.
+        support::seed_preflight(
+            &fake,
+            namespace,
+            "pf-1",
+            "Restore",
+            None,
+            Some("urn:test#someone-else"),
+        );
+        support::seed_preflight(
+            &fake,
+            namespace,
+            "pf-backup",
+            "Backup",
+            None,
+            Some("urn:test#someone-else"),
         );
     }
     fake
@@ -871,5 +1063,196 @@ async fn the_governed_approval_route_is_absent_not_stubbed() {
     assert_eq!(
         session["namespaces"][0]["capabilities"]["approvalSubmit"],
         false
+    );
+}
+
+/// **The approver's readiness window is the approval packet, and no wider.**
+///
+/// D0 gives the approver "read only when needed for the approval packet". That
+/// is a statement about the OBJECT, not about the role: a Restore readiness
+/// result is what an approver is being asked to authorize, and a Backup one is
+/// not its business. An actor bound only as Approver therefore reads the first
+/// and gets the nonexistent-resource answer for the second — the same answer an
+/// unbound namespace gives, so an approver cannot map which checks exist.
+#[tokio::test]
+async fn an_approver_reads_restore_readiness_and_nothing_else() {
+    let fake = seeded();
+    let app = SharedApp::new(
+        fake.clone(),
+        support::idp::MockIdp::new(ISSUER, &[]),
+        SharedOptions {
+            bindings: support::RoleBindings {
+                revision: "approver-1".into(),
+                bindings: vec![
+                    support::binding(Role::Approver, NS_A, &["lw-a-approvers"]),
+                    support::binding(Role::Viewer, NS_A, &["lw-a-viewers"]),
+                ],
+            },
+            ..SharedOptions::default()
+        },
+    );
+    let approver = app.session_cookie("u-approver", &["lw-a-approvers"]);
+
+    let restore = app
+        .get(
+            &format!("/api/v1/namespaces/{NS_A}/preflights/pf-1"),
+            &approver,
+        )
+        .await;
+    assert_eq!(restore.status.as_u16(), 200, "{}", restore.text());
+    assert_eq!(restore.json()["item"]["operation"], "restore");
+
+    let backup = app
+        .get(
+            &format!("/api/v1/namespaces/{NS_A}/preflights/pf-backup"),
+            &approver,
+        )
+        .await;
+    backup.assert_problem(404, "not_found");
+    let details = app
+        .get(
+            &format!("/api/v1/namespaces/{NS_A}/preflights/pf-backup/details"),
+            &approver,
+        )
+        .await;
+    details.assert_problem(404, "not_found");
+    let operation = app
+        .get(
+            &format!("/api/v1/namespaces/{NS_A}/operations/preflight/pf-backup"),
+            &approver,
+        )
+        .await;
+    operation.assert_problem(404, "not_found");
+
+    // AN ACTOR WHO IS ALSO A VIEWER IS NOT NARROWED: the restriction is about
+    // holding the approver binding ALONE, not about being an approver.
+    let both = app.session_cookie("u-both", &["lw-a-approvers", "lw-a-viewers"]);
+    let backup = app
+        .get(
+            &format!("/api/v1/namespaces/{NS_A}/preflights/pf-backup"),
+            &both,
+        )
+        .await;
+    assert_eq!(backup.status.as_u16(), 200, "{}", backup.text());
+    fake.assert_strict();
+}
+
+/// **An operator cancels its own checks, and only its own.**
+///
+/// Two operators bound in the same namespace hold the same role and the same
+/// Kubernetes reach. What separates them is the actor recorded on the object
+/// when it was created, compared as `issuer#subject` — never a display name.
+#[tokio::test]
+async fn one_operator_cannot_cancel_another_operators_check() {
+    let fake = FakeKube::new();
+    fake.seed(
+        "kafkaclusters",
+        NS_A,
+        serde_json::json!({
+            "metadata": {"name": "conn-1"},
+            "spec": {"bootstrapServers": ["kafka:9096"], "auth": {"mode": "plaintext", "tls": false}, "role": "source"},
+        }),
+    );
+    let app = SharedApp::new(
+        fake.clone(),
+        support::idp::MockIdp::new(ISSUER, &[]),
+        SharedOptions {
+            bindings: support::RoleBindings {
+                revision: "operators-1".into(),
+                bindings: vec![support::binding(Role::Operator, NS_A, &["lw-a-operators"])],
+            },
+            ..SharedOptions::default()
+        },
+    );
+    let first = app.session_cookie("u-op-1", &["lw-a-operators"]);
+    let second = app.session_cookie("u-op-2", &["lw-a-operators"]);
+
+    let started = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/connections/conn-1/topic-discoveries"),
+            &first,
+            Some(&app.csrf_for("u-op-1")),
+            Some("owner-key-000001"),
+            "{}",
+        )
+        .await;
+    assert_eq!(started.status.as_u16(), 202, "{}", started.text());
+    let id = started.json()["item"]["id"].as_str().unwrap().to_string();
+    let stored = fake.object("topicdiscoveries", NS_A, &id).unwrap();
+    assert_eq!(
+        stored["metadata"]["annotations"][support::ACTOR_ANNOTATION],
+        format!("{ISSUER}#u-op-1")
+    );
+
+    // The other operator holds the same role and is refused anyway.
+    let refused = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/topic-discoveries/{id}:cancel"),
+            &second,
+            Some(&app.csrf_for("u-op-2")),
+            None,
+            "{}",
+        )
+        .await;
+    refused.assert_problem(403, "forbidden");
+    assert_eq!(
+        fake.object("topicdiscoveries", NS_A, &id).unwrap()["spec"]["cancelRequested"],
+        false
+    );
+
+    // The one who started it may stop it.
+    let allowed = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/topic-discoveries/{id}:cancel"),
+            &first,
+            Some(&app.csrf_for("u-op-1")),
+            None,
+            "{}",
+        )
+        .await;
+    assert_eq!(allowed.status.as_u16(), 200, "{}", allowed.text());
+    assert_eq!(
+        fake.object("topicdiscoveries", NS_A, &id).unwrap()["spec"]["cancelRequested"],
+        true
+    );
+    fake.assert_strict();
+    logweir_api::routes::reset_check_rate_limits();
+}
+
+/// Every action the authorizer knows appears in the decision table above.
+/// A new action added without a row would otherwise be untested policy.
+#[test]
+fn the_decision_table_covers_every_action() {
+    let listed = [
+        Action::ReadConnections,
+        Action::CreateConnection,
+        Action::TestConnection,
+        Action::WriteCredential,
+        Action::ReadTopicDiscoveries,
+        Action::DiscoverTopics,
+        Action::CancelTopicDiscovery,
+        Action::ReadPreflights,
+        Action::RunPreflight,
+        Action::CancelPreflight,
+        Action::ReadDestinations,
+        Action::ManageDestinations,
+        Action::ReadSchedules,
+        Action::CreateSchedule,
+        Action::SetScheduleSuspension,
+        Action::ReadBackups,
+        Action::CreateManualBackup,
+        Action::ReadRestores,
+        Action::CreateRestore,
+        Action::ReadApprovals,
+        Action::ReadApprovalPacket,
+        Action::SubmitApproval,
+        Action::ReadOperations,
+        Action::StreamOperationEvents,
+    ];
+    let names: std::collections::BTreeSet<&str> = listed.iter().map(|a| a.name()).collect();
+    assert_eq!(
+        names.len(),
+        listed.len(),
+        "two actions share an audit name, which would make the audit record ambiguous"
     );
 }

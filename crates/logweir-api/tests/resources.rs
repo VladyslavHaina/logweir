@@ -467,15 +467,19 @@ async fn session_and_namespaces_come_from_configuration_only() {
         "approvalsRead",
         "approvalPacketRead",
         "operationsRead",
+        // D2 W12: the three domains now have routes, so the local
+        // administrator — who may do every implemented action — sees them.
+        // Each flag is the domain's READ floor; whether the actor may also
+        // start or cancel is the role table, published per grant in `roles`.
+        "topicDiscovery",
+        "preflight",
+        "destinations",
+        "credentialWrite",
     ] {
         assert_eq!(caps[enabled], true, "{enabled}");
     }
     for disabled in [
         "manualBackupCreate",
-        "topicDiscovery",
-        "preflight",
-        "destinations",
-        "credentialWrite",
         "connectionTest",
         "approvalSubmit",
         "operationEvents",

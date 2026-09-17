@@ -19,12 +19,19 @@ use support::{FakeKube, Fault, Options, TestApp, HOST, NS_A, ORIGIN};
 /// Codes observed end to end in this file, checked against the full list at
 /// the end so a new code cannot be added without a producing test or an
 /// explicit reservation.
-const RESERVED_FOR_LATER_STAGES: [ProblemCode; 3] = [
+const RESERVED_FOR_LATER_STAGES: [ProblemCode; 4] = [
     // PLAT-17.2 session authenticator.
     ProblemCode::SessionExpired,
     // PLAT-19.2 approval policy.
     ProblemCode::ApprovalRequired,
     ProblemCode::PolicyMismatch,
+    // D2 §3.12 step 4: refusing a REPLACEMENT schedule whose destination's
+    // locationDigest differs from the legacy one. The replacement is created
+    // through `POST .../schedules`, which does not accept a destinationRef
+    // yet (PLAT-06.2 / D2 W13), so nothing in this build can produce it. The
+    // code is published so the adoption contract is complete and a client can
+    // branch on it before the producing route exists.
+    ProblemCode::LegacyLocationMismatch,
 ];
 
 fn schedules() -> String {
@@ -479,6 +486,12 @@ fn every_code_is_produced_or_reserved() {
         "kubernetes_unavailable", // kubernetes_failures_map_to_stable_codes_without_echoing_messages
         "upstream_timeout",       // a_kubernetes_call_past_its_deadline_is_upstream_timeout
         "internal_error",         // render-only: an invariant failure has no honest trigger
+        // D2 W12.
+        "destination_invalid", // destinations::the_rules_are_evaluated_before_the_object_exists
+        "destination_location_immutable", // a_rejected_rotation_is_reported_as_an_immutable_location
+        "transport_downgrade_forbidden", // destinations::update_access_refuses_an_idempotency_key_and_a_ca_bundle_on_plaintext
+        "legacy_location_unknown", // destinations::a_legacy_schedule_becomes_a_destination_from_facts_or_is_refused
+        "result_integrity_failed", // topic_discoveries::a_chunk_that_fails_its_integrity_check_refuses_the_page
     ]
     .into_iter()
     .collect();
@@ -490,4 +503,44 @@ fn every_code_is_produced_or_reserved() {
             code.as_str()
         );
     }
+}
+
+/// **A Kubernetes refusal of a rotation is reported as what it is.**
+///
+/// `spec.storage` and `spec.transport.security` are immutable, and the CRD's
+/// own CEL is what finally refuses a change to either. The API cannot build a
+/// patch that names them — `set_destination_access` has no key for them — so
+/// this drives the other half: when the API server rejects the patch as
+/// invalid, the answer is `destination_location_immutable` and NOT a generic
+/// validation failure, because the operator's next action is different.
+#[tokio::test]
+async fn a_rejected_rotation_is_reported_as_an_immutable_location() {
+    let app = TestApp::new();
+    support::seed_destination(&app.fake, support::NS_A, "primary");
+    app.fake.inject(support::Fault {
+        method: "PATCH",
+        path_contains: "/backupdestinations/primary".to_string(),
+        status: 422,
+        reason: "Invalid",
+        delay: None,
+        remaining: 1,
+    });
+    let response = app
+        .post(
+            &format!(
+                "/api/v1/namespaces/{}/destinations/primary:update-access",
+                support::NS_A
+            ),
+            None,
+            &serde_json::json!({
+                "expectedGeneration": 3,
+                "access": {"archiveWrite": {"mode": "secretKeys", "secret": {"existing": {"name": "s"}}}}
+            })
+            .to_string(),
+        )
+        .await;
+    response.assert_problem(409, "destination_location_immutable");
+    // The injected Kubernetes message carries a token-shaped string; none of
+    // it is echoed.
+    assert!(!response.text().contains("eyJhbGciOiJIUzI1NiJ9"));
 }

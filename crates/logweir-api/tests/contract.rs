@@ -64,6 +64,16 @@ fn the_document_names_every_route_and_every_route_answers() {
             "/api/v1/namespaces/{ns}/approvals",
             "/api/v1/namespaces/{ns}/approvals/{name}",
             "/api/v1/namespaces/{ns}/approvals/{name}/packet",
+            "/api/v1/namespaces/{ns}/destinations",
+            "/api/v1/namespaces/{ns}/destinations:from-legacy",
+            "/api/v1/namespaces/{ns}/destinations/{name}",
+            "/api/v1/namespaces/{ns}/destinations/{name}/usage",
+            "/api/v1/namespaces/{ns}/connections/{name}/topic-discoveries",
+            "/api/v1/namespaces/{ns}/topic-discoveries/{id}",
+            "/api/v1/namespaces/{ns}/topic-discoveries/{id}/topics",
+            "/api/v1/namespaces/{ns}/preflights",
+            "/api/v1/namespaces/{ns}/preflights/{id}",
+            "/api/v1/namespaces/{ns}/preflights/{id}/details",
             "/api/v1/namespaces/{ns}/operations/{kind}/{name}",
         ]
     );
@@ -78,7 +88,7 @@ fn the_document_names_every_route_and_every_route_answers() {
             );
         }
     }
-    assert_eq!(operation_ids.len(), 23);
+    assert_eq!(operation_ids.len(), 38);
 }
 
 /// Three documented paths exist only in shared mode: the two `/auth` routes and
@@ -106,7 +116,8 @@ async fn every_documented_operation_is_routed() {
         let concrete = path
             .replace("{ns}", support::NS_A)
             .replace("{kind}", "backup")
-            .replace("{name}", "absent-object");
+            .replace("{name}", "absent-object")
+            .replace("{id}", "absent-object");
         let shared_only = SHARED_ONLY_PATHS.contains(&path.as_str());
         for (method, _) in item.as_object().unwrap() {
             let response = match (method.as_str(), shared_only) {
@@ -212,11 +223,77 @@ fn request_schemas_are_strict_all_the_way_down() {
     assert!(checked >= 8, "only {checked} request objects were checked");
 }
 
+/// Every schema reachable from a RESPONSE envelope, and the one type that
+/// carries a credential value.
+///
+/// A REQUEST MAY CARRY A CREDENTIAL; A RESPONSE MAY NOT. Write-only entry
+/// exists precisely so a value can be typed once into a request body
+/// (`CreateDestinationRequest`, `UpdateDestinationAccessRequest`,
+/// `DestinationFromLegacyRequest`), and the property scan below would refuse
+/// every one of them by name. So the scan is applied to what a response can
+/// reach, and `a_response_envelope_never_reaches_the_write_only_credential`
+/// asserts the other half: no response schema in the document can contain the
+/// type that holds a value.
+fn response_reachable(document: &Value) -> BTreeSet<String> {
+    let schemas = document["components"]["schemas"]
+        .as_object()
+        .unwrap()
+        .clone();
+    let mut reachable = BTreeSet::new();
+    for name in schemas.keys() {
+        if !(name.ends_with("Response") || name.ends_with("List")) {
+            continue;
+        }
+        let mut seen = BTreeSet::new();
+        let mut objects = Vec::new();
+        walk(
+            &serde_json::json!({ "$ref": format!("#/components/schemas/{name}") }),
+            &schemas,
+            &mut seen,
+            &mut objects,
+        );
+        reachable.extend(objects.into_iter().map(|(n, _)| n));
+    }
+    reachable
+}
+
+/// THE WRITE-ONLY GUARANTEE, AS A SHAPE. The one type that holds a credential
+/// value is unreachable from every response envelope the document publishes.
+/// A projection that leaked a value would have to name a type that appears
+/// here, and this fails before it ships.
+#[test]
+fn a_response_envelope_never_reaches_the_write_only_credential() {
+    let document = document();
+    let reachable = response_reachable(&document);
+    assert!(
+        reachable.contains("AccessGrantView"),
+        "the walk reaches the destination projections at all"
+    );
+    for value_bearing in [
+        "NewCredentialRequest",
+        "SecretSourceRequest",
+        "AccessGrantRequest",
+    ] {
+        assert!(
+            document["components"]["schemas"]
+                .get(value_bearing)
+                .is_some(),
+            "{value_bearing} is published (as a request type)"
+        );
+        assert!(
+            !reachable.contains(value_bearing),
+            "{value_bearing} holds or leads to a credential VALUE and is reachable from a \
+             response envelope"
+        );
+    }
+}
+
 /// No response schema names a credential, a token or the approval documents —
 /// except `ApprovalPacket`, which is the one explicit route for them.
 #[test]
 fn response_schemas_carry_no_credential_or_document_bytes() {
     let document = document();
+    let reachable = response_reachable(&document);
     let schemas = document["components"]["schemas"].as_object().unwrap();
     let forbidden = [
         "password",
@@ -230,6 +307,9 @@ fn response_schemas_carry_no_credential_or_document_bytes() {
         "data",
     ];
     for (name, schema) in schemas {
+        if !reachable.contains(name.as_str()) {
+            continue;
+        }
         let Some(properties) = schema.get("properties").and_then(Value::as_object) else {
             continue;
         };
@@ -244,7 +324,15 @@ fn response_schemas_carry_no_credential_or_document_bytes() {
                 // browser is meant to receive (null until PLAT-17.2 issues
                 // sessions). Everything else that reads like a credential is
                 // a defect.
-                let allowed = property == "credentialRef" || property == "csrfToken" || flag;
+                // THREE NAMED EXCEPTIONS, EACH A REFERENCE AND NOT A VALUE.
+                // `credentialRef` and `secretName` are Secret NAMES; a name is
+                // what this service returns instead of anything about the
+                // credential. `csrfToken` is the synchronizer token the
+                // browser is meant to receive.
+                let allowed = property == "credentialRef"
+                    || property == "secretName"
+                    || property == "csrfToken"
+                    || flag;
                 assert!(
                     !lowered.contains(word) || allowed,
                     "{name}.{property} looks like credential material"

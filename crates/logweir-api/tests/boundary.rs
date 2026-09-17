@@ -37,11 +37,14 @@ async fn kubernetes_shaped_and_unlisted_paths_are_404_and_reach_nothing() {
         "/api/v1/namespaces/team-a/configmaps",
         "/api/v1/namespaces/team-a/trustrosters",
         "/api/v1/namespaces/team-a/backups/x/status",
-        "/api/v1/namespaces/team-a/operations/discovery/x",
-        "/api/v1/namespaces/team-a/operations/preflight/x",
         "/api/v1/namespaces/team-a/operations/secret/x",
+        // D2 W12 ADDED `{id}` ROUTES AND NOT A COLLECTION ROUTE. A discovery
+        // is always addressed through its connection or by its own id; there
+        // is no namespace-wide list of checks, and a client that guessed one
+        // gets 404 rather than an unbounded scan.
         "/api/v1/namespaces/team-a/topic-discoveries",
-        "/api/v1/namespaces/team-a/destinations",
+        "/api/v1/namespaces/team-a/destinations/x/topics",
+        "/api/v1/namespaces/team-a/backupdestinations",
         "/api/v1/namespaces/team-a/operations/backup/x/events",
         "/api/v1/nodes",
         "/api/v1/session/",
@@ -53,8 +56,13 @@ async fn kubernetes_shaped_and_unlisted_paths_are_404_and_reach_nothing() {
         let response = app.get(path).await;
         response.assert_problem(404, "not_found");
     }
-    // `operations/{discovery|preflight|...}` reach the handler, which refuses
-    // the kind before any lookup. Nothing reached Kubernetes at all.
+    // `POST .../preflights` exists; `GET` on it does not. A readiness result
+    // is addressed by id, and there is no namespace-wide list of checks.
+    app.get("/api/v1/namespaces/team-a/preflights")
+        .await
+        .assert_problem(405, "method_not_allowed");
+    // `operations/{secret|...}` reaches the handler, which refuses the kind
+    // before any lookup. Nothing reached Kubernetes at all.
     assert!(
         app.fake.requests().is_empty(),
         "a boundary refusal reached Kubernetes: {:#?}",

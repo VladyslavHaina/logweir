@@ -418,6 +418,150 @@ fn the_adapter_calls_only_the_four_permitted_kubernetes_verbs() {
     );
 }
 
+/// **Which Kubernetes RESOURCE each verb is spent on, pinned.**
+///
+/// The verb allowlist above says the adapter calls `list`, `get`, `create` and
+/// `patch`. It does NOT say on what: D2 W12 added two CORE objects to the
+/// adapter — `configmaps` (a check's own stored result) and `secrets` (a
+/// write-only credential) — and a `get` on `secrets` would have passed the verb
+/// scan unchanged while being exactly the permission this service must never
+/// hold.
+///
+/// So this pins the `(verb, resource)` pairs at the ONE place the adapter names
+/// them: every bounded call's first two arguments. A pair added here is a
+/// change to the console ServiceAccount's RBAC and to D2 §7.3, not a
+/// refactor — and `get/secrets`, `list/secrets` and any delete cannot appear
+/// without this test being edited by hand.
+#[test]
+fn the_adapter_spends_each_verb_on_exactly_these_resources() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("kube.rs");
+    let text = std::fs::read_to_string(&path).expect("src/kube.rs is readable");
+
+    // THE CALL IS WRITTEN ACROSS LINES, so the scan works over the joined
+    // code lines: for each `self.bounded(`, the first two ARGUMENTS are the
+    // verb (always a literal) and the resource (a literal, or the sealed
+    // `ProductResource`'s own plural for the generic methods).
+    // `rustfmt` breaks a long chain as `self\n    .bounded(...)`, so the
+    // receiver and the call land on different lines; normalising ` .` to `.`
+    // is what keeps the scan from silently missing such a call — and a missed
+    // call would be a verb nobody checked.
+    let code: String = code_lines(&text)
+        .map(|(_, line)| line.trim())
+        .collect::<Vec<&str>>()
+        .join(" ")
+        .replace(" .", ".");
+    let mut pairs: BTreeSet<String> = BTreeSet::new();
+    let mut cursor = 0usize;
+    while let Some(offset) = code[cursor..].find("self.bounded(") {
+        let at = cursor + offset + "self.bounded(".len();
+        cursor = at;
+        let args = first_two_arguments(&code[at..]);
+        assert!(args.len() >= 2, "an unparseable bounded() call at {at}");
+        let literal = |arg: &str| -> String {
+            let arg = arg.trim();
+            match (arg.strip_prefix('"'), arg.strip_suffix('"')) {
+                (Some(inner), _) if arg.len() >= 2 && arg.ends_with('"') => {
+                    inner[..inner.len() - 1].to_string()
+                }
+                _ => "<ProductResource plural>".to_string(),
+            }
+        };
+        pairs.insert(format!("{} {}", literal(&args[0]), literal(&args[1])));
+    }
+
+    let expected: BTreeSet<String> = [
+        // The eight sealed custom resources, through the generic methods.
+        "list_page <ProductResource plural>",
+        "get <ProductResource plural>",
+        "create <ProductResource plural>",
+        // The three named merge patches.
+        "patch <ProductResource plural>",
+        "patch backupschedules",
+        "patch backupdestinations",
+        // THE TWO CORE OBJECTS, one verb each.
+        "get configmaps",
+        "create secrets",
+        // The readiness probe.
+        "version version",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+
+    assert_eq!(
+        pairs, expected,
+        "the (verb, resource) set this adapter uses changed. Adding one is a change to the \
+         console ServiceAccount's RBAC (D2 §7.3) and to the security review that approved it: \
+         this service must never hold `get` or `list` on secrets, any verb on pods, jobs or \
+         logs, or a delete on anything."
+    );
+
+    // The negative, stated as text so the intent survives a refactor of the
+    // scan above: no line in the adapter asks for a Secret by name.
+    for forbidden in [
+        "\"get\", \"secrets\"",
+        "\"list_page\", \"secrets\"",
+        "\"patch\", \"secrets\"",
+        "\"delete\"",
+        "\"create\", \"configmaps\"",
+        "\"patch\", \"configmaps\"",
+    ] {
+        assert!(
+            !code_lines(&text).any(|(_, line)| line.contains(forbidden)),
+            "{}: the adapter names {forbidden}",
+            path.display()
+        );
+    }
+}
+
+/// The first two comma-separated arguments of a call, at bracket depth zero.
+fn first_two_arguments(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut in_string = false;
+    let mut current = String::new();
+    let mut previous = '\0';
+    for c in text.chars() {
+        if in_string {
+            current.push(c);
+            if c == '"' && previous != '\\' {
+                in_string = false;
+            }
+            previous = c;
+            continue;
+        }
+        match c {
+            '"' => {
+                in_string = true;
+                current.push(c);
+            }
+            '(' | '[' | '<' | '{' => {
+                depth += 1;
+                current.push(c);
+            }
+            ')' | ']' | '>' | '}' if depth == 0 => {
+                out.push(std::mem::take(&mut current));
+                return out;
+            }
+            ')' | ']' | '>' | '}' => {
+                depth -= 1;
+                current.push(c);
+            }
+            ',' if depth == 0 => {
+                out.push(std::mem::take(&mut current));
+                if out.len() == 2 {
+                    return out;
+                }
+            }
+            _ => current.push(c),
+        }
+        previous = c;
+    }
+    out
+}
+
 #[test]
 fn the_kubernetes_adapter_is_the_only_module_that_names_the_client() {
     let mut naming = BTreeSet::new();
