@@ -7555,6 +7555,26 @@ rules:
   - protectionpolicies/status
   verbs:
   - patch
+- apiGroups:
+  - logweir.dev
+  resources:
+  - rehearsalschedules
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - logweir.dev
+  resources:
+  - rehearsalschedules/status
+  verbs:
+  - patch
+- apiGroups:
+  - logweir.dev
+  resources:
+  - restores
+  verbs:
+  - create
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding

@@ -6814,6 +6814,19 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["protectionpolicies/status"]
     verbs: ["patch"]
+  # PLAT-14.3 (D3 W7): the `RehearsalSchedule` reconciler's watch, its referent
+  # `get` from `controllers/approval.rs`, its `Api::patch_status`, and the ONE
+  # `Restore` it creates per due slot. No `delete`, no `update`, no verb on
+  # `secrets`. See `config/rbac/role.yaml`.
+  - apiGroups: ["logweir.dev"]
+    resources: ["rehearsalschedules"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["rehearsalschedules/status"]
+    verbs: ["patch"]
+  - apiGroups: ["logweir.dev"]
+    resources: ["restores"]
+    verbs: ["create"]
 ---
 # Source: logweir/templates/human-roles.yaml
 apiVersion: rbac.authorization.k8s.io/v1

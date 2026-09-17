@@ -437,3 +437,47 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["protectionpolicies/status"]
     verbs: ["patch"]
+  # PLAT-14.3 / decision D3 §4 — THE `RehearsalSchedule` RECONCILER'S OWN ROWS.
+  #
+  # Added here by the D3 wave-2 rehearsal worker for the reason every worker
+  # since PLAT-19.1 has recorded: `manifest_lint.rs`'s
+  # `every_call_site_has_a_grant` is a HARD failure otherwise, and a call with
+  # no grant 403s in production while every route-table test stays green. NOTE
+  # FOR W13 (D3 §14): these rows are W13's to fold into its own RBAC pass,
+  # together with the human-role rows (viewer get/list/watch; operator create
+  # plus a `suspend`-only patch, which is the only mutable field).
+  #
+  # `list` and `watch` are `Controller::new(api, …)` in
+  # `controllers/rehearsal_schedule.rs`. `get` IS here, and it has a caller that
+  # the other new kinds do not have: `controllers/approval.rs` `get`s the
+  # `RehearsalSchedule` an `Approval` names, because D3 §4.3 makes that
+  # approval bind a digest RECOMPUTED from the referent's own sealed spec.
+  #
+  # NO `delete`, AND NO `update` ON THE KIND. The reconciler writes its own
+  # `/status` and creates `Restore`s; it never edits a schedule's spec — which
+  # is sealed except `suspend` — and it never deletes one. It also holds no verb
+  # on `secrets`: the standing authorization's envelope, its sidecar and the
+  # approver's PUBLIC key all come from an `Approval` and from the namespace's
+  # resolved `TrustPolicy`, and no private material exists on this path.
+  - apiGroups: ["logweir.dev"]
+    resources: ["rehearsalschedules"]
+    verbs: ["get", "list", "watch"]
+  # The status subresource, `patch` and nothing else — seam S7. The reservation
+  # (`pendingRestoreRef`), the slot, the skip reason, the cleanup list and the
+  # three conditions are all one `Api::patch_status` with a `Patch::Merge` whose
+  # BODY carries `metadata.resourceVersion` as the API server's update
+  # precondition. A reservation written as `replace_status` instead is a `PUT`,
+  # is authorised as `update`, and 403s here — which is the point.
+  - apiGroups: ["logweir.dev"]
+    resources: ["rehearsalschedules/status"]
+    verbs: ["patch"]
+  # THE SECOND WRITE TO A CUSTOM RESOURCE THAT IS NOT A STATUS, AND ITS CALLER.
+  # `controllers/rehearsal_schedule.rs` creates ONE `Restore` per due slot, with
+  # a name that is a pure function of the schedule and the slot so a duplicate
+  # reconcile is a 409 and not a second rehearsal. `create` ONLY: nothing in
+  # this crate updates, replaces or deletes a `Restore` object, and a rehearsal
+  # that could edit its own child's spec after creating it would be able to
+  # change the plan an approver's scope was proved against.
+  - apiGroups: ["logweir.dev"]
+    resources: ["restores"]
+    verbs: ["create"]

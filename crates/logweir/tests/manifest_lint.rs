@@ -543,6 +543,8 @@ fn every_granted_verb_has_a_caller() {
             "trustpolicies" => "TrustPolicy",
             // PLAT-14.2 (D3 W6).
             "protectionpolicies" => "ProtectionPolicy",
+            // PLAT-14.3 (D3 W7), the other direction of the same mapping.
+            "rehearsalschedules" => "RehearsalSchedule",
             other => panic!(
                 "role.yaml grants a verb on `{other}`, which this test cannot map to an \
                  `Api<T>`. Add the mapping — a resource with no type is a grant nobody can \
@@ -757,6 +759,12 @@ fn every_call_site_has_a_grant() {
             // and ONE named `RecoveryCatalog` for `get_opt`. Nothing else is
             // granted and nothing else is called.
             "ProtectionPolicy" => ("logweir.dev", "protectionpolicies"),
+            // PLAT-14.3 (D3 W7): `controllers/rehearsal_schedule.rs` reaches
+            // its own kind for the `Controller::new` watch and `patch_status`,
+            // and `controllers/approval.rs` `get`s the one a standing
+            // `Approval` names — D3 §4.3's digest is recomputed from the
+            // referent's own sealed spec, so the referent has to be read.
+            "RehearsalSchedule" => ("logweir.dev", "rehearsalschedules"),
             "Job" => ("batch", "jobs"),
             "ConfigMap" => ("", "configmaps"),
             "Pod" => ("", "pods"),
@@ -1054,6 +1062,26 @@ fn the_four_cluster_roles_are_exactly_as_specified() {
             v(&["protectionpolicies/status"]),
             v(&["patch"]),
         ),
+        // PLAT-14.3 (D3 W7) — the `RehearsalSchedule` reconciler's own rows.
+        // `get` HAS a caller here where the other new kinds have none:
+        // `controllers/approval.rs` reads the referent a standing `Approval`
+        // names, because the digest it binds is recomputed from that object's
+        // sealed spec (D3 §4.3(a)).
+        (
+            v(&["logweir.dev"]),
+            v(&["rehearsalschedules"]),
+            v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+        ),
+        (
+            v(&["logweir.dev"]),
+            v(&["rehearsalschedules/status"]),
+            v(&["patch"]),
+        ),
+        // The ONE `Restore` a due slot creates. `create` only — nothing in the
+        // crate updates, replaces or deletes a `Restore` object, and a
+        // rehearsal that could edit its own child after creating it could
+        // change the plan its approver's scope was proved against.
+        (v(&["logweir.dev"]), v(&["restores"]), v(&["create"])),
     ];
     assert_eq!(
         rules_of("config/rbac/role.yaml", "weirkeeper"),
