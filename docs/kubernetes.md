@@ -1033,9 +1033,13 @@ is observable on the object or in the cluster:
    `planMaxAgeSeconds`. The digest covers the policy's `metadata.generation`, so
    **any spec edit invalidates an approval** — nothing has to remember to.
 3. The controller writes `status.lease` with a resourceVersion-preconditioned
-   PATCH and *then* performs a consistent, non-cached, cluster-wide list of
+   PATCH — **and it must land**; a 409 aborts the pass before any Job exists —
+   and *then* performs a consistent, non-cached, cluster-wide list of
    `Restore`s. The order is the property: a restore that arrives after the lease
-   is seen by the list.
+   is seen by the list. A `Restore` is matched to this destination **by
+   identity**: `spec.sourceDestinationRef.name` equal to the policy's
+   `spec.destinationRef.name` in the same namespace, and URL equality only for a
+   legacy restore that names no destination at all.
 4. The worker re-validates every key against `<scope.prefix>/<backupId>/` and
    refuses the whole plan, deleting nothing, on the first one outside it.
 
@@ -1056,9 +1060,23 @@ over every dependency kind, dev edges included. Adding the edge to `weirkeeper`,
 | the `evidenceWrite` grant | the `BackupDestination`'s own `spec.access.evidenceWrite` | create-only puts under `logweir/`, and no delete |
 
 The first can remove a point and cannot write the document that attributes its
-removal. The second can write that document and cannot remove anything. A run
-that cannot open its record sink **exits 3 having deleted nothing**, because an
-unattributable deletion is not performed.
+removal. The second can write that document and cannot remove anything.
+
+**A run with no `evidenceWrite` credential exits 3 having deleted nothing**, and
+is refused before any handle is built. A credential that exists but cannot
+actually write under `logweir/` is caught one step later and by a different
+mechanism: opening the sink configures a client and performs no round trip, so
+the guarantee that holds there is the narrower true one — *the first point whose
+intent tombstone cannot be written is not deleted, and neither is any point
+after it*. Either way nothing is removed unattributably; only the exit code
+differs (3 against 1).
+
+**This controller does not function live until the retention ServiceAccount
+exists.** Every Job it builds requests `logweir-retention`, and the chart does
+not create it yet (`retention.enabled` and the SA are the wave-4 RBAC worker's).
+An `Enforce` policy before that lands produces a Job whose pods the API server
+will not admit — correctly fail-closed, and a merge-ordering constraint rather
+than something to discover at the live acceptance.
 
 The controller never reads either Secret — `config/rbac/role.yaml` grants it no
 verb on `secrets` at all — and never inherits them: the reaper builds its handle
@@ -1066,8 +1084,9 @@ with `AmazonS3Builder::new()` and the destination's own frozen addressing, never
 `from_env()`, so no ambient `AWS_ENDPOINT_URL` can relocate a deletion
 (seam **S5**).
 
-**What a run writes, and in what order.** Per point: the signed-key intent
-tombstone at `logweir/retention/<policyUid>/<runId>/<pointId>.intent.json`, then
+**What a run writes, and in what order.** Per point: the create-only intent
+tombstone — **unsigned in this build**, see below — at
+`logweir/retention/<policyUid>/<runId>/<pointId>.intent.json`, then
 the **manifest**, then the segment objects, then the completion tombstone. The
 manifest goes first so that a run interrupted halfway leaves a set the catalog
 reports `Missing` rather than a plausible-looking `Partial` one, and the leftover
@@ -1081,14 +1100,48 @@ kubectl --context docker-desktop -n <namespace> \
 # sha256:…  — copy this into spec.enforcement.approvedPlanSha256 to authorise a run
 ```
 
+**The approved plan names each set's key BOUND, not its objects — and no
+surface pretends otherwise.** The catalog view carries a point's `manifestKey`
+and no segment list, and this controller holds no archive credential for the
+destination, so a plan line names the manifest, the set prefix
+`<scope.prefix>/<backupId>/`, and `enumerate_set: true`. The worker lists that
+bound and re-validates every key it gets back before deleting it — which is the
+second half of the wrong-prefix rule ("listed from that point's own manifest or
+set directory"). Three consequences an administrator is entitled to have in
+front of them:
+
+* `status.lastEvaluation.candidates[].objects` is **omitted**, not `1`. Absent
+  means *not observed*, which is the rule everywhere else in this API; the
+  `Evaluated` condition message says the view carries no segment keys and the
+  plan does not enumerate.
+* The real count comes from `logweir-retention run … --dry-run`, which holds the
+  list grant the run needs anyway and prints `retention-point=<id> state=Kept
+  objects=<n> code=DryRun` per point. Nothing deletes on that path: the deleter
+  is never called, which a test asserts over a deleter that panics.
+* **An object that appears under an approved bound between the preview and the
+  run is removed**, without having been in the approved bytes. That is the
+  honest cost of the bound, and it is what `spec.enforcement.planMaxAgeSeconds`
+  is for.
+
 **`status.guarantees` says who is enforcing what, and never flatters anyone.**
 Each of `ageExpiry`, `minUsablePoints`, `activeRestoreProtection`,
 `sharedSegments` and `legalHold` reads `LogweirEnforced`,
-`ProviderEnforcedUnverified` or `NotEnforced`. `legalHold` is
-`ProviderEnforcedUnverified` even in `Enforce`: `object_store` 0.14 exposes no
-WORM readback, so "legal hold respected" means exactly *a provider refusal is
-authoritative, recorded, not retried, and excluded from the next plan* — never
-"Logweir knows the hold exists".
+`ProviderEnforcedUnverified` or `NotEnforced`. Two of them are never
+`LogweirEnforced` on a view this build can read, and the reasons are different:
+
+* `legalHold` is `ProviderEnforcedUnverified` even in `Enforce`, because
+  `object_store` 0.14 exposes no WORM readback. "Legal hold respected" means
+  exactly *a provider refusal is authoritative, recorded, not retried, and
+  excluded from the next plan* — never "Logweir knows the hold exists". The
+  exclusion half is real: `status.lastEnforcement.failed[]` carries the closed
+  code, and the next evaluation protects that point as `LegalHold`.
+* `sharedSegments` is **`NotEnforced`**, because the guarantee needs a point's
+  segment keys and the catalog view entry has no segment field at all. The
+  evaluation implements the rule — a segment a retained point's manifest names
+  protects the candidate that shares it — and has nothing to apply it to. It
+  becomes `LogweirEnforced` on its own, with no code change, the day a view
+  entry carries its keys. **Until then, do not read this destination as
+  protected against a shared-segment removal.**
 
 **`mode: ExternalLifecycle` is a declaration, not an enforcement.** It records
 that a bucket lifecycle rule exists so a console can stop claiming retention is
@@ -1120,6 +1173,24 @@ what a timestamp-driven bucket rule does. And the newest `minUsablePoints` usabl
 points are kept whatever the rules say, reported as `MinUsablePoints` in
 `status.lastEvaluation.protected` so an operator can see which points the rules
 wanted and the floor saved.
+
+**What protects a point being restored, today, and what does not.** D3 §6.5
+calls for two guards. The one that exists is the controller's: before creating a
+Job it lists every `Restore` in the cluster with a quorum read and **refuses the
+run outright if any nonterminal one reads this destination** — not only if one
+names a candidate's set. That is deliberately wider than the design asks, and it
+is fail-closed: a run refused for a restore it would not have touched costs one
+cadence slot, and the other way costs the set.
+
+The one that does **not** exist yet is the restore-side half: `Restore`
+admission and rehearsal point selection are supposed to hold with reason
+`PointRetentionInProgress` while a matching `status.lease` exists.
+`controllers/restore.rs` is another worker's file and the arm is a recorded
+hand-off. So the residual window is a `Restore` **created after** the
+controller's consistent list and before the run's first delete. It is narrow; it
+is real; and until the admission arm lands, an operator planning a large restore
+during a retention window should suspend the policy (`mode: Report`) rather than
+rely on the race.
 
 **A retention failure never blocks a backup.** It is a different controller, a
 different object and a different condition: an unreadable catalog view writes
@@ -2237,7 +2308,7 @@ Amendment H extends Global Constraint 6 with one narrow exception: *a
 separately linked, separately credentialed, optional retention worker may
 delete objects under an explicitly configured archive prefix, never under
 `logweir/`, only from an administrator-approved plan, and only with an
-attributable signed record.* The sentence above therefore becomes
+attributable record.* The sentence above therefore becomes
 version-scoped: it holds wherever `RetentionPolicy.mode != Enforce`.
 
 **The worker now exists** (`crates/logweir-retention`, decision D3 §6.5), so the

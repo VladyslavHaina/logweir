@@ -25,6 +25,25 @@
 # A new paraphrase found in review is added to the list here, in the same
 # commit as the surface it was found on.
 #
+# THE SECOND CLAIM THIS GATE NOW CARRIES (D3 W9, review `d3w9` H3). The
+# retention worker's enforcement record and its per-point tombstones are
+# **create-only and unsigned in this build**, and `docs/stability.md` says so in
+# those terms together with the reason (signing would make
+# `logweir-retention` link `crates/logweir-evidence`, whose reaching set
+# `scripts/check-one-signer.sh` holds to `{logweir, e2e}` — a decision about the
+# SIGNER, taken in two files a deletion feature does not own). That passage also
+# writes the rule this gate now enforces: *no surface may describe the record as
+# signed until one of the two named remedies lands*.
+#
+# It is the same defect class and the same remedy: a documented guarantee the
+# code does not deliver, caught by grep because prose has no compiler. Four
+# shipped surfaces carried it on the branch that introduced the worker — the
+# CRD's own `doc` string, served by `kubectl explain` and shipped in
+# `config/crd/`, the chart's CRD copies, all seven rendered chart outputs and
+# `logweir.yaml`; two paragraphs of `docs/kubernetes.md`; and a
+# `RetentionPolicy` status condition message. The gate was green, because its
+# phrase list did not carry the wording.
+#
 # COSTS NOTHING AND REACHES NOTHING: no network, no Docker, no `.engine/`, no
 # cargo, no toolchain. It reads files.
 set -euo pipefail
@@ -44,6 +63,17 @@ PHRASES=(
   "control plane provably cannot"
   "no component of the control plane can sign"
   "weirkeeper cannot sign"
+  # The retention record (review `d3w9` H3). Each of these is a wording that
+  # was actually on a shipped surface, not a hypothetical: the honest
+  # replacement is "create-only and unsigned in this build".
+  "only with a signed record"
+  "attributable signed record"
+  "signed-key intent tombstone"
+  "signed-key record"
+  "signed retention record"
+  "signed tombstone"
+  "the record is signed"
+  "signed enforcement record"
 )
 
 # EXACTLY TWO EXEMPT PATHS, AS LITERALS — NEVER A PATTERN. These two files

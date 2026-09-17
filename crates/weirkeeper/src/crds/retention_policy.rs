@@ -253,7 +253,7 @@ pub struct Enforcement {
     group = "logweir.dev",
     version = "v1alpha1",
     kind = "RetentionPolicy",
-    doc = "What may be removed from one destination, and under whose authority (ADR 0008 Amendments G and H). `spec.destinationRef`, `spec.catalogRef` and `spec.scope` are immutable, because an approved deletion plan names point ids and a re-pointable policy would apply it elsewhere. `mode: Report` is the default and deletes nothing; `Enforce` opts in to a separately credentialed worker bounded to an explicit archive prefix, never `logweir/`, only from an approved plan, and only with a signed record.",
+    doc = "What may be removed from one destination, and under whose authority (ADR 0008 Amendments G and H). `spec.destinationRef`, `spec.catalogRef` and `spec.scope` are immutable, because an approved deletion plan names point ids and a re-pointable policy would apply it elsewhere. `mode: Report` is the default and deletes nothing; `Enforce` opts in to a separately credentialed worker bounded to an explicit archive prefix, never `logweir/`, only from an approved plan, and only with an attributable record written create-only under `logweir/` by a credential that cannot delete. That record is UNSIGNED in this build: it is tamper-evident against the retention principal and against anyone who can only delete, and not against a principal that can write under `logweir/` (docs/stability.md).",
     plural = "retentionpolicies",
     singular = "retentionpolicy",
     namespaced,

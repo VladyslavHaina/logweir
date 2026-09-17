@@ -5796,7 +5796,11 @@ spec:
           point ids and a re-pointable policy would apply it elsewhere. `mode: Report`
           is the default and deletes nothing; `Enforce` opts in to a separately credentialed
           worker bounded to an explicit archive prefix, never `logweir/`, only from
-          an approved plan, and only with a signed record.'
+          an approved plan, and only with an attributable record written create-only
+          under `logweir/` by a credential that cannot delete. That record is UNSIGNED
+          in this build: it is tamper-evident against the retention principal and
+          against anyone who can only delete, and not against a principal that can
+          write under `logweir/` (docs/stability.md).'
         properties:
           spec:
             description: '`RetentionPolicy.spec`.'

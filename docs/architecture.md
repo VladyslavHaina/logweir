@@ -323,7 +323,7 @@ Global Constraint 6 ("Logweir writes only under `logweir/`, create-only") is
 extended with: *a separately linked, separately credentialed, optional retention
 worker may delete objects under an explicitly configured archive prefix, never
 under `logweir/`, only from an administrator-approved plan, and only with an
-attributable signed record.*
+attributable record.*
 
 `logweir-store` remains delete-free and the control plane remains delete-free.
 G-RET becomes a linkage gate as well as a source-text gate.
@@ -332,11 +332,39 @@ Tag 1's statement "no Logweir component holds any delete capability against
 object storage" becomes **version-scoped**: it is true wherever
 `RetentionPolicy.mode != Enforce`, which includes every installation that has no
 `RetentionPolicy` at all and every one whose policies are `Report` (the schema
-default) or `ExternalLifecycle`. **No worker exists in this build**, so the
-statement is currently unqualified in fact; it stops being unqualified in
-principle the moment an `Enforce` policy can be acted on, and
-`docs/stability.md`, `docs/kubernetes.md` §9 and §15.1 and the chart README are
-updated together with the code that changes it.
+default) or `ExternalLifecycle`.
+
+**Amended 2026-09-17, D3 W9 fix round 1 (review `d3w9` H5 and H3).** Two
+sentences of this amendment were written before the worker existed and are now
+false as written; they are corrected here rather than left to contradict
+`docs/kubernetes.md` six hundred lines away.
+
+1. **The worker exists.** `crates/logweir-retention` is the binary and
+   `crates/logweir-reaper` is the only crate in the workspace that names an
+   object-store delete; `scripts/check-no-archive-write.sh` check 3 walks
+   `cargo metadata` over every dependency kind and asserts the reaching set is
+   exactly `{logweir-retention}`. The version-scoped statement above is
+   therefore genuinely scoped rather than vacuously so: it still holds
+   unconditionally for `logweir-store`, the control plane, the everyday
+   `logweir` binary and `logweir-api`, none of which links the deleting crate,
+   and for every installation that has created no `Enforce` policy.
+2. **The record is attributable, and it is NOT signed in this build.** The word
+   "signed" is struck from the amendment above. Signing would make
+   `logweir-retention` link `crates/logweir-evidence`, whose reaching set
+   `scripts/check-one-signer.sh` holds to `{logweir, e2e}` — a decision about
+   the **signer**, taken in two files a deletion feature does not own. What is
+   delivered is a create-only put under `logweir/`, written with the
+   destination's `evidenceWrite` grant, to a prefix the run's own delete-capable
+   credential cannot reach: tamper-evident against the retention principal and
+   against anyone who can only delete, and **not** against a principal holding
+   `s3:PutObject` under `logweir/`, which could pre-empt the key. `docs/stability.md`
+   states both halves and forbids any surface from calling the record signed
+   until one of two named remedies lands; `scripts/check-withdrawn-claim.sh`
+   enforces that as a grep, in the same defect class as the original withdrawn
+   signing claim.
+
+`docs/stability.md`, `docs/kubernetes.md` §7f and §9 and the chart README carry
+the operator-facing form of both corrections.
 
 `ExternalLifecycle` is a **declaration and not an enforcement**: Logweir neither
 reads nor verifies a provider lifecycle rule, and `status.guarantees` records

@@ -977,8 +977,10 @@ retention-result=deleted=2 failed=1 objects=10
 requiring a delete-capable Secret to produce one would make a preview need the authority it exists
 to avoid.
 
-**Bounded retry, by code.** Three attempts per key with 1 s and 4 s between them, and **only** for
-a 5xx or a timeout. `AccessDenied`, `Locked` and `PreconditionFailed` are answered once — a second
+**Bounded retry, by code.** Three attempts per key — **two waits, because three attempts have two
+gaps** — of 1 s and 4 s, and **only** for a 5xx or a timeout. D3 §6.5 writes the backoff as
+"1 s/4 s/16 s", which reads as three numbers; a third wait would come after the last attempt, i.e.
+sixteen seconds of holding a Job open to learn nothing. `AccessDenied`, `Locked` and `PreconditionFailed` are answered once — a second
 attempt at a policy decision is three seconds of nothing — and `NotFound` is success, because a key
 an interrupted run already removed is a key this run wanted removed. That last rule is what makes
 completion idempotent: a `Orphaned` point's leftover segment keys are exactly what the next plan
@@ -1005,11 +1007,27 @@ approved plan digest, the approver reference, the rules as applied, every delete
 object count and every failure with its closed code. They are therefore tamper-evident against the
 retention principal, and against anyone who can only delete.
 
-What they **do not** prove: anything against a principal holding `s3:PutObject` under `logweir/`
-before the record is written, which a signature would cover and a create-only put does not. Closing
-that is either a reviewed widening of the one-signer allowlist for this binary, or a signing step
-performed by something that already holds the key; **neither is implemented, and no surface may
-describe the record as signed until one is.**
+What they **do not** prove: anything against a principal holding `s3:PutObject` under `logweir/`.
+Such a principal cannot replace the record — `PutMode::Create` refuses a second put — but it can
+**pre-empt** it: the run id is deterministic and derivable from the status, so a plausible document
+written at `logweir/retention/<uid>/<runId>.json` before the run makes the real put fail, which the
+worker reports on stderr and does not treat as fatal. The run still exits on its real outcome and
+the per-point tombstones are the surviving trail, but the top-level record is then an attacker's
+document. That is exactly the gap a signature closes.
+
+Closing it is either a reviewed widening of the one-signer allowlist for this binary, or a signing
+step performed by something that already holds the key; **neither is implemented, and no surface may
+describe the record as signed until one is.** That sentence is enforced rather than advisory:
+`scripts/check-withdrawn-claim.sh` carries eight paraphrases of it in its `PHRASES` list, in the
+same defect class as the original withdrawn signing claim, and fails the build on any shipped
+surface that restates it — the CRD's `doc` string and its ten generated copies included.
+
+**What W14 must assert instead of a signature:** that the record exists at
+`logweir/retention/<uid>/<runId>.json`; that its bytes digest to
+`status.lastEnforcement.recordSha256`, which the controller now publishes; that a second put at the
+same key is refused; that each deleted point's intent tombstone exists and predates its deletion;
+and — the one that actually matters — that the delete-capable principal can neither `PutObject` nor
+`DeleteObject` under `logweir/`, probed directly.
 
 ### A phase-5 / phase-6 `restore.yaml` divergence is exit 1, not exit 3
 
