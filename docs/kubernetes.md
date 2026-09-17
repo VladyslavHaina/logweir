@@ -1165,36 +1165,70 @@ Three RBAC notes, because each is easy to get wrong:
   by deriving each `Api<T>` call in `crates/weirkeeper/src/` and requiring a
   grant for it in every shipped copy of the role.
 
-### Which pod is read: the Job's owner UID, never the label alone
+### Which pod is read: the Job's owner reference, never the label alone
 
-**A pod is read only when its controller `ownerReference` is a `Job` whose
-`uid` is the run's own Job UID.** The `batch.kubernetes.io/job-name` label (and
-its legacy unprefixed spelling, still set on 1.29) narrows the listing, because
-a Job's pod name is generated and cannot be known in advance — but the label is
-a *selector*, never a *decision*. Anything that can create a pod in the
-namespace can set it, so a controller that read "the first pod with this label"
-would lift a planted pod's `state.terminated.exitCode`, its `refusal-reason=`
-line and its evidence keys onto somebody else's `Backup`, `Restore` or
+**A pod is read only when its controller `ownerReference` is a `batch/v1`
+`Job` whose `uid` is the run's own Job UID, and only when exactly one pod
+claims it.** The `batch.kubernetes.io/job-name` label (and its legacy
+unprefixed spelling, still set on 1.29) narrows the listing, because a Job's
+pod name is generated and cannot be known in advance — but the label is a
+*selector*, never a *decision*. Anything that can create a pod in the namespace
+can set it, so a controller that read "the first pod with this label" would
+lift a planted pod's `state.terminated.exitCode`, its `refusal-reason=` line
+and its evidence keys onto somebody else's `Backup`, `Restore` or
 `KafkaCluster` — a tenant-authored exit code and a tenant-authored pair of
-object keys on an object an approver reads. A UID is minted by the API server
-and cannot be forged by a pod author, and `controller: true` is required
-because a pod may carry several owner references and only one of them is the
-controller; an added non-controller reference is an association its own author
-made. The same rule covers a Job deleted and re-created under the same name
-(`Backup` and `Restore` Jobs *are* named after their object), whose
-predecessor's pod keeps the label until garbage collection finishes. **There is
-no fallback**: zero owned pods is "no pod yet" and takes the crashed-Job branch
-below — `exitCode` absent, phase `Failed`, reason `NoExitCode`, and for a
-`KafkaCluster` probe `reachable` left untouched — which is also what happens
-when the pod was genuinely garbage-collected. If a Job somehow owns two pods
-(an evicted runner replaced mid-reconcile), the **newest by
-`creationTimestamp`** is read, tie-broken by name, so two reconciles over the
-same cluster state cannot record two different exit codes. An ignored
-candidate is not silent: the controller logs it once per pod with code
-`ForeignPodIgnored`, naming the namespace, the Job and the pod. Nothing about
-this is configurable and nothing about it changes an object's schema, so there
-is no migration step, and an operator sees the change only as a run whose pod
-was never really its own no longer producing a status.
+object keys on an object an approver reads.
+
+**What the owner check buys, stated exactly.** `ownerReferences` is ordinary
+metadata written by whoever creates the pod. **Kubernetes does not validate
+it**: the API server does not check that the named owner exists, that the UID
+is right, or that the creator is entitled to claim it —
+`OwnerReferencesPermissionEnforcement` is not in the default admission chain,
+and where it is enabled it checks `delete` on the owner and never the UID. A
+pod's own `metadata.uid` is unforgeable; the `uid` inside an owner reference is
+not. So the check raises the bar from *anyone who can create a pod in this
+namespace* to *anyone who can create a pod **and** read the Job's
+`metadata.uid`* — a real reduction, because the label is guessable from the
+object's name and the UID is not, and that is the whole of it. The
+operator-side control is the one that closes it: **do not grant pod-create in a
+namespace where runs execute.** Kubernetes' built-in `edit` role carries both
+`pods: create` and `jobs: get`, which is exactly the pair this needs, so a
+namespace where untrusted tenants hold `edit` is not a namespace to run backups
+in. See [install.md](install.md) for the runner namespace layout.
+
+**Ambiguity is refused, not ranked.** Runner Jobs pin `backoffLimit: 0` and
+`restartPolicy: Never`, so the job controller cannot produce two pods for one
+Job. If two pods nevertheless claim it, at least one was minted by somebody who
+read the Job's UID, and the controller cannot tell which — so it reads **none**
+of them and writes the terminal state `PodOwnershipContested` (`exitCode`
+absent, phase `Failed`; for a `KafkaCluster` probe, `Reachable=Unknown` and
+`reachable` left unset). Picking the newest would be worse than picking at
+random: a planted pod is created after the genuine one by construction, so a
+newest-wins rule decides every contest in the planter's favour.
+`PodOwnershipContested` is deliberately **not** retryable — re-running the Job
+into the same namespace invites the same second claimant. A pod that fails the
+owner check is not a claimant and cannot contest anything, so the label alone
+still buys an attacker nothing at all.
+
+`controller: true` is required because a pod may carry several owner references
+and only one of them is the controller; an added non-controller reference is an
+association its own author made. The `batch/v1` group is checked because `Job`
+is not a `batch/v1`-exclusive kind. The same rule covers a Job deleted and
+re-created under the same name (`Backup` and `Restore` Jobs *are* named after
+their object), whose predecessor's pod keeps the label until garbage collection
+finishes.
+
+**There is no fallback.** Zero claiming pods is "no pod yet" and takes the
+crashed-Job branch below — `exitCode` absent, phase `Failed`, reason
+`NoExitCode`, and for a probe `reachable` left untouched — which is also what
+happens when the pod was genuinely garbage-collected. A Job with no
+`metadata.uid` is not even listed for. Every candidate that was not read is
+logged once, with code `ForeignPodIgnored` and the namespace, the Job and the
+pod name; in the contested case **all** claimants are named, including the one
+a newest-wins rule would have chosen. Nothing here is configurable and nothing
+changes an object's schema, so there is no migration step; an operator sees the
+change only as a run whose pod was never really its own no longer producing a
+status.
 
 ### The crashed Job: when there is no exit code at all
 
