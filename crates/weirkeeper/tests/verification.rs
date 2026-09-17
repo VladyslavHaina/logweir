@@ -3556,3 +3556,393 @@ fn a_policy_event_enqueues_the_objects_it_could_govern_and_no_others() {
         "2026-09-04T00:00:00Z"
     ))));
 }
+
+// ===========================================================================
+// Fix round 2 — the wiring itself (review findings G1 and G2)
+// ===========================================================================
+
+/// A `Backup` in `namespace`, named `name`, with a `resourceVersion`.
+fn backup_in(namespace: &str, name: &str, resource_version: &str) -> Backup {
+    serde_json::from_value(json!({
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "Backup",
+        "metadata": {
+            "name": name,
+            "namespace": namespace,
+            "uid": format!("uid-{name}"),
+            "generation": 1,
+            "resourceVersion": resource_version,
+        },
+        "spec": {
+            "sourceRef": {"name": "prod"},
+            "topics": ["orders"],
+            "archive": {"url": "s3://kafka-backups/k8s-demo",
+                        "secretRef": {"name": "logweir-s3"}},
+            "triggeredBy": "manual",
+            "deadlineSeconds": 3600,
+        },
+    }))
+    .expect("the fixture is a Backup")
+}
+
+/// **G1.** An edit that NARROWS wakes the namespace it stopped governing.
+///
+/// # The fail-open this closes
+///
+/// A `watches` mapper is handed only the NEW object. Removing `team-a` from
+/// `spec.namespaces` — or clearing `spec.default` — makes the new object's own
+/// scope false for `team-a` and would enqueue nothing there, although that edit
+/// is precisely what changed `team-a`'s resolution. A terminal `Backup` heals
+/// on its next requeue; a terminal `Restore` parks on `Action::await_change()`
+/// and **nothing** wakes it, so if the namespace's new fallback does not carry
+/// the signing key the correct verdict is `UntrustedSigner` and the object
+/// keeps a green badge indefinitely.
+///
+/// KILLS: "enqueue only what the new object names" — rows 2 and 4 below.
+#[test]
+fn a_policy_edit_that_narrows_still_wakes_what_it_stopped_governing() {
+    use weirkeeper::trust::{PolicyScope, PolicyScopeMemory};
+
+    let scopes = PolicyScopeMemory::default();
+    let wide = policy("team", &["team-a", "team-b"], vec![evidence_key()]);
+    let narrow = policy("team", &["team-a"], vec![evidence_key()]);
+
+    // 1. FIRST SIGHTING — no history, so the scope is what it declares.
+    assert_eq!(
+        scopes.observe(&wide),
+        PolicyScope::Namespaces(["team-a".to_string(), "team-b".to_string()].into()),
+    );
+
+    // 2. NARROWING — `team-b` is gone from the object and MUST still be woken.
+    assert_eq!(
+        scopes.observe(&narrow),
+        PolicyScope::Namespaces(["team-a".to_string(), "team-b".to_string()].into()),
+        "the namespace this edit stopped governing is the one whose resolution certainly \
+         changed, and the new object is the one place its name no longer appears"
+    );
+
+    // 3. THE MEMORY MOVED WITH IT — a second identical event is not still
+    //    dragging `team-b` along for ever.
+    assert_eq!(
+        scopes.observe(&narrow),
+        PolicyScope::Namespaces(["team-a".to_string()].into()),
+        "the union is with the PREVIOUS event, not with everything ever seen"
+    );
+
+    // 4. CLEARING `default` IS THE SAME EDIT ONE LEVEL UP.
+    let scopes = PolicyScopeMemory::default();
+    let fallback = policy("org-default", &[], vec![evidence_key()]);
+    assert_eq!(scopes.observe(&fallback), PolicyScope::Everything);
+    assert_eq!(
+        scopes.observe(&policy("org-default", &["team-a"], vec![evidence_key()])),
+        PolicyScope::Everything,
+        "a policy that stops being the cluster default could have changed EVERY namespace that \
+         was falling through to it"
+    );
+
+    // 5. WIDENING still works, and `Everything` absorbs from either side.
+    let scopes = PolicyScopeMemory::default();
+    assert_eq!(
+        scopes.observe(&policy("p", &["team-a"], vec![evidence_key()])),
+        PolicyScope::Namespaces(["team-a".to_string()].into()),
+    );
+    assert_eq!(
+        scopes.observe(&policy("p", &[], vec![evidence_key()])),
+        PolicyScope::Everything
+    );
+}
+
+/// **G2.** The mapper returns the objects in scope and no others.
+///
+/// KILLS: "return the whole store whatever the scope" (the unbound object) and
+/// "return nothing for `Everything`" (the third arm).
+#[test]
+fn the_trigger_maps_a_scope_to_the_objects_in_it() {
+    use weirkeeper::trust::PolicyScope;
+    use weirkeeper::verification::targets_in_scope;
+
+    let store: Vec<std::sync::Arc<Backup>> = vec![
+        std::sync::Arc::new(backup_in("team-a", "nightly", "11")),
+        std::sync::Arc::new(backup_in("team-b", "hourly", "12")),
+        std::sync::Arc::new(backup_in("team-c", "weekly", "13")),
+    ];
+    let names = |refs: Vec<kube::runtime::reflector::ObjectRef<Backup>>| {
+        refs.into_iter()
+            .map(|r| format!("{}/{}", r.namespace.unwrap_or_default(), r.name))
+            .collect::<std::collections::BTreeSet<String>>()
+    };
+
+    let scoped = names(targets_in_scope(
+        store.clone(),
+        &PolicyScope::Namespaces(["team-a".to_string(), "team-b".to_string()].into()),
+    ));
+    assert_eq!(
+        scoped,
+        ["team-a/nightly".to_string(), "team-b/hourly".to_string()].into(),
+        "a policy that names its namespaces wakes those and nothing else — `team-c` is \
+         untouched, which is what makes the trigger cheap on a cluster with many tenants"
+    );
+
+    assert_eq!(
+        names(targets_in_scope(store.clone(), &PolicyScope::Everything)).len(),
+        3,
+        "a policy that is, or was, the cluster default could have changed any of them"
+    );
+    assert!(
+        names(targets_in_scope(
+            store,
+            &PolicyScope::Namespaces(Default::default())
+        ))
+        .is_empty(),
+        "an empty scope enqueues nothing at all"
+    );
+}
+
+/// **G2.** `apply_retrust` sends ONE preconditioned `/status` PATCH, and
+/// nothing when the verdict has not moved.
+///
+/// This is the only function that writes the re-trust verdict and the only
+/// place seam **S7**'s `metadata.resourceVersion` precondition is applied, and
+/// until this row it had no test at all: a refactor that dropped the
+/// precondition, or that wrote a run fact, would have passed the whole suite.
+///
+/// KILLS: "send the patch without `metadata.resourceVersion`"; "patch the whole
+/// status"; "send a patch even when `retrust` returned `None`".
+#[tokio::test]
+async fn apply_retrust_sends_one_preconditioned_status_patch_or_nothing() {
+    let sent: Arc<Mutex<Vec<(String, String, Value)>>> = Arc::new(Mutex::new(Vec::new()));
+    let client = {
+        let sent = Arc::clone(&sent);
+        kube::Client::new(
+            service_fn(move |req: Request<Body>| {
+                let sent = Arc::clone(&sent);
+                async move {
+                    let method = req.method().to_string();
+                    let uri = req.uri().to_string();
+                    let bytes = req.into_body().collect().await.expect("a body").to_bytes();
+                    let body: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+                    sent.lock().expect("the recorder").push((method, uri, body));
+                    Ok::<_, std::convert::Infallible>(
+                        Response::builder()
+                            .status(200)
+                            .body(Body::from(
+                                serde_json::to_vec(&json!({
+                                    "apiVersion": "logweir.dev/v1alpha1", "kind": "Backup",
+                                    "metadata": {"name": "nightly", "namespace": "team-a",
+                                                 "uid": "uid-nightly", "resourceVersion": "42"},
+                                    "spec": {"sourceRef": {"name": "prod"},
+                                             "topics": ["orders"],
+                                             "archive": {"url": "s3://b",
+                                                         "secretRef": {"name": "s"}},
+                                             "triggeredBy": "manual",
+                                             "deadlineSeconds": 3600},
+                                }))
+                                .expect("serialises"),
+                            ))
+                            .expect("a response"),
+                    )
+                }
+            }),
+            "default",
+        )
+    };
+
+    // A terminal Backup carrying a `Valid` verdict, and a policy that revoked
+    // the key that produced it.
+    let mut object = backup_in("team-a", "nightly", "17");
+    object.status = serde_json::from_value(verified_status("2026-09-04T00:00:00Z"))
+        .expect("the fixture status is a BackupStatus");
+    let effective = at("2026-09-10T00:00:00Z");
+    let mut key = evidence_key();
+    key.state = KeyState::Revoked;
+    key.revoked_at = Some(effective);
+    key.revocation_reason = Some(RevocationReason::KeyCompromise);
+    key.revocation_effective_from = Some(effective);
+    let revoked = Resolution::Trust(Box::new(resolved(&policy("org-default", &[], vec![key]))));
+    let api: kube::Api<Backup> = kube::Api::namespaced(client.clone(), "team-a");
+
+    let outcome = weirkeeper::verification::apply_retrust(
+        &api,
+        &object,
+        &revoked,
+        backup_badge,
+        at("2026-09-12T08:00:00Z"),
+    )
+    .await
+    .expect("the double answers 200")
+    .expect("a revocation changes the verdict, so a patch is owed");
+    assert_eq!(
+        (outcome.from.as_str(), outcome.to.as_str()),
+        ("Valid", "Untrusted")
+    );
+
+    let calls = sent.lock().expect("the recorder").clone();
+    assert_eq!(calls.len(), 1, "exactly one write; got {calls:?}");
+    let (method, uri, body) = &calls[0];
+    assert_eq!(method, "PATCH");
+    assert!(
+        uri.split('?')
+            .next()
+            .is_some_and(|p| p.ends_with("/namespaces/team-a/backups/nightly/status")),
+        "the STATUS subresource and nothing else; got {uri}"
+    );
+    // ---- SEAM S7 ----
+    assert_eq!(
+        body["metadata"]["resourceVersion"],
+        json!("17"),
+        "every status write this branch adds carries `metadata.resourceVersion` as a \
+         PRECONDITION, so an object that changed between the read and this write answers 409 and \
+         the next reconcile reasons from what the object now says — which matters more here than \
+         anywhere else, because this pass reasons entirely from stored fields. Got {body}"
+    );
+    let touched: Vec<&String> = body["status"]
+        .as_object()
+        .expect("a status object")
+        .keys()
+        .collect();
+    assert_eq!(
+        touched,
+        vec!["evidence", "conditions"],
+        "D3 §7.4: the verification block and the condition that says the same thing, and never \
+         `phase`, `exitCode` or `outcome`. Got {body}"
+    );
+    assert_eq!(
+        body["status"]["evidence"]["verification"]["result"],
+        json!("Untrusted")
+    );
+
+    // ---- AND A SECOND PASS OVER THE PATCHED OBJECT SENDS NOTHING ----
+    sent.lock().expect("the recorder").clear();
+    let patched = body["status"].clone();
+    let mut settled = backup_in("team-a", "nightly", "18");
+    settled.status = serde_json::from_value(patched).expect("the patched status round-trips");
+    assert!(
+        weirkeeper::verification::apply_retrust(
+            &api,
+            &settled,
+            &revoked,
+            backup_badge,
+            at("2026-09-13T08:00:00Z"),
+        )
+        .await
+        .expect("no request is made at all")
+        .is_none(),
+        "the verdict is already what the policy says (erratum E11(d))"
+    );
+    assert!(
+        sent.lock().expect("the recorder").is_empty(),
+        "…and nothing was sent: one `kubectl apply` on a policy must not wake every terminal \
+         object in the cluster into a write"
+    );
+
+    // ---- NO PRECONDITION, NO PATCH ----
+    sent.lock().expect("the recorder").clear();
+    let mut unversioned = object.clone();
+    unversioned.metadata.resource_version = None;
+    assert!(
+        weirkeeper::verification::apply_retrust(
+            &api,
+            &unversioned,
+            &revoked,
+            backup_badge,
+            at("2026-09-12T08:00:00Z"),
+        )
+        .await
+        .expect("this is not an API failure")
+        .is_none(),
+        "an object with nothing to precondition on is not one this pass may write over blind"
+    );
+    assert!(sent.lock().expect("the recorder").is_empty());
+}
+
+/// **G3.** The roster is the FALLBACK, so a namespace a policy governs costs
+/// **no** API call at all.
+///
+/// # Why this counts requests instead of asserting a verdict
+///
+/// Because the optimisation is invisible in the verdict: resolving with the
+/// roster fetched and resolving without it produce the same `Resolution` for
+/// every namespace a policy answers — that is precisely why it is safe. The
+/// only observable is the request that does not happen, and the re-trust pass
+/// runs on every reconcile of every verdict-carrying object, so "one
+/// `GET trustrosters/default` per object per requeue" is the cost this row
+/// exists to hold down.
+///
+/// KILLS: "always fetch the roster before resolving" — the first two arms then
+/// make one request each.
+#[tokio::test]
+async fn a_namespace_a_policy_governs_reads_no_roster() {
+    let reads = Arc::new(AtomicUsize::new(0));
+    let client = {
+        let reads = Arc::clone(&reads);
+        kube::Client::new(
+            service_fn(move |req: Request<Body>| {
+                let reads = Arc::clone(&reads);
+                async move {
+                    assert!(
+                        req.uri().path().ends_with("/trustrosters/default"),
+                        "the only call this seam may make is the roster fallback; got {}",
+                        req.uri()
+                    );
+                    reads.fetch_add(1, Ordering::SeqCst);
+                    Ok::<_, std::convert::Infallible>(
+                        Response::builder()
+                            .status(404)
+                            .body(Body::from(
+                                br#"{"kind":"Status","apiVersion":"v1","status":"Failure",
+                                     "reason":"NotFound","code":404}"#
+                                    .to_vec(),
+                            ))
+                            .expect("a response"),
+                    )
+                }
+            }),
+            "default",
+        )
+    };
+
+    let explicit = policy("team-a", &["team-a"], vec![evidence_key()]);
+    let fallback = policy("org-default", &[], vec![evidence_key()]);
+    let contested = vec![
+        policy("one", &["team-b"], vec![evidence_key()]),
+        policy("two", &["team-b"], vec![evidence_key()]),
+    ];
+
+    for (label, policies, namespace) in [
+        (
+            "an explicit spec.namespaces match",
+            vec![explicit.clone()],
+            "team-a",
+        ),
+        ("the single default policy", vec![fallback], "anything"),
+        ("a contested namespace", contested, "team-b"),
+    ] {
+        let before = reads.load(Ordering::SeqCst);
+        weirkeeper::trust::resolve_with(&policies, &client, namespace)
+            .await
+            .expect("resolution completes");
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            before,
+            "{label}: the roster is reached only after an explicit match AND the default have \
+             both missed, so this answer costs nothing"
+        );
+    }
+
+    // …AND A NAMESPACE NO POLICY ANSWERS STILL FALLS THROUGH TO IT, exactly
+    // once. The optimisation removes a read; it must not remove the fallback.
+    let before = reads.load(Ordering::SeqCst);
+    let resolution = weirkeeper::trust::resolve_with(&[explicit], &client, "team-z")
+        .await
+        .expect("resolution completes");
+    assert_eq!(
+        reads.load(Ordering::SeqCst),
+        before + 1,
+        "a namespace no policy names is what the roster is FOR"
+    );
+    assert_eq!(
+        resolution,
+        Resolution::Unconfigured,
+        "and with no roster either, that is today's RosterNotFound"
+    );
+}

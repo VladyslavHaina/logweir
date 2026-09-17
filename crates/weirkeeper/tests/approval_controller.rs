@@ -2335,11 +2335,15 @@ async fn a_contested_namespace_refuses_every_approval() {
         "both claimants are named, so the operator knows which two objects disagree; got {message}"
     );
     assert_eq!(
-        seen(&recorder).len(),
-        2,
-        "the referent is NEVER fetched: without a resolved key set there is nothing any signature \
-         could be checked against. Saw {:?}",
-        seen(&recorder)
+        seen(&recorder),
+        vec![(
+            "GET".to_string(),
+            "/apis/logweir.dev/v1alpha1/trustpolicies".to_string()
+        )],
+        "the referent is NEVER fetched — without a resolved key set there is nothing any \
+         signature could be checked against — and NEITHER IS THE ROSTER: resolution reaches it \
+         only after an explicit match and the default have both missed, and a conflict is \
+         decided from the policy list alone"
     );
 }
 
