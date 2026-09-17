@@ -139,6 +139,15 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["kafkaclusters"]
     verbs: ["get"]
+  # The `BackupSchedule` a scheduled run's `spec.scheduleRef` names. `get` only,
+  # on one named object, and only BEFORE the run's inputs are frozen: D1 §3.1
+  # rule 2 makes an unfrozen scheduled run terminal `ScheduleNotFound` when its
+  # schedule is absent or carries another UID, which is how "deleting a schedule
+  # stops future work" is still said once PLAT-05.2 removes the ownerReference
+  # that used to say it. A manual run never makes this read.
+  - apiGroups: ["logweir.dev"]
+    resources: ["backupschedules"]
+    verbs: ["get"]
   # Events, so a refused Job or an unschedulable pod leaves a trail an operator
   # sees with `kubectl describe backup`. `create` and `patch` only — the
   # aggregated event API patches an existing series rather than appending.

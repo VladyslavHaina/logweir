@@ -288,9 +288,9 @@ pub fn run_identity(backup: &Backup) -> Result<RunIdentity, IdentityError> {
              execution id",
         )
     })?;
-    if slot.len() != SLOT_NAME_LEN || !valid_slot(&slot) {
+    if !valid_slot(&slot) {
         return Err(mismatch(format!(
-            "spec.slot `{slot}` is not a UTC slot in yyyymmdd-hhmmss form"
+            "spec.slot `{slot}` is not a UTC instant in yyyymmdd-hhmmss form"
         )));
     }
 
@@ -336,14 +336,18 @@ pub fn run_identity(backup: &Backup) -> Result<RunIdentity, IdentityError> {
     // ---- rule 3's last clause: a UID from somewhere ---------------------
     let (uid, from_owner_reference) = match reference.uid.as_deref().filter(|u| !u.is_empty()) {
         Some(uid) => (uid.to_string(), false),
-        None => match legacy_owner_uid(backup) {
+        None => match legacy_owner_uid(backup, &reference.name) {
             Some(uid) => (uid, true),
             None => {
-                return Err(mismatch(
+                return Err(mismatch(format!(
                     "a scheduled Backup needs spec.scheduleRef.uid, or the complete \
-                     BackupSchedule controller ownerReference an earlier controller wrote; with \
-                     neither, two same-named schedules' runs would share an archive prefix",
-                ))
+                     BackupSchedule controller ownerReference an earlier controller wrote for \
+                     `{}` — a reference of that kind naming a DIFFERENT schedule does not \
+                     supply it, because the legacy identity is that owner's UID and the run \
+                     would execute under another schedule's archive prefix. With neither, two \
+                     same-named schedules' runs would share one",
+                    reference.name
+                )))
             }
         },
     };
@@ -416,12 +420,11 @@ pub fn is_run_of_schedule(backup: &Backup, name: &str, uid: &str) -> bool {
     if named && reference.and_then(|r| r.uid.as_deref()) == Some(uid) {
         return true;
     }
-    if legacy_owner_uid(backup).as_deref() == Some(uid)
-        && backup
-            .owner_references()
-            .iter()
-            .any(|o| o.controller == Some(true) && o.name == name)
-    {
+    // The name is inside `legacy_owner_uid` now, and this call is where it
+    // always had to be: membership by ownerReference means "owned by the
+    // BackupSchedule called `name` with UID `uid`", never "owned by some
+    // BackupSchedule, and separately there is an owner called `name`".
+    if legacy_owner_uid(backup, name).as_deref() == Some(uid) {
         return true;
     }
     named
@@ -432,8 +435,23 @@ pub fn is_run_of_schedule(backup: &Backup, name: &str, uid: &str) -> bool {
             == Some(uid)
 }
 
-/// The UID of the complete `BackupSchedule` controller ownerReference, if any.
-fn legacy_owner_uid(backup: &Backup) -> Option<String> {
+/// The UID of the complete `BackupSchedule` controller ownerReference **naming
+/// `schedule`**, if any.
+///
+/// # THE NAME IS PART OF THE MATCH, AND LEAVING IT OUT IS AN ARCHIVE BUG
+///
+/// The legacy identity IS this owner's UID. A `Backup` whose
+/// `spec.scheduleRef` names `a` while its controller ownerReference names `b`
+/// would, without this equality, execute under schedule `b`'s archive prefix —
+/// a run filed under a schedule that never asked for it, and two schedules'
+/// history mixed in one bucket. The controller that wrote both fields always
+/// wrote the same name in them, so requiring it refuses only objects no
+/// controller produced.
+///
+/// `schedule` is passed in rather than read here because the caller has
+/// already resolved `spec.scheduleRef`, and a second read is a second chance
+/// to read a different field.
+fn legacy_owner_uid(backup: &Backup, schedule: &str) -> Option<String> {
     backup
         .owner_references()
         .iter()
@@ -441,6 +459,7 @@ fn legacy_owner_uid(backup: &Backup) -> Option<String> {
             o.controller == Some(true)
                 && o.kind == "BackupSchedule"
                 && o.api_version.starts_with(crate::crds::GROUP)
+                && o.name == schedule
                 && !o.uid.is_empty()
         })
         .map(|o| o.uid.clone())
@@ -456,13 +475,22 @@ fn composed_len(schedule: &str, slot: &str, attempt: u32) -> usize {
     crate::slot::SCHEDULED_BACKUP_PREFIX.len() + schedule.len() + 1 + slot.len() + suffix
 }
 
-/// `yyyymmdd-hhmmss`, digits and one hyphen.
+/// `yyyymmdd-hhmmss`, digits and one hyphen, **and a date that exists**.
+///
+/// # THE SHAPE IS NOT THE CHECK
+///
+/// `20261309-031700` is fifteen bytes of digits with a hyphen at 8 and is not a
+/// date; so is `20260230-000000`, and so is `20260915-256100`. A slot IS a UTC
+/// instant — it is half of the run's name and half of its archive prefix — so
+/// an object named after an instant that never occurs would take a prefix no
+/// schedule can ever mint, and no later run of that slot could collide with it
+/// to reveal the mistake. The `chrono` round-trip is what makes the check about
+/// the calendar rather than about the alphabet: `parse_from_str` is lenient in
+/// places (it accepts some out-of-range fields by normalising), and formatting
+/// the parsed value back and comparing is what rejects what it normalised.
 fn valid_slot(slot: &str) -> bool {
-    let bytes = slot.as_bytes();
-    bytes.len() == SLOT_NAME_LEN
-        && bytes[8] == b'-'
-        && bytes
-            .iter()
-            .enumerate()
-            .all(|(i, b)| i == 8 || b.is_ascii_digit())
+    const FORMAT: &str = "%Y%m%d-%H%M%S";
+    slot.len() == SLOT_NAME_LEN
+        && chrono::NaiveDateTime::parse_from_str(slot, FORMAT)
+            .is_ok_and(|t| t.format(FORMAT).to_string() == slot)
 }

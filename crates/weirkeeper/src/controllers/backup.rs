@@ -1947,6 +1947,46 @@ async fn require_schedule_for_scheduled_run(
     }
 }
 
+/// The selection a previous pass froze for this `Backup`, or `None` when this
+/// run has not been frozen yet (and so has a selection to resolve).
+///
+/// The `status.execution` gate is the same one D1 §3.1 rule 2's referent check
+/// uses, and it comes first: a run with no recorded execution has no plan to
+/// read, and one extra `GET` per unfrozen pass would be a request made for
+/// nothing. See [`backup_execution::stored_selection`] for why a frozen run
+/// re-reads rather than re-resolves, and why that does not weaken the
+/// stored-plan comparison.
+///
+/// # Errors
+///
+/// [`BackupError::Api`] when the API server could not be asked. A `ConfigMap`
+/// that is absent, unreadable or `v1` is `Ok(None)`, not an error:
+/// [`freeze_execution_inputs`] owns the decision about a missing or
+/// unacceptable plan, and owns it with the recorded digest in hand.
+async fn frozen_selection(
+    backup: &Backup,
+    client: &kube::Client,
+    namespace: &str,
+) -> Result<Option<ResolvedSelection>, BackupError> {
+    if backup
+        .status
+        .as_ref()
+        .and_then(|s| s.execution.as_ref())
+        .is_none()
+    {
+        return Ok(None);
+    }
+    let maps: Api<ConfigMap> = Api::namespaced(client.clone(), namespace);
+    let Some(existing) = maps
+        .get_opt(&plan_config_map_name(&backup.name_any()))
+        .await
+        .map_err(BackupError::Api)?
+    else {
+        return Ok(None);
+    };
+    Ok(backup_execution::stored_selection(&existing))
+}
+
 /// Freeze this run's inputs in the plan ConfigMap, or admit the frozen inputs
 /// already there — and return the inputs the Job must be built from.
 ///
@@ -2464,12 +2504,31 @@ async fn reconcile_backup_inner(
         }
 
         // === THE D1 W5 (PLAT-09.2) CALL SITE ===
-        // The named allowlist, or a terminal refusal for the dynamic mode this
-        // build does not resolve. W5 replaces the dynamic arm with its
-        // discovery pass; everything below is already shape-agnostic.
-        let selection = match shape {
-            SelectionShape::SelectedTopics => ResolvedSelection::named(&backup.spec),
-            SelectionShape::AllUserTopics => return Err(dynamic_selection_unsupported()),
+        //
+        // GATED ON THE FREEZE, LIKE THE REFERENT CHECK ABOVE, AND FOR THE SAME
+        // REASON. This branch is re-entered AFTER the freeze whenever the Job
+        // has gone (garbage collection, a deleted Job, a node that lost it) —
+        // `a_nonterminal_backup_whose_job_is_gone_recreates_it_from_the_frozen_inputs`
+        // is that pass. A run's topic set is decided ONCE; resolving it again
+        // on such a pass asks the cluster a question whose answer has moved on,
+        // and `verify_frozen_config_map` would then refuse the run as a
+        // `PlanConfigMapConflict` on an archive that may be half written. So
+        // when `status.execution` is recorded, the selection is READ BACK from
+        // the plan the run was admitted with.
+        //
+        // **W5: DO NOT PUT DISCOVERY IN FRONT OF THIS GATE.** Replace only the
+        // `AllUserTopics` arm of the inner match — the unfrozen path — with
+        // `backup_selection::resolve(backup, client, &namespace, now).await?`,
+        // which returns the same `ResolvedSelection`. A frozen dynamic run must
+        // never run a second discovery Job (D1 §12,
+        // `a_frozen_dynamic_backup_never_reruns_discovery`); `stored_selection`
+        // is what makes that true for free.
+        let selection = match frozen_selection(backup, client, &namespace).await? {
+            Some(frozen) => frozen,
+            None => match shape {
+                SelectionShape::SelectedTopics => ResolvedSelection::named(&backup.spec),
+                SelectionShape::AllUserTopics => return Err(dynamic_selection_unsupported()),
+            },
         };
 
         // Resolve once: the plan and credential must describe the same

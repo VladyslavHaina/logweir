@@ -72,7 +72,6 @@ use crate::conditions::{
 use crate::connection::ConnectionUse;
 use crate::controllers::backup::{plan_config_map_name, PLAN_ALLOWED_CLUSTERS_KEY, PLAN_SPEC_KEY};
 use crate::crds::backup::{Backup, BackupExecution, BackupSpec as BackupCrdSpec, TriggerKind};
-use crate::crds::backup_schedule::BackupSchedule;
 use crate::crds::kafka_cluster::KafkaCluster;
 use crate::crds::selection::{Coverage, IncompleteDiscovery, SelectionMode, SelectionStatus};
 use crate::crds::LocalRef;
@@ -278,16 +277,6 @@ fn shown(value: &str) -> String {
     }
 }
 
-/// Whether `slot` is a canonical `yyyymmdd-hhmmss` instant that EXISTS on the
-/// calendar — `20261309-031700` is fifteen characters of digits and a hyphen,
-/// and is not a date.
-fn valid_slot(slot: &str) -> bool {
-    const FORMAT: &str = "%Y%m%d-%H%M%S";
-    slot.len() == 15
-        && chrono::NaiveDateTime::parse_from_str(slot, FORMAT)
-            .is_ok_and(|t| t.format(FORMAT).to_string() == slot)
-}
-
 /// Derive the run identity from the typed spec and server-generated metadata.
 ///
 /// # ONE DERIVATION, IN [`crate::identity`], AND THIS IS ITS EXECUTION-SIDE
@@ -311,18 +300,19 @@ fn valid_slot(slot: &str) -> bool {
 ///
 /// # What this adds on top of the one derivation
 ///
-/// Two checks that belong to the EXECUTION contract and not to identity:
+/// **One** check, and it belongs to the EXECUTION contract rather than to
+/// identity: `spec.triggeredBy` is still a two-value vocabulary. The value
+/// becomes the signed receipt's `triggered_by`, so an unknown one is
+/// [`TERMINAL_STATE_EXECUTION_SPEC_INVALID`] exactly as it was — and it must
+/// AGREE with `spec.trigger.kind`, or a `Manual` run would sign a receipt
+/// saying `schedule`.
 ///
-/// 1. **`spec.triggeredBy` is still a two-value vocabulary.** The value becomes
-///    the signed receipt's `triggered_by`, so an unknown one is
-///    [`TERMINAL_STATE_EXECUTION_SPEC_INVALID`] exactly as it was — and it must
-///    AGREE with `spec.trigger.kind`, or a `Manual` run would sign a receipt
-///    saying `schedule`.
-/// 2. **A legacy owner reference must name the schedule `spec.scheduleRef`
-///    names.** `run_identity` takes the UID from the first complete
-///    `BackupSchedule` controller owner; PLAT-06.1 additionally required that
-///    owner's NAME to equal `scheduleRef.name`, and dropping that would let a
-///    `Backup` naming schedule `a` execute under schedule `b`'s archive prefix.
+/// PLAT-06.1's other two rails — a slot that is a real CALENDAR instant, and a
+/// legacy ownerReference that NAMES the schedule `spec.scheduleRef` names —
+/// were briefly re-stated here and now live where D1 §3.1 puts rules 1 and 3:
+/// in [`crate::identity`], guarded by `tests/run_identity.rs`. They are rules
+/// about what a run IS, and the scheduler's 409-adoption path is a second
+/// caller that needs them too.
 ///
 /// # Errors
 ///
@@ -330,7 +320,9 @@ fn valid_slot(slot: &str) -> bool {
 /// for an unknown `spec.triggeredBy`;
 /// [`crate::conditions::TERMINAL_STATE_SCHEDULED_IDENTITY_MISMATCH`] for a
 /// `triggeredBy` that contradicts `spec.trigger.kind` and for every identity
-/// [`crate::identity::run_identity`] refuses;
+/// [`crate::identity::run_identity`] refuses (a name its trigger does not
+/// compose, a slot that is not a date, a legacy ownerReference naming another
+/// schedule, an illegal trigger shape);
 /// [`crate::conditions::TERMINAL_STATE_NAME_TOO_LONG`] for a composed name that
 /// does not fit. A hand-written `Backup` that claims to be a scheduled run is
 /// refused rather than silently re-labelled: its signed receipt would otherwise
@@ -386,55 +378,11 @@ pub fn execution_identity(backup: &Backup) -> Result<ExecutionIdentity, Executio
         ));
     }
 
-    // PLAT-06.1's CALENDAR check on the slot, kept. `identity::run_identity`
-    // checks the SHAPE — fifteen characters, digits and one hyphen — which
-    // admits `20261309-031700`, a thirteenth month. A slot is a UTC instant and
-    // an object named after one that does not exist would take an archive
-    // prefix no schedule can ever produce.
-    if let Some(slot) = run.slot.as_deref() {
-        if !valid_slot(slot) {
-            return Err(ExecutionRefusal::new(
-                TERMINAL_STATE_SCHEDULED_IDENTITY_MISMATCH,
-                format!(
-                    "spec.slot `{}` is not a UTC instant in yyyymmdd-hhmmss form",
-                    shown(slot)
-                ),
-            ));
-        }
-    }
-
-    let schedule = match run.schedule {
-        None => None,
-        Some(schedule) => {
-            // (2) PLAT-06.1's owner-NAME check, kept.
-            if schedule.from_owner_reference {
-                let named = backup.owner_references().iter().any(|owner| {
-                    owner.controller == Some(true)
-                        && owner.api_version == BackupSchedule::api_version(&())
-                        && owner.kind == BackupSchedule::kind(&())
-                        && owner.name == schedule.name
-                        && owner.uid == schedule.uid
-                });
-                if !named {
-                    return Err(ExecutionRefusal::new(
-                        TERMINAL_STATE_SCHEDULED_IDENTITY_MISMATCH,
-                        format!(
-                            "spec.scheduleRef names `{}` and carries no uid, and this Backup's \
-                             BackupSchedule controller owner reference names a different \
-                             schedule; the legacy identity is that owner's UID, so the run would \
-                             execute under another schedule's archive prefix",
-                            shown(&schedule.name)
-                        ),
-                    ));
-                }
-            }
-            Some(ScheduleTrigger {
-                name: schedule.name,
-                uid: schedule.uid,
-                slot: run.slot.clone().unwrap_or_default(),
-            })
-        }
-    };
+    let schedule = run.schedule.map(|schedule| ScheduleTrigger {
+        name: schedule.name,
+        uid: schedule.uid,
+        slot: run.slot.clone().unwrap_or_default(),
+    });
 
     Ok(ExecutionIdentity {
         id: run.execution_id,
@@ -824,6 +772,41 @@ pub struct ResolvedSelection {
     pub topics: Vec<String>,
     /// Where those names came from.
     pub selection: SelectionInputs,
+}
+
+/// The selection a previous pass FROZE, read back out of a plan `ConfigMap`.
+///
+/// # WHY A FROZEN RUN RE-READS ITS SELECTION INSTEAD OF RESOLVING ONE
+///
+/// A run's topic set is decided ONCE, at the freeze. Resolving it again on a
+/// later pass — a pass that exists only to re-create a Job the garbage
+/// collector took — asks the cluster a question whose answer has moved on: a
+/// topic created or deleted since the freeze would yield a different list, and
+/// [`verify_frozen_config_map`] would refuse the run as a
+/// `PlanConfigMapConflict` **on a run whose archive may be half written**. D1
+/// §12 forbids exactly that (`a_frozen_dynamic_backup_never_reruns_discovery`).
+///
+/// # This does not weaken the comparison
+///
+/// The value it returns feeds `desired`, so the `topics`/`selection` halves of
+/// the stored-vs-desired comparison become vacuous. What still anchors the
+/// document is `status.execution.inputsSha256`: [`verify_frozen_config_map`]
+/// requires the STORED bytes to digest to the value **this controller** wrote
+/// before any Job existed, and that check does not involve `desired` at all. A
+/// swapped plan fails it whatever `desired` says.
+///
+/// `None` for a `ConfigMap` with no snapshot, an unparseable one, or a `v1`
+/// snapshot — `v1` predates dynamic selection, so its run is a named allowlist
+/// and the fresh resolution of it is the same list.
+#[must_use]
+pub fn stored_selection(existing: &ConfigMap) -> Option<ResolvedSelection> {
+    let stored = existing.data.as_ref()?.get(INPUTS_KEY)?;
+    let inputs: BackupExecutionInputs = serde_json::from_str(stored).ok()?;
+    let selection = inputs.selection?;
+    Some(ResolvedSelection {
+        topics: inputs.topics,
+        selection,
+    })
 }
 
 impl ResolvedSelection {
