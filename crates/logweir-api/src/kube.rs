@@ -563,6 +563,47 @@ impl KubeAdapter {
         self.bounded("get", "configmaps", api.get(name)).await
     }
 
+    /// Whether a credential Secret name is already taken, established WITHOUT
+    /// a read verb.
+    ///
+    /// A DRY-RUN CREATE IS STILL THE `create` VERB. This service has no `get`
+    /// and no `list` on Secrets and must never acquire one, so "does this name
+    /// exist" cannot be asked directly. `dryRun: All` runs the whole admission
+    /// and registry path and discards the write, and the registry answers
+    /// `AlreadyExists` for a taken name exactly as a real create would. It
+    /// needs no RBAC this service does not already hold, and it still cannot
+    /// tell the caller anything ABOUT the existing object — only that the name
+    /// is occupied, which is the one bit a fail-closed decision needs.
+    ///
+    /// THE PROBE CARRIES NO CREDENTIAL. The caller passes a Secret whose
+    /// `data` is empty: name uniqueness is decided by the name, so there is no
+    /// reason for the entered value to travel to the API server before the
+    /// decision to write it has been made.
+    ///
+    /// # Errors
+    ///
+    /// [`KubeFailure`] for anything that is neither success nor
+    /// `AlreadyExists`.
+    pub async fn credential_name_is_taken(
+        &self,
+        namespace: &str,
+        probe: &WriteOnlyCredential,
+    ) -> Result<bool, KubeFailure> {
+        let api: Api<WriteOnlyCredential> = Api::namespaced(self.client.clone(), namespace);
+        let params = PostParams {
+            dry_run: true,
+            field_manager: Some(FIELD_MANAGER.to_string()),
+        };
+        match self
+            .bounded("create", "secrets", api.create(&params, probe))
+            .await
+        {
+            Ok(_) => Ok(false),
+            Err(KubeFailure::AlreadyExists) => Ok(true),
+            Err(other) => Err(other),
+        }
+    }
+
     /// Create one write-only credential Secret and keep only its identity.
     ///
     /// THE ANSWER IS TWO STRINGS. The API server echoes `data` on a create;

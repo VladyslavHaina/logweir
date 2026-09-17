@@ -47,8 +47,8 @@ use weirkeeper::crds::backup_schedule::BackupSchedule;
 use weirkeeper::crds::preflight::Preflight as PreflightCr;
 
 use super::{
-    authorize, authorize_also, check_name, create_named_idempotent, get_object, json, list_page,
-    list_query, ApiPath, MAX_LIMIT,
+    authorize, authorize_also, check_name, create_named_idempotent, get_object, is_own_replay,
+    json, list_page, list_query, ApiPath, MAX_LIMIT,
 };
 use crate::app::AppState;
 use crate::auth::Actor;
@@ -1038,6 +1038,132 @@ fn build_credential_secret(
     }
 }
 
+/// The roles whose grants carry a credential VALUE, in a fixed order.
+///
+/// ONE PLACE THAT KNOWS WHICH NAMES A REQUEST WOULD WRITE, so the pre-flight
+/// below and the writes that follow it cannot disagree about the set.
+fn planned_credentials(
+    access: &AccessRequest,
+) -> Vec<(DestinationRoleDto, &crate::contract::NewCredentialRequest)> {
+    let grants: [(DestinationRoleDto, Option<&AccessGrantRequest>); 4] = [
+        (
+            DestinationRoleDto::ArchiveWrite,
+            Some(&access.archive_write),
+        ),
+        (
+            DestinationRoleDto::ArchiveRead,
+            access.archive_read.as_ref(),
+        ),
+        (
+            DestinationRoleDto::EvidenceWrite,
+            access.evidence_write.as_ref(),
+        ),
+        (
+            DestinationRoleDto::EvidenceRead,
+            access.evidence_read.as_ref(),
+        ),
+    ];
+    grants
+        .into_iter()
+        .filter_map(|(role, grant)| {
+            let new = grant?.secret.as_ref()?.new.as_ref()?;
+            Some((role, new))
+        })
+        .collect()
+}
+
+/// **CHECK EVERY NAME BEFORE WRITING ANYTHING.**
+///
+/// Two defects share one cause, and this is the fix for both. Writing the
+/// destination first and the credentials second meant a refusal had already
+/// created the destination — so the retry the documentation prescribes came
+/// back as a replay and ADOPTED the foreign Secret the first attempt had
+/// refused. And writing the credentials role by role meant an earlier role's
+/// value was already live when a later role refused, under a message that said
+/// nothing had changed.
+///
+/// Establishing absence needs no read verb: a `dryRun: All` create is still
+/// the `create` verb (see
+/// [`crate::kube::KubeAdapter::credential_name_is_taken`]), and it answers
+/// `AlreadyExists` for a taken name without revealing anything about the
+/// object holding it. The probe carries an EMPTY `data`, so the entered value
+/// does not travel anywhere before the decision to write it is made.
+///
+/// EVERY taken name is reported, not the first, because an operator fixing one
+/// conflict should not discover the next one on the retry.
+///
+/// # Errors
+///
+/// `state_conflict` naming every name that already exists, with nothing
+/// written; or the adapter's failure.
+async fn refuse_taken_credential_names(
+    state: &AppState,
+    namespace: &str,
+    destination: &str,
+    access: &AccessRequest,
+) -> Result<(), ApiError> {
+    let mut taken = Vec::new();
+    for (role, _) in planned_credentials(access) {
+        let name = credential_secret_name(destination, role);
+        let probe = probe_secret(namespace, &name);
+        if state
+            .kube()
+            .credential_name_is_taken(namespace, &probe)
+            .await
+            .map_err(KubeFailure::into_api_error)?
+        {
+            taken.push(name);
+        }
+    }
+    if taken.is_empty() {
+        return Ok(());
+    }
+    tracing::warn!(
+        namespace,
+        destination,
+        secrets = %taken.join(","),
+        "credential secret names already exist; nothing was written"
+    );
+    Err(ApiError::new(
+        ProblemCode::StateConflict,
+        format!(
+            "{} already exist{}, so the credential{} you entered {} NOT written and nothing at \
+             all was created — not the destination, and not any other credential in this \
+             request. This service holds `create` on Secrets and nothing else: it cannot read \
+             the existing value to compare it, and it cannot overwrite it. Rotate the content \
+             out of band (kubectl, or your secret manager), or point the grant at a different \
+             existing Secret with `secret.existing`.",
+            taken
+                .iter()
+                .map(|n| format!("`{n}`"))
+                .collect::<Vec<_>>()
+                .join(" and "),
+            if taken.len() == 1 { "s" } else { "" },
+            if taken.len() == 1 { "" } else { "s" },
+            if taken.len() == 1 { "was" } else { "were" },
+        ),
+    ))
+}
+
+/// A name-only Secret for the dry-run probe. NO `data`, and no owner
+/// reference: the destination may not exist yet, and a name conflict is
+/// decided by the name.
+fn probe_secret(namespace: &str, name: &str) -> WriteOnlyCredential {
+    WriteOnlyCredential {
+        metadata: ObjectMeta {
+            name: Some(name.to_string()),
+            namespace: Some(namespace.to_string()),
+            labels: Some(BTreeMap::from([(
+                MANAGED_BY_LABEL.to_string(),
+                MANAGED_BY_VALUE.to_string(),
+            )])),
+            ..ObjectMeta::default()
+        },
+        type_: Some(CREDENTIAL_SECRET_TYPE.to_string()),
+        data: BTreeMap::new(),
+    }
+}
+
 /// What an existing Secret under the deterministic name means for this call.
 ///
 /// THE NAME IS A FUNCTION OF THE DESTINATION AND THE ROLE, so "it is already
@@ -1136,16 +1262,33 @@ async fn create_new_credentials(
                             role = role_slug(role),
                             "credential secret already exists; the entered value was NOT written"
                         );
+                        // THE MESSAGE NAMES WHAT WAS ALREADY WRITTEN. The
+                        // pre-flight above makes this arm reachable only when
+                        // the name was taken BETWEEN the probe and the write —
+                        // a race, not the ordinary case — and in that window an
+                        // earlier role may already be live. Saying "nothing was
+                        // changed" there would be false, and it is what the
+                        // operator needs to clean up before retrying.
+                        let already = if outcome.created.is_empty() {
+                            " Nothing was changed.".to_string()
+                        } else {
+                            format!(
+                                " It was taken between this request's check and its write, and \
+                                 these Secrets WERE created by this request and must be deleted \
+                                 before a retry: {}.",
+                                outcome.created.join(", ")
+                            )
+                        };
                         return Err(ApiError::new(
                             ProblemCode::StateConflict,
                             format!(
                                 "The Secret `{name}` already exists, so the credential you \
-                                 entered was NOT written and nothing was changed. This service \
-                                 holds `create` on Secrets and nothing else: it cannot read the \
-                                 existing value to compare it, and it cannot overwrite it. \
-                                 Rotate `{name}`'s content out of band (kubectl, or your secret \
-                                 manager), or point this grant at a different existing Secret \
-                                 with `secret.existing`."
+                                 entered was NOT written.{already} This service holds `create` \
+                                 on Secrets and nothing else: it cannot read the existing value \
+                                 to compare it, and it cannot overwrite it. Rotate `{name}`'s \
+                                 content out of band (kubectl, or your secret manager), or point \
+                                 this grant at a different existing Secret with \
+                                 `secret.existing`."
                             ),
                         ));
                     }
@@ -1371,6 +1514,28 @@ pub async fn create(
     if request.default == Some(true) {
         refuse_second_default(&state, &ns, &request.name).await?;
     }
+    // THE REPLAY QUESTION IS ASKED FIRST, AND ONLY OF THIS SERVICE'S OWN
+    // RECORD. `created.replayed` cannot answer it here: it says a destination
+    // already existed under this scope, which — with the destination written
+    // before the credentials — is exactly what the FIRST attempt leaves behind
+    // when it refuses a foreign Secret. Deciding from it meant the retry this
+    // API's own documentation prescribes adopted the value that attempt had
+    // just refused.
+    let replaying = is_own_replay::<BackupDestination, _>(
+        &state,
+        &actor,
+        &ns,
+        ROUTE_CREATE,
+        &request.name,
+        &key,
+        &request,
+    )
+    .await?;
+    // AND NOTHING IS WRITTEN UNTIL EVERY NAME IS KNOWN TO BE FREE. Not the
+    // destination, and not the first of four Secrets.
+    if !replaying {
+        refuse_taken_credential_names(&state, &ns, &request.name, &request.access).await?;
+    }
     let created = create_named_idempotent(
         &state,
         &actor,
@@ -1383,18 +1548,13 @@ pub async fn create(
         |name, annotations| build(&ns, name, annotations, &request),
     )
     .await?;
-    // A REPLAY MAY ADOPT THE SECRET IT WROTE; A FRESH CREATE MAY NOT. If this
-    // call created the destination, a Secret already sitting under the
-    // deterministic name is not one this request wrote — it is stale, or it
-    // was planted — and adopting it would silently put the operator's new
-    // value nowhere while the destination names someone else's.
     let outcome = create_new_credentials(
         &state,
         &ns,
         &created.object,
         &request.access,
         &request_id,
-        if created.replayed {
+        if replaying {
             ExistingCredential::AcceptAsReplay
         } else {
             ExistingCredential::Refuse
@@ -1543,11 +1703,15 @@ pub async fn update_access(
              immutable: a plaintext destination cannot be given trust material.",
         ));
     }
-    // BEFORE THE PATCH, AND FAILING CLOSED. A rotation that cannot write the
-    // value must change nothing at all: if the credential write is refused
-    // below, the destination still names whatever it named before, and the
-    // operator gets a 409 rather than a 200 that records a rotation which did
-    // not happen.
+    // EVERY NAME FIRST, THEN THE WRITES, THEN THE PATCH. A rotation that
+    // cannot write one of its values must change nothing at all — not the
+    // destination, and not the credential of some other role that happened to
+    // come earlier in the loop.
+    //
+    // `:update-access` carries no `Idempotency-Key`, so there is no record
+    // that could make an existing name this request's own: it is always a
+    // refusal.
+    refuse_taken_credential_names(&state, &ns, &name, &request.access).await?;
     let outcome = create_new_credentials(
         &state,
         &ns,

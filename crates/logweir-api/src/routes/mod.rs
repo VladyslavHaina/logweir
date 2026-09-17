@@ -386,6 +386,55 @@ where
     .await
 }
 
+/// Whether an object under `name` is already THIS request's own — a replay —
+/// decided only by this service's idempotency record.
+///
+/// NEVER BY THE EXISTENCE OF ANYTHING ELSE. A route that needs to know
+/// "did I already run?" before it writes cannot infer it from a side object
+/// being present: a Secret sitting under a deterministic name is evidence that
+/// SOMETHING wrote it, not that this request did. The annotations
+/// [`create_named_idempotent`] records — the scope hash and the canonical
+/// request hash, both taken over the client's own `Idempotency-Key` — are the
+/// only thing that identifies a request as its own earlier attempt.
+///
+/// An absent object is not a replay. Any other Kubernetes failure is
+/// propagated rather than read as one, so a transient error never turns into
+/// "assume it was mine".
+///
+/// # Errors
+///
+/// The adapter's failure, or `internal_error` if the request cannot be hashed.
+pub async fn is_own_replay<K, Req>(
+    state: &AppState,
+    actor: &Actor,
+    namespace: &str,
+    route: &str,
+    name: &str,
+    key: &IdempotencyKey,
+    validated: &Req,
+) -> Result<bool, ApiError>
+where
+    K: ProductResource,
+    Req: Serialize,
+{
+    let canonical = serde_json::to_vec(validated).map_err(|_| {
+        ApiError::new(
+            ProblemCode::InternalError,
+            "The request could not be hashed.",
+        )
+    })?;
+    let mut identity = idempotency::identity(actor, namespace, route, "", key, &canonical);
+    identity.name = name.to_string();
+    match state.kube().get::<K>(namespace, name).await {
+        Ok(existing) => Ok(matches!(
+            idempotency::compare(Some(existing.annotations()), &identity),
+            ReplayVerdict::Replay
+        )),
+        Err(KubeFailure::NotFound) => Ok(false),
+        Err(other) => Err(other.into_api_error()),
+    }
+}
+
 /// Create an object under a name the CALLER chose, with the same replay rules.
 ///
 /// FOR THE KINDS WHOSE NAME IS PART OF THE CONTRACT. A `BackupDestination` is
