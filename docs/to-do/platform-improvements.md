@@ -141,7 +141,7 @@ Wave 2 resumes every branch in place with the prompts under
 | PLAT-17.1 (stages 1 and 3) | In progress (stages landed) | plat17-api-finish, plat17-api-review | Partial record under PLAT-17.1. Integrated into main as `4b571d1..de0207c`. Remaining for Done: console image and chart with the API's own RBAC (D0 stage 7), transient-check cancellation once PLAT-03/09.1 exist, `POST …/backups` (PLAT-06.2), SSE (PLAT-14.1), a browser journey through the API, and PLAT-17.2. |
 | PLAT-04.2, 05.x, 06.2, 09.2 | Contract decided | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. W1 (the pure cadence engine) landed in main as `6eedc0a..4b54a5c` after review; see the PLAT-04.2 partial record. W3a (the `Backup` run contract: `spec.trigger`, `spec.scheduleRef` with generation and `runPolicySha256`, the selection type with `allUserTopics` requiring `incompleteDiscovery`, `status.selection`, `src/identity.rs`, `src/policy.rs`, the §3.4 vocabulary) landed in `696c81a`/`b334a98` inside `crds-shapes`; a `Backup` naming both `topics` and `allUserTopics` is refused by CEL and, terminally, by admission. W3b (the reconciler consumes the contract; grammar `v2`) landed at `397e37d`; see the PLAT-04.2 partial record. W2 (editable policy, the §4.5 scheduler; `destinationRef` editable) landed at `98257f8`; see the PLAT-05.1/04.2 partial record. W5 (dynamic selection per run through the check runner) landed at `7072b9d`; see the PLAT-09.2 partial record. W6 (cadence previews, `PUT schedules`, `POST backups`) landed at `72751ab`; see the PLAT-06.2 partial record. W4, W7, W8 remain. |
 | PLAT-03.x, 08.x, 09.1 | In progress (W1, W2, W3, W4, W5, W6a, W6b, W7, W8, W9, W12 landed) | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. W1 (pure check contract and destination model) and W2 (explicit store options) landed as `c13b0cc..56bd074` after review (ACCEPT after two high and three medium fixes: JSON-form redaction bypass, ambient credentials inheriting the environment). W3 (`logweir_kafka::inventory`: bounded targeted describe, broker count, validate-only `CreateTopics`, error classification where an observed authorization failure makes visibility `limited` and anything unknown is failure, with a real admin-client fault capture because rdkafka 0.36 never invokes `ClientContext::error` for a metadata-only workflow — D2 §4.2 `[VERIFY U5]` corrected) and W5 (`weirkeeper::check`: check Jobs mirroring the execution pod, pod selection by controller owner UID only, framed-stdout relay through the W1 decoder, the full waiting-code table, TTL, plan/chunk/limit modules, the installation policy loader failing closed) landed as `23cec50..b8e62d1` after review (ACCEPT after one high and three medium fixes; 19 mutants killed; the rebase over PLAT-07.1 then routed the inventory client through the reader's `client_config`, removing a drifted copy that could upgrade plaintext to TLS when a CA was present — re-checked ACCEPT; weirkeeper 435, kafka 57). RBAC still owed by W11: `events: list` plus its `manifest_lint` row, the three new kinds' verbs, and a decision on `gc.rs`'s deletes. The reviewers' SEC-PODLOG finding against `controllers::backup::select_job_pod` is closed by `secpodlog` (see the defects table). W6a and W6b (the three Amendment F kinds and the destination sentinel on existing kinds) landed in `46880a3`/`88232f5`/`b334a98` inside `crds-shapes`; W7 (destination resolver, controller, evidence store cache) landed as `27fb924..0b25e95` (see the PLAT-08.1 partial record); W4 (runner `logweir check run`) landed at `537657d` (see the PLAT-03 partial record); W8 (`TopicDiscovery` controller) and W12 (API routes) are in review or in progress. W9, W10, W11, W13, W14 remain. |
-| PLAT-14.x, 15.x, 16.x, 19.1 | In progress (W0, W1, W3, W4, W8, W5, W6 landed) | [D3](decisions/D3-status-catalog-retention-trust.md) | Operation states, protection freshness, rehearsals, durable catalog, retention enforcement boundary, trust lifecycle; fifteen worker tasks. W4 (`d3-notify`: the shared notification module and `logweir notify deliver`) landed after review (ACCEPT after two high fixes); W3 (`d3-catalog-writer`: signed catalog point records, `list_page`, `logweir catalog sync|list`) landed after review (see the PLAT-15.1 partial record); W0 (the five Amendment G kinds, additive run status, `Restore.spec` additions, the `Approval` enum) landed in `496451a`/`88232f5`/`b334a98` inside `crds-shapes`; W1 (trust lifecycle core, `TrustPolicy` controller, `trust export|migrate-roster`, G8) landed as `64fcd38..5fc1a72` (see the PLAT-19.1 partial record); W8 (`RecoveryCatalog` controller) in progress. W2, W5, W6, W7, W9, W10, W11, W12, W13, W14 remain. |
+| PLAT-14.x, 15.x, 16.x, 19.1 | In progress (W0, W1, W3, W4, W8, W5, W6, W10 landed) | [D3](decisions/D3-status-catalog-retention-trust.md) | Operation states, protection freshness, rehearsals, durable catalog, retention enforcement boundary, trust lifecycle; fifteen worker tasks. W4 (`d3-notify`: the shared notification module and `logweir notify deliver`) landed after review (ACCEPT after two high fixes); W3 (`d3-catalog-writer`: signed catalog point records, `list_page`, `logweir catalog sync|list`) landed after review (see the PLAT-15.1 partial record); W0 (the five Amendment G kinds, additive run status, `Restore.spec` additions, the `Approval` enum) landed in `496451a`/`88232f5`/`b334a98` inside `crds-shapes`; W1 (trust lifecycle core, `TrustPolicy` controller, `trust export|migrate-roster`, G8) landed as `64fcd38..5fc1a72` (see the PLAT-19.1 partial record); W8 (`RecoveryCatalog` controller) in progress. W2, W5, W6, W7, W9, W10, W11, W12, W13, W14 remain. |
 
 ### Decision records
 
@@ -2267,6 +2267,58 @@ to the next lock holder, W14); the deliberate tightening that evidence claiming 
 signing time after an expired legacy key's `notAfter` is `Untrusted` is
 documented; `export` reads a policy from stdin or a file rather than dialling
 the cluster.
+
+**Partial record (2026-09-17) — PLAT-19.1: trust resolution wired into evidence
+verification and approval admission (D3 W10) landed; the task stays In progress
+until W11/W12 surface `Untrusted` and W14 proves rotation and revocation live.**
+Landed in main as `b3aed6f` (verification through the namespace's resolved trust,
+the fourth result, the four new refusal reasons), `0228333`/`2bb33ca`/`7da9bca` (tests),
+`3fd4f6b`/`c5c4795` (docs) and `bc031de`/`3eb7897` (review fixes) on top of D3 W1's
+`logweir_core::trust::decide` and `weirkeeper::trust`. Contract
+(`docs/kubernetes.md` §15.3, §8): every evidence-verification site and the approval
+admission resolve the object's OWN namespace through `weirkeeper::trust` (one
+shared reflector per controller via `trust::resolve_with`), offer only
+`EvidenceSigning` keys, and record `Untrusted` with `signedAt` and
+`trust.{basis, keyState, policy}` beside `Valid`/`NotAttempted`/`Invalid`; a retired
+key verifies historically only inside its window, a revoked key never, an unlisted
+key is `UntrustedSigner`, a window not yet open verifies nothing, a
+`ConsoleConfirmation` key is never accepted as an evidence signer and vice versa; a
+contested namespace (two policies claim it) or an unconfigured one is a HOLD
+(`NotAttempted` with the reason named), never a terminal verdict. Approvals ask
+`may_sign_new` and refuse with `KeyRetired`, `KeyRevoked`, `KeyNotYetValid` or
+`TrustPolicyConflict`; the restore path's approval bundle is built from the
+resolved trust too — key material from `ResolvedTrust::key`, the allowlist from
+`allowedTargetClusterIds`, expiry from `may_sign_new_for` — so a key that lives
+only in a `TrustPolicy` (§7.6 rotation) verifies the Approval AND materialises the
+bundle (the review found the old roster read there, looping forever). The re-trust
+pass is real: both the Backup and Restore controllers watch `TrustPolicy` and map a
+changed policy to the objects in its bound namespaces from the controller's own
+store (zero API calls), re-deriving a terminal object's verdict when the resolved
+policy digest differs and carrying conditions (`carry_conditions`) with a recorded
+reason — a key revoked after a run went terminal flips its badge on the next policy
+event, and an edit that NARROWS a policy (a namespace or key removed, or `default`
+cleared) enqueues the union of the policy's scope before and after the event
+(`trust::PolicyScopeMemory`), so nothing waits forever in `await_change` (the review's fail-open residual, closed
+before the merge with direct rows for the mapper and `apply_retrust`'s S7
+precondition). No policy bound ⇒ `legacy-roster-v1` synthesis (§7.5), asserted field by
+field against the pre-change verdicts including `notAfter` in both directions. Every
+status write is resourceVersion-preconditioned; no private key is read anywhere
+(`check-one-signer` green). Verified at `7da9bca` on main: weirkeeper + `logweir-core`
+1142/1142 (`verification` 34+, `approval_controller` 41+), strict clippy and fmt,
+`check-one-signer`, `check-pure-core`, `manifest_lint` 29, `doc_lint` 12, no
+RBAC/CRD/chart change (`trustpolicies` list/watch was already granted); thirty-nine
+planted mutants killed from a clean build (the worker's first matrix was
+untrustworthy — an mtime restore left a mutation compiled in — and was re-run).
+Independent review `claude/d3w10.review.md`: ACCEPT-WITH-FIXES (one high: the
+restore approval bundle still read the roster; three medium: nothing called the
+re-trust pass, the §7.5 fixture lacked a `notAfter` row, and a catalog-vocabulary
+flattening; six low; one question) then ACCEPT. Hand-offs: W11/W12 must surface
+`Untrusted` (the API maps it to `Unknown` today, pinned by a guard row) and carry
+`UntrustReason` beside the catalog's flattened word; `approval::decide` still LISTs
+per reconcile (a `Context` field across twelve live sites — a follow-up, not a
+correctness defect); a namespace a policy governs reads no roster at all. Live: none here — W14 owes §15's rotation, revocation and
+re-trust scenarios. Migration: none — an installation without a `TrustPolicy`
+verifies exactly as before through the synthesised legacy roster.
 
 ## PLAT-20 — Prove complete journeys and ship without gate sprawl
 
