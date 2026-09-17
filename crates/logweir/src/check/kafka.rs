@@ -129,6 +129,30 @@ pub fn projected_password(plan: &ConnectionPlan) -> Option<String> {
 /// D-SEAMS **S5** from the broker side: a trust anchor must never be the thing
 /// that decides a transport.
 ///
+/// # `caFile` is an IN-POD PATH, and this runner never opens it
+///
+/// [`ConnectionPlan::ca_file`] is passed through verbatim to
+/// `AuthConfig::with_tls_ca_file`, which becomes librdkafka's
+/// `ssl.ca.location`; nothing here reads, parses or validates the file. That
+/// is what lets the controller choose where it comes from: D2 §4.3 can render
+/// a `source-ca.pem` key into the plan `ConfigMap`, but W8's `TopicDiscovery`
+/// reconciler deliberately does not, because a `KafkaCluster` may name its CA
+/// in a **Secret** and that controller holds no verb on `secrets`. It projects
+/// the same mount an execution Job gets — `/connection/source-ca/ca.crt` — and
+/// names THAT path in the plan.
+///
+/// So the runner must not assume either location, and it does not: the value
+/// is opaque to it. `a_connection_ca_is_an_opaque_in_pod_path` asserts the
+/// path reaches the client unchanged for both shapes, and that it still does
+/// not decide the transport.
+///
+/// The DESTINATION side is different and deliberately so:
+/// `DestinationPlan::ca_file` IS read
+/// ([`crate::check::store::options_for`]), because
+/// `StoreOptions::with_root_certificate` takes PEM BYTES rather than a path.
+/// That file is rendered into the plan `ConfigMap` by the controller that owns
+/// the destination, which does hold the verb it needs.
+///
 /// # Errors
 /// [`CheckFailure`] with [`CheckCode::AuthenticationFailed`].
 pub fn auth_config(plan: &ConnectionPlan) -> Result<AuthConfig, CheckFailure> {

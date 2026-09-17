@@ -953,20 +953,81 @@ fn the_startup_path_builds_no_client() {
         }
     }
 
-    // (b) `load` CALLS ONLY WHAT IT IS ALLOWED TO. Clause (a) stops a helper in
-    //     this module; this stops one imported from elsewhere in the crate.
-    let (_, load_body) = bodies
+    // (b) EVERY FUNCTION REACHABLE BEFORE STEP 5 CALLS ONLY WHAT IT IS ALLOWED
+    //     TO. Clause (a) stops a dialling helper being added to this module;
+    //     this stops one being reached in another module.
+    //
+    //     It is a CLOSURE and not a check of `load` alone, which is reviewer
+    //     finding R-F1: `runner_bounds` is step 4 too and is itself on the
+    //     allowlist, so a `kafka::prewarm(` reached from THERE satisfied
+    //     clause (a) — the token is not a client constructor — and clause (b)
+    //     never looked at it. Mutant MR-B3 dialled before the digest check
+    //     with the whole suite green.
+    //
+    //     The walk starts at the three startup roots and follows every callee
+    //     that is DEFINED in this module, so a new startup helper is pulled in
+    //     automatically. It stops at the execution functions, which are the
+    //     step-5 boundary by definition: `execute_with` takes a `&Loaded`,
+    //     which only `load` produces.
+    let defined: BTreeSet<String> = bodies.iter().filter_map(|(sig, _)| fn_name(sig)).collect();
+    let execution: BTreeSet<String> = bodies
         .iter()
-        .find(|(sig, _)| sig.starts_with("pub fn load("))
-        .unwrap();
-    for call in calls_in(load_body) {
-        assert!(
-            LOAD_MAY_CALL.contains(&call.as_str()),
-            "`load` calls `{call}`, which is not on the startup allowlist. Steps 1-4 open \
-             nothing, so a new callee there is a decision: add it to LOAD_MAY_CALL with a \
-             reason, or move the call after the plan verifies. Allowed: {LOAD_MAY_CALL:?}"
-        );
+        .filter(|(sig, _)| EXECUTION_FUNCTIONS.iter().any(|f| sig.starts_with(f)))
+        .filter_map(|(sig, _)| fn_name(sig))
+        .collect();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    let mut queue: Vec<String> = STARTUP_ROOTS
+        .iter()
+        .map(|r| {
+            let n = fn_name(r).unwrap_or_else(|| panic!("`{r}` is not a signature"));
+            assert!(
+                defined.contains(&n),
+                "`{r}` is no longer in `check/mod.rs`; this guard is scanning nothing"
+            );
+            n
+        })
+        .collect();
+    while let Some(name) = queue.pop() {
+        if !seen.insert(name.clone()) {
+            continue;
+        }
+        // EVERY body with that name, not the first: `new`, `code` and `of` are
+        // each defined more than once in this module, and following all of
+        // them is the conservative reading — a guard that picked one could
+        // walk past the other.
+        for (sig, body) in bodies
+            .iter()
+            .filter(|(s, _)| fn_name(s).as_deref() == Some(&name))
+        {
+            for call in calls_in(body) {
+                // A call to a function DEFINED here is followed; clause (a)
+                // already forbids it a client token.
+                let leaf = call.rsplit("::").next().unwrap_or(&call).to_string();
+                if execution.contains(&leaf) {
+                    continue;
+                }
+                if defined.contains(&leaf) {
+                    queue.push(leaf);
+                    continue;
+                }
+                assert!(
+                STARTUP_MAY_CALL.contains(&call.as_str())
+                    || STARTUP_HELPERS_MAY_CALL.contains(&call.as_str()),
+                "`{sig}` is reachable before D2 §4.2 step 5 and calls `{call}`, which is not on \
+                 the startup allowlist. Steps 1-4 open nothing, so a new callee there is a \
+                 decision: add it to STARTUP_MAY_CALL with a reason, or move the call after \
+                 the plan verifies. Allowed: {STARTUP_MAY_CALL:?} plus \
+                 {STARTUP_HELPERS_MAY_CALL:?}"
+            );
+            }
+        }
     }
+    // The closure really walked past its roots — a walk that stopped at `load`
+    // would assert nothing about `runner_bounds`, which is R-F1 exactly.
+    assert!(
+        seen.contains("runner_bounds"),
+        "the startup closure did not reach `runner_bounds`: {seen:?}"
+    );
 
     // (c) `run` reaches a kind only after `load` returned Ok, through a
     //     `&Loaded` that only `load` produces.
@@ -1009,46 +1070,93 @@ const CLIENT_TOKENS: [&str; 13] = [
     "Wiring",
 ];
 
-/// The functions `load` — D2 §4.2 steps 1 to 4 — may call.
+/// The three functions D2 §4.2's startup order is made of. The closure starts
+/// here and follows every callee defined in the same module.
+///
+/// `run` is a root because it is what calls `load`, and the clause that it
+/// calls `load` BEFORE `execute` is (c) below.
+const STARTUP_ROOTS: [&str; 3] = ["pub fn run(", "pub fn load(", "pub fn runner_bounds("];
+
+/// Everything a function reachable before step 5 may call.
 ///
 /// A LIST, so a new callee there is a reviewable decision rather than an edit
-/// nobody sees. That is the half of the fix for reviewer mutant MR-B that
-/// clause (a) cannot make on its own: (a) stops a dialling helper being ADDED
-/// to `check/mod.rs`, and this stops one being IMPORTED into `load` from
-/// anywhere else in the crate.
+/// nobody sees. That is the half of the fix for reviewer mutants MR-B / MR-B2 /
+/// MR-B3 that clause (a) cannot make on its own: (a) stops a dialling helper
+/// being ADDED to `check/mod.rs`, and this stops one being REACHED in any other
+/// module.
 ///
-/// Every entry either reads the plan bytes, hashes and parses them, or shapes
-/// a refusal. None of them can open anything. `format!` does not appear
-/// because a macro's `!` ends the identifier run, which is a property of the
-/// tokeniser and not an exemption.
-const LOAD_MAY_CALL: [&str; 16] = [
-    // Result and Option constructors and combinators — control flow, no I/O.
+/// Only callees DEFINED OUTSIDE this module appear here — one defined inside it
+/// is followed by the walk instead, and clause (a) has already forbidden it a
+/// client token. `format!` does not appear because a macro's `!` ends the
+/// identifier run, which is a property of the tokeniser and not an exemption.
+/// `every_startup_allowlist_entry_is_still_earned` fails on an entry nothing
+/// calls, so the list cannot rot into a comment.
+const STARTUP_MAY_CALL: [&str; 25] = [
+    // -- control flow: Result/Option constructors and combinators ---------
     "Ok",
     "Err",
     "Some",
     "map_err",
-    // The injected environment reader: a `&dyn Fn(&str) -> Option<String>`, so
-    // a test supplies a map and the shipped binary supplies `std::env::var`.
+    "ok",
+    "into",
+    // -- the injected environment reader, and the shipped one it stands for
     "env",
-    // A refusal value and the strings that shape its message.
-    "Refusal::new",
+    "std::env::var",
+    // -- the strings that shape a refusal message --------------------------
     "to_string",
     "trim",
     "unwrap_or_default",
     "is_empty",
-    // `Path::display`, for the unreadable-plan message.
-    "display",
-    // `io::Error::kind`, so the message names the KIND and never adopter bytes.
-    "kind",
-    // Step 3's SHAPE check on the pinned digest (pure, in `logweir-core`).
+    "display", // `Path::display`, for the unreadable-plan message
+    "kind",    // `io::Error::kind` — the KIND, never adopter bytes
+    // -- the pure contract: step 3's digest SHAPE, and steps 3+4 as ONE call
     "logweir_core::check_contract::is_sha256_prefixed",
-    // Step 2: the bytes, once.
-    "std::fs::read",
-    // Steps 3 and 4, as ONE call so no caller can do them out of order.
     "CheckPlan::parse_and_verify",
-    // This module's extra step-4 bounds (the evidence-stream rules).
-    "runner_bounds",
+    // -- step 2: the bytes, once ------------------------------------------
+    "std::fs::read",
+    // -- `runner_bounds`' walk over the request ----------------------------
+    "logweir_core::check_contract::CheckRequest::EvidenceFetch",
+    "std::collections::BTreeSet::new",
+    "iter",
+    "enumerate",
+    "contains",
+    "insert",
+    "as_str",
+    // -- the redactor for `run`'s single stderr warn line ------------------
+    "logweir_core::check_contract::redact",
 ];
+
+/// Callees the walk reaches through a function DEFINED in `check/mod.rs` that
+/// is itself pure — the stderr subscriber, the deadline's clock and the stdout
+/// handle a refusal is printed through.
+///
+/// SEPARATE from [`STARTUP_MAY_CALL`] because they are a different claim: those
+/// are what STARTUP calls, these are what startup's own helpers call. Splitting
+/// them keeps the first list readable as "what steps 1-4 do".
+///
+/// None of them opens a socket or a bucket. `std::io::stdout` is the refusal
+/// line's writer, and D2 §4.2 requires that line on exit 3.
+const STARTUP_HELPERS_MAY_CALL: [&str; 9] = [
+    "Instant::now",
+    "Duration::from_secs",
+    "std::io::stdout",
+    "lock",
+    "tracing_subscriber::fmt",
+    "json",
+    "with_writer",
+    "with_env_filter",
+    "try_init",
+];
+
+/// A signature line's function NAME.
+fn fn_name(sig: &str) -> Option<String> {
+    let after = sig.split_once("fn ")?.1;
+    let name: String = after
+        .chars()
+        .take_while(|c| c.is_alphanumeric() || *c == '_')
+        .collect();
+    (!name.is_empty()).then_some(name)
+}
 
 /// Every `name(` called in a function body, as a bare identifier path.
 ///
@@ -1091,6 +1199,44 @@ fn calls_in(body: &str) -> Vec<String> {
         }
     }
     out
+}
+
+/// Neither startup allowlist may hold an entry nothing calls.
+///
+/// The repository's own idiom (`no_network_in_unit_tests::
+/// every_allow_list_entry_is_still_earned`): a list that outlives the call it
+/// was written for stops describing the code and starts hiding it, and the
+/// next reader cannot tell which entries are load-bearing.
+#[test]
+fn every_startup_allowlist_entry_is_still_earned() {
+    let src = std::fs::read_to_string(repo_root().join("crates/logweir/src/check/mod.rs"))
+        .expect("the startup module is readable");
+    let code: String = src
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !(t.starts_with("//") || t.starts_with("///") || t.starts_with("//!"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let called: BTreeSet<String> = fn_bodies(&code)
+        .iter()
+        .flat_map(|(_, b)| calls_in(b))
+        .collect();
+    let mut stale: Vec<&str> = Vec::new();
+    for entry in STARTUP_MAY_CALL
+        .iter()
+        .chain(STARTUP_HELPERS_MAY_CALL.iter())
+    {
+        if !called.contains(*entry) {
+            stale.push(entry);
+        }
+    }
+    assert!(
+        stale.is_empty(),
+        "these startup-allowlist entries name nothing `check/mod.rs` calls any more; remove \
+         them in the commit that removed the call: {stale:?}"
+    );
 }
 
 /// The bodies of every `fn` in a source file, keyed by its signature line.
@@ -4233,4 +4379,201 @@ fn the_marker_messages_name_a_family_that_survives_redaction() {
             row.message
         );
     }
+}
+
+// ===========================================================================
+// 15. Re-verification fixes (2026-09-17)
+// ===========================================================================
+
+/// **R-F2.** The transport comes from `plan.tls` and from NOTHING else
+/// (D-SEAMS S5: transport security is never derived).
+///
+/// The shipped line was already right, and nothing asserted it: the reviewer's
+/// mutant **F1b** re-derived it as `tls: plan.ca_file.is_some()` and survived
+/// the whole suite, because the default fixture is `tls: Some(false)` with no
+/// `ca_file`, so the `true` branch was never exercised. Under that mutant a
+/// connection with `tls: true` and a publicly-trusted CA — no projected bundle,
+/// which is the ordinary case for a managed broker — dials `SASL_PLAINTEXT`,
+/// and `with_tls_ca_file` cannot notice because the mutant keeps the CA and the
+/// transport consistent with each other.
+///
+/// So the assertion is over all four `(tls, ca_file)` combinations: the answer
+/// must track `tls` alone, in both directions, with and without a CA.
+#[test]
+fn the_transport_comes_from_plan_tls_and_from_nothing_else() {
+    for tls in [None, Some(false), Some(true)] {
+        for ca in [None, Some("/check/source-ca.pem".to_string())] {
+            let plan = ConnectionPlan {
+                auth_mode: "scramSha512".to_string(),
+                username: Some("backup".to_string()),
+                tls,
+                ca_file: ca.clone(),
+                ..connection()
+            };
+            let spec = logweir::check::kafka::auth_spec(&plan).expect("scramSha512 maps");
+            let want = tls == Some(true);
+            match spec {
+                logweir_core::spec::AuthSpec::ScramSha512 { tls: got, .. } => assert_eq!(
+                    got, want,
+                    "tls={tls:?} ca_file={ca:?} mapped to tls: {got}; the transport is the \
+                     plan's `tls` and is NEVER derived from whether a trust anchor was \
+                     projected (D-SEAMS S5)"
+                ),
+                other => panic!("scramSha512 must map to ScramSha512, got {other:?}"),
+            }
+        }
+    }
+    // ...and the two halves really are independent: a CA on a connection that
+    // is not TLS is refused rather than upgrading the transport, which is the
+    // same rule from the other side.
+    let clear_with_ca = ConnectionPlan {
+        auth_mode: "scramSha512".to_string(),
+        username: Some("backup".to_string()),
+        tls: Some(false),
+        ca_file: Some("/check/source-ca.pem".to_string()),
+        ..connection()
+    };
+    let err = logweir::check::kafka::auth_config(&clear_with_ca)
+        .expect_err("a CA on a clear connection is refused, never an upgrade");
+    assert_eq!(err.code, CheckCode::AuthenticationFailed);
+}
+
+/// **R-F3 / reviewer probe R7.** A details line stays parseable JSON however
+/// long the key is.
+///
+/// `redact_path` used to end with `redact`'s 512-CHARACTER cap, and
+/// `details_stream` applies it per LINE — so a line carrying a long S3 key with
+/// no 40-character run (nothing to redact) was cut mid-string and the stream,
+/// which D2 §6.7 documents as JSON lines, emitted an unparseable one. The cap
+/// now lives where each bound belongs: on the message (`with_message`), on the
+/// sample VALUE (`readiness::detail`, re-serialised by serde_json), and on the
+/// stream in BYTES (`details_stream`, which drops whole lines).
+#[test]
+fn a_long_key_leaves_the_details_stream_parseable() {
+    // R7's shape: 120 short `/`-separated segments, 888 characters, and no run
+    // anywhere near 40 — so redaction has nothing to do and only a cap could
+    // damage it.
+    let long_key: String = (0..120)
+        .map(|i| format!("seg{i:03}"))
+        .collect::<Vec<_>>()
+        .join("/");
+    assert!(long_key.len() > 512, "the probe needs a line over the cap");
+    assert_eq!(
+        logweir::check::redact_path(&long_key),
+        long_key,
+        "nothing in this key is credential-shaped, so nothing may change"
+    );
+
+    let line =
+        serde_json::json!({"check": "archive.segments", "missingSegment": long_key}).to_string();
+    let stream = kinds::restore::details_stream(&[line]);
+    for l in String::from_utf8(stream).unwrap().lines() {
+        let parsed: serde_json::Value = serde_json::from_str(l)
+            .unwrap_or_else(|e| panic!("a details line must be JSON ({e}): {l}"));
+        assert_eq!(parsed["missingSegment"], long_key);
+    }
+
+    // The bounded `detail` sample is capped as a VALUE, so its JSON survives
+    // too — and it says it was cut rather than handing a reader a prefix.
+    let d = kinds::readiness::detail(std::slice::from_ref(&long_key));
+    let sample = d["sample"][0].as_str().unwrap();
+    assert!(
+        sample.chars().count() <= kinds::readiness::DETAIL_VALUE_MAX_CHARS,
+        "a sample is {} characters",
+        sample.chars().count()
+    );
+    assert!(sample.ends_with('…'), "a cut sample says so: {sample}");
+    let round_trip: serde_json::Value = serde_json::from_str(&d.to_string()).unwrap();
+    assert_eq!(round_trip["count"], 1);
+
+    // A Kafka topic name is at most 249 characters, so the VALUE cap never
+    // cuts one. (Redaction may still fire on a name that is itself one long
+    // run of the base64 alphabet — that is F7's documented trade-off for a
+    // value with no `/` to split on, and it is a redaction, not a cut.)
+    let longest_topic: String = std::iter::repeat("orders.eu-west-1.")
+        .flat_map(|s| s.chars())
+        .take(249)
+        .collect();
+    assert_eq!(longest_topic.chars().count(), 249);
+    let sample = kinds::readiness::detail(std::slice::from_ref(&longest_topic));
+    assert_eq!(sample["sample"][0], longest_topic);
+    assert!(!sample["sample"][0].as_str().unwrap().ends_with('…'));
+}
+
+/// **D2 W8 seam.** A connection's `caFile` is an OPAQUE IN-POD PATH: the
+/// runner hands it to the client and never opens it.
+///
+/// W8's `TopicDiscovery` reconciler does not render `source-ca.pem` into the
+/// plan `ConfigMap` — a `KafkaCluster` may name its CA in a Secret and that
+/// controller holds no verb on `secrets` — so it projects the same mount an
+/// execution Job gets and names `/connection/source-ca/ca.crt` in the plan.
+/// A runner that assumed `/check/source-ca.pem`, or that read the file to
+/// inline it, would refuse every discovery against a private-CA broker.
+///
+/// The DESTINATION side is deliberately not this: `DestinationPlan::ca_file`
+/// is read, because `StoreOptions::with_root_certificate` takes PEM bytes.
+#[test]
+fn a_connection_ca_is_an_opaque_in_pod_path() {
+    // A uniquely-named projected variable, so the row does not race another
+    // test over the process environment.
+    const PASSWORD_VAR: &str = "LOGWEIR_CHECK_TEST_CA_ROW_PASSWORD";
+    std::env::set_var(PASSWORD_VAR, "not-a-real-password");
+    for path in [
+        // W8's projected mount…
+        "/connection/source-ca/ca.crt",
+        // …and D2 §4.3's plan-ConfigMap key, which other kinds may still use.
+        "/check/source-ca.pem",
+        // A path that does not exist at all: the runner must not stat it.
+        "/connection/nothing-is-here/ca.crt",
+    ] {
+        assert!(
+            !Path::new(path).exists(),
+            "the fixture path {path} must not exist, or this row proves nothing"
+        );
+        let plan = ConnectionPlan {
+            auth_mode: "scramSha512".to_string(),
+            username: Some("backup".to_string()),
+            tls: Some(true),
+            ca_file: Some(path.to_string()),
+            password_env: Some(PASSWORD_VAR.to_string()),
+            ..connection()
+        };
+        // The mapping does not touch the file...
+        let spec = logweir::check::kafka::auth_spec(&plan).expect("scramSha512 maps");
+        match spec {
+            logweir_core::spec::AuthSpec::ScramSha512 { tls, .. } => {
+                assert!(tls, "the transport is still the plan's `tls`");
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+        // ...and neither does building the client's auth: the path reaches
+        // `ssl.ca.location` unchanged, whether or not anything is there.
+        let auth = logweir::check::kafka::auth_config(&plan)
+            .expect("a projected CA path is carried, never opened");
+        match auth {
+            logweir_kafka::reader::AuthConfig::ScramSha512 { tls_ca_file, .. } => assert_eq!(
+                tls_ca_file.as_deref(),
+                Some(path),
+                "the plan's `caFile` must reach the client verbatim"
+            ),
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    // And it still cannot decide the transport: a CA on a clear connection is
+    // refused rather than upgrading it (D-SEAMS S5).
+    let clear = ConnectionPlan {
+        auth_mode: "scramSha512".to_string(),
+        username: Some("backup".to_string()),
+        tls: Some(false),
+        ca_file: Some("/connection/source-ca/ca.crt".to_string()),
+        password_env: Some(PASSWORD_VAR.to_string()),
+        ..connection()
+    };
+    assert_eq!(
+        logweir::check::kafka::auth_config(&clear)
+            .expect_err("a CA on a clear connection is refused")
+            .code,
+        CheckCode::AuthenticationFailed
+    );
 }
