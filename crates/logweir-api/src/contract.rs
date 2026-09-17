@@ -418,6 +418,26 @@ pub struct RetentionReportView {
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct ScheduleStatusView {
+    /// The `metadata.generation` the controller has evaluated. A `generation`
+    /// ahead of this one is an edit the controller has not seen yet; ABSENT
+    /// means it has not been computed, never that it is zero.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub observed_generation: Option<i64>,
+    /// The revision the controller last evaluated, with the effective zone,
+    /// the tz database that resolved it and the run-policy digest.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy: Option<SchedulePolicyView>,
+    /// Up to five upcoming firings for the current generation; empty when the
+    /// schedule is suspended or invalid. **This is the staleness signal**: a
+    /// live controller rewrites these once `nextRuns[0].at` has passed, so a
+    /// first entry in the past means nobody is evaluating this schedule.
+    /// ABSENT means "not yet computed", never "it never fires".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_runs: Option<Vec<NextRunView>>,
+    /// The schedule-created runs that are not terminal. ABSENT means "not yet
+    /// computed", never "none are running".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_runs: Option<Vec<ActiveRunView>>,
     /// When the schedule last created a Backup.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_fire_time: Option<DateTime<Utc>>,
@@ -451,21 +471,64 @@ pub struct Schedule {
     pub namespace: String,
     /// The Kubernetes UID.
     pub uid: String,
-    /// The resourceVersion; send it back as `expectedResourceVersion`.
+    /// The resourceVersion; send it back as `expectedResourceVersion` on
+    /// `:set-suspension`.
     pub resource_version: String,
+    /// The `metadata.generation`; send it back as `expectedGeneration` on
+    /// `PUT .../schedules/{name}` and on a manual run taken from this
+    /// schedule. It increments on EVERY spec change, suspension included.
+    ///
+    /// OPTIONAL IN THE SCHEMA, ALWAYS EMITTED BY THIS BUILD. The API server
+    /// sets `metadata.generation` on every object, so this projection always
+    /// carries it; it is declared optional ONLY because `ui/contract.js`'s
+    /// decoder drift test compares the schema's `required` set with a frozen
+    /// list on the console side, and moving a field into that set is a
+    /// contract change that must land in the same commit as `ui/contract.js`
+    /// and the console fixtures (D1 W7's ownership). A console that somehow
+    /// sees it absent must ask for a reload rather than guess a value for
+    /// `expectedGeneration`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<i64>,
     /// When the object was created.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub created_at: Option<DateTime<Utc>>,
     /// The cron expression.
     pub schedule: String,
-    /// The source connection.
+    /// The preset this expression IS, or absent for "Advanced cron".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset: Option<CadencePreset>,
+    /// The IANA zone the expression is evaluated in. ABSENT means UTC, which
+    /// is what every pre-PLAT-04.2 schedule does.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_zone: Option<String>,
+    /// The source connection. Immutable: a different cluster is a different
+    /// schedule.
     pub source_ref: NameRef,
-    /// Named topics.
+    /// Named topics. Empty with `allUserTopics`.
     pub topics: Vec<String>,
-    /// Where backups are written.
+    /// Dynamic selection, when the schedule uses it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub all_user_topics: Option<AllUserTopics>,
+    /// Where backups are written. With `destinationRef` this is the CRD's
+    /// sentinel URL and the console should render the destination instead.
     pub archive: ArchiveView,
+    /// The saved destination, when the schedule names one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub destination_ref: Option<NameRef>,
     /// `Forbid` or `Allow`.
     pub concurrency_policy: ConcurrencyPolicy,
+    /// How long after its instant a slot may still start. ABSENT means 3600.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub starting_deadline_seconds: Option<i64>,
+    /// ABSENT means `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub catch_up_policy: Option<CatchUpPolicy>,
+    /// ABSENT means no retries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry: Option<RetryPolicy>,
+    /// The run's `activeDeadlineSeconds`. ABSENT means 3600.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub active_deadline_seconds: Option<i64>,
     /// Retention reporting settings.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub retention: Option<RetentionView>,
@@ -735,6 +798,16 @@ pub struct Backup {
     pub slot: Option<String>,
     /// `schedule` or `manual`.
     pub triggered_by: String,
+    /// What caused this run. ABSENT on a run created before PLAT-04.2: read
+    /// `triggeredBy` then, and say "trigger not recorded" rather than
+    /// inventing one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trigger: Option<TriggerView>,
+    /// The schedule revision this run copied. ABSENT — or present with no
+    /// `uid`/`generation` — on a run created before PLAT-05.1: the console
+    /// shows "revision not recorded", never a guess.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule_ref: Option<ScheduleRefView>,
     /// The Job deadline.
     pub deadline_seconds: i64,
     /// The archive backup ID.
@@ -754,6 +827,56 @@ pub struct Backup {
     pub observed_auth: Option<ObservedAuthView>,
     /// The normalized status summary.
     pub operation: OperationSummary,
+}
+
+/// Which kind of run a `Backup` is (D1 §3.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+pub enum TriggerKind {
+    /// A slot that fired at its own instant.
+    Scheduled,
+    /// The same slot, started late because the controller was not running.
+    CatchUp,
+    /// Attempt k of a slot, 1 to 3, with a NEW execution id.
+    Retry,
+    /// Created by a person, this API or the console. No slot; the execution id
+    /// is the object's own UID.
+    Manual,
+}
+
+/// What caused a run.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TriggerView {
+    /// The kind.
+    pub kind: TriggerKind,
+    /// 0 for `Scheduled`, `CatchUp` and `Manual`; 1 to 3 for `Retry`.
+    pub attempt: i32,
+    /// The attempt this one retries.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_of: Option<NameRef>,
+    /// The zone the slot was computed in. INFORMATIONAL: the slot itself is
+    /// UTC, and this is what keeps a history row's local time readable after
+    /// somebody edits the schedule's `timeZone`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub time_zone: Option<String>,
+}
+
+/// The schedule revision a run recorded.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleRefView {
+    /// The schedule's name, in this namespace.
+    pub name: String,
+    /// Its UID. A schedule deleted and recreated under the same name is a
+    /// different schedule; a run of the old one is not a run of the new one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub uid: Option<String>,
+    /// The revision this run copied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub generation: Option<i64>,
+    /// The digest of the policy it copied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_policy_sha256: Option<String>,
 }
 
 /// The covered window.
@@ -2452,6 +2575,447 @@ pub struct CheckOperationResponse {
     pub request_id: String,
     /// The normalized check.
     pub item: CheckOperation,
+}
+
+// ======================================================================
+// Cadence: presets, previews and the editable schedule policy (D1 §4, §5)
+// ======================================================================
+
+/// The DST marker on one firing (D1 §4.3/§4.4).
+///
+/// THE SPELLING IS THE CONTROLLER'S, NOT THIS CRATE'S. `BackupSchedule.status.
+/// nextRuns[].adjustment` carries these exact PascalCase strings, and a console
+/// renders the preview and the saved status with one branch. A marker this
+/// build does not recognise is OMITTED from a projection rather than echoed:
+/// an unknown word is not a fact about a time zone.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub enum CadenceAdjustment {
+    /// The matched local time does not exist (spring forward); this instant is
+    /// the end of the gap.
+    NonexistentLocalTimeShifted,
+    /// The matched local time happens twice; this is the FIRST occurrence.
+    RepeatedLocalTimeFirst,
+    /// The matched local time happens twice; this is the SECOND occurrence.
+    RepeatedLocalTimeSecond,
+}
+
+impl CadenceAdjustment {
+    /// The stored spelling, or `None` for a word this build does not know.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "NonexistentLocalTimeShifted" => Some(Self::NonexistentLocalTimeShifted),
+            "RepeatedLocalTimeFirst" => Some(Self::RepeatedLocalTimeFirst),
+            "RepeatedLocalTimeSecond" => Some(Self::RepeatedLocalTimeSecond),
+            _ => None,
+        }
+    }
+}
+
+/// One upcoming firing: the UTC instant, the local wall time with its offset,
+/// and what the local clock did to reach it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct NextRunView {
+    /// The UTC instant. This, and only this, is the slot's identity.
+    pub at: DateTime<Utc>,
+    /// The same instant in the schedule's zone, offset included —
+    /// `2026-10-25T02:30:00+02:00`. The offset is what distinguishes the two
+    /// occurrences of a repeated hour.
+    pub local_time: String,
+    /// The marker, omitted when the instant needed no adjustment.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub adjustment: Option<CadenceAdjustment>,
+}
+
+/// One of the five preset cadences (D1 §4.2), with its parameters.
+///
+/// A PRESET IS NEVER STORED. `spec.schedule` is the single source of truth;
+/// this is the catalogue entry an expression IS, so a form can round-trip it.
+/// `ui/tests/fixtures/cadence-presets.json` is the same catalogue as data.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(tag = "kind", rename_all = "camelCase")]
+pub enum CadencePreset {
+    /// Every hour at `minute`.
+    #[serde(rename_all = "camelCase")]
+    Hourly {
+        /// 0–59.
+        minute: u32,
+    },
+    /// At local wall-clock hours divisible by `n`, at `minute`.
+    #[serde(rename_all = "camelCase")]
+    EveryNHours {
+        /// 2, 3, 4, 6, 8 or 12.
+        n: u32,
+        /// 0–59.
+        minute: u32,
+    },
+    /// Every day at `hour`:`minute`.
+    #[serde(rename_all = "camelCase")]
+    Daily {
+        /// 0–23.
+        hour: u32,
+        /// 0–59.
+        minute: u32,
+    },
+    /// Every week on `dayOfWeek` at `hour`:`minute`.
+    #[serde(rename_all = "camelCase")]
+    Weekly {
+        /// 0–6, 0 = Sunday.
+        day_of_week: u32,
+        /// 0–23.
+        hour: u32,
+        /// 0–59.
+        minute: u32,
+    },
+    /// Every month on `dayOfMonth` at `hour`:`minute`.
+    #[serde(rename_all = "camelCase")]
+    Monthly {
+        /// 1–28.
+        day_of_month: u32,
+        /// 0–23.
+        hour: u32,
+        /// 0–59.
+        minute: u32,
+    },
+}
+
+/// `GET /api/v1/cadence-previews`.
+///
+/// A DRAFT PREVIEW, COMPUTED IN RUST AND NOWHERE ELSE (D1 §4.4). The browser
+/// renders what this returns and never evaluates cron; the saved schedule's own
+/// previews are `status.nextRuns`, written by the controller from the same
+/// module.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct CadencePreviewResponse {
+    /// The request ID.
+    pub request_id: String,
+    /// The canonical five-field expression that was evaluated. With `preset=`
+    /// it is what the preset compiled to, so the form can save exactly this.
+    pub schedule: String,
+    /// The preset this expression IS, or absent for "Advanced cron".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preset: Option<CadencePreset>,
+    /// The EFFECTIVE zone: `UTC` when `timeZone` was not sent, so a reader
+    /// never has to know the default.
+    pub time_zone: String,
+    /// Which time-zone database resolved it, e.g. `chrono-tz 0.10.4`. Rule
+    /// updates ship with a release, so two releases can disagree about a slot
+    /// and this says which one answered.
+    pub tzdb: String,
+    /// The instant the walk started strictly after — the server's now unless
+    /// `after` was sent.
+    pub after: DateTime<Utc>,
+    /// Up to `count` firings, ascending. SHORTER IS A REAL ANSWER: an
+    /// expression such as `0 0 29 2 *` runs out of firings, and an empty list
+    /// means "it does not fire again", not "the server gave up".
+    pub runs: Vec<NextRunView>,
+}
+
+/// Topics to leave out of a dynamic selection. Literal names and literal
+/// prefixes; never a pattern language.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TopicExclusions {
+    /// Exact names, at most 1000.
+    #[serde(default)]
+    pub topics: Option<Vec<String>>,
+    /// Literal prefixes, at most 32. `orders-` excludes `orders-eu`;
+    /// `orders*` is not writable at all.
+    #[serde(default)]
+    pub prefixes: Option<Vec<String>>,
+}
+
+/// What a dynamic run does when discovery cannot prove it saw everything.
+/// REQUIRED, WITH NO DEFAULT: both possible defaults are wrong in a way the
+/// operator would not notice (D1 §0.1).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+pub enum IncompleteDiscoveryPolicy {
+    /// Fail the run.
+    Refuse,
+    /// Back up what was visible and label the run `VisibleUserTopicsOnly`.
+    BackUpVisibleTopics,
+}
+
+/// Dynamic selection: every user topic the run's principal can see, minus the
+/// exclusions.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct AllUserTopics {
+    /// What to leave out.
+    #[serde(default)]
+    pub exclude: Option<TopicExclusions>,
+    /// Required.
+    pub incomplete_discovery: IncompleteDiscoveryPolicy,
+}
+
+/// How a run picks its topics: a named allowlist, or dynamic resolution.
+///
+/// THE THIRD SHAPE IS NOT REFUSED HERE, AND THAT IS DELIBERATE. Sending a
+/// non-empty `topics` together with `allUserTopics` is refused by the CRD's own
+/// CEL (D1 §5.2 R2 / the `Backup` rule), and this API lets the API server say
+/// so rather than keeping a second copy of the rule that can drift from it. An
+/// EMPTY selection — neither a name nor a block — is refused here, before any
+/// write, because no rule catches it and a run with nothing to do is not a run.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TopicSelectionRequest {
+    /// Named topics; patterns are refused. Empty for dynamic selection.
+    #[serde(default)]
+    pub topics: Vec<String>,
+    /// Dynamic selection.
+    #[serde(default)]
+    pub all_user_topics: Option<AllUserTopics>,
+}
+
+/// Whether a slot past its starting deadline may still run.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+pub enum CatchUpPolicy {
+    /// Count it in `status.missedSlots` and move on — today's behaviour, and
+    /// what an absent field means.
+    None,
+    /// The LATEST due slot, and only that one, may still run. At most one
+    /// catch-up run, ever.
+    Latest,
+}
+
+/// Retries for a failed slot.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct RetryPolicy {
+    /// 0 to 3. Each retry is a NEW `Backup` with a new execution id: a failed
+    /// attempt's partial archive is never appended to.
+    pub max_retries: i32,
+    /// Seconds between a failed attempt finishing and its retry becoming
+    /// admissible, 60 to 21600. Absent means 300.
+    #[serde(default)]
+    pub delay_seconds: Option<i64>,
+}
+
+/// `PUT /api/v1/namespaces/{ns}/schedules/{name}` — the editable future policy
+/// (D1 §5.1, §5.6).
+///
+/// THE WHOLE POLICY, NOT A DIFF. Every mutable field is sent; a field omitted
+/// is REMOVED, which is what makes "absent means the documented default"
+/// reachable from a form. `spec.sourceRef` is not on this DTO at all: the
+/// identity of the protected cluster is immutable, and a request naming it is
+/// `422 validation_failed` with `sourceRef: field_immutable` before anything is
+/// read or written.
+///
+/// IT CHANGES THE FUTURE AND NOTHING ELSE. A `Backup` already created keeps its
+/// copied policy and its frozen inputs; an edit during a run does not reach the
+/// run (D1 §5.5).
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct UpdateSchedulePolicyRequest {
+    /// The `metadata.generation` the client last read. A different current
+    /// generation is `412 precondition_failed`: somebody else edited the
+    /// policy between the read and this write.
+    pub expected_generation: i64,
+    /// A five-field cron expression or `@hourly`/`@daily`/`@weekly`, parsed by
+    /// the controller's own parser.
+    pub schedule: String,
+    /// An IANA zone name. Absent means UTC and reproduces today's slots
+    /// exactly.
+    #[serde(default)]
+    pub time_zone: Option<String>,
+    /// PRESENT ONLY TO BE REFUSED, and present so that the refusal is a
+    /// FIELD ERROR rather than "unknown field". A console that reads a
+    /// schedule and writes it back sends every field it read; `sourceRef` is
+    /// one of them, and `sourceRef: field_immutable` tells the person what to
+    /// do (create a new schedule) where `malformed_request` would not.
+    #[serde(default)]
+    pub source_ref: Option<NameRef>,
+    /// The topic selection.
+    pub topic_selection: TopicSelectionRequest,
+    /// Where backups are written. Exactly one of `archive` or
+    /// `destinationRef`.
+    #[serde(default)]
+    pub archive: Option<ArchiveRequest>,
+    /// A saved `BackupDestination` in this namespace. Exactly one of `archive`
+    /// or `destinationRef`; the sentinel `archive.url` the CRD requires is
+    /// built here and is never accepted from a body.
+    #[serde(default)]
+    pub destination_ref: Option<NameRef>,
+    /// `Forbid` (default) or `Allow`.
+    #[serde(default)]
+    pub concurrency_policy: Option<ConcurrencyPolicy>,
+    /// How long after its instant a slot may still start, 60 to 604800.
+    /// Absent means 3600.
+    #[serde(default)]
+    pub starting_deadline_seconds: Option<i64>,
+    /// Absent means `None`.
+    #[serde(default)]
+    pub catch_up_policy: Option<CatchUpPolicy>,
+    /// Absent means no retries.
+    #[serde(default)]
+    pub retry: Option<RetryPolicy>,
+    /// The run's `activeDeadlineSeconds`, 60 to 86400. Absent means 3600.
+    #[serde(default)]
+    pub active_deadline_seconds: Option<i64>,
+    /// Retention reporting. Logweir deletes nothing.
+    #[serde(default)]
+    pub retention: Option<RetentionRequest>,
+    /// Whether the schedule is suspended. Suspension is part of the policy
+    /// here as well as its own command route; flipping it changes
+    /// `metadata.generation` and leaves `runPolicySha256` alone.
+    pub suspended: bool,
+}
+
+/// The revision a schedule's controller last evaluated (D1 §4.8).
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct SchedulePolicyView {
+    /// The `metadata.generation` this block was computed from.
+    pub generation: i64,
+    /// `sha256:<lowercase hex>` over the run policy of that generation.
+    pub run_policy_sha256: String,
+    /// The EFFECTIVE zone, `UTC` when `spec.timeZone` is absent.
+    pub time_zone: String,
+    /// Which time-zone database resolved it.
+    pub tzdb: String,
+    /// When this revision was first observed.
+    pub effective_since: DateTime<Utc>,
+    /// When this status last MOVED — **not** a liveness probe.
+    ///
+    /// The controller re-examines every schedule every 30 s and writes nothing
+    /// when the computed status equals the stored one, so this instant
+    /// standing still means "nothing has changed", not "nobody is watching". A
+    /// console must not compare it with the requeue interval. The staleness
+    /// signal is `nextRuns[0].at` in the past (D1 §4.9 as amended).
+    pub evaluated_at: DateTime<Utc>,
+}
+
+/// One schedule-created run that is not terminal (D1 §4.8).
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ActiveRunView {
+    /// The `Backup`'s name.
+    pub name: String,
+    /// `Scheduled`, `CatchUp` or `Retry`. A manual run is never here: it is
+    /// not counted by, and never blocked by, `concurrencyPolicy`.
+    pub kind: String,
+    /// 0 for a scheduled or catch-up run, 1 to 3 for a retry.
+    pub attempt: i32,
+}
+
+// ======================================================================
+// Manual backups (D1 §8.2)
+// ======================================================================
+
+/// The schedule a manual run copies its policy from.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct BackupScheduleRefRequest {
+    /// The `BackupSchedule` name, in this namespace.
+    pub name: String,
+    /// The revision the caller believes it is running. A different current
+    /// generation is `409 policy_changed`, with the current generation and
+    /// digest in the body.
+    #[serde(default)]
+    pub expected_generation: Option<i64>,
+}
+
+/// The readiness verdict a person clicked past.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum AcknowledgedReadiness {
+    /// A preflight said a prerequisite was not met and the person ran anyway.
+    NotReady,
+    /// Readiness could not be established.
+    Unknown,
+}
+
+/// "Run anyway", recorded and never authoritative (D1 §8.4).
+///
+/// THE API AND THE CONTROLLER NEVER GATE ON READINESS. Execution-time guards
+/// stay authoritative and the direct `kubectl create -f` path exists
+/// regardless; this records that a person was shown a `notReady` or `unknown`
+/// verdict and went ahead. It is an annotation on the run, not a permission.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct ReadinessAcknowledgementRequest {
+    /// The `Preflight` whose verdict was shown, in this namespace.
+    pub preflight: String,
+    /// What it said.
+    pub state: AcknowledgedReadiness,
+}
+
+/// `POST /api/v1/namespaces/{ns}/backups` — "Back up now" and "Run first
+/// backup now" (D1 §8.2).
+///
+/// TWO BODIES, ONE CR PATH. With `scheduleRef` the API copies the schedule's
+/// current revision — selection, archive, deadline — and records
+/// `{uid, generation, runPolicySha256}`; a policy field in the body beside it
+/// is `422`, because a "manual run of this schedule" that quietly ran a
+/// different policy would be the wrong thing recorded in the receipt. Without
+/// it the body IS the policy, for a cluster with no schedule yet.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CreateBackupRequest {
+    /// Body A: copy this schedule's current revision.
+    #[serde(default)]
+    pub schedule_ref: Option<BackupScheduleRefRequest>,
+    /// Body B: the source connection, in this namespace.
+    #[serde(default)]
+    pub source_ref: Option<NameRef>,
+    /// Body B: the topic selection.
+    #[serde(default)]
+    pub topic_selection: Option<TopicSelectionRequest>,
+    /// Body B: an inline archive location.
+    #[serde(default)]
+    pub legacy_archive: Option<ArchiveRequest>,
+    /// Body B: a saved `BackupDestination` instead of an inline archive.
+    #[serde(default)]
+    pub destination_ref: Option<NameRef>,
+    /// Body B: the run's `activeDeadlineSeconds`, 60 to 86400. Absent means
+    /// 3600.
+    #[serde(default)]
+    pub deadline_seconds: Option<i64>,
+    /// Either body: "Run anyway" after a `notReady` or `unknown` verdict.
+    #[serde(default)]
+    pub readiness_acknowledgement: Option<ReadinessAcknowledgementRequest>,
+}
+
+/// The schedule a manual run was taken from, as it stood when the run was
+/// created.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ScheduleContextView {
+    /// The schedule's name.
+    pub name: String,
+    /// Its UID.
+    pub uid: String,
+    /// The generation whose policy this run copied.
+    pub generation: i64,
+    /// The digest of that policy.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub run_policy_sha256: Option<String>,
+    /// Whether the schedule is suspended. A manual run is ALLOWED while it is,
+    /// and does not resume it; the console says so rather than hiding it.
+    pub suspended: bool,
+    /// The schedule-created runs that were not terminal. A manual run is
+    /// neither counted by nor blocked by `concurrencyPolicy`; this is a
+    /// non-blocking notice.
+    pub active_runs: Vec<ActiveRunView>,
+}
+
+/// `POST /api/v1/namespaces/{ns}/backups`: the created run, and the schedule
+/// it came from.
+#[derive(Clone, Debug, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ManualBackupResponse {
+    /// The request ID.
+    pub request_id: String,
+    /// Whether this response replays an earlier identical request (HTTP 200)
+    /// rather than creating (HTTP 201).
+    pub replayed: bool,
+    /// The created run.
+    pub item: Backup,
+    /// The schedule, when the run was taken from one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub schedule: Option<ScheduleContextView>,
 }
 
 // ======================================================================

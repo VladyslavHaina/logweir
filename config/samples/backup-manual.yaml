@@ -1,0 +1,102 @@
+# A MANUAL `Backup` — "Back up now", as an ordinary object (PLAT-06.2, D1 §8.1).
+#
+#     kubectl --context docker-desktop -n <namespace> \
+#       create -f config/samples/backup-manual.yaml
+#
+# `create`, NOT `apply`. A `Backup` is a run, and a new name is a new run: the
+# name below is a placeholder you replace per run, and re-applying a file whose
+# object already exists is the API server's own `AlreadyExists` rather than a
+# second archive.
+#
+# ---------------------------------------------------------------------------
+# ONE CR PATH: kubectl, THE API AND THE CONSOLE CREATE THE SAME OBJECT
+# ---------------------------------------------------------------------------
+# `POST /api/v1/namespaces/<ns>/backups` and the console's "Back up now" button
+# produce exactly this shape. The only fields they add are the deterministic
+# name (`logweir-manual-` plus 26 base32 characters of the idempotency scope,
+# so a double click or a lost response cannot create a second run) and the
+# console's own audit annotations. There is no second mechanism, no annotation
+# the controller executes, and nothing this file can ask for that the API
+# cannot — or the other way round.
+#
+# ---------------------------------------------------------------------------
+# WHAT MAKES IT A MANUAL RUN
+# ---------------------------------------------------------------------------
+# `trigger.kind: Manual` with `triggeredBy: manual`, no `slot`, and attempt 0.
+# Its execution id — and therefore its archive prefix — is this object's own
+# API-server UID, so it can never collide with a scheduled run's
+# `<scheduleUID>-<slot>` and can never append into a partial archive.
+#
+# A manual run is NEVER blocked by the schedule it copied: a suspended
+# schedule, an invalid cadence, a scheduled run already going under
+# `concurrencyPolicy: Forbid`, and a schedule DELETED between writing this file
+# and applying it all still produce a run. The controller does not read a
+# `BackupSchedule` for a manual run at all.
+#
+# ---------------------------------------------------------------------------
+# `scheduleRef` IS A RECORD OF WHAT YOU COPIED, AND IT IS CHECKED
+# ---------------------------------------------------------------------------
+# It is OPTIONAL: delete the whole block and the labels beside it for an ad-hoc
+# run against a cluster that has no schedule yet ("Run first backup now"), and
+# fill `sourceRef`, `topics` and `archive` yourself.
+#
+# When it IS present, `runPolicySha256` must be the digest of the policy fields
+# in THIS spec — `sourceRef`, the topic selection, `archive` and
+# `deadlineSeconds`, canonicalised (D1 §3.2). The controller recomputes it and
+# refuses the run terminally on a mismatch, so a copied block beside edited
+# fields fails visibly instead of running something nobody described. Read the
+# values to fill in from the schedule itself:
+#
+#     kubectl --context docker-desktop -n <ns> get backupschedule nightly \
+#       -o jsonpath='{.metadata.uid}{"\n"}{.status.policy.generation}{"\n"}{.status.policy.runPolicySha256}{"\n"}'
+#
+# and copy `spec.sourceRef`, `spec.topics` (or `spec.allUserTopics` with
+# `topics: []`), `spec.archive` and `spec.activeDeadlineSeconds` from the same
+# object. If you would rather not do that by hand, the API route does it for
+# you and cannot get it wrong.
+#
+# `topics` IS A NAMED ALLOWLIST WITH NO WILDCARD (GC18(c) rail 1, guard
+# **G-GLOB**). A `*` here is a refusal, not a match-all.
+#
+# The labels are HINTS for selection — `kubectl get backups -l
+# logweir.dev/trigger=manual` — and never authority: membership of a schedule
+# is `spec.scheduleRef.uid`, which is in the sealed spec.
+---
+apiVersion: logweir.dev/v1alpha1
+kind: Backup
+metadata:
+  # Replace per run. The API mints `logweir-manual-<26 base32 characters>` from
+  # the idempotency scope; by hand, any DNS-1123 name that is not already taken
+  # will do.
+  name: logweir-manual-2v4qk7bhq8nwz3xr9fcm5td6ea
+  labels:
+    app.kubernetes.io/name: logweir
+    logweir.dev/trigger: manual
+    logweir.dev/attempt: "0"
+    # Both label the run as this schedule's, for selection only.
+    logweir.dev/schedule: nightly
+    logweir.dev/schedule-uid: 00000000-0000-4000-8000-000000000000
+spec:
+  # Copied from the schedule generation named below.
+  sourceRef:
+    name: source
+  topics:
+    - orders
+    - payments
+  archive:
+    url: s3://kafka-backups/logweir
+    secretRef:
+      name: logweir-s3
+  # `activeDeadlineSeconds` from the schedule, or 3600.
+  deadlineSeconds: 3600
+  triggeredBy: manual
+  trigger:
+    kind: Manual
+    attempt: 0
+  # Omit this whole block for an ad-hoc run.
+  scheduleRef:
+    name: nightly
+    uid: 00000000-0000-4000-8000-000000000000
+    generation: 7
+    # sha256 over the canonical run policy of the fields above.
+    runPolicySha256: sha256:0bc972dc35e876abb576f8213bab3c88ee8a6bdd5f80286e518405c666219ac5

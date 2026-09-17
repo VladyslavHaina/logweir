@@ -3,6 +3,7 @@
 
 pub mod approvals;
 pub mod backups;
+pub mod cadence_previews;
 pub mod connections;
 pub mod destinations;
 pub mod health;

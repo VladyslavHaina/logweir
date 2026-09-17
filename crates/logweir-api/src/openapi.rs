@@ -417,6 +417,29 @@ fn paths() -> Value {
             vec![get_one("getConnection", "One KafkaCluster projection.", "ConnectionResponse")],
         ),
         (
+            "/api/v1/cadence-previews",
+            vec![Op {
+                method: "get",
+                operation_id: "previewCadence",
+                summary: "What a cron expression, or a preset, will actually do in a time zone: the next runs as UTC instants with their local wall times and DST markers. Computed by the same module the scheduler uses; the browser never evaluates cron. It reads nothing from Kubernetes and takes no namespace, so it needs permission to read schedules in at least one granted namespace.",
+                parameters: vec![
+                    param("schedule", "query", "A five-field cron expression or @hourly/@daily/@weekly. Exactly one of schedule or preset.", json!({ "type": "string", "maxLength": 128 }), false),
+                    param("preset", "query", "hourly, everyNHours, daily, weekly or monthly, with that preset's parameters. The response carries the canonical expression it compiled to.", json!({ "type": "string", "enum": ["hourly", "everyNHours", "daily", "weekly", "monthly"] }), false),
+                    param("minute", "query", "0 to 59. A parameter of every preset.", json!({ "type": "integer", "minimum": 0, "maximum": 59 }), false),
+                    param("hour", "query", "0 to 23. daily, weekly and monthly.", json!({ "type": "integer", "minimum": 0, "maximum": 23 }), false),
+                    param("dayOfWeek", "query", "0 to 6, 0 = Sunday. weekly only.", json!({ "type": "integer", "minimum": 0, "maximum": 6 }), false),
+                    param("dayOfMonth", "query", "1 to 28. monthly only; 29 to 31 are not a monthly cadence.", json!({ "type": "integer", "minimum": 1, "maximum": 28 }), false),
+                    param("n", "query", "2, 3, 4, 6, 8 or 12. everyNHours only: */n matches local wall-clock hours divisible by n, not n hours after creation.", json!({ "type": "integer", "enum": [2, 3, 4, 6, 8, 12] }), false),
+                    param("timeZone", "query", "An IANA zone name. Absent means UTC and reproduces the pre-PLAT-04.2 slots exactly.", json!({ "type": "string", "maxLength": 64 }), false),
+                    param("count", "query", "1 to 20. Default 10. A shorter answer is real: an expression can run out of firings.", json!({ "type": "integer", "minimum": 1, "maximum": 20, "default": 10 }), false),
+                    param("after", "query", "An RFC 3339 instant to walk strictly after. Default: the server's now.", json!({ "type": "string", "format": "date-time" }), false),
+                ],
+                request: None,
+                success: vec![("200", "The canonical expression, the effective zone, the tz database that resolved it, and the firings.", "CadencePreviewResponse")],
+                problems: all_codes(&[COMMON, &[ProblemCode::Forbidden, ProblemCode::MalformedRequest, ProblemCode::ValidationFailed]]),
+            }],
+        ),
+        (
             "/api/v1/namespaces/{ns}/schedules",
             vec![
                 list("listSchedules", "BackupSchedule projections.", "ScheduleList"),
@@ -425,7 +448,18 @@ fn paths() -> Value {
         ),
         (
             "/api/v1/namespaces/{ns}/schedules/{name}",
-            vec![get_one("getSchedule", "One BackupSchedule projection.", "ScheduleResponse")],
+            vec![
+                get_one("getSchedule", "One BackupSchedule projection.", "ScheduleResponse"),
+                Op {
+                    method: "put",
+                    operation_id: "updateSchedulePolicy",
+                    summary: "Replace a schedule's FUTURE policy under expectedGeneration. The whole policy is sent and a field omitted is removed. spec.sourceRef is not on the request: a different cluster is a different schedule, and naming it is 422 sourceRef: field_immutable. It never touches a Backup that already exists, its frozen inputs or its Job. Idempotency-Key is refused: the precondition is the idempotence.",
+                    parameters: vec![ns(), name(), origin()],
+                    request: Some("UpdateSchedulePolicyRequest"),
+                    success: vec![("200", "The edited schedule, with its new generation.", "ScheduleResponse")],
+                    problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, COMMAND]),
+                },
+            ],
         ),
         (
             "/api/v1/namespaces/{ns}/schedules/{name}:set-suspension",
@@ -441,7 +475,21 @@ fn paths() -> Value {
         ),
         (
             "/api/v1/namespaces/{ns}/backups",
-            vec![list("listBackups", "Backup projections with a status summary.", "BackupList")],
+            vec![
+                list("listBackups", "Backup projections with a status summary.", "BackupList"),
+                Op {
+                    method: "post",
+                    operation_id: "createBackup",
+                    summary: "Back up now. With scheduleRef the schedule's current revision is copied and recorded (uid, generation, runPolicySha256) and a policy field beside it is 422; without it the body is the policy, for a cluster with no schedule yet. A suspended schedule, an invalid cadence, an active Forbid run and a schedule deleted a second later none of them block the run. Readiness is recorded, never obeyed.",
+                    parameters: vec![ns(), idempotency_key(), origin()],
+                    request: Some("CreateBackupRequest"),
+                    success: vec![
+                        ("201", "Created; the run and the schedule it came from.", "ManualBackupResponse"),
+                        ("200", "Replayed an identical earlier request; the same run and the same UID.", "ManualBackupResponse"),
+                    ],
+                    problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, CREATE, &[ProblemCode::PolicyChanged, ProblemCode::NotFound]]),
+                },
+            ],
         ),
         (
             "/api/v1/namespaces/{ns}/backups/{name}",
@@ -754,10 +802,14 @@ pub fn openapi_document() -> String {
     let _ = generator.subschema_for::<c::ConnectionResponse>();
     let _ = generator.subschema_for::<c::CreateScheduleRequest>();
     let _ = generator.subschema_for::<c::SetSuspensionRequest>();
+    let _ = generator.subschema_for::<c::UpdateSchedulePolicyRequest>();
+    let _ = generator.subschema_for::<c::CadencePreviewResponse>();
     let _ = generator.subschema_for::<c::ScheduleList>();
     let _ = generator.subschema_for::<c::ScheduleResponse>();
     let _ = generator.subschema_for::<c::BackupList>();
     let _ = generator.subschema_for::<c::BackupResponse>();
+    let _ = generator.subschema_for::<c::CreateBackupRequest>();
+    let _ = generator.subschema_for::<c::ManualBackupResponse>();
     let _ = generator.subschema_for::<c::CreateRestoreRequest>();
     let _ = generator.subschema_for::<c::RestoreList>();
     let _ = generator.subschema_for::<c::RestoreResponse>();

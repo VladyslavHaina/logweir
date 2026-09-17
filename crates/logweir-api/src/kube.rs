@@ -20,10 +20,10 @@
 //! NOT imported: a type that can hold a Secret's data is a type that can leak
 //! one.
 //!
-//! THE UPDATES ARE THREE MERGE PATCHES, EACH BUILT HERE FROM TYPED
+//! THE UPDATES ARE FOUR MERGE PATCHES, EACH BUILT HERE FROM TYPED
 //! ARGUMENTS: [`KubeAdapter::set_schedule_suspension`],
-//! [`KubeAdapter::set_destination_access`] and
-//! [`KubeAdapter::request_check_cancel`]. Each carries
+//! [`KubeAdapter::set_schedule_policy`], [`KubeAdapter::set_destination_access`]
+//! and [`KubeAdapter::request_check_cancel`]. Each carries
 //! `metadata.resourceVersion`, so each is a conditional write the API server
 //! refuses on a stale read, and none of them accepts a caller-supplied path or
 //! patch document.
@@ -34,7 +34,11 @@
 //!
 //! NO KUBERNETES MESSAGE LEAVES THIS MODULE UNREDACTED. [`KubeFailure`] carries
 //! the status code and reason class only; the message is logged through
-//! [`redact`] and then dropped.
+//! [`redact`] and then dropped. The ONE exception is not an exception at all:
+//! [`classify`] compares a 422's message with the CRD's OWN published rule
+//! messages ([`SpecRule::ALL`]) and, on an exact containment, returns the
+//! closed [`SpecRule`] value. What leaves is a constant compiled into this
+//! binary, never the API server's text.
 //!
 //! NO INBOUND HEADER IS FORWARDED. Requests are built by `kube::Api` from typed
 //! parameters; nothing from the HTTP request reaches them but validated names.
@@ -50,11 +54,15 @@ use serde::{Deserialize, Serialize};
 use weirkeeper::crds::approval::Approval;
 use weirkeeper::crds::backup::Backup;
 use weirkeeper::crds::backup_destination::BackupDestination;
-use weirkeeper::crds::backup_schedule::BackupSchedule;
+use weirkeeper::crds::backup_schedule::{
+    BackupSchedule, CatchUpPolicy, ConcurrencyPolicy, Retention, RetrySpec,
+};
 use weirkeeper::crds::kafka_cluster::KafkaCluster;
 use weirkeeper::crds::preflight::Preflight;
 use weirkeeper::crds::restore::Restore;
+use weirkeeper::crds::selection::AllUserTopics;
 use weirkeeper::crds::topic_discovery::TopicDiscovery;
+use weirkeeper::crds::{ArchiveRef, LocalRef};
 
 use crate::config::KubeSource;
 use crate::problem::{ApiError, ProblemCode};
@@ -267,6 +275,9 @@ pub enum KubeFailure {
     Gone,
     /// 422 — the object failed server-side validation.
     Invalid,
+    /// 422 — the object failed one of the CRD's own published CEL rules, and
+    /// this build recognises which.
+    RuleRefused(SpecRule),
     /// 400 from the API server.
     BadRequest,
     /// 401 or 403 — this service's own identity was refused.
@@ -277,6 +288,97 @@ pub enum KubeFailure {
     Timeout,
     /// A transport failure, an unparseable response or a 5xx.
     Unavailable,
+}
+
+/// A CRD validation rule the API server refused a write with.
+///
+/// A CLOSED SET, MATCHED AGAINST THE CRD'S OWN CONSTANTS. D1 §5.2 says the API
+/// must NOT keep a second copy of R1–R3 and pre-empt them: a copy drifts from
+/// the schema, and a stored object can violate a rule this build has never
+/// heard of. So the write goes out, the API server decides, and this maps the
+/// refusal back to the rule — by comparing the returned message with the
+/// `weirkeeper::crds` constant that the CRD itself was generated from. A
+/// message that matches none of them stays [`KubeFailure::Invalid`] and is
+/// answered generically, because naming a rule this build cannot recognise
+/// would be a guess.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SpecRule {
+    /// `BackupSchedule` R1: `spec.sourceRef` is immutable.
+    ScheduleSourceRefImmutable,
+    /// `BackupSchedule` R2 / the `Backup` rule: `allUserTopics` requires an
+    /// empty `topics`.
+    SelectionShape,
+    /// `BackupSchedule` R3: retries need a name of 29 characters or fewer.
+    ScheduleRetryNameBudget,
+    /// `BackupSchedule`/`Backup`: `destinationRef` and the sentinel
+    /// `archive.url` travel together.
+    DestinationSentinel,
+}
+
+impl SpecRule {
+    /// Every rule, with the exact message its CRD publishes.
+    ///
+    /// The `Backup` and `BackupSchedule` selection rules carry DIFFERENT
+    /// sentences for the same shape, so both are listed; the longer one is
+    /// first, because a containment scan must not let the shorter prefix win.
+    pub const ALL: [(SpecRule, &'static str); 5] = [
+        (
+            SpecRule::ScheduleSourceRefImmutable,
+            weirkeeper::crds::backup_schedule::SOURCE_REF_IMMUTABLE_MESSAGE,
+        ),
+        (
+            SpecRule::SelectionShape,
+            weirkeeper::crds::backup::SELECTION_SHAPE_MESSAGE,
+        ),
+        (
+            SpecRule::SelectionShape,
+            weirkeeper::crds::backup_schedule::SELECTION_SHAPE_MESSAGE,
+        ),
+        (
+            SpecRule::ScheduleRetryNameBudget,
+            weirkeeper::crds::backup_schedule::RETRY_NAME_BUDGET_MESSAGE,
+        ),
+        (
+            SpecRule::DestinationSentinel,
+            weirkeeper::crds::backup::DESTINATION_SENTINEL_MESSAGE,
+        ),
+    ];
+
+    /// The rule a refusal message names, if this build knows it.
+    #[must_use]
+    pub fn classify(message: &str) -> Option<SpecRule> {
+        SpecRule::ALL
+            .into_iter()
+            .find(|(_, text)| message.contains(text))
+            .map(|(rule, _)| rule)
+    }
+
+    /// The request field the rule is about, and the stable field code.
+    #[must_use]
+    pub const fn field(self) -> (&'static str, &'static str) {
+        match self {
+            SpecRule::ScheduleSourceRefImmutable => ("sourceRef", "field_immutable"),
+            SpecRule::SelectionShape => ("topicSelection", "selection_invalid"),
+            SpecRule::ScheduleRetryNameBudget => ("retry.maxRetries", "schedule_invalid"),
+            SpecRule::DestinationSentinel => ("destinationRef", "field_immutable"),
+        }
+    }
+
+    /// The sentence the CRD publishes for it. A compiled-in constant, not the
+    /// API server's response text.
+    #[must_use]
+    pub const fn message(self) -> &'static str {
+        match self {
+            SpecRule::ScheduleSourceRefImmutable => {
+                weirkeeper::crds::backup_schedule::SOURCE_REF_IMMUTABLE_MESSAGE
+            }
+            SpecRule::SelectionShape => weirkeeper::crds::backup_schedule::SELECTION_SHAPE_MESSAGE,
+            SpecRule::ScheduleRetryNameBudget => {
+                weirkeeper::crds::backup_schedule::RETRY_NAME_BUDGET_MESSAGE
+            }
+            SpecRule::DestinationSentinel => weirkeeper::crds::backup::DESTINATION_SENTINEL_MESSAGE,
+        }
+    }
 }
 
 impl KubeFailure {
@@ -294,6 +396,14 @@ impl KubeFailure {
                 ProblemCode::CursorExpired,
                 "The list snapshot expired; restart the list without a cursor.",
             ),
+            KubeFailure::RuleRefused(rule) => {
+                let (field, code) = rule.field();
+                ApiError::validation(vec![crate::problem::FieldError::new(
+                    field,
+                    code,
+                    rule.message(),
+                )])
+            }
             KubeFailure::Invalid | KubeFailure::BadRequest => ApiError::new(
                 ProblemCode::ValidationFailed,
                 "Kubernetes rejected the object. The rejection details are recorded in the \
@@ -335,6 +445,44 @@ pub struct PageRequest {
     pub continue_token: Option<String>,
     /// An equality-only label selector, already validated.
     pub label_selector: Option<String>,
+}
+
+/// Every mutable field of a `BackupSchedule.spec` (D1 §5.1), as typed values.
+///
+/// THE STRUCT IS THE ALLOWLIST. [`KubeAdapter::set_schedule_policy`] builds its
+/// merge patch from exactly these fields and can name no other key, so
+/// "which parts of a schedule may an edit reach" is answered by reading this
+/// declaration. `sourceRef` is absent on purpose and `metadata` is not
+/// reachable at all.
+#[derive(Clone, Debug)]
+pub struct ScheduleSpecEdit {
+    /// The cron expression.
+    pub schedule: String,
+    /// The IANA zone, or `None` for UTC.
+    pub time_zone: Option<String>,
+    /// The named allowlist; empty in dynamic mode.
+    pub topics: Vec<String>,
+    /// Dynamic selection, or `None`.
+    pub all_user_topics: Option<AllUserTopics>,
+    /// The archive location, or the sentinel this crate built for
+    /// `destination_ref`.
+    pub archive: ArchiveRef,
+    /// The saved destination, or `None`.
+    pub destination_ref: Option<LocalRef>,
+    /// `Forbid` or `Allow`.
+    pub concurrency_policy: ConcurrencyPolicy,
+    /// `None` for the documented 3600.
+    pub starting_deadline_seconds: Option<i64>,
+    /// `None` for `CatchUpPolicy::None`.
+    pub catch_up_policy: Option<CatchUpPolicy>,
+    /// `None` for no retries.
+    pub retry: Option<RetrySpec>,
+    /// `None` for the documented 3600.
+    pub active_deadline_seconds: Option<i64>,
+    /// Retention reporting, or `None`.
+    pub retention: Option<Retention>,
+    /// Whether the schedule is suspended.
+    pub suspend: bool,
 }
 
 /// The adapter.
@@ -448,6 +596,122 @@ impl KubeAdapter {
         let patch = serde_json::json!({
             "metadata": { "resourceVersion": expected_resource_version },
             "spec": { "suspend": suspend },
+        });
+        let params = PatchParams {
+            field_manager: Some(FIELD_MANAGER.to_string()),
+            ..PatchParams::default()
+        };
+        self.bounded(
+            "patch",
+            "backupschedules",
+            api.patch(name, &params, &Patch::Merge(&patch)),
+        )
+        .await
+    }
+
+    /// Replace a `BackupSchedule`'s FUTURE policy — every mutable field of
+    /// D1 §5.1's matrix — under an optimistic-concurrency precondition.
+    ///
+    /// TYPED ARGUMENTS, NOT A PATCH DOCUMENT. The caller hands over a
+    /// [`ScheduleSpecEdit`], and this method builds the merge patch from it.
+    /// There is no key this method can write that is not a field of that
+    /// struct, and `sourceRef` is not one: the identity of the protected
+    /// cluster cannot be reached through this adapter at all, quite apart from
+    /// the CRD's R1 refusing it.
+    ///
+    /// AN OMITTED OPTION IS `null`, WHICH A MERGE PATCH REMOVES. That is what
+    /// makes "absent means the documented default" reachable from a form: a
+    /// schedule edited back to no retries really has no `spec.retry`, rather
+    /// than a stale one nobody can see.
+    ///
+    /// THE PRECONDITION IS `metadata.resourceVersion` AND NOT A GENERATION.
+    /// Kubernetes has no generation precondition; the route reads the object,
+    /// compares `metadata.generation` with the caller's `expectedGeneration`,
+    /// and passes the resourceVersion of THAT read here — so an edit landing
+    /// between the two is a 409 from the API server rather than a silent
+    /// overwrite.
+    ///
+    /// # Errors
+    ///
+    /// [`KubeFailure`], `Conflict` for a stale `resourceVersion` and
+    /// [`KubeFailure::RuleRefused`] for one of the CRD's own rules.
+    pub async fn set_schedule_policy(
+        &self,
+        namespace: &str,
+        name: &str,
+        edit: &ScheduleSpecEdit,
+        expected_resource_version: &str,
+    ) -> Result<BackupSchedule, KubeFailure> {
+        let api: Api<BackupSchedule> = Api::namespaced(self.client.clone(), namespace);
+        // EVERY OPTIONAL KEY IS SPELLED OUT, `null` INCLUDED, AND SO IS EVERY
+        // OPTIONAL KEY INSIDE A NESTED OBJECT. A JSON merge patch merges an
+        // object KEY BY KEY: patching `archive` with `{url}` alone leaves a
+        // `secretRef` from the previous archive in place, which is how a
+        // schedule moved onto a saved destination would keep a credential
+        // reference nothing reads — and break the CRD's own sentinel rule. A
+        // `serde` skip-if-none serialisation is therefore exactly the wrong
+        // shape here; these blocks are built by hand so an absent field is a
+        // `null` the API server removes.
+        let json_or_null = |v: Option<serde_json::Value>| v.unwrap_or(serde_json::Value::Null);
+        let number = |v: Option<i64>| json_or_null(v.map(|n| serde_json::json!(n)));
+        let archive = serde_json::json!({
+            "url": edit.archive.url,
+            "secretRef": json_or_null(
+                edit.archive
+                    .secret_ref
+                    .as_ref()
+                    .map(|r| serde_json::json!({ "name": r.name })),
+            ),
+        });
+        let all_user_topics = json_or_null(edit.all_user_topics.as_ref().map(|a| {
+            serde_json::json!({
+                "exclude": json_or_null(a.exclude.as_ref().map(|e| serde_json::json!({
+                    "topics": json_or_null(e.topics.as_ref().map(|t| serde_json::json!(t))),
+                    "prefixes": json_or_null(e.prefixes.as_ref().map(|p| serde_json::json!(p))),
+                }))),
+                "incompleteDiscovery": serde_json::to_value(a.incomplete_discovery)
+                    .unwrap_or(serde_json::Value::Null),
+            })
+        }));
+        let retry = json_or_null(edit.retry.as_ref().map(|r| {
+            serde_json::json!({
+                "maxRetries": r.max_retries,
+                "delaySeconds": number(r.delay_seconds),
+            })
+        }));
+        let retention = json_or_null(edit.retention.as_ref().map(|r| {
+            serde_json::json!({
+                "keepLast": number(r.keep_last),
+                "keepDays": number(r.keep_days),
+            })
+        }));
+        let patch = serde_json::json!({
+            "metadata": { "resourceVersion": expected_resource_version },
+            "spec": {
+                "schedule": edit.schedule,
+                "timeZone": json_or_null(
+                    edit.time_zone.as_ref().map(|z| serde_json::json!(z)),
+                ),
+                "topics": edit.topics,
+                "allUserTopics": all_user_topics,
+                "archive": archive,
+                "destinationRef": json_or_null(
+                    edit.destination_ref
+                        .as_ref()
+                        .map(|r| serde_json::json!({ "name": r.name })),
+                ),
+                "concurrencyPolicy": serde_json::to_value(edit.concurrency_policy)
+                    .unwrap_or(serde_json::Value::Null),
+                "startingDeadlineSeconds": number(edit.starting_deadline_seconds),
+                "catchUpPolicy": json_or_null(
+                    edit.catch_up_policy
+                        .and_then(|c| serde_json::to_value(c).ok()),
+                ),
+                "retry": retry,
+                "activeDeadlineSeconds": number(edit.active_deadline_seconds),
+                "retention": retention,
+                "suspend": edit.suspend,
+            },
         });
         let params = PatchParams {
             field_manager: Some(FIELD_MANAGER.to_string()),
@@ -678,7 +942,10 @@ fn classify(verb: &'static str, resource: &str, error: &kube::Error) -> KubeFail
                 (409, "AlreadyExists") => KubeFailure::AlreadyExists,
                 (409, _) => KubeFailure::Conflict,
                 (410, _) => KubeFailure::Gone,
-                (422, _) => KubeFailure::Invalid,
+                (422, _) => match SpecRule::classify(&response.message) {
+                    Some(rule) => KubeFailure::RuleRefused(rule),
+                    None => KubeFailure::Invalid,
+                },
                 (400, _) => KubeFailure::BadRequest,
                 (401 | 403, _) => KubeFailure::Refused(response.code),
                 (429, _) => KubeFailure::TooManyRequests,

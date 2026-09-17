@@ -84,6 +84,10 @@ pub enum Action {
     /// Change `BackupSchedule.spec.suspend` under a resourceVersion
     /// precondition.
     SetScheduleSuspension,
+    /// Replace a `BackupSchedule`'s FUTURE policy under an
+    /// `expectedGeneration` precondition (D1 §5.1/§5.6). `spec.sourceRef` is
+    /// not part of it and cannot be reached through it.
+    EditSchedulePolicy,
     /// List/get `Backup` projections.
     ReadBackups,
     /// Create a manual `Backup` (PLAT-06.1/06.2). Not implemented.
@@ -128,6 +132,7 @@ impl Action {
             Action::ReadSchedules => "schedule.read",
             Action::CreateSchedule => "schedule.create",
             Action::SetScheduleSuspension => "schedule.setSuspension",
+            Action::EditSchedulePolicy => "schedule.editPolicy",
             Action::ReadBackups => "backup.read",
             Action::CreateManualBackup => "backup.create",
             Action::ReadRestores => "restore.read",
@@ -146,10 +151,7 @@ impl Action {
     pub const fn implemented(self) -> bool {
         !matches!(
             self,
-            Action::TestConnection
-                | Action::CreateManualBackup
-                | Action::SubmitApproval
-                | Action::StreamOperationEvents
+            Action::TestConnection | Action::SubmitApproval | Action::StreamOperationEvents
         )
     }
 }
@@ -288,6 +290,7 @@ impl Role {
                     | Action::ReadSchedules
                     | Action::CreateSchedule
                     | Action::SetScheduleSuspension
+                    | Action::EditSchedulePolicy
                     | Action::ReadBackups
                     | Action::CreateManualBackup
                     | Action::ReadRestores
@@ -338,6 +341,7 @@ impl Role {
                     | Action::ReadSchedules
                     | Action::CreateSchedule
                     | Action::SetScheduleSuspension
+                    | Action::EditSchedulePolicy
                     | Action::ReadBackups
                     | Action::CreateManualBackup
                     | Action::ReadRestores
@@ -697,13 +701,27 @@ pub struct Capabilities {
     pub destinations: bool,
     /// `GET .../schedules[/{name}]`.
     pub schedules_read: bool,
-    /// `POST .../schedules`.
+    /// `POST .../schedules` — AND `PUT .../schedules/{name}`.
+    ///
+    /// ONE FLAG FOR TWO ROUTES, BECAUSE IT IS ONE AUTHORITY. D1 §5.1 makes a
+    /// schedule's future policy editable, and this crate's decision (recorded
+    /// in `docs/api.md`) is that an operator who may WRITE a policy into a
+    /// bound namespace may write a new one over it: the edit reaches exactly
+    /// the fields `POST` already sets, never `spec.sourceRef`, and never a
+    /// created run. `Action::EditSchedulePolicy` is a separate action so the
+    /// AUDIT record says `schedule.editPolicy` rather than `schedule.create`,
+    /// but it has the same role allowance — pinned by
+    /// `tests/role_matrix.rs::editing_a_policy_is_exactly_the_authority_to_create_one`
+    /// — so a console reads this one flag for both buttons. D2 §8's rule
+    /// stands: `ui/contract.js`'s `CAPABILITY_FLAGS` is a frozen 19-entry list,
+    /// and splitting a flag is a contract change that lands on both sides at
+    /// once.
     pub schedule_create: bool,
     /// `POST .../schedules/{name}:set-suspension`.
     pub schedule_set_suspension: bool,
     /// `GET .../backups[/{name}]`.
     pub backups_read: bool,
-    /// Manual backup creation (PLAT-06.1/06.2): no route.
+    /// `POST .../backups` — the canonical manual `Backup` (D1 §8.2).
     pub manual_backup_create: bool,
     /// `GET .../restores[/{name}]`.
     pub restores_read: bool,
@@ -816,11 +834,12 @@ mod tests {
     #[test]
     fn the_namespace_is_checked_before_the_action() {
         let z = LocalAdminAuthorizer::new(vec!["team-a".into()]);
-        let err = authorize(&z, &actor(), "team-b", Action::CreateManualBackup).unwrap_err();
+        let err = authorize(&z, &actor(), "team-b", Action::SubmitApproval).unwrap_err();
         assert_eq!(err.code, ProblemCode::NamespaceForbidden);
-        let err = authorize(&z, &actor(), "team-a", Action::CreateManualBackup).unwrap_err();
+        let err = authorize(&z, &actor(), "team-a", Action::SubmitApproval).unwrap_err();
         assert_eq!(err.code, ProblemCode::Forbidden);
         assert!(authorize(&z, &actor(), "team-a", Action::CreateSchedule).is_ok());
+        assert!(authorize(&z, &actor(), "team-a", Action::EditSchedulePolicy).is_ok());
     }
 
     #[test]
@@ -829,7 +848,9 @@ mod tests {
         let c = Capabilities::for_namespace(&z, &actor(), "team-a");
         assert!(c.schedule_create && c.restore_create && c.connection_create);
         assert!(c.topic_discovery && c.preflight && c.destinations && c.credential_write);
-        assert!(!c.manual_backup_create);
+        // D1 W6: `POST .../backups` has a route, so the flag is no longer a
+        // permanent `false`.
+        assert!(c.manual_backup_create);
         assert!(!c.approval_submit && !c.operation_events && !c.connection_test);
         assert_eq!(
             Capabilities::for_namespace(&z, &actor(), "team-b"),

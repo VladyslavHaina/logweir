@@ -7,17 +7,22 @@
 
 use kube::ResourceExt;
 use weirkeeper::crds::approval::Approval as ApprovalCr;
-use weirkeeper::crds::backup::Backup as BackupCr;
-use weirkeeper::crds::backup_schedule::{BackupSchedule, ConcurrencyPolicy as CrdConcurrency};
+use weirkeeper::crds::backup::{Backup as BackupCr, TriggerKind as CrdTriggerKind};
+use weirkeeper::crds::backup_schedule::{
+    BackupSchedule, CatchUpPolicy as CrdCatchUp, ConcurrencyPolicy as CrdConcurrency,
+};
 use weirkeeper::crds::kafka_cluster::{AuthMode, KafkaCluster};
 use weirkeeper::crds::restore::{Restore as RestoreCr, TargetMode};
+use weirkeeper::crds::selection::IncompleteDiscovery as CrdIncompleteDiscovery;
 use weirkeeper::crds::{ArchiveRef, LocalRef};
 
 use crate::contract::{
-    Approval, ApprovalPacket, ArchiveView, Backup, ConcurrencyPolicy, Connection,
-    ConnectionAuthMode, ConnectionAuthView, NameRef, ObservedAuthView, ReachabilityState,
-    ReachabilityView, RemovableSetView, Restore, RestoreMode, RestoreTargetView,
-    RetentionReportView, RetentionView, Schedule, ScheduleStatusView, SubjectRefView,
+    ActiveRunView, AllUserTopics, Approval, ApprovalPacket, ArchiveView, Backup, CadenceAdjustment,
+    CadencePreset, CatchUpPolicy, ConcurrencyPolicy, Connection, ConnectionAuthMode,
+    ConnectionAuthView, IncompleteDiscoveryPolicy, NameRef, NextRunView, ObservedAuthView,
+    ReachabilityState, ReachabilityView, RemovableSetView, Restore, RestoreMode, RestoreTargetView,
+    RetentionReportView, RetentionView, RetryPolicy, Schedule, SchedulePolicyView, ScheduleRefView,
+    ScheduleStatusView, SubjectRefView, TopicExclusions, TriggerKind, TriggerView,
     VerifiedSubjectView, WindowCoveredView,
 };
 use crate::status::{backup_operation, condition_view, restore_operation, summary, MAX_CONDITIONS};
@@ -142,21 +147,63 @@ pub fn schedule(object: &BackupSchedule) -> Schedule {
         namespace: object.namespace().unwrap_or_default(),
         uid: object.uid().unwrap_or_default(),
         resource_version: object.resource_version().unwrap_or_default(),
+        generation: object.metadata.generation,
         created_at: created_at(object),
         schedule: object.spec.schedule.clone(),
+        preset: weirkeeper::cadence::presets::match_preset(&object.spec.schedule).map(preset_view),
+        time_zone: object.spec.time_zone.clone(),
         source_ref: name_ref(&object.spec.source_ref),
         topics: object.spec.topics.clone(),
+        all_user_topics: object.spec.all_user_topics.as_ref().map(all_user_topics),
         archive: archive_view(&object.spec.archive),
+        destination_ref: object.spec.destination_ref.as_ref().map(name_ref),
         concurrency_policy: match object.spec.concurrency_policy {
             CrdConcurrency::Forbid => ConcurrencyPolicy::Forbid,
             CrdConcurrency::Allow => ConcurrencyPolicy::Allow,
         },
+        starting_deadline_seconds: object.spec.starting_deadline_seconds,
+        catch_up_policy: object.spec.catch_up_policy.map(|c| match c {
+            CrdCatchUp::None => CatchUpPolicy::None,
+            CrdCatchUp::Latest => CatchUpPolicy::Latest,
+        }),
+        retry: object.spec.retry.as_ref().map(|r| RetryPolicy {
+            max_retries: r.max_retries,
+            delay_seconds: r.delay_seconds,
+        }),
+        active_deadline_seconds: object.spec.active_deadline_seconds,
         retention: object.spec.retention.as_ref().map(|r| RetentionView {
             keep_last: r.keep_last,
             keep_days: r.keep_days,
         }),
         suspended: object.spec.suspend,
         status: ScheduleStatusView {
+            observed_generation: status.and_then(|s| s.observed_generation),
+            policy: status
+                .and_then(|s| s.policy.as_ref())
+                .map(|p| SchedulePolicyView {
+                    generation: p.generation,
+                    run_policy_sha256: p.run_policy_sha256.clone(),
+                    time_zone: p.time_zone.clone(),
+                    tzdb: p.tzdb.clone(),
+                    effective_since: p.effective_since,
+                    evaluated_at: p.evaluated_at,
+                }),
+            next_runs: status.and_then(|s| s.next_runs.as_ref()).map(|runs| {
+                runs.iter()
+                    .take(MAX_LIST_ENTRIES)
+                    .map(|r| NextRunView {
+                        at: r.at,
+                        local_time: r.local_time.clone(),
+                        // An adjustment word this build does not know is
+                        // DROPPED, not echoed: an unrecognised marker is not a
+                        // fact about a time zone.
+                        adjustment: r.adjustment.as_deref().and_then(CadenceAdjustment::parse),
+                    })
+                    .collect()
+            }),
+            active_runs: status
+                .and_then(|s| s.active_runs.as_ref())
+                .map(|runs| runs.iter().take(MAX_LIST_ENTRIES).map(active_run).collect()),
             last_fire_time: status.and_then(|s| s.last_fire_time),
             next_fire_time: status.and_then(|s| s.next_fire_time),
             active_backup: status
@@ -171,6 +218,65 @@ pub fn schedule(object: &BackupSchedule) -> Schedule {
                 .and_then(|cs| cs.iter().find(|c| c.r#type == "Ready"))
                 .map(condition_view),
             retention_report: report,
+        },
+    }
+}
+
+/// One non-terminal schedule-created run.
+#[must_use]
+pub fn active_run(run: &weirkeeper::crds::backup_schedule::ActiveRun) -> ActiveRunView {
+    ActiveRunView {
+        name: run.name.clone(),
+        kind: run.kind.clone(),
+        attempt: run.attempt,
+    }
+}
+
+/// The cadence engine's preset as the contract spells it. The two enums are
+/// the same five shapes; `contract` carries the `JsonSchema` derive the
+/// OpenAPI document needs, and `tests/cadence_previews.rs` asserts the JSON is
+/// byte-identical so they cannot drift.
+#[must_use]
+pub fn preset_view(preset: weirkeeper::cadence::presets::Preset) -> CadencePreset {
+    use weirkeeper::cadence::presets::Preset;
+    match preset {
+        Preset::Hourly { minute } => CadencePreset::Hourly { minute },
+        Preset::EveryNHours { n, minute } => CadencePreset::EveryNHours { n, minute },
+        Preset::Daily { hour, minute } => CadencePreset::Daily { hour, minute },
+        Preset::Weekly {
+            day_of_week,
+            hour,
+            minute,
+        } => CadencePreset::Weekly {
+            day_of_week,
+            hour,
+            minute,
+        },
+        Preset::Monthly {
+            day_of_month,
+            hour,
+            minute,
+        } => CadencePreset::Monthly {
+            day_of_month,
+            hour,
+            minute,
+        },
+    }
+}
+
+/// Dynamic selection as the contract spells it.
+#[must_use]
+pub fn all_user_topics(spec: &weirkeeper::crds::selection::AllUserTopics) -> AllUserTopics {
+    AllUserTopics {
+        exclude: spec.exclude.as_ref().map(|e| TopicExclusions {
+            topics: e.topics.clone(),
+            prefixes: e.prefixes.clone(),
+        }),
+        incomplete_discovery: match spec.incomplete_discovery {
+            CrdIncompleteDiscovery::Refuse => IncompleteDiscoveryPolicy::Refuse,
+            CrdIncompleteDiscovery::BackUpVisibleTopics => {
+                IncompleteDiscoveryPolicy::BackUpVisibleTopics
+            }
         },
     }
 }
@@ -207,6 +313,23 @@ pub fn backup(object: &BackupCr) -> Backup {
         schedule: object.spec.schedule_ref.as_ref().map(|r| r.name.clone()),
         slot: object.spec.slot.clone(),
         triggered_by: object.spec.triggered_by.clone(),
+        trigger: object.spec.trigger.as_ref().map(|t| TriggerView {
+            kind: match t.kind {
+                CrdTriggerKind::Scheduled => TriggerKind::Scheduled,
+                CrdTriggerKind::CatchUp => TriggerKind::CatchUp,
+                CrdTriggerKind::Retry => TriggerKind::Retry,
+                CrdTriggerKind::Manual => TriggerKind::Manual,
+            },
+            attempt: t.attempt,
+            retry_of: t.retry_of.as_ref().map(name_ref),
+            time_zone: t.time_zone.clone(),
+        }),
+        schedule_ref: object.spec.schedule_ref.as_ref().map(|r| ScheduleRefView {
+            name: r.name.clone(),
+            uid: r.uid.clone(),
+            generation: r.generation,
+            run_policy_sha256: r.run_policy_sha256.clone(),
+        }),
         deadline_seconds: object.spec.deadline_seconds,
         backup_id: status.and_then(|s| s.backup_id.clone()),
         records: status.and_then(|s| s.records),

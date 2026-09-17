@@ -82,6 +82,12 @@ pub enum ProblemCode {
     ResultIntegrityFailed,
     /// 409 — the bound approval policy does not match (PLAT-19.2).
     PolicyMismatch,
+    /// 409 — a manual run named `expectedGeneration` and the schedule's
+    /// policy has moved on since (D1 §8.2). The body carries the current
+    /// generation and run-policy digest so the console can show what changed;
+    /// confirming starts a NEW idempotency intent, because running a policy
+    /// the person did not see is not what the button promised.
+    PolicyChanged,
     /// 410 — the list cursor expired or Kubernetes compacted its continue
     /// token; restart the list without a cursor.
     CursorExpired,
@@ -114,7 +120,7 @@ pub enum ProblemCode {
 impl ProblemCode {
     /// Every code, in declaration order. The OpenAPI document and the tests
     /// iterate this list, so a new code cannot be undocumented or untested.
-    pub const ALL: [ProblemCode; 32] = [
+    pub const ALL: [ProblemCode; 33] = [
         ProblemCode::MalformedRequest,
         ProblemCode::HeaderNotAllowed,
         ProblemCode::IdempotencyKeyRequired,
@@ -132,6 +138,7 @@ impl ProblemCode {
         ProblemCode::StateConflict,
         ProblemCode::ApprovalRequired,
         ProblemCode::PolicyMismatch,
+        ProblemCode::PolicyChanged,
         ProblemCode::DestinationLocationImmutable,
         ProblemCode::TransportDowngradeForbidden,
         ProblemCode::LegacyLocationMismatch,
@@ -170,6 +177,7 @@ impl ProblemCode {
             ProblemCode::StateConflict => "state_conflict",
             ProblemCode::ApprovalRequired => "approval_required",
             ProblemCode::PolicyMismatch => "policy_mismatch",
+            ProblemCode::PolicyChanged => "policy_changed",
             ProblemCode::DestinationLocationImmutable => "destination_location_immutable",
             ProblemCode::TransportDowngradeForbidden => "transport_downgrade_forbidden",
             ProblemCode::LegacyLocationMismatch => "legacy_location_mismatch",
@@ -207,6 +215,7 @@ impl ProblemCode {
             | ProblemCode::StateConflict
             | ProblemCode::ApprovalRequired
             | ProblemCode::PolicyMismatch
+            | ProblemCode::PolicyChanged
             | ProblemCode::DestinationLocationImmutable
             | ProblemCode::TransportDowngradeForbidden
             | ProblemCode::LegacyLocationMismatch
@@ -247,6 +256,7 @@ impl ProblemCode {
             ProblemCode::StateConflict => "State conflict",
             ProblemCode::ApprovalRequired => "Approval required",
             ProblemCode::PolicyMismatch => "Policy mismatch",
+            ProblemCode::PolicyChanged => "Schedule policy changed",
             ProblemCode::DestinationLocationImmutable => "Destination location immutable",
             ProblemCode::TransportDowngradeForbidden => "Transport change forbidden",
             ProblemCode::LegacyLocationMismatch => "Legacy location mismatch",
@@ -339,6 +349,24 @@ impl FieldError {
     }
 }
 
+/// What a schedule's policy is NOW, on `policy_changed` (D1 §8.2).
+///
+/// A PROBLEM EXTENSION, NOT A FIELD ERROR. `expectedGeneration` was not
+/// malformed — it named a revision that has been superseded — so the answer a
+/// console needs is the current revision, not a sentence about a field. RFC
+/// 9457 permits extension members; this is the only one this API defines.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct PolicyChangedDetail {
+    /// The schedule's current `metadata.generation`.
+    pub current_generation: i64,
+    /// Its current run-policy digest, when the controller has recorded one.
+    /// ABSENT means the controller has not evaluated this revision yet, never
+    /// that the policy is empty.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub current_run_policy_sha256: Option<String>,
+}
+
 /// The rendered problem document.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -361,6 +389,9 @@ pub struct Problem {
     /// Field-level failures, when the code is `validation_failed`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub errors: Vec<FieldError>,
+    /// The schedule's current revision, when the code is `policy_changed`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub policy: Option<PolicyChangedDetail>,
 }
 
 /// An error a handler returns.
@@ -374,6 +405,8 @@ pub struct ApiError {
     pub errors: Vec<FieldError>,
     /// `Retry-After` seconds, for `rate_limited`.
     pub retry_after_seconds: Option<u64>,
+    /// The schedule's current revision, for `policy_changed`.
+    pub policy: Option<PolicyChangedDetail>,
 }
 
 impl ApiError {
@@ -384,6 +417,7 @@ impl ApiError {
             detail: detail.into(),
             errors: Vec::new(),
             retry_after_seconds: None,
+            policy: None,
         }
     }
 
@@ -394,6 +428,7 @@ impl ApiError {
             detail: "One or more fields are invalid.".to_string(),
             errors,
             retry_after_seconds: None,
+            policy: None,
         }
     }
 
@@ -412,6 +447,25 @@ impl ApiError {
                 .to_string(),
             errors,
             retry_after_seconds: None,
+            policy: None,
+        }
+    }
+
+    /// `policy_changed` naming the revision the schedule is at NOW.
+    #[must_use]
+    pub fn policy_changed(current_generation: i64, current_digest: Option<String>) -> Self {
+        Self {
+            code: ProblemCode::PolicyChanged,
+            detail: "The schedule's policy changed after the revision this request named. Read \
+                     the schedule again; confirming runs the new revision under a new \
+                     Idempotency-Key."
+                .to_string(),
+            errors: Vec::new(),
+            retry_after_seconds: None,
+            policy: Some(PolicyChangedDetail {
+                current_generation,
+                current_run_policy_sha256: current_digest,
+            }),
         }
     }
 
@@ -433,6 +487,7 @@ impl ApiError {
             request_id: request_id.to_string(),
             retryable: self.code.retryable(),
             errors: self.errors.clone(),
+            policy: self.policy.clone(),
         }
     }
 }

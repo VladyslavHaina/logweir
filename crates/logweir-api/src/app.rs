@@ -188,12 +188,16 @@ impl AppState {
 /// The complete router, middleware included.
 pub fn router(state: AppState) -> Router {
     use crate::routes::{
-        approvals, backups, connections, destinations, health, namespaces, operations, preflights,
-        restores, schedules, session, topic_discoveries,
+        approvals, backups, cadence_previews, connections, destinations, health, namespaces,
+        operations, preflights, restores, schedules, session, topic_discoveries,
     };
 
     let api = Router::new()
         .route("/api/v1/session", get(session::get_session))
+        // D1 §4.4's exact path. It has no `{ns}` because it reads nothing: a
+        // draft cadence is not an object, and this route makes no Kubernetes
+        // call at all.
+        .route("/api/v1/cadence-previews", get(cadence_previews::preview))
         .route("/api/v1/namespaces", get(namespaces::list_namespaces))
         .route(
             "/api/v1/namespaces/{ns}/connections",
@@ -249,9 +253,14 @@ pub fn router(state: AppState) -> Router {
         )
         .route(
             "/api/v1/namespaces/{ns}/schedules/{name}",
-            get(schedules::get_one).post(schedules::command),
+            get(schedules::get_one)
+                .put(schedules::update)
+                .post(schedules::command),
         )
-        .route("/api/v1/namespaces/{ns}/backups", get(backups::list))
+        .route(
+            "/api/v1/namespaces/{ns}/backups",
+            get(backups::list).post(backups::create),
+        )
         .route(
             "/api/v1/namespaces/{ns}/backups/{name}",
             get(backups::get_one),

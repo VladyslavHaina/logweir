@@ -521,6 +521,166 @@
         ]
       }
     },
+    "/api/v1/cadence-previews": {
+      "get": {
+        "operationId": "previewCadence",
+        "summary": "What a cron expression, or a preset, will actually do in a time zone: the next runs as UTC instants with their local wall times and DST markers. Computed by the same module the scheduler uses; the browser never evaluates cron. It reads nothing from Kubernetes and takes no namespace, so it needs permission to read schedules in at least one granted namespace.",
+        "parameters": [
+          {
+            "name": "schedule",
+            "in": "query",
+            "required": false,
+            "description": "A five-field cron expression or @hourly/@daily/@weekly. Exactly one of schedule or preset.",
+            "schema": {
+              "type": "string",
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "preset",
+            "in": "query",
+            "required": false,
+            "description": "hourly, everyNHours, daily, weekly or monthly, with that preset's parameters. The response carries the canonical expression it compiled to.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "hourly",
+                "everyNHours",
+                "daily",
+                "weekly",
+                "monthly"
+              ]
+            }
+          },
+          {
+            "name": "minute",
+            "in": "query",
+            "required": false,
+            "description": "0 to 59. A parameter of every preset.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 59
+            }
+          },
+          {
+            "name": "hour",
+            "in": "query",
+            "required": false,
+            "description": "0 to 23. daily, weekly and monthly.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 23
+            }
+          },
+          {
+            "name": "dayOfWeek",
+            "in": "query",
+            "required": false,
+            "description": "0 to 6, 0 = Sunday. weekly only.",
+            "schema": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 6
+            }
+          },
+          {
+            "name": "dayOfMonth",
+            "in": "query",
+            "required": false,
+            "description": "1 to 28. monthly only; 29 to 31 are not a monthly cadence.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 28
+            }
+          },
+          {
+            "name": "n",
+            "in": "query",
+            "required": false,
+            "description": "2, 3, 4, 6, 8 or 12. everyNHours only: */n matches local wall-clock hours divisible by n, not n hours after creation.",
+            "schema": {
+              "type": "integer",
+              "enum": [
+                2,
+                3,
+                4,
+                6,
+                8,
+                12
+              ]
+            }
+          },
+          {
+            "name": "timeZone",
+            "in": "query",
+            "required": false,
+            "description": "An IANA zone name. Absent means UTC and reproduces the pre-PLAT-04.2 slots exactly.",
+            "schema": {
+              "type": "string",
+              "maxLength": 64
+            }
+          },
+          {
+            "name": "count",
+            "in": "query",
+            "required": false,
+            "description": "1 to 20. Default 10. A shorter answer is real: an expression can run out of firings.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 20,
+              "default": 10
+            }
+          },
+          {
+            "name": "after",
+            "in": "query",
+            "required": false,
+            "description": "An RFC 3339 instant to walk strictly after. Default: the server's now.",
+            "schema": {
+              "type": "string",
+              "format": "date-time"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The canonical expression, the effective zone, the tz database that resolved it, and the firings.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CadencePreviewResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "session_expired",
+          "unauthenticated",
+          "validation_failed"
+        ]
+      }
+    },
     "/api/v1/namespaces/{ns}/schedules": {
       "get": {
         "operationId": "listSchedules",
@@ -767,6 +927,92 @@
           "unauthenticated",
           "upstream_timeout"
         ]
+      },
+      "put": {
+        "operationId": "updateSchedulePolicy",
+        "summary": "Replace a schedule's FUTURE policy under expectedGeneration. The whole policy is sent and a field omitted is removed. spec.sourceRef is not on the request: a different cluster is a different schedule, and naming it is 422 sourceRef: field_immutable. It never touches a Backup that already exists, its frozen inputs or its Job. Idempotency-Key is refused: the precondition is the idempotence.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateSchedulePolicyRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "The edited schedule, with its new generation.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ScheduleResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "idempotency_key_invalid",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "origin_mismatch",
+          "payload_too_large",
+          "precondition_failed",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "unsupported_media_type",
+          "upstream_timeout",
+          "validation_failed"
+        ]
       }
     },
     "/api/v1/namespaces/{ns}/schedules/{name}:set-suspension": {
@@ -938,6 +1184,107 @@
           "rate_limited",
           "session_expired",
           "unauthenticated",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      },
+      "post": {
+        "operationId": "createBackup",
+        "summary": "Back up now. With scheduleRef the schedule's current revision is copied and recorded (uid, generation, runPolicySha256) and a policy field beside it is 422; without it the body is the policy, for a cluster with no schedule yet. A suspended schedule, an invalid cadence, an active Forbid run and a schedule deleted a second later none of them block the run. Readiness is recorded, never obeyed.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateBackupRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created; the run and the schedule it came from.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManualBackupResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Replayed an identical earlier request; the same run and the same UID.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ManualBackupResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "idempotency_conflict",
+          "idempotency_key_invalid",
+          "idempotency_key_required",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "origin_mismatch",
+          "payload_too_large",
+          "policy_changed",
+          "rate_limited",
+          "session_expired",
+          "state_conflict",
+          "unauthenticated",
+          "unsupported_media_type",
           "upstream_timeout",
           "validation_failed"
         ]
@@ -3175,6 +3522,49 @@
           }
         }
       },
+      "AcknowledgedReadiness": {
+        "description": "The readiness verdict a person clicked past.",
+        "oneOf": [
+          {
+            "description": "A preflight said a prerequisite was not met and the person ran anyway.",
+            "type": "string",
+            "enum": [
+              "notReady"
+            ]
+          },
+          {
+            "description": "Readiness could not be established.",
+            "type": "string",
+            "enum": [
+              "unknown"
+            ]
+          }
+        ]
+      },
+      "ActiveRunView": {
+        "description": "One schedule-created run that is not terminal (D1 §4.8).",
+        "type": "object",
+        "required": [
+          "attempt",
+          "kind",
+          "name"
+        ],
+        "properties": {
+          "attempt": {
+            "description": "0 for a scheduled or catch-up run, 1 to 3 for a retry.",
+            "type": "integer",
+            "format": "int32"
+          },
+          "kind": {
+            "description": "`Scheduled`, `CatchUp` or `Retry`. A manual run is never here: it is not counted by, and never blocked by, `concurrencyPolicy`.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The `Backup`'s name.",
+            "type": "string"
+          }
+        }
+      },
       "ActorView": {
         "description": "The authenticated actor.",
         "type": "object",
@@ -3221,6 +3611,26 @@
             ]
           }
         ]
+      },
+      "AllUserTopics": {
+        "description": "Dynamic selection: every user topic the run's principal can see, minus the exclusions.",
+        "type": "object",
+        "required": [
+          "incompleteDiscovery"
+        ],
+        "properties": {
+          "exclude": {
+            "description": "What to leave out.",
+            "default": null,
+            "$ref": "#/components/schemas/TopicExclusions",
+            "nullable": true
+          },
+          "incompleteDiscovery": {
+            "description": "Required.",
+            "$ref": "#/components/schemas/IncompleteDiscoveryPolicy"
+          }
+        },
+        "additionalProperties": false
       },
       "Approval": {
         "description": "Public approval metadata. The documents themselves are only on the packet route.",
@@ -3556,6 +3966,11 @@
             "type": "string",
             "nullable": true
           },
+          "scheduleRef": {
+            "description": "The schedule revision this run copied. ABSENT — or present with no `uid`/`generation` — on a run created before PLAT-05.1: the console shows \"revision not recorded\", never a guess.",
+            "$ref": "#/components/schemas/ScheduleRefView",
+            "nullable": true
+          },
           "slot": {
             "description": "The schedule slot.",
             "type": "string",
@@ -3571,6 +3986,11 @@
             "items": {
               "type": "string"
             }
+          },
+          "trigger": {
+            "description": "What caused this run. ABSENT on a run created before PLAT-04.2: read `triggeredBy` then, and say \"trigger not recorded\" rather than inventing one.",
+            "$ref": "#/components/schemas/TriggerView",
+            "nullable": true
           },
           "triggeredBy": {
             "description": "`schedule` or `manual`.",
@@ -3674,6 +4094,27 @@
           }
         }
       },
+      "BackupScheduleRefRequest": {
+        "description": "The schedule a manual run copies its policy from.",
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "expectedGeneration": {
+            "description": "The revision the caller believes it is running. A different current generation is `409 policy_changed`, with the current generation and digest in the body.",
+            "default": null,
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "name": {
+            "description": "The `BackupSchedule` name, in this namespace.",
+            "type": "string"
+          }
+        },
+        "additionalProperties": false
+      },
       "CaBundleRequest": {
         "description": "A CA bundle in a `ConfigMap` in this namespace. A `ConfigMap` and never a Secret: a CA certificate is public material.",
         "type": "object",
@@ -3714,6 +4155,236 @@
             "description": "`sha256:<hex>` over the CA bytes the controller read, so a rotation is visible without reading the bundle again.",
             "type": "string",
             "nullable": true
+          }
+        }
+      },
+      "CadenceAdjustment": {
+        "description": "The DST marker on one firing (D1 §4.3/§4.4).\n\nTHE SPELLING IS THE CONTROLLER'S, NOT THIS CRATE'S. `BackupSchedule.status. nextRuns[].adjustment` carries these exact PascalCase strings, and a console renders the preview and the saved status with one branch. A marker this build does not recognise is OMITTED from a projection rather than echoed: an unknown word is not a fact about a time zone.",
+        "oneOf": [
+          {
+            "description": "The matched local time does not exist (spring forward); this instant is the end of the gap.",
+            "type": "string",
+            "enum": [
+              "NonexistentLocalTimeShifted"
+            ]
+          },
+          {
+            "description": "The matched local time happens twice; this is the FIRST occurrence.",
+            "type": "string",
+            "enum": [
+              "RepeatedLocalTimeFirst"
+            ]
+          },
+          {
+            "description": "The matched local time happens twice; this is the SECOND occurrence.",
+            "type": "string",
+            "enum": [
+              "RepeatedLocalTimeSecond"
+            ]
+          }
+        ]
+      },
+      "CadencePreset": {
+        "description": "One of the five preset cadences (D1 §4.2), with its parameters.\n\nA PRESET IS NEVER STORED. `spec.schedule` is the single source of truth; this is the catalogue entry an expression IS, so a form can round-trip it. `ui/tests/fixtures/cadence-presets.json` is the same catalogue as data.",
+        "oneOf": [
+          {
+            "description": "Every hour at `minute`.",
+            "type": "object",
+            "required": [
+              "kind",
+              "minute"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "hourly"
+                ]
+              },
+              "minute": {
+                "description": "0–59.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0.0
+              }
+            }
+          },
+          {
+            "description": "At local wall-clock hours divisible by `n`, at `minute`.",
+            "type": "object",
+            "required": [
+              "kind",
+              "minute",
+              "n"
+            ],
+            "properties": {
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "everyNHours"
+                ]
+              },
+              "minute": {
+                "description": "0–59.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "n": {
+                "description": "2, 3, 4, 6, 8 or 12.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0.0
+              }
+            }
+          },
+          {
+            "description": "Every day at `hour`:`minute`.",
+            "type": "object",
+            "required": [
+              "hour",
+              "kind",
+              "minute"
+            ],
+            "properties": {
+              "hour": {
+                "description": "0–23.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "daily"
+                ]
+              },
+              "minute": {
+                "description": "0–59.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0.0
+              }
+            }
+          },
+          {
+            "description": "Every week on `dayOfWeek` at `hour`:`minute`.",
+            "type": "object",
+            "required": [
+              "dayOfWeek",
+              "hour",
+              "kind",
+              "minute"
+            ],
+            "properties": {
+              "dayOfWeek": {
+                "description": "0–6, 0 = Sunday.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "hour": {
+                "description": "0–23.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "weekly"
+                ]
+              },
+              "minute": {
+                "description": "0–59.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0.0
+              }
+            }
+          },
+          {
+            "description": "Every month on `dayOfMonth` at `hour`:`minute`.",
+            "type": "object",
+            "required": [
+              "dayOfMonth",
+              "hour",
+              "kind",
+              "minute"
+            ],
+            "properties": {
+              "dayOfMonth": {
+                "description": "1–28.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "hour": {
+                "description": "0–23.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0.0
+              },
+              "kind": {
+                "type": "string",
+                "enum": [
+                  "monthly"
+                ]
+              },
+              "minute": {
+                "description": "0–59.",
+                "type": "integer",
+                "format": "uint32",
+                "minimum": 0.0
+              }
+            }
+          }
+        ]
+      },
+      "CadencePreviewResponse": {
+        "description": "`GET /api/v1/cadence-previews`.\n\nA DRAFT PREVIEW, COMPUTED IN RUST AND NOWHERE ELSE (D1 §4.4). The browser renders what this returns and never evaluates cron; the saved schedule's own previews are `status.nextRuns`, written by the controller from the same module.",
+        "type": "object",
+        "required": [
+          "after",
+          "requestId",
+          "runs",
+          "schedule",
+          "timeZone",
+          "tzdb"
+        ],
+        "properties": {
+          "after": {
+            "description": "The instant the walk started strictly after — the server's now unless `after` was sent.",
+            "type": "string",
+            "format": "date-time"
+          },
+          "preset": {
+            "description": "The preset this expression IS, or absent for \"Advanced cron\".",
+            "$ref": "#/components/schemas/CadencePreset",
+            "nullable": true
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          },
+          "runs": {
+            "description": "Up to `count` firings, ascending. SHORTER IS A REAL ANSWER: an expression such as `0 0 29 2 *` runs out of firings, and an empty list means \"it does not fire again\", not \"the server gave up\".",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NextRunView"
+            }
+          },
+          "schedule": {
+            "description": "The canonical five-field expression that was evaluated. With `preset=` it is what the preset compiled to, so the form can save exactly this.",
+            "type": "string"
+          },
+          "timeZone": {
+            "description": "The EFFECTIVE zone: `UTC` when `timeZone` was not sent, so a reader never has to know the default.",
+            "type": "string"
+          },
+          "tzdb": {
+            "description": "Which time-zone database resolved it, e.g. `chrono-tz 0.10.4`. Rule updates ship with a release, so two releases can disagree about a slot and this says which one answered.",
+            "type": "string"
           }
         }
       },
@@ -3807,7 +4478,7 @@
             "type": "boolean"
           },
           "manualBackupCreate": {
-            "description": "Manual backup creation (PLAT-06.1/06.2): no route.",
+            "description": "`POST .../backups` — the canonical manual `Backup` (D1 §8.2).",
             "type": "boolean"
           },
           "operationEvents": {
@@ -3831,7 +4502,7 @@
             "type": "boolean"
           },
           "scheduleCreate": {
-            "description": "`POST .../schedules`.",
+            "description": "`POST .../schedules` — AND `PUT .../schedules/{name}`.\n\nONE FLAG FOR TWO ROUTES, BECAUSE IT IS ONE AUTHORITY. D1 §5.1 makes a schedule's future policy editable, and this crate's decision (recorded in `docs/api.md`) is that an operator who may WRITE a policy into a bound namespace may write a new one over it: the edit reaches exactly the fields `POST` already sets, never `spec.sourceRef`, and never a created run. `Action::EditSchedulePolicy` is a separate action so the AUDIT record says `schedule.editPolicy` rather than `schedule.create`, but it has the same role allowance — pinned by `tests/role_matrix.rs::editing_a_policy_is_exactly_the_authority_to_create_one` — so a console reads this one flag for both buttons. D2 §8's rule stands: `ui/contract.js`'s `CAPABILITY_FLAGS` is a frozen 19-entry list, and splitting a flag is a contract change that lands on both sides at once.",
             "type": "boolean"
           },
           "scheduleSetSuspension": {
@@ -3847,6 +4518,25 @@
             "type": "boolean"
           }
         }
+      },
+      "CatchUpPolicy": {
+        "description": "Whether a slot past its starting deadline may still run.",
+        "oneOf": [
+          {
+            "description": "Count it in `status.missedSlots` and move on — today's behaviour, and what an absent field means.",
+            "type": "string",
+            "enum": [
+              "None"
+            ]
+          },
+          {
+            "description": "The LATEST due slot, and only that one, may still run. At most one catch-up run, ever.",
+            "type": "string",
+            "enum": [
+              "Latest"
+            ]
+          }
+        ]
       },
       "CheckEntryView": {
         "description": "One check entry.",
@@ -4438,6 +5128,56 @@
             ]
           }
         ]
+      },
+      "CreateBackupRequest": {
+        "description": "`POST /api/v1/namespaces/{ns}/backups` — \"Back up now\" and \"Run first backup now\" (D1 §8.2).\n\nTWO BODIES, ONE CR PATH. With `scheduleRef` the API copies the schedule's current revision — selection, archive, deadline — and records `{uid, generation, runPolicySha256}`; a policy field in the body beside it is `422`, because a \"manual run of this schedule\" that quietly ran a different policy would be the wrong thing recorded in the receipt. Without it the body IS the policy, for a cluster with no schedule yet.",
+        "type": "object",
+        "properties": {
+          "deadlineSeconds": {
+            "description": "Body B: the run's `activeDeadlineSeconds`, 60 to 86400. Absent means 3600.",
+            "default": null,
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "destinationRef": {
+            "description": "Body B: a saved `BackupDestination` instead of an inline archive.",
+            "default": null,
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "legacyArchive": {
+            "description": "Body B: an inline archive location.",
+            "default": null,
+            "$ref": "#/components/schemas/ArchiveRequest",
+            "nullable": true
+          },
+          "readinessAcknowledgement": {
+            "description": "Either body: \"Run anyway\" after a `notReady` or `unknown` verdict.",
+            "default": null,
+            "$ref": "#/components/schemas/ReadinessAcknowledgementRequest",
+            "nullable": true
+          },
+          "scheduleRef": {
+            "description": "Body A: copy this schedule's current revision.",
+            "default": null,
+            "$ref": "#/components/schemas/BackupScheduleRefRequest",
+            "nullable": true
+          },
+          "sourceRef": {
+            "description": "Body B: the source connection, in this namespace.",
+            "default": null,
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "topicSelection": {
+            "description": "Body B: the topic selection.",
+            "default": null,
+            "$ref": "#/components/schemas/TopicSelectionRequest",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
       },
       "CreateConnectionRequest": {
         "description": "`POST /api/v1/namespaces/{ns}/connections`.",
@@ -5355,6 +6095,25 @@
           }
         }
       },
+      "IncompleteDiscoveryPolicy": {
+        "description": "What a dynamic run does when discovery cannot prove it saw everything. REQUIRED, WITH NO DEFAULT: both possible defaults are wrong in a way the operator would not notice (D1 §0.1).",
+        "oneOf": [
+          {
+            "description": "Fail the run.",
+            "type": "string",
+            "enum": [
+              "Refuse"
+            ]
+          },
+          {
+            "description": "Back up what was visible and label the run `VisibleUserTopicsOnly`.",
+            "type": "string",
+            "enum": [
+              "BackUpVisibleTopics"
+            ]
+          }
+        ]
+      },
       "LastTestView": {
         "description": "The most recent explicit access test.",
         "type": "object",
@@ -5386,6 +6145,34 @@
           "truncated": {
             "description": "Whether the search for the newest test hit its page bound, so this may not be the newest one. A \"last test\" that might not be last is worse than none, so the caller is told rather than reassured.",
             "type": "boolean"
+          }
+        }
+      },
+      "ManualBackupResponse": {
+        "description": "`POST /api/v1/namespaces/{ns}/backups`: the created run, and the schedule it came from.",
+        "type": "object",
+        "required": [
+          "item",
+          "replayed",
+          "requestId"
+        ],
+        "properties": {
+          "item": {
+            "description": "The created run.",
+            "$ref": "#/components/schemas/Backup"
+          },
+          "replayed": {
+            "description": "Whether this response replays an earlier identical request (HTTP 200) rather than creating (HTTP 201).",
+            "type": "boolean"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          },
+          "schedule": {
+            "description": "The schedule, when the run was taken from one.",
+            "$ref": "#/components/schemas/ScheduleContextView",
+            "nullable": true
           }
         }
       },
@@ -5474,6 +6261,30 @@
           }
         },
         "additionalProperties": false
+      },
+      "NextRunView": {
+        "description": "One upcoming firing: the UTC instant, the local wall time with its offset, and what the local clock did to reach it.",
+        "type": "object",
+        "required": [
+          "at",
+          "localTime"
+        ],
+        "properties": {
+          "adjustment": {
+            "description": "The marker, omitted when the instant needed no adjustment.",
+            "$ref": "#/components/schemas/CadenceAdjustment",
+            "nullable": true
+          },
+          "at": {
+            "description": "The UTC instant. This, and only this, is the slot's identity.",
+            "type": "string",
+            "format": "date-time"
+          },
+          "localTime": {
+            "description": "The same instant in the schedule's zone, offset included — `2026-10-25T02:30:00+02:00`. The offset is what distinguishes the two occurrences of a repeated hour.",
+            "type": "string"
+          }
+        }
       },
       "ObservedAuthView": {
         "description": "The identity a run presented.",
@@ -5854,6 +6665,25 @@
           }
         }
       },
+      "PolicyChangedDetail": {
+        "description": "What a schedule's policy is NOW, on `policy_changed` (D1 §8.2).\n\nA PROBLEM EXTENSION, NOT A FIELD ERROR. `expectedGeneration` was not malformed — it named a revision that has been superseded — so the answer a console needs is the current revision, not a sentence about a field. RFC 9457 permits extension members; this is the only one this API defines.",
+        "type": "object",
+        "required": [
+          "currentGeneration"
+        ],
+        "properties": {
+          "currentGeneration": {
+            "description": "The schedule's current `metadata.generation`.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "currentRunPolicySha256": {
+            "description": "Its current run-policy digest, when the controller has recorded one. ABSENT means the controller has not evaluated this revision yet, never that the policy is empty.",
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
       "Preflight": {
         "description": "An operation-readiness result.",
         "type": "object",
@@ -6152,6 +6982,11 @@
               "$ref": "#/components/schemas/FieldError"
             }
           },
+          "policy": {
+            "description": "The schedule's current revision, when the code is `policy_changed`.",
+            "$ref": "#/components/schemas/PolicyChangedDetail",
+            "nullable": true
+          },
           "requestId": {
             "description": "The request ID, also returned as `X-Request-ID`.",
             "type": "string"
@@ -6327,6 +7162,13 @@
             ]
           },
           {
+            "description": "409 — a manual run named `expectedGeneration` and the schedule's policy has moved on since (D1 §8.2). The body carries the current generation and run-policy digest so the console can show what changed; confirming starts a NEW idempotency intent, because running a policy the person did not see is not what the button promised.",
+            "type": "string",
+            "enum": [
+              "policy_changed"
+            ]
+          },
+          {
             "description": "410 — the list cursor expired or Kubernetes compacted its continue token; restart the list without a cursor.",
             "type": "string",
             "enum": [
@@ -6459,6 +7301,25 @@
             "$ref": "#/components/schemas/ReachabilityState"
           }
         }
+      },
+      "ReadinessAcknowledgementRequest": {
+        "description": "\"Run anyway\", recorded and never authoritative (D1 §8.4).\n\nTHE API AND THE CONTROLLER NEVER GATE ON READINESS. Execution-time guards stay authoritative and the direct `kubectl create -f` path exists regardless; this records that a person was shown a `notReady` or `unknown` verdict and went ahead. It is an annotation on the run, not a permission.",
+        "type": "object",
+        "required": [
+          "preflight",
+          "state"
+        ],
+        "properties": {
+          "preflight": {
+            "description": "The `Preflight` whose verdict was shown, in this namespace.",
+            "type": "string"
+          },
+          "state": {
+            "description": "What it said.",
+            "$ref": "#/components/schemas/AcknowledgedReadiness"
+          }
+        },
+        "additionalProperties": false
       },
       "ReadinessRequest": {
         "description": "Explicit readiness settings.",
@@ -6983,6 +7844,28 @@
           }
         }
       },
+      "RetryPolicy": {
+        "description": "Retries for a failed slot.",
+        "type": "object",
+        "required": [
+          "maxRetries"
+        ],
+        "properties": {
+          "delaySeconds": {
+            "description": "Seconds between a failed attempt finishing and its retry becoming admissible, 60 to 21600. Absent means 300.",
+            "default": null,
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "maxRetries": {
+            "description": "0 to 3. Each retry is a NEW `Backup` with a new execution id: a failed attempt's partial archive is never appended to.",
+            "type": "integer",
+            "format": "int32"
+          }
+        },
+        "additionalProperties": false
+      },
       "Role": {
         "description": "The four product roles. They are LOGWEIR roles: they are not Kubernetes roles, they are not granted by cluster RBAC, and holding one says nothing about what the console ServiceAccount may do.",
         "oneOf": [
@@ -7053,9 +7936,25 @@
           "uid"
         ],
         "properties": {
+          "activeDeadlineSeconds": {
+            "description": "The run's `activeDeadlineSeconds`. ABSENT means 3600.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "allUserTopics": {
+            "description": "Dynamic selection, when the schedule uses it.",
+            "$ref": "#/components/schemas/AllUserTopics",
+            "nullable": true
+          },
           "archive": {
-            "description": "Where backups are written.",
+            "description": "Where backups are written. With `destinationRef` this is the CRD's sentinel URL and the console should render the destination instead.",
             "$ref": "#/components/schemas/ArchiveView"
+          },
+          "catchUpPolicy": {
+            "description": "ABSENT means `None`.",
+            "$ref": "#/components/schemas/CatchUpPolicy",
+            "nullable": true
           },
           "concurrencyPolicy": {
             "description": "`Forbid` or `Allow`.",
@@ -7067,6 +7966,17 @@
             "format": "date-time",
             "nullable": true
           },
+          "destinationRef": {
+            "description": "The saved destination, when the schedule names one.",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "generation": {
+            "description": "The `metadata.generation`; send it back as `expectedGeneration` on `PUT .../schedules/{name}` and on a manual run taken from this schedule. It increments on EVERY spec change, suspension included.\n\nOPTIONAL IN THE SCHEMA, ALWAYS EMITTED BY THIS BUILD. The API server sets `metadata.generation` on every object, so this projection always carries it; it is declared optional ONLY because `ui/contract.js`'s decoder drift test compares the schema's `required` set with a frozen list on the console side, and moving a field into that set is a contract change that must land in the same commit as `ui/contract.js` and the console fixtures (D1 W7's ownership). A console that somehow sees it absent must ask for a reload rather than guess a value for `expectedGeneration`.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
           "name": {
             "description": "The object name.",
             "type": "string"
@@ -7075,8 +7985,13 @@
             "description": "The namespace.",
             "type": "string"
           },
+          "preset": {
+            "description": "The preset this expression IS, or absent for \"Advanced cron\".",
+            "$ref": "#/components/schemas/CadencePreset",
+            "nullable": true
+          },
           "resourceVersion": {
-            "description": "The resourceVersion; send it back as `expectedResourceVersion`.",
+            "description": "The resourceVersion; send it back as `expectedResourceVersion` on `:set-suspension`.",
             "type": "string"
           },
           "retention": {
@@ -7084,13 +7999,24 @@
             "$ref": "#/components/schemas/RetentionView",
             "nullable": true
           },
+          "retry": {
+            "description": "ABSENT means no retries.",
+            "$ref": "#/components/schemas/RetryPolicy",
+            "nullable": true
+          },
           "schedule": {
             "description": "The cron expression.",
             "type": "string"
           },
           "sourceRef": {
-            "description": "The source connection.",
+            "description": "The source connection. Immutable: a different cluster is a different schedule.",
             "$ref": "#/components/schemas/NameRef"
+          },
+          "startingDeadlineSeconds": {
+            "description": "How long after its instant a slot may still start. ABSENT means 3600.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
           },
           "status": {
             "description": "What the controller recorded.",
@@ -7100,8 +8026,13 @@
             "description": "Whether the schedule is suspended.",
             "type": "boolean"
           },
+          "timeZone": {
+            "description": "The IANA zone the expression is evaluated in. ABSENT means UTC, which is what every pre-PLAT-04.2 schedule does.",
+            "type": "string",
+            "nullable": true
+          },
           "topics": {
-            "description": "Named topics.",
+            "description": "Named topics. Empty with `allUserTopics`.",
             "type": "array",
             "items": {
               "type": "string"
@@ -7109,6 +8040,48 @@
           },
           "uid": {
             "description": "The Kubernetes UID.",
+            "type": "string"
+          }
+        }
+      },
+      "ScheduleContextView": {
+        "description": "The schedule a manual run was taken from, as it stood when the run was created.",
+        "type": "object",
+        "required": [
+          "activeRuns",
+          "generation",
+          "name",
+          "suspended",
+          "uid"
+        ],
+        "properties": {
+          "activeRuns": {
+            "description": "The schedule-created runs that were not terminal. A manual run is neither counted by nor blocked by `concurrencyPolicy`; this is a non-blocking notice.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ActiveRunView"
+            }
+          },
+          "generation": {
+            "description": "The generation whose policy this run copied.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "name": {
+            "description": "The schedule's name.",
+            "type": "string"
+          },
+          "runPolicySha256": {
+            "description": "The digest of that policy.",
+            "type": "string",
+            "nullable": true
+          },
+          "suspended": {
+            "description": "Whether the schedule is suspended. A manual run is ALLOWED while it is, and does not resume it; the console says so rather than hiding it.",
+            "type": "boolean"
+          },
+          "uid": {
+            "description": "Its UID.",
             "type": "string"
           }
         }
@@ -7135,6 +8108,76 @@
           "requestId": {
             "description": "The request ID.",
             "type": "string"
+          }
+        }
+      },
+      "SchedulePolicyView": {
+        "description": "The revision a schedule's controller last evaluated (D1 §4.8).",
+        "type": "object",
+        "required": [
+          "effectiveSince",
+          "evaluatedAt",
+          "generation",
+          "runPolicySha256",
+          "timeZone",
+          "tzdb"
+        ],
+        "properties": {
+          "effectiveSince": {
+            "description": "When this revision was first observed.",
+            "type": "string",
+            "format": "date-time"
+          },
+          "evaluatedAt": {
+            "description": "When this status last MOVED — **not** a liveness probe.\n\nThe controller re-examines every schedule every 30 s and writes nothing when the computed status equals the stored one, so this instant standing still means \"nothing has changed\", not \"nobody is watching\". A console must not compare it with the requeue interval. The staleness signal is `nextRuns[0].at` in the past (D1 §4.9 as amended).",
+            "type": "string",
+            "format": "date-time"
+          },
+          "generation": {
+            "description": "The `metadata.generation` this block was computed from.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "runPolicySha256": {
+            "description": "`sha256:<lowercase hex>` over the run policy of that generation.",
+            "type": "string"
+          },
+          "timeZone": {
+            "description": "The EFFECTIVE zone, `UTC` when `spec.timeZone` is absent.",
+            "type": "string"
+          },
+          "tzdb": {
+            "description": "Which time-zone database resolved it.",
+            "type": "string"
+          }
+        }
+      },
+      "ScheduleRefView": {
+        "description": "The schedule revision a run recorded.",
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "generation": {
+            "description": "The revision this run copied.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "name": {
+            "description": "The schedule's name, in this namespace.",
+            "type": "string"
+          },
+          "runPolicySha256": {
+            "description": "The digest of the policy it copied.",
+            "type": "string",
+            "nullable": true
+          },
+          "uid": {
+            "description": "Its UID. A schedule deleted and recreated under the same name is a different schedule; a run of the old one is not a run of the new one.",
+            "type": "string",
+            "nullable": true
           }
         }
       },
@@ -7169,6 +8212,14 @@
             "type": "string",
             "nullable": true
           },
+          "activeRuns": {
+            "description": "The schedule-created runs that are not terminal. ABSENT means \"not yet computed\", never \"none are running\".",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ActiveRunView"
+            },
+            "nullable": true
+          },
           "lastFireTime": {
             "description": "When the schedule last created a Backup.",
             "type": "string",
@@ -7186,9 +8237,28 @@
             "format": "date-time",
             "nullable": true
           },
+          "nextRuns": {
+            "description": "Up to five upcoming firings for the current generation; empty when the schedule is suspended or invalid. **This is the staleness signal**: a live controller rewrites these once `nextRuns[0].at` has passed, so a first entry in the past means nobody is evaluating this schedule. ABSENT means \"not yet computed\", never \"it never fires\".",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NextRunView"
+            },
+            "nullable": true
+          },
+          "observedGeneration": {
+            "description": "The `metadata.generation` the controller has evaluated. A `generation` ahead of this one is an edit the controller has not seen yet; ABSENT means it has not been computed, never that it is zero.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
           "pendingBackup": {
             "description": "A reserved Backup name whose creation is not yet confirmed.",
             "type": "string",
+            "nullable": true
+          },
+          "policy": {
+            "description": "The revision the controller last evaluated, with the effective zone, the tz database that resolved it and the run-policy digest.",
+            "$ref": "#/components/schemas/SchedulePolicyView",
             "nullable": true
           },
           "ready": {
@@ -7724,6 +8794,31 @@
           }
         }
       },
+      "TopicExclusions": {
+        "description": "Topics to leave out of a dynamic selection. Literal names and literal prefixes; never a pattern language.",
+        "type": "object",
+        "properties": {
+          "prefixes": {
+            "description": "Literal prefixes, at most 32. `orders-` excludes `orders-eu`; `orders*` is not writable at all.",
+            "default": null,
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          },
+          "topics": {
+            "description": "Exact names, at most 1000.",
+            "default": null,
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
       "TopicNamingRequest": {
         "description": "How restored topics are named.",
         "type": "object",
@@ -7768,6 +8863,27 @@
             "$ref": "#/components/schemas/ScanView"
           }
         }
+      },
+      "TopicSelectionRequest": {
+        "description": "How a run picks its topics: a named allowlist, or dynamic resolution.\n\nTHE THIRD SHAPE IS NOT REFUSED HERE, AND THAT IS DELIBERATE. Sending a non-empty `topics` together with `allUserTopics` is refused by the CRD's own CEL (D1 §5.2 R2 / the `Backup` rule), and this API lets the API server say so rather than keeping a second copy of the rule that can drift from it. An EMPTY selection — neither a name nor a block — is refused here, before any write, because no rule catches it and a run with nothing to do is not a run.",
+        "type": "object",
+        "properties": {
+          "allUserTopics": {
+            "description": "Dynamic selection.",
+            "default": null,
+            "$ref": "#/components/schemas/AllUserTopics",
+            "nullable": true
+          },
+          "topics": {
+            "description": "Named topics; patterns are refused. Empty for dynamic selection.",
+            "default": [],
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "additionalProperties": false
       },
       "TransportRequest": {
         "description": "Transport security and its trust material.",
@@ -7826,6 +8942,68 @@
           }
         }
       },
+      "TriggerKind": {
+        "description": "Which kind of run a `Backup` is (D1 §3.1).",
+        "oneOf": [
+          {
+            "description": "A slot that fired at its own instant.",
+            "type": "string",
+            "enum": [
+              "Scheduled"
+            ]
+          },
+          {
+            "description": "The same slot, started late because the controller was not running.",
+            "type": "string",
+            "enum": [
+              "CatchUp"
+            ]
+          },
+          {
+            "description": "Attempt k of a slot, 1 to 3, with a NEW execution id.",
+            "type": "string",
+            "enum": [
+              "Retry"
+            ]
+          },
+          {
+            "description": "Created by a person, this API or the console. No slot; the execution id is the object's own UID.",
+            "type": "string",
+            "enum": [
+              "Manual"
+            ]
+          }
+        ]
+      },
+      "TriggerView": {
+        "description": "What caused a run.",
+        "type": "object",
+        "required": [
+          "attempt",
+          "kind"
+        ],
+        "properties": {
+          "attempt": {
+            "description": "0 for `Scheduled`, `CatchUp` and `Manual`; 1 to 3 for `Retry`.",
+            "type": "integer",
+            "format": "int32"
+          },
+          "kind": {
+            "description": "The kind.",
+            "$ref": "#/components/schemas/TriggerKind"
+          },
+          "retryOf": {
+            "description": "The attempt this one retries.",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "timeZone": {
+            "description": "The zone the slot was computed in. INFORMATIONAL: the slot itself is UTC, and this is what keeps a history row's local time readable after somebody edits the schedule's `timeZone`.",
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
       "UpdateDestinationAccessRequest": {
         "description": "`POST .../destinations/{name}:update-access`.",
         "type": "object",
@@ -7848,6 +9026,98 @@
             "default": null,
             "$ref": "#/components/schemas/UpdateTransportRequest",
             "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "UpdateSchedulePolicyRequest": {
+        "description": "`PUT /api/v1/namespaces/{ns}/schedules/{name}` — the editable future policy (D1 §5.1, §5.6).\n\nTHE WHOLE POLICY, NOT A DIFF. Every mutable field is sent; a field omitted is REMOVED, which is what makes \"absent means the documented default\" reachable from a form. `spec.sourceRef` is not on this DTO at all: the identity of the protected cluster is immutable, and a request naming it is `422 validation_failed` with `sourceRef: field_immutable` before anything is read or written.\n\nIT CHANGES THE FUTURE AND NOTHING ELSE. A `Backup` already created keeps its copied policy and its frozen inputs; an edit during a run does not reach the run (D1 §5.5).",
+        "type": "object",
+        "required": [
+          "expectedGeneration",
+          "schedule",
+          "suspended",
+          "topicSelection"
+        ],
+        "properties": {
+          "activeDeadlineSeconds": {
+            "description": "The run's `activeDeadlineSeconds`, 60 to 86400. Absent means 3600.",
+            "default": null,
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "archive": {
+            "description": "Where backups are written. Exactly one of `archive` or `destinationRef`.",
+            "default": null,
+            "$ref": "#/components/schemas/ArchiveRequest",
+            "nullable": true
+          },
+          "catchUpPolicy": {
+            "description": "Absent means `None`.",
+            "default": null,
+            "$ref": "#/components/schemas/CatchUpPolicy",
+            "nullable": true
+          },
+          "concurrencyPolicy": {
+            "description": "`Forbid` (default) or `Allow`.",
+            "default": null,
+            "$ref": "#/components/schemas/ConcurrencyPolicy",
+            "nullable": true
+          },
+          "destinationRef": {
+            "description": "A saved `BackupDestination` in this namespace. Exactly one of `archive` or `destinationRef`; the sentinel `archive.url` the CRD requires is built here and is never accepted from a body.",
+            "default": null,
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "expectedGeneration": {
+            "description": "The `metadata.generation` the client last read. A different current generation is `412 precondition_failed`: somebody else edited the policy between the read and this write.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "retention": {
+            "description": "Retention reporting. Logweir deletes nothing.",
+            "default": null,
+            "$ref": "#/components/schemas/RetentionRequest",
+            "nullable": true
+          },
+          "retry": {
+            "description": "Absent means no retries.",
+            "default": null,
+            "$ref": "#/components/schemas/RetryPolicy",
+            "nullable": true
+          },
+          "schedule": {
+            "description": "A five-field cron expression or `@hourly`/`@daily`/`@weekly`, parsed by the controller's own parser.",
+            "type": "string"
+          },
+          "sourceRef": {
+            "description": "PRESENT ONLY TO BE REFUSED, and present so that the refusal is a FIELD ERROR rather than \"unknown field\". A console that reads a schedule and writes it back sends every field it read; `sourceRef` is one of them, and `sourceRef: field_immutable` tells the person what to do (create a new schedule) where `malformed_request` would not.",
+            "default": null,
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "startingDeadlineSeconds": {
+            "description": "How long after its instant a slot may still start, 60 to 604800. Absent means 3600.",
+            "default": null,
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "suspended": {
+            "description": "Whether the schedule is suspended. Suspension is part of the policy here as well as its own command route; flipping it changes `metadata.generation` and leaves `runPolicySha256` alone.",
+            "type": "boolean"
+          },
+          "timeZone": {
+            "description": "An IANA zone name. Absent means UTC and reproduces today's slots exactly.",
+            "default": null,
+            "type": "string",
+            "nullable": true
+          },
+          "topicSelection": {
+            "description": "The topic selection.",
+            "$ref": "#/components/schemas/TopicSelectionRequest"
           }
         },
         "additionalProperties": false
