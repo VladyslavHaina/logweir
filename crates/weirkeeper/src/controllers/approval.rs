@@ -58,6 +58,7 @@ use kube::runtime::controller::Action;
 use kube::runtime::{watcher, Controller};
 use kube::{Api, Resource, ResourceExt};
 use logweir_core::ids::sha256_prefixed;
+use logweir_core::trust::{KeyUsage, SigningRefusal};
 use logweir_verify::{verify_detached, Sidecar, VerifyingKey};
 use serde::Deserialize;
 use serde_json::json;
@@ -68,8 +69,9 @@ use crate::conditions::{current_condition, merge_condition, status_unchanged};
 use crate::crds::approval::{Approval, ApprovalStatus, SubjectKind, VerifiedSubjectRef};
 use crate::crds::backup::Backup;
 use crate::crds::restore::Restore;
-use crate::crds::trust_roster::{TrustRoster, TrustRosterSpec};
+use crate::crds::trust_roster::TrustRoster;
 use crate::crds::Condition;
+use crate::trust::{Resolution, ResolvedKey, ResolvedTrust, REASON_TRUST_POLICY_CONFLICT};
 
 /// The DSSE `payloadType` an approval document is signed under.
 ///
@@ -143,6 +145,60 @@ pub enum ApprovalRefusal {
         /// That entry's `notAfter`, RFC 3339.
         not_after: String,
     },
+    /// The matched key is declared `Retired` — PLAT-19.1, D3 §7.4.
+    ///
+    /// **NOT [`Self::KeyIdExpired`], although §7.4 says a retired key "refuses
+    /// a fresh approval exactly as `KeyIdExpired` does today".** It refuses the
+    /// same way; it does not refuse for the same reason, and `KeyIdExpired`
+    /// carries a `notAfter` a retired key has not reached. Reporting a
+    /// deliberate retirement as an expiry would send an operator to extend a
+    /// window that is not the problem.
+    KeyRetired {
+        /// The matched key's `keyId`.
+        key_id: String,
+        /// Its `retiredAt`, RFC 3339, when the policy records one.
+        retired_at: Option<String>,
+    },
+    /// The matched key is declared `Revoked` — PLAT-19.1, D3 §7.4.
+    ///
+    /// ITS OWN REASON, AND THAT IS THE POINT. A revocation is the one key
+    /// event an operator must never read as an expiry: `KeyCompromise` means
+    /// the private half is believed to be in someone else's hands, and the
+    /// remedy is an investigation, not a longer `notAfter`.
+    KeyRevoked {
+        /// The matched key's `keyId`.
+        key_id: String,
+        /// `KeyCompromise`, `Superseded` or `Unspecified`.
+        reason: String,
+        /// `revocationEffectiveFrom`, RFC 3339, when the policy records one.
+        effective_from: Option<String>,
+    },
+    /// The matched key's validity window has not opened yet — PLAT-19.1.
+    ///
+    /// REACHABLE ONLY UNDER A REAL `TrustPolicy`: §7.6 step 1 stages a
+    /// successor key before the cutover, and a future `notBefore` is the
+    /// natural way to do that. The synthesised `legacy-roster-v1` gives every
+    /// key a `notBefore` at the Unix epoch, so no roster-only cluster can reach
+    /// this.
+    KeyNotYetValid {
+        /// The matched key's `keyId`.
+        key_id: String,
+        /// Its `notBefore`, RFC 3339.
+        not_before: String,
+    },
+    /// Two or more `TrustPolicy` objects claim this namespace, so it resolves
+    /// to **nothing** — PLAT-19.1, D3 §7.1.
+    ///
+    /// NOT A VERDICT ABOUT THE APPROVER. Picking one of two contesting
+    /// policies would be a trust decision made by a sort order, and the safe
+    /// reading of a disagreement about authority is that there is none. The
+    /// same word appears on both policies' `status.conflicts`.
+    TrustPolicyConflict {
+        /// The contested namespace.
+        namespace: String,
+        /// Every policy claiming it, sorted.
+        policies: Vec<String>,
+    },
     /// The sidecar is a genuinely-signed sidecar for a DIFFERENT kind of
     /// document, handed over in place of an approval.
     PayloadTypeMismatch {
@@ -187,6 +243,10 @@ impl ApprovalRefusal {
             Self::SignatureInvalid(_) => "SignatureInvalid",
             Self::KeyIdNotInRoster { .. } => "KeyIdNotInRoster",
             Self::KeyIdExpired { .. } => "KeyIdExpired",
+            Self::KeyRetired { .. } => "KeyRetired",
+            Self::KeyRevoked { .. } => "KeyRevoked",
+            Self::KeyNotYetValid { .. } => "KeyNotYetValid",
+            Self::TrustPolicyConflict { .. } => REASON_TRUST_POLICY_CONFLICT,
             Self::PayloadTypeMismatch { .. } => "PayloadTypeMismatch",
             Self::PlanHashMismatch { .. } => "PlanHashMismatch",
             Self::SubjectKindMismatch { .. } => "SubjectKindMismatch",
@@ -208,6 +268,45 @@ impl fmt::Display for ApprovalRefusal {
                 f,
                 "the approval verified under key id {key_id}, whose notAfter {not_after} has \
                  passed; a key past notAfter does not authorise anything"
+            ),
+            Self::KeyRetired { key_id, retired_at } => write!(
+                f,
+                "the approval verified under key id {key_id}, which the resolved trust policy \
+                 records as Retired{}; a retired key authorises nothing new, however green the \
+                 archives it signed remain",
+                match retired_at {
+                    Some(at) => format!(" at {at}"),
+                    None => String::new(),
+                }
+            ),
+            Self::KeyRevoked {
+                key_id,
+                reason,
+                effective_from,
+            } => write!(
+                f,
+                "the approval verified under key id {key_id}, which the resolved trust policy \
+                 records as Revoked ({reason}){}; a revoked key is not an expired key and \
+                 authorises nothing",
+                match effective_from {
+                    Some(at) => format!(", effective {at}"),
+                    None => String::new(),
+                }
+            ),
+            Self::KeyNotYetValid { key_id, not_before } => write!(
+                f,
+                "the approval verified under key id {key_id}, whose notBefore {not_before} has \
+                 not arrived; a key staged for a future rotation authorises nothing yet"
+            ),
+            Self::TrustPolicyConflict {
+                namespace,
+                policies,
+            } => write!(
+                f,
+                "the namespace {namespace} is claimed by more than one TrustPolicy ({}), so it \
+                 resolves to no trust at all and no approval in it is accepted; remove the \
+                 namespace from all but one policy",
+                policies.join(", ")
             ),
             Self::PayloadTypeMismatch { got, want } => write!(
                 f,
@@ -252,6 +351,13 @@ pub struct Verified {
     /// keys satisfies it (`design-operator.md:169-181`). It is LABELLED, never
     /// refused.
     pub self_attested_risk: bool,
+    /// Which trust answered: a `TrustPolicy`'s `metadata.name`, or
+    /// `legacy-roster-v1` for the synthesised roster (D3 §7.5).
+    ///
+    /// IT REACHES THE CONDITION MESSAGE AS `trustSource=<name>`, which is what
+    /// D3 §15's L10 asserts on an unmigrated cluster and what tells an operator
+    /// looking at one `Approval` whether their migration is live.
+    pub trust_source: String,
     /// Filled by [`decide`] with the API object whose bytes were checked.
     /// Pure [`evaluate`] callers have no Kubernetes referent and leave it
     /// absent; only a reconcile outcome is written to status.
@@ -342,7 +448,7 @@ struct ApprovalDocument {
 pub fn evaluate(
     approval_bytes: &[u8],
     sidecar_bytes: &[u8],
-    roster: &TrustRosterSpec,
+    trust: &ResolvedTrust,
     now: DateTime<Utc>,
     referent_kind: &str,
     referent_plan_bytes: &[u8],
@@ -362,47 +468,49 @@ pub fn evaluate(
         });
     }
 
-    // ---- 2. the WHOLE roster parses, or nothing is accepted --------------
-    let mut parsed: Vec<(&str, Option<&DateTime<Utc>>, VerifyingKey)> =
-        Vec::with_capacity(roster.approver_keys.len());
-    for entry in &roster.approver_keys {
-        match VerifyingKey::from_pem_str(&entry.spki_pem) {
-            Ok(key) => parsed.push((entry.key_id.as_str(), entry.not_after.as_ref(), key)),
-            Err(e) => {
-                return Err(ApprovalRefusal::SignatureInvalid(format!(
-                    "TrustRoster '{ROSTER_NAME}' entry keyId {} carries an spkiPem that is not a \
-                     P-256 or Ed25519 public key ({e}); a partially loaded roster is not a \
-                     roster, so no approval is accepted against it",
-                    entry.key_id
-                )));
-            }
-        }
+    // ---- 2. the WHOLE approver key set parses, or nothing is accepted ----
+    //
+    // CARRIED AS DATA BY THE RESOLUTION LAYER, not re-derived here. The rule
+    // is the ROSTER's ("a partially loaded roster is not a roster") and it
+    // stops at the roster: a real `TrustPolicy` reports one unparseable key as
+    // one `Unparseable` key and keeps the other 63 working, because it has
+    // somewhere to record which entry failed. `blocked_for` carries the
+    // legacy message byte-for-byte, so the sentence an operator reads did not
+    // change on the day this path replaced the roster walk.
+    if let Some(message) = trust.blocked_for(KeyUsage::GovernedApproval) {
+        return Err(ApprovalRefusal::SignatureInvalid(message.to_string()));
     }
+    let declared: Vec<&ResolvedKey> = trust
+        .keys
+        .iter()
+        .filter(|k| k.trust.has_usage(KeyUsage::GovernedApproval))
+        .collect();
 
     // ---- 3. an entry must agree with its own key material ----------------
-    for (declared, _, key) in &parsed {
-        let computed = key.key_id();
-        if *declared != computed.as_str() {
+    for entry in &declared {
+        if let Err(computed) = &entry.declared_id_matches {
             return Err(ApprovalRefusal::KeyIdNotInRoster {
                 key_id: format!(
-                    "TrustRoster '{ROSTER_NAME}' entry declares keyId {declared} but its own \
-                     spkiPem hashes to {computed}"
+                    "{} entry declares keyId {} but its own spkiPem hashes to {computed}",
+                    trust_object(trust),
+                    entry.trust.key_id
                 ),
             });
         }
     }
 
-    // ---- 4. a key outside the roster is NOT a signature failure ----------
-    let matching: Vec<&(&str, Option<&DateTime<Utc>>, VerifyingKey)> = parsed
+    // ---- 4. a key outside the resolved trust is NOT a signature failure ---
+    let matching: Vec<&&ResolvedKey> = declared
         .iter()
-        .filter(|(declared, _, _)| sidecar.signatures.iter().any(|s| s.keyid == *declared))
+        .filter(|k| k.is_usable() && sidecar.signatures.iter().any(|s| s.keyid == k.trust.key_id))
         .collect();
     if matching.is_empty() {
         return Err(ApprovalRefusal::KeyIdNotInRoster {
             key_id: format!(
-                "the sidecar names [{}] and the roster's approverKeys are [{}]",
+                "the sidecar names [{}] and {}'s GovernedApproval keys are [{}]",
                 join(sidecar.signatures.iter().map(|s| s.keyid.as_str())),
-                join(roster.approver_keys.iter().map(|e| e.key_id.as_str())),
+                trust_object(trust),
+                join(declared.iter().map(|k| k.trust.key_id.as_str())),
             ),
         });
     }
@@ -416,17 +524,23 @@ pub fn evaluate(
     // binding is the whole reason the return value is used instead of being
     // discarded in favour of an id already in hand.
     let mut last_error: Option<String> = None;
-    let mut hit: Option<(String, Option<&DateTime<Utc>>)> = None;
-    for (_, not_after, key) in matching {
-        match verify_detached(key, PAYLOAD_TYPE_APPROVAL, approval_bytes, &sidecar) {
+    let mut hit: Option<String> = None;
+    for entry in matching {
+        let Ok(key) = VerifyingKey::from_pem_str(&entry.spki_pem) else {
+            // Unreachable: `is_usable()` already required a parsed PEM. Named
+            // rather than unwrapped, because a panic in an admission path is a
+            // denial of service.
+            continue;
+        };
+        match verify_detached(&key, PAYLOAD_TYPE_APPROVAL, approval_bytes, &sidecar) {
             Ok(matched_key_id) => {
-                hit = Some((matched_key_id, *not_after));
+                hit = Some(matched_key_id);
                 break;
             }
             Err(e) => last_error = Some(e.to_string()),
         }
     }
-    let (matched_key_id, not_after) = match hit {
+    let matched_key_id = match hit {
         Some(v) => v,
         None => {
             return Err(ApprovalRefusal::SignatureInvalid(
@@ -437,17 +551,19 @@ pub fn evaluate(
         }
     };
 
-    // ---- 6. the matched key must not be past its notAfter -----------------
+    // ---- 6. THE MATCHED KEY MUST BE ABLE TO SIGN SOMETHING NEW ------------
     //
-    // The MATCHED entry's, not the first entry's: a roster may hold several
-    // approver keys and only one of them signed this.
-    if let Some(not_after) = not_after {
-        if *not_after <= now {
-            return Err(ApprovalRefusal::KeyIdExpired {
-                key_id: matched_key_id,
-                not_after: not_after.to_rfc3339(),
-            });
-        }
+    // D3 §7.4's first question, and this is the call site that makes it a
+    // question at all: *admission is a new use*. An `Approval` object that
+    // arrives today carrying a signature by a key retired last week is asking
+    // whether that key may authorise something now — not whether an archive it
+    // signed last year still verifies, which is `decide`'s question and has a
+    // different answer.
+    //
+    // The MATCHED key's lifecycle, not the first key's: a policy may hold
+    // several approver keys and only one of them signed this.
+    if let Err(refusal) = trust.may_sign_new_for(&matched_key_id, KeyUsage::GovernedApproval, now) {
+        return Err(signing_refusal(trust, &matched_key_id, refusal));
     }
 
     // ---- the bytes are authentic; now read what they say ------------------
@@ -481,21 +597,100 @@ pub fn evaluate(
         });
     }
 
-    // LABELLED, NEVER REFUSED. The roster carries key material for both lists
-    // (interface **I17**), so this is a comparison of ids drawn from two typed
-    // lists rather than a guess.
-    let self_attested_risk = roster
-        .signing_keys
-        .iter()
-        .any(|e| e.key_id == matched_key_id);
+    // LABELLED, NEVER REFUSED — and under a real `TrustPolicy` it is
+    // STRUCTURALLY IMPOSSIBLE rather than merely absent. D3 §7.3's CEL rule G8
+    // makes a policy key declare exactly one usage, so `has_usage` here can
+    // only be true for the synthesised `legacy-roster-v1`, whose two lists may
+    // name the same key id. That is precisely §7.3's "the label remains for
+    // legacy-roster namespaces": the label goes on where the separation cannot
+    // be enforced, and the enforcement replaces it where it can.
+    let self_attested_risk = trust
+        .key(&matched_key_id)
+        .is_some_and(|k| k.trust.has_usage(KeyUsage::EvidenceSigning));
 
     Ok(Verified {
         matched_key_id,
         approver: doc.approver,
         ticket: doc.ticket,
         self_attested_risk,
+        trust_source: trust.source.name().to_string(),
         verified_subject_ref: None,
     })
+}
+
+/// The object an operator would edit to change this refusal — the roster when
+/// trust came from the synthesised `legacy-roster-v1`, the policy otherwise.
+///
+/// THE REFUSAL NAMES THE THING TO EDIT. "no key on the TrustRoster 'default'
+/// authorises this" is the wrong sentence for a namespace governed by
+/// `org-default`, and sending an operator to an object that no longer decides
+/// anything for their namespace is worse than saying nothing.
+fn trust_object(trust: &ResolvedTrust) -> String {
+    if trust.source.is_legacy() {
+        format!("TrustRoster '{ROSTER_NAME}'")
+    } else {
+        format!("TrustPolicy '{}'", trust.source.name())
+    }
+}
+
+/// One [`SigningRefusal`] as the refusal an operator reads.
+///
+/// # No wildcard arm
+///
+/// A seventh [`SigningRefusal`] must fail to compile here rather than reach the
+/// cluster as a reason nobody chose — the same rule
+/// [`ApprovalRefusal::reason`] follows.
+///
+/// `UntrustedSigner` and `KeyUsageMismatch` are UNREACHABLE from check 6: the
+/// key came out of the resolved trust's own `GovernedApproval` list, so it
+/// exists and it carries the usage. They map to
+/// [`ApprovalRefusal::KeyIdNotInRoster`] because that is what they would mean
+/// if a future refactor made them reachable — the key the signature named is
+/// not one this namespace's trust offers for approvals.
+fn signing_refusal(
+    trust: &ResolvedTrust,
+    key_id: &str,
+    refusal: SigningRefusal,
+) -> ApprovalRefusal {
+    let key = trust.key(key_id);
+    match refusal {
+        SigningRefusal::UntrustedSigner | SigningRefusal::KeyUsageMismatch => {
+            ApprovalRefusal::KeyIdNotInRoster {
+                key_id: format!(
+                    "{} offers no GovernedApproval key with id {key_id}",
+                    trust_object(trust)
+                ),
+            }
+        }
+        SigningRefusal::KeyIdExpired => ApprovalRefusal::KeyIdExpired {
+            key_id: key_id.to_string(),
+            not_after: key.map_or_else(String::new, |k| k.trust.not_after.to_rfc3339()),
+        },
+        SigningRefusal::KeyNotYetValid => ApprovalRefusal::KeyNotYetValid {
+            key_id: key_id.to_string(),
+            not_before: key.map_or_else(String::new, |k| k.trust.not_before.to_rfc3339()),
+        },
+        SigningRefusal::KeyRetired => ApprovalRefusal::KeyRetired {
+            key_id: key_id.to_string(),
+            retired_at: key.and_then(|k| k.trust.retired_at).map(|t| t.to_rfc3339()),
+        },
+        SigningRefusal::KeyRevoked => ApprovalRefusal::KeyRevoked {
+            key_id: key_id.to_string(),
+            // `{:?}` on the pure enum, whose variant names ARE the CRD's
+            // `revocationReason` values (`KeyCompromise`, `Superseded`,
+            // `Unspecified`) — the same string an operator reads off the
+            // policy they would go and edit.
+            reason: format!(
+                "{:?}",
+                key.map_or(logweir_core::trust::RevocationReason::Unspecified, |k| k
+                    .trust
+                    .reason(),)
+            ),
+            effective_from: key
+                .and_then(|k| k.trust.revocation_effective_from.or(k.trust.revoked_at))
+                .map(|t| t.to_rfc3339()),
+        },
+    }
 }
 
 /// `a, b, c` — used only inside refusal messages.
@@ -677,9 +872,9 @@ impl ApprovalOutcome {
     pub fn message(&self) -> String {
         match self {
             Self::Verified(v) => format!(
-                "the DSSE signature over spec.approvalBytes verified under TrustRoster \
-                 '{ROSTER_NAME}' approverKeys entry {}, and the recomputed plan hash matched",
-                v.matched_key_id
+                "the DSSE signature over spec.approvalBytes verified under GovernedApproval key \
+                 {} (trustSource={}), and the recomputed plan hash matched",
+                v.matched_key_id, v.trust_source
             ),
             Self::Refused(r) => r.to_string(),
             Self::Referent(p) => p.to_string(),
@@ -757,13 +952,30 @@ pub async fn decide(
         .namespace()
         .ok_or_else(|| ReconcileError::NoNamespace(name.clone()))?;
 
-    // THE ROSTER FIRST, and a missing one short-circuits everything: without a
-    // roster there is no set of keys any signature could be checked against,
-    // so fetching the referent would be work performed to reach a conclusion
-    // already known.
-    let roster = match load_roster(client).await? {
-        RosterLoad::Found(roster) => roster,
-        RosterLoad::NotFound => {
+    // THE NAMESPACE'S TRUST FIRST, and an absent or contested one
+    // short-circuits everything: without a resolved key set there is no set of
+    // keys any signature could be checked against, so fetching the referent
+    // would be work performed to reach a conclusion already known.
+    //
+    // PLAT-19.1 REPLACES `load_roster` HERE. `trust::resolve` reads every
+    // `TrustPolicy` and falls back to the synthesised `legacy-roster-v1`, so a
+    // cluster that has never seen a policy resolves to exactly the key set
+    // `TrustRoster/default` gave it — and `Unconfigured` is today's
+    // `RosterNotFound`, the same refusal with the same message.
+    let trust = match crate::trust::resolve(client, &namespace).await? {
+        Resolution::Trust(trust) => trust,
+        Resolution::Conflict {
+            namespace,
+            policies,
+        } => {
+            return Ok(ApprovalOutcome::Refused(
+                ApprovalRefusal::TrustPolicyConflict {
+                    namespace,
+                    policies,
+                },
+            ))
+        }
+        Resolution::Unconfigured => {
             return Ok(ApprovalOutcome::Refused(ApprovalRefusal::RosterNotFound))
         }
     };
@@ -865,7 +1077,7 @@ pub async fn decide(
         match evaluate(
             approval.spec.approval_bytes.as_bytes(),
             approval.spec.sidecar_bytes.as_bytes(),
-            &roster.spec,
+            &trust,
             Utc::now(),
             referent_kind,
             plan_bytes.as_bytes(),

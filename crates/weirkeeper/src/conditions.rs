@@ -538,6 +538,16 @@ pub const REASON_VERIFICATION_INVALID: &str = "VerificationInvalid";
 /// `NotAttempted` exists as a verdict distinct from `Invalid`.
 pub const REASON_VERIFICATION_NOT_ATTEMPTED: &str = "VerificationNotAttempted";
 
+/// [`CONDITION_VERIFIED`]'s reason when the signature verified and the SIGNER
+/// is one this installation will not accept — PLAT-19.1, decision D3 §7.4.
+///
+/// A CLAIM ABOUT THE KEY, and the third thing that is not
+/// [`REASON_VERIFICATION_INVALID`]: the document is exactly what it says it is,
+/// and the key that made it is revoked, unknown to the resolved `TrustPolicy`,
+/// declared for another usage, or was used outside the window it was trusted
+/// in. The operator's next step is their trust policy, not their archive.
+pub const REASON_VERIFICATION_UNTRUSTED: &str = "VerificationUntrusted";
+
 /// [`CONDITION_VERIFIED`]'s reason when a `Backup`'s evidence verified and the
 /// run did not exit 0. The `Backup` half of interface **I21** — there is no
 /// `outcome` on that path to read instead.
@@ -607,6 +617,7 @@ pub const CONDITION_REASONS: &[&str] = &[
     REASON_VERIFIED,
     REASON_VERIFICATION_INVALID,
     REASON_VERIFICATION_NOT_ATTEMPTED,
+    REASON_VERIFICATION_UNTRUSTED,
     REASON_EXIT_CODE_NOT_ZERO,
     REASON_OUTCOME_NOT_PASS,
     REASON_LEGACY_EXECUTION,

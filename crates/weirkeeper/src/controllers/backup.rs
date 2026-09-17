@@ -2890,6 +2890,10 @@ async fn reconcile_backup_inner(
         receipt_sha256.as_deref(),
     ) {
         let result = verify(EvidenceRef {
+            // PLAT-19.1: trust is resolved PER NAMESPACE, and this is
+            // `metadata.namespace` read off the object being reconciled —
+            // never a name the subject supplied.
+            namespace: namespace.to_string(),
             payload_key: payload_key.to_string(),
             payload_sha256: digest.to_string(),
             sidecar_key: sidecar_key.to_string(),
