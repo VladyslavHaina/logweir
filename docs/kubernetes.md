@@ -3552,6 +3552,188 @@ a plan ConfigMap (§20.6), and an adopter whose policy is "no Secret name in a
 ConfigMap" gets that for free by putting the certificate where public material
 belongs.
 
+## 21. `Preflight`: what a readiness check proves, and what it cannot
+
+A `Preflight` answers one question — *would this operation fail, and why?* —
+by running **one short-lived Job in the execution pod's own shape**: the same
+image, the same ServiceAccount, the same Secret projections, the same CA and
+signing mounts, and `automountServiceAccountToken: false`. Nothing else can
+answer it. The controller holds no verb on `secrets`, and "the bytes exist" is
+not "the credential works".
+
+```bash
+kubectl --context docker-desktop get preflight -n team-a
+# NAME    OPERATION   PHASE       RESULT     EXPIRES   AGE
+# pf-9a1b Restore     Completed   notReady   14m       28s
+```
+
+### 21.1 A `ready` verdict authorizes nothing
+
+Every execution-time guard still runs and **none of them reads a `Preflight`**:
+the backup controller's glob rail and destination admission, the runner's
+phase −1 source rails, the restore admission checks 0–9, phase 0's collision
+check and LogAppendTime probe, G-WIN in phase 5, and PLAT-02.2's signer
+validation. That is not a convention — `preflight_controller.rs`'s
+`no_execution_path_reads_preflight_or_discovery` is a source scan over the four
+execution reconcilers and both runner paths, and its planted mutant is an
+`import` of this kind into `controllers/restore.rs`.
+
+The reason is the shape of the problem. A preview is a statement about a
+moment; a run happens later. A colliding topic created in between is caught at
+execution and nowhere else, and a reconciler that trusted a green badge would
+have removed the only check that could see it. A client — the API or the UI —
+**may** require an applicable `ready` preflight as friction before submitting a
+run. It may never bypass a guard, and the absence of a preflight is never a
+server refusal.
+
+### 21.2 `Completed` is not `ready`, and `Failed` is neither
+
+| `phase` | What happened |
+|---|---|
+| `Pending` | the plan is rendered and the Job is being created |
+| `Queued` | a concurrency ceiling is holding it back (`ConcurrencyLimited`) |
+| `Running` | the Job exists and has not finished |
+| `Completed` | **a result exists.** The verdict is `status.result.state` |
+| `Failed` | **no result could be produced** — `ResultUnreadable`, `RunnerContractUnsupported`, `DeadlineExceeded`, `Stalled` |
+| `Cancelled` | `spec.cancelRequested` was set and the Job's deadline was collapsed |
+
+`status.result.state` is `ready`, `notReady` or `unknown`, aggregated exactly
+as D2 §6.4 states it: `notReady` if any blocking check is `notReady`;
+otherwise `unknown` if any blocking check is `unknown` **or skipped**;
+otherwise `ready`. An EMPTY check set is `unknown` and never `ready` —
+"nothing was checked" is not "everything passed".
+
+A pod that never started is a real answer and not a failure: a missing Secret
+is reported as `connection.credentialProjected notReady
+CredentialSecretNotFound` **with a remedy**, and every check the Job would have
+answered becomes `unknown` with `BlockedByPrerequisite` rather than silently
+passing. The Job is cancelled immediately in that case — waiting out
+`activeDeadlineSeconds` for a Secret that does not exist is the experience this
+kind exists to replace.
+
+### 21.3 Every row carries a code, a remedy, a scope and a check time
+
+`status.result.checks[]` is the whole verdict, and each entry says who
+answered:
+
+| `authority` | Who |
+|---|---|
+| `controller` | facts about Kubernetes objects — the connection, the destination, the plan, the recovery point, the approval, the roster, the policy |
+| `checkJob` | what the pod observed with real credentials — SASL, the bucket, the manifest, the target's topics |
+| `podStatus` | what the kubelet said about a pod that has not run yet |
+
+`gating` is `blocking`, `advisory` or `executionOnly`. **An
+`executionOnly` row is `unknown` forever and says so**: `connection.topicsReadable`,
+`destination.archivePrefixWritable`, `target.logAppendTime` and
+`configuration.egress` cannot be proved without doing the thing they are about.
+`configuration.egress` in particular is decided by a NetworkPolicy no check can
+observe; its remedy names the broker and object-store ports instead.
+
+Two fields of the per-check record of D2 §6.4 are deliberately **not** in the
+CRD: `facts` and `detail`. A free-form JSON object in a structural schema needs
+`x-kubernetes-preserve-unknown-fields`, which turns off pruning and makes a
+status a place arbitrary bytes can be parked. The non-secret facts an operator
+needs — `clusterId`, `brokerCount`, `imageID`, `signerKeyId` — are rendered
+into `message` as `[key=value; …]`, and the long form (missing segment keys,
+colliding topic names) goes to the immutable `ConfigMap` named by
+`status.result.detailsRef`.
+
+**Nothing in a status is a raw error.** Every message and remedy passes the
+redaction chokepoint: URL userinfo, AWS access key ids, secret and token value
+forms, PEM blocks, S3 XML bodies and long base64 or hex runs are replaced, and
+the result is capped. That cap is why a message quotes a SHORT digest
+(`sha256:1f4c2b8a9e07…`) while the whole hash is in `status.binding.planHash`,
+which is a field and not prose.
+
+### 21.4 Staleness: a green preview cannot outlive its inputs
+
+`status.binding` is recorded **before** the Job is created, from the objects
+the pass resolved: the recomputed `planHash`, every referent with its UID and
+generation, the CA digests, the roster, the approval's resource version and the
+policy digest, reduced to one `inputsDigest`.
+
+A stored result applies only while **all** of these hold:
+
+- `phase: Completed`;
+- `now < status.result.expiresAt`;
+- the recorded `planHash` equals the draft's;
+- the recomputed `inputsDigest` equals the recorded one.
+
+So, concretely:
+
+- editing the **target**, the **recovery point**, the **point in time**, the
+  **topic subset** or the **mapping prefix** changes the plan bytes, so the
+  hash changes and the result is stale;
+- choosing **another destination**, or a **recreated** one, changes a referent
+  UID;
+- **editing a destination's access or CA** changes its generation;
+- **deleting and recreating a recovery point** changes a `Backup` UID, which is
+  the identity PLAT-11.1 fixes;
+- an **approval moving from pending to verified** changes its
+  `resourceVersion`.
+
+Each row also carries its own `expiresAt`, and the verdict's is the soonest of
+them. `target.mappedTopics` and `target.topicCreate` expire in **five minutes**
+— the shortest in the catalogue, because a topic can appear on the target
+between a preview and a run. `plan.parse` and `plan.names` carry **no** expiry:
+they are functions of bytes, and `binding.planHash` already pins those.
+
+The controller keeps the same promise from its own side. A terminal
+`Preflight` whose result is still `ready` is revalidated: if `expiresAt` has
+passed, or a referent moved under it, `status.result.state` is **downgraded to
+`unknown`** and `status.message` names the reason
+(`expired`, `planHashChanged`, `referentChanged:<Kind>/<name>`,
+`caBundleChanged`, `policyChanged`, `inputsDigestChanged`). It is downgraded to
+`unknown` and never to `notReady`: nothing was found wrong, the answer simply
+stopped being about the current objects.
+
+### 21.5 A restore preflight writes nothing
+
+No topic is created, altered or deleted. The collision answer comes from
+targeted metadata per mapped name and from a **validate-only** `CreateTopics`
+(`AdminOptions::validate_only(true)`) — both inside the check pod, with the
+restore's own credential, and never from the controller. The controller patches
+its own `/status`, its own Job's `ttlSecondsAfterFinished` (after the status
+commit, so garbage collection cannot race the relay) and its own owned
+`ConfigMap`s, and nothing else.
+
+### 21.6 Skipping a check is not answering it
+
+`spec.request.skipChecks` leaves a row out of the run. The row is still
+reported, with `state: skipped`, and **a skipped blocking check keeps the
+overall verdict `unknown`**. The same applies to the one row a draft cannot
+answer: a `Preflight` over `planBytes` has no `Restore` for an approver to sign,
+so `approval.state` is `skipped` with `SubjectNotCreated` and the verdict is
+`unknown` however green everything else is.
+
+### 21.7 What this build does not do
+
+- **An inline `legacyArchive` / `legacySourceArchive` is not checked.** Turning
+  an `s3://…` URL into the location a check plan needs is the legacy-addressing
+  block of the installation policy, which belongs to the destination resolver.
+  Such a request is reported `phase: Failed` with `ArchiveUrlUnreadable` and a
+  message saying to create a `BackupDestination` and use `destinationRef`. It
+  is never a verdict about the operation.
+- **`recoveryPoint.state` cannot report `RecoveryPointLocationMismatch`.** The
+  frozen destination snapshot does not reach `Backup.status` in this build, so
+  there is no digest to compare and the comparison is skipped rather than
+  guessed at.
+- **No `gc.rs`.** A terminal `Preflight` is not deleted by the controller; the
+  `weirkeeper` ClusterRole grants `delete` on nothing. Remove them with
+  `kubectl delete preflight`, and the owner cascade takes the Job and the
+  `ConfigMap`s with each one.
+
+### 21.8 Upgrade and rollback
+
+Additive in both directions. The kind, its two RBAC rules and the
+`events: list` rule arrive with the controller image and leave with it; an
+older controller that does not know the kind simply never reconciles a
+`Preflight`, which then sits with no status and authorises nothing — which is
+what it does when it is `ready`, too. Nothing on an execution path reads one,
+so no `Backup`, `Restore` or `BackupSchedule` behaves differently on either
+side of the upgrade. An absent `status.binding` means "never bound" and a
+consumer must treat the result as inapplicable.
+
 Documentation is licensed [CC-BY-4.0](LICENSE-docs).
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
