@@ -98,6 +98,18 @@ terminal reports, and backend-live-close left namespace
 `logweir-backend-close-20260915` behind. Its interrupted PLAT-06.1 worktree
 `/tmp/logweir-plat06-worktree` is preserved, unmerged and unreviewed.
 
+Shared lab fixture (2026-09-17, `lab-refresh`): `weirkeeper:scram-reviewed` and
+`logweir:scram-local` were rebuilt from main `c1d3411` with the unmodified
+Dockerfiles (revision labels now present; the previous, label-less images from
+2026-09-14 are kept as `weirkeeper:scram-reviewed-20260914` and
+`logweir:scram-local-20260914` for a documented tag-and-restart rollback); all
+fourteen CRDs installed, every UID and generation unchanged; 17 of 18 lab objects
+kept their phase and the 18th changed only as PLAT-07.1 predicts
+(`missing-reference` → `CredentialNotRenderable`); a manual Backup ran to a
+`Valid` receipt on the new runner. Both tags are mutable under `imagePullPolicy:
+Never`, so a worker rebuilding them changes the lab without a Deployment diff —
+the revision label is how drift is detected until the fixture is pinned.
+
 Claude orchestration recovery: worker rules, reports and artifacts are under
 `/tmp/logweir-roadmap-run/claude/`; workers use isolated worktrees under
 `/tmp/logweir-roadmap-run/wt/` and serialize docker-desktop operations that
@@ -865,10 +877,11 @@ change and a reload with the same plan hash three times; path-style leaves
 `allow_http: false` in the plan bytes the API server holds; a deleted point is
 refused without substitution; a failing negative control against the pre-change
 UI. The 15th journey (a forged subject binding refused terminally by the
-controller) fails only because the shared lab controller image predates the
-`ApprovalSubjectMismatch` check — the same journey passed on 2026-09-16 13:39Z
-while a current-source controller was swapped in; it is re-run after the lab tag
-is rebuilt from main. Independent review `claude/ui-restore-selection.review.md`:
+controller) failed only because the shared lab controller image predated the
+`ApprovalSubjectMismatch` check; after the lab images were rebuilt from main
+`c1d3411` (`claude/lab-refresh.result.md`) the full harness passed 15/15
+(`artifacts/lab-refresh/`, run `20260917T024927Z`, `Failed/ApprovalSubjectMismatch`
+with zero Jobs). Independent review `claude/ui-restore-selection.review.md`:
 ACCEPT-WITH-FIXES (seven low) then ACCEPT. Migration: none (static assets, sixteen
 files; deep links to `#/restore?ns=` still work and land on the selector; the
 `plat13` harness and the demo steps were updated to enter the wizard on a point).
