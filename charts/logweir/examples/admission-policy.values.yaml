@@ -1,0 +1,48 @@
+# The console credential admission policy, on — D2 §7.3.
+#
+# WHAT THIS EXAMPLE IS FOR. `admissionPolicy.enabled` is false in
+# `values.yaml` for ONE reason: `admissionregistration.k8s.io/v1`
+# ValidatingAdmissionPolicy is Kubernetes 1.30+ and this chart's floor is 1.29.
+# The rendered counterpart of this file is what holds the two documents' shape
+# to a review — without it the template would be a branch nothing ever renders.
+#
+# It also turns the policy ConfigMap into something with content: one
+# administrator attestation, so `charts/logweir/rendered/admission-policy.yaml`
+# shows what `visibilityAttestations` looks like when it is not empty, and one
+# `ControllerIdentity` evidence location.
+admissionPolicy:
+  enabled: true
+  consoleServiceAccountName: logweir-api
+  extraPrincipals:
+    - system:serviceaccount:team-a:logweir-api
+checks:
+  maxActivePerNamespace: 4
+  maxActiveTotal: 20
+  maxActiveDiscoveriesPerConnection: 1
+  maxEvidenceFetchActivePerNamespace: 4
+  discovery:
+    freshSeconds: 900
+    retentionSeconds: 86400
+    keepPerConnection: 5
+    defaultMaxTopics: 20000
+    hardMaxTopics: 50000
+    visibilityAttestations:
+      - id: att-orders-prod
+        namespace: team-a
+        kafkaCluster: source
+        clusterId: M29I2S7FQPyHBEX12Vx7XA
+        principal: User:backup
+        attestedBy: platform-admin@example.invalid
+        attestedAt: "2026-09-15T00:00:00Z"
+        expiresAt: "2026-12-15T00:00:00Z"
+        statement: >-
+          User:backup has DESCRIBE on literal Topic:* with no DENY;
+          reviewed ACL export 2026-09-14
+  preflight:
+    defaultTimeoutSeconds: 120
+    retentionSeconds: 3600
+evidence:
+  controllerIdentityLocations:
+    - endpoint: https://minio-b.team-a.svc:9000
+      region: ""
+      bucket: lw-b

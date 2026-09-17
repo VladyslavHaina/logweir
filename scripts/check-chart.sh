@@ -384,7 +384,7 @@ fi
 
 # ---------------------------------------------------------------- 6. the schema
 echo "== 6. values.schema.json refuses a non-boolean flag =="
-for flag in demoKafka.enabled minio.enabled ui.enabled identity.enabled; do
+for flag in demoKafka.enabled minio.enabled ui.enabled identity.enabled admissionPolicy.enabled; do
   helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} --set "$flag=yes" > /dev/null 2> "$tmp/schema-$flag.err"
   rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -402,6 +402,36 @@ if [ "$rc" -eq 0 ]; then
   fail=1
 else
   echo "   rc=$rc  (broad bootstrap API CIDR refused, as it must be)"
+fi
+
+# D2 W11 — THE INSTALLATION POLICY'S OWN REFUSALS. The rendered `policy.json`
+# is parsed by `weirkeeper::check::policy` with `deny_unknown_fields` and no
+# per-field default inside `checks`/`discovery`/`preflight`, and a document it
+# refuses fails CLOSED and SILENTLY: empty attestations, empty evidence
+# allowlist, and one advisory `configuration.policy notReady` row nobody sees
+# unless they read a Preflight. So the schema has to refuse the same values at
+# INSTALL time, where the operator is still looking.
+#
+#   keepPerConnection=0   would delete a discovery the moment it finished
+#   a partial attestation  matches nothing while LOOKING like an attestation an
+#                          operator can rely on for `attestedComplete`
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  --set 'checks.discovery.keepPerConnection=0' > /dev/null 2> "$tmp/schema-keep-zero.err"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+  echo "FAIL: checks.discovery.keepPerConnection accepted 0; keeping none deletes a discovery the moment it finishes" >&2
+  fail=1
+else
+  echo "   rc=$rc  (checks.discovery.keepPerConnection=0 refused, as it must be)"
+fi
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  --set-string 'checks.discovery.visibilityAttestations[0].id=att-partial' > /dev/null 2> "$tmp/schema-partial-attestation.err"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+  echo "FAIL: an attestation naming only \`id\` rendered; every field of a completeness attestation is required" >&2
+  fail=1
+else
+  echo "   rc=$rc  (a partial visibility attestation refused, as it must be)"
 fi
 
 echo

@@ -80,6 +80,16 @@ spec:
               value: {{ .Values.runnerImagePullPolicy | quote }}
             - name: LOGWEIR_ARCHIVE_URL
               value: {{ include "logweir.archive.url" . | quote }}
+            # D2 §4.4 — the installation policy. The override ships empty and
+            # the namespace comes from the pod; `templates/policy.yaml` renders
+            # `weirkeeper-policy` into exactly that namespace. See
+            # `config/manager/deployment.yaml` for the whole reasoning.
+            - name: LOGWEIR_POLICY_CONFIGMAP
+              value: ""
+            - name: LOGWEIR_INSTALLATION_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             {{- if $endpoint }}
             - name: AWS_ENDPOINT_URL
               value: {{ $endpoint | quote }}

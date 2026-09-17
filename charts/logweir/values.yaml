@@ -48,6 +48,39 @@ controller:
   tolerations: []
   affinity: {}
 
+# ------------------------------ the installation policy (D2 §4.4), rendered
+# as the `weirkeeper-policy` ConfigMap in the release namespace. Only someone
+# who can write that ConfigMap can change it, which is what makes an
+# attestation an ADMINISTRATOR statement; a namespace operator cannot.
+checks:
+  maxActivePerNamespace: 4      # check Jobs running at once in one namespace
+  maxActiveTotal: 20            # and across the whole installation
+  maxActiveDiscoveriesPerConnection: 1
+  maxEvidenceFetchActivePerNamespace: 4  # a separate pool: verification is never starved
+  discovery:
+    freshSeconds: 900           # past this an inventory reads stale, never wrong
+    retentionSeconds: 86400     # a terminal TopicDiscovery is collected after this
+    keepPerConnection: 5        # and never more than this many per connection
+    defaultMaxTopics: 20000
+    hardMaxTopics: 50000
+    visibilityAttestations: []  # [{id,namespace,kafkaCluster,clusterId,principal,attestedBy,attestedAt,expiresAt,statement}]
+  preflight:
+    defaultTimeoutSeconds: 120
+    retentionSeconds: 3600      # a terminal Preflight is collected after this
+engine:
+  allowUnverifiedCustomCa: false  # a destination CA the archive engine cannot verify
+evidence:
+  controllerIdentityLocations: [] # [{endpoint, region, bucket}] the controller may read evidence from
+
+# ------------- admissionPolicy — fence the console's `create secrets` (D2 §7.3)
+# OFF by default ONLY because `admissionregistration.k8s.io/v1`
+# ValidatingAdmissionPolicy is Kubernetes 1.30+ and this chart's floor is 1.29.
+# Turn it on wherever the API server has the kind.
+admissionPolicy:
+  enabled: false
+  consoleServiceAccountName: logweir-api  # in the release namespace
+  extraPrincipals: []           # more `system:serviceaccount:<ns>:<name>` subjects
+
 # ----------------------------------- the archive the controller reads from
 # Empty with minio.enabled:true defaults to the chart's own MinIO.
 archive:

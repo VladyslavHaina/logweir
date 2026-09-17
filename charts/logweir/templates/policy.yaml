@@ -1,0 +1,87 @@
+{{- /*
+The installation policy `ConfigMap` — D2 §4.4, rendered by W11 and read by
+`weirkeeper::check::policy`.
+
+WHY IT IS A ConfigMap IN THE RELEASE NAMESPACE, AND WHY THAT IS THE WHOLE
+SECURITY ARGUMENT. `status.result.visibility.state: attestedComplete` is the
+one place where a human statement outranks what Logweir observed, and D2 §5.4
+only allows it from "an explicit administrator-governed capability". The
+capability here is `create`/`update` on THIS ConfigMap in the RELEASE
+namespace: a chart or cluster administrator has it, and a namespace operator —
+who holds `logweir-operator`, which names no `configmaps` at all — does not.
+The controller reads it with the `configmaps: get` it already had.
+
+NO CREDENTIAL, EVER. Every value below comes from `values.yaml`; none of them
+is a secret, and Global Constraint / spec §9's rule that private signing
+material never reaches a ConfigMap is not weakened by this file — there is no
+path from a Secret into this document.
+
+FAIL-CLOSED ON ITS OWN MALFORMEDNESS. `check::policy::parse` uses
+`deny_unknown_fields` and refuses an out-of-range value; a document it refuses
+produces `Policy::fail_closed()` (no attestations, no evidence allowlist) plus
+the advisory `configuration.policy notReady PolicyUnreadable` row. That is why
+`values.schema.json` REQUIRES every field of `checks`, `checks.discovery` and
+`checks.preflight`: a half-written block would render a document the controller
+refuses, and the refusal is silent unless someone reads a Preflight.
+
+THE `legacyArchiveAddressing` BLOCK IS THE SAME `archive.s3.*` VALUES
+`deployment.yaml` renders as `AWS_ENDPOINT_URL` / `AWS_REGION` /
+`AWS_ALLOW_HTTP` / `AWS_VIRTUAL_HOSTED_STYLE_REQUEST`, and it exists for D2
+§3.12 (b): `destinations:from-legacy` may label a derived location
+`installationConfig` only when it has actually READ the installation's
+addressing. Before this template existed the route could not read it and
+therefore never emitted that provenance (the amendment of 2026-09-17). The two
+are derived from ONE pair of helpers so they cannot drift.
+
+THE `if $endpoint` GUARD IS THE WHOLE POINT OF THE BLOCK, not a tidiness.
+`deployment.yaml` renders `AWS_ALLOW_HTTP` ONLY inside `{{ if $endpoint }}`, so
+an install with no endpoint at all (plain Amazon S3) forwards no addressing
+env and its `allowHttp` is not `true` — it does not exist. Copying the bare
+`ternary` out of that block would publish `allowHttp: true` for exactly that
+install and hand `:from-legacy` a plaintext-HTTP fact nobody configured, which
+is D-SEAMS S5 (transport security is never derived) failing in the one
+direction that matters.
+*/ -}}
+{{- $endpoint := include "logweir.archive.endpoint" . -}}
+{{- $region := include "logweir.archive.region" . -}}
+{{- $explicit := ne .Values.archive.s3.endpoint "" -}}
+{{- $legacy := dict "endpoint" "" "region" $region "allowHttp" false "virtualHostedStyle" false -}}
+{{- if $endpoint -}}
+{{- $legacy = dict
+      "endpoint" $endpoint
+      "region" $region
+      "allowHttp" (ternary .Values.archive.s3.allowHttp true $explicit)
+      "virtualHostedStyle" (ternary .Values.archive.s3.virtualHostedStyle false $explicit) -}}
+{{- end -}}
+{{- $discovery := dict
+      "freshSeconds" (.Values.checks.discovery.freshSeconds | int)
+      "retentionSeconds" (.Values.checks.discovery.retentionSeconds | int)
+      "keepPerConnection" (.Values.checks.discovery.keepPerConnection | int)
+      "defaultMaxTopics" (.Values.checks.discovery.defaultMaxTopics | int)
+      "hardMaxTopics" (.Values.checks.discovery.hardMaxTopics | int)
+      "visibilityAttestations" .Values.checks.discovery.visibilityAttestations -}}
+{{- $policy := dict
+      "version" 1
+      "checks" (dict
+        "maxActivePerNamespace" (.Values.checks.maxActivePerNamespace | int)
+        "maxActiveTotal" (.Values.checks.maxActiveTotal | int)
+        "maxActiveDiscoveriesPerConnection" (.Values.checks.maxActiveDiscoveriesPerConnection | int)
+        "maxEvidenceFetchActivePerNamespace" (.Values.checks.maxEvidenceFetchActivePerNamespace | int))
+      "discovery" $discovery
+      "preflight" (dict
+        "defaultTimeoutSeconds" (.Values.checks.preflight.defaultTimeoutSeconds | int)
+        "retentionSeconds" (.Values.checks.preflight.retentionSeconds | int))
+      "engine" (dict "allowUnverifiedCustomCa" .Values.engine.allowUnverifiedCustomCa)
+      "evidence" (dict "controllerIdentityLocations" .Values.evidence.controllerIdentityLocations)
+      "legacyArchiveAddressing" $legacy -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: weirkeeper-policy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: control-plane
+data:
+  policy.json: |-
+{{ $policy | toPrettyJson | indent 4 }}

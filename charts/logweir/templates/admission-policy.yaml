@@ -1,0 +1,101 @@
+{{- if .Values.admissionPolicy.enabled }}
+{{- /*
+The ValidatingAdmissionPolicy D2 §7.3 asks for, and the one thing that fences
+the console API's `create` on Secrets.
+
+WHAT IT CLOSES. `logweir-api` holds `create` on `secrets` and NO read verb, so
+a stored credential cannot be read back by any route (`docs/api.md`). `create`
+alone is still the widest grant that service asks for: in a namespace it could
+in principle mint a `kubernetes.io/service-account-token` Secret for any
+ServiceAccount there, which is a token for an identity the console was never
+given. The two credential builders already stamp a distinct, immutable-after-
+create `type` — `logweir.dev/object-store-credential` (PLAT-08.1's destination
+credential) and `logweir.dev/kafka-sasl-password` (PLAT-07.1's connection
+credential) — and the `app.kubernetes.io/managed-by: logweir` label, precisely
+so this policy can require both.
+
+WHAT IT DOES NOT CLOSE, said plainly. A cluster administrator can delete this
+policy (O0, default (a), spec §9); it raises the cost of a mistake and of a
+compromised console, not of a deliberate administrator. It says nothing about
+what the console does with a credential it legitimately creates, and it is not
+what keeps the value unreadable — that is the missing read verb.
+
+WHY `matchConditions` AND NOT A NARROWER `matchConstraints`. RBAC cannot
+express "this Secret shape", and `matchConstraints` cannot express "this
+subject": the subject test is a `matchConditions` expression over
+`request.userInfo.username`. Every other principal in the cluster — an
+administrator, the controller, a CSI driver — is skipped by that condition and
+is completely unaffected by this policy, which is why `failurePolicy: Fail` is
+safe to set. A Fail-closed policy that matched every subject would break
+`kubernetes.io/service-account-token` creation cluster-wide.
+
+WHY IT IS OFF BY DEFAULT, and the only reason: `admissionregistration.k8s.io/v1`
+ValidatingAdmissionPolicy is Kubernetes **1.30+**, and this chart's floor is
+1.29 (Global Constraint 25), where the API server answers `no matches for
+kind`. Turn `admissionPolicy.enabled` on wherever the kind exists. The same two
+documents are in `config/samples/console-credential-admission-policy.yaml` for
+a kustomize install, which is applied BY HAND for the same reason
+`config/samples/validatingadmissionpolicy.yaml` is.
+
+[UNVERIFIED — not applied to a live API server]. What would verify it: on a
+1.30+ cluster, apply both documents, then as the console ServiceAccount create
+(a) a Secret of type `logweir.dev/object-store-credential` carrying the
+managed-by label — ACCEPTED — and (b) a Secret of type
+`kubernetes.io/service-account-token` — REJECTED with the message below — and
+show (b) succeeding once the binding is deleted. D2 W14 owns that evidence.
+*/ -}}
+{{- $sa := printf "system:serviceaccount:%s:%s" .Release.Namespace .Values.admissionPolicy.consoleServiceAccountName -}}
+{{- $principals := prepend .Values.admissionPolicy.extraPrincipals $sa | uniq -}}
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: logweir-console-credentials-only
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: admission
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["secrets"]
+  matchConditions:
+    # THE SUBJECT TEST. Nothing outside this list is evaluated at all.
+    - name: console-service-account
+      expression: request.userInfo.username in {{ $principals | toJson }}
+  validations:
+    - expression: >-
+        has(object.type) && (object.type == 'logweir.dev/object-store-credential' ||
+        object.type == 'logweir.dev/kafka-sasl-password')
+      message: >-
+        the Logweir console may create only its own credential Secrets: type must be
+        logweir.dev/object-store-credential or logweir.dev/kafka-sasl-password
+      reason: Forbidden
+    - expression: >-
+        has(object.metadata.labels) &&
+        'app.kubernetes.io/managed-by' in object.metadata.labels &&
+        object.metadata.labels['app.kubernetes.io/managed-by'] == 'logweir'
+      message: >-
+        the Logweir console may create only Secrets it owns: the
+        app.kubernetes.io/managed-by=logweir label is required
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: logweir-console-credentials-only
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: admission
+spec:
+  policyName: logweir-console-credentials-only
+  # DENY, not Warn or Audit: a policy that only warned would leave the grant
+  # exactly as wide as it is today and read, on an audit surface, as though it
+  # did not.
+  validationActions: ["Deny"]
+  # CLUSTER-WIDE. `matchResources` is omitted, so every namespace the console
+  # is bound in is covered; an adopter who wants it narrower adds a
+  # `namespaceSelector` here.
+{{- end }}

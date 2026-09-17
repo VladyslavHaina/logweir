@@ -6766,6 +6766,54 @@ metadata:
     helm.sh/chart: logweir-0.1.0
     app.kubernetes.io/component: control-plane
 ---
+# Source: logweir/templates/policy.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: weirkeeper-policy
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: control-plane
+data:
+  policy.json: |-
+    {
+      "checks": {
+        "maxActiveDiscoveriesPerConnection": 1,
+        "maxActivePerNamespace": 4,
+        "maxActiveTotal": 20,
+        "maxEvidenceFetchActivePerNamespace": 4
+      },
+      "discovery": {
+        "defaultMaxTopics": 20000,
+        "freshSeconds": 900,
+        "hardMaxTopics": 50000,
+        "keepPerConnection": 5,
+        "retentionSeconds": 86400,
+        "visibilityAttestations": []
+      },
+      "engine": {
+        "allowUnverifiedCustomCa": false
+      },
+      "evidence": {
+        "controllerIdentityLocations": []
+      },
+      "legacyArchiveAddressing": {
+        "allowHttp": false,
+        "endpoint": "",
+        "region": "",
+        "virtualHostedStyle": false
+      },
+      "preflight": {
+        "defaultTimeoutSeconds": 120,
+        "retentionSeconds": 3600
+      },
+      "version": 1
+    }
+---
 # Source: logweir/templates/clusterrole.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -6838,6 +6886,13 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["preflights/status"]
     verbs: ["patch"]
+  # D2 W11 (§4.3 `gc.rs`, §5.8): the ONE `delete` rule, on the two TRANSIENT
+  # check kinds and nothing else. `collect_expired` in each of the two
+  # reconcilers, with `DeleteParams { preconditions: { uid } }` and a
+  # per-pass cap. See `config/rbac/role.yaml`.
+  - apiGroups: ["logweir.dev"]
+    resources: ["topicdiscoveries", "preflights"]
+    verbs: ["delete"]
   - apiGroups: ["batch"]
     resources: ["jobs"]
     verbs: ["create", "get", "list", "watch", "patch"]
@@ -6905,6 +6960,19 @@ rules:
       - restores
       - trustrosters
     verbs: ["get", "list", "watch"]
+  # The eight kinds Amendments F and G added. Read only. See
+  # `config/rbac/viewer_role.yaml`.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - backupdestinations
+      - preflights
+      - protectionpolicies
+      - recoverycatalogs
+      - rehearsalschedules
+      - retentionpolicies
+      - topicdiscoveries
+      - trustpolicies
+    verbs: ["get", "list", "watch"]
 ---
 # Source: logweir/templates/human-roles.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -6928,6 +6996,21 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["backupschedules"]
     verbs: ["update", "patch"]
+  # D2 §7.2. `patch` and NOT `update`: a destination's access grants and a
+  # check's `cancelRequested` are merge patches, and what may change is the
+  # CRD's own CEL rule.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - backupdestinations
+      - preflights
+      - topicdiscoveries
+    verbs: ["create"]
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - backupdestinations
+      - preflights
+      - topicdiscoveries
+    verbs: ["patch"]
 ---
 # Source: logweir/templates/human-roles.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -6944,6 +7027,26 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["approvals"]
     verbs: ["create"]
+  # D2 §7.2 — approval context, read only.
+  - apiGroups: ["logweir.dev"]
+    resources: ["preflights"]
+    verbs: ["get", "list"]
+---
+# Source: logweir/templates/human-roles.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: logweir-trust-admin
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: human-role
+rules:
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
 ---
 # Source: logweir/templates/clusterrolebinding.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -7144,6 +7247,16 @@ spec:
               value: "Always"
             - name: LOGWEIR_ARCHIVE_URL
               value: ""
+            # D2 §4.4 — the installation policy. The override ships empty and
+            # the namespace comes from the pod; `templates/policy.yaml` renders
+            # `weirkeeper-policy` into exactly that namespace. See
+            # `config/manager/deployment.yaml` for the whole reasoning.
+            - name: LOGWEIR_POLICY_CONFIGMAP
+              value: ""
+            - name: LOGWEIR_INSTALLATION_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:

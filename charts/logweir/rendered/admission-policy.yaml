@@ -1,6 +1,6 @@
 # GENERATED FILE — do not edit by hand.
 # Rendered by scripts/check-chart.sh (just chart-check):
-#   helm template logweir charts/logweir -n logweir-system --include-crds -f charts/logweir/examples/demo.values.yaml
+#   helm template logweir charts/logweir -n logweir-system --include-crds -f charts/logweir/examples/admission-policy.values.yaml
 # It is checked in so a template change lands as a diff a reviewer reads; the
 # gate compares a temporary render and fails on drift.
 ---
@@ -1683,80 +1683,6 @@ spec:
                   type: object
                 nullable: true
                 type: array
-              history:
-                description: |-
-                  What the PLAT-05.2 inventory last found: how much history this schedule has, and how much of it is still owned by the schedule object (D1 §6).
-
-                  An ABSENT block means the inventory has never run, which is what makes the first reconcile after an upgrade take one.
-                nullable: true
-                properties:
-                  estimatedBytes:
-                    description: 'D1 §6.6''s estimate of the etcd bytes this history occupies: Σ(serialized `Backup` length + 2048 + 2 × topic name bytes).'
-                    format: int64
-                    type: integer
-                  inventoriedAt:
-                    description: When the inventory last ran.
-                    format: date-time
-                    type: string
-                  legacyMigratableRuns:
-                    description: How many of `legacy_owned_runs` are terminal, and therefore migratable on the next pass.
-                    format: int64
-                    type: integer
-                  legacyOwnedRuns:
-                    description: How many of those runs still carry this schedule's controller ownerReference, so deleting the schedule would still collect them.
-                    format: int64
-                    type: integer
-                  migrationBlocked:
-                    description: 'The runs whose migration PATCH was refused: **an arbitrary bounded sample of at most ten, sorted by name** so that two passes over the same namespace report the same ten. It is a sample and not a list — the total is inside `legacy_owned_runs`.'
-                    items:
-                      description: |-
-                        One `Backup` the §6.2 migration could not detach from its schedule, and why (D1 §6.2 step 4).
-
-                        NAMED IN THE STATUS AND NOT ONLY IN A CONDITION MESSAGE, because the `HistoryRetained` condition is recomputed on EVERY reconcile and only an inventory pass observes a blocked patch. A condition whose message were the only record would lose its names on the next steady pass and then re-acquire them an hour later; a reader would see a schedule flap between "blocked, and here is what" and "blocked, and no idea what".
-                      properties:
-                        name:
-                          description: The `Backup`'s name.
-                          type: string
-                        reason:
-                          description: |-
-                            Why the patch could not be applied. ONE CLOSED VOCABULARY, not a mix of HTTP digits and CamelCase — a `jq` or console reader has to be able to branch on it:
-
-                            * `ApiForbidden` — the API server answered `403`. Transient: fix the RBAC and the next inventory retries. * `ApiInvalid` — the API server answered `422`. Transient: a legacy object that fails a newer schema; fix it and the next inventory retries. * `NoScheduleReference` — **terminal**, and the one that is not the API server's doing. The run's `spec.scheduleRef` does not name this schedule, so detaching it would leave it a member of nothing ([`crate::identity::is_run_of_schedule`] rule 3), and `Backup.spec` is CEL-sealed so no operator can add the reference. It never clears. The remedies are `--cascade=orphan` or deleting the run.
-
-                            Every entry names a `Backup`. An inventory that did not finish is not about one object and is therefore NOT in this list — it is [`ScheduleHistory::ownership_scan_complete`], and the condition says so.
-                          type: string
-                      required:
-                      - name
-                      - reason
-                      type: object
-                    nullable: true
-                    type: array
-                  ownershipScanComplete:
-                    description: |-
-                      Whether the last walk that could have found a legacy ownerReference ran to exhaustion (D1 §6.7, and the hole this field closes).
-
-                      # THE CLAIM `HistoryRetained=True` RESTS ON, AND WHY IT NEEDED A FIELD
-
-                      "No run is owned by this schedule" is a statement about runs the controller did not see as much as about the ones it did. A **capped** namespace-wide walk saw at most `MAX_INVENTORY_PAGES × INVENTORY_PAGE_SIZE` objects and says so in `run_count_capped`; what it cannot say is that the objects past the bound carry no ownerReference. Before this field, such a walk reported `runCountCapped: true`, which the `HistoryLarge` arm turned into `HistoryRetained=True`, which unlocked the `logweir.dev/schedule-uid` selector — a label no unmigrated legacy object carries. Every later walk then looked only where the answer could not be, the condition said `Retained` forever, and D1 §6.9's upgrade gate passed on a schedule whose history a default-propagation delete would still collect. Reached by D1 §6.6's own published worst row.
-
-                      `false` therefore forces `HistoryRetained=False` and keeps the next walk namespace-wide. It is `true` when the walk ended on its own, and when the walk was label-selected — a selected walk is only ever run *after* a complete namespace-wide one proved there was nothing owned, and that earlier proof is what the claim rests on.
-                    type: boolean
-                  runCount:
-                    description: How many `Backup`s of this schedule UID the last inventory saw, terminal and active alike. A floor when `runCountCapped` is set.
-                    format: int64
-                    type: integer
-                  runCountCapped:
-                    description: Whether the inventory stopped at its page cap, so `run_count` and `estimated_bytes` are floors rather than totals.
-                    type: boolean
-                required:
-                - estimatedBytes
-                - inventoriedAt
-                - legacyMigratableRuns
-                - legacyOwnedRuns
-                - ownershipScanComplete
-                - runCount
-                - runCountCapped
-                type: object
               lastFireTime:
                 description: When this schedule last created a `Backup`.
                 format: date-time
@@ -6646,53 +6572,6 @@ metadata:
     helm.sh/chart: logweir-0.1.0
     app.kubernetes.io/component: control-plane
 ---
-# Source: logweir/templates/ui/ui.yaml
-apiVersion: v1
-kind: ServiceAccount
-metadata:
-  name: logweir-ui
-  namespace: logweir-system
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: ui
----
-# Source: logweir/templates/minio/minio.yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: logweir-minio-root
-  namespace: logweir-system
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: minio
-type: Opaque
-stringData:
-  MINIO_ROOT_USER: "minioadmin"
-  MINIO_ROOT_PASSWORD: "minioadmin"
----
-# Source: logweir/templates/minio/minio.yaml
-apiVersion: v1
-kind: Secret
-metadata:
-  name: logweir-s3
-  namespace: logweir-system
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: minio
-type: Opaque
-stringData:
-  access-key-id: "minioadmin"
-  secret-access-key: "minioadmin"
----
 # Source: logweir/templates/policy.yaml
 apiVersion: v1
 kind: ConfigMap
@@ -6720,18 +6599,36 @@ data:
         "hardMaxTopics": 50000,
         "keepPerConnection": 5,
         "retentionSeconds": 86400,
-        "visibilityAttestations": []
+        "visibilityAttestations": [
+          {
+            "attestedAt": "2026-09-15T00:00:00Z",
+            "attestedBy": "platform-admin@example.invalid",
+            "clusterId": "M29I2S7FQPyHBEX12Vx7XA",
+            "expiresAt": "2026-12-15T00:00:00Z",
+            "id": "att-orders-prod",
+            "kafkaCluster": "source",
+            "namespace": "team-a",
+            "principal": "User:backup",
+            "statement": "User:backup has DESCRIBE on literal Topic:* with no DENY; reviewed ACL export 2026-09-14"
+          }
+        ]
       },
       "engine": {
         "allowUnverifiedCustomCa": false
       },
       "evidence": {
-        "controllerIdentityLocations": []
+        "controllerIdentityLocations": [
+          {
+            "bucket": "lw-b",
+            "endpoint": "https://minio-b.team-a.svc:9000",
+            "region": ""
+          }
+        ]
       },
       "legacyArchiveAddressing": {
-        "allowHttp": true,
-        "endpoint": "http://logweir-minio.logweir-system.svc:9000",
-        "region": "us-east-1",
+        "allowHttp": false,
+        "endpoint": "",
+        "region": "",
         "virtualHostedStyle": false
       },
       "preflight": {
@@ -6740,23 +6637,6 @@ data:
       },
       "version": 1
     }
----
-# Source: logweir/templates/ui/ui.yaml
-apiVersion: v1
-kind: ConfigMap
-metadata:
-  name: logweir-ui-runtime-050a1aeb70
-  namespace: logweir-system
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: ui
-immutable: true
-data:
-  runtime.js: |
-    window.LOGWEIR_NAMESPACE_CONTEXT = Object.freeze({"allowed": ["logweir-system"], "selected": "logweir-system"});
 ---
 # Source: logweir/templates/clusterrole.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -6790,25 +6670,20 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["topicdiscoveries"]
     verbs: ["list", "watch"]
-  # D3 W8 (PLAT-15.1): the ninth kind, `list`/`watch` for the catalog
-  # reconciler's own watch, plus the `get` D3 W6 needs to read the ONE catalog a
-  # `ProtectionPolicy` names. See `config/rbac/role.yaml`.
+  # D3 W8 (PLAT-15.1): the ninth kind. `list`/`watch` only — the reconciler
+  # never reads a catalog by name. See `config/rbac/role.yaml`.
   - apiGroups: ["logweir.dev"]
     resources: ["recoverycatalogs"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["list", "watch"]
   # D2 W9 (PLAT-03.1 / PLAT-03.2): the tenth kind, likewise in its own rules.
   # No `get`: nothing calls `Api<Preflight>::get`, and no execution path may
   # look one up (D2 §6.8). See `config/rbac/role.yaml` for the NOTE FOR W11.
   - apiGroups: ["logweir.dev"]
     resources: ["preflights"]
     verbs: ["list", "watch"]
-  # `create` is one `Backup` per due slot; `patch` is PLAT-05.2's history
-  # migration (D1 §6.8) — a metadata-only merge patch that removes the
-  # schedule's ownerReference from a terminal run. No `update`, no `delete`.
-  # See `config/rbac/role.yaml`.
   - apiGroups: ["logweir.dev"]
     resources: ["backups"]
-    verbs: ["create", "patch"]
+    verbs: ["create"]
   - apiGroups: ["logweir.dev"]
     resources:
       - approvals/status
@@ -6860,28 +6735,6 @@ rules:
   - apiGroups: ["logweir.dev"]
     resources: ["trustpolicies/status"]
     verbs: ["patch"]
-  # PLAT-14.2 (D3 W6): the `ProtectionPolicy` reconciler's `Controller::new`
-  # watch and its `Api::patch_status`. No `get` on the kind and no `update`
-  # anywhere. See `config/rbac/role.yaml`.
-  - apiGroups: ["logweir.dev"]
-    resources: ["protectionpolicies"]
-    verbs: ["list", "watch"]
-  - apiGroups: ["logweir.dev"]
-    resources: ["protectionpolicies/status"]
-    verbs: ["patch"]
-  # PLAT-14.3 (D3 W7): the `RehearsalSchedule` reconciler's watch, its referent
-  # `get` from `controllers/approval.rs`, its `Api::patch_status`, and the ONE
-  # `Restore` it creates per due slot. No `delete`, no `update`, no verb on
-  # `secrets`. See `config/rbac/role.yaml`.
-  - apiGroups: ["logweir.dev"]
-    resources: ["rehearsalschedules"]
-    verbs: ["get", "list", "watch"]
-  - apiGroups: ["logweir.dev"]
-    resources: ["rehearsalschedules/status"]
-    verbs: ["patch"]
-  - apiGroups: ["logweir.dev"]
-    resources: ["restores"]
-    verbs: ["create"]
 ---
 # Source: logweir/templates/human-roles.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -6992,61 +6845,6 @@ rules:
     resources: ["trustpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
 ---
-# Source: logweir/templates/ui/ui.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: logweir-ui
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: ui
-rules:
-  - apiGroups: ["logweir.dev"]
-    resources:
-      - approvals
-      - backups
-      - backupschedules
-      - kafkaclusters
-      - restores
-    verbs: ["get", "list"]
-  # D2 §7.4: the three kinds Amendment F added, READ ONLY. Summaries; no
-  # create, no patch. See this file's header.
-  - apiGroups: ["logweir.dev"]
-    resources:
-      - backupdestinations
-      - preflights
-      - topicdiscoveries
-    verbs: ["get", "list"]
-  - apiGroups: ["logweir.dev"]
-    resources:
-      - approvals
-      - backupschedules
-      - kafkaclusters
-      - restores
-    verbs: ["create"]
-  - apiGroups: ["logweir.dev"]
-    resources: ["backupschedules"]
-    verbs: ["patch"]
----
-# Source: logweir/templates/ui/ui.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRole
-metadata:
-  name: logweir-ui-trustrosters
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: ui
-rules:
-  - apiGroups: ["logweir.dev"]
-    resources: ["trustrosters"]
-    verbs: ["list"]
----
 # Source: logweir/templates/clusterrolebinding.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -7065,26 +6863,6 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: weirkeeper
-    namespace: logweir-system
----
-# Source: logweir/templates/ui/ui.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: logweir-ui-trustrosters
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: ui
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: logweir-ui-trustrosters
-subjects:
-  - kind: ServiceAccount
-    name: logweir-ui
     namespace: logweir-system
 ---
 # Source: logweir/templates/identity.yaml
@@ -7138,176 +6916,6 @@ subjects:
     name: logweir-identity-bootstrap
     namespace: logweir-system
 ---
-# Source: logweir/templates/ui/ui.yaml
-apiVersion: rbac.authorization.k8s.io/v1
-kind: RoleBinding
-metadata:
-  name: logweir-ui
-  namespace: logweir-system
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: ui
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: logweir-ui
-subjects:
-  - kind: ServiceAccount
-    name: logweir-ui
-    namespace: logweir-system
----
-# Source: logweir/templates/demo-kafka/kafka.yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: logweir-kafka-source-headless
-  namespace: logweir-system
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: demo-kafka
-    logweir.dev/kafka-role: source
-spec:
-  clusterIP: None
-  selector:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/component: demo-kafka
-    logweir.dev/kafka-role: source
-  ports:
-    - name: kafka
-      port: 9092
-      targetPort: kafka
----
-# Source: logweir/templates/demo-kafka/kafka.yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: logweir-kafka-source
-  namespace: logweir-system
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: demo-kafka
-    logweir.dev/kafka-role: source
-spec:
-  type: ClusterIP
-  selector:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/component: demo-kafka
-    logweir.dev/kafka-role: source
-  ports:
-    - name: kafka
-      port: 9092
-      targetPort: kafka
----
-# Source: logweir/templates/demo-kafka/kafka.yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: logweir-kafka-target-headless
-  namespace: logweir-system
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: demo-kafka
-    logweir.dev/kafka-role: target
-spec:
-  clusterIP: None
-  selector:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/component: demo-kafka
-    logweir.dev/kafka-role: target
-  ports:
-    - name: kafka
-      port: 9092
-      targetPort: kafka
----
-# Source: logweir/templates/demo-kafka/kafka.yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: logweir-kafka-target
-  namespace: logweir-system
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: demo-kafka
-    logweir.dev/kafka-role: target
-spec:
-  type: ClusterIP
-  selector:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/component: demo-kafka
-    logweir.dev/kafka-role: target
-  ports:
-    - name: kafka
-      port: 9092
-      targetPort: kafka
----
-# Source: logweir/templates/minio/minio.yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: logweir-minio
-  namespace: logweir-system
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: minio
-spec:
-  type: ClusterIP
-  selector:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/component: minio
-  ports:
-    - name: s3
-      port: 9000
-      targetPort: s3
-    - name: console
-      port: 9001
-      targetPort: console
----
-# Source: logweir/templates/ui/ui.yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: logweir-ui
-  namespace: logweir-system
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: ui
-spec:
-  type: ClusterIP
-  selector:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/component: ui
-  ports:
-    - name: http
-      port: 8001
-      targetPort: http
----
 # Source: logweir/templates/deployment.yaml
 apiVersion: apps/v1
 kind: Deployment
@@ -7336,11 +6944,6 @@ spec:
         app.kubernetes.io/instance: logweir
     spec:
       serviceAccountName: weirkeeper
-      nodeSelector:
-        kubernetes.io/os: linux
-      tolerations:
-      - key: demo.logweir.dev/example
-        operator: Exists
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -7360,7 +6963,7 @@ spec:
             - name: LOGWEIR_RUNNER_PULL_POLICY
               value: "Always"
             - name: LOGWEIR_ARCHIVE_URL
-              value: "s3://kafka-backups/logweir"
+              value: ""
             # D2 §4.4 — the installation policy. The override ships empty and
             # the namespace comes from the pod; `templates/policy.yaml` renders
             # `weirkeeper-policy` into exactly that namespace. See
@@ -7371,14 +6974,6 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.namespace
-            - name: AWS_ENDPOINT_URL
-              value: "http://logweir-minio.logweir-system.svc:9000"
-            - name: AWS_ALLOW_HTTP
-              value: "true"
-            - name: AWS_VIRTUAL_HOSTED_STYLE_REQUEST
-              value: "false"
-            - name: AWS_REGION
-              value: "us-east-1"
             - name: AWS_ACCESS_KEY_ID
               valueFrom:
                 secretKeyRef:
@@ -7403,402 +6998,66 @@ spec:
             capabilities:
               drop: ["ALL"]
 ---
-# Source: logweir/templates/minio/minio.yaml
-apiVersion: apps/v1
-kind: Deployment
+# Source: logweir/templates/admission-policy.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
 metadata:
-  name: logweir-minio
-  namespace: logweir-system
+  name: logweir-console-credentials-only
   labels:
     app.kubernetes.io/name: logweir
     app.kubernetes.io/instance: logweir
     app.kubernetes.io/managed-by: Helm
     helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: minio
+    app.kubernetes.io/component: admission
 spec:
-  replicas: 1
-  strategy:
-    type: Recreate
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: logweir
-      app.kubernetes.io/instance: logweir
-      app.kubernetes.io/component: minio
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: logweir
-        app.kubernetes.io/instance: logweir
-        app.kubernetes.io/component: minio
-    spec:
-      automountServiceAccountToken: false
-      nodeSelector:
-        kubernetes.io/os: linux
-      tolerations:
-      - key: demo.logweir.dev/example
-        operator: Exists
-      containers:
-        - name: minio
-          image: quay.io/minio/minio@sha256:14cea493d9a34af32f524e538b8346cf79f3321eff8e708c1e2960462bd8936e
-          imagePullPolicy: IfNotPresent
-          args: ["server", "/data", "--console-address", ":9001"]
-          envFrom:
-            - secretRef:
-                name: logweir-minio-root
-          ports:
-            - name: s3
-              containerPort: 9000
-            - name: console
-              containerPort: 9001
-          readinessProbe:
-            httpGet:
-              path: /minio/health/ready
-              port: s3
-            periodSeconds: 5
-          livenessProbe:
-            httpGet:
-              path: /minio/health/live
-              port: s3
-            periodSeconds: 20
-          resources:
-            requests:
-              cpu: 50m
-              memory: 256Mi
-          volumeMounts:
-            - name: data
-              mountPath: /data
-      volumes:
-        - name: data
-          emptyDir: {}
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE"]
+        resources: ["secrets"]
+  matchConditions:
+    # THE SUBJECT TEST. Nothing outside this list is evaluated at all.
+    - name: console-service-account
+      expression: request.userInfo.username in ["system:serviceaccount:logweir-system:logweir-api","system:serviceaccount:team-a:logweir-api"]
+  validations:
+    - expression: >-
+        has(object.type) && (object.type == 'logweir.dev/object-store-credential' ||
+        object.type == 'logweir.dev/kafka-sasl-password')
+      message: >-
+        the Logweir console may create only its own credential Secrets: type must be
+        logweir.dev/object-store-credential or logweir.dev/kafka-sasl-password
+      reason: Forbidden
+    - expression: >-
+        has(object.metadata.labels) &&
+        'app.kubernetes.io/managed-by' in object.metadata.labels &&
+        object.metadata.labels['app.kubernetes.io/managed-by'] == 'logweir'
+      message: >-
+        the Logweir console may create only Secrets it owns: the
+        app.kubernetes.io/managed-by=logweir label is required
+      reason: Forbidden
 ---
-# Source: logweir/templates/ui/ui.yaml
-apiVersion: apps/v1
-kind: Deployment
+# Source: logweir/templates/admission-policy.yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
 metadata:
-  name: logweir-ui
-  namespace: logweir-system
+  name: logweir-console-credentials-only
   labels:
     app.kubernetes.io/name: logweir
     app.kubernetes.io/instance: logweir
     app.kubernetes.io/managed-by: Helm
     helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: ui
+    app.kubernetes.io/component: admission
 spec:
-  replicas: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: logweir
-      app.kubernetes.io/instance: logweir
-      app.kubernetes.io/component: ui
-  template:
-    metadata:
-      annotations:
-        # The immutable, content-addressed context changes name on upgrade;
-        # this rolls the pod to the newly selected namespace set.
-        checksum/logweir-ui-runtime: 050a1aeb7038b79f657802c45a372907bcb497df81faf539555b045c0ddff911
-      labels:
-        app.kubernetes.io/name: logweir
-        app.kubernetes.io/instance: logweir
-        app.kubernetes.io/component: ui
-    spec:
-      serviceAccountName: logweir-ui
-      nodeSelector:
-        kubernetes.io/os: linux
-      tolerations:
-      - key: demo.logweir.dev/example
-        operator: Exists
-      # THE ONE POD OF THE OPTIONAL COMPONENTS THAT NEEDS ITS TOKEN: it is the
-      # credential `kubectl proxy` attaches to every request it forwards.
-      automountServiceAccountToken: true
-      securityContext:
-        runAsNonRoot: true
-        runAsUser: 65532
-        runAsGroup: 65532
-        seccompProfile:
-          type: RuntimeDefault
-      containers:
-        - name: proxy
-          image: docker.io/vladyslavhaina/logweir-ui:latest
-          imagePullPolicy: Always
-          args:
-            - proxy
-            - --www=/ui
-            - --www-prefix=/ui/
-            - --address=0.0.0.0
-            - --port=8001
-            - '--accept-hosts=.*'
-            - '--accept-paths=^/(ui/|apis/logweir\.dev/v1alpha1/)'
-          env:
-            - name: HOME
-              value: /tmp
-            - name: KUBECACHEDIR
-              value: /tmp/kube-cache
-          ports:
-            - name: http
-              containerPort: 8001
-          readinessProbe:
-            httpGet:
-              path: /ui/
-              port: http
-            periodSeconds: 5
-          resources:
-            requests:
-              cpu: 10m
-              memory: 32Mi
-            limits:
-              memory: 128Mi
-          securityContext:
-            allowPrivilegeEscalation: false
-            readOnlyRootFilesystem: true
-            capabilities:
-              drop: ["ALL"]
-          # `/ui` remains the image's read-only page. This single mounted file
-          # replaces its empty standalone context with Helm's non-secret one;
-          # it is not a page copy.
-          volumeMounts:
-            - name: tmp
-              mountPath: /tmp
-            - name: runtime
-              mountPath: /ui/runtime.js
-              subPath: runtime.js
-              readOnly: true
-      volumes:
-        # `tmp` is the only writable volume. `runtime` is a read-only
-        # ConfigMap containing only the namespace context, never page assets.
-        - name: tmp
-          emptyDir: {}
-        - name: runtime
-          configMap:
-            name: logweir-ui-runtime-050a1aeb70
-            items:
-              - key: runtime.js
-                path: runtime.js
----
-# Source: logweir/templates/demo-kafka/kafka.yaml
-apiVersion: apps/v1
-kind: StatefulSet
-metadata:
-  name: logweir-kafka-source
-  namespace: logweir-system
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: demo-kafka
-    logweir.dev/kafka-role: source
-spec:
-  serviceName: logweir-kafka-source-headless
-  replicas: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: logweir
-      app.kubernetes.io/instance: logweir
-      app.kubernetes.io/component: demo-kafka
-      logweir.dev/kafka-role: source
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: logweir
-        app.kubernetes.io/instance: logweir
-        app.kubernetes.io/component: demo-kafka
-        logweir.dev/kafka-role: source
-    spec:
-      automountServiceAccountToken: false
-      nodeSelector:
-        kubernetes.io/os: linux
-      tolerations:
-      - key: demo.logweir.dev/example
-        operator: Exists
-      containers:
-        - name: kafka
-          image: apache/kafka@sha256:ed74d7d115968d5e8b00ba6822ac6a384cbaaf54ca38991828647000d7089b68
-          imagePullPolicy: IfNotPresent
-          env:
-            # THE CLUSTER ID, per role and DISTINCT — values.yaml says why the
-            # image's own default cannot be left to stand for two brokers.
-            - name: CLUSTER_ID
-              value: "EdaYkCkyT2ONrlUc3uKpSw"
-            - name: KAFKA_NODE_ID
-              value: "1"
-            - name: KAFKA_PROCESS_ROLES
-              value: controller,broker
-            - name: KAFKA_LISTENERS
-              value: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-            # THE ADVERTISED LISTENER IS THE ClusterIP SERVICE'S DNS NAME. A
-            # Kafka client is redirected to the advertised listener by the
-            # broker's metadata whatever address it bootstrapped at, so this
-            # is the name that has to resolve from every pod — and it does.
-            - name: KAFKA_ADVERTISED_LISTENERS
-              value: PLAINTEXT://logweir-kafka-source.logweir-system.svc.cluster.local:9092
-            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
-              value: 1@localhost:9093
-            - name: KAFKA_CONTROLLER_LISTENER_NAMES
-              value: CONTROLLER
-            - name: KAFKA_INTER_BROKER_LISTENER_NAME
-              value: PLAINTEXT
-            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
-              value: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
-            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
-              value: "1"
-            - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
-              value: "1"
-            - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
-              value: "1"
-            - name: KAFKA_MIN_INSYNC_REPLICAS
-              value: "1"
-            - name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS
-              value: "0"
-            - name: KAFKA_LOG_DIRS
-              value: /var/lib/kafka/data
-            # MUST carry the KAFKA_ prefix: the apache/kafka entrypoint translates
-            # only KAFKA_*-prefixed variables into server.properties.
-            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
-              value: "false"
-            - name: KAFKA_HEAP_OPTS
-              value: -Xmx512M -Xms256M
-          ports:
-            - name: kafka
-              containerPort: 9092
-            - name: controller
-              containerPort: 9093
-          # A port probe, because the broker binds its data-plane listener
-          # only once startup has completed; the seed Job's own retry loop is
-          # what proves a client round trip.
-          startupProbe:
-            tcpSocket:
-              port: kafka
-            periodSeconds: 5
-            failureThreshold: 60
-          readinessProbe:
-            tcpSocket:
-              port: kafka
-            periodSeconds: 10
-          resources:
-            limits:
-              memory: 1Gi
-            requests:
-              cpu: 100m
-              memory: 512Mi
-          volumeMounts:
-            - name: data
-              mountPath: /var/lib/kafka/data
-      volumes:
-        - name: data
-          emptyDir: {}
----
-# Source: logweir/templates/demo-kafka/kafka.yaml
-apiVersion: apps/v1
-kind: StatefulSet
-metadata:
-  name: logweir-kafka-target
-  namespace: logweir-system
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: demo-kafka
-    logweir.dev/kafka-role: target
-spec:
-  serviceName: logweir-kafka-target-headless
-  replicas: 1
-  selector:
-    matchLabels:
-      app.kubernetes.io/name: logweir
-      app.kubernetes.io/instance: logweir
-      app.kubernetes.io/component: demo-kafka
-      logweir.dev/kafka-role: target
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: logweir
-        app.kubernetes.io/instance: logweir
-        app.kubernetes.io/component: demo-kafka
-        logweir.dev/kafka-role: target
-    spec:
-      automountServiceAccountToken: false
-      nodeSelector:
-        kubernetes.io/os: linux
-      tolerations:
-      - key: demo.logweir.dev/example
-        operator: Exists
-      containers:
-        - name: kafka
-          image: apache/kafka@sha256:ed74d7d115968d5e8b00ba6822ac6a384cbaaf54ca38991828647000d7089b68
-          imagePullPolicy: IfNotPresent
-          env:
-            # THE CLUSTER ID, per role and DISTINCT — values.yaml says why the
-            # image's own default cannot be left to stand for two brokers.
-            - name: CLUSTER_ID
-              value: "tQmDMMCERvy6yIB-vuOZCQ"
-            - name: KAFKA_NODE_ID
-              value: "1"
-            - name: KAFKA_PROCESS_ROLES
-              value: controller,broker
-            - name: KAFKA_LISTENERS
-              value: PLAINTEXT://0.0.0.0:9092,CONTROLLER://0.0.0.0:9093
-            # THE ADVERTISED LISTENER IS THE ClusterIP SERVICE'S DNS NAME. A
-            # Kafka client is redirected to the advertised listener by the
-            # broker's metadata whatever address it bootstrapped at, so this
-            # is the name that has to resolve from every pod — and it does.
-            - name: KAFKA_ADVERTISED_LISTENERS
-              value: PLAINTEXT://logweir-kafka-target.logweir-system.svc.cluster.local:9092
-            - name: KAFKA_CONTROLLER_QUORUM_VOTERS
-              value: 1@localhost:9093
-            - name: KAFKA_CONTROLLER_LISTENER_NAMES
-              value: CONTROLLER
-            - name: KAFKA_INTER_BROKER_LISTENER_NAME
-              value: PLAINTEXT
-            - name: KAFKA_LISTENER_SECURITY_PROTOCOL_MAP
-              value: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
-            - name: KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR
-              value: "1"
-            - name: KAFKA_TRANSACTION_STATE_LOG_REPLICATION_FACTOR
-              value: "1"
-            - name: KAFKA_TRANSACTION_STATE_LOG_MIN_ISR
-              value: "1"
-            - name: KAFKA_MIN_INSYNC_REPLICAS
-              value: "1"
-            - name: KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS
-              value: "0"
-            - name: KAFKA_LOG_DIRS
-              value: /var/lib/kafka/data
-            # MUST carry the KAFKA_ prefix: the apache/kafka entrypoint translates
-            # only KAFKA_*-prefixed variables into server.properties.
-            - name: KAFKA_AUTO_CREATE_TOPICS_ENABLE
-              value: "false"
-            - name: KAFKA_HEAP_OPTS
-              value: -Xmx512M -Xms256M
-          ports:
-            - name: kafka
-              containerPort: 9092
-            - name: controller
-              containerPort: 9093
-          # A port probe, because the broker binds its data-plane listener
-          # only once startup has completed; the seed Job's own retry loop is
-          # what proves a client round trip.
-          startupProbe:
-            tcpSocket:
-              port: kafka
-            periodSeconds: 5
-            failureThreshold: 60
-          readinessProbe:
-            tcpSocket:
-              port: kafka
-            periodSeconds: 10
-          resources:
-            limits:
-              memory: 1Gi
-            requests:
-              cpu: 100m
-              memory: 512Mi
-          volumeMounts:
-            - name: data
-              mountPath: /var/lib/kafka/data
-      volumes:
-        - name: data
-          emptyDir: {}
+  policyName: logweir-console-credentials-only
+  # DENY, not Warn or Audit: a policy that only warned would leave the grant
+  # exactly as wide as it is today and read, on an audit surface, as though it
+  # did not.
+  validationActions: ["Deny"]
+  # CLUSTER-WIDE. `matchResources` is omitted, so every namespace the console
+  # is bound in is covered; an adopter who wants it narrower adds a
+  # `namespaceSelector` here.
 ---
 # Source: logweir/templates/identity.yaml
 # The private object is intentionally rendered EMPTY. The hook Job generates or
@@ -7867,98 +7126,6 @@ metadata:
     app.kubernetes.io/component: signing-identity
 rules: []
 ---
-# Source: logweir/templates/demo-kafka/kafka.yaml
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: logweir-kafka-seed
-  namespace: logweir-system
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: demo-kafka-seed
-  annotations:
-    helm.sh/hook: post-install
-    helm.sh/hook-weight: "1"
-    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
-spec:
-  backoffLimit: 4
-  activeDeadlineSeconds: 900
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: logweir
-        app.kubernetes.io/instance: logweir
-        app.kubernetes.io/component: demo-kafka-seed
-    spec:
-      restartPolicy: Never
-      automountServiceAccountToken: false
-      nodeSelector:
-        kubernetes.io/os: linux
-      tolerations:
-      - key: demo.logweir.dev/example
-        operator: Exists
-      containers:
-        - name: seed
-          image: apache/kafka@sha256:ed74d7d115968d5e8b00ba6822ac6a384cbaaf54ca38991828647000d7089b68
-          imagePullPolicy: IfNotPresent
-          env:
-            - name: SOURCE
-              value: logweir-kafka-source.logweir-system.svc.cluster.local:9092
-            - name: TARGET
-              value: logweir-kafka-target.logweir-system.svc.cluster.local:9092
-            - name: RECORDS
-              value: "200"
-          command: ["/bin/bash", "-c"]
-          args:
-            - |
-              set -euo pipefail
-              KT=/opt/kafka/bin/kafka-topics.sh
-              OFFSETS=/opt/kafka/bin/kafka-get-offsets.sh
-              PRODUCER=/opt/kafka/bin/kafka-console-producer.sh
-              wait_for() {
-                i=0
-                while [ "$i" -lt 90 ]; do
-                  if "$KT" --bootstrap-server "$1" --list >/dev/null 2>&1; then
-                    echo "broker $1 answers"
-                    return 0
-                  fi
-                  echo "waiting for broker $1 ($i/90)"
-                  i=$((i + 1))
-                  sleep 5
-                done
-                echo "broker $1 never answered a metadata request"
-                return 1
-              }
-              records_on() {
-                "$OFFSETS" --bootstrap-server "$SOURCE" --topic "$1" | awk -F: '{ s += $3 } END { print s+0 }'
-              }
-              wait_for "$SOURCE"
-              wait_for "$TARGET"
-              "$KT" --bootstrap-server "$SOURCE" --create --if-not-exists --partitions 3 --replication-factor 1 --topic orders
-              "$KT" --bootstrap-server "$SOURCE" --create --if-not-exists --partitions 3 --replication-factor 1 --topic payments
-              # THE MARKER TOPIC, ON THE TARGET ONLY: the scratch segregation
-              # proof phase 0 requires (docs/kubernetes.md section 8).
-              "$KT" --bootstrap-server "$TARGET" --create --if-not-exists --partitions 1 --replication-factor 1 --topic logweir.scratch
-              for topic in orders payments; do
-                existing=$(records_on "$topic")
-                if [ "$existing" -gt 0 ]; then
-                  echo "$topic already holds $existing records on the source; not producing again"
-                  continue
-                fi
-                awk -v t="$topic" -v n="$RECORDS" 'BEGIN { for (i = 1; i <= n; i++) printf "%s-%06d:{\"id\":%d,\"topic\":\"%s\"}\n", t, i, i, t }' \
-                  | "$PRODUCER" --bootstrap-server "$SOURCE" --topic "$topic" --property parse.key=true --property key.separator=:
-                after=$(records_on "$topic")
-                if [ "$after" -lt "$RECORDS" ]; then
-                  echo "$topic holds $after records after producing $RECORDS; the archive would be short"
-                  exit 1
-                fi
-                echo "$topic: $after records on the source"
-              done
-              echo "READY: orders and payments seeded on $SOURCE; logweir.scratch present on $TARGET"
----
 # Source: logweir/templates/identity.yaml
 apiVersion: batch/v1
 kind: Job
@@ -7988,11 +7155,6 @@ spec:
       restartPolicy: Never
       serviceAccountName: logweir-identity-bootstrap
       automountServiceAccountToken: true
-      nodeSelector:
-        kubernetes.io/os: linux
-      tolerations:
-      - key: demo.logweir.dev/example
-        operator: Exists
       securityContext:
         runAsNonRoot: true
         runAsUser: 65532
@@ -8021,63 +7183,3 @@ spec:
             readOnlyRootFilesystem: true
             capabilities:
               drop: ["ALL"]
----
-# Source: logweir/templates/minio/minio.yaml
-apiVersion: batch/v1
-kind: Job
-metadata:
-  name: logweir-minio-seed
-  namespace: logweir-system
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: minio-seed
-  annotations:
-    helm.sh/hook: post-install,post-upgrade
-    helm.sh/hook-weight: "0"
-    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
-spec:
-  backoffLimit: 4
-  activeDeadlineSeconds: 600
-  template:
-    metadata:
-      labels:
-        app.kubernetes.io/name: logweir
-        app.kubernetes.io/instance: logweir
-        app.kubernetes.io/component: minio-seed
-    spec:
-      restartPolicy: Never
-      automountServiceAccountToken: false
-      nodeSelector:
-        kubernetes.io/os: linux
-      tolerations:
-      - key: demo.logweir.dev/example
-        operator: Exists
-      containers:
-        - name: mc
-          image: quay.io/minio/mc@sha256:a7fe349ef4bd8521fb8497f55c6042871b2ae640607cf99d9bede5e9bdf11727
-          imagePullPolicy: IfNotPresent
-          envFrom:
-            - secretRef:
-                name: logweir-minio-root
-          env:
-            - name: MINIO_HOST
-              value: "logweir-minio.logweir-system.svc"
-          command: ["/bin/sh", "-c"]
-          args:
-            - |
-              set -eu
-              export MC_HOST_local="http://${MINIO_ROOT_USER}:${MINIO_ROOT_PASSWORD}@${MINIO_HOST}:9000"
-              i=0
-              while [ "$i" -lt 90 ]; do
-                if mc ready local >/dev/null 2>&1; then break; fi
-                echo "waiting for MinIO at ${MINIO_HOST}:9000 ($i/90)"
-                i=$((i + 1))
-                sleep 2
-              done
-              mc ready local
-              mc mb --ignore-existing local/kafka-backups
-              mc mb --ignore-existing local/logweir-evidence
-              echo 'buckets ready: kafka-backups logweir-evidence'

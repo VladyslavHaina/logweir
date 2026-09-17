@@ -4,7 +4,7 @@
   "description": "Types for every value in values.yaml. The three optional components are switched by booleans and nothing else: `--set demoKafka.enabled=yes` is refused here, before anything renders. Task 38 adds `environment`, `kubernetes`, `imagePullSecrets` and `kafka` — the keys an adopter's own values file needs — and the per-component placement overrides. What this file does NOT type is the `kafka.security` pair and `kafka.secretKey`: those are checked at RENDER time by `templates/_helpers.tpl`, so an unsupported mechanism fails naming the two Logweir speaks rather than as an anonymous schema error.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["controllerImage", "runnerImage", "imagePullPolicy", "runnerImagePullPolicy", "imagePullSecrets", "identity", "controller", "archive", "kubernetes", "kafka", "minio", "demoKafka", "ui"],
+  "required": ["controllerImage", "runnerImage", "imagePullPolicy", "runnerImagePullPolicy", "imagePullSecrets", "identity", "controller", "archive", "kubernetes", "kafka", "minio", "demoKafka", "ui", "checks", "engine", "evidence", "admissionPolicy"],
   "definitions": {
     "nodeSelector": {
       "type": "object",
@@ -19,6 +19,34 @@
     "affinity": {
       "type": "object",
       "description": "A pod affinity/anti-affinity block, verbatim as Kubernetes spells it."
+    },
+    "visibilityAttestation": {
+      "type": "object",
+      "description": "One administrator completeness attestation (D2 \u00a75.4). EVERY field is required and non-empty: `weirkeeper`'s own `check::policy` refuses an unknown field but would accept a blank `clusterId` or `principal`, and a blank one matches nothing while LOOKING like an attestation an operator can rely on. The two timestamps are RFC 3339. Logweir never verifies the statement; the UI renders `attested by <attestedBy> at <attestedAt>; not verified by Logweir`.",
+      "additionalProperties": false,
+      "required": ["id", "namespace", "kafkaCluster", "clusterId", "principal", "attestedBy", "attestedAt", "expiresAt", "statement"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1 },
+        "namespace": { "type": "string", "minLength": 1 },
+        "kafkaCluster": { "type": "string", "minLength": 1 },
+        "clusterId": { "type": "string", "minLength": 1 },
+        "principal": { "type": "string", "minLength": 1, "pattern": "^User:" },
+        "attestedBy": { "type": "string", "minLength": 1 },
+        "attestedAt": { "type": "string", "minLength": 1, "format": "date-time" },
+        "expiresAt": { "type": "string", "minLength": 1, "format": "date-time" },
+        "statement": { "type": "string", "minLength": 1, "maxLength": 2048 }
+      }
+    },
+    "identityLocation": {
+      "type": "object",
+      "description": "One object-store location the controller's OWN identity may read evidence from (D2 \u00a74.4). An unlisted location is refused with `ControllerIdentityNotAllowlisted`, so the empty default is the closed direction.",
+      "additionalProperties": false,
+      "required": ["bucket"],
+      "properties": {
+        "endpoint": { "type": "string" },
+        "region": { "type": "string" },
+        "bucket": { "type": "string", "minLength": 1 }
+      }
     },
     "kafkaCluster": {
       "type": "object",
@@ -49,6 +77,79 @@
     }
   },
   "properties": {
+    "checks": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The check-pool ceilings and the two per-kind retention blocks of the installation policy (D2 \u00a74.4), rendered into the `weirkeeper-policy` ConfigMap. Every field is REQUIRED here because `weirkeeper::check::policy` parses the document with `deny_unknown_fields` and no per-field default inside `checks`, `discovery` or `preflight`: a half-written block is a policy the controller refuses at load, and it refuses it fail-closed (no attestations, no allowlist).",
+      "required": ["maxActivePerNamespace", "maxActiveTotal", "maxActiveDiscoveriesPerConnection", "maxEvidenceFetchActivePerNamespace", "discovery", "preflight"],
+      "properties": {
+        "maxActivePerNamespace": { "type": "integer", "minimum": 1 },
+        "maxActiveTotal": { "type": "integer", "minimum": 1 },
+        "maxActiveDiscoveriesPerConnection": { "type": "integer", "minimum": 1 },
+        "maxEvidenceFetchActivePerNamespace": { "type": "integer", "minimum": 1 },
+        "discovery": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["freshSeconds", "retentionSeconds", "keepPerConnection", "defaultMaxTopics", "hardMaxTopics", "visibilityAttestations"],
+          "properties": {
+            "freshSeconds": { "type": "integer", "minimum": 1 },
+            "retentionSeconds": { "type": "integer", "minimum": 1 },
+            "keepPerConnection": { "type": "integer", "minimum": 1 },
+            "defaultMaxTopics": { "type": "integer", "minimum": 1 },
+            "hardMaxTopics": { "type": "integer", "minimum": 1, "maximum": 200000 },
+            "visibilityAttestations": {
+              "type": "array",
+              "items": { "$ref": "#/definitions/visibilityAttestation" }
+            }
+          }
+        },
+        "preflight": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["defaultTimeoutSeconds", "retentionSeconds"],
+          "properties": {
+            "defaultTimeoutSeconds": { "type": "integer", "minimum": 1, "maximum": 600 },
+            "retentionSeconds": { "type": "integer", "minimum": 1 }
+          }
+        }
+      }
+    },
+    "engine": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The policy document's `engine` block, and NOT an image: `allowUnverifiedCustomCa` is whether a `BackupDestination` may carry a private CA the archive engine cannot verify. `false` is the closed direction.",
+      "required": ["allowUnverifiedCustomCa"],
+      "properties": {
+        "allowUnverifiedCustomCa": { "type": "boolean" }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The policy document's `evidence` block.",
+      "required": ["controllerIdentityLocations"],
+      "properties": {
+        "controllerIdentityLocations": {
+          "type": "array",
+          "items": { "$ref": "#/definitions/identityLocation" }
+        }
+      }
+    },
+    "admissionPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "The ValidatingAdmissionPolicy that fences the console API ServiceAccount's `create` on Secrets to the two Logweir credential types (D2 \u00a77.3). `enabled` is false by default for ONE reason and it is written down: `admissionregistration.k8s.io/v1` ValidatingAdmissionPolicy is Kubernetes 1.30+ and this chart's floor is 1.29, where the document would be rejected with `no matches for kind`. It is not a security opinion.",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "consoleServiceAccountName": { "type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" },
+        "extraPrincipals": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "minLength": 1, "pattern": "^system:serviceaccount:[a-z0-9]([-a-z0-9]*[a-z0-9])?:[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" }
+        }
+      }
+    },
     "identity": {
       "type": "object",
       "additionalProperties": false,

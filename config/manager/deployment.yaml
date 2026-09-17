@@ -142,6 +142,39 @@ spec:
             - name: LOGWEIR_ARCHIVE_URL
               value: ""
             # ---------------------------------------------------------------
+            # THE INSTALLATION POLICY — D2 §4.4, AND THE TWO VARIABLES THAT
+            # DECIDE WHERE IT IS
+            # ---------------------------------------------------------------
+            # `weirkeeper::check::policy::configured_ref` resolves the policy
+            # `ConfigMap` in ONE order: an explicit `<namespace>/<name>` in
+            # `LOGWEIR_POLICY_CONFIGMAP`, else `weirkeeper-policy` in
+            # `LOGWEIR_INSTALLATION_NAMESPACE`, else NOTHING — and nothing is a
+            # supported install that reads as the documented defaults, never as
+            # an error. So the override ships EMPTY and the namespace comes from
+            # the pod's own `metadata.namespace`: an operator who moves the
+            # document does it in one place, and nobody has to keep a namespace
+            # string in a manifest in step with `helm -n`.
+            #
+            # WHAT THE DOCUMENT CAN DO, and why only an administrator may write
+            # it: it carries the check-pool ceilings, the two retention windows
+            # the GC pass acts on, and the completeness ATTESTATIONS that are
+            # the only way a `TopicDiscovery` reaches
+            # `visibility.state: attestedComplete` (D2 §5.4). Writing it needs
+            # `create`/`update` on a ConfigMap in THIS namespace, which
+            # `logweir-operator` does not have.
+            #
+            # `logweir.yaml` SHIPS NO SUCH ConfigMap. A kustomize install
+            # therefore runs on the compiled-in defaults and can never report
+            # `attestedComplete` until an administrator creates
+            # `weirkeeper-policy` by hand (`docs/install.md`); the Helm chart
+            # renders it from `values.yaml`.
+            - name: LOGWEIR_POLICY_CONFIGMAP
+              value: ""
+            - name: LOGWEIR_INSTALLATION_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            # ---------------------------------------------------------------
             # THE FIFTH SECRET — `logweir-evidence-ro`, AND `optional: true`
             # ---------------------------------------------------------------
             # Task 24, spec §9, Global Constraint 6 ("a separate bucket and a

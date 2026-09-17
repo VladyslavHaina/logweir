@@ -7353,6 +7353,13 @@ rules:
   - approvals
   verbs:
   - create
+- apiGroups:
+  - logweir.dev
+  resources:
+  - preflights
+  verbs:
+  - get
+  - list
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -7378,6 +7385,42 @@ rules:
   verbs:
   - update
   - patch
+- apiGroups:
+  - logweir.dev
+  resources:
+  - backupdestinations
+  - preflights
+  - topicdiscoveries
+  verbs:
+  - create
+- apiGroups:
+  - logweir.dev
+  resources:
+  - backupdestinations
+  - preflights
+  - topicdiscoveries
+  verbs:
+  - patch
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  labels:
+    app.kubernetes.io/component: human-role
+    app.kubernetes.io/name: logweir
+  name: logweir-trust-admin
+rules:
+- apiGroups:
+  - logweir.dev
+  resources:
+  - trustpolicies
+  verbs:
+  - get
+  - list
+  - watch
+  - create
+  - update
+  - patch
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -7396,6 +7439,21 @@ rules:
   - kafkaclusters
   - restores
   - trustrosters
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - logweir.dev
+  resources:
+  - backupdestinations
+  - preflights
+  - protectionpolicies
+  - recoverycatalogs
+  - rehearsalschedules
+  - retentionpolicies
+  - topicdiscoveries
+  - trustpolicies
   verbs:
   - get
   - list
@@ -7494,6 +7552,13 @@ rules:
   - preflights/status
   verbs:
   - patch
+- apiGroups:
+  - logweir.dev
+  resources:
+  - topicdiscoveries
+  - preflights
+  verbs:
+  - delete
 - apiGroups:
   - batch
   resources:
@@ -7621,6 +7686,12 @@ spec:
           value: info
         - name: LOGWEIR_ARCHIVE_URL
           value: ""
+        - name: LOGWEIR_POLICY_CONFIGMAP
+          value: ""
+        - name: LOGWEIR_INSTALLATION_NAMESPACE
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.namespace
         - name: AWS_ACCESS_KEY_ID
           valueFrom:
             secretKeyRef:
