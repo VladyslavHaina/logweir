@@ -143,6 +143,10 @@ pub mod evidence_store;
 pub mod identity;
 pub mod job;
 pub mod policy;
+/// PLAT-14.2 / decision D3 §§3.2–3.4: the freshness definition, the alert
+/// vocabulary and the deduplication ledger, as pure functions over objects the
+/// caller already read. `controllers::protection_policy` is the thin half.
+pub mod protection;
 pub mod retention;
 pub mod slot;
 pub mod testing;

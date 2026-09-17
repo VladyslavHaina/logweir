@@ -89,6 +89,7 @@ pub mod backup_schedule;
 pub mod backup_selection;
 pub mod kafka_cluster;
 pub mod preflight;
+pub mod protection_policy;
 pub mod recovery_catalog;
 pub mod restore;
 pub mod topic_discovery;
