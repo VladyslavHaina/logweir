@@ -51,6 +51,7 @@ use crate::contract::{
     CheckOperationResponse, CheckScopeView, CheckVerdict, CreatePreflightRequest,
     DestinationRoleDto, DetailEntryView, DetailPageResponse, ExecutionOnlyView, Page, Preflight,
     PreflightBindingView, PreflightOperationDto, PreflightResponse, PreflightState, ReferentView,
+    StaleReasonKind, StaleReasonView,
 };
 use crate::cursor::{self, CursorError, CursorScope};
 use crate::http::{read_json, RequestId, MAX_JSON_BODY};
@@ -167,38 +168,139 @@ const fn is_terminal(state: PreflightState) -> bool {
     )
 }
 
+/// The exact wire spelling of each reason, as
+/// `logweir_core::check_contract::StaleReason`'s `Display` renders it.
+///
+/// ONE VOCABULARY, TWO COMPONENTS. The controller writes these spellings and
+/// this module reads them; `tests/preflights.rs` pins the list against the
+/// core enum with a wildcard-free `match`, so a seventh reason added in
+/// `logweir-core` stops the API's test compiling rather than arriving as a
+/// token nothing here can name.
+pub const REASON_EXPIRED: &str = "expired";
+/// See [`REASON_EXPIRED`].
+pub const REASON_PLAN_HASH_CHANGED: &str = "planHashChanged";
+/// See [`REASON_EXPIRED`]. Rendered as `referentChanged:<Kind>/<name>`.
+pub const REASON_REFERENT_CHANGED: &str = "referentChanged";
+/// See [`REASON_EXPIRED`].
+pub const REASON_CA_BUNDLE_CHANGED: &str = "caBundleChanged";
+/// See [`REASON_EXPIRED`].
+pub const REASON_POLICY_CHANGED: &str = "policyChanged";
+/// See [`REASON_EXPIRED`].
+pub const REASON_INPUTS_DIGEST_CHANGED: &str = "inputsDigestChanged";
+
+/// The controller's own sentence, when it downgrades a verdict that stopped
+/// applying, up to the parenthesised reason list.
+///
+/// A COUPLING, NAMED RATHER THAN HIDDEN. The `Preflight` CRD has no field for
+/// the reasons: `weirkeeper`'s preflight reconciler renders them into
+/// `status.message` as `this result no longer applies (<reasons>); …`. The API
+/// can compute only two of the six itself — it holds the caller's plan hash
+/// and the recorded expiry, not a binding recomputed from live objects — so
+/// the other four exist exactly here. Reading them is what lets this service
+/// hand a console typed reasons instead of leaving it to parse the same prose
+/// less carefully. It is read STRICTLY: the prefix must match, only spellings
+/// in the closed vocabulary above are accepted, and anything else is ignored
+/// rather than guessed at, so a message this build does not recognise yields
+/// no reason at all rather than an invented one.
+pub const DOWNGRADE_MESSAGE_PREFIX: &str = "this result no longer applies (";
+
+/// One recorded reason token, typed. `None` for anything outside the closed
+/// vocabulary.
+fn reason_from_token(token: &str) -> Option<StaleReasonView> {
+    let token = token.trim();
+    if let Some(subject) = token.strip_prefix(&format!("{REASON_REFERENT_CHANGED}:")) {
+        // `<Kind>/<name>`. A Kubernetes name may not contain `/`, so the first
+        // one splits it; a token without one names a kind and no subject
+        // rather than being dropped.
+        let (kind, name) = match subject.split_once('/') {
+            Some((kind, name)) => (kind, Some(name.to_string())),
+            None => (subject, None),
+        };
+        if kind.is_empty() {
+            return None;
+        }
+        return Some(StaleReasonView {
+            reason: StaleReasonKind::ReferentChanged,
+            kind: Some(crate::validate::bounded(kind, 128)),
+            name: name.map(|n| crate::validate::bounded(&n, 253)),
+        });
+    }
+    let reason = match token {
+        REASON_EXPIRED => StaleReasonKind::Expired,
+        REASON_PLAN_HASH_CHANGED => StaleReasonKind::PlanHashChanged,
+        REASON_CA_BUNDLE_CHANGED => StaleReasonKind::CaBundleChanged,
+        REASON_POLICY_CHANGED => StaleReasonKind::PolicyChanged,
+        REASON_INPUTS_DIGEST_CHANGED => StaleReasonKind::InputsDigestChanged,
+        _ => return None,
+    };
+    Some(StaleReasonView::plain(reason))
+}
+
+/// The reasons the CONTROLLER recorded, recovered from its downgrade message.
+fn recorded_reasons(message: Option<&str>) -> Vec<StaleReasonView> {
+    let Some(rest) = message.and_then(|m| {
+        m.find(DOWNGRADE_MESSAGE_PREFIX)
+            .map(|at| &m[at + DOWNGRADE_MESSAGE_PREFIX.len()..])
+    }) else {
+        return Vec::new();
+    };
+    let Some(end) = rest.find(')') else {
+        return Vec::new();
+    };
+    rest[..end]
+        .split(',')
+        .filter_map(reason_from_token)
+        .collect()
+}
+
 /// D2 §6.6's applicability, recomputed per read.
 ///
 /// `draft_plan_hash` is the `?planHash=` the caller sent: the hash of the plan
 /// they are looking at RIGHT NOW. A result bound to a different hash is a
 /// result about a plan that no longer exists.
+///
+/// TWO SOURCES, ONE VOCABULARY. This service compares the expiry and the plan
+/// hash itself; the four reasons that need a binding recomputed from live
+/// objects are the controller's, recovered from the message it wrote when it
+/// downgraded the verdict. Duplicates are collapsed, so a reason both sides
+/// found is reported once.
 fn staleness(
     object: &PreflightCr,
-    state: PreflightState,
+    _state: PreflightState,
     now: DateTime<Utc>,
     draft_plan_hash: Option<&str>,
-) -> (bool, Vec<String>) {
-    let mut reasons = Vec::new();
+) -> (bool, Vec<StaleReasonView>) {
+    let mut reasons: Vec<StaleReasonView> = Vec::new();
     let status = object.status.as_ref();
     let result = status.and_then(|s| s.result.as_ref());
     if let Some(expires) = result.and_then(|r| r.expires_at.as_ref()) {
         if now >= *expires {
-            reasons.push("expired".to_string());
+            reasons.push(StaleReasonView::plain(StaleReasonKind::Expired));
         }
     }
     let bound = status
         .and_then(|s| s.binding.as_ref())
         .and_then(|b| b.plan_hash.as_deref());
-    if let (Some(draft), Some(bound)) = (draft_plan_hash, bound) {
-        if draft != bound {
-            reasons.push("planHashChanged".to_string());
+    let plan_hash_changed = match (draft_plan_hash, bound) {
+        (Some(draft), Some(bound)) => draft != bound,
+        // A caller holding a draft against a verdict bound to no plan at all
+        // is not looking at the same thing either.
+        (Some(_), None) => true,
+        (None, _) => false,
+    };
+    if plan_hash_changed {
+        reasons.push(StaleReasonView::plain(StaleReasonKind::PlanHashChanged));
+    }
+    // A CANCELLED CHECK IS NOT A STALE ONE. The earlier shape reported
+    // `cancelRequested` here; the controller never emits it, because a
+    // cancelled check ends with no result at all — its verdict is ABSENT, not
+    // out of date, and `state` and `terminal` already say so. Reporting it
+    // invited a console to say "your readiness result is out of date" about a
+    // check that never produced one.
+    for recovered in recorded_reasons(status.and_then(|s| s.message.as_deref())) {
+        if !reasons.contains(&recovered) {
+            reasons.push(recovered);
         }
-    }
-    if draft_plan_hash.is_some() && bound.is_none() {
-        reasons.push("planHashChanged".to_string());
-    }
-    if object.spec.cancel_requested && !is_terminal(state) {
-        reasons.push("cancelRequested".to_string());
     }
     // A RESULT THAT DOES NOT EXIST IS NOT FRESH. Anything before `Completed`
     // has no verdict to be applicable, and saying "stale" there would be

@@ -1724,7 +1724,16 @@ pub struct TopicDiscovery {
     pub fresh_until: Option<DateTime<Utc>>,
     /// Whether the result is past its freshness or its binding changed.
     pub stale: bool,
-    /// Why, when it is.
+    /// Why, when it is: `expired`, `connectionReplaced`, `connectionChanged`
+    /// or `principalChanged`.
+    ///
+    /// A DIFFERENT VOCABULARY FROM A DIFFERENT PRODUCER, and deliberately
+    /// still strings. D2 §5.7's four reasons are computed by THIS service, by
+    /// comparing the recorded binding with the connection as it is now; no
+    /// controller emits them, so there is no second list for a closed enum to
+    /// be pinned against the way [`StaleReasonKind`] is pinned against
+    /// `check_contract::StaleReason`. Closing it would be a contract change
+    /// with nothing on the other side asking for it.
     pub stale_reasons: Vec<String>,
     /// The cluster id the check read.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2036,6 +2045,84 @@ pub struct PreflightBindingView {
     pub referents: Vec<ReferentView>,
 }
 
+/// Why a stored readiness verdict no longer describes the caller's inputs.
+///
+/// CLOSED OVER EXACTLY WHAT THE CONTROLLER EMITS. These are the six spellings
+/// `logweir_core::check_contract::StaleReason` renders, and
+/// `crates/logweir-api/tests/preflights.rs` pins the two lists against each
+/// other so neither side can grow a reason the other cannot carry. A DTO that
+/// could not name `referentChanged` left W13 parsing the controller's prose to
+/// find out which object moved.
+///
+/// `cancelRequested` is DELIBERATELY ABSENT, and was in the first cut of this
+/// enum. The controller never emits it: a cancelled check is `state:
+/// cancelled` and carries no result at all, so its verdict is not stale — it
+/// is ABSENT, which is a different thing and one `state` and `terminal`
+/// already say. Reporting it here invited a console to render "your readiness
+/// result is out of date" for a check that never produced one.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub enum StaleReasonKind {
+    /// The verdict is past `expiresAt`, or recorded no expiry at all.
+    Expired,
+    /// The plan the caller is looking at is not the plan the check was bound
+    /// to.
+    PlanHashChanged,
+    /// A named object's UID or generation moved, or it appeared or vanished,
+    /// since the verdict was computed — a recreated destination, an edited
+    /// access block, a re-created recovery point, a `TrustRoster` edit, or an
+    /// `Approval` whose resourceVersion moved when verification landed.
+    /// [`StaleReasonView::kind`] and [`StaleReasonView::name`] say which.
+    ReferentChanged,
+    /// A destination's CA bundle `ConfigMap` now digests differently, so the
+    /// trust material the check exercised is not the trust material a run
+    /// would use.
+    CaBundleChanged,
+    /// The installation policy `ConfigMap` digests differently, which can
+    /// change the concurrency ceilings, the engine CA rule, the
+    /// `ControllerIdentity` allowlist and the visibility attestations the
+    /// verdict was computed under.
+    PolicyChanged,
+    /// The recomputed inputs digest differs and none of the named reasons
+    /// explains it. THE CATCH-ALL EXISTS SO "stale" IS NEVER REPORTED WITHOUT
+    /// A REASON: a field the five named comparisons do not cover (a backup
+    /// readiness request's topic set, for instance) still surfaces.
+    InputsDigestChanged,
+}
+
+/// One reason, with its subject when it has one.
+///
+/// STRUCTURED, NOT A PARSED STRING. The controller renders `referentChanged`
+/// as `referentChanged:<Kind>/<name>`; splitting that once, here, is the
+/// difference between a console that can say "the destination `primary` was
+/// replaced" and one that shows a colon-separated token to an operator.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct StaleReasonView {
+    /// Which reason this is.
+    pub reason: StaleReasonKind,
+    /// The kind of the object that moved. `referentChanged` only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// That object's name — or, for the single `TrustRoster` and `Approval` a
+    /// binding names, its UID, because those two are identified in the binding
+    /// by UID and a name would add nothing. `referentChanged` only.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+}
+
+impl StaleReasonView {
+    /// A reason with no subject.
+    #[must_use]
+    pub const fn plain(reason: StaleReasonKind) -> Self {
+        Self {
+            reason,
+            kind: None,
+            name: None,
+        }
+    }
+}
+
 /// A check that cannot be answered before the run.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -2177,8 +2264,8 @@ pub struct Preflight {
     pub applicable: bool,
     /// Whether it is out of date.
     pub stale: bool,
-    /// Why, when it is.
-    pub stale_reasons: Vec<String>,
+    /// Why, when it is. Closed over [`StaleReasonKind`].
+    pub stale_reasons: Vec<StaleReasonView>,
     /// When the facts were observed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_at: Option<DateTime<Utc>>,
