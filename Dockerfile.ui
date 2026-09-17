@@ -114,7 +114,7 @@ LABEL org.opencontainers.image.licenses="Apache-2.0"
 # TWO INSTRUCTIONS, NOT ONE `COPY ui /ui`. A whole-directory copy would take
 # `ui/README.md` and `ui/tests/` with it — the second of which carries a
 # throwaway keypair — and would keep taking whatever lands under `ui/` next.
-# These globs take the twelve top-level files (`*.html`, `*.js`, `*.css`) and
+# These globs take the thirteen top-level files (`*.html`, `*.js`, `*.css`) and
 # the nine under `pages/`, which is `scripts/check-ui-offline.sh`'s scope and
 # `shipped_ui_files()`'s in `crates/logweir/tests/chart_lint.rs`.
 #

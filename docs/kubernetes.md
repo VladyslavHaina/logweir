@@ -3799,6 +3799,18 @@ yet" rather than valid or invalid, and a discovery or a preflight reads
 `pending`. Nothing is rendered as ready or as failed on the strength of an
 absent status.
 
+**Where a schedule writes.** `BackupSchedule.spec.destinationRef` (PLAT-06.2)
+is projected and the schedules table renders it, resolved by name against the
+destinations in the namespace: a live one is shown with the location it writes
+to, a schedule naming a destination that is not there any more is a refusal to
+say where it writes rather than a guess at the object now holding that name,
+and a schedule with no reference is labelled as carrying an inline archive. The
+console does **not** write that field. `POST .../schedules` has no
+`destinationRef`, and `PUT .../schedules/{name}` -- which does -- replaces the
+whole future policy, while `ui/api.js` offers `create` plus one narrow suspend
+patch and no replace at all. Bind an existing schedule to a destination with
+`kubectl` or with the schedule policy form (D1 W7) that owns that route.
+
 ### The gates that keep it that way
 
 `just lint` runs `scripts/check-ui-offline.sh`, which reads every shipped byte

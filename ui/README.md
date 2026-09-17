@@ -733,8 +733,19 @@ the destination form therefore survives exactly as long as the form element
 does: through nothing -- not a refusal, not a re-render after a 409, not a route
 change. The form's credential inputs carry no `value` attribute in any render,
 so there is nowhere for one to land even if a draft somehow held it.
-`CREDENTIAL_INPUTS` is exported beside the allowlist so the suite can assert the
-two lists are disjoint mechanically rather than by reading them.
+`CREDENTIAL_INPUTS` is **derived from the four grant roles** (three field names
+each, `sessionToken` included even though no input renders one yet, because
+`grantBody` already reads it) and exported beside the allowlist, so the suite
+asserts the two lists are disjoint mechanically rather than by reading them.
+
+**And the failure banner says so.** "Your input is kept" is true of every form
+in this tree except the two that take a credential, where it is the exact
+opposite of what happened -- the re-render an operator is reading has just
+emptied the boxes the sentence is about. Both credential forms declare
+`clearsCredentials: true` on their mutation subject and get the true sentence
+instead. The rotation also runs the grants' own checks **before** it sends, so
+an operator who chose `new` and typed nothing is refused beside the field
+rather than by a 422 on a JSON path that matches no input on screen.
 
 ### Who may start one
 
@@ -755,33 +766,52 @@ pinned against the schema's own `required` set, so it is one commit across
 
 ### What this build cannot do yet, said rather than worked around
 
-* **A schedule cannot name a destination.** `CreateScheduleRequest` requires an
-  inline `archive` and has no `destinationRef` until PLAT-06.2. The create form
-  says so and keeps the inline fields; it does **not** derive an inline archive
-  from a chosen destination, because a destination carries an endpoint, a
-  region, an addressing mode and a CA bundle that an inline archive does not,
-  and dropping four of those silently would write to the wrong place. The
-  selector lives in the readiness panel instead, where
-  `BackupPreflightRequest.destination` makes it real, and moves into the create
-  form unchanged the day the field lands.
+Each sentence below is also **on the page**, beside the control it is about,
+with the task that owes the missing piece named in it. A "not available yet"
+sentence with no owner is how a gap becomes a permanent feature.
+
+* **A NEW schedule cannot name a destination; an existing one can, and this
+  page still does not send it.** `CreateScheduleRequest` requires an inline
+  `archive` and has no `destinationRef` (**PLAT-06.2** owes that one). The
+  create form says so and keeps the inline fields; it does **not** derive an
+  inline archive from a chosen destination, because a destination carries an
+  endpoint, a region, an addressing mode and a CA bundle that an inline archive
+  does not, and dropping four of those silently would write to the wrong place.
+  `PUT .../schedules/{name}` **does** take `destinationRef` under
+  `expectedGeneration` -- and this page cannot use it, for a reason of its own
+  rather than a missing field: that route replaces the **whole future policy**
+  (a field omitted is removed), and `api.js` exports `create` plus exactly one
+  narrow suspend patch and no replace at all, which
+  `ui_lint::the_api_module_offers_no_delete_and_no_put` holds. The schedule
+  policy form (**D1 W7**) owns that route. What this page does do is **read**
+  it: the schedules table has a DESTINATION column resolving
+  `spec.destinationRef` by name against the destinations it read, showing the
+  location a live one writes to, refusing to say where a vanished one writes,
+  and naming an inline archive as one. The selector itself lives in the
+  readiness panel, where `BackupPreflightRequest.destination` makes it real.
 * **A recovery point publishes no frozen destination.** `Backup`'s projection
-  carries `archive` and no `destination`/`locationDigest`, so the wizard cannot
-  take a source destination from the point's frozen one. It sends the inline
-  source archive -- which is what the `Restore` it creates carries anyway -- and
-  step 5 says so.
+  carries `archive` and no `destinationRef`/`locationDigest`, so the wizard
+  cannot take a source destination from the point's frozen one or match the
+  digest. It sends the inline source archive -- which is what the `Restore` it
+  creates carries anyway -- and step 5 says so and names **PLAT-08.2 (D2 W10)**,
+  whose projection owes it. The CRD already has the field; this is a projection
+  gap, not a model gap.
 * **A coverage label needs a field the console does not publish.** The three
-  strings are `Coverage::label()`'s, verbatim, and the schedule card renders one
-  when the object carries `status.selection.coverage` (legacy mode). The product
-  API's `Schedule` DTO publishes neither that nor `allUserTopics`, so in console
-  mode a schedule naming no topic gets a sentence saying which two shapes that
-  could be and to read the object with `kubectl` -- guessing "all user topics"
-  from an empty list would invent the very claim the labels exist to bound.
+  strings are `Coverage::label()`'s, verbatim. `ScheduleView.allUserTopics`
+  landed with D1 W6, so the page can now say **which selection shape** a
+  schedule uses, what its `incompleteDiscovery` policy is and what it excludes.
+  No API projection publishes `status.selection` or any `coverage`, so what a
+  RUN actually covered still cannot be labelled: the page says so and names
+  **PLAT-09.2** for the projection and **D1 W7** for the surface. Guessing "all
+  user topics" from an empty list would invent the very claim the labels bound.
 * **There is no source-connectivity check kind.** D2 section 4.2's plan kinds
   are `topicInventory`, `operationReadiness`, `restorePreflight`,
   `destinationAccess` and `evidenceFetch`; none of them is "dial this connection
-  and tell me if it answers" on its own. So the clusters page keeps its re-read
-  control, still labelled *connection probe*, and the real dial available there
-  is "Discover topics".
+  and tell me if it answers" on its own, and a backup readiness check requires
+  one to a thousand named topics. So the clusters page keeps its re-read
+  control, still labelled *connection probe*, says that the real dial there is
+  "Discover topics", and names **PLAT-03.1** for the check kind and
+  **PLAT-07.2** for the control that would consume it.
 
 
 ## The three rules, each with a gate
