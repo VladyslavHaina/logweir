@@ -6151,3 +6151,184 @@ fn a_retry_policy_that_cannot_be_named_is_refused_as_a_policy() {
         REASON_SCHEDULED
     );
 }
+
+/// D1 §2 and §8.3: a **manual** run of this schedule is part of its history and
+/// is **not** a schedule-created run — it neither occupies a `Forbid` slot nor
+/// is blocked by one.
+///
+/// # The trap this closes, which the W3b review found before it bit
+///
+/// Membership used to be the complete `BackupSchedule` controller
+/// ownerReference, and a manual `Backup` has none — so "not counted" held by
+/// accident. PLAT-05.1 moves membership onto `spec.scheduleRef {name, uid}`,
+/// which a manual run created from a schedule DOES carry (the API copies the
+/// revision so the run records what policy it ran), and PLAT-05.2 removes the
+/// ownerReference outright. Without a trigger-kind clause, "Back up now" would
+/// silently start blocking the next scheduled slot — and an operator would see
+/// `ConcurrencyBlocked` on a schedule that is working exactly as designed.
+///
+/// `participates_in_concurrency` is where the two questions part:
+/// history-membership stays `is_run_of_schedule` (PLAT-05.2's inventory and
+/// migration need the manual run), and ACCOUNTING adds the kind.
+#[tokio::test]
+async fn a_manual_run_of_this_schedule_is_neither_counted_nor_blocked() {
+    let now = utc(2026, 9, 10, 12, 1);
+    let current = due_name(now);
+    let schedule = forbid_schedule("nightly", UID, "* * * * *", false);
+
+    // A manual `Backup` created FROM this schedule: it names the schedule, it
+    // carries its UID, and it is running right now.
+    let mut manual = backup_value("logweir-manual-abc123", UID, Some("Running"), None);
+    manual["metadata"]
+        .as_object_mut()
+        .expect("metadata is an object")
+        .remove("ownerReferences");
+    manual["spec"]["scheduleRef"] = serde_json::json!({ "name": "nightly", "uid": UID });
+    manual["spec"]["triggeredBy"] = serde_json::json!("manual");
+    manual["spec"]["trigger"] = serde_json::json!({ "kind": "Manual", "attempt": 0 });
+    manual["spec"]
+        .as_object_mut()
+        .expect("spec is an object")
+        .remove("slot");
+
+    // It IS a member of the schedule for history purposes...
+    let typed: weirkeeper::crds::backup::Backup =
+        serde_json::from_value(manual.clone()).expect("the fixture is a Backup");
+    assert!(
+        weirkeeper::identity::is_run_of_schedule(&typed, "nightly", UID),
+        "a manual run created from a schedule is part of that schedule's history — PLAT-05.2's \
+         inventory and migration have to see it"
+    );
+    // ...and it is NOT a schedule-created run.
+    assert!(
+        !weirkeeper::controllers::backup_schedule::participates_in_concurrency(
+            &typed, "nightly", UID
+        ),
+        "but it does not participate in concurrencyPolicy: `Back up now` follows the CronJob \
+         precedent and is neither blocked nor blocking"
+    );
+
+    let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+        Route {
+            method: "GET",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 200,
+            body: backup_list_body(vec![manual]),
+        },
+        absent_backup(&current),
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body(&current),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: reservation_echo(
+                &serde_json::to_string(&schedule).expect("serialises"),
+                &current,
+                &slot_name(now),
+                0,
+            ),
+        },
+    ]);
+    let outcome = reconcile_schedule(&schedule, &client, now)
+        .await
+        .expect("the slot fires beside a running manual backup");
+    assert_eq!(
+        outcome.decision.reason(),
+        REASON_SCHEDULED,
+        "under Forbid, with a manual run of this very schedule still running: {:?}",
+        outcome.decision
+    );
+    assert_eq!(outcome.created.as_deref(), Some(current.as_str()));
+    let bodies = bodies.lock().expect("readable").clone();
+    let status = patched_status(&bodies);
+    assert_eq!(
+        status["activeRuns"],
+        serde_json::json!([{ "name": current, "kind": "Scheduled", "attempt": 0 }]),
+        "and the manual run is not in `activeRuns`, which is the schedule-created accounting \
+         list: {status}"
+    );
+    assert_eq!(
+        status["activeBackupRef"]["name"],
+        serde_json::json!(current)
+    );
+}
+
+/// D1 §3.1 rule 1, R8: a **non-scheduled** object sitting on a slot's
+/// deterministic name is a foreign occupant, not an attempt of that slot.
+///
+/// # Why it is not read as the slot's run
+///
+/// Rule 1 constrains the names of scheduled kinds only, so nothing refuses a
+/// `Manual` Backup called `logweir-backup-<schedule>-<slot>` — the repository's
+/// own `pre-connection-contract-inputs.json` fixture is exactly that shape.
+/// D1 §2 discovers attempt chains by GETTING those names, so such an object
+/// would otherwise look like attempt 0 of the slot.
+///
+/// It is not. A manual run executes under its OWN UID and therefore its own
+/// execution id, so the archive it writes is not the archive slot S's run would
+/// have written; adopting it would make the scheduler report a window as
+/// covered by a run that covered a different one. The slot is reported
+/// `SlotNameUnavailable`, the skip is recorded, and nothing is created under a
+/// different name — the same answer another schedule's object gets, for the
+/// same reason.
+#[tokio::test]
+async fn a_manual_run_squatting_a_slot_name_is_a_foreign_occupant() {
+    let now = utc(2026, 9, 10, 12, 1);
+    let current: &'static str = Box::leak(due_name(now).into_boxed_str());
+    let schedule = forbid_schedule("nightly", UID, "* * * * *", false);
+
+    let mut squatter = backup_value(current, UID, Some("Running"), None);
+    squatter["metadata"]
+        .as_object_mut()
+        .expect("metadata is an object")
+        .remove("ownerReferences");
+    squatter["spec"]["scheduleRef"] = serde_json::json!({ "name": "nightly", "uid": UID });
+    squatter["spec"]["triggeredBy"] = serde_json::json!("manual");
+    squatter["spec"]["trigger"] = serde_json::json!({ "kind": "Manual", "attempt": 0 });
+
+    let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+        no_backups(),
+        Route {
+            method: "GET",
+            path_suffix: Box::leak(format!("/backups/{current}").into_boxed_str()),
+            status: 200,
+            body: squatter.to_string(),
+        },
+        // PRESENT AND UNUSED: a POST would collide with the squatter, and
+        // adopting it would be worse than colliding.
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body(current),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).expect("serialises"),
+        },
+    ]);
+    let outcome = reconcile_schedule(&schedule, &client, now)
+        .await
+        .expect("a held name is a decision, not an error");
+    assert_eq!(outcome.decision.reason(), "SlotNameUnavailable");
+    assert_eq!(outcome.created, None);
+    let bodies = bodies.lock().expect("readable").clone();
+    assert!(posts(&bodies).is_empty());
+    let status = patched_status(&bodies);
+    assert_eq!(
+        status["lastSlot"]["disposition"],
+        serde_json::json!("NameUnavailable")
+    );
+    assert_eq!(status["lastMissedSlot"], slot_name(now));
+    assert!(status["conditions"][0]["message"]
+        .as_str()
+        .expect("a message")
+        .contains("held by an object this schedule does not own"));
+}

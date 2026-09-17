@@ -1624,6 +1624,47 @@ pub fn is_owned_by_schedule(backup: &Backup, schedule_name: &str, schedule_uid: 
         })
 }
 
+/// Whether `backup` is a run of this schedule that **participates in
+/// `concurrencyPolicy`** (D1 §2, §8.3).
+///
+/// # Membership and accounting are two questions, and this is the second one
+///
+/// [`crate::identity::is_run_of_schedule`] answers "is this run part of this
+/// schedule's history", and a MANUAL run created from a schedule is: it carries
+/// `spec.scheduleRef {name, uid}`, it appears in the schedule's history view,
+/// and PLAT-05.2's inventory and migration must see it. But D1 §2 defines a
+/// *schedule-created run* as one whose trigger kind is `Scheduled`, `CatchUp`
+/// or `Retry`, and **only those participate in `concurrencyPolicy`** — "Back up
+/// now" follows the CronJob precedent and is neither blocked by a running slot
+/// nor blocks the next one (D1 §0.1 item 7, §8.3).
+///
+/// Until now the distinction cost nothing, because accounting used the complete
+/// controller ownerReference and a manual `Backup` has none. Moving accounting
+/// onto `scheduleRef` — which PLAT-05.2 forces, since it removes that
+/// ownerReference — would have made every manual run occupy a `Forbid` slot.
+/// This function is where the two questions part.
+///
+/// # Why `declared_trigger` and not `run_identity`
+///
+/// [`crate::identity::declared_trigger`] is infallible and already applies D1
+/// §3.1 rule 4 to legacy objects: a `Backup` with no `spec.trigger` and
+/// `triggeredBy: schedule` reads as `Scheduled`/0, exactly as the controller
+/// that created it did. `run_identity` can return `Err`, and a run whose
+/// identity does not compose must still COUNT as active — dropping it would
+/// weaken `Forbid` for precisely the malformed objects that most deserve it.
+#[must_use]
+pub fn participates_in_concurrency(
+    backup: &Backup,
+    schedule_name: &str,
+    schedule_uid: &str,
+) -> bool {
+    is_run_of_schedule(backup, schedule_name, schedule_uid)
+        && matches!(
+            crate::identity::declared_trigger(backup).0,
+            TriggerKind::Scheduled | TriggerKind::CatchUp | TriggerKind::Retry
+        )
+}
+
 /// Whether the Backup CR has reached a phase that cannot run again.
 ///
 /// Everything else, including an absent or future phase, is deliberately
@@ -3006,7 +3047,9 @@ async fn refresh_active_runs(
         Some(recorded) => {
             for entry in recorded.iter().take(MAX_ACTIVE_RUNS) {
                 if let Some(backup) = api.get_opt(&entry.name).await? {
-                    if is_run_of_schedule(&backup, name, uid) && !backup_is_terminal(&backup) {
+                    if participates_in_concurrency(&backup, name, uid)
+                        && !backup_is_terminal(&backup)
+                    {
                         active.push(active_entry(&backup));
                     }
                     if Some(entry.name.as_str()) == pending {
@@ -3017,7 +3060,7 @@ async fn refresh_active_runs(
             if let Some(pending) = pending {
                 if pending_child.is_none() && !recorded.iter().any(|e| e.name == pending) {
                     if let Some(backup) = api.get_opt(pending).await? {
-                        if !is_run_of_schedule(&backup, name, uid) {
+                        if !participates_in_concurrency(&backup, name, uid) {
                             return Err(ScheduleError::ForeignBackup(pending.to_string()));
                         }
                         if !backup_is_terminal(&backup) {
@@ -3032,7 +3075,7 @@ async fn refresh_active_runs(
             let listed = api.list(&ListParams::default()).await?;
             for backup in &listed.items {
                 let this = backup.name_any();
-                let member = is_run_of_schedule(backup, name, uid);
+                let member = participates_in_concurrency(backup, name, uid);
                 if Some(this.as_str()) == pending {
                     if !member {
                         return Err(ScheduleError::ForeignBackup(this));
@@ -3109,7 +3152,17 @@ async fn observe_attempt_chain(
             .await
             .map_err(|e| ChainError::Api(ScheduleError::Api(e)))?;
         let Some(backup) = found else { break };
-        if !is_run_of_schedule(&backup, schedule_name, uid) {
+        // D1 §3.1 RULE 1 CONSTRAINS SCHEDULED NAMES ONLY, SO THIS HAS TO
+        // DECIDE WHAT ELSE MAY SIT ON ONE. Nothing refuses a `Manual` Backup
+        // named `logweir-backup-<schedule>-<slot>`; the repository's own
+        // `pre-connection-contract-inputs.json` fixture is that shape. Such an
+        // object is a **foreign occupant**, not an attempt of this slot: it
+        // executes under its own UID and its own execution id, so reading it as
+        // attempt k would make the scheduler believe a window was covered by a
+        // run that wrote a different archive. The slot is reported
+        // `SlotNameUnavailable` and never re-run under a different name — the
+        // same answer another schedule's object gets, for the same reason.
+        if !participates_in_concurrency(&backup, schedule_name, uid) {
             return Err(ChainError::Foreign(name));
         }
         chain.push(ObservedAttempt {
@@ -3254,7 +3307,7 @@ async fn create_run(
         Err(kube::Error::Api(e)) if e.code == 409 => {
             let existing = api.get(&plan.name).await?;
             if existing.name_any() != plan.name
-                || !is_run_of_schedule(&existing, schedule_name, uid)
+                || !participates_in_concurrency(&existing, schedule_name, uid)
             {
                 return Err(ScheduleError::ForeignBackup(plan.name.clone()));
             }

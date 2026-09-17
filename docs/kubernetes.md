@@ -1348,6 +1348,33 @@ The classification is an **allowlist**: a state nobody has classified falls to
 terminal run with no terminal condition has no instant to measure a delay from
 and is likewise never retried.
 
+### Manual runs, and what may sit on a slot's name
+
+A **manual** run (`spec.trigger.kind: Manual`, "Back up now") is part of its
+schedule's history — it carries `spec.scheduleRef {name, uid}` and appears in
+the schedule's history view — and it is **not** a schedule-created run. Only
+`Scheduled`, `CatchUp` and `Retry` participate in `concurrencyPolicy`: a manual
+run neither occupies a `Forbid` slot nor is blocked by one, and it never appears
+in `status.activeRuns`. That follows the CronJob "run now" precedent, and it is
+what makes "Back up now" usable on a schedule whose nightly run is still going.
+
+Membership and accounting are therefore two different questions asked of the
+same object, and the code asks them with two different predicates. Anything that
+counts runs for `concurrencyPolicy` or reports them in `status.activeRuns` adds
+the trigger-kind clause; anything that asks "is this part of this schedule's
+history" — the PLAT-05.2 inventory, the ownerReference migration — does not.
+
+The naming rule constrains **scheduled** names only, so nothing in the API
+refuses a manual `Backup` called `logweir-backup-<schedule>-<slot>`. The
+scheduler discovers a slot's attempts by GETTING exactly those names, so it has
+to say what such an object means, and it says **foreign occupant**: a manual run
+executes under its own UID and therefore its own archive id, so reading it as
+attempt 0 would report a window as covered by a run that covered a different
+one. The slot is reported `Ready=True reason=SlotNameUnavailable`, recorded in
+`status.lastMissedSlot` and `status.lastSlot.disposition: NameUnavailable`, and
+never re-run under a different name — the same answer an object belonging to
+another schedule gets, for the same reason.
+
 ### The policy truth table
 
 Evaluation is top to bottom; the first matching row decides. "Blocked" means
@@ -1360,7 +1387,7 @@ Evaluation is top to bottom; the first matching row decides. "Blocked" means
 | 3 | `suspend: true` | nothing; `nextRuns` empty | `Suspended` (False) |
 | 4 | Cron, zone, selection or run policy invalid | nothing; running work continues | `UnparseableSchedule` / `UnknownTimeZone` / `InvalidTopicSelection` / `InvalidRunPolicy` (all False) |
 | 5 | No due slot inside the walk bound | nothing | `NoDueSlot` (False) |
-| 6 | The slot's deterministic name is held by another schedule's object | nothing | `SlotNameUnavailable` / `NameUnavailable` |
+| 6 | The slot's deterministic name is held by an object that is not a scheduled run of this schedule | nothing | `SlotNameUnavailable` / `NameUnavailable` |
 | 7 | Some attempt of S succeeded | nothing | `Scheduled` / `Admitted` |
 | 8 | The highest attempt of S is nonterminal | nothing | `Scheduled` |
 | 9 | The highest attempt failed, not retryable | nothing | `RunFailed` / `Failed` |
