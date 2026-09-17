@@ -175,14 +175,6 @@ pub fn status_for(
                 .collect()
         })
         .unwrap_or_default();
-    // `Superseded` IS RECOMPUTED HERE, NOT JUST CARRIED — PLAT-19.1 review
-    // finding F2, second half. `trust_policy::reconcile_policy` runs only for a
-    // policy that EXISTS, so deleting every policy left `Superseded=True` on
-    // this roster forever: a rollback-in-place advertised the opposite of what
-    // was happening. This reconciler requeues every 300 s whether or not a
-    // policy exists, so it is the one that can clear it. Both writers call the
-    // same function, so they cannot disagree about what the condition means.
-    conditions.push(superseded_condition(roster, policies, now));
     conditions.push(merge_condition(
         current_condition(existing, CONDITION_LOADED),
         Condition {
@@ -194,6 +186,18 @@ pub fn status_for(
             message: Some(verdict.message.clone()),
         },
     ));
+    // `Superseded` IS RECOMPUTED HERE, NOT JUST CARRIED — PLAT-19.1 review
+    // finding F2, second half. `trust_policy::reconcile_policy` runs only for a
+    // policy that EXISTS, so deleting every policy left `Superseded=True` on
+    // this roster forever: a rollback-in-place advertised the opposite of what
+    // was happening. This reconciler requeues every 300 s whether or not a
+    // policy exists, so it is the one that can clear it. Both writers call the
+    // same function, so they cannot disagree about what the condition means.
+    //
+    // AFTER `Loaded`, not before: this reconciler's OWN condition stays
+    // `conditions[0]`, which is the position it has held since Task 16b and
+    // which `approval_controller.rs`'s transition-time assertions read.
+    conditions.push(superseded_condition(roster, policies, now));
     TrustRosterStatus {
         loaded: Some(verdict.loaded),
         expired_key_ids: Some(verdict.expired_key_ids.clone()),

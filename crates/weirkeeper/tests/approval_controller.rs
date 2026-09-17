@@ -200,7 +200,7 @@ fn approval_object(approval_bytes: &str, sidecar_bytes: &str, kind: SubjectKind)
 fn roster_body(approver_keys: &str, signing_keys: &str) -> String {
     format!(
         r#"{{"apiVersion":"logweir.dev/v1alpha1","kind":"TrustRoster",
-             "metadata":{{"name":"{ROSTER_NAME}"}},
+             "metadata":{{"name":"{ROSTER_NAME}","resourceVersion":"41"}},
              "spec":{{"approverKeys":[{approver_keys}],"signingKeys":[{signing_keys}],
                       "allowedClusterIds":["scratch-cluster-id"]}}}}"#
     )
@@ -1382,18 +1382,19 @@ fn a_roster_with_an_unparseable_pem_is_not_loaded_and_names_the_key_id() {
 async fn the_roster_reconciler_patches_only_status_at_cluster_scope() {
     let roster: TrustRoster = serde_json::from_str(&roster_body(&approver_entry_json(), ""))
         .expect("the fixture is a TrustRoster");
-    let (client, recorder) = mock_client_recording(vec![Route {
-        method: "PATCH",
-        path_suffix: "/trustrosters/default/status",
-        status: 200,
-        body: roster_body(&approver_entry_json(), ""),
-    }]);
+    let (client, recorder) = mock_client_recording(roster_patch_route());
     let verdict = trust_roster::reconcile_roster(&roster, &client)
         .await
         .expect("the reconcile completes");
     assert!(verdict.loaded);
+    // The LIST is a read of a different kind at cluster scope (PLAT-19.1); the
+    // only WRITE is still the one `/status` patch, which is what this test is
+    // named for.
     assert_eq!(
-        seen(&recorder),
+        seen(&recorder)
+            .into_iter()
+            .filter(|(m, _)| m != "GET")
+            .collect::<Vec<_>>(),
         vec![(
             "PATCH".to_string(),
             format!("/apis/logweir.dev/v1alpha1/trustrosters/{ROSTER_NAME}/status")
@@ -1702,12 +1703,35 @@ fn roster_carrying(patch: &serde_json::Value, spec_json: &str) -> TrustRoster {
 
 /// The one route a `TrustRoster` reconcile can take.
 fn roster_patch_route() -> Vec<Route> {
-    vec![Route {
-        method: "PATCH",
-        path_suffix: "/trustrosters/default/status",
+    vec![
+        // PLAT-19.1. The roster reconciler LISTS `TrustPolicy` now, because
+        // `Superseded` is a statement about which policy displaces this roster
+        // and that is not answerable from the roster alone — and because this
+        // reconciler is the one that CLEARS the condition when every policy is
+        // deleted (review finding F2). An empty list is the roster-only
+        // cluster, which is what every test in this file is about.
+        empty_policy_list_route(),
+        Route {
+            method: "PATCH",
+            path_suffix: "/trustrosters/default/status",
+            status: 200,
+            body: roster_body(&approver_entry_json(), ""),
+        },
+    ]
+}
+
+/// `GET …/trustpolicies` answering with an empty list — a cluster that has no
+/// `TrustPolicy` at all, so the roster is still what every namespace resolves
+/// to.
+fn empty_policy_list_route() -> Route {
+    Route {
+        method: "GET",
+        path_suffix: "/trustpolicies",
         status: 200,
-        body: roster_body(&approver_entry_json(), ""),
-    }]
+        body: r#"{"apiVersion":"logweir.dev/v1alpha1","kind":"TrustPolicyList",
+                  "metadata":{"resourceVersion":"1"},"items":[]}"#
+            .to_string(),
+    }
 }
 
 /// The good approver key with a `notAfter`, as a JSON `KeyEntry`.
@@ -1741,12 +1765,25 @@ async fn a_steady_trust_roster_issues_no_second_status_patch() {
         .await
         .expect("the second reconcile completes");
     assert!(verdict.loaded, "the verdict is still computed and returned");
+    // NO WRITE. PLAT-19.1 added one READ per pass — the `TrustPolicy` list the
+    // `Superseded` condition is computed from — and a read does not wake a
+    // watch, does not bump `resourceVersion` and does not feed the loop this
+    // test exists for. The property is, and always was, that a steady object
+    // is never PATCHED again. Measured live before the fix: 12,107 reconciles
+    // and 12,270 resourceVersion bumps in 91.2 s on one steady object.
     assert_eq!(
-        seen(&calls),
+        seen(&calls)
+            .into_iter()
+            .filter(|(m, _)| m != "GET")
+            .collect::<Vec<_>>(),
         Vec::<(String, String)>::new(),
-        "the second pass over an unchanged roster makes NO CALL AT ALL — this reconciler's only \
-         call is the patch it no longer sends. Measured live before the fix: 12,107 reconciles \
-         and 12,270 resourceVersion bumps in 91.2 s on one steady object"
+        "the second pass over an unchanged roster writes NOTHING: this reconciler's only write \
+         is the patch it no longer sends"
+    );
+    assert_eq!(
+        seen(&calls).into_iter().filter(|(m, _)| m == "GET").count(),
+        1,
+        "and the one read it does make is the policy list, once"
     );
 }
 
