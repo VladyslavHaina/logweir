@@ -605,6 +605,22 @@ custom resource needs a `delete` verb the `weirkeeper` ClusterRole grants on
 nothing today. Until that grant lands, terminal `TopicDiscovery` objects
 accumulate and are deleted by an operator or by namespace cleanup.
 
+**Status writes clear what they no longer claim.** The `/status` merge PATCH
+carries an explicit `null` for every clearable field this pass computed as
+absent — `lastAvailablePoint`, `lastAttempt`, `missed`, `schedules`,
+`rehearsal`, `staleSince`, `alerts`. RFC 7386 removes a key only for a `null`,
+so without them the console would keep serving a recovery point the controller
+had just decided was not available, with `health: Unknown` beside it. The
+no-op skip is unaffected: a `null` for a key the object does not have changes
+nothing, so a steady object still sends no patch at all.
+
+**One write per interval, not one per reconcile.** `evaluatedAt`,
+`lastAvailablePoint.ageSeconds` and `missed.sinceLastFire` are all measured
+*at* `evaluatedAt` and move only when it does; the condition `message`s carry
+no clock-derived number at all. A pass over unchanged cluster state inside the
+half-interval window therefore sends nothing, and past it sends exactly one
+patch in which only those three fields differ.
+
 **RBAC.** This kind adds exactly two rules to the `weirkeeper` ClusterRole:
 `list`/`watch` on `topicdiscoveries` (the controller's watch) and `patch` on
 `topicdiscoveries/status`. No `get`: the reconciler never re-reads a discovery.
@@ -864,13 +880,24 @@ answered) or `CatalogStale`.
 `spec.trigger.kind=Retry`) is one failed slot — its final attempt — so
 `maxConsecutiveFailedRuns: 2` means two failed nights and not two retries of
 one. A slot still running stops the walk: counting past it would open an alert
-for a condition a run in flight may be about to end. Membership uses
+for a condition a run in flight may be about to end. A missed slot counts
+towards `AtRisk` only when it is **newer than the schedule's last fire** —
+`status.lastMissedSlot` is an audit trail that is never cleared, so reading it
+as a live signal would pin a perfectly protected schedule to `Protected=False`
+for its whole life. It is still reported under `status.missed`. Membership uses
 `spec.scheduleRef.uid` (the authority) and not the `logweir.dev/schedule-uid`
 label (the index), which is why **a manual run of a schedule counts as that
 schedule's history**.
 
 **Alerts are a ledger, not a log.** One open alert per `(policy, kind)` under a
-stable key, `logweir-protection-<policyUID>-<kind>`. `transition` increments on
+stable key, `logweir-protection-<policyUID>-<kind>`. **`Staleness` covers
+`Unprotected` too** — there being nothing to recover from at all is the worst
+state the enum has, and it pages under the same key rather than opening a second
+incident for the same objective. **A resolve is only ever sent when `health` is
+back to `Healthy` or `AtRisk`**: under `Stale`, `Unprotected` or `Unknown` an
+open entry is left exactly as it is, because protection getting worse, or
+becoming unmeasurable, is not the condition clearing and a `resolve` on the
+shared dedup key would close a real incident. `transition` increments on
 open, on resolve and on each re-notify; `notifiedTransition` records the last
 transition a delivery Job was created for. A condition that stays true produces
 **no further messages** — not one per reconcile — until it resolves or until
@@ -881,23 +908,34 @@ it opens.
 
 **Delivery is a Job, and that is a boundary and not an implementation detail.**
 The controller holds no verb on `secrets` and gains no HTTP egress. For each
-alert transition it creates one immutable `ConfigMap` `<policy>-ev-<sha8>`
-holding the unsigned protection event, then one Job
-`<policy>-n-<sha8>-<attempt>` running `logweir notify deliver --event
-/event/event.json` in the runner image, with the sink credentials projected as
+alert transition it creates one Job `<policy>-n-<sha8>-<attempt>` running
+`logweir notify deliver --event /event/event.json` in the runner image, and one
+immutable `ConfigMap` `<policy>-ev-<sha8>` holding the unsigned protection
+event that Job mounts, with the sink credentials projected as
 `valueFrom.secretKeyRef` — a reference the kubelet resolves, never a value this
 controller read. Both names are pure functions of
 `(policyUID, alertKey, transition)`, so a duplicate reconcile is a **409** and
-not a second page. Delivery is retried at most three times (60 s / 300 s /
-900 s); exhaustion sets `NotificationsDelivered=False` with reason
-`DeliveryFailed` **and does nothing else**. A notification failure never
+not a second page. **Three attempts in total** for one transition, waiting 60 s
+and then 300 s; exhaustion sets `NotificationsDelivered=False` with reason
+`DeliveryFailed` **and does nothing else**. (D3 §3.4 reads "at most 3 times with
+60 s/300 s/900 s", which is four attempts if the first is not a retry; three is
+what shipped, because it bounds a transition's delivery inside the interval the
+policy is re-evaluated on, so a failure is visible in status before the next
+pass.) A notification failure never
 rewrites a backup result: this controller patches `protectionpolicies/status`
 and nothing else, and it reads `Backup` and `Restore` objects through bounded
 `list` calls only.
 
-**The ordering rules, all three of which are load-bearing.** The event
-`ConfigMap` is created **before** its Job (a Job whose mount does not exist sits
-in `ContainerCreating` until its deadline). `ttlSecondsAfterFinished` is patched
+**The ordering rules, all three of which are load-bearing.** The delivery Job
+is created **before** the event `ConfigMap` it mounts, and that `ConfigMap` is
+owned by the FIRST Job of its transition so the API server's TTL controller
+collects it — owned by the policy, an immutable object that this role cannot
+delete accumulated one per `(alertKey, transition)` for the life of the policy.
+The cost of the order is stated rather than buried: a pod scheduled in the
+window between the two creates sits `ContainerCreating` on a mount the kubelet
+retries, and a crash inside that window leaves a Job whose ConfigMap never
+arrives — which the next pass repairs, because the ledger records a delivery
+only once both objects exist. `ttlSecondsAfterFinished` is patched
 onto a finished delivery Job **only after** the `/status` patch carrying that
 delivery's verdict returned 200 (the exit code lives on the pod, and the TTL
 controller removes the Job and its pod together). And the pod is proved by the
@@ -914,6 +952,18 @@ archive can be trusted, so the type has three variants and `logweir notify
 deliver` refuses a fourth at parse time. See
 [`docs/formats/protection-event.md`](formats/protection-event.md).
 
+**Reading the catalog, and what a field this build cannot find means.** The
+policy reads the catalog's own materialised `selectable` — BOTH of D3 §5.4's
+axes — so a point that is `Available` but whose signer this installation has
+retired or revoked is not protection, and `ArchiveUnavailable` opens for it. An
+entry whose axes come through EMPTY (a rename in the catalog's page schema) is
+read as `CatalogUnreadable` and therefore `Unknown`, never as "not available":
+the second reading would tell every catalog-backed policy in the cluster that
+its backups are gone because a field moved. Nothing yet holds the two spellings
+together — W8 or W13 should add one fixture line asserting a serialized
+`catalog_view::ViewEntry` deserializes into `protection::CatalogEntry` with both
+axes preserved.
+
 **Bounds.** At most 16 ledger entries (8 of them recoveries), 16 schedules, 64
 topics on `lastAvailablePoint` (`topicsTruncated: true` beyond that), the newest
 50 runs considered per evaluation over at most 5 API pages of 200, and at most 4
@@ -923,12 +973,20 @@ Jobs.
 
 **Deviations from decision D3 §3, recorded here rather than in a commit
 message.** The delivery Job runs as `logweir-runner` and not as a new
-`logweir-notifier` ServiceAccount: `logweir-runner` is granted no verb on
-anything, its token is not mounted, and creating a second zero-verb account
-would touch four files this worker does not own. A policy may declare up to
-four notification routes, but `logweir notify deliver` reads one environment
-variable per sink kind, so one Job addresses at most one PagerDuty, one webhook
-and one Slack — the **first** of each in route order.
+`logweir-notifier` ServiceAccount: `logweir-runner` is bound to no Role or
+ClusterRole, is granted no verb on anything, its token is not mounted (on the
+account and again on the PodSpec), and creating a second zero-verb account would
+touch four files this worker does not own. **The NetworkPolicy half is not
+covered and W13 owns it:** `logweir-runner-egress` selects
+`batch.kubernetes.io/job-name Exists`, so a delivery pod inherits egress to the
+broker ports as well as 443, where D3 §9 wants a notifier reaching DNS and 443
+only. The `logweir.dev/component=notification` label is already on the Job and
+its pod template, so the narrower policy is a selector away; until then, on an
+enforcing CNI a compromised runner image in a delivery pod can reach a broker.
+A policy may declare up to four notification routes, but `logweir notify
+deliver` reads one environment variable per sink kind, so one Job addresses at
+most one PagerDuty, one webhook and one Slack — the **first** of each in route
+order.
 
 **RBAC.** This kind adds exactly two rules to the `weirkeeper` ClusterRole —
 `list`/`watch` on `protectionpolicies` and `patch` on
