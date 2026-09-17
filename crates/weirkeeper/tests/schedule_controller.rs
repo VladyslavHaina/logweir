@@ -3772,7 +3772,15 @@ async fn an_invalid_pending_reference_is_cleared_with_a_resource_version_precond
             .body,
     )
     .unwrap();
-    assert!(patch["status"]["pendingBackupRef"].is_null());
+    // BOTH SPELLINGS, AND EXPLICITLY. `is_null()` passes for a key the patch
+    // simply did not carry, and an absent key in a merge patch means "leave it
+    // alone" — so the weaker form was green for a controller that had stopped
+    // clearing the field at all. This schedule is SUSPENDED, so there is no
+    // admission to clear it as a side effect: the clear has to be a decision of
+    // its own, or the stale reservation stands forever and every reader shows
+    // accepted work that does not exist.
+    assert_cleared(&patch["status"], "pendingBackupRef");
+    assert_cleared(&patch["status"], "pendingRun");
     assert_eq!(patch["metadata"]["name"], serde_json::json!("nightly"));
     assert_eq!(
         patch["metadata"]["resourceVersion"],
@@ -5540,6 +5548,22 @@ async fn downtime_with_catch_up_latest_creates_exactly_one_catch_up() {
         serde_json::json!(5),
         "the five slots the catch-up did not cover are still counted: {status}"
     );
+    // AND THE COUNT COMES WITH ONE ENTRY AN OPERATOR CAN READ. This slot was
+    // not itself skipped — it ran, as a catch-up — so without a boundary entry
+    // `recent` would be empty beside a `count` of five, and a number with no
+    // sample is a number nobody can act on. The names of the gap itself are
+    // deliberately not enumerated (a week of one-minute slots is ten thousand
+    // of them); one entry naming the slot the accounting caught up AT, with the
+    // reason those slots were skipped, is what makes the count legible.
+    assert_eq!(
+        status["missedSlots"]["recent"],
+        serde_json::json!([{
+            "slot": slot_name(latest),
+            "reason": "ControllerUnavailable",
+            "recordedAt": latest + chrono::Duration::seconds(90),
+        }]),
+        "the gap moved the count, so `recent` carries the boundary entry: {status}"
+    );
 }
 
 /// D1 §4.7 row 19: a catch-up never runs a slot older than the revision in
@@ -6495,4 +6519,539 @@ async fn a_blocked_slot_is_not_counted_and_waiting_longer_does_not_count_it_agai
         serde_json::json!(slot_name(now)),
         "and the marker advances now, on the disposition it cannot come back from: {status}"
     );
+}
+
+// ===========================================================================
+// Fix round 1 — the reviewer's findings, each with the row that guards it
+// ===========================================================================
+
+/// **H-1.** A slot that has already received a FINAL disposition is not counted
+/// again on the next pass.
+///
+/// # Why the existing guard could not catch this
+///
+/// `a_blocked_slot_is_not_counted_and_waiting_longer_does_not_count_it_again`
+/// drives the NON-final branch, where `account_skipped` returns before it
+/// touches anything. This is the other branch, and it is the steady state of a
+/// missed slot: a slot that was missed stays the latest due slot until the next
+/// one comes due, so the controller reaches the same final disposition for it
+/// on every pass in between. On a 30-second requeue a daily schedule that
+/// misses one slot would inflate `count` by roughly 2,880 for that single slot,
+/// fill `recent` with ten copies of it, and bump `resourceVersion` every time —
+/// the churn erratum E11(d) exists to prevent, reached through a third field.
+#[tokio::test]
+async fn a_final_disposition_is_not_counted_twice_for_the_same_slot() {
+    let away_since = utc(2026, 9, 10, 12, 0);
+    let latest = utc(2026, 9, 10, 12, 30);
+    let mut schedule = cadence_schedule_cron("*/5 * * * *", r#", "startingDeadlineSeconds": 60"#);
+    schedule.status = Some(BackupScheduleStatus {
+        missed_slots: Some(weirkeeper::crds::backup_schedule::MissedSlots {
+            count: 0,
+            count_capped: false,
+            last_evaluated_slot: Some(slot_name(away_since)),
+            recent: None,
+        }),
+        active_runs: Some(Vec::new()),
+        ..BackupScheduleStatus::default()
+    });
+
+    let routes = vec![
+        absent_backup(&due_name(latest)),
+        // PRESENT AND UNUSED in both passes.
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body(&due_name(latest)),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).expect("serialises"),
+        },
+    ];
+
+    // PASS 1 — the slot is past its deadline: five slots in the gap, plus this
+    // one.
+    let (client, _calls, bodies) = mock_client_recording_bodies(routes.clone());
+    reconcile_schedule(&schedule, &client, latest + chrono::Duration::seconds(90))
+        .await
+        .expect("a missed slot is a decision");
+    let first = patched_status(&bodies.lock().expect("readable"));
+    assert_eq!(first["missedSlots"]["count"], serde_json::json!(6));
+    assert_eq!(
+        first["missedSlots"]["recent"].as_array().map(Vec::len),
+        Some(1)
+    );
+
+    // PASS 2 — thirty seconds later. No newer slot is due (`*/5`), so the
+    // controller reaches the SAME final disposition for the SAME slot.
+    let mut again = schedule.clone();
+    again.status = Some(serde_json::from_value(first).expect("the patch is a schedule status"));
+    let (client, _calls, bodies) = mock_client_recording_bodies(routes);
+    let outcome = reconcile_schedule(&again, &client, latest + chrono::Duration::seconds(120))
+        .await
+        .expect("the same missed slot is still a decision");
+    assert_eq!(outcome.decision.reason(), REASON_SLOT_MISSED);
+
+    let recorded = bodies.lock().expect("readable").clone();
+    match patched_status_opt(&recorded) {
+        // The ideal outcome: nothing about the status moved, so nothing is
+        // written at all.
+        None => {}
+        Some(second) => {
+            assert_eq!(
+                second["missedSlots"]["count"],
+                serde_json::json!(6),
+                "the same slot with the same final disposition is counted ONCE: {second}"
+            );
+            assert_eq!(
+                second["missedSlots"]["recent"].as_array().map(Vec::len),
+                Some(1),
+                "and `recent` does not fill with copies of it: {second}"
+            );
+            assert_eq!(
+                second["missedSlots"]["lastEvaluatedSlot"],
+                serde_json::json!(slot_name(latest))
+            );
+        }
+    }
+
+    // PASS 3 — the NEXT slot, and it runs. The marker is the slot immediately
+    // before it, so the gap between them is EMPTY: nothing was skipped, and
+    // `recent` must not gain a boundary entry saying otherwise. A boundary
+    // entry pushed whenever a marker exists would put a `ControllerUnavailable`
+    // row into `recent` on every successful admission of every healthy
+    // schedule — a sample that contradicts its own count.
+    let next = latest + chrono::Duration::minutes(5);
+    let admitted: &'static str = Box::leak(due_name(next).into_boxed_str());
+    let mut healthy = schedule.clone();
+    healthy.status = Some(BackupScheduleStatus {
+        missed_slots: Some(weirkeeper::crds::backup_schedule::MissedSlots {
+            count: 6,
+            count_capped: false,
+            last_evaluated_slot: Some(slot_name(latest)),
+            recent: Some(vec![weirkeeper::crds::backup_schedule::MissedSlot {
+                slot: slot_name(latest),
+                reason: "PastStartingDeadline".to_string(),
+                recorded_at: latest,
+            }]),
+        }),
+        active_runs: Some(Vec::new()),
+        ..BackupScheduleStatus::default()
+    });
+    let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+        absent_backup(admitted),
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body(admitted),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: reservation_echo(
+                &serde_json::to_string(&healthy).expect("serialises"),
+                admitted,
+                &slot_name(next),
+                0,
+            ),
+        },
+    ]);
+    let outcome = reconcile_schedule(&healthy, &client, next + chrono::Duration::seconds(10))
+        .await
+        .expect("the next slot fires");
+    assert_eq!(outcome.decision.reason(), REASON_SCHEDULED);
+    let third = patched_status(&bodies.lock().expect("readable"));
+    assert_eq!(
+        third["missedSlots"]["count"],
+        serde_json::json!(6),
+        "an admitted slot adds nothing to the count: {third}"
+    );
+    assert_eq!(
+        third["missedSlots"]["recent"].as_array().map(Vec::len),
+        Some(1),
+        "and adds no boundary entry, because the gap it closed was empty: {third}"
+    );
+    assert_eq!(
+        third["missedSlots"]["recent"][0]["reason"],
+        serde_json::json!("PastStartingDeadline"),
+        "the one entry is still pass 1's, not a `ControllerUnavailable` row for a slot that \
+         was never skipped: {third}"
+    );
+}
+
+/// **M-1.** A foreign object at a LATER attempt does not erase what the earlier
+/// attempts proved about the window.
+///
+/// # The history this keeps honest
+///
+/// The walk used to abandon the whole chain at the first name this schedule
+/// does not own, so a `Succeeded` attempt 0 sitting beside a squatted `-r1`
+/// was reported `SlotNameUnavailable`: `lastFireTime` did not advance,
+/// `lastSlot.backupRef` was `None`, and `missedSlots` counted a window that a
+/// successful run had in fact covered — a false entry in the one record an
+/// operator reads to tell a correct implementation from a broken schedule.
+///
+/// A held name matters only when something would be created under it. Attempt 0
+/// succeeded, so nothing would be; the honest answer is what the attempts say.
+#[tokio::test]
+async fn a_foreign_object_at_a_later_attempt_does_not_erase_a_succeeded_one() {
+    let slot = utc(2026, 9, 10, 12, 30);
+    let schedule = cadence_schedule_cron(
+        "*/30 * * * *",
+        r#", "retry": { "maxRetries": 2, "delaySeconds": 60 }"#,
+    );
+    let attempt0: &'static str = Box::leak(due_name(slot).into_boxed_str());
+    let squatted: &'static str = Box::leak(format!("{attempt0}-r1").into_boxed_str());
+
+    // Someone's manual Backup is sitting on the retry name. Nothing refuses
+    // that — it is R8's own premise.
+    let mut squatter = backup_value(squatted, UID, Some("Running"), None);
+    squatter["metadata"]
+        .as_object_mut()
+        .expect("metadata is an object")
+        .remove("ownerReferences");
+    squatter["spec"]["scheduleRef"] = serde_json::json!({ "name": "nightly", "uid": UID });
+    squatter["spec"]["triggeredBy"] = serde_json::json!("manual");
+    squatter["spec"]["trigger"] = serde_json::json!({ "kind": "Manual", "attempt": 0 });
+
+    let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+        no_backups(),
+        Route {
+            method: "GET",
+            path_suffix: Box::leak(format!("/backups/{attempt0}").into_boxed_str()),
+            status: 200,
+            body: terminal_backup(attempt0, "Succeeded", Some(0), Some("ok"), slot).to_string(),
+        },
+        Route {
+            method: "GET",
+            path_suffix: Box::leak(format!("/backups/{squatted}").into_boxed_str()),
+            status: 200,
+            body: squatter.to_string(),
+        },
+        // PRESENT AND UNUSED.
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body(squatted),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).expect("serialises"),
+        },
+    ]);
+    let outcome = reconcile_schedule(&schedule, &client, slot + chrono::Duration::minutes(20))
+        .await
+        .expect("a covered window is a decision");
+
+    assert_eq!(
+        outcome.decision.reason(),
+        REASON_SCHEDULED,
+        "the slot RAN and succeeded; a squatter on the retry name does not unmake that: {:?}",
+        outcome.decision
+    );
+    assert_eq!(outcome.created.as_deref(), Some(attempt0));
+    let bodies = bodies.lock().expect("readable").clone();
+    assert!(posts(&bodies).is_empty());
+    let status = patched_status(&bodies);
+    assert_eq!(
+        status["lastFireTime"],
+        serde_json::json!(slot),
+        "the fire is recorded, which is what a history reader needs: {status}"
+    );
+    assert_eq!(
+        status["lastSlot"]["disposition"],
+        serde_json::json!("Admitted")
+    );
+    assert_eq!(
+        status["lastSlot"]["backupRef"]["name"],
+        serde_json::json!(attempt0)
+    );
+    assert!(
+        status["lastMissedSlot"].is_null(),
+        "and the window is NOT recorded as missed: {status}"
+    );
+
+    // THE CONVERSE STILL HOLDS. With attempt 0 absent, the squatter holds the
+    // name the next admission would use, and the slot IS unavailable.
+    let held: &'static str = attempt0;
+    let mut squatter0 = backup_value(held, UID, Some("Running"), None);
+    squatter0["metadata"]
+        .as_object_mut()
+        .expect("metadata is an object")
+        .remove("ownerReferences");
+    squatter0["spec"]["scheduleRef"] = serde_json::json!({ "name": "nightly", "uid": UID });
+    squatter0["spec"]["triggeredBy"] = serde_json::json!("manual");
+    squatter0["spec"]["trigger"] = serde_json::json!({ "kind": "Manual", "attempt": 0 });
+    let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+        no_backups(),
+        Route {
+            method: "GET",
+            path_suffix: Box::leak(format!("/backups/{held}").into_boxed_str()),
+            status: 200,
+            body: squatter0.to_string(),
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/namespaces/logweir-t18/backups",
+            status: 201,
+            body: created_backup_body(held),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/backupschedules/nightly/status",
+            status: 200,
+            body: serde_json::to_string(&schedule).expect("serialises"),
+        },
+    ]);
+    let outcome = reconcile_schedule(&schedule, &client, slot + chrono::Duration::minutes(20))
+        .await
+        .expect("a held name is a decision");
+    assert_eq!(
+        outcome.decision.reason(),
+        "SlotNameUnavailable",
+        "the occupant holds the name attempt 0 would use, so the slot cannot run: {:?}",
+        outcome.decision
+    );
+    assert!(posts(&bodies.lock().expect("readable")).is_empty());
+}
+
+/// **M-2.** Every schedule-created kind is counted, not just `Scheduled`.
+///
+/// # What the reviewer's mutant walked through
+///
+/// `participates_in_concurrency`'s trigger-kind clause was guarded only at its
+/// `Manual` boundary: `a_manual_run_of_this_schedule_is_neither_counted_nor_blocked`
+/// proves `Manual` is OUT, and nothing proved `CatchUp` and `Retry` are IN.
+/// Narrowing the clause to `Scheduled | Retry` survived the whole suite — and
+/// with that mutation live, a running catch-up does not block the next
+/// scheduled slot (two concurrent runs of one schedule, which is precisely what
+/// `Forbid` promises not to do), never appears in `status.activeRuns`, and is
+/// classified `ForeignBackup` by `create_run`'s own 409 adoption.
+#[tokio::test]
+async fn every_schedule_created_kind_blocks_a_later_slot_under_forbid() {
+    let now = utc(2026, 9, 10, 12, 1);
+    let current = due_name(now);
+    let earlier = due_name(utc(2026, 9, 10, 12, 0));
+
+    for (label, kind, attempt) in [("a catch-up", "CatchUp", 0), ("a retry", "Retry", 1)] {
+        // A nonterminal run of THIS schedule, of a kind that is not
+        // `Scheduled`. A retry is named `…-r1`, and its name is not what makes
+        // it count — its trigger kind is.
+        let running = if attempt == 0 {
+            earlier.clone()
+        } else {
+            format!("{earlier}-r1")
+        };
+        let mut run = backup_value(&running, UID, Some("Running"), Some(&running));
+        run["spec"]["trigger"] = serde_json::json!({ "kind": kind, "attempt": attempt });
+        run["spec"]["scheduleRef"] = serde_json::json!({ "name": "nightly", "uid": UID });
+
+        let schedule = forbid_schedule("nightly", UID, "* * * * *", false);
+        let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+            Route {
+                method: "GET",
+                path_suffix: "/namespaces/logweir-t18/backups",
+                status: 200,
+                body: backup_list_body(vec![run]),
+            },
+            absent_backup(&current),
+            // PRESENT AND UNUSED IN BOTH ARMS.
+            Route {
+                method: "POST",
+                path_suffix: "/namespaces/logweir-t18/backups",
+                status: 201,
+                body: created_backup_body(&current),
+            },
+            Route {
+                method: "PATCH",
+                path_suffix: "/backupschedules/nightly/status",
+                status: 200,
+                body: serde_json::to_string(&schedule).expect("serialises"),
+            },
+        ]);
+        let outcome = reconcile_schedule(&schedule, &client, now)
+            .await
+            .unwrap_or_else(|e| panic!("{label}: {e}"));
+
+        assert_eq!(
+            outcome.decision.reason(),
+            REASON_CONCURRENCY_BLOCKED,
+            "{label} of this schedule is a schedule-created run and blocks the next slot under \
+             Forbid: {:?}",
+            outcome.decision
+        );
+        let bodies = bodies.lock().expect("readable").clone();
+        assert!(
+            posts(&bodies).is_empty(),
+            "{label}: a POST route was available and was not used"
+        );
+        let status = patched_status(&bodies);
+        assert_eq!(
+            status["activeRuns"],
+            serde_json::json!([{ "name": running, "kind": kind, "attempt": attempt }]),
+            "{label}: and it is reported with its own kind, so an operator can see WHAT is \
+             running: {status}"
+        );
+        assert_eq!(
+            status["activeBackupRef"]["name"],
+            serde_json::json!(running),
+            "{label}"
+        );
+    }
+}
+
+/// A reservation naming a slot the calendar does not have is **stale status**,
+/// not work to resume.
+///
+/// # Why the composed-name check cannot catch this on its own
+///
+/// `reserved_slot` re-derives `name(schedule, slot, attempt)` and compares it
+/// with the recorded name — but the name carries the slot string VERBATIM, so a
+/// non-calendar slot re-composes exactly and passes. The calendar is a separate
+/// question, and `identity::run_identity` now asks it of `spec.slot`: a slot IS
+/// a UTC instant, half of the run's name and half of its archive prefix, so an
+/// object named after an instant that never occurs takes a prefix no schedule
+/// can ever mint and no later run can collide with to reveal the mistake.
+///
+/// Resuming such a reservation would create a `Backup` only for the Backup
+/// controller to refuse it terminally. The scheduler clears it instead — and
+/// the schedule still fires its real due slot, which is what an operator needs.
+#[tokio::test]
+async fn a_reservation_naming_an_impossible_slot_is_cleared_rather_than_resumed() {
+    let now = utc(2026, 9, 10, 12, 1);
+    let current: &'static str = Box::leak(due_name(now).into_boxed_str());
+
+    for bad in [
+        "20261309-031700", // month 13
+        "20260230-000000", // 30 February
+        "20260915-256100", // hour 25, minute 61
+        "00000000-000000", // month 0, day 0 — NORMALISED by chrono, not refused
+    ] {
+        let impossible = format!("logweir-backup-nightly-{bad}");
+        assert_eq!(
+            weirkeeper::slot::scheduled_backup_name("nightly", bad).expect("it composes"),
+            impossible,
+            "{bad}: the fixture's name composes, so a refusal is the calendar and not the name"
+        );
+
+        let mut schedule = forbid_schedule("nightly", UID, "* * * * *", false);
+        schedule.status = Some(BackupScheduleStatus {
+            pending_backup_ref: Some(LocalRef {
+                name: impossible.clone(),
+            }),
+            ..BackupScheduleStatus::default()
+        });
+
+        let (client, calls, bodies) = mock_client_recording_bodies(vec![
+            no_backups(),
+            absent_backup(current),
+            Route {
+                method: "POST",
+                path_suffix: "/namespaces/logweir-t18/backups",
+                status: 201,
+                body: created_backup_body(current),
+            },
+            Route {
+                method: "PATCH",
+                path_suffix: "/backupschedules/nightly/status",
+                status: 200,
+                body: reservation_echo(
+                    &serde_json::to_string(&schedule).expect("serialises"),
+                    current,
+                    &slot_name(now),
+                    0,
+                ),
+            },
+        ]);
+        let outcome = reconcile_schedule(&schedule, &client, now)
+            .await
+            .unwrap_or_else(|e| panic!("{bad}: stale status is not an error: {e}"));
+
+        // NOTHING WAS ASKED ABOUT THE IMPOSSIBLE NAME. No route answers it and
+        // the double panics on a request it has no route for, so this is a
+        // property the table can see rather than an assertion about a result.
+        for seen in calls.lock().expect("readable").iter() {
+            assert!(
+                !seen.uri.contains(bad),
+                "{bad}: the reservation was not even looked up: {} {}",
+                seen.method,
+                seen.uri
+            );
+        }
+        let bodies = bodies.lock().expect("readable").clone();
+        assert_eq!(
+            body_name(posts(&bodies)[0]),
+            current,
+            "{bad}: nothing is created UNDER the impossible slot, and the schedule gets on \
+             with its real due slot"
+        );
+        assert_eq!(outcome.decision.reason(), REASON_SCHEDULED, "{bad}");
+        assert_eq!(outcome.created.as_deref(), Some(current), "{bad}");
+        let status = patched_status(&bodies);
+        assert_cleared(&status, "pendingBackupRef");
+        assert_cleared(&status, "pendingRun");
+    }
+}
+
+/// **L-1.** The reservation's `Ready` message names the schedule's ACTUAL
+/// concurrency policy.
+///
+/// `admit` is the uniform path for both policies, so the hard-coded `Forbid`
+/// this replaces made an `Allow` schedule publish a condition naming the wrong
+/// one. The final write replaces it moments later — but a watcher,
+/// `kubectl get -w` or the console reads what is on the object at the time.
+#[tokio::test]
+async fn the_reservation_message_names_the_policy_that_admitted_the_slot() {
+    let now = utc(2026, 9, 10, 12, 1);
+    let current: &'static str = Box::leak(due_name(now).into_boxed_str());
+
+    for (policy, schedule) in [
+        (
+            "Forbid",
+            forbid_schedule("nightly", UID, "* * * * *", false),
+        ),
+        ("Allow", schedule("nightly", UID, "* * * * *", false)),
+    ] {
+        let (client, _calls, bodies) = mock_client_recording_bodies(vec![
+            no_backups(),
+            absent_backup(current),
+            Route {
+                method: "POST",
+                path_suffix: "/namespaces/logweir-t18/backups",
+                status: 201,
+                body: created_backup_body(current),
+            },
+            Route {
+                method: "PATCH",
+                path_suffix: "/backupschedules/nightly/status",
+                status: 200,
+                body: reservation_echo(
+                    &serde_json::to_string(&schedule).expect("serialises"),
+                    current,
+                    &slot_name(now),
+                    0,
+                ),
+            },
+        ]);
+        reconcile_schedule(&schedule, &client, now)
+            .await
+            .unwrap_or_else(|e| panic!("{policy}: {e}"));
+        let reserved = reserved_status(&bodies.lock().expect("readable"));
+        let message = reserved["conditions"][0]["message"]
+            .as_str()
+            .expect("the reservation carries a message");
+        assert!(
+            message.contains(&format!("concurrencyPolicy {policy} atomically admitted")),
+            "{policy}: the transient reservation condition must name the policy that actually \
+             admitted the slot. Got: {message}"
+        );
+    }
 }
