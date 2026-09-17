@@ -3,7 +3,7 @@
 # IT IS NOT A THIRD LOGWEIR BINARY AND IT COMPILES NOTHING. `Dockerfile` builds
 # the runner (two binaries, the extracted OSO engine, an amd64-only ELF);
 # `Dockerfile.weirkeeper` builds the controller (one binary, `ca-certificates`
-# and nothing else). This file builds neither: it is a `COPY` of twenty
+# and nothing else). This file builds neither: it is a `COPY` of twenty-one
 # static files over a kubectl the Kubernetes project publishes, and its whole
 # build is two layers and a second or two. There is no builder stage, no
 # `rustup`, no `apt`, no `$BUILDPLATFORM` argument and no cross-compile
@@ -63,7 +63,7 @@
 # `ui/tests/` carries a THROWAWAY KEYPAIR and fixtures naming a developer's
 # compose stack (Global Constraint 28: no key material in the page or in
 # anything that serves it). `scripts/check-image-ui.sh` asserts `/ui` holds the
-# twenty files and NOTHING else, so an image that gained either is a red.
+# twenty-one files and NOTHING else, so an image that gained either is a red.
 #
 # NO SHELL, NO PACKAGE MANAGER, NO `apt` LAYER. The base carries `/bin/kubectl`
 # and a distroless root filesystem — measured 2026-09-14: `docker run
@@ -118,7 +118,7 @@ LABEL org.opencontainers.image.licenses="Apache-2.0"
 # the eight under `pages/`, which is `scripts/check-ui-offline.sh`'s scope and
 # `shipped_ui_files()`'s in `crates/logweir/tests/chart_lint.rs`.
 #
-# Docker's `*` does not cross a `/`, so `ui/*.js` is the ten top-level scripts
+# Docker's `*` does not cross a `/`, so `ui/*.js` is the eleven top-level scripts
 # and never `ui/tests/*.js`.
 COPY ui/*.html ui/*.js ui/*.css /ui/
 COPY ui/pages /ui/pages
@@ -126,7 +126,7 @@ COPY ui/pages /ui/pages
 # ---------------------------------------------------------------------------
 # THE LICENCES
 # ---------------------------------------------------------------------------
-# LOGWEIR'S OWN, for the page: the twenty files above are Logweir's code under
+# LOGWEIR'S OWN, for the page: the twenty-one files above are Logweir's code under
 # Apache-2.0, and Apache-2.0 requires the licence and the NOTICE to travel with
 # the redistribution (Global Constraint 15, spec §16 clause 5). The same path
 # both other images use, so one `docker run --entrypoint cat` idiom finds them

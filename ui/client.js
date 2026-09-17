@@ -451,7 +451,20 @@ function operationStatus(summary) {
  *  reader can see what is missing instead of reading an empty cell and
  *  guessing why. */
 const ABSENT_IN_CONSOLE = Object.freeze({
-  kafkaclusters: Object.freeze(["status.conditions"]),
+  // CONNECTION CONTRACT v1's TWO REFERENCES ARE NOT IN THE PRODUCT API YET.
+  // `schemas/logweir-api-v1.openapi.json`'s `ConnectionAuthView` carries the
+  // mode, the username, `credentialRef` and `tls` and nothing else, so a
+  // console-mode projection cannot say which data key of the Secret the
+  // controller projects, nor which private CA this connection trusts. They are
+  // NAMED here rather than left as empty cells, and `requestBody` refuses a
+  // create that carries either instead of dropping it: a form that silently
+  // sent a connection without its CA would produce an object that dials
+  // without one.
+  kafkaclusters: Object.freeze([
+    "status.conditions",
+    "spec.auth.secretRef.passwordKey",
+    "spec.auth.tlsCa",
+  ]),
   backupschedules: Object.freeze([
     "status.retentionReport.skipped[].key",
     "status.retentionReport.skipped[].reason",
@@ -938,6 +951,29 @@ function conflictKind(error) {
 function requestBody(plural, object) {
   const spec = (object || {}).spec || {};
   if (plural === "kafkaclusters") {
+    // REFUSED, NOT DROPPED (PLAT-07.2). `CreateConnectionRequest` declares
+    // `additionalProperties: false` and has no field for either of connection
+    // contract v1's references, so there is no shape this module could put
+    // them in. Sending the request without them would create a connection that
+    // projects the legacy data key, or that dials without the private CA the
+    // operator named -- a different connection from the one the form
+    // described. The refusal is by name, like every other console-mode gap.
+    if (((spec.auth.secretRef) || {}).passwordKey) {
+      throw noRoute(
+        "the product API's connection create has no field for spec.auth.secretRef.passwordKey " +
+          "(saved-connection contract v1), so this connection cannot be created through it " +
+          "without changing which entry of the Secret the controller projects. Create it with " +
+          "kubectl, or use the legacy direct mode.",
+      );
+    }
+    if (spec.auth.tlsCa !== undefined && spec.auth.tlsCa !== null) {
+      throw noRoute(
+        "the product API's connection create has no field for spec.auth.tlsCa " +
+          "(saved-connection contract v1), so this connection cannot be created through it " +
+          "without dropping the private CA it named. Create it with kubectl, or use the legacy " +
+          "direct mode.",
+      );
+    }
     const auth = { mode: spec.auth.mode, tls: spec.auth.tls === true };
     if (typeof spec.auth.username === "string" && spec.auth.username.length > 0) {
       auth.username = spec.auth.username;

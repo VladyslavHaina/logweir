@@ -53,6 +53,18 @@
 // defaults OFF, and by nothing else -- not by the addressing style, not by the
 // shape of an endpoint, not by any environment value.
 //
+// THE TARGET IS CHOSEN BY IDENTITY (PLAT-07.2). Step 4's select carries each
+// saved connection's UID, not its name, and the draft keeps the pair. A
+// KafkaCluster RENAMED between opening the wizard and submitting it keeps the
+// selection -- same object, same brokers, same credential, and the plan is
+// built from what it says now. One DELETED AND RECREATED under the same name is
+// a REFUSAL naming both uids: it is a different set of brokers reached with a
+// different credential, and writing a restore into it because the label matched
+// is exactly the substitution PLAT-11.1 removed from the recovery point. Both
+// wizard sides read the same probe words as the clusters page, from
+// `../select.js`, so "connection probe" means the same thing in all three
+// places and nothing here says "ready".
+//
 // ONE GUIDED SUBMIT (PLAT-12.1). "Create the Restore" is the only action, and
 // it does the whole journey in order: check that the plan about to be sent is
 // the plan on screen, create the Restore idempotently -- its name is minted
@@ -103,6 +115,15 @@ import {
   windowMessage,
 } from "../render.js";
 import { defaultTopicPrefix, TARGET_MODES, preparePlanDocument } from "../plan.js";
+import {
+  clusterUid,
+  filterSelectorOptions,
+  probeLine,
+  probeState,
+  readClusterSelection,
+  renderClusterSelector,
+  resolveClusterSelection,
+} from "../select.js";
 import { isObjectName, itemsOf } from "./clusters.js";
 import { approvalAuthorizes, restoreOperationRoute } from "./approvals.js";
 
@@ -119,8 +140,8 @@ export const WIZARD_FORM = "restore-wizard";
  *  NAME -- and the plan bytes themselves are never kept: they are rendered
  *  again, and hashed again, from these. */
 export const WIZARD_DRAFT_FIELDS = Object.freeze([
-  "backupSetRef", "pointInTime", "mode", "topicPrefix", "targetCluster", "endpoint", "region",
-  "pathStyle", "allowHttp", "evidenceBucket", "archiveSecret",
+  "backupSetRef", "pointInTime", "mode", "topicPrefix", "targetCluster", "targetClusterUid",
+  "endpoint", "region", "pathStyle", "allowHttp", "evidenceBucket", "archiveSecret",
 ]);
 
 /** The API server's field paths, mapped to the wizard's inputs. `archive` and
@@ -417,6 +438,7 @@ export function renderArchiveStep(state) {
       cell(meta.name),
       cell(((cluster.spec || {}).bootstrapServers || []).join(", ")),
       cell(status.clusterId),
+      probeLine(probeState(cluster, s.now, s.freshSeconds)),
       cell(archiveFor(s, meta.name)),
       cell(archiveSecretFor(s, meta.name)),
     ];
@@ -426,14 +448,53 @@ export function renderArchiveStep(state) {
     "<p class=\"blurb\">The source cluster this restore reads an archive of. The archives " +
     "below were read from this namespace's Backup objects: this page holds no bucket " +
     "credential and lists no object storage.</p>" +
+    renderSourceBinding(s) +
     table(
-      ["SOURCE CLUSTER", "BOOTSTRAP", "CLUSTER ID", "ARCHIVE", "ARCHIVE CREDENTIAL"],
+      ["SOURCE CLUSTER", "BOOTSTRAP", "CLUSTER ID", "CONNECTION PROBE", "ARCHIVE",
+        "ARCHIVE CREDENTIAL"],
       rows,
       "no KafkaCluster in this namespace carries role: source",
     ) +
     renderArchiveCredentialField(s) +
     renderStoreFields(s) +
     "</section>"
+  );
+}
+
+/** THE SOURCE SIDE'S OWN BINDING: the saved connection the chosen recovery
+ *  point was taken from, resolved against the connections that exist now.
+ *
+ *  A `Backup` records `spec.sourceRef.name` and no uid -- the reference was
+ *  written before saved connections had identities -- so this resolves BY NAME
+ *  and says what it resolved to, including the uid it pinned. That is the
+ *  honest statement available here: the archive this restore reads is on
+ *  object storage and does not depend on the source cluster still existing, so
+ *  a source that is gone is a NOTE and not a refusal -- unlike the target,
+ *  which the run writes into.
+ *
+ *  The probe beside it is the same probe the clusters page renders, with the
+ *  same freshness budget and the same refusal to call anything ready. */
+export function renderSourceBinding(state) {
+  const s = state || {};
+  const point = s.point || null;
+  const named = (((point || {}).spec || {}).sourceRef || {}).name;
+  if (typeof named !== "string" || named.length === 0) {
+    return "";
+  }
+  const resolved = resolveClusterSelection(s.clusters, { uid: "", name: named });
+  if (resolved.state !== "selected") {
+    return (
+      "<p class=\"note\" id=\"source-binding\">This recovery point was taken from the " +
+      "KafkaCluster <code>" + esc(named) + "</code>, which is no longer in this namespace. The " +
+      "archive is on object storage and does not need it, so the restore can still be built; " +
+      "nothing below was substituted for it.</p>"
+    );
+  }
+  return (
+    "<p class=\"note\" id=\"source-binding\">Source connection: <code>" +
+    esc(resolved.name) + "</code>, uid <code>" + esc(resolved.uid) + "</code> (role: " +
+    cell(resolved.role) + "). " + probeLine(probeState(resolved.cluster, s.now, s.freshSeconds)) +
+    "</p>"
   );
 }
 
@@ -888,7 +949,6 @@ export function renderTargetStep(state) {
   const target = fields.target || {};
   const clusters = itemsOf(s.clusters);
   const chosen = targetCluster(s);
-  const chosenName = ((chosen || {}).metadata || {}).name;
   const labelled = clusters.some((c) => ((c.spec || {}).role) === "target");
   const options = TARGET_MODES.map(
     (mode) =>
@@ -900,18 +960,6 @@ export function renderTargetStep(state) {
     typeof target.topicPrefix === "string" && target.topicPrefix.length > 0
       ? target.topicPrefix
       : prefixFor(fields.pointInTime);
-  const clusterOptions = clusters
-    .map((c) => {
-      const name = (c.metadata || {}).name;
-      const role = (c.spec || {}).role;
-      return (
-        "<option value=\"" + esc(name) + "\"" +
-        (name === chosenName ? " selected" : "") + ">" +
-        esc(name) + " (role: " + esc(typeof role === "string" && role.length > 0 ? role : "unset") +
-        ")</option>"
-      );
-    })
-    .join("");
   const markerWarning =
     target.mode === "scratch" && typeof ((chosen || {}).spec || {}).markerTopic !== "string"
       ? "<p class=\"complaint\">" + SCRATCH_MARKER_WARNING + "</p>"
@@ -922,17 +970,26 @@ export function renderTargetStep(state) {
     "<p class=\"blurb\">Where the restored records are written. Nothing that already " +
     "exists is written to: a Restore only ever creates topics that did not exist, and " +
     "refuses outright if a mapped target topic is already there.</p>" +
-    "<div class=\"field-row\">" +
-    "<div class=\"field\"><label for=\"target-cluster\">target cluster</label>" +
-    "<select id=\"target-cluster\" name=\"targetCluster\"" +
-    invalidAttributes("target-cluster", errors.targetCluster) + ">" + clusterOptions + "</select>" +
-    fieldErrorLine("target-cluster", errors.targetCluster) + "</div>" +
+    renderClusterSelector({
+      id: "target-cluster",
+      name: "targetCluster",
+      label: "target cluster",
+      help: "Every saved connection in this namespace, with its capability label and its own " +
+        "connection probe. Chosen by uid: a rename keeps this selection, a delete-and-recreate " +
+        "under the same name is refused.",
+      prefer: "target",
+      clusters: s.clusters,
+      selection: { uid: s.targetClusterUid, name: s.targetClusterName },
+      now: s.now,
+      freshSeconds: s.freshSeconds,
+      errors: errors,
+    }) +
+    fieldErrorLine("target-cluster", errors.targetCluster) +
     "<div class=\"field\"><label for=\"target-mode\">mode</label>" +
     "<select id=\"target-mode\" name=\"mode\"" + invalidAttributes("target-mode", errors.mode) + ">" +
     options + "</select>" +
     "<p class=\"help\">newTopic writes beside what is there; scratch needs a target that " +
     "proves it is scratch.</p>" + fieldErrorLine("target-mode", errors.mode) + "</div>" +
-    "</div>" +
     (labelled ? "" : "<p class=\"note\">" + TARGET_ROLE_SENTENCE + "</p>") +
     markerWarning +
     "<div class=\"field\"><label for=\"topic-prefix\">topicNaming.prefix</label>" +
@@ -1351,7 +1408,18 @@ export function validateRestore(state) {
   if (typeof target.topicPrefix !== "string" || target.topicPrefix.length === 0) {
     problems.topicPrefix = "the prefix every restored topic's name starts with";
   }
-  if (targetCluster(s) === null) {
+  const resolvedTarget = resolveTarget(s);
+  if (resolvedTarget.state === "recreated") {
+    problems.targetCluster =
+      "the KafkaCluster this wizard selected (uid " + resolvedTarget.uid + ") is gone and a " +
+      "different object now answers to the name " + resolvedTarget.name + " (uid " +
+      resolvedTarget.recreatedUid + "). A recreated connection is a different set of brokers " +
+      "reached with a different credential; choose the target you mean";
+  } else if (resolvedTarget.state === "missing") {
+    problems.targetCluster =
+      "the KafkaCluster this wizard selected (" + resolvedTarget.name + ", uid " +
+      resolvedTarget.uid + ") is not in this namespace any more; choose the target you mean";
+  } else if (resolvedTarget.state !== "selected") {
     problems.targetCluster = "choose the KafkaCluster the restore writes to";
   }
   if (typeof ((fields.evidence || {}).bucket) !== "string" || fields.evidence.bucket.length === 0) {
@@ -1391,6 +1459,7 @@ export function wizardDraftValues(state) {
     mode: target.mode,
     topicPrefix: target.topicPrefix,
     targetCluster: s.targetClusterName,
+    targetClusterUid: s.targetClusterUid,
     endpoint: source.endpoint,
     region: source.region,
     pathStyle: source.pathStyle === true,
@@ -1415,9 +1484,20 @@ export function applyWizardDraft(state, draft) {
   if (typeof d.mode === "string") {
     state.fields.target.mode = d.mode;
   }
-  if (typeof d.targetCluster === "string" &&
-    itemsOf(state.clusters).some((c) => ((c || {}).metadata || {}).name === d.targetCluster)) {
-    selectTarget(state, d.targetCluster);
+  // THE UID FIRST, THE NAME AS THE LEGACY PATH. A draft kept before PLAT-07.2
+  // carries a name and no uid; it is resolved by name and PINNED to whatever
+  // uid answers, exactly as an existing `sourceRef.name` is. A draft that
+  // carries a uid is applied even when that uid no longer answers, BECAUSE the
+  // refusal has to be reachable: dropping an unresolvable selection here would
+  // silently restore the default target, which is the substitution this page
+  // refuses everywhere else.
+  if (typeof d.targetClusterUid === "string" && d.targetClusterUid.length > 0) {
+    selectTarget(state, d.targetClusterUid, typeof d.targetCluster === "string" ? d.targetCluster : "");
+  } else if (typeof d.targetCluster === "string" && d.targetCluster.length > 0) {
+    const byName = resolveClusterSelection(state.clusters, { uid: "", name: d.targetCluster });
+    if (byName.state === "selected") {
+      selectTarget(state, byName.uid, byName.name);
+    }
   }
   if (typeof d.topicPrefix === "string") {
     state.fields.target.topicPrefix = d.topicPrefix;
@@ -1745,12 +1825,27 @@ function chosenBackup(state) {
  *  `<select>` marks the same cluster `selected` and `bootstrapOf` reads this
  *  one into the plan. */
 function targetCluster(state) {
-  for (const cluster of itemsOf(state.clusters)) {
-    if ((cluster.metadata || {}).name === state.targetClusterName) {
-      return cluster;
-    }
-  }
-  return firstTarget(state.clusters);
+  const resolved = resolveTarget(state);
+  return resolved.state === "selected" ? resolved.cluster : null;
+}
+
+/** THE TARGET SELECTION, RESOLVED. The one place this page turns the pair the
+ *  state holds -- `{targetClusterUid, targetClusterName}` -- into an answer,
+ *  and it is `../select.js`'s answer, so the wizard, the schedule form and the
+ *  clusters page all refuse the same things for the same reasons.
+ *
+ *  THERE IS NO FALLBACK TO "THE FIRST ONE INSTEAD". `firstTarget` still picks
+ *  the DEFAULT for a fresh state, in `initialState`, where it is visible in the
+ *  rendered select before anything is sent. Here -- after a selection exists --
+ *  a UID that no longer answers is `missing` or `recreated` and the wizard says
+ *  so: silently sliding onto another cluster is how a restore lands in a
+ *  namespace's production brokers because somebody rebuilt a scratch cluster. */
+export function resolveTarget(state) {
+  const s = state || {};
+  return resolveClusterSelection(s.clusters, {
+    uid: s.targetClusterUid,
+    name: s.targetClusterName,
+  });
 }
 
 /** The default prefix for an instant, or the empty string when there is no
@@ -1928,6 +2023,11 @@ export function initialState(ns, clusters, backups, selection) {
     archiveSecretName: archiveSecretName,
     evidenceBucket: "logweir-evidence",
     targetClusterName: ((target || {}).metadata || {}).name,
+    // THE IDENTITY, BESIDE THE NAME. The default is a preselect and nothing
+    // more, but it is a preselect BY UID from the first render, so the very
+    // first thing the draft keeps is an identity rather than a label.
+    targetClusterUid: clusterUid(target),
+    targetClusterState: target === null ? "none" : "selected",
     editing: null,
     deadlineSeconds: 3600,
     fields: {
@@ -1981,9 +2081,25 @@ function targetAuth(cluster) {
   }
   return { mode: auth.mode, username: auth.username, tls: auth.tls === true };
 }
-export function selectTarget(state, name) {
-  state.targetClusterName = name;
-  const cluster = targetCluster(state);
+/** Binds the wizard to one saved connection BY UID, with its name beside it.
+ *
+ *  `name` is optional and is only what the option said: the resolved object's
+ *  own name wins when the UID answers, so a rename is followed rather than
+ *  recorded twice. When the UID does NOT answer, the name given is kept as
+ *  what was asked for, because that is what the refusal has to be able to
+ *  print. */
+export function selectTarget(state, uid, name) {
+  state.targetClusterUid = typeof uid === "string" ? uid : "";
+  if (typeof name === "string" && name.length > 0) {
+    state.targetClusterName = name;
+  }
+  const resolved = resolveTarget(state);
+  state.targetClusterState = resolved.state;
+  if (resolved.state === "selected") {
+    state.targetClusterName = resolved.name;
+    state.targetClusterUid = resolved.uid;
+  }
+  const cluster = resolved.state === "selected" ? resolved.cluster : null;
   state.fields.target.bootstrapServers = ((cluster || {}).spec || {}).bootstrapServers || [];
   state.fields.target.auth = targetAuth(cluster);
 }
@@ -2041,7 +2157,12 @@ function wire(node, state, parse, api, lifecycle, prepared) {
       state.fields.target.topicPrefix = valueOf(prefix) || prefixFor(state.fields.pointInTime);
     }
     if (cluster !== null) {
-      selectTarget(state, valueOf(cluster));
+      // THE UID THE OPTION CARRIES, AND THE NAME IT SHOWED. Reading the
+      // select's value alone would give a uid with no name, so a refusal --
+      // which fires exactly when that uid has stopped resolving -- could then
+      // only print half an identity.
+      const picked = readClusterSelection(node, "target-cluster");
+      selectTarget(state, picked.uid, picked.name);
     }
     for (const block of [state.fields.source, state.fields.evidence]) {
       if (endpoint !== null) {
@@ -2119,6 +2240,8 @@ function wire(node, state, parse, api, lifecycle, prepared) {
   // The stepper: each entry scrolls its section into view and hands it focus,
   // so a keyboard reader lands where a pointer reader looks. Motion follows
   // the reader's own preference.
+  wireTargetSearch(node, lifecycle);
+
   for (const link of node.querySelectorAll(".stepper-link")) {
     listen(link, "click", () => {
       if (!active(lifecycle)) {
@@ -2281,6 +2404,30 @@ function wireSelector(node, state, lifecycle) {
   };
   listen(search, "input", filter, lifecycle);
   listen(search, "change", filter, lifecycle);
+}
+
+/** THE TARGET SELECTOR'S SEARCH, filtered in place.
+ *
+ *  It hides options and never removes them, and never touches `selected`, so
+ *  the answer this form would submit is the same before and after a search. It
+ *  issues no request: the list was read once by the mount half and this is a
+ *  filter over what is already on screen. */
+function wireTargetSearch(node, lifecycle) {
+  const search = node.querySelector("#target-cluster-search");
+  const select = node.querySelector("#target-cluster");
+  const note = node.querySelector("#target-cluster-no-match");
+  if (search === null || select === null) {
+    return;
+  }
+  listen(search, "input", () => {
+    if (!active(lifecycle)) {
+      return;
+    }
+    const visible = filterSelectorOptions(select, search.value);
+    if (note !== null) {
+      note.hidden = visible > 0;
+    }
+  }, lifecycle);
 }
 
 /** A form control's value. Kept here rather than inline so the submit region

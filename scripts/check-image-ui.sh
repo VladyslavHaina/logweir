@@ -26,7 +26,7 @@
 # ---------------------------------------------------------------------------
 # WHAT IT PROVES, IN THE ORDER THE CHECKS RUN
 # ---------------------------------------------------------------------------
-#   1. THE SERVED FILES. `/ui` inside the image holds exactly the twenty
+#   1. THE SERVED FILES. `/ui` inside the image holds exactly the twenty-one
 #      shipped files (`ui/*.html`, `ui/*.js`, `ui/*.css`, `ui/pages/*`), each
 #      one's sha256 EQUAL to the tree's, and NOTHING ELSE — no `README.md`, no
 #      `tests/` (which carries a throwaway keypair and fixtures naming a
@@ -284,10 +284,10 @@ fi
 # =========================================================================
 # CHECK 1 — THE SERVED FILES. The point of the whole image.
 # =========================================================================
-echo "-- check 1 (the page): /ui is the twenty shipped files, sha256 for sha256, and nothing else"
+echo "-- check 1 (the page): /ui is the twenty-one shipped files, sha256 for sha256, and nothing else"
 if ! cp_out /ui "$work/ui"; then
   fail "check 1 (the page): $ref carries no /ui directory." \
-       "  \`Dockerfile.ui\` COPYs the twenty shipped files there and the chart's" \
+       "  \`Dockerfile.ui\` COPYs the twenty-one shipped files there and the chart's" \
        "  Deployment runs \`kubectl proxy --www=/ui\`; an image without it serves" \
        "  nothing."
 fi
@@ -325,17 +325,17 @@ while IFS= read -r f; do
   image_count=$((image_count + 1))
 done < <(find "$work/ui" -type f | LC_ALL=C sort)
 
-# TWENTY, NAMED. A gate whose expected count came from the tree alone would
+# TWENTY-ONE, NAMED. A gate whose expected count came from the tree alone would
 # stay green if someone deleted seven files from both sides at once.
-if [ "$tree_count" -ne 20 ]; then
-  fail "check 1 (the page): the tree holds $tree_count shipped UI file(s), not twenty." \
+if [ "$tree_count" -ne 21 ]; then
+  fail "check 1 (the page): the tree holds $tree_count shipped UI file(s), not twenty-one." \
        "  The shipped page is ui/*.html, ui/*.js, ui/*.css and ui/pages/* — the same" \
        "  set \`check-ui-offline.sh\` scans and shipped_ui_files() asserts in" \
        "  crates/logweir/tests/chart_lint.rs. Fix the tree, never this number."
 fi
-if [ "$image_count" -ne 20 ]; then
-  fail "check 1 (the page): $ref's /ui holds $image_count file(s), not twenty." \
-       "  It must hold the twenty shipped files and NOTHING else: no README.md," \
+if [ "$image_count" -ne 21 ]; then
+  fail "check 1 (the page): $ref's /ui holds $image_count file(s), not twenty-one." \
+       "  It must hold the twenty-one shipped files and NOTHING else: no README.md," \
        "  no tests/ (a throwaway keypair and fixtures naming a developer's compose" \
        "  stack), no key material of any kind (Global Constraint 28)." \
        "  What is in the image:" \
@@ -354,7 +354,7 @@ if [ "$rc" -ne 0 ]; then
        "  browser receives with the bytes in this repository." \
        "  Rebuild the image (\`just image-ui\`) — never edit ui/ to match a stale one."
 fi
-echo "   ok: twenty files, sha256 for sha256, and nothing else under /ui"
+echo "   ok: twenty-one files, sha256 for sha256, and nothing else under /ui"
 
 # =========================================================================
 # CHECK 2 — THE LICENCES: two present, two byte-identical, two ABSENT.
@@ -363,7 +363,7 @@ echo "-- check 2 (licence): Logweir's LICENSE and NOTICE, kubectl's inventory an
 for f in LICENSE NOTICE; do
   if ! cp_out "/usr/share/licenses/logweir/$f" "$work/logweir-$f"; then
     fail "check 2 (licence): $ref is missing /usr/share/licenses/logweir/$f." \
-       "  The twenty files it serves are Logweir's own Apache-2.0 code, and" \
+       "  The twenty-one files it serves are Logweir's own Apache-2.0 code, and" \
          "  Apache-2.0 requires the licence and the NOTICE to travel with the" \
          "  redistribution (Global Constraint 15, spec §16 clause 5)."
   fi
@@ -420,7 +420,7 @@ if cp_out /usr/share/licenses/logweir/THIRD_PARTY_NOTICES.md "$work/tpn"; then
   fail "check 2 (licence): $ref CARRIES /usr/share/licenses/logweir/THIRD_PARTY_NOTICES.md." \
        "  That file is the inventory of Logweir's RUST dependency graph, generated" \
        "  from Cargo.lock. This image links no Rust binary and redistributes no" \
-       "  crate — it is twenty static files over a kubectl — so shipping it would" \
+       "  crate — it is twenty-one static files over a kubectl — so shipping it would" \
        "  claim a redistribution that does not happen. The other two images carry it" \
        "  because they each ship a statically linked Rust binary; this one does not."
 fi
@@ -486,7 +486,7 @@ echo "   ok: base digest agrees three ways; entrypoint is kubectl with no CMD"
 # =========================================================================
 if [ "$no_exec" -eq 1 ]; then
   echo
-  echo "ok: --no-exec — an AArch64 image, the twenty shipped files byte for byte, the licences"
+  echo "ok: --no-exec — an AArch64 image, the twenty-one shipped files byte for byte, the licences"
   echo "    and the base and entrypoint are correct in $ref. NOTHING was executed from the image,"
   echo "    so \`kubectl version --client\` is NOT asserted here; a native runner asserts that."
   exit 0
@@ -504,6 +504,6 @@ docker run --rm "$ref" version --client \
           "  \`--no-exec\` for a variant this host cannot run."
 
 echo
-echo "ok: the twenty shipped files byte for byte at /ui and nothing else, Logweir's licences,"
+echo "ok: the twenty-one shipped files byte for byte at /ui and nothing else, Logweir's licences,"
 echo "    kubectl's inventory and licence, no MIT notice and no Rust inventory, the base digest"
 echo "    agreeing three ways, the entrypoint kubectl with no CMD, and kubectl runs — in $ref"

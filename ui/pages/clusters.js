@@ -23,6 +23,23 @@
 // idempotent by name: submitting the same draft again after an unknown outcome
 // resolves to the object the first request made, and a different object under
 // that name is reported as a conflict and never touched.
+//
+// THE FORM TAKES CONTRACT v1's REFERENCES AND NEVER A VALUE (PLAT-07.1,
+// PLAT-07.2). `spec.auth.secretRef.passwordKey` names the data key inside the
+// Secret that holds the SASL password -- absent means `password`, which is what
+// every earlier release projected -- and `spec.auth.tlsCa` names exactly one
+// key of a Secret or a ConfigMap holding the private CA that signs the brokers'
+// certificates. Both are NAMES. There is no field on this form a password could
+// be typed into, `CLUSTER_DRAFT_FIELDS` names none, and
+// `the_cluster_form_has_no_password_input` asserts both against the rendered
+// bytes so a field added later cannot quietly become one.
+//
+// AND `status.reachable` IS A CONNECTION PROBE, NEVER "READY" (PLAT-07.2, D2
+// section 9). The badge, the stale label and the controller's own refusal
+// reason all come from `../select.js`, which is also what the schedule form and
+// the restore wizard select a saved connection with -- so the three surfaces
+// agree about what an observation means and about what is too old to present as
+// current.
 
 import { apiClient } from "../client.js";
 import {
@@ -41,7 +58,6 @@ import {
   watchMutation,
 } from "../lifecycle.js";
 import {
-  badge,
   cell,
   detailLink,
   errorBox,
@@ -54,6 +70,17 @@ import {
   replace,
   table,
 } from "../render.js";
+import {
+  PROBE_SENTENCE,
+  TEST_CONNECTION_SENTENCE,
+  clusterUid,
+  probeBadge,
+  probeLine,
+  probeState,
+  renderProbePanel,
+  renderTestConnection,
+  staleBadge,
+} from "../select.js";
 
 const PLURAL = "kafkaclusters";
 
@@ -66,7 +93,18 @@ export const CLUSTER_FORM = "cluster-form";
  *  settings or the NAME of a Secret; the form has no field a credential could
  *  be typed into, and a field added later is not kept unless it is named here. */
 export const CLUSTER_DRAFT_FIELDS = Object.freeze([
-  "name", "servers", "role", "mode", "username", "secret", "tls",
+  "name", "servers", "role", "mode", "username", "secret", "passwordKey",
+  "tls", "tlsCaKind", "tlsCaName", "tlsCaKey",
+]);
+
+/** The credential-shaped field names this form must NEVER have, held as data
+ *  so `the_cluster_form_has_no_password_input` can assert the rendered bytes
+ *  and `CLUSTER_DRAFT_FIELDS` against the same list rather than against a
+ *  spelling inside one test. `passwordKey` is the NAME OF A DATA KEY and is
+ *  deliberately not on it; a key's name is not a secret, and contract v1 needs
+ *  it to project the right entry of the Secret. */
+export const FORBIDDEN_CLUSTER_FIELDS = Object.freeze([
+  "password", "secretValue", "credential", "passphrase", "token",
 ]);
 
 /** The API server's field paths, mapped to this form's inputs, so a 422's
@@ -77,7 +115,13 @@ export const CLUSTER_FIELD_PATHS = Object.freeze([
   ["spec.role", "role"],
   ["spec.auth.mode", "mode"],
   ["spec.auth.username", "username"],
+  ["spec.auth.secretRef.passwordKey", "passwordKey"],
   ["spec.auth.secretRef", "secret"],
+  ["spec.auth.tlsCa.secretKeyRef.key", "tlsCaKey"],
+  ["spec.auth.tlsCa.configMapKeyRef.key", "tlsCaKey"],
+  ["spec.auth.tlsCa.secretKeyRef.name", "tlsCaName"],
+  ["spec.auth.tlsCa.configMapKeyRef.name", "tlsCaName"],
+  ["spec.auth.tlsCa", "tlsCaName"],
   ["spec.auth.tls", "tls"],
 ]);
 
@@ -128,23 +172,57 @@ export function authCell(spec) {
   const ref = auth.secretRef || {};
   if (typeof ref.name === "string" && ref.name.length > 0) {
     parts.push("via Secret " + esc(ref.name));
+    // CONTRACT v1's KEY, and only when it was set. An absent key means the
+    // legacy entry and rendering a default here would claim the object says
+    // something it does not. The key's NAME is not a secret; its value is
+    // never read by this page, by a status field or by a rendered document.
+    if (typeof ref.passwordKey === "string" && ref.passwordKey.length > 0) {
+      parts.push("key " + esc(ref.passwordKey));
+    }
   }
   parts.push(auth.tls === true ? "TLS" : "no TLS");
-  return parts.join(" ");
+  parts.push(caWords(auth.tlsCa));
+  return parts.filter((part) => part.length > 0).join(" ");
 }
 
-/** `status.reachable` as a badge whose WORDS carry the state as well as its
- *  colour. An unset field is the absent marker, not a claim either way: the
- *  controller has not probed this cluster yet. */
-export function reachableBadge(status) {
-  const reachable = (status || {}).reachable;
-  if (reachable === true) {
-    return badge("ok", "reachable");
+/** Contract v1's `spec.auth.tlsCa` as words: which kind of object holds the
+ *  private CA, its name and its key. The empty string when none is named,
+ *  which is a connection that trusts the runner image's own store. */
+export function caWords(tlsCa) {
+  const ca = tlsCa || {};
+  const secret = ca.secretKeyRef || null;
+  const configMap = ca.configMapKeyRef || null;
+  const source = secret !== null ? secret : configMap;
+  if (source === null) {
+    return "";
   }
-  if (reachable === false) {
-    return badge("flat", "not reachable");
-  }
-  return cell(null);
+  return (
+    "CA from " + (secret !== null ? "Secret " : "ConfigMap ") + cell(source.name) +
+    " key " + cell(source.key)
+  );
+}
+
+/** `status.reachable` AS A CONNECTION PROBE, in one badge whose words carry
+ *  the state as well as its colour.
+ *
+ *  It takes a `status` rather than a whole object because that is what its
+ *  callers had before PLAT-07.2 and what the design suite exercises it with;
+ *  the judgement itself lives in `../select.js`, so this page, the schedule
+ *  form and both wizard sides say the same words about the same field. An
+ *  unset `reachable` with no reason at all is `never probed` -- not the absent
+ *  marker and not a claim either way, because "the controller has not written
+ *  anything yet" is itself worth saying. */
+export function reachableBadge(status, now, freshSeconds) {
+  return probeBadge(probeState({ status: status || {} }, now, freshSeconds));
+}
+
+/** The probe as a table cell: the verdict badge, the stale badge beside it
+ *  when the observation is older than the freshness budget, and nothing else
+ *  -- the reason and the observed instant have their own columns. */
+export function probeCell(object, now, freshSeconds) {
+  const state = probeState(object, now, freshSeconds);
+  const stale = staleBadge(state);
+  return probeBadge(state) + (stale.length > 0 ? " " + stale : "");
 }
 
 /** The sentence the clusters table carries when the namespace holds none. */
@@ -152,53 +230,108 @@ export const NO_CLUSTER_SENTENCE =
   "No KafkaCluster in this namespace yet. Create one with the form below, or pick another " +
   "namespace above.";
 
-/** The clusters table. NAME, ROLE, REACHABLE, CLUSTER-ID, OBSERVED, AUTH. */
-export function renderClusterList(input, ns) {
+/** The clusters table. NAME, ROLE, CONNECTION PROBE, OBSERVED, CLUSTER-ID,
+ *  AUTH, and one Test connection control per row.
+ *
+ *  THE PROBE COLUMN IS CALLED WHAT IT IS. It was headed REACHABLE and rendered
+ *  a bare `reachable` badge with the observed instant two columns away, so a
+ *  five-hour-old success and a five-second-old one looked identical at a
+ *  glance. The column is now the probe's verdict, the stale label when the
+ *  observation is past the freshness budget, and the controller's own reason
+ *  beside it -- and the word `ready` appears nowhere, because nothing on this
+ *  page has decided that anything is.
+ *
+ *  `now` is epoch milliseconds, defaulted to the caller's clock by
+ *  `probeState`; a test passes one so a freshness verdict is reproducible. */
+export function renderClusterList(input, ns, now, freshSeconds) {
   const rows = itemsOf(input).map((object) => {
     const spec = object.spec || {};
     const status = object.status || {};
+    const state = probeState(object, now, freshSeconds);
     return [
       nameCell(object, ns),
       cell(spec.role),
-      reachableBadge(status),
-      cell(status.clusterId),
+      probeCell(object, now, freshSeconds),
       cell(status.observedAt),
+      state.reason.length === 0 ? cell(null) : "<code>" + esc(state.reason) + "</code>",
+      cell(status.clusterId),
       authCell(spec),
+      renderTestConnection(object, false),
     ];
   });
+  const attributes = itemsOf(input).map(
+    (object) => "data-cluster-uid=\"" + esc(clusterUid(object)) + "\"",
+  );
   return (
     "<h2>Clusters</h2>" +
     "<p class=\"blurb\">Every KafkaCluster in this namespace. " +
     "<code>clusterId</code> is read from the broker and never from a spec.</p>" +
-    table(["NAME", "ROLE", "REACHABLE", "CLUSTER-ID", "OBSERVED", "AUTH"], rows, NO_CLUSTER_SENTENCE) +
+    "<p class=\"note\">" + PROBE_SENTENCE + "</p>" +
+    table(
+      ["NAME", "ROLE", "CONNECTION PROBE", "OBSERVED", "REASON", "CLUSTER-ID", "AUTH", ""],
+      rows,
+      NO_CLUSTER_SENTENCE,
+      attributes,
+    ) +
+    "<p class=\"note\">" + TEST_CONNECTION_SENTENCE + "</p>" +
     listFooter()
   );
 }
 
-/** One cluster, in full. */
-export function renderClusterDetail(object) {
+/** One cluster, in full: its probe panel with the Test connection control, and
+ *  then the saved connection contract v1 carries -- every reference by name,
+ *  no value of anything. */
+export function renderClusterDetail(object, now, freshSeconds, pending) {
   const spec = (object && object.spec) || {};
   const status = (object && object.status) || {};
   const servers = Array.isArray(spec.bootstrapServers) ? spec.bootstrapServers : [];
+  const auth = spec.auth || {};
+  const ref = auth.secretRef || {};
+  const state = probeState(object, now, freshSeconds);
   return (
     "<h2>Cluster " + nameOf(object) + "</h2>" +
-    reachableBadge(status) +
+    renderProbePanel(object, { now: now, freshSeconds: freshSeconds, pending: pending === true }) +
     facts([
       ["role", cell(spec.role)],
       ["bootstrap servers", servers.length === 0 ? cell(null) : esc(servers.join(", "))],
       ["marker topic", cell(spec.markerTopic)],
       ["auth", authCell(spec)],
+      ["credential Secret", cell(ref.name)],
+      ["credential key", typeof ref.passwordKey === "string" && ref.passwordKey.length > 0
+        ? esc(ref.passwordKey)
+        : (typeof ref.name === "string" && ref.name.length > 0
+          ? "- (absent means the key every earlier release projected)"
+          : cell(null))],
+      ["TLS", auth.tls === true ? "on" : "off"],
+      ["private CA", caWords(auth.tlsCa).length === 0 ? cell(null) : caWords(auth.tlsCa)],
       ["cluster id", cell(status.clusterId)],
-      ["observed at", cell(status.observedAt)],
-      ["reason", cell(status.reason)],
+      ["probe observed at", cell(status.observedAt)],
+      ["probe reason", cell(status.reason)],
+      ["probe freshness", esc(String(state.freshSeconds)) + "s budget"],
+      ["uid", "<code id=\"cluster-uid\">" + esc(clusterUid(object)) + "</code>"],
     ])
   );
 }
 
 /** The values an empty form starts from. */
 const CLUSTER_DEFAULTS = Object.freeze({
-  name: "", servers: "", role: "source", mode: "plaintext", username: "", secret: "", tls: false,
+  name: "", servers: "", role: "source", mode: "plaintext", username: "", secret: "",
+  passwordKey: "", tls: false, tlsCaKind: "none", tlsCaName: "", tlsCaKey: "",
 });
+
+/** The three answers the private-CA control takes. `none` is the default and
+ *  means the runner image's own trust store, which is what every connection to
+ *  a publicly signed broker uses. */
+export const TLS_CA_KINDS = Object.freeze(["none", "secret", "configMap"]);
+
+/** A Kubernetes data key: the `^[-._a-zA-Z0-9]+$` the CRD spells for
+ *  `secretRef.passwordKey` and for both halves of `tlsCa`. */
+const DATA_KEY = /^[-._a-zA-Z0-9]+$/;
+
+/** True when `value` is a data key the API server will accept. */
+export function isDataKey(value) {
+  return typeof value === "string" && value.length > 0 && value.length <= 253 && DATA_KEY.test(value);
+}
 
 /** A lowercase RFC 1123 subdomain: what Kubernetes accepts as an object name,
  *  and what a Secret's name must be. */
@@ -247,6 +380,37 @@ export function validateCluster(values) {
     problems.secret = "scramSha512 needs the name of the Secret that holds the password";
   } else if (typeof v.secret === "string" && v.secret.length > 0 && !isObjectName(v.secret)) {
     problems.secret = "a Secret name is lowercase letters, digits, '-' and '.'";
+  }
+  // CONTRACT v1, THE SAME FOUR RULES `weirkeeper::connection::resolve` AND THE
+  // CRD's CEL APPLY. A CONVENIENCE and never the gate: the API server refuses
+  // three of these at admission and the resolver refuses the fourth before a
+  // Job exists. Saying so here turns a round trip into a message beside the
+  // field, and each message names the rule rather than restating the value.
+  const key = String(v.passwordKey || "").trim();
+  if (key.length > 0 && !isDataKey(key)) {
+    problems.passwordKey = "a Secret data key is letters, digits, '-', '_' and '.'";
+  }
+  if (key.length > 0 && (typeof v.secret !== "string" || v.secret.length === 0)) {
+    problems.passwordKey = "a data key belongs to a Secret; name the Secret first, or leave " +
+      "this blank for the key every earlier release projected";
+  }
+  if (v.mode === "plaintext" && v.tls === true) {
+    problems.tls = "auth mode plaintext with TLS on -- TLS without SASL -- is not supported by " +
+      "saved-connection contract v1 and is refused rather than dialled without TLS. Choose " +
+      "scramSha512 over TLS, or leave TLS off for a plaintext listener";
+  }
+  const kind = TLS_CA_KINDS.indexOf(v.tlsCaKind) === -1 ? "none" : v.tlsCaKind;
+  if (kind !== "none") {
+    if (v.tls !== true) {
+      problems.tlsCaName = "a CA verifies a TLS transport, so naming one requires TLS on";
+    }
+    if (!isObjectName(String(v.tlsCaName || "").trim())) {
+      problems.tlsCaName = "the name of the " + (kind === "secret" ? "Secret" : "ConfigMap") +
+        " in this namespace that holds the PEM CA certificate(s)";
+    }
+    if (!isDataKey(String(v.tlsCaKey || "").trim())) {
+      problems.tlsCaKey = "the data key inside it, letters, digits, '-', '_' and '.'";
+    }
   }
   return problems;
 }
@@ -299,8 +463,45 @@ export function renderClusterForm(view) {
     "<p class=\"help\">The NAME of the Secret holding the credential. The value is never read " +
     "by this page.</p>" + line("cluster-secret", "secret") + "</div>" +
     "</div>" +
+    "<div class=\"field\"><label for=\"cluster-password-key\">data key in that Secret " +
+    "(spec.auth.secretRef.passwordKey)</label>" +
+    "<input id=\"cluster-password-key\" name=\"passwordKey\" value=\"" + esc(d.passwordKey) +
+    "\"" + field("cluster-password-key", "passwordKey") + ">" +
+    "<p class=\"help\">Which entry of that Secret the controller projects. Leave it blank for " +
+    "the entry every earlier release used, which is what a KafkaCluster created before " +
+    "connection contract v1 means. This is the KEY's name, not its value: nothing on this page " +
+    "reads the Secret.</p>" + line("cluster-password-key", "passwordKey") + "</div>" +
     "<label class=\"inline\"><input id=\"cluster-tls\" name=\"tls\" type=\"checkbox\"" +
     (d.tls === true ? " checked" : "") + "> TLS</label>" +
+    line("cluster-tls", "tls") +
+    "<p class=\"help\">The only switch that turns TLS on, and it is independent of the auth " +
+    "mode: contract v1 supports scramSha512 over TLS (SASL_SSL). plaintext with TLS on is " +
+    "refused rather than dialled in the clear.</p>" +
+    "<fieldset class=\"ca\"><legend>private certificate authority " +
+    "(spec.auth.tlsCa)</legend>" +
+    "<p class=\"help\">Only when the brokers' certificates are signed by an authority the " +
+    "runner image does not already trust. Exactly one key of a Secret or a ConfigMap in this " +
+    "namespace, holding PEM certificate(s); a CA certificate is public, so a ConfigMap is an " +
+    "ordinary home for it. It replaces the default trust store for this connection and requires " +
+    "TLS on.</p>" +
+    "<div class=\"field\"><label for=\"cluster-tls-ca-kind\">CA source</label>" +
+    "<select id=\"cluster-tls-ca-kind\" name=\"tlsCaKind\">" +
+    TLS_CA_KINDS.map(
+      (kind) =>
+        "<option value=\"" + esc(kind) + "\"" + (d.tlsCaKind === kind ? " selected" : "") + ">" +
+        esc(kind === "none" ? "none (trust the runner image's own store)" : kind) + "</option>",
+    ).join("") +
+    "</select></div>" +
+    "<div class=\"field-row\">" +
+    "<div class=\"field\"><label for=\"cluster-tls-ca-name\">CA object name</label>" +
+    "<input id=\"cluster-tls-ca-name\" name=\"tlsCaName\" value=\"" + esc(d.tlsCaName) + "\"" +
+    field("cluster-tls-ca-name", "tlsCaName") + ">" +
+    line("cluster-tls-ca-name", "tlsCaName") + "</div>" +
+    "<div class=\"field\"><label for=\"cluster-tls-ca-key\">CA data key</label>" +
+    "<input id=\"cluster-tls-ca-key\" name=\"tlsCaKey\" value=\"" + esc(d.tlsCaKey) + "\"" +
+    field("cluster-tls-ca-key", "tlsCaKey") + ">" +
+    line("cluster-tls-ca-key", "tlsCaKey") + "</div>" +
+    "</div></fieldset>" +
     "<div class=\"actions\"><button type=\"submit\" class=\"primary\">Create</button></div>" +
     "</fieldset>" +
     "<div class=\"form-status\" id=\"cluster-form-status\" tabindex=\"-1\">" +
@@ -325,6 +526,25 @@ export function clusterBody(values) {
   }
   if (values.secret) {
     auth.secretRef = { name: values.secret };
+    // ABSENT IS A MEANING, so a blank key is left out rather than sent as the
+    // default: an object that omits `passwordKey` is byte-for-byte what every
+    // release before contract v1 wrote, and one that spells the default is a
+    // different object with the same behaviour. The difference matters because
+    // `spec` is immutable and the frozen execution inputs record what is here.
+    const key = String(values.passwordKey || "").trim();
+    if (key.length > 0) {
+      auth.secretRef.passwordKey = key;
+    }
+  }
+  const kind = TLS_CA_KINDS.indexOf(values.tlsCaKind) === -1 ? "none" : values.tlsCaKind;
+  if (kind !== "none") {
+    const reference = {
+      name: String(values.tlsCaName || "").trim(),
+      key: String(values.tlsCaKey || "").trim(),
+    };
+    auth.tlsCa = kind === "secret"
+      ? { secretKeyRef: reference }
+      : { configMapKeyRef: reference };
   }
   return {
     apiVersion: "logweir.dev/v1alpha1",
@@ -390,6 +610,7 @@ export async function mountClusters(node, ns, parse, lifecycle, deps) {
           "</div>",
       ),
     );
+    wireProbeTests(node, ns, parse, lifecycle, api);
     wireForm(node, ns, parse, lifecycle, api);
   } catch (error) {
     if (!cancelled(error, lifecycle) && active(lifecycle)) {
@@ -398,17 +619,172 @@ export async function mountClusters(node, ns, parse, lifecycle, deps) {
   }
 }
 
-/** Reads one cluster and renders its detail. */
-export async function mountClusterDetail(node, ns, name, parse, lifecycle) {
+/** Reads one cluster and renders its detail, with the Test connection control
+ *  wired to a re-read of the same object. */
+export async function mountClusterDetail(node, ns, name, parse, lifecycle, deps) {
+  const api = deps || API;
   try {
-    const object = await API.get(ns, PLURAL, name, readOptions(lifecycle));
+    const object = await api.get(ns, PLURAL, name, readOptions(lifecycle));
     if (!active(lifecycle)) {
       return;
     }
     replace(node, parse(renderClusterDetail(object)));
+    wireDetailProbe(node, ns, name, parse, lifecycle, api);
   } catch (error) {
     if (!cancelled(error, lifecycle) && active(lifecycle)) {
       replace(node, errorBox(error));
+    }
+  }
+}
+
+/** THE "TEST CONNECTION" CONTROL, ON THE DETAIL VIEW.
+ *
+ *  It is a READ, and the panel says so: the page re-reads this KafkaCluster and
+ *  renders whatever the controller has recorded since. It cannot make the
+ *  controller dial -- `spec` is immutable, this page's whole write surface is
+ *  five creates and one suspend patch, and the re-probe cadence is the probe
+ *  Job's own TTL -- so a control that claimed to force a dial would be lying in
+ *  the same way a stale probe rendered as current lies.
+ *
+ *  IT IS BOUND TO THE ROUTE'S LIFETIME LIKE EVERY OTHER READ (PLAT-13.1): the
+ *  answer is dropped when the view is gone, so a slow re-read cannot paint a
+ *  probe from namespace A over namespace B. */
+function wireDetailProbe(node, ns, name, parse, lifecycle, api) {
+  const form = node.querySelector("form.probe-test");
+  if (form === null) {
+    return;
+  }
+  let reading = false;
+  listen(form, "submit", (event) => {
+    event.preventDefault();
+    if (!active(lifecycle) || reading) {
+      return;
+    }
+    reading = true;
+    const button = form.querySelector("button");
+    if (button !== null) {
+      button.disabled = true;
+    }
+    api.get(ns, PLURAL, name, readOptions(lifecycle)).then(
+      (object) => {
+        reading = false;
+        if (!active(lifecycle)) {
+          return;
+        }
+        replace(node, parse(renderClusterDetail(object)));
+        wireDetailProbe(node, ns, name, parse, lifecycle, api);
+      },
+      (error) => {
+        reading = false;
+        if (cancelled(error, lifecycle) || !active(lifecycle)) {
+          return;
+        }
+        const panel = node.querySelector("#cluster-probe-line");
+        if (panel !== null) {
+          replace(panel, parse(renderProbeReadFailure(error)));
+        }
+        if (button !== null) {
+          button.disabled = false;
+        }
+      },
+    );
+  }, lifecycle);
+}
+
+/** What a failed re-read says. THE API SERVER'S OWN reason and message,
+ *  verbatim, exactly as `errorBox` renders them elsewhere: the page made no
+ *  authorisation decision and must not narrate one, and a re-read that was
+ *  refused is not an observation about the broker. */
+export function renderProbeReadFailure(error) {
+  const e = error || {};
+  const reason = typeof e.reason === "string" && e.reason.length > 0 ? e.reason : "";
+  const message = typeof e.message === "string" ? e.message : String(e);
+  return (
+    "<span class=\"refusal\">Test connection could not re-read this KafkaCluster, so the " +
+    "observation above is unchanged and is not a statement about right now" +
+    (reason.length === 0 ? "" : " (" + esc(reason) + ")") + ": " + esc(message) + "</span>"
+  );
+}
+
+/** The per-row Test connection controls on the LIST view. Each one re-reads
+ *  its own cluster by name and replaces THAT row's probe cells; the rest of the
+ *  page -- the create form's draft included -- is untouched, which is why this
+ *  is not a re-mount. */
+function wireProbeTests(node, ns, parse, lifecycle, api) {
+  for (const form of node.querySelectorAll("form.probe-test")) {
+    wireRowProbe(node, ns, parse, lifecycle, api, form);
+  }
+}
+
+function wireRowProbe(node, ns, parse, lifecycle, api, form) {
+  const name = form.getAttribute("data-probe-name");
+  const uid = form.getAttribute("data-probe-uid");
+  let reading = false;
+  listen(form, "submit", (event) => {
+    event.preventDefault();
+    if (!active(lifecycle) || reading || typeof name !== "string" || name.length === 0) {
+      return;
+    }
+    reading = true;
+    const button = form.querySelector("button");
+    if (button !== null) {
+      button.disabled = true;
+    }
+    api.get(ns, PLURAL, name, readOptions(lifecycle)).then(
+      (object) => {
+        reading = false;
+        if (button !== null) {
+          button.disabled = false;
+        }
+        if (!active(lifecycle)) {
+          return;
+        }
+        // THE UID IS CHECKED BEFORE ANYTHING IS PAINTED. A cluster deleted and
+        // recreated under the same name between the list read and this one is
+        // a DIFFERENT connection, and writing its probe into the old row would
+        // be the exact substitution this task forbids everywhere else.
+        if (clusterUid(object) !== uid) {
+          paintRow(node, parse, uid, renderRecreatedRow(name, uid, clusterUid(object)));
+          return;
+        }
+        paintRow(node, parse, uid, probeLine(probeState(object)));
+      },
+      (error) => {
+        reading = false;
+        if (button !== null) {
+          button.disabled = false;
+        }
+        if (cancelled(error, lifecycle) || !active(lifecycle)) {
+          return;
+        }
+        paintRow(node, parse, uid, renderProbeReadFailure(error));
+      },
+    );
+  }, lifecycle);
+}
+
+/** The sentence a row gets when the name it re-read answers to a different
+ *  object than the one the row is about. */
+export function renderRecreatedRow(name, was, now) {
+  return (
+    "<span class=\"refusal\">The KafkaCluster named <code>" + esc(name) + "</code> is no longer " +
+    "the object this row is about: this row is uid <code>" + esc(was) + "</code> and that name " +
+    "now answers to uid <code>" + esc(now) + "</code>. Nothing was painted over: reload the " +
+    "list to see what this namespace holds.</span>"
+  );
+}
+
+/** Replaces the probe cell of the row carrying `uid`. Finds the row by its
+ *  recorded identity rather than by counting, so a list that changed under the
+ *  read cannot be edited in the wrong place. */
+function paintRow(node, parse, uid, html) {
+  for (const row of node.querySelectorAll("tr[data-cluster-uid]")) {
+    if (row.getAttribute("data-cluster-uid") !== uid) {
+      continue;
+    }
+    const cells = row.querySelectorAll("td");
+    if (cells.length > 2) {
+      replace(cells[2], parse(html));
     }
   }
 }
@@ -423,7 +799,11 @@ export function readClusterValues(form) {
     mode: String(e.mode.value),
     username: String(e.username.value).trim(),
     secret: String(e.secret.value).trim(),
+    passwordKey: String(e.passwordKey.value).trim(),
     tls: e.tls.checked === true,
+    tlsCaKind: String(e.tlsCaKind.value),
+    tlsCaName: String(e.tlsCaName.value).trim(),
+    tlsCaKey: String(e.tlsCaKey.value).trim(),
   };
 }
 

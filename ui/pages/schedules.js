@@ -25,6 +25,19 @@
 // refuses a second click while its patch is pending and reports a refusal in
 // the schedule's own card, leaving the rest of the page -- the create form's
 // draft included -- where it was.
+//
+// THE SOURCE IS CHOSEN, NOT TYPED (PLAT-07.2). `spec.sourceRef.name` used to be
+// a free-text input, so a typo was a schedule the controller could not resolve
+// and a correct name was a reference that silently followed whatever object
+// held that name next. It is now `../select.js`'s searchable selector: the
+// draft keeps the chosen cluster's UID beside its name, the UID is what the
+// form is bound to, and a UID that no longer resolves is a REFUSAL naming it
+// -- including the case where a different object has since taken that name,
+// which is what a KafkaCluster deleted and recreated looks like from here. The
+// request body still spells `sourceRef.name`, because that is what the CRD
+// takes; the name it spells is the one the resolved object carries NOW, so a
+// cluster renamed since the draft was started is sent correctly rather than
+// under its old name.
 
 import { apiClient } from "../client.js";
 import {
@@ -58,11 +71,20 @@ import {
   rfc3339,
   table,
 } from "../render.js";
+import {
+  clusterName,
+  clusterUid,
+  filterSelectorOptions,
+  readClusterSelection,
+  renderClusterSelector,
+  resolveClusterSelection,
+} from "../select.js";
 import { focusFirstProblem, isObjectName, itemsOf } from "./clusters.js";
 import { isRecoveryPoint, recoveryPoints, restorePointRoute } from "./restore-wizard.js";
 
 const PLURAL = "backupschedules";
 const BACKUPS = "backups";
+const CLUSTERS = "kafkaclusters";
 
 const API = apiClient();
 
@@ -75,7 +97,8 @@ export const SUSPEND_FORM = "schedule-suspend";
 /** The fields a draft of the create form keeps: names, a cron line, a topic
  *  list, an archive URL, a Secret NAME and two numbers. No credential. */
 export const SCHEDULE_DRAFT_FIELDS = Object.freeze([
-  "name", "cron", "source", "topics", "archive", "archiveSecret", "keepLast", "keepDays",
+  "name", "cron", "source", "sourceUid", "topics", "archive", "archiveSecret",
+  "keepLast", "keepDays",
 ]);
 
 /** The API server's field paths, mapped to the create form's inputs. */
@@ -278,8 +301,8 @@ export function renderRetentionPanel(object) {
 }
 
 const SCHEDULE_DEFAULTS = Object.freeze({
-  name: "", cron: "0 * * * *", source: "", topics: "", archive: "", archiveSecret: "logweir-s3",
-  keepLast: "", keepDays: "",
+  name: "", cron: "0 * * * *", source: "", sourceUid: "", topics: "", archive: "",
+  archiveSecret: "logweir-s3", keepLast: "", keepDays: "",
 });
 
 /** The five glob metacharacters `logweir_core::guard::GLOB_METACHARACTERS`
@@ -308,7 +331,7 @@ export function validateSchedule(values) {
       "@daily or @weekly";
   }
   if (!isObjectName(v.source)) {
-    problems.source = "the name of a KafkaCluster in this namespace";
+    problems.source = "choose a saved KafkaCluster in this namespace";
   }
   const topics = String(v.topics || "").split(",").map((t) => t.trim()).filter((t) => t.length > 0);
   if (topics.length === 0) {
@@ -361,12 +384,21 @@ export function renderScheduleForm(view) {
     field("schedule-cron", "cron") + ">" +
     "<p class=\"help\">minute hour day-of-month month day-of-week, in UTC.</p>" +
     line("schedule-cron", "cron") + "</div>" +
-    "<div class=\"field\"><label for=\"schedule-source\">source KafkaCluster</label>" +
-    "<input id=\"schedule-source\" name=\"source\" required value=\"" + esc(d.source) + "\"" +
-    field("schedule-source", "source") + ">" +
-    "<p class=\"help\">The name of a KafkaCluster in this namespace.</p>" +
-    line("schedule-source", "source") + "</div>" +
     "</div>" +
+    renderClusterSelector({
+      id: "schedule-source",
+      name: "source",
+      label: "source KafkaCluster",
+      help: "The saved connection each run of this schedule reads from. Chosen by identity: " +
+        "the draft remembers this object's uid, not its name.",
+      prefer: "source",
+      clusters: v.clusters,
+      selection: { uid: d.sourceUid, name: d.source },
+      now: v.now,
+      freshSeconds: v.freshSeconds,
+      errors: errors,
+    }) +
+    line("schedule-source", "source") +
     "<div class=\"field\"><label for=\"schedule-topics\">topics, comma separated -- names, never patterns</label>" +
     "<input id=\"schedule-topics\" name=\"topics\" required value=\"" + esc(d.topics) + "\"" +
     field("schedule-topics", "topics") + ">" +
@@ -438,17 +470,62 @@ export function scheduleBody(values) {
   };
 }
 
-/** Checks the values, then creates the schedule idempotently by name. */
-export async function submitSchedule(ns, values, deps) {
+/** The message a schedule create is refused with when its chosen source no
+ *  longer resolves. Named so the same words are asserted rather than guessed. */
+export function sourceRefusal(resolved) {
+  const r = resolved || {};
+  if (r.state === "recreated") {
+    return (
+      "the KafkaCluster this form selected (uid " + r.uid + ") is gone and a different object " +
+      "now answers to the name " + r.name + " (uid " + r.recreatedUid + "). A recreated " +
+      "connection is a different set of brokers reached with a different credential, so " +
+      "nothing was sent; choose the connection you mean"
+    );
+  }
+  return (
+    "the KafkaCluster this form selected (" + r.name + ", uid " + r.uid + ") is not in this " +
+    "namespace any more, so nothing was sent; choose a saved connection"
+  );
+}
+
+/** Checks the values against the page's own rules AND against the saved
+ *  connections the page actually read, then creates the schedule idempotently
+ *  by name.
+ *
+ *  `clusters` is the list this page read. RESOLVING AGAINST IT IS THE POINT:
+ *  the draft carries a UID, and a UID that no longer answers -- because the
+ *  cluster was deleted, or deleted and recreated under the same name while this
+ *  form sat open -- is refused here, before a request, rather than sent as a
+ *  name that would resolve to whatever holds it now. The NAME sent is the one
+ *  the resolved object carries at this moment, so a rename between opening the
+ *  form and submitting it is followed rather than fought.
+ *
+ *  Called without `clusters` -- which is what a caller that has not read them
+ *  looks like -- it falls back to the typed values, which is the pre-PLAT-07.2
+ *  behaviour and is what keeps an existing draft usable. */
+export async function submitSchedule(ns, values, deps, clusters) {
   const problems = validateSchedule(values);
   if (Object.keys(problems).length > 0) {
     throw invalidInput(problems);
   }
-  return createOnce(deps || API, ns, PLURAL, scheduleBody(values), SCHEDULE_SPEC_RULES);
+  let sent = values;
+  if (clusters !== undefined && clusters !== null) {
+    const resolved = resolveClusterSelection(clusters, {
+      uid: values.sourceUid,
+      name: values.source,
+    });
+    if (resolved.state !== "selected") {
+      throw invalidInput({ source: sourceRefusal(resolved) });
+    }
+    sent = Object.assign({}, values, { source: resolved.name, sourceUid: resolved.uid });
+  }
+  return createOnce(deps || API, ns, PLURAL, scheduleBody(sent), SCHEDULE_SPEC_RULES);
 }
 
-/** What the create form renders from in namespace `ns`. */
-export function scheduleFormView(ns) {
+/** What the create form renders from in namespace `ns`: its draft, its record,
+ *  the messages the record's failure carries, and the saved connections its
+ *  source selector offers. */
+export function scheduleFormView(ns, clusters, now, freshSeconds) {
   const key = formKey(ns, SCHEDULE_FORM);
   const state = mutationFor(key).state;
   if (state.phase === "succeeded") {
@@ -458,6 +535,9 @@ export function scheduleFormView(ns) {
     draft: readDraft(key),
     state: state,
     errors: state.phase === "failed" ? fieldErrors(state.error, SCHEDULE_FIELD_PATHS) : null,
+    clusters: clusters,
+    now: now,
+    freshSeconds: freshSeconds,
   };
 }
 
@@ -544,15 +624,21 @@ export async function mountSchedules(node, ns, parse, lifecycle, deps) {
     // The schedules AND the runs they produced: a schedule card's recovery
     // points are `Backup` objects naming it, and there is no field on the
     // schedule that carries them.
+    // THE SCHEDULES, THE RUNS THEY PRODUCED, AND THE SAVED CONNECTIONS. The
+    // third read is the source selector's list: the form offers a choice among
+    // objects that exist, and the submit resolves the chosen UID against this
+    // same list rather than against a name typed some time ago.
     const collections = await Promise.all([
       api.list(ns, PLURAL, readOptions(lifecycle)),
       api.list(ns, BACKUPS, readOptions(lifecycle)),
+      api.list(ns, CLUSTERS, readOptions(lifecycle)),
     ]);
     if (!active(lifecycle)) {
       return;
     }
     const collection = collections[0];
     const backups = collections[1];
+    const clusters = collections[2];
     const objects = itemsOf(collection);
     const panels = objects.map((object) => renderScheduleCard(ns, object, backups)).join("");
     replace(
@@ -560,10 +646,10 @@ export async function mountSchedules(node, ns, parse, lifecycle, deps) {
       parse(
         renderScheduleList(collection) + panels +
           "<div class=\"form-slot\" id=\"schedule-form-slot\">" +
-          renderScheduleForm(scheduleFormView(ns)) + "</div>",
+          renderScheduleForm(scheduleFormView(ns, clusters)) + "</div>",
       ),
     );
-    wire(node, ns, parse, lifecycle, api, objects);
+    wire(node, ns, parse, lifecycle, api, objects, clusters);
   } catch (error) {
     if (!cancelled(error, lifecycle) && active(lifecycle)) {
       replace(node, errorBox(error));
@@ -574,10 +660,12 @@ export async function mountSchedules(node, ns, parse, lifecycle, deps) {
 /** The create form's values, read from the DOM. */
 export function readScheduleValues(form) {
   const e = form.elements;
+  const source = readClusterSelection(form, "schedule-source");
   return {
     name: String(e.name.value).trim(),
     cron: String(e.cron.value).trim(),
-    source: String(e.source.value).trim(),
+    source: source.name,
+    sourceUid: source.uid,
     topics: String(e.topics.value),
     archive: String(e.archive.value).trim(),
     archiveSecret: String(e.archiveSecret.value).trim(),
@@ -586,11 +674,11 @@ export function readScheduleValues(form) {
   };
 }
 
-function wire(node, ns, parse, lifecycle, api, objects) {
+function wire(node, ns, parse, lifecycle, api, objects, clusters) {
   for (const toggle of node.querySelectorAll("form.suspend")) {
     wireToggle(node, ns, parse, lifecycle, api, objects, toggle);
   }
-  wireCreate(node, ns, parse, lifecycle, api);
+  wireCreate(node, ns, parse, lifecycle, api, clusters);
 }
 
 function wireToggle(node, ns, parse, lifecycle, api, objects, toggle) {
@@ -627,7 +715,7 @@ function wireToggle(node, ns, parse, lifecycle, api, objects, toggle) {
   }, lifecycle);
 }
 
-function wireCreate(node, ns, parse, lifecycle, api) {
+function wireCreate(node, ns, parse, lifecycle, api, clusters) {
   const form = node.querySelector("#schedule-form");
   if (form === null) {
     return;
@@ -649,6 +737,7 @@ function wireCreate(node, ns, parse, lifecycle, api) {
   };
   listen(form, "input", remember, lifecycle);
   listen(form, "change", remember, lifecycle);
+  wireSourceSelector(node, form, remember, lifecycle);
   watchMutation(node, key, mutation, (state) => {
     if (state.phase === "succeeded") {
       dropDraft(key);
@@ -659,8 +748,8 @@ function wireCreate(node, ns, parse, lifecycle, api) {
     if (slot === null) {
       return;
     }
-    replace(slot, parse(renderScheduleForm(scheduleFormView(ns))));
-    wireCreate(node, ns, parse, lifecycle, api);
+    replace(slot, parse(renderScheduleForm(scheduleFormView(ns, clusters))));
+    wireCreate(node, ns, parse, lifecycle, api, clusters);
     if (state.phase === "failed") {
       focusFirstProblem(node, "#schedule-form-status");
     }
@@ -672,6 +761,52 @@ function wireCreate(node, ns, parse, lifecycle, api) {
     }
     const values = readScheduleValues(form);
     keepDraft(key, values, SCHEDULE_DRAFT_FIELDS);
-    mutation.run(() => submitSchedule(ns, values, api));
+    mutation.run(() => submitSchedule(ns, values, api, clusters));
   }, lifecycle);
+}
+
+/** THE SOURCE SELECTOR'S TWO BEHAVIOURS, both local to the form.
+ *
+ *  The search box filters the options and nothing else -- it issues no request,
+ *  changes no selection and never removes an option, so the answer the form
+ *  would submit is the same before and after a search. Changing the select
+ *  writes the chosen object's NAME back into the hidden input beside it, so the
+ *  draft keeps the pair `{uid, name}` a refusal has to print even after the
+ *  object is gone. */
+export function wireSourceSelector(node, form, remember, lifecycle) {
+  const search = form.querySelector("#schedule-source-search");
+  const select = form.querySelector("#schedule-source");
+  if (select === null) {
+    return;
+  }
+  const hiddenName = form.querySelector("#schedule-source-name");
+  const hiddenUid = form.querySelector("#schedule-source-uid");
+  const note = form.querySelector("#schedule-source-no-match");
+  const sync = () => {
+    const option = select.options === undefined ? null : select.options[select.selectedIndex];
+    if (hiddenUid !== null) {
+      hiddenUid.value = String(select.value === undefined || select.value === null ? "" : select.value);
+    }
+    if (hiddenName !== null && option !== null && option !== undefined) {
+      hiddenName.value = String(option.getAttribute("data-name") || "");
+    }
+  };
+  listen(select, "change", () => {
+    if (!active(lifecycle)) {
+      return;
+    }
+    sync();
+    remember();
+  }, lifecycle);
+  if (search !== null) {
+    listen(search, "input", () => {
+      if (!active(lifecycle)) {
+        return;
+      }
+      const visible = filterSelectorOptions(select, search.value);
+      if (note !== null) {
+        note.hidden = visible > 0;
+      }
+    }, lifecycle);
+  }
 }
