@@ -113,7 +113,9 @@ fn contract(bundle: &ApprovalBundleBytes) -> ExecutionContract {
         // approval authorization with none of the optional v2 blocks.
         version: wire::ContractVersion::V2,
         authorization_kind: wire::AuthorizationKind::Approval,
-        scope_sha256: None,
+        authorization_sha256: None,
+        authorization_sidecar_sha256: None,
+        authorization_keys_sha256: None,
         rehearsal_schedule_uid: None,
         policy_snapshot_sha256: None,
         confirmation_key_sha256: None,

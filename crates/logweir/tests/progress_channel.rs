@@ -175,6 +175,69 @@ fn no_teardown_key_is_printed_when_the_attestation_was_not_persisted() {
     );
 }
 
+/// **F5: the new lines must fit in the controller's key-scan window.**
+///
+/// `weirkeeper::controllers::backup::KEY_SCAN_TAIL_LINES = 8` is how many
+/// trailing pod-log lines the controller reads when it scans for evidence keys
+/// BY NAME. That constant lives in `weirkeeper` (D3 W2/W13's file) and is not
+/// edited here; it is MIRRORED below so that a runner-side change which
+/// overruns it fails loudly in the file that caused it, instead of silently
+/// pushing `topic-preflight=` — erratum E10(c)'s only producer for
+/// `Restore.status.topicPreflight` — out of the window.
+///
+/// Measured for a passing restore at the time `teardown-key=` landed: summary,
+/// `topic-preflight=`, `teardown-key=`, `scorecard-key=`, `sidecar-key=`,
+/// `offset-report-key=` — six, plus the `drill finished` tracing line that
+/// production emits and this in-process seam does not, for **seven of eight**.
+/// One slot of the two the constant's own doc comment reserves as tolerance is
+/// now spent, and the orchestrator carries "raise the constant" to W2.
+#[test]
+fn the_trailing_lines_a_passing_restore_prints_fit_the_controllers_scan_window() {
+    /// MIRRORED from `weirkeeper::controllers::backup::KEY_SCAN_TAIL_LINES`.
+    /// A `weirkeeper` dependency here would invert the crate layering, so the
+    /// number is copied and this comment is the join.
+    const KEY_SCAN_TAIL_LINES: usize = 8;
+    /// The `drill finished` line `tracing` emits in production. `run_with`
+    /// installs no subscriber (its own doc comment says why), so the child
+    /// below does not print it and the budget must account for it by hand.
+    const PRODUCTION_TRACING_LINES: usize = 1;
+
+    let stdout = child_stdout("the_progress_child_runs_one_restore_and_exits");
+    let lines: Vec<&str> = stdout.lines().collect();
+    // Everything from the summary line onwards: the summary is the last line
+    // that is NOT a key line, so the controller's window has to reach past it
+    // to see the first key.
+    let summary_at = lines
+        .iter()
+        .rposition(|l| l.starts_with("run ") && l.contains("outcome"))
+        .unwrap_or_else(|| panic!("no summary line in:\n{stdout}"));
+    let trailing = lines.len() - summary_at;
+    assert!(
+        trailing + PRODUCTION_TRACING_LINES <= KEY_SCAN_TAIL_LINES,
+        "a passing restore's trailing block is {trailing} lines, and production adds \
+         {PRODUCTION_TRACING_LINES} more, against a {KEY_SCAN_TAIL_LINES}-line scan window. \
+         One more trailing line pushes `topic-preflight=` out of it — and because the scan \
+         matches by key NAME, the failure is a silently absent status field and not an \
+         error. Either drop a line here or raise KEY_SCAN_TAIL_LINES in \
+         crates/weirkeeper/src/controllers/backup.rs.\n{stdout}"
+    );
+    // And every key a controller reads IS inside the window, counted from the
+    // end exactly as the controller counts.
+    let window = &lines[lines.len() - (KEY_SCAN_TAIL_LINES - PRODUCTION_TRACING_LINES)..];
+    for prefix in [
+        "topic-preflight=",
+        wire::TEARDOWN_KEY_PREFIX,
+        "scorecard-key=",
+        "sidecar-key=",
+        "offset-report-key=",
+    ] {
+        assert!(
+            window.iter().any(|l| l.starts_with(prefix)),
+            "`{prefix}` is outside the controller's {KEY_SCAN_TAIL_LINES}-line tail:\n{stdout}"
+        );
+    }
+}
+
 /// **THE MUTANT: a progress line carrying a credential.**
 ///
 /// Two halves, and both are needed. The first proves the filter refuses every
@@ -194,6 +257,48 @@ fn the_channel_is_a_filter_and_the_only_producer_goes_through_it() {
             "{forbidden:?} reached stdout:\n{stdout}"
         );
     }
+}
+
+/// **F6: `teardown-key=` is gated on the exit code, so interface I9's
+/// "`refusal-reason=` is the process's FINAL stdout line for exit 3" holds
+/// structurally.**
+///
+/// This is a SOURCE lint and not a runtime row, and the reason is worth
+/// stating: the state it guards is unreachable. A run refused by a guard has
+/// no phase-9-attested scorecard, so no runtime mutant can make the ungated
+/// version print anything — I planted `if true {` in place of the gate and the
+/// whole suite stayed green. An invariant that holds only because the state
+/// never occurs is one a future change breaks silently, so the guard is the
+/// gate's presence rather than its effect.
+///
+/// `crates/logweir/tests/execution_contract_v2.rs::
+/// a_guard_refusal_ends_stdout_with_the_refusal_reason_line` observes the
+/// invariant itself on a real exit-3 process.
+#[test]
+fn the_teardown_key_line_is_gated_on_the_exit_code() {
+    let mod_rs = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("src/drill/mod.rs"),
+    )
+    .expect("read drill/mod.rs");
+    let gate = "if code != ExitCode::GuardRefused {";
+    let print = "TEARDOWN_KEY_PREFIX";
+    let gate_at = mod_rs
+        .find(gate)
+        .unwrap_or_else(|| panic!("`{gate}` must guard the teardown key line"));
+    let print_at = mod_rs
+        .find(print)
+        .unwrap_or_else(|| panic!("the teardown key line must exist"));
+    assert!(
+        gate_at < print_at,
+        "interface I9 puts `refusal-reason=` last on exit 3; the teardown key line must sit \
+         behind an exit-code gate, not in front of one"
+    );
+    // The gate and the print are within a few lines of each other, so a
+    // coincidental earlier match cannot satisfy this.
+    assert!(
+        mod_rs[gate_at..print_at].lines().count() < 12,
+        "the gate found is not the one guarding the teardown key line"
+    );
 }
 
 /// Source lint: `progress_phase_line` is the ONLY producer of the line.
