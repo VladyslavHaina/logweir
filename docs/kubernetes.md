@@ -1436,11 +1436,14 @@ pending reservation during the handoff.
 The controller has no timer and no leader lease: it re-examines every schedule
 every 30 seconds (sooner when a retry delay expires first), works out which slot
 is due, and reserves before it creates. A slot that came due more than
-`spec.startingDeadlineSeconds` — **absent means 3600, the one-hour horizon an
-older controller hard-coded** — before the controller looked is **skipped**,
-unless `catchUpPolicy: Latest` lets the most recent one still run. A controller
-restarted after a week must not fire six days of backlog, because a `Backup` for
-a window nobody is waiting for costs the same broker read as one somebody is.
+`spec.startingDeadlineSeconds` before the controller looked is **skipped**,
+unless `catchUpPolicy: Latest` lets the most recent one still run. **That field
+is absent on every schedule stored before it existed, and absent means 3600** —
+so an unconfigured schedule still skips a slot that came due more than **one
+hour** before the controller looked, byte for byte the horizon an older
+controller hard-coded. A controller restarted after a week must not fire six
+days of backlog, because a `Backup` for a window nobody is waiting for costs the
+same broker read as one somebody is.
 
 A skip is a fact, not a silence. It lands in `status.missedSlots` with a `Ready`
 condition whose reason is `SlotMissed`, and in the older single-valued
