@@ -242,6 +242,17 @@ pub struct SourceSpec {
     #[serde(default = "latest")]
     pub backup: String,
     pub topics: Vec<String>,
+    /// **Execution contract v2** (decision D3 §5.5): the recovery point this
+    /// plan is bound to, re-verified by the runner against the archive before
+    /// any data-plane work.
+    ///
+    /// `#[serde(default)]` — absent is v1's behaviour exactly: the archive set
+    /// comes from `backup` above and no binding check runs. The type and the
+    /// reasoning live in
+    /// [`crate::execution_contract::PointBinding`], beside the version that
+    /// gates it.
+    #[serde(default)]
+    pub point: Option<crate::execution_contract::PointBinding>,
 }
 fn latest() -> String {
     "latestCompleted".into()

@@ -6,8 +6,35 @@
 //! before it constructs any data-plane client.  Keeping the names here makes
 //! the controller and runner share one wire contract without introducing a
 //! dependency between their crates.
+//!
+//! # Version 2 (decision D3 §8, Amendment I)
+//!
+//! [`VERSION`] is `"2"`. The bump is the whole point of the version existing:
+//! v2 carries three things a v1 runner would silently not do — the recovery
+//! **point binding** (D3 §5.5), the **standing rehearsal authorization**
+//! (D3 §4.3) and the **progress / teardown stdout lines** (D3 §2.4) — so an
+//! old binary must refuse the new argument *before dispatch* rather than run a
+//! plan whose checks it does not implement. It does: the argv handshake is
+//! `VERSION_ARG` and an old build's exact-match on `"1"` rejects `"2"`.
+//!
+//! **Additive, and v1 documents still load and verify byte for byte.** Every
+//! v2 field is a new environment variable or a new optional block in an
+//! existing document; nothing v1 wrote changes shape, and no v1 digest moves.
+//! What v1 does NOT get is permission to carry v2 material — see
+//! [`ContractVersion`] for the exact rule and the reason it is not a courtesy.
 
-pub const VERSION: &str = "1";
+use crate::rehearsal_scope::{RehearsalScope, MODE_SCRATCH};
+use serde::{Deserialize, Serialize};
+
+/// The execution contract this build implements and the controller stamps
+/// into every new Restore Job.
+pub const VERSION: &str = "2";
+/// The tag-1 contract. Still *accepted* by this build, under the one narrow
+/// transition [`ContractVersion::V1`] documents.
+pub const VERSION_V1: &str = "1";
+/// The current contract, spelled out so a reader comparing against a literal
+/// does not have to know whether [`VERSION`] has moved on.
+pub const VERSION_V2: &str = "2";
 pub const VERSION_ARG: &str = "--execution-contract-version";
 
 pub const VERSION_ENV: &str = "LOGWEIR_EXECUTION_CONTRACT_VERSION";
@@ -24,6 +51,12 @@ pub const APPROVAL_SIDECAR_SHA256_ENV: &str = "LOGWEIR_EXECUTION_APPROVAL_SIDECA
 pub const APPROVER_KEY_SHA256_ENV: &str = "LOGWEIR_EXECUTION_APPROVER_KEY_SHA256";
 pub const ALLOWED_CLUSTERS_SHA256_ENV: &str = "LOGWEIR_EXECUTION_ALLOWED_CLUSTERS_SHA256";
 
+/// The MANDATORY core, unchanged from v1 and all-or-nothing in both versions.
+///
+/// It stays thirteen on purpose. A v2 variable added here would make every v1
+/// Job's environment "incomplete" the moment this binary shipped, which is the
+/// opposite of additive — the v2 additions live in [`V2_ENV`] and are
+/// conditional by block.
 pub const ALL_ENV: [&str; 13] = [
     VERSION_ENV,
     SUBJECT_API_VERSION_ENV,
@@ -39,3 +72,769 @@ pub const ALL_ENV: [&str; 13] = [
     APPROVER_KEY_SHA256_ENV,
     ALLOWED_CLUSTERS_SHA256_ENV,
 ];
+
+// ---------------------------------------------------------------------------
+// v2 additions (D0 "bundle contract v2", D3 §4.3 and §5.5)
+// ---------------------------------------------------------------------------
+
+/// Which authorization this run was created under: [`AUTHORIZATION_KIND_APPROVAL`]
+/// (the per-run `Approval`, tag 1's only shape) or [`AUTHORIZATION_KIND_STANDING`]
+/// (D3 §4.3's standing rehearsal authorization).
+///
+/// **Absent means `approval`.** That is the compatible direction and the
+/// fail-closed one at the same time: a standing-authorized run *needs* the
+/// scope block to be admitted at all, so an environment that forgot to say
+/// `standing` gets the ordinary path and the scope file it mounted is refused
+/// as unexpected, rather than a scope check being silently skipped.
+pub const AUTHORIZATION_KIND_ENV: &str = "LOGWEIR_EXECUTION_AUTHORIZATION_KIND";
+/// `sha256:<hex>` over the exact mounted rehearsal scope document bytes, in
+/// the same shape and for the same reason as `PLAN_SHA256_ENV`.
+pub const SCOPE_SHA256_ENV: &str = "LOGWEIR_EXECUTION_SCOPE_SHA256";
+/// The `RehearsalSchedule` UID the standing authorization names as its
+/// subject. Carried so the runner's refusal can say WHICH schedule's
+/// authorization it was executing under without parsing the document.
+pub const REHEARSAL_SCHEDULE_UID_ENV: &str = "LOGWEIR_EXECUTION_REHEARSAL_SCHEDULE_UID";
+/// `sha256:<hex>` over the mounted approval-policy snapshot (D0: "policy
+/// snapshot/digest"). **PLAT-19.2 fills this half**; this contract only has to
+/// be able to carry it, and to refuse a v1 invocation that tries to.
+pub const POLICY_SNAPSHOT_SHA256_ENV: &str = "LOGWEIR_EXECUTION_POLICY_SNAPSHOT_SHA256";
+/// `sha256:<hex>` over the mounted confirmation-issuer public key — the second
+/// of D0's "both public keys". `APPROVER_KEY_SHA256_ENV` is the first.
+pub const CONFIRMATION_KEY_SHA256_ENV: &str = "LOGWEIR_EXECUTION_CONFIRMATION_KEY_SHA256";
+
+/// Every v2-only variable. **Each is optional**, in the blocks
+/// [`ContractVersion`] documents; none of them may appear under v1.
+pub const V2_ENV: [&str; 5] = [
+    AUTHORIZATION_KIND_ENV,
+    SCOPE_SHA256_ENV,
+    REHEARSAL_SCHEDULE_UID_ENV,
+    POLICY_SNAPSHOT_SHA256_ENV,
+    CONFIRMATION_KEY_SHA256_ENV,
+];
+
+/// The union, and what a reader uses to answer "is there a contract in this
+/// environment at all".
+///
+/// It has to be the union rather than [`ALL_ENV`]: a Job that set only v2
+/// variables — a controller bug, or a partially applied template — must be
+/// diagnosed as an incomplete contract, not treated as a credential-free
+/// standalone invocation that runs with no contract checks whatsoever.
+pub const ALL_ENV_ANY: [&str; 18] = [
+    VERSION_ENV,
+    SUBJECT_API_VERSION_ENV,
+    SUBJECT_KIND_ENV,
+    SUBJECT_NAME_ENV,
+    SUBJECT_NAMESPACE_ENV,
+    SUBJECT_UID_ENV,
+    APPROVAL_NAME_ENV,
+    APPROVAL_UID_ENV,
+    PLAN_SHA256_ENV,
+    APPROVAL_SHA256_ENV,
+    APPROVAL_SIDECAR_SHA256_ENV,
+    APPROVER_KEY_SHA256_ENV,
+    ALLOWED_CLUSTERS_SHA256_ENV,
+    AUTHORIZATION_KIND_ENV,
+    SCOPE_SHA256_ENV,
+    REHEARSAL_SCHEDULE_UID_ENV,
+    POLICY_SNAPSHOT_SHA256_ENV,
+    CONFIRMATION_KEY_SHA256_ENV,
+];
+
+pub const AUTHORIZATION_KIND_APPROVAL: &str = "approval";
+pub const AUTHORIZATION_KIND_STANDING: &str = "standing";
+
+/// WHICH authorization a run executes under, as a closed set rather than a
+/// string a reader has to interpret.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum AuthorizationKind {
+    /// The per-run `Approval` and its DSSE sidecar. Tag 1's only shape, and
+    /// what an absent [`AUTHORIZATION_KIND_ENV`] means.
+    #[default]
+    Approval,
+    /// D3 §4.3's standing rehearsal authorization: one signed scope, proven to
+    /// contain each slot's rendered plan, twice — once by the controller
+    /// before the `Restore` exists, once by the runner against the mounted
+    /// bundle before any data-plane client is constructed.
+    Standing,
+}
+
+impl AuthorizationKind {
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            AUTHORIZATION_KIND_APPROVAL => Some(Self::Approval),
+            AUTHORIZATION_KIND_STANDING => Some(Self::Standing),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Approval => AUTHORIZATION_KIND_APPROVAL,
+            Self::Standing => AUTHORIZATION_KIND_STANDING,
+        }
+    }
+}
+
+/// The v1/v2 decision, **explicit in the type** so no call site can carry the
+/// version as a `String` and compare it with a literal it spelled itself.
+///
+/// # What v1 still buys, and what it does not
+///
+/// D0: "existing bundle v1 remains accepted only for already-created legacy
+/// governed Restores under the documented transition", and D3 §8 Amendment I
+/// repeats it. A runner cannot read a `Restore`'s creation timestamp — it
+/// holds no cluster credential at all — so "already-created legacy" is decided
+/// from the only thing the runner can see: **a v1 invocation may carry no v2
+/// material.** No point binding in the plan, no standing authorization, no
+/// policy snapshot, no confirmation key. Those are exactly the things a
+/// Restore created *after* the v2 rollout has, so a v1 contract carrying any
+/// of them is a new Restore wearing an old version number, and it is refused.
+///
+/// This is the rule the mutant "v1 accepted for a new Restore" has to break,
+/// and it is checkable with no clock and no API server.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContractVersion {
+    V1,
+    V2,
+}
+
+impl ContractVersion {
+    /// The wire value, or `None` for a version this build does not implement.
+    ///
+    /// `None` and not a defaulted `V1`: an unknown version means the
+    /// controller is newer than the runner, and guessing downward would run a
+    /// plan under checks its author did not ask for.
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            VERSION_V1 => Some(Self::V1),
+            VERSION_V2 => Some(Self::V2),
+            _ => None,
+        }
+    }
+
+    #[must_use]
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::V1 => VERSION_V1,
+            Self::V2 => VERSION_V2,
+        }
+    }
+
+    /// Whether this version may carry any of the v2 material at all.
+    #[must_use]
+    pub fn carries_v2_material(self) -> bool {
+        matches!(self, Self::V2)
+    }
+
+    /// The refusal a v1 invocation earns when it carries `what`, or `None`
+    /// when the pairing is legal.
+    ///
+    /// Returns the message rather than a bare `bool` so every call site refuses
+    /// in the same words, and so the words name the remedy: a legacy Restore is
+    /// finished or deleted, it is not upgraded in place.
+    #[must_use]
+    pub fn refuse_v2_material(self, what: &str) -> Option<String> {
+        match self {
+            Self::V2 => None,
+            Self::V1 => Some(format!(
+                "execution contract v1 cannot carry {what}: v1 is accepted only for Restores \
+                 created before the contract v2 rollout, and those carry none of it. Let the \
+                 in-flight legacy Restore finish (or delete it) and create the new one, which \
+                 the controller stamps as v{VERSION_V2}; no data operation was started"
+            )),
+        }
+    }
+}
+
+impl std::fmt::Display for ContractVersion {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The recovery point bound into plan bytes (D3 §5.1 / §5.5)
+// ---------------------------------------------------------------------------
+
+/// `source.point` — the recovery point a v2 restore plan is bound to.
+///
+/// # Why it is in the PLAN and not in the environment
+///
+/// The environment is the controller's word for it; the plan is what the
+/// approver signed. Binding the point into plan bytes means the approval
+/// covers *which archive object this restore recovers from*, and PLAT-15.2's
+/// disaster path — a fresh installation with no `Backup` CR anywhere — has
+/// nothing else to bind to. The runner re-derives the identity from the bytes
+/// it actually read, so a point that was swapped underneath an approved plan
+/// is a digest mismatch rather than a quiet substitution.
+///
+/// # Absent means v1's behaviour, exactly
+///
+/// `#[serde(default)]` on the field that holds it: a plan with no `point`
+/// block selects its archive set the way every plan did before this existed
+/// (`source.backup`, `latestCompleted` or a pinned id) and the runner performs
+/// no binding check. That is not a weaker mode for the same run — it is the
+/// only mode a pre-catalog plan can express.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PointBinding {
+    /// `lwp1-` + 32 lowercase hex characters, content-derived from the signed
+    /// receipt (D3 §5.1). A DISPLAY and lookup key; `receipt_sha256` is the
+    /// binding.
+    pub point_id: String,
+    /// The object key of the signed backup receipt, under `logweir/backups/`.
+    pub receipt_key: String,
+    /// `sha256:<hex>` over the exact stored receipt bytes.
+    pub receipt_sha256: String,
+    /// `sha256:<hex>` over the manifest bytes the receipt itself attests
+    /// (`BackupReceipt.archive.manifest_sha256`). Checked so a receipt that is
+    /// intact but describes a different archive cannot pass.
+    pub manifest_sha256: String,
+}
+
+// ---------------------------------------------------------------------------
+// The progress channel (D3 §2.4), contract-versioned and bounded
+// ---------------------------------------------------------------------------
+
+/// `progress-contract=<version>` — the ONE line that says which grammar the
+/// `progress-phase=` lines that follow are written in.
+///
+/// D3 §2.4 calls the channel "contract-versioned" and does not put a version
+/// inside the per-phase line, because the per-phase line is read by prefix out
+/// of a bounded tail and every byte of it is budget. So the version is
+/// announced once, at the top of the run, and the per-phase grammar stays
+/// exactly `<n>:<name>`.
+pub const PROGRESS_CONTRACT_PREFIX: &str = "progress-contract=";
+/// `progress-phase=<n>:<name>` (D3 §2.4).
+pub const PROGRESS_PHASE_PREFIX: &str = "progress-phase=";
+/// The hard cap on a whole progress line, including the prefix.
+///
+/// It exists because the controller reads pod logs with
+/// `LogParams{tail_lines: 50, limit_bytes: 65536}` and a line that could grow
+/// without bound could push every evidence key out of that window — the
+/// progress channel is explicitly optional, and it may never cost a reader the
+/// lines that are not.
+pub const PROGRESS_LINE_MAX_BYTES: usize = 96;
+/// The longest phase name the channel will render.
+pub const PROGRESS_NAME_MAX_BYTES: usize = 32;
+
+/// **The restore runner's ten phases, by number and name — the CLOSED
+/// vocabulary of the progress channel.**
+///
+/// D3 §2.4: "`logweir restore run`: existing phases `0..9` with their existing
+/// names". They are listed here, in the pure layer, because the channel is a
+/// filter (see [`progress_phase_line`]) and a filter needs something to filter
+/// against. A charset rule alone would not do: `hunter2` is lowercase
+/// alphanumeric, and a channel that could render it could render a projected
+/// password.
+///
+/// `crates/logweir/tests/progress_channel.rs` pins this table against the
+/// `drill::record` call sites, so a renamed phase is a failing test rather
+/// than a phase that silently stops being announced.
+pub const RESTORE_PHASE_NAMES: [(i8, &str); 10] = [
+    (0, "admit"),
+    (1, "approval"),
+    (2, "target-ready"),
+    (3, "target-diff"),
+    (4, "sample-select"),
+    (5, "preflight"),
+    (6, "restore"),
+    (7, "verify"),
+    (8, "score-and-sign"),
+    (9, "teardown"),
+];
+
+/// **The backup runner's five named steps, all at phase `-1`.**
+///
+/// D3 §2.4: the backup path "has no numbered phases after admission", so it
+/// announces `-1:admit` and then `engine`, `readback`, `sign`, `upload`.
+/// Inventing `0..4` here would put two unrelated numbering schemes on one
+/// channel and leave a controller unable to tell which runner a
+/// `progress-phase=2:` line came from.
+pub const BACKUP_STEP_NAMES: [&str; 5] = ["admit", "engine", "readback", "sign", "upload"];
+
+/// The `progress-contract=` line for `version`.
+#[must_use]
+pub fn progress_contract_line(version: ContractVersion) -> String {
+    format!("{PROGRESS_CONTRACT_PREFIX}{}", version.as_str())
+}
+
+/// One `progress-phase=` line, or **`None` for anything this channel refuses
+/// to say**.
+///
+/// # This is a filter, not a formatter, and that is the security property
+///
+/// A progress line is printed to a pod log that a controller reads and a UI
+/// renders, on a path that has plan-controlled strings, broker errors and
+/// projected credentials in scope. So the `(phase, name)` pair must be one
+/// this build already knows — a member of [`RESTORE_PHASE_NAMES`] or of
+/// [`BACKUP_STEP_NAMES`] at phase `-1` — and nothing else is renderable at
+/// all. A closed vocabulary and not a charset rule, because `hunter2` passes
+/// every charset rule anyone would write.
+///
+/// A caller that hands this function a credential, a URL with userinfo, a
+/// broker error, a record's bytes or a newline that would forge a second line
+/// gets `None`, and its caller prints nothing. Silence is the right failure:
+/// D3 §2.4 says in as many words that "absence is not an error", so a reader
+/// already has to treat a missing line as normal.
+#[must_use]
+pub fn progress_phase_line(phase: i8, name: &str) -> Option<String> {
+    let known = match phase {
+        -1 => BACKUP_STEP_NAMES.contains(&name),
+        _ => RESTORE_PHASE_NAMES
+            .iter()
+            .any(|(p, n)| *p == phase && *n == name),
+    };
+    if !known {
+        return None;
+    }
+    // Belt and braces over the table itself: the bound is what keeps the
+    // channel from ever costing a reader the evidence keys in a 50-line,
+    // 64 KiB tail, and a table entry is as capable of being edited as a
+    // call site is.
+    if name.len() > PROGRESS_NAME_MAX_BYTES {
+        return None;
+    }
+    let line = format!("{PROGRESS_PHASE_PREFIX}{phase}:{name}");
+    if line.len() > PROGRESS_LINE_MAX_BYTES {
+        return None;
+    }
+    Some(line)
+}
+
+/// `teardown-key=<key>` (D3 §2.4), printed only when phase 9 attested.
+pub const TEARDOWN_KEY_PREFIX: &str = "teardown-key=";
+
+// ---------------------------------------------------------------------------
+// plan ∈ scope (D3 §4.3(d)), the runner's half and the controller's
+// ---------------------------------------------------------------------------
+
+/// Everything a rendered plan says that a signed rehearsal scope constrains.
+///
+/// A struct rather than `&DrillSpec` directly so the SAME predicate serves
+/// both halves of D3 §4.3's "checked twice": the controller builds these facts
+/// from the plan it is about to render and freeze, the runner builds them from
+/// the plan bytes it actually mounted ([`plan_scope_facts`]). One predicate,
+/// two producers — which is the only arrangement in which "the controller
+/// proved it" and "the runner proved it" mean the same thing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PlanScopeFacts {
+    /// The allowed-cluster set this run was given, from the separately mounted
+    /// allowlist document — never from the plan, which cannot widen its own.
+    pub allowed_cluster_ids: Vec<String>,
+    /// The prefix every source topic is actually mapped through.
+    pub topic_prefix: String,
+    /// The plan's `source.topics`, in plan order.
+    pub source_topics: Vec<String>,
+    /// The names this plan will create on the target, in `source_topics` order.
+    pub mapped_topics: Vec<String>,
+    /// The wire spelling of `target.mode`.
+    pub mode: String,
+    /// `sample.records_per_partition`.
+    pub records_per_partition: u64,
+}
+
+/// The facts a mounted restore plan and its allowlist state.
+///
+/// Pure, and it derives the mapped names the same way phase 0 does — through
+/// [`crate::spec::target_topic_prefix`], which is the one place that rule
+/// lives. Deriving them a second way here would let the scope check bless
+/// names phase 0 then maps differently.
+#[must_use]
+pub fn plan_scope_facts(
+    plan: &crate::spec::DrillSpec,
+    allowed: &crate::spec::AllowedClusters,
+) -> PlanScopeFacts {
+    let topic_prefix = crate::spec::target_topic_prefix(plan);
+    PlanScopeFacts {
+        allowed_cluster_ids: allowed.allowed_cluster_ids.clone(),
+        mapped_topics: plan
+            .source
+            .topics
+            .iter()
+            .map(|t| format!("{topic_prefix}{t}"))
+            .collect(),
+        topic_prefix,
+        source_topics: plan.source.topics.clone(),
+        mode: plan.target.mode.to_string(),
+        records_per_partition: plan.sample.records_per_partition as u64,
+    }
+}
+
+/// Every way a plan fell outside the signed scope, named.
+///
+/// **All of them, never the first.** An operator fixing a rehearsal template
+/// one refusal at a time, at one slot per week, is the reason: a check that
+/// stops at the first mismatch turns a five-minute edit into five weeks.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScopeRefusal {
+    pub mismatches: Vec<String>,
+}
+
+impl std::fmt::Display for ScopeRefusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "the rendered plan is outside the signed standing rehearsal authorization: {}",
+            self.mismatches.join("; ")
+        )
+    }
+}
+
+/// D3 §4.3(d): prove `plan ∈ scope`.
+///
+/// # What it can prove here, and what it delegates
+///
+/// * mode, prefix, source topics, mapped names and records-per-partition are
+///   all functions of the plan's own bytes, so they are proven outright;
+/// * the **target cluster id** is not a plan field — a cluster id is read from
+///   the broker, and this check runs before any broker exists. So it is proven
+///   through the rail that already enforces it: the mounted allowlist must be
+///   exactly the signed `target_cluster_id`, and phase 0 then refuses any
+///   observed id outside that set. Narrowing the allowlist is what turns
+///   "the signed scope names cluster X" into "this run cannot reach anything
+///   but X" without a second broker round trip;
+/// * `max_partitions` and `deadline_seconds` are NOT plan fields at all — the
+///   first is a catalog-supplied bound and the second is the Job's
+///   `activeDeadlineSeconds`. They are the controller's half of §4.3(d) and
+///   this predicate does not pretend to check them.
+pub fn plan_within_scope(
+    facts: &PlanScopeFacts,
+    scope: &RehearsalScope,
+) -> Result<(), Box<ScopeRefusal>> {
+    let mut mismatches = Vec::new();
+
+    // FIRST, per `RehearsalScope::is_scratch_only`'s own contract: a scope
+    // naming a mode this build does not implement is one this build must not
+    // act on, whatever the rest of it says.
+    if !scope.is_scratch_only() {
+        mismatches.push(format!(
+            "the signed scope permits modes [{}], and this build implements only `{MODE_SCRATCH}`",
+            scope.modes.join(", ")
+        ));
+    }
+    if facts.mode != MODE_SCRATCH {
+        mismatches.push(format!(
+            "the plan runs in mode `{}`; a standing rehearsal authorization permits \
+             `{MODE_SCRATCH}` only",
+            facts.mode
+        ));
+    }
+    if facts.topic_prefix != scope.topic_prefix {
+        mismatches.push(format!(
+            "the plan maps through prefix `{}`; the signed scope is `{}`",
+            facts.topic_prefix, scope.topic_prefix
+        ));
+    }
+    let outside: Vec<&String> = facts
+        .source_topics
+        .iter()
+        .filter(|t| !scope.topics.contains(t))
+        .collect();
+    if let Some(first) = outside.first() {
+        mismatches.push(format!(
+            "source topic `{first}` is not in the signed scope; every topic outside it, in plan \
+             order: {}",
+            outside
+                .iter()
+                .map(|t| format!("`{t}`"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+    // The mapped names, independently of the prefix check above: a plan whose
+    // prefix matched but whose mapping did not derive from it would restore
+    // into names the signed prefix does not cover, and the prefix comparison
+    // alone would have passed it.
+    for (source, mapped) in facts.source_topics.iter().zip(facts.mapped_topics.iter()) {
+        let expected = format!("{}{source}", scope.topic_prefix);
+        if mapped != &expected {
+            mismatches.push(format!(
+                "the plan maps `{source}` to `{mapped}`; the signed scope's prefix yields \
+                 `{expected}`"
+            ));
+        }
+    }
+    if facts.mapped_topics.len() != facts.source_topics.len() {
+        mismatches.push(format!(
+            "the plan maps {} of its {} source topics",
+            facts.mapped_topics.len(),
+            facts.source_topics.len()
+        ));
+    }
+    if facts.records_per_partition > u64::from(scope.records_per_partition) {
+        mismatches.push(format!(
+            "the plan samples {} records per partition; the signed scope permits {}",
+            facts.records_per_partition, scope.records_per_partition
+        ));
+    }
+    // The target cluster id, through the allowlist — see this function's doc
+    // comment for why that is the strongest form available before a broker
+    // exists, and why it is EQUALITY and not membership.
+    if facts.allowed_cluster_ids.len() != 1
+        || facts.allowed_cluster_ids[0] != scope.target_cluster_id
+    {
+        mismatches.push(format!(
+            "the mounted allowed-cluster set is [{}]; a standing rehearsal authorization admits \
+             exactly the signed target cluster id `{}` and nothing else",
+            facts.allowed_cluster_ids.join(", "),
+            scope.target_cluster_id
+        ));
+    }
+
+    if mismatches.is_empty() {
+        Ok(())
+    } else {
+        Err(Box::new(ScopeRefusal { mismatches }))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_contract_version_is_two_and_v1_is_still_nameable() {
+        assert_eq!(VERSION, "2");
+        assert_eq!(ContractVersion::parse(VERSION), Some(ContractVersion::V2));
+        assert_eq!(ContractVersion::parse("1"), Some(ContractVersion::V1));
+        assert_eq!(ContractVersion::parse("3"), None);
+        assert_eq!(ContractVersion::parse(""), None);
+    }
+
+    #[test]
+    fn v1_may_not_carry_v2_material_and_v2_may() {
+        assert!(ContractVersion::V2
+            .refuse_v2_material("a point binding")
+            .is_none());
+        let refusal = ContractVersion::V1
+            .refuse_v2_material("a point binding")
+            .expect("v1 must refuse v2 material");
+        assert!(refusal.contains("a point binding"), "{refusal}");
+        assert!(
+            refusal.contains("no data operation was started"),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn the_environment_sets_are_disjoint_and_their_union_is_every_name() {
+        for name in V2_ENV {
+            assert!(!ALL_ENV.contains(&name), "{name} is in both sets");
+        }
+        assert_eq!(ALL_ENV.len() + V2_ENV.len(), ALL_ENV_ANY.len());
+        for name in ALL_ENV.iter().chain(V2_ENV.iter()) {
+            assert!(ALL_ENV_ANY.contains(name), "{name} missing from the union");
+        }
+        let mut sorted = ALL_ENV_ANY.to_vec();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), ALL_ENV_ANY.len(), "a name is listed twice");
+    }
+
+    #[test]
+    fn every_contract_variable_is_namespaced_to_logweir_execution() {
+        for name in ALL_ENV_ANY {
+            assert!(name.starts_with("LOGWEIR_EXECUTION_"), "{name}");
+        }
+    }
+
+    #[test]
+    fn a_progress_line_carries_a_phase_and_a_name_and_nothing_else() {
+        assert_eq!(
+            progress_phase_line(0, "admit").as_deref(),
+            Some("progress-phase=0:admit")
+        );
+        assert_eq!(
+            progress_phase_line(-1, "readback").as_deref(),
+            Some("progress-phase=-1:readback")
+        );
+        assert_eq!(
+            progress_contract_line(ContractVersion::V2),
+            "progress-contract=2"
+        );
+    }
+
+    /// The mutant this channel exists to survive: a caller that hands the
+    /// formatter a projected password, a URL with userinfo, or anything that
+    /// could forge a second line gets NOTHING on stdout.
+    /// THE MUTANT this channel exists to survive. Note `hunter2` and
+    /// `s3cr3t`: both pass every charset rule anyone would write, which is
+    /// exactly why the vocabulary is a closed TABLE and not a character class.
+    #[test]
+    fn a_progress_line_refuses_to_carry_a_credential_or_forge_a_line() {
+        for hostile in [
+            "hunter2",
+            "s3cr3t",
+            "s3cr3t-P@ssw0rd",
+            "https://user:pass@example.invalid/bucket",
+            "admit\nscorecard-key=logweir/drills/forged.json",
+            "admit sasl.password=hunter2",
+            "ADMIT",
+            "admit_step",
+            "",
+            &"a".repeat(PROGRESS_NAME_MAX_BYTES + 1),
+        ] {
+            assert_eq!(
+                progress_phase_line(0, hostile),
+                None,
+                "the channel rendered {hostile:?}"
+            );
+        }
+        // A legal name at the wrong phase is also not a thing this build says:
+        // `admit` is phase 0 and step -1, never phase 5.
+        assert_eq!(progress_phase_line(5, "admit"), None);
+        assert_eq!(progress_phase_line(42, "admit"), None);
+        assert_eq!(progress_phase_line(-2, "admit"), None);
+        // And a restore phase name is not a backup step.
+        assert_eq!(progress_phase_line(-1, "verify"), None);
+    }
+
+    #[test]
+    fn every_line_the_channel_can_say_is_within_the_bound() {
+        for (phase, name) in RESTORE_PHASE_NAMES {
+            let line = progress_phase_line(phase, name).expect("a known phase renders");
+            assert!(line.len() <= PROGRESS_LINE_MAX_BYTES, "{line}");
+        }
+        for name in BACKUP_STEP_NAMES {
+            let line = progress_phase_line(-1, name).expect("a known step renders");
+            assert!(line.len() <= PROGRESS_LINE_MAX_BYTES, "{line}");
+        }
+    }
+
+    #[test]
+    fn the_restore_vocabulary_is_the_ten_phases_and_nothing_else() {
+        assert_eq!(RESTORE_PHASE_NAMES.len(), 10);
+        for (i, (phase, _)) in RESTORE_PHASE_NAMES.iter().enumerate() {
+            assert_eq!(*phase as usize, i, "the table is dense and in phase order");
+        }
+    }
+
+    fn scope() -> RehearsalScope {
+        RehearsalScope {
+            template_digest: "sha256:aa".into(),
+            target_cluster_id: "TARGET00000000000000000".into(),
+            topic_prefix: "rehearsal-3f2a91c7-".into(),
+            topics: vec!["orders".into(), "payments".into()],
+            max_partitions: 200,
+            records_per_partition: 25,
+            deadline_seconds: 3600,
+            modes: vec![MODE_SCRATCH.to_string()],
+        }
+    }
+
+    fn facts() -> PlanScopeFacts {
+        PlanScopeFacts {
+            allowed_cluster_ids: vec!["TARGET00000000000000000".into()],
+            topic_prefix: "rehearsal-3f2a91c7-".into(),
+            source_topics: vec!["orders".into()],
+            mapped_topics: vec!["rehearsal-3f2a91c7-orders".into()],
+            mode: MODE_SCRATCH.to_string(),
+            records_per_partition: 25,
+        }
+    }
+
+    #[test]
+    fn a_rendered_plan_inside_the_scope_is_accepted() {
+        plan_within_scope(&facts(), &scope()).expect("this plan is inside the signed scope");
+    }
+
+    #[test]
+    fn every_mismatch_is_named_and_not_only_the_first() {
+        let mut f = facts();
+        f.topic_prefix = "rehearsal-deadbeef-".into();
+        f.mapped_topics = vec!["rehearsal-deadbeef-orders".into()];
+        f.source_topics = vec!["ledger".into()];
+        f.mode = "newTopic".into();
+        f.records_per_partition = 1000;
+        f.allowed_cluster_ids = vec!["OTHER000000000000000000".into()];
+        let refusal = plan_within_scope(&f, &scope()).expect_err("outside the scope");
+        let rendered = refusal.to_string();
+        for expected in [
+            "mode `newTopic`",
+            "rehearsal-deadbeef-",
+            "`ledger`",
+            "1000 records per partition",
+            "OTHER000000000000000000",
+        ] {
+            assert!(
+                rendered.contains(expected),
+                "{expected} missing:\n{rendered}"
+            );
+        }
+        assert!(
+            refusal.mismatches.len() >= 5,
+            "only {} mismatches named:\n{rendered}",
+            refusal.mismatches.len()
+        );
+    }
+
+    #[test]
+    fn a_scope_naming_a_mode_this_build_does_not_implement_is_refused() {
+        let mut s = scope();
+        s.modes = vec![MODE_SCRATCH.into(), "newTopic".into()];
+        let refusal = plan_within_scope(&facts(), &s).expect_err("an unknown mode is refused");
+        assert!(refusal.to_string().contains("implements only"), "{refusal}");
+    }
+
+    /// The mapped names are checked independently of the prefix: a plan whose
+    /// prefix matched the scope but whose mapping did not derive from it would
+    /// restore into names nobody signed.
+    #[test]
+    fn a_mapped_name_that_does_not_derive_from_the_signed_prefix_is_refused() {
+        let mut f = facts();
+        f.mapped_topics = vec!["orders".into()];
+        let refusal = plan_within_scope(&f, &scope()).expect_err("an unmapped name is refused");
+        assert!(refusal.to_string().contains("`orders`"), "{refusal}");
+    }
+
+    /// Membership is not enough: an allowlist of two clusters would let phase 0
+    /// admit a target the scope never named.
+    #[test]
+    fn a_widened_allowed_cluster_set_is_refused_even_though_it_contains_the_signed_id() {
+        let mut f = facts();
+        f.allowed_cluster_ids = vec![
+            "TARGET00000000000000000".into(),
+            "OTHER000000000000000000".into(),
+        ];
+        let refusal = plan_within_scope(&f, &scope()).expect_err("a widened allowlist is refused");
+        assert!(
+            refusal
+                .to_string()
+                .contains("exactly the signed target cluster id"),
+            "{refusal}"
+        );
+    }
+
+    #[test]
+    fn a_point_binding_round_trips_through_the_plan_documents_grammar() {
+        let binding = PointBinding {
+            point_id: format!("lwp1-{}", "a".repeat(32)),
+            receipt_key: "logweir/backups/nightly-7/run-9.receipt.json".into(),
+            receipt_sha256: format!("sha256:{}", "b".repeat(64)),
+            manifest_sha256: format!("sha256:{}", "c".repeat(64)),
+        };
+        let yaml = serde_yaml::to_string(&binding).expect("serialises");
+        assert!(yaml.contains("point_id:"), "{yaml}");
+        assert!(yaml.contains("receipt_key:"), "{yaml}");
+        let back: PointBinding = serde_yaml::from_str(&yaml).expect("parses");
+        assert_eq!(back, binding);
+    }
+
+    #[test]
+    fn an_authorization_kind_is_a_closed_set() {
+        assert_eq!(
+            AuthorizationKind::parse("approval"),
+            Some(AuthorizationKind::Approval)
+        );
+        assert_eq!(
+            AuthorizationKind::parse("standing"),
+            Some(AuthorizationKind::Standing)
+        );
+        assert_eq!(AuthorizationKind::parse("Standing"), None);
+        assert_eq!(AuthorizationKind::parse("none"), None);
+        assert_eq!(AuthorizationKind::default(), AuthorizationKind::Approval);
+    }
+}
