@@ -441,6 +441,26 @@ fn run() -> ExitCode {
         controllers.push(Box::pin(
             weirkeeper::controllers::protection_policy::controller(client.clone(), runner.clone()),
         ));
+        // D3 W7 (PLAT-14.3) pushes the THIRTEENTH — the `RehearsalSchedule`
+        // reconciler that turns a cron, a qualifying recovery point and ONE
+        // signed standing authorization into one isolated scratch restore per
+        // slot, and records a reason for every slot that produced none. It
+        // takes only the client: it creates `Restore` objects and their
+        // approval bundles, and the `Restore` reconciler is what turns those
+        // into Jobs — so neither the runner image nor the read-only archive
+        // handle would ever be read here (the same argument `backup_schedule`
+        // makes one line up). `tests/linkage.rs`'s controller count moved in
+        // this same commit.
+        //
+        // **ORDERING NOTE FOR THE INTEGRATOR.** D3 §14 sequences W9's
+        // `RetentionPolicy` as the thirteenth and this one as the FOURTEENTH.
+        // W9 had not merged when this branch was cut, so on this branch the
+        // count is thirteen and this is the thirteenth line; when W9 lands,
+        // this becomes the fourteenth and `tests/linkage.rs`'s number moves
+        // with it. The line itself does not change.
+        controllers.push(Box::pin(
+            weirkeeper::controllers::rehearsal_schedule::controller(client.clone()),
+        ));
 
         let registered = controllers.len();
         info!(

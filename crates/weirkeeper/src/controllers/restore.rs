@@ -90,6 +90,7 @@
 //! phase 9's teardown of the scratch topics a `mode: scratch` run created —
 //! which happens **inside the runner**, over topics, never here.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
@@ -903,7 +904,48 @@ pub fn approval_bundle_config_map(
     .into_iter()
     .collect();
 
-    Ok(ConfigMap {
+    Ok(bundle_object(
+        name,
+        namespace,
+        restore_uid,
+        annotations,
+        [
+            (
+                APPROVAL_DOC_FILE.to_string(),
+                approval.spec.approval_bytes.clone(),
+            ),
+            (
+                APPROVAL_SIG_FILE.to_string(),
+                approval.spec.sidecar_bytes.clone(),
+            ),
+            (APPROVER_KEY_FILE.to_string(), key.spki_pem.clone()), // public SPKI only
+            (ALLOWED_CLUSTERS_FILE.to_string(), allowed_bytes),
+        ]
+        .into_iter()
+        .collect(),
+    ))
+}
+
+// --------------------------------------------------------------------------
+// THE STANDING-AUTHORIZATION ARM OF THE APPROVAL BUNDLE (D3 W7, PLAT-14.3)
+//
+// One function, two arms, one object shape. `bundle_object` below is the shape
+// both arms produce, factored out so that the immutability, the single
+// controller owner and the name can never differ between "a human approved this
+// run" and "a human approved this schedule". A second renderer would be a second
+// answer to *what did the controller commit this run to*, and the digests in the
+// Job template are computed from whichever one ran.
+// --------------------------------------------------------------------------
+
+/// The ConfigMap shape every approval bundle has, whichever arm rendered it.
+fn bundle_object(
+    name: String,
+    namespace: String,
+    restore_uid: String,
+    annotations: BTreeMap<String, String>,
+    data: BTreeMap<String, String>,
+) -> ConfigMap {
+    ConfigMap {
         metadata: ObjectMeta {
             name: Some(approval_bundle_config_map_name(&name)),
             namespace: Some(namespace),
@@ -919,24 +961,256 @@ pub fn approval_bundle_config_map(
             ..ObjectMeta::default()
         },
         immutable: Some(true),
-        data: Some(
-            [
-                (
-                    APPROVAL_DOC_FILE.to_string(),
-                    approval.spec.approval_bytes.clone(),
-                ),
-                (
-                    APPROVAL_SIG_FILE.to_string(),
-                    approval.spec.sidecar_bytes.clone(),
-                ),
-                (APPROVER_KEY_FILE.to_string(), key.spki_pem.clone()), // public SPKI only
-                (ALLOWED_CLUSTERS_FILE.to_string(), allowed_bytes),
-            ]
-            .into_iter()
-            .collect(),
-        ),
+        data: Some(data),
         ..ConfigMap::default()
-    })
+    }
+}
+
+/// The trusted-public-keys member, standing-only — D3 §4.3(e).
+pub const AUTHORIZATION_KEYS_FILE: &str = "authorization-keys.json";
+
+/// D3 §4.3(e)'s bundle, for a `Restore` authorised by a STANDING document.
+///
+/// # What is in it, and why the envelope is written under `approval.json`
+///
+/// Five members. Four of them are the five-member v1 bundle minus the plan
+/// (which lives in its own ConfigMap, exactly as it does for the per-run arm),
+/// and the fifth is the keyring:
+///
+/// | file | bytes |
+/// |---|---|
+/// | `approval.json` | the SIGNED standing envelope, copied verbatim from `Approval.spec.approvalBytes` |
+/// | `approval.sig` | its DSSE sidecar, copied verbatim |
+/// | `approver.pub.pem` | the public SPKI of the key the `Approval` verified under |
+/// | `allowed-clusters.json` | **exactly** `[scope.targetClusterId]` |
+/// | `authorization-keys.json` | every key this namespace's trust currently lets authorise |
+///
+/// The envelope is written under `approval.json` and not under a sixth name
+/// because there is ONE document here and two contracts that name it. The
+/// runner's mandatory five-member check reads `approval.json`/`approval.sig`
+/// and the standing check reads `--standing-authorization <path>` with its
+/// sidecar DERIVED as `<path>` with the extension replaced — which is
+/// `approval.sig` for exactly this path. Writing the same bytes twice under two
+/// names would let a future edit change one copy and not the other, and the two
+/// digests in the Job template would then disagree about one signature.
+///
+/// # The allowlist is EQUALITY, not membership
+///
+/// `[scope.targetClusterId]` and nothing else, which is W5's R1.3 obligation 1
+/// and is what `plan_within_scope` then requires. Narrowing the allowlist is
+/// what turns "the signed scope names cluster X" into "this run cannot reach
+/// anything but X" without a second broker round trip: phase 0 refuses any
+/// observed cluster id outside the mounted set, and the mounted set is one id.
+///
+/// # No private material, and no key lifecycle
+///
+/// `publicKeyPem` is public SPKI. Lifecycle — `state`, `notBefore`/`notAfter`,
+/// revocation — is `trust::decide`'s and was evaluated by the caller BEFORE
+/// these bytes were rendered; the runner re-checks what a credential-less
+/// process can, which is pinning and usage.
+///
+/// # Errors
+///
+/// [`RestoreError`] for an object with no namespace or UID, for a key id the
+/// resolved trust does not carry, and for a keyring that will not serialise.
+pub fn standing_bundle_config_map(
+    restore: &Restore,
+    envelope: &str,
+    sidecar: &str,
+    key_id: &str,
+    keyring: &logweir_core::execution_contract::AuthorizationKeyring,
+    trust: &crate::trust::ResolvedTrust,
+    target_cluster_id: &str,
+) -> Result<ConfigMap, RestoreError> {
+    let name = restore.name_any();
+    let namespace = restore
+        .namespace()
+        .ok_or_else(|| RestoreError::NoNamespace(name.clone()))?;
+    let restore_uid = restore
+        .uid()
+        .ok_or_else(|| RestoreError::NoUid(name.clone()))?;
+    let authorization = restore.spec.authorization.as_ref().ok_or_else(|| {
+        RestoreError::Materialization(format!(
+            "the Restore {name} carries no spec.authorization, so it is not standing-authorised"
+        ))
+    })?;
+    let key = trust.key(key_id).ok_or_else(|| {
+        RestoreError::Materialization(format!(
+            "the standing authorization verified under key {key_id}, which {} does not carry",
+            trust_source_phrase(trust)
+        ))
+    })?;
+    if keyring.keys.is_empty() {
+        return Err(RestoreError::Materialization(format!(
+            "{} currently lets no key authorise a rehearsal; an empty keyring is refused by the \
+             runner and is not written",
+            trust_source_phrase(trust)
+        )));
+    }
+    let keyring_bytes = serde_json::to_string_pretty(keyring).map_err(|error| {
+        RestoreError::Materialization(format!(
+            "the authorization keyring could not be rendered: {error}"
+        ))
+    })?;
+    let allowed = logweir_core::spec::AllowedClusters {
+        allowed_cluster_ids: vec![target_cluster_id.to_string()],
+        source_cluster_id: None,
+    };
+    let allowed_bytes = serde_json::to_string_pretty(&allowed).map_err(|error| {
+        RestoreError::Materialization(format!(
+            "the target-cluster allowlist could not be rendered: {error}"
+        ))
+    })?;
+    let annotations: BTreeMap<String, String> = [
+        (
+            BUNDLE_RESTORE_UID_ANNOTATION.to_string(),
+            restore_uid.clone(),
+        ),
+        (
+            BUNDLE_PLAN_HASH_ANNOTATION.to_string(),
+            recomputed_plan_hash(restore),
+        ),
+        (
+            BUNDLE_APPROVAL_NAME_ANNOTATION.to_string(),
+            authorization.approval_ref.name.clone(),
+        ),
+    ]
+    .into_iter()
+    .collect();
+    Ok(bundle_object(
+        name,
+        namespace,
+        restore_uid,
+        annotations,
+        [
+            (APPROVAL_DOC_FILE.to_string(), envelope.to_string()),
+            (APPROVAL_SIG_FILE.to_string(), sidecar.to_string()),
+            (APPROVER_KEY_FILE.to_string(), key.spki_pem.clone()),
+            (ALLOWED_CLUSTERS_FILE.to_string(), allowed_bytes),
+            (AUTHORIZATION_KEYS_FILE.to_string(), keyring_bytes),
+        ]
+        .into_iter()
+        .collect(),
+    ))
+}
+
+/// The execution contract v2 environment a STANDING-authorised Restore Job
+/// carries — the thirteen mandatory names plus D3 §4.3's five.
+///
+/// # Why `AUTHORIZATION_SHA256` equals `APPROVAL_SHA256` here
+///
+/// Because they pin the same bytes, which is the point: there is one signed
+/// document, it is mounted once, and the two contracts name it differently
+/// (see [`standing_bundle_config_map`]). Emitting a second digest over a second
+/// copy would create a way for the two to disagree and no way for the runner to
+/// tell which one the approver signed.
+///
+/// `POLICY_SNAPSHOT_SHA256` and `CONFIRMATION_KEY_SHA256` are deliberately NOT
+/// set: PLAT-19.2 owns both halves, and the runner refuses a mounted member
+/// with no pinned digest AND a pinned digest with nothing mounted, so emitting
+/// either without the file would refuse every rehearsal.
+///
+/// # Errors
+///
+/// As [`standing_bundle_config_map`], plus a missing bundle member.
+pub fn standing_execution_contract_env(
+    restore: &Restore,
+    bundle: &ConfigMap,
+    schedule_uid: &str,
+) -> Result<Vec<(String, String)>, RestoreError> {
+    use logweir_core::execution_contract as contract;
+
+    let data = bundle.data.as_ref().ok_or_else(|| {
+        RestoreError::Materialization("the rendered approval bundle has no data".to_string())
+    })?;
+    let get = |key: &str| {
+        data.get(key).ok_or_else(|| {
+            RestoreError::Materialization(format!(
+                "the rendered approval bundle is missing public member {key}"
+            ))
+        })
+    };
+    let name = restore.name_any();
+    let namespace = restore
+        .namespace()
+        .ok_or_else(|| RestoreError::NoNamespace(name.clone()))?;
+    let restore_uid = restore
+        .uid()
+        .ok_or_else(|| RestoreError::NoUid(name.clone()))?;
+    let authorization = restore.spec.authorization.as_ref().ok_or_else(|| {
+        RestoreError::Materialization(format!(
+            "the Restore {name} carries no spec.authorization, so it is not standing-authorised"
+        ))
+    })?;
+    let digest = |bytes: &[u8]| sha256_prefixed(bytes);
+    let envelope = digest(get(APPROVAL_DOC_FILE)?.as_bytes());
+    let envelope_sidecar = digest(get(APPROVAL_SIG_FILE)?.as_bytes());
+
+    Ok(vec![
+        (
+            contract::VERSION_ENV.to_string(),
+            contract::VERSION.to_string(),
+        ),
+        (
+            contract::SUBJECT_API_VERSION_ENV.to_string(),
+            Restore::api_version(&()).to_string(),
+        ),
+        (
+            contract::SUBJECT_KIND_ENV.to_string(),
+            Restore::kind(&()).to_string(),
+        ),
+        (contract::SUBJECT_NAME_ENV.to_string(), name),
+        (contract::SUBJECT_NAMESPACE_ENV.to_string(), namespace),
+        (contract::SUBJECT_UID_ENV.to_string(), restore_uid),
+        (
+            contract::APPROVAL_NAME_ENV.to_string(),
+            authorization.approval_ref.name.clone(),
+        ),
+        (
+            contract::APPROVAL_UID_ENV.to_string(),
+            bundle
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get(BUNDLE_APPROVAL_UID_ANNOTATION))
+                .cloned()
+                .unwrap_or_default(),
+        ),
+        (
+            contract::PLAN_SHA256_ENV.to_string(),
+            digest(restore.spec.plan_bytes.as_bytes()),
+        ),
+        (contract::APPROVAL_SHA256_ENV.to_string(), envelope.clone()),
+        (
+            contract::APPROVAL_SIDECAR_SHA256_ENV.to_string(),
+            envelope_sidecar.clone(),
+        ),
+        (
+            contract::APPROVER_KEY_SHA256_ENV.to_string(),
+            digest(get(APPROVER_KEY_FILE)?.as_bytes()),
+        ),
+        (
+            contract::ALLOWED_CLUSTERS_SHA256_ENV.to_string(),
+            digest(get(ALLOWED_CLUSTERS_FILE)?.as_bytes()),
+        ),
+        (
+            contract::AUTHORIZATION_KIND_ENV.to_string(),
+            contract::AUTHORIZATION_KIND_STANDING.to_string(),
+        ),
+        (contract::AUTHORIZATION_SHA256_ENV.to_string(), envelope),
+        (
+            contract::AUTHORIZATION_SIDECAR_SHA256_ENV.to_string(),
+            envelope_sidecar,
+        ),
+        (
+            contract::AUTHORIZATION_KEYS_SHA256_ENV.to_string(),
+            digest(get(AUTHORIZATION_KEYS_FILE)?.as_bytes()),
+        ),
+        (
+            contract::REHEARSAL_SCHEDULE_UID_ENV.to_string(),
+            schedule_uid.to_string(),
+        ),
+    ])
 }
 
 /// Environment contract pinned into every newly rendered Restore Job.

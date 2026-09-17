@@ -147,6 +147,11 @@ pub mod policy;
 /// vocabulary and the deduplication ledger, as pure functions over objects the
 /// caller already read. `controllers::protection_policy` is the thin half.
 pub mod protection;
+/// PLAT-14.3 / decision D3 §4: the pure half of a recurring recovery rehearsal
+/// — the template digest a standing authorization binds, the qualifying-point
+/// filter chain, the rendered plan and the scope the controller proves it falls
+/// inside. `controllers::rehearsal_schedule` is the thin half.
+pub mod rehearsal;
 pub mod retention;
 pub mod slot;
 pub mod testing;

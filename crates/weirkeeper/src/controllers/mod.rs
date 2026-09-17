@@ -91,6 +91,13 @@ pub mod kafka_cluster;
 pub mod preflight;
 pub mod protection_policy;
 pub mod recovery_catalog;
+/// PLAT-14.3 / decision D3 §4 — the `RehearsalSchedule` reconciler. The FIRST
+/// reconciler that creates a `Restore` (`backup_schedule` creates `Backup`s),
+/// and the first one whose authority for doing so is a document a human signed
+/// ONCE rather than per run. It mints nothing: the crate links no signer
+/// (`tests/linkage.rs`), so the standing envelope and its sidecar are COPIED
+/// verbatim out of the immutable `Approval` that transports them.
+pub mod rehearsal_schedule;
 pub mod restore;
 pub mod schedule_history;
 pub mod topic_discovery;

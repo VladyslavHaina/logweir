@@ -461,10 +461,27 @@ pub fn evaluate(
     })?;
 
     // ---- 1. the payload type, BEFORE ANY KEY IS TRIED --------------------
-    if sidecar.payload_type != PAYLOAD_TYPE_APPROVAL {
+    //
+    // WHICH payload type depends on the REFERENT KIND, and that is the whole of
+    // D3 W7's change to this function (PLAT-14.3). A `RehearsalSchedule`
+    // subject carries a STANDING rehearsal authorization, whose DSSE payload
+    // type is its own
+    // (`execution_contract::PAYLOAD_TYPE_STANDING_AUTHORIZATION`) precisely so
+    // that a genuinely signed drill approval replayed as a standing
+    // authorization — or the reverse — is refused by the SIGNATURE layer rather
+    // than by a field comparison somebody could forget to write. The payload
+    // type is part of what `verify_detached` covers, so choosing it here is
+    // choosing what the signature is over.
+    let want_payload =
+        if referent_kind == crate::crds::approval::SubjectKind::RehearsalSchedule.as_str() {
+            logweir_core::execution_contract::PAYLOAD_TYPE_STANDING_AUTHORIZATION
+        } else {
+            PAYLOAD_TYPE_APPROVAL
+        };
+    if sidecar.payload_type != want_payload {
         return Err(ApprovalRefusal::PayloadTypeMismatch {
             got: sidecar.payload_type,
-            want: PAYLOAD_TYPE_APPROVAL.to_string(),
+            want: want_payload.to_string(),
         });
     }
 
@@ -532,7 +549,7 @@ pub fn evaluate(
             // denial of service.
             continue;
         };
-        match verify_detached(&key, PAYLOAD_TYPE_APPROVAL, approval_bytes, &sidecar) {
+        match verify_detached(&key, want_payload, approval_bytes, &sidecar) {
             Ok(matched_key_id) => {
                 hit = Some(matched_key_id);
                 break;
@@ -1051,23 +1068,76 @@ pub async fn decide(
                 Err(e) => return Err(e.into()),
             }
         }
-        // FAILS CLOSED, DELIBERATELY, UNTIL THE REHEARSAL CONTROLLER LANDS.
+        // D3 W7 (PLAT-14.3) LANDS THE RECOMPUTATION THIS ARM WAS WAITING FOR.
         //
-        // D3 §4.3 makes a `RehearsalSchedule` approval bind a digest RECOMPUTED
-        // from the referent's own sealed spec, not `planBytes` it does not
-        // have. That recomputation is the rehearsal worker's, and it is not in
-        // this build. Until it is, this arm refuses with the same
-        // `ReferentHasNoPlanBytes` verdict `Backup` gets: the enum value exists
-        // because the CRD admits it and check 8 must be able to tell the kinds
-        // apart, and an approval this build cannot verify must be a visible
-        // refusal rather than a `Verified=True` nobody computed.
+        // `ReferentHasNoPlanBytes` no longer applies to this kind (D3 §4.3's
+        // own sentence). A `RehearsalSchedule` has no `planBytes` and does not
+        // need any: what the standing authorization binds is a digest over the
+        // referent's OWN SEALED SPEC MINUS `suspend`
+        // (`crate::rehearsal::template_bytes`), recomputed here, every pass,
+        // from the object the API server just returned. Checks 7 and 8 are
+        // unchanged code — check 7 compares `sha256_prefixed(those bytes)` with
+        // the `plan_hash` inside the signed document, and check 8 compares the
+        // signed `subject_kind` with `RehearsalSchedule` — which is what D3
+        // §4.3 means by "the same rule applied to a different referent".
+        //
+        // The spec is sealed except `suspend`, so the digest cannot drift under
+        // a running authorization; `suspend` is excluded so that PAUSING an
+        // unattended rehearsal does not invalidate the document authorising it,
+        // which would make the one control an operator reaches for in an
+        // incident the control that breaks the schedule.
         SubjectKind::RehearsalSchedule => {
-            return Ok(ApprovalOutcome::Referent(
-                ReferentProblem::ReferentHasNoPlanBytes {
-                    kind: referent_kind.to_string(),
-                    name: subject.name.clone(),
-                },
-            ))
+            use crate::crds::rehearsal_schedule::RehearsalSchedule;
+            let api: Api<RehearsalSchedule> = Api::namespaced(client.clone(), &namespace);
+            match api.get(&subject.name).await {
+                Ok(schedule) => {
+                    let uid = schedule
+                        .uid()
+                        .ok_or_else(|| ReconcileError::NoUid(subject.name.clone()))?;
+                    let current = VerifiedSubjectRef {
+                        api_version: RehearsalSchedule::api_version(&()).to_string(),
+                        kind: SubjectKind::RehearsalSchedule,
+                        name: subject.name.clone(),
+                        namespace: namespace.clone(),
+                        uid,
+                    };
+                    if let Some(previous) = approval
+                        .status
+                        .as_ref()
+                        .and_then(|status| status.verified_subject_ref.as_ref())
+                    {
+                        if previous != &current {
+                            return Ok(ApprovalOutcome::Referent(
+                                ReferentProblem::ReferentUidChanged {
+                                    kind: referent_kind.to_string(),
+                                    name: subject.name.clone(),
+                                    verified_uid: previous.uid.clone(),
+                                    current_uid: current.uid,
+                                },
+                            ));
+                        }
+                    }
+                    let bytes = crate::rehearsal::template_bytes(&schedule.spec).map_err(|e| {
+                        // Unreachable for this type, which carries no float.
+                        // Reported as a referent problem rather than panicking:
+                        // an admission path is not a place to abort.
+                        ReconcileError::NoUid(format!(
+                            "the RehearsalSchedule {} spec could not be canonicalised: {e}",
+                            subject.name
+                        ))
+                    })?;
+                    (String::from_utf8(bytes).unwrap_or_default(), Some(current))
+                }
+                Err(kube::Error::Api(e)) if e.code == 404 => {
+                    return Ok(ApprovalOutcome::Referent(
+                        ReferentProblem::ReferentNotFound {
+                            kind: referent_kind.to_string(),
+                            name: subject.name.clone(),
+                        },
+                    ))
+                }
+                Err(e) => return Err(e.into()),
+            }
         }
     };
 

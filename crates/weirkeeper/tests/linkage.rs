@@ -949,7 +949,7 @@ fn the_no_argv_binary_starts_and_exits_zero_on_sigterm() {
          11), so a non-empty stderr is a panic or a missing subscriber. Got: {stderr:?}"
     );
     assert!(
-        stdout.contains("\"controllers\":12"),
+        stdout.contains("\"controllers\":13"),
         "the startup line names the registered controller count. It was 0 until Task 16, which \
          registered TWO — `controllers::trust_roster` and `controllers::approval`, in that \
          order — Task 18 registered the THIRD, `controllers::backup_schedule`, Task 17 the \
@@ -959,9 +959,13 @@ fn the_no_argv_binary_starts_and_exits_zero_on_sigterm() {
          `controllers::trust_policy`, D2 W8 the NINTH, \
          `controllers::topic_discovery`, D3 W8 the TENTH, \
          `controllers::recovery_catalog`, D2 W9 the ELEVENTH, \
-         `controllers::preflight`, and D3 W6 (PLAT-14.2) the TWELFTH, \
-         `controllers::protection_policy`. A count \
-         that is not 12 means `main`'s registration point lost a `controllers.push(…)` line. \
+         `controllers::preflight`, D3 W6 (PLAT-14.2) the TWELFTH, \
+         `controllers::protection_policy`, and D3 W7 (PLAT-14.3) the \
+         THIRTEENTH, `controllers::rehearsal_schedule` — which D3 §14 numbers \
+         FOURTEENTH because it sequences W9's `RetentionPolicy` before it; W9 \
+         had not merged when this branch was cut, so this number moves to 14 \
+         when it does. A count \
+         that is not 13 means `main`'s registration point lost a `controllers.push(…)` line. \
          Got: {stdout:?}"
     );
 
