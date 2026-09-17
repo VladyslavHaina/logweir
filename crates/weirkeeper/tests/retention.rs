@@ -1280,10 +1280,16 @@ fn the_gate_has_no_path_exemptions() {
             // file, it is compared in BOTH directions so a stale name fails the
             // gate too, and `retention_policy_controller.rs::
             // the_reaper_allowlist_holds_exactly_one_binary` pins it to exactly
-            // one name. The property this loop is about is that no PATH is
-            // excused from a scan, and a `*_LINK` allowlist excuses no path.
-            let is_a_link_allowlist = name.ends_with("_LINK");
-            let looks_like_an_exemption = !is_a_link_allowlist
+            // one name.
+            //
+            // **ONE LITERAL NAME, NEVER A SUFFIX CLASS** (review `d3w9` L2).
+            // The first version of this skip matched `*_LINK`, which is the
+            // pattern-versus-literal mistake `check-withdrawn-claim.sh`'s own
+            // header refuses in terms ("EXACTLY TWO EXEMPT PATHS, AS LITERALS —
+            // NEVER A PATTERN"): a future `ALLOWED_ANYTHING_LINK` would have
+            // been excused without review. String equality and nothing else.
+            let is_the_reaper_allowlist = name == "ALLOWED_REAPER_LINK";
+            let looks_like_an_exemption = !is_the_reaper_allowlist
                 && name
                     .chars()
                     .all(|c| c.is_ascii_uppercase() || c == '_' || c.is_ascii_digit())

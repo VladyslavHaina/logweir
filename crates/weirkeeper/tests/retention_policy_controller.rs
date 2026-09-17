@@ -285,7 +285,6 @@ fn a_plan_naming_a_key_outside_its_scope_is_refused_whole() {
         &destination(),
         rules(Some(3), None, 3),
         &evaluation,
-        now(),
     )
     .expect_err("a plan that would name a key outside its scope is not a plan");
     assert!(
@@ -626,8 +625,8 @@ fn identity() -> plan::PlanIdentity {
 
 fn plan_for(points: &[plan::PointFacts], r: plan::Rules) -> (plan::PlanDocument, String) {
     let evaluation = evaluate(points, r);
-    let document = plan::plan_document(&identity(), &destination(), r, &evaluation, now())
-        .expect("the plan renders");
+    let document =
+        plan::plan_document(&identity(), &destination(), r, &evaluation).expect("the plan renders");
     let (_, digest) = plan::plan_bytes(&document).expect("the plan serialises");
     (document, digest)
 }
@@ -653,27 +652,76 @@ fn changing_the_rules_invalidates_the_approved_digest() {
     assert_ne!(before, after);
 }
 
-/// And changing the GENERATION alone changes it too: the generation is inside
-/// the bytes, so any spec edit at all invalidates the approval.
+/// **The generation does NOT reach the digest** — review `d3w9` C1, second leg.
+///
+/// The first landing put `policy_generation` in the bytes and this row asserted
+/// that a bump changed the digest, as a feature. It is a deadlock: approving a
+/// plan means patching `spec.enforcement.approvedPlanSha256`, a spec patch
+/// bumps `metadata.generation`, and the digest the approval names changes in the
+/// same write. There is no ordering of events in which the two agree.
 #[test]
-fn a_generation_bump_alone_invalidates_the_approved_digest() {
+fn a_generation_bump_alone_leaves_the_digest_alone() {
     let points: Vec<plan::PointFacts> = (1..=6).map(|d| point(&format!("p{d}"), d)).collect();
     let r = rules(Some(2), None, 3);
     let evaluation = evaluate(&points, r);
     let (_, at_four) = plan::plan_bytes(
-        &plan::plan_document(&identity(), &destination(), r, &evaluation, now()).expect("renders"),
+        &plan::plan_document(&identity(), &destination(), r, &evaluation).expect("renders"),
     )
     .expect("serialises");
     let mut five = identity();
     five.generation = 5;
     let (_, at_five) = plan::plan_bytes(
-        &plan::plan_document(&five, &destination(), r, &evaluation, now()).expect("renders"),
+        &plan::plan_document(&five, &destination(), r, &evaluation).expect("renders"),
     )
     .expect("serialises");
-    assert_ne!(
+    assert_eq!(
         at_four, at_five,
-        "`policy_generation` is inside the plan bytes precisely so that a spec change cannot \
-         leave a stale approval looking current"
+        "approving a plan is a SPEC patch and a spec patch bumps the generation; a digest the \
+         act of approving changes can never be approved. What invalidates an approval is the \
+         CONTENT — the rules as applied and the exact lines — and both are in the bytes."
+    );
+}
+
+/// **The digest does not move with the clock** — review `d3w9` C1, first leg.
+///
+/// The reconciler requeues every 60 s and `reconcile` builds `Utc::now()`
+/// fresh each time. With `evaluated_at` in the bytes, two renderings of one
+/// archive three seconds apart digested differently, so the value an
+/// administrator copied onto the spec had already expired when they copied it.
+#[test]
+fn the_digest_does_not_move_with_the_clock() {
+    let points: Vec<plan::PointFacts> = (1..=6).map(|d| point(&format!("p{d}"), d)).collect();
+    let r = rules(Some(2), None, 3);
+    // The SAME archive, evaluated at two instants. `evaluate` takes `now` for
+    // the age rule, so the evaluations themselves are computed at both.
+    let first = plan::evaluate(&plan::Input {
+        destination: &destination(),
+        points: &points,
+        rules: r,
+        holds: &[],
+        protection: &plan::Protection::default(),
+        now: now(),
+        max_deletions_per_run: 50,
+    });
+    let second = plan::evaluate(&plan::Input {
+        destination: &destination(),
+        points: &points,
+        rules: r,
+        holds: &[],
+        protection: &plan::Protection::default(),
+        now: now() + chrono::Duration::seconds(3),
+        max_deletions_per_run: 50,
+    });
+    let digest_of = |e: &plan::Evaluation| {
+        plan::plan_bytes(&plan::plan_document(&identity(), &destination(), r, e).expect("renders"))
+            .expect("serialises")
+            .1
+    };
+    assert_eq!(
+        digest_of(&first),
+        digest_of(&second),
+        "there must be no instant in the digested bytes: a digest that changes every 60 s can \
+         never equal an approvedPlanSha256, so `mode: Enforce` could never create a Job"
     );
 }
 
@@ -697,17 +745,23 @@ fn every_plan_line_names_its_manifest_first_and_stays_in_its_set() {
     assert_eq!(document.location_id, LOCATION);
 }
 
-/// The plan `ConfigMap` name is bounded even at a 253-character policy name.
+/// The plan `ConfigMap`'s name is UID-stemmed, content-named and bounded — and
+/// it is the name the controller actually uses (review `d3w9` L3).
 #[test]
-fn the_plan_config_map_name_is_bounded() {
-    let long = "a".repeat(253);
-    let name = plan::plan_config_map_name(&long, 7);
+fn the_plan_config_map_name_is_the_one_the_controller_uses() {
+    let digest = format!("sha256:{}", "ab".repeat(32));
+    let name = plan::plan_config_map_name(UID, &digest);
+    assert!(name.starts_with("lwr-"));
+    assert!(name.ends_with("-plan-abababababab"));
     assert!(
         name.len() <= 253,
-        "a name longer than the budget is replaced by a digest of itself; got {} characters",
+        "a DNS subdomain is 253 characters; got {}",
         name.len()
     );
-    assert_eq!(plan::plan_config_map_name("primary", 7), "primary-plan-7");
+    // Stable in the UID, not in the policy NAME, so a 253-character policy name
+    // cannot overflow it.
+    assert_eq!(name, plan::plan_config_map_name(UID, &digest));
+    assert_ne!(name, plan::plan_config_map_name("another-uid", &digest));
 }
 
 /// The run id is deterministic, so a controller that crashed between the lease
@@ -971,6 +1025,21 @@ fn view_entry(id: &str, age_days: i64) -> Value {
     })
 }
 
+/// The digest the catalog publishes for a page, computed the way the controller
+/// recomputes it.
+///
+/// A page with NO published digest is now a view failure (review `d3w9` M4), so
+/// every fixture that wants a readable view has to publish one — which is the
+/// production shape: `catalog_view::materialise` always writes it.
+fn page_digest_of(entries: &[Value]) -> String {
+    let bodies: Vec<String> = entries
+        .iter()
+        .map(|e| serde_json::to_string(e).expect("an entry serialises"))
+        .collect();
+    let refs: Vec<&str> = bodies.iter().map(String::as_str).collect();
+    weirkeeper::catalog_view::page_digest(&refs)
+}
+
 fn page_config_map(entries: &[Value]) -> String {
     let body: String = entries
         .iter()
@@ -1151,7 +1220,11 @@ fn happy_routes(entries: &[Value]) -> Vec<Route> {
             "/recoverycatalogs/primary",
             catalog_body(
                 Some(DEST),
-                json!([{"configMapName": "page-0", "index": 0, "count": 6}]),
+                json!([{
+                    "configMapName": "page-0", "index": 0,
+                    "count": entries.len(),
+                    "sha256": page_digest_of(entries)
+                }]),
             ),
         ),
         route("GET", "/configmaps/page-0", page_config_map(entries)),
@@ -1174,6 +1247,17 @@ fn fixture(routes: Vec<Route>) -> Fixture {
 }
 
 async fn run(fixture: &Fixture, policy: &RetentionPolicy) -> ctrl::Outcome {
+    run_at(fixture, policy, now()).await
+}
+
+/// One pass at an EXPLICIT instant.
+///
+/// The first landing had only the frozen-`now()` form, which is why C1 — a plan
+/// digest that moved with the wall clock — survived
+/// `approving_the_published_digest_creates_exactly_one_job`: both of its passes
+/// ran at the same instant, so the row asserted nothing about the thing that
+/// was broken.
+async fn run_at(fixture: &Fixture, policy: &RetentionPolicy, at: DateTime<Utc>) -> ctrl::Outcome {
     let installation = check::policy::Policy::defaults();
     let image = RunnerImage::default();
     ctrl::reconcile_policy(
@@ -1182,7 +1266,7 @@ async fn run(fixture: &Fixture, policy: &RetentionPolicy) -> ctrl::Outcome {
             client: &fixture.client,
             policy: &installation,
             runner_image: &image,
-            now: now(),
+            now: at,
         },
     )
     .await
@@ -1663,6 +1747,7 @@ async fn an_empty_candidate_list_creates_no_job() {
 // The active-restore race
 // ---------------------------------------------------------------------------
 
+/// A `Restore` that names its archive by URL — the LEGACY shape.
 fn restore_body(set: &str, phase: Option<&str>) -> Value {
     let mut status = json!({});
     if let Some(phase) = phase {
@@ -1683,6 +1768,21 @@ fn restore_body(set: &str, phase: Option<&str>) -> Value {
         },
         "status": status
     })
+}
+
+/// A `Restore` that names its destination BY REFERENCE — the D2/D3 shape, and
+/// the one the first landing could not see at all (review `d3w9` C2).
+///
+/// `crds/restore.rs`'s CEL rule forces `sourceArchive.url` to the sentinel
+/// `logweir-destination://<name>` whenever `sourceDestinationRef` is set, so a
+/// URL comparison cannot rescue this shape either.
+fn destination_backed_restore(destination: &str, set: &str, phase: Option<&str>) -> Value {
+    let mut restore = restore_body(set, phase);
+    restore["spec"]["sourceDestinationRef"] = json!({"name": destination});
+    restore["spec"]["evidenceDestinationRef"] = json!({"name": destination});
+    restore["spec"]["sourceArchive"] =
+        json!({"url": format!("logweir-destination://{destination}")});
+    restore
 }
 
 fn restore_list(items: Vec<Value>) -> String {
@@ -1840,6 +1940,15 @@ async fn a_finished_run_is_harvested_and_clears_its_lease() {
         route("GET", "/retentionpolicies", policy_list(vec![])),
         route("GET", leaked, job_body(&job_name, true)),
         route("GET", "/pods", pod_list(0)),
+        // The run's own key lines — the controller reads them through the same
+        // owner-UID pod path it reads the exit code through (review `d3w9` H2).
+        route(
+            "GET",
+            "/log",
+            "retention-point=p6 state=Deleted objects=4\n\
+             retention-result=deleted=1 failed=0 objects=4\n"
+                .to_string(),
+        ),
         route(
             "PATCH",
             "/retentionpolicies/primary/status",
@@ -1891,6 +2000,13 @@ async fn three_consecutive_failures_degrade_and_stop_scheduling() {
         route("GET", "/retentionpolicies", policy_list(vec![])),
         route("GET", leaked, job_body(&job_name, true)),
         route("GET", "/pods", pod_list(1)),
+        route(
+            "GET",
+            "/log",
+            "retention-point=p6 state=Kept objects=0 code=AccessDenied\n\
+             retention-result=deleted=0 failed=1 objects=0\n"
+                .to_string(),
+        ),
         route(
             "PATCH",
             "/retentionpolicies/primary/status",
@@ -2329,4 +2445,766 @@ fn the_everyday_binary_links_no_delete_path() {
              dependencies are {deps:?}"
         );
     }
+}
+
+// ===========================================================================
+// FIX ROUND 1 — one row per finding, each failing without its fix
+// ===========================================================================
+
+/// **C1, through the reconciler.** Two passes at DIFFERENT instants publish one
+/// digest, and approving it starts exactly one Job.
+///
+/// The first landing's `approving_the_published_digest_creates_exactly_one_job`
+/// ran both passes at the frozen `now()`, so it asserted nothing about the
+/// clock — which is why the defect survived it. Here the second pass is five
+/// minutes later, which is longer than `IDLE_REQUEUE_SECONDS`.
+#[tokio::test]
+async fn two_passes_at_different_instants_publish_one_digest_and_approving_it_starts_one_job() {
+    let first = fixture(happy_routes(&six_points()));
+    run(&first, &policy(enforcing(None), json!({}))).await;
+    let digest_at_0417 = first.status()["lastEvaluation"]["planSha256"]
+        .as_str()
+        .expect("a digest")
+        .to_string();
+
+    let second = fixture(happy_routes(&six_points()));
+    run_at(
+        &second,
+        &policy(enforcing(None), json!({})),
+        now() + chrono::Duration::minutes(5),
+    )
+    .await;
+    let digest_later = second.status()["lastEvaluation"]["planSha256"]
+        .as_str()
+        .expect("a digest")
+        .to_string();
+
+    assert_eq!(
+        digest_at_0417, digest_later,
+        "the digest must not move with the clock: an administrator copies \
+         `status.lastEvaluation.planSha256` onto the spec, and the copy itself triggers a \
+         reconcile. If the two differ there is no ordering of events in which an approval ever \
+         matches, and `mode: Enforce` can never create a Job."
+    );
+
+    // And the digest learned at one instant authorises a run at another.
+    let mut routes = happy_routes(&six_points());
+    routes.push(plan_config_map_route(&digest_at_0417));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let third = fixture(routes);
+    let outcome = run_at(
+        &third,
+        &policy(enforcing(Some(&digest_at_0417)), json!({})),
+        now() + chrono::Duration::minutes(5),
+    )
+    .await;
+    assert_eq!(outcome.phase, ctrl::RetentionPhase::Started);
+    assert_eq!(third.posted("/jobs").len(), 1, "exactly one Job");
+}
+
+/// **C2.** A nonterminal `Restore` that names this destination BY REFERENCE
+/// protects its point and stops the run.
+///
+/// Every row in the first landing built the `Restore` with `sourceArchive.url`
+/// only, so this branch — the one the whole D2/D3 design steers toward — had
+/// zero coverage, and the comparison it used (`location_id.contains(name)`)
+/// could never be true: `location_id` is `s3://<bucket>/<prefix>`, and the CEL
+/// rule forces the URL to the `logweir-destination://` sentinel whenever the
+/// reference is set.
+#[tokio::test]
+async fn a_destination_backed_restore_protects_its_point_and_blocks_the_run() {
+    let mut routes = happy_routes(&six_points());
+    routes.retain(|r| r.path_suffix != "/restores");
+    routes.push(route(
+        "GET",
+        "/restores",
+        restore_list(vec![destination_backed_restore(
+            DEST,
+            "set-p6",
+            Some("Running"),
+        )]),
+    ));
+    let f = fixture(routes);
+    let outcome = run(&f, &policy(enforcing(None), json!({}))).await;
+
+    assert_eq!(
+        outcome.candidates, 2,
+        "p6 is protected, so two candidates remain. A restore naming its destination by \
+         reference is the D2/D3 path, and the reaper would otherwise delete the manifest and \
+         segments of a set a live restore is reading."
+    );
+    let protected = f.status()["lastEvaluation"]["protected"]
+        .as_array()
+        .expect("protected")
+        .clone();
+    assert!(
+        protected
+            .iter()
+            .any(|p| p["pointId"] == "p6" && p["reason"] == "ActiveRestore"),
+        "protected: {protected:?}"
+    );
+    assert!(f.seen().iter().all(|(m, _)| m != "POST"));
+}
+
+/// **C2, the negative control.** The same restore in ANOTHER namespace protects
+/// nothing: a `destinationRef` is namespace-local, so the same name elsewhere
+/// is a different object.
+#[tokio::test]
+async fn a_destination_backed_restore_in_another_namespace_protects_nothing() {
+    let mut routes = happy_routes(&six_points());
+    routes.retain(|r| r.path_suffix != "/restores");
+    let mut elsewhere = destination_backed_restore(DEST, "set-p6", Some("Running"));
+    elsewhere["metadata"]["namespace"] = json!("some-other-namespace");
+    routes.push(route("GET", "/restores", restore_list(vec![elsewhere])));
+    let f = fixture(routes);
+    let outcome = run(&f, &policy(json!({}), json!({}))).await;
+    assert_eq!(outcome.candidates, 3);
+}
+
+/// **C2, as a table over the pure predicate.** The substring comparison the
+/// first landing used was true or false by accident of spelling.
+#[test]
+fn restore_touches_compares_names_and_never_substrings() {
+    let named = destination_backed_restore(DEST, "set-a", Some("Running"));
+    let named: weirkeeper::crds::restore::Restore =
+        serde_json::from_value(named).expect("a Restore");
+    assert!(
+        ctrl::restore_touches(&named, DEST, LOCATION, NS),
+        "the reference names this destination in this namespace"
+    );
+    assert!(
+        !ctrl::restore_touches(&named, "another-destination", LOCATION, NS),
+        "a different destination of the same location is not this one"
+    );
+    assert!(
+        !ctrl::restore_touches(&named, DEST, LOCATION, "elsewhere"),
+        "a destinationRef is namespace-local"
+    );
+
+    // The substring trap, stated: a destination NAMED `kafka` would have
+    // matched `s3://lw-archive/kafka-backups/…` under the old comparison, and a
+    // destination named `archive` would not have matched its own URL at all.
+    let mut coincidence = destination_backed_restore("kafka", "set-a", Some("Running"));
+    coincidence["spec"]["sourceDestinationRef"] = json!({"name": "kafka"});
+    let coincidence: weirkeeper::crds::restore::Restore =
+        serde_json::from_value(coincidence).expect("a Restore");
+    assert!(
+        !ctrl::restore_touches(&coincidence, DEST, "s3://lw-archive/kafka-backups", NS),
+        "a destination whose NAME happens to appear in another destination's URL is still a \
+         different destination"
+    );
+
+    // The legacy shape keeps URL equality, and only it.
+    let legacy: weirkeeper::crds::restore::Restore =
+        serde_json::from_value(restore_body("set-a", Some("Running"))).expect("a Restore");
+    assert!(ctrl::restore_touches(&legacy, DEST, LOCATION, NS));
+    assert!(!ctrl::restore_touches(
+        &legacy,
+        DEST,
+        "s3://other-bucket/team-b",
+        NS
+    ));
+}
+
+/// **C3.** A status conflict means no Job — the lease did not land, so nothing
+/// is holding these points.
+///
+/// The first landing mapped 409 to `Ok(())`. Every enforcing pass patched three
+/// times with the same, already-superseded version: the evaluation landed, the
+/// LEASE 409'd and was discarded, and the Job was created anyway.
+#[tokio::test]
+async fn a_status_conflict_creates_no_job() {
+    let digest = {
+        let learn = fixture(happy_routes(&six_points()));
+        run(&learn, &policy(enforcing(None), json!({}))).await;
+        learn.status()["lastEvaluation"]["planSha256"]
+            .as_str()
+            .expect("a digest")
+            .to_string()
+    };
+    let mut routes = happy_routes(&six_points());
+    routes.retain(|r| r.path_suffix != "/retentionpolicies/primary/status");
+    routes.push(Route {
+        method: "PATCH",
+        path_suffix: "/retentionpolicies/primary/status",
+        status: 409,
+        body: json!({
+            "kind": "Status", "apiVersion": "v1", "status": "Failure",
+            "reason": "Conflict", "code": 409,
+            "message": "the object has been modified"
+        })
+        .to_string(),
+    });
+    routes.push(plan_config_map_route(&digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let f = fixture(routes);
+    let outcome = run(&f, &policy(enforcing(Some(&digest)), json!({}))).await;
+
+    assert!(
+        f.seen().iter().all(|(m, _)| m != "POST"),
+        "a run whose lease did not land is a run nothing is holding points for, and it must not \
+         start. Requests: {:?}",
+        f.seen()
+    );
+    assert_eq!(outcome.enforced_reason, ctrl::REASON_LEASE_NOT_HELD);
+}
+
+/// **C3, the other half.** Each status PATCH preconditions on the version the
+/// LAST one returned, not on the one the watcher delivered.
+#[tokio::test]
+async fn each_status_patch_carries_the_version_the_last_one_returned() {
+    let digest = {
+        let learn = fixture(happy_routes(&six_points()));
+        run(&learn, &policy(enforcing(None), json!({}))).await;
+        learn.status()["lastEvaluation"]["planSha256"]
+            .as_str()
+            .expect("a digest")
+            .to_string()
+    };
+    // The API server answers every status write with a NEW version, exactly as
+    // a real one does.
+    let mut bumped = policy_value(json!({}), json!({}));
+    bumped["metadata"]["resourceVersion"] = json!("9001");
+    let mut routes = happy_routes(&six_points());
+    routes.retain(|r| r.path_suffix != "/retentionpolicies/primary/status");
+    routes.push(route(
+        "PATCH",
+        "/retentionpolicies/primary/status",
+        bumped.to_string(),
+    ));
+    routes.push(plan_config_map_route(&digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let f = fixture(routes);
+    run(&f, &policy(enforcing(Some(&digest)), json!({}))).await;
+
+    let versions: Vec<String> = f
+        .status_patches()
+        .iter()
+        .filter_map(|p| {
+            p["metadata"]["resourceVersion"]
+                .as_str()
+                .map(str::to_string)
+        })
+        .collect();
+    assert!(
+        versions.len() >= 2,
+        "an enforcing pass patches more than once"
+    );
+    assert_eq!(
+        versions[0], "4242",
+        "the first patch preconditions on what the watcher delivered"
+    );
+    assert!(
+        versions[1..].iter().all(|v| v == "9001"),
+        "and every later one on what the API server returned — a reconciler that holds no `get` \
+         on its own kind has no other fresh version. Got: {versions:?}"
+    );
+}
+
+/// **H1.** `sharedSegments` reports `NotEnforced` while the view carries no
+/// segment keys, and the condition says why.
+///
+/// Asserted through `point_facts` over a real `ViewEntry`, which is the
+/// production shape: the unit rows above feed `segment_keys` straight into
+/// `PointFacts`, which no view can do.
+#[tokio::test]
+async fn shared_segment_protection_is_reported_not_enforced() {
+    let entry: weirkeeper::catalog_view::ViewEntry =
+        serde_json::from_value(view_entry("p1", 1)).expect("a view entry");
+    let facts = ctrl::point_facts(&entry);
+    assert!(
+        facts.segment_keys.is_empty(),
+        "the catalog view entry has no segment field at all, so there is nothing to protect with"
+    );
+
+    let f = fixture(happy_routes(&six_points()));
+    run(&f, &policy(json!({}), json!({}))).await;
+    assert_eq!(
+        f.status()["guarantees"]["sharedSegments"],
+        ctrl::GUARANTEE_NOT_ENFORCED,
+        "writing LogweirEnforced for a rule that has nothing to apply is the withdrawn-guarantee \
+         defect class on a status field"
+    );
+    assert!(
+        f.condition(ctrl::CONDITION_EVALUATED)["message"]
+            .as_str()
+            .expect("a message")
+            .contains("no segment keys"),
+        "and the condition says why: {}",
+        f.condition(ctrl::CONDITION_EVALUATED)["message"]
+    );
+}
+
+/// **H2.** A finished run records what it deleted, what it could not, and where
+/// the record is — from its own key lines, through the owner-UID pod path.
+#[tokio::test]
+async fn a_finished_run_records_what_it_deleted_and_what_it_could_not() {
+    let run_id = "r00000000deadbee4";
+    let job_name = format!("{}-{run_id}", stem());
+    let leaked: &'static str = Box::leak(format!("/jobs/{job_name}").into_boxed_str());
+    let log = "retention-plan=sha256:aa points=2 objects=4\n\
+               retention-point=p5 state=Deleted objects=2\n\
+               retention-point=p6 state=Kept objects=0 code=Locked\n\
+               retention-record=logweir/retention/uid/r00000000deadbee4.json sha256=sha256:bb\n\
+               retention-result=deleted=1 failed=1 objects=2\n";
+    let routes = vec![
+        route("GET", "/retentionpolicies", policy_list(vec![])),
+        route("GET", leaked, job_body(&job_name, true)),
+        route("GET", "/pods", pod_list(1)),
+        route("GET", "/log", log.to_string()),
+        route(
+            "PATCH",
+            "/retentionpolicies/primary/status",
+            policy_value(json!({}), json!({})).to_string(),
+        ),
+        route("PATCH", leaked, "{}".to_string()),
+    ];
+    let f = fixture(routes);
+    let status = json!({
+        "lastEnforcement": {"runId": run_id, "startedAt": "2026-09-17T04:00:00Z"}
+    });
+    run(&f, &policy(enforcing(None), status)).await;
+
+    let last = &f.status()["lastEnforcement"];
+    assert_eq!(last["deleted"], json!(["p5"]));
+    assert_eq!(last["failed"], json!([{"pointId": "p6", "code": "Locked"}]));
+    assert_eq!(last["objectsDeleted"], 2);
+    assert_eq!(
+        last["recordKey"],
+        "logweir/retention/uid/r00000000deadbee4.json"
+    );
+    assert_eq!(
+        last["recordSha256"], "sha256:bb",
+        "W14's L9 compares the record's bytes against this field; without it there is nothing \
+         to compare against"
+    );
+}
+
+/// **H2, the consequence.** A recorded provider refusal protects that point on
+/// the next pass — D3 §6.5's "excluded from the next plan until the reason
+/// clears", which could not fire while `failed[]` was never written.
+#[tokio::test]
+async fn a_recorded_provider_refusal_protects_that_point_on_the_next_pass() {
+    let f = fixture(happy_routes(&six_points()));
+    let status = json!({
+        "lastEnforcement": {
+            "runId": "r0", "finishedAt": "2026-09-17T04:00:00Z", "exitCode": 1,
+            "failed": [{"pointId": "p6", "code": "Locked"}]
+        }
+    });
+    let outcome = run(&f, &policy(json!({}), status)).await;
+    assert_eq!(outcome.candidates, 2, "p6 is excluded from this plan");
+    let protected = f.status()["lastEvaluation"]["protected"]
+        .as_array()
+        .expect("protected")
+        .clone();
+    assert!(
+        protected
+            .iter()
+            .any(|p| p["pointId"] == "p6" && p["reason"] == "LegalHold"),
+        "protected: {protected:?}"
+    );
+}
+
+/// **H4.** An approved plan older than `planMaxAgeSeconds` starts no Job.
+#[tokio::test]
+async fn an_expired_plan_starts_no_job() {
+    let digest = {
+        let learn = fixture(happy_routes(&six_points()));
+        run(&learn, &policy(enforcing(None), json!({}))).await;
+        learn.status()["lastEvaluation"]["planSha256"]
+            .as_str()
+            .expect("a digest")
+            .to_string()
+    };
+    let mut routes = happy_routes(&six_points());
+    routes.push(plan_config_map_route(&digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let f = fixture(routes);
+    // The status remembers the same digest with a window that closed an hour
+    // ago — `planMaxAgeSeconds` is 3600 in the fixture.
+    let status = json!({
+        "lastEvaluation": {
+            "planSha256": digest,
+            "planExpiresAt": "2026-09-17T03:00:00Z"
+        }
+    });
+    let outcome = run(&f, &policy(enforcing(Some(&digest)), status)).await;
+
+    assert_eq!(outcome.enforced_reason, ctrl::REASON_PLAN_EXPIRED);
+    assert!(
+        f.seen().iter().all(|(m, _)| m != "POST"),
+        "one of D3 §6.5's four gates, and the first landing declared the reason and never \
+         emitted it. Requests: {:?}",
+        f.seen()
+    );
+    // And the window re-anchors, so the policy is not wedged forever.
+    let expires: chrono::DateTime<chrono::Utc> =
+        serde_json::from_value(f.status()["lastEvaluation"]["planExpiresAt"].clone())
+            .expect("an instant");
+    assert!(expires > now(), "the re-anchored window is in the future");
+}
+
+/// **H4, the negative control.** A window that is still open starts the run.
+#[tokio::test]
+async fn a_plan_inside_its_window_starts() {
+    let digest = {
+        let learn = fixture(happy_routes(&six_points()));
+        run(&learn, &policy(enforcing(None), json!({}))).await;
+        learn.status()["lastEvaluation"]["planSha256"]
+            .as_str()
+            .expect("a digest")
+            .to_string()
+    };
+    let mut routes = happy_routes(&six_points());
+    routes.push(plan_config_map_route(&digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let f = fixture(routes);
+    let status = json!({
+        "lastEvaluation": {"planSha256": digest, "planExpiresAt": "2026-09-17T05:00:00Z"}
+    });
+    let outcome = run(&f, &policy(enforcing(Some(&digest)), status)).await;
+    assert_eq!(outcome.phase, ctrl::RetentionPhase::Started);
+}
+
+/// **M1.** The preview omits the object count it cannot observe, rather than
+/// publishing `1`.
+#[tokio::test]
+async fn the_preview_omits_the_object_count_it_cannot_observe() {
+    let f = fixture(happy_routes(&six_points()));
+    run(&f, &policy(json!({}), json!({}))).await;
+    let candidates = f.status()["lastEvaluation"]["candidates"]
+        .as_array()
+        .expect("candidates")
+        .clone();
+    assert!(!candidates.is_empty());
+    for candidate in &candidates {
+        assert!(
+            candidate["objects"].is_null(),
+            "the view carries no segment keys, so `1` — the manifest and nothing else — would \
+             tell an administrator that a three-line plan removes three objects while the run \
+             removes several thousand. Absent is `not observed`, which is this API's rule \
+             everywhere else. Got: {candidate}"
+        );
+    }
+    let message = f.condition(ctrl::CONDITION_EVALUATED)["message"]
+        .as_str()
+        .expect("a message")
+        .to_string();
+    assert!(
+        message.contains("does not enumerate") || message.contains("omitted"),
+        "and the condition says the plan does not enumerate: {message}"
+    );
+}
+
+/// **M2.** A run that stopped on its own object ceiling is not counted as a
+/// failure, so three of them do not stop retention for good.
+#[tokio::test]
+async fn a_budget_bounded_run_does_not_count_toward_degradation() {
+    let run_id = "r00000000deadbee5";
+    let job_name = format!("{}-{run_id}", stem());
+    let leaked: &'static str = Box::leak(format!("/jobs/{job_name}").into_boxed_str());
+    let log = "retention-point=p6 state=Orphaned objects=3 code=BudgetExhausted\n\
+               retention-result=deleted=0 failed=1 objects=3\n";
+    let routes = vec![
+        route("GET", "/retentionpolicies", policy_list(vec![])),
+        route("GET", leaked, job_body(&job_name, true)),
+        route("GET", "/pods", pod_list(1)),
+        route("GET", "/log", log.to_string()),
+        route(
+            "PATCH",
+            "/retentionpolicies/primary/status",
+            policy_value(json!({}), json!({})).to_string(),
+        ),
+        route("PATCH", leaked, "{}".to_string()),
+    ];
+    let f = fixture(routes);
+    let status = json!({
+        "lastEnforcement": {"runId": run_id, "startedAt": "2026-09-17T04:00:00Z"},
+        "consecutiveRunFailures": 2
+    });
+    run(&f, &policy(enforcing(None), status)).await;
+    assert_eq!(
+        f.status()["consecutiveRunFailures"],
+        2,
+        "the ceiling is the bound working, not a failure; three bounded runs on a large archive \
+         must not set EnforcementDegraded and stop retention for good"
+    );
+    assert_eq!(f.condition(ctrl::CONDITION_DEGRADED)["status"], "False");
+}
+
+/// **M3.** A sibling prefix is not a narrowing of the destination.
+#[tokio::test]
+async fn a_sibling_prefix_is_not_a_narrowing_of_the_destination() {
+    let f = fixture(happy_routes(&six_points()));
+    // The destination is rooted at `team-a`; `team-ab` is a different tenant.
+    let outcome = run(
+        &f,
+        &policy(json!({"scope": {"prefix": "team-ab"}}), json!({})),
+    )
+    .await;
+    assert_eq!(outcome.ready_reason, ctrl::REASON_DESTINATION_UNUSABLE);
+    assert!(f.condition(ctrl::CONDITION_READY)["message"]
+        .as_str()
+        .expect("a message")
+        .contains("team-ab"));
+}
+
+/// **M3, the negative control.** The destination's own prefix, and a genuine
+/// narrowing of it, both pass the SCOPE guard.
+///
+/// A narrowing whose points then lie outside it is refused later and
+/// differently — by `plan_document`, with `PlanRefused` — which is the correct
+/// separation: "this scope is not under the destination" and "this scope
+/// excludes every candidate" are two findings an operator fixes in two places.
+#[tokio::test]
+async fn the_destination_prefix_and_a_genuine_narrowing_both_pass_the_scope_guard() {
+    let f = fixture(happy_routes(&six_points()));
+    let outcome = run(&f, &policy(json!({"scope": {"prefix": SCOPE}}), json!({}))).await;
+    assert_eq!(outcome.ready, "True", "the destination's own prefix passes");
+
+    let g = fixture(happy_routes(&six_points()));
+    let narrowed = run(
+        &g,
+        &policy(json!({"scope": {"prefix": "team-a/nightly"}}), json!({})),
+    )
+    .await;
+    assert_ne!(
+        narrowed.ready_reason,
+        ctrl::REASON_DESTINATION_UNUSABLE,
+        "`team-a/nightly` IS under `team-a`, so the scope guard must not be what refuses it"
+    );
+    assert_eq!(
+        narrowed.ready_reason,
+        ctrl::REASON_UNSUPPORTED_COMBINATION,
+        "what refuses it is the plan: no candidate's keys are under that narrower prefix"
+    );
+}
+
+/// **M4.** A page the catalog published no digest for is a view failure.
+#[tokio::test]
+async fn a_page_with_no_published_digest_is_a_view_failure() {
+    let mut routes = happy_routes(&six_points());
+    routes.retain(|r| r.path_suffix != "/recoverycatalogs/primary");
+    routes.push(route(
+        "GET",
+        "/recoverycatalogs/primary",
+        catalog_body(
+            Some(DEST),
+            json!([{"configMapName": "page-0", "index": 0, "count": 6}]),
+        ),
+    ));
+    let f = fixture(routes);
+    let outcome = run(&f, &policy(json!({}), json!({}))).await;
+    assert_eq!(outcome.ready_reason, ctrl::REASON_CATALOG_UNUSABLE);
+    assert!(
+        f.condition(ctrl::CONDITION_EVALUATED)["message"]
+            .as_str()
+            .expect("a message")
+            .contains("sha256"),
+        "the same function refuses an INCOMPLETE view; accepting an UNVERIFIED one would be the \
+         same defect through the other door"
+    );
+}
+
+/// **M5.** The cadence is read: a schedule that has not come due starts no Job.
+#[tokio::test]
+async fn a_cadence_that_has_not_come_due_starts_no_job() {
+    let digest = {
+        let learn = fixture(happy_routes(&six_points()));
+        run(&learn, &policy(enforcing(None), json!({}))).await;
+        learn.status()["lastEvaluation"]["planSha256"]
+            .as_str()
+            .expect("a digest")
+            .to_string()
+    };
+    let mut spec = enforcing(Some(&digest));
+    // A yearly cron whose last firing was nine months before `now()` — far
+    // older than `planMaxAgeSeconds`, so it is a slot to wait past rather than
+    // one to catch up on.
+    spec["enforcement"]["schedule"] = json!("0 3 25 12 *");
+    let mut routes = happy_routes(&six_points());
+    routes.push(plan_config_map_route(&digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let f = fixture(routes);
+    let outcome = run(&f, &policy(spec, json!({}))).await;
+    assert_eq!(outcome.enforced_reason, ctrl::REASON_NOTHING_TO_DO);
+    assert!(
+        f.seen().iter().all(|(m, _)| m != "POST"),
+        "an operator who wrote a nightly cron must not get a run every reconcile"
+    );
+}
+
+/// **M5.** An unparseable schedule is refused, not silently hourly.
+#[tokio::test]
+async fn an_unparseable_schedule_is_refused() {
+    let mut spec = enforcing(None);
+    spec["enforcement"]["schedule"] = json!("not a cron");
+    let f = fixture(happy_routes(&six_points()));
+    let outcome = run(&f, &policy(spec, json!({}))).await;
+    assert_eq!(outcome.enforced_reason, ctrl::REASON_UNSUPPORTED_SCHEDULE);
+    assert!(f.seen().iter().all(|(m, _)| m != "POST"));
+}
+
+/// **M5 / Q1.** One run per SLOT, not one per minute: a pass that has already
+/// recorded this plan's run in this slot creates nothing.
+#[tokio::test]
+async fn a_second_pass_in_one_slot_creates_no_second_job() {
+    let digest = {
+        let learn = fixture(happy_routes(&six_points()));
+        run(&learn, &policy(enforcing(None), json!({}))).await;
+        learn.status()["lastEvaluation"]["planSha256"]
+            .as_str()
+            .expect("a digest")
+            .to_string()
+    };
+    // The slot the fixture's `"17 4 * * *"` names at `now()`.
+    let slot = now();
+    let run_id = plan::run_id(UID, &digest, slot.timestamp());
+    let mut routes = happy_routes(&six_points());
+    routes.push(plan_config_map_route(&digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let f = fixture(routes);
+    let status = json!({
+        "lastEnforcement": {
+            "runId": run_id, "startedAt": "2026-09-17T04:17:00Z",
+            "finishedAt": "2026-09-17T04:17:30Z", "exitCode": 0
+        }
+    });
+    // Ten minutes later, inside the same daily slot.
+    let outcome = run_at(
+        &f,
+        &policy(enforcing(Some(&digest)), status),
+        now() + chrono::Duration::minutes(10),
+    )
+    .await;
+    assert_eq!(outcome.enforced_reason, ctrl::REASON_NOTHING_TO_DO);
+    assert!(
+        f.seen().iter().all(|(m, _)| m != "POST"),
+        "the deterministic name makes a duplicate a 409; the slot is what makes it one run per \
+         CADENCE rather than one per minute"
+    );
+}
+
+/// **M6.** An object squatting the plan `ConfigMap`'s name creates no Job, and
+/// the refusal names the object.
+#[tokio::test]
+async fn a_squatted_plan_config_map_name_creates_no_job() {
+    let digest = {
+        let learn = fixture(happy_routes(&six_points()));
+        run(&learn, &policy(enforcing(None), json!({}))).await;
+        learn.status()["lastEvaluation"]["planSha256"]
+            .as_str()
+            .expect("a digest")
+            .to_string()
+    };
+    let name = plan::plan_config_map_name(UID, &digest);
+    let suffix: &'static str = Box::leak(format!("/configmaps/{name}").into_boxed_str());
+    let mut routes = happy_routes(&six_points());
+    routes.push(route(
+        "GET",
+        suffix,
+        json!({
+            "apiVersion": "v1", "kind": "ConfigMap",
+            "metadata": {
+                "name": name, "namespace": NS, "resourceVersion": "1",
+                "annotations": {plan::PLAN_DIGEST_ANNOTATION: "sha256:0000"}
+            },
+            "immutable": true,
+            "data": {plan::PLAN_DATA_KEY: "{\"squatted\":true}"}
+        })
+        .to_string(),
+    ));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let f = fixture(routes);
+    let outcome = run(&f, &policy(enforcing(Some(&digest)), json!({}))).await;
+
+    assert_eq!(
+        outcome.enforced_reason,
+        ctrl::REASON_PLAN_CONFIG_MAP_CONFLICT
+    );
+    assert!(
+        f.posted("/jobs").is_empty(),
+        "the plan an administrator approved is not the plan at that name"
+    );
+    assert!(f.condition(ctrl::CONDITION_ENFORCED)["message"]
+        .as_str()
+        .expect("a message")
+        .contains(&name));
+}
+
+/// **M9.** The plan `ConfigMap`'s name is published, so a reader never
+/// recomputes it.
+#[tokio::test]
+async fn the_plan_ref_is_published_once_a_run_is_authorised() {
+    let digest = {
+        let learn = fixture(happy_routes(&six_points()));
+        run(&learn, &policy(enforcing(None), json!({}))).await;
+        learn.status()["lastEvaluation"]["planSha256"]
+            .as_str()
+            .expect("a digest")
+            .to_string()
+    };
+    let mut routes = happy_routes(&six_points());
+    routes.push(plan_config_map_route(&digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let f = fixture(routes);
+    run(&f, &policy(enforcing(Some(&digest)), json!({}))).await;
+    assert_eq!(
+        f.status()["lastEvaluation"]["planRef"]["name"],
+        plan::plan_config_map_name(UID, &digest),
+        "the contract says `read the names from status; never compute one`, and W11's /preview \
+         is told to read this field"
+    );
+}
+
+/// **H2's parser**, as a table. Key lines are read BY NAME and never by
+/// position: a pod log is stdout and stderr merged in nondeterministic order.
+#[test]
+fn the_run_line_parser_reads_by_name_and_skips_what_it_cannot_read() {
+    let log = "some unrelated line\n\
+               retention-result=deleted=2 failed=1 objects=17\n\
+               retention-point=p1 state=Deleted objects=9\n\
+               retention-point=p2 state=Orphaned objects=3 code=AccessDenied\n\
+               retention-point=p3 objects=0\n\
+               retention-record=logweir/retention/u/r.json sha256=sha256:cc\n\
+               retention-point=\n";
+    let report = ctrl::parse_run_lines(log, Some(1));
+    assert_eq!(report.deleted, vec!["p1"]);
+    assert_eq!(
+        report.failed,
+        vec![("p2".to_string(), "AccessDenied".to_string())]
+    );
+    assert_eq!(
+        report.objects_deleted, 17,
+        "read from the result line wherever it appeared"
+    );
+    assert_eq!(
+        report.record_key.as_deref(),
+        Some("logweir/retention/u/r.json")
+    );
+    assert_eq!(report.record_sha256.as_deref(), Some("sha256:cc"));
+    assert_eq!(report.exit_code, Some(1));
+
+    // A point line with no `state=` is skipped rather than guessed at, and an
+    // empty one produces nothing at all.
+    assert!(!report.deleted.contains(&"p3".to_string()));
+    assert!(report.failed.iter().all(|(p, _)| p != "p3"));
+
+    // And a run that stopped on its ceiling is not a failed run.
+    let bounded = ctrl::parse_run_lines(
+        "retention-point=p9 state=Orphaned objects=1 code=BudgetExhausted\n",
+        Some(1),
+    );
+    assert!(bounded.bounded_only());
+    assert!(!report.bounded_only(), "an AccessDenied is not a bound");
 }

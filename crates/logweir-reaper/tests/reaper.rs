@@ -187,14 +187,11 @@ fn plan(lines: Vec<PlanLine>) -> Plan {
         policy_namespace: "team-a".to_string(),
         policy_name: "primary".to_string(),
         policy_uid: UID.to_string(),
-        policy_generation: 4,
         location_id: "s3://kafka-backups/team-a".to_string(),
         scope_prefix: SCOPE.to_string(),
         keep_last: Some(2),
         keep_days: Some(30),
         min_usable_points: 3,
-        evaluated_at: Utc.with_ymd_and_hms(2026, 9, 17, 4, 17, 0).unwrap(),
-        points_evaluated: 6,
         lines,
     }
 }
@@ -202,7 +199,6 @@ fn plan(lines: Vec<PlanLine>) -> Plan {
 fn binding() -> RunBinding {
     RunBinding {
         policy_uid: UID.to_string(),
-        policy_generation: 4,
         scope_prefix: SCOPE.to_string(),
         max_deletions_per_run: 50,
         max_objects_per_run: 20_000,
@@ -451,20 +447,34 @@ fn a_widened_set_prefix_is_refused() {
     assert!(matches!(err, Refusal::ScopeViolation { .. }), "got {err:?}");
 }
 
-/// The plan must be for THIS policy at THIS generation. A policy edit bumps the
-/// generation, so a plan from before the edit does not run.
+/// The plan must be for THIS policy.
+///
+/// **By UID and not by generation** (review `d3w9` C1): approving a plan is a
+/// spec patch and a spec patch bumps the generation, so a plan bound to one
+/// could never be approved. What binds the plan to the run is the policy's
+/// identity, its scope, and the approved digest `parse_plan` checked over the
+/// exact bytes.
 #[test]
-fn a_plan_for_another_policy_or_generation_is_refused() {
-    let mut p = plan(vec![line("lwp1-a", "set-a", &["seg-0"])]);
-    p.policy_generation = 3;
-    let err = validate_plan(&p, &binding()).expect_err("a stale generation is refused");
-    assert!(matches!(err, Refusal::PolicyMismatch { .. }), "got {err:?}");
-
+fn a_plan_for_another_policy_is_refused() {
     let mut q = plan(vec![line("lwp1-a", "set-a", &["seg-0"])]);
     q.policy_uid = "00000000-0000-4000-8000-000000000000".to_string();
     assert!(matches!(
         validate_plan(&q, &binding()),
         Err(Refusal::PolicyMismatch { .. })
+    ));
+    // And the plan carries no generation at all, so nothing here can compare
+    // one: `deny_unknown_fields` refuses a document that still has it.
+    let mut with_generation =
+        serde_json::to_value(plan(vec![line("lwp1-a", "set-a", &["seg-0"])])).expect("JSON");
+    with_generation
+        .as_object_mut()
+        .expect("an object")
+        .insert("policy_generation".to_string(), serde_json::json!(4));
+    let bytes = serde_json::to_vec(&with_generation).expect("serialises");
+    let digest = logweir_core::ids::sha256_prefixed(&bytes);
+    assert!(matches!(
+        parse_plan(&bytes, &digest),
+        Err(Refusal::Unreadable(_))
     ));
 }
 
@@ -837,6 +847,7 @@ fn the_record_names_the_plan_the_approver_and_every_outcome() {
         &outcome,
         &RecordContext {
             run_id: "r0123456789abcdef".to_string(),
+            policy_generation: 4,
             approver: "audit:0f3a".to_string(),
             plan_sha256: "sha256:aa".to_string(),
             started_at: Utc.with_ymd_and_hms(2026, 9, 17, 4, 17, 0).unwrap(),
@@ -880,6 +891,7 @@ fn the_record_bytes_are_deterministic() {
     let outcome = run(&p, &FakeDeleter::default(), &FakeSink::default(), limits());
     let ctx = RecordContext {
         run_id: "r0".to_string(),
+        policy_generation: 4,
         approver: "kubectl:alice".to_string(),
         plan_sha256: "sha256:aa".to_string(),
         started_at: Utc.with_ymd_and_hms(2026, 9, 17, 4, 17, 0).unwrap(),
@@ -919,7 +931,9 @@ fn the_object_ceiling_stops_the_run_and_names_the_reason() {
     assert_eq!(outcome.points[1].state, PointState::Kept.as_str());
     assert_eq!(
         outcome.points[1].code.as_deref(),
-        Some("ObjectBudgetExhausted")
+        Some("BudgetExhausted"),
+        "the run's own ceiling has its own code (review `d3w9` M2), so the controller can \
+         decline to count it toward consecutiveRunFailures"
     );
 }
 
@@ -1039,4 +1053,207 @@ fn an_empty_plan_is_valid_and_deletes_nothing() {
     );
     assert_eq!(outcome.objects_deleted, 0);
     assert!(outcome.complete());
+}
+
+// ===========================================================================
+// FIX ROUND 1
+// ===========================================================================
+
+/// **M1.** A dry run over an enumerating plan reports the REAL object count.
+///
+/// Every plan this build writes sets `enumerate_set: true` — the catalog view
+/// carries no segment keys — so a preview that reported the plan's own key list
+/// reported `1`, the manifest and nothing else, for a point whose removal takes
+/// thousands of objects.
+#[test]
+fn a_dry_run_enumerates_and_reports_the_real_count() {
+    let mut l = line("lwp1-a", "set-a", &[]);
+    l.enumerate_set = true;
+    let p = plan(vec![l]);
+    let listed: Vec<String> = (0..5)
+        .map(|i| format!("{SCOPE}/set-a/seg-{i}"))
+        .chain(std::iter::once(format!("{SCOPE}/set-a/manifest.json")))
+        .collect();
+    let sink = FakeSink::default();
+    let outcome = execute(
+        &p,
+        // The deleter PANICS: a preview that enumerates must still delete
+        // nothing at all.
+        &NeverDeletes,
+        &FakeSleeper::default(),
+        &sink,
+        &FakeLister(listed),
+        &attribution(),
+        Limits {
+            dry_run: true,
+            max_objects: 20_000,
+        },
+    );
+    assert_eq!(outcome.objects_deleted, 0);
+    assert_eq!(outcome.attempts, 0, "a dry run issues no delete call");
+    assert!(sink.keys().is_empty(), "and writes no tombstone");
+    assert_eq!(
+        outcome.points[0].remaining_keys.len(),
+        6,
+        "the manifest plus its five segments — the number an administrator needs, not the \
+         plan's own 1. Got: {:?}",
+        outcome.points[0].remaining_keys
+    );
+    assert_eq!(
+        outcome.points[0].remaining_keys[0],
+        format!("{SCOPE}/set-a/manifest.json"),
+        "and the manifest is still first, which is the order the real run would use"
+    );
+}
+
+/// **M1, the fall-back.** A preview by a caller holding no list grant reports
+/// the plan's own keys rather than failing.
+#[test]
+fn a_dry_run_without_a_lister_falls_back_to_the_plans_own_keys() {
+    let mut l = line("lwp1-a", "set-a", &[]);
+    l.enumerate_set = true;
+    let p = plan(vec![l]);
+    let outcome = execute(
+        &p,
+        &NeverDeletes,
+        &FakeSleeper::default(),
+        &FakeSink::default(),
+        &logweir_reaper::NoListing,
+        &attribution(),
+        Limits {
+            dry_run: true,
+            max_objects: 20_000,
+        },
+    );
+    assert_eq!(outcome.points[0].remaining_keys.len(), 1);
+    assert_eq!(outcome.points[0].code.as_deref(), Some("DryRun"));
+}
+
+/// **M2.** A run stopped by its own ceiling mid-point is named
+/// `BudgetExhausted`, not `Unclassified`.
+#[test]
+fn a_mid_point_budget_stop_is_named_and_is_not_a_failure() {
+    let p = plan(vec![line("lwp1-a", "set-a", &["seg-0", "seg-1", "seg-2"])]);
+    let deleter = FakeDeleter::default();
+    let sink = FakeSink::default();
+    let outcome = run(
+        &p,
+        &deleter,
+        &sink,
+        Limits {
+            dry_run: false,
+            max_objects: 2,
+        },
+    );
+    assert_eq!(outcome.points[0].state, PointState::Orphaned.as_str());
+    assert_eq!(
+        outcome.points[0].code.as_deref(),
+        Some("BudgetExhausted"),
+        "a run that stopped on its own ceiling and a run that could not read the bucket are \
+         different findings, fixed in different places"
+    );
+    assert!(
+        outcome.bounded_only(),
+        "and the run as a whole says so, so the controller can decline to count it toward \
+         consecutiveRunFailures"
+    );
+    // The negative control: one real failure and it is no longer `bounded_only`.
+    let failing = FakeDeleter::refusing(
+        &format!("{SCOPE}/set-a/seg-0"),
+        &[DeleteError::AccessDenied],
+    );
+    let mixed = run(&p, &failing, &FakeSink::default(), limits());
+    assert!(!mixed.bounded_only());
+}
+
+/// **M7.** The deleter refuses Azure and GCS rather than reading the process
+/// environment for a delete-capable credential.
+#[test]
+fn the_deleter_refuses_azure_and_gcs_rather_than_reading_the_environment() {
+    use logweir_core::engine::StorageUrl;
+    use logweir_reaper::archive::BuildError;
+    use logweir_reaper::ArchiveReaper;
+
+    let azure = ArchiveReaper::new(
+        &StorageUrl::Azure {
+            account_name: "acct".to_string(),
+            container_name: "c".to_string(),
+            prefix: String::new(),
+        },
+        None,
+        false,
+    );
+    assert!(
+        matches!(
+            azure,
+            Err(BuildError::UnsupportedProvider("Azure Blob Storage"))
+        ),
+        "the S3 arm is written with `AmazonS3Builder::new()` precisely so no ambient variable \
+         can relocate a deletion; a `from_env()` on another provider is the same defect through \
+         the other door. Got: {azure:?}"
+    );
+
+    let gcs = ArchiveReaper::new(
+        &StorageUrl::Gcs {
+            bucket: "b".to_string(),
+            prefix: String::new(),
+        },
+        None,
+        false,
+    );
+    assert!(
+        matches!(
+            gcs,
+            Err(BuildError::UnsupportedProvider("Google Cloud Storage"))
+        ),
+        "got {gcs:?}"
+    );
+    assert!(
+        format!("{}", azure.expect_err("an error")).contains("mode: Report"),
+        "and the refusal says what an operator can still do"
+    );
+}
+
+/// **M8.** A key whose normalised form differs from the plan's is refused, not
+/// deleted in its normalised form.
+///
+/// `object_store::path::Path::from` normalises AFTER every rail above has run:
+/// it drops empty segments and percent-encodes `.`, `..`, `%`, `#`, `<`, `>`,
+/// `?`, `*` and the control set. Two consequences, both closed here.
+#[test]
+fn a_key_whose_normalised_form_differs_is_refused() {
+    use logweir_reaper::archive::normalise;
+
+    // The ordinary case still works.
+    assert!(normalise(&format!("{SCOPE}/set-a/seg-0")).is_ok());
+
+    // (a) A LEADING SLASH NORMALISES INTO THE EVIDENCE ROOT. With an empty
+    //     scope prefix, `/logweir/x` passes `validate_key` — it starts with
+    //     neither `logweir/` nor anything disallowed — and `Path::from` turns
+    //     it into `logweir/x`.
+    let laundered = normalise("/logweir/x");
+    assert!(
+        laundered.is_err(),
+        "the string validated must be the path deleted; `{:?}` normalises into the evidence \
+         root",
+        laundered.map(|p| p.to_string())
+    );
+
+    // (b) A KEY CARRYING `?`, `#` OR `%` IS PERCENT-ENCODED INTO A DIFFERENT
+    //     OBJECT. The delete would then hit nothing, the backend would answer
+    //     `NotFound`, and `attempt` treats that as success — reporting a point
+    //     `Deleted` with its objects still in the bucket.
+    for key in [
+        format!("{SCOPE}/set-a/seg?0"),
+        format!("{SCOPE}/set-a/seg#0"),
+        format!("{SCOPE}/set-a/seg%200"),
+        format!("{SCOPE}/set-a//seg-0"),
+        format!("{SCOPE}/set-a/../seg-0"),
+    ] {
+        assert!(
+            normalise(&key).is_err(),
+            "`{key}` normalises to something else, so deleting the normalised form would be \
+             deleting a path nothing validated"
+        );
+    }
 }
