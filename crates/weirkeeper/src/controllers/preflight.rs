@@ -297,11 +297,21 @@ pub const RESTORE_CONTROLLER_ROWS: &[Row] = &[
         Authority::Controller,
         Some(EXPIRY_DEFAULT),
     ),
+    // EXECUTION-ONLY FOR A RESTORE, AND BLOCKING FOR A BACKUP — not a
+    // weakening, a statement about what is answerable. The verdict needs the
+    // runner's PUBLIC `signerKeyId` fact, which rides on
+    // `signer.privateKeyUsable`; the landed `RestorePreflightRequest` (D2 §4.2,
+    // W1's contract) carries no `signer_path`, so a `restorePreflight` pod is
+    // never given a key to report. A BLOCKING row nobody can answer pins every
+    // restore preflight at `unknown` for ever, which is reviewer finding F1's
+    // own shape. The row is still reported, with `SignerKeyIdNotObserved` and a
+    // message naming the reason. Closing it is a W1 amendment: add
+    // `signer_path` to `RestorePreflightRequest`.
     row(
         CheckId::SignerRostered,
-        Gating::Blocking,
+        Gating::ExecutionOnly,
         Authority::Controller,
-        Some(EXPIRY_DEFAULT),
+        None,
     ),
     row(
         CheckId::ApprovalState,
@@ -386,45 +396,159 @@ pub fn controller_rows(operation: PreflightOperation) -> Vec<Row> {
     out
 }
 
-/// The rows a check JOB would have answered, for the case where none ran.
+/// The rows the check JOB will answer for THIS RENDERED PLAN — **pure**, and
+/// the mirror of the runner's own emission rules.
 ///
-/// USED ONLY WHEN THERE IS NO VERIFIED RELAY. When a relay arrived, the rows it
-/// carried are the rows that ran: the runner omits a row it was asked to skip
-/// and a row its plan did not reach, and synthesising one the runner
-/// deliberately left out (`target.scratchMarker` for a `newTopic` restore) would
-/// pin the verdict at `unknown` forever.
+/// # Why this is a function of the plan and not of the operation
+///
+/// It used to be a static list per operation, and that was reviewer finding
+/// **F1**: a `Preflight` could never report `ready`. The rows the runner emits
+/// are decided by the REQUEST it is handed — which `roles` a destination check
+/// exercises, whether a `signer_path` was projected, whether an evidence
+/// destination was named, whether the restore plan's target mode is `scratch` —
+/// and every static list differed from the real one. `assemble` renders a row
+/// nobody answered as a BLOCKING `unknown`, so each difference pinned the
+/// verdict at `unknown` for ever, with a row reading "the check Job did not
+/// report this row" and no remedy.
+///
+/// So the rule lives here, once, and
+/// `the_expected_rows_are_the_rows_the_runner_emits` holds it against the
+/// runner's own pinned fixtures in `crates/logweir/tests/check_cli.rs` — the
+/// two crates share no dependency edge, so that test reads the runner's
+/// `want` literals out of its source rather than copying them.
+///
+/// `restore_target_is_scratch` comes from the plan bytes a `restorePreflight`
+/// mounts: `target.scratchMarker` is the one row whose presence depends on the
+/// document rather than on the request, and the controller parses the same
+/// bytes ([`PlanFacts::scratch`]).
 #[must_use]
-pub fn job_rows(operation: PreflightOperation) -> Vec<CheckId> {
+pub fn job_rows(request: &CheckRequest, restore_target_is_scratch: bool) -> BTreeSet<CheckId> {
+    let mut out = BTreeSet::new();
+    match request {
+        CheckRequest::OperationReadiness(r) => {
+            let skip: BTreeSet<CheckId> = r.skip_checks.iter().copied().collect();
+            let mut push = |id: CheckId| {
+                if !skip.contains(&id) {
+                    out.insert(id);
+                }
+            };
+            // `readiness.rs` applies `skip` to `runner.contract` too.
+            push(CheckId::RunnerContract);
+            match r.operation {
+                CheckOperation::Restore => push(CheckId::TargetAuthenticated),
+                CheckOperation::Backup | CheckOperation::DestinationAccess => {
+                    push(CheckId::ConnectionAuthenticated);
+                    push(CheckId::ConnectionTopicsDescribable);
+                }
+            }
+            if r.operation == CheckOperation::Backup {
+                push(CheckId::ConnectionTopicsReadable);
+            }
+            if r.destination.is_some() {
+                for role in &r.roles {
+                    push(destination_row_for(*role));
+                }
+            }
+            if r.signer_path.is_some() {
+                push(CheckId::SignerPrivateKeyUsable);
+            }
+        }
+        CheckRequest::DestinationAccess(r) => {
+            out.insert(CheckId::RunnerContract);
+            for role in &r.roles {
+                out.insert(destination_row_for(*role));
+            }
+        }
+        CheckRequest::RestorePreflight(r) => {
+            let wanted: BTreeSet<CheckId> = r.checks.iter().copied().collect();
+            let skipped: BTreeSet<CheckId> = r.skip_checks.iter().copied().collect();
+            let want =
+                |id: CheckId| (wanted.is_empty() || wanted.contains(&id)) && !skipped.contains(&id);
+            // `restore.rs` pushes `runner.contract` UNCONDITIONALLY — unlike
+            // `readiness.rs`, which filters it. The asymmetry is the runner's;
+            // mirroring it is the whole point of this function.
+            out.insert(CheckId::RunnerContract);
+            for id in [
+                CheckId::PlanParse,
+                CheckId::ArchiveBackupSet,
+                CheckId::ArchiveCoverage,
+                CheckId::ArchiveSegments,
+                CheckId::TargetAuthenticated,
+                CheckId::TargetMappedTopics,
+                CheckId::TargetTopicCreate,
+                CheckId::TargetTimestampBound,
+                CheckId::TargetLogAppendTime,
+            ] {
+                if want(id) {
+                    out.insert(id);
+                }
+            }
+            if restore_target_is_scratch && want(CheckId::TargetScratchMarker) {
+                out.insert(CheckId::TargetScratchMarker);
+            }
+            if r.evidence_destination.is_some() && want(CheckId::DestinationEvidenceWritable) {
+                out.insert(CheckId::DestinationEvidenceWritable);
+            }
+        }
+        // Neither kind is ever rendered by this controller.
+        CheckRequest::TopicInventory(_) | CheckRequest::EvidenceFetch(_) => {}
+    }
+    out
+}
+
+/// The one row a destination role produces — `access.rs`'s `match`, mirrored.
+#[must_use]
+pub fn destination_row_for(role: DestinationRole) -> CheckId {
+    match role {
+        DestinationRole::ArchiveRead => CheckId::DestinationArchiveListable,
+        DestinationRole::ArchiveWrite => CheckId::DestinationArchivePrefixWritable,
+        DestinationRole::EvidenceWrite => CheckId::DestinationEvidenceWritable,
+        DestinationRole::EvidenceRead => CheckId::DestinationEvidenceReadable,
+    }
+}
+
+/// The rows to report `unknown` for when NO plan could be rendered at all.
+///
+/// Used only on the path where a blocking controller row refused before a
+/// `CheckRequest` existed (an unresolvable connection or destination, an
+/// unparseable plan). Every row here is `unknown` in that case whatever the set
+/// is; what it buys is that the verdict LISTS the questions that went
+/// unanswered instead of publishing a short green-looking record.
+#[must_use]
+pub fn unrendered_job_rows(operation: PreflightOperation) -> BTreeSet<CheckId> {
     match operation {
-        PreflightOperation::Backup => vec![
+        PreflightOperation::Backup => [
             CheckId::RunnerContract,
             CheckId::ConnectionAuthenticated,
             CheckId::ConnectionTopicsDescribable,
             CheckId::DestinationArchiveListable,
             CheckId::DestinationEvidenceWritable,
-            CheckId::DestinationEvidenceReadable,
             CheckId::SignerPrivateKeyUsable,
-        ],
-        PreflightOperation::DestinationAccess => vec![
+        ]
+        .into_iter()
+        .collect(),
+        PreflightOperation::DestinationAccess => [
             CheckId::RunnerContract,
             CheckId::DestinationArchiveListable,
             CheckId::DestinationEvidenceWritable,
-            CheckId::DestinationEvidenceReadable,
-        ],
-        PreflightOperation::Restore => vec![
+        ]
+        .into_iter()
+        .collect(),
+        PreflightOperation::Restore => [
             CheckId::RunnerContract,
+            // `plan.parse` is deliberately absent: the CONTROLLER answers it
+            // (it holds the claimed hash and the bytes), so listing it here
+            // would claim one id for two authorities.
             CheckId::TargetAuthenticated,
-            CheckId::TargetScratchMarker,
             CheckId::TargetMappedTopics,
             CheckId::TargetTopicCreate,
             CheckId::TargetTimestampBound,
             CheckId::ArchiveBackupSet,
             CheckId::ArchiveCoverage,
             CheckId::ArchiveSegments,
-            CheckId::DestinationArchiveListable,
-            CheckId::DestinationEvidenceWritable,
-            CheckId::SignerPrivateKeyUsable,
-        ],
+        ]
+        .into_iter()
+        .collect(),
     }
 }
 
@@ -739,6 +863,27 @@ pub fn signer_rostered_row(
     now: DateTime<Utc>,
 ) -> CheckOutcome {
     let id = CheckId::SignerRostered;
+    if operation == PreflightOperation::Restore {
+        // See `RESTORE_CONTROLLER_ROWS`: the restore check plan carries no
+        // signer path, so no pod reports a key id and there is nothing to match
+        // against the roster. `CheckOutcome::new` forces an execution-only row
+        // to `unknown` whatever is passed here.
+        return outcome(
+            operation,
+            id,
+            CheckState::Unknown,
+            CheckCode::SignerKeyIdNotObserved,
+            now,
+        )
+        .with_message(
+            "a restore preflight's check plan projects no signing key, so which key this restore \
+             would sign its evidence with is established by the run",
+        )
+        .with_remedy(
+            "The runner still validates its signer before it writes anything (PLAT-02.2), and \
+             `TrustRoster.spec.signingKeys` is what makes that evidence verifiable.",
+        );
+    }
     if !roster.found {
         return outcome(
             operation,
@@ -1088,6 +1233,24 @@ fn topic_name_is_legal(name: &str) -> bool {
             .all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-')
 }
 
+/// A scope naming the TOPIC a row is about.
+///
+/// Reviewer finding **F7**: `redact`'s `long-base64-or-hex-run` rule replaces
+/// any run of 40+ characters from `[A-Za-z0-9+/=_-]`, and a Kafka topic name's
+/// only run-breaking character is `.`. So the exact case a
+/// `MappedTopicNameIllegal` row is about — a name that is too long — is the
+/// case whose name `with_message` eats. `entry_of` copies `scope` VERBATIM, and
+/// a topic name is not credential-shaped, so the name goes there and the prose
+/// keeps its (possibly redacted) copy.
+#[must_use]
+pub fn topic_scope(name: &str) -> CheckScope {
+    CheckScope {
+        kind: "Topic".to_string(),
+        name: name.to_string(),
+        uid: None,
+    }
+}
+
 /// `plan.names` — D2 §6.3's four `notReady` codes, over the MAPPED names.
 ///
 /// The rules are phase 0's, applied to the plan a restore would submit rather
@@ -1105,6 +1268,7 @@ pub fn plan_names_row(facts: &PlanFacts, now: DateTime<Utc>) -> CheckOutcome {
     let topics = &spec.source.topics;
     if let Err(entry) = logweir_core::guard::reject_glob_metacharacters(topics) {
         return mk(CheckState::NotReady, CheckCode::GlobInTopic)
+            .with_scope(topic_scope(&entry))
             .with_message(&format!(
                 "the plan selects `{entry}`, which carries a glob metacharacter; Logweir never \
                  expands patterns into a run"
@@ -1121,6 +1285,7 @@ pub fn plan_names_row(facts: &PlanFacts, now: DateTime<Utc>) -> CheckOutcome {
         .or_else(|| prefix.contains('$').then_some(&prefix))
     {
         return mk(CheckState::NotReady, CheckCode::ExpansionInTopic)
+            .with_scope(topic_scope(entry))
             .with_message(&format!(
                 "`{entry}` carries a `$`, which the engine's configuration loader expands \
                  before the document is parsed"
@@ -1141,6 +1306,7 @@ pub fn plan_names_row(facts: &PlanFacts, now: DateTime<Utc>) -> CheckOutcome {
         .find(|n| !topic_name_is_legal(n))
     {
         return mk(CheckState::NotReady, CheckCode::MappedTopicNameIllegal)
+            .with_scope(topic_scope(&bad))
             .with_message(&format!(
                 "the mapped name `{bad}` is not a legal Kafka topic name ([a-zA-Z0-9._-], at \
                  most {TOPIC_NAME_MAX_CHARS} characters, not `.` or `..`)"
@@ -1237,6 +1403,7 @@ pub fn plan_bindings_row(
                 CheckState::NotReady,
                 CheckCode::PlanTopicsNotInRecoveryPoint,
             )
+            .with_scope(topic_scope(first))
             .with_message(&format!(
                 "{} selected topic(s) are not in the recovery point, the first being `{first}`",
                 missing.len()
@@ -1690,6 +1857,14 @@ pub fn pod_outcomes(
 
     let attributed = attribute_for(operation, w, projections);
     let carrier = attributed.filter(|id| rows.iter().any(|r| r.id == *id));
+    // REVIEWER QUESTION Q1. The waiting state is still REPORTED below — a pod
+    // that was disrupted after it wrote its frames is a fact an operator wants
+    // — but a VERIFIED RELAY IS NEVER DISCARDED. `check::observe` is not
+    // believed to produce both in one pass; this is the safe direction anyway,
+    // because throwing away a result that exists and replacing it with
+    // `BlockedByPrerequisite` placeholders is strictly worse than reporting
+    // both, and `blocked` is exactly "drop every relayed row".
+    let blocks_the_job_rows = !relayed;
     let mut out = Vec::with_capacity(rows.len());
     for r in &rows {
         if Some(r.id) == carrier {
@@ -1729,7 +1904,7 @@ pub fn pod_outcomes(
             .with_remedy(&remedy_for(w.code));
         }
     }
-    (out, true)
+    (out, blocks_the_job_rows)
 }
 
 /// One sentence an operator can act on, per pod-level code.
@@ -1819,17 +1994,22 @@ pub fn remedy_for(code: CheckCode) -> String {
 ///    answer by D2 §6.3's legend and a relayed duplicate would be a second
 ///    answer with one id.
 /// 2. The relayed rows, for every id the controller did not answer.
-/// 3. When there is NO relay, the rows a Job would have answered, as `unknown`
-///    with [`CheckCode::BlockedByPrerequisite`] — never absent, because an
-///    absent blocking row is a row that cannot hold the verdict back.
+/// 3. Every row `expected` names that nobody answered, as `unknown` with
+///    [`CheckCode::BlockedByPrerequisite`] — never absent, because an absent
+///    blocking row is a row that cannot hold the verdict back.
 /// 4. The rows the REQUEST asked to skip, as `skipped`, which D2 §6.2 keeps the
 ///    overall verdict `unknown` for: skipping a question is not answering it.
+///
+/// `expected` is [`job_rows`] over the RENDERED plan, or
+/// [`unrendered_job_rows`] when no plan could be rendered. It is a parameter
+/// and not a lookup here so that the one rule that has to match the runner's
+/// emission lives in one function with one guard (reviewer finding **F1**).
 #[must_use]
 pub fn assemble(
-    operation: PreflightOperation,
     controller: Vec<CheckOutcome>,
     relayed: Vec<CheckOutcome>,
     blocked: bool,
+    expected: &BTreeSet<CheckId>,
     skipped: &BTreeSet<CheckId>,
     now: DateTime<Utc>,
 ) -> Vec<CheckOutcome> {
@@ -1847,7 +2027,7 @@ pub fn assemble(
             }
         }
     }
-    for id in job_rows(operation) {
+    for id in expected.iter().copied() {
         if seen.contains(&id) || skipped.contains(&id) {
             continue;
         }
@@ -1975,15 +2155,62 @@ pub fn entry_of(outcome: &CheckOutcome) -> CheckEntry {
     }
 }
 
+/// How many rows `status.result.checks` may hold — the shipped CRD's own
+/// `maxItems`, restated here because the API server enforces it with a 422.
+pub const MAX_PUBLISHED_CHECKS: usize = logweir_core::check_contract::MAX_CHECK_ENTRIES;
+
 /// The aggregated verdict — D2 §6.4, and nothing this module decides itself.
+///
+/// Returns the result and **how many rows did not fit**, which the caller puts
+/// in `status.message`.
+///
+/// # The verdict is computed over EVERY row, and only the list is capped
+///
+/// Reviewer finding **F8**: `CheckResult::validate` caps the RELAY at 64 rows,
+/// and `assemble` then adds up to sixteen controller and pod rows on top. The
+/// shipped CRD declares `maxItems: 64` on `status.result.checks`, so the merge
+/// patch was a 422 the reconciler could only requeue on — the verdict was never
+/// published at all.
+///
+/// Capping is therefore done here, and `aggregate` / `aggregate_expires_at` run
+/// over the WHOLE set first: a truncation that could change the verdict would
+/// be a way to publish `ready` by producing more rows. What the cap decides is
+/// which rows an operator gets to READ, so the order is the order of
+/// usefulness — blocking rows that are not `ready` first, because those are the
+/// ones that explain the verdict.
 #[must_use]
-pub fn result_for(checks: &[CheckOutcome], details: Option<DetailsRef>) -> PreflightResult {
-    PreflightResult {
-        state: state_str(aggregate(checks)).to_string(),
-        expires_at: aggregate_expires_at(checks),
-        checks: Some(checks.iter().map(entry_of).collect()),
-        details_ref: details,
-    }
+pub fn result_for(
+    checks: &[CheckOutcome],
+    details: Option<DetailsRef>,
+) -> (PreflightResult, usize) {
+    let state = state_str(aggregate(checks)).to_string();
+    let expires_at = aggregate_expires_at(checks);
+
+    let rank = |c: &CheckOutcome| match (c.gating, c.state) {
+        (Gating::Blocking, CheckState::NotReady) => 0u8,
+        (Gating::Blocking, CheckState::Unknown | CheckState::Skipped) => 1,
+        (Gating::Advisory, CheckState::NotReady) => 2,
+        (Gating::Blocking, CheckState::Ready) => 3,
+        _ => 4,
+    };
+    let mut ordered: Vec<&CheckOutcome> = checks.iter().collect();
+    // STABLE, so the id order `assemble` established survives inside a rank.
+    ordered.sort_by_key(|c| rank(c));
+    let dropped = ordered.len().saturating_sub(MAX_PUBLISHED_CHECKS);
+    ordered.truncate(MAX_PUBLISHED_CHECKS);
+    // Published in id order, whatever the rank order was: a reader scanning a
+    // status wants the catalogue's order, not the controller's triage.
+    ordered.sort_by_key(|c| c.id);
+
+    (
+        PreflightResult {
+            state,
+            expires_at,
+            checks: Some(ordered.into_iter().map(entry_of).collect()),
+            details_ref: details,
+        },
+        dropped,
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -2253,6 +2480,13 @@ pub struct Inputs {
     pub evidence: Option<Result<ResolvedDestination, destination::DestinationRefusal>>,
     /// The grants this check exercises.
     pub roles: Vec<DestinationRole>,
+    /// Whether the archive-side destination opted in to the create-only
+    /// readiness marker (`spec.readiness.writeProbe: CreateOnlyMarker`).
+    ///
+    /// READ FROM THE OBJECT, never assumed. It used to be hard-`false`, which
+    /// gave an operator who had opted in a `WriteNotProbed` row whose message
+    /// was false about their own spec (reviewer finding **F3**).
+    pub write_probe: bool,
     /// A backup check's topic set.
     pub topics: Vec<String>,
     /// A restore check's plan.
@@ -2306,6 +2540,7 @@ impl Default for Inputs {
             evidence_name: None,
             evidence: None,
             roles: Vec::new(),
+            write_probe: false,
             topics: Vec::new(),
             plan: None,
             bindings: BindingFacts::default(),
@@ -2410,6 +2645,29 @@ impl Inputs {
         self.operation != PreflightOperation::DestinationAccess
     }
 
+    /// `destination.resolved`, over BOTH destinations — see the call site.
+    ///
+    /// `None` when this operation names no destination at all.
+    #[must_use]
+    pub fn destination_verdict_row(&self, now: DateTime<Utc>) -> Option<CheckOutcome> {
+        let pairs: [(Option<&String>, Option<&DestinationResolution>); 2] = [
+            (self.archive_name.as_ref(), self.archive.as_ref()),
+            (self.evidence_name.as_ref(), self.evidence.as_ref()),
+        ];
+        let mut first_ok: Option<CheckOutcome> = None;
+        for (name, resolved) in pairs {
+            let (Some(name), Some(resolved)) = (name, resolved) else {
+                continue;
+            };
+            let row = destination_row(self.operation, resolved, name, now);
+            if resolved.is_err() {
+                return Some(row);
+            }
+            first_ok.get_or_insert(row);
+        }
+        first_ok
+    }
+
     /// The controller-authority and pod-authority rows for this pass.
     #[must_use]
     pub fn controller_outcomes(
@@ -2454,9 +2712,15 @@ impl Inputs {
                 now,
             ));
         }
-        if let (Some(name), Some(resolved)) = (self.archive_name.as_deref(), self.archive.as_ref())
-        {
-            out.push(destination_row(op, resolved, name, now));
+        // F9: ONE `destination.resolved` ID, TWO OBJECTS. A restore names a
+        // source destination and an evidence destination, and the catalogue
+        // has a single row id for both. Reporting only the archive's verdict
+        // gave an operator a GREEN row about the destination that was fine and
+        // no cause at all for the one that was not. The row therefore carries
+        // the first REFUSAL, scoped to the object that produced it, and falls
+        // back to the archive when both resolve.
+        if let Some(row) = self.destination_verdict_row(now) {
+            out.push(row);
         }
         if op == PreflightOperation::Restore {
             if let Some(plan) = self.plan.as_ref() {
@@ -2551,6 +2815,10 @@ pub const EVIDENCE_CA_PATH: &str = "/check/evidence-ca.pem";
 /// Where the verbatim restore plan is mounted.
 pub const RESTORE_PLAN_PATH: &str = "/check/plan.yaml";
 
+/// What resolving one `BackupDestination` for one role produced: the resolved
+/// form, or the refusal that is itself a finding.
+pub type DestinationResolution = Result<ResolvedDestination, destination::DestinationRefusal>;
+
 /// The plan documents and the Job this check needs.
 #[derive(Clone, Debug)]
 pub struct JobShape {
@@ -2558,6 +2826,10 @@ pub struct JobShape {
     pub documents: check_plan::PlanDocuments,
     /// The Job.
     pub spec: check_job::CheckJobSpec,
+    /// The plan document, as a value — so the caller can derive the rows the
+    /// runner will emit ([`job_rows`]) from the REQUEST it actually rendered
+    /// rather than from the operation (reviewer finding **F1**).
+    pub plan: CheckPlan,
 }
 
 fn connection_plan(c: &ResolvedConnection) -> ConnectionPlan {
@@ -2642,8 +2914,10 @@ pub fn build_job_shape(
                 topics: inputs.topics.clone(),
                 signer_path: Some(crate::backup_execution::SIGNING_KEY_PATH.to_string()),
                 // The create-only marker is the ONLY key a check may ever
-                // write, and it is opt-in on the destination.
-                write_probe: false,
+                // write, and it is opt-in ON THE DESTINATION — read from
+                // `spec.readiness.writeProbe`, never assumed (reviewer finding
+                // F3).
+                write_probe: inputs.write_probe,
                 skip_checks: skip.clone(),
             }))
         }
@@ -2653,7 +2927,7 @@ pub fn build_job_shape(
                 logweir_core::check_contract::DestinationAccessRequest {
                     destination: destination_plan(d, Some(ARCHIVE_CA_PATH)),
                     roles: inputs.roles.clone(),
-                    write_probe: false,
+                    write_probe: inputs.write_probe,
                 },
             )
         }
@@ -2779,7 +3053,11 @@ pub fn build_job_shape(
         image: image.image.clone(),
         image_pull_policy: image.image_pull_policy.clone(),
     };
-    Ok(JobShape { documents, spec })
+    Ok(JobShape {
+        documents,
+        spec,
+        plan,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -2957,13 +3235,20 @@ pub async fn resolve(
     let (archive_ref, evidence_ref, roles, legacy) = match request.operation {
         PreflightOperation::Backup => {
             let b = request.backup.as_ref();
+            // THE ROLES DECIDE THE ROWS (reviewer finding **F1**). The runner
+            // emits one destination row PER REQUESTED ROLE: `ArchiveRead` is
+            // `destination.archiveListable`, `EvidenceWrite` is
+            // `destination.evidenceWritable`, `EvidenceRead` is
+            // `destination.evidenceReadable`. `ArchiveWrite` was requested here
+            // and `ArchiveRead` was not, so D2 §6.3's BLOCKING
+            // `destination.archiveListable` row was never emitted and never
+            // could be — and `assemble` then held the verdict at `unknown` for
+            // ever. `EvidenceRead` is added below, but only when the
+            // destination configures that grant.
             (
                 b.and_then(|b| b.destination_ref.as_ref().map(|d| d.name.clone())),
                 None,
-                vec![
-                    DestinationRole::ArchiveWrite,
-                    DestinationRole::EvidenceWrite,
-                ],
+                vec![DestinationRole::ArchiveRead, DestinationRole::EvidenceWrite],
                 b.and_then(|b| b.legacy_archive.as_ref().map(|a| a.url.clone())),
             )
         }
@@ -3022,6 +3307,33 @@ pub async fn resolve(
                 });
             }
             inputs.bindings.source_storage = Some(d.plan_storage());
+        }
+        // THE SPEC FACTS THE RESOLVED FORM DOES NOT CARRY, read once from the
+        // object itself: whether the destination opted in to the create-only
+        // marker (reviewer finding **F3**) and whether it configures an
+        // `evidenceRead` grant at all. A `DestinationAccess` request names its
+        // own roles, so neither is derived for it.
+        if resolved.is_ok() && request.operation != PreflightOperation::DestinationAccess {
+            let api: Api<crate::crds::backup_destination::BackupDestination> =
+                Api::namespaced(client.clone(), namespace);
+            if let Some(object) = api.get_opt(&name).await.map_err(ReconcileError::Api)? {
+                inputs.write_probe = destination::write_probe_enabled(&object);
+                // `EvidenceRead` is requested ONLY when the destination
+                // configures that grant. The check plan carries ONE credential
+                // for its destination, so probing a role the object leaves
+                // unconfigured would exercise the wrong credential and report a
+                // refusal about a grant nobody asked for. Absent means
+                // verification is `NotAttempted` (D2 §3.6), and the advisory
+                // row is then simply not requested rather than answered wrongly.
+                let configured = !matches!(
+                    destination::resolve(&object, DestinationRole::EvidenceRead, &policy)
+                        .map(|d| d.grant),
+                    Ok(destination::ResolvedGrant::NotConfigured) | Err(_)
+                );
+                if configured && request.operation == PreflightOperation::Backup {
+                    inputs.roles.push(DestinationRole::EvidenceRead);
+                }
+            }
         }
         inputs.archive_name = Some(name);
         inputs.archive = Some(resolved);
@@ -3444,7 +3756,16 @@ pub async fn reconcile_preflight(
             .map(|b| format!("{}: {}", b.id, b.message))
             .collect::<Vec<_>>()
             .join("; ");
-        let checks = assemble(operation, probe, Vec::new(), true, &inputs.skip, now);
+        // NO PLAN WAS RENDERED, so there is no request to derive the expected
+        // rows from.
+        let checks = assemble(
+            probe,
+            Vec::new(),
+            true,
+            &unrendered_job_rows(operation),
+            &inputs.skip,
+            now,
+        );
         let status = status_for(
             pf,
             &StatusInput {
@@ -3453,7 +3774,7 @@ pub async fn reconcile_preflight(
                 message,
                 binding: Some(recorded_binding),
                 observed_at: Some(now),
-                result: Some(result_for(&checks, None)),
+                result: Some(result_for(&checks, None).0),
                 ..StatusInput::default()
             },
             now,
@@ -3712,16 +4033,31 @@ pub async fn reconcile_preflight(
         .and_then(|w| attribute_for(operation, w, &inputs.projections()))
         .is_some();
     let failed = observation.phase == check::CheckPhase::Failed && !relayed && !attributed;
+    // THE ROWS THIS PLAN'S RUNNER WILL HAVE EMITTED, derived from the request
+    // that was rendered and not from the operation (reviewer finding F1).
+    let expected = job_rows(
+        &shape.plan.request,
+        inputs.plan.as_ref().is_some_and(PlanFacts::scratch),
+    );
     let checks = assemble(
-        operation,
         controller,
         relayed_checks,
         blocked_by_pod,
+        &expected,
         &inputs.skip,
         now,
     );
-    let result = result_for(&checks, details);
+    let (result, dropped) = result_for(&checks, details);
     let expires_at = result.expires_at;
+    let message = if dropped == 0 {
+        observation.message.clone()
+    } else {
+        format!(
+            "{} ({dropped} further check row(s) did not fit the {MAX_PUBLISHED_CHECKS}-row cap \
+             on status.result.checks; the verdict is computed over all of them)",
+            observation.message
+        )
+    };
     let status = status_for(
         pf,
         &StatusInput {
@@ -3740,7 +4076,7 @@ pub async fn reconcile_preflight(
             } else {
                 verdict_reason(&result)
             }),
-            message: observation.message.clone(),
+            message,
             binding: Some(recorded_binding),
             job_ref: Some(job_name.clone()),
             observed_at: Some(now),
@@ -3901,7 +4237,8 @@ fn error_policy(pf: Arc<Preflight>, err: &ReconcileError, _ctx: Arc<ReconcilerCo
 /// The context this reconciler holds: the shared one, plus the policy cache.
 ///
 /// A SECOND TYPE RATHER THAN A FIELD ON [`Context`]. `controllers::Context` is
-/// shared by nine reconcilers and eight of them read no installation policy; a
+/// shared by every reconciler in this directory and all but this one read no
+/// installation policy; a
 /// field there would be carried and never read, which is the shape
 /// `Context::runner_image`'s own note warns about.
 pub struct ReconcilerContext {

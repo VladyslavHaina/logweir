@@ -487,6 +487,31 @@ pub fn is_valid_now(dest: &BackupDestination) -> bool {
     })
 }
 
+/// Whether this destination opted in to the create-only readiness marker —
+/// `spec.readiness.writeProbe: CreateOnlyMarker`.
+///
+/// # Why this is a free function and not a field on [`ResolvedDestination`]
+///
+/// It is a fact about the SPEC, not about a resolved role: the same answer
+/// holds for all four grants, and adding a field would mean touching every
+/// construction site of a struct this module's own tests pin. Added by D2 W9
+/// (reviewer finding **F3**): the field is shipped, user-settable and
+/// documented as *"a `Preflight` with `operation: DestinationAccess` may create
+/// ONE marker object"*, and until this existed the preflight controller
+/// hard-coded `writeProbe: false` into every plan — so an operator who opted in
+/// got `destination.evidenceWritable: unknown / WriteNotProbed` with a message
+/// that was FALSE about their object. A status that contradicts the spec is the
+/// UI-FAKEPREFLIGHT pattern the kind exists to close.
+///
+/// Absent `spec.readiness` and absent `writeProbe` both mean `Disabled`, which
+/// is Global Constraint 6's create-only boundary left untouched.
+#[must_use]
+pub fn write_probe_enabled(dest: &BackupDestination) -> bool {
+    dest.spec.readiness.as_ref().is_some_and(|r| {
+        r.write_probe == crate::crds::backup_destination::WriteProbe::CreateOnlyMarker
+    })
+}
+
 // ---------------------------------------------------------------------------
 // The resolver
 // ---------------------------------------------------------------------------
