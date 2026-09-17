@@ -3365,9 +3365,111 @@ an unrelated `exitCode: 0` at index 0.
 `logweir backup run` prints `refusal-reason=<TerminalState>` as its **final
 stdout line** for exit 3 — that is the CLI's contract and it holds. But a pod
 log is **stdout and stderr merged in nondeterministic order**, and `backup run`
-also writes the guard's full explanation to stderr. The controller therefore scans the final eight non-empty log lines and
-matches by key name (`KEY_SCAN_TAIL_LINES = 8`). Missing evidence keys remain
+also writes the guard's full explanation to stderr. The controller therefore scans the final sixteen non-empty log lines and
+matches by key name (`KEY_SCAN_TAIL_LINES = 16`). Missing evidence keys remain
 unset; a missing exit-3 discriminator becomes `GuardRefusedUnknownReason`.
+
+The window is a **budget with a stated margin**, not a guess. A passing restore
+under execution contract v2 prints seven trailing lines (the summary,
+`topic-preflight=`, `teardown-key=`, `scorecard-key=`, `sidecar-key=`,
+`offset-report-key=`, and the `drill finished` line `tracing` emits in
+production), so nine are held in reserve. Because the scan matches by key name
+and takes the **last** occurrence of each prefix, a wider window can only find
+a key it would otherwise have missed — never a different one. Two tests keep
+the two halves honest: `progress_channel.rs` measures what the runner actually
+prints, and `backup_controller.rs` checks the window still fits.
+
+### What a run says about itself while it is running — `status.progress`
+
+Before PLAT-14.1 a run in flight said `phase: Running` and nothing else, which
+is the same answer for a healthy capture and for a pod that has been unable to
+pull its image for four minutes. `status.progress` is the difference, and it is
+**additive**: it is absent on any object an older controller reconciled, which
+is the documented absent-field behaviour and not a degraded state.
+
+| Field | What it says |
+|---|---|
+| `stage` | `Admission`, `Queued`, `Preparing`, `Running`, `Verifying` or `Finished` |
+| `reason`, `message` | the current `RunnerReady` reason, and a sanitized explanation |
+| `lastTransitionTime` | moves only when `stage` or `reason` moves |
+| `lastObservedTime` | "still being watched", rewritten at most once per 60 s, and cleared with an explicit `null` once the stage is `Finished` |
+| `runner` | the one owned pod: its name, phase, whether it is scheduled, the container state, and the kubelet's own waiting reason **verbatim** |
+| `runnerPhase` | the runner's own phase, from its `progress-phase=<n>:<name>` lines |
+| `diagnostics[]` | at most eight, newest first, deduplicated on `(code, object.kind, object.name)` |
+
+Two timestamps and not one clock read per pass: a reconciler's own status patch
+is what wakes it, so a field carrying a fresh instant every pass would make
+every pass a write. A run whose state has not changed issues **zero** API
+writes between heartbeats.
+
+### `RunnerReady`, and the four states a run can reach with no exit code
+
+The `RunnerReady` condition is `False` while the runner container cannot start,
+with one of six reasons — `WaitingForPod`, `PodUnschedulable`,
+`VolumeMountFailed`, `CredentialReferenceMissing`, `RunnerImageUnavailable`,
+`PodCreationForbidden` — and `True` with reason `RunnerStarted` once the
+container has been seen running or terminated.
+
+The diagnostic code and the condition reason are **two vocabularies on
+purpose**. `diagnostics[].code` is the most specific thing known
+(`CredentialSecretNotFound` means create a Secret; `CredentialSecretKeyMissing`
+means add a key to one that exists); the condition reason is its class, because
+a `metav1` reason is a closed label other software matches on. The parameters —
+which Secret, which volume — travel in the diagnostic's `object` and `message`.
+
+Four of those reasons are also terminal states: `VolumeMountFailed`,
+`CredentialReferenceMissing`, `RunnerImageUnavailable`, `PodCreationForbidden`.
+They replace `NoExitCode` **only** when the matching diagnostic was recorded
+before the Job ended; otherwise the table above is unchanged, and `exitCode`
+stays absent in all four. A run whose pod never started has no code to lift, and
+none is invented.
+
+### Failing fast, and what it costs
+
+When a **non-transient** diagnostic has held continuously for
+`failFastSeconds` (default 300, floor 60) and the runner container has **never**
+started, the controller collapses the Job's `activeDeadlineSeconds` rather than
+waiting for it. The Job fails with `DeadlineExceeded`, the existing crashed-Job
+path runs, and the terminal reason is the recorded diagnostic. No data-plane
+process ever started, so no approval, plan or archive state was consumed; a new
+attempt is a new `Backup` or `Restore`, never a mutation of the old one.
+
+`PodUnschedulable` is **never** failed fast, and that is a decision: a node can
+join a cluster, a pod can be preempted, and a cluster autoscaler exists. It is
+reported and left to the Job's own deadline.
+
+### Diagnostics are derived from Events, which are best effort
+
+Kubernetes Events are rotated and rate limited. An absent event yields a
+**weaker** code (`WaitingForPod`) and never an invented cause. Events are listed
+only while the pod is not running, by `involvedObject.uid` and never by name —
+`FailedCreate` is a common event in a namespace with a `ResourceQuota`, and a
+controller that took the first one it saw would cancel a healthy Job because of
+somebody else's workload.
+
+### `status.records` and `status.capture` come from the verified receipt
+
+`Backup.status.records` is the sum of the signed receipt's per-topic counts, and
+`status.capture.{startedAt,finishedAt}` are copied verbatim from the same
+document. Both are written on the verification patch and **only** when the
+verdict is `Valid`: a count on a `Backup` has to be one some key this
+installation accepts attested to, not a number anybody who can write to the
+bucket chose. The per-topic breakdown stays in the receipt, where it is
+attested; a status is not a second copy of a signed document.
+
+### Completed Job cleanup, and its repair
+
+The order is unchanged and load bearing: **terminal status first, TTL second**.
+A status patch that did not return 200 leaves the reconcile before any TTL
+exists, so pod garbage collection cannot start on a run whose exit code was
+never recorded. The TTL value is `LOGWEIR_JOB_TTL_SECONDS` (default 604800,
+floor 3600; chart value `controller.jobTtlSeconds`).
+
+If that second patch failed, the run is already terminal and no later pass
+re-reads its pod — so nothing would ever set the TTL and the finished Job would
+sit in the namespace's quota for ever. A pass over a terminal object therefore
+patches the TTL when, and only when, the Job is finished, carries exactly this
+object's controller owner, and has none. It reads no pod and writes no status.
 
 ### What a green `Backup` requires
 

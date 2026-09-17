@@ -520,7 +520,11 @@ not a finding: exits 1, 3 and 4 write no artifact at all by contract, and a scor
 line from the end", and never treat its absence as an error. That is the same rule plan erratum E4
 draws for `refusal-reason=`: a pod log is stdout and stderr merged in nondeterministic order, so
 every reader in this project scans a bounded tail and matches by key name
-(`KEY_SCAN_TAIL_LINES = 8`, `controllers::backup::evidence_keys`).
+(`KEY_SCAN_TAIL_LINES = 16`, `controllers::backup::evidence_keys`). It was 8
+until D3 W2 raised it: contract v2's `teardown-key=` line left a passing
+restore at seven of the eight, and because the scan matches by key NAME an
+overrun is a silently absent status field rather than an error. The window is
+now a budget with its margin written down — see `docs/kubernetes.md` §10.
 
 ### The runner progress channel is OPTIONAL, bounded and contract-versioned (D3 §2.4)
 
