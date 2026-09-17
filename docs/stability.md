@@ -617,6 +617,88 @@ product serializes and cannot be tripped by a naming choice.
 **Timeouts are the drill path's**: 5 s to connect and 10 s overall per POST, so three sinks cost at
 most 30 s — inside the delivery Job's `activeDeadlineSeconds: 120`.
 
+### `logweir check run`'s exit codes, its frames and the one key it may write (D2 §4.2)
+
+`logweir check run --plan <path> --check-contract-version 1` is the **one** check runner
+(decision D2 §4.2, seam ruling S1). Five plan kinds — `topicInventory`, `operationReadiness`,
+`restorePreflight`, `destinationAccess`, `evidenceFetch` — share one argv surface, one frame
+format and one closed error vocabulary, because a second runner would be a second place the
+contract could drift from what the controller parses. There is deliberately no
+`logweir topics discover` and no per-kind subcommand.
+
+**The invocation.** The controller writes it (`weirkeeper::check::job::runner_argv` and
+`runner_job_spec`); nothing else may:
+
+```
+argv: check run --plan /check/check-plan.json --check-contract-version 1
+env:  LOGWEIR_CHECK_CONTRACT_VERSION=1
+      LOGWEIR_CHECK_PLAN_SHA256=sha256:<64 lowercase hex>
+      LOGWEIR_CHECK_SUBJECT_UID=<uid>
+      RUST_LOG=warn        TMPDIR=/work
+```
+
+**No network before the plan verifies.** The runner parses argv, reads the plan bytes once,
+compares their SHA-256 against `$LOGWEIR_CHECK_PLAN_SHA256`, parses strictly with
+`deny_unknown_fields`, and requires the plan's `subjectUid` to equal `$LOGWEIR_CHECK_SUBJECT_UID`
+— all before a client is built. A plan `ConfigMap` swapped under a running Job therefore cannot be
+executed against the wrong object, and a plan a newer controller wrote with a field this runner
+does not understand is refused rather than partly honoured.
+
+**Stdout is the machine contract and carries frames only.** `logweir-check-topic=` lines,
+`logweir-check-part=` lines, and one final `logweir-check-end=` line, each at most 4,096 bytes
+including its newline. The end line declares, per stream, how many parts were printed and their
+SHA-256, plus the topic-line count and digest; a reader that cannot verify all of them reports
+`ResultUnreadable` and never publishes the log content. **Stderr carries JSON tracing at `warn`**
+and nothing a controller parses — a pod log has no stream selector, so nothing on stderr is
+machine-readable (erratum E4).
+
+**The exit codes.**
+
+| code | meaning |
+|---|---|
+| **0** | an end line was printed, **whatever the per-check states**. A `notReady` check is a RESULT, not a runner failure, and the controller reads the relayed codes rather than the exit status. |
+| **1** | an operational failure before a result existed: no end line, so the relay does not verify and the controller reports `ResultUnreadable`. |
+| **3** | a contract refusal (the four startup steps above). `refusal-reason=CheckContractMismatch` is printed on stdout and **no frame is printed at all**. |
+
+**2 and 4 are never returned by this subcommand**, and that is a contract rather than an accident.
+Global Constraint 11 reserves 2 for "a drill result that is not a pass — a scorecard IS written and
+signed" and 4 for "signing or lock-proof failed"; a check signs nothing and writes no artifact, so
+either code would make a check indistinguishable from a drill result to every reader of the exit
+contract, including `weirkeeper::conditions::reason_for_exit`. **Do not read a bare exit 0 as
+"everything passed"** — read the relayed result.
+
+**An old runner image does not fail this way.** A build without the `check` subcommand rejects it
+as an unknown subcommand and exits 1 with a clap usage error, which the controller maps to
+`RunnerContractUnsupported` (D2 §4.3). That is why the version handshake is checked in argv **and**
+in the environment: a rollout that upgraded one and not the other is refused rather than guessed at.
+
+**What a check may do to the world.**
+
+* It **never invokes the engine binary.** Nothing under `crates/logweir/src/check/` names an engine
+  invocation, so `scripts/check-no-oso.sh` passes unchanged.
+* It **never writes**, except the optional create-only readiness marker
+  `logweir/readiness/<destinationUid>.json`, put with `PutMode::Create` through
+  `Store::put_create_only` under Global Constraint 6's `logweir/` root. **"Already exists" counts as
+  write-authorised**: S3 and MinIO authorise a `PUT` before they evaluate the `If-None-Match`
+  precondition, so a 412 proves the grant. It is reported as `MarkerAlreadyPresent` rather than
+  `MarkerWritten`, because "I wrote it" and "it was already there" are different facts.
+* It **never creates, alters or deletes a topic.** The restore preflight's collision answer is
+  targeted metadata plus a `CreateTopics` with `validate_only = true`; the execution path's probe
+  topic has no counterpart here.
+* It **never prints a credential.** Every message, remedy and fact passes
+  `logweir_core::check_contract::redact` and a 512-character cap, and no broker or object-store
+  error string is ever interpolated into a frame — the code carries the classification and the
+  message names the operation, the object and the key.
+* **Every network call is time-bounded** by the plan's own `timeoutSeconds`: per-call timeouts on
+  the broker side, `request_timeout` plus a retry cap on the object-store side.
+
+**An empty inventory and a failed one are different answers.** A `topicInventory` that ran against
+a cluster showing no topic declares `topicLines: {"count": 0, …}`; one whose broker never answered
+declares **no** `topicLines` block at all and carries a `connection.authenticated` row with the
+classified code. Reading the first as the second — or either as "the cluster is empty" — is the
+PLAT-09.1 defect the distinction exists to prevent: a successful Kafka listing never proves full
+visibility, because the broker silently omits topics the principal cannot `DESCRIBE`.
+
 ### A phase-5 / phase-6 `restore.yaml` divergence is exit 1, not exit 3
 
 Logweir renders `restore.yaml` twice: once for `kafka-backup validate-restore` at phase 5 and once
