@@ -2047,12 +2047,24 @@ pub struct PreflightBindingView {
 
 /// Why a stored readiness verdict no longer describes the caller's inputs.
 ///
-/// CLOSED OVER EXACTLY WHAT THE CONTROLLER EMITS. These are the six spellings
+/// CLOSED OVER CORE'S VOCABULARY, PLUS ONE. Six of these are the spellings
 /// `logweir_core::check_contract::StaleReason` renders, and
 /// `crates/logweir-api/tests/preflights.rs` pins the two lists against each
-/// other so neither side can grow a reason the other cannot carry. A DTO that
-/// could not name `referentChanged` left W13 parsing the controller's prose to
-/// find out which object moved.
+/// other so neither side can grow a reason the other cannot carry.
+/// [`StaleReasonKind::Unverifiable`] is the seventh and is this service's own:
+/// core has no spelling for "I could not compare this", and without one the
+/// only honest answers left were to invent a reason or to stay silent — and
+/// staying silent is `applicable: true` for a verdict nobody checked.
+///
+/// THESE ARE COMPARISONS, NOT MESSAGES. The API recomputes staleness on every
+/// read from `status.binding` against the objects as they are now — which is
+/// the division of labour `weirkeeper`'s preflight reconciler documents and
+/// `check_contract::inputs_digest` restates. An earlier cut of this module
+/// recovered the reasons from the controller's prose instead; that prose is
+/// redacted and capped at 512 characters, so a long referent list lost its
+/// closing bracket and the parse returned NOTHING — reporting a downgraded
+/// verdict as applicable. It failed open, which is the one direction a
+/// staleness check may never fail.
 ///
 /// `cancelRequested` is DELIBERATELY ABSENT, and was in the first cut of this
 /// enum. The controller never emits it: a cancelled check is `state:
@@ -2077,6 +2089,16 @@ pub enum StaleReasonKind {
     /// A destination's CA bundle `ConfigMap` now digests differently, so the
     /// trust material the check exercised is not the trust material a run
     /// would use.
+    ///
+    /// **RESERVED: nothing emits this yet.** It is part of core's vocabulary,
+    /// so it is published here, but the recorded `status.binding` does not
+    /// carry the CA bundle list and neither this service nor the controller
+    /// can therefore compare it. CA-bundle drift surfaces, if at all, through
+    /// the destination's own `referentChanged` (its generation moves when its
+    /// `caBundle` reference is edited). It becomes reachable when
+    /// `status.binding` records `caBundles[]`; until then a console that
+    /// branches on it is branching on a value it will never receive, and
+    /// `docs/api.md` says so.
     CaBundleChanged,
     /// The installation policy `ConfigMap` digests differently, which can
     /// change the concurrency ceilings, the engine CA rule, the
@@ -2087,7 +2109,26 @@ pub enum StaleReasonKind {
     /// explains it. THE CATCH-ALL EXISTS SO "stale" IS NEVER REPORTED WITHOUT
     /// A REASON: a field the five named comparisons do not cover (a backup
     /// readiness request's topic set, for instance) still surfaces.
+    ///
+    /// **RESERVED on the same grounds as [`StaleReasonKind::CaBundleChanged`]:**
+    /// the recorded digest was taken over a wider document than this service
+    /// can rebuild, so comparing the two would report a difference that is an
+    /// artefact of the narrower recomputation rather than a change in the
+    /// world. A gap this service cannot close is
+    /// [`StaleReasonKind::Unverifiable`], not a false positive.
     InputsDigestChanged,
+    /// **This service could not compare something, so it refuses to call the
+    /// verdict applicable.** [`StaleReasonView::basis`] says what.
+    ///
+    /// THE ONE VARIANT THAT IS NOT CORE'S. Every other reason answers "this
+    /// changed"; this one answers "I do not know whether it changed", which is
+    /// a different claim and the only honest one when a referent cannot be
+    /// read, when the recorded binding is missing, or when an input lives
+    /// somewhere this service has no verb for. Silence in those cases is
+    /// `applicable: true` for a verdict nobody checked — and a green readiness
+    /// badge that was never re-evaluated is exactly the defect PLAT-03.2 is
+    /// about.
+    Unverifiable,
 }
 
 /// One reason, with its subject when it has one.
@@ -2101,14 +2142,21 @@ pub enum StaleReasonKind {
 pub struct StaleReasonView {
     /// Which reason this is.
     pub reason: StaleReasonKind,
-    /// The kind of the object that moved. `referentChanged` only.
+    /// The kind of the object that moved. `referentChanged` and
+    /// `unverifiable` only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
-    /// That object's name — or, for the single `TrustRoster` and `Approval` a
-    /// binding names, its UID, because those two are identified in the binding
-    /// by UID and a name would add nothing. `referentChanged` only.
+    /// That object's name — or, for the `TrustRoster` and `Approval` a binding
+    /// names, its UID, because those two are identified in the binding by UID
+    /// and a name would add nothing. `referentChanged` and `unverifiable`
+    /// only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Why this service could not compare something. `unverifiable` only, and
+    /// always present there: a refusal to answer that does not say what it
+    /// could not check is not an answer.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub basis: Option<String>,
 }
 
 impl StaleReasonView {
@@ -2119,6 +2167,18 @@ impl StaleReasonView {
             reason,
             kind: None,
             name: None,
+            basis: None,
+        }
+    }
+
+    /// `unverifiable`, with the cause and the object it is about.
+    #[must_use]
+    pub fn unverifiable(kind: Option<String>, name: Option<String>, basis: &str) -> Self {
+        Self {
+            reason: StaleReasonKind::Unverifiable,
+            kind,
+            name,
+            basis: Some(basis.to_string()),
         }
     }
 }
@@ -2266,6 +2326,13 @@ pub struct Preflight {
     pub stale: bool,
     /// Why, when it is. Closed over [`StaleReasonKind`].
     pub stale_reasons: Vec<StaleReasonView>,
+    /// What the staleness comparison actually covered, in the order it ran.
+    ///
+    /// AN EMPTY `staleReasons` MEANS "I COMPARED THESE AND THEY MATCH", and
+    /// this is the list of "these". Without it a console cannot tell a verdict
+    /// that was re-checked against live objects from one where the check was
+    /// skipped, and those two look identical in every other field.
+    pub stale_basis: Vec<String>,
     /// When the facts were observed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_at: Option<DateTime<Utc>>,

@@ -29,14 +29,24 @@ use chrono::{DateTime, Utc};
 use http::{HeaderMap, StatusCode, Uri};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::Resource as _;
+use logweir_core::check_contract::{
+    stale_reasons, BindingInputs, CheckOperation as CoreCheckOperation, Referent as CoreReferent,
+    RosterRef, StaleReason,
+};
 use logweir_core::destination::DestinationRole;
 use std::collections::BTreeMap;
+use weirkeeper::crds::approval::Approval as ApprovalCr;
+use weirkeeper::crds::backup::Backup as BackupCr;
 use weirkeeper::crds::backup_destination::BackupDestination;
+use weirkeeper::crds::backup_schedule::BackupSchedule;
+use weirkeeper::crds::kafka_cluster::KafkaCluster;
+use weirkeeper::crds::preflight::Referent;
 use weirkeeper::crds::preflight::{
     BackupPreflightRequest as CrdBackupRequest, DestinationAccessRequest, Preflight as PreflightCr,
     PreflightOperation, PreflightRequest, PreflightSpec,
     RestorePreflightRequest as CrdRestoreRequest, UidRef,
 };
+use weirkeeper::crds::restore::Restore as RestoreCr;
 use weirkeeper::crds::{ArchiveRef, LocalRef};
 
 use super::{
@@ -56,6 +66,7 @@ use crate::contract::{
 use crate::cursor::{self, CursorError, CursorScope};
 use crate::http::{read_json, RequestId, MAX_JSON_BODY};
 use crate::idempotency::IdempotencyKey;
+use crate::kube::KubeFailure;
 use crate::problem::{ApiError, FieldError, ProblemCode};
 use crate::status::{condition_view, MAX_CONDITIONS};
 use crate::validate;
@@ -168,145 +179,425 @@ const fn is_terminal(state: PreflightState) -> bool {
     )
 }
 
-/// The exact wire spelling of each reason, as
-/// `logweir_core::check_contract::StaleReason`'s `Display` renders it.
+/// The kinds a `Preflight`'s `status.binding.referents[]` can name, and
+/// whether this service can read one.
 ///
-/// ONE VOCABULARY, TWO COMPONENTS. The controller writes these spellings and
-/// this module reads them; `tests/preflights.rs` pins the list against the
-/// core enum with a wildcard-free `match`, so a seventh reason added in
-/// `logweir-core` stops the API's test compiling rather than arriving as a
-/// token nothing here can name.
-pub const REASON_EXPIRED: &str = "expired";
-/// See [`REASON_EXPIRED`].
-pub const REASON_PLAN_HASH_CHANGED: &str = "planHashChanged";
-/// See [`REASON_EXPIRED`]. Rendered as `referentChanged:<Kind>/<name>`.
-pub const REASON_REFERENT_CHANGED: &str = "referentChanged";
-/// See [`REASON_EXPIRED`].
-pub const REASON_CA_BUNDLE_CHANGED: &str = "caBundleChanged";
-/// See [`REASON_EXPIRED`].
-pub const REASON_POLICY_CHANGED: &str = "policyChanged";
-/// See [`REASON_EXPIRED`].
-pub const REASON_INPUTS_DIGEST_CHANGED: &str = "inputsDigestChanged";
+/// FIVE OF SIX ARE IN THE SEALED ADAPTER. The reconciler records
+/// `KafkaCluster`, `BackupDestination`, `Backup`, `Restore`, `Approval` and
+/// `TrustRoster`; the first five are `ProductResource`s this API already
+/// reads. `TrustRoster` is CLUSTER-SCOPED and deliberately outside the sealed
+/// set — the console has no verb for it — so a binding that names one is
+/// reported [`StaleReasonKind::Unverifiable`] rather than quietly skipped.
+/// Skipping it would mean a roster edit, which is exactly the kind of change
+/// that invalidates a signer check, silently left out of the comparison.
+pub const REFERENT_KIND_KAFKA_CLUSTER: &str = "KafkaCluster";
+/// See [`REFERENT_KIND_KAFKA_CLUSTER`].
+pub const REFERENT_KIND_DESTINATION: &str = "BackupDestination";
+/// See [`REFERENT_KIND_KAFKA_CLUSTER`].
+pub const REFERENT_KIND_BACKUP: &str = "Backup";
+/// See [`REFERENT_KIND_KAFKA_CLUSTER`].
+pub const REFERENT_KIND_RESTORE: &str = "Restore";
+/// See [`REFERENT_KIND_KAFKA_CLUSTER`].
+pub const REFERENT_KIND_APPROVAL: &str = "Approval";
+/// See [`REFERENT_KIND_KAFKA_CLUSTER`].
+pub const REFERENT_KIND_SCHEDULE: &str = "BackupSchedule";
 
-/// The controller's own sentence, when it downgrades a verdict that stopped
-/// applying, up to the parenthesised reason list.
+/// `basis` for a referent whose kind this service has no verb for.
+pub const BASIS_KIND_NOT_READABLE: &str =
+    "this service has no verb for this kind, so its revision cannot be compared";
+/// `basis` for a referent whose read failed.
+pub const BASIS_READ_FAILED: &str =
+    "the object could not be read, so its revision cannot be compared";
+/// `basis` when a projection did not recompute staleness at all.
+pub const BASIS_NOT_RECOMPUTED: &str =
+    "this response did not recompute staleness; read the preflight itself for a current verdict";
+/// `basis` when the check recorded no binding at all.
+pub const BASIS_NO_BINDING: &str =
+    "the check recorded no binding, so there is nothing to compare the current objects against";
+/// `staleBasis` entry for the installation policy: compared, but by the
+/// controller rather than here.
 ///
-/// A COUPLING, NAMED RATHER THAN HIDDEN. The `Preflight` CRD has no field for
-/// the reasons: `weirkeeper`'s preflight reconciler renders them into
-/// `status.message` as `this result no longer applies (<reasons>); …`. The API
-/// can compute only two of the six itself — it holds the caller's plan hash
-/// and the recorded expiry, not a binding recomputed from live objects — so
-/// the other four exist exactly here. Reading them is what lets this service
-/// hand a console typed reasons instead of leaving it to parse the same prose
-/// less carefully. It is read STRICTLY: the prefix must match, only spellings
-/// in the closed vocabulary above are accepted, and anything else is ignored
-/// rather than guessed at, so a message this build does not recognise yields
-/// no reason at all rather than an invented one.
-pub const DOWNGRADE_MESSAGE_PREFIX: &str = "this result no longer applies (";
+/// WHY THIS IS A BASIS LINE AND NOT AN `unverifiable` REASON. The other gaps
+/// are per-request — a read that failed this time, a binding that is missing
+/// from this object — and they mean nobody checked. The policy is different:
+/// the reconciler compares `binding.policyDigest` against
+/// `CheckPolicy::digest()` on every pass and downgrades `result.state` to
+/// `unknown` when it moves, so it IS checked, continuously, by the component
+/// that can see it. Reporting `unverifiable` for it on every response would
+/// make every verdict permanently inapplicable while adding no information a
+/// console could act on — and a field that always says the same thing is a
+/// field that gets ignored, including on the day it means something.
+///
+/// The digest itself is `CheckPolicy::digest()` over the PARSED
+/// `LOGWEIR_POLICY_CONFIGMAP` document (default `weirkeeper-policy`, key
+/// `policy.json`) in the installation namespace. This service reads a
+/// `ConfigMap` only when a check owns it — owner UID, immutability and digest
+/// all verified — and that document is owned by nothing, is mutable, and lives
+/// outside the actor's granted namespaces, so reaching it is a new grant and a
+/// cross-namespace read that D2 W11 owns.
+pub const COVERED_POLICY_BY_CONTROLLER: &str =
+    "policyDigest:byController(the reconciler compares it each pass and downgrades the result)";
 
-/// One recorded reason token, typed. `None` for anything outside the closed
-/// vocabulary.
-fn reason_from_token(token: &str) -> Option<StaleReasonView> {
-    let token = token.trim();
-    if let Some(subject) = token.strip_prefix(&format!("{REASON_REFERENT_CHANGED}:")) {
-        // `<Kind>/<name>`. A Kubernetes name may not contain `/`, so the first
-        // one splits it; a token without one names a kind and no subject
-        // rather than being dropped.
-        let (kind, name) = match subject.split_once('/') {
-            Some((kind, name)) => (kind, Some(name.to_string())),
-            None => (subject, None),
-        };
-        if kind.is_empty() {
-            return None;
-        }
-        return Some(StaleReasonView {
-            reason: StaleReasonKind::ReferentChanged,
-            kind: Some(crate::validate::bounded(kind, 128)),
-            name: name.map(|n| crate::validate::bounded(&n, 253)),
-        });
+/// What the comparison covered, for `staleBasis`.
+pub const COVERED_EXPIRY: &str = "expiry";
+/// See [`COVERED_EXPIRY`].
+pub const COVERED_PLAN_HASH: &str = "planHash";
+/// See [`COVERED_EXPIRY`].
+pub const COVERED_REFERENTS: &str = "referents";
+/// See [`COVERED_EXPIRY`].
+pub const COVERED_POLICY_DIGEST: &str = "policyDigest";
+
+/// One recorded referent, read as it is NOW.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReferentReading {
+    /// The object exists; this is its revision now.
+    Live {
+        /// Its UID now. A recreated object has a different one.
+        uid: String,
+        /// Its `metadata.generation` now.
+        generation: Option<i64>,
+    },
+    /// The object is gone.
+    Absent,
+    /// It could not be read at all, with the reason for `basis`.
+    Unreadable(&'static str),
+}
+
+/// The live half of the comparison: every recorded referent, read back.
+#[derive(Clone, Debug, Default)]
+pub struct LiveBinding {
+    /// One reading per recorded referent, in the recorded order.
+    pub readings: Vec<(Referent, ReferentReading)>,
+    /// The installation policy digest as it is now, when this service can see
+    /// it. `None` means it could not be compared, NOT that it is unchanged.
+    pub policy_digest: Option<String>,
+}
+
+/// Read every referent a check's binding recorded, as it is now.
+///
+/// THIS IS THE RECOMPUTATION THE CONTROLLER'S CONTRACT ASSIGNS TO THE API.
+/// `status.binding` is written once, before the Job is created; `weirkeeper`'s
+/// preflight reconciler documents that "W12 recomputes that from live objects
+/// on every GET and answers `applicable: false` with named `staleReasons` when
+/// it differs", and `check_contract::inputs_digest` says the same. Every input
+/// is already structured — `referents[]` carries `kind`, `name`, `uid` and
+/// `generation` — so nothing here parses anything.
+///
+/// A read that fails is recorded as [`ReferentReading::Unreadable`] and never
+/// as "unchanged": the whole point of this pass is that not knowing must not
+/// look like knowing.
+///
+/// # Errors
+///
+/// Never. Every per-object failure becomes an `Unreadable` reading, because a
+/// staleness answer that 503s is worse than one that says which referent it
+/// could not check.
+pub async fn read_live_binding(
+    state: &AppState,
+    namespace: &str,
+    object: &PreflightCr,
+) -> LiveBinding {
+    let recorded = object
+        .status
+        .as_ref()
+        .and_then(|s| s.binding.as_ref())
+        .and_then(|b| b.referents.clone())
+        .unwrap_or_default();
+    let mut readings = Vec::with_capacity(recorded.len());
+    for referent in recorded {
+        let reading = read_one_referent(state, namespace, &referent).await;
+        readings.push((referent, reading));
     }
-    let reason = match token {
-        REASON_EXPIRED => StaleReasonKind::Expired,
-        REASON_PLAN_HASH_CHANGED => StaleReasonKind::PlanHashChanged,
-        REASON_CA_BUNDLE_CHANGED => StaleReasonKind::CaBundleChanged,
-        REASON_POLICY_CHANGED => StaleReasonKind::PolicyChanged,
-        REASON_INPUTS_DIGEST_CHANGED => StaleReasonKind::InputsDigestChanged,
-        _ => return None,
-    };
-    Some(StaleReasonView::plain(reason))
+    LiveBinding {
+        readings,
+        // THE POLICY DIGEST IS NOT READABLE HERE, AND THAT IS REPORTED RATHER
+        // THAN ASSUMED. The controller takes it from `CheckPolicy::digest()`
+        // over the parsed `LOGWEIR_POLICY_CONFIGMAP` document (default
+        // `weirkeeper-policy`, key `policy.json`) in the INSTALLATION
+        // namespace. This service reads a `ConfigMap` only when a check owns
+        // it — owner UID, immutability and digest all verified — and the
+        // policy document is owned by nothing, is mutable, and lives outside
+        // the actor's granted namespaces. Reaching it is a new grant and a new
+        // cross-namespace read, which is D2 W11's to make; until then
+        // `policyChanged` is answered `unverifiable`, never "unchanged".
+        policy_digest: None,
+    }
 }
 
-/// The reasons the CONTROLLER recorded, recovered from its downgrade message.
-fn recorded_reasons(message: Option<&str>) -> Vec<StaleReasonView> {
-    let Some(rest) = message.and_then(|m| {
-        m.find(DOWNGRADE_MESSAGE_PREFIX)
-            .map(|at| &m[at + DOWNGRADE_MESSAGE_PREFIX.len()..])
-    }) else {
-        return Vec::new();
-    };
-    let Some(end) = rest.find(')') else {
-        return Vec::new();
-    };
-    rest[..end]
-        .split(',')
-        .filter_map(reason_from_token)
-        .collect()
+async fn read_one_referent(
+    state: &AppState,
+    namespace: &str,
+    referent: &Referent,
+) -> ReferentReading {
+    // A name that cannot exist is `Absent` without a Kubernetes call.
+    if !crate::validate::is_dns_subdomain(&referent.name) {
+        return ReferentReading::Absent;
+    }
+    match referent.kind.as_str() {
+        REFERENT_KIND_KAFKA_CLUSTER => {
+            revision::<KafkaCluster>(state, namespace, &referent.name).await
+        }
+        REFERENT_KIND_DESTINATION => {
+            revision::<BackupDestination>(state, namespace, &referent.name).await
+        }
+        REFERENT_KIND_BACKUP => revision::<BackupCr>(state, namespace, &referent.name).await,
+        REFERENT_KIND_RESTORE => revision::<RestoreCr>(state, namespace, &referent.name).await,
+        REFERENT_KIND_APPROVAL => revision::<ApprovalCr>(state, namespace, &referent.name).await,
+        REFERENT_KIND_SCHEDULE => {
+            revision::<BackupSchedule>(state, namespace, &referent.name).await
+        }
+        // `TrustRoster` and anything a later controller adds.
+        _ => ReferentReading::Unreadable(BASIS_KIND_NOT_READABLE),
+    }
 }
 
-/// D2 §6.6's applicability, recomputed per read.
+async fn revision<K: crate::kube::ProductResource>(
+    state: &AppState,
+    namespace: &str,
+    name: &str,
+) -> ReferentReading {
+    match state.kube().get::<K>(namespace, name).await {
+        Ok(object) => ReferentReading::Live {
+            uid: object.meta().uid.clone().unwrap_or_default(),
+            generation: object.meta().generation,
+        },
+        Err(KubeFailure::NotFound) => ReferentReading::Absent,
+        Err(_) => ReferentReading::Unreadable(BASIS_READ_FAILED),
+    }
+}
+
+/// The neutral value for every `BindingInputs` member the CRD does not record.
+///
+/// IDENTICAL ON BOTH SIDES, ON PURPOSE. `PreflightBinding` stores the
+/// operation, the plan hash, the referents, the policy digest and one digest
+/// over everything; it does not store the CA bundle list, the roster, the
+/// approval's resourceVersion or a backup's topic set. Feeding core the same
+/// placeholder for those on both sides means it compares exactly what was
+/// recorded and reports nothing about what was not — which is honest, because
+/// a difference invented by a narrower recomputation is not a change in the
+/// world. What is NOT compared is reported instead, as `unverifiable`.
+fn neutral_roster() -> RosterRef {
+    RosterRef {
+        uid: String::new(),
+        generation: 0,
+    }
+}
+
+fn binding_inputs(
+    operation: CoreCheckOperation,
+    plan_hash: Option<String>,
+    referents: Vec<CoreReferent>,
+    policy_digest: String,
+) -> BindingInputs {
+    BindingInputs {
+        operation,
+        plan_hash,
+        topics: None,
+        referents,
+        ca_bundles: Vec::new(),
+        roster: neutral_roster(),
+        approval: None,
+        policy_digest,
+    }
+}
+
+/// A core referent from a CRD one.
+///
+/// THE NAMESPACE IS THE CHECK'S OWN. `PreflightBinding.referents[]` has no
+/// namespace field, because a `LocalRef` cannot leave its namespace — so both
+/// sides of the comparison carry the same one and it contributes nothing,
+/// while core's `(kind, namespace, name)` identity still works.
+fn core_referent(
+    kind: &str,
+    namespace: &str,
+    name: &str,
+    uid: &str,
+    generation: Option<i64>,
+) -> CoreReferent {
+    CoreReferent {
+        kind: kind.to_string(),
+        namespace: namespace.to_string(),
+        name: name.to_string(),
+        uid: uid.to_string(),
+        generation,
+    }
+}
+
+fn core_operation(operation: PreflightOperation) -> CoreCheckOperation {
+    match operation {
+        PreflightOperation::Backup => CoreCheckOperation::Backup,
+        PreflightOperation::Restore => CoreCheckOperation::Restore,
+        PreflightOperation::DestinationAccess => CoreCheckOperation::DestinationAccess,
+    }
+}
+
+fn view_of(reason: &StaleReason) -> StaleReasonView {
+    match reason {
+        StaleReason::Expired => StaleReasonView::plain(StaleReasonKind::Expired),
+        StaleReason::PlanHashChanged => StaleReasonView::plain(StaleReasonKind::PlanHashChanged),
+        StaleReason::ReferentChanged(subject) => {
+            // `<Kind>/<name>`, as core renders it. A Kubernetes name cannot
+            // contain `/`, so the first one splits it.
+            let (kind, name) = match subject.split_once('/') {
+                Some((kind, name)) => (kind.to_string(), Some(name.to_string())),
+                None => (subject.clone(), None),
+            };
+            StaleReasonView {
+                reason: StaleReasonKind::ReferentChanged,
+                kind: Some(crate::validate::bounded(&kind, 128)),
+                name: name.map(|n| crate::validate::bounded(&n, 253)),
+                basis: None,
+            }
+        }
+        StaleReason::CaBundleChanged => StaleReasonView::plain(StaleReasonKind::CaBundleChanged),
+        StaleReason::PolicyChanged => StaleReasonView::plain(StaleReasonKind::PolicyChanged),
+        StaleReason::InputsDigestChanged => {
+            StaleReasonView::plain(StaleReasonKind::InputsDigestChanged)
+        }
+    }
+}
+
+/// D2 §6.6's applicability, recomputed per read — from STRUCTURED FIELDS.
 ///
 /// `draft_plan_hash` is the `?planHash=` the caller sent: the hash of the plan
-/// they are looking at RIGHT NOW. A result bound to a different hash is a
-/// result about a plan that no longer exists.
+/// they are looking at RIGHT NOW. `live` is every recorded referent read back
+/// through the sealed adapter.
 ///
-/// TWO SOURCES, ONE VOCABULARY. This service compares the expiry and the plan
-/// hash itself; the four reasons that need a binding recomputed from live
-/// objects are the controller's, recovered from the message it wrote when it
-/// downgraded the verdict. Duplicates are collapsed, so a reason both sides
-/// found is reported once.
+/// The comparison itself is `check_contract::stale_reasons`, so the API and
+/// the controller cannot each implement half of the rule. What this function
+/// adds is the part core has no vocabulary for: everything it could NOT
+/// compare becomes [`StaleReasonKind::Unverifiable`] with a cause, and never
+/// an absence of reasons.
 fn staleness(
     object: &PreflightCr,
-    _state: PreflightState,
     now: DateTime<Utc>,
     draft_plan_hash: Option<&str>,
-) -> (bool, Vec<StaleReasonView>) {
-    let mut reasons: Vec<StaleReasonView> = Vec::new();
+    live: Option<&LiveBinding>,
+) -> (bool, Vec<StaleReasonView>, Vec<String>) {
+    let namespace = object.meta().namespace.clone().unwrap_or_default();
+    let namespace = namespace.as_str();
     let status = object.status.as_ref();
-    let result = status.and_then(|s| s.result.as_ref());
-    if let Some(expires) = result.and_then(|r| r.expires_at.as_ref()) {
-        if now >= *expires {
-            reasons.push(StaleReasonView::plain(StaleReasonKind::Expired));
-        }
-    }
-    let bound = status
-        .and_then(|s| s.binding.as_ref())
-        .and_then(|b| b.plan_hash.as_deref());
-    let plan_hash_changed = match (draft_plan_hash, bound) {
-        (Some(draft), Some(bound)) => draft != bound,
-        // A caller holding a draft against a verdict bound to no plan at all
-        // is not looking at the same thing either.
-        (Some(_), None) => true,
-        (None, _) => false,
+    let Some(result) = status.and_then(|s| s.result.as_ref()) else {
+        // NOTHING HAS BEEN DECIDED YET. A check with no result has no verdict
+        // to be stale; `applicable` is false because it has not completed, and
+        // saying "stale" here would name a problem that does not exist.
+        return (false, Vec::new(), Vec::new());
     };
-    if plan_hash_changed {
-        reasons.push(StaleReasonView::plain(StaleReasonKind::PlanHashChanged));
-    }
-    // A CANCELLED CHECK IS NOT A STALE ONE. The earlier shape reported
-    // `cancelRequested` here; the controller never emits it, because a
-    // cancelled check ends with no result at all — its verdict is ABSENT, not
-    // out of date, and `state` and `terminal` already say so. Reporting it
-    // invited a console to say "your readiness result is out of date" about a
-    // check that never produced one.
-    for recovered in recorded_reasons(status.and_then(|s| s.message.as_deref())) {
-        if !reasons.contains(&recovered) {
-            reasons.push(recovered);
+    let Some(binding) = status.and_then(|s| s.binding.as_ref()) else {
+        return (
+            true,
+            vec![StaleReasonView::unverifiable(None, None, BASIS_NO_BINDING)],
+            Vec::new(),
+        );
+    };
+    // A CALLER THAT DID NOT READ THE LIVE OBJECTS SAYS SO. Handing this
+    // function an empty `LiveBinding` would compare nothing and report
+    // nothing, which is `applicable: true` for a verdict nobody re-checked —
+    // so "I did not recompute" is a distinct, explicit input.
+    let Some(live) = live else {
+        return (
+            true,
+            vec![StaleReasonView::unverifiable(
+                None,
+                None,
+                BASIS_NOT_RECOMPUTED,
+            )],
+            Vec::new(),
+        );
+    };
+
+    let mut covered = vec![COVERED_EXPIRY.to_string()];
+    let mut unverifiable = Vec::new();
+    let mut recorded_referents = Vec::new();
+    let mut current_referents = Vec::new();
+    for (referent, reading) in &live.readings {
+        match reading {
+            ReferentReading::Unreadable(basis) => unverifiable.push(StaleReasonView::unverifiable(
+                Some(crate::validate::bounded(&referent.kind, 128)),
+                Some(crate::validate::bounded(&referent.name, 253)),
+                basis,
+            )),
+            ReferentReading::Absent => {
+                // Recorded and gone: core renders it `referentChanged` because
+                // only one side has it.
+                recorded_referents.push(core_referent(
+                    &referent.kind,
+                    namespace,
+                    &referent.name,
+                    referent.uid.as_deref().unwrap_or_default(),
+                    referent.generation,
+                ));
+            }
+            ReferentReading::Live { uid, generation } => {
+                recorded_referents.push(core_referent(
+                    &referent.kind,
+                    namespace,
+                    &referent.name,
+                    referent.uid.as_deref().unwrap_or_default(),
+                    referent.generation,
+                ));
+                current_referents.push(core_referent(
+                    &referent.kind,
+                    namespace,
+                    &referent.name,
+                    uid,
+                    *generation,
+                ));
+            }
         }
     }
-    // A RESULT THAT DOES NOT EXIST IS NOT FRESH. Anything before `Completed`
-    // has no verdict to be applicable, and saying "stale" there would be
-    // wrong; `applicable` below is what carries that.
+    if !live.readings.is_empty() {
+        covered.push(format!("{COVERED_REFERENTS}:{}", live.readings.len()));
+    }
+
+    // The policy digest, when it can be seen at all. See
+    // [`COVERED_POLICY_BY_CONTROLLER`] for why an unreadable policy is a basis
+    // line rather than a refusal to answer.
+    let recorded_policy = binding.policy_digest.clone().unwrap_or_default();
+    let current_policy = match &live.policy_digest {
+        Some(digest) => {
+            covered.push(COVERED_POLICY_DIGEST.to_string());
+            digest.clone()
+        }
+        None => {
+            covered.push(COVERED_POLICY_BY_CONTROLLER.to_string());
+            recorded_policy.clone()
+        }
+    };
+
+    let operation = core_operation(object.spec.request.operation);
+    let recorded_inputs = binding_inputs(
+        operation,
+        binding.plan_hash.clone(),
+        recorded_referents,
+        recorded_policy,
+    );
+    let current_inputs = binding_inputs(
+        operation,
+        // A caller who sent no draft hash is not claiming to hold one, so the
+        // recorded hash is compared with itself and contributes nothing.
+        draft_plan_hash
+            .map(str::to_string)
+            .or_else(|| binding.plan_hash.clone()),
+        current_referents,
+        current_policy,
+    );
+    if draft_plan_hash.is_some() {
+        covered.push(COVERED_PLAN_HASH.to_string());
+    }
+
+    let mut reasons: Vec<StaleReasonView> =
+        stale_reasons(&recorded_inputs, result.expires_at, &current_inputs, now)
+            .iter()
+            .map(view_of)
+            .collect();
+    for reason in unverifiable {
+        if !reasons.contains(&reason) {
+            reasons.push(reason);
+        }
+    }
     let stale = !reasons.is_empty();
-    (stale, reasons)
+    (stale, reasons, covered)
 }
 
 /// A `Preflight` as the product DTO.
@@ -315,12 +606,13 @@ pub fn project(
     object: &PreflightCr,
     now: DateTime<Utc>,
     draft_plan_hash: Option<&str>,
+    live: Option<&LiveBinding>,
 ) -> Preflight {
     let meta = object.meta();
     let status = object.status.as_ref();
     let result = status.and_then(|s| s.result.as_ref());
     let state = state_of(object);
-    let (stale, stale_reasons) = staleness(object, state, now, draft_plan_hash);
+    let (stale, stale_reasons, stale_basis) = staleness(object, now, draft_plan_hash, live);
     let entries: Vec<CheckEntryView> = result
         .and_then(|r| r.checks.as_ref())
         .map(|c| c.iter().map(entry_view).collect())
@@ -379,6 +671,7 @@ pub fn project(
         applicable: completed && !stale,
         stale,
         stale_reasons,
+        stale_basis,
         observed_at: status.and_then(|s| s.observed_at.as_ref().copied()),
         expires_at: result.and_then(|r| r.expires_at.as_ref().copied()),
         checks,
@@ -803,7 +1096,9 @@ pub async fn create(
         &PreflightResponse {
             request_id,
             replayed: Some(created.replayed),
-            item: project(&created.object, state.now(), None),
+            // A BRAND-NEW CHECK HAS NO VERDICT TO BE STALE, so there is
+            // nothing to recompute against.
+            item: project(&created.object, state.now(), None, None),
         },
     ))
 }
@@ -877,6 +1172,11 @@ pub async fn get_one(
     }
     let object = get_object::<PreflightCr>(&state, &actor, &ns, &id).await?;
     narrow_for_approver(&state, &actor, &ns, &object)?;
+    // THE RECOMPUTATION THE CONTROLLER'S CONTRACT ASSIGNS TO THIS SERVICE.
+    // Every recorded referent is read back before the verdict is projected;
+    // this is the only route that answers a readiness verdict, so it is the
+    // only one that owes the comparison.
+    let live = read_live_binding(&state, &ns, &object).await;
     Ok(json(
         StatusCode::OK,
         &PreflightResponse {
@@ -886,6 +1186,7 @@ pub async fn get_one(
                 &object,
                 state.now(),
                 query.get("planHash").map(String::as_str),
+                Some(&live),
             ),
         },
     ))
@@ -1119,7 +1420,7 @@ pub async fn cancel(
         |o| o.spec.cancel_requested,
     )
     .await?;
-    let projected = project(&object, state.now(), None);
+    let projected = project(&object, state.now(), None, None);
     Ok(json(
         StatusCode::OK,
         &CancelResponse {
@@ -1145,7 +1446,7 @@ pub async fn operation(
     authorize(state, actor, namespace, Action::ReadPreflights)?;
     let object = get_object::<PreflightCr>(state, actor, namespace, name).await?;
     narrow_for_approver(state, actor, namespace, &object)?;
-    let projected = project(&object, state.now(), None);
+    let projected = project(&object, state.now(), None, None);
     Ok(json(
         StatusCode::OK,
         &CheckOperationResponse {

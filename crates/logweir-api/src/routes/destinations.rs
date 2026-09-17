@@ -1384,15 +1384,22 @@ async fn last_test(
         }
     }
     let now = state.now();
-    Ok(newest.map(|p| {
-        let projected = super::preflights::project(&p, now, None);
-        LastTestView {
-            preflight_id: projected.id.clone(),
-            state: projected.state,
-            observed_at: projected.observed_at,
-            stale: projected.stale,
-            truncated,
-        }
+    let Some(newest) = newest else {
+        return Ok(None);
+    };
+    // THE ONE TEST THIS REPORTS IS RECOMPUTED LIKE ANY OTHER VERDICT. It is a
+    // handful of reads — a `DestinationAccess` check binds the destination and
+    // little else — and the alternative is a `stale` flag on the destination
+    // page that means something weaker than the same flag on the preflight
+    // page, which is worse than the reads.
+    let live = super::preflights::read_live_binding(state, namespace, &newest).await;
+    let projected = super::preflights::project(&newest, now, None, Some(&live));
+    Ok(Some(LastTestView {
+        preflight_id: projected.id.clone(),
+        state: projected.state,
+        observed_at: projected.observed_at,
+        stale: projected.stale,
+        truncated,
     }))
 }
 
@@ -1817,7 +1824,8 @@ pub async fn test(
         &PreflightResponse {
             request_id,
             replayed: Some(created.replayed),
-            item: super::preflights::project(&created.object, state.now(), None),
+            // A test that was just started has no verdict to be stale.
+            item: super::preflights::project(&created.object, state.now(), None, None),
         },
     ))
 }
