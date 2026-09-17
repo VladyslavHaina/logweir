@@ -506,8 +506,14 @@ pub fn job_rows(request: &CheckRequest, restore_target_is_scratch: bool) -> BTre
                 out.insert(CheckId::DestinationEvidenceWritable);
             }
         }
-        // Neither kind is ever rendered by this controller.
-        CheckRequest::TopicInventory(_) | CheckRequest::EvidenceFetch(_) => {}
+        // None of these three is ever rendered by this controller: a topic
+        // inventory belongs to `TopicDiscovery`, an evidence fetch to the
+        // verification path, and a `catalogSync` to `RecoveryCatalog` — whose
+        // result is a relayed BODY and not a row set, so it has no expected
+        // rows for a `Preflight` to be missing.
+        CheckRequest::TopicInventory(_)
+        | CheckRequest::EvidenceFetch(_)
+        | CheckRequest::CatalogSync(_) => {}
     }
     out
 }

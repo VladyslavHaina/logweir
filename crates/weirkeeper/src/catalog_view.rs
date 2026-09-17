@@ -52,8 +52,8 @@ use k8s_openapi::api::core::v1::ConfigMap;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference;
 use kube::api::ObjectMeta;
 use kube::ResourceExt as _;
+use logweir_core::check_contract::CheckPlanKind;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
 
 use crate::crds::recovery_catalog::{
     CatalogCounts, CatalogPage, DeepCheck, HistogramBucket, SignerSummary, SyncMode, SyncSettings,
@@ -67,36 +67,26 @@ use crate::job::{ConfigMapMount, EnvFromSecret, RunnerJobSpec, RunnerOwner};
 
 /// The plan kind a `RecoveryCatalog` sync runs — D-SEAMS **S1**.
 ///
-/// # WHY A STRING HERE AND NOT `CheckPlanKind::CatalogSync`
+/// **THE SEAM IS CLOSED.** This was a hand-written `"catalogSync"` for as long
+/// as D2's [`CheckPlanKind`] was a closed FIVE-member vocabulary that did not
+/// name it, guarded by a test that failed the day the kind landed. It has
+/// landed: the constant is now DERIVED from the enum, so the two cannot drift,
+/// and it is kept as a constant only because a `&'static str` in a JSON key
+/// position reads better than a method call. Everything else about the Job —
+/// the argv, the mount path, the three pinned environment variables, the
+/// deadline margin, the labels, `automountServiceAccountToken: false`, the plan
+/// `ConfigMap` and its 409 rule — is taken from [`crate::check`] and is not
+/// re-decided here.
 ///
-/// D2's [`logweir_core::check_contract::CheckPlanKind`] is a CLOSED five-member
-/// vocabulary and `catalogSync` is not in it: D2 W4's runner is in its fix
-/// round and its own test
-/// (`crates/logweir/tests/check_cli.rs::an_unknown_plan_kind_is_refused`) uses
-/// `{"catalogSync": …}` as its example of a kind serde does NOT know. The kind
-/// is D2's to add, in D2's crate, together with the `CheckRequest` variant the
-/// runner dispatches on; adding a sixth variant from here would be this task
-/// editing `logweir-core` and two other workers' test files to make a controller
-/// compile.
-///
-/// So the spelling lives here, ONCE, beside the discriminator, and
-/// `the_catalog_sync_kind_is_not_yet_in_the_closed_vocabulary` is the test that
-/// fails the day D2 lands it — at which point this constant and
-/// [`JOB_DISCRIMINATOR`] are deleted and every use becomes
-/// `CheckPlanKind::CatalogSync`. Everything else about the Job — the argv, the
-/// mount path, the three pinned environment variables, the deadline margin, the
-/// labels, `automountServiceAccountToken: false`, the plan `ConfigMap` and its
-/// 409 rule — is taken from [`crate::check`] and is not re-decided here.
-pub const PLAN_KIND: &str = "catalogSync";
+/// [`CheckPlanKind`]: logweir_core::check_contract::CheckPlanKind
+pub const PLAN_KIND: &str = CheckPlanKind::CatalogSync.as_str();
 
 /// The two-letter Job-name discriminator for [`PLAN_KIND`], in the shape
 /// [`logweir_core::check_contract::CheckPlanKind::job_discriminator`] gives the
 /// other five (`td`, `rd`, `rp`, `da`, `ev`).
 ///
-/// `cs`, and `the_job_discriminator_collides_with_no_landed_kind` asserts it is
-/// none of theirs: two kinds sharing a discriminator would give two different
-/// checks of one subject the same Job name, and the second would 409 forever.
-pub const JOB_DISCRIMINATOR: &str = "cs";
+/// `cs`, and DERIVED, for the reason [`PLAN_KIND`] gives.
+pub const JOB_DISCRIMINATOR: &str = CheckPlanKind::CatalogSync.job_discriminator();
 
 /// The contract string a check plan carries, re-exported so this module names
 /// D2's spelling and never a second one.
@@ -2327,80 +2317,66 @@ impl std::error::Error for PageConflict {}
 
 /// The `catalogSync` request, as the plan carries it.
 ///
-/// **NOTE FOR D2's runner:** this is the shape `CheckRequest::CatalogSync`
-/// takes when the kind lands in `logweir-core`; the struct moves there
-/// unchanged and this declaration is deleted. It carries no credential and no
-/// endpoint of its own: the destination block is D2's
-/// [`logweir_core::check_contract::DestinationPlan`], rendered from the
-/// resolved destination, and every `AWS_*` variable is projected onto the Job
-/// by [`crate::destination::ResolvedDestination::job_env`] (D-SEAMS **S5**).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields, rename_all = "camelCase")]
-pub struct CatalogSyncRequest {
-    /// Where the catalog is.
-    pub destination: logweir_core::check_contract::DestinationPlan,
-    /// `Index` or `Full`.
-    pub mode: SyncMode,
-    /// How hard to check each point.
-    pub deep_check: DeepCheck,
-    /// The object budget for one run.
-    pub max_objects_per_run: i64,
-    /// How many newest points to relay.
-    pub view_limit: i64,
-    /// The day shard an `Index` walk resumes from.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub index_shard: Option<String>,
-    /// The key a `Full` rescan continues after.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub rescan_start_after: Option<String>,
-    /// Where the PEM bundle of trusted signing keys is mounted, or `None` when
-    /// this installation holds no trust material at all.
-    ///
-    /// `None` is a real answer and not an omission: with no bundle the runner
-    /// reports [`SignatureVerdict::NotAttempted`] for every point, which is how
-    /// `unverified` ends up equal to `total` and `TrustAvailable=False` ends up
-    /// on the status. A runner that silently verified against nothing would
-    /// report `verified` for a forgery.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub trust_bundle_file: Option<String>,
+/// **IT MOVED, EXACTLY AS THIS COMMENT SAID IT WOULD.** The shape was declared
+/// here while `CheckRequest` had no variant for it; now that D2 carries both,
+/// the declaration is D2's and this is a re-export, so a field added on one
+/// side cannot be missing on the other. The controller still owns the two CRD
+/// enums (`spec.sync.mode`, `spec.sync.deepCheck`) because they carry
+/// `JsonSchema` and the published CRD is generated from them; the two `From`
+/// impls below are the whole of the translation, and
+/// `the_crd_and_the_plan_spell_the_two_enums_identically` asserts they spell
+/// the same strings.
+pub use logweir_core::check_contract::CatalogSyncRequest;
+
+impl From<SyncMode> for logweir_core::check_contract::CatalogSyncMode {
+    fn from(mode: SyncMode) -> Self {
+        match mode {
+            SyncMode::Index => Self::Index,
+            SyncMode::Full => Self::Full,
+        }
+    }
 }
 
-/// The plan document — the same field names D2's [`CheckPlan`] carries.
+impl From<DeepCheck> for logweir_core::check_contract::CatalogDeepCheck {
+    fn from(deep: DeepCheck) -> Self {
+        match deep {
+            DeepCheck::None => Self::None,
+            DeepCheck::ManifestDigest => Self::ManifestDigest,
+            DeepCheck::SegmentSample => Self::SegmentSample,
+        }
+    }
+}
+
+/// The plan document — D2's own [`CheckPlan`], serialised.
 ///
-/// A `serde_json::Value` and not a typed `CheckPlan` for exactly the reason
-/// [`PLAN_KIND`] gives: `CheckRequest` is a closed enum and `catalogSync` is
-/// not yet a variant, so a typed value cannot be constructed. The field
-/// spellings are taken from the type's own `serde` attributes, and
-/// `the_plan_document_carries_d2s_field_names` asserts they match what
-/// `CheckPlan` deserialises.
+/// **IT IS A TYPED `CheckPlan` NOW.** It was a hand-built `serde_json::Value`
+/// because `CheckRequest` was a closed enum with no `catalogSync` variant, so a
+/// typed value could not be constructed and the field spellings had to be
+/// copied. They are no longer copied: this builds the very type the runner
+/// deserialises with `deny_unknown_fields`, so a field this controller writes
+/// and that runner does not know is a compile error here rather than a
+/// `CheckContractMismatch` in a pod.
 ///
 /// [`CheckPlan`]: logweir_core::check_contract::CheckPlan
 ///
 /// # Errors
 ///
-/// [`serde_json::Error`] if the request does not serialise.
+/// [`serde_json::Error`] if the plan does not serialise.
 pub fn plan_document(
     subject_uid: &str,
     timeout_seconds: u32,
     policy_digest: Option<&str>,
     request: &CatalogSyncRequest,
 ) -> Result<Vec<u8>, serde_json::Error> {
-    let mut doc = json!({
-        "contract": CHECK_PLAN_CONTRACT,
-        "contractVersion": logweir_core::check_contract::CHECK_CONTRACT_VERSION,
-        "subjectUid": subject_uid,
-        "timeoutSeconds": timeout_seconds,
-        "request": { PLAN_KIND: serde_json::to_value(request)? },
-    });
-    if let Some(digest) = policy_digest {
-        doc.as_object_mut()
-            .expect("a plan document is a JSON object")
-            .insert(
-                "policyDigest".to_string(),
-                Value::String(digest.to_string()),
-            );
-    }
-    serde_json::to_vec(&doc)
+    let plan = logweir_core::check_contract::CheckPlan {
+        contract: CHECK_PLAN_CONTRACT.to_string(),
+        contract_version: logweir_core::check_contract::CHECK_CONTRACT_VERSION,
+        subject_uid: subject_uid.to_string(),
+        timeout_seconds,
+        policy_digest: policy_digest.map(ToString::to_string),
+        request: logweir_core::check_contract::CheckRequest::CatalogSync(Box::new(request.clone())),
+    };
+    serde_json::to_vec(&plan)
 }
 
 /// Everything one sync Job needs.
@@ -2450,7 +2426,10 @@ pub struct SyncJobSpec {
 /// Two things are this function's, and only two:
 ///
 /// 1. The Job name and the `logweir.dev/check-kind` label carry [`PLAN_KIND`],
-///    because the closed enum cannot spell it yet.
+///    which is now [`CheckPlanKind::CatalogSync`]'s own string rather than a
+///    second spelling of it.
+///
+///    [`CheckPlanKind::CatalogSync`]: logweir_core::check_contract::CheckPlanKind::CatalogSync
 /// 2. **`ttlSecondsAfterFinished` IS SET AT CREATION**, unlike every other
 ///    check Job in this tree. The framework patches a TTL on only after the
 ///    status commit because a check's relay lives on the pod and the TTL
