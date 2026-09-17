@@ -60,6 +60,35 @@ pub const MAX_EVIDENCE_SIDECAR_BYTES: u64 = 64 * 1024;
 /// A result carries at most this many per-check entries (D2 §6.4).
 pub const MAX_CHECK_ENTRIES: usize = 64;
 
+/// The ceiling on [`CheckPlan::timeout_seconds`] for the five probe kinds.
+///
+/// TEN MINUTES. Every one of them is a bounded probe — a metadata call, a
+/// handful of `get`s — and a probe that needs longer is a probe that is not
+/// answering.
+pub const MAX_CHECK_TIMEOUT_SECONDS: u32 = 600;
+
+/// The ceiling on [`CheckPlan::timeout_seconds`] for a `catalogSync`.
+///
+/// THIRTY MINUTES, AND IT IS A DIFFERENT NUMBER ON PURPOSE. A catalog sync is
+/// not a probe: it is a paged walk of an adopter's own bucket, whose cost is
+/// set by how many recovery points they hold and not by how fast one endpoint
+/// answers. `weirkeeper::controllers::recovery_catalog::SYNC_TIMEOUT_SECONDS`
+/// is 900, which the single 600-second ceiling would have refused at step 4
+/// with `CheckContractMismatch` — every sync Job, on every cadence, before a
+/// credential was read. `the_controllers_sync_plan_is_one_this_runner_accepts`
+/// is the guard that would have caught it.
+pub const MAX_CATALOG_SYNC_TIMEOUT_SECONDS: u32 = 1800;
+
+/// `spec.sync.viewLimit`'s range, as the CRD's `schemars(range)` states it.
+pub const MIN_CATALOG_VIEW_LIMIT: i64 = 100;
+/// See [`MIN_CATALOG_VIEW_LIMIT`].
+pub const MAX_CATALOG_VIEW_LIMIT: i64 = 5_000;
+/// `spec.sync.maxObjectsPerRun`'s range, as the CRD's `schemars(range)` states
+/// it.
+pub const MIN_CATALOG_OBJECTS_PER_RUN: i64 = 1_000;
+/// See [`MIN_CATALOG_OBJECTS_PER_RUN`].
+pub const MAX_CATALOG_OBJECTS_PER_RUN: i64 = 1_000_000;
+
 /// Frame prefixes. Public because `weirkeeper::check::relay` and the runner
 /// both write and read them, and a second spelling is a second contract.
 pub const TOPIC_FRAME_PREFIX: &str = "logweir-check-topic=";
@@ -583,7 +612,7 @@ pub fn advisory_warnings(checks: &[CheckOutcome]) -> Vec<&CheckOutcome> {
 
 // --------------------------------------------------------------- check plan
 
-/// Which of the five plan kinds a request is (D2 §4.2).
+/// Which of the six plan kinds a request is (D2 §4.2, D3 §5.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CheckPlanKind {
@@ -592,40 +621,56 @@ pub enum CheckPlanKind {
     RestorePreflight,
     DestinationAccess,
     EvidenceFetch,
+    /// D3 §5.3's `RecoveryCatalog` sync: one bounded, read-only walk of the
+    /// durable catalog in object storage, relayed as the body
+    /// `docs/kubernetes.md` §7d grammars.
+    CatalogSync,
 }
 
 impl CheckPlanKind {
+    /// The wire spelling.
+    ///
+    /// `const fn` so a caller that needs the string in a CONSTANT position can
+    /// derive it from this table rather than writing a second literal —
+    /// `weirkeeper::catalog_view::PLAN_KIND` is exactly that caller, and it
+    /// spent D3 W8 as a hand-written `"catalogSync"` because this was not
+    /// `const`.
     #[must_use]
-    pub fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::TopicInventory => "topicInventory",
             Self::OperationReadiness => "operationReadiness",
             Self::RestorePreflight => "restorePreflight",
             Self::DestinationAccess => "destinationAccess",
             Self::EvidenceFetch => "evidenceFetch",
+            Self::CatalogSync => "catalogSync",
         }
     }
 
     /// The two-letter Job-name discriminator of D2 §4.3 (`td`, `rd`, `rp`,
-    /// `da`, `ev`). It lives here so the controller and any tooling that has
-    /// to recognise a check Job by name read one table.
+    /// `da`, `ev`, `cs`). It lives here so the controller and any tooling that
+    /// has to recognise a check Job by name read one table.
+    ///
+    /// `const fn` for the reason [`CheckPlanKind::as_str`] gives.
     #[must_use]
-    pub fn job_discriminator(self) -> &'static str {
+    pub const fn job_discriminator(self) -> &'static str {
         match self {
             Self::TopicInventory => "td",
             Self::OperationReadiness => "rd",
             Self::RestorePreflight => "rp",
             Self::DestinationAccess => "da",
             Self::EvidenceFetch => "ev",
+            Self::CatalogSync => "cs",
         }
     }
 
-    pub const ALL: [Self; 5] = [
+    pub const ALL: [Self; 6] = [
         Self::TopicInventory,
         Self::OperationReadiness,
         Self::RestorePreflight,
         Self::DestinationAccess,
         Self::EvidenceFetch,
+        Self::CatalogSync,
     ];
 }
 
@@ -788,7 +833,112 @@ pub struct EvidenceFetchRequest {
     pub objects: Vec<EvidenceObjectRequest>,
 }
 
-/// The five requests, externally tagged so an unknown kind is a parse error
+/// How much of the durable catalog one `catalogSync` walks (D3 §5.3).
+///
+/// The wire spellings are `"Index"` and `"Full"` — PascalCase and NOT this
+/// module's usual `camelCase`, because they are the spellings
+/// `RecoveryCatalog.spec.sync.mode` already publishes in a CRD an operator
+/// edits. A plan that renamed them would make the controller translate between
+/// two spellings of one value, which is the defect every closed vocabulary in
+/// this file exists to avoid.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+pub enum CatalogSyncMode {
+    /// Day shards of `logweir/catalog/v1/log/`, newest first, down to the
+    /// floor the recorded cursor implies.
+    #[default]
+    Index,
+    /// A resumable rescan of `logweir/catalog/v1/points/`, continuing after
+    /// [`CatalogSyncRequest::rescan_start_after`].
+    Full,
+}
+
+impl CatalogSyncMode {
+    /// The wire spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Index => "Index",
+            Self::Full => "Full",
+        }
+    }
+}
+
+/// How hard a `catalogSync` checks each point it finds (D3 §5.3).
+///
+/// PascalCase for the reason [`CatalogSyncMode`] gives.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, Serialize, Deserialize,
+)]
+pub enum CatalogDeepCheck {
+    /// The record and its receipt exist.
+    None,
+    /// Additionally: the manifest is readable and its digest is the receipt's.
+    #[default]
+    ManifestDigest,
+    /// Additionally: sample segment bytes. **Not implemented by this build** —
+    /// a plan naming it is honoured as [`CatalogDeepCheck::ManifestDigest`] and
+    /// the result says so, rather than reporting a check that did not run.
+    SegmentSample,
+}
+
+impl CatalogDeepCheck {
+    /// The wire spelling.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "None",
+            Self::ManifestDigest => "ManifestDigest",
+            Self::SegmentSample => "SegmentSample",
+        }
+    }
+}
+
+/// `catalogSync` (D3 §5.3, `docs/kubernetes.md` §7d).
+///
+/// It carries NO credential and NO endpoint of its own: `destination` is the
+/// resolved [`DestinationPlan`], and every `AWS_*` variable is projected onto
+/// the Job by `secretKeyRef` (D-SEAMS **S5**). The grant is `archiveRead` and
+/// the walk writes nothing at all — not even the create-only readiness marker
+/// a `destinationAccess` may write.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct CatalogSyncRequest {
+    /// Where the catalog is.
+    pub destination: DestinationPlan,
+    /// `Index` or `Full`.
+    pub mode: CatalogSyncMode,
+    /// How hard to check each point.
+    pub deep_check: CatalogDeepCheck,
+    /// The object budget for one run — how many objects the walk may `get` or
+    /// `list` before it stops and records a cursor.
+    pub max_objects_per_run: i64,
+    /// How many NEWEST points to relay. The body carries at most this many
+    /// `catalog-entry=` lines; everything else the walk saw is counted and
+    /// histogrammed.
+    pub view_limit: i64,
+    /// The oldest day shard the previous `Index` walk reached, `YYYY-MM-DD`.
+    /// The next walk aims at that day MINUS one day of overlap and still
+    /// starts at today, so the window stays newest-first.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index_shard: Option<String>,
+    /// The key a `Full` rescan continues strictly after.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rescan_start_after: Option<String>,
+    /// Where the PEM bundle of this installation's PUBLIC signing keys is
+    /// mounted, or `None` when it holds no trust material at all.
+    ///
+    /// `None` is a real answer and not an omission: with no bundle the runner
+    /// reports the `notAttempted` signature verdict for every point, which is
+    /// how `unverified` ends up equal to `total` and `TrustAvailable=False`
+    /// ends up on the status. **A runner that silently verified against
+    /// nothing would report `verified` for a forgery.**
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub trust_bundle_file: Option<String>,
+}
+
+/// The six requests, externally tagged so an unknown kind is a parse error
 /// with the kind named, and so each variant keeps its own
 /// `deny_unknown_fields`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -803,6 +953,10 @@ pub enum CheckRequest {
     RestorePreflight(Box<RestorePreflightRequest>),
     DestinationAccess(DestinationAccessRequest),
     EvidenceFetch(EvidenceFetchRequest),
+    // Boxed for the same reason: a destination plus three optional paths is
+    // the largest of the unboxed shapes, and one oversized variant sets the
+    // size of every `CheckRequest` value in the process.
+    CatalogSync(Box<CatalogSyncRequest>),
 }
 
 impl CheckRequest {
@@ -814,6 +968,7 @@ impl CheckRequest {
             Self::RestorePreflight(_) => CheckPlanKind::RestorePreflight,
             Self::DestinationAccess(_) => CheckPlanKind::DestinationAccess,
             Self::EvidenceFetch(_) => CheckPlanKind::EvidenceFetch,
+            Self::CatalogSync(_) => CheckPlanKind::CatalogSync,
         }
     }
 }
@@ -923,10 +1078,16 @@ impl CheckPlan {
     /// controller bug, and the runner must not act on it: the budgets are what
     /// make the relay, the etcd footprint and the Kafka call count bounded.
     pub fn validate(&self) -> Result<(), CheckPlanError> {
-        if self.timeout_seconds == 0 || self.timeout_seconds > 600 {
+        // TWO CEILINGS, BECAUSE THERE ARE TWO KINDS OF WORK. See
+        // [`MAX_CATALOG_SYNC_TIMEOUT_SECONDS`].
+        let ceiling = match &self.request {
+            CheckRequest::CatalogSync(_) => MAX_CATALOG_SYNC_TIMEOUT_SECONDS,
+            _ => MAX_CHECK_TIMEOUT_SECONDS,
+        };
+        if self.timeout_seconds == 0 || self.timeout_seconds > ceiling {
             return Err(CheckPlanError::field(
                 "timeoutSeconds",
-                format!("{} is outside 1..=600", self.timeout_seconds),
+                format!("{} is outside 1..={ceiling}", self.timeout_seconds),
             ));
         }
         match &self.request {
@@ -986,6 +1147,40 @@ impl CheckPlan {
                     ));
                 }
             }
+            CheckRequest::CatalogSync(r) => {
+                if r.view_limit < MIN_CATALOG_VIEW_LIMIT || r.view_limit > MAX_CATALOG_VIEW_LIMIT {
+                    return Err(CheckPlanError::field(
+                        "request.catalogSync.viewLimit",
+                        format!(
+                            "{} is outside {MIN_CATALOG_VIEW_LIMIT}..={MAX_CATALOG_VIEW_LIMIT}",
+                            r.view_limit
+                        ),
+                    ));
+                }
+                if r.max_objects_per_run < MIN_CATALOG_OBJECTS_PER_RUN
+                    || r.max_objects_per_run > MAX_CATALOG_OBJECTS_PER_RUN
+                {
+                    return Err(CheckPlanError::field(
+                        "request.catalogSync.maxObjectsPerRun",
+                        format!(
+                            "{} is outside                              {MIN_CATALOG_OBJECTS_PER_RUN}..={MAX_CATALOG_OBJECTS_PER_RUN}",
+                            r.max_objects_per_run
+                        ),
+                    ));
+                }
+                // A DAY SHARD IS A DAY, and the runner turns this into a key
+                // prefix. A value that is not `YYYY-MM-DD` would silently
+                // become a prefix that lists nothing, and a sync that walked
+                // nothing would publish an empty view of a full archive.
+                if let Some(day) = r.index_shard.as_deref() {
+                    if !is_iso_day(day) {
+                        return Err(CheckPlanError::field(
+                            "request.catalogSync.indexShard",
+                            "an index cursor is a UTC day, `YYYY-MM-DD`",
+                        ));
+                    }
+                }
+            }
             CheckRequest::EvidenceFetch(r) => {
                 if r.objects.is_empty() || r.objects.len() > MAX_EVIDENCE_OBJECTS {
                     return Err(CheckPlanError::field(
@@ -1033,6 +1228,25 @@ pub fn is_sha256_prefixed(s: &str) -> bool {
         }
         None => false,
     }
+}
+
+/// `YYYY-MM-DD`, UTC — the day a catalog index shard names.
+///
+/// SHAPE ONLY, and deliberately: `2026-02-30` passes. The runner turns this
+/// into a key prefix and a `chrono` date; what this guards is that a plan
+/// cannot carry `../` or an empty string into a listing, and a nonexistent
+/// calendar day simply lists nothing. A second calendar implementation here
+/// would be a second answer to a question `chrono` already answers on the
+/// side that actually needs the date.
+#[must_use]
+pub fn is_iso_day(day: &str) -> bool {
+    day.len() == 10
+        && day.as_bytes()[4] == b'-'
+        && day.as_bytes()[7] == b'-'
+        && day
+            .bytes()
+            .enumerate()
+            .all(|(i, b)| i == 4 || i == 7 || b.is_ascii_digit())
 }
 
 // ------------------------------------------------------------------- frames
