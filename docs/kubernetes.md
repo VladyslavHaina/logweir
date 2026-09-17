@@ -580,6 +580,124 @@ than silently wrong. Rolling the CRD back deletes any `TopicDiscovery` objects
 and, by owner cascade, their result `ConfigMap`s and check Jobs; no `Backup`,
 `Restore` or archive is affected, because a discovery result is never an
 execution input.
+### 7d. The `RecoveryCatalog` view: bounded, expiring, and never a second source of truth
+
+A `RecoveryCatalog` indexes one destination's durable catalog —
+`logweir/catalog/v1/` in object storage, written by the backup runner beside every
+receipt (`docs/formats/catalog-point.md`). **The archive is the truth.** What
+lives in Kubernetes is a window onto it, and the window is deliberately small,
+deliberately immutable, and deliberately temporary.
+
+```bash
+kubectl --context docker-desktop get recoverycatalog -n team-a
+# NAME     DESTINATION  POINTS  AVAILABLE  SYNCED  TRUNCATED  AGE
+# primary  archive      5312    5287       2m      true       6h
+```
+
+**What a sync is.** A short-lived check Job — the same `logweir check run` every
+other check uses, with the `catalogSync` plan kind — reads the catalog with the
+destination's own credential, projected by `secretKeyRef`, and prints its result
+through the ordinary result frames. The controller reads that Job's stdout from
+the pod it can prove the Job owns, verifies each page's digest over the page's
+own entry lines, and writes the result. It runs on `spec.sync.intervalSeconds`,
+or immediately when `spec.syncRequest` changes — that token is the **only mutable
+field**, and the controller records the one it acted on in
+`status.observedSyncRequest`, so asking twice is one sync and a new token is not
+mistaken for a retry.
+
+**What the view is bounded by.**
+
+| Bound | Value | Why |
+|---|---|---|
+| `spec.sync.viewLimit` | 100–5000, default 2000 | How many **newest** points are materialised. Points beyond it are counted, histogrammed and reachable with `logweir catalog list` against the archive — never silently dropped, and `status.truncated` says the view is a window. |
+| `status.pages[]` | at most 8 `ConfigMap`s | Each page is immutable, carries its entries one compact JSON per line under `entries.jsonl`, and records its own `sha256`. |
+| `status.indexConfigMap` | one `ConfigMap` | The fence pointer: per page, the point-id range and the recovery-point range. A fence pointer **excludes** pages; a hit inside the range is not an existence proof. |
+| `status.histogram` | at most 400 days | Points per day over the whole walk, not only the window. |
+| `status.signers[]` | at most 16 | Untrusted keys first, so the row an administrator has to act on is never the one that is dropped. |
+
+**How the view is collected, with no `delete` permission anywhere.** Every page
+and the fence pointer are owned by the **sync Job**, with
+`blockOwnerDeletion: false`. The Job carries
+`ttlSecondsAfterFinished = max(3 × intervalSeconds, 86400)`; when Kubernetes
+removes the Job, garbage collection removes its pages. Each successful sync
+publishes a new set and the previous one ages out. If syncing stops for longer
+than the TTL the view disappears and the object reports `Stale` and then
+`Ready=False/ViewExpired`, and `status.pages` is cleared rather than left naming
+objects that are gone. **The archive is untouched by any of this**: the
+controller holds no `delete` verb on anything, and `logweir catalog list` still
+reads the durable catalog.
+
+**Two axes, and nothing merges them.** Each entry carries an `availability` and a
+`verification`, and a `selectable` flag that is their conjunction.
+
+| `availability` | meaning |
+|---|---|
+| `Available` | receipt, sidecar and manifest readable; the manifest digest equals the receipt's |
+| `Missing` | a definite `NotFound` |
+| `Unreadable` | any other storage error — 403, timeout, truncated. **"Could not tell", never "is not there".** |
+| `Deleted` | a completed retention tombstone exists |
+| `Conflict` | two records disagree for one identity, or a record's facts contradict the receipt |
+| `UnsupportedFormat` | the record's major version is above this build's |
+| `Partial` | a sampled segment the manifest lists is missing |
+
+| `verification` | meaning |
+|---|---|
+| `Verified` | the receipt's DSSE verifies under a key this installation accepts |
+| `VerifiedHistorical` | the same, under a retired or expired key, for evidence signed while it was valid |
+| `UntrustedSigner` | the signature verifies under a key this installation does **not** list |
+| `Revoked` | the key was revoked for compromise |
+| `Invalid` | the signature does not verify, or a digest does not match |
+| `NoEvidence` | a manifest with no receipt at all |
+| `NotAttempted` | nothing could be fetched, or this installation holds no trust material |
+
+A point is offered for an ordinary restore only when it is `Available` **and**
+(`Verified` or `VerifiedHistorical`). Everything else is listed with its exact
+state and a remedy sentence; nothing is hidden and nothing unverified is
+presented as verified evidence.
+
+**What a sync does NOT verify.** It does not decide trust. The Job is handed this
+installation's **public** signing keys in an immutable `ConfigMap` (public
+material only — nothing private ever reaches a `ConfigMap`) and reports whether a
+signature verified and under which key id. Whether that key is one this
+installation accepts, has retired or has revoked is decided by the controller
+against the trust source, once, and applied to both the entries and
+`status.counts.untrustedSigner`. A public key found beside an archive is a
+**claim**: it is displayed with its fingerprint and is never trusted by proximity
+(`docs/keys.md`). With no trust material at all, `TrustAvailable=False` and every
+point is `NotAttempted` — an installation that holds no key has not disproved
+anything.
+
+A sync also does not re-derive the facts it displays. The signed receipt is the
+verification root: the point id is `sha256` of the receipt bytes, and a **restore
+re-verifies its point at execution**, so nothing here is evidence — it is an
+index onto evidence.
+
+**Counts do not sum to `total`, and that is stated rather than smoothed over.**
+`status.counts` has ten fields across the two seven-state axes.
+`counts.unverified` folds `NotAttempted` and `NoEvidence`; `Partial`, `Revoked`
+and `VerifiedHistorical` have no field of their own and are named in the `Synced`
+condition's message instead.
+
+**Conditions.** `Ready` (a usable view exists now), `Synced` (what the last sync
+did — `Succeeded`, `PartialScan` when part of the archive could not be read,
+`ScanIncomplete` when the object budget ran out and the cursor was recorded, or a
+closed check code on a failure), `Stale` (the view is older than two intervals; a
+`intervalSeconds: 0` catalog is manual-only and never stale by the clock) and
+`TrustAvailable`.
+
+**A failed sync keeps the previous view.** The status patch omits `pages`, which
+an RFC 7386 merge patch reads as "leave it alone", and those pages age out on
+their own Job's TTL. A view that is still true is not blanked because the next
+walk could not run.
+
+**Upgrade and rollback.** The kind and its controller are additive: nothing
+exists until an operator creates a `RecoveryCatalog`, and a cluster with none is
+byte-for-byte unaffected. On rollback the objects become inert — the controller
+stops syncing, the last sync Job's TTL removes its pages, and the durable catalog
+in object storage is untouched. `spec.legacyArchive` is admitted by the CRD for
+PLAT-15.2's connect-an-existing-archive path and **this build creates no sync Job
+for it**: such a catalog reports `Ready=False/LegacyArchiveUnsupported` and names
+the supported path (a `BackupDestination` with a read-only `archiveRead` grant).
 
 ## 8. The approval flow
 
