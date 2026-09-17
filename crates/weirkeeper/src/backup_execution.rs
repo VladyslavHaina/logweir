@@ -75,7 +75,7 @@ use crate::crds::backup::{Backup, BackupExecution, BackupSpec as BackupCrdSpec, 
 use crate::crds::kafka_cluster::KafkaCluster;
 use crate::crds::selection::{Coverage, IncompleteDiscovery, SelectionMode, SelectionStatus};
 use crate::crds::LocalRef;
-use crate::destination::ResolvedDestinationSnapshot;
+use crate::destination::{ResolvedDestination, ResolvedDestinationSnapshot, ARCHIVE_CA_PLAN_KEY};
 use logweir_core::engine::StorageUrl;
 use logweir_core::ids::sha256_prefixed;
 use logweir_core::spec::{AllowedClusters, AuthSpec, BackupSettings, BackupSourceSpec, BackupSpec};
@@ -450,6 +450,34 @@ pub fn runner_argv(trigger: ExecutionTrigger, execution_id: &str) -> Vec<String>
     .iter()
     .map(|token| (*token).to_string())
     .collect()
+}
+
+/// [`runner_argv`] with D2 §3.5's **version-skew handshake** appended, for a
+/// destination-backed run.
+///
+/// # A RUNNER WITHOUT THE CONTRACT MUST REFUSE, NOT IMPROVISE
+///
+/// The same technique as `--execution-contract-version`: an unknown flag is a
+/// clap parse error, so an OLD runner image handed a destination-backed Job
+/// exits before it dispatches — it never reaches the store builder that would
+/// otherwise have assembled the archive handle out of whatever `AWS_*`
+/// happened to be in the pod. Without the handshake a new controller could
+/// drive an old runner that silently built its store from ambient credentials
+/// while the plan said otherwise, which is defect **SEC-ENVHTTP** re-opened
+/// one layer down.
+///
+/// A LEGACY inline-`archive` run does NOT carry it: the flag is the promise
+/// that every store setting arrives explicitly, and on the legacy path it does
+/// not.
+#[must_use]
+pub fn runner_argv_with_store_contract(
+    trigger: ExecutionTrigger,
+    execution_id: &str,
+) -> Vec<String> {
+    let mut argv = runner_argv(trigger, execution_id);
+    argv.push(crate::destination::STORE_CONTRACT_VERSION_ARG.to_string());
+    argv.push(crate::destination::STORE_CONTRACT_VERSION.to_string());
+    argv
 }
 
 // ---------------------------------------------------------------------------
@@ -969,6 +997,7 @@ pub fn resolve_inputs(
     cluster: &KafkaCluster,
     addressing_env: &[(String, String)],
     selection: &ResolvedSelection,
+    destination: Option<&ResolvedDestination>,
 ) -> Result<BackupExecutionInputs, ExecutionRefusal> {
     let name = backup.name_any();
     let cluster_name = cluster.name_any();
@@ -1005,12 +1034,26 @@ pub fn resolve_inputs(
     connection
         .check_job_namespace(&identity.backup.namespace)
         .map_err(ExecutionRefusal::from)?;
-    let storage = crate::retention::storage_url_for(&backup.spec.archive.url).map_err(|e| {
-        ExecutionRefusal::new(
-            TERMINAL_STATE_ARCHIVE_URL_UNREADABLE,
-            format!("the archive URL on {name} is not an object-store location: {e}"),
-        )
-    })?;
+    // WHERE THE ARCHIVE IS, FROM ONE OF TWO PLACES AND NEVER FROM BOTH.
+    //
+    // A destination-backed run takes its storage block from the RESOLVED
+    // destination. `spec.archive.url` on such a `Backup` is the sentinel
+    // `logweir-destination://<name>` (CEL rule `DESTINATION_SENTINEL_RULE`),
+    // which `storage_url_for` refuses as an unknown scheme — and that refusal
+    // is load-bearing on the OTHER side of the seam: an older controller
+    // reading the same object writes the terminal `ArchiveUrlUnreadable`
+    // before it POSTs anything, which is D2 §3.6's rollback behaviour.
+    //
+    // A legacy run resolves the URL exactly as it always has.
+    let storage = match destination {
+        Some(resolved) => resolved.plan_storage(),
+        None => crate::retention::storage_url_for(&backup.spec.archive.url).map_err(|e| {
+            ExecutionRefusal::new(
+                TERMINAL_STATE_ARCHIVE_URL_UNREADABLE,
+                format!("the archive URL on {name} is not an object-store location: {e}"),
+            )
+        })?,
+    };
     if backup
         .spec
         .archive
@@ -1072,14 +1115,17 @@ pub fn resolve_inputs(
         ));
     }
 
-    let args = runner_argv(identity.trigger, &identity.id);
+    let args = match destination {
+        Some(_) => runner_argv_with_store_contract(identity.trigger, &identity.id),
+        None => runner_argv(identity.trigger, &identity.id),
+    };
     Ok(BackupExecutionInputs {
         version: INPUTS_VERSION.to_string(),
         trigger: Some(run_inputs(backup)),
         schedule_ref: schedule_ref_inputs(backup),
         run_policy_sha256: Some(crate::policy::run_policy_sha256(&backup.spec)),
         selection: Some(selection.selection.clone()),
-        destination: None,
+        destination: destination.map(ResolvedDestination::snapshot),
         source: SourceInputs {
             cluster: ObjectIdentity {
                 namespace: cluster
@@ -1101,13 +1147,26 @@ pub fn resolve_inputs(
         archive: ArchiveInputs {
             url: backup.spec.archive.url.clone(),
             storage,
-            addressing_env: addressing_env
-                .iter()
-                .map(|(name, value)| EnvValue {
-                    name: name.clone(),
-                    value: value.clone(),
-                })
-                .collect(),
+            // **EMPTY FOR A DESTINATION-BACKED RUN, AND THAT IS DEFECT
+            // SEC-ENVHTTP's CONTROLLER HALF.** The forwarded set is the
+            // controller's OWN `AWS_ENDPOINT_URL`, `AWS_REGION`,
+            // `AWS_ALLOW_HTTP` and `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` — a
+            // global setting that the engine's `from_env()` honours over the
+            // approved plan. A destination renders the complete explicit set
+            // itself, from the object and from nothing else
+            // (`ResolvedDestination::job_env`), so forwarding anything here
+            // would be a second answer to the same question and the process's
+            // answer would win.
+            addressing_env: match destination {
+                Some(_) => Vec::new(),
+                None => addressing_env
+                    .iter()
+                    .map(|(name, value)| EnvValue {
+                        name: name.clone(),
+                        value: value.clone(),
+                    })
+                    .collect(),
+            },
         },
         runner: RunnerInputs {
             args,
@@ -1169,6 +1228,24 @@ pub struct FrozenInputs {
     pub canonical: String,
     /// `sha256_prefixed` of [`FrozenInputs::canonical`].
     pub sha256: String,
+    /// The destination's CA bundle, copied into the SAME immutable plan
+    /// `ConfigMap` as [`ARCHIVE_CA_PLAN_KEY`] — D2 §3.7.
+    ///
+    /// # Why the bytes are here and the DIGEST is in the snapshot
+    ///
+    /// A snapshot is re-encoded and compared byte for byte on every later pass,
+    /// so putting a 64 KiB PEM bundle inside it would put 64 KiB through
+    /// `det_json` on every reconcile of every destination-backed `Backup`. The
+    /// snapshot therefore carries `caSha256` and these bytes travel beside it,
+    /// in the same immutable object, under their own key — and the digest is
+    /// what BINDS them, so a CA swapped into a run that already exists makes
+    /// the plan disagree with its own snapshot
+    /// ([`verify_frozen_config_map`]) instead of being trusted silently.
+    ///
+    /// `None` for every legacy run and for every destination with no
+    /// `spec.transport.caBundle`; the plan then carries its three keys exactly
+    /// as it did before destinations existed.
+    pub ca_pem: Option<String>,
 }
 
 /// The one canonical encoding of a snapshot.
@@ -1192,12 +1269,56 @@ impl FrozenInputs {
     ///
     /// See [`canonical_inputs`].
     pub fn freeze(inputs: BackupExecutionInputs) -> Result<Self, ExecutionRefusal> {
+        Self::freeze_with_ca(inputs, None)
+    }
+
+    /// [`FrozenInputs::freeze`], with the destination CA bundle that travels
+    /// beside the snapshot in the same immutable plan `ConfigMap`.
+    ///
+    /// # Errors
+    ///
+    /// See [`canonical_inputs`], plus
+    /// [`TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT`] when the bytes handed here
+    /// are not the bytes the snapshot's `caSha256` names, or when one of the
+    /// two is present without the other. **A CA the plan cannot prove is a CA
+    /// the run does not get**: the alternative is a Job mounting bytes nothing
+    /// in the frozen document commits to.
+    pub fn freeze_with_ca(
+        inputs: BackupExecutionInputs,
+        ca_pem: Option<String>,
+    ) -> Result<Self, ExecutionRefusal> {
+        let declared = inputs
+            .destination
+            .as_ref()
+            .and_then(|d| d.ca_sha256.as_deref());
+        match (declared, ca_pem.as_deref()) {
+            (None, None) => {}
+            (Some(digest), Some(bytes)) => {
+                let computed = sha256_prefixed(bytes.as_bytes());
+                if computed != digest {
+                    return Err(ExecutionRefusal::conflict(format!(
+                        "the frozen destination names CA digest {digest} and the bundle beside it                          digests to {computed}; the bytes a run trusts are the bytes its snapshot                          commits to"
+                    )));
+                }
+            }
+            (Some(digest), None) => {
+                return Err(ExecutionRefusal::conflict(format!(
+                    "the frozen destination names CA digest {digest} and no {ARCHIVE_CA_PLAN_KEY}                      travels with it; a Job would mount no CA while the snapshot says it has one"
+                )));
+            }
+            (None, Some(_)) => {
+                return Err(ExecutionRefusal::conflict(format!(
+                    "a {ARCHIVE_CA_PLAN_KEY} was handed to the freeze and the snapshot names no                      destination CA; nothing in the frozen document would commit to those bytes"
+                )));
+            }
+        }
         let canonical = canonical_inputs(&inputs)?;
         let sha256 = sha256_prefixed(canonical.as_bytes());
         Ok(Self {
             inputs,
             canonical,
             sha256,
+            ca_pem,
         })
     }
 
@@ -1248,13 +1369,21 @@ impl FrozenInputs {
                 format!("the rendered cluster allowlist does not serialise: {e}"),
             )
         })?;
-        Ok([
+        let mut documents: BTreeMap<String, String> = [
             (PLAN_SPEC_KEY.to_string(), spec),
             (PLAN_ALLOWED_CLUSTERS_KEY.to_string(), allowed),
             (INPUTS_KEY.to_string(), self.canonical.clone()),
         ]
         .into_iter()
-        .collect())
+        .collect();
+        // THE FOURTH KEY, AND ONLY FOR A DESTINATION THAT DECLARES A CA.
+        // `freeze_with_ca` has already checked that these bytes are the ones
+        // the snapshot's `caSha256` names, so the plan and the document that
+        // describes it cannot disagree about which root a run trusts.
+        if let Some(ca) = self.ca_pem.as_ref() {
+            documents.insert(ARCHIVE_CA_PLAN_KEY.to_string(), ca.clone());
+        }
+        Ok(documents)
     }
 
     /// The `status.execution` projection for these inputs.
@@ -1424,6 +1553,17 @@ pub fn verify_frozen_config_map(
     let mut keys: Vec<&str> = data.keys().map(String::as_str).collect();
     keys.sort_unstable();
     let mut expected_keys = vec![PLAN_ALLOWED_CLUSTERS_KEY, PLAN_SPEC_KEY, INPUTS_KEY];
+    // THE FOURTH KEY IS ADMITTED HERE AND PROVED BELOW. A destination that
+    // declares a CA bundle freezes its bytes beside the snapshot (D2 §3.7), so
+    // the key set is three or four. Admitting it is not trusting it: the
+    // snapshot is parsed a few lines down, `freeze_with_ca` refuses bytes whose
+    // digest is not the one the snapshot names, and `documents()` is compared
+    // against `data` whole — so a plan carrying an `archive-ca.pem` its
+    // snapshot does not commit to is still a conflict, with a message naming
+    // the digest rather than the key set.
+    if data.contains_key(ARCHIVE_CA_PLAN_KEY) {
+        expected_keys.push(ARCHIVE_CA_PLAN_KEY);
+    }
     expected_keys.sort_unstable();
     if keys != expected_keys {
         return refuse(format!("its keys are {keys:?}, not {expected_keys:?}"));
@@ -1453,7 +1593,10 @@ pub fn verify_frozen_config_map(
         Ok(parsed) => parsed,
         Err(e) => return refuse(format!("{INPUTS_KEY} is not a typed snapshot: {e}")),
     };
-    let frozen = FrozenInputs::freeze(parsed)?;
+    // REFROZEN WITH THE BYTES THE OBJECT ACTUALLY CARRIES, so the digest bind
+    // in `freeze_with_ca` is evaluated against what a kubelet would mount and
+    // not against what the controller wishes were there.
+    let frozen = FrozenInputs::freeze_with_ca(parsed, data.get(ARCHIVE_CA_PLAN_KEY).cloned())?;
     if frozen.canonical != *stored {
         return refuse(format!("{INPUTS_KEY} is not in its canonical encoding"));
     }

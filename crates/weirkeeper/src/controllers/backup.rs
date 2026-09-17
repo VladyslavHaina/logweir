@@ -105,6 +105,7 @@ use crate::crds::backup::Backup;
 use crate::crds::backup_schedule::BackupSchedule;
 use crate::crds::kafka_cluster::KafkaCluster;
 use crate::crds::Condition;
+use crate::destination::{self, DestinationRole, ResolveError, ResolvedDestination};
 use crate::diagnostics;
 use crate::job::{self, EnvFromSecret, RunnerJobSpec, RunnerOwner, SecretMount, CONTAINER_NAME};
 use crate::policy::SelectionShape;
@@ -405,6 +406,47 @@ pub fn desired_execution_inputs_for(
     cluster: &KafkaCluster,
     selection: &ResolvedSelection,
 ) -> Result<FrozenInputs, BackupError> {
+    desired_execution_inputs_for_destination(backup, cluster, selection, None)
+}
+
+/// [`desired_execution_inputs_for`] for a run whose location comes from a
+/// saved `BackupDestination` — D2 §3.5, §3.7, seam **S4**.
+///
+/// # THE TWO PATHS DIFFER IN WHAT THE CONTROLLER'S OWN PROCESS CONTRIBUTES
+///
+/// `None` is the legacy inline-`archive` run, byte for byte as it has always
+/// been: `storage` from [`crate::retention::storage_url_for`] (which reads
+/// `AWS_ALLOW_HTTP` and `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` out of this
+/// process) and [`archive_addressing_env`]'s four forwarded variables frozen
+/// into the snapshot. That is defect **SEC-ENVHTTP**, and it stays on the
+/// legacy path deliberately: those four variables are how every existing
+/// install points its runners at a non-AWS store, and removing them would
+/// break every upgrade at the moment of the upgrade. What closes the defect
+/// there is moving OFF the legacy path — `destinations:from-legacy` (D2 §3.12)
+/// — and until an operator does, `docs/kubernetes.md` §20 names the
+/// forwarding as the reason a controller-level `AWS_ALLOW_HTTP=true` is a
+/// cluster-wide setting.
+///
+/// `Some(destination)` is the closed path: `storage` from the destination's own
+/// location, NO forwarded addressing in the snapshot at all, and the complete
+/// explicit `AWS_*` set rendered into the Job from
+/// [`ResolvedDestination::job_env`] — which reads no environment variable of
+/// any kind. A planted `AWS_ENDPOINT_URL` in the controller's process cannot
+/// reach such a Job, and `no_controller_environment_reaches_a_destination_backed_job`
+/// is the guard.
+///
+/// # Errors
+///
+/// [`BackupError::Refused`] with the terminal state
+/// [`backup_execution::resolve_inputs`] or [`execution_identity`] names, or
+/// [`TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT`] when the CA bytes are not the
+/// ones the resolved destination's digest names.
+pub fn desired_execution_inputs_for_destination(
+    backup: &Backup,
+    cluster: &KafkaCluster,
+    selection: &ResolvedSelection,
+    destination: Option<&ResolvedDestination>,
+) -> Result<FrozenInputs, BackupError> {
     let identity = execution_identity(backup).map_err(refused)?;
     let inputs = resolve_inputs(
         backup,
@@ -412,9 +454,34 @@ pub fn desired_execution_inputs_for(
         cluster,
         &archive_addressing_env(),
         selection,
+        destination,
     )
     .map_err(refused)?;
-    FrozenInputs::freeze(inputs).map_err(refused)
+    // THE BYTES TRAVEL WITH THE SNAPSHOT, NOT INSIDE IT (D2 §3.7). `ca_pem` is
+    // read here, from the resolution the reconciler already made, so the plan
+    // `ConfigMap` and the digest in the frozen document are written in one act
+    // and cannot disagree.
+    //
+    // NOT `from_utf8_lossy`. A `ConfigMap`'s `data` values are strings, so
+    // bytes that are not UTF-8 would be replacement-charactered on the way in
+    // and the plan would then digest to something the snapshot does not name —
+    // a `PlanConfigMapConflict` on every later pass, with a message about a
+    // digest rather than about the bundle. `check_ca_bundle` has already
+    // refused anything that is not a PEM bundle; this is the second rail, and
+    // it names the real problem.
+    let ca_pem = match destination.and_then(|d| d.ca_pem.as_ref()) {
+        None => None,
+        Some(bytes) => Some(String::from_utf8(bytes.clone()).map_err(|_| {
+            BackupError::Refused(
+                TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
+                format!(
+                    "the CA bundle of the BackupDestination this Backup names is not UTF-8, so it                      cannot be written into the immutable plan ConfigMap a runner mounts ({}                      bytes)",
+                    bytes.len()
+                ),
+            )
+        })?),
+    };
+    FrozenInputs::freeze_with_ca(inputs, ca_pem).map_err(refused)
 }
 
 /// Which of D1 §7.1's two selection shapes this `Backup` declares — the check
@@ -600,6 +667,198 @@ pub fn plan_allowed_clusters(cluster: &KafkaCluster) -> logweir_core::spec::Allo
 /// Whatever [`desired_execution_inputs`] refuses.
 pub fn plan_config_map(backup: &Backup, cluster: &KafkaCluster) -> Result<ConfigMap, BackupError> {
     inputs_config_map(backup, &desired_execution_inputs(backup, cluster)?).map_err(refused)
+}
+
+// ---------------------------------------------------------------------------
+// Destination admission — D2 §3.6
+// ---------------------------------------------------------------------------
+
+/// The longest a `Backup` waits for its `BackupDestination` to exist and be
+/// `Valid` before the wait becomes the answer — D2 §3.6.
+///
+/// # Why a HOLD at all, and why it ends
+///
+/// A `destinationRef` and the `BackupDestination` it names are created by two
+/// different `kubectl apply`s, often in one directory, in whatever order the
+/// server happens to take them. Refusing terminally on the first pass would
+/// make a correct manifest set fail on a race the operator cannot influence —
+/// and a `Backup.spec` is CEL-immutable, so that refusal could never be
+/// repaired in place.
+///
+/// It ends because a HOLD that never ends is a `Backup` that sits at `Pending`
+/// for the rest of the cluster's life with nothing to observe it. Ten minutes
+/// is long enough for a second `apply` and short enough that a scheduled run's
+/// next slot has not yet overtaken it.
+pub const DESTINATION_HOLD_MAX_SECONDS: i64 = 600;
+
+/// How long this `Backup` may hold: `min(spec.deadlineSeconds, 600)`.
+///
+/// **THE RUN'S OWN DEADLINE CAPS IT.** A `Backup` whose runner is allowed sixty
+/// seconds should not spend ten minutes waiting to start one; the operator
+/// already said how long this run is worth.
+#[must_use]
+pub fn destination_hold_budget(backup: &Backup) -> i64 {
+    backup
+        .spec
+        .deadline_seconds
+        .min(DESTINATION_HOLD_MAX_SECONDS)
+        .max(0)
+}
+
+/// Whether this `Backup` has held for its whole budget — D2 §3.6 step 1.
+///
+/// Measured from `metadata.creationTimestamp`, which is the API server's own
+/// clock reading and the one timestamp a `Backup` carries that no controller
+/// wrote. A `Backup` with no creation timestamp (impossible from an API server,
+/// reachable from a hand-built fixture) has not expired: inventing an expiry
+/// from a missing timestamp would fail runs for want of a field.
+#[must_use]
+pub fn destination_hold_expired(backup: &Backup, now: DateTime<Utc>) -> bool {
+    let Some(created) = backup.meta().creation_timestamp.as_ref() else {
+        return false;
+    };
+    (now - created.0).num_seconds() >= destination_hold_budget(backup)
+}
+
+/// What destination admission decided for one `Backup`.
+#[derive(Debug)]
+pub enum DestinationAdmission {
+    /// The `Backup` names no `destinationRef`: a legacy inline-`archive` run,
+    /// unchanged in every respect.
+    NotRequested,
+    /// One `BackupDestination`, resolved for [`DestinationRole::ArchiveWrite`]
+    /// with its CA bundle read.
+    Resolved(Box<ResolvedDestination>),
+    /// The destination is absent or not yet `Valid`, and the hold budget has
+    /// not run out. NOTHING IS CREATED while this is the answer.
+    Holding {
+        /// The [`logweir_core::check_contract::CheckCode`] as a condition
+        /// `reason`.
+        reason: &'static str,
+        /// What is wrong and what to do. Names objects and fields, never a
+        /// credential — the resolver has none to name.
+        message: String,
+    },
+}
+
+/// Resolve the `BackupDestination` a `Backup` names, for the role a backup run
+/// needs — D2 §3.6's "Backup reconcile additions", before the freeze.
+///
+/// # THE ROLE IS `ArchiveWrite`, AND IT DOES NOT DEFAULT TO ANYTHING
+///
+/// A backup run WRITES the archive. `archiveRead` and `evidenceWrite` fall back
+/// to this grant (D2 §3.4) and never the other way round, so a destination that
+/// configures only a read grant is `DestinationRoleNotConfigured` here rather
+/// than a run that writes with whatever principal was available.
+///
+/// # The three outcomes
+///
+/// * [`DestinationAdmission::NotRequested`] — no `destinationRef`.
+/// * [`DestinationAdmission::Holding`] — `DestinationNotFound` or
+///   `DestinationNotValid` within the budget ([`destination_hold_budget`]).
+/// * `Err(BackupError::Refused)` — every other refusal, and an expired hold.
+///   Terminal: a role nobody configured, two ServiceAccounts in one pod or an
+///   addressing the pinned engine cannot honour are DECISIONS, and a decision
+///   retried forever is a decision nobody sees.
+///
+/// # Errors
+///
+/// [`BackupError::Api`] for a failed read, or [`BackupError::Refused`] as
+/// above.
+pub async fn admit_destination(
+    backup: &Backup,
+    client: &kube::Client,
+    namespace: &str,
+    now: DateTime<Utc>,
+) -> Result<DestinationAdmission, BackupError> {
+    let Some(reference) = backup.spec.destination_ref.as_ref() else {
+        return Ok(DestinationAdmission::NotRequested);
+    };
+    // THE POLICY IS READ ONLY ON THIS PATH. A legacy `Backup` performs no
+    // extra `get` at all, which is what keeps every route-table double in
+    // `tests/backup_controller.rs` unchanged — and what keeps an installation
+    // that has never created a `BackupDestination` from depending on a
+    // `ConfigMap` in the release namespace to run a backup.
+    let load = crate::check::policy::load(
+        client,
+        super::topic_discovery::configured_policy_ref().as_ref(),
+        &crate::check::policy::PolicyCache::new(),
+        now,
+    )
+    .await
+    .map_err(BackupError::Api)?;
+    let resolved = destination::resolve_ref(
+        client,
+        namespace,
+        &reference.name,
+        DestinationRole::ArchiveWrite,
+        load.policy(),
+    )
+    .await;
+    match resolved {
+        Ok(resolved) => {
+            // THE JOB RUNS WHERE THE REFERENCES RESOLVE, AND NOWHERE ELSE.
+            // Every reference the resolution carries is a bare object name, and
+            // the kubelet resolves a bare name in the POD's namespace; a Job
+            // placed elsewhere would project whichever Secret happens to carry
+            // that name THERE. `resolve_ref` is namespace-local, so this can
+            // only fail on a hand-built resolution — and it is checked anyway,
+            // because the consequence is a silent credential substitution.
+            if let Err(refusal) = resolved.check_job_namespace(namespace) {
+                return Err(BackupError::Refused(refusal.reason(), refusal.message));
+            }
+            Ok(DestinationAdmission::Resolved(Box::new(resolved)))
+        }
+        Err(ResolveError::Api(e)) => Err(BackupError::Api(e)),
+        Err(ResolveError::Refused(refusal)) => {
+            if refusal.is_hold() && !destination_hold_expired(backup, now) {
+                return Ok(DestinationAdmission::Holding {
+                    reason: refusal.reason(),
+                    message: refusal.message,
+                });
+            }
+            Err(BackupError::Refused(refusal.reason(), refusal.message))
+        }
+    }
+}
+
+/// The `/status` patch a holding `Backup` carries — `phase: Pending` and one
+/// `Admitted=False` condition naming the destination refusal.
+///
+/// # It is not a terminal state and it does not pretend to be one
+///
+/// `phase: Pending` is the phase a `Backup` already has before its Job exists,
+/// and `status_is_terminal` does not match it, so the next pass re-reads the
+/// destination and the hold resolves itself the moment the object appears.
+/// `Admitted=False` is what a console renders, and its `reason` is the
+/// resolver's own `CheckCode` — the same string the `BackupDestination`'s own
+/// `Valid` condition carries, so the two objects agree about the fault.
+#[must_use]
+pub fn destination_hold_patch(
+    backup: &Backup,
+    reason: &str,
+    message: &str,
+    now: DateTime<Utc>,
+) -> Value {
+    let existing = backup.status.as_ref().and_then(|s| s.conditions.as_ref());
+    let admitted = condition(
+        backup,
+        crate::conditions::CONDITION_ADMITTED,
+        "False",
+        reason,
+        message,
+        now,
+    );
+    json!({
+        "status": {
+            "phase": crate::conditions::PHASE_PENDING,
+            // THE OTHER CONDITIONS ARE CARRIED, because a JSON merge patch
+            // REPLACES arrays: a hold that emitted only `Admitted` would delete
+            // whatever `TopicsResolved` a dynamic selection had already
+            // written on an earlier pass.
+            "conditions": carry_conditions(existing, vec![admitted]),
+        }
+    })
 }
 
 /// The two evidence keys, as read off the log.
@@ -1133,6 +1392,34 @@ pub fn runner_job_spec_from_inputs(
         });
     }
 
+    // === THE DESTINATION'S CONTRIBUTION, FROM THE FROZEN BLOCK (D2 §3.5) ===
+    //
+    // FROM `frozen` AND NOT FROM A FRESH READ. A Job is created once and may be
+    // RE-created — garbage collected, a node lost, a controller restarted
+    // mid-run. Rendering the second Job from the destination as it reads NOW
+    // would let a CA or access rotation between the freeze and the re-creation
+    // change what an approved, half-written run addresses and trusts. D2 §3.7:
+    // "the Job is rendered only from the snapshot".
+    //
+    // LEGACY RUNS REACH NONE OF THIS. `inputs.destination` is `None` for every
+    // inline-`archive` run, `job_env` is never called, and the Job this
+    // function returns is byte-identical to the one it returned before
+    // destinations existed — which is what the untouched goldens assert.
+    let destination_env = inputs.destination.as_ref().map(|d| d.job_env());
+    if let Some(env) = destination_env.as_ref() {
+        env_from_secret.extend(env.from_secret.iter().cloned());
+    }
+    // ONE POD, ONE ServiceAccount. A workload-identity grant REPLACES the
+    // connection's runner ServiceAccount, because the pod's identity is what
+    // the object store authenticates and a pod has exactly one. The runner
+    // reaches no API server either way (`job::build` sets
+    // `automountServiceAccountToken: false`), so this is an object-store
+    // identity and not a Kubernetes privilege change.
+    let service_account_name = destination_env
+        .as_ref()
+        .and_then(|env| env.service_account_name.clone())
+        .unwrap_or_else(|| connection.execution.service_account_name.clone());
+
     Ok(RunnerJobSpec {
         // THE JOB IS NAMED AFTER THE CR, VERBATIM. See
         // `RunnerJobSpec::name` for the 63-character argument.
@@ -1146,7 +1433,7 @@ pub fn runner_job_spec_from_inputs(
         },
         args: inputs.runner.args.clone(),
         deadline_seconds: inputs.runner.deadline_seconds,
-        service_account_name: connection.execution.service_account_name.clone(),
+        service_account_name,
         secret_mounts,
         config_map_mounts: projection.config_map_mounts,
         env_from_secret,
@@ -1158,6 +1445,10 @@ pub fn runner_job_spec_from_inputs(
         // store its plan document names.
         env_literal: {
             let mut env = vec![("RUST_LOG".to_string(), "info".to_string())];
+            // EMPTY FOR A DESTINATION-BACKED RUN — `resolve_inputs` froze no
+            // addressing at all for one — so these two `extend`s are exclusive
+            // in practice and the complete explicit set below is the only
+            // answer to "where is the bucket".
             env.extend(
                 inputs
                     .archive
@@ -1165,6 +1456,9 @@ pub fn runner_job_spec_from_inputs(
                     .iter()
                     .map(|v| (v.name.clone(), v.value.clone())),
             );
+            if let Some(destination) = destination_env.as_ref() {
+                env.extend(destination.literals.iter().cloned());
+            }
             env.extend(projection.env_literal);
             env
         },
@@ -2694,20 +2988,53 @@ async fn reconcile_backup_inner(
             },
         };
 
+        // === THE DESTINATION, BEFORE THE FREEZE (D2 §3.6) ===
+        //
+        // NOTHING IS CREATED WHILE THIS HOLDS. A `destinationRef` naming an
+        // object that does not exist yet, or one whose own reconciler has not
+        // reached a `Valid=True` for its current generation, is a race an
+        // operator resolves with a second `apply` — so it is a requeue with the
+        // reason on the object, not a terminal refusal of an immutable spec.
+        // Everything else the resolver refuses is terminal, and so is a hold
+        // that has used its whole budget.
+        let destination = match admit_destination(backup, client, &namespace, now).await? {
+            DestinationAdmission::NotRequested => None,
+            DestinationAdmission::Resolved(resolved) => Some(resolved),
+            DestinationAdmission::Holding { reason, message } => {
+                info!(
+                    backup = %name,
+                    namespace = %namespace,
+                    reason,
+                    detail = %message,
+                    "holding: this Backup's BackupDestination is not usable yet, and no plan, no                      ConfigMap and no Job are created while it is not"
+                );
+                patch_status_if_changed(
+                    &backups,
+                    backup,
+                    &name,
+                    destination_hold_patch(&view, reason, &message, now),
+                )
+                .await?;
+                return Ok(BackupOutcome {
+                    job_name,
+                    created: false,
+                    exit_code: None,
+                    terminal_state: None,
+                    keys: EvidenceKeys::default(),
+                    ttl_patched: false,
+                });
+            }
+        };
+
         // Resolve once: the plan and credential must describe the same
         // KafkaCluster used by the connection probe, including its Secret.
         let cluster = plan_source_cluster(backup, client, &namespace).await?;
-        let desired = FrozenInputs::freeze(
-            resolve_inputs(
-                backup,
-                identity,
-                &cluster,
-                &archive_addressing_env(),
-                &selection,
-            )
-            .map_err(refused)?,
-        )
-        .map_err(refused)?;
+        let desired = desired_execution_inputs_for_destination(
+            backup,
+            &cluster,
+            &selection,
+            destination.as_deref(),
+        )?;
 
         // THE PLAN CONFIGMAP, IN THIS SAME PASS AND BEFORE THE JOB `POST`
         // (errata E5a) — and now the freeze boundary. The Job mounts

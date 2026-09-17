@@ -1178,84 +1178,13 @@ impl ResolvedDestination {
     /// [`AWS_ENDPOINT_URL_ENV`].
     #[must_use]
     pub fn job_env(&self) -> DestinationEnv {
-        let mut env = DestinationEnv {
-            literals: vec![
-                (
-                    STORE_CONTRACT_VERSION_ENV.to_string(),
-                    STORE_CONTRACT_VERSION.to_string(),
-                ),
-                (
-                    AWS_ALLOW_HTTP_ENV.to_string(),
-                    // FROM THE TRANSPORT AND FROM NOTHING ELSE (D-SEAMS S5).
-                    bool_env(self.location.transport.allows_plaintext_http()),
-                ),
-                (
-                    AWS_VIRTUAL_HOSTED_ENV.to_string(),
-                    // FROM THE ADDRESSING AND FROM NOTHING ELSE.
-                    bool_env(!self.location.addressing.is_path_style()),
-                ),
-                (
-                    AWS_METADATA_ENDPOINT_ENV.to_string(),
-                    logweir_store::DEAD_METADATA_ENDPOINT.to_string(),
-                ),
-            ],
-            from_secret: Vec::new(),
-            service_account_name: None,
-        };
-        if let Some(region) = self.location.region.as_ref() {
-            env.literals
-                .push((AWS_REGION_ENV.to_string(), region.clone()));
-        }
-        if self.ca_bundle.is_some() {
-            env.literals.push((
-                ARCHIVE_CA_FILE_ENV.to_string(),
-                format!("{PLAN_MOUNT_PATH}/{ARCHIVE_CA_PLAN_KEY}"),
-            ));
-        }
-        match &self.grant {
-            ResolvedGrant::SecretKeys {
-                secret,
-                access_key_id_key,
-                secret_access_key_key,
-                session_token_key,
-            } => {
-                env.literals.push((
-                    ARCHIVE_CREDENTIALS_ENV.to_string(),
-                    CREDENTIALS_STATIC.to_string(),
-                ));
-                env.from_secret.push(EnvFromSecret {
-                    name: AWS_ACCESS_KEY_ID_ENV.to_string(),
-                    secret_name: secret.clone(),
-                    key: access_key_id_key.clone(),
-                });
-                env.from_secret.push(EnvFromSecret {
-                    name: AWS_SECRET_ACCESS_KEY_ENV.to_string(),
-                    secret_name: secret.clone(),
-                    key: secret_access_key_key.clone(),
-                });
-                if let Some(token) = session_token_key {
-                    env.from_secret.push(EnvFromSecret {
-                        name: AWS_SESSION_TOKEN_ENV.to_string(),
-                        secret_name: secret.clone(),
-                        key: token.clone(),
-                    });
-                }
-            }
-            ResolvedGrant::WorkloadIdentity {
-                service_account_name,
-            } => {
-                env.literals.push((
-                    ARCHIVE_CREDENTIALS_ENV.to_string(),
-                    CREDENTIALS_WORKLOAD_IDENTITY.to_string(),
-                ));
-                env.service_account_name = Some(service_account_name.clone());
-            }
-            // Neither reaches a runner Job: `ControllerIdentity` is read by the
-            // controller's own cache and `NotConfigured` is read by nobody.
-            ResolvedGrant::ControllerIdentity | ResolvedGrant::NotConfigured => {}
-        }
-        env.literals.sort_by(|a, b| a.0.cmp(&b.0));
-        env
+        render_job_env(
+            self.location.transport,
+            self.location.addressing,
+            self.location.region.as_deref(),
+            self.ca_bundle.is_some(),
+            &self.grant,
+        )
     }
 
     /// The EVIDENCE-side environment for a Job that already carries `archive`'s
@@ -1393,6 +1322,139 @@ impl ResolvedDestination {
     }
 }
 
+/// The COMPLETE, EXPLICIT archive environment one resolved location and grant
+/// contribute to a runner Job — D2 §3.5.
+///
+/// # ONE RENDERER, TWO CALLERS, AND THAT IS THE POINT
+///
+/// [`ResolvedDestination::job_env`] renders it from the LIVE object at the
+/// freeze; [`ResolvedDestinationSnapshot::job_env`] renders it from the FROZEN
+/// block on every later pass (a Job recreated after the controller restarted, a
+/// pod rescheduled onto another node). Two implementations would be two answers
+/// to "what does this run address", and the second one would drift the first
+/// time a variable was added — which is the exact shape of defect
+/// **SEC-ENVHTTP**, one layer up. `the_snapshot_renders_the_same_job_env`
+/// pins the equality.
+///
+/// # Every variable, and why it is here
+///
+/// * `LOGWEIR_STORE_CONTRACT_VERSION` — the handshake. A runner that does
+///   not know the contract refuses before it dispatches.
+/// * `LOGWEIR_ARCHIVE_CREDENTIALS` — which provider the runner builds with.
+/// * `AWS_ALLOW_HTTP` — `"true"` if and only if
+///   `spec.transport.security == InsecureHTTP`. ALWAYS RENDERED, including
+///   the `"false"` case, because an ABSENT variable is one an ambient
+///   `AWS_ALLOW_HTTP=true` in the pod's environment could still answer.
+/// * `AWS_VIRTUAL_HOSTED_STYLE_REQUEST` — from `spec.storage.addressing`
+///   alone, and it does not touch the line above. Two fields, two answers.
+/// * `AWS_METADATA_ENDPOINT` — a dead loopback, so a missing workload
+///   identity cannot fall through to the node's instance role (G16).
+/// * `AWS_REGION` — only when the destination names one.
+/// * `LOGWEIR_ARCHIVE_CA_FILE` — only with a CA bundle; the bytes are frozen
+///   into the run's own plan `ConfigMap`, never re-read at Job time.
+///
+/// `AWS_ENDPOINT_URL` is absent by construction: see
+/// [`AWS_ENDPOINT_URL_ENV`].
+#[must_use]
+fn render_job_env(
+    transport: TransportSecurity,
+    addressing: Addressing,
+    region: Option<&str>,
+    has_ca: bool,
+    grant: &ResolvedGrant,
+) -> DestinationEnv {
+    let mut env = DestinationEnv {
+        literals: vec![
+            (
+                STORE_CONTRACT_VERSION_ENV.to_string(),
+                STORE_CONTRACT_VERSION.to_string(),
+            ),
+            (
+                AWS_ALLOW_HTTP_ENV.to_string(),
+                // FROM THE TRANSPORT AND FROM NOTHING ELSE (D-SEAMS S5).
+                bool_env(transport.allows_plaintext_http()),
+            ),
+            (
+                AWS_VIRTUAL_HOSTED_ENV.to_string(),
+                // FROM THE ADDRESSING AND FROM NOTHING ELSE.
+                bool_env(!addressing.is_path_style()),
+            ),
+            (
+                AWS_METADATA_ENDPOINT_ENV.to_string(),
+                logweir_store::DEAD_METADATA_ENDPOINT.to_string(),
+            ),
+        ],
+        from_secret: Vec::new(),
+        service_account_name: None,
+    };
+    if let Some(region) = region {
+        env.literals
+            .push((AWS_REGION_ENV.to_string(), region.to_string()));
+    }
+    if has_ca {
+        env.literals.push((
+            ARCHIVE_CA_FILE_ENV.to_string(),
+            format!("{PLAN_MOUNT_PATH}/{ARCHIVE_CA_PLAN_KEY}"),
+        ));
+    }
+    match grant {
+        ResolvedGrant::SecretKeys {
+            secret,
+            access_key_id_key,
+            secret_access_key_key,
+            session_token_key,
+        } => {
+            env.literals.push((
+                ARCHIVE_CREDENTIALS_ENV.to_string(),
+                CREDENTIALS_STATIC.to_string(),
+            ));
+            env.from_secret.push(EnvFromSecret {
+                name: AWS_ACCESS_KEY_ID_ENV.to_string(),
+                secret_name: secret.clone(),
+                key: access_key_id_key.clone(),
+            });
+            env.from_secret.push(EnvFromSecret {
+                name: AWS_SECRET_ACCESS_KEY_ENV.to_string(),
+                secret_name: secret.clone(),
+                key: secret_access_key_key.clone(),
+            });
+            if let Some(token) = session_token_key {
+                env.from_secret.push(EnvFromSecret {
+                    name: AWS_SESSION_TOKEN_ENV.to_string(),
+                    secret_name: secret.clone(),
+                    key: token.clone(),
+                });
+            }
+        }
+        ResolvedGrant::WorkloadIdentity {
+            service_account_name,
+        } => {
+            env.literals.push((
+                ARCHIVE_CREDENTIALS_ENV.to_string(),
+                CREDENTIALS_WORKLOAD_IDENTITY.to_string(),
+            ));
+            env.service_account_name = Some(service_account_name.clone());
+        }
+        // Neither reaches a runner Job: `ControllerIdentity` is read by the
+        // controller's own cache and `NotConfigured` is read by nobody.
+        ResolvedGrant::ControllerIdentity | ResolvedGrant::NotConfigured => {}
+    }
+    env.literals.sort_by(|a, b| a.0.cmp(&b.0));
+    env
+}
+
+/// The region one frozen archive `StorageUrl` names, or `None`.
+///
+/// S3 IS THE ONLY BACKEND WITH ONE. A destination is `StorageProvider::S3` by
+/// construction ([`PROVIDER`]), and the other variants exist because
+/// `StorageUrl` is shared with the legacy inline path.
+fn region_of(storage: &StorageUrl) -> Option<&str> {
+    match storage {
+        StorageUrl::S3 { region, .. } => region.as_deref(),
+        _ => None,
+    }
+}
+
 fn bool_env(value: bool) -> String {
     if value { "true" } else { "false" }.to_string()
 }
@@ -1477,6 +1539,34 @@ pub struct ResolvedDestinationSnapshot {
 }
 
 impl ResolvedDestinationSnapshot {
+    /// The COMPLETE, EXPLICIT archive environment a Job rendered from THIS
+    /// FROZEN BLOCK carries — D2 §3.7's "the Job is rendered only from the
+    /// snapshot".
+    ///
+    /// # Why the frozen block and not the live object
+    ///
+    /// A runner Job is created once and may be RE-created: garbage collected,
+    /// a node lost, a controller restarted mid-run. Rendering the second Job
+    /// from the destination as it reads NOW would let a CA rotation or an
+    /// access-key rotation between the freeze and the re-creation change what a
+    /// run that is already approved and already half-written addresses and
+    /// trusts. The snapshot is the input that was admitted, so it is the input
+    /// the Job is built from, on the first pass and on every later one.
+    ///
+    /// It is [`render_job_env`], the same renderer
+    /// [`ResolvedDestination::job_env`] uses — see there for every variable and
+    /// for what is ABSENT BY CONSTRUCTION.
+    #[must_use]
+    pub fn job_env(&self) -> DestinationEnv {
+        render_job_env(
+            self.transport,
+            self.addressing,
+            region_of(&self.archive_storage),
+            self.ca_sha256.is_some(),
+            &self.grant,
+        )
+    }
+
     /// The ONE canonical encoding of this block — `logweir_core::det_json`, the
     /// same encoder [`crate::backup_execution::canonical_inputs`] uses for the
     /// document this block sits inside.
