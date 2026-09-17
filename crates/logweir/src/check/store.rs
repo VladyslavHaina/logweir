@@ -107,11 +107,35 @@ pub trait ObjectAccess {
     /// [`StoreError`]; `NotFound` is a genuine absence and never a denial.
     fn get(&self, key: &str) -> Result<Vec<u8>, StoreError>;
 
-    /// At most `max` keys under `prefix`, in ascending key order.
+    /// At most `max` keys under `prefix`, in ascending key order, starting
+    /// strictly AFTER `start_after`.
+    ///
+    /// The cursor is on the TRAIT and not only on the concrete `Store`
+    /// because a `catalogSync`'s `Full` rescan is resumable across Jobs
+    /// (D3 §5.3): without it, a walk that ran out of budget could only ever
+    /// re-read the same first page, and `status.cursor.rescanStartAfter`
+    /// would be a field nothing honoured.
     ///
     /// # Errors
     /// [`StoreError`].
-    fn list_bounded(&self, prefix: &str, max: usize) -> Result<Vec<String>, StoreError>;
+    fn list_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        max: usize,
+    ) -> Result<Vec<String>, StoreError>;
+
+    /// [`ObjectAccess::list_page`] from the beginning of the prefix.
+    ///
+    /// A PROVIDED method, so a new implementation cannot answer the two
+    /// differently: the readiness listing probe and the catalog walk ask the
+    /// same backend the same question.
+    ///
+    /// # Errors
+    /// [`StoreError`].
+    fn list_bounded(&self, prefix: &str, max: usize) -> Result<Vec<String>, StoreError> {
+        self.list_page(prefix, None, max)
+    }
 
     /// `PutMode::Create`, under `logweir/` only.
     ///
@@ -129,11 +153,16 @@ impl ObjectAccess for Store {
         Store::get(self, key).map(|(bytes, _)| bytes)
     }
 
-    fn list_bounded(&self, prefix: &str, max: usize) -> Result<Vec<String>, StoreError> {
-        // `list_page` is the BOUNDED list D3 §5.2 added; `list_keys` is
+    fn list_page(
+        &self,
+        prefix: &str,
+        start_after: Option<&str>,
+        max: usize,
+    ) -> Result<Vec<String>, StoreError> {
+        // `Store::list_page` is the BOUNDED list D3 §5.2 added; `list_keys` is
         // unbounded and in-memory, and a check must not hold an adopter's
         // whole bucket to answer "may I list".
-        Store::list_page(self, prefix, None, max)
+        Store::list_page(self, prefix, start_after, max)
             .map(|(keys, _)| keys)
             // `EngineError::Operational`'s message is `object_store::Error`'s
             // `Display`, which is exactly what `StoreErrorClass` scans, so the

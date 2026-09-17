@@ -1,4 +1,4 @@
-//! The five plan kinds, and the seam they are driven through.
+//! The six plan kinds, and the seam they are driven through.
 //!
 //! # `Wiring` is why none of this needs a socket to be tested
 //!
@@ -20,6 +20,7 @@
 //! carrying one answer from the side that can actually establish it.
 
 pub mod access;
+pub mod catalog_sync;
 pub mod evidence;
 pub mod inventory;
 pub mod readiness;
@@ -479,5 +480,6 @@ pub fn run_kind_with(loaded: &Loaded, deadline: Deadline, wiring: &dyn Wiring) -
         CheckRequest::RestorePreflight(r) => restore::run(r, wiring, deadline),
         CheckRequest::DestinationAccess(r) => access::run(r, wiring, deadline),
         CheckRequest::EvidenceFetch(r) => evidence::run(r, wiring, deadline),
+        CheckRequest::CatalogSync(r) => catalog_sync::run(r, wiring, deadline),
     }
 }
