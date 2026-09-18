@@ -28,9 +28,9 @@ use std::sync::Arc;
 use chrono::{TimeZone, Utc};
 use k8s_openapi::api::core::v1::Pod;
 use logweir_core::check_contract::{
-    frames, topic_tsv_sha256, CheckCode, CheckPlan, CheckPlanKind, CheckRequest, CheckResult,
-    ExpectedSummary, InventoryCounts, InventoryResult, Stream, TopicEntry, TruncationReason,
-    TOPIC_INVENTORY_FORMAT,
+    frames, topic_tsv_sha256, Authority, CheckCode, CheckId, CheckOutcome, CheckPlan,
+    CheckPlanKind, CheckRequest, CheckResult, CheckState, ExpectedSummary, Gating, InventoryCounts,
+    InventoryResult, Stream, TopicEntry, TruncationReason, TOPIC_INVENTORY_FORMAT,
 };
 use serde_json::{json, Value};
 use weirkeeper::check::{chunks, job as cjob, plan};
@@ -2253,6 +2253,314 @@ async fn observed_at_is_the_runners_own_instant_and_not_a_clock_read() {
     assert_eq!(status["startedAt"], json!("2026-09-16T11:58:45Z"));
     // `freshUntil` is `observedAt` plus the default 900 s window.
     assert_eq!(status["freshUntil"], json!("2026-09-16T12:14:00Z"));
+}
+
+// ---------------------------------------------------------------------------
+// A relayed classification is the reason — defect `D2-RESULTUNREADABLE`
+// ---------------------------------------------------------------------------
+//
+// The D2 live run (`artifacts/d2-live/20260918T030840Z`) put an unreachable
+// bootstrap (S11) and a broker-side password change (S12) in front of the real
+// controller. Both ended `Failed` with `status.reason: ResultUnreadable` while
+// the pod's own relayed frame carried `connection.authenticated
+// notReady/BrokerUnreachable` and `…/AuthenticationFailed` with a message and a
+// remedy — so the console could not tell an unreachable broker from a rejected
+// password. The strings below are the ones those dumps hold.
+
+/// S11's relayed sentence and remedy, verbatim from
+/// `objects/s11/td-timeout-relayed.json`.
+const S11_MESSAGE: &str = "all-topics metadata reported BrokerUnreachable";
+const S11_REMEDY: &str = "Check that the bootstrap addresses resolve from this namespace and \
+                          that a NetworkPolicy or mesh policy allows egress to the broker port.";
+/// S12's, from `results.json#S12.relayedCheckResult`, shortened past the
+/// bootstrap URL the live frame quotes.
+const S12_MESSAGE: &str =
+    "fetch_cluster_id reported MetadataTimeout, but the client's error callback observed \
+     AuthenticationFailed first: SASL authentication error with SCRAM-SHA-512";
+const S12_REMEDY: &str = "Check the SASL mechanism, the username and the projected password \
+                          on the connection's Secret; rotate the credential if it was changed \
+                          on the broker.";
+
+/// The `connection.authenticated` row `logweir::check::kinds::from_broker_failure`
+/// builds for a classified broker failure.
+fn broker_failure(code: CheckCode, state: CheckState, message: &str, remedy: &str) -> CheckOutcome {
+    CheckOutcome::new(
+        CheckId::ConnectionAuthenticated,
+        state,
+        Gating::Blocking,
+        Authority::CheckJob,
+        code,
+    )
+    .with_message(message)
+    .with_remedy(remedy)
+}
+
+/// A complete, verifiable relay for a check that produced NO inventory — the
+/// shape `logweir::check::kinds::inventory` emits for a broker it could not
+/// reach: a result document with `checks` and no `inventory` block, and an end
+/// frame whose `topicLines` summary is ABSENT, because "the inventory did not
+/// run" and "the cluster is empty" are different findings.
+fn failure_relay_log(checks: Vec<CheckOutcome>) -> String {
+    let mut result = CheckResult::new(CheckPlanKind::TopicInventory);
+    result.checks = checks;
+    let bytes = result.to_canonical_json().expect("a serialisable result");
+    let parts = frames::write_parts(Stream::Result, &bytes).expect("small enough to frame");
+    let mut streams = BTreeMap::new();
+    streams.insert(Stream::Result, (bytes.clone(), parts.len()));
+    let end = frames::end_frame(PLAN_SHA, UID, &streams, None);
+
+    let mut out = String::new();
+    for p in parts {
+        out.push_str(&p);
+        out.push('\n');
+    }
+    out.push_str(&frames::write_end(&end).expect("a framable end"));
+    out.push('\n');
+    out
+}
+
+/// Reconcile a finished Job whose pod relayed `checks` and no inventory, and
+/// hand back the terminal outcome with the status that was PATCHed.
+async fn reconcile_failure_relay(checks: Vec<CheckOutcome>) -> (td::Outcome, Value) {
+    // NO `POST …/configmaps` ROUTE: the double panics on a request it has no
+    // route for, so "nothing was stored" is an assertion and not an absence.
+    let (client, _r, bodies) =
+        mock_client_recording_bodies(finished_routes(failure_relay_log(checks), vec![]));
+    let outcome = td::reconcile_discovery(&running(), &context(client, None))
+        .await
+        .expect("the reconcile answers");
+    let status = status_of(&bodies);
+    (outcome, status)
+}
+
+/// **S11, the unreachable broker.** `td-timeout`'s bootstrap `10.255.255.1:9096`
+/// answered nothing; the runner classified it and relayed the row. The reason is
+/// the runner's own code and the message carries the remedy an operator has to
+/// act on — not `ResultUnreadable`, which says only that the controller did not
+/// look.
+///
+/// MUTANT: bind `result.inventory` instead of the whole document in `commit`
+/// (the `e7d0e79` behaviour). `reason` goes back to `ResultUnreadable` and this
+/// row fails on its first assertion.
+#[tokio::test]
+async fn a_relayed_broker_unreachable_is_the_reason_with_its_remedy() {
+    let row = broker_failure(
+        CheckCode::BrokerUnreachable,
+        CheckState::NotReady,
+        S11_MESSAGE,
+        S11_REMEDY,
+    );
+    let (outcome, status) = reconcile_failure_relay(vec![row.clone()]).await;
+
+    assert_eq!(outcome.phase, PHASE_FAILED);
+    assert_eq!(outcome.reason, CheckCode::BrokerUnreachable.as_str());
+    assert_eq!(status["reason"], json!("BrokerUnreachable"));
+    let message = status["message"].as_str().expect("a message");
+    assert!(
+        message.starts_with("connection.authenticated:"),
+        "the failing check is named: {message}"
+    );
+    assert!(
+        message.contains(&row.message),
+        "the runner's sentence survives: {message}"
+    );
+    assert!(
+        message.contains("allows egress to the broker port"),
+        "and so does its remedy: {message}"
+    );
+    // Nothing was stored and no inventory was invented from a failed check.
+    assert_eq!(outcome.chunks_written, 0);
+    assert_eq!(status["result"], Value::Null);
+    // The condition carries the same closed reason, so a `kubectl wait` on it
+    // and the printer column agree.
+    assert_eq!(
+        status["conditions"][0]["reason"],
+        json!("BrokerUnreachable")
+    );
+    assert_eq!(status["conditions"][0]["status"], json!("False"));
+}
+
+/// **S12, the rotated password.** The broker's SCRAM password for the
+/// `rotating` principal was changed without touching the Secret. An operator
+/// reading this object must be able to tell it apart from S11 — that is the
+/// whole consequence the defect row records.
+///
+/// MUTANT: same as above; also, project `CheckCode::ResultUnreadable` instead of
+/// `failed.code` and the two scenarios become indistinguishable again.
+#[tokio::test]
+async fn a_relayed_authentication_failure_is_distinguishable_from_an_unreachable_broker() {
+    let row = broker_failure(
+        CheckCode::AuthenticationFailed,
+        CheckState::NotReady,
+        S12_MESSAGE,
+        S12_REMEDY,
+    );
+    let (outcome, status) = reconcile_failure_relay(vec![row]).await;
+
+    assert_eq!(outcome.phase, PHASE_FAILED);
+    assert_eq!(outcome.reason, CheckCode::AuthenticationFailed.as_str());
+    assert_ne!(outcome.reason, CheckCode::BrokerUnreachable.as_str());
+    let message = status["message"].as_str().expect("a message");
+    assert!(
+        message.contains("rotate the credential if it was changed"),
+        "the remedy names the rotation: {message}"
+    );
+    assert_eq!(status["result"], Value::Null);
+}
+
+/// **S11's second accepted reason.** `MetadataTimeout` is an `unknown` code
+/// (`logweir::check::kinds::is_unknown_code`), not a `notReady` one, and D2
+/// §14.4 S11 accepts it beside `BrokerUnreachable`. A projection that read only
+/// `notReady` rows would leave exactly the timeout it was written for reading
+/// `ResultUnreadable`.
+///
+/// MUTANT: drop the `unknown | skipped` arm of `blocking_failure`. This row
+/// fails; the two above stay green, which is what makes it a separate guard.
+#[tokio::test]
+async fn a_relayed_metadata_timeout_projects_metadata_timeout() {
+    let row = broker_failure(
+        CheckCode::MetadataTimeout,
+        CheckState::Unknown,
+        "the metadata request did not answer inside the budget",
+        "Raise `spec.request.timeoutSeconds`, or check broker load.",
+    );
+    let (outcome, _status) = reconcile_failure_relay(vec![row]).await;
+
+    assert_eq!(outcome.phase, PHASE_FAILED);
+    assert_eq!(outcome.reason, CheckCode::MetadataTimeout.as_str());
+}
+
+/// **A `notReady` blocking row outranks an `unknown` one**, exactly as D2 §6.4
+/// aggregates — and the order in the document does not decide it.
+///
+/// MUTANT: return `checks.iter().find(|c| c.gating == Gating::Blocking)`. The
+/// first row wins and this asserts `MetadataTimeout`.
+#[tokio::test]
+async fn a_not_ready_row_outranks_an_unknown_one_whatever_the_document_order() {
+    let unknown = broker_failure(
+        CheckCode::MetadataTimeout,
+        CheckState::Unknown,
+        "the metadata request did not answer inside the budget",
+        "",
+    );
+    let not_ready = broker_failure(
+        CheckCode::AuthenticationFailed,
+        CheckState::NotReady,
+        S12_MESSAGE,
+        S12_REMEDY,
+    );
+    let (outcome, _status) = reconcile_failure_relay(vec![unknown, not_ready]).await;
+
+    assert_eq!(outcome.reason, CheckCode::AuthenticationFailed.as_str());
+}
+
+/// **An ADVISORY `notReady` is a warning and never the terminal reason.** D2
+/// §6.4 says an advisory row never changes the aggregate; a reason taken from
+/// one would name the wrong cause, and the object would claim a classification
+/// nothing blocking supports.
+///
+/// MUTANT: remove the `gating == Blocking` filter. This row reads
+/// `TopicAuthorizationFailed` instead of `ResultUnreadable` and fails.
+#[tokio::test]
+async fn an_advisory_not_ready_row_is_never_the_terminal_reason() {
+    let advisory = CheckOutcome::new(
+        CheckId::ConnectionTopicsDescribable,
+        CheckState::NotReady,
+        Gating::Advisory,
+        Authority::CheckJob,
+        CheckCode::TopicAuthorizationFailed,
+    )
+    .with_message("some topics could not be described");
+    let (outcome, status) = reconcile_failure_relay(vec![advisory]).await;
+
+    assert_eq!(outcome.phase, PHASE_FAILED);
+    assert_eq!(outcome.reason, CheckCode::ResultUnreadable.as_str());
+    let message = status["message"].as_str().expect("a message");
+    assert!(
+        message.contains("no blocking check that is not ready"),
+        "and it says why it could not classify: {message}"
+    );
+}
+
+/// **The genuinely unreadable case still reads `ResultUnreadable`.** A verified
+/// relay with a result document that carries neither an inventory nor a blocking
+/// row is a document that contradicts itself; there is nothing to project.
+///
+/// MUTANT: return the first check whatever its state. An empty `checks` array
+/// has none, so pair this with the advisory row above — together they pin both
+/// halves of the fallback.
+#[tokio::test]
+async fn an_empty_check_set_with_no_inventory_is_still_result_unreadable() {
+    let (outcome, status) = reconcile_failure_relay(Vec::new()).await;
+
+    assert_eq!(outcome.phase, PHASE_FAILED);
+    assert_eq!(outcome.reason, CheckCode::ResultUnreadable.as_str());
+    assert_eq!(outcome.chunks_written, 0);
+    assert_eq!(status["result"], Value::Null);
+}
+
+/// **No result document at all is a THIRD fact**, and it gets its own sentence:
+/// nothing was read, so nothing is inferred — including from the exit code. A
+/// relay that decodes (the end frame is there, and it verifies against the plan
+/// digest and the subject UID) but declares no `result` stream is exactly that.
+///
+/// It is NOT the empty pod log, which never reaches this arm at all: that is
+/// refused one step earlier as "no end frame", and
+/// `an_ownerless_label_wearing_pod_leaves_the_result_unreadable` holds it.
+///
+/// MUTANT: pass `Some(&[])` in place of `None` for a missing document. The
+/// reason is unchanged, so only this message assertion catches the conflation of
+/// "the runner printed no result" with "the runner printed a result that checked
+/// nothing".
+#[tokio::test]
+async fn a_relay_with_no_result_document_says_nothing_was_read() {
+    let end = frames::end_frame(PLAN_SHA, UID, &BTreeMap::new(), None);
+    let log = format!("{}\n", frames::write_end(&end).expect("a framable end"));
+    let (client, _r, bodies) = mock_client_recording_bodies(finished_routes(log, vec![]));
+    let outcome = td::reconcile_discovery(&running(), &context(client, None))
+        .await
+        .expect("the reconcile answers");
+
+    assert_eq!(outcome.phase, PHASE_FAILED);
+    assert_eq!(outcome.reason, CheckCode::ResultUnreadable.as_str());
+    let status = status_of(&bodies);
+    let message = status["message"].as_str().expect("a message");
+    assert!(
+        message.contains("carries no result document"),
+        "nothing was read, and the message says so: {message}"
+    );
+}
+
+/// **Whatever is projected is a member of the closed vocabulary.** The reason
+/// travels into a `metav1.Condition.reason`, which is a constrained string, and
+/// it is derived from a document a runner wrote — so the guard is that
+/// `CheckCode::parse` accepts every reason this path can produce.
+///
+/// MUTANT: project `failed.message` in place of `failed.code.as_str()`. Every
+/// row here fails.
+#[tokio::test]
+async fn every_projected_reason_is_a_member_of_the_closed_code_vocabulary() {
+    for code in [
+        CheckCode::BrokerUnreachable,
+        CheckCode::AuthenticationFailed,
+        CheckCode::TlsHandshakeFailed,
+        CheckCode::ClusterAuthorizationFailed,
+        CheckCode::MetadataTimeout,
+    ] {
+        let row = broker_failure(
+            code,
+            CheckState::NotReady,
+            "a classified failure",
+            "a remedy",
+        );
+        let (outcome, _status) = reconcile_failure_relay(vec![row]).await;
+        assert_eq!(outcome.reason, code.as_str());
+        assert!(
+            CheckCode::parse(&outcome.reason).is_some(),
+            "`{}` is not a CheckCode",
+            outcome.reason
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
