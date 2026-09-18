@@ -249,6 +249,10 @@ export const CONSOLE_WRITABLE_PLURALS = Object.freeze([
   "restores",
   "destinations",
   "preflights",
+  // D1 W7 (PLAT-06.2). `POST .../backups` is "Back up now": a durable create
+  // with a required `Idempotency-Key`, which is the whole of what makes a
+  // double click, a lost response and a reload one run.
+  "backups",
 ]);
 
 /** The product API's session document: the actor, the namespace grants and the
@@ -429,6 +433,54 @@ export async function consoleSetSuspension(ns, name, body, options) {
   return problemBody(response);
 }
 
+/** Previews a DRAFT cadence: `GET /api/v1/cadence-previews`.
+ *
+ *  NO NAMESPACE, NO KUBERNETES OBJECT, NO WRITE. The product API compiles a
+ *  preset to its canonical cron expression, resolves the zone against the tz
+ *  database it was built with, and returns the next firings. THE BROWSER NEVER
+ *  EVALUATES CRON -- a second implementation in a page is a second opinion
+ *  about when a backup runs -- so this route is the schedule form's only
+ *  source for both the canonical expression it saves and the instants it shows.
+ *
+ *  The parameters are a FROZEN ALLOWLIST, as `consoleSub`'s filters are: a
+ *  caller hands `{preset: "daily", hour: 2, minute: 0, timeZone: "Europe/Berlin"}`
+ *  and gets exactly those, and an invented parameter is dropped here rather
+ *  than sent to a route that answers `400 malformed_request` for it. */
+export async function cadencePreview(query, options) {
+  const response = await request(
+    path("api", "v1", "cadence-previews") + previewQuery(query || {}),
+    readInit(options),
+  );
+  return problemBody(response);
+}
+
+/** Replaces one schedule's FUTURE POLICY: the product API's one replace.
+ *
+ *  A REPLACE, NOT A PATCH, AND THE DIFFERENCE IS THE WHOLE CONTRACT. A field
+ *  omitted from `body` is REMOVED from the schedule, so the caller sends the
+ *  complete policy it means -- which is why the form that owns this route owns
+ *  every field of that policy. The replay guard is `body.expectedGeneration`
+ *  and not an idempotency key: the route answers `400
+ *  idempotency_key_invalid` for a key, and `412 precondition_failed` for a
+ *  generation that has moved, so a second submission of a stale form is
+ *  refused by the revision it was built from rather than silently applied.
+ *
+ *  It is the ONE identifier in this module reached with a method other than
+ *  GET or POST, and `crates/logweir/tests/ui_lint.rs` holds it to exactly
+ *  that: the replace method occurs once in this file, as `REPLACE_METHOD`'s
+ *  value, and the removal verb occurs not at all. (Neither word is spelled in
+ *  this paragraph, because that gate matches both tokens BARE and a comment is
+ *  bytes like any other.) */
+export async function consoleSchedulePolicy(ns, name, body, options) {
+  const init = writeInit(body, Object.assign({}, options || {}, { idempotencyKey: null }));
+  init.method = REPLACE_METHOD;
+  const response = await request(
+    path("api", "v1", "namespaces", ns, "schedules", name),
+    init,
+  );
+  return problemBody(response);
+}
+
 /** Turns a non-2xx product-API response into an Error carrying the problem
  *  document's own `code`, `detail`, `requestId` and field `errors[]`.
  *
@@ -500,6 +552,43 @@ function readInit(options) {
 // update. Spelled as a constant so the colon in it is visible in exactly one
 // place, beside the paragraph that says what it is.
 const SUSPENSION_VERB = ":set-suspension";
+
+// The HTTP method `consoleSchedulePolicy` sends, and the ONE place this module
+// spells it. `ui_lint.rs::the_api_module_offers_no_delete_and_no_put` asserts
+// that the token appears exactly once in this file and that it is the value of
+// this constant -- so widening the module to a second replace, or to a delete,
+// is a change a reviewer reads here rather than one that hides in a call.
+const REPLACE_METHOD = "PUT";
+
+// The parameters `GET /api/v1/cadence-previews` declares, frozen. `schedule`
+// and `preset` are alternatives -- exactly one -- and the four integers belong
+// to whichever preset was named; the route answers `422` for a parameter of a
+// DIFFERENT preset, which is a refusal this page shows rather than pre-empts.
+const PREVIEW_PARAMETERS = Object.freeze([
+  "schedule", "preset", "timeZone", "after",
+]);
+
+const PREVIEW_NUMBERS = Object.freeze([
+  "minute", "hour", "dayOfWeek", "dayOfMonth", "n", "count",
+]);
+
+// The preview's query string, built from the allowlist above and nothing else.
+function previewQuery(query) {
+  const parts = [];
+  for (const name of PREVIEW_PARAMETERS) {
+    const value = query[name];
+    if (typeof value === "string" && value.length > 0) {
+      parts.push(name + "=" + encodeURIComponent(value));
+    }
+  }
+  for (const name of PREVIEW_NUMBERS) {
+    const value = query[name];
+    if (typeof value === "number" && isFinite(value)) {
+      parts.push(name + "=" + encodeURIComponent(String(Math.floor(value))));
+    }
+  }
+  return parts.length === 0 ? "" : "?" + parts.join("&");
+}
 
 // The four kinds `GET .../operations/{kind}/{name}` serves. `backup` and
 // `restore` are durable runs; `discovery` and `preflight` are transient checks

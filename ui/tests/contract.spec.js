@@ -232,7 +232,7 @@ test("every_console_decoder_requires_exactly_what_the_schema_requires", () => {
     checked += 1;
   }
   assert.ok(
-    checked >= 105,
+    checked >= 121,
     "this arm compared " + String(checked) + " shapes; it covers every response DTO, every list " +
       "and single-item envelope, and every request body the client builds",
   );
@@ -422,7 +422,7 @@ test("every_closed_set_this_client_holds_is_the_schema_s_own", () => {
     );
     checked += 1;
   }
-  assert.equal(checked, 25, "this arm compared " + String(checked) + " sets");
+  assert.equal(checked, 29, "this arm compared " + String(checked) + " sets");
 });
 
 test("the_plan_module_s_target_modes_and_the_product_api_s_restore_modes_agree", () => {
@@ -453,6 +453,9 @@ test("every_request_shape_this_client_builds_is_the_schema_s_own", () => {
     schedules: "CreateScheduleRequest",
     restores: "CreateRestoreRequest",
     "schedules:set-suspension": "SetSuspensionRequest",
+    // D1 W7: the future-policy replace and the manual run.
+    "schedules:policy": "UpdateSchedulePolicyRequest",
+    backups: "CreateBackupRequest",
   };
   for (const route of Object.keys(routes)) {
     assert.ok(CONSOLE_REQUESTS[route] !== undefined, route + " has a declared request shape");
@@ -460,7 +463,9 @@ test("every_request_shape_this_client_builds_is_the_schema_s_own", () => {
   }
   for (const name of ["ArchiveRequest", "ConnectionAuthRequest", "CreateConnectionRequest",
     "RetentionRequest", "CreateScheduleRequest", "TopicNamingRequest", "RestoreTargetRequest",
-    "CreateRestoreRequest", "SetSuspensionRequest"]) {
+    "CreateRestoreRequest", "SetSuspensionRequest",
+    "TopicSelectionRequest", "UpdateSchedulePolicyRequest", "BackupScheduleRefRequest",
+    "ReadinessAcknowledgementRequest", "CreateBackupRequest"]) {
     assert.ok(CONSOLE_SHAPES[name] !== undefined, name + " is in the compared surface");
   }
 });

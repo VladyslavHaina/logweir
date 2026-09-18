@@ -74,7 +74,7 @@ const VIEWER_AUTHORITY: &str = "viewer's entire cluster authority";
 /// has nothing to do with the `kafka-backup` subcommand GC3 denies. The escape
 /// sits on the element's own line because that gate matches per physical line
 /// -- which is also why this paragraph spells the name without its quotes.
-const API_EXPORTS: [&str; 20] = [
+const API_EXPORTS: [&str; 22] = [
     "GROUP",
     "VERSION",
     "WRITABLE_PLURALS",
@@ -105,6 +105,12 @@ const API_EXPORTS: [&str; 20] = [
     "consoleAction",
     "consoleCreate",
     "consoleSetSuspension",
+    // D1 W7: the draft-cadence preview (a safe, namespace-less GET that reads
+    // no object) and the product API's ONE replace, the schedule's future
+    // policy. See [`the_api_module_offers_no_delete_and_no_put`] for the terms
+    // on which the second one is allowed to exist at all.
+    "cadencePreview",
+    "consoleSchedulePolicy",
     "problemError",
 ];
 
@@ -690,17 +696,53 @@ fn the_api_module_offers_no_delete_and_no_put() {
     let api = ui_root().join("api.js");
     let contents = read(&api);
 
-    for token in ["DELETE", "PUT"] {
-        if let Some(offset) = contains_bare_token(&contents, token) {
-            panic!(
-                "api.js:{} carries the bare token {token:?}. The module exports `create` plus \
-                 exactly one update; a delete or a replace here would be a write the page's \
-                 own contract says it cannot make. The token is matched BARE, so neither \
-                 quote style hides it.",
-                line_of(&contents, offset)
-            );
-        }
+    // A DELETE IS STILL UNREACHABLE FROM THIS PAGE, IN EITHER MODE. Logweir
+    // holds no delete capability of any kind -- against an archive, against a
+    // custom resource, against anything -- and this is the half of that a
+    // review of `ui/` can still see.
+    if let Some(offset) = contains_bare_token(&contents, "DELETE") {
+        panic!(
+            "api.js:{} carries the bare token \"DELETE\". The module exports no delete and \
+             must not: a delete here would be a write the page's own contract says it \
+             cannot make. The token is matched BARE, so neither quote style hides it.",
+            line_of(&contents, offset)
+        );
     }
+
+    // AND THERE IS EXACTLY ONE REPLACE (D1 W7, PLAT-05.1). `PUT
+    // .../schedules/{name}` is the product API's editable future policy: it
+    // replaces the whole policy under `expectedGeneration`, and D1 §5.6 makes
+    // it the route a guided edit form must use. Until D1 W6 landed it, this
+    // test forbade the token outright, and the page said so in prose
+    // (`EDIT_IS_A_REPLACE`).
+    //
+    // WHAT REPLACED THE BAN IS NOT A WEAKER RULE. The token must appear
+    // EXACTLY ONCE, and that once must be the value of a module-level
+    // `const REPLACE_METHOD`, which is what makes "this module can replace one
+    // thing" a sentence a reviewer reads in one place rather than a property
+    // they would have to reconstruct from the call sites. A second replace --
+    // a `PUT` over a connection, a destination, a Backup -- lands as a second
+    // occurrence and fails here, exactly as a delete does above.
+    let declaration = "const REPLACE_METHOD = \"PUT\";";
+    assert!(
+        contents.contains(declaration),
+        "api.js must spell its one replace method as `{declaration}`: the module is allowed \
+         exactly one replace, the schedule policy route, and naming the method once beside \
+         the paragraph that says why is what keeps that reviewable."
+    );
+    let occurrences = contents.match_indices("PUT").count();
+    assert_eq!(
+        occurrences, 1,
+        "api.js spells the bare token \"PUT\" {occurrences} time(s); exactly one is \
+         permitted, and it is the value of `REPLACE_METHOD`. A second replace in this \
+         module widens what every page can attempt without any page changing."
+    );
+    assert!(
+        contents.contains("export async function consoleSchedulePolicy("),
+        "the one replace is `consoleSchedulePolicy`, the schedule's future policy. If it \
+         has been renamed, rename it here too -- this assertion is what stops \
+         `REPLACE_METHOD` being reused by some other route."
+    );
 
     assert_eq!(
         api_exports(),

@@ -416,6 +416,53 @@ const RETENTION_REPORT = shapeOf(
   { evaluatedAt: str, keepLast: int, keepDays: int, note: str },
 );
 
+// ---------------------------------------------- D1 W7: the cadence policy
+//
+// THE FOUR CLOSED SETS BELOW ARE THE CONTROLLER'S OWN SPELLINGS. `nextRuns[]`
+// on a saved schedule and `runs[]` on a draft preview are ONE shape
+// (`NextRunView`), so a form renders a policy that is saved and a policy that
+// is only typed through one branch; and the three `adjustment` words are the
+// PascalCase the CRD writes, so a preview and a status cannot disagree about
+// which occurrence of a repeated local hour a row is.
+
+/** The DST marker on one firing. A word this build does not know is a contract
+ *  failure and never a blank cell: the whole value of the marker is that the
+ *  reader learns WHICH instant a row is. */
+export const CADENCE_ADJUSTMENTS = Object.freeze([
+  "NonexistentLocalTimeShifted", "RepeatedLocalTimeFirst", "RepeatedLocalTimeSecond",
+]);
+
+/** Whether a slot past its starting deadline may still run. ABSENT means
+ *  `None`, which is what every schedule written before PLAT-04.2 carries. */
+export const CATCH_UP_POLICIES = Object.freeze(["None", "Latest"]);
+
+/** Which kind of run a `Backup` is. PascalCase, the CRD's own. */
+export const TRIGGER_KINDS = Object.freeze(["Scheduled", "CatchUp", "Retry", "Manual"]);
+
+/** The readiness verdict a person clicked past, as the API records it. */
+export const ACKNOWLEDGED_READINESS = Object.freeze(["notReady", "unknown"]);
+
+const NEXT_RUN = shapeOf(
+  "NextRunView",
+  { at: str, localTime: str },
+  { adjustment: oneOf(CADENCE_ADJUSTMENTS) },
+);
+
+const ACTIVE_RUN = shapeOf("ActiveRunView", { name: str, kind: str, attempt: int });
+
+// `evaluatedAt` IS WHEN THE STATUS LAST MOVED, NOT A LIVENESS PROBE. The
+// controller writes nothing when nothing changed, so this instant standing
+// still means "nothing has changed" and a console must never compare it with
+// the requeue interval. The staleness signal is `nextRuns[0].at` in the past,
+// and `ui/render.js`'s `nextRunsPanel` is the one place that reads it.
+const SCHEDULE_POLICY = shapeOf(
+  "SchedulePolicyView",
+  {
+    generation: int, runPolicySha256: str, timeZone: str, tzdb: str,
+    effectiveSince: str, evaluatedAt: str,
+  },
+);
+
 const SCHEDULE_STATUS = shapeOf(
   "ScheduleStatusView",
   {},
@@ -423,7 +470,30 @@ const SCHEDULE_STATUS = shapeOf(
     lastFireTime: str, nextFireTime: str, lastMissedSlot: str,
     activeBackup: str, pendingBackup: str,
     ready: objectOf(CONDITION), retentionReport: objectOf(RETENTION_REPORT),
+    // D1 W7. `activeRuns` ABSENT means "not yet computed", never "none are
+    // running", and `ui/pages/schedules.js` renders those two differently.
+    observedGeneration: int, policy: objectOf(SCHEDULE_POLICY),
+    nextRuns: listOf(objectOf(NEXT_RUN)), activeRuns: listOf(objectOf(ACTIVE_RUN)),
   },
+);
+
+/** The retry policy a schedule carries. ABSENT is `maxRetries: 0`, which is
+ *  "no retry" and is what every schedule written before PLAT-04.2 means. */
+const RETRY_POLICY = shapeOf("RetryPolicy", { maxRetries: int }, { delaySeconds: int });
+
+// A PRESET IS NEVER STORED. `spec.schedule` is the single source of truth and
+// this is the catalogue entry an expression IS, so a form can round-trip one.
+// It is declared as one shape rather than as five, because the published
+// document spells it as a `oneOf` of five objects sharing a `kind` tag: the
+// drift arm skips the required-set comparison for a `oneOf`, and what this
+// client needs from it is the tag and the parameters of whichever branch
+// arrived. The PARAMETERS are checked against the catalogue by
+// `ui/pages/schedules.js`'s own table, which `ui/tests/d1.spec.js` compares
+// with `ui/tests/fixtures/cadence-presets.json` -- the file Rust generates.
+const CADENCE_PRESET = shapeOf(
+  "CadencePreset",
+  { kind: str },
+  { minute: int, hour: int, dayOfWeek: int, dayOfMonth: int, n: int },
 );
 
 /** What a dynamic run does when discovery cannot prove it saw everything.
@@ -449,13 +519,24 @@ const ALL_USER_TOPICS = shapeOf(
 // selection is dynamic. Both are OPTIONAL and both are absent on every schedule
 // written before that change, so absent keeps meaning what it meant.
 //
-// EVERY OTHER FIELD D1 W6 ADDED IS DELIBERATELY NOT DECLARED HERE. `preset`,
-// `timeZone`, `retry`, `catchUpPolicy`, `startingDeadlineSeconds`,
-// `activeDeadlineSeconds` and `generation` are the editable future policy, and
-// the form that owns them is D1 W7's. Leaving them undeclared puts them in the
-// decoder's `unknown` list -- tolerated, recorded, and visibly unrendered --
-// which is exactly what "an older client tolerates a newer field" is for, and
-// is honest in a way that declaring a field nothing renders would not be.
+// AND D1 W7 DECLARES THE REST, BECAUSE D1 W7 IS THE FORM THAT OWNS THEM.
+// `preset`, `timeZone`, `retry`, `catchUpPolicy`, `startingDeadlineSeconds`,
+// `activeDeadlineSeconds` and `generation` were left in the decoder's
+// `unknown` list by D1 W6 -- tolerated, recorded and visibly unrendered --
+// with the constraint that they are declared by the task that RENDERS them,
+// never by one that would leave a declared field with nothing on screen. That
+// task is this one: `ui/pages/schedules.js`'s policy form reads every one of
+// them, and `renderScheduleRevision` reads `generation`.
+//
+// `generation` STAYS OPTIONAL, AND THAT IS NOT THIS SIDE'S CHOICE. D1 W6
+// records that the API always emits it and left it out of the schema's
+// `required` set only so that tightening it would be one cross-side commit.
+// The drift arm compares this client's required set with the SCHEMA's, so
+// moving it here alone turns `contract.spec.js` red: the tightening needs
+// `crates/logweir-api/src/contract.rs` in the same commit, which is Rust
+// product code this task does not own. The page therefore treats an absent
+// generation as "revision not recorded" -- the same words a pre-PLAT-05.1 run
+// gets -- and never as revision 0.
 const SCHEDULE = shapeOf(
   "Schedule",
   {
@@ -467,6 +548,9 @@ const SCHEDULE = shapeOf(
   {
     createdAt: str, retention: objectOf(RETENTION),
     destinationRef: objectOf(NAME_REF), allUserTopics: objectOf(ALL_USER_TOPICS),
+    generation: int, preset: objectOf(CADENCE_PRESET), timeZone: str,
+    startingDeadlineSeconds: int, catchUpPolicy: oneOf(CATCH_UP_POLICIES),
+    retry: objectOf(RETRY_POLICY), activeDeadlineSeconds: int,
   },
 );
 
@@ -496,6 +580,26 @@ const WINDOW_COVERED = shapeOf("WindowCoveredView", { fromMs: int, toMs: int });
 
 const OBSERVED_AUTH = shapeOf("ObservedAuthView", {}, { mode: str, username: str });
 
+// WHAT KIND OF RUN THIS IS, AND WHICH REVISION IT FROZE (D1 W7).
+//
+// BOTH ARE OPTIONAL AND BOTH ARE ABSENT ON A PRE-PLAT-05.1 RUN, and the page
+// renders that absence as "revision not recorded" rather than as `Manual`,
+// generation 0 or an empty digest. `triggeredBy` -- the CRD's older, coarser
+// `manual | schedule` string -- stays required and stays rendered: it is what
+// a run created before `trigger` existed carries, and the two are shown as the
+// two facts they are rather than one reconciled guess.
+const TRIGGER = shapeOf(
+  "TriggerView",
+  { kind: oneOf(TRIGGER_KINDS), attempt: int },
+  { retryOf: objectOf(NAME_REF), timeZone: str },
+);
+
+const SCHEDULE_REF = shapeOf(
+  "ScheduleRefView",
+  { name: str },
+  { uid: str, generation: int, runPolicySha256: str },
+);
+
 const BACKUP = shapeOf(
   "Backup",
   {
@@ -507,6 +611,7 @@ const BACKUP = shapeOf(
     createdAt: str, schedule: str, slot: str, backupId: str, manifestKey: str,
     records: int, windowCovered: objectOf(WINDOW_COVERED),
     observedAuth: objectOf(OBSERVED_AUTH),
+    trigger: objectOf(TRIGGER), scheduleRef: objectOf(SCHEDULE_REF),
   },
 );
 
@@ -635,6 +740,54 @@ const APPROVAL_RESPONSE = item("ApprovalResponse", APPROVAL);
 const APPROVAL_PACKET_RESPONSE = readOnlyItem("ApprovalPacketResponse", APPROVAL_PACKET);
 const OPERATION_RESPONSE = readOnlyItem("OperationResponse", OPERATION);
 
+// ------------------------------------------- D1 W7: the three W6 answers
+
+/** A draft cadence, previewed. `schedule` is the CANONICAL expression -- what
+ *  a preset compiled to, and therefore the string the form saves -- and
+ *  `timeZone` is the EFFECTIVE zone, `UTC` when the request named none. A
+ *  shorter list than `count` is a real answer and an empty one means "it does
+ *  not fire again"; neither is an error, and `ui/render.js` says so. */
+const CADENCE_PREVIEW_RESPONSE = shapeOf(
+  "CadencePreviewResponse",
+  {
+    requestId: str, schedule: str, timeZone: str, tzdb: str, after: str,
+    runs: listOf(objectOf(NEXT_RUN)),
+  },
+  { preset: objectOf(CADENCE_PRESET) },
+);
+
+/** The schedule a manual run was taken from, as the create route saw it.
+ *  `suspended` and `activeRuns` are NOTICES here and not blocks: D1 section 8.3 is
+ *  explicit that nothing about a schedule prevents a manual run. */
+const SCHEDULE_CONTEXT = shapeOf(
+  "ScheduleContextView",
+  {
+    name: str, uid: str, generation: int, suspended: bool,
+    activeRuns: listOf(objectOf(ACTIVE_RUN)),
+  },
+  { runPolicySha256: str },
+);
+
+/** `POST .../backups`. `replayed` is REQUIRED here -- unlike the generic
+ *  create envelope, where it is optional -- because this route's whole
+ *  contract is that the second click is answered `200` with the first click's
+ *  run, and a console that could not tell the two apart would report a second
+ *  run that does not exist. */
+const MANUAL_BACKUP_RESPONSE = shapeOf(
+  "ManualBackupResponse",
+  { requestId: str, replayed: bool, item: objectOf(BACKUP) },
+  { schedule: objectOf(SCHEDULE_CONTEXT) },
+);
+
+/** The extension member `409 policy_changed` carries. The ONE extension
+ *  member this API defines: `expectedGeneration` was not malformed, it named a
+ *  superseded revision, and the current revision is what a console needs. */
+const POLICY_CHANGED_DETAIL = shapeOf(
+  "PolicyChangedDetail",
+  { currentGeneration: int },
+  { currentRunPolicySha256: str },
+);
+
 
 // ===========================================================================
 // the console REQUEST DTOs -- the other half of the contract
@@ -713,6 +866,66 @@ const CREATE_RESTORE_REQUEST = shapeOf(
 const SET_SUSPENSION_REQUEST = shapeOf(
   "SetSuspensionRequest",
   { suspended: bool, expectedResourceVersion: str },
+);
+
+// ------------------------------------------- D1 W7: the two write bodies
+
+const TOPIC_SELECTION_REQUEST = shapeOf(
+  "TopicSelectionRequest",
+  {},
+  { topics: listOf(str), allUserTopics: objectOf(ALL_USER_TOPICS) },
+);
+
+/** `PUT .../schedules/{name}`: THE WHOLE FUTURE POLICY, NOT A DIFF.
+ *
+ *  A FIELD OMITTED IS REMOVED, and that is the property the form is built
+ *  around: every field of the policy is on screen, the body carries every one
+ *  the form holds, and the page says so above the button. `expectedGeneration`
+ *  is the precondition; `sourceRef` is on the DTO only to be refused, so this
+ *  client never sends it. */
+const UPDATE_SCHEDULE_POLICY_REQUEST = shapeOf(
+  "UpdateSchedulePolicyRequest",
+  {
+    expectedGeneration: int, schedule: str, suspended: bool,
+    topicSelection: objectOf(TOPIC_SELECTION_REQUEST),
+  },
+  {
+    timeZone: str, archive: objectOf(ARCHIVE_REQUEST), destinationRef: objectOf(NAME_REF),
+    concurrencyPolicy: str, startingDeadlineSeconds: int,
+    catchUpPolicy: oneOf(CATCH_UP_POLICIES), retry: objectOf(RETRY_POLICY),
+    activeDeadlineSeconds: int, retention: objectOf(RETENTION_REQUEST),
+    sourceRef: objectOf(NAME_REF),
+  },
+);
+
+const BACKUP_SCHEDULE_REF_REQUEST = shapeOf(
+  "BackupScheduleRefRequest",
+  { name: str },
+  { expectedGeneration: int },
+);
+
+/** An acknowledgement is RECORDED and is never authoritative. The API reads no
+ *  `Preflight` and gates on nothing; this is the annotation a person's second
+ *  click leaves behind, so that a run taken past a red verdict says so. */
+const READINESS_ACKNOWLEDGEMENT_REQUEST = shapeOf(
+  "ReadinessAcknowledgementRequest",
+  { preflight: str, state: oneOf(ACKNOWLEDGED_READINESS) },
+);
+
+/** `POST .../backups`. TWO BODIES IN ONE SHAPE, as the schema spells it:
+ *  `scheduleRef` alone takes the schedule's own current revision, and
+ *  `sourceRef` + `topicSelection` + a location is the ad-hoc run. Mixing them
+ *  is a 422, and `ui/client.js` builds exactly one of the two. */
+const CREATE_BACKUP_REQUEST = shapeOf(
+  "CreateBackupRequest",
+  {},
+  {
+    scheduleRef: objectOf(BACKUP_SCHEDULE_REF_REQUEST),
+    sourceRef: objectOf(NAME_REF), topicSelection: objectOf(TOPIC_SELECTION_REQUEST),
+    legacyArchive: objectOf(ARCHIVE_REQUEST), destinationRef: objectOf(NAME_REF),
+    deadlineSeconds: int,
+    readinessAcknowledgement: objectOf(READINESS_ACKNOWLEDGEMENT_REQUEST),
+  },
 );
 
 // ===========================================================================
@@ -1171,6 +1384,10 @@ export const CONSOLE_REQUESTS = Object.freeze({
   "destinations:test": TEST_DESTINATION_REQUEST,
   "destinations:from-legacy": DESTINATION_FROM_LEGACY_REQUEST,
   "connections:topic-discoveries": CREATE_TOPIC_DISCOVERY_REQUEST,
+  // D1 W7. The policy replace is keyed by the route it is sent to; the manual
+  // run is keyed by the plural, because it goes through `consoleCreate`.
+  "schedules:policy": UPDATE_SCHEDULE_POLICY_REQUEST,
+  backups: CREATE_BACKUP_REQUEST,
 });
 
 /** Checks a body this client BUILT against the shape the server publishes.
@@ -1245,6 +1462,24 @@ export const CONSOLE_SHAPES = Object.freeze({
   RestoreTargetRequest: RESTORE_TARGET_REQUEST,
   CreateRestoreRequest: CREATE_RESTORE_REQUEST,
   SetSuspensionRequest: SET_SUSPENSION_REQUEST,
+
+  // D1 W7: the cadence policy, the revision and the manual run.
+  NextRunView: NEXT_RUN,
+  ActiveRunView: ACTIVE_RUN,
+  SchedulePolicyView: SCHEDULE_POLICY,
+  RetryPolicy: RETRY_POLICY,
+  CadencePreset: CADENCE_PRESET,
+  TriggerView: TRIGGER,
+  ScheduleRefView: SCHEDULE_REF,
+  CadencePreviewResponse: CADENCE_PREVIEW_RESPONSE,
+  ScheduleContextView: SCHEDULE_CONTEXT,
+  ManualBackupResponse: MANUAL_BACKUP_RESPONSE,
+  PolicyChangedDetail: POLICY_CHANGED_DETAIL,
+  TopicSelectionRequest: TOPIC_SELECTION_REQUEST,
+  UpdateSchedulePolicyRequest: UPDATE_SCHEDULE_POLICY_REQUEST,
+  BackupScheduleRefRequest: BACKUP_SCHEDULE_REF_REQUEST,
+  ReadinessAcknowledgementRequest: READINESS_ACKNOWLEDGEMENT_REQUEST,
+  CreateBackupRequest: CREATE_BACKUP_REQUEST,
 
   // D2: destinations, topic discoveries and operation readiness.
   CaBundleView: CA_BUNDLE,
@@ -1332,6 +1567,10 @@ export const CONSOLE_ENUMS = Object.freeze({
   RestoreMode: RESTORE_MODES,
   Role: ROLES,
   IncompleteDiscoveryPolicy: INCOMPLETE_DISCOVERY_POLICIES,
+  CadenceAdjustment: CADENCE_ADJUSTMENTS,
+  CatchUpPolicy: CATCH_UP_POLICIES,
+  TriggerKind: TRIGGER_KINDS,
+  AcknowledgedReadiness: ACKNOWLEDGED_READINESS,
   AddressingDto: ADDRESSING_MODES,
   TransportSecurityDto: TRANSPORT_SECURITY,
   StorageProviderDto: STORAGE_PROVIDERS,
@@ -1462,6 +1701,38 @@ export function decodeDetailPage(value) {
  *  had already finished. @returns {Decoded} */
 export function decodeCancel(value) {
   return decodeWith(CANCEL_RESPONSE, value);
+}
+
+/** A draft cadence's next firings, as `GET /api/v1/cadence-previews` computed
+ *  them. THE BROWSER NEVER EVALUATES CRON: this is the whole of what the
+ *  schedule form knows about when a policy will fire, and the saved object's
+ *  `status.nextRuns` is the same shape from the controller.
+ *  @returns {Decoded} */
+export function decodeCadencePreview(value) {
+  return decodeWith(CADENCE_PREVIEW_RESPONSE, value);
+}
+
+/** A manual run, and the schedule it was taken from.
+ *  @returns {Decoded} */
+export function decodeManualBackup(value) {
+  return decodeWith(MANUAL_BACKUP_RESPONSE, value);
+}
+
+/** The `policy` extension member of a `409 policy_changed`, or `null` when the
+ *  problem carries none.
+ *
+ *  A PROBLEM THAT IS NOT THAT ONE IS NOT AN ERROR HERE. Every other refusal a
+ *  policy edit or a manual run can get -- `412`, `422`, `409
+ *  idempotency_conflict` -- reaches the page as its own message; this reads
+ *  the one member that carries a FACT the page needs (the revision that is in
+ *  force now) and answers `null` for everything else rather than throwing a
+ *  contract failure over a problem document that was perfectly well formed. */
+export function decodePolicyChanged(problem) {
+  const detail = (problem || {}).policy;
+  if (detail === null || detail === undefined) {
+    return null;
+  }
+  return decodeWith(POLICY_CHANGED_DETAIL, detail).value;
 }
 
 // ===========================================================================

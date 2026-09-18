@@ -39,11 +39,13 @@
 // every response is read by `api.js`, which holds the one `fetch` in the tree.
 
 import {
+  cadencePreview,
   consoleAction,
   consoleCreate,
   consoleGet,
   consoleList,
   consoleOperation,
+  consoleSchedulePolicy,
   consoleSetSuspension,
   consoleSub,
   create,
@@ -56,6 +58,7 @@ import {
 import {
   contractFailure,
   decodeApprovalPacket,
+  decodeCadencePreview,
   decodeCancel,
   decodeCheckOperation,
   decodeConsoleItem,
@@ -65,7 +68,9 @@ import {
   decodeDiscoveryLatest,
   decodeLegacyList,
   decodeLegacyObject,
+  decodeManualBackup,
   decodeOperation,
+  decodePolicyChanged,
   decodeRequest,
   decodeSession,
   decodeTopicPage,
@@ -474,13 +479,33 @@ const ABSENT_IN_CONSOLE = Object.freeze({
     "spec.auth.secretRef.passwordKey",
     "spec.auth.tlsCa",
   ]),
+  // D1 W7. THE CONTROLLER RECORDS THESE AND THE PRODUCT API DOES NOT PUBLISH
+  // THEM. `ScheduleStatusView` carries `policy`, `nextRuns` and `activeRuns`
+  // and stops there, so a console-mode schedule card can show the revision and
+  // the previews and cannot show what happened to the last slot or how many
+  // came due and were skipped. Naming them here is the difference between a
+  // gap and an omission: the page prints the sentence that says which task
+  // owes the projection, and legacy mode -- which reads the custom resource
+  // itself -- renders all four.
   backupschedules: Object.freeze([
     "status.retentionReport.skipped[].key",
     "status.retentionReport.skipped[].reason",
+    "status.lastSlot",
+    "status.missedSlots",
+    "status.pendingRun",
+    "status.history",
   ]),
+  // AND THE SAME FOR A RUN'S COVERAGE. `Backup` publishes `trigger` and
+  // `scheduleRef` (D1 W6) and no `status.selection` at all, so the coverage
+  // label `weirkeeper` writes on every dynamic run -- the one fact that says
+  // whether "all topics" was attested or only visible -- is not reachable in
+  // console mode. The page will not infer one from the mode, the topic list or
+  // a successful phase; it says so and names the route that owes it.
   backups: Object.freeze([
     "status.manifestSha256",
     "status.jobRef",
+    "status.selection",
+    "status.conditions",
   ]),
   restores: Object.freeze(["status.integrity", "status.jobRef"]),
   approvals: Object.freeze([]),
@@ -566,12 +591,76 @@ function projectSchedule(item) {
     }
     object.spec.allUserTopics = dynamic;
   }
+  // THE EDITABLE FUTURE POLICY (D1 W7, PLAT-04.2/05.1), UNDER THE CRD's OWN
+  // NAMES. Every one of these is optional on the wire and ABSENT on every
+  // schedule written before PLAT-04.2, and absent keeps meaning what it meant:
+  // UTC evaluation, a one-hour starting deadline, no catch-up, no retry and a
+  // 3600 s run deadline. The projection invents none of them -- the form
+  // renders "the default, N" for an absent field and sends nothing for it.
+  for (const field of ["timeZone", "startingDeadlineSeconds", "catchUpPolicy",
+    "activeDeadlineSeconds"]) {
+    if (item[field] !== null) {
+      object.spec[field] = item[field];
+    }
+  }
+  if (item.retry !== null) {
+    const retry = { maxRetries: item.retry.maxRetries };
+    if (item.retry.delaySeconds !== null) {
+      retry.delaySeconds = item.retry.delaySeconds;
+    }
+    object.spec.retry = retry;
+  }
+  // THE REVISION. `metadata.generation` is Kubernetes' own field and the
+  // number a manual run records, so it is projected where it belongs rather
+  // than into the spec. The product API always emits it and declares it
+  // OPTIONAL -- see `ui/contract.js`'s note on the cross-side tightening -- so
+  // an absent one is "revision not recorded" and never revision 0.
+  if (item.generation !== null) {
+    object.metadata.generation = item.generation;
+  }
+  // A PRESET IS NOT A FIELD OF THE OBJECT. `spec.schedule` is the single
+  // source of truth; this is the catalogue entry that expression IS, computed
+  // by the server so the browser never has to match cron. It therefore rides
+  // OUTSIDE `spec`, beside `__contract`, where nothing can mistake it for
+  // something the CRD stores or something a form may send.
+  if (item.preset !== null) {
+    object.__preset = item.preset;
+  }
   const view = item.status;
   const status = {};
   for (const field of ["lastFireTime", "nextFireTime", "lastMissedSlot"]) {
     if (view[field] !== null) {
       status[field] = view[field];
     }
+  }
+  if (view.observedGeneration !== null) {
+    status.observedGeneration = view.observedGeneration;
+  }
+  if (view.policy !== null) {
+    status.policy = {
+      generation: view.policy.generation,
+      runPolicySha256: view.policy.runPolicySha256,
+      timeZone: view.policy.timeZone,
+      tzdb: view.policy.tzdb,
+      effectiveSince: view.policy.effectiveSince,
+      evaluatedAt: view.policy.evaluatedAt,
+    };
+  }
+  // AN ABSENT LIST IS NOT AN EMPTY ONE, AND THE TWO ARE PROJECTED APART.
+  // `nextRuns` absent means the controller has computed none (a suspended or
+  // invalid schedule); `activeRuns` absent means NOT YET COMPUTED and never
+  // "none are running", which is why neither is defaulted to `[]` here.
+  if (view.nextRuns !== null) {
+    status.nextRuns = view.nextRuns.map((run) => {
+      const out = { at: run.at, localTime: run.localTime };
+      if (run.adjustment !== null) {
+        out.adjustment = run.adjustment;
+      }
+      return out;
+    });
+  }
+  if (view.activeRuns !== null) {
+    status.activeRuns = view.activeRuns.map(activeRun);
   }
   if (view.activeBackup !== null) {
     status.activeBackupRef = { name: view.activeBackup };
@@ -599,6 +688,10 @@ function projectSchedule(item) {
   }
   object.status = status;
   return object;
+}
+
+function activeRun(run) {
+  return { name: run.name, kind: run.kind, attempt: run.attempt };
 }
 
 function removable(set) {
@@ -631,8 +724,36 @@ function projectBackup(item) {
     triggeredBy: item.triggeredBy,
     deadlineSeconds: item.deadlineSeconds,
   };
-  if (item.schedule !== null) {
+  // `schedule` IS THE OLD, COARSER FACT AND `scheduleRef` IS THE NEW ONE, and
+  // the projection keeps them in one field the way the CRD does: the name
+  // alone for a run created before PLAT-05.1, and the name with the uid,
+  // generation and run-policy digest for one created after it. A run that
+  // carries neither has no schedule, which is what a manual ad-hoc run is.
+  if (item.scheduleRef !== null) {
+    const ref = { name: item.scheduleRef.name };
+    for (const field of ["uid", "generation", "runPolicySha256"]) {
+      if (item.scheduleRef[field] !== null) {
+        ref[field] = item.scheduleRef[field];
+      }
+    }
+    object.spec.scheduleRef = ref;
+  } else if (item.schedule !== null) {
     object.spec.scheduleRef = { name: item.schedule };
+  }
+  // WHICH KIND OF RUN THIS IS (D1 W7, PLAT-05.1/06.2). ABSENT on every run
+  // frozen before `trigger` existed, and the page renders that absence as
+  // "trigger not recorded" rather than reading `triggeredBy` as a kind: the
+  // older field says `manual` or `schedule`, which cannot tell a catch-up or a
+  // retry from an ordinary slot.
+  if (item.trigger !== null) {
+    const trigger = { kind: item.trigger.kind, attempt: item.trigger.attempt };
+    if (item.trigger.retryOf !== null) {
+      trigger.retryOf = { name: item.trigger.retryOf.name };
+    }
+    if (item.trigger.timeZone !== null) {
+      trigger.timeZone = item.trigger.timeZone;
+    }
+    object.spec.trigger = trigger;
   }
   if (item.slot !== null) {
     object.spec.slot = item.slot;
@@ -798,6 +919,50 @@ const legacyApi = Object.freeze({
   async listCluster(plural, options) {
     return decodeLegacyList(plural, await listCluster(plural, options)).value;
   },
+  // ------------------------------------------- D1 W7 (PLAT-04.2/05.1/06.2)
+  //
+  // TWO OF THE THREE ARE CONSOLE-ONLY, AND SAID SO BY NAME. There is no
+  // cadence-preview route in front of `kubectl proxy` -- it is a computation
+  // `logweir-api` performs with the controller's own tz database -- and the
+  // browser will not evaluate cron to fill the gap, because a second
+  // implementation is a second opinion about when a backup runs. The saved
+  // schedule's `status.nextRuns` IS rendered in legacy mode: the controller
+  // computed it, and the page reads the object.
+  //
+  // The policy replace is console-only for a different reason: `ui/api.js`
+  // holds exactly one replace, it is built on the product API's
+  // `expectedGeneration` precondition, and a JSON-merge patch against
+  // kube-apiserver would have neither that precondition nor the API's
+  // pre-write refusals. The CRD's own rules accept the edit either way, so
+  // this is the page's boundary and not the cluster's, and the sentence says
+  // which command does it instead.
+  cadencePreview() {
+    return Promise.reject(consoleOnly("Previewing a cadence before saving it"));
+  },
+  editSchedulePolicy() {
+    return Promise.reject(consoleOnly("Editing a schedule's future policy"));
+  },
+  runBackupNow() {
+    // AND SO IS THE THIRD, FOR TWO REASONS THAT ARE BOTH ABOUT THIS MODE AND
+    // NOT ABOUT THE FEATURE.
+    //
+    // THE NAME IS DERIVED FROM FACTS THE BROWSER DOES NOT HOLD. D1 section 8.2 makes
+    // a manual run's name `logweir-manual-` plus base32 of a sha256 over
+    // `(issuer, sub, namespace, route, key)` -- the AUTHENTICATED subject, as
+    // the product API knows it. A browser has no issuer and no subject in
+    // either mode, so a name minted here would be a DIFFERENT name from the
+    // one the canonical path produces, and "kubectl, the API and the console
+    // create the same object" would stop being true of the one field every
+    // replay guard in this design rests on.
+    //
+    // AND THE IN-CLUSTER UI SERVICEACCOUNT HAS NO `create backups`.
+    // `charts/logweir/templates/ui/ui.yaml` grants `create` on approvals,
+    // kafkaclusters, backupschedules and restores and stops there; D1 section 8.5
+    // adds this one, and that grant is a chart change with its own review.
+    // Sending the create anyway would be a 403 this page would then have to
+    // narrate, which is the thing refusing here by name exists to avoid.
+    return Promise.reject(consoleOnly("Back up now"));
+  },
 });
 
 // THE CLIENT'S OWN CHECKS RUN IN BOTH MODES, over the body about to be sent,
@@ -937,6 +1102,85 @@ const consoleApi = Object.freeze({
     } catch (refused) {
       throw withCauses(refused, "schedules");
     }
+  },
+  // ------------------------------------------- D1 W7 (PLAT-04.2/05.1/06.2)
+  async cadencePreview(query, options) {
+    // A SAFE GET THAT READS NO OBJECT, so there is no namespace to scope it
+    // to and no capability flag that covers it. The product API's own rule is
+    // "may read schedules in at least one granted namespace", which is a
+    // question this page cannot answer for itself -- the grants it holds are
+    // the ones the session document published -- so it asks, and renders the
+    // 403 if that is the answer.
+    const decoded = decodeCadencePreview(await cadencePreview(query, options));
+    return decoded.value;
+  },
+  async editSchedulePolicy(ns, name, body) {
+    // THE SAME AUTHORITY AS CREATING ONE. D1 W6 made editing a schedule's
+    // future policy a new action with the SAME role row as creating one, and
+    // left the capability flag `scheduleCreate` covering both; a route test
+    // there pins the equality, so splitting the flag and splitting the
+    // authority have to happen together.
+    requireGrant(ns, "scheduleCreate");
+    const checked = decodeRequest("schedules:policy", body);
+    if (checked.unknown.length > 0) {
+      throw contractFailure(
+        "UpdateSchedulePolicyRequest",
+        checked.unknown[0],
+        "this page built a policy this API does not declare; it was not sent",
+      );
+    }
+    try {
+      const answer = await consoleSchedulePolicy(ns, name, body, {
+        token: decided === null ? null : decided.token,
+      });
+      const decoded = decodeConsoleItem("schedules", answer);
+      return note(projectSchedule(decoded.value.item), "backupschedules", decoded.unknown);
+    } catch (refused) {
+      throw withCauses(refused, "schedules");
+    }
+  },
+  async runBackupNow(ns, body, key) {
+    requireGrant(ns, "manualBackupCreate");
+    const checked = decodeRequest("backups", body);
+    if (checked.unknown.length > 0) {
+      throw contractFailure(
+        "CreateBackupRequest",
+        checked.unknown[0],
+        "this page built a manual run this API does not declare; it was not sent",
+      );
+    }
+    let answer;
+    try {
+      // THE KEY IS THE CALLER'S, NOT THIS MODULE'S, AND THAT IS THE POINT.
+      // Every other create in this file composes its key from the NAME being
+      // created; a manual run has no name until the server derives one, so
+      // the intent has to be minted by whoever holds the draft and kept for
+      // as long as that draft lives. `ui/pages/schedules.js` mints one per
+      // draft and hands the SAME string to every resend of it.
+      answer = await consoleCreate(ns, "backups", body, {
+        idempotencyKey: key,
+        token: decided === null ? null : decided.token,
+      });
+    } catch (refused) {
+      // A `409 policy_changed` CARRIES A FACT AND NOT ONLY A COMPLAINT: the
+      // revision that is in force now. It is attached to the error so the page
+      // can offer the new one rather than telling a person to reload and look.
+      const changed = refused.problem === undefined || refused.problem === null
+        ? null
+        : decodePolicyChanged(refused.problem);
+      if (changed !== null) {
+        refused.policy = changed;
+      }
+      throw withCauses(refused, "backups");
+    }
+    const decoded = decodeManualBackup(answer);
+    const made = note(projectBackup(decoded.value.item), "backups", decoded.unknown);
+    made.__contract.replayed = decoded.value.replayed === true;
+    // THE SCHEDULE'S OWN STATE TRAVELS WITH THE RUN, as notices. A suspended
+    // schedule and an already-active run are both things a person should SEE
+    // after clicking, and neither is a reason the click was refused -- D1 section 8.3
+    // is explicit that nothing about a schedule blocks a manual run.
+    return { run: made, schedule: decoded.value.schedule, replayed: made.__contract.replayed };
   },
   async listCluster(plural) {
     throw noRoute(
@@ -1534,6 +1778,21 @@ export function apiClient() {
     },
     listCluster(plural, options) {
       return dispatch((api) => api.listCluster(plural, options));
+    },
+
+    // D1 W7 (PLAT-04.2, PLAT-05.1, PLAT-06.2): the draft cadence preview, the
+    // future-policy replace and "Back up now". They go through `dispatch` and
+    // not `dispatchChecks` because they are the SAME five kinds this facade
+    // has always served -- a schedule and a Backup -- rather than a domain of
+    // their own; the legacy half answers the two console-only ones by name.
+    cadencePreview(query, options) {
+      return dispatch((api) => api.cadencePreview(query, options));
+    },
+    editSchedulePolicy(ns, name, body) {
+      return dispatch((api) => api.editSchedulePolicy(ns, name, body));
+    },
+    runBackupNow(ns, body, key) {
+      return dispatch((api) => api.runBackupNow(ns, body, key));
     },
 
     // D2 (PLAT-08, PLAT-09.1, PLAT-03): saved destinations, bounded topic
