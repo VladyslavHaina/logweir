@@ -621,11 +621,15 @@ def l_04_5(H: Any) -> dict[str, Any]:
 
     logs = fenced.controller_logs(H, since="15m")
     H.artifact("logs/L-04-5-fenced-controllers.log", logs)
+    # NARROW ON PURPOSE. A loose filter matched an unrelated warning that merely
+    # contained "backup" and "already", which would have let the row claim an
+    # adoption it had not seen. The 409 the criterion is about is the API
+    # server's answer to a Backup CREATE, so the line must name that status.
     adoption = [
         line
         for line in logs.splitlines()
-        if ("409" in line or "AlreadyExists" in line or "already exists" in line)
-        and ("backup" in line.lower() or "adopt" in line.lower())
+        if ("AlreadyExists" in line or "already exists" in line or '"code":409' in line)
+        and "backups.logweir.dev" in line
     ]
     conflicts = [
         item
@@ -634,8 +638,8 @@ def l_04_5(H: Any) -> dict[str, Any]:
         if item.get("response") == 409
     ]
     H.require(
-        bool(adoption) or bool(conflicts),
-        "no 409 adoption was observed in either replica's log or in either proxy's captures; "
+        bool(conflicts) or bool(adoption),
+        "no 409 adoption was observed in either proxy's captures or either replica's log; "
         "D1 asks for at least one",
         dumps={"logTail": logs[-4000:]},
     )
