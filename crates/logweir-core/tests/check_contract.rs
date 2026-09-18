@@ -1224,10 +1224,18 @@ fn unkeyed_secret_material_is_still_removed() {
             "relayed dGhpc2lzYXNlY3JldHZhbHVlZm9ydGVzdGluZ29ubHk= refused",
             "dGhpc2lzYXNlY3JldHZhbHVlZm9ydGVzdGluZ29ubHk",
         ),
-        // … nor a value half that is not a public form in its own right.
+        // … nor a value half that is not a public form in its own right …
         (
             "relayed sessionkey=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY01 refused",
             "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY01",
+        ),
+        // … nor a key half longer than a fact name. This is the residual shape
+        // the 24-character cap is FOR: a blob with a `=` part-way through and a
+        // short lower-case tail after it would otherwise read as
+        // `<factName>=<name>`.
+        (
+            "relayed dGhpc2lzYXNlY3JldHZhbHVlZm9ydGVzdA=abcdef refused",
+            "dGhpc2lzYXNlY3JldHZhbHVlZm9ydGVzdA",
         ),
     ];
     for (input, witness) in cases {
