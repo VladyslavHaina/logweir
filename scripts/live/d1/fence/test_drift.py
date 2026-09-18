@@ -62,6 +62,40 @@ def _contains(revision: str) -> tuple[bool, str, dict]:
         return False, str(exc), {}
 
 
+def test_the_boundary_is_what_the_image_build_consumes() -> None:
+    """Pure, and one row per side of the line the review drew (**F-4**)."""
+    row("the orchestrator's own scratch file at the root is ignorable",
+        fenced.untracked_is_ignorable("prompt")
+        and fenced.untracked_is_ignorable("notes.txt"))
+    row("MUTANT: an untracked Rust source is compiled into the image",
+        not fenced.untracked_is_ignorable("crates/weirkeeper/src/zz.rs"))
+    row("MUTANT: an untracked Cargo.lock decides what the image was built from",
+        not fenced.untracked_is_ignorable("Cargo.lock")
+        and not fenced.untracked_is_ignorable("Cargo.toml")
+        and not fenced.untracked_is_ignorable("rust-toolchain.toml"))
+    row("MUTANT: an untracked file under .cargo/ changes the compiler's inputs",
+        not fenced.untracked_is_ignorable(".cargo/config.toml"))
+    row("MUTANT: the files the runtime stages COPY by name",
+        not fenced.untracked_is_ignorable("third_party/org-root.fingerprint")
+        and not fenced.untracked_is_ignorable("THIRD_PARTY_NOTICES.md")
+        and not fenced.untracked_is_ignorable("LICENSE"))
+    row("MUTANT: shipped product artifacts a lab is equally built from",
+        not fenced.untracked_is_ignorable("charts/logweir/values.yaml")
+        and not fenced.untracked_is_ignorable("config/crd/backups.yaml")
+        and not fenced.untracked_is_ignorable("ui/src/app.ts")
+        and not fenced.untracked_is_ignorable("logweir.yaml"))
+    row("the harness trees, their fixtures and prose are ignorable",
+        fenced.untracked_is_ignorable("scripts/live/d1/scratch.py")
+        and fenced.untracked_is_ignorable("scripts/fixtures/x.py")
+        and fenced.untracked_is_ignorable("e2e/k8s/d3/x.json")
+        and fenced.untracked_is_ignorable("docs/note.md"))
+    row("MUTANT: FAIL CLOSED — an untracked file in a directory it has never "
+        "heard of is refused",
+        not fenced.untracked_is_ignorable("scripts/check-image.sh")
+        and not fenced.untracked_is_ignorable("newthing/x.rs")
+        and not fenced.untracked_is_ignorable(".github/workflows/images.yml"))
+
+
 def test_an_untracked_file_does_not_trip_the_drift_check() -> None:
     head = _git("rev-parse", "HEAD")
     stray = ROOT / "hf-drift-probe-untracked.txt"
@@ -75,6 +109,21 @@ def test_an_untracked_file_does_not_trip_the_drift_check() -> None:
             str(out.get("untrackedIgnored")))
     finally:
         stray.unlink(missing_ok=True)
+
+
+def test_an_untracked_build_input_trips_it_live() -> None:
+    """The reviewer's own case, against this repository."""
+    head = _git("rev-parse", "HEAD")
+    stray = ROOT / "crates" / "hr2-drift-probe-untracked.rs"
+    stray.write_text("// an untracked Rust source inside the build inputs\n")
+    try:
+        ok, why, _ = _contains(head)
+        row("MUTANT: an untracked file inside crates/ is refused, and named",
+            not ok and "hr2-drift-probe-untracked.rs" in why, why[:180])
+    finally:
+        stray.unlink(missing_ok=True)
+    ok, why, _ = _contains(head)
+    row("the probe left the checkout clean again", ok, why[:160])
 
 
 def test_a_tracked_modification_still_trips_it() -> None:

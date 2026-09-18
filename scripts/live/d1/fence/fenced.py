@@ -535,6 +535,55 @@ def image_revision(H: Any, image: str) -> str:
 # should fail in.
 NON_IMAGE_PATHS = ("scripts/live/", "scripts/fixtures/", "e2e/", "docs/")
 
+# What the image build actually CONSUMES, derived from the two Dockerfiles.
+#
+# Both end their builder stage with `COPY . .` (`Dockerfile:151`,
+# `Dockerfile.weirkeeper:144`) and `.dockerignore` excludes only `/target`,
+# `/.e2e`, `/.demo`, `/.engine`, `/.git`, `/upstream`, `**/*.tar.gz` and the two
+# Dockerfiles — so the build CONTEXT is very nearly the whole repository. The
+# context is not the question, though: a stray text file in it invalidates a
+# cargo layer and changes no byte of the output. What changes the output is what
+# the build READS — `cargo build` over the workspace, and the handful of files
+# the runtime stages copy by name.
+#
+# THIS IS WHY IGNORING EVERY UNTRACKED PATH WAS WRONG (lab-refresh-4 review
+# **F-4**). An untracked `crates/weirkeeper/src/x.rs` is compiled into the
+# image; an untracked `Cargo.lock` or `rust-toolchain.toml` decides which
+# versions and which compiler built it. Ignoring those would let a refresh
+# silently measure a lab built from code the checkout no longer has — the exact
+# stale-pin failure this check exists to catch.
+IMAGE_BUILD_INPUTS = (
+    # the workspace `cargo build` reads
+    "crates/", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo/",
+    # the files the runtime stages COPY by name
+    "third_party/", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md",
+    # shipped product artifacts a lab is equally built from
+    "ui/", "charts/", "config/", "logweir.yaml",
+)
+
+
+def untracked_is_ignorable(path: str) -> bool:
+    """Whether an UNTRACKED file can be ignored when comparing lab and checkout.
+
+    Three questions, in order, and the last one is what makes this fail closed.
+
+    1. Is it inside the image's build inputs? Then no — it would change the
+       image, tracked or not.
+    2. Is it inside a tree no image contains? Then yes: a harness file, a
+       fixture it mounts, or prose.
+    3. Otherwise it is ignorable only if it is a bare file at the repository
+       root. That is the orchestrator's `prompt` and its like — scratch that
+       lands in the build CONTEXT, invalidates a cargo layer and changes no
+       output byte, because no crate references a file at the root by name.
+       Anything in a directory this function has never heard of is REFUSED, so
+       a new product directory is a refusal rather than a silent pass.
+    """
+    if path.startswith(IMAGE_BUILD_INPUTS):
+        return False
+    if path.startswith(NON_IMAGE_PATHS):
+        return True
+    return "/" not in path
+
 
 def assert_checkout_contains(H: Any, revision: str) -> dict[str, Any]:
     """Refuse unless the product code in this checkout IS the build under test.
@@ -579,29 +628,41 @@ def assert_checkout_contains(H: Any, revision: str) -> dict[str, Any]:
                           timeout=120, record=False).stdout.splitlines()
         if line.strip()
     ]
-    # TRACKED CONTENT ONLY, and this is the rule stated correctly rather than a
-    # relaxation of it. `git status --porcelain` lists untracked files too, and
-    # the repository root carries one that the orchestrator owns — `prompt`, the
-    # brief itself — which no image contains, which no worker may delete under
-    # WORKER-RULES, and which the non-image allowlist cannot cover because it is
-    # a root-level file rather than a directory. Refusing on it made a lab that
-    # matched the checkout exactly un-runnable, and pushed lab-refresh-4 into
-    # `--fence-revision`, a flag that SUSPENDS this very check (§9.1). An
-    # untracked file cannot change what an image was built from; only tracked
-    # content can. What is ignored is recorded, so the evidence names it.
+    # TRACKED CONTENT, PLUS THE UNTRACKED FILES AN IMAGE WOULD BE BUILT FROM.
+    #
+    # `git status --porcelain` lists untracked files, and the repository root
+    # carries one the orchestrator owns — `prompt`, the brief itself — which no
+    # worker may delete under WORKER-RULES and which the non-image allowlist
+    # cannot cover because it is a root-level file rather than a directory.
+    # Refusing on it made a lab that matched the checkout exactly un-runnable
+    # and pushed lab-refresh-4 into `--fence-revision`, a flag that SUSPENDS
+    # this very check (§9.1).
+    #
+    # "Ignore every untracked path" was the wrong repair, and the review said so
+    # (**F-4**): both Dockerfiles end with `COPY . .`, so an untracked
+    # `crates/**/x.rs` really is compiled into the image and an untracked
+    # `Cargo.lock` really does decide what it was built from. The question is
+    # not tracked-or-not; it is whether the image build would CONSUME the file.
+    # `untracked_is_ignorable` answers that one, and fails closed on a path it
+    # has never heard of. What is ignored is recorded; what is refused is named
+    # in the refusal.
     untracked = [
         line[3:].strip()
         for line in H.run(["git", "status", "--porcelain", "--untracked-files=all"],
                           timeout=120, record=False).stdout.splitlines()
         if line.startswith("?? ")
     ]
+    untracked_ignored = [u for u in untracked if untracked_is_ignorable(u)]
+    untracked_refused = [u for u in untracked if not untracked_is_ignorable(u)]
     dirty = [
         line[3:].strip()
         for line in H.run(["git", "status", "--porcelain", "--untracked-files=no"],
                           timeout=120, record=False).stdout.splitlines()
         if line.strip()
     ]
-    product = sorted({p for p in changed + dirty if not p.startswith(NON_IMAGE_PATHS)})
+    product = sorted(
+        {p for p in changed + dirty if not p.startswith(NON_IMAGE_PATHS)} | set(untracked_refused)
+    )
     if product:
         raise H.Failure(
             f"the lab runs {revision[:12]} and this checkout has moved product files since: "
@@ -616,7 +677,7 @@ def assert_checkout_contains(H: Any, revision: str) -> dict[str, Any]:
         "imageRevisionInHistory": True,
         "changedSinceImage": changed,
         "uncommitted": dirty,
-        "untrackedIgnored": untracked,
+        "untrackedIgnored": untracked_ignored,
     }
 
 
