@@ -2551,6 +2551,47 @@ fn is_public_name(c: &str) -> bool {
         })
 }
 
+/// How long the ONE adopter-chosen component of an object key may be.
+///
+/// TWENTY-FOUR. A backup set id (`20260915T030000Z`, a UUID, `MyBackupSet01`)
+/// and a Kafka topic name are what land here, and both conventions this product
+/// writes fit; a longer one is over-redacted, which is the safe direction.
+///
+/// It is a SECURITY bound, not a cosmetic one, and it was measured. Without it,
+/// a randomly generated AWS secret access key beside a set id is read as an
+/// object key **2.3% of the time** — its own `/` splits it, and one half being
+/// all lower case is not rare (`(38/64)^n` is only small for large `n`). At
+/// twenty-four the same measurement is 1.25e-5, and a bare key in prose is
+/// 0/400,000. Both figures are over 400,000 random keys; the script is in the
+/// worker report.
+const FREE_COMPONENT_MAX: usize = 24;
+
+/// A component Logweir itself writes into an archive key.
+///
+/// These are ANCHORS in the same sense a UUID or a digest is: a run carrying
+/// one is an object key, whatever the adopter called their backup set. Without
+/// them `redact` blanked `team/prod/archives/20260915T030000Z/manifest.json`
+/// — D2-REDACT-OVERBROAD's own symptom, in the one place the tracker names it
+/// (`archive.backupSet`'s refusal message), for any set id that is not a UUID
+/// (review finding **F5**). A random credential never contains one.
+fn is_archive_component(c: &str) -> bool {
+    const WORDS: [&str; 6] = [
+        "manifest",
+        "topics",
+        // Global Constraint 6's reserved root, and what hangs off it.
+        "logweir",
+        "backups",
+        "readiness",
+        "blobs",
+    ];
+    if WORDS.contains(&c) {
+        return true;
+    }
+    let numbered = |rest: &str| !rest.is_empty() && rest.bytes().all(|b| b.is_ascii_digit());
+    c.strip_prefix("partition=").is_some_and(numbered)
+        || c.strip_prefix("segment-").is_some_and(numbered)
+}
+
 /// Anything an object key may hold once the run is known to BE an object key:
 /// no `+`, and no component long enough to be a credential.
 fn is_key_component(c: &str) -> bool {
@@ -2607,13 +2648,15 @@ fn is_fact_pair(c: &str) -> bool {
 ///   lower-case name, or a `<factName>=<identifier>` pair. This is what lets a
 ///   bare `signerKeyId`, an `imageID`'s digest, a Secret `<ns>/<name>` and a
 ///   prefix-joined manifest key through.
-/// * **or the run is ANCHORED** by a component that is a UUID or a digest — a
-///   backup set id or a content digest — which makes the run an object key
-///   rather than a token, and **at most one** of its remaining components may
-///   be something other than a public form. Kafka topic names may carry upper
-///   case, and the strict clause above would have redacted the whole segment
-///   path for `payments-EU`; a segment key has exactly ONE adopter-chosen
-///   component, which is that topic name.
+/// * **or the run is ANCHORED** — by a UUID, by a digest, or by a component
+///   this product itself writes into an archive key
+///   ([`is_archive_component`]) — which makes the run an object key rather than
+///   a token. **At most one** of its remaining components may then be something
+///   other than a public form, and that one is capped at
+///   [`FREE_COMPONENT_MAX`]. Kafka topic names may carry upper case, and the
+///   strict clause above would have redacted the whole segment path for
+///   `payments-EU`; a segment key has exactly ONE adopter-chosen component,
+///   which is that topic name or the backup set id.
 ///
 /// # Why the anchored branch is capped at one
 ///
@@ -2644,9 +2687,24 @@ fn is_public_identifier(run: &str) -> bool {
     // `is_key_component`, whose length cap no 64- or 128-character component
     // can meet. Before that was made explicit the `is_hex_digest` disjunct in
     // the anchor test was dead code.
-    components.iter().any(|c| is_uuid(c) || is_hex_digest(c))
+    components
+        .iter()
+        .any(|c| is_uuid(c) || is_hex_digest(c) || is_archive_component(c))
         && components.iter().all(|c| public(c) || is_key_component(c))
-        && components.iter().filter(|c| !public(c)).count() <= 1
+        && at_most_one_free_component(&components)
+}
+
+/// At most one component that is not a public form, and that one no longer than
+/// [`FREE_COMPONENT_MAX`] — the clause both key-shaped tests share.
+fn at_most_one_free_component(components: &[&str]) -> bool {
+    let public = |c: &str| {
+        c.is_empty() || is_hex_digest(c) || is_uuid(c) || is_public_name(c) || is_fact_pair(c)
+    };
+    let mut free = components.iter().filter(|c| !public(c));
+    match free.next() {
+        None => true,
+        Some(one) => one.len() <= FREE_COMPONENT_MAX && free.next().is_none(),
+    }
 }
 
 /// Whether a VALUE is shaped like an object key: `/`-separated components,
@@ -2675,7 +2733,7 @@ pub fn is_object_key_shaped(value: &str) -> bool {
         c.is_empty() || is_hex_digest(c) || is_uuid(c) || is_public_name(c) || is_fact_pair(c)
     };
     components.iter().all(|c| public(c) || is_key_component(c))
-        && components.iter().filter(|c| !public(c)).count() <= 1
+        && at_most_one_free_component(&components)
 }
 
 // --------------------------------------------------------------- visibility

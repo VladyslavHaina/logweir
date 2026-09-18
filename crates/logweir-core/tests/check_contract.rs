@@ -1147,6 +1147,23 @@ fn a_public_identifier_survives_redaction() {
             r#"secret "missing-secret" not found"#.to_string(),
             "missing-secret".to_string(),
         ),
+        // **F5**, the exact string the re-verification reported. The set id is
+        // a timestamp, not a UUID, so nothing anchored the run and
+        // `archive.backupSet`'s refusal read `the backup manifest
+        // `[redacted].json``. That is D2-REDACT-OVERBROAD's own symptom in the
+        // one place the tracker names it. THE FIXTURE RUN IS 43 CHARACTERS —
+        // `an_unreadable_manifest_names_the_prefixed_key`'s is 39, one under
+        // the threshold, which is why it could not fail.
+        (
+            "the backup manifest `team/prod/archives/20260915T030000Z/manifest.json` on \
+             destination `dest-a` could not be read: AccessDenied"
+                .to_string(),
+            "team/prod/archives/20260915T030000Z/manifest.json".to_string(),
+        ),
+        (
+            "{\"missingSegment\":\"team/prod/archives/20260915T030000Z/topics/orders/partition=0/segment-1.bin\"}".to_string(),
+            "team/prod/archives/20260915T030000Z/topics/orders/partition=0/segment-1.bin".to_string(),
+        ),
         // The shipped CRD carries no `facts` map, so the controller folds them
         // into the message and redacts the whole sentence again. `=` is in the
         // run alphabet, which makes `signerKeyId=<sha256>` ONE 76-character
@@ -1244,6 +1261,24 @@ fn unkeyed_secret_material_is_still_removed() {
         (
             "relayed dGhpc2lzYXNlY3JldHZhbHVlZm9ydGVzdA=6feecc8c16c5551d9feb3eb5f77e2da773bf68bd9ef9c52927ceb2c86e56892b refused",
             "dGhpc2lzYXNlY3JldHZhbHVlZm9ydGVzdA",
+        ),
+        // **F5's other half.** The archive structure that makes a run an object
+        // key is not a licence for what sits beside it: a 40-character
+        // credential in the adopter-chosen slot is over the free-component cap,
+        // and one whose own `/` splits it is two free components.
+        (
+            "the backup manifest `team/prod/archives/wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY01/manifest.json` could not be read",
+            "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY01",
+        ),
+        (
+            "{\"missingSegment\":\"team/prod/archives/20260915T030000Z/topics/wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY/segment-1.bin\"}",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        ),
+        // The free component is capped, so a twenty-five-character upper-case run in the
+        // adopter's slot goes even with `manifest` beside it.
+        (
+            "manifest team/prod/ZZfakefakefakefakefake012/manifest.json refused",
+            "ZZfakefakefakefakefake012",
         ),
         // **F2.** An unkeyed `k=v` whose key name is not on `SECRET_KEYWORDS`.
         // The fact clause exists for what `entry_of` folds into a message, and

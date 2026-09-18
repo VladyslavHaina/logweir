@@ -4532,16 +4532,32 @@ fn a_planted_key_in_a_key_path_is_still_redacted() {
             );
         }
     }
-    // ...and an ORDINARY archive key survives whole, which is the point: the
-    // whole-string form eats it because `/`, `-`, `=` and the digits are all
-    // in the base64 alphabet.
+    // ...and an ORDINARY archive key survives whole.
     let ordinary = "kafka-backups/20260915T030000Z/topics/orders/partition=0/segment-1.bin";
     assert_eq!(logweir::check::redact_path(ordinary), ordinary);
-    assert!(
-        logweir_core::check_contract::redact(ordinary).starts_with("[redacted]"),
-        "if the whole-string form ever stops eating an ordinary archive key, `redact_path` has \
-         no reason to exist: {}",
-        logweir_core::check_contract::redact(ordinary)
+    // Since review finding **F5** the whole-string form keeps it too — a run
+    // carrying `topics`, `partition=<n>` or `manifest` is an object key
+    // whatever the adopter called their backup set, and blanking this exact
+    // message is what D2-REDACT-OVERBROAD is about.
+    assert_eq!(
+        logweir_core::check_contract::redact(ordinary),
+        ordinary,
+        "`archive.backupSet`'s refusal must name the key it could not read"
+    );
+
+    // WHAT STILL SEPARATES THE TWO, so this test keeps saying something. A
+    // run that is key-SHAPED but carries no anchor at all — no UUID, no
+    // digest, none of this product's own archive components — is an object key
+    // to `redact_path`, whose values are already known to be keys, and is not
+    // one to `redact`, which is applied to prose that may say anything.
+    let unanchored = "team-alpha/prod-region-one/MyBackupSet01";
+    assert!(unanchored.len() >= 40, "the probe must reach the threshold");
+    assert_eq!(logweir::check::redact_path(unanchored), unanchored);
+    assert_eq!(
+        logweir_core::check_contract::redact(unanchored),
+        "[redacted]",
+        "`redact` must not read an unanchored run as a key: {}",
+        logweir_core::check_contract::redact(unanchored)
     );
 }
 
