@@ -34,6 +34,8 @@ fn repo_root() -> PathBuf {
 }
 
 const GATE: &str = "scripts/check-withdrawn-claim.sh";
+/// The wrap-insensitive corpus scan the gate runs — review `d3w9` R2.
+const SCAN: &str = "scripts/withdrawn-claim-scan.py";
 
 fn gate_source() -> String {
     std::fs::read_to_string(repo_root().join(GATE))
@@ -173,6 +175,14 @@ impl Overlay {
         // The gate itself, at the path its own second exemption names — so the
         // overlay also exercises the exemption rather than only the failure.
         std::fs::copy(repo_root().join(GATE), path.join(GATE)).expect("copy the gate");
+        // AND THE SCAN THE GATE RUNS. The gate resolves it from its own
+        // directory rather than from `$ROOT`, so a fixture corpus is a thing to
+        // be scanned and not a place to find the scanner — and an overlay is a
+        // copy of the GATE plus a fixture corpus, so it carries both halves.
+        // Without this the gate refuses (loudly, which is the right failure)
+        // and every row below would assert against a refusal rather than
+        // against a verdict.
+        std::fs::copy(repo_root().join(SCAN), path.join(SCAN)).expect("copy the scan");
         Overlay { path }
     }
 
@@ -268,6 +278,92 @@ fn the_gate_enforces_every_phrase_on_its_own_list() {
              listed but not enforced is a phrase a reviewer thinks is covered. \
              The unenforced entry has {} characters. stderr was:\n{stderr}",
             p.len()
+        );
+    }
+}
+
+/// **A line break is not an exemption** — review `d3w9` R2.
+///
+/// The gate was `grep -rniF`, which is line-based, and this corpus hard-wraps
+/// prose at a median of 76 columns. A phrase that happened to break across two
+/// lines was invisible to it, and that was not a gap in one phrase: EVERY
+/// phrase on the list was escapable the same way, including the original
+/// withdrawn signing claim the gate was built for. One instance survived a
+/// whole review round in the D3 decision document; the wrap-insensitive scan
+/// found it, and two more, on its first run.
+///
+/// Each phrase is planted THREE ways — on one line, wrapped as prose, and
+/// wrapped inside a Rust doc comment (the shape that also needs the leading
+/// `///` stripped before the join). All three must go red.
+#[test]
+fn a_line_break_does_not_exempt_a_phrase() {
+    for (i, phrase) in phrases().iter().enumerate() {
+        let Some((head, tail)) = phrase.split_once(' ') else {
+            // A single-word phrase cannot wrap; nothing to prove.
+            continue;
+        };
+
+        let ov = Overlay::new(&format!("wrap-{i}"));
+        ov.plant(
+            "docs/one-line.md",
+            &format!("A sentence containing {phrase} in it.\n"),
+        );
+        ov.plant(
+            "docs/wrapped.md",
+            &format!("A sentence containing {head}\n{tail} in it.\n"),
+        );
+        ov.plant(
+            "docs/doc-comment.rs",
+            &format!("//! A sentence containing {head}\n//! {tail} in it.\n"),
+        );
+        let out = ov.run();
+        let stderr = text(&out.stderr);
+        assert!(
+            !out.status.success(),
+            "phrase {i} planted three ways left the gate green; status={:?}\nstderr:\n{stderr}",
+            out.status.code()
+        );
+        for surface in ["docs/one-line.md", "docs/wrapped.md", "docs/doc-comment.rs"] {
+            assert!(
+                stderr.contains(surface),
+                "phrase {i} was not caught in {surface}. A line break must not be a way past \
+                 this gate — escaping it would otherwise take nothing more deliberate than a \
+                 paragraph reflow. stderr was:\n{stderr}"
+            );
+        }
+    }
+}
+
+/// The scan the gate runs is a FILE, and the gate refuses without it.
+///
+/// The same shape `scripts/check-no-archive-write.sh` check 3 uses, and for the
+/// same measured reason: a heredoc body containing backticks inside a command
+/// substitution is mis-parsed by bash, and a gate that reports success having
+/// run nothing is this repository's signature defect.
+#[test]
+fn the_gate_refuses_without_its_scan() {
+    let gate = gate_source();
+    assert!(
+        gate.contains("withdrawn-claim-scan.py"),
+        "the gate names its scan by path"
+    );
+    assert!(
+        repo_root().join(SCAN).exists(),
+        "and the scan is in the tree"
+    );
+    assert!(
+        gate.contains("REFUSING to run"),
+        "a missing python3 or a missing scan is a refusal, not a silent skip: {gate}"
+    );
+    // The scan must not have to be exempted from itself — the exemption list is
+    // exactly two literal paths and `the_exemption_list_is_exactly_two_paths`
+    // asserts there is no third.
+    let scan = std::fs::read_to_string(repo_root().join(SCAN)).expect("the scan is readable");
+    for phrase in phrases() {
+        assert!(
+            !scan.to_lowercase().contains(&phrase.to_lowercase()),
+            "the scan quotes `{phrase}`, which would make it fail its own gate and need a \
+             third exemption"
         );
     }
 }

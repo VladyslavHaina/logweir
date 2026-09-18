@@ -44,14 +44,37 @@
 # `RetentionPolicy` status condition message. The gate was green, because its
 # phrase list did not carry the wording.
 #
+# THE MATCH IS WRAP-INSENSITIVE, AND THAT WAS A REAL HOLE (review `d3w9` R2).
+# This was `grep -rniF`, which is LINE-BASED, and this corpus hard-wraps prose
+# at a median of 76 columns — so a phrase that happened to break across two
+# lines was invisible. It was not a gap in one phrase: EVERY phrase below was
+# escapable the same way, including the original withdrawn signing claim this
+# gate was built for, and escaping it took nothing more deliberate than a
+# paragraph reflow. One survived here for a whole review round.
+#
+# So the match now runs over a whitespace-normalised join of each file, with a
+# leading comment marker stripped from every continuation line so a Rust doc
+# comment and a shell comment wrap the same way a paragraph does. The walk is
+# `scripts/withdrawn-claim-scan.py`, in a FILE and not a heredoc, for the reason
+# `scripts/check-no-archive-write.sh` records: a heredoc body containing
+# backticks inside a command substitution is mis-parsed by bash, and a gate that
+# reports success having run nothing is this repository's signature defect. It
+# prints `path:lineno:text`, byte for byte what `grep -rn` printed, so the
+# reporting loop below is unchanged.
+#
 # COSTS NOTHING AND REACHES NOTHING: no network, no Docker, no `.engine/`, no
-# cargo, no toolchain. It reads files.
+# cargo, no toolchain. It reads files, with python3.
 set -euo pipefail
 
 # `LOGWEIR_ROOT` exists so the tests can point this at a temp overlay; it
 # defaults to the repository root, exactly like `scripts/check-one-signer.sh:58`
 # and `scripts/check-pure-core.sh`.
 ROOT="${LOGWEIR_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
+# THE SCAN COMES FROM WHERE THIS SCRIPT LIVES, NOT FROM $ROOT. `LOGWEIR_ROOT`
+# points this gate at a fixture corpus, and a fixture corpus is a thing to be
+# SCANNED, not a place to find the scanner: resolving the tool there would make
+# every overlay test either carry a copy of it or silently exercise nothing.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$ROOT"
 
 # The withdrawn claim and its paraphrases. Fixed strings (`grep -F`), matched
@@ -121,50 +144,74 @@ DIR_SURFACES=(
   scripts
 )
 
-grep_args=()
+# The scan needs python3. REFUSE, naming it, rather than falling through: a
+# guard that skips its only check and still exits 0 is a check that cannot fail.
+SCAN="$SCRIPT_DIR/withdrawn-claim-scan.py"
+if ! command -v python3 >/dev/null 2>&1; then
+  echo "check-withdrawn-claim: REFUSING to run — \`python3\` is not on PATH." >&2
+  echo "  The corpus scan is wrap-insensitive and is written in python3; a" >&2
+  echo "  line-based grep fall-back would silently reinstate the hole this" >&2
+  echo "  gate was fixed to close (review d3w9 R2). Install it and re-run." >&2
+  exit 1
+fi
+if [ ! -f "$SCAN" ]; then
+  echo "check-withdrawn-claim: REFUSING to run — $SCAN is missing, so this" >&2
+  echo "  gate scanned nothing, and a gate that scans nothing passes forever." >&2
+  exit 1
+fi
+
+# The phrase list, handed to the scan as a file: one phrase per line, so a
+# phrase containing a space, a backtick or a slash needs no quoting dance.
+phrase_file="$(mktemp)"
+trap 'rm -f "$phrase_file"' EXIT
 for phrase in "${PHRASES[@]}"; do
-  grep_args+=(-e "$phrase")
+  printf '%s\n' "$phrase" >> "$phrase_file"
 done
 
-# One `grep` invocation per surface group, its status handled on its own line:
-# `grep` exits 1 for "no match", which is the GREEN case here, so a bare
-# pipeline under `set -e` would abort the script on success. Nothing here reads
-# an exit code through a pipe.
-hits=""
-collect() {
-  local out
-  out="$(grep -rniF "${grep_args[@]}" "$@" 2>/dev/null || true)"
-  if [ -n "$out" ]; then
-    hits="$hits$out"$'\n'
-  fi
-}
-
-present_files=()
+# Every file of every surface, enumerated here rather than by `grep -r` so the
+# scan sees exactly what the greps saw. `find`'s status is read on its own line;
+# nothing here reads an exit code through a pipe.
+targets=()
 for f in "${FILE_SURFACES[@]}"; do
-  [ -f "$f" ] && present_files+=("$f")
+  [ -f "$f" ] && targets+=("$f")
 done
-if [ "${#present_files[@]}" -gt 0 ]; then
-  collect "${present_files[@]}"
-fi
-
 for d in "${DIR_SURFACES[@]}"; do
-  if [ -d "$d" ]; then
-    collect "$d"
-  fi
+  [ -d "$d" ] || continue
+  while IFS= read -r found; do
+    [ -n "$found" ] && targets+=("$found")
+  done < <(find "$d" -type f 2>/dev/null | LC_ALL=C sort)
 done
-
 if [ -d crates ]; then
-  collect --include='*.rs' crates
+  while IFS= read -r found; do
+    [ -n "$found" ] && targets+=("$found")
+  done < <(find crates -type f -name '*.rs' 2>/dev/null | LC_ALL=C sort)
 fi
 
-echo "== corpus grep: no shipped surface restates the withdrawn claim about signing =="
-echo "   ${#PHRASES[@]} phrases; exempt, as literal paths: $EXEMPT_1, $EXEMPT_2"
+if [ "${#targets[@]}" -eq 0 ]; then
+  echo "FAIL: no surface file was found at all; this gate asserted nothing" >&2
+  exit 1
+fi
+
+hits_file="$(mktemp)"
+trap 'rm -f "$phrase_file" "$hits_file"' EXIT
+python3 "$SCAN" "$phrase_file" "${targets[@]}" > "$hits_file"
+scan_status=$?
+if [ "$scan_status" -ne 0 ]; then
+  echo "FAIL: the corpus scan exited $scan_status; it asserted nothing" >&2
+  exit 1
+fi
+hits="$(cat "$hits_file")"
+
+echo "== corpus scan: no shipped surface restates the withdrawn claim about signing =="
+echo "   ${#PHRASES[@]} phrases over ${#targets[@]} file(s), matched ACROSS LINE WRAPS;"
+echo "   exempt, as literal paths: $EXEMPT_1, $EXEMPT_2"
 
 fail=0
 while IFS= read -r line; do
   [ -n "$line" ] || continue
-  # `grep -rn` output is `path:line:text`; the path can contain no colon in
-  # this tree, and the surfaces are all relative to $ROOT.
+  # The scan's output is `path:line:text` — the shape `grep -rn` printed; the
+  # path can contain no colon in this tree, and the surfaces are all relative
+  # to $ROOT.
   path="${line%%:*}"
   rest="${line#*:}"
   lineno="${rest%%:*}"
