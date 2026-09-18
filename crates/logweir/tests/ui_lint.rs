@@ -1868,3 +1868,73 @@ fn the_preview_server_binds_loopback_and_refuses_writes() {
         "and the command that starts it"
     );
 }
+
+/// The live console journey and the page agree about the probe panel's
+/// control, BY ITS LABEL.
+///
+/// # The staleness this exists to catch happened
+///
+/// `scripts/plat12-13-ui-e2e.mjs`'s journey *"a failed probe shows the
+/// controller's reason"* asserted `panel.includes("Test connection")` on
+/// `#cluster-probe`. `d2-source-check` relabelled that panel's button to
+/// `Re-read probe` and moved "Test connection" to the control that really
+/// dials — and the assertion KEPT PASSING, because the panel's own sentence
+/// still says those words while pointing somewhere else. The lab reported a
+/// 20-of-20 run in which one journey had quietly stopped checking that the
+/// probe panel offers a control at all (`lab-refresh-4` §10.3).
+///
+/// A live harness is the wrong place to notice that: it needs a cluster, so it
+/// runs rarely, and it asserts on rendered TEXT, which two different sentences
+/// can satisfy. This is the cheap half — the page's button label and the
+/// journey's expectation are read out of the two sources and compared, in the
+/// default `cargo test` suite, so relabelling one without the other is red in
+/// seconds rather than a green run that checks less than it says.
+#[test]
+fn the_live_journey_expects_the_probe_control_the_page_actually_ships() {
+    let select = read(&repo_root().join("ui").join("select.js"));
+    let harness = read(&repo_root().join("scripts").join("plat12-13-ui-e2e.mjs"));
+
+    // The label the page emits, read out of `renderTestConnection`'s own
+    // button rather than out of a constant a test could drift from.
+    let at = select
+        .find("export function renderTestConnection(")
+        .expect("ui/select.js still renders the probe panel's control");
+    let body = &select[at..];
+    let open = body
+        .find("<button type=\\\"submit\\\"")
+        .expect("that control is still a submit button");
+    let after = &body[open..];
+    let start = after.find('>').expect("the button tag closes") + 1;
+    let end = after.find("</button>").expect("the button element closes");
+    let label = after[start..end].trim().to_string();
+
+    assert!(
+        !label.is_empty() && !label.contains('+') && !label.contains("esc("),
+        "the probe control's label is no longer a plain literal in \
+         `renderTestConnection`, so this guard can no longer read it: `{label}`"
+    );
+
+    // The journey's expectation, read out of the one assertion about it.
+    let journey = harness
+        .find("aFailedProbeShowsTheControllersReason")
+        .expect("the journey still exists");
+    let scope = &harness[journey..];
+    let expected = "check(rereadLabel === \"";
+    let e_at = scope.find(expected).unwrap_or_else(|| {
+        panic!(
+            "the journey no longer compares the probe control's label to an exact string. It \
+             asserted `panel.includes(...)` on the panel's TEXT until the label moved under it \
+             and the assertion kept passing; reading the BUTTON is what makes it a control \
+             assertion, and this guard is what keeps the two in step."
+        )
+    });
+    let rest = &scope[e_at + expected.len()..];
+    let wanted = &rest[..rest.find('"').expect("the expected label closes")];
+
+    assert_eq!(
+        wanted, label,
+        "the live console journey expects the probe panel's button to read `{wanted}` and \
+         `ui/select.js` renders `{label}`. One of them was relabelled without the other, which \
+         is exactly how that journey came to assert nothing after the `Re-read probe` rename."
+    );
+}

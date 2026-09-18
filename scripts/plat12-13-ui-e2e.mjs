@@ -1431,7 +1431,17 @@ async function aFailedProbeShowsTheControllersReason(browser, base) {
     await page.waitForSelector("#cluster-probe");
     const panel = await page.locator("#cluster-probe").innerText();
     check(panel.includes("ConnectionConfigInvalid"), "the detail panel names the reason: " + panel);
-    check(panel.includes("Test connection"), "and offers the re-read control: " + panel);
+    // THE CONTROL, BY ITS BUTTON AND NOT BY PROSE. This asserted
+    // `panel.includes("Test connection")` until d2-source-check relabelled the
+    // probe panel's button to `Re-read probe` and moved "Test connection" to
+    // the control that really dials. The assertion kept passing -- the panel's
+    // sentence still says the words, while pointing somewhere else -- so this
+    // journey had stopped checking that the probe panel offers a control at
+    // all. Reading the BUTTON is what makes it a control assertion again.
+    const rereadLabel = (await page.locator("#cluster-probe form.probe-test button").innerText())
+      .trim();
+    check(rereadLabel === "Re-read probe",
+      "the probe panel offers its re-read control, by the label the page ships: " + rereadLabel);
     check(!/\bready\b/i.test(panel), "and never says ready: " + panel);
     await shot(page, "probe-refused-detail");
     record("a failed probe shows the controller's reason", {
