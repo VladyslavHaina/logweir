@@ -5548,3 +5548,111 @@ async fn a_terminal_restore_whose_job_lost_its_ttl_has_it_repaired() {
         "with the configured TTL and nothing else: {patch}"
     );
 }
+
+/// **Review round 1, N1: the `Restore` half of F1.**
+///
+/// The `Backup` twin
+/// (`backup_controller::no_terminal_patch_deletes_the_condition_that_says_why_the_run_failed`)
+/// guards its own three builders, and the `Restore` builders were left
+/// CORRECT BUT UNGUARDED — the reviewer dropped `RunnerReady` from
+/// `crashed_status_patch` and all sixty-two rows in this file still passed.
+/// A guard without a mutant is not a guard (WORKER-RULES), and this kind has
+/// the twin defect available: a merge patch REPLACES arrays, so the terminal
+/// patch that records a failure would delete the only condition saying what
+/// the failure WAS, and a terminal `Restore` requeues `AwaitChange` — nothing
+/// ever reconciles it again to put the condition back.
+///
+/// All three builders, because the carry is a property of each of them and not
+/// of the reconcile that happens to call one.
+///
+/// MUTANT: dropping `CONDITION_RUNNER_READY` from any of the three
+/// `carry_conditions` calls in `controllers/restore.rs`.
+#[test]
+fn no_terminal_restore_builder_deletes_the_condition_that_says_why_the_run_failed() {
+    // The object as the progress path left it: stuck, and the status says why.
+    let mut stuck = restore();
+    stuck.status = Some(RestoreStatus {
+        conditions: Some(
+            serde_json::from_value(serde_json::json!([{
+                "type": "RunnerReady",
+                "status": "False",
+                "reason": "CredentialReferenceMissing",
+                "message": "secret \"logweir-restore-incident-4471-approval-bundle\" not found",
+                "lastTransitionTime": "2026-09-10T11:58:00Z",
+            }]))
+            .expect("the stored condition array"),
+        ),
+        ..RestoreStatus::default()
+    });
+
+    let keys = RestoreEvidenceKeys::default();
+    let cases: Vec<(&str, Value)> = vec![
+        (
+            "crashed_status_patch — what a fail-fast cancellation produces, and \
+             the one the reviewer's mutant reached",
+            crashed_status_patch(&stuck, "NoExitCode", NAME, now()),
+        ),
+        (
+            "refused_status_patch — a refusal this controller decided by itself",
+            refused_status_patch(&stuck, TERMINAL_STATE_NAME_TOO_LONG, "too long", now()),
+        ),
+        (
+            "finished_status_patch exit 0",
+            finished_status_patch(&stuck, 0, &keys, None, None, None, None, now()),
+        ),
+        (
+            "finished_status_patch exit 2",
+            finished_status_patch(&stuck, 2, &keys, None, None, None, None, now()),
+        ),
+        (
+            "finished_status_patch exit 3, a guard refusal",
+            finished_status_patch(
+                &stuck,
+                3,
+                &keys,
+                Some(TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON),
+                None,
+                None,
+                None,
+                now(),
+            ),
+        ),
+    ];
+
+    for (label, patch) in &cases {
+        let carried = conditions_of(&patch["status"])
+            .into_iter()
+            .find(|(t, ..)| t == "RunnerReady")
+            .unwrap_or_else(|| {
+                panic!(
+                    "[{label}] dropped `RunnerReady`. D3 §2.2: every terminal builder carries it \
+                     and `Verified` forward. A terminal `Restore` requeues `AwaitChange`, so the \
+                     patch that RECORDS the failure is the last word — deleting the condition \
+                     that explains it is permanent. Got: {patch}"
+                )
+            });
+        assert_eq!(
+            (carried.1.as_str(), carried.2.as_str()),
+            ("False", "CredentialReferenceMissing"),
+            "[{label}] carries it VERBATIM. None of these builders owns this condition, and \
+             re-deriving it would mean reading a pod that step 2b's guard exists to stop them \
+             reading"
+        );
+    }
+
+    // …AND THE SCALAR REASON IS STILL THE TERMINAL ONE. `RunnerReady` riding
+    // along must not capture the REASON column, which speaks for the condition
+    // this patch is about — review finding M2, and the rule
+    // `every_status_write_sets_the_scalar_reason` holds over every builder.
+    for (label, patch) in &cases {
+        let reason = patch["status"]["reason"]
+            .as_str()
+            .unwrap_or_else(|| panic!("[{label}] every status write sets a scalar reason"));
+        assert_ne!(
+            reason, "CredentialReferenceMissing",
+            "[{label}] the run is over; the REASON column names how it ENDED, not what it was \
+             once stuck on. The `RunnerReady` reason is the scalar only while that condition is \
+             the current state, which is the running path's rule and not this one's"
+        );
+    }
+}
