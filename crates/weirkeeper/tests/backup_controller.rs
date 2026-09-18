@@ -10660,3 +10660,146 @@ fn a_destination_backed_backup_job_names_its_evidence_credential() {
         legacy.env_literal
     );
 }
+
+/// **A JOB RE-CREATED AFTER THE DESTINATION WAS EDITED READS THE PLAN AND NOT
+/// THE OBJECT** — the reconcile half of the review's M1/M2.
+///
+/// # Why the pure row above is not enough
+///
+/// `a_destination_edited_after_the_freeze_does_not_change_a_created_run` proves
+/// `desired_execution_inputs_frozen` renders the stored block faithfully. It
+/// says nothing about whether the RECONCILER calls it — and a mutant replacing
+/// `stored_destination` with `None` survived that row while re-resolving the
+/// live object on every Job-gone pass, which is the defect itself.
+///
+/// # The route table is the assertion
+///
+/// **There is no `backupdestinations` route.** The double panics on a request
+/// it was not given a route for, so a pass that reads the destination at all
+/// fails here by construction — which is exactly the property D2 §3.7 states:
+/// a run that is already frozen does not consult the object again. The edited
+/// object is never even served, so the row cannot be satisfied by a
+/// coincidentally-equal resolution.
+///
+/// KILLS: `stored_destination` replaced by `None` in `reconcile_backup_inner`
+/// (the reconcile then GETs the destination and the double panics); and
+/// `desired_execution_inputs_frozen` swapped back for the resolving arm.
+#[tokio::test]
+async fn a_frozen_destination_backed_backup_recreates_its_job_without_reading_the_destination() {
+    let backed = destination_backed_backup("dest-a");
+    let selection = weirkeeper::backup_execution::ResolvedSelection::named(&backed.spec);
+    let frozen = desired_execution_inputs_for_destination(
+        &backed,
+        &prod_cluster(),
+        &selection,
+        Some(&both_roles(dest_a_value())),
+    )
+    .expect("the freeze resolves");
+    let plan = serde_json::to_value(
+        weirkeeper::backup_execution::inputs_config_map(&backed, &frozen)
+            .expect("the plan renders"),
+    )
+    .expect("a ConfigMap serialises");
+
+    // The object as a previous pass left it: inputs frozen and recorded, the
+    // Job created and reported running — and then the Job is gone.
+    let mut stored = with_status_patch(
+        &backed,
+        &weirkeeper::controllers::backup::execution_status_patch(&frozen),
+    );
+    let running = running_status_patch(&stored, NAME, utc(2026, 11, 9, 3, 17));
+    stored = with_status_patch(&stored, &running);
+
+    let routes = vec![
+        Route {
+            method: "GET",
+            path_suffix: "/jobs/logweir-backup-nightly-20261109-031700",
+            status: 404,
+            body: not_found_body("jobs.batch", NAME),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/kafkaclusters/prod",
+            status: 200,
+            body: kafka_cluster_json(),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/configmaps/logweir-backup-nightly-20261109-031700-plan",
+            status: 200,
+            body: plan.to_string(),
+        },
+        // ROUTED SO THAT "NO SECOND PLAN" IS AN ASSERTION AND NOT AN ABSENCE.
+        Route {
+            method: "POST",
+            path_suffix: "/configmaps",
+            status: 201,
+            body: plan.to_string(),
+        },
+        Route {
+            method: "POST",
+            path_suffix: "/jobs",
+            status: 201,
+            body: running_job_body(),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/status",
+            status: 200,
+            body: backup_json(),
+        },
+        // …AND DELIBERATELY NO `/backupdestinations/dest-a`. See the doc
+        // comment: reading it at all is the defect, and the double panics.
+    ];
+    let (client, _seen, bodies) = mock_client_recording_bodies(routes);
+    let outcome = reconcile_backup(
+        &stored,
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 30),
+    )
+    .await
+    .expect("a frozen destination-backed run re-creates its Job from the plan it holds");
+    let bodies = bodies.lock().expect("readable").clone();
+
+    assert!(
+        outcome.created,
+        "the missing Job is re-created rather than the run being refused: {:?}",
+        calls(&bodies)
+    );
+    assert_eq!(
+        outcome.terminal_state, None,
+        "and it is NOT a PlanConfigMapConflict, which is what re-resolving an edited \
+         destination would produce on an archive that may be half written"
+    );
+    assert!(
+        !bodies
+            .iter()
+            .any(|b| path(&b.uri).contains("/backupdestinations")),
+        "D2 §3.7: a frozen run does not consult its BackupDestination again. Got {:?}",
+        calls(&bodies)
+    );
+    assert!(
+        !bodies
+            .iter()
+            .any(|b| b.method == "POST" && path(&b.uri).ends_with("/configmaps")),
+        "no second plan is created: {:?}",
+        calls(&bodies)
+    );
+    assert!(!rewrote_a_config_map(&bodies));
+    assert_eq!(
+        posted_job(&bodies).expect("the Job was POSTed"),
+        serde_json::to_value(
+            runner_job(
+                &backed,
+                &prod_cluster(),
+                &frozen,
+                &job::RunnerImage::default()
+            )
+            .expect("the Job renders")
+        )
+        .expect("a Job serialises"),
+        "and the Job is the one the FROZEN inputs describe, evidence credential included"
+    );
+}
