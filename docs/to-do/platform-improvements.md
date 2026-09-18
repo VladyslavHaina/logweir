@@ -110,6 +110,24 @@ kept their phase and the 18th changed only as PLAT-07.1 predicts
 Never`, so a worker rebuilding them changes the lab without a Deployment diff —
 the revision label is how drift is detected until the fixture is pinned.
 
+Shared lab fixture (2026-09-18, `lab-refresh-2`): both images rebuilt from main
+`e7d0e79` (`weirkeeper:scram-reviewed` `sha256:dcb63a07…`, `logweir:scram-local`
+`sha256:930c304e…`; the `c1d3411` pair kept as `-c1d3411` tags), the CRDs applied from
+`config/crd` (14 kinds; exactly the five changed files moved a generation — `backups`,
+`backupschedules`, `recoverycatalogs`, `retentionpolicies`, `trustpolicies` — every UID
+unchanged), the `weirkeeper` ClusterRole 7 → 26 rules and `logweir-trust-admin` created
+(every grant verified with `auth can-i` plus negative controls), the `weirkeeper-policy`
+ConfigMap applied with its `LOGWEIR_POLICY_CONFIGMAP`/`LOGWEIR_INSTALLATION_NAMESPACE`
+wiring patched into the lab Deployment (the chart renders both; the lab Deployment predated
+them), the VAP not applied (values off, no console ServiceAccount); one pod,
+`"controllers":14`, no `Forbidden` in two minutes; `test-plat06-live.py` 7/7,
+`test-plat07-live.py` 6/6, the forged-subject journey 20/20. Five 2026-09-14 objects went
+`Valid` → `Untrusted` (TRUST-UPGRADE-SIGNEDAT). Report `claude/lab-refresh-2.result.md`.
+The three live waves then ran against it: D1 W8 (`b500190`, `scripts/live/d1/`), D2 W14
+(`d3cc637`, `e2e/k8s/d2/`), D3 W14 (`1ab43cd`, `e2e/k8s/d3/`), each with an independent review
+that re-ran part of the evidence; no task reached Done — every unmet acceptance item and
+every defect is recorded under its task and in the defect table.
+
 Claude orchestration recovery: worker rules, reports and artifacts are under
 `/tmp/logweir-roadmap-run/claude/`; workers use isolated worktrees under
 `/tmp/logweir-roadmap-run/wt/` and serialize docker-desktop operations that
@@ -139,9 +157,9 @@ Wave 2 resumes every branch in place with the prompts under
 | PLAT-12.1 (immediate slice), PLAT-12.2 (subject slice) | In progress (slices landed) | ui-correct | The guided submit, idempotent durable Restore and subject binding landed with PLAT-13.2 (records under each task); remaining: PLAT-11.2/13.2-backed selection flow and PLAT-19.2 policy routing for 12.1, retry identity for 12.2. |
 | PLAT-17.2 (stage 2) | In progress (stage landed) | plat17-2-authz, plat17-2-authz-review | Partial record under PLAT-17.2. Integrated into main as `24752f4..90ecd0c`. Shared mode is implemented and live-verified locally but not deployable or declarable secure until D0 stages 5 and 7. |
 | PLAT-17.1 (stages 1 and 3) | In progress (stages landed) | plat17-api-finish, plat17-api-review | Partial record under PLAT-17.1. Integrated into main as `4b571d1..de0207c`. Remaining for Done: console image and chart with the API's own RBAC (D0 stage 7), transient-check cancellation once PLAT-03/09.1 exist, `POST …/backups` (PLAT-06.2), SSE (PLAT-14.1), a browser journey through the API, and PLAT-17.2. |
-| PLAT-04.2, 05.x, 06.2, 09.2 | Contract decided | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. W1 (the pure cadence engine) landed in main as `6eedc0a..4b54a5c` after review; see the PLAT-04.2 partial record. W3a (the `Backup` run contract: `spec.trigger`, `spec.scheduleRef` with generation and `runPolicySha256`, the selection type with `allUserTopics` requiring `incompleteDiscovery`, `status.selection`, `src/identity.rs`, `src/policy.rs`, the §3.4 vocabulary) landed in `696c81a`/`b334a98` inside `crds-shapes`; a `Backup` naming both `topics` and `allUserTopics` is refused by CEL and, terminally, by admission. W3b (the reconciler consumes the contract; grammar `v2`) landed at `397e37d`; see the PLAT-04.2 partial record. W2 (editable policy, the §4.5 scheduler; `destinationRef` editable) landed at `98257f8`; see the PLAT-05.1/04.2 partial record. W5 (dynamic selection per run through the check runner) landed at `7072b9d`; see the PLAT-09.2 partial record. W6 (cadence previews, `PUT schedules`, `POST backups`) landed at `72751ab`; see the PLAT-06.2 partial record. W4 (retained history; runs detached from the schedule's ownerReference) landed at `6845ffb`; see the PLAT-05.2 partial record. W7, W8 remain. |
-| PLAT-03.x, 08.x, 09.1 | In progress (W1, W2, W3, W4, W5, W6a, W6b, W7, W8, W9, W12, W13, W11, W10 landed) | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. W1 (pure check contract and destination model) and W2 (explicit store options) landed as `c13b0cc..56bd074` after review (ACCEPT after two high and three medium fixes: JSON-form redaction bypass, ambient credentials inheriting the environment). W3 (`logweir_kafka::inventory`: bounded targeted describe, broker count, validate-only `CreateTopics`, error classification where an observed authorization failure makes visibility `limited` and anything unknown is failure, with a real admin-client fault capture because rdkafka 0.36 never invokes `ClientContext::error` for a metadata-only workflow — D2 §4.2 `[VERIFY U5]` corrected) and W5 (`weirkeeper::check`: check Jobs mirroring the execution pod, pod selection by controller owner UID only, framed-stdout relay through the W1 decoder, the full waiting-code table, TTL, plan/chunk/limit modules, the installation policy loader failing closed) landed as `23cec50..b8e62d1` after review (ACCEPT after one high and three medium fixes; 19 mutants killed; the rebase over PLAT-07.1 then routed the inventory client through the reader's `client_config`, removing a drifted copy that could upgrade plaintext to TLS when a CA was present — re-checked ACCEPT; weirkeeper 435, kafka 57). RBAC still owed by W11: `events: list` plus its `manifest_lint` row, the three new kinds' verbs, and a decision on `gc.rs`'s deletes. The reviewers' SEC-PODLOG finding against `controllers::backup::select_job_pod` is closed by `secpodlog` (see the defects table). W6a and W6b (the three Amendment F kinds and the destination sentinel on existing kinds) landed in `46880a3`/`88232f5`/`b334a98` inside `crds-shapes`; W7 (destination resolver, controller, evidence store cache) landed as `27fb924..0b25e95` (see the PLAT-08.1 partial record); W4 (runner `logweir check run`) landed at `537657d` (see the PLAT-03 partial record); W8 (`TopicDiscovery` controller) and W12 (API routes) are in review or in progress. W9, W10, W11, W13, W14 remain. |
-| PLAT-14.x, 15.x, 16.x, 19.1 | In progress (W0, W1, W3, W4, W8, W5, W6, W10, W7, W9, W2 landed) | [D3](decisions/D3-status-catalog-retention-trust.md) | Operation states, protection freshness, rehearsals, durable catalog, retention enforcement boundary, trust lifecycle; fifteen worker tasks. W4 (`d3-notify`: the shared notification module and `logweir notify deliver`) landed after review (ACCEPT after two high fixes); W3 (`d3-catalog-writer`: signed catalog point records, `list_page`, `logweir catalog sync|list`) landed after review (see the PLAT-15.1 partial record); W0 (the five Amendment G kinds, additive run status, `Restore.spec` additions, the `Approval` enum) landed in `496451a`/`88232f5`/`b334a98` inside `crds-shapes`; W1 (trust lifecycle core, `TrustPolicy` controller, `trust export|migrate-roster`, G8) landed as `64fcd38..5fc1a72` (see the PLAT-19.1 partial record); W8 (`RecoveryCatalog` controller) in progress. W2, W5, W6, W7, W9, W10, W11, W12, W13, W14 remain. |
+| PLAT-04.2, 05.x, 06.2, 09.2 | In progress (W1, W2, W3a, W3b, W4, W5, W6 landed; W8 live run 2026-09-18 — no task Done, see the live validation records and D1-DISCOVERY-IMAGE) | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. W1 (the pure cadence engine) landed in main as `6eedc0a..4b54a5c` after review; see the PLAT-04.2 partial record. W3a (the `Backup` run contract: `spec.trigger`, `spec.scheduleRef` with generation and `runPolicySha256`, the selection type with `allUserTopics` requiring `incompleteDiscovery`, `status.selection`, `src/identity.rs`, `src/policy.rs`, the §3.4 vocabulary) landed in `696c81a`/`b334a98` inside `crds-shapes`; a `Backup` naming both `topics` and `allUserTopics` is refused by CEL and, terminally, by admission. W3b (the reconciler consumes the contract; grammar `v2`) landed at `397e37d`; see the PLAT-04.2 partial record. W2 (editable policy, the §4.5 scheduler; `destinationRef` editable) landed at `98257f8`; see the PLAT-05.1/04.2 partial record. W5 (dynamic selection per run through the check runner) landed at `7072b9d`; see the PLAT-09.2 partial record. W6 (cadence previews, `PUT schedules`, `POST backups`) landed at `72751ab`; see the PLAT-06.2 partial record. W4 (retained history; runs detached from the schedule's ownerReference) landed at `6845ffb`; see the PLAT-05.2 partial record. W7, W8 remain. |
+| PLAT-03.x, 08.x, 09.1 | In progress (W1, W2, W3, W4, W5, W6a, W6b, W7, W8, W9, W12, W13, W11, W10 landed; W14 live run 2026-09-18 — no task Done, five defects D2-*) | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. W1 (pure check contract and destination model) and W2 (explicit store options) landed as `c13b0cc..56bd074` after review (ACCEPT after two high and three medium fixes: JSON-form redaction bypass, ambient credentials inheriting the environment). W3 (`logweir_kafka::inventory`: bounded targeted describe, broker count, validate-only `CreateTopics`, error classification where an observed authorization failure makes visibility `limited` and anything unknown is failure, with a real admin-client fault capture because rdkafka 0.36 never invokes `ClientContext::error` for a metadata-only workflow — D2 §4.2 `[VERIFY U5]` corrected) and W5 (`weirkeeper::check`: check Jobs mirroring the execution pod, pod selection by controller owner UID only, framed-stdout relay through the W1 decoder, the full waiting-code table, TTL, plan/chunk/limit modules, the installation policy loader failing closed) landed as `23cec50..b8e62d1` after review (ACCEPT after one high and three medium fixes; 19 mutants killed; the rebase over PLAT-07.1 then routed the inventory client through the reader's `client_config`, removing a drifted copy that could upgrade plaintext to TLS when a CA was present — re-checked ACCEPT; weirkeeper 435, kafka 57). RBAC still owed by W11: `events: list` plus its `manifest_lint` row, the three new kinds' verbs, and a decision on `gc.rs`'s deletes. The reviewers' SEC-PODLOG finding against `controllers::backup::select_job_pod` is closed by `secpodlog` (see the defects table). W6a and W6b (the three Amendment F kinds and the destination sentinel on existing kinds) landed in `46880a3`/`88232f5`/`b334a98` inside `crds-shapes`; W7 (destination resolver, controller, evidence store cache) landed as `27fb924..0b25e95` (see the PLAT-08.1 partial record); W4 (runner `logweir check run`) landed at `537657d` (see the PLAT-03 partial record); W8 (`TopicDiscovery` controller) and W12 (API routes) are in review or in progress. W9, W10, W11, W13, W14 remain. |
+| PLAT-14.x, 15.x, 16.x, 19.1 | In progress (W0, W1, W3, W4, W8, W5, W6, W10, W7, W9, W2 landed; W14 live run 2026-09-18 — no task Done, RET-DIGEST-PREFIX, RET-NOIMAGE, CATALOG-RESYNC-NOT-HARVESTED, TRUST-UPGRADE-SIGNEDAT) | [D3](decisions/D3-status-catalog-retention-trust.md) | Operation states, protection freshness, rehearsals, durable catalog, retention enforcement boundary, trust lifecycle; fifteen worker tasks. W4 (`d3-notify`: the shared notification module and `logweir notify deliver`) landed after review (ACCEPT after two high fixes); W3 (`d3-catalog-writer`: signed catalog point records, `list_page`, `logweir catalog sync|list`) landed after review (see the PLAT-15.1 partial record); W0 (the five Amendment G kinds, additive run status, `Restore.spec` additions, the `Approval` enum) landed in `496451a`/`88232f5`/`b334a98` inside `crds-shapes`; W1 (trust lifecycle core, `TrustPolicy` controller, `trust export|migrate-roster`, G8) landed as `64fcd38..5fc1a72` (see the PLAT-19.1 partial record); W8 (`RecoveryCatalog` controller) in progress. W2, W5, W6, W7, W9, W10, W11, W12, W13, W14 remain. |
 
 ### Decision records
 
@@ -219,6 +237,17 @@ surviving. None is fixed yet except where a worker is named.
 | STATUS-RECORDS | `Backup.status.records` is declared in `config/crd/backups.yaml` with a `RECORDS` printer column and is never written by any controller path; it is blank on every Backup the PLAT-06.1 and PLAT-07.1 live runs produced and on the lab's own scheduled Backup, while the counts exist in the signed receipt. Found by plat07-live. Either write it from the verified receipt or drop the field and column. **Fixed** by D3 W2 at `d69ca1a`: written from the verified receipt only, absent otherwise; `status.completion`/`status.teardown` remain declared-and-unwritten (owner needed). | PLAT-14.1 (D3 W2 status/progress) |
 | RECEIPT-DUP | A Backup Job re-created from its frozen inputs (PLAT-06.1 case e) writes a second run-id receipt under the same execution id while overwriting the manifest at the same key; if the topic advanced between the runs, the first signed receipt's digests no longer match and a verifier reports it Invalid. Found by plat06-review (M1); run identity is idempotent, signed evidence is not. | PLAT-15.1 catalog / D3 W3 (point identity is content-derived from the receipt) |
 | LINT-INLINE-CALL | The reverse RBAC lint (`manifest_lint::every_call_site_has_a_grant`) and its forward twin do not see an inline `Api::<T>::namespaced(…).delete(…)` call shape (plat06-review L1), so a future controller call written that way would escape both. | PLAT-20.1 regression set; fix alongside the next controller task that adds a call |
+| D1-DISCOVERY-IMAGE | A dynamic `Backup`'s discovery Job names the compile-time image pin: `backup_selection::resolve` (`crates/weirkeeper/src/controllers/backup_selection.rs:1022`) never receives the process `RunnerImage`, the builder at `:1307` leaves `image: None` and `:1310` posts the Job directly, so the Job carries `job.rs:62`'s `RUNNER_IMAGE` digest with `imagePullPolicy: Never` (`job.rs:261`) — `ErrImageNeverPull`, then `DeadlineExceeded` → `TopicsResolved=False/DiscoveryFailed`. Every other Job builder is overwritten by its reconciler with `ctx.runner_image` (`kafka_cluster.rs:1123`, `topic_discovery.rs:1562`, `recovery_catalog.rs:635`, `retention_policy.rs:1784`); the runner Job of the same namespace and minute got `logweir:scram-local` and completed in 4 s. On a default chart install the discovery Job would name an unpublished digest under `Never` while `LOGWEIR_RUNNER_IMAGE`/`LOGWEIR_RUNNER_PULL_POLICY` reach only the runner Job, so PLAT-09.2's dynamic half is unusable on every installation. Evidence: `claude/d1w8.result.md` §6, `artifacts/d1-live/20260918t0330z/objects/L-09-1/`. Fix (not started): pass the process `RunnerImage` into `resolve` and set `image`/`image_pull_policy` on the `CheckJobSpec` as the other call sites do, with a regression arm asserting the discovery Job's image equals the configured one. | PLAT-09.2 (D1 W5) |
+| D2-RESULTUNREADABLE | A `TopicDiscovery` (and the API's timeout path) whose check Job relays a classified `notReady` result — `connection.authenticated` `BrokerUnreachable` for an unreachable bootstrap, `AuthenticationFailed` after a broker-side password change — ends `Failed` with `status.reason: ResultUnreadable`: the `CheckPhase::Succeeded → commit()` path in `crates/weirkeeper/src/controllers/topic_discovery.rs` treats "no inventory" as unreadable before it reads the relayed check codes. The pod's own frame carries the right code, message and remedy (`d2-live/<ts>/objects/s11/td-timeout-relayed.json`). Consequence: the console cannot tell an unreachable broker from a rejected password (PLAT-09.1 timeout and rotation tests FAIL; PLAT-17.1's timeout half PARTIAL). Evidence: `claude/d2w14.result.md` §5.1, S11/S12/api T2. Fix (not started): read the relayed codes first and project them; `ResultUnreadable` only when no frame was relayed. | PLAT-09.1, PLAT-17.1 |
+| D2-PREFLIGHT-PREFIX | The restore preflight builds `archive.backupSet`'s `manifestKey` as `<id>/manifest.json` and ignores the destination's `storage.prefix`, so a destination with `prefix: team/prod` answers `notReady/AccessDenied` for a manifest that `mc` reads as the same principal at `<bucket>/team/prod/<id>/manifest.json`, and a prefix-less destination answers `ready/ManifestReadable` for the same set. No restore preflight can be green for any prefixed destination; a green preview is only reachable prefix-less (E4/E6). Evidence: §5.2, `objects/s16/preflight-pf-flat.json` and the check plan beside it. Fix (not started): join the prefix into the manifest and segment keys exactly as the runner writes them; a test with a prefixed destination. | PLAT-03.2 |
+| D2-SIGNERID-REDACTED | The runner redacts the `signerKeyId` fact inside the relayed frame (`facts: {"signerKeyId": "[redacted]"}`) and the controller then compares the literal `[redacted]` with the `TrustRoster`'s key ids, so `signer.rostered` answers `notReady/SignerNotRostered` for a key whose SPKI sha256 equals the roster entry, while `signer.privateKeyUsable` on the same Job is `ready`. Every Backup preflight is blocked by a permanent false negative. A key id is public material. Evidence: §5.3, `results.json#E5`. Fix (not started): exempt key ids from the redaction rule (or carry the id in a non-redacted field) with a row that plants a rostered key and expects `ready`. | PLAT-03.1 |
+| D2-REDACT-OVERBROAD | The redaction rule also blanks the missing segment's name in `archive.segments` and in the `detailsRef` ConfigMap that exists to carry it (`{"missingSegment":"[redacted].bin.zst"}`), `runner.image`'s `imageID` and the manifest key in `archive.backupSet`'s message, so the printed remedy "do not restore until the objects are recovered" cannot be acted on. Evidence: §5.4, `objects/s16/details.jsonl`. Fix (not started): redact secret material by key name, not any long token; assert the segment path survives into `detailsRef`. | PLAT-03.2 |
+| D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN | For a destination-backed Backup whose `evidenceRead` grant is `SecretKeys`, `controllers/backup.rs:1302` answers `EvidenceSource::NotAttempted` with its sentence, `receipt_sha256` is `None`, and the `if let` guard at `backup.rs:3966` skips the verification patch — so the operator sees no `status.evidence.verification` at all instead of the honest `NotAttempted`. The receipts are sound (`logweir drill verify` exit 0 on `bk-a`/`bk-b` receipts fetched from both buckets). Evidence: §5.5, S1.statusVerification. Fix (not started): write the `NotAttempted` verdict when there is no receipt digest; a row asserting the field is present for a `SecretKeys` grant. | PLAT-08.1 (D2 W10) |
+| RET-DIGEST-PREFIX | No retention report renders on this build: `catalog_view.rs:966`/`:1616` `page_digest` returns bare hex while `RecoveryCatalog.status.pages[].sha256` is written `sha256:`-prefixed, and `retention_policy.rs:1345` compares them with `!=` and answers `ViewUnreadable` — the controller's own condition message prints both values, equal apart from the prefix. Every PLAT-16.1 test that needs the view (two destinations, unreadable manifest, overlapping keep rules, evaluation failure as a distinguishable state) and every PLAT-16.2 controller-side guard (active restore, legal hold, last usable point, shared segments) waits on it; the two tests that passed live (declared external lifecycle, continued scheduled backup 25/25) do not need the view. Evidence: `claude/d3w14.result.md` §5 PLAT-16.1. Fix (not started): compare the normalised digest AND correct the fixture at `retention_policy_controller.rs:1226`, which publishes the bare spelling and is why every controller test passed — a row whose catalog page carries the live `sha256:` form. Independent review confirmed it critical and reproduced it live. | PLAT-16.1, PLAT-16.2 (D3 W9) |
+| RET-NOIMAGE | `retention_policy.rs` renders every enforcement Job's command as `logweir-retention` from `LOGWEIR_RUNNER_IMAGE`, but `Dockerfile` (`:158`, `:185`) builds only `-p logweir` and copies one binary; there is no `Dockerfile.retention` and no retention image value in the chart. Live: exit `127` (executable not found) from the image the shared controller names. The wave proved the enforcer's worker half (dry preview with real counts, one Enforce pass removing exactly the plan's 9 objects under `archive/`, the record verified by digest, four refusals) from an image built from `e7d0e79` with that one binary added, run as the operator Job D3 §7f prescribes; the shared controller's runner image was never changed. Evidence: §5 PLAT-16.2. Fix (not started): build and ship the binary (a `Dockerfile.retention` or a second stage in `Dockerfile`), a chart value for its image, CI publishing it, and a render-install check that the enforcement Job's image is the retention image. | PLAT-16.2 (D3 W9/W13) |
+| CATALOG-RESYNC-NOT-HARVESTED | `RecoveryCatalog.spec.syncRequest` is documented as "change it to ask for a sync now"; on the second request the sync Job runs to `Complete` (19 of 19 Jobs) and the controller never harvests it — after 480 s the object still reads `Synced=Unknown/PodNotStarted` with the previous view published; an `intervalSeconds: 300` catalog behaved the same past its interval; a published view is also routinely followed by a write that puts `Synced` back to `Unknown/PodNotStarted`, so that condition is unusable as a completion signal (the harness watched `status.syncedAt` instead). Operators can only refresh a view by deleting and re-creating the catalog. Evidence: §5 PLAT-15.1 "New blocker". Fix (not started): harvest a completed sync Job whose request generation matches, keep `Synced` stable after a publish, and a controller test that the second `syncRequest` publishes a new `syncedAt`. | PLAT-15.1 (D3 W8) |
+| NOTIFY-INSECURE-SINK-UNEXPOSED | `logweir notify deliver` refuses a non-`https://` webhook before it dials, and `NOTIFY_ALLOW_INSECURE_SINKS` — the documented local-development escape hatch — is set by nothing in the `ProtectionPolicy` spec or `delivery_job_spec`, so D3 L5's "an in-cluster echo sink records exactly 1 POST" is unprovable as written on docker-desktop: the sink received 0 POSTs and the alert reads `webhook:failed` (the bounded retry, `attempts=2` of 3, and "notification failure does not rewrite the backup result" — 33 Backups keeping their `resourceVersion` — were proven). Evidence: §5 PLAT-14.2. Decision needed (not started): W13 exposes the flag on the chart/Job for lab use, or L5 is restated around an https sink with a lab CA. | PLAT-14.2 (D3 W4/W13) |
+| TRUST-UPGRADE-SIGNEDAT | On the 2026-09-18 lab refresh to `e7d0e79`, five fixture objects written on 2026-09-14 (three `Backup`s, two `Restore`s) were re-derived from `Valid` to `Untrusted` (`SignedOutsideValidity`, "the document carries no signing-time field") while their phase, exit code and reason were unchanged: `verification.rs::stored_claim` reads the claimed signing time from `status.evidence.verification.signedAt`, a field the pre-D3 W10 controller never wrote, and `logweir_core::trust::decide` fails closed on `ClaimAbsence::FieldAbsent` — the same code path as a document that genuinely claims no signing time. The archive is never read and no signature is re-checked, so nothing about these receipts is in doubt; every fresh run records `signedAt` and verifies `Valid` (ten of ten in the refresh's plat06 run). Evidence: `lab-refresh-2.result.md` §8; `claude/d3w14.result.md` §4 measured it again — a fresh run is `Valid` with `signedAt`; stripping the field re-derives `Untrusted`; clearing the whole verification block triggers no archive re-read, so a pre-`signedAt` object cannot be repaired in place (`verification.rs:1554`; `:1450` returns `None` for an absent block, so clearing it forces no re-read — review confirmed, high). Smallest correct repair per review: an absent verification block schedules one evidence-fetch Job; otherwise document the upgrade consequence. Fix (not started, queued): distinguish "this status predates `signedAt`" from "this document claims no signing time" — re-read the receipt's `finished_at` from the archive once at upgrade, or carry it forward — and say in `docs/stability.md` and D3's L10 note what an upgrade does to pre-`signedAt` status. | PLAT-19.1 (upgrade; D3 W10) |
 
 ### Codex batch history (2026-09-14, superseded by the table above)
 
@@ -417,6 +446,23 @@ denial, image failure, timeout and redaction. **Dependencies:** PLAT-02.2;
 PLAT-07.1 and PLAT-08.1 contracts for saved-reference integration; their UI
 tasks are not prerequisites for this readiness contract.
 
+**Live validation record (2026-09-18) — PLAT-03.1: six of the listed tests PASS live on
+`e7d0e79`; the acceptance sentence FAILS on scope and naming; one blocking defect; stays In
+progress.** PASS: missing Secret (S14a — `CredentialSecretNotFound` naming
+`missing-secret` in 10 s), missing key (S14b — `CredentialSecretKeyMissing`, but the
+message names neither Secret nor key after redaction, the reviewer's finding), wrong
+credentials (S14c — `AuthenticationFailed`), storage denial (S3), timeout (S14f —
+`BrokerUnreachable` on the blocking row, dependents `BlockedByPrerequisite`), redaction
+(18 markers × {plain, base64} across every Preflight and 60 minutes of log: 0 hits).
+NOT-RUN: image failure (S14e needs the shared controller's `LOGWEIR_RUNNER_IMAGE` changed).
+FAIL: "with check time and scope" — six `notReady` rows carry no `scope` (E3: the
+`podStatus`-, `checkJob`- and two `controller`-authority rows; ready rows do); and
+`signer.rostered` refuses a rostered key on every Backup preflight because the runner
+redacts `signerKeyId` inside the relayed frame and the controller compares the literal
+`[redacted]` (E5; D2-SIGNERID-REDACTED, `readiness.rs:337` / `preflight.rs:947`). Also
+owed: the source-connectivity check kind PLAT-07.2's "Test connection" consumes. Evidence
+`claude/artifacts/d2-live/20260918T030840Z/objects/s14/`, `results.json#E3,#E5`.
+
 ### PLAT-03.2 — Add restore-specific preflight and invalidation
 
 **Problem/implementation:** Cached reachability currently looks like completed
@@ -532,6 +578,23 @@ legacy-addressing block); `RecoveryPointLocationMismatch` is inert until W10 put
 the frozen snapshot on `Backup.status`; no `gc.rs`. Live: none here — W14 owes
 S15b (a green preflight, then a collision, then `exitCode=3`). Migration: three
 additive grants on a kind nothing had created yet.
+
+**Live validation record (2026-09-18) — PLAT-03.2: five listed tests and the staleness
+half of the acceptance PASS live on `e7d0e79`; one FAIL, one NOT-RUN, and a green preview
+is reachable only for a prefix-less destination; stays In progress.** PASS: stale inventory
+(S19 — the Backup preflight answers `TopicNotFound` from the broker, not the inventory),
+plan edits (S15 — two plans, two hashes, two `inputsDigest`s; the bound `planHash`
+immutable in place), new target conflict after preview (S15b — `MappedTopicsAbsent`, then
+the collision created on the target and the Restore `exitCode 3`/`GuardRefused` "already
+exists"), denied access (S17 — `archive.backupSet/AccessDenied` for a principal with no
+policy at a location a working destination proves readable), a destination edit making
+prior checks stale without moving the plan (S21 — generation diverges, `planHash` and
+`locationDigest` unchanged). FAIL: missing segment (S16 — `SegmentMissing`, `count: 1`
+correct; the sample and the `detailsRef` document both `[redacted]`; D2-REDACT-OVERBROAD,
+`check_contract.rs:2418` rule `long-base64-or-hex-run`). NOT-RUN: expired approval (S18
+needs the cluster-scoped `TrustRoster` edited). Defect: the restore preflight ignores
+`storage.prefix` (E4/E6; D2-PREFLIGHT-PREFIX, `restore.rs:270`/`:480`), so no preview can
+be green for a prefixed destination. Evidence `claude/artifacts/d2-live/20260918T030840Z/objects/s1[5-9]/`, `objects/s21/`.
 
 ## PLAT-04 — Make scheduling policy predictable
 
@@ -733,6 +796,27 @@ preconditioned merge patches. Earlier evidence used custom namespace Roles
 `artifacts/w0-reservation/can-i-matrix-before.txt` capture is superseded and
 annotated (it queried `status` as an object name).
 
+**Live validation record (2026-09-18) — PLAT-04.2: D1 W8 measured the cadence contract on
+docker-desktop against images built from `e7d0e79`; three scenarios PASS, one PARTIAL, two
+NOT-RUN; stays In progress.** Harness `scripts/live/d1/{run,fixture}.py` (landed as
+`b500190`; evidence `claude/artifacts/d1-live/20260918t0330z/`, report
+`claude/d1w8.result.md`, review `claude/d1w8.review.md`). Proven live: time-zone
+evaluation with its UTC negative control and `status.nextRuns` (L-04-1); the cadence preview
+API through a real `logweir-api` in localAdmin mode (L-04-preview); `missedSlots.countCapped`
+(L-04-cap); an unparseable cron refusing, admitting nothing for two periods, then recovering
+(L-04-3); the full retry chain — attempt 0 `Failed` exit 1, `-r1` 60 s later with
+`trigger {kind: Retry, attempt: 1, retryOf}`, `-r2`, no `-r3`, `lastSlot {disposition:
+Exhausted, reason: RetryExhausted}`, and a second slot whose `-r1` succeeded once the store
+came back with a receipt read from the archive and no `-r2` (L-04-4); two of L-04-6's three
+clauses. Unmet: L-04-2 (long downtime) and L-04-5 (duplicate reconciliation across two
+replicas) need D1 §13.1's fenced source-matched controller plus the namespace-rewriting
+proxy, which was not deployed because the shared controller was serving two other live
+waves (stopping or doubling it is not a test); L-04-6's Allow-cap clause (`Ready` reason
+`ActiveRunLimit` not observed — holding ten runs open needs a large seeded topic; a harness
+gap, as is L-04-2's catch-up half, which the reviewer found reachable by backdating
+`status.policy.effectiveSince` the way L-04-cap already does). Nothing measured
+contradicts the contract.
+
 ## PLAT-05 — Edit future protection without losing recovery history
 
 **Priority P1 · Proposed.** Immutable schedules force replacement, and their
@@ -752,6 +836,18 @@ edit/fire, conversion of existing resources, invalid edit and rollback.
 **Dependencies:** PLAT-04.1. Agree the future selection fields with PLAT-09.1's
 discovery contract; do not wait for PLAT-09.2 implementation, which consumes
 this task's immutable snapshot contract.
+
+**Live validation record (2026-09-18) — PLAT-05.1: the acceptance sentence PASSES live on
+`e7d0e79`; three of the listed tests are NOT-RUN for want of a fenced controller; stays In
+progress.** Proven: existing runs retain their original settings and new runs identify the
+applied revision through `spec.scheduleRef.generation` and `runPolicySha256` (L-05.1-1,
+re-run by the independent reviewer); all three CEL rules refusing on the real API server
+with their decided text, including the `destinationRef` edit, and `Mars/Olympus` accepted by
+the schema and refused by the controller with no admissions (L-05.1-4). Unmet: L-05.1-2
+(concurrent edit and fire — needs the proxy to hold one identified controller request),
+L-05.1-3 (conversion from main@4956785 — needs a swappable controller image) and L-05.1-5
+(rollback) — all D1 §13.1 isolation the shared lab could not provide while other waves ran.
+Evidence `claude/artifacts/d1-live/20260918t0330z/`.
 
 ### PLAT-05.2 — Decouple schedule deletion from retained history
 
@@ -817,6 +913,21 @@ L-05.2-1…6 (delete with active and completed runs, API garbage collection, the
 migration in place, same-name recreation). Migration: one additive grant; existing
 runs are detached on first reconcile and the schedule's `HistoryRetained` reports
 the walk; rollback per D1 §6.9.
+
+**Live validation record (2026-09-18) — PLAT-05.2: four scenarios PASS live on `e7d0e79`,
+three NOT-RUN and two sub-clauses unverified; stays In progress.** Proven: migration
+detaches legacy owners while preserving a foreign owner, a label and an annotation
+byte-for-byte and writing the UID label and marker annotation (L-05.2-1); deletion under all
+three cascade modes leaves every run, plan ConfigMap and Job alive with its own UID while
+active runs finish and verify (L-05.2-2, re-run by the reviewer); a same-name recreation is
+a different schedule down to the `NameUnavailable` disposition (L-05.2-4); unrelated
+resources do not move (L-05.2-5); `ownershipScanComplete` observed `true` on a small
+history. Unmet: L-05.2-3 (migration interruption with an injected 409), L-05.2-6 (read
+cost by request counting) and the >10 000-`Backup` capped walk (`MAX_INVENTORY_PAGES` 20 ×
+`INVENTORY_PAGE_SIZE` 500) — each needs D1 §13.1's fenced controller and proxy, and the
+walk must not be seeded against a controller other waves use; within L-05.2-1 the "every
+migration PATCH carries `metadata.resourceVersion`" clause and within L-05.2-2 the
+"unfrozen" sub-case are unverified. Evidence `claude/artifacts/d1-live/20260918t0330z/`.
 
 ## PLAT-06 — Make manual backup a normal operation
 
@@ -1082,6 +1193,20 @@ no live restore run through the new resolver (D2 W10's combined leg); the
 `credential` write-only builder has no caller until PLAT-17's routes; no node
 placement in the execution context (contract v1 has no such setting).
 
+**Live validation record (2026-09-18) — PLAT-07.2: the acceptance sentence and all five
+listed tests PASS live on `e7d0e79`; the task stays In progress on one clause of its own
+implementation text.** All 20 journeys of `scripts/plat12-13-ui-e2e.mjs` pass against the
+refreshed lab (deleted/recreated cluster, delayed refresh, credential rotation, the refused
+probe carrying the controller's own reason, mid-wizard target recreation, the namespace
+change that clears the selection), re-run 20/20 by the independent reviewer; `ui_live.mjs`
+J6 measures a second delete-and-recreate on a discovery's binding (`stale:
+connectionReplaced`, both UIDs recorded); the console API creates a contract-v1 connection
+(`api_live.py` C1, 201, validated field for field, the object present with the returned
+UID). Evidence `claude/artifacts/d2-live/20260918T030840Z/{selector,ui,api}/`. Unmet:
+"explicit connection test/refresh" — "Test connection" re-reads what the controller
+recorded and its own sentence says so (`ui/select.js:538`); nothing dials until PLAT-03.1
+delivers a source-connectivity check kind (only "Discover topics" starts a real check Job).
+
 ## PLAT-08 — Save backup destinations instead of rebuilding storage inputs
 
 **Priority P1 · Proposed.** Recovery currently exposes endpoint/region/Secret
@@ -1100,6 +1225,32 @@ configuration leakage; secret values are not returned. **Tests:** Distinct
 endpoints/credentials, denied location, malformed URL, namespace separation
 and evidence/archive destination differences. **Dependencies:** PLAT-07.1 for
 shared credential conventions.
+
+**Live validation record (2026-09-18) — PLAT-08.1: D2 W14 ran the destination matrix on
+docker-desktop against images built from `e7d0e79`; the acceptance sentence and every
+listed test PASS live; the task stays In progress for three named items.** Harness
+`e2e/k8s/d2/` (landed as `aaf48ed`…`d3cc637`; evidence
+`claude/artifacts/d2-live/20260918T030840Z/`, report `claude/d2w14.result.md`, review
+`claude/d2w14.review.md` ACCEPT with an independent re-run of the two-destination Backup and
+the selector). Proven with real objects, Jobs and buckets: two MinIO destinations with
+disjoint buckets and three credentials each — the Job env, the frozen plan storage block
+and the bucket contents disjoint (S1); denied location → `Preflight DestinationAccess`
+`archiveListable/AccessDenied`, the Backup `Failed` with `exitCode 1` (S3); malformed and
+refused inputs — transport/scheme, malformed endpoints, the reserved `logweir/` prefix,
+`VirtualHosted`+endpoint → `AddressingUnsupportedByEngine`, both immutability refusals (S2);
+namespace separation (S4); a Restore reading `lw-a` with `a-reader` and writing its
+evidence to `lw-b` with `b-writer`, the scorecard verified from `lw-b`'s bytes and nothing
+under `lw-a/logweir/drills/` (S5); no global-configuration leakage (S6); no secret value in
+any object, API body, browser page or 60 minutes of controller log (S14.redaction and two
+independent sweeps). Receipts for both destination-backed Backups fetched from their own
+buckets verify with `logweir drill verify` against the roster key. Not Done because:
+(1) `Backup.status.destination` (`name`, `uid`, `generation`, `locationDigest`) is absent
+from the live CRD, so a recovery point publishes no frozen location and the Preflight's
+`RecoveryPointLocationMismatch` is inert (NOT-RUN); (2) D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN
+— a `SecretKeys` grant's honest `NotAttempted` verdict never reaches `status` (defect
+table); (3) D2 §15 U6, the per-role minimal-permission table, is still unmeasured (the
+MinIO policies that sufficed are recorded, not bisected). `ControllerIdentity` evidence
+reads and U1 (private CA through the engine) are NOT-RUN and belong to PLAT-08.2/U1.
 
 ### PLAT-08.2 — Inherit destination defaults and validate storage choices
 
@@ -1437,6 +1588,23 @@ the healthy default and labels an attestation "attested by X at T; not verified
 by Logweir". Migration: two additive RBAC grants; the kind is served and
 reconciled; nothing else executes against it yet.
 
+**Live validation record (2026-09-18) — PLAT-09.1: seven of nine acceptance/test items
+PASS live on `e7d0e79`; two FAIL on one controller defect; stays In progress.** PASS: large
+catalog (S7 — 5,003 topics in three immutable owned chunks, every chunk's sha256 equal to
+its annotation and index entry, the union exactly the broker's user-topic set), empty
+cluster (S10), ACL-limited principal (S9 — `limited`, basis `expectedTopicNotAuthorized`,
+exactly `orders` visible; with nothing expected `unknown`/`listingOnly`), internal topics
+(S8), refresh and GC (S12 baseline→failure→refresh, five kept per connection), selecting
+visible topics from the stored inventory on screen (`ui_live.mjs` J1/J2), and the four
+states empty/failed/stale/permission-limited rendered distinctly from real objects
+(J3–J6; the reviewer notes J4's recorded reason is a cancellation, so "failed with the
+reason" rests on S11/S12). FAIL: timeout (S11) and credential rotation (S12) — the object
+says `ResultUnreadable` while the runner's relayed frame says `BrokerUnreachable` /
+`AuthenticationFailed` (D2-RESULTUNREADABLE, `topic_discovery.rs:1821`); the rotation
+itself is proven end to end (Secret updated → `Succeeded`, the earlier success readable
+throughout). Not proven: `S9.attested` (`attestedComplete` needs an entry in the shared
+installation policy). Evidence `claude/artifacts/d2-live/20260918T030840Z/`.
+
 ### PLAT-09.2 — Resolve explicit and dynamic selection per run
 
 **Problem/implementation:** An all-topics promise cannot be a one-time list or
@@ -1515,6 +1683,23 @@ bounded in bytes as well as entries. Gaps: live L-09-1…6 are W8's (L-09-1's `s
 top-level `topics`); the runner half never ran live here. Migration: none —
 named allowlists are untouched and every `v1` plan keeps running; a `Backup`
 refused for dynamic selection before this landed must be recreated.
+
+**Live validation record (2026-09-18) — PLAT-09.2: the dynamic half FAILS live on
+`e7d0e79` on one controller defect; only the named allowlist PASSES; stays In progress.**
+Proven: L-09-6 — a named allowlist runs with no discovery Job, `selection {mode:
+SelectedTopics, coverage: NamedTopics}`, frozen `topics: ["t1"]`. FAIL: L-09-1, L-09-2 and
+L-09-4 — every dynamic `Backup` ends `Resolving → Failed`, `TopicsResolved=False /
+DiscoveryFailed`, because its discovery Job names the compile-time image pin under
+`imagePullPolicy: Never` (`ErrImageNeverPull`, then the check deadline) while the runner Job
+of the same controller and minute runs the configured image (D1-DISCOVERY-IMAGE,
+`backup_selection.rs:1022`/`:1307`; defect table). NOT-RUN: L-09-3a/3b (need the proxy and
+the fix), L-09-5 (needs a KRaft broker with `StandardAuthorizer` and a SCRAM principal
+denied `Describe` on one topic — credentials are set at storage-format time, so a build of
+its own). The acceptance sentence ("a newly created user topic enters the next dynamic
+backup; failed or partial discovery never claims whole-cluster coverage") is not
+demonstrated in either half; nothing measured disproves the resolution, exclusion, coverage
+or `SelectionEmpty` rules — they are untested behind the one located defect. Evidence
+`claude/artifacts/d1-live/20260918t0330z/objects/L-09-*/`.
 
 ## PLAT-10 — Make schedules the everyday protection workspace
 
@@ -1912,6 +2097,18 @@ repeated failure deduplication, recovery notification, unavailable archive,
 sampled-versus-complete labeling and notification transport failure.
 **Dependencies:** PLAT-14.1, PLAT-15.1 availability integration.
 
+**Live validation record (2026-09-18) — PLAT-14.2 (evidence only, stays In progress).**
+D3 W14 on `e7d0e79` contributed: staleness detection reaching an alert; exactly one open
+alert across three evaluation intervals with every delivery Job belonging to one transition
+(two Jobs = the bounded retry, `attempts=2` of at most 3); a transport failure recorded on
+`ProtectionPolicy.status` and nowhere else; and "notification failure does not rewrite the
+backup result" — all 33 Backups kept their `resourceVersion`. Unprovable on this build: D3
+L5's "an in-cluster echo sink records exactly 1 POST" — `logweir notify deliver` refuses a
+non-`https://` sink before dialling and `NOTIFY_ALLOW_INSECURE_SINKS` is set by nothing in
+the spec or the delivery Job (NOTIFY-INSECURE-SINK-UNEXPOSED; a decision for W13). Still
+missing: recovery notification (needs a fresh point through the catalog view), unavailable
+archive, sampled-versus-complete labelling. Evidence `claude/artifacts/d3-live/20260918t0316z/`.
+
 ### PLAT-14.3 — Schedule basic recovery rehearsals
 
 **Problem/implementation:** Successful backups alone do not prove the supported
@@ -2067,6 +2264,27 @@ trusting unsigned metadata as verified evidence. **Tests:** Missing/corrupt
 manifest, duplicate identity, large catalog, partial access, stale index and
 schema-version compatibility. **Dependencies:** PLAT-08.1, PLAT-02.1 public
 verification material.
+
+**Live validation record (2026-09-18) — PLAT-15.1: D3 W14 proved the acceptance sentence
+live on `e7d0e79` — history reconstructed from storage after CR loss without trusting
+unsigned metadata as verified evidence — and found the listed tests partly unreachable and
+one blocker; stays In progress.** Harness `e2e/k8s/d3/` (landed as `1ab43cd`; evidence
+`claude/artifacts/d3-live/20260918t0316z/`, report `claude/d3w14.result.md`, review
+`claude/d3w14.review.md` ACCEPT-WITH-FIXES on the harness, which were applied). Proven:
+three recovery points rebuilt into the `RecoveryCatalog` view with zero `Backup` CRs in the
+namespace (the reviewer reproduced it with two), the two axes kept separate — the
+`catalogSync` Job reports only whether a signature verified and under which key id, the
+controller decides trust (`status.signers[].trusted`, `TrustAvailable=True`, "1 signing
+key(s) from `TrustRoster/default`"); `Missing` for a removed manifest; schema-version
+mismatch never fatal and never offered. Unmet from the test list: large catalog/paging
+(`viewLimit` floor 100 and `maxObjectsPerRun` floor 1000 — truncation needs more than 100
+real signed points; no bound was faked by editing the CRD), partial access (an `Unreadable`
+row needs a key-scoped credential on a second destination), corrupt manifest ("could not
+tell" as distinct from `Missing`), and the `UnsupportedFormat` classification (a record both
+validly signed and of a future major needs the installation's private key). Blocker:
+CATALOG-RESYNC-NOT-HARVESTED — a second `spec.syncRequest` runs a Job to `Complete` that
+the controller never harvests, and `Synced` flips back to `Unknown/PodNotStarted` after a
+publish, so a view can only be refreshed by re-creating the catalog (defect table).
 
 ### PLAT-15.2 — Add Connect existing archive and disaster restore
 
@@ -2284,6 +2502,21 @@ need W0 fields. Live: none — W14 owes a dry-run and a real enforcement against
 MinIO with the record verified. Migration: additive RBAC rules and a new binary
 image; nothing enforces until a policy opts in.
 
+**Live validation record (2026-09-18) — PLAT-16.1: blocked live on `e7d0e79` by one
+digest-spelling defect; two of six tests PASS; stays In progress.** No retention report
+renders for any destination: `catalog_view.rs:966` publishes `page_digest` as bare hex,
+`status.pages[].sha256` carries the `sha256:` prefix, and `retention_policy.rs:1345`
+compares them with `!=` and answers `ViewUnreadable` — the controller's own condition
+message prints both values equal apart from the prefix, and the controller test fixture
+(`retention_policy_controller.rs:1226`) publishes the bare spelling, which is why every unit
+row passed (RET-DIGEST-PREFIX, confirmed critical and reproduced by the reviewer). PASS
+without the view: declared external lifecycle (`ExternalLifecycleConflict=True /
+DeclaredExpiryConflicts`, the bucket wins, `minUsablePoints` / `activeRestoreProtection`
+`NotEnforced`) and continued scheduled backup (25/25 `Succeeded` through the window, a
+refused retention verdict blocking no backup). Waiting on the fix: two destinations,
+unreadable manifest, overlapping keep rules, evaluation failure as a distinguishable state,
+and the acceptance sentence itself. Evidence `claude/artifacts/d3-live/20260918t0316z/`.
+
 ### PLAT-16.2 — Decide and implement the supported enforcement boundary
 
 **Problem/implementation:** A mature retention control needs an accountable
@@ -2306,6 +2539,27 @@ PLAT-15.1, PLAT-17.2 authorization.
 **Migration/safety and done evidence:** Existing reporting-only users remain
 reporting-only until an explicit enforcement choice. Record irreversible-action
 boundaries, least-privilege permissions and a safe isolated enforcement test.
+
+**Live validation record (2026-09-18) — PLAT-16.2: the enforcer's worker half is proven
+live on `e7d0e79` from an image built for the wave; the controller half is NOT-RUN and the
+binary ships in no image; stays In progress.** Proven with the `logweir-retention` binary
+added to an image built from this commit (`e2e/k8s/d3/Dockerfile.retention`; the shared
+controller's `LOGWEIR_RUNNER_IMAGE` never changed), run as the operator Job D3 §7f
+prescribes: a dry preview with real per-candidate object counts deleting nothing; one
+enforced pass removing exactly the nine objects the plan's set bounds named, every one under
+`archive/`, every `logweir/` object still present (the reviewer re-verified: 9 gone, 0
+`logweir/` removed, 7 tombstones plus the record added); the record verified by digest —
+unsigned, as D3 §6.5/L9 and `docs/stability.md` prescribe (one contradicting line at
+D3 §1084 is queued); refusals for a wrong prefix (exit 3), a stale approved digest (exit
+3), no `evidenceWrite` credential (exit 3) and a denied deletion (exit 1, `Kept` /
+`AccessDenied`, nothing removed). Not proven: every controller-side guard (active restore,
+legal hold, last usable point, shared segments — no evaluation exists while
+RET-DIGEST-PREFIX stands; the enforced plan was hand-built in the product's own
+`deny_unknown_fields` format and every affected row says so), partial failure, bounded
+retry, and the record's create-only put (MinIO via `mc` cannot issue `If-None-Match`).
+Packaging: RET-NOIMAGE — `Dockerfile` builds only `-p logweir`; the enforcement Job's
+command `logweir-retention` exits 127 from the image the shared controller names (defect
+table). Evidence `claude/artifacts/d3-live/20260918t0316z/`.
 
 ## PLAT-17 — Establish a shared-console product API and identity boundary
 
@@ -2365,6 +2619,26 @@ timeout/cancellation (needs PLAT-03/09.1 kinds), `POST …/backups` (PLAT-06.2),
 destinations/credential-write/approval-submit routes, SSE, a browser journey,
 the readiness-cache mutex question (Q1, deferred to stage 7), and all of
 PLAT-17.2.
+
+**Live validation record (2026-09-18) — PLAT-17.1: both acceptance clauses and five of six
+listed tests PASS live on `e7d0e79` through the product API (`api_live.py` 41/44); stays In
+progress on the timeout half.** PASS: contract validation (every write response and list
+envelope validated field for field against `schemas/logweir-api-v1.openapi.json`, zero
+drift), malformed input (undeclared field, wrong type, missing required → 422
+`problem+json` with a field path, nothing created; `PUT`/`DELETE` refused), duplicate
+request (one key, three POSTs, one UID; different content → `idempotency_conflict`; the
+three key-refusing routes answer 400), pagination (56 objects at `limit=10` →
+`[10,10,10,10,10,6]`, set equality with `kubectl`, tampered and route-replayed cursors
+refused), restart with existing operations (a real kill, a 16.3 s measured outage, the
+controller moving an operation while the API was down, the same UIDs and a replayed
+pre-restart key afterwards); "the controller remains the execution authority" (the API
+created no Job, Pod or Secret) and "arbitrary Kubernetes paths unavailable" (Secrets, Pods,
+logs, exec, Jobs, `/apis/...`, two raw-socket traversals → 404; another namespace 403;
+`Impersonate-*` 400). PARTIAL: timeout/cancellation — cancellation proven for both
+transient kinds (`:cancel` on a `Running` check → `Cancelled` ~1 s later, kubectl-confirmed);
+the timeout path terminates but projects `ResultUnreadable` (D2-RESULTUNREADABLE). The
+2026-09-16 record's other open items (console image and chart with the API's own RBAC,
+`inCluster` mode, SSE) are untouched. Evidence `claude/artifacts/d2-live/20260918T030840Z/api/`.
 
 ### PLAT-17.2 — Enforce user identity, roles and audit attribution
 
@@ -2557,6 +2831,22 @@ Overlap, retirement, revocation, unknown/stale expiry, unauthorized update,
 old archive, multiple namespaces
 and upgrade from the default roster. **Dependencies:** PLAT-02.1; PLAT-17.2
 for shared-console administration.
+
+**Live validation record (2026-09-18) — PLAT-19.1 (evidence only, stays In progress).**
+D3 W14 on `e7d0e79`, all PASS: an explicit `TrustPolicy` taking over from the synthesised
+`legacy-roster-v1`; retirement keeping old evidence `Valid` with `trust.basis: Historical`;
+`KeyCompromise` revocation flipping a terminal Backup's badge to `Untrusted` on the next
+policy event with `phase`, `exitCode` and `conditions[Complete]` untouched; the CEL
+lifecycle refusing a backwards edit with its own message. Upgrade case FAILS:
+TRUST-UPGRADE-SIGNEDAT — status written before D3 W10 carries no
+`evidence.verification.signedAt`, the re-derivation reads only that field
+(`verification.rs:1554`) and fails closed to `Untrusted`, and clearing the block schedules
+no archive re-read (`:1450`), so five 2026-09-14 lab objects cannot be repaired in place
+while every fresh run is `Valid` (defect table; the lab refresh report §8 and
+`claude/d3w14.result.md` §4). Still missing: a second signer's archive, multiple
+namespaces, the keys view's `unknown` rendering (UI), and "unauthorized update" as an RBAC
+result (the refusal proven here is CEL's under a cluster-admin subject). Evidence
+`claude/artifacts/d3-live/20260918t0316z/`.
 
 ### PLAT-19.2 — Support ordinary confirmation and governed approval
 

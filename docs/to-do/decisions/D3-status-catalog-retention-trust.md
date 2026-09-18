@@ -1081,8 +1081,10 @@ canonical plan document.
   `maxDeletionsPerRun`, `maxObjectsPerRun`, `deadlineSeconds`. Three consecutive failed runs set
   `EnforcementDegraded` and stop scheduling until the spec changes.
 - **Attributable deletion.** Every run writes
-  `application/vnd.logweir.retention-record+json;version=1.0.0` (signed with the runner signing
-  key) to `logweir/retention/<policyUid>/<runId>.json` + `.sig`: policy identity/generation,
+  `application/vnd.logweir.retention-record+json;version=1.0.0` (create-only and UNSIGNED,
+  verified by the digest `status.lastEnforcement` records — the ruling above; amended
+  2026-09-18 after D3 W14's review found this line still said "signed") to
+  `logweir/retention/<policyUid>/<runId>.json`: policy identity/generation,
   `planSha256`, approver reference (the API audit id or the patching subject recorded in an
   annotation), rules, every deleted point id with its object count, every failure with its code,
   start/finish, installation key id. `status.lastEnforcement.recordKey` points at it.
