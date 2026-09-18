@@ -1629,6 +1629,7 @@ pub fn retrust_with(
                     SigningTime::Recovered(at) => EvidenceClaim::at(*at),
                     SigningTime::Absent(absence) => EvidenceClaim::absent(*absence),
                     SigningTime::NotNeeded
+                    | SigningTime::Deferred
                     | SigningTime::Unreadable(_)
                     | SigningTime::NotAttempted(_) => stored_claim(stored),
                 },
@@ -1661,9 +1662,21 @@ pub fn retrust_with(
                 // on, so the one write below fixes all of them at once. Nothing
                 // is lost — `matchedKeyId` and `verifiedAt` still record the
                 // original observation, and `detail` says what happened.
+                // A DEFERRED PASS REPRODUCES THE PREVIOUS SENTENCE, because
+                // it learned nothing new to say. Recomputing it would render a
+                // different `detail` on every reconcile inside the backoff
+                // window and turn a pass that must be silent into a write.
+                let detail = match signing_time {
+                    SigningTime::Deferred => stored
+                        .get("detail")
+                        .and_then(Value::as_str)
+                        .map(str::to_string),
+                    _ => None,
+                }
+                .unwrap_or_else(|| unverified_detail(&projection, matched_key_id, signing_time));
                 (
                     VerificationVerdict::NotAttempted.as_str().to_string(),
-                    Some(unverified_detail(&projection, matched_key_id, signing_time)),
+                    Some(detail),
                     trust,
                 )
             } else {
@@ -1701,7 +1714,56 @@ pub fn retrust_with(
             json!(at.to_rfc3339_opts(SecondsFormat::Secs, true)),
         );
     }
-    if let Some(t) = trust {
+    if let Some(mut t) = trust {
+        // ---- THE TWO FIELDS THAT MAKE "ONE BOUNDED RE-READ" BOUNDED --------
+        //
+        // Review finding **G2**. `retryAfter` bars the next attempt after one
+        // that learned nothing; `signingTimeRead` settles the object for good
+        // once a completed read has established that the absence is the
+        // DOCUMENT's. Both live on `trust` so a merge patch that nulls the
+        // whole block clears them together with the verdict they belong to,
+        // and both are dropped the moment a read succeeds — a block carrying
+        // `signedAt` needs neither.
+        let object = t.as_object_mut().expect("a trust block is an object");
+        match signing_time {
+            SigningTime::Unreadable(_) | SigningTime::NotAttempted(_) => {
+                object.insert(
+                    "retryAfter".into(),
+                    json!((now + chrono::Duration::seconds(RETRY_AFTER_SECS))
+                        .to_rfc3339_opts(SecondsFormat::Secs, true)),
+                );
+            }
+            // CARRIED VERBATIM, NEVER RECOMPUTED — a deferred pass that moved
+            // the instant would render a different block on every reconcile
+            // and defeat the bound it is implementing.
+            SigningTime::Deferred => {
+                if let Some(v) = stored.pointer("/trust/retryAfter") {
+                    object.insert("retryAfter".into(), v.clone());
+                }
+                if let Some(v) = stored.pointer("/trust/signingTimeRead") {
+                    object.insert("signingTimeRead".into(), v.clone());
+                }
+            }
+            // THE DOCUMENT ANSWERED, so the question is closed: no backoff,
+            // because there is nothing left to retry.
+            SigningTime::Absent(_) => {
+                object.insert("signingTimeRead".into(), json!(SIGNING_TIME_ABSENT));
+            }
+            // A SUCCESSFUL READ CARRIES NEITHER. `signedAt` is on the block now
+            // and `compared_a_claim` answers from the basis, so leaving a stale
+            // backoff behind would be a field nobody reads.
+            SigningTime::Recovered(_) => {}
+            // NOTHING WAS ATTEMPTED AND NOTHING IS FORGOTTEN. `retrust`'s
+            // six-argument wrapper takes this arm, and a caller that is not
+            // performing the recovery must not clear a bound it did not set.
+            SigningTime::NotNeeded => {
+                for key in ["retryAfter", "signingTimeRead"] {
+                    if let Some(v) = stored.pointer(&format!("/trust/{key}")) {
+                        object.insert((*key).to_string(), v.clone());
+                    }
+                }
+            }
+        }
         block.insert("trust".into(), t);
     }
     if let Some(v) = stored.get("verifiedAt") {
@@ -1765,6 +1827,11 @@ fn unverified_detail(
         .unwrap_or("this namespace's trust");
     let why = match signing_time {
         SigningTime::NotNeeded => "the document has not been re-read yet".to_string(),
+        // ONLY A FALLBACK. `retrust_with` reuses the stored sentence on a
+        // deferred pass, so this is reached only for a block that carried none.
+        SigningTime::Deferred => {
+            "the last attempt learned nothing and the next one is not due yet".to_string()
+        }
         SigningTime::Unreadable(detail) => {
             format!("the archive was read for it and did not answer: {detail}")
         }
@@ -1840,11 +1907,16 @@ fn unverified_detail(
 /// build as `basis: None` with no `signedAt` — **the same bytes** as the lab's
 /// legacy re-stamp. They are indistinguishable on the status, so this rule
 /// re-reads that document too. The read answers with the document's own
-/// absence, [`decide`] refuses it exactly as before, the re-rendered block is
-/// identical and **no patch is sent** ([`retrust_with`] returns `None`). The
-/// cost is therefore one `Store::get` per policy event and zero writes, and it
-/// buys the only thing that can tell the two apart: reading the document.
-/// Guessing the other way is what left five sound archives marked `Untrusted`.
+/// absence, [`decide`] refuses it exactly as before, and the completed read
+/// records `trust.signingTimeRead: absent` so the object is never asked again.
+/// It buys the only thing that can tell the two apart — reading the document —
+/// for exactly one `Store::get`; guessing the other way is what left five sound
+/// archives marked `Untrusted`.
+///
+/// **THE BOUND IS ON THE OBJECT, BECAUSE RECONCILES ARE NOT RARE** (review
+/// finding G2). A terminal object is requeued every `REQUEUE_SECS`, so an
+/// attempt that learns nothing records [`RETRY_AFTER_SECS`] in
+/// `trust.retryAfter` and bars the next one; see [`signing_time_need`].
 fn stored_claim(stored: &Value) -> EvidenceClaim {
     match stored.get("signedAt").and_then(Value::as_str) {
         None if !compared_a_claim(stored) => EvidenceClaim::absent(ClaimAbsence::NotRecorded),
@@ -1874,10 +1946,58 @@ fn stored_claim(stored: &Value) -> EvidenceClaim {
 /// change its verdict — the compromise rows run first — but it does fill in the
 /// `signedAt` the record should have had, once, after which it is settled.
 fn compared_a_claim(stored: &Value) -> bool {
+    // THE READ ALREADY HAPPENED AND THE DOCUMENT ANSWERED. `signingTimeRead`
+    // is written only when a completed re-read found no signing time in the
+    // document itself, which turns the question this function asks into a
+    // settled fact: the absence is the DOCUMENT's, exactly as if a basis had
+    // compared one. Without it a document that genuinely carries none is
+    // re-read on every reconcile for ever — review finding **G2**.
+    if stored
+        .pointer("/trust/signingTimeRead")
+        .and_then(Value::as_str)
+        == Some(SIGNING_TIME_ABSENT)
+    {
+        return true;
+    }
     matches!(
         stored.pointer("/trust/basis").and_then(Value::as_str),
         Some(TRUST_BASIS_CURRENT | TRUST_BASIS_HISTORICAL)
     )
+}
+
+/// `trust.signingTimeRead` for a completed re-read whose document carried no
+/// signing time.
+const SIGNING_TIME_ABSENT: &str = "absent";
+
+/// How long a fruitless attempt bars the next one — review finding **G2**.
+///
+/// **A TERMINAL OBJECT RECONCILES EVERY `REQUEUE_SECS` (15 s), NOT ONLY ON A
+/// POLICY EVENT.** The re-trust hook wraps `reconcile`, which requeues every
+/// object unconditionally, so "one bounded re-read" was bounded per pass and
+/// not over time: a namespace holding a thousand objects whose archive cannot
+/// answer issued ~67 `Store::get`s a second, for ever, for verdicts that
+/// provably cannot change. Fifteen minutes is sixty reconciles, so the steady
+/// cost is one `get` and one small patch per object per quarter hour, and an
+/// archive that comes back is noticed within one window.
+const RETRY_AFTER_SECS: i64 = 900;
+
+/// What a reconcile should do about this object's missing signing time.
+///
+/// THREE ANSWERS AND NOT A `bool`, because "there is nothing to read" and "the
+/// last attempt is still inside its backoff" have to render DIFFERENT
+/// verdicts: the first re-derives normally, the second has to reproduce the
+/// previous block byte-for-byte or the pass patches on every reconcile.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReadPlan {
+    /// Nothing to read: the block already carries a signing time, a basis that
+    /// compared one, a completed read, or no document to read.
+    None,
+    /// An attempt is owed and due. The caller performs it.
+    Read(SigningTimeNeed),
+    /// An attempt was made recently and learned nothing; `trust.retryAfter`
+    /// has not passed. No `Store::get`, no `evidence_source` resolution, and
+    /// the stored sentence is carried forward unchanged.
+    Deferred,
 }
 
 // ---------------------------------------------------------------------------
@@ -1926,6 +2046,11 @@ pub enum SigningTime {
     /// Nothing was read, because nothing needed to be: the stored block
     /// already carries a `signedAt`, or it is not a pre-PLAT-19.1 block.
     NotNeeded,
+    /// Nothing was read because the last attempt learned nothing and its
+    /// `trust.retryAfter` has not passed. The previous sentence and the
+    /// previous backoff are carried forward verbatim, so the re-rendered block
+    /// is byte-identical and the pass writes nothing.
+    Deferred,
     /// The document was read, its digest matched, and this is its own claimed
     /// signing time — derived by [`logweir_core::trust::read_claimed_signing_time`],
     /// the same function the fresh path uses.
@@ -1955,7 +2080,30 @@ pub enum SigningTime {
 /// it stays on the previous verdict with the reason said out loud rather than
 /// being flipped on a field that did not exist when it was written.
 #[must_use]
-pub fn signing_time_need(status: Option<&Value>) -> Option<SigningTimeNeed> {
+pub fn signing_time_need(status: Option<&Value>, now: DateTime<Utc>) -> ReadPlan {
+    let Some(need) = signing_time_owed(status) else {
+        return ReadPlan::None;
+    };
+    // THE BACKOFF IS READ OFF THE OBJECT, not held in the process — review
+    // finding **G2**. A controller restart re-lists every object and is
+    // exactly the moment one read each is wanted, so process memory would
+    // forget the bound at the only time it is expensive; the object remembers.
+    let deferred = stored_verification(status)
+        .and_then(|b| b.pointer("/trust/retryAfter"))
+        .and_then(Value::as_str)
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .is_some_and(|until| now < until.with_timezone(&Utc));
+    if deferred {
+        ReadPlan::Deferred
+    } else {
+        ReadPlan::Read(need)
+    }
+}
+
+/// The document a re-read would fetch, ignoring the backoff — the pure half of
+/// [`signing_time_need`].
+#[must_use]
+pub fn signing_time_owed(status: Option<&Value>) -> Option<SigningTimeNeed> {
     let block = stored_verification(status)?;
     block
         .get("matchedKeyId")
@@ -2263,7 +2411,10 @@ where
             "re-deriving after ONE bounded re-read of the document, which supplied the signing \
              time this status was written without"
         }
-        SigningTime::NotNeeded | SigningTime::Unreadable(_) | SigningTime::NotAttempted(_) => {
+        SigningTime::NotNeeded
+        | SigningTime::Deferred
+        | SigningTime::Unreadable(_)
+        | SigningTime::NotAttempted(_) => {
             "re-deriving from the stored matchedKeyId, signedAt and verifiedAt — no storage \
              read and no signature check"
         }

@@ -4218,7 +4218,7 @@ fn a_pre_signedat_object_is_repaired_to_valid_by_one_bounded_read() {
     // ever ASKING for one, and a discriminator that never fires makes the rest
     // of this row unreachable in production.
     assert!(
-        weirkeeper::verification::signing_time_need(Some(&pre_signedat_status())).is_some(),
+        weirkeeper::verification::signing_time_owed(Some(&pre_signedat_status())).is_some(),
         "a block with no `trust` at all compared nothing, so the read has to be asked for"
     );
     let outcome = weirkeeper::verification::retrust_with(
@@ -4266,7 +4266,7 @@ fn a_pre_signedat_object_is_repaired_to_valid_by_one_bounded_read() {
     let mut repaired = pre_signedat_status();
     repaired["evidence"]["verification"] = row["verification"].clone();
     assert!(
-        weirkeeper::verification::signing_time_need(Some(&repaired)).is_none(),
+        weirkeeper::verification::signing_time_owed(Some(&repaired)).is_none(),
         "a repaired object must not ask for the archive again on every policy event"
     );
     assert!(
@@ -4394,7 +4394,7 @@ fn a_document_that_claims_no_signing_time_is_still_untrusted() {
     for basis in ["Current", "Historical"] {
         let compared = basis_status(basis, "Untrusted");
         assert!(
-            weirkeeper::verification::signing_time_need(Some(&compared)).is_none(),
+            weirkeeper::verification::signing_time_owed(Some(&compared)).is_none(),
             "{basis}: this block is evidence that a claim WAS compared, so re-reading it would \
              be a `get` that can change nothing"
         );
@@ -4481,7 +4481,7 @@ fn a_compromise_revocation_does_not_wait_for_the_re_read() {
 /// — the `receiptSha256`-less row, which has nothing safe to read.
 #[test]
 fn a_re_read_is_asked_for_only_when_it_can_be_done_safely() {
-    let need = weirkeeper::verification::signing_time_need(Some(&pre_signedat_status()))
+    let need = weirkeeper::verification::signing_time_owed(Some(&pre_signedat_status()))
         .expect("the lab's own shape is exactly the case this repairs");
     assert_eq!(need.payload_key, LAB_RECEIPT_KEY);
     assert_eq!(need.payload_type, LAB_PAYLOAD_TYPE);
@@ -4497,7 +4497,7 @@ fn a_re_read_is_asked_for_only_when_it_can_be_done_safely() {
         "scorecardSha256": "sha256:abc",
         "verification": pre_signedat_status()["evidence"]["verification"].clone(),
     });
-    let scorecard = weirkeeper::verification::signing_time_need(Some(&restore))
+    let scorecard = weirkeeper::verification::signing_time_owed(Some(&restore))
         .expect("a Restore's scorecard is the same repair");
     assert_eq!(scorecard.payload_key, "logweir/drills/d1/scorecard.json");
 
@@ -4530,7 +4530,7 @@ fn a_re_read_is_asked_for_only_when_it_can_be_done_safely() {
         ("no status at all", json!({})),
     ] {
         assert!(
-            weirkeeper::verification::signing_time_need(Some(&status)).is_none(),
+            weirkeeper::verification::signing_time_owed(Some(&status)).is_none(),
             "{label}: {status}"
         );
     }
@@ -4790,7 +4790,7 @@ fn a_second_policy_event_re_reads_what_the_first_one_could_not() {
     stored["evidence"]["verification"] = first.verification.clone();
 
     // ---- EVENT 2: the pass still knows this status predates `signedAt` ---
-    let need = weirkeeper::verification::signing_time_need(Some(&stored)).expect(
+    let need = weirkeeper::verification::signing_time_owed(Some(&stored)).expect(
         "an `Unverified` basis is this pass's own mark for `I have not read the document yet`, \
          and reading it back as a document's absence is how one blip became permanent",
     );
@@ -4818,7 +4818,11 @@ fn a_second_policy_event_re_reads_what_the_first_one_could_not() {
         "two passes and still no re-observation"
     );
 
-    // ---- AND A REPEAT OF EVENT 1 WRITES NOTHING (erratum E11(d)) --------
+    // ---- AND A REPEAT INSIDE THE BACKOFF WRITES NOTHING (E11(d)) --------
+    //
+    // The controller's next reconcile is 15 s later, `trust.retryAfter` has not
+    // passed, so the plan is `Deferred`: no `get`, the stored sentence and the
+    // stored backoff carried forward, and the rendered block identical.
     assert!(
         weirkeeper::verification::retrust_with(
             &stored,
@@ -4826,14 +4830,12 @@ fn a_second_policy_event_re_reads_what_the_first_one_could_not() {
             backup_badge,
             Some(&vec![first.verified.clone()]),
             Some(1),
-            at("2026-09-18T13:40:00Z"),
-            &weirkeeper::verification::SigningTime::Unreadable(
-                "the evidence object is not in the archive; nothing was verified".to_string(),
-            ),
+            at("2026-09-18T13:15:00Z"),
+            &weirkeeper::verification::SigningTime::Deferred,
         )
         .is_none(),
-        "an archive that is still down renders the identical block, so the retry costs one `get` \
-         and no write"
+        "a deferred pass renders the identical block, so an archive that is still down costs \
+         neither a `get` nor a write"
     );
 }
 
@@ -4859,7 +4861,7 @@ fn an_evidence_path_api_failure_does_not_abort_the_re_trust_pass() {
     ] {
         let src = read(relative);
         let start = src
-            .find("signing_time_need(status)")
+            .find("signing_time_need(")
             .unwrap_or_else(|| panic!("{relative} invokes the re-derivation"));
         let end = src[start..]
             .find("recover_signing_time(")
@@ -5007,7 +5009,7 @@ fn the_labs_intermediate_build_shape_is_repaired_by_one_read() {
     for (label, stored, badge, key, signed_at) in rows {
         // ---- EVENT 1: the archive does not answer -----------------------
         let need =
-            weirkeeper::verification::signing_time_need(Some(&stored)).unwrap_or_else(|| {
+            weirkeeper::verification::signing_time_owed(Some(&stored)).unwrap_or_else(|| {
                 panic!(
                     "{label}: `basis: None` with no `signedAt` is the intermediate build's own \
                  re-derivation, not a document that claims nothing — and reading it as the \
@@ -5050,7 +5052,7 @@ fn the_labs_intermediate_build_shape_is_repaired_by_one_read() {
         let mut after_first = stored.clone();
         after_first["evidence"]["verification"] = first.verification.clone();
         assert!(
-            weirkeeper::verification::signing_time_need(Some(&after_first)).is_some(),
+            weirkeeper::verification::signing_time_owed(Some(&after_first)).is_some(),
             "{label}: and the retry survives its own output (review F2)"
         );
         let second = weirkeeper::verification::retrust_with(
@@ -5083,7 +5085,7 @@ fn the_labs_intermediate_build_shape_is_repaired_by_one_read() {
         let mut repaired = stored.clone();
         repaired["evidence"]["verification"] = second.verification.clone();
         assert!(
-            weirkeeper::verification::signing_time_need(Some(&repaired)).is_none(),
+            weirkeeper::verification::signing_time_owed(Some(&repaired)).is_none(),
             "{label}: a repaired object never asks for the archive again"
         );
     }
@@ -5091,15 +5093,16 @@ fn the_labs_intermediate_build_shape_is_repaired_by_one_read() {
 
 /// A document that genuinely claims no signing time is written by a CURRENT
 /// build as `basis: None` with no `signedAt` — the same bytes as the lab's
-/// legacy re-stamp — so it is re-read too. This is the honest cost of the rule,
-/// and it is bounded: the read answers with the document's own absence, the
-/// verdict does not move, and **no patch is sent**.
+/// legacy re-stamp — so it is re-read once. **And exactly once:** the completed
+/// read records `trust.signingTimeRead: absent`, which says the absence is the
+/// DOCUMENT's, and the object never asks the archive again.
 ///
-/// KILLS: "settle it by writing something different after a fruitless read" —
-/// any such marker would have to be a new basis value, and the assertion below
-/// would then see a second write per policy event instead of none.
+/// KILLS: "leave the block unchanged after a fruitless read" — review finding
+/// **G2**. A terminal object reconciles every `REQUEUE_SECS`, so without the
+/// marker below this document cost one `Store::get` every 15 seconds, for ever,
+/// for a verdict that provably cannot change.
 #[test]
-fn a_fruitless_re_read_costs_one_get_and_no_write() {
+fn a_fruitless_re_read_settles_the_object_for_good() {
     let absent = || {
         weirkeeper::verification::SigningTime::Absent(
             logweir_core::trust::ClaimAbsence::FieldAbsent,
@@ -5141,10 +5144,172 @@ fn a_fruitless_re_read_costs_one_get_and_no_write() {
         "the re-read confirmed what the block already said, so erratum E11(d) sends no patch. \
          Got {second:?}"
     );
-    // …and the next policy event asks for the same one `get`, forever, which is
-    // the price of not being able to tell the two shapes apart on the status.
-    assert!(
-        weirkeeper::verification::signing_time_need(Some(&settled)).is_some(),
-        "documented in docs/stability.md: one `Store::get` per policy event, zero writes"
+    // ---- AND THE QUESTION IS CLOSED -----------------------------------
+    assert_eq!(
+        first.verification["trust"]["signingTimeRead"],
+        json!("absent"),
+        "the completed read records its ANSWER, so the question is not asked again"
     );
+    assert!(
+        weirkeeper::verification::signing_time_owed(Some(&settled)).is_none(),
+        "one read, then silence: a terminal object reconciles every REQUEUE_SECS, so an object \
+         that kept asking would cost one archive `get` every 15 seconds for ever"
+    );
+    assert_eq!(
+        weirkeeper::verification::signing_time_need(Some(&settled), at("2027-01-01T00:00:00Z")),
+        weirkeeper::verification::ReadPlan::None,
+        "…at any later instant, because this is an answer and not a backoff"
+    );
+}
+
+/// **Review finding G2, the guard.** Three reconciles with an unreachable
+/// archive issue **exactly one** `Store::get`.
+///
+/// # Why this counts real reads and not a plan enum
+///
+/// `ReadPlan::Read` is the ONLY route to `read_signing_time`, which is the only
+/// thing in this module that calls `Store::get` — so the loop below performs a
+/// real read through a real read-only handle whenever the plan says to, over an
+/// evidence tree the object is missing from, and counts the reads it made. A
+/// deferred pass never reaches the handle at all, which is also why it costs no
+/// `evidence_source` resolution in the controller.
+///
+/// KILLS: "re-read on every pass" — the shipped behaviour. A terminal object
+/// reconciles every `REQUEUE_SECS` (15 s), so the three passes below are 30
+/// seconds of one object's life; at the shipped rate a namespace holding a
+/// thousand such objects issued roughly 67 archive GETs a second, for ever, for
+/// verdicts that provably cannot change.
+#[test]
+fn three_reconciles_with_an_unreachable_archive_issue_one_get() {
+    let tree = EvidenceTree::new("g2", b"unused", b"unused");
+    let store = tree.handle();
+    tree.remove(PAYLOAD_KEY);
+
+    let mut status = pre_signedat_status();
+    // The object this run owns is the one the tree does not have.
+    status["evidence"]["receiptKey"] = json!(PAYLOAD_KEY);
+
+    let mut reads = 0usize;
+    let mut conditions: Vec<weirkeeper::crds::Condition> = Vec::new();
+    let mut patches = 0usize;
+    // Three reconciles, `REQUEUE_SECS` apart, exactly as the controller requeues.
+    for minute in [0, 15, 30] {
+        let now = at("2026-09-19T12:00:00Z") + chrono::Duration::seconds(minute);
+        let signing_time = match weirkeeper::verification::signing_time_need(Some(&status), now) {
+            weirkeeper::verification::ReadPlan::None => {
+                panic!("a pre-`signedAt` block always owes a read at {now}")
+            }
+            weirkeeper::verification::ReadPlan::Deferred => {
+                weirkeeper::verification::SigningTime::Deferred
+            }
+            weirkeeper::verification::ReadPlan::Read(need) => {
+                reads += 1;
+                weirkeeper::verification::read_signing_time(Some(&store), &need)
+            }
+        };
+        if let Some(outcome) = weirkeeper::verification::retrust_with(
+            &status,
+            &org_default(),
+            backup_badge,
+            Some(&conditions),
+            Some(1),
+            now,
+            &signing_time,
+        ) {
+            patches += 1;
+            status["evidence"]["verification"] = outcome.verification.clone();
+            conditions = vec![outcome.verified.clone()];
+        }
+    }
+    assert_eq!(
+        reads, 1,
+        "ONE bounded re-read, and the bound is `trust.retryAfter` on the object rather than a \
+         hope that reconciles are rare"
+    );
+    assert_eq!(
+        patches, 1,
+        "and one patch: the first pass records the backoff, and the two deferred passes render \
+         the identical block"
+    );
+    let retry_after = status["evidence"]["verification"]["trust"]["retryAfter"]
+        .as_str()
+        .expect("a fruitless attempt records when the next one is due");
+    assert_eq!(
+        retry_after, "2026-09-19T12:15:00Z",
+        "fifteen minutes is sixty reconciles, so the steady cost is one `get` per object per \
+         quarter hour instead of one every fifteen seconds"
+    );
+
+    // ---- AND THE ARCHIVE COMING BACK IS NOTICED WITHIN ONE WINDOW -------
+    assert_eq!(
+        weirkeeper::verification::signing_time_need(Some(&status), at("2026-09-19T12:14:59Z")),
+        weirkeeper::verification::ReadPlan::Deferred,
+        "one second before the instant, still barred"
+    );
+    assert!(
+        matches!(
+            weirkeeper::verification::signing_time_need(Some(&status), at("2026-09-19T12:15:00Z")),
+            weirkeeper::verification::ReadPlan::Read(_)
+        ),
+        "and due at it — a bucket that comes back is picked up, not waited on for ever"
+    );
+}
+
+/// A backoff must never outlive the thing it is bounding: a read that SUCCEEDS
+/// clears it, and a `KeyCompromise` revocation is not delayed by one.
+///
+/// KILLS: "carry `retryAfter` forward unconditionally" — a repaired object
+/// would keep a stale instant nobody reads; and "defer before the key rows" —
+/// the ratchet has to survive the backoff, because a stolen key may not wait
+/// fifteen minutes.
+#[test]
+fn a_backoff_does_not_outlive_its_purpose() {
+    let mut deferred_status = pre_signedat_status();
+    deferred_status["evidence"]["verification"]["trust"] =
+        json!({"basis": "Unverified", "keyState": "Active", "retryAfter": "2099-01-01T00:00:00Z"});
+    deferred_status["evidence"]["verification"]["result"] = json!("NotAttempted");
+
+    // ---- A SUCCESSFUL READ CLEARS IT --------------------------------------
+    let repaired = weirkeeper::verification::retrust_with(
+        &deferred_status,
+        &org_default(),
+        backup_badge,
+        None,
+        Some(1),
+        at("2026-09-19T12:00:00Z"),
+        &weirkeeper::verification::SigningTime::Recovered(at(RECEIPT_FINISHED_AT)),
+    )
+    .expect("the read succeeded, so the verdict changes");
+    assert_eq!(repaired.to, "Valid");
+    assert_eq!(
+        repaired.verification["trust"].get("retryAfter"),
+        None,
+        "there is nothing left to retry, so the instant goes with the question"
+    );
+    assert_eq!(repaired.verification["trust"].get("signingTimeRead"), None);
+
+    // ---- AND THE RATCHET IGNORES IT ---------------------------------------
+    let effective = at("2026-09-10T00:00:00Z");
+    let mut key = evidence_key();
+    key.state = KeyState::Revoked;
+    key.revoked_at = Some(effective);
+    key.revocation_reason = Some(RevocationReason::KeyCompromise);
+    key.revocation_effective_from = Some(effective);
+    let revoked = weirkeeper::verification::retrust_with(
+        &deferred_status,
+        &Resolution::Trust(Box::new(resolved(&policy("org-default", &[], vec![key])))),
+        backup_badge,
+        None,
+        Some(1),
+        at("2026-09-19T12:00:00Z"),
+        // Deferred: no read happened, and none is due for another 73 years.
+        &weirkeeper::verification::SigningTime::Deferred,
+    )
+    .expect("a compromise revocation always changes a NotAttempted verdict");
+    assert_eq!(
+        revoked.to, "Untrusted",
+        "a stolen private half does not wait for a backoff: `decide`'s compromise rows run \
+         before the row that defers, and they never consult the claim"
+    );
+    assert_ne!(revoked.verification["trust"]["basis"], json!("Unverified"));
 }

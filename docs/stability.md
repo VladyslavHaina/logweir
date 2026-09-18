@@ -1127,17 +1127,31 @@ nothing", no re-read was scheduled, and three consecutive upgrades reported the
 same five objects `Untrusted`. The allow-list form is the one that stays
 correct under a build nobody has written yet.
 
-**What it costs.** A document that genuinely carries no signing time is written
-by a current build as `basis: None` with no `signedAt` — the same bytes as that
-legacy re-stamp. The two are indistinguishable on the status, so such a document
-is re-read too. The read answers with the document's own absence, the verdict
-does not move, the re-rendered block is identical and **no patch is sent**: one
-`get` per policy event, zero writes, for as long as the object exists. That is
-the price of the only thing that can tell the two apart, which is reading the
-document; guessing the other way is what left five sound archives marked
-`Untrusted`.
+**What it costs, and how it is bounded.** A document that genuinely carries no
+signing time is written by a current build as `basis: None` with no `signedAt` —
+the same bytes as that legacy re-stamp. The two are indistinguishable on the
+status, so such a document is re-read too. That is the price of the only thing
+that can tell them apart, which is reading the document; guessing the other way
+is what left five sound archives marked `Untrusted`.
 
-Until the read succeeds, the object is neither withdrawn nor presented:
+It is read **once**. A terminal object is reconciled every `REQUEUE_SECS` (15
+seconds), not only when a `TrustPolicy` changes, so "one bounded re-read" needed
+something on the object to be bounded by:
+
+* a read that **succeeds** writes `signedAt`, and the object is ordinary again;
+* a read that **completes and finds none** writes
+  `trust.signingTimeRead: absent` — the absence is the document's, and asking
+  again can only get the same answer;
+* a read that **learns nothing** (the archive did not answer, or there was no
+  reader) writes `trust.retryAfter`, fifteen minutes ahead. Reconciles inside
+  that window resolve no destination, issue no `get` and write nothing.
+
+So the steady cost of an unreachable archive is one `get` and one small patch
+per object per quarter hour, and an archive that comes back is picked up within
+one window. Without that bound it was one `get` every fifteen seconds per
+object, for ever, for verdicts that provably cannot change.
+
+Until a read succeeds, the object is neither withdrawn nor presented:
 `result` becomes **`NotAttempted`** — no verification was attempted under this
 policy — with `trust.basis: Unverified`, while `matchedKeyId` and `verifiedAt`
 keep recording the original observation. It is `result` and not only the basis
@@ -1146,11 +1160,11 @@ because `ui/pages/backups.js`, the product API's status projection and the
 every one of them already fails closed on; the badge is the literal word
 `unverified` and the `Verified` condition is `False` with reason
 `VerificationNotAttempted`. An unreachable archive leaves the object there and
-the next policy event tries once more — the `Unverified` basis is itself the
-mark that the status still predates `signedAt`, so the retry survives any number
-of failed passes, and a pass that changes nothing writes nothing. A destination
-whose `evidenceRead` grant only a pod may hold is never repaired by the
-controller, and the `detail` says so.
+the next attempt is tried once `trust.retryAfter` has passed — the `Unverified`
+basis is itself the mark that the status still predates `signedAt`, so the retry
+survives any number of failed passes, and a pass that changes nothing writes
+nothing. A destination whose `evidenceRead` grant only a pod may hold is never
+repaired by the controller, and the `detail` says so.
 
 A digest mismatch at the recorded key takes the same path with a `detail`
 beginning "digest mismatch at"; no claim is taken from bytes that are not the
@@ -1159,9 +1173,9 @@ bytes the run reported writing.
 **What does not wait for the read.** An unlisted signer, a key-usage mismatch
 and a `KeyCompromise` revocation still change a pre-`signedAt` object's verdict
 immediately. None of those rows consults the signing time, so none of them is
-delayed by an archive that will not answer — nor by a kube API failure while
-resolving the evidence path, which is recorded as "no read was attempted"
-rather than failing the reconcile.
+delayed by an archive that will not answer, by a backoff that has not expired,
+nor by a kube API failure while resolving the evidence path, which is recorded
+as "no read was attempted" rather than failing the reconcile.
 
 One consequence worth stating: while an object sits on `NotAttempted`, its
 stored `verifiedAt` is no longer accepted as an independent observation (that

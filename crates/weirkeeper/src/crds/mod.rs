@@ -294,6 +294,29 @@ pub struct TrustBasis {
     /// Which `TrustPolicy` answered, with the revision that answered.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub policy: Option<PolicyRef>,
+    /// **The controller will not re-read this run's document before this
+    /// instant** — the bounded backoff behind `docs/kubernetes.md` §15.2c.
+    ///
+    /// A terminal object reconciles every `REQUEUE_SECS`, so "one bounded
+    /// re-read" needed something on the object to be bounded BY: without it a
+    /// document the archive cannot answer for costs one `Store::get` every 15
+    /// seconds, for ever, for a verdict that cannot change. Written only when
+    /// an attempt learned nothing — the archive did not answer, or there was
+    /// no reader — and cleared the moment a read succeeds.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_after: Option<Time>,
+    /// `absent` once the bounded re-read COMPLETED and the document itself
+    /// carried no signing time.
+    ///
+    /// **THE PERMANENT SETTLE, AND IT IS A FACT ABOUT THE DOCUMENT.** A block
+    /// with no `signedAt` and no `basis` that compared one is re-read, because
+    /// nothing on the status says whether the absence is this installation's
+    /// or the document's. Once a read has answered, it IS the document's, and
+    /// asking the archive again can only get the same answer — so this records
+    /// the answer instead of the question. It is never written for a read that
+    /// failed, and never beside a `signedAt`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub signing_time_read: Option<String>,
 }
 
 /// A cluster-scoped `TrustPolicy`, with the revision a verdict used.

@@ -4309,9 +4309,18 @@ async fn reconcile_with_trust(
                 // evidence path the original verdict came from, so a
                 // destination-backed run reads its own bucket and one whose
                 // grant only a pod may hold reads nothing and says so.
-                let signing_time = match crate::verification::signing_time_need(status) {
-                    None => crate::verification::SigningTime::NotNeeded,
-                    Some(need) => {
+                let signing_time = match crate::verification::signing_time_need(status, Utc::now())
+                {
+                    crate::verification::ReadPlan::None => {
+                        crate::verification::SigningTime::NotNeeded
+                    }
+                    // THE BACKOFF SHORT-CIRCUITS BEFORE `evidence_source`, so a
+                    // deferred pass costs neither a `Store::get` NOR the
+                    // destination read that resolving the handle would need.
+                    crate::verification::ReadPlan::Deferred => {
+                        crate::verification::SigningTime::Deferred
+                    }
+                    crate::verification::ReadPlan::Read(need) => {
                         // A FAILED READ IS NOT A FAILED RECONCILE — review
                         // finding **F6**. `?` here aborted the pass before
                         // `apply_retrust` ran, so a kube API blip delayed a

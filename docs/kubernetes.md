@@ -4530,15 +4530,27 @@ Refusing it as though the *document* carried no signing time is wrong, and
 measurably so: it reports this cluster's own upgrade history as a finding about
 somebody's archive. So the controller distinguishes the two:
 
-| the stored block | what it means | what the controller does |
-|---|---|---|
-| no `signedAt`, no `trust` | an older controller wrote it | one bounded re-read, then decide |
-| no `signedAt`, `trust` present | a current controller wrote it, over a document that carries no signing time | `Untrusted`, `SignedOutsideValidity`, as before |
+The question is not *which build wrote this block* — nothing on the status says
+so — but **is this block evidence that a signing time was ever compared to the
+key's validity window?**
 
-On a policy event for an object in the first row, and only if the status also
-records the document's key and its `sha256`, the controller performs **one**
-`get` of that document through the same evidence path the original verdict came
-from — the controller's own read-only handle for a legacy inline-`archive` run,
+| the stored block (no `signedAt`) | what it means | what the controller does |
+|---|---|---|
+| `trust.basis` is `Current` or `Historical` | a signing time was read from the document and compared to the key's validity window | `Untrusted`, `SignedOutsideValidity`, as before — the document itself carries none |
+| `trust.signingTimeRead: absent` | a re-read completed and the document carried no signing time | the same, and no further read: the answer is on the record |
+| anything else — no `trust` block, a `trust` block with no `basis`, `None`, `Unverified`, or a spelling a later build invents | nothing has been compared to the window yet | one bounded re-read, then decide |
+
+Only `Current` and `Historical` are reachable through the window comparison, and
+the comparison is unreachable without a claim — so the first row is an
+allow-list that stays correct under a build nobody has written yet. Enumerating
+the other side instead is what left five objects marked `Untrusted` across three
+upgrades: an intermediate build had re-derived them into `basis: None` with no
+`signedAt`, which two earlier rules both read as "a document that claims
+nothing".
+
+On a reconcile of an object in the last row, and only if the status also records
+the document's key and its `sha256`, the controller performs **one** `get` of
+that document through the same evidence path the original verdict came from — the controller's own read-only handle for a legacy inline-`archive` run,
 or the destination's handle for a destination-backed one. The bytes are checked
 against the digest the run recorded before anything is read out of them, so a
 signing time taken this way is exactly as trustworthy as the verdict being
@@ -4572,14 +4584,26 @@ fails closed on.
 `Unverified` is **never green**. The badge renders the literal word `unverified`
 and the `Verified` condition reads `False` with reason
 `VerificationNotAttempted` — not `VerificationUntrusted`, because nothing has
-been refused. If the archive is unreachable the object stays there and the next
-policy event tries once more: the `Unverified` basis is itself the mark that
-says "this status still predates `signedAt`", so the retry survives any number
-of failed passes. There is no retry loop inside a reconcile and no queue, and a
-pass that changes nothing writes nothing. A destination whose `evidenceRead`
-grant only a pod may hold (D2 §3.9) is never repaired by this controller at
-all, and its `detail` says so — the printed `logweir drill verify` command is
-the answer there, as everywhere else.
+been refused. A destination whose `evidenceRead` grant only a pod may hold
+(D2 §3.9) is never repaired by this controller at all, and its `detail` says so
+— the printed `logweir drill verify` command is the answer there, as everywhere
+else.
+
+**What "bounded" means, precisely.** A terminal object is reconciled every
+`REQUEUE_SECS` (15 seconds), not only when a `TrustPolicy` changes, so an
+attempt that learns nothing records **`trust.retryAfter`** — fifteen minutes
+ahead — and no further read is attempted until that instant. A reconcile inside
+that window resolves no destination, issues no `get` and writes nothing; the
+`Unverified` basis is still the mark that says "this status predates
+`signedAt`", so the retry survives any number of failed passes and an archive
+that comes back is picked up within one window. There is no retry loop inside a
+reconcile and no queue.
+
+```yaml
+trust:
+  basis: Unverified
+  retryAfter: 2026-09-19T12:15:00Z   # no read before this instant
+```
 
 A **digest mismatch** — the bytes at the recorded key are not the bytes the run
 reported writing — is reported through the same `Unverified` path, with a
@@ -4589,22 +4613,30 @@ original verdict was reached over the *recorded* bytes and no claim is taken
 from the substituted ones.
 
 **Three things this does not do.** It does not touch `verifiedAt`, which stays
-the independent observation it has always been. It does not delay a revocation:
+the independent observation it has always been — and a backoff never delays a
+revocation: an unlisted signer, a usage mismatch and a `KeyCompromise`
+revocation are decided before the row that defers, and none of them consults the
+signing time. It does not delay a revocation:
 an unlisted signer, a usage mismatch and a `KeyCompromise` revocation still
 change a pre-`signedAt` object's verdict immediately, with no read, because none
 of those rows consults the signing time — and a kube API failure while resolving
 the evidence path is recorded as "no read was attempted" rather than failing the
-reconcile, so it does not delay one either. And it does not repeat: once
-`signedAt` is on the status the object is an ordinary one, and a further policy
-event writes nothing unless the verdict actually changes.
+reconcile, so it does not delay one either. And it does not repeat. A repaired object carries `signedAt` and is an ordinary
+one; a document that genuinely carries no signing time — indistinguishable on
+the status from the legacy re-stamp, so it is read once too — records
+`trust.signingTimeRead: absent` when the read answers, and is never asked again.
+Either way a further reconcile writes nothing unless the verdict actually
+changes.
 
 **What it costs.** One `get` and one destination resolution per pre-`signedAt`
-object per policy event, dispatched in the same burst the re-derivation already
-uses and bounded by the objects the controller holds. The destination handle is
-UID-cached and the installation policy is cached, so the marginal cost is the
-`get`. A cluster with many such objects and an unreachable archive keeps paying
-one failed `get` per object per policy event until the archive answers; nothing
-retries between events.
+object, then nothing: a successful read writes `signedAt`, a document that
+carries none records `signingTimeRead`, and an attempt that learned nothing is
+barred for fifteen minutes by `retryAfter`. The destination handle is UID-cached
+and the installation policy is cached, so the marginal cost is the `get` itself.
+A cluster with many such objects and an unreachable archive pays one failed
+`get` and one small patch per object per quarter hour until the archive answers
+— not one per reconcile, which at `REQUEUE_SECS` would be four an hour times
+sixty.
 
 **Rollback.** An older controller reached by rollback ignores `signedAt` and
 `trust` entirely and reports the `result` it finds, so a repaired object reads
