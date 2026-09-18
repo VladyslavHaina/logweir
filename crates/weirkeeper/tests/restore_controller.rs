@@ -6089,3 +6089,149 @@ fn the_ca_bundles_are_copied_into_the_runs_own_immutable_plan() {
          signed, and a re-serialisation would change the hash the runner pins"
     );
 }
+
+// ===========================================================================
+// Fix round 1, R1 — the `Restore` twin of D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN
+// ===========================================================================
+
+/// [`evidence_destination_value`] with an `evidenceRead` grant only a pod may
+/// hold — D2 §3.9's evidence-fetch Job, which this build does not create.
+fn evidence_destination_with_pod_only_read() -> Value {
+    let mut value = evidence_destination_value();
+    value["spec"]["access"]["evidenceRead"] = serde_json::json!({"mode": "SecretKeys", "secret": {
+        "name": "ev-evidence-reader",
+        "accessKeyIdKey": "access-key-id", "secretAccessKeyKey": "secret-access-key"
+    }});
+    value
+}
+
+/// [`finished_routes`] plus the two `GET …/backupdestinations/<name>` a
+/// destination-backed `Restore`'s evidence routing makes.
+fn finished_routes_for_destinations(pods: String, log: String, evidence: Value) -> Vec<Route> {
+    let mut routes = finished_routes(pods, log, "Complete");
+    routes.extend(destination_routes(source_destination_value(), evidence));
+    routes
+}
+
+/// **A DESTINATION-BACKED `Restore` PUBLISHES ITS `NotAttempted` VERDICT** —
+/// review finding **R1**, the twin of `D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN`.
+///
+/// # Why this row is not optional once the `Backup` half is fixed
+///
+/// `restore.rs`'s second patch carried the byte-for-byte same fence as
+/// `backup.rs`'s — `if let (Some(payload_key), Some(sidecar_key),
+/// Some(digest))` — and its `NotAttempted` arm was dead for the identical
+/// reason: `observed` is `None` for that source, so `scorecard_sha256` is
+/// `None` by construction. `docs/kubernetes.md` §7e promises the
+/// `NotAttempted` verdict for destination-backed execution generally, §7d
+/// (`Restore`) included; fixing only the `Backup` half would have made that
+/// documented sentence true for one kind and still false for the other.
+///
+/// The `evidenceRead` grant that matters here is the **evidence** destination's
+/// — the scorecard was written under its `evidenceWrite`, and reading it back
+/// through the source destination is the two-destination form of grounding G2.
+///
+/// KILLS: re-fencing the block on `scorecard_sha256`; answering `Valid`,
+/// `Invalid` or `Untrusted` without bytes; dropping the detail sentence;
+/// copying `outcome`, `objectives` or `measured` out of a document nobody read.
+#[tokio::test]
+async fn a_destination_backed_restore_with_a_pod_only_grant_publishes_not_attempted() {
+    let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes_for_destinations(
+        pod_list_terminated(0),
+        log_body(&i8_tail()),
+        evidence_destination_with_pod_only_read(),
+    ));
+    reconcile_restore(
+        &destination_backed_restore(),
+        &client,
+        // THE GLOBAL HANDLE IS NEVER CONSULTED for a destination-backed run
+        // (D2 §3.10); this oracle exists so that reading it would be visible.
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile succeeds");
+
+    let statuses = patched_statuses(&bodies.lock().expect("readable"));
+    let second = statuses.last().expect("the verification patch was written");
+    let verification = &second["evidence"]["verification"];
+    assert_eq!(
+        verification["result"],
+        Value::String("NotAttempted".to_string()),
+        "R1: an ABSENT field is what an operator used to get, and an absent field is \
+         indistinguishable from a controller that never looked. Statuses: {statuses:?}"
+    );
+    let detail = verification["detail"]
+        .as_str()
+        .expect("the verdict carries its detail");
+    assert!(
+        detail.contains("evidence-fetch Job") && detail.contains("logweir drill verify"),
+        "the sentence names the capability that is missing and the command an operator can run \
+         instead: {detail}"
+    );
+    assert!(
+        verification["matchedKeyId"].as_str().is_none(),
+        "nothing was verified, so no key matched: {verification}"
+    );
+    assert!(
+        second["outcome"].is_null() && second["objectives"].is_null(),
+        "and NOTHING is copied out of a scorecard nobody fetched — the verdict is the only thing \
+         this patch learned: {second}"
+    );
+    let (_, state, reason) = conditions_of(second)
+        .into_iter()
+        .find(|(t, ..)| t == "Verified")
+        .expect("the Verified condition");
+    assert_eq!(
+        (state.as_str(), reason.as_str()),
+        ("False", "VerificationNotAttempted"),
+        "the badge that follows from it — `Restore` green also needs outcome `pass`, which this \
+         run has no document to claim: {second}"
+    );
+}
+
+/// The GC11 half, and the decision it records: **"no artifact was written"
+/// still writes nothing**, on the `Restore` path exactly as on the `Backup`
+/// one.
+///
+/// The guard is `keys.mandatory_complete()` — the scorecard and sidecar key
+/// lines say a document exists; the digest only says one was read, which is
+/// the question the verdict answers.
+///
+/// KILLS: hoisting the `NotAttempted` verdict out of the key guard as well as
+/// out of the digest guard.
+#[tokio::test]
+async fn a_restore_that_wrote_no_artifact_still_writes_no_verification_block() {
+    let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes_for_destinations(
+        pod_list_terminated(1),
+        // GC11: an operational failure writes no scorecard, so the log carries
+        // none of interface I8's key lines.
+        log_body("logweir: the source archive could not be read\n"),
+        evidence_destination_with_pod_only_read(),
+    ));
+    reconcile_restore(
+        &destination_backed_restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile succeeds");
+
+    let statuses = patched_statuses(&bodies.lock().expect("readable"));
+    for status in &statuses {
+        assert!(
+            status["evidence"]["verification"].is_null(),
+            "GC11: exit 1 wrote no scorecard, so there is no document to have an opinion about \
+             and no verdict is published: {status}"
+        );
+    }
+    assert_eq!(
+        statuses[0]["exitCode"].as_i64(),
+        Some(1),
+        "the exit code is still recorded: {}",
+        statuses[0]
+    );
+}

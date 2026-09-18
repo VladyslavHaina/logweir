@@ -4313,18 +4313,36 @@ async fn reconcile_restore_inner(
     // patch above is what makes that an ordering guarantee rather than a
     // comment.
     //
-    // ATTEMPTED ONLY WHEN THERE IS SOMETHING TO VERIFY: both mandatory keys
-    // and the digest the controller computed over the bytes it fetched. At
-    // exits 1, 3 and 4 the contract says no artifact was written (GC11), so
-    // there is no document to have an opinion about.
-    if let (Some(payload_key), Some(sidecar_key), Some(digest)) = (
+    // ATTEMPTED ONLY WHEN AN ARTIFACT WAS WRITTEN, AND **THE TWO MANDATORY
+    // KEYS ARE WHAT SAY SO** — D2 §3.9's Restore paragraph, which runs "the
+    // same flow" as the `Backup` half on `scorecard-key`/`sidecar-key`, and
+    // whose step 2 chooses the mode once both keys are present. At exits 1, 3
+    // and 4 the contract says no artifact was written (GC11), the runner
+    // prints no key lines, and there is no document to have an opinion about:
+    // no verification block is written at all. That absence is the GC11
+    // distinction and it is DELIBERATELY kept.
+    //
+    // THE DIGEST IS REQUIRED BY THE PATHS THAT VERIFY BYTES, AND BY THEM ONLY.
+    // A `NotAttempted` source fetched nothing, so `scorecard_sha256` is `None`
+    // BY CONSTRUCTION (`observed` is `None` for it, above) — and while the
+    // digest was demanded of every source this whole block was skipped for it,
+    // so an operator whose EVIDENCE destination reads with a grant only a pod
+    // may hold (`SecretKeys`, `WorkloadIdentity`) saw NO
+    // `status.evidence.verification` at all rather than the honest
+    // `NotAttempted` and the sentence naming why. That is the `Restore` twin
+    // of defect D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN, and it is the same fix as
+    // `controllers::backup`'s — one flow, one answer. NOTHING IS INVENTED
+    // HERE: the only verdict writable without bytes is `NotAttempted`, and
+    // `Valid`/`Invalid`/`Untrusted` still come only from a verifier that read
+    // the document.
+    let reference = match (
         keys.scorecard.as_deref(),
         keys.sidecar.as_deref(),
         observed
             .as_ref()
             .and_then(|o| o.scorecard_sha256.as_deref()),
     ) {
-        let reference = EvidenceRef {
+        (Some(payload_key), Some(sidecar_key), Some(digest)) => Some(EvidenceRef {
             // PLAT-19.1: trust is resolved PER NAMESPACE, and this is
             // `metadata.namespace` read off the object being reconciled —
             // never a name the subject supplied.
@@ -4333,24 +4351,33 @@ async fn reconcile_restore_inner(
             payload_sha256: digest.to_string(),
             sidecar_key: sidecar_key.to_string(),
             payload_type: logweir_verify::PAYLOAD_TYPE_SCORECARD,
-        };
-        let result = match &evidence_from {
-            backup::EvidenceSource::GlobalHandle => verify(reference).await,
-            // THE SAME VERIFIER, ON THE EVIDENCE DESTINATION'S HANDLE — D2
-            // §3.9's "no second verification path".
-            backup::EvidenceSource::Destination(store) => {
-                crate::verification::verify_oracle(Some(Arc::clone(store)), client.clone())(
-                    reference,
-                )
-                .await
-            }
-            backup::EvidenceSource::NotAttempted { detail } => {
-                crate::verification::VerificationResult::not_attempted(
-                    reference.payload_type,
-                    detail.clone(),
-                )
-            }
-        };
+        }),
+        _ => None,
+    };
+    let verdict = match (&evidence_from, reference) {
+        // THE DECISION IS ALREADY MADE AND IT IS RECORDED. `evidence_source_for`
+        // answered with the reason there is no reader for this run's evidence;
+        // the guard is `keys.mandatory_complete()` and not the digest, because
+        // the question this arm answers is "was a scorecard written", which the
+        // keys say and the digest — which only a fetch produces — cannot.
+        (backup::EvidenceSource::NotAttempted { detail }, _) if keys.mandatory_complete() => {
+            Some(crate::verification::VerificationResult::not_attempted(
+                logweir_verify::PAYLOAD_TYPE_SCORECARD,
+                detail.clone(),
+            ))
+        }
+        (backup::EvidenceSource::GlobalHandle, Some(reference)) => Some(verify(reference).await),
+        // THE SAME VERIFIER, ON THE EVIDENCE DESTINATION'S HANDLE — D2
+        // §3.9's "no second verification path".
+        (backup::EvidenceSource::Destination(store), Some(reference)) => Some(
+            crate::verification::verify_oracle(Some(Arc::clone(store)), client.clone())(reference)
+                .await,
+        ),
+        // GC11's no-artifact case, and a fetch that returned no digest: no
+        // document, no opinion, no block.
+        _ => None,
+    };
+    if let Some(result) = verdict {
         let current = restore
             .status
             .as_ref()
