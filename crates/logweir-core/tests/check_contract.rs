@@ -1279,6 +1279,12 @@ fn an_anchored_run_is_not_a_licence_to_carry_a_credential() {
     /// 45% of real keys carry at least one `/` (p = 1/64 per character over
     /// 40), and each of its components is short and alphanumeric.
     const AWS: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    /// The same 40 characters with exactly ONE internal `/`, which is the
+    /// densest case: two components, so a cap of two would pass it. The
+    /// three-component probes above die at any cap below three and cannot pin
+    /// the number — mutant M23 lifted the cap to two and survived until this
+    /// row existed.
+    const AWS_ONE_SLASH: &str = "wJalrXUtnFEMIK7MDENGb/PxRfiCYEXAMPLEKEY0";
     const SET: &str = "3f0ada8f-1a2b-4c3d-9e8f-0123456789ab";
     const DIGEST: &str = "6feecc8c16c5551d9feb3eb5f77e2da773bf68bd9ef9c52927ceb2c86e56892b";
 
@@ -1311,11 +1317,31 @@ fn an_anchored_run_is_not_a_licence_to_carry_a_credential() {
             leaked.push(format!("{name}: {out}"));
         }
     }
+    // The one-slash form, which is what pins the cap AT one.
+    for (name, input) in [
+        (
+            "one slash, a set id shares the run",
+            format!("{SET}/{AWS_ONE_SLASH}"),
+        ),
+        (
+            "one slash, a segment path shares the run",
+            format!("the object {SET}/topics/orders/partition=0/{AWS_ONE_SLASH} failed"),
+        ),
+    ] {
+        assert!(
+            input.contains(AWS_ONE_SLASH),
+            "the fixture must carry the key"
+        );
+        let out = redact(&input);
+        if out.contains(AWS_ONE_SLASH) {
+            leaked.push(format!("{name}: {out}"));
+        }
+    }
     assert!(
         leaked.is_empty(),
         "an anchored run carried a credential out whole ({} of {}):\n  {}",
         leaked.len(),
-        probes.len(),
+        probes.len() + 2,
         leaked.join("\n  ")
     );
 
