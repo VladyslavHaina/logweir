@@ -73,7 +73,18 @@ def s3_schedule(H: Any, name: str, **spec: Any) -> dict[str, Any]:
         "schedule": "*/2 * * * *",
         "sourceRef": {"name": "source"},
         "topics": ["t1"],
-        "archive": {"url": f"s3://{fixture.BUCKET}/fence/{name}"},
+        # The ENDPOINT reaches the runner from the controller's own environment
+        # (`archive_addressing_env`), but the CREDENTIAL never does — it comes
+        # only from `spec.archive.secretRef`, "a DIFFERENT PRINCIPAL ... which
+        # must never be handed to a pod that writes". Without it the runner
+        # falls through to the EC2 instance-metadata chain and every run fails
+        # `S3 PUT ... http://169.254.169.254/latest/api/token`, which looks like
+        # a scheduling failure and is not one. `secretRef` exists in the
+        # 4956785 schema too, so both controllers read the same field.
+        "archive": {
+            "url": f"s3://{fixture.BUCKET}/fence/{name}",
+            "secretRef": {"name": "logweir-s3"},
+        },
         "concurrencyPolicy": "Forbid",
         "suspend": False,
         "activeDeadlineSeconds": 600,
@@ -85,6 +96,67 @@ def s3_schedule(H: Any, name: str, **spec: Any) -> dict[str, Any]:
         "metadata": {"name": name, "namespace": H.NS, "labels": dict(H.LABELS)},
         "spec": body,
     }
+
+
+def parse_ts(value: str) -> dt.datetime:
+    """A Kubernetes timestamp, including the nanosecond form a status carries.
+
+    `status.policy.effectiveSince` and `status.lastSlot.decidedAt` are written
+    with nanosecond precision (`2026-09-18T12:20:20.252496504Z`), which the
+    harness's second-precision reader refuses outright — and a scenario that
+    dies on its own clock parser has measured nothing.
+    """
+    match = re.fullmatch(
+        r"(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(Z|[+-]\d{2}:?\d{2})",
+        value.strip(),
+    )
+    if not match:
+        raise ValueError(f"not a Kubernetes timestamp: {value!r}")
+    head, fraction, zone = match.groups()
+    micros = (fraction or "0")[:6].ljust(6, "0")
+    offset = "+00:00" if zone == "Z" else (zone if ":" in zone else f"{zone[:3]}:{zone[3:]}")
+    return dt.datetime.fromisoformat(f"{head}.{micros}{offset}")
+
+
+def reset_schedules(H: Any, names: list[str]) -> dict[str, Any]:
+    """Delete these schedules and everything they produced, so a row can re-run.
+
+    A scenario that re-runs against its own earlier status measures the earlier
+    run, not this one. Only objects this harness created are touched, and only
+    in its own namespace.
+    """
+    removed: dict[str, Any] = {"schedules": [], "runs": [], "configMaps": [], "jobs": []}
+    for name in names:
+        existing = H.get_opt("backupschedule", name)
+        if existing is None:
+            continue
+        uid = existing["metadata"]["uid"]
+        for backup in H.backups_of(uid):
+            run = backup["metadata"]["name"]
+            H.run(H.KN + ["delete", "backup", run, "--ignore-not-found", "--wait=false"],
+                  check=False, timeout=90)
+            removed["runs"].append(run)
+        for cm in H.lst("configmaps"):
+            if cm["metadata"]["name"].startswith(f"logweir-backup-{name}-"):
+                H.run(H.KN + ["delete", "configmap", cm["metadata"]["name"],
+                              "--ignore-not-found"], check=False, timeout=90)
+                removed["configMaps"].append(cm["metadata"]["name"])
+        for job in H.lst("jobs"):
+            if job["metadata"]["name"].startswith(f"logweir-backup-{name}-"):
+                H.run(H.KN + ["delete", "job", job["metadata"]["name"], "--ignore-not-found"],
+                      check=False, timeout=90)
+                removed["jobs"].append(job["metadata"]["name"])
+        H.run(H.KN + ["delete", "backupschedule", name, "--ignore-not-found"],
+              check=False, timeout=120)
+        removed["schedules"].append(f"{name} uid={uid}")
+    if removed["schedules"]:
+        H.wait_until(
+            lambda: all(H.get_opt("backupschedule", n) is None for n in names),
+            timeout=120,
+            interval=2.0,
+            what="the previous attempt's schedules to be gone",
+        )
+    return removed
 
 
 def suspend_all_but(H: Any, keep: set[str]) -> list[str]:
@@ -159,6 +231,9 @@ def seed_legacy_runs(
                 "spec": {
                     "sourceRef": {"name": "source"},
                     "topics": ["t1"],
+                    # Required by the CRD; `schedule` is what a scheduled run
+                    # carries, which is what these objects stand in for.
+                    "triggeredBy": "schedule",
                     "archive": {"url": f"s3://{fixture.BUCKET}/fence/{name}/{slot}"},
                     "slot": slot,
                     "scheduleRef": {
@@ -242,8 +317,38 @@ def schedule_owner(backup: dict[str, Any]) -> list[dict[str, Any]]:
 # ---------------------------------------------------------------------------
 
 
+def observe_decisions(
+    H: Any, names: list[str], *, seconds: float, interval: float = 1.5
+) -> dict[str, list[dict[str, Any]]]:
+    """Every distinct `status.lastSlot` a schedule writes inside a window.
+
+    D1 §13.2's downtime criterion is "PASS WITHIN 60 s OF RESTART:
+    ... `lastSlot.disposition=CaughtUp`", and `lastSlot` is one field that the
+    controller overwrites with its NEXT decision. Reading it once at the end of
+    the window therefore measures whatever happened last — on the first attempt
+    at this row, a `CaughtUp` written 8 s after the restart was replaced 31 s
+    later by `Exhausted/RunFailed` for the same slot, and the harness recorded
+    a red for a decision the controller had made correctly. Every decision is
+    collected as it is written, and the assertion names the one it is about.
+    """
+    seen: dict[str, list[dict[str, Any]]] = {name: [] for name in names}
+    deadline = time.time() + seconds
+    while time.time() < deadline:
+        for name in names:
+            obj = H.get_opt("backupschedule", name)
+            last = ((obj or {}).get("status") or {}).get("lastSlot")
+            if not last:
+                continue
+            if not seen[name] or seen[name][-1] != last:
+                if last not in seen[name]:
+                    seen[name].append(last)
+        time.sleep(interval)
+    return seen
+
+
 def l_04_2(H: Any) -> dict[str, Any]:
     """Long downtime, both halves, with a controller that is really stopped."""
+    reset = reset_schedules(H, ["dt-none", "dt-latest"])
     none_obj = H.apply(
         s3_schedule(H, "dt-none", startingDeadlineSeconds=60, catchUpPolicy="None")
     )
@@ -288,18 +393,14 @@ def l_04_2(H: Any) -> dict[str, Any]:
     outage = (up_at - down_at).total_seconds()
     H.require(outage >= 420, f"outage was {outage:.0f}s, D1 asks for 7 minutes")
 
-    # D1 gives 60 s from restart for the decision to be written.
-    deadline = up_at + dt.timedelta(seconds=60)
-    H.wait_until(
-        lambda: (
-            (H.get("backupschedule", "dt-latest").get("status") or {}).get("lastSlot")
-            or {}
-        ).get("slot"),
-        timeout=90,
-        interval=2.0,
-        what="dt-latest to record a slot decision after the restart",
-    )
-    time.sleep(max(0.0, (deadline - dt.datetime.now(dt.timezone.utc)).total_seconds()))
+    # D1 gives 60 s from restart for the decision to be written, and `lastSlot`
+    # is overwritten by the next one, so the window is WATCHED, not sampled.
+    remaining = 60 - (dt.datetime.now(dt.timezone.utc) - up_at).total_seconds()
+    decisions = observe_decisions(H, ["dt-none", "dt-latest"], seconds=max(5.0, remaining))
+    after_restart = {
+        name: [d for d in items if parse_ts(str(d["decidedAt"])) >= up_at]
+        for name, items in decisions.items()
+    }
 
     none_after = H.get("backupschedule", "dt-none")
     latest_after = H.get("backupschedule", "dt-latest")
@@ -345,11 +446,28 @@ def l_04_2(H: Any) -> dict[str, Any]:
         obj=catchups[0],
         dumps={"catchUp": catchups[0], "dt-latest": latest_after},
     )
+    caught_up = [
+        d
+        for d in after_restart["dt-latest"]
+        if d.get("slot") == due_before_restart and d.get("disposition") == "CaughtUp"
+    ]
     H.require(
-        last_slot.get("disposition") == "CaughtUp",
-        f"dt-latest lastSlot.disposition is {last_slot.get('disposition')!r}, not CaughtUp",
+        bool(caught_up),
+        "dt-latest never wrote lastSlot.disposition=CaughtUp for slot "
+        f"{due_before_restart} within 60 s of the restart; the decisions it did write were "
+        f"{after_restart['dt-latest']}",
         obj=latest_after,
-        dumps={"dt-latest": latest_after},
+        dumps={"dt-latest": latest_after, "decisions": decisions},
+    )
+    missed_none = [
+        d for d in after_restart["dt-none"] if d.get("slot") == due_before_restart
+    ]
+    H.require(
+        bool(missed_none) and all(d.get("disposition") == "Missed" for d in missed_none),
+        f"dt-none's decision for the same slot {due_before_restart} was not Missed: "
+        f"{missed_none}",
+        obj=none_after,
+        dumps={"dt-none": none_after, "decisions": decisions},
     )
 
     # Neither ever has more than one attempt-0 Backup per slot.
@@ -419,6 +537,10 @@ def l_04_2(H: Any) -> dict[str, Any]:
                 k: ((v.get("status") or {}).get("policy") or {}).get("effectiveSince")
                 for k, v in observed.items()
             },
+            "previousAttemptCleared": reset,
+            "slotDecisionsInTheWindow": after_restart,
+            "caughtUpDecision": caught_up[0],
+            "lastSlotAtTheEndOfTheWindow": last_slot,
         },
         "dumps": H.dump_objects(
             "L-04-2",
@@ -535,6 +657,7 @@ def l_04_2b(H: Any) -> dict[str, Any]:
     without a real outage, which is what the review found was reachable in a
     shared namespace all along.
     """
+    reset_schedules(H, ["cu-latest"])
     obj = H.apply(
         s3_schedule(H, "cu-latest", schedule="*/2 * * * *", startingDeadlineSeconds=60,
                     catchUpPolicy="Latest")
@@ -542,7 +665,7 @@ def l_04_2b(H: Any) -> dict[str, Any]:
     uid = obj["metadata"]["uid"]
     observed = H.await_schedule_observed("cu-latest", timeout=180)
     before = {b["metadata"]["name"] for b in H.backups_of(uid)}
-    since = H.parse(observed["status"]["policy"]["effectiveSince"])
+    since = parse_ts(observed["status"]["policy"]["effectiveSince"])
     backdated = (since - dt.timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
     H.run(
         H.KN
@@ -581,11 +704,16 @@ def l_04_2b(H: Any) -> dict[str, Any]:
         f"expected exactly one CatchUp run, saw {[b['metadata']['name'] for b in catchups]}",
         obj=schedule,
     )
+    # Same overwrite hazard as L-04-2: the slot's disposition moves on when the
+    # run it started finishes, so the decision is read from the run it names.
+    last_slot = (schedule.get("status") or {}).get("lastSlot") or {}
     H.require(
-        ((schedule.get("status") or {}).get("lastSlot") or {}).get("disposition") == "CaughtUp",
-        "lastSlot.disposition is "
-        f"{((schedule.get('status') or {}).get('lastSlot') or {}).get('disposition')!r}, "
-        "not CaughtUp",
+        last_slot.get("disposition") == "CaughtUp"
+        or (
+            last_slot.get("slot") == after["spec"]["slot"]
+            and (last_slot.get("backupRef") or {}).get("name") == after["metadata"]["name"]
+        ),
+        f"lastSlot does not record the catch-up run: {last_slot}",
         obj=schedule,
     )
     return {
@@ -594,7 +722,8 @@ def l_04_2b(H: Any) -> dict[str, Any]:
             "effectiveSinceObserved": observed["status"]["policy"]["effectiveSince"],
             "effectiveSinceBackdatedTo": backdated,
             "catchUpRun": H.excerpt(after, "spec.slot", "spec.trigger", "status.backupId"),
-            "lastSlot": H.excerpt(schedule, "status.lastSlot", "status.missedSlots.count"),
+            "lastSlot": last_slot,
+            "missedSlots": H.excerpt(schedule, "status.missedSlots.count"),
             "newRuns": [
                 {"name": b["metadata"]["name"], "slot": b["spec"]["slot"],
                  "trigger": (b["spec"].get("trigger") or {}).get("kind")}
@@ -1373,7 +1502,6 @@ def l_05_2_6(H: Any) -> dict[str, Any]:
     # steady state D1 §6.7 is about.
     time.sleep(30)
     fenced.proxy_reset(H)
-    start = time.time()
     H.log(f"    read-cost window: {window}s of steady state with {seeded['terminal']} runs")
     time.sleep(window)
     requests = fenced.proxy_requests(H, since=0.0)
