@@ -60,7 +60,7 @@ use logweir_core::destination::DestinationRole;
 use crate::catalog_view::{self as view, PageConflict, SyncTrigger, TrustView, ViewLimits};
 use crate::check::{self, CheckPhase};
 use crate::conditions::{current_condition, merge_condition, status_unchanged};
-use crate::crds::recovery_catalog::{RecoveryCatalog, SyncCursor};
+use crate::crds::recovery_catalog::{LastSyncJob, RecoveryCatalog, SyncCursor};
 use crate::crds::{Condition, Time};
 use crate::destination::{self, ResolveError};
 use crate::job::RunnerOwner;
@@ -441,7 +441,7 @@ impl Pass<'_> {
                 .status
                 .as_ref()
                 .and_then(|s| s.last_sync_job.as_ref())
-                .is_some_and(|j| j.finished_at.is_some());
+                .is_some_and(|record| harvested_record(record, job));
             if !harvested {
                 return self.harvest(job).await;
             }
@@ -1569,6 +1569,39 @@ impl Pass<'_> {
 // ---------------------------------------------------------------------------
 // Small pure helpers
 // ---------------------------------------------------------------------------
+
+/// Whether `record` is the record of **this Job's** completion, and therefore
+/// whether this Job's result has already been read.
+///
+/// `finishedAt` is the fact that says "read"; the comparison with the Job's own
+/// `completionTime` is what makes it a fact about THIS Job. Two reasons it is
+/// not simply `finished_at.is_some()`:
+///
+/// 1. **Upgrade.** Every catalog stuck by `CATALOG-RESYNC-NOT-HARVESTED` is
+///    carrying, right now, a new Job's name beside an older Job's timestamp.
+///    The write above stops that being created; this reads past one that
+///    already exists, so a stuck catalog harvests its completed Job on the
+///    first reconcile after the upgrade instead of waiting for its next slot —
+///    and a `intervalSeconds: 0` catalog, which has no next slot, recovers at
+///    all.
+/// 2. **It is the honest question.** "Has something been written here" is a
+///    weaker claim than "this Job's result is what was written", and the
+///    difference is exactly the bug.
+///
+/// A Job that finished with NO `completionTime` — a `Failed` condition carries
+/// none — is recorded with the harvesting pass's own clock, so there is nothing
+/// to compare against and the tracked name is the identity. Answering `false`
+/// there would re-harvest a failed sync on every pass forever.
+#[must_use]
+pub fn harvested_record(record: &LastSyncJob, job: &Job) -> bool {
+    let Some(recorded) = record.finished_at else {
+        return false;
+    };
+    match job.status.as_ref().and_then(|s| s.completion_time.as_ref()) {
+        Some(completed) => recorded == completed.0,
+        None => true,
+    }
+}
 
 /// Whether this Job's CONTROLLER owner reference is the catalog — D-SEAMS
 /// **S6**, applied to a Job rather than a pod. A Job carrying the right name is

@@ -959,3 +959,112 @@ async fn a_stale_finished_job_is_never_harvested_twice() {
     }
     assert_no_delete(&f);
 }
+
+// ===========================================================================
+// 4. The objects the defect has already stuck, and the upgrade past it
+// ===========================================================================
+
+/// **Upgrade.** Every catalog this defect stuck is carrying, right now, a NEW
+/// Job's name beside an OLD Job's `finishedAt` — that is what the merge wrote.
+/// Replacing the record stops another one being created; it does not read the
+/// ones that exist, so the harvest arm asks the honest question instead: is
+/// this record the record of THIS Job's completion?
+///
+/// It matters most for a `intervalSeconds: 0` catalog, which has no next slot
+/// to recover on and would otherwise need a brand-new `syncRequest` token — but
+/// the shape is the same at every cadence, so this row drives the hourly one
+/// the rest of the module uses and a pass one reconcile after the upgrade.
+#[tokio::test]
+async fn a_record_left_by_the_defect_is_harvested_after_the_upgrade() {
+    let first_finished = at(2026, 9, 16, 12, 2, 0);
+    let second_finished = at(2026, 9, 16, 12, 20, 0);
+    let second = leak(request_stem("token-2"));
+
+    // Exactly what the live object looked like: the second request's Job name,
+    // the FIRST request's timestamps, the first view still published and
+    // `Synced` left on a waiting code by the running pass that never got a
+    // harvest after it.
+    let mut status = published_status(second, "token-2", first_finished);
+    status["conditions"][1] = json!({
+        "type": "Synced", "status": "Unknown", "reason": "PodNotStarted",
+        "message": "the check Job is running", "observedGeneration": 1,
+        "lastTransitionTime": stamp(first_finished)
+    });
+
+    let plan_sha = format!("sha256:{}", "5".repeat(64));
+    let f = fixture(harvest_routes(
+        second,
+        JOB_UID_2,
+        &plan_sha,
+        (at(2026, 9, 16, 12, 15, 0), second_finished),
+        framed(&plan_sha, &body_with(4)),
+    ));
+    let outcome = run_at(
+        &f,
+        &catalog(json!({"syncRequest": "token-2"}), status),
+        at(2026, 9, 16, 12, 25, 0),
+    )
+    .await;
+
+    assert_eq!(
+        outcome.phase,
+        ctrl::CatalogPhase::Published,
+        "a record whose `finishedAt` is not this Job's completion time has not been harvested, \
+         whoever wrote it; a stuck catalog recovers on the first reconcile after the upgrade \
+         and not only at its next slot — and a manual-only catalog has no next slot"
+    );
+    let patch = f.patched_status();
+    assert_eq!(patch["syncedAt"], stamp(second_finished));
+    assert_eq!(condition(&patch, "Synced")["status"], "True");
+    assert_eq!(condition(&patch, "Synced")["reason"], "Succeeded");
+    assert_eq!(outcome.entries, 4);
+}
+
+/// The identity test itself, over its four cases — including the one that must
+/// answer `true` with nothing to compare, because answering `false` there would
+/// re-harvest a failed sync on every pass forever.
+#[test]
+fn the_harvest_test_is_about_this_jobs_completion() {
+    let completed = at(2026, 9, 16, 12, 20, 0);
+    let job: k8s_openapi::api::batch::v1::Job = serde_json::from_str(&job_body(
+        "j",
+        JOB_UID_1,
+        "sha256:x",
+        Some((at(2026, 9, 16, 12, 15, 0), completed)),
+    ))
+    .expect("a Job");
+    // A Job that finished by FAILING carries no `completionTime`.
+    let failed: k8s_openapi::api::batch::v1::Job = serde_json::from_value(json!({
+        "apiVersion": "batch/v1", "kind": "Job",
+        "metadata": {"name": "j", "namespace": NS, "uid": JOB_UID_1},
+        "status": {"startTime": stamp(at(2026, 9, 16, 12, 15, 0)),
+                   "conditions": [{"type": "Failed", "status": "True"}]}
+    }))
+    .expect("a Job");
+
+    let record = |finished: Option<DateTime<Utc>>| LastSyncJob {
+        name: Some("j".to_string()),
+        started_at: None,
+        finished_at: finished,
+        exit_code: None,
+        refusal_reason: None,
+    };
+
+    assert!(
+        !ctrl::harvested_record(&record(None), &job),
+        "no `finishedAt` is the plain 'not read yet'"
+    );
+    assert!(
+        ctrl::harvested_record(&record(Some(completed)), &job),
+        "the record of this Job's own completion IS the harvest"
+    );
+    assert!(
+        !ctrl::harvested_record(&record(Some(at(2026, 9, 16, 12, 2, 0))), &job),
+        "another Job's timestamp is not this Job's result, which is the whole defect"
+    );
+    assert!(
+        ctrl::harvested_record(&record(Some(at(2026, 9, 16, 12, 16, 0))), &failed),
+        "a Job with no completionTime is recorded with the harvesting pass's own clock; there \
+         is nothing to compare, and answering `false` re-harvests a failed sync forever"
+    );
+}
