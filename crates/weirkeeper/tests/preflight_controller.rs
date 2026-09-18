@@ -3000,9 +3000,33 @@ fn primary_location_digest() -> String {
 }
 
 /// A draft restore over `point`, reconciled in full.
+///
+/// The EVIDENCE destination sits in a different bucket from the source one, so
+/// the two resolve to different `locationDigest`s. That is what makes "the
+/// expected digest is the ARCHIVE destination's" a testable claim rather than
+/// a coincidence of one shared fixture bucket.
 async fn restore_over_recovery_point(point: Value) -> Value {
     let job = job_name(CheckPlanKind::RestorePreflight);
-    let mut routes = restore_referent_routes();
+    let mut evidence = backup_destination("evidence");
+    evidence["spec"]["storage"]["bucket"] = json!("evidence-bucket");
+    let mut routes = vec![
+        route(
+            "GET",
+            "/trustrosters/default",
+            roster(RUNNER_KEY_ID, vec!["target-id"]).to_string(),
+        ),
+        route(
+            "GET",
+            "/kafkaclusters/target",
+            kafka_cluster("target", Some("target-id")).to_string(),
+        ),
+        route(
+            "GET",
+            "/backupdestinations/primary",
+            backup_destination("primary").to_string(),
+        ),
+        route("GET", "/backupdestinations/evidence", evidence.to_string()),
+    ];
     routes.push(route("GET", "/backups/nightly-1", point.to_string()));
     // The point's own `spec.sourceRef`: the check reads the cluster the
     // recovery point was captured from, to bind `plan.bindings` to it.
