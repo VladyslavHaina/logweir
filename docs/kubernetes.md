@@ -4500,33 +4500,64 @@ same bytes when the run finished. `signedAt` then comes from the receipt's
 `finished_at` (or the scorecard's last phase), exactly as a fresh run derives
 it, and the verdict is re-derived with it.
 
-Until that read succeeds the object keeps **the verdict it already had**, with
-`trust.basis: Unverified` and a `detail` saying why:
+Until that read succeeds the object is **neither withdrawn nor presented**:
+`result` becomes `NotAttempted` — no verification *was* attempted under this
+policy — with `trust.basis: Unverified` and a `detail` saying why. The original
+observation is not lost: `matchedKeyId` and `verifiedAt` still record it.
 
 ```yaml
-result: Valid                # unchanged - nothing has been read, so nothing is withdrawn
+result: NotAttempted         # not Untrusted: nothing was read, so nothing is refused
+matchedKeyId: 2c76e22f...    # unchanged - the original verification still happened
+verifiedAt: 2026-09-14T…Z    # unchanged - and it is still the independent observation
 trust:
-  basis: Unverified          # and nothing is claimed either
+  basis: Unverified          # nothing has been compared to the key's window yet
 detail: "the signature over this document verified under key <id>, and the trust policy
          <name> has not been applied to it yet (Unverified): ..."
 ```
+
+**`result` and not only the basis, and that is the whole safety argument.**
+`ui/pages/backups.js`, the product API's status projection and the `SIGNED`
+printer column all read `result` and nothing else, so a block that meant "not
+verified" while leaving `Valid` there would render a green *"verified by
+weirkeeper"* badge. `NotAttempted` is the value every one of those already
+fails closed on.
 
 `Unverified` is **never green**. The badge renders the literal word `unverified`
 and the `Verified` condition reads `False` with reason
 `VerificationNotAttempted` — not `VerificationUntrusted`, because nothing has
 been refused. If the archive is unreachable the object stays there and the next
-policy event tries once more; there is no retry loop and no queue. A
-destination whose `evidenceRead` grant only a pod may hold (D2 §3.9) is never
-repaired by this controller at all, and its `detail` says so — the printed
-`logweir drill verify` command is the answer there, as everywhere else.
+policy event tries once more: the `Unverified` basis is itself the mark that
+says "this status still predates `signedAt`", so the retry survives any number
+of failed passes. There is no retry loop inside a reconcile and no queue, and a
+pass that changes nothing writes nothing. A destination whose `evidenceRead`
+grant only a pod may hold (D2 §3.9) is never repaired by this controller at
+all, and its `detail` says so — the printed `logweir drill verify` command is
+the answer there, as everywhere else.
+
+A **digest mismatch** — the bytes at the recorded key are not the bytes the run
+reported writing — is reported through the same `Unverified` path, with a
+`detail` beginning "digest mismatch at". It is a stronger signal than a
+timeout and is worth escalating; the verdict is not weakened by it, because the
+original verdict was reached over the *recorded* bytes and no claim is taken
+from the substituted ones.
 
 **Three things this does not do.** It does not touch `verifiedAt`, which stays
 the independent observation it has always been. It does not delay a revocation:
 an unlisted signer, a usage mismatch and a `KeyCompromise` revocation still
 change a pre-`signedAt` object's verdict immediately, with no read, because none
-of those rows consults the signing time. And it does not repeat: once `signedAt`
-is on the status the object is an ordinary one, and a further policy event
-writes nothing unless the verdict actually changes.
+of those rows consults the signing time — and a kube API failure while resolving
+the evidence path is recorded as "no read was attempted" rather than failing the
+reconcile, so it does not delay one either. And it does not repeat: once
+`signedAt` is on the status the object is an ordinary one, and a further policy
+event writes nothing unless the verdict actually changes.
+
+**What it costs.** One `get` and one destination resolution per pre-`signedAt`
+object per policy event, dispatched in the same burst the re-derivation already
+uses and bounded by the objects the controller holds. The destination handle is
+UID-cached and the installation policy is cached, so the marginal cost is the
+`get`. A cluster with many such objects and an unreachable archive keeps paying
+one failed `get` per object per policy event until the archive answers; nothing
+retries between events.
 
 **Rollback.** An older controller reached by rollback ignores `signedAt` and
 `trust` entirely and reports the `result` it finds, so a repaired object reads

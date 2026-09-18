@@ -1111,18 +1111,38 @@ signing time are different facts and get different answers.
   when the document carries none. That stays `Untrusted` /
   `SignedOutsideValidity`, and the fail-closed rule is unchanged.
 
-Until the read succeeds, the object keeps the verdict it already had with
-`trust.basis: Unverified`. That basis is **never green**: the badge is the
-literal word `unverified` and the `Verified` condition is `False` with reason
+Until the read succeeds, the object is neither withdrawn nor presented:
+`result` becomes **`NotAttempted`** — no verification was attempted under this
+policy — with `trust.basis: Unverified`, while `matchedKeyId` and `verifiedAt`
+keep recording the original observation. It is `result` and not only the basis
+because `ui/pages/backups.js`, the product API's status projection and the
+`SIGNED` printer column all read `result` alone, and `NotAttempted` is the value
+every one of them already fails closed on; the badge is the literal word
+`unverified` and the `Verified` condition is `False` with reason
 `VerificationNotAttempted`. An unreachable archive leaves the object there and
-the next policy event tries once more — one attempt per event, no retry loop.
-A destination whose `evidenceRead` grant only a pod may hold is never repaired
-by the controller, and the `detail` says so.
+the next policy event tries once more — the `Unverified` basis is itself the
+mark that the status still predates `signedAt`, so the retry survives any number
+of failed passes, and a pass that changes nothing writes nothing. A destination
+whose `evidenceRead` grant only a pod may hold is never repaired by the
+controller, and the `detail` says so.
+
+A digest mismatch at the recorded key takes the same path with a `detail`
+beginning "digest mismatch at"; no claim is taken from bytes that are not the
+bytes the run reported writing.
 
 **What does not wait for the read.** An unlisted signer, a key-usage mismatch
 and a `KeyCompromise` revocation still change a pre-`signedAt` object's verdict
 immediately. None of those rows consults the signing time, so none of them is
-delayed by an archive that will not answer.
+delayed by an archive that will not answer — nor by a kube API failure while
+resolving the evidence path, which is recorded as "no read was attempted"
+rather than failing the reconcile.
+
+One consequence worth stating: while an object sits on `NotAttempted`, its
+stored `verifiedAt` is no longer accepted as an independent observation (that
+rule admits only a `Valid` or `Untrusted` block), so a `KeyCompromise`
+revocation arriving in that window reads `Revoked` rather than
+`RecordedBeforeRevocation`. Both are `Untrusted` and neither is green; the
+difference is one sentence, and it errs toward refusing.
 
 **Rollback** is unaffected: both fields are additive, an older controller
 ignores them and reports the `result` it finds, and a repaired object reads as
