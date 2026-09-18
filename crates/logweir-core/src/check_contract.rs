@@ -322,6 +322,7 @@ closed_vocabulary! {
         LogAppendTimeOverrideVerifiedOnlyAtExecution => "LogAppendTimeOverrideVerifiedOnlyAtExecution",
         ApprovalPending => "ApprovalPending",
         SubjectNotCreated => "SubjectNotCreated",
+        RecoveryPointLocationUnknown => "RecoveryPointLocationUnknown",
         // -- framework / phase codes (D2 §4.2, §4.3, §5.1, §6.2) ---------
         CheckContractMismatch => "CheckContractMismatch",
         ResultUnreadable => "ResultUnreadable",

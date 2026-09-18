@@ -1528,6 +1528,24 @@ pub enum RecoveryPointFacts {
 /// under the same name is a different run over a different window. The UID is
 /// what PLAT-11.1 fixes as the identity, and it is in the binding digest, so a
 /// recreated recovery point also makes every earlier preflight stale.
+///
+/// # The location comparison, and its three answers
+///
+/// A recovery point is only restorable from the destination it was WRITTEN to
+/// (D2 §3.12). The point's frozen `locationDigest` — `Backup.status.destination`
+/// — is compared with the digest this check resolved for the source
+/// destination:
+///
+/// * both present and equal → `RecoveryPointSucceeded`;
+/// * both present and different → `RecoveryPointLocationMismatch`, with both
+///   digests in the message;
+/// * the point has none and the check resolved one → `unknown` with
+///   `RecoveryPointLocationUnknown`. A point archived before saved destinations
+///   existed publishes no location, and a blocking row that answered `ready`
+///   there would be reporting a comparison nobody made.
+///
+/// Neither digest is recomputed from a live object: a destination edited after
+/// a run froze must not be able to make a moved recovery point look settled.
 #[must_use]
 pub fn recovery_point_row(facts: &RecoveryPointFacts, now: DateTime<Utc>) -> Option<CheckOutcome> {
     let op = PreflightOperation::Restore;
@@ -1588,27 +1606,62 @@ pub fn recovery_point_row(facts: &RecoveryPointFacts, now: DateTime<Utc>) -> Opt
                         .with_remedy("Restore from a Backup that Succeeded."),
                 );
             }
-            if let (Some(frozen), Some(expected)) = (
+            match (
                 location_digest.as_deref(),
                 expected_location_digest.as_deref(),
             ) {
-                if frozen != expected {
+                // TWO LOCATIONS, AND THEY ARE NOT THE SAME ONE. Both digests
+                // are in the message: an operator holding two destinations
+                // needs to know WHICH of them this point is in, and a sentence
+                // that only says "different" sends them to compare two objects
+                // by hand.
+                (Some(frozen), Some(expected)) if frozen != expected => {
                     return Some(
                         mk(
                             CheckState::NotReady,
                             CheckCode::RecoveryPointLocationMismatch,
                         )
                         .with_scope(scope)
-                        .with_message(
-                            "the recovery point was written to a different location from the \
-                                 source destination this check resolved",
-                        )
+                        .with_message(&format!(
+                            "the recovery point was written to {frozen} and the source \
+                             destination this check resolved is {expected}"
+                        ))
                         .with_remedy(
                             "Read this recovery point from the destination it was written \
-                                 to.",
+                             to.",
                         ),
                     );
                 }
+                // A LEGACY POINT UNDER A DESTINATION-BACKED CHECK. The Backup
+                // publishes no frozen destination, so this row cannot say the
+                // location agrees — and saying `ready` would be the check
+                // claiming a comparison it never made. `unknown` is the honest
+                // answer and, as a blocking row, it holds the verdict at
+                // `unknown` until somebody confirms the location by hand.
+                //
+                // The mirror case — a point WITH a digest under a check that
+                // resolved no source destination — stays `ready` here: that
+                // preflight makes no location claim to compare against, and
+                // `plan.bindings` is the row that holds the legacy plan's
+                // location to account (D2 §3.12).
+                (None, Some(expected)) => {
+                    return Some(
+                        mk(CheckState::Unknown, CheckCode::RecoveryPointLocationUnknown)
+                            .with_scope(scope)
+                            .with_message(&format!(
+                                "this recovery point records no frozen destination, so it cannot \
+                             be compared with the source destination this check resolved \
+                             ({expected}); it was archived by an inline-archive run or by a \
+                             controller that predates status.destination"
+                            ))
+                            .with_remedy(
+                                "Confirm by hand that this Backup was written to this \
+                             destination, or restore from a recovery point archived through \
+                             it.",
+                            ),
+                    );
+                }
+                _ => {}
             }
             Some(
                 mk(CheckState::Ready, CheckCode::RecoveryPointSucceeded)
@@ -3583,16 +3636,26 @@ pub async fn resolve(
                                 uid,
                                 expected_uid: rp.uid.clone(),
                                 phase: backup.status.as_ref().and_then(|s| s.phase.clone()),
-                                // `RecoveryPointLocationMismatch` NEEDS THE
-                                // FROZEN DESTINATION, WHICH IS NOT ON A
-                                // `Backup` STATUS IN THIS BUILD. D2 §3.7's
-                                // `ResolvedDestinationSnapshot` reaches
-                                // `execution-inputs.json` with PLAT-06.1 and
-                                // W10; until then there is no digest to
-                                // compare, and `recovery_point_row` skips the
-                                // comparison rather than guessing at it.
-                                location_digest: None,
-                                expected_location_digest: None,
+                                // THE TWO DIGESTS THE LOCATION COMPARISON
+                                // NEEDS, AND NEITHER IS RECOMPUTED HERE. The
+                                // left one is what the run FROZE (D2 §3.7,
+                                // `Backup.status.destination`, absent on a
+                                // legacy inline-archive point); the right one
+                                // is what THIS check resolved for the source
+                                // destination a moment ago. Deriving either
+                                // from the live `BackupDestination` would let
+                                // an edit after the freeze make a moved
+                                // recovery point look like it never moved.
+                                location_digest: backup
+                                    .status
+                                    .as_ref()
+                                    .and_then(|s| s.destination.as_ref())
+                                    .map(|d| d.location_digest.clone()),
+                                expected_location_digest: inputs
+                                    .archive
+                                    .as_ref()
+                                    .and_then(|r| r.as_ref().ok())
+                                    .map(|d| d.location_digest.clone()),
                             }
                         }
                     }
