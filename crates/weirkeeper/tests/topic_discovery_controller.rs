@@ -2482,6 +2482,45 @@ async fn an_advisory_not_ready_row_is_never_the_terminal_reason() {
     );
 }
 
+/// **An `executionOnly` row is never the terminal reason either.** D2 §6.3: an
+/// execution-only check "cannot be checked before execution", so
+/// `CheckOutcome::new` forces it to `unknown` and `check_contract::aggregate`
+/// excludes it entirely. A reason taken from one would have the object claim a
+/// classified failure for a check **that never ran**.
+///
+/// This is the complement of the advisory row above, and it needs its own: the
+/// filter is `gating == Blocking`, and each of the two ways to relax it lets a
+/// different kind through. The reviewer's R3 found that gap — with the filter at
+/// `!= Advisory` all sixty-two other rows stayed green.
+///
+/// MUTANT: relax the filter to `c.gating != Gating::Advisory`. This row reads
+/// `BrokerUnreachable` and fails; `an_advisory_not_ready_row_is_never_the_terminal_reason`
+/// stays green, which is exactly why one row could not cover both.
+#[tokio::test]
+async fn an_execution_only_row_is_never_the_terminal_reason() {
+    let execution_only = CheckOutcome::new(
+        CheckId::ConnectionTopicsReadable,
+        CheckState::NotReady,
+        Gating::ExecutionOnly,
+        Authority::CheckJob,
+        CheckCode::BrokerUnreachable,
+    )
+    .with_message("a read was not attempted before the run");
+    // The constructor already refused the `notReady` asked for above: an
+    // execution-only row is `unknown` BY CONSTRUCTION and never a verdict.
+    assert_eq!(execution_only.state, CheckState::Unknown);
+
+    let (outcome, status) = reconcile_failure_relay(vec![execution_only]).await;
+
+    assert_eq!(outcome.phase, PHASE_FAILED);
+    assert_eq!(
+        outcome.reason,
+        CheckCode::ResultUnreadable.as_str(),
+        "a check that never ran is not the reason a discovery failed"
+    );
+    assert_eq!(status["result"], Value::Null);
+}
+
 /// **The genuinely unreadable case still reads `ResultUnreadable`.** A verified
 /// relay with a result document that carries neither an inventory nor a blocking
 /// row is a document that contradicts itself; there is nothing to project.
