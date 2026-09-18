@@ -308,6 +308,171 @@ def test_the_protected_objects_survive_an_enforced_pass() -> None:
                                     OBJECTS_AFTER, PROTECTED_PREFIXES))
 
 
+# --- PLAT-16.1 and 16.2's new rows ------------------------------------------
+# The recorded shapes are this branch's own live runs of 2026-09-18.
+def _pol(conds: list[dict], **status) -> dict:
+    return {"status": dict(status, conditions=conds)}
+
+
+LIFECYCLE_GUARANTEES = {
+    "ageExpiry": "ProviderEnforcedUnverified", "legalHold": "ProviderEnforcedUnverified",
+    "minUsablePoints": "NotEnforced", "activeRestoreProtection": "NotEnforced",
+    "sharedSegments": "NotEnforced",
+}
+LIFECYCLE_CONDS = [
+    {"type": "Evaluated", "status": "Unknown", "reason": "NeverEvaluated",
+     "message": "an ExternalLifecycle policy produces no Logweir evaluation"},
+    {"type": "Enforced", "status": "False", "reason": "RecommendationOnly"},
+]
+LIFECYCLE_POLICY = _pol(LIFECYCLE_CONDS, guarantees=LIFECYCLE_GUARANTEES)
+
+
+def test_a_lifecycle_nobody_read_is_reported_as_unknown() -> None:
+    row("the declared rule is unknown, unenforced and unevaluated",
+        all(d3.external_lifecycle_is_unknown(LIFECYCLE_POLICY).values()))
+    row("MUTANT: ageExpiry claimed as LogweirEnforced",
+        not all(d3.external_lifecycle_is_unknown(
+            _pol(LIFECYCLE_CONDS,
+                 guarantees=dict(LIFECYCLE_GUARANTEES, ageExpiry="LogweirEnforced"))).values()))
+    row("MUTANT: a count-based guarantee claimed for a bucket rule",
+        not all(d3.external_lifecycle_is_unknown(
+            _pol(LIFECYCLE_CONDS,
+                 guarantees=dict(LIFECYCLE_GUARANTEES,
+                                 minUsablePoints="LogweirEnforced"))).values()))
+    row("MUTANT: an EMPTY evaluation — a claim to know nothing will be deleted",
+        not all(d3.external_lifecycle_is_unknown(
+            _pol(LIFECYCLE_CONDS, guarantees=LIFECYCLE_GUARANTEES,
+                 lastEvaluation={"candidates": [], "candidateCount": 0})).values()))
+    row("MUTANT: Evaluated=True on a policy nothing evaluated",
+        not all(d3.external_lifecycle_is_unknown(
+            _pol([{"type": "Evaluated", "status": "True", "reason": "EvaluationComplete"},
+                  {"type": "Enforced", "status": "False", "reason": "RecommendationOnly"}],
+                 guarantees=LIFECYCLE_GUARANTEES)).values()))
+
+
+FAILED_EVAL = _pol([
+    {"type": "Evaluated", "status": "False", "reason": "ViewUnreadable",
+     "message": "namespace X has no RecoveryCatalog named Y"},
+    {"type": "Ready", "status": "False", "reason": "CatalogUnusable"},
+])
+
+
+def test_an_evaluation_failure_is_never_an_empty_report() -> None:
+    row("a failure carries its own reason, message and a not-ready policy",
+        all(d3.evaluation_failure_is_distinguishable(FAILED_EVAL).values()))
+    row("MUTANT: THE DEFECT — a failure that answers `candidates: []`",
+        not all(d3.evaluation_failure_is_distinguishable(_pol(
+            FAILED_EVAL["status"]["conditions"],
+            lastEvaluation={"candidates": [], "candidateCount": 0})).values()))
+    row("MUTANT: a candidateCount of 0 beside no candidate list",
+        not all(d3.evaluation_failure_is_distinguishable(_pol(
+            FAILED_EVAL["status"]["conditions"],
+            lastEvaluation={"candidateCount": 0})).values()))
+    row("MUTANT: Evaluated=False with no reason at all",
+        not all(d3.evaluation_failure_is_distinguishable(_pol(
+            [{"type": "Evaluated", "status": "False", "reason": "", "message": "x"},
+             {"type": "Ready", "status": "False"}])).values()))
+    row("MUTANT: a success reason wearing a False status",
+        not all(d3.evaluation_failure_is_distinguishable(_pol(
+            [{"type": "Evaluated", "status": "False", "reason": "EvaluationComplete",
+              "message": "x"},
+             {"type": "Ready", "status": "False"}])).values()))
+    row("MUTANT: Ready=True, so a console shows the policy as working",
+        not all(d3.evaluation_failure_is_distinguishable(_pol(
+            [{"type": "Evaluated", "status": "False", "reason": "ViewUnreadable",
+              "message": "x"},
+             {"type": "Ready", "status": "True"}])).values()))
+
+
+def test_the_shared_segment_guarantee_is_derived_from_the_view() -> None:
+    plain = [{"pointId": "p1"}, {"pointId": "p2"}]
+    with_keys = [{"pointId": "p1", "segmentKeys": ["a/s0"]}, {"pointId": "p2"}]
+    row("no segment keys in the view means NotEnforced and no SharedSegment",
+        all(d3.shared_segment_contract(plain, {"protected": []},
+                                       {"sharedSegments": "NotEnforced"}).values()))
+    row("segment keys in the view would mean LogweirEnforced",
+        all(d3.shared_segment_contract(with_keys, {"protected": []},
+                                       {"sharedSegments": "LogweirEnforced"}).values()))
+    row("MUTANT: THE WITHDRAWN-GUARANTEE DEFECT — LogweirEnforced on a view "
+        "that cannot support it",
+        not all(d3.shared_segment_contract(plain, {"protected": []},
+                                           {"sharedSegments": "LogweirEnforced"}).values()))
+    row("MUTANT: a SharedSegment protection the view cannot justify",
+        not all(d3.shared_segment_contract(
+            plain, {"protected": [{"pointId": "p1", "reason": "SharedSegment"}]},
+            {"sharedSegments": "NotEnforced"}).values()))
+    row("MUTANT: a guarantee outside the published vocabulary",
+        not all(d3.shared_segment_contract(plain, {"protected": []},
+                                           {"sharedSegments": "Probably"}).values()))
+
+
+PARTIAL_POINTS = [{"retention-point": "pA", "state": "Deleted"},
+                  {"retention-point": "pB", "state": "Kept", "code": "AccessDenied"}]
+PARTIAL_DOC = {
+    "exit_code": 1, "objects_deleted": 3,
+    "points": [
+        {"point_id": "pA", "state": "Deleted", "objects_deleted": 3},
+        {"point_id": "pB", "state": "Kept", "objects_deleted": 0, "code": "AccessDenied",
+         "remaining_keys": ["archive/B/manifest.json", "archive/B/s0.bin.zst"]},
+    ],
+}
+GONE = {"archive/A/manifest.json", "archive/A/s0.bin.zst", "archive/A/s1.bin.zst"}
+REMAIN = {"archive/B/manifest.json", "archive/B/s0.bin.zst", "logweir/retention/r.json"}
+
+
+def _partial(**over):
+    args = dict(points=PARTIAL_POINTS, exit_code=1, gone=GONE, remaining=REMAIN,
+                allowed_prefix="archive/A/", denied_prefix="archive/B/", doc=PARTIAL_DOC)
+    args.update(over)
+    return all(d3.partial_failure_is_attributable(**args).values())
+
+
+def test_a_partial_failure_says_exactly_what_it_did() -> None:
+    row("one deleted, one denied, and a record that adds up", _partial())
+    row("MUTANT: exit 0 on a run that did not complete", not _partial(exit_code=0))
+    row("MUTANT: a record total larger than what actually went",
+        not _partial(doc=dict(PARTIAL_DOC, objects_deleted=5)))
+    row("MUTANT: a key removed under the DENIED set",
+        not _partial(gone=GONE | {"archive/B/manifest.json"}))
+    row("MUTANT: the denied point claiming a deletion",
+        not _partial(doc={**PARTIAL_DOC, "points": [
+            PARTIAL_DOC["points"][0],
+            dict(PARTIAL_DOC["points"][1], objects_deleted=2)]}))
+    row("MUTANT: no closed code on the point that did not complete",
+        not _partial(doc={**PARTIAL_DOC, "points": [
+            PARTIAL_DOC["points"][0],
+            {"point_id": "pB", "state": "Kept", "objects_deleted": 0,
+             "remaining_keys": ["archive/B/manifest.json"]}]}))
+    row("MUTANT: leftovers it cannot name — the next plan has nothing to go on",
+        not _partial(doc={**PARTIAL_DOC, "points": [
+            PARTIAL_DOC["points"][0],
+            {"point_id": "pB", "state": "Kept", "objects_deleted": 0,
+             "code": "AccessDenied"}]}))
+    row("MUTANT: leftovers that are not actually there any more",
+        not _partial(remaining={"logweir/retention/r.json"}))
+    row("MUTANT: only the first point reported — a run that stopped dead",
+        not _partial(points=PARTIAL_POINTS[:1]))
+
+
+DEGRADED = _pol([{"type": "EnforcementDegraded", "status": "True", "reason": "RunFailures",
+                  "message": "three consecutive retention runs failed"}])
+
+
+def test_bounded_retry_degrades_and_stops() -> None:
+    row("three failures, a degraded condition with words, and no further Job",
+        all(d3.bounded_retry_degrades(DEGRADED, 3, 0).values()))
+    row("MUTANT: degraded before the budget is spent",
+        not all(d3.bounded_retry_degrades(DEGRADED, 2, 0).values()))
+    row("MUTANT: three failures and no degraded condition",
+        not all(d3.bounded_retry_degrades(_pol([]), 3, 0).values()))
+    row("MUTANT: degraded, and still creating Jobs",
+        not all(d3.bounded_retry_degrades(DEGRADED, 3, 2).values()))
+    row("MUTANT: a degraded condition with no message",
+        not all(d3.bounded_retry_degrades(
+            _pol([{"type": "EnforcementDegraded", "status": "True", "reason": "RunFailures",
+                   "message": "  "}]), 3, 0).values()))
+
+
 def main() -> int:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
