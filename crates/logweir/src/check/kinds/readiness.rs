@@ -41,6 +41,12 @@ use crate::check::{catalogue, Deadline, Emission};
 pub fn connection_ids(operation: CheckOperation) -> (CheckId, Option<CheckId>) {
     match operation {
         CheckOperation::Restore => (CheckId::TargetAuthenticated, None),
+        // A SOURCE-CONNECTION CHECK NAMES NO TOPIC, so it has no topic row —
+        // the same rule `kinds::source_connection` states at length, kept here
+        // too because this table is what any caller reads to find out which
+        // rows an operation owns, and an operation missing from it would be a
+        // second place the answer could differ.
+        CheckOperation::SourceConnection => (CheckId::ConnectionAuthenticated, None),
         CheckOperation::Backup | CheckOperation::DestinationAccess => (
             CheckId::ConnectionAuthenticated,
             Some(CheckId::ConnectionTopicsDescribable),

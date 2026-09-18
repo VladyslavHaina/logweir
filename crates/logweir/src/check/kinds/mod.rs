@@ -1,4 +1,4 @@
-//! The six plan kinds, and the seam they are driven through.
+//! The seven plan kinds, and the seam they are driven through.
 //!
 //! # `Wiring` is why none of this needs a socket to be tested
 //!
@@ -25,6 +25,7 @@ pub mod evidence;
 pub mod inventory;
 pub mod readiness;
 pub mod restore;
+pub mod source_connection;
 
 use std::time::Duration;
 
@@ -481,5 +482,6 @@ pub fn run_kind_with(loaded: &Loaded, deadline: Deadline, wiring: &dyn Wiring) -
         CheckRequest::DestinationAccess(r) => access::run(r, wiring, deadline),
         CheckRequest::EvidenceFetch(r) => evidence::run(r, wiring, deadline),
         CheckRequest::CatalogSync(r) => catalog_sync::run(r, wiring, deadline),
+        CheckRequest::SourceConnection(r) => source_connection::run(r, wiring, deadline),
     }
 }

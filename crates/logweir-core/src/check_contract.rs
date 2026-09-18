@@ -613,7 +613,7 @@ pub fn advisory_warnings(checks: &[CheckOutcome]) -> Vec<&CheckOutcome> {
 
 // --------------------------------------------------------------- check plan
 
-/// Which of the six plan kinds a request is (D2 §4.2, D3 §5.3).
+/// Which of the seven plan kinds a request is (D2 §4.2, D2-SOURCECHECK, D3 §5.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub enum CheckPlanKind {
@@ -622,6 +622,12 @@ pub enum CheckPlanKind {
     RestorePreflight,
     DestinationAccess,
     EvidenceFetch,
+    /// D2-SOURCECHECK's source-connectivity check: dial ONE connection and say
+    /// whether it answers. No destination, no signer, no plan and no topic —
+    /// which is the whole difference from [`Self::OperationReadiness`], whose
+    /// request cannot be rendered without a destination and whose Backup
+    /// catalogue asks four more questions than "does this connection work".
+    SourceConnection,
     /// D3 §5.3's `RecoveryCatalog` sync: one bounded, read-only walk of the
     /// durable catalog in object storage, relayed as the body
     /// `docs/kubernetes.md` §7d grammars.
@@ -645,12 +651,13 @@ impl CheckPlanKind {
             Self::DestinationAccess => "destinationAccess",
             Self::EvidenceFetch => "evidenceFetch",
             Self::CatalogSync => "catalogSync",
+            Self::SourceConnection => "sourceConnection",
         }
     }
 
     /// The two-letter Job-name discriminator of D2 §4.3 (`td`, `rd`, `rp`,
-    /// `da`, `ev`, `cs`). It lives here so the controller and any tooling that
-    /// has to recognise a check Job by name read one table.
+    /// `da`, `ev`, `cs`, `sc`). It lives here so the controller and any tooling
+    /// that has to recognise a check Job by name read one table.
     ///
     /// `const fn` for the reason [`CheckPlanKind::as_str`] gives.
     #[must_use]
@@ -662,16 +669,18 @@ impl CheckPlanKind {
             Self::DestinationAccess => "da",
             Self::EvidenceFetch => "ev",
             Self::CatalogSync => "cs",
+            Self::SourceConnection => "sc",
         }
     }
 
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 7] = [
         Self::TopicInventory,
         Self::OperationReadiness,
         Self::RestorePreflight,
         Self::DestinationAccess,
         Self::EvidenceFetch,
         Self::CatalogSync,
+        Self::SourceConnection,
     ];
 }
 
@@ -681,6 +690,8 @@ pub enum CheckOperation {
     Backup,
     Restore,
     DestinationAccess,
+    /// D2-SOURCECHECK: the connection itself, and nothing that uses it.
+    SourceConnection,
 }
 
 /// How a Kafka connection is authenticated, spelled as the plan spells it.
@@ -801,6 +812,20 @@ pub struct RestorePreflightRequest {
     pub checks: Vec<CheckId>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub skip_checks: Vec<CheckId>,
+}
+
+/// `sourceConnection` (D2-SOURCECHECK, the addition D2 §4.2's table owes).
+///
+/// ONE FIELD, AND THE ABSENCES ARE THE CONTRACT. `deny_unknown_fields` on a
+/// struct that holds a connection and nothing else is what makes "this check
+/// reads no destination, loads no signer and names no topic" a property of the
+/// TYPE rather than of a convention the next caller may not read. A plan that
+/// tried to smuggle a destination into a connectivity test is refused in the
+/// runner's step 4, before a socket exists.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SourceConnectionRequest {
+    pub connection: ConnectionPlan,
 }
 
 /// `destinationAccess` (D2 §4.2).
@@ -939,7 +964,7 @@ pub struct CatalogSyncRequest {
     pub trust_bundle_file: Option<String>,
 }
 
-/// The six requests, externally tagged so an unknown kind is a parse error
+/// The seven requests, externally tagged so an unknown kind is a parse error
 /// with the kind named, and so each variant keeps its own
 /// `deny_unknown_fields`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -958,6 +983,8 @@ pub enum CheckRequest {
     // the largest of the unboxed shapes, and one oversized variant sets the
     // size of every `CheckRequest` value in the process.
     CatalogSync(Box<CatalogSyncRequest>),
+    // NOT boxed: one connection, which is the smallest shape in this enum.
+    SourceConnection(SourceConnectionRequest),
 }
 
 impl CheckRequest {
@@ -970,6 +997,7 @@ impl CheckRequest {
             Self::DestinationAccess(_) => CheckPlanKind::DestinationAccess,
             Self::EvidenceFetch(_) => CheckPlanKind::EvidenceFetch,
             Self::CatalogSync(_) => CheckPlanKind::CatalogSync,
+            Self::SourceConnection(_) => CheckPlanKind::SourceConnection,
         }
     }
 }
@@ -1183,6 +1211,14 @@ impl CheckPlan {
                     }
                 }
             }
+            // NOTHING TO BOUND, AND THAT IS NOT AN OMISSION. Every other
+            // request carries a list or a budget whose size a runner would
+            // otherwise spend the whole check on; this one carries a single
+            // connection, and `timeoutSeconds` above is the only ceiling it
+            // has. An empty arm is written out so that a field added here
+            // later is a compile error at a site that already asks "what
+            // bounds this?".
+            CheckRequest::SourceConnection(_) => {}
             CheckRequest::EvidenceFetch(r) => {
                 if r.objects.is_empty() || r.objects.len() > MAX_EVIDENCE_OBJECTS {
                     return Err(CheckPlanError::field(
