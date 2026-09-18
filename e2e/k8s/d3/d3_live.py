@@ -1268,14 +1268,29 @@ def hatch_is_open(value: Any) -> bool:
     return str(value).strip().lower() in {"1", "true", "yes"}
 
 
-def notify_delivery_ok(hatch_open: bool, posts: int, delivered: bool,
+def expected_posts(hatch_open: bool, new_transitions: int) -> int:
+    """How many POSTs this window should have produced.
+
+    ONE PER NEWLY NOTIFIED TRANSITION, and none at all while the escape hatch is
+    shut. Not "one, always": `renotifyAfterSeconds` is unset, so one transition
+    is one alert however many times the policy is reconciled, and re-running
+    this phase against a policy whose alert is already open must see ZERO — the
+    same rule `notify-stale-point-alerts-exactly-once` asserts from the other
+    side. A flat expectation of 1 made the row pass only on a fresh namespace
+    and call a correct re-run a failure (observed 2026-09-18).
+    """
+    return new_transitions if hatch_open else 0
+
+
+def notify_delivery_ok(hatch_open: bool, posts: int, want_posts: int, delivered: bool,
                        unchanged: int, total: int) -> bool:
     """What the controller's own environment implies, and the invariant under it.
 
-    The POST count is a consequence of the escape hatch and not a contract; the
-    Backups' resourceVersions are the contract, whichever way delivery went.
+    The POST count is a consequence of the escape hatch and of how many
+    transitions this window opened; the Backups' resourceVersions are the
+    contract, whichever way delivery went.
     """
-    return posts == (1 if hatch_open else 0) and delivered == hatch_open and unchanged == total
+    return posts == want_posts and delivered == hatch_open and unchanged == total
 
 
 def schedule_object(name: str, dest: str) -> dict[str, Any]:
@@ -2693,6 +2708,12 @@ def notify() -> None:
     posts_before = sink_posts()
     backups_before = {b["metadata"]["name"]: b["metadata"]["resourceVersion"]
                       for b in lst("backups")}
+    # HOW MANY TRANSITIONS WERE ALREADY NOTIFIED. A re-run against a policy
+    # whose alert is already open opens no new transition and must therefore see
+    # no new POST; only the transitions this window opens are owed one.
+    existing = get_opt("protectionpolicy", "protect-a") or {}
+    notified_before = sum(a.get("notifiedTransition") or 0
+                          for a in ((existing.get("status") or {}).get("alerts") or []))
     apply(protection_policy("protect-a", max_age=300))
     wait_for(
         "protectionpolicy",
@@ -2764,15 +2785,20 @@ def notify() -> None:
     hatch_open = hatch_is_open(hatch)
     posts = posts_after - posts_before
     delivered = delivery.get("state") == "Delivered"
+    notified_after = sum(a.get("notifiedTransition") or 0 for a in alerts)
+    new_transitions = max(0, notified_after - notified_before)
+    want_posts = expected_posts(hatch_open, new_transitions)
     evidence.append(artifact("notify/controller-facts.json", facts))
     check(
         "notify-delivery-never-rewrites-a-backup",
         "PLAT-14.2",
-        notify_delivery_ok(hatch_open, posts, delivered, len(unchanged), len(backups_before)),
+        notify_delivery_ok(hatch_open, posts, want_posts, delivered, len(unchanged),
+                           len(backups_before)),
         f"LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS={hatch!r} on the controller, so a plaintext "
-        f"sink is {'dialled' if hatch_open else 'refused before the dial'} and exactly "
-        f"{1 if hatch_open else 0} POST(s) are expected: the sink received {posts}, the "
-        f"alert records delivery {delivery.get('state')!r} after "
+        f"sink is {'dialled' if hatch_open else 'refused before the dial'}; this window "
+        f"opened {new_transitions} new notified transition(s) (notifiedTransition "
+        f"{notified_before} -> {notified_after}), so {want_posts} POST(s) are owed: the sink "
+        f"received {posts}, the alert records delivery {delivery.get('state')!r} after "
         f"{delivery.get('attempts')} attempt(s) — and every one of the "
         f"{len(backups_before)} Backups in this namespace still carries the resourceVersion "
         f"it had before the protection controller ran ({len(unchanged)} unchanged). "

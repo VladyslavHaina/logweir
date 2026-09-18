@@ -194,16 +194,23 @@ def test_notification_delivery_follows_the_hatch_and_never_rewrites_a_backup() -
     row("the hatch, as the controller reads it",
         d3.hatch_is_open("1") and d3.hatch_is_open("true") and not d3.hatch_is_open(None)
         and not d3.hatch_is_open("0"))
-    row("hatch open: exactly one POST, Delivered, no Backup rewritten",
-        d3.notify_delivery_ok(True, 1, True, 7, 7))
+    row("one POST per transition this window opened, none while the hatch is shut",
+        d3.expected_posts(True, 1) == 1 and d3.expected_posts(True, 0) == 0
+        and d3.expected_posts(False, 1) == 0)
+    row("hatch open, one new transition: one POST, Delivered, no Backup rewritten",
+        d3.notify_delivery_ok(True, 1, d3.expected_posts(True, 1), True, 7, 7))
+    row("hatch open, a re-run that opened no transition: no POST, still Delivered",
+        d3.notify_delivery_ok(True, 0, d3.expected_posts(True, 0), True, 7, 7))
     row("hatch shut: no POST, not Delivered, no Backup rewritten",
-        d3.notify_delivery_ok(False, 0, False, 7, 7))
-    row("MUTANT: the pre-fix row — zero POSTs while the hatch is open",
-        not d3.notify_delivery_ok(True, 0, False, 7, 7))
+        d3.notify_delivery_ok(False, 0, d3.expected_posts(False, 1), False, 7, 7))
+    row("MUTANT: the pre-fix row — zero POSTs for a transition the hatch let through",
+        not d3.notify_delivery_ok(True, 0, d3.expected_posts(True, 1), False, 7, 7))
+    row("MUTANT: a re-notification with no transition behind it",
+        not d3.notify_delivery_ok(True, 1, d3.expected_posts(True, 0), True, 7, 7))
     row("MUTANT: a POST that got out while the hatch was shut",
-        not d3.notify_delivery_ok(False, 1, True, 7, 7))
+        not d3.notify_delivery_ok(False, 1, d3.expected_posts(False, 1), True, 7, 7))
     row("MUTANT: delivery rewrote a Backup",
-        not d3.notify_delivery_ok(True, 1, True, 6, 7))
+        not d3.notify_delivery_ok(True, 1, d3.expected_posts(True, 1), True, 6, 7))
 
 
 def main() -> int:
