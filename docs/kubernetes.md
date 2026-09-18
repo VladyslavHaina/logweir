@@ -1057,9 +1057,20 @@ skip with no `Restore`:
 
 The last row is the one that matters most, and it runs over the bytes that will
 be frozen, before the reservation and before any `POST`: an out-of-scope plan
-reaches no `Restore`, no `ConfigMap` and no Job. The runner then proves the same
-thing again against the mounted bundle, through the same predicate from the same
-projection, before it constructs any client.
+reaches no `Restore`, no `ConfigMap` and no Job. **That half is live today.** The
+runner's half — proving the same thing again against the mounted bundle, through
+the same predicate from the same projection, before it constructs any client —
+is the intended end state and is not reachable yet; see "What is not wired yet"
+below.
+
+**What the bundle contains.** One immutable `ConfigMap` owned by the `Restore`:
+the signed standing document at `standing-authorization.json` with its sidecar
+derived at `standing-authorization.sig` (the paths the runner mounts), the
+trusted public keys at `authorization-keys.json`, an allowlist holding **exactly**
+the signed target cluster id, the approver's public key, and the per-run
+`approval.json` / `approval.sig` slot described under "What is not wired yet".
+Every member is pinned by a sha256 in the Job's immutable environment, and no
+private key material is ever written to it.
 
 **The rendered prefix is unique per schedule object.**
 `spec.target.topicPrefix` is rendered as `<prefix><schedule-uid-first-8>-`, for
@@ -1076,6 +1087,18 @@ outside the prefix. Failures are read from the signed teardown attestation into
 `RehearsalSchedule.status.cleanup.pendingTopics`; while that list is non-empty
 the next slot is **skipped** with `LeftoverTopics`, because the run that would
 otherwise collide is not allowed to adopt or delete topics it did not create.
+
+**That guard covers an ATTESTED teardown failure and not a crash.** A run killed
+before phase 9 — deadline, OOM, node loss, an evicted pod — writes no teardown
+attestation at all, so `Restore.status.teardown` is absent, `pendingTopics` stays
+empty and the next slot fires under the same per-schedule prefix over whatever
+the dead run left behind. What happens then is the runner's phase 0 question (it
+refuses a mapped name that already exists), not this controller's, and the
+controller will not have told you why. If a rehearsal disappears without a
+terminal status, list the target's `rehearsal-<uid8>-` topics before the next
+slot is due. Making the prefix per-slot rather than per-schedule, or treating a
+vanished non-terminal child as `LeftoverTopics`, would close it; neither has
+landed.
 Clear them with your own Kafka tooling and then clear the status field:
 
 ```
@@ -1120,13 +1143,34 @@ Rolling the CRDs back deletes any `RehearsalSchedule` objects and, by owner
 cascade, their `Restore` CRs and approval bundles; no archive object and no
 signed evidence is affected.
 
-**What is not wired yet.** A standing-authorized `Restore` is created, and its
-bundle is materialised, but the `Restore` reconciler's admission still resolves
-`spec.approvalRef` only: until that arm lands, such a `Restore` holds at
-`ApprovalNotReceived` and no Job is created. The runner also still requires a
-per-run approval over the plan bytes (`logweir restore run --approval`), which
-an unattended controller cannot mint. Both are recorded gaps, not behaviours to
-rely on.
+**What is not wired yet — a rehearsal cannot execute, and this is the whole
+list.** The schedule fires, selects a point, proves the plan is inside the signed
+scope, reserves, creates the `Restore` and writes its bundle. Nothing runs. Two
+independent reasons, tracked together as **PLAT-14.3b**:
+
+1. **The runner's standing check sits BESIDE the per-run approval, not in place
+   of it.** `logweir restore run`'s startup path verifies `--approval` under
+   `PAYLOAD_TYPE_APPROVAL` unconditionally, and that document must bind
+   `sha256(plan bytes)` — which only a human with a signing key can produce,
+   because the controller links no signer at all. The standing scope proof runs
+   *after* that, over an already authenticated plan. Whether `--approval` becomes
+   optional under `AUTHORIZATION_KIND=standing` is a contract decision, not a
+   patch, and it has not been made. Until it is, the bundle's `approval.json` /
+   `approval.sig` members are a placeholder.
+2. **Five functions in the `Restore` reconciler do not read
+   `spec.authorization`.** `admit` and `get_approval` resolve `spec.approvalRef`
+   only, so a standing `Restore` is refused terminally with
+   `ApprovalNotReceived`; `triggered_by` would emit `approval/` with an empty
+   name, which the runner's own trigger check refuses; `runner_argv` emits
+   neither `--standing-authorization` nor `--authorization-keys`; and
+   `runner_job_spec` projects neither new member and never calls the
+   standing environment renderer.
+
+The schedule says so rather than sitting silent: a child refused this way sets
+`RehearsalHealthy=False` with reason **`StandingAuthorizationNotAdmitted`** and a
+message naming those five functions and PLAT-14.3b. A rehearsal that never ran is
+not a rehearsal that failed, and the archive, the broker and the approver's key
+are not the problem.
 
 ## 8. The approval flow
 
