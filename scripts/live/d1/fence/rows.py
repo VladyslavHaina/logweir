@@ -555,6 +555,7 @@ def l_04_2(H: Any) -> dict[str, Any]:
 
 def l_04_5(H: Any) -> dict[str, Any]:
     """Two fenced replicas: one object per slot and attempt, and a 409 adoption."""
+    reset_schedules(H, ["dup"])
     obj = H.apply(
         s3_schedule(
             H,
@@ -763,6 +764,7 @@ def l_05_1_2(H: Any) -> dict[str, Any]:
     detail: dict[str, Any] = {}
 
     # ---- ordering A: hold the reservation, edit, release -> 409, new generation
+    reset_schedules(H, ["race-a", "race-b"])
     obj = H.apply(s3_schedule(H, "race-a", schedule="*/2 * * * *"))
     uid = obj["metadata"]["uid"]
     H.await_schedule_observed("race-a", timeout=180)
@@ -902,6 +904,7 @@ def l_05_1_2(H: Any) -> dict[str, Any]:
 
 def l_05_1_3(H: Any) -> dict[str, Any]:
     """Conversion: objects written by main@4956785, then the current controller."""
+    reset_schedules(H, ["legacy"])
     old = fenced.swap_image(H, "old")
     H.apply(s3_schedule(H, "legacy", schedule="*/2 * * * *"))
     observed = H.await_schedule_observed("legacy", timeout=300)
@@ -1068,6 +1071,7 @@ def _metadata_delta(before: dict[str, Any], after: dict[str, Any]) -> set[str]:
 
 def l_05_1_5(H: Any) -> dict[str, Any]:
     """Rollback to main@4956785 with the new CRDs installed, then forward again."""
+    reset_schedules(H, ["roll"])
     tz = H.apply(
         s3_schedule(
             H,
@@ -1091,6 +1095,16 @@ def l_05_1_5(H: Any) -> dict[str, Any]:
     # The documented procedure: suspend the schedules that use the new fields.
     H.patch("backupschedule", "roll", {"spec": {"suspend": True}})
     suspended_others = suspend_all_but(H, {"roll"})
+    # ONLY TERMINAL RUNS ARE FROZEN. A run still executing moves its own
+    # resourceVersion as its Job progresses, and counting that as "the rollback
+    # moved an object" would be an accusation about the wrong thing. D1's
+    # clause is "EXISTING Backups and ConfigMaps keep their resourceVersion".
+    H.wait_until(
+        lambda: all(H.terminal(b) for b in H.lst("backups")),
+        timeout=600,
+        interval=5.0,
+        what="every run in the namespace to be terminal before the rollback",
+    )
     frozen: dict[str, str] = {}
     for backup in H.lst("backups"):
         frozen[f"backup/{backup['metadata']['name']}"] = backup["metadata"]["resourceVersion"]
@@ -1194,6 +1208,7 @@ def l_05_1_5(H: Any) -> dict[str, Any]:
 
 def l_05_2_3(H: Any) -> dict[str, Any]:
     """Migration interrupted after seven PATCHes, resumed, and one PATCH 409ed."""
+    reset_schedules(H, ["many"])
     schedule = H.apply(s3_schedule(H, "many", schedule="*/2 * * * *", suspend=True))
     fenced.scale(H, 0)
     seeded = seed_legacy_runs(
@@ -1384,6 +1399,7 @@ def l_05_2_1rv(H: Any) -> dict[str, Any]:
 
 def l_05_2_2u(H: Any) -> dict[str, Any]:
     """The unfrozen sub-case: the plan ConfigMap POST is 503ed until the delete."""
+    reset_schedules(H, ["unfroz"])
     suspend_all_but(H, {"unfroz"})
     schedule = H.apply(s3_schedule(H, "unfroz", schedule="*/2 * * * *"))
     uid = schedule["metadata"]["uid"]
@@ -1472,6 +1488,7 @@ def l_05_2_2u(H: Any) -> dict[str, Any]:
 def l_05_2_6(H: Any) -> dict[str, Any]:
     """Read cost with 500 retained runs, counted at the only place that sees it."""
     window = int(os.environ.get("LOGWEIR_D1_READCOST_SECONDS", "600"))
+    reset_schedules(H, ["cost"])
     schedule = H.apply(s3_schedule(H, "cost", schedule="*/2 * * * *", suspend=True))
     fenced.scale(H, 0)
     seeded = seed_legacy_runs(
