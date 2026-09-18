@@ -1,0 +1,65 @@
+# The image the D3 live acceptance needs, and that this repository does not build.
+#
+# WHY THIS FILE EXISTS. `crates/weirkeeper/src/controllers/retention_policy.rs`
+# renders every enforcement Job's command as `logweir-retention` and takes the
+# Job's image from the controller's `LOGWEIR_RUNNER_IMAGE`. No image this
+# repository builds contains that binary: the product `Dockerfile` runs
+# `cargo build … -p logweir` and copies `/usr/local/bin/logweir`, there is no
+# `Dockerfile.retention` beside it, `.github/workflows/images.yml` builds three
+# images and none is a retention image, and `charts/logweir/values.yaml` has no
+# retention image value. So `mode: Enforce` produces a Job that dies at the
+# kubelet with `exec: "logweir-retention": executable file not found in $PATH`,
+# which `d3_live.py::packaging` proves live (exit 127).
+#
+# THIS IS NOT THAT FIX. It is a TEST fixture: the recipe the acceptance harness
+# needs so its PLAT-16.2 rows can be reproduced from the repository alone. It
+# changes neither the product `Dockerfile` nor the chart, and it is built by
+# hand — nothing in `justfile` or CI references it. The product fix (a shipped
+# `Dockerfile.retention`, a `retention.image` chart value, the
+# `logweir-retention` ServiceAccount the chart still omits) belongs to
+# PLAT-16.2 and is defect RET-NOIMAGE, not this file.
+#
+# HOW IT AVOIDS DUPLICATING THE PRODUCT DOCKERFILE. Everything that makes the
+# cross-compile work — the amd64 multiarch apt set, the rustup target, the four
+# `CARGO_TARGET_X86_64_*` linker variables, the pinned toolchain — lives in the
+# product `Dockerfile`'s `builder` stage. Copying it here would give it a second
+# home that drifts. Instead this file STARTS from that stage, built by name, so
+# the recipe is two `docker build` invocations and no copied lines:
+#
+#   docker build --platform linux/amd64 --target builder \
+#     -f Dockerfile -t logweir-builder:d3w14 .
+#
+#   docker build --platform linux/amd64 --load \
+#     -f e2e/k8s/d3/Dockerfile.retention \
+#     --build-arg BUILDER_IMAGE=logweir-builder:d3w14 \
+#     --build-arg RUNNER_IMAGE=logweir:scram-local \
+#     --label org.opencontainers.image.revision="$(git rev-parse HEAD)" \
+#     -t logweir:scram-local-d3w14 .
+#
+#   python3 e2e/k8s/d3/d3_live.py preview --retention-image logweir:scram-local-d3w14
+#
+# The `--label` is not decoration: the lab has no other way to tell which commit
+# a locally built image came from, and `WORKER-RULES.md` requires it.
+#
+# The first build also warms the dependency graph, so the second one compiles
+# `logweir-retention` and its three path dependencies and nothing else.
+
+ARG BUILDER_IMAGE=logweir-builder:d3w14
+ARG RUNNER_IMAGE=logweir:scram-local
+
+FROM ${BUILDER_IMAGE} AS builder
+# THE SECOND BINARY. `-p logweir-retention` is the only difference from the
+# product build, and `--target` is load-bearing for the same two reasons it is
+# there: it cross-compiles, and it puts the result under an
+# architecture-qualified path so the `COPY --from=builder` below cannot pick up
+# a host-architecture binary by accident.
+RUN cargo build --release --target x86_64-unknown-linux-gnu -p logweir-retention
+
+# The SHIPPED runner image, plus the one binary it does not carry. Starting from
+# it rather than from `debian:bookworm-slim` is deliberate: the enforcement rows
+# are then about the binary and not about a runtime that differs from the
+# product's.
+FROM ${RUNNER_IMAGE} AS runtime
+COPY --from=builder \
+     /src/target/x86_64-unknown-linux-gnu/release/logweir-retention \
+     /usr/local/bin/logweir-retention
