@@ -3015,14 +3015,30 @@ of them starts a runner Job.
 
 | Reason | When | A new `Backup` could succeed |
 |---|---|---|
-| `DiscoveryFailed` | The check Job did not produce a usable result: an unreachable broker, a pod that never started, a deadline | yes |
-| `DiscoveryResultUnreadable` | It produced output that did not verify — frames that do not decode, a result document whose counts or digest the frames do not support, a missing plan ConfigMap | no, not without fixing the runner |
+| `DiscoveryFailed` | The check Job did not produce a usable result: an unreachable broker, a rejected credential, a pod that never started, a deadline | yes |
+| `DiscoveryResultUnreadable` | It produced output that did not verify — frames that do not decode, a result document whose counts or digest the frames do not support, a missing plan ConfigMap, no result document at all, or a verified result carrying neither an inventory nor a blocking check that is not `ready` | no, not without fixing the runner |
 | `DiscoveryIncomplete` | Visibility was not established and the policy is `Refuse` | only with more permission, or an attestation |
 | `SelectionEmpty` | Nothing was left after internal topics, exclusions and the topics the broker would not describe | only if the cluster changes |
 | `SelectionTooLarge` | Over 5,000 resolved names, or over 256 KiB of them | only with more exclusions |
 | `SelectionTooLarge` (truncated listing) | The runner had to cut the listing at the plan's 20,000-topic `maxTopics` or at its relay budget, so the names are a **prefix** of what the principal can see | **not** with more exclusions — they are applied controller-side, after the listing. Name the topics explicitly, or split the cluster across schedules |
 | `SourceChangedDuringResolution` | The broker's `clusterId` is not the one the `KafkaCluster` observed, or the saved connection changed while the discovery ran | yes |
 | `JobNameConflict` | Something else owns `lwd-<backup uid>` | remove it first |
+
+**A classified broker failure is `DiscoveryFailed`, and the message names the
+check's own code.** When the runner reaches the broker and the broker refuses
+it, the relayed result carries no inventory and one blocking
+`connection.authenticated` row instead — `BrokerUnreachable`,
+`AuthenticationFailed`, `MetadataTimeout`, `TlsHandshakeFailed`,
+`ClusterAuthorizationFailed` and the rest of the check vocabulary (§7c). The
+controller projects the first blocking check that is not `ready` (`notReady`
+before `unknown` or `skipped`, advisory and execution-only rows excluded) and
+writes that code, the check's id, the runner's sentence and its remedy into
+`TopicsResolved`'s message, while the reason stays in this table's closed set.
+So an unreachable bootstrap and a rotated password are told apart by the
+message and are **both retryable** — before 2026-09-18 both read
+`DiscoveryResultUnreadable`, which says the runner needs fixing and that a new
+`Backup` cannot help. Neither the reason vocabulary nor the CRD changed;
+rolling the controller back restores the older, flatter message.
 
 **The two `SelectionTooLarge` rows share one reason and one condition**, and
 are told apart by the message: the truncated case says the names it returned
