@@ -50,9 +50,12 @@ INJECTIONS: dict[str, str] = {
         "words ('declared harness injection' in D1 §13.2)."
     ),
     "L-04-2b": (
-        "backdates `status.policy.effectiveSince` on a `Latest` schedule. Only used "
-        "if the real seven-minute outage does not produce the catch-up clause, and "
-        "recorded as a SEPARATE row so it can never stand in for L-04-2."
+        "backdates `status.policy.effectiveSince` AND "
+        "`status.missedSlots.lastEvaluatedSlot` on a `Latest` schedule: the first "
+        "decides whether a slot in a gap is caught up or skipped, the second decides "
+        "whether there is a gap at all. Recorded as a SEPARATE row so it can never "
+        "stand in for L-04-2, which needs no injection because a real outage moves "
+        "both fields by itself."
     ),
 }
 
@@ -669,6 +672,16 @@ def l_04_2b(H: Any) -> dict[str, Any]:
     before = {b["metadata"]["name"] for b in H.backups_of(uid)}
     since = parse_ts(observed["status"]["policy"]["effectiveSince"])
     backdated = (since - dt.timedelta(minutes=30)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    # BOTH FIELDS, and the first attempt at this row shows why only one is not
+    # enough. `effectiveSince` decides whether a slot in a gap is caught up or
+    # skipped (D1 §4.7 row 19); `missedSlots.lastEvaluatedSlot` decides whether
+    # there is a gap at all. Backdating the revision alone left
+    # `lastEvaluatedSlot` at the current slot, so the scheduler had nothing to
+    # walk and wrote `Admitted/Scheduled` for the slot that was due anyway —
+    # W8's `L-04-cap` injected the second field and not the first, and saw the
+    # mirror image of that. A real outage moves both, which is why L-04-2
+    # beside this row needs no injection at all.
+    gap_start = (since - dt.timedelta(minutes=20)).strftime("%Y%m%d-%H%M%S")
     H.run(
         H.KN
         + [
@@ -679,8 +692,19 @@ def l_04_2b(H: Any) -> dict[str, Any]:
             "--type",
             "merge",
             "-p",
-            json.dumps({"status": {"policy": {**observed["status"]["policy"],
-                                              "effectiveSince": backdated}}}),
+            json.dumps(
+                {
+                    "status": {
+                        "policy": {**observed["status"]["policy"],
+                                   "effectiveSince": backdated},
+                        "missedSlots": {
+                            "count": 0,
+                            "countCapped": False,
+                            "lastEvaluatedSlot": gap_start,
+                        },
+                    }
+                }
+            ),
         ],
         timeout=60,
     )
@@ -723,6 +747,7 @@ def l_04_2b(H: Any) -> dict[str, Any]:
             "injection": INJECTIONS["L-04-2b"],
             "effectiveSinceObserved": observed["status"]["policy"]["effectiveSince"],
             "effectiveSinceBackdatedTo": backdated,
+            "lastEvaluatedSlotBackdatedTo": gap_start,
             "catchUpRun": H.excerpt(after, "spec.slot", "spec.trigger", "status.backupId"),
             "lastSlot": last_slot,
             "missedSlots": H.excerpt(schedule, "status.missedSlots.count"),
