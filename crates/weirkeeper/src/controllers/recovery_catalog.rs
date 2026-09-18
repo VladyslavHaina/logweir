@@ -934,10 +934,24 @@ impl Pass<'_> {
             .map(|t| t.0)
             .unwrap_or(self.ctx.now);
 
+        // THE HARVEST WRITE REPLACES THE RECORD TOO — review finding L1.
+        //
+        // Seeded with the same explicit `null`s `start` writes, for the same
+        // RFC 7386 reason, and then overwritten by the arms below where a
+        // value exists. The path that needs it is the UPGRADE one: a harvest
+        // is normally preceded by this build's `start`, which already cleared
+        // the record, but a catalog stuck by
+        // `CATALOG-RESYNC-NOT-HARVESTED` is harvested with NO such `start` in
+        // front of it — so a stale `refusalReason` from the one sync that did
+        // refuse would be published beside `exitCode: 0` and
+        // `Synced=True/Succeeded`, describing two different Jobs as one.
         let last_job = |reason: Option<&CheckCode>| {
             let mut value = json!({
                 "name": job_name,
                 "finishedAt": Time::from(finished_at),
+                "startedAt": Value::Null,
+                "exitCode": Value::Null,
+                "refusalReason": Value::Null,
             });
             if let Some(at) = started_at {
                 value["startedAt"] = json!(Time::from(at));
