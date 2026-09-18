@@ -1028,9 +1028,25 @@ fn the_ttl_repair_needs_all_three_of_its_conditions() {
         "a Job that already has one is not repaired — re-sending the same value every reconcile \
          is the write loop E11(d) is about"
     );
+    // AN UNFINISHED JOB THAT IS OTHERWISE PERFECT. The fixture has to be owned
+    // and TTL-less, or the owner check stops it first and this assertion is
+    // about the wrong condition — which is exactly how the mutant "drop the
+    // finished check" survived its first run.
+    let unfinished = {
+        let mut v = serde_json::to_value(finished_job(None, owned())).expect("a Job");
+        v["status"] = json!({"active": 1});
+        serde_json::from_value::<Job>(v).expect("the Job fixture parses")
+    };
     assert!(
-        !weirkeeper::diagnostics::needs_ttl_repair(&job(), OWNER_UID),
-        "an UNFINISHED Job gets no TTL: that would be a deadline it did not ask for"
+        weirkeeper::diagnostics::needs_ttl_repair(&finished_job(None, owned()), OWNER_UID),
+        "…and the same Job WITH a Complete condition is repairable, so the only difference \
+         between the two is the one this assertion is about"
+    );
+    assert!(
+        !weirkeeper::diagnostics::needs_ttl_repair(&unfinished, OWNER_UID),
+        "MUTANT: an UNFINISHED Job gets no TTL — that is a deadline it did not ask for, and \
+         `ttlSecondsAfterFinished` on a Job still doing work is how a run gets collected out \
+         from under the controller reading it"
     );
     assert!(
         !weirkeeper::diagnostics::needs_ttl_repair(
