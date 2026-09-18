@@ -1083,9 +1083,18 @@ def l_05_1_3(H: Any) -> dict[str, Any]:
         obj=after_backup,
         dumps={"before": pre["backup"], "after": after_backup},
     )
+    status_delta = sorted(
+        k
+        for k in set(json.loads(status_before) or {}) | set(after_backup.get("status") or {})
+        if json.dumps((json.loads(status_before) or {}).get(k), sort_keys=True)
+        != json.dumps((after_backup.get("status") or {}).get(k), sort_keys=True)
+    )
     H.require(
-        json.dumps(after_backup.get("status"), sort_keys=True) == status_before,
-        "the pre-upgrade Backup's status changed across the upgrade",
+        not status_delta,
+        "the pre-upgrade Backup's status changed across the upgrade, outside D1 §6.2's "
+        f"migration fields (metadata only): {status_delta}. Verification went "
+        f"{((json.loads(status_before) or {}).get('evidence') or {}).get('verification', {}).get('result')!r}"
+        f" -> {((after_backup.get('status') or {}).get('evidence') or {}).get('verification', {}).get('result')!r}",
         obj=after_backup,
         dumps={"before": pre["backup"], "after": after_backup},
     )
