@@ -11007,3 +11007,172 @@ async fn a_run_that_wrote_no_artifact_still_writes_no_verification_block() {
         statuses[0]
     );
 }
+
+// ===========================================================================
+// Fix round 1, R3 — the merge patch nulls the fields the verdict does not hold
+// ===========================================================================
+
+use weirkeeper::conditions::status_unchanged;
+use weirkeeper::controllers::backup::verification_patch_value;
+use weirkeeper::verification::backup_badge;
+
+/// **A VERDICT THAT HOLDS NO KEY CLEARS THE ONE THAT WAS THERE** — review
+/// finding **R3**, seam **S7** and the D3 W2 record's clause: *"every write a
+/// resourceVersion-preconditioned merge PATCH with explicit `null` for a field
+/// that no longer holds."*
+///
+/// # The three properties, and why each one is separate
+///
+/// 1. **The patch nulls.** `VerificationResult::to_status_value` builds a fresh
+///    block and OMITS `matchedKeyId`, `signedAt` and `trust` when the verdict
+///    has none. RFC 7386 leaves an omitted key in place, so an omission is not
+///    a clearing — `controllers::backup::verification_patch_value` turns the
+///    omissions into explicit nulls on the way into `second_patch`.
+/// 2. **The nulls actually clear.** Applied over a status carrying a stale
+///    `matchedKeyId` and `trust`, the patch must REMOVE them. That is the
+///    whole point: `verification::retrust` re-derives `Valid` or `Untrusted`
+///    from a stored `matchedKeyId` (guarded by `has_trust_verdict`), so a
+///    stale key id left under a `NotAttempted` is a trust decision about a
+///    document this controller never fetched.
+/// 3. **And they cost no write.** `conditions::apply_merge_patch` removes a
+///    key sent as `null` and does nothing when it was already absent, so a
+///    verdict that has not moved still compares equal and
+///    `patch_status_if_changed` still sends nothing. Erratum **E11(d)** —
+///    20 reconciles a second, each a real write — is what that guard exists to
+///    prevent, and nulling fields is exactly the change that could have
+///    reintroduced it.
+///
+/// **THE NULLS BELONG TO THE PATCH AND NOT TO THE RENDERED BLOCK**, which is
+/// why `verification_patch_value` is a wrapper rather than an edit to
+/// `to_status_value`: `verification::valid_verification` reads `trust` as
+/// `None => compatible` but `Some(anything unreadable) => Untrusted`, so a
+/// `trust: null` inside the value the badge is computed over would turn a
+/// legacy `Valid` that carries no trust projection into `Untrusted`. The last
+/// arm below pins that.
+///
+/// KILLS: dropping `verification_patch_value` from either reconciler; nulling
+/// a field the verdict DOES hold; moving the nulls inside `to_status_value`.
+#[tokio::test]
+async fn the_verification_patch_nulls_every_field_the_verdict_does_not_hold() {
+    let evidence_read = serde_json::json!({"mode": "SecretKeys", "secret": {
+        "name": "lw-b-evidence-reader",
+        "accessKeyIdKey": "id", "secretAccessKeyKey": "key"
+    }});
+    let mut value = dest_b_value();
+    value["spec"]["access"]["evidenceRead"] = evidence_read;
+
+    let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes_for_destination(
+        &pod_list_terminated(0),
+        log_body(&i7_tail()),
+        "/backupdestinations/dest-b",
+        value,
+    ));
+    reconcile_backup(
+        &frozen_destination_backed_backup("dest-b"),
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 20),
+    )
+    .await
+    .expect("the reconcile succeeds");
+
+    // ---- 1. THE PATCH NULLS ------------------------------------------
+    let statuses = patched_statuses(&bodies.lock().expect("the body recorder is readable"));
+    let second = statuses.last().expect("the verification patch").clone();
+    let block = second["evidence"]["verification"].clone();
+    for key in ["matchedKeyId", "signedAt", "trust"] {
+        assert_eq!(
+            block.get(key),
+            Some(&Value::Null),
+            "`{key}` must be an EXPLICIT null and not an omission: RFC 7386 leaves an omitted \
+             key in place, so an omission would keep whatever was there. Got: {block}"
+        );
+    }
+    assert!(
+        block["detail"].is_string() && block["result"] == json!("NotAttempted"),
+        "the fields the verdict DOES hold are untouched: {block}"
+    );
+
+    // ---- 2. THE NULLS ACTUALLY CLEAR ---------------------------------
+    let mut stale = json!({
+        "evidence": { "verification": {
+            "result": "Valid",
+            "matchedKeyId": "an-old-key",
+            "payloadType": logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT,
+            "trust": { "basis": "Current" },
+            "signedAt": "2026-11-09T03:17:30Z",
+            "verifiedAt": "2026-11-09T03:18:00Z"
+        }}
+    });
+    apply_merge_patch(&mut stale, &second);
+    let merged = &stale["evidence"]["verification"];
+    assert_eq!(merged["result"], json!("NotAttempted"));
+    for key in ["matchedKeyId", "signedAt", "trust"] {
+        assert_eq!(
+            merged.get(key),
+            None,
+            "`{key}` is GONE after the merge, not carried under the new verdict — a stale key id \
+             is what `verification::retrust` would re-derive a trust verdict from, about a \
+             document this controller never fetched. Got: {merged}"
+        );
+    }
+
+    // ---- 3. AND THEY COST NO WRITE -----------------------------------
+    //
+    // The object as it stands AFTER this patch, patched with the same patch:
+    // nothing moves, so `patch_status_if_changed` sends nothing. Erratum
+    // E11(d).
+    let settled = stale.clone();
+    assert!(
+        status_unchanged(Some(&settled), &json!({ "status": second })),
+        "a verdict that has not moved must still compare equal — nulls over already-absent keys \
+         remove nothing. Got: {settled}"
+    );
+
+    // ---- 4. THE BADGE'S VALUE IS THE UN-NULLED ONE --------------------
+    //
+    // `valid_verification` reads `trust` as `None => compatible` and
+    // `Some(unreadable) => Untrusted`. A `Valid` verdict that carries no trust
+    // projection renders WITHOUT a `trust` key, and putting a null there would
+    // flip it to `Untrusted` — so the wrapper must not be applied to the value
+    // the badge is computed over.
+    let rendered = VerificationResult {
+        result: VerificationVerdict::Valid,
+        matched_key_id: Some("test-key".to_string()),
+        payload_type: logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT.to_string(),
+        verified_at: utc(2026, 11, 9, 3, 20),
+        detail: None,
+        trust: None,
+    }
+    .to_status_value(None);
+    assert_eq!(
+        rendered.get("trust"),
+        None,
+        "the RENDERED block still omits `trust` for a verdict with no projection: {rendered}"
+    );
+    let green = backup_badge(&json!({
+        "exitCode": 0,
+        "evidence": { "verification": rendered.clone() }
+    }));
+    assert!(
+        green.green,
+        "a legacy `Valid` with no trust projection is still green: {rendered}"
+    );
+    let nulled = verification_patch_value(rendered);
+    assert_eq!(
+        nulled.get("trust"),
+        Some(&Value::Null),
+        "the PATCH form nulls it: {nulled}"
+    );
+    assert!(
+        !backup_badge(&json!({
+            "exitCode": 0,
+            "evidence": { "verification": nulled.clone() }
+        }))
+        .green,
+        "MUTANT: applying the wrapper to the value the badge reads turns a legacy `Valid` into \
+         `Untrusted`. That is why `verification_patch_value` is applied ONLY on the way into \
+         `second_patch`. Got: {nulled}"
+    );
+}

@@ -4410,14 +4410,26 @@ async fn reconcile_restore_inner(
             matched_key_id = result.matched_key_id.as_deref().unwrap_or("<none>"),
             green = badge.green,
             badge = %badge.label,
-            "weirkeeper verified this Restore's signed scorecard with its read-only evidence \
-             credential"
+            // R2's sibling: the verb every arm earns. It used to read
+            // "weirkeeper verified this Restore's signed scorecard with its
+            // read-only evidence credential", which is false on the
+            // `NotAttempted` arm — nothing was fetched, no credential was used
+            // and no signature was checked. `verification` carries which
+            // verdict it was.
+            "weirkeeper recorded this Restore's evidence verdict"
         );
         patch_status_if_changed(
             &restores,
             restore,
             &name,
-            second_patch(&conditions_in(&terminal), verified, block),
+            // EXPLICIT NULLS FOR THE FIELDS THIS VERDICT DOES NOT HOLD — see
+            // `backup::verification_patch_value`. One rule, one helper, both
+            // reconcilers.
+            second_patch(
+                &conditions_in(&terminal),
+                verified,
+                backup::verification_patch_value(block),
+            ),
         )
         .await?;
     }
