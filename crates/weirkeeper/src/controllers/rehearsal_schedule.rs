@@ -107,6 +107,25 @@ pub const REASON_NO_RESULT: &str = "NoResult";
 pub const REASON_PASSED: &str = "Passed";
 /// `RehearsalHealthy`'s reason for a fail.
 pub const REASON_FAILED: &str = "Failed";
+/// `RehearsalHealthy`'s reason when the child was refused because THIS BUILD's
+/// `Restore` reconciler does not yet read `spec.authorization` — PLAT-14.3b.
+///
+/// ITS OWN REASON, AND NOT `Failed`. A rehearsal that never ran is not a
+/// rehearsal that failed, and an operator who reads `Failed` goes looking at
+/// their archive, their broker and their approver's key — none of which is the
+/// problem. The message names the five `restore.rs` functions that must gain a
+/// standing arm, so the next person to look does not have to rediscover them.
+pub const REASON_STANDING_NOT_ADMITTED: &str = "StandingAuthorizationNotAdmitted";
+
+/// The sentence [`REASON_STANDING_NOT_ADMITTED`] carries.
+pub const STANDING_NOT_ADMITTED_MESSAGE: &str = concat!(
+    "the rehearsal was created and its bundle was written, but this build's Restore reconciler ",
+    "refused it with ApprovalNotReceived: `admit`, `get_approval`, `triggered_by`, `runner_argv` ",
+    "and `runner_job_spec` in controllers/restore.rs all resolve spec.approvalRef only and do ",
+    "not read spec.authorization, and the runner's own standing check sits BESIDE a per-run ",
+    "approval that no unattended controller can mint. Tracked as PLAT-14.3b; no rehearsal can ",
+    "execute until it lands, and this schedule is not at fault"
+);
 
 /// The steady requeue. A cron with a one-minute resolution needs to be looked
 /// at more often than it fires, and a rehearsal's own child changes state
@@ -576,9 +595,25 @@ pub fn authorize(facts: &Facts<'_>) -> Result<Authorization, Skip> {
         ));
     }
 
+    // A BLANK UID IS NOT A UID. It becomes the contract's mandatory
+    // `LOGWEIR_EXECUTION_APPROVAL_UID`, and the runner treats a value that is
+    // present and empty as MISSING — so a default here would render a bundle
+    // every Job refuses, before phase 0, with a message about the contract
+    // rather than about this Approval. Unreachable for an object the API server
+    // returned, and named rather than defaulted for exactly that reason.
+    let approval_uid = approval
+        .uid()
+        .filter(|uid| !uid.trim().is_empty())
+        .ok_or_else(|| {
+            Skip::new(
+                SkipReason::AuthorizationInvalid,
+                format!("the Approval `{wanted}` carries no metadata.uid"),
+            )
+        })?;
+
     Ok(Authorization {
         name: approval.name_any(),
-        uid: approval.uid().unwrap_or_default(),
+        uid: approval_uid,
         key_id,
         envelope: approval.spec.approval_bytes.clone(),
         sidecar: approval.spec.sidecar_bytes.clone(),
@@ -1170,12 +1205,15 @@ async fn write_bundle(
     let keyring = keyring(trust, now);
     let desired = match super::restore::standing_bundle_config_map(
         restore,
-        &authorization.envelope,
-        &authorization.sidecar,
-        &authorization.key_id,
-        &keyring,
+        &super::restore::StandingInputs {
+            envelope: &authorization.envelope,
+            sidecar: &authorization.sidecar,
+            approval_uid: &authorization.uid,
+            key_id: &authorization.key_id,
+            keyring: &keyring,
+            target_cluster_id: &authorization.scope.target_cluster_id,
+        },
         trust,
-        &authorization.scope.target_cluster_id,
     ) {
         Ok(map) => map,
         Err(e) => {
@@ -1244,11 +1282,45 @@ async fn previous_child(
         .map_err(ReconcileError::Api)
 }
 
+/// How many pages [`busy_target`] follows before it gives up and says so.
+///
+/// Bounded because a reconcile may not become an unbounded walk, and generous
+/// because the page size below is already large.
+pub const MAX_TARGET_PAGES: u32 = 32;
+
+/// The page size [`busy_target`] asks for.
+pub const TARGET_PAGE_SIZE: u32 = 200;
+
 /// Another schedule's unfinished rehearsal against this same target cluster.
 ///
 /// THE ONE LIST IN THIS FILE, and it is the one question a GET cannot answer:
 /// "is anybody else using this broker". It is narrowed by the target label, so
 /// it reads only rehearsal `Restore`s, and it excludes this schedule's own.
+///
+/// # It FOLLOWS THE CONTINUE TOKEN, because one capped page is a guard that
+/// stops guarding
+///
+/// A rehearsal child is named `logweir-rehearsal-<schedule>-<YYYYmmdd-HHMMSS>`
+/// and the API server returns a label-selected list in NAME order, so one
+/// capped page holds the OLDEST rehearsals against this cluster. Nothing prunes
+/// them — they are owned by the schedule with `blockOwnerDeletion: false` and
+/// are kept as the audit trail — so once a target carries more than a page of
+/// them the page contains only finished runs and the one still IN FLIGHT is
+/// exactly the object outside it. `TargetBusy` would then stop being raised and
+/// two rehearsals would run against the same broker: the race D3 §4.4 exists to
+/// forbid, arriving silently after about two months of a daily schedule. A
+/// guard that quietly stops guarding is worse than no guard at all.
+///
+/// The walk stops at the FIRST non-terminal hit — the question is "is anybody
+/// else running", not "how many" — so the ordinary case costs one round trip.
+///
+/// # And it is still bounded
+///
+/// At [`MAX_TARGET_PAGES`] pages the walk stops, reports `None` and LOGS that
+/// it did not finish. That is the one case in which this function can be wrong,
+/// and it is recorded rather than hidden: an installation with 6 400 retained
+/// rehearsals against one cluster has a history-retention problem, not a
+/// concurrency question this function can answer.
 async fn busy_target(
     restores: &Api<Restore>,
     schedule: &RehearsalSchedule,
@@ -1259,21 +1331,41 @@ async fn busy_target(
         rehearsal::TARGET_LABEL,
         schedule.spec.target.cluster_ref.name
     );
-    let list = restores
-        .list(&ListParams::default().labels(&selector).limit(64))
-        .await
-        .map_err(ReconcileError::Api)?;
-    Ok(list
-        .items
-        .into_iter()
-        .find(|r| {
+    let mut token: Option<String> = None;
+    for page in 0..MAX_TARGET_PAGES {
+        let mut params = ListParams::default()
+            .labels(&selector)
+            .limit(TARGET_PAGE_SIZE);
+        if let Some(token) = token.as_deref() {
+            params = params.continue_token(token);
+        }
+        let list = restores.list(&params).await.map_err(ReconcileError::Api)?;
+        let hit = list.items.iter().find(|r| {
             r.labels()
                 .get(rehearsal::SCHEDULE_LABEL)
                 .map(String::as_str)
                 != Some(schedule_name)
                 && !super::restore::status_is_terminal(r)
-        })
-        .map(|r| r.name_any()))
+        });
+        if let Some(hit) = hit {
+            return Ok(Some(hit.name_any()));
+        }
+        match list.metadata.continue_.filter(|t| !t.is_empty()) {
+            Some(next) => token = Some(next),
+            None => return Ok(None),
+        }
+        if page + 1 == MAX_TARGET_PAGES {
+            warn!(
+                schedule = %schedule_name,
+                target = %schedule.spec.target.cluster_ref.name,
+                pages = MAX_TARGET_PAGES,
+                "the per-target concurrency walk hit its page bound without reaching the end of \
+                 the list; TargetBusy is not raised from an incomplete walk, and the retained \
+                 rehearsal history for this cluster wants pruning"
+            );
+        }
+    }
+    Ok(None)
 }
 
 /// Every candidate point, from the `Backup`s the schedule's `scheduleRefs` name
@@ -1509,6 +1601,9 @@ pub struct Observation {
     pub pending_topics: Vec<String>,
     /// The measured recovery time.
     pub rto_seconds: Option<i64>,
+    /// The child was refused with `ApprovalNotReceived` while carrying a
+    /// standing authorization — the PLAT-14.3b hold, not a rehearsal failure.
+    pub standing_not_admitted: bool,
 }
 
 /// Project one `Restore` into [`Observation`].
@@ -1523,6 +1618,16 @@ pub fn observe(restore: Option<&Restore>) -> Observation {
     let passed = terminal
         && outcome.as_deref() == Some("pass")
         && status.and_then(|s| s.exit_code) == Some(0);
+    // THE PLAT-14.3b HOLD, RECOGNISED RATHER THAN LEFT SILENT. A standing
+    // `Restore` that this build's reconciler refused terminally with
+    // `ApprovalNotReceived` says nothing about the archive, the broker or the
+    // approver's key; reporting it as a rehearsal FAILURE would send an operator
+    // to look at all three. It is reported as its own reason, naming the arm
+    // that is missing.
+    let standing_not_admitted = terminal
+        && restore.spec.authorization.is_some()
+        && status.and_then(|s| s.exit_reason.as_deref().or(s.reason.as_deref()))
+            == Some(crate::conditions::TERMINAL_STATE_APPROVAL_NOT_RECEIVED);
     Observation {
         restore: Some(restore.name_any()),
         terminal,
@@ -1538,6 +1643,7 @@ pub fn observe(restore: Option<&Restore>) -> Observation {
         rto_seconds: status
             .and_then(|s| s.measured.as_ref())
             .and_then(|m| m.rto_seconds),
+        standing_not_admitted,
     }
 }
 
@@ -1739,7 +1845,13 @@ pub fn status_patch(
     ));
 
     let (health_status, health_reason, health_message) = if observation.terminal {
-        if observation.passed {
+        if observation.standing_not_admitted {
+            (
+                "False".to_string(),
+                REASON_STANDING_NOT_ADMITTED.to_string(),
+                STANDING_NOT_ADMITTED_MESSAGE.to_string(),
+            )
+        } else if observation.passed {
             (
                 "True".to_string(),
                 REASON_PASSED.to_string(),
