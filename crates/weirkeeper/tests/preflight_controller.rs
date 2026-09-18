@@ -1106,6 +1106,92 @@ fn the_recovery_point_row_walks_its_table() {
     );
 }
 
+/// A `Succeeded` recovery point that froze `frozen`, checked against a source
+/// destination that resolved `expected`.
+fn recovery_point_at(frozen: Option<&str>, expected: Option<&str>) -> RecoveryPointFacts {
+    RecoveryPointFacts::Found {
+        name: "nightly-1".to_string(),
+        uid: BACKUP_UID.to_string(),
+        expected_uid: Some(BACKUP_UID.to_string()),
+        phase: Some("Succeeded".to_string()),
+        location_digest: frozen.map(str::to_string),
+        expected_location_digest: expected.map(str::to_string),
+    }
+}
+
+/// **A RECOVERY POINT IS ONLY RESTORABLE FROM THE DESTINATION IT WAS WRITTEN
+/// TO** — D2 §3.12, and the row that finally says so.
+///
+/// # The defect this closes
+///
+/// Until `Backup.status.destination` existed there was no digest on the object
+/// to compare, so `recoveryPoint.state` answered `RecoveryPointSucceeded` for a
+/// point sitting in the OTHER destination's bucket. A restore started from that
+/// green row reaches `archive.backupSet` and fails there, against a bucket the
+/// operator never chose, with a store error instead of a sentence naming the
+/// two locations.
+///
+/// # Why `unknown` and not `ready` for a legacy point
+///
+/// A point archived before saved destinations existed publishes no location at
+/// all. `ready` would be this blocking row reporting a comparison nobody made;
+/// `notReady` would refuse a restore that is very probably fine. `unknown` is
+/// the third answer the aggregate already understands, and it holds the verdict
+/// until a human confirms the location.
+///
+/// KILLS, one mutant each:
+/// * the mismatch arm answering `Ready`/`RecoveryPointSucceeded`;
+/// * the mismatch message dropping either digest;
+/// * the `(None, Some(_))` arm falling through to `Ready`;
+/// * the `(None, Some(_))` arm widened to `(_, _)`, which would make the
+///   mirror case — a frozen point under a check that resolved no destination —
+///   `unknown` too and pin every legacy restore preflight at `unknown`.
+#[test]
+fn the_recovery_point_location_comparison_has_three_answers() {
+    let here = "sha256:1111111111111111111111111111111111111111111111111111111111111111";
+    let there = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+
+    let same = recovery_point_row(&recovery_point_at(Some(here), Some(here)), now()).unwrap();
+    assert_eq!(same.code, CheckCode::RecoveryPointSucceeded);
+    assert_eq!(same.state, CheckState::Ready);
+
+    let moved = recovery_point_row(&recovery_point_at(Some(here), Some(there)), now()).unwrap();
+    assert_eq!(moved.code, CheckCode::RecoveryPointLocationMismatch);
+    assert_eq!(moved.state, CheckState::NotReady);
+    let message = moved.message.as_str();
+    assert!(
+        message.contains(here) && message.contains(there),
+        "BOTH digests belong in the sentence: an operator holding two \
+         destinations has to be told which one this point is in. Got: {message}"
+    );
+    assert!(
+        !moved.remedy.is_empty(),
+        "every notReady row names a way forward"
+    );
+
+    let legacy = recovery_point_row(&recovery_point_at(None, Some(here)), now()).unwrap();
+    assert_eq!(legacy.code, CheckCode::RecoveryPointLocationUnknown);
+    assert_eq!(
+        legacy.state,
+        CheckState::Unknown,
+        "a point with no frozen destination is not a point proved to be in this one"
+    );
+    assert!(
+        legacy.message.contains(here),
+        "the row names the destination it could not compare against"
+    );
+
+    // THE MIRROR CASE, AND IT IS NOT THE SAME CASE. A check that resolved no
+    // source destination makes no location claim, so there is nothing for this
+    // row to compare and `plan.bindings` is what holds the legacy plan's
+    // location to account. Answering `unknown` here would pin every legacy
+    // restore preflight at `unknown` for a question nobody asked.
+    let no_claim = recovery_point_row(&recovery_point_at(Some(here), None), now()).unwrap();
+    assert_eq!(no_claim.code, CheckCode::RecoveryPointSucceeded);
+    let neither = recovery_point_row(&recovery_point_at(None, None), now()).unwrap();
+    assert_eq!(neither.code, CheckCode::RecoveryPointSucceeded);
+}
+
 fn approver_roster(not_after: Option<DateTime<Utc>>) -> RosterFacts {
     RosterFacts {
         found: true,
@@ -2863,6 +2949,156 @@ async fn an_expired_approver_key_is_reported_before_the_restore_is_submitted() {
     assert!(
         status["binding"]["planHash"].as_str().is_some(),
         "the verdict is bound to the exact plan hash (D2 §6.6)"
+    );
+}
+
+/// The `Backup` a restore points at: `Succeeded`, over the plan's own topic,
+/// carrying `frozen` as its `status.destination.locationDigest` when it has
+/// one. `None` is a LEGACY recovery point — an inline-`archive` run, or one an
+/// older controller froze.
+fn recovery_point_object(frozen: Option<&str>) -> Value {
+    let mut object = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "Backup",
+        "metadata": {
+            "name": "nightly-1", "namespace": NS, "uid": BACKUP_UID,
+            "generation": 1, "resourceVersion": "700"
+        },
+        "spec": {
+            "sourceRef": {"name": "source"},
+            "topics": ["orders"],
+            "triggeredBy": "manual",
+            "deadlineSeconds": 3600,
+            "archive": {"url": "s3://s3-bucket"}
+        },
+        "status": {"phase": "Succeeded"}
+    });
+    if let Some(digest) = frozen {
+        object["status"]["destination"] = json!({
+            "name": "primary",
+            "uid": DEST_UID,
+            "generation": 3,
+            "locationDigest": digest
+        });
+    }
+    object
+}
+
+/// The digest the `primary` fixture resolves to — what a destination-backed
+/// restore check compares a recovery point against. Taken from the resolver,
+/// never spelled out here: a literal would drift the day the canonical form
+/// changes and this test would keep passing about the wrong thing.
+fn primary_location_digest() -> String {
+    let object = serde_json::from_value(backup_destination("primary"))
+        .expect("the fixture is a BackupDestination");
+    weirkeeper::destination::resolve(
+        &object,
+        DestinationRole::ArchiveRead,
+        &weirkeeper::check::policy::Policy::defaults(),
+    )
+    .expect("the fixture resolves")
+    .location_digest
+}
+
+/// A draft restore over `point`, reconciled in full.
+async fn restore_over_recovery_point(point: Value) -> Value {
+    let job = job_name(CheckPlanKind::RestorePreflight);
+    let mut routes = restore_referent_routes();
+    routes.push(route("GET", "/backups/nightly-1", point.to_string()));
+    // The point's own `spec.sourceRef`: the check reads the cluster the
+    // recovery point was captured from, to bind `plan.bindings` to it.
+    routes.push(route(
+        "GET",
+        "/kafkaclusters/source",
+        kafka_cluster("source", Some("prod-id")).to_string(),
+    ));
+    routes.push(route(
+        "GET",
+        leak(job.clone()),
+        finished_job(&job).to_string(),
+    ));
+    routes.push(route(
+        "GET",
+        "/pods",
+        list_of(vec![owned_pod(&job, terminated(0))]),
+    ));
+    routes.push(route("GET", "/events", list_of(vec![])));
+    routes.push(route(
+        "GET",
+        "-plan",
+        plan_config_map(&job, PLAN_DIGEST).to_string(),
+    ));
+    routes.push(route("GET", "/log", relay_log(PLAN_DIGEST, vec![], None)));
+    routes.push(route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")));
+    routes.push(route("PATCH", leak(job.clone()), echo("Job", &job)));
+    let request = restore_request(json!({
+        "recoveryPointRef": {"name": "nightly-1", "uid": BACKUP_UID}
+    }));
+    let (status, _) = reconcile_with(&preflight(request), routes).await;
+    status
+}
+
+/// **THE ROW IS WIRED TO THE OBJECT, NOT ONLY TO ITS OWN FACT TYPE.**
+///
+/// # The defect this closes
+///
+/// `recovery_point_row` could compare digests for a year and report nothing:
+/// before `Backup.status.destination` existed the reconciler passed
+/// `location_digest: None` and `expected_location_digest: None` with a comment
+/// saying why, and every restore preflight answered `RecoveryPointSucceeded`.
+/// This test reconciles three real recovery points through the routes and reads
+/// the published verdict, so the wiring — a read of the point's frozen block
+/// and a read of the destination THIS check resolved — is what is under test.
+///
+/// KILLS, one mutant each:
+/// * `location_digest` back to `None` (every case becomes `ready`);
+/// * `expected_location_digest` back to `None` (mismatch and legacy both
+///   become `ready`);
+/// * `expected_location_digest` taken from the EVIDENCE destination instead of
+///   the archive one;
+/// * the frozen digest re-resolved from the live `BackupDestination` rather
+///   than read off the point, which makes the moved point look settled.
+#[tokio::test]
+async fn the_recovery_point_location_row_reads_the_frozen_destination_off_the_object() {
+    let here = primary_location_digest();
+    let there = "sha256:2222222222222222222222222222222222222222222222222222222222222222";
+    assert_ne!(here, there, "the premise: two different locations");
+
+    let same = restore_over_recovery_point(recovery_point_object(Some(&here))).await;
+    let row = check_entry(&same, "recoveryPoint.state");
+    assert_eq!(
+        row["code"], "RecoveryPointSucceeded",
+        "a point frozen at the destination this check resolved is the point"
+    );
+    assert_eq!(row["state"], "ready");
+
+    let moved = restore_over_recovery_point(recovery_point_object(Some(there))).await;
+    let row = check_entry(&moved, "recoveryPoint.state");
+    assert_eq!(
+        row["code"], "RecoveryPointLocationMismatch",
+        "D2 §6.3's code is REACHABLE now, and this is the case that reaches it"
+    );
+    assert_eq!(row["state"], "notReady");
+    assert_eq!(
+        moved["result"]["state"], "notReady",
+        "a blocking notReady row makes the whole verdict notReady"
+    );
+    let message = row["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains(&here) && message.contains(there),
+        "the operator is told BOTH locations: {message}"
+    );
+
+    let legacy = restore_over_recovery_point(recovery_point_object(None)).await;
+    let row = check_entry(&legacy, "recoveryPoint.state");
+    assert_eq!(
+        row["code"], "RecoveryPointLocationUnknown",
+        "a point that publishes no location is not a point proved to be here"
+    );
+    assert_eq!(row["state"], "unknown");
+    assert_ne!(
+        legacy["result"]["state"], "ready",
+        "the upgrade note in one assertion: an old recovery point never gets a \
+         green verdict it did not earn"
     );
 }
 

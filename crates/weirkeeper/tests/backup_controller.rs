@@ -11222,3 +11222,173 @@ async fn the_verification_patch_nulls_every_field_the_verdict_does_not_hold() {
          nulls the patch carries do not change that: {verified}"
     );
 }
+
+// ===========================================================================
+// D2 §3.7 — the frozen destination reaches `Backup.status` (PLAT-08.1 residue)
+// ===========================================================================
+
+/// **THE RECOVERY POINT PUBLISHES WHERE IT IS, FROM THE SAME SNAPSHOT THE PLAN
+/// WAS RENDERED FROM.**
+///
+/// # The defect this closes
+///
+/// D2 W10 froze the resolved destination into `execution-inputs.json` and
+/// stopped there: `Backup.status` carried no field for it, so a recovery point
+/// published no location, the `Preflight`'s `RecoveryPointLocationMismatch` had
+/// nothing to compare (tracker row `D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN`'s
+/// neighbour in the W14 record) and PLAT-15.1's catalog could not index a point
+/// by its destination. The digest existed and nobody could read it.
+///
+/// # ONE PROJECTION
+///
+/// The block is `frozen_destination_status` of the snapshot, so the status and
+/// the frozen document cannot disagree: a reader comparing
+/// `status.destination.locationDigest` against the plan is comparing two
+/// renderings of one value.
+///
+/// KILLS, one mutant each:
+/// * `execution_status_patch` omitting the `destination` key for a
+///   destination-backed run;
+/// * `frozen_destination_status` taking any of the four fields from somewhere
+///   other than the snapshot (the name for the uid, a recomputed digest);
+/// * the block written from a FRESH resolution rather than the frozen one —
+///   the second half of this test freezes against `dest-a` and then resolves
+///   `dest-b`, and only a block read off the snapshot stays at `dest-a`.
+#[test]
+fn the_freeze_publishes_the_frozen_destination_on_status() {
+    let backed = destination_backed_backup("dest-a");
+    let pair = both_roles(dest_a_value());
+    let frozen = desired_execution_inputs_for_destination(
+        &backed,
+        &prod_cluster(),
+        &weirkeeper::backup_execution::ResolvedSelection::named(&backed.spec),
+        Some(&pair),
+    )
+    .expect("the destination-backed inputs resolve");
+    let snapshot = frozen
+        .inputs
+        .destination
+        .as_ref()
+        .expect("a destination-backed run freezes its destination")
+        .clone();
+
+    let patch = execution_status_patch(&frozen);
+    let block = &patch["status"]["destination"];
+    assert_eq!(block["name"], "dest-a");
+    assert_eq!(block["uid"], DEST_A_UID, "the UID, not only the name");
+    assert_eq!(block["generation"], 3);
+    assert_eq!(
+        block["locationDigest"].as_str(),
+        Some(snapshot.location_digest.as_str()),
+        "the digest published is the digest frozen, not a second computation"
+    );
+    assert_eq!(
+        block.as_object().map(|o| o.len()),
+        Some(4),
+        "four fields and no storage settings, no credential and no CA: {block}"
+    );
+
+    // THE PATCH IS A PROJECTION OF THE SNAPSHOT, NOT OF THE CLUSTER. Freezing
+    // the same object against `dest-b` produces a different block, which is
+    // what makes the first assertion mean "read off the snapshot".
+    let other = desired_execution_inputs_for_destination(
+        &destination_backed_backup("dest-b"),
+        &prod_cluster(),
+        &weirkeeper::backup_execution::ResolvedSelection::named(&backed.spec),
+        Some(&both_roles(dest_b_value())),
+    )
+    .expect("the second destination resolves");
+    let other_block = &execution_status_patch(&other)["status"]["destination"];
+    assert_ne!(
+        other_block["locationDigest"], block["locationDigest"],
+        "two destinations, two locations: the premise of the comparison the Preflight makes"
+    );
+    assert_eq!(other_block["uid"], DEST_B_UID);
+}
+
+/// **A LEGACY INLINE-`archive` RUN PUBLISHES NO BLOCK — AND NO `null`.**
+///
+/// Absent is a real value (`docs/kubernetes.md` §7's absent-field rule): it
+/// means "this recovery point publishes no frozen location", which is exactly
+/// what the `Preflight` answers `unknown` for. A merge patch carrying
+/// `"destination": null` would be this controller asserting the absence on
+/// every pass of every legacy object, and `Backup.spec` is immutable, so the
+/// key can never need clearing.
+///
+/// KILLS: `execution_status_patch` writing `"destination": null` on the legacy
+/// path, and writing the block unconditionally.
+#[test]
+fn a_legacy_run_publishes_no_destination_block_and_no_null() {
+    let legacy = desired_for(&backup());
+    assert!(
+        legacy.inputs.destination.is_none(),
+        "the premise: an inline-archive run freezes no destination"
+    );
+    let patch = execution_status_patch(&legacy);
+    let status = patch["status"].as_object().expect("a status object");
+    assert!(
+        !status.contains_key("destination"),
+        "the key is OMITTED, never written as null: {patch}"
+    );
+    assert!(
+        status.contains_key("execution"),
+        "the rest of the freeze patch is unchanged: {patch}"
+    );
+}
+
+/// **WRITTEN ONCE, AT THE FREEZE, AND NEVER REWRITTEN.**
+///
+/// A later pass re-reads the STORED snapshot and renders this same patch, so
+/// `patch_status_if_changed` sends nothing — which is the whole mechanism by
+/// which a destination edited after the freeze moves neither the plan nor the
+/// published location. The typed readback is the one a re-created Job is
+/// rendered from, so this is the same value on the first pass and the last.
+///
+/// KILLS: a `status.destination` rebuilt from a fresh `destination::resolve`
+/// on each pass — the mutant makes the re-rendered patch differ from the
+/// recorded one the moment the object moves, and the block a recovery point
+/// publishes then follows the live object instead of its own run.
+#[test]
+fn the_status_destination_is_the_same_on_every_later_pass() {
+    let backed = destination_backed_backup("dest-a");
+    let selection = weirkeeper::backup_execution::ResolvedSelection::named(&backed.spec);
+    let first = desired_execution_inputs_for_destination(
+        &backed,
+        &prod_cluster(),
+        &selection,
+        Some(&both_roles(dest_a_value())),
+    )
+    .expect("the first freeze resolves");
+    let patch = execution_status_patch(&first);
+
+    // The readback path: the stored snapshot, decoded from the plan bytes a
+    // later pass mounts, rendered again.
+    let stored: weirkeeper::backup_execution::BackupExecutionInputs =
+        serde_json::from_str(&first.canonical).expect("the canonical bytes decode");
+    let replayed = weirkeeper::backup_execution::FrozenInputs::freeze(stored)
+        .expect("the stored snapshot re-freezes");
+    assert_eq!(
+        execution_status_patch(&replayed),
+        patch,
+        "a later pass renders the identical patch, so patch_status_if_changed sends nothing"
+    );
+
+    let recorded = with_status_patch(&backed, &patch);
+    let published = recorded
+        .status
+        .as_ref()
+        .and_then(|s| s.destination.as_ref())
+        .expect("the freeze patch lands on the typed object");
+    assert_eq!(published.name, "dest-a");
+    assert_eq!(published.uid, DEST_A_UID);
+    assert_eq!(published.generation, 3);
+    assert_eq!(
+        published.location_digest,
+        first
+            .inputs
+            .destination
+            .as_ref()
+            .expect("the snapshot")
+            .location_digest
+    );
+}
