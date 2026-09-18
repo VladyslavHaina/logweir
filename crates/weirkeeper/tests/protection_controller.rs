@@ -3336,3 +3336,392 @@ fn a_recovery_is_stamped_when_it_finished_and_not_when_it_was_created() {
     );
     assert_eq!(alert["resolvedAt"].as_str(), Some(finished.as_str()));
 }
+
+// ===========================================================================
+// W13 — NOTIFY-INSECURE-SINK-UNEXPOSED: the escape hatch is an INSTALLATION
+// setting
+// ===========================================================================
+//
+// `logweir notify deliver` refuses a non-`https://` webhook or Slack URL
+// BEFORE it dials, and `NOTIFY_ALLOW_INSECURE_SINKS` — the documented
+// local-development hatch — used to be set by nothing in the spec and nothing
+// in `delivery_job_spec`. On a laptop cluster the in-cluster echo sink D3 L5
+// asks for therefore received 0 POSTs and the alert read `webhook:failed`,
+// with no value anywhere an operator could set.
+//
+// The hatch is now `notify.allowInsecureSinks` on the chart, read by THIS
+// process from `LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS` and forwarded into every
+// delivery Job. The four things these rows hold: it is forwarded ONLY when
+// set, a policy cannot turn it on, the Job is unchanged when it is unset, and
+// the chart's spelling is this crate's constant.
+
+/// The literal env of a delivery Job on a DEFAULT installation, as a golden.
+///
+/// Byte-for-byte what this function built before the hatch existed — one
+/// entry, `RUST_LOG=warn` — so every rendered Job in every install that left
+/// the value alone is unmoved. The mutant is `env_literal.push(...)`
+/// unconditionally, or pushed with a falsy value: both add a name here.
+#[test]
+fn a_delivery_job_carries_no_insecure_sink_variable_unless_the_installation_set_it() {
+    let job_spec = pp::delivery_job_spec(
+        "j",
+        NS,
+        &pp::owner_of(POLICY, POLICY_UID),
+        "cm",
+        spec()
+            .notifications
+            .as_ref()
+            .and_then(|n| n.routes.as_deref()),
+        &RunnerImage::default(),
+        false,
+    );
+    assert_eq!(
+        job_spec.env_literal,
+        vec![("RUST_LOG".to_string(), "warn".to_string())],
+        "the unset case is a GOLDEN: a delivery Job on a default installation carries exactly \
+         the literal env it carried before `notify.allowInsecureSinks` existed"
+    );
+    let rendered =
+        serde_json::to_string(&weirkeeper::job::build(&job_spec)).expect("the Job serialises");
+    assert!(
+        !rendered.contains(pp::ALLOW_INSECURE_SINKS_ENV),
+        "an unset hatch renders NOTHING — not the variable with a falsy value, which \
+         `logweir notify deliver` would read as `no` today and which the next reader of \
+         `kubectl get job -o yaml` would read as `this install allows cleartext`: {rendered}"
+    );
+}
+
+/// And with the installation's hatch on: the variable, the value `1`, and
+/// nothing else about the Job moved.
+#[test]
+fn the_installation_hatch_reaches_the_delivery_job_as_the_documented_variable() {
+    let policy_spec = spec();
+    let routes = policy_spec
+        .notifications
+        .as_ref()
+        .and_then(|n| n.routes.as_deref());
+    let off = pp::delivery_job_spec(
+        "j",
+        NS,
+        &pp::owner_of(POLICY, POLICY_UID),
+        "cm",
+        routes,
+        &RunnerImage::default(),
+        false,
+    );
+    let on = pp::delivery_job_spec(
+        "j",
+        NS,
+        &pp::owner_of(POLICY, POLICY_UID),
+        "cm",
+        routes,
+        &RunnerImage::default(),
+        true,
+    );
+    assert_eq!(
+        on.env_literal,
+        vec![
+            ("RUST_LOG".to_string(), "warn".to_string()),
+            (pp::ALLOW_INSECURE_SINKS_ENV.to_string(), "1".to_string())
+        ],
+        "`1` and only `1`: it is the value `logweir::notify`'s reader and this crate's own \
+         predicate both accept, so the two halves of one decision cannot drift"
+    );
+    assert_eq!(
+        pp::ALLOW_INSECURE_SINKS_ENV,
+        "NOTIFY_ALLOW_INSECURE_SINKS",
+        "the Job-side name is the one `logweir notify deliver` reads and the one \
+         `docs/formats/protection-event.md` documents; renaming it here silently disarms the \
+         hatch"
+    );
+
+    // EVERYTHING ELSE IS THE SAME JOB. The hatch is one literal env entry, not
+    // a different Job: same argv (so the command line still names no URL),
+    // same secret env, same mounts, same deadline.
+    assert_eq!(on.args, off.args);
+    assert_eq!(on.env_from_secret, off.env_from_secret);
+    assert_eq!(on.config_map_mounts, off.config_map_mounts);
+    assert_eq!(on.secret_mounts, off.secret_mounts);
+    assert_eq!(on.deadline_seconds, off.deadline_seconds);
+    for argument in &on.args {
+        assert!(
+            !argument.contains("://"),
+            "the delivery Job's command line never carries a sink URL, hatch or no hatch: \
+             {argument}"
+        );
+    }
+    for (name, value) in &on.env_literal {
+        assert!(
+            !value.contains("://"),
+            "`{name}` carries a URL as a literal; a sink URL is a credential and reaches the pod \
+             as a secretKeyRef"
+        );
+    }
+}
+
+/// **A `ProtectionPolicy` cannot turn the hatch on.**
+///
+/// The spec is a namespaced object any namespace operator may write. A field
+/// there would let whoever creates a policy downgrade their own alerts'
+/// transport to cleartext — the event, the policy's name, its health, and on
+/// Slack a bearer credential in the URL — with no place for the administrator
+/// who installed Logweir to say no.
+///
+/// Three locks, and this row holds all three: the CRD has no such property
+/// anywhere (so the API server PRUNES it), the typed spec drops it if one
+/// arrives anyway, and `delivery_job_spec` reads only its own argument.
+#[test]
+fn a_policy_cannot_turn_the_insecure_sink_hatch_on() {
+    let hatch = "allowInsecureSinks";
+    let crd = weirkeeper::crds::render_all()
+        .into_iter()
+        .find(|r| r.kind == "ProtectionPolicy")
+        .expect("the ProtectionPolicy CRD is rendered");
+    assert!(
+        !crd.yaml.contains(hatch),
+        "the CRD offers `{hatch}` somewhere in its schema; a structural schema is how the API \
+         server decides what to keep, so a property here is a policy field whatever this \
+         controller then does with it"
+    );
+
+    // A spec that asks for it in every plausible place. Unknown fields are
+    // pruned by the API server and dropped by serde; the typed value must
+    // carry no trace, and the Job built from it none either.
+    let mut value = spec_value();
+    merge(
+        &mut value,
+        &json!({
+            "notifications": {
+                "allowInsecureSinks": true,
+                "routes": [{
+                    "name": "oncall",
+                    "allowInsecureSinks": true,
+                    "webhook": {
+                        "urlSecretRef": {"name": "hooks", "key": "ops"},
+                        "allowInsecureSinks": true
+                    }
+                }]
+            }
+        }),
+    );
+    let spec: ProtectionPolicySpec =
+        serde_json::from_value(value).expect("an unknown field is ignored, not a parse error");
+    let round_trip = serde_json::to_string(&spec).expect("the typed spec serialises");
+    assert!(
+        !round_trip.contains(hatch),
+        "the typed spec kept `{hatch}`: {round_trip}"
+    );
+
+    let job_spec = pp::delivery_job_spec(
+        "j",
+        NS,
+        &pp::owner_of(POLICY, POLICY_UID),
+        "cm",
+        spec.notifications
+            .as_ref()
+            .and_then(|n| n.routes.as_deref()),
+        &RunnerImage::default(),
+        // The INSTALLATION says no, which is the whole of the answer.
+        false,
+    );
+    assert_eq!(
+        job_spec.env_literal,
+        vec![("RUST_LOG".to_string(), "warn".to_string())],
+        "a policy asking three times over still gets the default install's Job"
+    );
+}
+
+/// The reconcile forwards the installation's answer — not a constant, not the
+/// policy's — into the Job it actually creates.
+#[test]
+fn the_reconcile_forwards_the_installations_hatch_into_the_job_it_creates() {
+    for allow in [false, true] {
+        let policy = policy_with(
+            {
+                let mut value = spec_value();
+                merge(
+                    &mut value,
+                    &json!({"objectives": {"requireCatalogAvailability": false}}),
+                );
+                value
+            },
+            json!({}),
+        );
+        let mut routes = read_routes(vec![backup("b-1", 40, json!({}))], json!({}));
+        routes.push(post(
+            "/configmaps",
+            json!({"apiVersion": "v1", "kind": "ConfigMap",
+                   "metadata": {"name": "cm", "namespace": NS}})
+            .to_string(),
+        ));
+        routes.push(post(
+            "/jobs",
+            json!({"apiVersion": "batch/v1", "kind": "Job",
+                   "metadata": {"name": "j", "namespace": NS}, "spec": {}})
+            .to_string(),
+        ));
+        routes.push(first_job_route(
+            &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
+            1,
+        ));
+        routes.push(patch(STATUS_PATH));
+        let (outcome, _, body_log) = drive_in(&policy, routes, now(), allow);
+        assert_eq!(outcome.created_jobs, 1, "one delivery Job (allow={allow})");
+
+        let body = bodies(&body_log)
+            .into_iter()
+            .find(|(method, uri, _)| method == "POST" && path_of(uri).ends_with("/jobs"))
+            .expect("the delivery Job was created")
+            .2;
+        let job: Value = serde_json::from_str(&body).expect("the created Job is JSON");
+        let env = job["spec"]["template"]["spec"]["containers"][0]["env"]
+            .as_array()
+            .expect("the container carries env")
+            .clone();
+        let found: Vec<&Value> = env
+            .iter()
+            .filter(|e| e["name"].as_str() == Some(pp::ALLOW_INSECURE_SINKS_ENV))
+            .collect();
+        if allow {
+            assert_eq!(
+                found.len(),
+                1,
+                "the installation allows insecure sinks and the Job it created does not say so, \
+                 so `logweir notify deliver` refuses the sink before it dials: {body}"
+            );
+            assert_eq!(found[0]["value"].as_str(), Some("1"));
+            assert!(
+                found[0]["valueFrom"].is_null(),
+                "a literal, never a reference: it is a switch and not a credential"
+            );
+        } else {
+            assert!(
+                found.is_empty(),
+                "a default installation's delivery Job named the hatch: {body}"
+            );
+        }
+    }
+}
+
+/// **An explicit affirmative only.** `0`, `false`, the empty string a
+/// Kubernetes `env:` entry with an empty `value:` actually produces (plan
+/// erratum E19(e)) and an absent variable are all "no".
+///
+/// A hatch that defaults open is not a hatch, and an operator who switches the
+/// value off must not discover it was still on — the same reading
+/// `logweir::notify::SinkRoutes::from_lookup` gives the Job-side variable.
+#[test]
+fn the_insecure_sink_hatch_is_an_explicit_affirmative_only() {
+    for yes in ["1", "true", "yes", "TRUE", "Yes", "  true  "] {
+        assert!(
+            pp::configured_allow_insecure_sinks(Ok(yes.to_string())),
+            "{yes:?} means yes"
+        );
+    }
+    for no in [
+        "", "   ", "0", "false", "no", "off", "1 true", "y", "on", "enabled",
+    ] {
+        assert!(
+            !pp::configured_allow_insecure_sinks(Ok(no.to_string())),
+            "{no:?} must NOT open a cleartext transport"
+        );
+    }
+    assert!(
+        !pp::configured_allow_insecure_sinks(Err(std::env::VarError::NotPresent)),
+        "an absent variable is the shipped default and it is closed"
+    );
+    assert_eq!(
+        pp::CONTROLLER_ALLOW_INSECURE_SINKS_ENV,
+        "LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS",
+        "the controller-side name is `LOGWEIR_`-prefixed like every other variable this process \
+         reads for itself, and it is NOT the Job-side name: they are different decisions and a \
+         `grep` in a cluster must be able to tell them apart"
+    );
+    assert_ne!(
+        pp::CONTROLLER_ALLOW_INSECURE_SINKS_ENV,
+        pp::ALLOW_INSECURE_SINKS_ENV
+    );
+}
+
+/// The read happens ONCE, in `controller`, and through the predicate.
+///
+/// Two reads are two answers in one process, and a decision made inline is
+/// reachable from no test at all — which is how plan erratum E19(e)'s wrong
+/// ERROR line survived to Task 24.
+#[test]
+fn the_insecure_sink_hatch_is_read_once_through_the_predicate() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src/controllers/protection_policy.rs"),
+    )
+    .expect("the reconciler source is readable");
+    let dense: String = source.chars().filter(|c| !c.is_whitespace()).collect();
+    let reads = dense
+        .matches("std::env::var(CONTROLLER_ALLOW_INSECURE_SINKS_ENV")
+        .count();
+    assert_eq!(
+        reads, 1,
+        "the hatch must be read EXACTLY ONCE per process; found {reads}. Two reads are two \
+         answers, and a reconcile that re-read it would let one policy's Jobs differ from \
+         another's inside one controller"
+    );
+    assert!(
+        dense.contains(
+            "configured_allow_insecure_sinks(std::env::var(CONTROLLER_ALLOW_INSECURE_SINKS_ENV"
+        ),
+        "the read must be the ARGUMENT of `configured_allow_insecure_sinks`: the predicate is \
+         the whole of the decision and `controller` supplies only the read"
+    );
+    assert!(
+        source.contains("ALLOWS INSECURE notification sinks"),
+        "an installation that allows cleartext alert delivery says so in its own logs, once, at \
+         startup: the operator who set it on a laptop is not always the one reading the \
+         controller a month later"
+    );
+}
+
+/// **The chart's spelling IS this crate's constant.**
+///
+/// `crates/logweir/tests/chart_lint.rs` owns the chart gates, but `logweir`
+/// declares no `weirkeeper` edge and cannot name
+/// [`pp::CONTROLLER_ALLOW_INSECURE_SINKS_ENV`] — the same reason
+/// `tests/chart_policy.rs` lives in this crate. This row is the other half:
+/// the rendered variable, the value that turns it on, and the default, held to
+/// the controller that reads them. A chart that rendered
+/// `LOGWEIR_ALLOW_INSECURE_SINKS`, or `"true"` instead of `"1"`, would install
+/// cleanly and change nothing at all — which is exactly the shape of the
+/// defect this fixes.
+#[test]
+fn the_chart_renders_the_hatch_under_the_name_this_controller_reads() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .ancestors()
+        .nth(2)
+        .expect("crates/weirkeeper sits two levels under the workspace root")
+        .to_path_buf();
+    let deployment = std::fs::read_to_string(root.join("charts/logweir/templates/deployment.yaml"))
+        .expect("the chart's Deployment template is readable");
+    assert!(
+        deployment.contains(&format!(
+            "- name: {}\n              value: \"1\"",
+            pp::CONTROLLER_ALLOW_INSECURE_SINKS_ENV
+        )),
+        "the Deployment must render `{}` with the literal `1` — the only value the predicate \
+         accepts",
+        pp::CONTROLLER_ALLOW_INSECURE_SINKS_ENV
+    );
+    assert!(
+        deployment.contains("{{- if .Values.notify.allowInsecureSinks }}"),
+        "and it must render ONLY when the value is true, so a default install's manifest is \
+         byte-identical to the one `logweir.yaml` carries"
+    );
+
+    let values = std::fs::read_to_string(root.join("charts/logweir/values.yaml"))
+        .expect("the chart's values file is readable");
+    let parsed: serde_json::Value = serde_yaml::from_str(&values).expect("values.yaml parses");
+    assert_eq!(
+        parsed["notify"]["allowInsecureSinks"].as_bool(),
+        Some(false),
+        "the shipped default is CLOSED: production leaves it false and an adopter who never \
+         heard of the hatch cannot be posting alerts in cleartext"
+    );
+}
