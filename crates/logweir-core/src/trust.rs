@@ -321,6 +321,24 @@ pub enum TrustBasis {
     /// A compromise-revoked key, with a controller-written observation from
     /// before the revocation took effect. **Never green.**
     RecordedBeforeRevocation,
+    /// **NO VERDICT HAS BEEN REACHED YET**, because the stored status predates
+    /// the `signedAt` field ([`ClaimAbsence::NotRecorded`]) and the document
+    /// that carries the real claim has not been read.
+    ///
+    /// # It is not a fifth way to refuse; it is the absence of an answer
+    ///
+    /// [`TrustBasis::None`] means *this key's lifecycle does not support this
+    /// document*, which is a conclusion. This one means *nothing has been
+    /// compared*. The distinction is the whole of `TRUST-UPGRADE-SIGNEDAT`:
+    /// flipping a terminal object to `Untrusted` on the strength of a status
+    /// field that did not exist when it was written is a verdict about the
+    /// controller's own history, dressed as a verdict about an archive.
+    ///
+    /// **Never green** — [`Verdict::may_render_green`] admits only
+    /// [`Self::Current`] and [`Self::Historical`], so this basis cannot be
+    /// presented as a pass under a policy that has not actually been applied
+    /// to the document.
+    Unverified,
     /// No basis at all.
     None,
 }
@@ -333,6 +351,7 @@ impl TrustBasis {
             Self::Current => "Current",
             Self::Historical => "Historical",
             Self::RecordedBeforeRevocation => "RecordedBeforeRevocation",
+            Self::Unverified => "Unverified",
             Self::None => "None",
         }
     }
@@ -427,6 +446,23 @@ impl Verdict {
             && matches!(self.basis, TrustBasis::Current | TrustBasis::Historical)
     }
 
+    /// Whether this verdict is UNDECIDED and waiting on one bounded re-read of
+    /// the document — [`TrustBasis::Unverified`], and nothing else.
+    ///
+    /// # Read this alongside [`Self::result`], not instead of it
+    ///
+    /// The undecided verdict carries `result: Untrusted` on purpose: a caller
+    /// that never learns about this method FAILS CLOSED, which is the same
+    /// direction every other row of D3 §7.4 fails in. A caller that CAN
+    /// perform the re-read — `weirkeeper::verification::retrust`, which holds
+    /// the object's stored result and the archive handle — asks this question
+    /// and keeps the previous verdict while the read is outstanding, instead
+    /// of withdrawing a verdict it has not re-examined.
+    #[must_use]
+    pub const fn awaits_signing_time(&self) -> bool {
+        matches!(self.basis, TrustBasis::Unverified)
+    }
+
     fn valid(basis: TrustBasis, key_state: TrustKeyState) -> Self {
         Self {
             result: TrustResult::Valid,
@@ -442,6 +478,24 @@ impl Verdict {
             basis,
             key_state,
             reason: Some(reason),
+        }
+    }
+
+    /// The UNDECIDED verdict: nothing was compared, because the claim came
+    /// from a status that predates `signedAt` ([`ClaimAbsence::NotRecorded`]).
+    ///
+    /// `result` is [`TrustResult::Untrusted`] and `reason` is
+    /// [`UntrustReason::SignedOutsideValidity`] so that a caller reading only
+    /// those two fields refuses — the same fail-closed default the window rows
+    /// have. The basis is what says "this is not a conclusion", and
+    /// [`Self::awaits_signing_time`] is how the one caller that can fix it
+    /// asks.
+    fn undecided(key_state: TrustKeyState) -> Self {
+        Self {
+            result: TrustResult::Untrusted,
+            basis: TrustBasis::Unverified,
+            key_state,
+            reason: Some(UntrustReason::SignedOutsideValidity),
         }
     }
 }
@@ -476,13 +530,38 @@ pub struct EvidenceClaim {
 /// The set is closed and each variant is a DIFFERENT operator action: an
 /// unknown payload type is a build that has not learned a document; an absent
 /// field is a document that is not what it says it is; an empty phase list is
-/// a run that recorded nothing; an unparseable value is a malformed instant.
+/// a run that recorded nothing; an unparseable value is a malformed instant;
+/// and [`Self::NotRecorded`] is not about a document at all.
 #[derive(Deserialize, Serialize, Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClaimAbsence {
     /// This build does not know where this media type keeps its signing time.
     UnknownPayloadType,
     /// The document does not carry the field this type's signing time lives in.
     FieldAbsent,
+    /// **THE DOCUMENT WAS NEVER CONSULTED.** The claim was read out of a
+    /// STORED STATUS written by a controller that predates the `signedAt`
+    /// field, so the absence is a fact about this installation's own history
+    /// and not about the document's bytes.
+    ///
+    /// # Why this is a different fact from [`Self::FieldAbsent`], and the
+    /// upgrade that proved it
+    ///
+    /// Defect `TRUST-UPGRADE-SIGNEDAT`. On the 2026-09-18 lab upgrade, five
+    /// objects written on 2026-09-14 moved `Valid` -> `Untrusted` with
+    /// [`Self::FieldAbsent`]'s sentence — *"the document carries no
+    /// signing-time field"* — although no document had been read and no
+    /// signature re-checked. The receipts were fine; only the *status* shape
+    /// was old. Reporting a fact about a status as a fact about a document is
+    /// how a routine upgrade comes to look like five corrupt archives.
+    ///
+    /// [`decide`] therefore refuses to *conclude* on this variant: it returns
+    /// an UNDECIDED verdict ([`TrustBasis::Unverified`]) whose contract is
+    /// that the caller performs one bounded re-read of the document and asks
+    /// again with a real claim. It is never produced by
+    /// [`read_claimed_signing_time`] — a document cannot claim to have been
+    /// written before a Kubernetes status field existed — and
+    /// `no_document_ever_claims_notrecorded` keeps it that way.
+    NotRecorded,
     /// A scorecard whose `phases` list is empty. **Schema-valid**: the
     /// scorecard schema puts no `minItems` on `phases`, so a run that recorded
     /// no phase produces a document with nothing to read.
@@ -498,6 +577,7 @@ impl ClaimAbsence {
         match self {
             Self::UnknownPayloadType => "UnknownPayloadType",
             Self::FieldAbsent => "FieldAbsent",
+            Self::NotRecorded => "NotRecorded",
             Self::EmptyPhases => "EmptyPhases",
             Self::Unparseable => "Unparseable",
         }
@@ -522,6 +602,11 @@ impl ClaimAbsence {
             Self::Unparseable => {
                 "the document's signing-time field is not an RFC 3339 instant, so the key's \
                  validity window could not be checked"
+            }
+            Self::NotRecorded => {
+                "this status was written before the controller recorded the document's own \
+                 signing time, so nothing has been compared to the key's validity window yet \
+                 and the document itself has not been read"
             }
         }
     }
@@ -755,6 +840,14 @@ pub fn may_sign_new(
 ///    [`TrustBasis::Historical`]; anything else — including a document with NO
 ///    claimed signing time — is [`UntrustReason::SignedOutsideValidity`].
 ///
+/// 5. **A claim whose absence is [`ClaimAbsence::NotRecorded`]** — the claim
+///    was read from a STATUS that predates the `signedAt` field, so no
+///    document has been consulted. That is not a row of the table at all: it
+///    is [`Verdict::undecided`], basis [`TrustBasis::Unverified`], and the
+///    caller is expected to re-read the document once and ask again. It is
+///    checked AFTER rows 1-3 so that an unlisted signer, a usage mismatch and
+///    a compromise revocation still take effect immediately.
+///
 /// # Why an absent claim refuses
 ///
 /// Fail closed. The claim is the thing the window is compared against, so its
@@ -762,6 +855,13 @@ pub fn may_sign_new(
 /// checked". Treating it as "inside the window" would make every document
 /// whose timestamp field a future format renames verify green against a
 /// retired key.
+///
+/// **[`ClaimAbsence::NotRecorded`] is the one absence that is not the
+/// document's.** Refusing it the same way reports this installation's own
+/// upgrade history as a finding about somebody's archive, which is the defect
+/// `TRUST-UPGRADE-SIGNEDAT` records; it still never renders green, and it
+/// still never says `Valid` under a policy that has not been applied to the
+/// document.
 #[must_use]
 pub fn decide(
     key: Option<&TrustedKey>,
@@ -815,6 +915,28 @@ pub fn decide(
         } else {
             Verdict::untrusted(UntrustReason::Revoked, TrustBasis::None, key_state)
         };
+    }
+
+    // ---- row: THE STATUS PREDATES `signedAt`, so nothing was compared ----
+    //
+    // `TRUST-UPGRADE-SIGNEDAT`. This arm is deliberately the LAST one before
+    // the window question and deliberately AFTER the three rows above, and the
+    // order is the ratchet:
+    //
+    //  * no key, and wrong usage, are facts about the KEY. No re-read of any
+    //    document can make an unlisted signer listed, so those still flip a
+    //    pre-`signedAt` object immediately.
+    //  * the two compromise rows never read the claim AT ALL (that is the
+    //    whole content of the compromise rule), so a `KeyCompromise`
+    //    revocation still flips a terminal object immediately, with or without
+    //    a recorded signing time. `a_compromise_revocation_flips_a_pre_signedat_object`
+    //    is the guard, and moving this arm above them is the mutation it kills.
+    //
+    // What is left is exactly the window question — and the window cannot be
+    // asked of a status that never recorded the instant to ask about. The
+    // honest answer is not "outside the window", it is "not yet asked".
+    if claim.absence == Some(ClaimAbsence::NotRecorded) {
+        return Verdict::undecided(key_state);
     }
 
     // ---- every remaining row is a window question ------------------------

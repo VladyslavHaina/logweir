@@ -998,3 +998,213 @@ fn the_verdict_is_a_function_of_its_arguments_and_nothing_else() {
          true if `now` is the argument and not a clock read"
     );
 }
+
+// ===========================================================================
+// TRUST-UPGRADE-SIGNEDAT — a status that predates `signedAt` is not a document
+// that claims none
+// ===========================================================================
+
+/// **The whole rule, in one assertion.** A claim whose absence is
+/// [`ClaimAbsence::NotRecorded`] produces an UNDECIDED verdict: basis
+/// `Unverified`, never green, and `awaits_signing_time()` true so the one
+/// caller that can re-read the document knows to.
+///
+/// KILLS: "treat `NotRecorded` like `FieldAbsent`" — the basis below would be
+/// `None` and `awaits_signing_time()` false, which is exactly the shipped
+/// behaviour that re-derived five sound 2026-09-14 lab objects from `Valid` to
+/// `Untrusted` without reading one byte of any archive.
+///
+/// ALSO KILLS: "make the undecided verdict `Valid` so nothing flips" — a caller
+/// that reads `result` alone must still refuse, because an undecided verdict is
+/// not a pass. Both halves are asserted.
+#[test]
+fn a_status_that_predates_signedat_is_undecided_and_never_green() {
+    let key = active();
+    let verdict = decide(
+        Some(&key),
+        KeyUsage::EvidenceSigning,
+        &EvidenceClaim::absent(ClaimAbsence::NotRecorded),
+        &IndependentObservation::none(),
+        at("2026-09-18T13:14:39Z"),
+    );
+    assert!(
+        verdict.awaits_signing_time(),
+        "the caller has to be able to tell 'not yet asked' from 'asked and refused'"
+    );
+    assert_eq!(verdict.basis, TrustBasis::Unverified);
+    assert_eq!(
+        verdict.basis.as_str(),
+        "Unverified",
+        "the wire spelling a status renders"
+    );
+    assert!(
+        !verdict.may_render_green(),
+        "an undecided verdict is not a pass, and D3 §7.4 admits only Current and Historical"
+    );
+    assert_eq!(
+        verdict.result,
+        TrustResult::Untrusted,
+        "FAIL CLOSED BY DEFAULT: a caller that never learns about `awaits_signing_time` refuses, \
+         which is the direction every other row of the table fails in"
+    );
+
+    // …and the DOCUMENT's own absence is untouched: still a refusal, still on
+    // no basis at all, and it does not await anything.
+    let document = decide(
+        Some(&key),
+        KeyUsage::EvidenceSigning,
+        &EvidenceClaim::absent(ClaimAbsence::FieldAbsent),
+        &IndependentObservation::none(),
+        at("2026-09-18T13:14:39Z"),
+    );
+    assert!(!document.awaits_signing_time());
+    assert_eq!(document.basis, TrustBasis::None);
+    assert_eq!(document.reason, Some(UntrustReason::SignedOutsideValidity));
+}
+
+/// **The ratchet.** Every row that does not read the claim still takes effect
+/// immediately on a pre-`signedAt` object — a compromise revocation above all.
+///
+/// KILLS: "check `NotRecorded` first, before the key rows" — the most
+/// dangerous edit available here. It would park a `KeyCompromise` revocation on
+/// `Unverified` and keep the previous `Valid` result while a stolen key's
+/// signatures stayed accepted until an archive happened to be readable. Each of
+/// the four rows below is a separate assertion, and moving the arm above any of
+/// them fails this test.
+#[test]
+fn a_compromise_revocation_flips_a_pre_signedat_object_with_no_read() {
+    let now = at("2026-09-18T13:14:39Z");
+    let effective = at("2026-09-10T00:00:00Z");
+    let claim = EvidenceClaim::absent(ClaimAbsence::NotRecorded);
+
+    // ---- no key on the policy at all -------------------------------------
+    let stranger = decide(
+        None,
+        KeyUsage::EvidenceSigning,
+        &claim,
+        &IndependentObservation::none(),
+        now,
+    );
+    assert!(!stranger.awaits_signing_time());
+    assert_eq!(stranger.reason, Some(UntrustReason::UntrustedSigner));
+
+    // ---- the key exists and carries the wrong usage -----------------------
+    let mut approval_only = active();
+    approval_only.usages = vec![KeyUsage::GovernedApproval];
+    let mismatch = decide(
+        Some(&approval_only),
+        KeyUsage::EvidenceSigning,
+        &claim,
+        &IndependentObservation::none(),
+        now,
+    );
+    assert!(!mismatch.awaits_signing_time());
+    assert_eq!(mismatch.reason, Some(UntrustReason::KeyUsageMismatch));
+
+    // ---- KeyCompromise, no local history: fails closed NOW ----------------
+    let mut compromised = active();
+    compromised.state = KeyState::Revoked;
+    compromised.revoked_at = Some(effective);
+    compromised.revocation_reason = Some(RevocationReason::KeyCompromise);
+    compromised.revocation_effective_from = Some(effective);
+    let revoked = decide(
+        Some(&compromised),
+        KeyUsage::EvidenceSigning,
+        &claim,
+        &IndependentObservation::none(),
+        now,
+    );
+    assert!(
+        !revoked.awaits_signing_time(),
+        "a stolen private half is not a question about when the document was signed, and waiting \
+         for an archive read before acting on it is the one delay this rule may not take"
+    );
+    assert_eq!(revoked.result, TrustResult::Untrusted);
+    assert_eq!(revoked.reason, Some(UntrustReason::Revoked));
+
+    // ---- KeyCompromise WITH a controller-written observation ---------------
+    let recorded = decide(
+        Some(&compromised),
+        KeyUsage::EvidenceSigning,
+        &claim,
+        &IndependentObservation::at(at("2026-09-04T00:00:00Z")),
+        now,
+    );
+    assert!(!recorded.awaits_signing_time());
+    assert_eq!(recorded.basis, TrustBasis::RecordedBeforeRevocation);
+    assert_eq!(
+        recorded.reason,
+        Some(UntrustReason::RecordedBeforeRevocation),
+        "the compromise rows read the OBSERVATION and never the claim, so the claim's absence \
+         cannot reach them at all"
+    );
+}
+
+/// `NotRecorded` is a fact about a STATUS, so no DOCUMENT ever produces it.
+///
+/// KILLS: "return `NotRecorded` from `read_claimed_signing_time` for a missing
+/// field" — the shortest wrong way to implement this rule. It would make every
+/// genuinely timestamp-less document undecided forever, waiting for a re-read
+/// that can never supply what the bytes do not contain.
+#[test]
+fn no_document_ever_claims_notrecorded() {
+    let shapes = [
+        ("application/vnd.logweir.backup-receipt+json", json!({})),
+        (
+            "application/vnd.logweir.backup-receipt+json",
+            json!({"finished_at": 7}),
+        ),
+        (
+            "application/vnd.logweir.backup-receipt+json",
+            json!({"finished_at": "not an instant"}),
+        ),
+        (
+            "application/vnd.logweir.drill-scorecard+json",
+            json!({"phases": []}),
+        ),
+        ("application/vnd.logweir.drill-scorecard+json", json!({})),
+        ("application/vnd.logweir.drill-teardown+json", json!({})),
+        ("application/vnd.logweir.drill-approval+json", json!({})),
+        ("application/vnd.logweir.catalog-point+json", json!({})),
+        ("application/vnd.example.unknown+json", json!({})),
+        ("", json!({})),
+    ];
+    for (payload_type, document) in shapes {
+        let absence = logweir_core::trust::read_claimed_signing_time(payload_type, &document)
+            .expect_err("none of these documents carries a readable signing time");
+        assert_ne!(
+            absence,
+            ClaimAbsence::NotRecorded,
+            "`NotRecorded` says 'this installation never recorded it', which no set of document \
+             bytes can be evidence for: {payload_type} {document}"
+        );
+    }
+}
+
+/// The two absences do not say the same thing to an operator.
+///
+/// KILLS: "give `NotRecorded` `FieldAbsent`'s sentence" — which is how the
+/// defect presented in the first place: five sound receipts reported as
+/// documents that *"carry no signing-time field"*.
+#[test]
+fn notrecorded_says_it_is_about_the_status_and_not_the_document() {
+    assert_eq!(ClaimAbsence::NotRecorded.as_str(), "NotRecorded");
+    let detail = ClaimAbsence::NotRecorded.detail();
+    assert_ne!(detail, ClaimAbsence::FieldAbsent.detail());
+    assert!(
+        detail.contains("this status was written before"),
+        "it has to name the STATUS as the thing that is old: {detail}"
+    );
+    assert!(
+        !detail.contains("the document carries no"),
+        "and it must not report a fact about a document nobody read: {detail}"
+    );
+    for other in [
+        ClaimAbsence::UnknownPayloadType,
+        ClaimAbsence::FieldAbsent,
+        ClaimAbsence::EmptyPhases,
+        ClaimAbsence::Unparseable,
+    ] {
+        assert_ne!(other.as_str(), ClaimAbsence::NotRecorded.as_str());
+    }
+}
