@@ -1299,7 +1299,12 @@ def l_05_2_3(H: Any) -> dict[str, Any]:
         f"migrated runs without the schedule-uid label: {missing_label}",
         dumps={"sample": after[missing_label[0]] if missing_label else None},
     )
-    captures = fenced.captures(H, "migration_patch")
+    # The proxy restarts with its pod, so the resumed pass's captures are a
+    # SECOND record. Both are needed: "no Backup was patched after it was
+    # already migrated" is a statement about the whole migration, not about the
+    # half that happened to survive the interruption.
+    captures = first_pass + fenced.captures(H, "migration_patch")
+    H.artifact("objects/L-05.2-3/all-migration-captures.json", captures)
     successes: dict[str, list[int]] = {}
     for item in captures:
         if item.get("response") in {200, 201}:
@@ -1354,7 +1359,14 @@ def l_05_2_1rv(H: Any) -> dict[str, Any]:
     The W8 run could not claim it — "only the proxy can see that". This is that
     reading, taken from the proxy that carried L-05.2-3's twenty migrations.
     """
-    captures = fenced.captures(H, "migration_patch")
+    # Both passes, as L-05.2-3 recorded them: the interrupted one lives only in
+    # that artifact, because its proxy died with its pod.
+    path = H.OUT / "objects/L-05.2-3/all-migration-captures.json"
+    H.require(
+        path.exists(),
+        "L-05.2-3 has not run in this namespace, so there are no migration PATCHes to read",
+    )
+    captures = json.loads(path.read_text())
     H.require(
         len(captures) >= 20,
         f"only {len(captures)} migration PATCHes were captured; run L-05.2-3 first",
