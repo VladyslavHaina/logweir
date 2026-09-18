@@ -378,10 +378,12 @@ pub fn ttl_patch() -> Value {
 /// `cancel.rs`.
 ///
 /// `activeDeadlineSeconds: 1` and not `delete`: the weirkeeper `ClusterRole`
-/// grants `delete` on nothing (`config/rbac/role.yaml`'s own header), and it is
-/// the better mechanism anyway — the Job FAILS with `DeadlineExceeded`, its
+/// grants `delete` on the two transient CHECK KINDS and on nothing else — no
+/// Job, ever (`config/rbac/role.yaml`'s own header) — and a deadline collapse
+/// is the better mechanism anyway. The Job FAILS with `DeadlineExceeded`, its
 /// pods terminate, and it becomes finished, so the TTL applies and the object
-/// stays around long enough to say what happened.
+/// stays around long enough to say what happened; a delete would take the
+/// reason with it.
 ///
 /// **The caller verifies the owner UID before sending it.** A Job's name is
 /// derived from the subject's UID ([`job::check_job_name`]), but a name is not

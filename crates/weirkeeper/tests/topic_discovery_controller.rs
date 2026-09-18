@@ -2030,7 +2030,8 @@ async fn a_cancel_collapses_the_owned_jobs_deadline_and_stores_nothing() {
     assert_eq!(
         body_of(&bodies, "PATCH", JOB_PATH),
         json!({"spec": {"activeDeadlineSeconds": 1}}),
-        "cancel is a deadline collapse and never a delete: this role grants `delete` on nothing"
+        "cancel is a deadline collapse and never a delete: the role grants `delete` on the two \
+         transient check kinds and on NO Job, and the collector is its only caller"
     );
 }
 

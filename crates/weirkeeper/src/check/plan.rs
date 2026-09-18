@@ -11,7 +11,9 @@
 //! * **An owner reference with `controller: true`.** The object goes away with
 //!   its check through garbage collection, so nothing here deletes it — the
 //!   rule this whole directory keeps, and the reason the `weirkeeper`
-//!   `ClusterRole` grants `delete` on nothing.
+//!   `ClusterRole` grants `delete` on no `ConfigMap`. Its one `delete` rule
+//!   names the two transient check kinds (D2 §4.3's collector), and collecting
+//!   a check is what takes this object with it.
 //! * **The digest on an annotation.** It is what makes the 409 rule below a
 //!   comparison rather than a guess.
 //!
