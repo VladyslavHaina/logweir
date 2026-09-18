@@ -1795,26 +1795,35 @@ def s11_criteria(status: dict[str, Any], job_conditions: list[dict[str, Any]],
                  relayed: Any, new_chunks: list[str]) -> dict[str, bool]:
     """D2 §14.4's S11 criteria, each judged on its own.
 
-    The fifth one is restated, and the reason is in `s11()`: the check Job
-    SUCCEEDS on this path, because the runner classifies the timeout itself,
-    relays a readable frame and exits 0. What is asserted instead is that the
-    Job ended AND the reason on the object is the code of the runner's own
-    blocking check — "the Job ended" alone would accept a Job that merely
-    finished.
+    THE FIFTH ONE IS THE AMENDED CRITERION, AND IT IS NARROW ON PURPOSE. §14.4
+    S11 as amended 2026-09-18 (main `ce69be4`, D2 W14 / lab-refresh-3) reads
+    "the check Job is `Complete` — the runner exits 0 after relaying its
+    `notReady` result and the failure is carried in the projected reason".
+    `Failed` belongs to the deadline path (`Job DeadlineExceeded →
+    Failed/DeadlineExceeded`), which is NOT this scenario's fixture: S11 points
+    `td-timeout` at a blackhole broker with `timeoutSeconds: 10` and the runner
+    classifies the timeout itself.
+
+    An earlier form of this accepted `Complete` OR `Failed`, which was looser
+    than the document it cites: a regression in which the runner went back to
+    failing the check Job on the Kafka-timeout path would have satisfied it
+    (review L-2). Requiring `Complete` is what the fixture says should happen;
+    the reason and the relayed frame then have to agree, because "the Job
+    completed" alone would accept a Job that merely finished.
     """
     blocking = [c for c in ((relayed or {}).get("checks") or [])
                 if isinstance(c, dict) and c.get("gating") == "blocking"
                 and c.get("state") == "notReady"]
-    terminal = [c for c in job_conditions
-                if c.get("type") in {"Complete", "Failed"} and c.get("status") == "True"]
+    complete = [c for c in job_conditions
+                if c.get("type") == "Complete" and c.get("status") == "True"]
     return {
         "phase == Failed": status.get("phase") == "Failed",
         "status.reason in {BrokerUnreachable, MetadataTimeout}":
             status.get("reason") in {"BrokerUnreachable", "MetadataTimeout"},
         "no chunks in status": not (status.get("result") or {}).get("chunks"),
         "no chunk ConfigMaps": not new_chunks,
-        "the Job ended and the reason came from its relayed blocking check":
-            bool(terminal) and bool(blocking)
+        "the check Job is Complete and the reason came from its relayed blocking check":
+            bool(complete) and bool(blocking)
             and status.get("reason") in {c.get("code") for c in blocking},
     }
 
@@ -2894,9 +2903,10 @@ def s11() -> None:
         # Job ended" would accept a Job that merely finished, so the frame and
         # the projection are required to agree.
         #
-        # DEVIATION, RECORDED AND NOT SILENT: §14.4's literal "Job `Failed`"
-        # wording no longer describes a reachable state. It is carried in the
-        # scenario detail under `contractDeviation` for the doc's owner to amend.
+        # NO DEVIATION ANY MORE. The wording was amended on main at `ce69be4`;
+        # what travels with `results.json` is now a CITATION of the criterion
+        # this row asserts, so the next reader is not told to fix a document
+        # that is already correct (review L-3).
         blocking = [c for c in ((relayed or {}).get("checks") or [])
                     if isinstance(c, dict) and c.get("gating") == "blocking"
                     and c.get("state") == "notReady"]
@@ -2904,14 +2914,15 @@ def s11() -> None:
             c["type"] for c in job_conditions
             if c.get("type") in {"Complete", "Failed"} and c.get("status") == "True"
         ]
+        sc.detail["jobIsComplete"] = "Complete" in sc.detail["jobTerminalConditions"]
         sc.detail["blockingNotReadyCodes"] = [c.get("code") for c in blocking]
-        sc.detail["contractDeviation"] = (
-            "D2 §14.4 S11 asks for `Job Failed`. The check Job SUCCEEDS on this path: the "
-            "runner relays a classified `notReady` frame and exits 0, and the controller "
-            "projects the reason from that frame. Only the Job-deadline path produces a "
-            "failed Job. This row asserts the reachable form — the Job ended and the "
-            "object's reason equals the relayed blocking check's code — and §14.4's "
-            "wording needs amending to match."
+        sc.detail["contractCitation"] = (
+            "D2 §14.4 S11 as amended 2026-09-18 (main `ce69be4`, D2 W14 / lab-refresh-3): "
+            "\"the check Job is `Complete` — the runner exits 0 after relaying its "
+            "`notReady` result and the failure is carried in the projected reason\". This "
+            "row asserts exactly that: `Complete`, and a projected reason equal to the code "
+            "of the runner's own blocking `notReady` check. `Failed` is the deadline path "
+            "and not this fixture."
         )
         criteria = s11_criteria(status, job_conditions, relayed, new_chunks)
         sc.detail["criteria"] = criteria

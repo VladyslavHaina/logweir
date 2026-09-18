@@ -82,10 +82,24 @@ def test_s11_judges_the_reachable_form_of_the_fifth_criterion() -> None:
     succeeded = dict(S11_STATUS, phase="Succeeded")
     row("MUTANT: an unreachable broker that ended Succeeded",
         not all(d2.s11_criteria(succeeded, S11_JOB_COMPLETE, S11_RELAYED, []).values()))
-    row("the deadline path still satisfies it: a Job that FAILED also ended",
-        all(d2.s11_criteria(
+    # §14.4 S11 as amended at `ce69be4` says the check Job is `Complete`. A
+    # FAILED Job on this fixture is the runner going back to failing the Job on
+    # the Kafka-timeout path — the pre-W9 behaviour the amendment describes as
+    # past. It used to be asserted here as a POSITIVE (review L-2).
+    row("MUTANT: a FAILED check Job on the Kafka-timeout fixture",
+        not all(d2.s11_criteria(
             S11_STATUS,
             [{"type": "Failed", "status": "True", "reason": "DeadlineExceeded"}],
+            S11_RELAYED, []).values()))
+    row("MUTANT: SuccessCriteriaMet alone is not Complete",
+        not all(d2.s11_criteria(
+            S11_STATUS,
+            [{"type": "SuccessCriteriaMet", "status": "True", "reason": "CompletionsReached"}],
+            S11_RELAYED, []).values()))
+    row("MUTANT: a Complete condition that is not True",
+        not all(d2.s11_criteria(
+            S11_STATUS,
+            [{"type": "Complete", "status": "False", "reason": "CompletionsReached"}],
             S11_RELAYED, []).values()))
 
 
