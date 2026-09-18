@@ -5310,6 +5310,18 @@ answered:
 | `checkJob` | what the pod observed with real credentials — SASL, the bucket, the manifest, the target's topics |
 | `podStatus` | what the kubelet said about a pod that has not run yet |
 
+`scope` names the object a row is ABOUT — `{kind, name, uid}` — and every row
+carries one. A row that has a better referent uses it (the `KafkaCluster`
+principal a connection dialled, the `BackupDestination` a grant belongs to, the
+`TrustRoster` a signing key is or is not on, the topic a collision names);
+anything left over takes the referent its authority implies, so a `podStatus`
+row names the Pod the kubelet reported on, a `checkJob` row names the check Job
+and a `controller` row names the `Preflight` itself. Before the Job has a pod a
+pod-status row names the Job, and before a plan could be rendered at all every
+row names the `Preflight`. A verdict stored by an older controller may carry
+rows with no `scope`; the field is optional and nothing reads it as a
+discriminator.
+
 `gating` is `blocking`, `advisory` or `executionOnly`. **An
 `executionOnly` row is `unknown` forever and says so**: `connection.topicsReadable`,
 `destination.archivePrefixWritable`, `target.logAppendTime` and
@@ -5328,10 +5340,24 @@ colliding topic names) goes to the immutable `ConfigMap` named by
 
 **Nothing in a status is a raw error.** Every message and remedy passes the
 redaction chokepoint: URL userinfo, AWS access key ids, secret and token value
-forms, PEM blocks, S3 XML bodies and long base64 or hex runs are replaced, and
-the result is capped. That cap is why a message quotes a SHORT digest
-(`sha256:1f4c2b8a9e07…`) while the whole hash is in `status.binding.planHash`,
-which is a field and not prose.
+forms, PEM blocks, S3 XML bodies and unstructured base64 or hex runs of 40
+characters or more are replaced, and the result is capped. That cap is why a
+message quotes a SHORT digest (`sha256:1f4c2b8a9e07…`) while the whole hash is
+in `status.binding.planHash`, which is a field and not prose.
+
+**Redaction is by key name and by secret shape, and never by "any long
+token".** A remedy has to name the thing it asks you to go and fix, so the
+public identifiers survive whole: a `signerKeyId` (the SHA-256 of a
+SubjectPublicKeyInfo DER — it is on the `TrustRoster`, which is how you roster
+it), a content digest, `runner.image`'s `imageID`, a backup set's UUID, an
+object key, a segment path, and the NAME of a Secret and of the data key inside
+it. So does the kubelet's own `couldn't find key password in Secret
+<namespace>/<name>`: D2 §6.5 says a Secret name is a public reference, and a
+message that named neither the Secret nor the key was the one row an operator
+could not act on. A credential VALUE never survives — under a key name
+(`password`, `token`, `aws_secret_access_key`, `sasl.password`) at any length,
+or unkeyed at forty characters and up, which is an AWS secret access key's
+exact width.
 
 ### 21.4 Staleness: a green preview cannot outlive its inputs
 
@@ -5415,6 +5441,19 @@ restore's own credential, and never from the controller. The controller patches
 its own `/status`, its own Job's `ttlSecondsAfterFinished` (after the status
 commit, so garbage collection cannot race the relay) and its own owned
 `ConfigMap`s, and nothing else.
+
+The archive rows read the source `BackupDestination`'s own key space. A backup
+set's manifest is `<spec.storage.prefix>/<backupId>/manifest.json` and its
+segments are `<prefix>/<backupId>/topics/<topic>/partition=<n>/segment-…` —
+exactly where the runner writes them, because the manifest names its segments
+RELATIVE to the prefix and the prefix is joined at the storage boundary. A
+destination that sets `spec.storage.prefix` therefore gets the same answers as
+one that does not; there is nothing to configure, and a preflight that could
+only be green for a prefix-less destination was a bug (fixed 2026-09-18 — the
+check read `<backupId>/manifest.json` at the bucket root and answered
+`archive.backupSet notReady AccessDenied`). If you are re-running a preflight
+that reported that against a prefixed destination, create a new one: `Preflight`
+specs are immutable and the stored verdict is not revised in place.
 
 ### 21.7 Skipping a check is not answering it
 
