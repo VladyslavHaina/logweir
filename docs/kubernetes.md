@@ -5354,10 +5354,15 @@ object key, a segment path, and the NAME of a Secret and of the data key inside
 it. So does the kubelet's own `couldn't find key password in Secret
 <namespace>/<name>`: D2 §6.5 says a Secret name is a public reference, and a
 message that named neither the Secret nor the key was the one row an operator
-could not act on. A credential VALUE never survives — under a key name
-(`password`, `token`, `aws_secret_access_key`, `sasl.password`) at any length,
-or unkeyed at forty characters and up, which is an AWS secret access key's
-exact width.
+could not act on. A credential VALUE is removed under a key name
+(`password`, `token`, `aws_secret_access_key`, `sasl.password`) at ANY length,
+and unkeyed at forty characters and up — an AWS secret access key's exact width
+— **unless it is indistinguishable from a content digest**: a raw key printed as
+64 or 128 lower-case hex characters reads exactly like a SHA-256 or SHA-512, and
+no rule can refuse it while digests have to survive. That residual is stated in
+full, with the probability argument, on `is_hex_digest` in
+`crates/logweir-core/src/check_contract.rs`. Print secrets under a key name, not
+bare.
 
 ### 21.4 Staleness: a green preview cannot outlive its inputs
 

@@ -1237,6 +1237,15 @@ fn unkeyed_secret_material_is_still_removed() {
             "relayed dGhpc2lzYXNlY3JldHZhbHVlZm9ydGVzdA=abcdef refused",
             "dGhpc2lzYXNlY3JldHZhbHVlZm9ydGVzdA",
         ),
+        // **F2.** An unkeyed `k=v` whose key name is not on `SECRET_KEYWORDS`.
+        // The fact clause exists for what `entry_of` folds into a message, and
+        // every one of those values is a digest or a UUID; accepting a
+        // lower-case run as the value half let a 32-hex API key ride out under
+        // any name an adopter's tool happens to print.
+        (
+            "connect datadogapikey=deadbeefcafebabe0123456789abcdef ok",
+            "deadbeefcafebabe0123456789abcdef",
+        ),
     ];
     for (input, witness) in cases {
         assert!(
@@ -1247,6 +1256,80 @@ fn unkeyed_secret_material_is_still_removed() {
         assert!(!out.contains(witness), "`{witness}` leaked: {out}");
         assert!(out.contains(REDACTED), "`{input}` produced {out}");
     }
+}
+
+/// **F1, the review's critical finding.** An anchored run is an object key, and
+/// an object key is NOT a licence to carry a credential alongside the anchor.
+///
+/// `is_public_identifier`'s anchored branch exists so that a segment path whose
+/// topic name carries upper case survives. Its first spelling asked only that
+/// every component be short and `[A-Za-z0-9._=-]`, which the canonical AWS
+/// secret access key satisfies component-by-component: its own `/` characters
+/// split its 40 into 13, 7 and 18. So the moment a backup set id shared the
+/// token run — and a set id immediately precedes archive keys everywhere in
+/// this product's prose — the key was "an object key" and survived whole. That
+/// is a REGRESSION against `b7b7ac6`, which replaced both runs entire.
+///
+/// Every probe is checked, and the failures are collected rather than asserted
+/// one at a time, so a mutant that lifts the cap is reported as leaking all
+/// four rather than only the first.
+#[test]
+fn an_anchored_run_is_not_a_licence_to_carry_a_credential() {
+    /// The canonical AWS secret access key, in its `/`-bearing form. Roughly
+    /// 45% of real keys carry at least one `/` (p = 1/64 per character over
+    /// 40), and each of its components is short and alphanumeric.
+    const AWS: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    const SET: &str = "3f0ada8f-1a2b-4c3d-9e8f-0123456789ab";
+    const DIGEST: &str = "6feecc8c16c5551d9feb3eb5f77e2da773bf68bd9ef9c52927ceb2c86e56892b";
+
+    let probes: Vec<(&str, String)> = vec![
+        // The reviewer's own probe, verbatim: a set id and the key, nothing
+        // else.
+        ("a set id shares the run", format!("{SET}/{AWS}")),
+        // A content digest in the anchor position instead.
+        ("a digest shares the run", format!("{DIGEST}/{AWS}")),
+        // An object key — the manifest's own directory — shares it.
+        (
+            "an object key shares the run",
+            format!("the object team/prod/{SET}/manifest/{AWS} failed"),
+        ),
+        // A whole segment path shares it, upper-case topic included, so the
+        // one shape the anchored branch exists FOR cannot be used to smuggle.
+        (
+            "a segment path shares the run",
+            format!(
+                "the object {SET}/topics/payments-EU/partition=2/segment-00000000000000000000/{AWS} failed"
+            ),
+        ),
+    ];
+
+    let mut leaked: Vec<String> = Vec::new();
+    for (name, input) in &probes {
+        assert!(input.contains(AWS), "the fixture must carry the key");
+        let out = redact(input);
+        if out.contains(AWS) {
+            leaked.push(format!("{name}: {out}"));
+        }
+    }
+    assert!(
+        leaked.is_empty(),
+        "an anchored run carried a credential out whole ({} of {}):\n  {}",
+        leaked.len(),
+        probes.len(),
+        leaked.join("\n  ")
+    );
+
+    // AND THE SHAPE THE BRANCH EXISTS FOR IS STILL GREEN. A rule that redacted
+    // this too would be `b7b7ac6` again and would take D2-REDACT-OVERBROAD with
+    // it, so the negative half is only half the guard.
+    let segment = format!(
+        "team/prod/{SET}/topics/payments-EU/partition=2/segment-00000000000000000000.bin.zst"
+    );
+    assert_eq!(
+        redact(&segment),
+        segment,
+        "the segment path an operator must go and recover was redacted"
+    );
 }
 
 // --------------------------------------------------------------- visibility

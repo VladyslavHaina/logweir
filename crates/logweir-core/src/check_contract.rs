@@ -2545,6 +2545,13 @@ fn is_key_component(c: &str) -> bool {
 /// all; a padded base64 blob's `=` is trailing, which leaves the whole blob on
 /// the KEY side of the split, where `+`, `/` and the 24-character cap refuse
 /// it.
+///
+/// The VALUE half must be a digest or a UUID and NOTHING ELSE. Every fact
+/// `entry_of` folds into a message is one of those two (`signerKeyId`,
+/// `imageID`, `podUID`, `clusterId`), so the clause costs nothing; accepting a
+/// lower-case run as well let an unkeyed `k=v` credential ride out under any
+/// name an adopter's tool happens to print — `datadogapikey=<32 hex>` is 46
+/// characters, over the threshold, and was returned whole (review finding F2).
 const FACT_KEY_MAX: usize = 24;
 
 fn is_fact_pair(c: &str) -> bool {
@@ -2558,7 +2565,7 @@ fn is_fact_pair(c: &str) -> bool {
         && key.len() <= FACT_KEY_MAX
         && key.as_bytes()[0].is_ascii_lowercase()
         && key.bytes().all(|b| b.is_ascii_alphanumeric());
-    key_ok && !value.is_empty() && (is_hex_digest(value) || is_uuid(value) || is_public_name(value))
+    key_ok && (is_hex_digest(value) || is_uuid(value))
 }
 
 /// Whether a long run is a public identifier rather than material.
@@ -2572,23 +2579,44 @@ fn is_fact_pair(c: &str) -> bool {
 ///   prefix-joined manifest key through.
 /// * **or the run is ANCHORED** by a component that is a UUID or a digest — a
 ///   backup set id or a content digest — which makes the run an object key
-///   rather than a token, and the rest of it is then read as key components.
-///   Kafka topic names may carry upper case, and the strict form above would
-///   have redacted the whole segment path for `payments-EU`.
+///   rather than a token, and **at most one** of its remaining components may
+///   be something other than a public form. Kafka topic names may carry upper
+///   case, and the strict clause above would have redacted the whole segment
+///   path for `payments-EU`; a segment key has exactly ONE adopter-chosen
+///   component, which is that topic name.
 ///
-/// An AWS secret access key satisfies neither: its components carry upper case
-/// (and often `+`), and nothing in it is a UUID or a digest.
+/// # Why the anchored branch is capped at one
+///
+/// Review finding **F1**, critical. Without the cap the branch asked only that
+/// every component be short and `[A-Za-z0-9._=-]` — which the canonical AWS
+/// secret access key satisfies component by component, because its own `/`
+/// characters split its 40 into 13, 7 and 18. So the moment a backup set id
+/// shared the token run, the credential was "an object key" and survived
+/// whole, where the unstructured rule had replaced it. A 40-character key with
+/// *n* internal slashes yields *n*+1 upper-case-bearing components, and at
+/// *n* = 0 the single component is 40 characters and already fails
+/// [`is_key_component`]'s length cap — so the whole family dies at one of the
+/// two clauses, while a real segment path keeps its one adopter-chosen name.
+///
+/// An AWS secret access key satisfies no branch: its components carry upper
+/// case (and often `+`), nothing in it is a UUID or a digest, and it has more
+/// than one component that is neither.
 fn is_public_identifier(run: &str) -> bool {
     let components: Vec<&str> = run.split('/').collect();
-    if components.iter().all(|c| {
+    let public = |c: &&str| {
         c.is_empty() || is_hex_digest(c) || is_uuid(c) || is_public_name(c) || is_fact_pair(c)
-    }) {
+    };
+    if components.iter().all(public) {
         return true;
     }
+    // The anchor may itself be a digest: a digest component is a public form,
+    // so it satisfies the `all` below through `public` rather than through
+    // `is_key_component`, whose length cap no 64- or 128-character component
+    // can meet. Before that was made explicit the `is_hex_digest` disjunct in
+    // the anchor test was dead code.
     components.iter().any(|c| is_uuid(c) || is_hex_digest(c))
-        && components
-            .iter()
-            .all(|c| c.is_empty() || is_key_component(c))
+        && components.iter().all(|c| public(c) || is_key_component(c))
+        && components.iter().filter(|c| !public(c)).count() <= 1
 }
 
 fn flush_run(out: &mut String, run: &mut String) {
