@@ -196,6 +196,14 @@ impl Fault {
 struct ObjectState {
     objects: BTreeMap<String, Vec<u8>>,
     get_fault: Option<Fault>,
+    /// Faults scoped to ONE key. A whole-store `get_fault` cannot tell a
+    /// receipt read from a record read — which is how review finding F4's
+    /// guard gap survived: the record read failed first, so the receipt
+    /// branch was never reached with a failure at all.
+    key_faults: BTreeMap<String, Fault>,
+    /// The same, for a listing: one day shard that will not list is a
+    /// different fact from a whole store that will not.
+    list_prefix_faults: BTreeMap<String, Fault>,
     list_fault: Option<Fault>,
     put_fault: Option<Fault>,
     /// The backend answered `NotSupported`/`NotImplemented` to
@@ -235,6 +243,26 @@ impl FakeObjects {
         self
     }
 
+    /// Fail the `list_page` of ONE prefix, and only that prefix.
+    fn failing_list_prefix(self, prefix: &str, f: Fault) -> Self {
+        self.state
+            .lock()
+            .unwrap()
+            .list_prefix_faults
+            .insert(prefix.to_string(), f);
+        self
+    }
+
+    /// Fail the `get` of ONE key, and only that key.
+    fn failing_key(self, key: &str, f: Fault) -> Self {
+        self.state
+            .lock()
+            .unwrap()
+            .key_faults
+            .insert(key.to_string(), f);
+        self
+    }
+
     fn failing_list(self, f: Fault) -> Self {
         self.state.lock().unwrap().list_fault = Some(f);
         self
@@ -260,6 +288,9 @@ impl FakeObjects {
 impl ObjectAccess for FakeObjects {
     fn get(&self, key: &str) -> Result<Vec<u8>, StoreError> {
         let s = self.state.lock().unwrap();
+        if let Some(f) = s.key_faults.get(key) {
+            return Err(f.to_error(key));
+        }
         if let Some(f) = &s.get_fault {
             return Err(f.to_error(key));
         }
@@ -283,6 +314,9 @@ impl ObjectAccess for FakeObjects {
         max: usize,
     ) -> Result<Vec<String>, StoreError> {
         let s = self.state.lock().unwrap();
+        if let Some(f) = s.list_prefix_faults.get(prefix) {
+            return Err(f.to_error(prefix));
+        }
         if let Some(f) = &s.list_fault {
             return Err(f.to_error(prefix));
         }
@@ -5071,7 +5105,11 @@ fn a_catalog_sync_relays_the_body_the_grammar_specifies() {
 
     let cursor = summary_of(&body, "catalog-cursor=");
     assert_eq!(cursor["complete"], true);
-    assert_eq!(cursor["indexShard"], "2025-08-12");
+    assert_eq!(
+        cursor["indexShard"], "2026-09-15",
+        "the reported floor is the ARCHIVE's own oldest day — one listing establishes it — and \
+         not a lookback measured from today: {body}"
+    );
 
     // And the check row says what the walk did, with no credential in it.
     let row = run.row(CheckId::DestinationArchiveListable);
@@ -5488,9 +5526,10 @@ fn the_body_is_bounded_by_the_view_limit_and_counts_the_rest() {
          archive and not about the page set: {body}"
     );
     assert_eq!(
-        counts["available"], 5,
-        "the buckets cover what was EXAMINED, and a bucket number for a point nothing fetched \
-         would be a fiction: {body}"
+        counts["available"], 12,
+        "EVERY counted point is examined; `viewLimit` bounds the LINES and nothing else \
+         (review finding F1). The buckets summing to less than `total` on a completed walk is \
+         what finding F2 called a silent bucket scope: {body}"
     );
     assert_eq!(
         counts["byDay"][0]["points"], 12,
@@ -5541,9 +5580,18 @@ fn a_catalog_plan_outside_its_bounds_is_refused_before_any_client() {
         let err = plan
             .validate()
             .expect_err("`{field}` outside its range is refused");
+        let text = err.to_string();
+        assert!(text.contains(field), "expected `{field}` in `{text}`");
+        // THE MESSAGE IS WHAT AN OPERATOR READS in `refusal-detail`, so it is
+        // asserted as prose and not only as a field name: it names the range
+        // it refused against, and it carries no run of stray whitespace.
         assert!(
-            err.to_string().contains(field),
-            "expected `{field}` in `{err}`"
+            text.contains("is outside") && text.contains(".."),
+            "a refusal names the range it refused against: {text}"
+        );
+        assert!(
+            !text.contains("  "),
+            "a doubled space in an operator-facing refusal: {text:?}"
         );
     }
 
@@ -5746,8 +5794,12 @@ fn a_full_rescan_resumes_after_its_cursor() {
     );
 }
 
-/// The `Index` cursor is a FLOOR and never the start: the window stays
-/// newest-first however far back the previous walk reached.
+/// The plan's `indexShard` never moves the window: the walk starts at today
+/// and ends at the archive's own oldest day, whatever the cursor says.
+///
+/// It used to be CONSUMED as a floor derived from the previous reach, which is
+/// review finding F3's ratchet. It is reported and not consumed now, and this
+/// row is what says so.
 #[test]
 fn the_index_cursor_bounds_the_walk_and_never_moves_the_window() {
     let (objects, newer, older) = two_point_objects();
@@ -5768,12 +5820,16 @@ fn the_index_cursor_bounds_the_walk_and_never_moves_the_window() {
     assert_eq!(
         entries.len(),
         2,
-        "the floor is the cursor MINUS one day of overlap, so yesterday's point is still seen: \
-         {body}"
+        "yesterday's point is still seen, because the floor is the archive's oldest day and \
+         not the day the cursor names: {body}"
     );
     assert_eq!(entries[1]["pointId"], older.point.point_id);
     let cursor = summary_of(&body, "catalog-cursor=");
-    assert_eq!(cursor["indexShard"], "2026-09-15");
+    assert_eq!(
+        cursor["indexShard"], "2026-09-15",
+        "a cursor naming TODAY does not shrink the range: the floor is the archive's, not the \
+         plan's: {body}"
+    );
     assert_eq!(cursor["complete"], true);
 }
 
@@ -5826,6 +5882,595 @@ fn the_long_run_rule_is_named_once() {
             .filter(|r| r.name == check::LONG_RUN_RULE)
             .count(),
         1
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Fix round 1 — the review's F1..F5
+// ---------------------------------------------------------------------------
+
+/// Seed `n` points on `n` consecutive days ending today, newest first.
+fn many_points(n: usize) -> (FakeObjects, Vec<String>) {
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let mut objects = FakeObjects::new();
+    let mut ids = Vec::new();
+    for i in 0..n {
+        let day = now().date_naive() - chrono::Duration::days(i as i64);
+        let f = catalog_fixture(
+            &catalog_receipt(
+                &format!("set-{i:03}"),
+                "run-a",
+                &format!("{}T03:00:00Z", day.format("%Y-%m-%d")),
+            ),
+            "s3://lw-archive/kafka-backups",
+            &sidecar,
+            CATALOG_CLAIMED_KEY_ID,
+        );
+        ids.push(f.point.point_id.clone());
+        objects = place(objects, &f);
+    }
+    (objects, ids)
+}
+
+/// **F1.** A `Full` rescan EXAMINES everything it counts. `viewLimit` bounds the
+/// lines the body carries and nothing else.
+///
+/// It used to bound examination: the walk stopped calling `examine` at
+/// `viewLimit` while it kept counting, then reported `complete: true` with no
+/// cursor. On a 20 000-point archive with the default `viewLimit: 2000` the
+/// other 18 000 points were never manifest-checked, and never would be on any
+/// cadence, because a completed walk leaves nothing to resume from.
+#[test]
+fn a_full_rescan_examines_every_point_it_counts() {
+    let (objects, _) = many_points(9);
+    let request = logweir_core::check_contract::CatalogSyncRequest {
+        mode: logweir_core::check_contract::CatalogSyncMode::Full,
+        view_limit: 3,
+        ..sync_request()
+    };
+    let run = drive_sync(
+        request,
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
+    );
+    let body = body_of(&run);
+    assert_eq!(entries_of(&body).len(), 3, "the LINES are bounded: {body}");
+    let counts = summary_of(&body, "catalog-counts=");
+    assert_eq!(counts["total"], 9);
+    assert_eq!(
+        counts["available"], 9,
+        "EVERY counted point was manifest-checked, not just the three the view \
+         carries: {body}"
+    );
+    let cursor = summary_of(&body, "catalog-cursor=");
+    assert_eq!(cursor["complete"], true);
+    assert!(cursor.get("rescanStartAfter").is_none());
+    assert_eq!(
+        run.row(CheckId::DestinationArchiveListable).facts["catalogExamined"],
+        "9"
+    );
+}
+
+/// **F2.** The availability buckets sum to `total` on EVERY walk — over a
+/// fixture larger than one page and larger than the view limit, in both modes.
+///
+/// §7d states the invariant; it used to be false, because a walk that reached
+/// its floor with more than `viewLimit` points reported `complete: true` with
+/// buckets covering only `viewLimit`. An operator read "no conflicts in 50 000
+/// points" from a walk that examined 2 000.
+#[test]
+fn the_buckets_sum_to_total_on_every_walk() {
+    // Eleven points over eleven days, one of them broken, with a view limit of
+    // two and a page target far below the set — so neither the window nor the
+    // page can be what the buckets are measuring.
+    let (objects, ids) = many_points(11);
+    let broken = logweir::catalog::record::record_key(&ids[5]);
+    let objects = objects.failing_key(&broken, Fault::NotFound);
+
+    for mode in [
+        logweir_core::check_contract::CatalogSyncMode::Index,
+        logweir_core::check_contract::CatalogSyncMode::Full,
+    ] {
+        let request = logweir_core::check_contract::CatalogSyncRequest {
+            mode,
+            view_limit: 2,
+            ..sync_request()
+        };
+        let run = drive_sync(
+            request,
+            &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects.clone()),
+        );
+        let body = body_of(&run);
+        let counts = summary_of(&body, "catalog-counts=");
+        let total = counts["total"].as_i64().expect("a total");
+        let summed: i64 = [
+            "available",
+            "missing",
+            "unreadable",
+            "deleted",
+            "conflict",
+            "unsupportedFormat",
+            "partial",
+        ]
+        .iter()
+        .map(|k| counts[*k].as_i64().unwrap_or(0))
+        .sum();
+        assert_eq!(total, 11, "{mode:?}: {body}");
+        assert_eq!(
+            summed, total,
+            "{mode:?}: the buckets must sum to `total` BY CONSTRUCTION — nothing is counted \
+             that was not examined: {body}"
+        );
+        assert_eq!(counts["missing"], 1, "{mode:?}: {body}");
+        assert_eq!(entries_of(&body).len(), 2, "{mode:?}: the window is two");
+        assert_eq!(summary_of(&body, "catalog-cursor=")["complete"], true);
+    }
+}
+
+/// **F3.** The `Index` floor is the ARCHIVE's own oldest day, so the reported
+/// cursor is stable and `complete: true` is reachable at any archive age.
+///
+/// The floor used to be the previous walk's reported cursor minus a day, so it
+/// receded one day per sync for ever; past the shard cap the loop could never
+/// reach it, `complete` was never true again, and every sync published
+/// `ScanIncomplete` — "the object budget ran out" — on a healthy archive whose
+/// budget was never touched.
+#[test]
+fn the_index_floor_is_the_archives_own_oldest_day_and_does_not_ratchet() {
+    // An archive whose oldest point is a THOUSAND days old — past the cap the
+    // old walk could ever reach.
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let mut objects = FakeObjects::new();
+    let mut days = Vec::new();
+    for back in [0i64, 500, 1_000] {
+        let day = now().date_naive() - chrono::Duration::days(back);
+        days.push(day.format("%Y-%m-%d").to_string());
+        let f = catalog_fixture(
+            &catalog_receipt(
+                &format!("set-{back}"),
+                "run-a",
+                &format!("{}T03:00:00Z", day.format("%Y-%m-%d")),
+            ),
+            "s3://lw-archive/kafka-backups",
+            &sidecar,
+            CATALOG_CLAIMED_KEY_ID,
+        );
+        objects = place(objects, &f);
+    }
+    let oldest = days.last().expect("three days").clone();
+
+    // ONE sync reaches the oldest day and completes.
+    let first = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects.clone()),
+    );
+    let first_body = body_of(&first);
+    let first_cursor = summary_of(&first_body, "catalog-cursor=");
+    assert_eq!(
+        first_cursor["complete"], true,
+        "a 1000-day-old archive completes in ONE sync: {first_body}"
+    );
+    assert_eq!(first_cursor["indexShard"], oldest);
+    assert_eq!(summary_of(&first_body, "catalog-counts=")["total"], 3);
+
+    // AND THE NEXT SYNC, fed that cursor, reports the SAME day. No ratchet.
+    let second = drive_sync(
+        logweir_core::check_contract::CatalogSyncRequest {
+            index_shard: Some(first_cursor["indexShard"].as_str().unwrap().to_string()),
+            ..sync_request()
+        },
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects.clone()),
+    );
+    let second_body = body_of(&second);
+    let second_cursor = summary_of(&second_body, "catalog-cursor=");
+    assert_eq!(
+        second_cursor["indexShard"], first_cursor["indexShard"],
+        "the reported floor is a fact about the ARCHIVE, not a token fed back — a cursor \
+         derived from the previous reach recedes a day per sync for ever: {second_body}"
+    );
+    assert_eq!(second_cursor["complete"], true);
+    assert_eq!(summary_of(&second_body, "catalog-counts=")["total"], 3);
+
+    // An EMPTY index is a complete walk of nothing, not a failure.
+    let empty = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, FakeObjects::new()),
+    );
+    let empty_body = body_of(&empty);
+    assert_eq!(summary_of(&empty_body, "catalog-counts=")["total"], 0);
+    assert_eq!(summary_of(&empty_body, "catalog-cursor=")["complete"], true);
+}
+
+/// **F4.** The receipt's three outcomes are three different facts, and the
+/// record's and the sidecar's too. A key-scoped fault is what makes each one
+/// reachable on its own.
+///
+/// The reviewer's mutant folded the receipt `get`'s `Err(_) => Unreadable` into
+/// `Missing` and the whole suite stayed green: the one row that installed a
+/// fault failed EVERY `get`, so the record read failed first and the receipt
+/// branch was never reached with a failure at all.
+#[test]
+fn a_receipt_that_cannot_be_read_is_never_missing() {
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let f = catalog_fixture(
+        &catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z"),
+        "s3://lw-archive/kafka-backups",
+        &sidecar,
+        CATALOG_CLAIMED_KEY_ID,
+    );
+    let denied = Fault::Io(
+        "Generic S3 error: Error performing GET: response error \"<Error><Code>AccessDenied\
+         </Code></Error>\", status: 403 Forbidden"
+            .to_string(),
+    );
+
+    let cases: Vec<(&str, String, Fault, &str, &str)> = vec![
+        (
+            "the record is absent",
+            f.record_key.clone(),
+            Fault::NotFound,
+            "Missing",
+            "notAttempted",
+        ),
+        (
+            "the record is denied",
+            f.record_key.clone(),
+            denied.clone(),
+            "Unreadable",
+            "notAttempted",
+        ),
+        (
+            "the receipt is absent",
+            f.receipt_key.clone(),
+            Fault::NotFound,
+            "Missing",
+            "notAttempted",
+        ),
+        (
+            "the receipt is denied",
+            f.receipt_key.clone(),
+            denied.clone(),
+            "Unreadable",
+            "notAttempted",
+        ),
+        (
+            "the sidecar is absent",
+            f.sidecar_key.clone(),
+            Fault::NotFound,
+            "Available",
+            "noEvidence",
+        ),
+        (
+            "the sidecar is denied",
+            f.sidecar_key.clone(),
+            denied.clone(),
+            "Available",
+            "notAttempted",
+        ),
+        (
+            "the manifest is absent",
+            f.manifest_key.clone(),
+            Fault::NotFound,
+            "Missing",
+            "notAttempted",
+        ),
+        (
+            "the manifest is denied",
+            f.manifest_key.clone(),
+            denied,
+            "Unreadable",
+            "notAttempted",
+        ),
+    ];
+    for (what, key, fault, availability, signature) in cases {
+        let objects = place(FakeObjects::new(), &f).failing_key(&key, fault);
+        let run = drive_sync(
+            sync_request(),
+            &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
+        );
+        let body = body_of(&run);
+        let counts = summary_of(&body, "catalog-counts=");
+        assert_eq!(counts["total"], 1, "{what}: {body}");
+        // A point whose RECORD could not be read has no receipt-derived facts
+        // to publish, so it is counted and not listed.
+        if let Some(entry) = entries_of(&body).first() {
+            assert_eq!(entry["availability"], availability, "{what}: {entry}");
+            assert_eq!(entry["signature"], signature, "{what}: {entry}");
+        }
+        let bucket = match availability {
+            "Missing" => "missing",
+            "Unreadable" => "unreadable",
+            _ => "available",
+        };
+        assert_eq!(counts[bucket], 1, "{what}: {body}");
+        if availability == "Unreadable" {
+            assert_eq!(
+                counts["missing"], 0,
+                "{what}: a denial is NEVER reported as absence — it is the distinction the \
+                 seven availability states exist for: {body}"
+            );
+        }
+    }
+}
+
+/// **F4, the size half (question F12).** A document larger than a record could
+/// ever be is `Unreadable`, not parsed.
+#[test]
+fn an_oversized_catalog_document_is_unreadable_and_is_not_parsed() {
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let f = catalog_fixture(
+        &catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z"),
+        "s3://lw-archive/kafka-backups",
+        &sidecar,
+        CATALOG_CLAIMED_KEY_ID,
+    );
+    // A RECORD THAT WOULD OTHERWISE PARSE. Unknown fields are ignored inside
+    // major 1 (D3 §5.2 rule 2), so padding one with a long string leaves a
+    // document `read_record` accepts — which is what makes the ceiling, and not
+    // the parser, the thing under test. A block of spaces would fail to parse
+    // either way and the mutant that deletes the ceiling would survive.
+    let mut doc: serde_json::Value =
+        serde_json::from_slice(&f.record_bytes).expect("the record is JSON");
+    doc["e2e_padding"] = serde_json::json!(
+        "x".repeat(logweir::check::kinds::catalog_sync::MAX_CATALOG_DOCUMENT_BYTES)
+    );
+    let huge = serde_json::to_vec(&doc).expect("JSON");
+    assert!(huge.len() > logweir::check::kinds::catalog_sync::MAX_CATALOG_DOCUMENT_BYTES);
+    // The CONTROL: the same document under the ceiling reads normally.
+    let control = place(FakeObjects::new(), &f);
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, control),
+    );
+    assert_eq!(
+        summary_of(&body_of(&run), "catalog-counts=")["available"],
+        1,
+        "the control must read, or the row proves nothing"
+    );
+    let objects = place(FakeObjects::new(), &f).with_object(&f.record_key, &huge);
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
+    );
+    let body = body_of(&run);
+    assert_eq!(
+        summary_of(&body, "catalog-counts=")["unreadable"],
+        1,
+        "{body}"
+    );
+}
+
+/// **F5.** A walk stopped by the object budget says so on the WALK, and no
+/// point is reported `Unreadable` for it.
+///
+/// A point abandoned between its record and its receipt used to be
+/// `Unreadable`, whose fixed remedy names the `archiveRead` grant and the
+/// network — and which the controller takes BEFORE the `!complete` branch and
+/// publishes as `PartialScan`: "a permission or transport failure". A
+/// budget-bounded walk is the designed, normal state the cursor exists for.
+#[test]
+fn a_budget_stop_is_the_walks_outcome_and_never_a_points() {
+    // FOUR POINTS ON ONE DAY, so the budget runs out BETWEEN POINTS inside a
+    // shard rather than between shards. A point-per-day fixture only ever
+    // exercises the shard-level guard, which is how two mutants on the
+    // point-level one survived a campaign.
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let mut objects = FakeObjects::new();
+    for i in 0..4 {
+        let f = catalog_fixture(
+            &catalog_receipt(
+                &format!("set-{i}"),
+                "run-a",
+                &format!("2026-09-16T0{i}:00:00Z"),
+            ),
+            "s3://lw-archive/kafka-backups",
+            &sidecar,
+            CATALOG_CLAIMED_KEY_ID,
+        );
+        objects = place(objects, &f);
+    }
+    // NINE OBJECTS: the floor listing, one shard listing and exactly ONE whole
+    // point, with three left over — fewer than a point costs. The leftover is
+    // the point of the number: a guard that asked `objects < budget` instead of
+    // `objects + OBJECTS_PER_POINT <= budget` would begin a second point it
+    // cannot pay for, overspend the budget and count it. A budget that happens
+    // to be a whole number of points cannot tell the two apart, and that is how
+    // this mutant survived its first campaign.
+    let run = drive_sync(
+        logweir_core::check_contract::CatalogSyncRequest {
+            max_objects_per_run: 9,
+            ..sync_request()
+        },
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects.clone()),
+    );
+    let body = body_of(&run);
+    let counts = summary_of(&body, "catalog-counts=");
+    let spent: i64 = run.row(CheckId::DestinationArchiveListable).facts["catalogObjectsRead"]
+        .parse()
+        .expect("an object count");
+    assert!(
+        spent <= 9,
+        "A WALK NEVER SPENDS MORE OBJECTS THAN ITS BUDGET: {spent} of 9. {body}"
+    );
+    assert_eq!(
+        counts["unreadable"], 0,
+        "a point the budget never reached is UNEXAMINED, not unreadable: {body}"
+    );
+    assert_eq!(
+        counts["missing"], 0,
+        "and it is certainly not absent: {body}"
+    );
+    assert_eq!(
+        counts["total"], 1,
+        "ONE whole point fits nine objects and the second was not begun: {body}"
+    );
+    assert_eq!(
+        counts["available"], 1,
+        "everything counted was examined — the invariant holds on a stopped walk too: {body}"
+    );
+    let cursor = summary_of(&body, "catalog-cursor=");
+    assert_eq!(cursor["complete"], false);
+    assert!(
+        cursor["indexShard"].is_string(),
+        "and it says where it stopped"
+    );
+    assert_eq!(
+        run.row(CheckId::DestinationArchiveListable).facts["catalogStoppedFor"],
+        "objectBudget",
+        "the reason is named on the row, because `complete: false` alone is what the \
+         controller renders as an object-budget message whatever stopped the walk"
+    );
+
+    // THE SAME, IN `Full`: a rescan that stops short says so and carries its
+    // cursor. `complete` is derived in ONE place for both modes.
+    // TEN: one page listing and two whole points, with one object left over.
+    let run = drive_sync(
+        logweir_core::check_contract::CatalogSyncRequest {
+            mode: logweir_core::check_contract::CatalogSyncMode::Full,
+            max_objects_per_run: 10,
+            ..sync_request()
+        },
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects.clone()),
+    );
+    let body = body_of(&run);
+    let counts = summary_of(&body, "catalog-counts=");
+    let spent: i64 = run.row(CheckId::DestinationArchiveListable).facts["catalogObjectsRead"]
+        .parse()
+        .expect("an object count");
+    assert!(spent <= 10, "{spent} of 10 objects. {body}");
+    assert_eq!(counts["unreadable"], 0, "{body}");
+    assert_eq!(
+        counts["total"], 2,
+        "two whole points fit ten objects and the third was not begun: {body}"
+    );
+    let cursor = summary_of(&body, "catalog-cursor=");
+    assert_eq!(cursor["complete"], false, "{body}");
+    assert!(
+        cursor["rescanStartAfter"].is_string(),
+        "AN INCOMPLETE RESCAN ALWAYS CARRIES ITS CURSOR, whatever stopped it: {body}"
+    );
+    assert_eq!(
+        run.row(CheckId::DestinationArchiveListable).facts["catalogStoppedFor"],
+        "objectBudget"
+    );
+
+    // AND A SHARD THAT WILL NOT LIST IS NOT A BUDGET. It gets its own reason,
+    // because the controller renders `complete: false` as an object-budget
+    // message whatever stopped the walk.
+    let older = catalog_fixture(
+        &catalog_receipt("set-old", "run-a", "2026-09-14T03:00:00Z"),
+        "s3://lw-archive/kafka-backups",
+        &sidecar,
+        CATALOG_CLAIMED_KEY_ID,
+    );
+    let shard = format!("{}2026/09/15/", logweir::catalog::record::LOG_PREFIX);
+    let objects = place(objects, &older).failing_list_prefix(&shard, Fault::NotFound);
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
+    );
+    let body = body_of(&run);
+    assert_eq!(
+        summary_of(&body, "catalog-cursor=")["complete"],
+        false,
+        "{body}"
+    );
+    assert_eq!(
+        run.row(CheckId::DestinationArchiveListable).facts["catalogStoppedFor"],
+        "shardUnreadable",
+        "a day this walk could not see is not the object budget: {body}"
+    );
+}
+
+/// **F11.** A credential planted in a field that is not a digest is redacted by
+/// the WHOLE rule set, and the three digests still come through.
+#[test]
+fn a_long_credential_in_a_non_digest_field_is_redacted() {
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+    let f = catalog_fixture(
+        &catalog_receipt("set-a", "run-a", "2026-09-16T03:00:00Z"),
+        "s3://lw-archive/kafka-backups",
+        &sidecar,
+        CATALOG_CLAIMED_KEY_ID,
+    );
+    // Forty-four characters of base64 — over the long-run rule's threshold, and
+    // exactly the shape the exemption used to let through.
+    const PLANTED_LONG: &str = "c2VjcmV0LWNyZWRlbnRpYWwtbm9ib2R5LXNob3VsZC1zZWU";
+    assert!(PLANTED_LONG.len() >= 40);
+    let mut doc: serde_json::Value =
+        serde_json::from_slice(&f.record_bytes).expect("the record is JSON");
+    doc["backup_id"] = serde_json::json!(PLANTED_LONG);
+    let objects = place(FakeObjects::new(), &f)
+        .with_object(&f.record_key, &serde_json::to_vec(&doc).unwrap());
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(DestinationRole::ArchiveRead, objects),
+    );
+    let everything = run.everything();
+    assert!(
+        !everything.contains(PLANTED_LONG),
+        "a 44-character run in `backupId` reached the relay verbatim: {everything}"
+    );
+    let entries = entries_of(&body_of(&run));
+    assert_eq!(entries[0]["backupId"], "[redacted]");
+    assert_eq!(
+        entries[0]["receiptSha256"], f.point.receipt.sha256,
+        "and the binding is untouched, which is the whole reason the exemption exists"
+    );
+    assert_eq!(entries[0]["signerKeyId"], CATALOG_CLAIMED_KEY_ID);
+    assert_eq!(
+        entries[0]["receiptKey"], f.point.receipt.key,
+        "an object key survives, because its long-run clause is per path segment"
+    );
+
+    // AND THE KEY THAT PROVES THE SEGMENT RULE IS LOAD-BEARING. Every segment
+    // of this one is short; the whole string is a 57-character run, because
+    // `/` and `-` are both in the base64 alphabet. The WHOLE `redact` would
+    // return `[redacted]` and leave the controller a key nobody can fetch.
+    let long_key = catalog_fixture(
+        &catalog_receipt(
+            "set-abcdefghijklmnop",
+            "run-abcdefghijklmnop",
+            "2026-09-16T04:00:00Z",
+        ),
+        "s3://lw-archive/kafka-backups",
+        &sidecar,
+        CATALOG_CLAIMED_KEY_ID,
+    );
+    let run_of = |k: &str| {
+        k.split(|c: char| !(c.is_ascii_alphanumeric() || "+/=_-".contains(c)))
+            .map(str::len)
+            .max()
+            .unwrap_or(0)
+    };
+    assert!(
+        run_of(&long_key.point.receipt.key) >= 40,
+        "the fixture key must reach the long-run threshold or this proves nothing: {}",
+        long_key.point.receipt.key
+    );
+    assert!(
+        long_key
+            .point
+            .receipt
+            .key
+            .split('/')
+            .all(|seg| run_of(seg) < 40),
+        "and every SEGMENT must stay under it"
+    );
+    let run = drive_sync(
+        sync_request(),
+        &FakeWiring::default().with_role(
+            DestinationRole::ArchiveRead,
+            place(FakeObjects::new(), &long_key),
+        ),
+    );
+    let entries = entries_of(&body_of(&run));
+    assert_eq!(
+        entries[0]["receiptKey"], long_key.point.receipt.key,
+        "a 57-character key run survives because the clause is per segment"
+    );
+    assert_eq!(
+        entries[0]["manifestKey"],
+        long_key.point.archive.manifest_key
     );
 }
 
@@ -5908,7 +6553,7 @@ catalog-page=1/1 count=1 sha256=9198b1b1f3c4a77fd1788aa8ec661b8c1b2fbf585405d84c
 catalog-entry={"pointId":"lwp1-0e02dc33bf63349ec262a62043d9bd04","backupId":"set-a","runId":"run-a","recoveryPointAtMs":1789527600000,"coveredFromMs":1789524000000,"coveredToMs":1789527600000,"locations":[{"locationId":"s3://lw-archive/kafka-backups","availability":"Available"}],"receiptKey":"logweir/backups/set-a/run-a.receipt.json","receiptSha256":"sha256:0e02dc33bf63349ec262a62043d9bd0441fb867c72aa2d5b4ce8a085b05469db","manifestKey":"kafka-backups/set-a/manifest.json","manifestSha256":"sha256:d5eea23a2f7ca3f36d2a5dbf3ab2532a3de3a797ded388afb816068c2863a152","recordedAt":"2026-09-16T06:00:00Z","formatVersion":"1.0.0","availability":"Available","signature":"notAttempted","signerKeyId":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0","remedy":"No signature verdict was reached: this installation holds no key that signed this point. Add the signing key to the trust source if you accept evidence from it."}
 catalog-counts={"total":1,"available":1,"missing":0,"unreadable":0,"deleted":0,"conflict":0,"unsupportedFormat":0,"partial":0,"signature":{"verified":0,"invalid":0,"noEvidence":0,"notAttempted":1},"byDay":[{"day":"2026-09-16","points":1}]}
 catalog-signers=[{"keyId":"0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c4b5a69788796a5b4c3d2e1f0","points":1}]
-catalog-cursor={"indexShard":"2025-08-12","complete":true}
+catalog-cursor={"indexShard":"2026-09-16","complete":true}
 "#;
 
 /// The emitter produces [`PINNED_SYNC_BODY`], byte for byte.
