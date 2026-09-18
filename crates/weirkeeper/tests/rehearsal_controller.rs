@@ -320,6 +320,54 @@ fn restore_list(items: Vec<Value>) -> String {
     .to_string()
 }
 
+/// A page that says there is MORE — `metadata.continue` non-empty.
+fn restore_page(items: Vec<Value>) -> String {
+    json!({
+        "apiVersion": "v1",
+        "kind": "RestoreList",
+        "metadata": {"resourceVersion": "1", "continue": "eyJwYWdlIjoyfQ"},
+        "items": items
+    })
+    .to_string()
+}
+
+/// One finished rehearsal belonging to ANOTHER schedule, against this target.
+fn other_schedules_rehearsal(name: &str, phase: &str, outcome: Option<&str>) -> Value {
+    json!({
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "Restore",
+        "metadata": {
+            "name": name,
+            "namespace": NS,
+            "uid": format!("uid-{name}"),
+            "resourceVersion": "3",
+            "labels": {
+                "logweir.dev/rehearsal-schedule": "weekly-payments",
+                "logweir.dev/rehearsal-target": TARGET
+            }
+        },
+        "spec": {
+            "planBytes": "{}",
+            "sourceArchive": {"url": "s3://x"},
+            "backupSetRef": "b",
+            "pointInTime": "2026-09-13T02:00:00Z",
+            "target": {"clusterRef": {"name": TARGET}, "mode": "scratch", "topicNaming": {"prefix": "rehearsal-"}},
+            "deadlineSeconds": 3600
+        },
+        "status": {"phase": phase, "exitCode": 0, "outcome": outcome}
+    })
+}
+
+/// Every recorded request, method and path, query string KEPT.
+fn seen(recorder: &Recorder) -> Vec<(String, String)> {
+    recorder
+        .lock()
+        .expect("the recorder is not poisoned")
+        .iter()
+        .map(|r| (r.method.clone(), r.uri.clone()))
+        .collect()
+}
+
 fn destination_value() -> Value {
     json!({
         "apiVersion": "logweir.dev/v1alpha1",
@@ -1115,14 +1163,29 @@ async fn the_rendered_bundle_is_what_the_runner_loads() {
     assert_eq!(bundle["immutable"], true, "the bundle is immutable");
     let data = bundle["data"].as_object().expect("the bundle carries data");
     for member in [
+        // THE STANDING DOCUMENT HAS ITS OWN NAME. D3 W5's landed fixture mounts
+        // it at `standing-authorization.json` with its sidecar DERIVED at
+        // `.sig`; writing it into `approval.json` instead makes the runner
+        // verify it under `PAYLOAD_TYPE_APPROVAL` and report a correctly signed
+        // rehearsal as a SUBSTITUTED approval.
+        "standing-authorization.json",
+        "standing-authorization.sig",
+        "authorization-keys.json",
+        "allowed-clusters.json",
+        "approver.pub.pem",
+        // The per-run slot PLAT-14.3b owns.
         "approval.json",
         "approval.sig",
-        "approver.pub.pem",
-        "allowed-clusters.json",
-        "authorization-keys.json",
     ] {
         assert!(data.contains_key(member), "the bundle carries {member}");
     }
+    assert_eq!(
+        data["standing-authorization.sig"]
+            .as_str()
+            .expect("a string"),
+        sidecar(),
+        "the sidecar is copied verbatim to the path the runner DERIVES"
+    );
 
     // ---- the keyring: parses, carries the approver key, no private material
     let keyring: wire::AuthorizationKeyring =
@@ -1147,9 +1210,12 @@ async fn the_rendered_bundle_is_what_the_runner_loads() {
     );
 
     // ---- the envelope: parses, and the runner's own admission accepts it
-    let doc: wire::StandingAuthorization =
-        serde_json::from_str(data["approval.json"].as_str().expect("a string"))
-            .expect("the envelope is the shape the runner parses");
+    let doc: wire::StandingAuthorization = serde_json::from_str(
+        data["standing-authorization.json"]
+            .as_str()
+            .expect("a string"),
+    )
+    .expect("the envelope is the shape the runner parses");
     wire::admit_standing_authorization(&doc, Some(SCHEDULE_UID), now())
         .expect("the runner admits this document");
 
@@ -1216,27 +1282,84 @@ async fn the_rendered_bundle_is_what_the_runner_loads() {
         digest_of("allowed-clusters.json")
     );
     assert_eq!(
-        env[wire::AUTHORIZATION_SHA256_ENV],
-        digest_of("approval.json"),
-        "one document, pinned under both names — see standing_bundle_config_map"
-    );
-    assert_eq!(
-        env[wire::AUTHORIZATION_SIDECAR_SHA256_ENV],
-        digest_of("approval.sig")
-    );
-    assert_eq!(
-        env[wire::AUTHORIZATION_KEYS_SHA256_ENV],
-        digest_of("authorization-keys.json")
-    );
-    assert_eq!(
         env[wire::PLAN_SHA256_ENV],
         logweir_core::ids::sha256_prefixed(restore.spec.plan_bytes.as_bytes())
     );
-    // The thirteen mandatory names are all present, all-or-nothing.
+    // THE THIRTEEN MANDATORY NAMES, PRESENT **AND NON-BLANK**.
+    //
+    // `contains_key` alone is TAUTOLOGICAL for this purpose and it let a real
+    // defect through: the runner's own `required()` filters on
+    // `!value.trim().is_empty()` before deciding a name is present, so a value
+    // emitted present-and-blank is a value the runner reports as MISSING and
+    // the whole contract is refused with `GuardRefusal: incomplete Restore
+    // execution contract` before phase 0. `APPROVAL_UID` was exactly that: the
+    // standing bundle wrote no `logweir.dev/approval-uid` annotation and the
+    // environment read it with `.unwrap_or_default()`. This loop is the rule
+    // the runner applies, and it is the row that kills that mutant.
     for name in wire::ALL_ENV {
+        let value = env
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} is missing from the contract"));
         assert!(
-            env.contains_key(name),
-            "{name} is missing from the contract"
+            !value.trim().is_empty(),
+            "{name} is present-and-blank, which the runner's required() treats as missing"
+        );
+    }
+    for name in [
+        wire::AUTHORIZATION_KIND_ENV,
+        wire::AUTHORIZATION_SHA256_ENV,
+        wire::AUTHORIZATION_SIDECAR_SHA256_ENV,
+        wire::AUTHORIZATION_KEYS_SHA256_ENV,
+        wire::REHEARSAL_SCHEDULE_UID_ENV,
+    ] {
+        let value = env
+            .get(name)
+            .unwrap_or_else(|| panic!("{name} is missing from the standing contract"));
+        assert!(!value.trim().is_empty(), "{name} is present-and-blank");
+    }
+    assert_eq!(
+        env[wire::APPROVAL_UID_ENV],
+        APPROVAL_UID,
+        "the contract names the Approval object the bundle committed to"
+    );
+    // EVERY PINNED DIGEST HAS A MOUNTED MEMBER AND EVERY MOUNTED MEMBER A
+    // PINNED DIGEST — the both-directions rule `validate_execution_contract`
+    // applies over the v2 optional members, mirrored here because `weirkeeper`
+    // cannot depend on the `logweir` crate (PLAT-14.3b step 7 closes that split
+    // with a byte fixture).
+    // NOTE — today `approval.json` and `standing-authorization.json` hold the
+    // SAME bytes, because the per-run slot is a placeholder PLAT-14.3b owns
+    // (see `standing_bundle_config_map`). A mutant that pinned one where the
+    // other belongs is therefore EQUIVALENT while that is true, and stops being
+    // equivalent the moment a real per-run approval fills that slot. The
+    // assertion below is written against the member NAME so it starts
+    // discriminating on that day without being rewritten.
+    assert_eq!(
+        data["standing-authorization.json"]
+            .as_str()
+            .expect("a string"),
+        data["approval.json"].as_str().expect("a string"),
+        "the placeholder duplication this note describes still holds; if this fails, the two \
+         members have diverged and the digest assertions below are now discriminating"
+    );
+    for (pinned, member) in [
+        (
+            wire::AUTHORIZATION_SHA256_ENV,
+            "standing-authorization.json",
+        ),
+        (
+            wire::AUTHORIZATION_SIDECAR_SHA256_ENV,
+            "standing-authorization.sig",
+        ),
+        (
+            wire::AUTHORIZATION_KEYS_SHA256_ENV,
+            "authorization-keys.json",
+        ),
+    ] {
+        assert_eq!(
+            env[pinned],
+            digest_of(member),
+            "{pinned} must pin {member}'s own bytes"
         );
     }
     // PLAT-19.2's two are NOT set: a pinned digest with nothing mounted is a
@@ -1402,6 +1525,265 @@ fn a_point_whose_source_is_the_target_is_never_selected() {
     let skip = rehearsal::select_point(&[point], &rules, now())
         .expect_err("a point from the target cluster is not");
     assert_eq!(skip.reason, rehearsal::SkipReason::TargetUnavailable);
+}
+
+/// **Review finding F4.** The per-target concurrency walk FOLLOWS the API
+/// server's continue token.
+///
+/// A rehearsal child is named `logweir-rehearsal-<schedule>-<slot>` and a
+/// label-selected list comes back in NAME order, so one capped page holds the
+/// OLDEST rehearsals against a cluster. Nothing prunes them — they are the
+/// audit trail — so after about two months of a daily schedule the page holds
+/// only finished runs and the one still IN FLIGHT is exactly the object outside
+/// it. A single-page walk would therefore stop raising `TargetBusy` precisely
+/// when it starts mattering, and two rehearsals would run against one broker.
+///
+/// The double cannot vary a body per page, so this asserts the property that
+/// distinguishes the two implementations: the reconcile issues MORE THAN ONE
+/// list against `/restores`, and every request after the first carries a
+/// `continue=` parameter. The mutant — dropping the loop — makes it exactly one.
+#[tokio::test]
+async fn the_per_target_walk_follows_the_continue_token() {
+    let page = restore_page(vec![other_schedules_rehearsal(
+        "logweir-rehearsal-weekly-payments-20260101-030000",
+        "Succeeded",
+        Some("pass"),
+    )]);
+    let (client, recorder, _) = mock_client_recording_bodies(routes(
+        approval_value(&envelope()),
+        trust_policy_value("Active", None),
+        cluster_value(true, Some(TARGET_CLUSTER_ID)),
+        backup_list(vec![]),
+        page,
+    ));
+    rs::reconcile_schedule(&schedule(), &context(client), now())
+        .await
+        .expect("the reconcile answers");
+
+    let lists: Vec<String> = seen(&recorder)
+        .into_iter()
+        .filter(|(method, uri)| {
+            method == "GET" && uri.split('?').next().unwrap_or("").ends_with(RESTORES_PATH)
+        })
+        .map(|(_, uri)| uri)
+        .collect();
+    assert!(
+        lists.len() > 1,
+        "a page that says there is MORE must be followed; the walk stopped after {} request(s)",
+        lists.len()
+    );
+    assert!(
+        lists[1..].iter().all(|uri| uri.contains("continue=")),
+        "every request after the first carries the server's continue token: {lists:?}"
+    );
+    assert!(
+        lists.len() <= rs::MAX_TARGET_PAGES as usize,
+        "and the walk stays bounded: {} requests",
+        lists.len()
+    );
+}
+
+/// The walk stops at the FIRST non-terminal hit — the question is "is anybody
+/// else running", not "how many" — so the ordinary case costs one round trip
+/// even when the server says there are more pages.
+#[tokio::test]
+async fn the_per_target_walk_stops_at_the_first_live_rehearsal() {
+    let page = restore_page(vec![other_schedules_rehearsal(
+        "logweir-rehearsal-weekly-payments-20260920-030000",
+        "Running",
+        None,
+    )]);
+    let (client, recorder, bodies) = mock_client_recording_bodies(routes(
+        approval_value(&envelope()),
+        trust_policy_value("Active", None),
+        cluster_value(true, Some(TARGET_CLUSTER_ID)),
+        backup_list(vec![]),
+        page,
+    ));
+    let outcome = rs::reconcile_schedule(&schedule(), &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    assert!(
+        matches!(&outcome.verdict, rs::Verdict::Skipped(s) if s.reason == rehearsal::SkipReason::TargetBusy),
+        "{:?}",
+        outcome.verdict
+    );
+    let lists = seen(&recorder)
+        .into_iter()
+        .filter(|(method, uri)| {
+            method == "GET" && uri.split('?').next().unwrap_or("").ends_with(RESTORES_PATH)
+        })
+        .count();
+    assert_eq!(lists, 1, "a live hit on page one ends the walk");
+    assert_eq!(posted(&recorder, RESTORES_PATH), 0);
+    assert_eq!(last_skip(&bodies).as_deref(), Some("TargetBusy"));
+}
+
+/// **Review finding F3, the operator-visible half.** A rehearsal `Restore` this
+/// build's `Restore` reconciler refused with `ApprovalNotReceived` — because
+/// `admit`, `get_approval`, `triggered_by`, `runner_argv` and `runner_job_spec`
+/// all resolve `spec.approvalRef` only and do not read `spec.authorization` —
+/// is reported under its OWN reason, naming the missing arm and PLAT-14.3b.
+///
+/// Reporting it as `Failed` would send an operator to look at their archive,
+/// their broker and their approver's key, none of which is the problem.
+#[tokio::test]
+async fn a_child_refused_for_the_unwired_standing_arm_says_so_by_name() {
+    let refused = json!({
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "Restore",
+        "metadata": {"name": "logweir-rehearsal-weekly-orders-20260913-030000", "namespace": NS, "uid": "r1", "resourceVersion": "3"},
+        "spec": {
+            "planBytes": "{}",
+            "authorization": {
+                "kind": "Standing",
+                "approvalRef": {"name": APPROVAL},
+                "rehearsalScheduleRef": {"name": SCHEDULE}
+            },
+            "sourceArchive": {"url": "logweir-destination://primary"},
+            "backupSetRef": "b",
+            "pointInTime": "2026-09-13T02:00:00Z",
+            "target": {"clusterRef": {"name": TARGET}, "mode": "scratch", "topicNaming": {"prefix": "rehearsal-"}},
+            "deadlineSeconds": 3600
+        },
+        "status": {"phase": "Failed", "exitReason": "ApprovalNotReceived"}
+    });
+    let mut table = happy_routes();
+    table.push(Route {
+        method: "GET",
+        path_suffix: "/restores/logweir-rehearsal-weekly-orders-20260913-030000",
+        status: 200,
+        body: refused.to_string(),
+    });
+    let (client, _, bodies) = mock_client_recording_bodies(table);
+    let schedule = schedule_with(json!({
+        "activeRestoreRef": {"name": "logweir-rehearsal-weekly-orders-20260913-030000"}
+    }));
+    rs::reconcile_schedule(&schedule, &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    let patch = patch_bodies(&bodies)
+        .into_iter()
+        .find(|b| b.pointer("/status/conditions").is_some())
+        .expect("a status patch carries the conditions");
+    let health = patch["status"]["conditions"]
+        .as_array()
+        .expect("conditions is an array")
+        .iter()
+        .find(|c| c["type"] == "RehearsalHealthy")
+        .expect("RehearsalHealthy is published")
+        .clone();
+    assert_eq!(health["status"], "False");
+    assert_eq!(
+        health["reason"], "StandingAuthorizationNotAdmitted",
+        "a rehearsal that never ran is not a rehearsal that failed"
+    );
+    let message = health["message"].as_str().expect("a message");
+    for named in [
+        "admit",
+        "get_approval",
+        "triggered_by",
+        "runner_argv",
+        "runner_job_spec",
+        "PLAT-14.3b",
+    ] {
+        assert!(
+            message.contains(named),
+            "the message names {named}: {message}"
+        );
+    }
+}
+
+/// And an ORDINARY failure is still `Failed`: the hold reason must not swallow
+/// a real one.
+#[tokio::test]
+async fn an_ordinary_rehearsal_failure_is_still_reported_as_failed() {
+    let failed = json!({
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "Restore",
+        "metadata": {"name": "logweir-rehearsal-weekly-orders-20260913-030000", "namespace": NS, "uid": "r1", "resourceVersion": "3"},
+        "spec": {
+            "planBytes": "{}",
+            "authorization": {
+                "kind": "Standing",
+                "approvalRef": {"name": APPROVAL},
+                "rehearsalScheduleRef": {"name": SCHEDULE}
+            },
+            "sourceArchive": {"url": "logweir-destination://primary"},
+            "backupSetRef": "b",
+            "pointInTime": "2026-09-13T02:00:00Z",
+            "target": {"clusterRef": {"name": TARGET}, "mode": "scratch", "topicNaming": {"prefix": "rehearsal-"}},
+            "deadlineSeconds": 3600
+        },
+        "status": {"phase": "Failed", "exitCode": 2, "outcome": "fail-integrity"}
+    });
+    let mut table = happy_routes();
+    table.push(Route {
+        method: "GET",
+        path_suffix: "/restores/logweir-rehearsal-weekly-orders-20260913-030000",
+        status: 200,
+        body: failed.to_string(),
+    });
+    let (client, _, bodies) = mock_client_recording_bodies(table);
+    let schedule = schedule_with(json!({
+        "activeRestoreRef": {"name": "logweir-rehearsal-weekly-orders-20260913-030000"}
+    }));
+    rs::reconcile_schedule(&schedule, &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    let patch = patch_bodies(&bodies)
+        .into_iter()
+        .find(|b| b.pointer("/status/conditions").is_some())
+        .expect("a status patch carries the conditions");
+    let health = patch["status"]["conditions"]
+        .as_array()
+        .expect("conditions is an array")
+        .iter()
+        .find(|c| c["type"] == "RehearsalHealthy")
+        .expect("RehearsalHealthy is published")
+        .clone();
+    assert_eq!(health["status"], "False");
+    assert_eq!(health["reason"], "Failed");
+}
+
+/// An `Approval` with no `metadata.uid` is refused at authorization rather than
+/// defaulted to `""`.
+///
+/// `LOGWEIR_EXECUTION_APPROVAL_UID` is one of the thirteen mandatory contract
+/// values and the runner treats a present-and-blank value as MISSING, so a
+/// default here renders a bundle every Job refuses — with a message about the
+/// contract rather than about this `Approval`. Unreachable from a real API
+/// server, which is exactly why it is a refusal and not a fallback.
+#[tokio::test]
+async fn an_approval_with_no_uid_is_refused_rather_than_defaulted() {
+    let mut approval = approval_value(&envelope());
+    approval["metadata"]
+        .as_object_mut()
+        .expect("an object")
+        .remove("uid");
+    let (client, recorder, bodies) = mock_client_recording_bodies(routes(
+        approval,
+        trust_policy_value("Active", None),
+        cluster_value(true, Some(TARGET_CLUSTER_ID)),
+        backup_list(vec![backup_value(
+            "logweir-backup-nightly-20260919-020000",
+            "2026-09-19T02:00:00Z",
+            json!(["orders", "payments"]),
+            true,
+        )]),
+        restore_list(vec![]),
+    ));
+    let outcome = rs::reconcile_schedule(&schedule(), &context(client), now())
+        .await
+        .expect("the reconcile answers");
+    let rs::Verdict::Skipped(skip) = &outcome.verdict else {
+        panic!("{:?}", outcome.verdict)
+    };
+    assert_eq!(skip.reason, rehearsal::SkipReason::AuthorizationInvalid);
+    assert!(skip.detail.contains("metadata.uid"), "{skip}");
+    assert_eq!(posted(&recorder, RESTORES_PATH), 0);
+    assert_eq!(posted(&recorder, CONFIGMAPS_PATH), 0);
+    assert_eq!(last_skip(&bodies).as_deref(), Some("AuthorizationInvalid"));
 }
 
 // ===========================================================================
