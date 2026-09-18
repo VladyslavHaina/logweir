@@ -538,32 +538,34 @@ same reason.
   administrator who accepts the risk for their installation sets
   `engine.allowUnverifiedCustomCa` in the installation policy `ConfigMap`; the
   compiled constant flips only after the measurement.
-- **`ControllerIdentity` evidence reads and the engine-CA opt-in need the
-  installation policy `ConfigMap`, which the chart does not render yet.** With
-  no `LOGWEIR_POLICY_CONFIGMAP` on the controller Deployment every
-  installation-policy key reads its closed default: an EMPTY
-  `evidence.controllerIdentityLocations` and
-  `engine.allowUnverifiedCustomCa: false`. Both features therefore refuse —
-  correctly, closed — and the refusal SAYS SO rather than blaming an
-  administrator's allowlist, because on such an install nobody can list
-  anything. **D2 W11 owes exactly this**, and these are the keys:
+- **`ControllerIdentity` evidence reads and the engine-CA opt-in are
+  administrator settings, and OFF until an administrator turns them on.** Both
+  live in the `weirkeeper-policy` `ConfigMap` the chart renders (D2 W11) from
+  two values:
 
   ```yaml
-  # ConfigMap <release-namespace>/weirkeeper-policy, key policy.yaml
-  version: 1
-  evidence:
-    controllerIdentityLocations:        # each entry: bucket + endpoint + region
-      - bucket: lw-a
-        endpoint: https://minio-a.storage.svc:9000
-        region: us-east-1
+  # charts/logweir/values.yaml
   engine:
-    allowUnverifiedCustomCa: false      # D2 §14 S2b sets this true, then back
+    allowUnverifiedCustomCa: false  # D2 §14's S2b sets this true, then back
+  evidence:
+    controllerIdentityLocations: [] # [{endpoint, region, bucket}] — all three
   ```
 
-  plus `LOGWEIR_POLICY_CONFIGMAP` (and/or `LOGWEIR_INSTALLATION_NAMESPACE`) on
-  the controller Deployment, or the `ConfigMap` is never read. Until that
-  lands, a destination-backed run's verification is `NotAttempted` on every
-  install and a destination declaring a `caBundle` cannot be used at all.
+  The shipped defaults are the closed ones, so out of the box every
+  `evidenceRead: ControllerIdentity` is refused `ControllerIdentityNotAllowlisted`
+  and every destination declaring a `caBundle` is refused
+  `CaBundleUnsupportedByEngine`. That is the intended posture: a namespace
+  operator may ASK for the controller's own principal, and only a chart or
+  cluster administrator may grant it.
+
+  **When there is no policy document at all**, both refusals say so instead of
+  blaming an administrator's allowlist — because "nobody listed this location"
+  and "no policy exists, so nobody listed anything anywhere" send an operator to
+  two different places, and the second one is an object that is not there. The
+  refusal names which of the two states it is in: no
+  `LOGWEIR_POLICY_CONFIGMAP` / `LOGWEIR_INSTALLATION_NAMESPACE` on the
+  Deployment at all (a hand-wired controller; the chart and `logweir.yaml` both
+  set the pair), or the named `ConfigMap` simply absent.
 - **A `SecretKeys` or `WorkloadIdentity` `evidenceRead` is not read.** That
   grant needs an evidence-fetch Job in the object's own namespace, because the
   controller holds no verb on `secrets` and must not. Such a run gets

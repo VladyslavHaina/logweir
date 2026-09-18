@@ -1047,34 +1047,55 @@ fn installation_policy_cache() -> &'static crate::check::policy::PolicyCache {
     CACHE.get_or_init(crate::check::policy::PolicyCache::new)
 }
 
-/// A sentence naming the chart wiring, when the installation configured no
-/// policy `ConfigMap` at all — D2 W11's dependency, said on the object.
+/// A sentence naming the missing administrator setting, when this
+/// installation's policy document is not the one refusing — D2 W11's
+/// `weirkeeper-policy` `ConfigMap`.
 ///
 /// # FAIL CLOSED, AND SAY WHICH CLOSED DOOR IT IS
 ///
-/// With no `LOGWEIR_POLICY_CONFIGMAP` (and no `LOGWEIR_INSTALLATION_NAMESPACE`)
-/// on the controller Deployment, `configured_ref` is `None` and every load is
-/// `Policy::defaults()`: an EMPTY `evidence.controllerIdentityLocations` and
-/// `engine.allowUnverifiedCustomCa: false`. Both features this task ships
-/// therefore refuse — correctly, closed — but the refusal would read as "your
-/// administrator did not list this location" when the truth is "this
-/// installation renders no policy at all, so nobody can list anything". An
-/// operator who cannot tell those apart edits the wrong object.
+/// Both features this task ships are administrator settings with closed
+/// defaults: `evidence.controllerIdentityLocations` is empty and
+/// `engine.allowUnverifiedCustomCa` is `false`. When an administrator HAS
+/// written a policy and simply did not list this location, the refusal's own
+/// message is the whole story — they edit the `ConfigMap`.
 ///
-/// Empty when a policy IS configured: then the refusal's own message is the
-/// whole story.
+/// When there is no policy document at all the refusal reads as "your
+/// administrator did not list this location" and the truth is "no policy
+/// exists, so nobody has listed anything anywhere" — and an operator who cannot
+/// tell those apart goes looking for an object that is not there. Two ways to
+/// be in that state, both covered:
+///
+/// * **No reference configured.** Neither
+///   [`crate::check::policy::POLICY_CONFIGMAP_ENV`] nor
+///   `LOGWEIR_INSTALLATION_NAMESPACE` on the controller Deployment, so
+///   `configured_ref` is `None` and nothing is ever read. A hand-wired or
+///   embedded controller; the chart and `logweir.yaml` both set the pair.
+/// * **Referenced and absent.** The variables are set and the `ConfigMap` is
+///   not there — `get_opt` answered `None` and the load defaulted.
+///
+/// Empty when a policy was actually read, loaded or refused: then the document
+/// exists and the administrator's own message applies.
+#[must_use]
 fn policy_reachability_note(load: &crate::check::policy::PolicyLoad) -> String {
-    if crate::controllers::topic_discovery::configured_policy_ref().is_some() {
+    if !matches!(load, crate::check::policy::PolicyLoad::Defaulted(_)) {
         return String::new();
     }
-    let _ = load;
+    let reference = crate::controllers::topic_discovery::configured_policy_ref();
+    let where_ = match reference.as_ref() {
+        None => format!(
+            "this installation names no policy ConfigMap at all — neither {} nor {} is set on \
+             the controller Deployment",
+            crate::check::policy::POLICY_CONFIGMAP_ENV,
+            crate::check::policy::INSTALLATION_NAMESPACE_ENV
+        ),
+        Some((namespace, name)) => format!(
+            "the policy ConfigMap this installation names, {namespace}/{name}, does not exist"
+        ),
+    };
     format!(
-        ". NOTE: this installation configures no policy ConfigMap — {} is unset on the \
-         controller Deployment — so every installation-policy key reads its closed default and \
-         no administrator can change one. The chart must render the `{}` ConfigMap and that \
-         environment variable (D2 W11)",
-        crate::check::policy::POLICY_CONFIGMAP_ENV,
-        crate::check::policy::DEFAULT_POLICY_NAME
+        ". NOTE: {where_}, so every installation-policy key reads its closed default and no \
+         administrator setting can change one. The chart renders this ConfigMap from its \
+         `engine.*` and `evidence.*` values (D2 W11)"
     )
 }
 

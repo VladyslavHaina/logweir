@@ -10410,9 +10410,11 @@ async fn evidence_is_routed_by_grant_and_never_falls_back_to_the_global_handle()
                 "the resolver's own code: {detail}"
             );
             assert!(
-                detail.contains("LOGWEIR_POLICY_CONFIGMAP"),
-                "…and, because this installation renders no policy at all, the name of the \
-                 chart wiring that is missing (D2 W11): {detail}"
+                detail.contains("policy ConfigMap"),
+                "…and, because this test process names no policy document, WHICH closed door \
+                 it is — an operator told only `not allowlisted` goes looking for an object \
+                 that does not exist (D2 W11 renders it from the chart's engine.* and \
+                 evidence.* values): {detail}"
             );
         }
         other => panic!("an unlisted location is NotAttempted; got {other:?}"),
