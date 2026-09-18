@@ -1049,18 +1049,39 @@ def l_09_1() -> dict[str, Any]:
         f"discovery visibility is not 'unknown': {sel}",
         obj=inputs,
     )
-    internal = (
-        (sel.get("internalExcluded") or {}).get("count")
-        if isinstance(sel.get("internalExcluded"), dict)
-        else sel.get("internalExcludedCount")
+    # WHERE THE COUNTS LIVE, and why this row used to read the wrong place.
+    # The frozen plan records the discovery's own accounting one level down,
+    # under `selection.discovery`, as `{count, names}` pairs with a bounded name
+    # sample — `crates/weirkeeper/tests/backup_selection.rs`'s
+    # `discovery["internalExcluded"]["count"]` is the same shape from the other
+    # side. `status.selection` carries the same two numbers flattened
+    # (`internalExcludedCount`, `excludedByRuleCount`) for an operator reading
+    # `kubectl get -o yaml`, and deliberately carries NO names: an unbounded
+    # name list never reaches a status. This row asserted the flat spellings on
+    # the plan, where neither shape has ever been written, and so failed on a
+    # path while the product was right (lab-refresh-3 §8.1).
+    discovery = sel.get("discovery") or {}
+    internal_block = discovery.get("internalExcluded") or {}
+    by_rule_block = discovery.get("excludedByRule") or {}
+    internal = internal_block.get("count")
+    by_rule = by_rule_block.get("count")
+    require(
+        isinstance(internal, int) and internal >= 1,
+        f"selection.discovery.internalExcluded.count is {internal!r}; expected at least the "
+        f"one internal topic the fixture made ({sel})",
+        obj=inputs,
     )
-    by_rule = (
-        (sel.get("excludedByRule") or {}).get("count")
-        if isinstance(sel.get("excludedByRule"), dict)
-        else sel.get("excludedByRuleCount")
+    require(
+        "__consumer_offsets" in (internal_block.get("names") or []),
+        f"the internal exclusion does not name __consumer_offsets: {internal_block}",
+        obj=inputs,
     )
-    require(internal is not None and internal >= 1, f"internalExcluded is {internal}", obj=inputs)
-    require(by_rule == 2, f"excludedByRule is {by_rule}, expected 2 (skip-me and pfx-a)", obj=inputs)
+    require(
+        by_rule == 2 and sorted(by_rule_block.get("names") or []) == ["pfx-a", "skip-me"],
+        f"selection.discovery.excludedByRule is {by_rule_block}, expected count 2 naming "
+        f"skip-me and pfx-a",
+        obj=inputs,
+    )
     yaml_topics = re.findall(r"^\s*-\s*(\S+)\s*$", plan["backupYaml"], flags=re.M)
     require(
         [x for x in yaml_topics if x in {"t1", "t2", "skip-me", "pfx-a", "__consumer_offsets"}]
@@ -1080,6 +1101,23 @@ def l_09_1() -> dict[str, Any]:
         f"status.selection.resolvedTopicCount is {status_sel.get('resolvedTopicCount')}",
         obj=done,
     )
+    # The status is the flattened view of the plan it was frozen from. A status
+    # that disagreed with its own plan would be the worse defect, so the two are
+    # compared rather than each being read alone.
+    require(
+        status_sel.get("internalExcludedCount") == internal
+        and status_sel.get("excludedByRuleCount") == by_rule,
+        f"status.selection says internalExcludedCount="
+        f"{status_sel.get('internalExcludedCount')!r}/excludedByRuleCount="
+        f"{status_sel.get('excludedByRuleCount')!r} while the frozen plan says "
+        f"{internal!r}/{by_rule!r}",
+        obj=done,
+    )
+    require(
+        "names" not in status_sel and "__consumer_offsets" not in json.dumps(status_sel),
+        f"an unbounded name list reached the status: {status_sel}",
+        obj=done,
+    )
     return {
         "uids": {"backup": uid, "discoveryJob": jobs[0]["metadata"]["uid"]},
         "asserted": {
@@ -1087,6 +1125,8 @@ def l_09_1() -> dict[str, Any]:
             "discoveryJobName": jobs[0]["metadata"]["name"],
             "frozenTopics": inputs["topics"],
             "inputsSelection": sel,
+            "discoveryCounts": {"internalExcluded": internal_block,
+                                "excludedByRule": by_rule_block},
             "statusSelection": status_sel,
             "backupYamlTopics": yaml_topics,
             "receiptTopics": receipt["source"]["topics"],
@@ -1167,9 +1207,40 @@ def l_09_4() -> dict[str, Any]:
     uid = obj["metadata"]["uid"]
     done = wait_for("backup", "empty-run", terminal, timeout=420, what="to reach a terminal phase")
     require(done["status"]["phase"] == "Failed", f"phase is {done['status']['phase']}", obj=done)
+    # WHERE THE REASON LIVES. D1 §3.4 defines the discovery terminal states as
+    # `Failed=True` CONDITIONS carrying the reason, with `exitReason:
+    # operational` and no `exitCode` — an `exitCode` would claim a runner ran,
+    # and for `SelectionEmpty` none is ever created. `status.reason` is the
+    # runner-exit projection and is deliberately absent here, so reading it
+    # failed this row on a path while the controller was answering exactly what
+    # the contract asks (lab-refresh-3 §8.1). `TopicsResolved=False` carries the
+    # same reason, and both are asserted: the phase, the refusal and the
+    # resolution verdict have to tell one story.
+    failed = condition(done, "Failed") or {}
+    resolved = condition(done, "TopicsResolved") or {}
     require(
-        done["status"].get("reason") == "SelectionEmpty",
-        f"reason is {done['status'].get('reason')!r}, expected SelectionEmpty",
+        failed.get("status") == "True" and failed.get("reason") == "SelectionEmpty",
+        f"the Failed condition is {failed.get('status')!r}/{failed.get('reason')!r}, "
+        f"expected True/SelectionEmpty",
+        obj=done,
+    )
+    require(
+        resolved.get("status") == "False" and resolved.get("reason") == "SelectionEmpty",
+        f"the TopicsResolved condition is {resolved.get('status')!r}/"
+        f"{resolved.get('reason')!r}, expected False/SelectionEmpty",
+        obj=done,
+    )
+    require(
+        done["status"].get("exitReason") == "operational"
+        and done["status"].get("exitCode") is None,
+        f"a controller refusal is exitReason=operational with no exitCode; this one is "
+        f"exitReason={done['status'].get('exitReason')!r}, "
+        f"exitCode={done['status'].get('exitCode')!r}",
+        obj=done,
+    )
+    require(
+        "no runner Job is created" in (failed.get("message") or ""),
+        f"the refusal does not say that no runner Job follows: {failed.get('message')!r}",
         obj=done,
     )
     jobs = discovery_jobs(uid)
@@ -1185,7 +1256,10 @@ def l_09_4() -> dict[str, Any]:
         "uids": {"backup": uid},
         "asserted": {
             "phase": done["status"]["phase"],
-            "reason": done["status"].get("reason"),
+            "failedCondition": {k: failed.get(k) for k in ("status", "reason", "message")},
+            "topicsResolvedCondition": {k: resolved.get(k) for k in ("status", "reason")},
+            "exitReason": done["status"].get("exitReason"),
+            "statusReason": done["status"].get("reason"),
             "excludedTopics": everything,
             "jobs": [j["metadata"]["name"] for j in lst("jobs") if j["metadata"]["name"].endswith(uid)],
             "runnerJobs": [],
@@ -2697,12 +2771,14 @@ NOT_RUN_REASONS = {
     "L-09-3a": ("PLAT-09.2", "a topic deleted between freeze and execution",
                 "holds the runner Job POST. " + PROXY),
     "L-09-3b": ("PLAT-09.2", "the source changes between discovery and freeze",
-                "blocked by the defect L-09-1 measured: no dynamic run reaches the freeze step "
-                "in this installation, because the discovery Job is created with the "
-                "compile-time image pin instead of the LOGWEIR_RUNNER_IMAGE the process was "
-                "given, and no node holds that pin. `SourceChangedDuringResolution` is decided "
-                "AFTER discovery succeeds, so the case cannot be reached. The harness code for "
-                "it is written and runnable once the discovery Job names the right image."),
+                "NOT blocked any more. It was blocked by the defect L-09-1 measured — the "
+                "discovery Job carried the compile-time image pin instead of the "
+                "LOGWEIR_RUNNER_IMAGE the process was given, no node held that pin, and "
+                "`SourceChangedDuringResolution` is decided AFTER discovery succeeds, so the "
+                "case could not be reached. That defect (D1-DISCOVERY-IMAGE) is closed: "
+                "lab-refresh-3 §8.1 shows the discovery Job naming the configured image and "
+                "succeeding. The row is implemented and runnable; a run that did not take it "
+                "records it here as unrun for budget, never as blocked."),
     "L-09-5": ("PLAT-09.2", "an ACL-limited principal",
                "needs a Kafka with StandardAuthorizer and a SCRAM principal without Describe "
                "on one topic. KRaft SCRAM credentials are bootstrapped at storage-format "
@@ -2736,11 +2812,11 @@ FENCED_NOT_RUN_REASONS = {
         "the one row the fence unblocks that this run did not take."
     ),
     "L-09-3a": (
-        "NOT blocked by the fence or the proxy any more — this run held a migration PATCH "
-        "and injected a 503 through that same proxy. It is a PLAT-09.2 row, outside this "
-        "worker's brief, and it was not attempted. It is also blocked behind the defect "
-        "L-09-1 measured (the discovery Job names the compile-time image pin), which is "
-        "unchanged by this run."
+        "NOT blocked by the fence or the proxy any more — the fence run held a migration "
+        "PATCH and injected a 503 through that same proxy — and no longer blocked by the "
+        "defect L-09-1 measured either: D1-DISCOVERY-IMAGE is closed (lab-refresh-3 §8.1), "
+        "so a dynamic run now reaches the freeze step. It is a PLAT-09.2 row outside the "
+        "fence worker's brief and was not attempted."
     ),
 }
 
