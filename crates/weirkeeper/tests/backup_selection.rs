@@ -44,7 +44,9 @@ use weirkeeper::conditions::{
     TERMINAL_STATE_DISCOVERY_RESULT_UNREADABLE, TERMINAL_STATE_SELECTION_EMPTY,
     TERMINAL_STATE_SELECTION_TOO_LARGE, TERMINAL_STATE_SOURCE_CHANGED_DURING_RESOLUTION,
 };
-use weirkeeper::controllers::backup::{reconcile_backup, unobserved_archive};
+use weirkeeper::controllers::backup::{
+    reconcile_backup, reconcile_backup_with_runner_image, unobserved_archive,
+};
 use weirkeeper::controllers::backup_selection as sel;
 use weirkeeper::crds::backup::Backup;
 use weirkeeper::crds::selection::{Coverage, IncompleteDiscovery, SelectionMode};
@@ -537,6 +539,29 @@ async fn reconcile_with(b: &Backup, routes: Vec<Route>) -> (Option<String>, Vec<
         .expect("a refusal is an outcome, not an error");
     let bodies = bodies.lock().expect("readable").clone();
     (outcome.terminal_state, bodies)
+}
+
+/// [`reconcile_with`] for a controller process that was handed an image and a
+/// pull policy — `main`'s `Context::runner_image`, which is what every
+/// installation that sets `LOGWEIR_RUNNER_IMAGE` has.
+async fn reconcile_with_runner_image(
+    b: &Backup,
+    routes: Vec<Route>,
+    runner: &weirkeeper::job::RunnerImage,
+) -> Vec<SeenBody> {
+    let (client, _seen, bodies) = mock_client_recording_bodies(routes);
+    reconcile_backup_with_runner_image(
+        b,
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        now(),
+        runner,
+    )
+    .await
+    .expect("a refusal is an outcome, not an error");
+    let bodies = bodies.lock().expect("readable").clone();
+    bodies
 }
 
 fn path(uri: &str) -> &str {
@@ -2699,4 +2724,131 @@ fn a_v1_frozen_backup_is_untouched() {
         weirkeeper::backup_execution::ResolvedSelection::named(&named_backup().spec).selection;
     assert_eq!(fresh.coverage, Coverage::NamedTopics);
     assert!(fresh.discovery.is_none());
+}
+
+/// **THE DISCOVERY JOB RUNS THE IMAGE THE PROCESS WAS CONFIGURED WITH** —
+/// defect `D1-DISCOVERY-IMAGE`, measured live on 2026-09-18.
+///
+/// `LOGWEIR_RUNNER_IMAGE` and `LOGWEIR_RUNNER_PULL_POLICY` reach the
+/// controller once, as `Context::runner_image`, and every Job this controller
+/// creates takes them. The discovery Job did not: `resolve` never received a
+/// `RunnerImage`, so `CheckJobSpec::{image, image_pull_policy}` were a
+/// hard-coded `None` pair and the Job named `job::RUNNER_IMAGE` — a
+/// compile-time digest — under `imagePullPolicy: Never`. On the lab that was
+/// `ErrImageNeverPull`, then `DeadlineExceeded`, then
+/// `TopicsResolved=False/DiscoveryFailed`, while the RUNNER Job of the same
+/// namespace, the same controller and the same minute ran `logweir:scram-local`
+/// and completed in four seconds. On a default chart install it is worse: the
+/// runner Job gets a pullable tag and the discovery Job an unpublished digest
+/// under `Never`, so PLAT-09.2's dynamic half is unusable everywhere.
+///
+/// **THE PROPERTY IS AN EQUALITY BETWEEN THE TWO JOBS, NOT A LITERAL.** Both
+/// Jobs are POSTed by the same reconciler for the same run; the defect was
+/// that they disagreed. So this reconciles twice with ONE `RunnerImage` — the
+/// pass that starts the discovery, and the pass that freezes and starts the
+/// runner — and holds the two containers to the same image and the same pull
+/// policy.
+///
+/// KILLS: `image: None` / `image_pull_policy: None` at the discovery
+/// `CheckJobSpec`; dropping either of the two threaded parameters; passing
+/// `RunnerImage::default()` at the `controllers::backup` call site.
+#[tokio::test]
+async fn the_discovery_job_runs_the_configured_runner_image() {
+    let configured = weirkeeper::job::RunnerImage {
+        image: Some("logweir:scram-local".to_string()),
+        image_pull_policy: Some("IfNotPresent".to_string()),
+    };
+
+    // PASS 1 — no discovery Job exists, so this pass POSTs it.
+    let started = reconcile_with_runner_image(&visible_only(), start_routes(), &configured).await;
+    let discovery = posted_jobs(&started);
+    assert_eq!(discovery.len(), 1, "one Job: {:?}", calls(&started));
+    assert_eq!(
+        discovery[0]["metadata"]["name"],
+        json!(discovery_job(UID)),
+        "the Job this pass POSTed is the DISCOVERY Job"
+    );
+    let discovery_container = &discovery[0]["spec"]["template"]["spec"]["containers"][0];
+    assert_eq!(
+        discovery_container["name"],
+        json!(weirkeeper::job::CONTAINER_NAME)
+    );
+    assert_eq!(
+        discovery_container["image"],
+        json!("logweir:scram-local"),
+        "the discovery Job names the image the OPERATOR configured, never the compile-time pin: \
+         a node that does not hold {} answers ErrImageNeverPull and the run dies DiscoveryFailed",
+        weirkeeper::job::RUNNER_IMAGE
+    );
+    assert_ne!(
+        discovery_container["image"],
+        json!(weirkeeper::job::RUNNER_IMAGE),
+        "D1-DISCOVERY-IMAGE: the pin is what this Job used to carry"
+    );
+    assert_eq!(
+        discovery_container["imagePullPolicy"],
+        json!("IfNotPresent"),
+        "the pull policy override reaches this Job too; it used to stay at the compiled-in {}",
+        weirkeeper::job::IMAGE_PULL_POLICY
+    );
+
+    // PASS 2 — the discovery finished, so this pass freezes it and POSTs the
+    // RUNNER Job, from the same process and the same configuration.
+    let resolved = reconcile_with_runner_image(
+        &visible_only(),
+        resolved_routes(&[entry("orders", 6)]),
+        &configured,
+    )
+    .await;
+    let runner = posted_jobs(&resolved);
+    assert_eq!(runner.len(), 1, "one Job: {:?}", calls(&resolved));
+    assert_eq!(
+        runner[0]["metadata"]["name"],
+        json!(NAME),
+        "the Job this pass POSTed is the RUNNER Job"
+    );
+    let runner_container = &runner[0]["spec"]["template"]["spec"]["containers"][0];
+    assert_eq!(
+        discovery_container["image"], runner_container["image"],
+        "ONE controller, ONE configured image: the discovery Job and the run's own Job cannot \
+         name different images, which is exactly what the live run measured"
+    );
+    assert_eq!(
+        discovery_container["imagePullPolicy"], runner_container["imagePullPolicy"],
+        "and one configured pull policy"
+    );
+}
+
+/// The other half of [`the_discovery_job_runs_the_configured_runner_image`]:
+/// **an installation that configures NOTHING creates exactly the Job it
+/// created before the override existed.**
+///
+/// `RunnerImage::default()` is `None`/`None`, and `None` means the compiled-in
+/// constant — so this is the backward-compatibility arm, and it is why every
+/// other row in this file (which reconciles through `reconcile_backup`) still
+/// describes the shipped behaviour.
+///
+/// KILLS: defaulting the threaded image to something other than the pin;
+/// making the override mandatory.
+#[tokio::test]
+async fn an_unconfigured_controller_leaves_the_discovery_job_on_the_pin() {
+    let bodies = reconcile_with_runner_image(
+        &visible_only(),
+        start_routes(),
+        &weirkeeper::job::RunnerImage::default(),
+    )
+    .await;
+    let discovery = posted_jobs(&bodies);
+    assert_eq!(discovery.len(), 1, "one Job: {:?}", calls(&bodies));
+    let container = &discovery[0]["spec"]["template"]["spec"]["containers"][0];
+    assert_eq!(
+        container["image"],
+        json!(weirkeeper::job::RUNNER_IMAGE),
+        "no override means the shipped pin, unchanged"
+    );
+    assert_eq!(
+        container["imagePullPolicy"],
+        json!(weirkeeper::job::IMAGE_PULL_POLICY),
+        "and the compiled-in pull policy, unchanged"
+    );
 }

@@ -96,7 +96,7 @@ use crate::crds::backup::Backup;
 use crate::crds::kafka_cluster::KafkaCluster;
 use crate::crds::selection::{AllUserTopics, Coverage, IncompleteDiscovery, SelectionMode};
 use crate::crds::Condition;
-use crate::job::RunnerOwner;
+use crate::job::{RunnerImage, RunnerOwner};
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -1014,6 +1014,24 @@ async fn write_status(
 /// discovers again, which is D1 §12's
 /// `a_frozen_dynamic_backup_never_reruns_discovery`.
 ///
+/// # The image is the PROCESS's, not the compiled-in pin
+///
+/// `runner` is `controllers::Context::runner_image`, threaded from the one
+/// call site — the same value the run's own runner Job takes. A discovery Job
+/// runs the same image a run does, so a `None` here (the default, and what
+/// every route-table test sees) means the compiled pin
+/// [`crate::job::RUNNER_IMAGE`] under [`crate::job::IMAGE_PULL_POLICY`], and
+/// the values an operator set through [`crate::job::RUNNER_IMAGE_ENV`] and
+/// [`crate::job::RUNNER_PULL_POLICY_ENV`] reach this Job too.
+/// Defect **D1-DISCOVERY-IMAGE**: this parameter did not exist, so on every
+/// installation the discovery Job named the compile-time digest under
+/// `imagePullPolicy: Never` (`ErrImageNeverPull` -> `DeadlineExceeded` ->
+/// `TopicsResolved=False/DiscoveryFailed`) while the runner Job of the same
+/// namespace and minute ran the configured image. Every other Job builder
+/// takes the same override at its own call site
+/// (`kafka_cluster.rs`, `topic_discovery.rs`, `recovery_catalog.rs`,
+/// `retention_policy.rs`).
+///
 /// # Errors
 ///
 /// [`BackupError::Api`] for a transport failure, which requeues. A refusal is
@@ -1024,13 +1042,14 @@ pub async fn resolve(
     client: &kube::Client,
     namespace: &str,
     now: DateTime<Utc>,
+    runner: &RunnerImage,
 ) -> Result<Resolution, BackupError> {
     // THE NAME OF A FINISHED DISCOVERY JOB THIS PASS OBSERVED, for the TTL on
     // the refusal path (L6). It stays `None` for a refusal raised before the
     // Job exists or before it finished, where a TTL patch would be a 404 or
     // would arm the collector against a pod still holding a relay.
     let mut finished_job: Option<String> = None;
-    match resolve_inner(backup, client, namespace, now, &mut finished_job).await {
+    match resolve_inner(backup, client, namespace, now, runner, &mut finished_job).await {
         Ok(Inner::Pending) => Ok(Resolution::Pending),
         Ok(Inner::Resolved(selection)) => Ok(Resolution::Resolved(selection)),
         Err(BackupError::Refused(state, message)) => {
@@ -1078,6 +1097,7 @@ async fn resolve_inner(
     client: &kube::Client,
     namespace: &str,
     now: DateTime<Utc>,
+    runner: &RunnerImage,
     finished_job: &mut Option<String>,
 ) -> Result<Inner, BackupError> {
     let name = backup.name_any();
@@ -1129,6 +1149,7 @@ async fn resolve_inner(
             &resolved,
             &source_sha256,
             now,
+            runner,
         )
         .await;
     };
@@ -1224,6 +1245,7 @@ async fn start(
     resolved: &ResolvedConnection,
     source_sha256: &str,
     now: DateTime<Utc>,
+    runner: &RunnerImage,
 ) -> Result<Inner, BackupError> {
     let name = backup.name_any();
     // M3 / D1 §7.2 R2: REFUSE UP FRONT RATHER THAN DISPATCH A JOB THAT CANNOT
@@ -1301,11 +1323,16 @@ async fn start(
         config_map_mounts: projection.config_map_mounts,
         env_from_secret: projection.env_from_secret,
         env_literal: projection.env_literal,
-        // THE PIN, AS EVERY OTHER CONTROLLER-BUILT JOB TAKES IT. A discovery
-        // Job runs the same runner image a run does, so a cluster that can pull
-        // one can pull the other.
-        image: None,
-        image_pull_policy: None,
+        // THE PROCESS'S IMAGE, AS EVERY OTHER CONTROLLER-BUILT JOB TAKES IT
+        // (Task 33's image, Task 37's pull policy). A discovery Job runs the
+        // same runner image a run does, so it takes the same override the
+        // run's own Job takes — `None` in either leaves the compiled-in
+        // constant in place, which is what every test that does not pass one
+        // sees. Defect D1-DISCOVERY-IMAGE: these two lines used to be a
+        // hard-coded `None` pair, so a configured
+        // `job::RUNNER_IMAGE_ENV` reached the runner Job and NOT this one.
+        image: runner.image.clone(),
+        image_pull_policy: runner.image_pull_policy.clone(),
     };
     let desired = build_discovery_job(&spec, job_name, job_deadline, source_sha256);
     let jobs: Api<Job> = Api::namespaced(client.clone(), namespace);

@@ -2981,7 +2981,10 @@ the deadline as the cause. A named allowlist has no such floor.
    `lwd-<backup uid>-plan`. Both are owned by the `Backup` with
    `controller: true`, so deleting the `Backup` collects them; the Job carries
    `logweir.dev/purpose=topic-discovery` and
-   `activeDeadlineSeconds: min(300, spec.deadlineSeconds)`. The phase becomes
+   `activeDeadlineSeconds: min(300, spec.deadlineSeconds)`. It runs **the same
+   image and pull policy as the run's own runner Job** — the controller's
+   `LOGWEIR_RUNNER_IMAGE` and `LOGWEIR_RUNNER_PULL_POLICY`, or the compiled-in
+   pin when neither is set (§14). The phase becomes
    `Resolving` with `TopicsResolved=False/DiscoveryRunning`, and the reconcile
    requeues.
 3. When the Job finishes, reads the **full** stdout of the pod whose controller
@@ -4211,6 +4214,17 @@ once at startup. Blank values use the compiled defaults: the pinned runner
 image and `Never`. Policy values are `Never`, `IfNotPresent`, or `Always`;
 any other value refuses startup. These overrides let a newly built controller
 use the runner image actually loaded or published for the deployment.
+
+Both values reach **every** Job this controller creates: the run's own runner
+Job, the `KafkaCluster` probe, interactive checks, recovery-catalog and
+retention Jobs, and a dynamic `Backup`'s per-run topic discovery Job. Before
+2026-09-18 the discovery Job was the one exception — it named the compiled-in
+pin under `imagePullPolicy: Never` while the runner Job of the same run used
+the configured image, so a dynamic run failed `TopicsResolved=False` with
+reason `DiscoveryFailed` after its pod reported `ErrImageNeverPull`. An
+installation that sets neither variable is unaffected; one that sets either
+needs no change, and a controller upgraded into place fixes existing dynamic
+schedules at their next run. Rolling back restores the old split.
 
 Both images embed `third_party/org-root.fingerprint` at
 `/etc/logweir/org-root.fingerprint`. It is SHA-256 of the public key's DER SPKI:

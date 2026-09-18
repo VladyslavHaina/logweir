@@ -3498,7 +3498,13 @@ async fn reconcile_backup_inner(
             None => match shape {
                 SelectionShape::SelectedTopics => ResolvedSelection::named(&backup.spec),
                 SelectionShape::AllUserTopics => {
-                    match backup_selection::resolve(backup, client, &namespace, now).await? {
+                    // `runner` IS PASSED HERE FOR THE SAME REASON IT IS PASSED
+                    // TO `create_runner_job` BELOW: the discovery Job is a Job
+                    // this controller creates, so it takes the image and pull
+                    // policy this PROCESS was configured with and never the
+                    // compile-time pin (defect D1-DISCOVERY-IMAGE).
+                    match backup_selection::resolve(backup, client, &namespace, now, runner).await?
+                    {
                         // The discovery Job exists and has not produced a
                         // readable result. Nothing else happens this pass; the
                         // reconciler's own 15 s requeue is D1 §7.2 R2's.
