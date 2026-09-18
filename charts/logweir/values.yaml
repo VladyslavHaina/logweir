@@ -54,6 +54,8 @@ controller:
   nodeSelector: {}              # each component may override kubernetes.* for its own pods
   tolerations: []
   affinity: {}
+notify:                         # what the controller tells its delivery Jobs
+  allowInsecureSinks: false     # DEV ONLY: lets one POST to an http:// sink. Production: false
 
 # ------------------------------ the installation policy (D2 §4.4), rendered
 # as the `weirkeeper-policy` ConfigMap in the release namespace. Only someone

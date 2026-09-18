@@ -4,7 +4,7 @@
   "description": "Types for every value in values.yaml. The three optional components are switched by booleans and nothing else: `--set demoKafka.enabled=yes` is refused here, before anything renders. Task 38 adds `environment`, `kubernetes`, `imagePullSecrets` and `kafka` — the keys an adopter's own values file needs — and the per-component placement overrides. What this file does NOT type is the `kafka.security` pair and `kafka.secretKey`: those are checked at RENDER time by `templates/_helpers.tpl`, so an unsupported mechanism fails naming the two Logweir speaks rather than as an anonymous schema error.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["controllerImage", "runnerImage", "imagePullPolicy", "runnerImagePullPolicy", "imagePullSecrets", "identity", "controller", "archive", "kubernetes", "kafka", "minio", "demoKafka", "ui", "checks", "engine", "evidence", "admissionPolicy"],
+  "required": ["controllerImage", "runnerImage", "imagePullPolicy", "runnerImagePullPolicy", "imagePullSecrets", "identity", "controller", "archive", "kubernetes", "kafka", "minio", "demoKafka", "ui", "checks", "engine", "evidence", "admissionPolicy", "notify"],
   "definitions": {
     "nodeSelector": {
       "type": "object",
@@ -133,6 +133,15 @@
           "type": "array",
           "items": { "$ref": "#/definitions/identityLocation" }
         }
+      }
+    },
+    "notify": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "What the controller tells the delivery Jobs it creates for `ProtectionPolicy` alerts. NOT part of the policy `ConfigMap`: it is rendered as `LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS` on the `weirkeeper` Deployment, and only when true. `allowInsecureSinks` is the documented local-development escape hatch for a `http://` webhook or Slack URL \u2014 `logweir notify deliver` refuses a non-`https://` sink before it dials, so without it an in-cluster echo sink on a laptop cluster receives nothing. It is an INSTALLATION setting and a `ProtectionPolicy` cannot turn it on: a namespaced object that could would let whoever creates a policy downgrade their own alerts' transport to cleartext, carrying the event, the policy's name and (for Slack, where the URL is the credential) a bearer token. Production leaves it `false`.",
+      "required": ["allowInsecureSinks"],
+      "properties": {
+        "allowInsecureSinks": { "type": "boolean" }
       }
     },
     "admissionPolicy": {
