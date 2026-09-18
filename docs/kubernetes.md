@@ -5496,7 +5496,7 @@ exactly one block to it.
 | `Backup` | `backup` | a source `KafkaCluster`, a destination or a legacy archive, 1–1000 **named** topics | the whole D2 §6.3 Backup catalogue |
 | `Restore` | `restore` | a draft plan or an existing `Restore`, a target, the source and evidence destinations, the recovery point | the target, plan, archive and approval rows |
 | `DestinationAccess` | `destinationAccess` | a `BackupDestination` and 1–4 roles | the `destination.*` rows for those roles |
-| `SourceConnection` | `sourceConnection` | one `connectionRef` — and nothing else | `connection.resolved`, `connection.credentialProjected`, `connection.authenticated`, `connection.clusterIdentity`, `runner.*`, `configuration.policy` |
+| `SourceConnection` | `sourceConnection` | one `connectionRef` — and nothing else | `connection.resolved`, `connection.credentialProjected`, `connection.authenticated`, `connection.clusterIdentity`, `runner.*`, `configuration.policy` and `configuration.egress` (execution-only) |
 
 ```yaml
 apiVersion: logweir.dev/v1alpha1
@@ -5535,6 +5535,15 @@ question about a broker is blast radius bought for nothing. `signer.rostered`
 and `destination.*` are therefore not reported either — a row about a key or a
 grant the pod was never given is not a verdict.
 
+**`connection.clusterIdentity` asks a narrower question here.**
+`ClusterIdentityChanged` — the broker naming a different cluster than
+`KafkaCluster.status.clusterId` records — is blocking, because that is a fact
+about the connection itself. `SourceIsAllowlistedTarget` is **not** reported:
+whether a cluster may be backed up is a `Backup` question, guarded by the
+runner's phase −1 rail, and reporting it here made a successful dial to a
+legitimate restore target read `not ready` under a remedy advising a backup
+nobody asked for.
+
 **Upgrade and rollback.** The block and the enum value are ADDITIVE to the
 CRD: every existing `Preflight` is byte-for-byte unaffected, no conversion is
 written and nothing is re-reconciled. Apply the CRDs before rolling the
@@ -5558,6 +5567,13 @@ kubectl --context docker-desktop delete preflight -n <ns> <name>
 They are transient by construction — the garbage collector removes terminal
 ones after `policy.preflight.retentionSeconds` anyway — so there is nothing to
 preserve. Their Jobs and `ConfigMap`s go with them through the owner cascade.
+
+**If they are not deleted, the cost is not confined to them.** The reconciler
+watches `Api::all`, so an object the previous controller cannot decode is
+neither a crash nor a per-object refusal: the list/watch fails and retries, and
+**no `Preflight` in any namespace is reconciled** until the undecodable ones are
+gone. A rollback that skips the deletion looks like every readiness check in the
+installation quietly stopping, with nothing in the object to say why.
 
 ### 21.1 A `ready` verdict authorizes nothing
 
