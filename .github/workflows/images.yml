@@ -90,11 +90,35 @@ jobs:
       # the container's `command`. This step fails the same way the cluster did.
       # It runs the binary rather than listing it, so a copied-but-unrunnable
       # file (wrong architecture, missing shared library) fails here too.
+      #
+      # AND IT INSPECTS THE OUTPUT, BECAUSE EXIT 0 IS NOT IDENTITY (review
+      # finding L1). Changing one token in the Dockerfile — `COPY …
+      # release/logweir /usr/local/bin/logweir-retention` — produced an image
+      # on which this step's earlier, exit-code-only form printed
+      # `logweir 0.1.0` and passed, i.e. an image whose enforcement Job runs the
+      # everyday binary under the enforcement binary's name. `case` on the
+      # version string, no pipe, so docker's own status is still read.
+      #
+      # THIS IS DELIBERATELY THE SMALL, FAST-FAILING HALF. The full assertion —
+      # including the mis-copy in the other direction and the two versions
+      # having to agree — is `scripts/check-image.sh` check 7, which
+      # `bash scripts/ci-images.sh check` runs below on this same tag and
+      # `… candidates` runs again on the digest the registry returns. This step
+      # earns its place by failing in seconds, before the login step, and by
+      # naming the defect; drop it if the duplication ever costs more than that.
       - name: The runner image carries the enforcement binary
         if: matrix.arch == 'amd64'
         run: |
-          docker run --rm --platform linux/amd64 \
-            --entrypoint logweir-retention logweir:check --version
+          version="$(docker run --rm --platform linux/amd64 \
+            --entrypoint logweir-retention logweir:check --version)"
+          case "$version" in
+            "logweir-retention "*) echo "ok: $version" ;;
+            *)
+              echo "the image's /usr/local/bin/logweir-retention is not the" >&2
+              echo "enforcement binary; --version printed: $version" >&2
+              exit 1
+              ;;
+          esac
       - name: Test local images
         run: bash scripts/ci-images.sh check
       - uses: docker/login-action@v3

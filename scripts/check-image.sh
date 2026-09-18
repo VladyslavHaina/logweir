@@ -32,7 +32,12 @@
 #   3. the CLI answers `logweir --version`;
 #   4. the image alone can mint a signed approval over `examples/drill.yaml`;
 #   5. both redistributed licences are present (GC15) — TWO assertions, one per
-#      file, so a failure names WHICH licence is missing.
+#      file, so a failure names WHICH licence is missing;
+#   7. the retention enforcement binary is present, resolvable BY BARE NAME on
+#      `$PATH`, and is itself — added 2026-09-18 for defect RET-NOIMAGE, whose
+#      whole point is that checks 1-6 passed on an image that did not carry it.
+#      It is numbered 7 and runs last for the same reason 1-5 keep their
+#      numbers: `e2e/tests/check_image.rs` matches the number in stderr.
 #
 # CHECK 6 IS SIXTH BY NUMBER AND FIRST BY POSITION, and the reason is written
 # out beside it below. In short: the numbers 1-5 are matched in stderr by
@@ -400,4 +405,84 @@ docker run --rm --platform "$PLATFORM" --entrypoint /bin/sh "$ref" -c \
           "  by Dockerfile:187) is absent or empty. GC15 governs Logweir's own" \
           "  redistribution exactly as it governs upstream's."
 
-echo "ok: x86-64 binaries, engine, CLI, approval minting and both licences are present in $ref"
+# ------------------------------------------------------------------ check 7
+# THE ENFORCEMENT BINARY IS PRESENT, ON `$PATH`, AND IS ITSELF — defect
+# RET-NOIMAGE and review finding L1.
+#
+# The controller renders every retention enforcement Job with
+# `command: ["logweir-retention"]` out of this image. Until 2026-09-18 no image
+# this repository built carried that binary, so `mode: Enforce` produced a Job
+# the kubelet killed with exitCode 127 — and checks 1-6 above all passed on
+# that image, because none of them looked for a second binary.
+#
+# `--entrypoint logweir-retention`, THE BARE NAME, is load-bearing: a path would
+# prove a file exists, while the bare name makes the runtime resolve it through
+# `$PATH` exactly as the kubelet resolves a container's `command`. This check
+# therefore fails the same way the cluster did, and it RUNS the binary, so a
+# wrong-architecture or unlinkable copy fails here too.
+#
+# RUNNING IT IS NOT ENOUGH, AND THAT WAS PROVED BY PLANTING IT. The first
+# version of this assertion checked only the exit code; a reviewer rebuilt the
+# image with one token changed — `COPY … release/logweir
+# /usr/local/bin/logweir-retention` — and it passed while printing
+# `logweir 0.1.0`. A mistyped `COPY` source ships an image whose enforcement Job
+# silently runs the everyday binary. So the OUTPUT is what is inspected:
+#
+#   * the enforcement binary must name ITSELF (`logweir-retention <version>`);
+#   * the entrypoint must still name `logweir` and must NOT be the enforcement
+#     binary, which catches the mis-copy in the other direction;
+#   * the two versions must be EQUAL, because both packages take
+#     `version.workspace = true` — a mismatch means the two binaries came from
+#     different builds, which is the stale-layer failure.
+#
+# Parameter expansion and `case`, never a pipe: the exit status read is
+# docker's, on its own line (STANDING RULE 20).
+echo "-- check 7 (enforcement binary): logweir-retention is present, on PATH, and is itself"
+if ! retention_version=$(docker run --rm --platform "$PLATFORM" \
+                           --entrypoint logweir-retention "$ref" --version 2>&1); then
+  fail "check 7: \`logweir-retention\` did not run inside $ref:" \
+       "$retention_version" \
+       "  The retention enforcement Job runs this binary BY BARE NAME out of this" \
+       "  image. \`exec: \"logweir-retention\": executable file not found in \$PATH\`" \
+       "  here is exitCode 127 in the cluster (defect RET-NOIMAGE). Dockerfile must" \
+       "  build \`-p logweir-retention\` and COPY it to /usr/local/bin/."
+fi
+if ! cli_version=$(docker run --rm --platform "$PLATFORM" "$ref" --version 2>&1); then
+  fail "check 7: \`logweir --version\` did not run inside $ref:" "$cli_version" \
+       "  Check 3 above reports this too; check 7 needs the string to compare."
+fi
+case "$retention_version" in
+  "logweir-retention "*) ;;
+  *)
+    fail "check 7: /usr/local/bin/logweir-retention in $ref is NOT the enforcement binary." \
+         "  \`--version\` printed: $retention_version" \
+         "  Expected a line beginning \`logweir-retention \`. A COPY whose SOURCE is" \
+         "  the everyday binary produces exactly this — an image whose enforcement" \
+         "  Job runs \`logweir\` under the enforcement binary's name and deletes" \
+         "  nothing while reporting success."
+    ;;
+esac
+case "$cli_version" in
+  "logweir-retention "*)
+    fail "check 7: /usr/local/bin/logweir in $ref is the ENFORCEMENT binary." \
+         "  \`--version\` printed: $cli_version" \
+         "  The two COPY sources are swapped: every backup, restore, verify and" \
+         "  check Job would run the deleter."
+    ;;
+  "logweir "*) ;;
+  *)
+    fail "check 7: /usr/local/bin/logweir in $ref does not name itself." \
+         "  \`--version\` printed: $cli_version" \
+         "  Expected a line beginning \`logweir \`."
+    ;;
+esac
+if [ "${retention_version#logweir-retention }" != "${cli_version#logweir }" ]; then
+  fail "check 7: the two binaries in $ref report DIFFERENT versions." \
+       "  logweir-retention: $retention_version" \
+       "  logweir:           $cli_version" \
+       "  Both packages take \`version.workspace = true\`, so one build cannot" \
+       "  produce two versions. A mismatch means one of them came from a stale" \
+       "  layer or a different tree."
+fi
+
+echo "ok: x86-64 binaries, engine, CLI, the enforcement binary, approval minting and both licences are present in $ref"
