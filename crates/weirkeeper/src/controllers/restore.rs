@@ -4608,6 +4608,8 @@ async fn reconcile_with_trust(
                 let signing_time = match crate::verification::signing_time_need(status) {
                     None => crate::verification::SigningTime::NotNeeded,
                     Some(need) => {
+                        // A FAILED READ IS NOT A FAILED RECONCILE — review
+                        // finding **F6**; see the same hunk in `backup.rs`.
                         let (handle, unread) = match backup::evidence_source_for(
                             restore.spec.evidence_destination_ref.as_ref(),
                             &ctx.client,
@@ -4615,11 +4617,16 @@ async fn reconcile_with_trust(
                             Utc::now(),
                         )
                         .await
-                        .map_err(RestoreError::Api)?
                         {
-                            backup::EvidenceSource::GlobalHandle => (ctx.archive.clone(), None),
-                            backup::EvidenceSource::Destination(store) => (Some(store), None),
-                            backup::EvidenceSource::NotAttempted { detail } => (None, Some(detail)),
+                            Ok(backup::EvidenceSource::GlobalHandle) => (ctx.archive.clone(), None),
+                            Ok(backup::EvidenceSource::Destination(store)) => (Some(store), None),
+                            Ok(backup::EvidenceSource::NotAttempted { detail }) => {
+                                (None, Some(detail))
+                            }
+                            Err(e) => (
+                                None,
+                                Some(crate::verification::evidence_path_unreadable(&e)),
+                            ),
                         };
                         crate::verification::recover_signing_time(handle, unread, need).await
                     }

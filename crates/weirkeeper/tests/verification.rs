@@ -4275,16 +4275,17 @@ fn a_pre_signedat_object_is_repaired_to_valid_by_one_bounded_read() {
 }
 
 /// **ROWS 2 and 3 — an archive that does not answer, and a grant only a pod may
-/// hold.** Both keep the PREVIOUS verdict on an `Unverified` basis, and both
-/// say which one they are.
+/// hold.** Neither withdraws the verdict and neither presents one: the block
+/// becomes `NotAttempted` on an `Unverified` basis, saying which one it is.
 ///
 /// KILLS: "flip to `Untrusted` when the read fails" — the failure this whole
 /// task exists to prevent, now reachable through a temporarily unreachable
-/// bucket instead of through an upgrade; and "render it green anyway because
-/// `result` still says `Valid`" — the badge assertion, which is why the basis
-/// is written at all.
+/// bucket instead of through an upgrade; and "carry the stored `Valid` across"
+/// — review finding **F1**, which put a green *"verified by weirkeeper"* badge
+/// on the console and `VerificationState::Valid` on the API for a document
+/// nobody had re-verified.
 #[test]
-fn an_unread_archive_keeps_the_previous_verdict_as_unverified() {
+fn an_unread_archive_neither_withdraws_nor_presents_a_verdict() {
     let rows = [
         (
             "unreachable archive",
@@ -4312,12 +4313,14 @@ fn an_unread_archive_keeps_the_previous_verdict_as_unverified() {
     ];
     for (label, signing_time, expected) in rows {
         let row = retrust_row(&pre_signedat_status(), &signing_time);
+        assert_eq!(row["from"], json!("Valid"), "{label}");
         assert_eq!(
             row["to"],
-            json!("Valid"),
-            "{label}: the PREVIOUS verdict is kept"
+            json!("NotAttempted"),
+            "{label}: F1 — the string every consumer that reads `result` alone already fails \
+             closed on. NOT the stored `Valid`, which the console, the API projection and the \
+             SIGNED printer column all render as verified"
         );
-        assert_eq!(row["from"], json!("Valid"), "{label}");
         assert_eq!(
             row["verification"]["trust"]["basis"],
             json!("Unverified"),
@@ -4638,4 +4641,217 @@ fn a_matched_key_is_always_written_beside_a_trust_block() {
             "{label}: every verdict that matched a key carries the basis it reached. Got {block}"
         );
     }
+}
+
+/// **Review finding F1, the guard.** The block the undecided arm writes is not
+/// green on any surface that reads `result` — the CRD's own `SIGNED` printer
+/// column included, read out of the shipped CRD so the JSONPath cannot drift
+/// away from this assertion.
+///
+/// KILLS: "carry the stored `Valid` across while the read is outstanding" —
+/// `crds::TrustBasis`'s invariant is *"every old reader treats anything that is
+/// not `Valid` as unverified"*, and this is the first verdict that had to obey
+/// it without being a refusal. With `Valid` restored, the printer column below
+/// prints `Valid` for a document nobody re-verified.
+#[test]
+fn the_signed_printer_column_never_prints_valid_for_an_unread_verdict() {
+    let row = retrust_row(
+        &pre_signedat_status(),
+        &weirkeeper::verification::SigningTime::Unreadable("the bucket did not answer".to_string()),
+    );
+    let block = row["verification"].clone();
+    assert_eq!(block["result"], json!("NotAttempted"));
+
+    let object = json!({"status": {"evidence": {"verification": block}}});
+    for crd in ["config/crd/backups.yaml", "config/crd/restores.yaml"] {
+        let doc: Value = serde_yaml::from_str(&read(crd)).expect("the shipped CRD parses");
+        let columns = doc["spec"]["versions"][0]["additionalPrinterColumns"]
+            .as_array()
+            .expect("the version declares printer columns");
+        let signed = columns
+            .iter()
+            .find(|c| c["name"] == json!("SIGNED"))
+            .unwrap_or_else(|| panic!("{crd} declares a SIGNED column"));
+        let json_path = signed["jsonPath"].as_str().expect("a JSONPath");
+        // `.status.evidence.verification.result` -> `/status/evidence/…`
+        let pointer = json_path.replace('.', "/");
+        let printed = object.pointer(&pointer);
+        assert_ne!(
+            printed,
+            Some(&json!("Valid")),
+            "{crd}: `kubectl get` prints this column verbatim and an operator reads it as the \
+             verdict. Path {json_path}, object {object}"
+        );
+        assert_eq!(printed, Some(&json!("NotAttempted")), "{crd}");
+    }
+}
+
+/// **Defence in depth for the same finding.** Even if a block shaped
+/// `result: Valid` + `basis: Unverified` ever reaches a badge — a hand-edited
+/// status, a rollback that half-wrote, a future builder — the Rust rule refuses
+/// it, and refuses it as *not attempted* rather than as *untrusted*.
+///
+/// KILLS: "drop the `Unverified` arm from `valid_verification`" — the block
+/// below would fall through to the catch-all and render
+/// `VerificationUntrusted`, accusing a document nobody examined; and any edit
+/// that made the basis clause permissive would make it green.
+#[test]
+fn a_valid_result_on_an_unverified_basis_is_still_not_green() {
+    let mut status = pre_signedat_status();
+    status["evidence"]["verification"] = json!({
+        "result": "Valid",
+        "matchedKeyId": FIXTURE_KEY_ID,
+        "payloadType": LAB_PAYLOAD_TYPE,
+        "verifiedAt": "2026-09-18T13:14:23Z",
+        "trust": {"basis": "Unverified", "keyState": "Active"},
+    });
+    for (label, badge) in [
+        ("backup", backup_badge(&status)),
+        (
+            "restore",
+            restore_badge(&json!({
+                "outcome": "pass",
+                "evidence": status["evidence"].clone(),
+            })),
+        ),
+    ] {
+        assert!(
+            !badge.green,
+            "{label}: an unestablished basis is never green"
+        );
+        assert_eq!(badge.label, UNVERIFIED, "{label}");
+        assert_eq!(
+            badge.reason, REASON_VERIFICATION_NOT_ATTEMPTED,
+            "{label}: nothing was refused, so `VerificationUntrusted` would be an accusation \
+             about a document this controller never read"
+        );
+    }
+}
+
+/// **Review finding F2, the guard.** The pass's own output is still recognised
+/// as a status that predates `signedAt`, so an archive that was unreachable on
+/// the first policy event is re-read on the second — and the object ends
+/// `Valid` with the document's own `signedAt`.
+///
+/// KILLS: "read the discriminator off the presence of `trust` alone" — the
+/// shipped behaviour, under which the undecided write destroyed its own
+/// evidence: `signing_time_need` returned `None` on the second event and the
+/// object was written `Untrusted` / *"the document carries no signing-time
+/// field"*, permanently, from one transient blip during an upgrade.
+#[test]
+fn a_second_policy_event_re_reads_what_the_first_one_could_not() {
+    // ---- EVENT 1: the bucket does not answer ----------------------------
+    let first = weirkeeper::verification::retrust_with(
+        &pre_signedat_status(),
+        &org_default(),
+        backup_badge,
+        None,
+        Some(1),
+        at("2026-09-18T13:14:39Z"),
+        &weirkeeper::verification::SigningTime::Unreadable(
+            "the evidence object is not in the archive; nothing was verified".to_string(),
+        ),
+    )
+    .expect("an undecided verdict is a change from the stored Valid");
+    assert_eq!(first.to, "NotAttempted");
+    assert_eq!(first.verification["trust"]["basis"], json!("Unverified"));
+
+    // The status the controller now holds is the one it just patched.
+    let mut stored = pre_signedat_status();
+    stored["evidence"]["verification"] = first.verification.clone();
+
+    // ---- EVENT 2: the pass still knows this status predates `signedAt` ---
+    let need = weirkeeper::verification::signing_time_need(Some(&stored)).expect(
+        "an `Unverified` basis is this pass's own mark for `I have not read the document yet`, \
+         and reading it back as a document's absence is how one blip became permanent",
+    );
+    assert_eq!(need.payload_key, LAB_RECEIPT_KEY);
+
+    // …and with the bucket answering, the object is repaired.
+    let second = weirkeeper::verification::retrust_with(
+        &stored,
+        &org_default(),
+        backup_badge,
+        Some(&vec![first.verified.clone()]),
+        Some(1),
+        at("2026-09-18T14:20:00Z"),
+        &weirkeeper::verification::SigningTime::Recovered(at(RECEIPT_FINISHED_AT)),
+    )
+    .expect("the read succeeded, so the verdict changes");
+    assert_eq!(second.from, "NotAttempted");
+    assert_eq!(second.to, "Valid");
+    assert_eq!(second.verification["signedAt"], json!(RECEIPT_FINISHED_AT));
+    assert_eq!(second.verification["trust"]["basis"], json!("Current"));
+    assert_eq!(second.verified.status, "True");
+    assert_eq!(
+        second.verification["verifiedAt"],
+        json!("2026-09-18T13:14:23Z"),
+        "two passes and still no re-observation"
+    );
+
+    // ---- AND A REPEAT OF EVENT 1 WRITES NOTHING (erratum E11(d)) --------
+    assert!(
+        weirkeeper::verification::retrust_with(
+            &stored,
+            &org_default(),
+            backup_badge,
+            Some(&vec![first.verified.clone()]),
+            Some(1),
+            at("2026-09-18T13:40:00Z"),
+            &weirkeeper::verification::SigningTime::Unreadable(
+                "the evidence object is not in the archive; nothing was verified".to_string(),
+            ),
+        )
+        .is_none(),
+        "an archive that is still down renders the identical block, so the retry costs one `get` \
+         and no write"
+    );
+}
+
+/// **Review finding F6, the guard.** Neither reconcile hook aborts on a kube
+/// API failure while resolving the evidence path: the error becomes the reason
+/// no read was attempted, and the verdict is still re-derived on that pass.
+///
+/// A SOURCE SCAN, because reaching the error arm needs a `kube::Client` that
+/// fails only on the destination read, and the property is structural: this
+/// hook must not own a `?`. The window scanned is exactly the hunk between the
+/// need and the read, so an unrelated `?` elsewhere in either file is invisible
+/// to it.
+///
+/// KILLS: "`…evidence_source(…).await.map_err(BackupError::Api)?`" — the shipped
+/// shape, under which a transient API blip skipped the whole re-trust pass and
+/// delayed a `KeyCompromise` revocation on exactly the objects this hook exists
+/// for.
+#[test]
+fn an_evidence_path_api_failure_does_not_abort_the_re_trust_pass() {
+    for relative in [
+        "crates/weirkeeper/src/controllers/backup.rs",
+        "crates/weirkeeper/src/controllers/restore.rs",
+    ] {
+        let src = read(relative);
+        let start = src
+            .find("signing_time_need(status)")
+            .unwrap_or_else(|| panic!("{relative} invokes the re-derivation"));
+        let end = src[start..]
+            .find("recover_signing_time(")
+            .map(|i| start + i)
+            .unwrap_or_else(|| panic!("{relative} performs the bounded read"));
+        let hunk = &src[start..end];
+        assert!(
+            hunk.contains("evidence_path_unreadable"),
+            "{relative}: the evidence path's own failure has to become a `NotAttempted` reason, \
+             not the reconcile's error. Hunk:\n{hunk}"
+        );
+        assert!(
+            !hunk.contains("map_err"),
+            "{relative}: a `?` here skips `apply_retrust` entirely, so a revocation waits for a \
+             healthy API on the one class of object that cannot afford to. Hunk:\n{hunk}"
+        );
+    }
+    // …and the sentence it produces says both things an operator needs.
+    let detail = weirkeeper::verification::evidence_path_unreadable(
+        &kube::Error::LinesCodecMaxLineLengthExceeded,
+    );
+    assert!(detail.contains("no re-read was attempted"), "{detail}");
+    assert!(detail.contains("next policy event"), "{detail}");
 }

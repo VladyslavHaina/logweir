@@ -4270,14 +4270,23 @@ async fn reconcile_with_trust(
                 let signing_time = match crate::verification::signing_time_need(status) {
                     None => crate::verification::SigningTime::NotNeeded,
                     Some(need) => {
+                        // A FAILED READ IS NOT A FAILED RECONCILE — review
+                        // finding **F6**. `?` here aborted the pass before
+                        // `apply_retrust` ran, so a kube API blip delayed a
+                        // revocation on exactly the objects this hook is about.
+                        // The error becomes the reason no read was attempted,
+                        // and the verdict is still re-derived.
                         let (handle, unread) =
                             match evidence_source(&backup, &ctx.client, &namespace, Utc::now())
                                 .await
-                                .map_err(BackupError::Api)?
                             {
-                                EvidenceSource::GlobalHandle => (ctx.archive.clone(), None),
-                                EvidenceSource::Destination(store) => (Some(store), None),
-                                EvidenceSource::NotAttempted { detail } => (None, Some(detail)),
+                                Ok(EvidenceSource::GlobalHandle) => (ctx.archive.clone(), None),
+                                Ok(EvidenceSource::Destination(store)) => (Some(store), None),
+                                Ok(EvidenceSource::NotAttempted { detail }) => (None, Some(detail)),
+                                Err(e) => (
+                                    None,
+                                    Some(crate::verification::evidence_path_unreadable(&e)),
+                                ),
                             };
                         crate::verification::recover_signing_time(handle, unread, need).await
                     }

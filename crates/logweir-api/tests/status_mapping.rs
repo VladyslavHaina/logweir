@@ -1056,3 +1056,103 @@ fn an_untrusted_verdict_is_never_valid_on_this_api() {
         );
     }
 }
+
+/// **TRUST-UPGRADE-SIGNEDAT, review finding F1.** The block the re-trust pass
+/// writes while it is waiting on one bounded re-read is never `valid` on this
+/// API and never `verifiedSuccess`.
+///
+/// # Why this row lives here and not beside the reconciler
+///
+/// `weirkeeper::verification::valid_verification` reads `trust.basis` and
+/// refuses `Unverified`. **This projection does not** — `status.rs`'s match is
+/// over `result` alone, exactly like `ui/pages/backups.js`'s
+/// `validVerification` and the CRD's `SIGNED` printer column. So the safety of
+/// the whole design rests on the RECONCILER writing a `result` that every one
+/// of those three already fails closed on, and the only place that can be
+/// asserted for the API is here.
+///
+/// The block below is built by `retrust_with` itself rather than hand-written,
+/// so it cannot drift away from what the controller patches.
+///
+/// KILLS: "carry the stored `Valid` across while the read is outstanding" —
+/// which made this assertion `VerificationState::Valid`, `verifiedSuccess`
+/// true, and the console badge a green *"verified by weirkeeper at … against
+/// key …"* for a document the controller had not re-verified.
+#[test]
+fn an_unread_pre_signedat_verdict_is_never_valid_on_this_api() {
+    // The exact shape a controller older than `signedAt` wrote: a `Valid`
+    // verification block with no `signedAt` and no `trust`.
+    let stored = serde_json::json!({
+        "phase": "Succeeded",
+        "exitCode": 0,
+        "evidence": {
+            "receiptKey": "logweir/backups/b1/r1.receipt.json",
+            "receiptSha256": "sha256:aa",
+            "verification": {
+                "result": "Valid",
+                "matchedKeyId": "917cf9a2",
+                "payloadType": "application/vnd.logweir.backup-receipt+json;version=1.0.0",
+                "verifiedAt": "2026-09-14T00:00:00Z",
+            }
+        },
+    });
+    // A RESOLUTION THAT CARRIES THE SIGNER, so `decide` reaches the undecided
+    // row rather than short-circuiting on `UntrustedSigner` or on an
+    // unconfigured cluster. The PEM is never parsed by the re-trust pass — it
+    // looks the key up by id — so a placeholder is honest here.
+    let roster = weirkeeper::crds::trust_roster::TrustRosterSpec {
+        approver_keys: Vec::new(),
+        signing_keys: vec![weirkeeper::crds::trust_roster::KeyEntry {
+            key_id: "917cf9a2".to_string(),
+            spki_pem: "-----BEGIN PUBLIC KEY-----\nplaceholder\n-----END PUBLIC KEY-----\n"
+                .to_string(),
+            subject: None,
+            not_after: None,
+        }],
+        allowed_cluster_ids: Vec::new(),
+    };
+    let resolution = weirkeeper::trust::Resolution::Trust(Box::new(
+        weirkeeper::trust::synthesize_legacy(&roster),
+    ));
+    let outcome = weirkeeper::verification::retrust_with(
+        &stored,
+        &resolution,
+        backup_badge,
+        None,
+        Some(1),
+        now(),
+        &weirkeeper::verification::SigningTime::Unreadable("the bucket did not answer".to_string()),
+    )
+    .expect("an undecided verdict is a change from the stored `Valid`");
+    let block = outcome.verification;
+    assert_eq!(
+        block["trust"]["basis"],
+        serde_json::json!("Unverified"),
+        "this row is only evidence if it is the undecided arm's own output. Got {block}"
+    );
+    assert_ne!(
+        block["result"],
+        serde_json::json!("Valid"),
+        "no re-read succeeded, so the block must not keep the word every consumer reads as \
+         `verified`. Got {block}"
+    );
+
+    let status = serde_json::json!({
+        "phase": "Succeeded",
+        "exitCode": 0,
+        "evidence": { "verification": block.clone() },
+    });
+    let (object, _) = patched::<Backup>(base_backup(), &serde_json::json!({"status": status}));
+    let op = backup_operation(&backup_of(&object));
+    assert_ne!(
+        op.verification.state,
+        VerificationState::Valid,
+        "the API renders this as a verified operation otherwise. Got {:?} for {block}",
+        op.verification.state
+    );
+    assert_eq!(op.verification.state, VerificationState::NotAttempted);
+    assert!(
+        !op.verified_success,
+        "and `verifiedSuccess` is the field a caller automates on"
+    );
+}

@@ -1640,8 +1640,29 @@ pub fn retrust_with(
             // carried across verbatim; only the basis and the sentence change,
             // and the badge stops being green on the basis alone.
             if verdict.awaits_signing_time() {
+                // `NotAttempted`, AND NOT THE STORED `Valid` — review finding
+                // **F1**, critical.
+                //
+                // Carrying the previous result across kept the string "Valid"
+                // on a block no policy had been applied to, and `crds::TrustBasis`
+                // states the invariant every surface leans on: *"every old
+                // reader treats anything that is not `Valid` as unverified"*.
+                // Three of them read `result` and nothing else —
+                // `ui/pages/backups.js`'s `validVerification`,
+                // `logweir_api::status`'s projection, and the `SIGNED` printer
+                // column — so a console rendered a green *"verified by
+                // weirkeeper at … against key …"* badge over a document it had
+                // not re-verified. Measured by the reviewer against this exact
+                // block.
+                //
+                // `NotAttempted` is not a refusal and it is literally true: no
+                // verification was attempted under this policy. It is the value
+                // every consumer that predates the basis already fails closed
+                // on, so the one write below fixes all of them at once. Nothing
+                // is lost — `matchedKeyId` and `verifiedAt` still record the
+                // original observation, and `detail` says what happened.
                 (
-                    from.clone(),
+                    VerificationVerdict::NotAttempted.as_str().to_string(),
                     Some(unverified_detail(&projection, matched_key_id, signing_time)),
                     trust,
                 )
@@ -1801,8 +1822,27 @@ fn unverified_detail(
 /// wrote its status, and a cluster upgraded twice would misclassify on it.
 fn stored_claim(stored: &Value) -> EvidenceClaim {
     let carries = |key: &str| stored.get(key).is_some_and(|v| !v.is_null());
+    // AND THE PASS'S OWN OUTPUT IS STILL A PRE-`signedAt` STATUS — review
+    // finding **F2**, high.
+    //
+    // The undecided write inserts a `trust` block (it must: `valid_verification`
+    // reads an ABSENT `trust` as the additive-compatibility case and would
+    // render such a block green), which on the next event looked like "a build
+    // that knows both fields wrote this" and answered `FieldAbsent`. The
+    // documented retry therefore never happened: one transient archive blip
+    // during an upgrade baked in `Untrusted` and *"the document carries no
+    // signing-time field"* forever, and a pod-only grant — which can never be
+    // repaired by this controller — degraded to the same wrong sentence after
+    // exactly one event.
+    //
+    // `basis: Unverified` is this pass's own mark for "I have not read the
+    // document yet", so it is read back as exactly that. It is written only
+    // here, only for a `NotRecorded` claim, and it disappears the moment a real
+    // `signedAt` lands.
+    let undecided =
+        stored.pointer("/trust/basis").and_then(Value::as_str) == Some(TRUST_BASIS_UNVERIFIED);
     match stored.get("signedAt").and_then(Value::as_str) {
-        None if !carries("trust") => EvidenceClaim::absent(ClaimAbsence::NotRecorded),
+        None if !carries("trust") || undecided => EvidenceClaim::absent(ClaimAbsence::NotRecorded),
         None => EvidenceClaim::absent(ClaimAbsence::FieldAbsent),
         Some(text) => match DateTime::parse_from_rfc3339(text) {
             Ok(t) => EvidenceClaim::at(t.with_timezone(&Utc)),
@@ -1958,6 +1998,21 @@ pub fn read_signing_time(store: Option<&Store>, need: &SigningTimeNeed) -> Signi
         Ok((bytes, _version)) => signing_time_in(&bytes, need),
         Err(e) => SigningTime::Unreadable(store_detail(&e)),
     }
+}
+
+/// The `detail` for a re-read that was not attempted because the evidence path
+/// itself could not be resolved — review finding **F6**.
+///
+/// A kube API failure is a fact about this controller's connection, not about
+/// the document, so it reads as `NotAttempted` like every other reason there is
+/// no handle, and the verdict is still re-derived on the pass that saw it.
+#[must_use]
+pub fn evidence_path_unreadable(e: &kube::Error) -> String {
+    format!(
+        "this run's evidence path could not be resolved, so no re-read was attempted: {e}; the \
+         verdict is re-derived from the status alone and the read is tried again on the next \
+         policy event"
+    )
 }
 
 /// [`read_signing_time`] on a blocking thread — the seam both reconcilers call.
