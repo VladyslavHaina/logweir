@@ -3037,10 +3037,24 @@ def enforce_guards() -> None:
     image = retention_image("retention-partial-failure")
     if image is None:
         return
-    candidates = [c["pointId"] for c in (ev.get("candidates") or [])]
+    # CANDIDATES WHOSE OBJECTS ARE STILL THERE. The catalog can legitimately
+    # still call a point a candidate after an earlier phase deleted its objects
+    # — the view is rebuilt on a cadence — and a "denied" deletion of a key
+    # that does not exist still answers AccessDenied, which would make the
+    # record's `remaining_keys` name objects the bucket no longer has. The
+    # fixture needs two sets that are really present.
+    live_keys = {o["key"] for o in objects(BUCKET_B)}
+    candidates = [
+        c["pointId"] for c in (ev.get("candidates") or [])
+        if c.get("pointId") in by_point
+        and sum(1 for k in live_keys
+                if k.startswith(f"{DEST_PREFIX}/{by_point[c['pointId']]['backupId']}/")) >= 2
+    ]
     if len(candidates) < 2:
         record("retention-partial-failure", "PLAT-16.2", "NOT-RUN",
-               f"needs two candidates in one plan and this evaluation has {len(candidates)}.",
+               f"needs two candidates whose objects are still in the bucket, and this "
+               f"evaluation has {len(candidates)} of "
+               f"{len(ev.get('candidates') or [])} candidate(s).",
                evidence)
         return
     allowed_set = by_point[candidates[0]]["backupId"]
@@ -3210,6 +3224,30 @@ def bounded_retry() -> None:
                               "consecutiveRunFailures": failures, "runsObserved": seen,
                               "ownedJobsAtDegrade": sorted(jobs_at_degrade),
                               "ownedJobsAfter": new_jobs}))
+    # A ROW THAT SAW NO RUN HAS MEASURED NOTHING. The retry BUDGET is the
+    # subject, and it cannot be judged by a window in which the controller
+    # never drove the enforcer once: that is a statement about the cadence, the
+    # lease or the destination's points, not about D3 §6.5. Recorded as NOT-RUN
+    # with what was observed, never as a product failure.
+    if not seen:
+        record(
+            "retention-bounded-retry", "PLAT-16.2", "NOT-RUN",
+            f"no enforcement run happened at all in {window}s, so the retry budget was never "
+            f"exercised. Evaluated="
+            f"{condition(policy, 'Evaluated').get('status')}/"
+            f"{condition(policy, 'Evaluated').get('reason')}, Ready="
+            f"{condition(policy, 'Ready').get('status')}/"
+            f"{condition(policy, 'Ready').get('reason')}, Enforced="
+            f"{condition(policy, 'Enforced').get('status')}/"
+            f"{condition(policy, 'Enforced').get('reason')}, "
+            f"consecutiveRunFailures={failures}. The fixture needs an Enforce policy that is "
+            f"the ONLY policy on a destination whose points are still present, and three "
+            f"genuinely failed runs at the observed inter-run gap — about eight minutes for "
+            f"the first — so roughly half an hour of window.",
+            evidence,
+        )
+        run(KN + ["delete", "retentionpolicy", f"{OWNER}-degrade", "--wait=true"], check=False)
+        return
     retry = bounded_retry_degrades(policy, failures, len(new_jobs))
     check(
         "retention-bounded-retry",

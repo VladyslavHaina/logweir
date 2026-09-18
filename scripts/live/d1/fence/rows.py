@@ -1280,8 +1280,16 @@ def l_05_1_5(H: Any) -> dict[str, Any]:
     H.wait_for("backup", first["metadata"]["name"], H.terminal, timeout=600,
                what="to reach a terminal phase before the rollback")
 
-    # The documented procedure: suspend the schedules that use the new fields.
-    H.patch("backupschedule", "roll", {"spec": {"suspend": True}})
+    # THE SCHEDULE UNDER TEST STAYS RUNNING ACROSS THE ROLLBACK, and that is
+    # the whole change. The first landing suspended every schedule before the
+    # swap, which made D1 §13.2 L-05.1-5's fourth clause — "any Backup created
+    # by the old controller carries an ownerReference and is migrated when
+    # terminal" — VACUOUS BY CONSTRUCTION: main@4956785 created no Backup at
+    # all, so there was nothing to attribute and nothing to migrate. The
+    # lab-refresh-4 review called that out, and a clause a row cannot fail is
+    # not a clause. The OTHER schedules are still suspended, because they are
+    # other rows' fixtures and a rolled-back controller firing them would be
+    # noise this row did not ask for.
     suspended_others = suspend_all_but(H, {"roll"})
     # ONLY TERMINAL RUNS ARE FROZEN. A run still executing moves its own
     # resourceVersion as its Job progresses, and counting that as "the rollback
@@ -1301,15 +1309,130 @@ def l_05_1_5(H: Any) -> dict[str, Any]:
             frozen[f"configmap/{cm['metadata']['name']}"] = cm["metadata"]["resourceVersion"]
     before_names = {b["metadata"]["name"] for b in H.lst("backups")}
 
+    # WHAT THE FENCE WAS ALREADY BEING REFUSED, BEFORE THE ROLLBACK. The fenced
+    # controller's cluster-scoped grant is deliberately READ-ONLY on
+    # `trustrosters` and `trustpolicies` (fenced.py), which is narrower than the
+    # shipped ClusterRole, so a `Forbidden` on those kinds is a property of the
+    # FENCE and is present under both images. Counting it as a rollback failure
+    # would blame the swap for the harness's own isolation; ignoring it would
+    # hide a real one. It is measured on both sides instead.
+    forbidden_before_swap = [
+        ln for ln in fenced.controller_logs(H, since="12m").splitlines()
+        if "Forbidden" in ln or "is forbidden" in ln
+    ]
     old = fenced.swap_image(H, "old")
-    time.sleep(180)  # >= one full */2 period under the rolled-back controller
-    after_names = {b["metadata"]["name"] for b in H.lst("backups")}
-    created_while_back = sorted(after_names - before_names)
+    # >= two full */2 periods under the rolled-back controller, so "it kept
+    # running the schedule" is a claim about a cadence and not about one slot.
+    time.sleep(300)
+    # BY NAME, NOT BY `spec.scheduleRef.uid`. That field is the NEW build's
+    # ownership rail, and asking the old build for it is asking whether the
+    # rollback happened rather than what it did: a run main@4956785 created and
+    # did not stamp would read as "no run at all". Everything in the namespace
+    # that was not here before the swap is the old controller's work, and the
+    # attribution clauses below then ask what it stamped on each one.
+    rolled_back_backups = [b for b in H.lst("backups")
+                           if b["metadata"]["name"] not in before_names]
+    created_while_back = sorted(b["metadata"]["name"] for b in rolled_back_backups)
+    # THE DIAGNOSIS IS COLLECTED BEFORE THE FIRST ASSERTION, so a failure of
+    # "it kept running the schedule" arrives with the controller's own logs and
+    # restart count rather than sending the next reader back to the cluster.
+    pods = fenced.pods(H)
+    restarts = [
+        (p["metadata"]["name"], cs.get("restartCount"), (cs.get("lastState") or {}))
+        for p in pods for cs in (p["status"].get("containerStatuses") or [])
+        if cs["name"] == "weirkeeper"
+    ]
+    logs = fenced.controller_logs(H, since="12m")
+    forbidden = [ln for ln in logs.splitlines()
+                 if "Forbidden" in ln or '"code":403' in ln or "is forbidden" in ln]
+    panicked = [ln for ln in logs.splitlines()
+                if "panicked" in ln or "PanicException" in ln]
+    # THE KINDS THIS ROW IS ABOUT. A refusal on a schedule, a run, a plan or a
+    # Job is the rollback failing; a refusal on the two cluster-scoped trust
+    # kinds is the fence's own read-only grant, and the `_pre_existing` set
+    # proves it was there before the swap as well.
+    rollback_kinds = ("backupschedules", "backups", "configmaps", "jobs", "topicdiscoveries")
+    forbidden_on_this_rows_kinds = [
+        ln for ln in forbidden
+        if any(kind in ln for kind in rollback_kinds)
+    ]
+    fence_grant_refusals = [ln for ln in forbidden if ln not in forbidden_on_this_rows_kinds]
+    new_fence_refusals = [ln for ln in fence_grant_refusals
+                          if ln not in forbidden_before_swap]
+    schedule_while_back = H.get("backupschedule", "roll")
+    rollback_evidence = {
+        "scheduleUid": uid,
+        "before": sorted(before_names),
+        "createdWhileRolledBack": created_while_back,
+        "scheduleWhileRolledBack": H.excerpt(
+            schedule_while_back, "status.lastFireTime", "status.nextFireTime",
+            "status.conditions.0.reason", "status.conditions.0.message"),
+        "controllerRestarts": restarts,
+        "forbidden": forbidden[:10],
+        "panics": panicked[:10],
+        "controllerLogTail": logs.splitlines()[-40:],
+    }
     H.require(
-        not created_while_back,
-        f"the rolled-back controller created Backups for suspended schedules: "
-        f"{created_while_back}",
-        dumps={"created": created_while_back},
+        bool(created_while_back),
+        "the rolled-back main@4956785 controller created NO run for a schedule that was "
+        "never suspended: the rollback stopped the schedule instead of surviving it. This "
+        "is the clause the first landing could not fail, because it suspended everything "
+        "before the swap",
+        dumps=rollback_evidence,
+    )
+    # EVERY RUN THE OLD CONTROLLER MADE IS ATTRIBUTABLE. D1 §6.2's ownership
+    # rail is an ownerReference to the schedule, by UID, with the deterministic
+    # slot name — not a label, not a guess from the name.
+    attribution = [
+        {
+            "name": b["metadata"]["name"],
+            "slot": b["spec"].get("slot"),
+            "ownerReferenceToSchedule": any(
+                o.get("uid") == uid for o in (b["metadata"].get("ownerReferences") or [])),
+            "specScheduleRefUid": (b["spec"].get("scheduleRef") or {}).get("uid"),
+            "ownerReferences": b["metadata"].get("ownerReferences"),
+        }
+        for b in rolled_back_backups
+    ]
+    rollback_evidence["attribution"] = attribution
+    rollback_evidence["forbiddenOnThisRowsKinds"] = forbidden_on_this_rows_kinds[:5]
+    rollback_evidence["fenceGrantRefusals"] = fence_grant_refusals[:3]
+    rollback_evidence["fenceGrantRefusalsNewSinceTheSwap"] = new_fence_refusals[:3]
+    unattributable = [a["name"] for a in attribution if not a["ownerReferenceToSchedule"]]
+    H.require(
+        not unattributable,
+        f"runs the rolled-back controller created carry no ownerReference to the schedule "
+        f"they came from: {unattributable}. D1 §6.2's ownership rail for a pre-upgrade run "
+        f"IS the ownerReference; `spec.scheduleRef.uid` is the newer build's and is recorded "
+        f"beside it rather than asserted of a build that predates it",
+        dumps=rollback_evidence,
+    )
+    misnamed = [
+        b["metadata"]["name"] for b in rolled_back_backups
+        if b["spec"].get("slot") and b["metadata"]["name"] != H.run_name("roll", b["spec"]["slot"])
+    ]
+    H.require(
+        not misnamed,
+        f"the old controller's runs are not named deterministically from their slot: "
+        f"{misnamed}",
+        dumps={"runs": [{"name": b["metadata"]["name"], "slot": b["spec"].get("slot")}
+                        for b in rolled_back_backups]},
+    )
+    # THE NEW-SHAPE FIELDS DID NOT BREAK IT. The old build knows nothing of
+    # `status.policy`, `spec.timeZone` or `spec.retry`, and the CRDs are the
+    # new ones throughout — so this is the rollback question D1 §6.2 asks:
+    # never a crash, never a 403, and the RBAC it needs is the shipped role's.
+    H.require(
+        all((r[1] or 0) == 0 for r in restarts),
+        f"the rolled-back controller restarted while reading new-shape objects: {restarts}",
+        dumps=rollback_evidence,
+    )
+    H.require(
+        not panicked and not forbidden_on_this_rows_kinds,
+        f"the rolled-back controller crashed, or was refused by RBAC on a kind this "
+        f"rollback is about ({', '.join(rollback_kinds)}): "
+        f"{(panicked + forbidden_on_this_rows_kinds)[:4]}",
+        dumps=rollback_evidence,
     )
     moved = {}
     for backup in H.lst("backups"):
@@ -1327,7 +1450,6 @@ def l_05_1_5(H: Any) -> dict[str, Any]:
     )
 
     new = fenced.swap_image(H, "new")
-    H.patch("backupschedule", "roll", {"spec": {"suspend": False}})
     resumed = H.wait_until(
         lambda: next(
             (
@@ -1366,11 +1488,58 @@ def l_05_1_5(H: Any) -> dict[str, Any]:
         if (b["metadata"].get("labels") or {}).get("logweir.dev/schedule-uid") == uid
         and not schedule_owner(b)
     ]
+    # THE FOURTH CLAUSE, WITH SOMETHING TO SAY. The old controller's runs exist
+    # now, so "migrated when terminal" is checkable: each one that reached a
+    # terminal phase under the rolled-forward controller must have had its
+    # ownerReference replaced by the `logweir.dev/schedule-uid` label — D1
+    # §6.2's migration, applied to objects a PREVIOUS build created.
+    H.wait_until(
+        lambda: all(
+            H.terminal(H.get("backup", name))
+            for name in created_while_back
+        ),
+        timeout=600,
+        interval=5.0,
+        what="the old controller's runs to reach a terminal phase after rolling forward",
+    )
+    old_runs_after = [H.get("backup", name) for name in created_while_back]
+    unmigrated = [
+        b["metadata"]["name"] for b in old_runs_after
+        if schedule_owner(b)
+        or (b["metadata"].get("labels") or {}).get("logweir.dev/schedule-uid") != uid
+    ]
+    H.require(
+        not unmigrated,
+        f"terminal runs the OLD controller created were not migrated after rolling forward: "
+        f"{unmigrated} still carry a schedule ownerReference or lack "
+        f"`logweir.dev/schedule-uid`",
+        dumps={"oldRuns": [{"name": b["metadata"]["name"],
+                            "ownerReferences": b["metadata"].get("ownerReferences"),
+                            "labels": b["metadata"].get("labels"),
+                            "phase": (b.get("status") or {}).get("phase")}
+                           for b in old_runs_after]},
+    )
     return {
         "detail": {
             "oldController": {k: old[k] for k in old if k.endswith(("Image", "Revision"))},
             "newController": {k: new[k] for k in new if k.endswith(("Image", "Revision"))},
-            "suspendedForRollback": ["roll"] + suspended_others,
+            "suspendedForRollback": suspended_others,
+            "scheduleLeftRunning": "roll",
+            "createdByTheOldController": created_while_back,
+            "attributionOfTheOldControllersRuns": attribution,
+            "scheduleWhileRolledBack": rollback_evidence["scheduleWhileRolledBack"],
+            "oldControllerRestarts": restarts,
+            "forbiddenOnThisRowsKinds": forbidden_on_this_rows_kinds[:5],
+            # RECORDED, NEVER HIDDEN: the fence's read-only cluster grant is
+            # narrower than the shipped ClusterRole, so the fenced controller is
+            # refused on `trustrosters`/`trustpolicies` under BOTH images. The
+            # third field is what the rollback ADDED, and it is the one a reader
+            # should look at.
+            "fenceGrantRefusals": fence_grant_refusals[:3],
+            "fenceGrantRefusalsBeforeTheSwap": forbidden_before_swap[:3],
+            "fenceGrantRefusalsNewSinceTheSwap": new_fence_refusals[:3],
+            "panicLines": panicked[:5],
+            "migratedAfterRollForward": [b["metadata"]["name"] for b in old_runs_after],
             "objectsFrozen": len(frozen),
             # The frozen map itself, so "not one resourceVersion moved" is
             # checkable against the objects rather than asserted (review R-7).
