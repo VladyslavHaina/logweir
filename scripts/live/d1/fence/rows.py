@@ -45,6 +45,12 @@ INJECTIONS: dict[str, str] = {
         "scheduler READS when a history is large; how the history got large is not "
         "part of it."
     ),
+    "seeding/force-inventory": (
+        "clears `status.history` after seeding, because the schedule was inventoried "
+        "when it was created — before the runs existed — and D1 §4.5 step 1 would not "
+        "look again for sixty minutes. It asks for the inventory now and decides "
+        "nothing about its outcome. Same injection W8 declared for L-05.2-1."
+    ),
     "L-05.2-3/L-05.2-2u": (
         "the proxy answers one request with 409 / 503. Both are the scenario's own "
         "words ('declared harness injection' in D1 §13.2)."
@@ -296,6 +302,13 @@ def seed_legacy_runs(
     patched = time.time() - started
     terminal = [b for b in H.lst("backups") if b["metadata"]["name"] in set(names)
                 and (b.get("status") or {}).get("phase") == "Succeeded"]
+    # DECLARED INJECTION, and without it these two rows measure nothing. The
+    # schedule was inventoried the moment it was created, before any of these
+    # runs existed, so it recorded `legacyMigratableRuns: 0` — and D1 §4.5 step
+    # 1 will not inventory again for sixty minutes. Clearing `status.history`
+    # asks for the inventory now and decides nothing else; `run.py`'s
+    # `force_inventory` is the same injection W8 declared for L-05.2-1.
+    H.force_inventory(name)
     return {
         "schedule": name,
         "requested": count,
@@ -305,6 +318,7 @@ def seed_legacy_runs(
         "createSeconds": round(created, 1),
         "totalSeconds": round(patched, 1),
         "legacyOwner": legacy_owner,
+        "inventoryForced": True,
     }
 
 
