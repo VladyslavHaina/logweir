@@ -552,8 +552,11 @@ def assert_checkout_contains(H: Any, revision: str) -> dict[str, Any]:
     un-runnable against a lab that is otherwise exactly right.
 
     What has to be true is narrower, and checkable: this checkout KNOWS the
-    commit the image was built from, CONTAINS it, and everything that has moved
-    since — committed or not — is a file no image contains.
+    commit the image was built from, CONTAINS it, and every TRACKED thing that
+    has moved since — committed or not — is a file no image contains. Untracked
+    files are ignored and recorded: a file git does not track cannot have been
+    in the build, and one of them is the orchestrator's own brief at the
+    repository root, which no worker may delete (lab-refresh-4 §9.1).
     """
     head = H.run(["git", "rev-parse", "HEAD"], timeout=60, record=False).stdout.strip()
     if H.run(["git", "cat-file", "-e", f"{revision}^{{commit}}"],
@@ -576,10 +579,26 @@ def assert_checkout_contains(H: Any, revision: str) -> dict[str, Any]:
                           timeout=120, record=False).stdout.splitlines()
         if line.strip()
     ]
+    # TRACKED CONTENT ONLY, and this is the rule stated correctly rather than a
+    # relaxation of it. `git status --porcelain` lists untracked files too, and
+    # the repository root carries one that the orchestrator owns — `prompt`, the
+    # brief itself — which no image contains, which no worker may delete under
+    # WORKER-RULES, and which the non-image allowlist cannot cover because it is
+    # a root-level file rather than a directory. Refusing on it made a lab that
+    # matched the checkout exactly un-runnable, and pushed lab-refresh-4 into
+    # `--fence-revision`, a flag that SUSPENDS this very check (§9.1). An
+    # untracked file cannot change what an image was built from; only tracked
+    # content can. What is ignored is recorded, so the evidence names it.
+    untracked = [
+        line[3:].strip()
+        for line in H.run(["git", "status", "--porcelain", "--untracked-files=all"],
+                          timeout=120, record=False).stdout.splitlines()
+        if line.startswith("?? ")
+    ]
     dirty = [
         line[3:].strip()
-        for line in H.run(["git", "status", "--porcelain"], timeout=120, record=False)
-        .stdout.splitlines()
+        for line in H.run(["git", "status", "--porcelain", "--untracked-files=no"],
+                          timeout=120, record=False).stdout.splitlines()
         if line.strip()
     ]
     product = sorted({p for p in changed + dirty if not p.startswith(NON_IMAGE_PATHS)})
@@ -597,6 +616,7 @@ def assert_checkout_contains(H: Any, revision: str) -> dict[str, Any]:
         "imageRevisionInHistory": True,
         "changedSinceImage": changed,
         "uncommitted": dirty,
+        "untrackedIgnored": untracked,
     }
 
 
