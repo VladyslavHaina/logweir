@@ -1001,3 +1001,193 @@ export function evidenceBlock(evidence) {
     "</p></section>"
   );
 }
+
+// ===========================================================================
+// D1 W7 (PLAT-04.2, PLAT-05.1, PLAT-06.2, PLAT-09.2): cadence, revision and
+// trigger, in the words the controller wrote
+// ===========================================================================
+//
+// FOUR RULES LIVE IN THIS SECTION, AND EACH ONE IS A SENTENCE THIS PAGE
+// REFUSES TO WRITE.
+//
+//   1. NOTHING HERE EVALUATES CRON. The instants below came from the
+//      controller (`status.nextRuns`) or from `GET /api/v1/cadence-previews`,
+//      which is the same engine over a draft. A second implementation in a
+//      browser is a second opinion about when a backup runs, and D1 section 4.4
+//      forbids one in as many words.
+//   2. AN ADJUSTMENT IS NAMED, NEVER SMOOTHED. A fixed local time inside a
+//      repeated hour FIRES TWICE, and both rows are shown with their offsets:
+//      hiding the second would make the page disagree with the cluster about
+//      how many backups happen that night.
+//   3. A REVISION THAT WAS NOT RECORDED IS NOT REVISION ZERO. Every run frozen
+//      before PLAT-05.1 carries no `scheduleRef.generation`, and so does every
+//      run in a console whose API does not publish one.
+//   4. STALENESS IS `nextRuns[0].at` IN THE PAST, AND NOTHING ELSE.
+//      `status.policy.evaluatedAt` is when the status last MOVED -- the
+//      controller writes nothing when nothing changed -- so comparing it with
+//      the requeue interval would label every healthy schedule stale. D1
+//      section 4.9's amendment says this in the CRD's own description.
+
+/** The three DST markers, keyed by the controller's own PascalCase, with what
+ *  each one means for the instant it is on.
+ *
+ *  THE KEYS ARE THE CONTRACT AND THE VALUES ARE THE PROSE. `ui/contract.js`
+ *  refuses a marker outside this set at the decoder, so a word this build does
+ *  not know never reaches here; what reaches here is always one of three, and
+ *  each gets a sentence rather than a symbol. */
+export const ADJUSTMENT_WORDS = Object.freeze({
+  NonexistentLocalTimeShifted:
+    "this local time does not exist on that date (the clocks go forward), so the run is at the " +
+    "end of the gap",
+  RepeatedLocalTimeFirst:
+    "this local time happens twice on that date (the clocks go back); this is the FIRST " +
+    "occurrence, and the second one below is a separate run",
+  RepeatedLocalTimeSecond:
+    "this local time happens twice on that date; this is the SECOND occurrence, and it is a " +
+    "separate run from the first",
+});
+
+/** The note a preview or a saved policy carries when its zone is UTC because
+ *  no zone was named -- which is what every schedule written before PLAT-04.2
+ *  carries, and what an empty time-zone field means. */
+export const UTC_FALLBACK_NOTE =
+  "No time zone is set, so the cron fields are read in UTC. That is what an absent timeZone " +
+  "has always meant and it is not a default this page chose: the local times below are UTC " +
+  "times. Name a zone to have the fields read as local wall-clock time there.";
+
+/** What an empty list of next runs is, and what it is not. */
+export const NO_NEXT_RUNS_SENTENCE =
+  "No further firing. A suspended schedule, a policy the controller refused, and a cadence " +
+  "that has genuinely run out all look like this list, and the Ready condition above says " +
+  "which one it is -- an empty list is an answer, not a failure to compute one.";
+
+/** What an out-of-date preview is, said without accusing the controller of
+ *  being down. */
+export const STALE_NEXT_RUNS_SENTENCE =
+  "The first firing below is in the past, so the controller has not rewritten these previews " +
+  "since it came due. It rewrites them when the generation changes or when the first entry " +
+  "passes, so this is the one staleness signal a schedule has; status.policy.evaluatedAt is " +
+  "NOT one, because nothing is written when nothing changed.";
+
+/** One firing, as a row: the UTC instant, the same instant in the schedule's
+ *  own zone with its offset, and the DST marker when there is one. */
+export function nextRunRow(run) {
+  const r = run || {};
+  const marker = typeof r.adjustment === "string" && ADJUSTMENT_WORDS[r.adjustment] !== undefined
+    ? badge("pending", r.adjustment)
+    : "";
+  return [cell(r.at), "<code>" + cell(r.localTime) + "</code>", marker];
+}
+
+/** The next-run panel, over a saved schedule's `status.nextRuns` or a draft's
+ *  preview `runs`. ONE renderer, because they are one shape.
+ *
+ *  `view` is `{runs, timeZone, tzdb, heading, now}`. `runs` absent (`null` or
+ *  `undefined`) is "this build has not computed any", which is NOT the same as
+ *  an empty array and is rendered as its own sentence. `now` is epoch
+ *  milliseconds and is OPTIONAL: with no clock the staleness arm renders
+ *  nothing, which keeps every other view in this tree computable without
+ *  reading one. */
+export function nextRunsPanel(view) {
+  const v = view || {};
+  const runs = v.runs;
+  const zone = typeof v.timeZone === "string" && v.timeZone.length > 0 ? v.timeZone : "UTC";
+  const heading = typeof v.heading === "string" ? v.heading : "Next runs";
+  if (runs === null || runs === undefined) {
+    return (
+      "<section class=\"next-runs\" data-next-runs=\"absent\"><h4>" + esc(heading) + "</h4>" +
+      "<p class=\"note\">This build has not computed the next firings for this schedule. " +
+      "The browser will not compute them either: cron is evaluated by the controller and by " +
+      "the cadence-preview route, and a second implementation here could disagree with " +
+      "both.</p></section>"
+    );
+  }
+  const list = Array.isArray(runs) ? runs : [];
+  const stale = list.length > 0 && typeof v.now === "number" &&
+    epochMs(list[0].at) !== null && epochMs(list[0].at) < v.now;
+  return (
+    "<section class=\"next-runs\" data-next-runs=\"" + String(list.length) + "\">" +
+    "<h4>" + esc(heading) + "</h4>" +
+    "<p class=\"note\">Read in <code>" + esc(zone) + "</code>" +
+    (typeof v.tzdb === "string" && v.tzdb.length > 0
+      ? ", against <code>" + esc(v.tzdb) + "</code> compiled into the controller and the API"
+      : "") +
+    ". The slot identity is always the UTC instant, which is why the names stay unique and " +
+    "monotonic whatever the zone.</p>" +
+    (zone === "UTC" ? "<p class=\"note\" data-utc-fallback=\"1\">" + esc(UTC_FALLBACK_NOTE) +
+      "</p>" : "") +
+    (stale ? "<p class=\"note\" data-stale=\"1\">" + badge("unverified", "out of date") + " " +
+      esc(STALE_NEXT_RUNS_SENTENCE) + "</p>" : "") +
+    table(["AT (UTC)", "LOCAL TIME", "DST"], list.map(nextRunRow), NO_NEXT_RUNS_SENTENCE) +
+    (list.filter((r) => (r || {}).adjustment !== undefined && (r || {}).adjustment !== null)
+      .map((r) => "<p class=\"note\" data-adjustment=\"" + esc(String(r.adjustment)) + "\">" +
+        "<code>" + esc(String(r.at)) + "</code>: " +
+        esc(ADJUSTMENT_WORDS[r.adjustment] || "") + "</p>").join("")) +
+    "</section>"
+  );
+}
+
+/** What "no trigger" means on a run, said rather than guessed. */
+export const NO_TRIGGER_SENTENCE =
+  "trigger not recorded (frozen before PLAT-05.1, or not published by this API)";
+
+/** What "no revision" means, said the same way. */
+export const NO_REVISION_SENTENCE =
+  "revision not recorded (frozen before PLAT-05.1, or not published by this API)";
+
+/** WHICH KIND OF RUN THIS IS, from `spec.trigger` and from nothing else.
+ *
+ *  `maxRetries` is the schedule's own `spec.retry.maxRetries` when the caller
+ *  has the schedule at hand, and is what turns "attempt 2" into "Retry 2 of
+ *  3". A caller that does NOT have it gets "Retry, attempt 2": the ceiling is
+ *  a property of the schedule's CURRENT policy and a run carries no copy of
+ *  it, so printing a guess would be printing a number this page made up.
+ *
+ *  `spec.triggeredBy` is NOT read here. That older field says `manual` or
+ *  `schedule` and cannot tell a catch-up or a retry from an ordinary slot, so
+ *  reading it as a kind would turn three facts into one. An absent trigger is
+ *  [`NO_TRIGGER_SENTENCE`]. */
+export function triggerLabel(trigger, maxRetries) {
+  const t = trigger || {};
+  if (typeof t.kind !== "string" || t.kind.length === 0) {
+    return "";
+  }
+  if (t.kind !== "Retry") {
+    return t.kind;
+  }
+  const attempt = typeof t.attempt === "number" ? String(t.attempt) : "?";
+  return typeof maxRetries === "number" && maxRetries > 0
+    ? "Retry " + attempt + " of " + String(maxRetries)
+    : "Retry, attempt " + attempt;
+}
+
+/** The trigger as a badge, or the sentence that says there is none. */
+export function triggerBadge(trigger, maxRetries) {
+  const words = triggerLabel(trigger, maxRetries);
+  if (words.length === 0) {
+    return "<span class=\"note\">" + esc(NO_TRIGGER_SENTENCE) + "</span>";
+  }
+  const kind = String((trigger || {}).kind).toLowerCase();
+  return badge("trigger-" + kind.replace(/[^a-z0-9]+/g, "-"), words);
+}
+
+/** WHICH REVISION A RUN FROZE: `revision g7 - policy sha256:ab12...`.
+ *
+ *  A SUSPEND FLIP MOVES THE GENERATION AND NOT THE DIGEST, and printing both
+ *  is what makes that visible: `generation` counts every spec change including
+ *  `suspend`, while `runPolicySha256` is over what a RUN does, so two runs of
+ *  different generations with the same digest did the same thing. */
+export function revisionLine(ref) {
+  const r = ref || {};
+  const parts = [];
+  if (typeof r.generation === "number") {
+    parts.push("revision g" + String(r.generation));
+  }
+  if (typeof r.runPolicySha256 === "string" && r.runPolicySha256.length > 0) {
+    parts.push("policy " + r.runPolicySha256);
+  }
+  if (parts.length === 0) {
+    return "<span class=\"note\">" + esc(NO_REVISION_SENTENCE) + "</span>";
+  }
+  return "<code>" + esc(parts.join(" \u00b7 ")) + "</code>";
+}

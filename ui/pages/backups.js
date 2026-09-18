@@ -49,9 +49,12 @@ import {
   listFooter,
   phaseBadge,
   replace,
+  revisionLine,
   table,
+  triggerBadge,
 } from "../render.js";
 import { itemsOf } from "./clusters.js";
+import { renderCoverageLine } from "./schedules.js";
 
 const PLURAL = "backups";
 
@@ -122,13 +125,34 @@ function nameCell(object, ns) {
   return detailLink("backups", ns || (meta.namespace || "default"), meta.name);
 }
 
-/** The backups table. NAME, PHASE, EXIT, RECORDS, SIGNED, AGE. */
+/** What the TRIGGER column is for, and what it is not.
+ *
+ *  `spec.trigger.kind` IS THE ONLY FIELD READ. `spec.triggeredBy` -- the older
+ *  `manual | schedule` string -- is still on every run and is still rendered on
+ *  the detail view, but it cannot tell a catch-up or a retry from an ordinary
+ *  slot, so reading it as a kind would flatten four facts into two. A run
+ *  frozen before PLAT-05.1 has no trigger, and the column says that rather
+ *  than filling in `Scheduled`.
+ *
+ *  AND THE RETRY CEILING IS NOT GUESSED. A retry renders "Retry, attempt 2"
+ *  here: the "of N" needs the schedule's CURRENT `retry.maxRetries`, which a
+ *  run carries no copy of, and this table does not read schedules. The
+ *  schedule's own card, which does hold the policy, renders "Retry 2 of 3". */
+export const TRIGGER_COLUMN_SENTENCE =
+  "TRIGGER is the run's own spec.trigger: Scheduled for a slot that fired at its instant, " +
+  "CatchUp for the same slot started late, Retry for attempt k of it with a new execution id, " +
+  "and Manual for a run a person asked for. A run frozen before PLAT-05.1 carries none and " +
+  "says so; it is never read from triggeredBy, which cannot tell those four apart.";
+
+/** The backups table. NAME, TRIGGER, PHASE, EXIT, RECORDS, SIGNED, AGE. */
 export function renderBackupList(input, ns) {
   const rows = itemsOf(input).map((object) => {
     const status = object.status || {};
     const meta = object.metadata || {};
+    const spec = object.spec || {};
     return [
       nameCell(object, ns),
+      triggerBadge(spec.trigger),
       phaseBadge(status.phase),
       cell(status.exitCode),
       cell(status.records),
@@ -141,7 +165,12 @@ export function renderBackupList(input, ns) {
     "<p class=\"blurb\">Every Backup run in this namespace. The AGE column is the " +
     "object's own creation instant, not a duration: these views are computed without " +
     "reading a clock.</p>" +
-    table(["NAME", "PHASE", "EXIT", "RECORDS", "SIGNED", "AGE"], rows, NO_BACKUP_SENTENCE) +
+    "<p class=\"note\">" + esc(TRIGGER_COLUMN_SENTENCE) + "</p>" +
+    table(
+      ["NAME", "TRIGGER", "PHASE", "EXIT", "RECORDS", "SIGNED", "AGE"],
+      rows,
+      NO_BACKUP_SENTENCE,
+    ) +
     listFooter()
   );
 }
@@ -165,10 +194,21 @@ export function renderBackupDetail(object) {
       ["records", cell(status.records)],
       ["manifest key", cell(status.manifestKey)],
       ["triggered by", cell(spec.triggeredBy)],
+      ["trigger", triggerBadge(spec.trigger)],
+      ["retry of", cell(((spec.trigger || {}).retryOf || {}).name)],
       ["slot", cell(spec.slot)],
+      ["schedule", cell((spec.scheduleRef || {}).name)],
+      ["schedule revision", revisionLine(spec.scheduleRef)],
       ["archive", cell(archive.url)],
       ["identity presented", cell(auth.mode) + " " + cell(auth.username)],
     ]) +
+    // WHAT THIS RUN COVERED, from its own `status.selection` and from nowhere
+    // else. `renderCoverageLine` is shared with the schedules page so a
+    // coverage label cannot read one way on a run and another on the schedule
+    // that made it; it renders the sentence naming the missing projection when
+    // the object carries no selection block, and the recorded
+    // `TopicsResolved=False` reason when a dynamic resolution refused.
+    renderCoverageLine(object) +
     "<p class=\"covered\">" + esc(coveredWindow(status.windowCovered)) + "</p>" +
     evidenceBlock(evidence) +
     "<section class=\"check\"><h3>Check it yourself</h3>" +

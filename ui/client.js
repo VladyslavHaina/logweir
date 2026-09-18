@@ -936,7 +936,7 @@ const legacyApi = Object.freeze({
   // pre-write refusals. The CRD's own rules accept the edit either way, so
   // this is the page's boundary and not the cluster's, and the sentence says
   // which command does it instead.
-  cadencePreview() {
+  previewCadence() {
     return Promise.reject(consoleOnly("Previewing a cadence before saving it"));
   },
   editSchedulePolicy() {
@@ -1104,7 +1104,7 @@ const consoleApi = Object.freeze({
     }
   },
   // ------------------------------------------- D1 W7 (PLAT-04.2/05.1/06.2)
-  async cadencePreview(query, options) {
+  async previewCadence(query, options) {
     // A SAFE GET THAT READS NO OBJECT, so there is no namespace to scope it
     // to and no capability flag that covers it. The product API's own rule is
     // "may read schedules in at least one granted namespace", which is a
@@ -1785,8 +1785,8 @@ export function apiClient() {
     // not `dispatchChecks` because they are the SAME five kinds this facade
     // has always served -- a schedule and a Backup -- rather than a domain of
     // their own; the legacy half answers the two console-only ones by name.
-    cadencePreview(query, options) {
-      return dispatch((api) => api.cadencePreview(query, options));
+    previewCadence(query, options) {
+      return dispatch((api) => api.previewCadence(query, options));
     },
     editSchedulePolicy(ns, name, body) {
       return dispatch((api) => api.editSchedulePolicy(ns, name, body));

@@ -55,12 +55,15 @@ import {
   readOptions,
   watchMutation,
 } from "../lifecycle.js";
+import { INCOMPLETE_DISCOVERY_POLICIES } from "../contract.js";
 import {
   ABSENT,
   RETENTION_SENTENCE,
   badge,
   cell,
   copyBlock,
+  detailLink,
+  errorBlock,
   errorBox,
   esc,
   facts,
@@ -68,9 +71,13 @@ import {
   invalidAttributes,
   listFooter,
   mutationStatus,
+  nextRunsPanel,
+  phaseBadge,
   replace,
+  revisionLine,
   rfc3339,
   table,
+  triggerBadge,
 } from "../render.js";
 import {
   clusterName,
@@ -419,9 +426,12 @@ export const SELECTION_UNKNOWN_SENTENCE =
  *  omission. */
 export const COVERAGE_NOT_PUBLISHED =
   "What each RUN actually covered is recorded on that run with a coverage label, and only an " +
-  "attested one ever means everything. This build's product API publishes no selection or " +
-  "coverage block on a schedule or a backup, so the console cannot show it: PLAT-09.2 owes the " +
-  "projection and D1 W7 owes the surface. Read a run with kubectl until then.";
+  "attested one ever means everything. THE SURFACE EXISTS NOW: this page renders " +
+  "status.selection's mode, coverage and counts wherever the object carries them, which in " +
+  "legacy mode is every run. What is still missing is the PROJECTION -- logweir-api's Backup " +
+  "view publishes trigger and scheduleRef and no status.selection at all -- so in console mode " +
+  "there is nothing to read, and this page will not infer a coverage from the mode, the frozen " +
+  "topic list or a successful phase. Read the run with kubectl until that projection lands.";
 
 /** Why a saved destination still cannot be named on a NEW schedule. */
 export const CREATE_HAS_NO_DESTINATION =
@@ -444,11 +454,66 @@ export const CREATE_HAS_NO_DESTINATION =
  *  replace in which an omitted field is REMOVED, so the form that owns it is
  *  the one that owns every field of that policy: D1 W7's. */
 export const EDIT_IS_A_REPLACE =
-  "An EXISTING schedule can be pointed at a saved destination: PUT .../schedules/{name} takes " +
-  "destinationRef under expectedGeneration. This page does not send it. That route replaces the " +
-  "whole future policy -- a field omitted is removed -- and ui/api.js exports create plus one " +
-  "narrow suspend patch and no replace at all, which ui_lint holds. The schedule policy form " +
-  "(D1 W7) owns that route; use it, or kubectl.";
+  "An EXISTING schedule can be pointed at a saved destination, and the Future policy panel on " +
+  "that schedule's card is where: it sends PUT .../schedules/{name} under expectedGeneration. " +
+  "That route replaces the WHOLE future policy -- a field omitted from the request is REMOVED " +
+  "from the schedule -- so the panel shows every field of the policy and sends every one of " +
+  "them, and a field left blank there is a field being cleared rather than a field left alone.";
+
+/** The two selection MODES, verbatim from `weirkeeper::crds::selection::Mode`.
+ *
+ *  A MODE IS NOT A COVERAGE, and the two are rendered side by side because
+ *  they answer different questions. The mode says what the POLICY asked for --
+ *  a named allowlist or every user topic -- and the coverage says what the RUN
+ *  may claim to have got. A dynamic run whose discovery was incomplete is mode
+ *  `AllUserTopics` and coverage `VisibleUserTopicsOnly`, and collapsing those
+ *  two into one word is exactly how "visible user topics only" becomes "all
+ *  topics" in the one place an auditor reads. */
+export const SELECTION_MODES = Object.freeze({
+  SelectedTopics: "named topics",
+  AllUserTopics: "all user topics",
+});
+
+/** The condition type a dynamic run's topic resolution is recorded under. */
+export const TOPICS_RESOLVED = "TopicsResolved";
+
+/** WHY A DYNAMIC RUN HAS NO TOPIC LIST, in the controller's own reason and
+ *  message, or the empty string when `TopicsResolved` is not `False`.
+ *
+ *  `TopicsResolved=False` WITH REASON `DiscoveryRunning` IS NOT A FAILURE --
+ *  it is the discovery Job still working -- so the reason is rendered rather
+ *  than translated into a verdict here. Every other reason the controller
+ *  writes on that condition (`DiscoveryIncomplete`, `SelectionEmpty`,
+ *  `DiscoveryResultUnreadable`, `SourceChangedDuringResolution`,
+ *  `SelectionTooLarge`) is terminal, and the message beside it is the one the
+ *  controller composed. */
+export function discoveryFailure(object) {
+  const conditions = ((object || {}).status || {}).conditions;
+  if (!Array.isArray(conditions)) {
+    return null;
+  }
+  const found = conditions.find((c) => (c || {}).type === TOPICS_RESOLVED);
+  if (found === undefined || found.status !== "False") {
+    return null;
+  }
+  return { reason: found.reason, message: found.message };
+}
+
+/** That refusal as a line, or the empty string. */
+export function renderDiscoveryFailure(object) {
+  const failure = discoveryFailure(object);
+  if (failure === null) {
+    return "";
+  }
+  return (
+    "<p class=\"coverage\" data-topics-resolved=\"False\">" +
+    badge("unverified", "topics not resolved") + " " + cell(failure.reason) +
+    (typeof failure.message === "string" && failure.message.length > 0
+      ? " -- " + esc(failure.message)
+      : "") +
+    "</p>"
+  );
+}
 
 /** The coverage label for one object, or the empty string.
  *
@@ -464,6 +529,18 @@ export function coverageOf(object) {
   return typeof coverage === "string" && COVERAGE_LABELS[coverage] !== undefined ? coverage : "";
 }
 
+/** The coverage label for one run as a CELL: the controller's own words, or
+ *  [`ABSENT`]. The sentence explaining the missing projection belongs beside a
+ *  run and not inside every row of a table, so this is the short form and
+ *  [`renderCoverageLine`] is the long one. */
+export function coverageCell(object) {
+  const coverage = coverageOf(object);
+  return coverage.length === 0
+    ? ABSENT
+    : (claimsWholeCluster(coverage) ? badge("green", COVERAGE_LABELS[coverage])
+      : badge("pending", COVERAGE_LABELS[coverage]));
+}
+
 /** The coverage line: the controller's own label, or the sentence that says
  *  this build does not publish one. */
 export function renderCoverageLine(object) {
@@ -472,10 +549,35 @@ export function renderCoverageLine(object) {
   const topics = Array.isArray(spec.topics) ? spec.topics : [];
   const coverage = coverageOf(o);
   if (coverage.length > 0) {
+    const selection = (o.status || {}).selection || {};
+    const mode = SELECTION_MODES[selection.mode];
+    const counts = [];
+    for (const [field, words] of [
+      ["resolvedTopicCount", "topics frozen"],
+      ["internalExcludedCount", "internal excluded"],
+      ["excludedByRuleCount", "excluded by rule"],
+      ["limitedTopicCount", "the broker refused to describe"],
+    ]) {
+      if (typeof selection[field] === "number") {
+        counts.push(String(selection[field]) + " " + words);
+      }
+    }
     return (
-      "<p class=\"coverage\" data-coverage=\"" + esc(coverage) + "\">" +
+      "<p class=\"coverage\" data-coverage=\"" + esc(coverage) + "\"" +
+      (mode === undefined ? "" : " data-selection-mode=\"" + esc(String(selection.mode)) + "\"") +
+      ">" +
       (claimsWholeCluster(coverage) ? badge("green", "coverage") : badge("pending", "coverage")) +
-      " " + esc(COVERAGE_LABELS[coverage]) + "</p>"
+      " " + esc(COVERAGE_LABELS[coverage]) +
+      // THE MODE IS PRINTED FROM THE FIELD OR NOT AT ALL. A mode this build
+      // does not know is shown as the raw word rather than guessed at; there
+      // is no third mode in the CRD and a fourth would be a contract change.
+      (selection.mode === undefined || selection.mode === null
+        ? ""
+        : " The policy asked for " +
+          esc(mode === undefined ? String(selection.mode) : mode) + ".") +
+      (counts.length === 0 ? "" : " " + esc(counts.join(", ")) + ".") +
+      "</p>" +
+      renderDiscoveryFailure(o)
     );
   }
   if (spec.allUserTopics !== undefined && spec.allUserTopics !== null) {
@@ -489,7 +591,7 @@ export function renderCoverageLine(object) {
       " On incomplete visibility this policy says: <code>" +
       cell(spec.allUserTopics.incompleteDiscovery) + "</code>." +
       (left.length === 0 ? "" : " Excluded: " + esc(left.join(", ")) + ".") +
-      " " + esc(COVERAGE_NOT_PUBLISHED) + "</p>"
+      " " + esc(COVERAGE_NOT_PUBLISHED) + "</p>" + renderDiscoveryFailure(o)
     );
   }
   if (topics.length === 0) {
@@ -1033,6 +1135,10 @@ export function renderRecoveryPoints(ns, object, backups) {
     const covered = status.windowCovered || {};
     return [
       cell(meta.name),
+      triggerBadge(spec.trigger, ((object || {}).spec || {}).retry === undefined
+        ? undefined
+        : object.spec.retry.maxRetries),
+      coverageCell(point),
       cell(spec.slot),
       cell(status.backupId),
       cell(rfc3339(covered.fromMs)),
@@ -1045,7 +1151,8 @@ export function renderRecoveryPoints(ns, object, backups) {
   return (
     "<section class=\"retention\"><h3>Recovery points</h3>" +
     table(
-      ["BACKUP", "SLOT", "BACKUP SET", "COVERED FROM", "COVERED TO", "RECORDS", ""],
+      ["BACKUP", "TRIGGER", "COVERAGE", "SLOT", "BACKUP SET", "COVERED FROM", "COVERED TO",
+        "RECORDS", ""],
       rows,
       NO_POINTS_SENTENCE,
     ) +
@@ -1058,11 +1165,20 @@ export function renderRecoveryPoints(ns, object, backups) {
   );
 }
 
-/** One schedule's card: its name, its toggle, the toggle's status, its
- *  recovery points and the retention panel. */
-export function renderScheduleCard(ns, object, backups) {
+/** ONE SCHEDULE'S CARD: its name, its toggle, the revision in force, what its
+ *  last slot did, its next firings, the runs in flight with the revisions they
+ *  froze, the manual-run panel, the policy form, its recovery points and the
+ *  retention panel.
+ *
+ *  `extra` carries what the card cannot read off the object: the destinations
+ *  the page listed, the readiness verdict, and the per-schedule view state the
+ *  mount half holds. Called without it -- which is what a spec row and the
+ *  first paint look like -- every panel renders from the object alone. */
+export function renderScheduleCard(ns, object, backups, extra) {
   const name = ((object && object.metadata) || {}).name || "";
   const state = mutationFor(formKey(ns, SUSPEND_FORM, name)).state;
+  const e = extra || {};
+  const own = (e.cards || {})[name] || {};
   return (
     "<section class=\"schedule\" data-schedule=\"" + esc(name) + "\"><div class=\"card-head\"><h3>" +
     nameOf(object) + "</h3>" +
@@ -1070,12 +1186,126 @@ export function renderScheduleCard(ns, object, backups) {
     "</div>" +
     "<div class=\"form-status\" data-suspend-status=\"" + esc(name) + "\" tabindex=\"-1\">" +
     renderSuspendStatus(object, state) + "</div>" +
+    renderScheduleRevision(object) +
     renderCoverageLine(object) +
+    renderLastSlot(object) +
+    nextRunsPanel({
+      runs: ((object || {}).status || {}).nextRuns,
+      timeZone: (((object || {}).status || {}).policy || {}).timeZone ||
+        ((object || {}).spec || {}).timeZone,
+      tzdb: (((object || {}).status || {}).policy || {}).tzdb,
+      heading: "Next runs",
+      now: e.now,
+    }) +
+    renderActiveRuns(ns, object, backups) +
+    "<div class=\"run-now-slot\" data-run-now-slot=\"" + esc(name) + "\">" +
+    renderRunNowPanel({
+      ns: ns,
+      name: name,
+      object: object,
+      state: mutationFor(formKey(ns, RUN_NOW_FORM, name)).state,
+      mayOperate: e.mayOperate,
+      readiness: own.readiness || null,
+      acknowledged: own.acknowledged === true,
+      runs: manualRunsOf(name, backups),
+      result: own.result || null,
+    }) + "</div>" +
+    "<div class=\"policy-slot\" data-policy-slot=\"" + esc(name) + "\">" +
+    renderPolicyForm(policyFormView(ns, object, own, e.destinations, e.mayOperate)) + "</div>" +
     renderRecoveryPoints(ns, object, backups) +
     renderRetentionPanel(object) +
     "</section>"
   );
 }
+
+/** THE REVISION IN FORCE, and the one the controller has actually evaluated.
+ *
+ *  THEY ARE PRINTED SEPARATELY BECAUSE THEY MEAN DIFFERENT THINGS. A
+ *  `metadata.generation` ahead of `status.observedGeneration` is an edit the
+ *  controller has not seen yet -- the policy on screen is not yet the policy
+ *  that schedules -- and a console that printed one number would be answering
+ *  the wrong question half the time. `status.policy.evaluatedAt` is when the
+ *  status last MOVED and is never rendered as a liveness signal: the
+ *  controller writes nothing when nothing has changed. */
+export function renderScheduleRevision(object) {
+  const o = object || {};
+  const meta = o.metadata || {};
+  const status = o.status || {};
+  const policy = status.policy;
+  if (typeof meta.generation !== "number" && (policy === undefined || policy === null)) {
+    return "";
+  }
+  const behind = typeof meta.generation === "number" &&
+    typeof status.observedGeneration === "number" &&
+    status.observedGeneration < meta.generation;
+  return (
+    "<p class=\"revision\" data-generation=\"" +
+    (typeof meta.generation === "number" ? String(meta.generation) : "") + "\">" +
+    revisionLine({
+      generation: meta.generation,
+      runPolicySha256: (policy || {}).runPolicySha256,
+    }) +
+    (policy === undefined || policy === null
+      ? ""
+      : " In force since <code>" + esc(String(policy.effectiveSince)) + "</code>, read in " +
+        "<code>" + esc(String(policy.timeZone)) + "</code> against <code>" +
+        esc(String(policy.tzdb)) + "</code>.") +
+    (behind
+      ? " " + badge("pending", "not yet evaluated") + " <span class=\"note\">The controller has " +
+        "evaluated revision g" + String(status.observedGeneration) + "; the policy saved above " +
+        "is not yet the policy that schedules.</span>"
+      : "") +
+    "</p>"
+  );
+}
+
+/** What one schedule's policy form renders from: its draft (or the object's
+ *  own values when there is no draft), its mutation record, the messages a
+ *  failure carries and the preview last taken for it. */
+export function policyFormView(ns, object, own, destinations, may) {
+  const name = ((object || {}).metadata || {}).name || "";
+  const key = formKey(ns, POLICY_FORM, name);
+  const state = mutationFor(key).state;
+  if (state.phase === "succeeded") {
+    dropDraft(key);
+  }
+  const draft = readDraft(key);
+  return {
+    name: name,
+    generation: ((object || {}).metadata || {}).generation,
+    values: draft === null ? policyValuesOf(object) : Object.assign(policyValuesOf(object), draft),
+    state: state,
+    errors: state.phase === "failed" ? fieldErrors(state.error, POLICY_FIELD_PATHS) : null,
+    preview: (own || {}).preview || null,
+    destinations: destinations,
+    mayOperate: may,
+  };
+}
+
+/** The API's field paths, mapped to the policy form's inputs. The paths are
+ *  the REQUEST's, because that is what a `422` from `PUT .../schedules/{name}`
+ *  names. */
+export const POLICY_FIELD_PATHS = Object.freeze([
+  ["schedule", "cron"],
+  ["timeZone", "timeZone"],
+  ["topicSelection", "topics"],
+  ["topicSelection.topics", "topics"],
+  ["topicSelection.allUserTopics", "incompleteDiscovery"],
+  ["topicSelection.allUserTopics.incompleteDiscovery", "incompleteDiscovery"],
+  ["archive", "archive"],
+  ["archive.url", "archive"],
+  ["archive.credentialRef", "archiveSecret"],
+  ["destinationRef", "destination"],
+  ["concurrencyPolicy", "concurrencyPolicy"],
+  ["startingDeadlineSeconds", "startingDeadlineSeconds"],
+  ["catchUpPolicy", "catchUpPolicy"],
+  ["retry.maxRetries", "maxRetries"],
+  ["retry.delaySeconds", "retryDelaySeconds"],
+  ["activeDeadlineSeconds", "activeDeadlineSeconds"],
+  ["retention.keepLast", "keepLast"],
+  ["retention.keepDays", "keepDays"],
+  ["expectedGeneration", "cron"],
+]);
 
 // --------------------------------------------------------------- mount half
 
@@ -1246,7 +1476,6 @@ export async function mountSchedules(node, ns, parse, lifecycle, deps) {
     const backups = collections[1];
     const clusters = collections[2];
     const objects = itemsOf(collection);
-    const panels = objects.map((object) => renderScheduleCard(ns, object, backups)).join("");
     // THE DESTINATIONS ARE A FOURTH READ AND ITS FAILURE IS NOT THE PAGE'S.
     // In legacy mode it is refused by name; the readiness panel then says so
     // and the rest of this view -- the schedules, their runs, the create form
@@ -1255,6 +1484,22 @@ export async function mountSchedules(node, ns, parse, lifecycle, deps) {
     if (!active(lifecycle)) {
       return;
     }
+    // THE PER-CARD VIEW STATE, HELD FOR THIS MOUNT. A draft preview, a
+    // readiness verdict a person asked for and the run one click produced are
+    // none of them facts about the object -- they are what this reader has
+    // done since the page was painted -- so they live here and not in the
+    // projection, and a repaint of one card carries them forward.
+    const cards = Object.create(null);
+    for (const object of objects) {
+      cards[((object.metadata || {}).name) || ""] = {};
+    }
+    const extra = {
+      cards: cards,
+      destinations: readiness.destinations,
+      mayOperate: mayOperate(ns),
+    };
+    const panels = objects
+      .map((object) => renderScheduleCard(ns, object, backups, extra)).join("");
     replace(
       node,
       parse(
@@ -1267,6 +1512,10 @@ export async function mountSchedules(node, ns, parse, lifecycle, deps) {
     );
     wire(node, ns, parse, lifecycle, api, objects, clusters);
     wireReadiness(node, ns, parse, lifecycle, api, readiness);
+    for (const object of objects) {
+      wirePolicy(node, ns, parse, lifecycle, api, object, backups, extra);
+      wireRunNow(node, ns, parse, lifecycle, api, object, backups, extra);
+    }
   } catch (error) {
     if (!cancelled(error, lifecycle) && active(lifecycle)) {
       replace(node, errorBox(error));
@@ -1455,4 +1704,1278 @@ export function wireSourceSelector(node, form, remember, lifecycle) {
       }
     }, lifecycle);
   }
+}
+
+// ===========================================================================
+// D1 W7: the future policy, its preview, and Back up now
+// ===========================================================================
+//
+// WHAT CHANGED UNDER THIS PAGE. Until PLAT-05.1 a BackupSchedule's spec was
+// SEALED: an object-level CEL rule refused every update but `spec.suspend`,
+// for every subject, cluster-admin included. That is why this page's one
+// update is the suspend toggle and why `ui/api.js` exports no replace. D1 W2
+// replaced that rule with three narrower ones -- `sourceRef` is immutable, a
+// dynamic selection needs an empty `topics`, a retrying schedule needs a short
+// name -- and D1 W6 added the route that edits everything else:
+// `PUT .../schedules/{name}`, under an `expectedGeneration` precondition.
+//
+// IT IS A REPLACE AND THE FORM IS BUILT AROUND THAT. A field omitted from the
+// request is REMOVED from the schedule, so a panel that showed three fields
+// and sent three fields would silently clear the other nine. Every field of
+// the policy is therefore on screen, seeded from the object this page read,
+// and every one of them is sent. The panel says so above its button.
+//
+// AND THE BROWSER STILL NEVER EVALUATES CRON. A preset is compiled to its
+// canonical expression by `GET /api/v1/cadence-previews`, which is the
+// controller's own engine and its own tz database; the form sends the preset's
+// parameters, receives the canonical `schedule` string, and SAVES THAT STRING.
+// A preset whose parameters have changed since the last preview cannot be
+// saved until it is previewed again -- not as a nag, but because this page has
+// no expression to save until the server has produced one.
+
+/** The identity of one schedule's policy form in the draft and mutation
+ *  registries. Each schedule has its own record, exactly as the toggle does. */
+export const POLICY_FORM = "schedule-policy";
+
+/** The identity of one schedule's manual-run intent. */
+export const RUN_NOW_FORM = "schedule-run-now";
+
+/** The fields a policy draft keeps. Names, numbers, a cron line, a zone and a
+ *  Secret NAME -- and no credential, exactly as the create form's list. */
+export const POLICY_DRAFT_FIELDS = Object.freeze([
+  "mode", "cron", "minute", "hour", "dayOfWeek", "dayOfMonth", "n",
+  "timeZone", "topics", "selection", "incompleteDiscovery", "excludeTopics",
+  "excludePrefixes", "archive", "archiveSecret", "destination",
+  "concurrencyPolicy", "startingDeadlineSeconds", "catchUpPolicy",
+  "maxRetries", "retryDelaySeconds", "activeDeadlineSeconds",
+  "keepLast", "keepDays", "suspended",
+]);
+
+/** THE PRESET CATALOGUE, AS DISPLAY DATA AND NOTHING ELSE.
+ *
+ *  `weirkeeper::cadence::presets` is the single catalogue and it emits
+ *  `ui/tests/fixtures/cadence-presets.json`; `ui/tests/d1.spec.js` compares
+ *  the kinds and the parameter bounds below with that file, so this table
+ *  cannot drift from Rust without a red row. What is deliberately NOT here is
+ *  the `cronTemplate`: filling it in would be this page compiling a preset,
+ *  which is the second implementation D1 section 4.2 forbids. The templates stay in
+ *  the fixture as evidence of what the server will produce, and the server
+ *  produces it. */
+export const CADENCE_PRESETS = Object.freeze([
+  Object.freeze({
+    kind: "hourly",
+    words: "Every hour, at a fixed minute",
+    parameters: Object.freeze([Object.freeze({ name: "minute", min: 0, max: 59 })]),
+  }),
+  Object.freeze({
+    kind: "everyNHours",
+    words: "Every N hours, at a fixed minute",
+    parameters: Object.freeze([
+      Object.freeze({ name: "n", min: 2, max: 12, values: Object.freeze([2, 3, 4, 6, 8, 12]) }),
+      Object.freeze({ name: "minute", min: 0, max: 59 }),
+    ]),
+  }),
+  Object.freeze({
+    kind: "daily",
+    words: "Every day, at a fixed time",
+    parameters: Object.freeze([
+      Object.freeze({ name: "hour", min: 0, max: 23 }),
+      Object.freeze({ name: "minute", min: 0, max: 59 }),
+    ]),
+  }),
+  Object.freeze({
+    kind: "weekly",
+    words: "Every week, on one day",
+    parameters: Object.freeze([
+      Object.freeze({ name: "dayOfWeek", min: 0, max: 6 }),
+      Object.freeze({ name: "hour", min: 0, max: 23 }),
+      Object.freeze({ name: "minute", min: 0, max: 59 }),
+    ]),
+  }),
+  Object.freeze({
+    kind: "monthly",
+    words: "Every month, on one day of the month",
+    parameters: Object.freeze([
+      Object.freeze({ name: "dayOfMonth", min: 1, max: 28 }),
+      Object.freeze({ name: "hour", min: 0, max: 23 }),
+      Object.freeze({ name: "minute", min: 0, max: 59 }),
+    ]),
+  }),
+]);
+
+/** The cadence mode a form opens on when the saved expression is not one of
+ *  the five. Everything else is "Advanced cron" -- D1 section 4.2's own phrase. */
+export const ADVANCED_CRON = "advanced";
+
+/** What an interval preset counts from, said because the obvious reading is
+ *  wrong. */
+export const EVERY_N_HOURS_SENTENCE =
+  "Every N hours means local wall-clock hours divisible by N -- 0, 6, 12 and 18 for N=6 -- and " +
+  "NOT N hours after the schedule was created. Across a daylight-saving transition the UTC " +
+  "cadence is kept, so an interval schedule neither doubles up nor skips an interval.";
+
+/** The defaults the controller applies to an omitted policy field
+ *  (D1 section 4.1), as the words the form shows beside each input.
+ *
+ *  THEY ARE NOT PREFILLED INTO THE INPUTS, and that is the point. This route
+ *  REMOVES a field the request omits, so an input left blank means "do not set
+ *  this field" and the schedule goes back to the documented default; an input
+ *  prefilled with 3600 would turn every save into a schedule that explicitly
+ *  sets what it used to inherit. */
+export const POLICY_DEFAULTS = Object.freeze({
+  timeZone: "UTC",
+  startingDeadlineSeconds: "3600 (one hour)",
+  catchUpPolicy: "None -- a slot past its deadline is counted and skipped",
+  retry: "no retries",
+  retryDelaySeconds: "300, when a retry policy is set without one",
+  activeDeadlineSeconds: "3600",
+});
+
+/** What the panel says above its button, verbatim. */
+export const WHOLE_POLICY_SENTENCE =
+  "This sends the WHOLE future policy. A field left blank here is a field being REMOVED from " +
+  "the schedule, not a field left alone: the route replaces the policy under the revision this " +
+  "panel was opened at. Runs already created are untouched -- each one froze its own copy -- " +
+  "and the next admission uses what you save here.";
+
+/** Why a preset cannot be saved before it is previewed. */
+export const PREVIEW_BEFORE_SAVE =
+  "Preview this cadence before saving it. A preset is compiled to its canonical cron expression " +
+  "by the API, against the same tz database the controller schedules with, and that expression " +
+  "is what gets saved -- this page does not compile one, because a second cron implementation " +
+  "in a browser is a second opinion about when a backup runs.";
+
+/** The catalogue entry for one preset kind, or `undefined`. */
+export function presetOf(kind) {
+  return CADENCE_PRESETS.find((preset) => preset.kind === kind);
+}
+
+/** The cadence mode a SAVED schedule opens its form on: the preset the product
+ *  API matched its expression to, or "Advanced cron".
+ *
+ *  `__preset` IS THE SERVER'S MATCH AND NOT THIS PAGE'S. `projectSchedule`
+ *  carries it outside `spec`, because a preset is not a field of the object --
+ *  `spec.schedule` is the single source of truth and this is the catalogue
+ *  entry that expression IS. In legacy mode there is no match, so every
+ *  schedule opens on Advanced cron with its stored expression, which is
+ *  exactly what it is. */
+export function cadenceModeOf(object) {
+  const preset = (object || {}).__preset;
+  const kind = preset === null || preset === undefined ? "" : String(preset.kind || "");
+  return presetOf(kind) === undefined ? ADVANCED_CRON : kind;
+}
+
+/** The draft a policy form opens on, read from the object this page last
+ *  listed. Every value is a string, as a form's values are. */
+export function policyValuesOf(object) {
+  const o = object || {};
+  const spec = o.spec || {};
+  const preset = o.__preset || {};
+  const retry = spec.retry || {};
+  const retention = spec.retention || {};
+  const archive = spec.archive || {};
+  const dynamic = spec.allUserTopics || null;
+  const exclude = (dynamic || {}).exclude || {};
+  const number = (value) => (typeof value === "number" ? String(value) : "");
+  return {
+    mode: cadenceModeOf(o),
+    cron: String(spec.schedule || ""),
+    minute: number(preset.minute),
+    hour: number(preset.hour),
+    dayOfWeek: number(preset.dayOfWeek),
+    dayOfMonth: number(preset.dayOfMonth),
+    n: number(preset.n),
+    timeZone: String(spec.timeZone || ""),
+    selection: dynamic === null ? "named" : "dynamic",
+    topics: (Array.isArray(spec.topics) ? spec.topics : []).join(", "),
+    incompleteDiscovery: String((dynamic || {}).incompleteDiscovery || ""),
+    excludeTopics: (Array.isArray(exclude.topics) ? exclude.topics : []).join(", "),
+    excludePrefixes: (Array.isArray(exclude.prefixes) ? exclude.prefixes : []).join(", "),
+    archive: String(archive.url || ""),
+    archiveSecret: String((archive.secretRef || {}).name || ""),
+    destination: String((spec.destinationRef || {}).name || ""),
+    concurrencyPolicy: String(spec.concurrencyPolicy || ""),
+    startingDeadlineSeconds: number(spec.startingDeadlineSeconds),
+    catchUpPolicy: String(spec.catchUpPolicy || ""),
+    maxRetries: number(retry.maxRetries),
+    retryDelaySeconds: number(retry.delaySeconds),
+    activeDeadlineSeconds: number(spec.activeDeadlineSeconds),
+    keepLast: number(retention.keepLast),
+    keepDays: number(retention.keepDays),
+    suspended: spec.suspend === true ? "true" : "false",
+  };
+}
+
+/** The cadence-preview query one set of form values asks for, or `null` when
+ *  the values do not describe a cadence yet.
+ *
+ *  EXACTLY ONE OF `schedule` OR `preset`. The route answers `400` for both and
+ *  `422` for a parameter belonging to a DIFFERENT preset, so this sends the
+ *  named preset's own parameters and nothing else. */
+export function previewQueryFor(values) {
+  const v = values || {};
+  const query = { count: PREVIEW_COUNT };
+  const zone = String(v.timeZone || "").trim();
+  if (zone.length > 0) {
+    query.timeZone = zone;
+  }
+  if (v.mode === ADVANCED_CRON) {
+    const cron = String(v.cron || "").trim();
+    if (cron.length === 0) {
+      return null;
+    }
+    query.schedule = cron;
+    return query;
+  }
+  const preset = presetOf(v.mode);
+  if (preset === undefined) {
+    return null;
+  }
+  query.preset = preset.kind;
+  for (const parameter of preset.parameters) {
+    const raw = String(v[parameter.name] === undefined ? "" : v[parameter.name]).trim();
+    if (!/^[0-9]+$/.test(raw)) {
+      return null;
+    }
+    query[parameter.name] = Number(raw);
+  }
+  return query;
+}
+
+/** How many firings a draft preview asks for. Five, which is what the
+ *  controller stores in `status.nextRuns`, so a draft and a saved schedule
+ *  show the same number of rows and a reader is comparing like with like. */
+export const PREVIEW_COUNT = 5;
+
+/** Whether the preview on screen is a preview OF these values. Compared as the
+ *  query, not as the form: two drafts that ask the same question get the same
+ *  answer, and a change to a field the preview does not depend on -- retention,
+ *  the archive -- does not invalidate it. */
+export function previewMatches(preview, values) {
+  const p = preview || null;
+  if (p === null || p.query === undefined || p.query === null) {
+    return false;
+  }
+  const wanted = previewQueryFor(values);
+  if (wanted === null) {
+    return false;
+  }
+  return JSON.stringify(p.query) === JSON.stringify(wanted);
+}
+
+/** The page's own checks over a policy draft, by field. A CONVENIENCE: the
+ *  API's `422` and the controller's `Ready` condition are the gate, and this
+ *  refuses only what this page can be sure of. */
+export function validatePolicy(values) {
+  const v = values || {};
+  const problems = Object.create(null);
+  if (v.mode === ADVANCED_CRON) {
+    const cron = String(v.cron || "").trim();
+    const fields = cron.split(/\s+/).filter((f) => f.length > 0);
+    const macro = cron === "@hourly" || cron === "@daily" || cron === "@weekly";
+    if (!macro && (fields.length !== 5 || fields.some((f) => !CRON_FIELD.test(f)))) {
+      problems.cron = "five cron fields (minute hour day-of-month month day-of-week), or " +
+        "@hourly, @daily or @weekly";
+    }
+  } else {
+    const preset = presetOf(v.mode);
+    if (preset === undefined) {
+      problems.mode = "choose a cadence: one of the five presets, or Advanced cron";
+    } else {
+      for (const parameter of preset.parameters) {
+        const raw = String(v[parameter.name] === undefined ? "" : v[parameter.name]).trim();
+        if (!/^[0-9]+$/.test(raw)) {
+          problems[parameter.name] = "a whole number from " + String(parameter.min) + " to " +
+            String(parameter.max);
+          continue;
+        }
+        const value = Number(raw);
+        if (value < parameter.min || value > parameter.max) {
+          problems[parameter.name] = "from " + String(parameter.min) + " to " +
+            String(parameter.max);
+        } else if (parameter.values !== undefined &&
+          parameter.values.indexOf(value) === -1) {
+          problems[parameter.name] = "one of " + parameter.values.join(", ");
+        }
+      }
+    }
+  }
+  // THE SELECTION'S TWO SHAPES, AND NOTHING BETWEEN THEM. The CRD's own rule
+  // R2 refuses `allUserTopics` beside a non-empty `topics`, and an empty
+  // allowlist with no dynamic block is a schedule that backs nothing up; both
+  // are refused here so neither reaches the API as a 422 a reader has to
+  // decode.
+  if (v.selection === "dynamic") {
+    if (INCOMPLETE_DISCOVERY_POLICIES.indexOf(String(v.incompleteDiscovery || "")) === -1) {
+      problems.incompleteDiscovery = "choose what a run does when discovery cannot prove it saw " +
+        "everything: " + INCOMPLETE_DISCOVERY_POLICIES.join(" or ") + ". There is no default, " +
+        "because both possible defaults are wrong in a way you would not notice";
+    }
+  } else {
+    const topics = String(v.topics || "").split(",").map((t) => t.trim())
+      .filter((t) => t.length > 0);
+    if (topics.length === 0) {
+      problems.topics = "name at least one topic; an empty list is not an allowlist";
+    } else {
+      const globbed = topics.filter((t) => t.split("").some((c) => GLOB.indexOf(c) !== -1));
+      if (globbed.length > 0) {
+        problems.topics = "names, never patterns: " + globbed.join(", ") +
+          " carries a glob metacharacter";
+      }
+    }
+  }
+  const archive = String(v.archive || "").trim();
+  const destination = String(v.destination || "").trim();
+  if (destination.length === 0 && (archive.length === 0 ||
+    archive.indexOf(SCHEME_SEPARATOR) <= 0)) {
+    problems.archive = "an object-store URL with its scheme, such as s3" + SCHEME_SEPARATOR +
+      "bucket/prefix -- or choose a saved destination instead";
+  }
+  for (const [key, min, max] of [
+    ["startingDeadlineSeconds", 60, 604800],
+    ["activeDeadlineSeconds", 60, 86400],
+    ["maxRetries", 0, 3],
+    ["retryDelaySeconds", 60, 21600],
+    ["keepLast", 0, 1000000],
+    ["keepDays", 0, 1000000],
+  ]) {
+    const raw = String(v[key] === undefined || v[key] === null ? "" : v[key]).trim();
+    if (raw.length === 0) {
+      continue;
+    }
+    if (!/^[0-9]+$/.test(raw)) {
+      problems[key] = "a whole number, or blank for the default";
+    } else if (Number(raw) < min || Number(raw) > max) {
+      problems[key] = "from " + String(min) + " to " + String(max) + ", or blank";
+    }
+  }
+  return problems;
+}
+
+/** The `UpdateSchedulePolicyRequest` a filled-in panel produces.
+ *
+ *  `schedule` IS THE CANONICAL EXPRESSION THE PREVIEW RETURNED for a preset,
+ *  and the typed line for Advanced cron. `expectedGeneration` is the revision
+ *  the panel was opened at, and `sourceRef` is NEVER sent: the route carries it
+ *  only to refuse it, and this page has no reason to ask for that refusal. */
+export function policyBody(values, generation, canonicalSchedule) {
+  const v = values || {};
+  const text = (key) => String(v[key] === undefined || v[key] === null ? "" : v[key]).trim();
+  const whole = (key) => (text(key).length === 0 ? null : Number(text(key)));
+  const topics = text("topics").split(",").map((t) => t.trim()).filter((t) => t.length > 0);
+  const selection = v.selection === "dynamic"
+    ? { topics: [], allUserTopics: { incompleteDiscovery: text("incompleteDiscovery") } }
+    : { topics: topics };
+  if (v.selection === "dynamic") {
+    const exclude = {};
+    const names = text("excludeTopics").split(",").map((t) => t.trim())
+      .filter((t) => t.length > 0);
+    const prefixes = text("excludePrefixes").split(",").map((t) => t.trim())
+      .filter((t) => t.length > 0);
+    if (names.length > 0) {
+      exclude.topics = names;
+    }
+    if (prefixes.length > 0) {
+      exclude.prefixes = prefixes;
+    }
+    if (Object.keys(exclude).length > 0) {
+      selection.allUserTopics.exclude = exclude;
+    }
+  }
+  const body = {
+    expectedGeneration: generation,
+    schedule: String(canonicalSchedule),
+    topicSelection: selection,
+    suspended: v.suspended === "true" || v.suspended === true,
+  };
+  if (text("timeZone").length > 0) {
+    body.timeZone = text("timeZone");
+  }
+  // ONE LOCATION, NEVER BOTH. `archive` and `destinationRef` are two spellings
+  // of one place, and the CRD's own sentinel rule refuses a schedule carrying
+  // a real URL beside a destination. A chosen destination wins and the inline
+  // fields are not sent at all; the API builds the sentinel URL itself.
+  if (text("destination").length > 0) {
+    body.destinationRef = { name: text("destination") };
+  } else {
+    const archive = { url: text("archive") };
+    if (text("archiveSecret").length > 0) {
+      archive.credentialRef = { name: text("archiveSecret") };
+    }
+    body.archive = archive;
+  }
+  if (text("concurrencyPolicy").length > 0) {
+    body.concurrencyPolicy = text("concurrencyPolicy");
+  }
+  if (whole("startingDeadlineSeconds") !== null) {
+    body.startingDeadlineSeconds = whole("startingDeadlineSeconds");
+  }
+  if (text("catchUpPolicy").length > 0) {
+    body.catchUpPolicy = text("catchUpPolicy");
+  }
+  if (whole("maxRetries") !== null) {
+    const retry = { maxRetries: whole("maxRetries") };
+    if (whole("retryDelaySeconds") !== null) {
+      retry.delaySeconds = whole("retryDelaySeconds");
+    }
+    body.retry = retry;
+  }
+  if (whole("activeDeadlineSeconds") !== null) {
+    body.activeDeadlineSeconds = whole("activeDeadlineSeconds");
+  }
+  const retention = {};
+  if (whole("keepLast") !== null) {
+    retention.keepLast = whole("keepLast");
+  }
+  if (whole("keepDays") !== null) {
+    retention.keepDays = whole("keepDays");
+  }
+  if (Object.keys(retention).length > 0) {
+    body.retention = retention;
+  }
+  return body;
+}
+
+// ------------------------------------------------------ the policy form
+
+function policyId(name, field) {
+  return "policy-" + name + "-" + field;
+}
+
+function policyNumber(name, values, errors, field, label, help) {
+  return (
+    "<div class=\"field\"><label for=\"" + esc(policyId(name, field)) + "\">" + esc(label) +
+    "</label><input id=\"" + esc(policyId(name, field)) + "\" name=\"" + esc(field) +
+    "\" type=\"number\" value=\"" + esc(String(values[field] || "")) + "\"" +
+    invalidAttributes(policyId(name, field), errors[field]) + ">" +
+    "<p class=\"help\">" + esc(help) + "</p>" +
+    fieldErrorLine(policyId(name, field), errors[field]) + "</div>"
+  );
+}
+
+function optionList(id, field, chosen, options) {
+  return options.map((option) => {
+    const value = option[0];
+    return "<option value=\"" + esc(value) + "\"" +
+      (String(chosen) === value ? " selected" : "") + ">" + esc(option[1]) + "</option>";
+  }).join("");
+}
+
+/** The cadence half of the panel: the mode, its parameters and the zone. */
+function renderCadenceFields(name, values, errors) {
+  const preset = presetOf(values.mode);
+  const modes = [[ADVANCED_CRON, "Advanced cron"]].concat(
+    CADENCE_PRESETS.map((p) => [p.kind, p.words]),
+  );
+  return (
+    "<fieldset class=\"cadence\"><legend>cadence</legend>" +
+    "<div class=\"field\"><label for=\"" + esc(policyId(name, "mode")) + "\">how often</label>" +
+    "<select id=\"" + esc(policyId(name, "mode")) + "\" name=\"mode\">" +
+    optionList(policyId(name, "mode"), "mode", values.mode, modes) + "</select>" +
+    "<p class=\"help\">A preset is compiled to a canonical cron expression by the API and that " +
+    "expression is what is stored: spec.schedule is the single source of truth, and a preset " +
+    "is never saved as one.</p>" +
+    fieldErrorLine(policyId(name, "mode"), errors.mode) + "</div>" +
+    (preset === undefined
+      ? "<div class=\"field\"><label for=\"" + esc(policyId(name, "cron")) +
+        "\">schedule, five cron fields</label><input id=\"" + esc(policyId(name, "cron")) +
+        "\" name=\"cron\" value=\"" + esc(String(values.cron || "")) + "\"" +
+        invalidAttributes(policyId(name, "cron"), errors.cron) + ">" +
+        "<p class=\"help\">minute hour day-of-month month day-of-week, read in the time zone " +
+        "below.</p>" + fieldErrorLine(policyId(name, "cron"), errors.cron) + "</div>"
+      : preset.parameters.map((parameter) => policyNumber(
+        name, values, errors, parameter.name, parameter.name,
+        "from " + String(parameter.min) + " to " + String(parameter.max) +
+          (parameter.values === undefined ? "" : "; one of " + parameter.values.join(", ")),
+      )).join("") +
+        (preset.kind === "everyNHours"
+          ? "<p class=\"help\">" + esc(EVERY_N_HOURS_SENTENCE) + "</p>"
+          : "")) +
+    "<div class=\"field\"><label for=\"" + esc(policyId(name, "timeZone")) + "\">time zone</label>" +
+    "<input id=\"" + esc(policyId(name, "timeZone")) + "\" name=\"timeZone\" value=\"" +
+    esc(String(values.timeZone || "")) + "\"" +
+    invalidAttributes(policyId(name, "timeZone"), errors.timeZone) + ">" +
+    "<p class=\"help\">An IANA name such as Europe/Berlin. Blank means " +
+    esc(POLICY_DEFAULTS.timeZone) + ": the cron fields are read as UTC times. A name this " +
+    "build's tz database does not have is refused by the controller with reason " +
+    "UnknownTimeZone -- never a silent fall back to UTC.</p>" +
+    fieldErrorLine(policyId(name, "timeZone"), errors.timeZone) + "</div>" +
+    "<div class=\"actions\"><button type=\"button\" data-preview=\"" + esc(name) +
+    "\">Preview next runs</button></div>" +
+    "</fieldset>"
+  );
+}
+
+/** The selection half: a named allowlist, or the dynamic block. */
+function renderSelectionFields(name, values, errors) {
+  const dynamic = values.selection === "dynamic";
+  return (
+    "<fieldset class=\"selection\"><legend>topics</legend>" +
+    "<div class=\"field\"><label for=\"" + esc(policyId(name, "selection")) + "\">selection</label>" +
+    "<select id=\"" + esc(policyId(name, "selection")) + "\" name=\"selection\">" +
+    optionList(policyId(name, "selection"), "selection", values.selection, [
+      ["named", "Named topics -- an explicit allowlist"],
+      ["dynamic", "All user topics -- resolved per run from a discovery"],
+    ]) + "</select>" +
+    "<p class=\"help\">" + esc(DYNAMIC_SELECTION_SENTENCE) + "</p></div>" +
+    (dynamic
+      ? "<div class=\"field\"><label for=\"" + esc(policyId(name, "incompleteDiscovery")) +
+        "\">when discovery cannot prove it saw everything</label>" +
+        "<select id=\"" + esc(policyId(name, "incompleteDiscovery")) +
+        "\" name=\"incompleteDiscovery\">" +
+        optionList(policyId(name, "incompleteDiscovery"), "incompleteDiscovery",
+          values.incompleteDiscovery, [
+            ["", "choose one -- there is no default"],
+            ["Refuse", "Refuse -- fail the run"],
+            ["BackUpVisibleTopics",
+              "BackUpVisibleTopics -- run, and label the coverage visible-only"],
+          ]) + "</select>" +
+        "<p class=\"help\">Required, with no default: both possible defaults are wrong in a way " +
+        "you would not notice.</p>" +
+        fieldErrorLine(policyId(name, "incompleteDiscovery"), errors.incompleteDiscovery) +
+        "</div>" +
+        "<div class=\"field\"><label for=\"" + esc(policyId(name, "excludeTopics")) +
+        "\">exclude these exact names, comma separated</label><input id=\"" +
+        esc(policyId(name, "excludeTopics")) + "\" name=\"excludeTopics\" value=\"" +
+        esc(String(values.excludeTopics || "")) + "\">" +
+        "<p class=\"help\">Exact names, never patterns. Internal topics are always excluded.</p>" +
+        "</div>" +
+        "<div class=\"field\"><label for=\"" + esc(policyId(name, "excludePrefixes")) +
+        "\">exclude these literal prefixes, comma separated</label><input id=\"" +
+        esc(policyId(name, "excludePrefixes")) + "\" name=\"excludePrefixes\" value=\"" +
+        esc(String(values.excludePrefixes || "")) + "\">" +
+        "<p class=\"help\">Literal prefixes, never patterns: dev- matches dev-orders and not " +
+        "orders-dev.</p></div>"
+      : "<div class=\"field\"><label for=\"" + esc(policyId(name, "topics")) +
+        "\">topics, comma separated -- names, never patterns</label><input id=\"" +
+        esc(policyId(name, "topics")) + "\" name=\"topics\" value=\"" +
+        esc(String(values.topics || "")) + "\"" +
+        invalidAttributes(policyId(name, "topics"), errors.topics) + ">" +
+        "<p class=\"help\">An explicit allowlist. Every run under this policy backs up exactly " +
+        "these.</p>" + fieldErrorLine(policyId(name, "topics"), errors.topics) + "</div>") +
+    "</fieldset>"
+  );
+}
+
+/** The deadlines, the catch-up policy and the retry policy, each with the
+ *  value an absent field means. */
+function renderPolicyFields(name, values, errors) {
+  return (
+    "<fieldset class=\"run-policy\"><legend>deadlines, catch-up and retries</legend>" +
+    policyNumber(name, values, errors, "startingDeadlineSeconds", "startingDeadlineSeconds",
+      "How long after its instant a slot may still start. 60 to 604800. Blank means the " +
+      "default, " + POLICY_DEFAULTS.startingDeadlineSeconds + ".") +
+    "<div class=\"field\"><label for=\"" + esc(policyId(name, "catchUpPolicy")) +
+    "\">catchUpPolicy</label><select id=\"" + esc(policyId(name, "catchUpPolicy")) +
+    "\" name=\"catchUpPolicy\">" +
+    optionList(policyId(name, "catchUpPolicy"), "catchUpPolicy", values.catchUpPolicy, [
+      ["", "not set -- the default, " + POLICY_DEFAULTS.catchUpPolicy],
+      ["None", "None -- count the missed slot and move on"],
+      ["Latest", "Latest -- run the latest missed slot once, and only that one"],
+    ]) + "</select>" +
+    "<p class=\"help\">Latest never runs more than one catch-up, ever, and never a slot older " +
+    "than the revision in force: a schedule edited at noon does not retroactively back up the " +
+    "morning under the new policy.</p></div>" +
+    policyNumber(name, values, errors, "maxRetries", "retry.maxRetries",
+      "0 to 3. Blank means " + POLICY_DEFAULTS.retry + ". A retry is a NEW Backup with a new " +
+      "execution id; nothing re-runs an existing one.") +
+    policyNumber(name, values, errors, "retryDelaySeconds", "retry.delaySeconds",
+      "60 to 21600. Blank means " + POLICY_DEFAULTS.retryDelaySeconds + ".") +
+    policyNumber(name, values, errors, "activeDeadlineSeconds", "activeDeadlineSeconds",
+      "The run's own deadline, copied into each Backup. 60 to 86400. Blank means the default, " +
+      POLICY_DEFAULTS.activeDeadlineSeconds + ". A dynamic selection needs at least 120.") +
+    "<div class=\"field\"><label for=\"" + esc(policyId(name, "concurrencyPolicy")) +
+    "\">concurrencyPolicy</label><select id=\"" + esc(policyId(name, "concurrencyPolicy")) +
+    "\" name=\"concurrencyPolicy\">" +
+    optionList(policyId(name, "concurrencyPolicy"), "concurrencyPolicy",
+      values.concurrencyPolicy, [
+        ["", "not set -- the default, Forbid"],
+        ["Forbid", "Forbid -- never overlap"],
+        ["Allow", "Allow -- permit overlapping slots"],
+      ]) + "</select></div>" +
+    "<div class=\"field\"><label for=\"" + esc(policyId(name, "suspended")) +
+    "\">suspend</label><select id=\"" + esc(policyId(name, "suspended")) + "\" name=\"suspended\">" +
+    optionList(policyId(name, "suspended"), "suspended", values.suspended, [
+      ["false", "not suspended"],
+      ["true", "suspended -- admit no further slots"],
+    ]) + "</select>" +
+    "<p class=\"help\">A suspend flip moves the schedule's generation and leaves the run-policy " +
+    "digest unchanged, which is why both are printed on every run.</p></div>" +
+    "</fieldset>"
+  );
+}
+
+/** Where the runs are written, and what a saved destination costs to change. */
+function renderPolicyLocation(name, values, errors, destinations) {
+  const all = Array.isArray(destinations) ? destinations : [];
+  return (
+    "<fieldset class=\"legacy-archive\"><legend>where runs are written</legend>" +
+    "<div class=\"field\"><label for=\"" + esc(policyId(name, "destination")) +
+    "\">saved destination</label><select id=\"" + esc(policyId(name, "destination")) +
+    "\" name=\"destination\">" +
+    optionList(policyId(name, "destination"), "destination", values.destination,
+      [["", "none -- use the inline archive below"]]
+        .concat(all.map((d) => [d.name, d.name + " -- " + d.canonicalUrl]))) + "</select>" +
+    "<p class=\"help\">Choosing one sends destinationRef and NOT the inline fields: the two are " +
+    "two spellings of one location, and the API writes the sentinel URL itself.</p></div>" +
+    "<div class=\"field\"><label for=\"" + esc(policyId(name, "archive")) +
+    "\">archive URL</label><input id=\"" + esc(policyId(name, "archive")) +
+    "\" name=\"archive\" value=\"" + esc(String(values.archive || "")) + "\"" +
+    invalidAttributes(policyId(name, "archive"), errors.archive) + ">" +
+    fieldErrorLine(policyId(name, "archive"), errors.archive) + "</div>" +
+    "<div class=\"field\"><label for=\"" + esc(policyId(name, "archiveSecret")) +
+    "\">archive credential (Secret name)</label><input id=\"" +
+    esc(policyId(name, "archiveSecret")) + "\" name=\"archiveSecret\" value=\"" +
+    esc(String(values.archiveSecret || "")) + "\">" +
+    "<p class=\"help\">Only its name is sent.</p></div>" +
+    policyNumber(name, values, errors, "keepLast", "retention keepLast",
+      "How many sets a retention evaluation keeps. It reports; it never deletes.") +
+    policyNumber(name, values, errors, "keepDays", "retention keepDays",
+      "How many days of sets it keeps.") +
+    "</fieldset>"
+  );
+}
+
+/** ONE SCHEDULE'S FUTURE POLICY, editable.
+ *
+ *  `view` is `{name, generation, values, errors, state, preview, destinations,
+ *  mayOperate, now}`. `generation` absent is the one case the panel refuses to
+ *  open a form for: the route's precondition IS the generation, and a page
+ *  that sent an edit without one would be asking the API to apply a policy to
+ *  whatever revision happens to be current -- which is the lost update this
+ *  precondition exists to prevent. */
+export function renderPolicyForm(view) {
+  const v = view || {};
+  const name = String(v.name || "");
+  const values = Object.assign({}, v.values || {});
+  const errors = ((v.errors || {}).fields) || {};
+  const state = v.state || {};
+  const pending = state.phase === "pending";
+  const generation = v.generation;
+  const preview = v.preview || null;
+  const previewed = previewMatches(preview, values);
+  if (v.mayOperate === false) {
+    return (
+      "<section class=\"policy\" data-policy=\"" + esc(name) + "\"><h4>Future policy</h4>" +
+      "<p class=\"note\">This login may read this schedule and not edit its policy.</p></section>"
+    );
+  }
+  if (typeof generation !== "number") {
+    return (
+      "<section class=\"policy\" data-policy=\"" + esc(name) + "\"><h4>Future policy</h4>" +
+      "<p class=\"note\" data-no-generation=\"1\">" + esc(NO_GENERATION_SENTENCE) +
+      "</p></section>"
+    );
+  }
+  return (
+    "<section class=\"policy\" data-policy=\"" + esc(name) + "\"><h4>Future policy</h4>" +
+    "<p class=\"note\">" + esc(WHOLE_POLICY_SENTENCE) + "</p>" +
+    "<p class=\"note\" data-editing-generation=\"" + String(generation) + "\">Editing revision " +
+    "<code>g" + String(generation) + "</code>. Saving makes the next revision, and the NEXT run " +
+    "admitted carries it; a run already created keeps the revision it froze.</p>" +
+    "<form class=\"policy-form\" data-name=\"" + esc(name) + "\" novalidate" +
+    (pending ? " aria-busy=\"true\"" : "") + ">" +
+    "<fieldset class=\"form-body\"" + (pending ? " disabled" : "") + ">" +
+    renderCadenceFields(name, values, errors) +
+    renderSelectionFields(name, values, errors) +
+    renderPolicyLocation(name, values, errors, v.destinations) +
+    renderPolicyFields(name, values, errors) +
+    "<div class=\"actions\"><button type=\"submit\" class=\"primary\"" +
+    (previewed || values.mode === ADVANCED_CRON ? "" : " disabled") + ">Save policy</button>" +
+    "</div></fieldset>" +
+    "<div class=\"form-status\" data-policy-status=\"" + esc(name) + "\" tabindex=\"-1\">" +
+    mutationStatus(state, {
+      kind: "BackupSchedule", name: name, verb: "replace", field: "spec", value: "the policy",
+    }, ((v.errors || {}).unmatched)) + "</div>" +
+    "</form>" +
+    (previewed || values.mode === ADVANCED_CRON
+      ? ""
+      : "<p class=\"note\" data-preview-first=\"1\">" + esc(PREVIEW_BEFORE_SAVE) + "</p>") +
+    "<div class=\"preview-slot\" data-preview-slot=\"" + esc(name) + "\">" +
+    renderPolicyPreview(preview, values) + "</div>" +
+    "</section>"
+  );
+}
+
+/** Why a schedule whose revision this build does not publish cannot be
+ *  edited from here. */
+export const NO_GENERATION_SENTENCE =
+  "This schedule's policy cannot be edited from this page: the edit route takes the revision " +
+  "the form was opened at as a precondition, and this build is not publishing a generation for " +
+  "this object. Without it the request would ask the API to replace whatever revision happens " +
+  "to be current when it lands, which is the lost update the precondition exists to prevent. " +
+  "Edit it with kubectl, which carries its own resourceVersion precondition.";
+
+/** A draft cadence's preview, or the words that say none has been taken. */
+export function renderPolicyPreview(preview, values) {
+  const p = preview || null;
+  if (p === null) {
+    return "";
+  }
+  if (p.error !== undefined && p.error !== null) {
+    return errorBlock(p.error, true);
+  }
+  const answer = p.answer || {};
+  const stale = !previewMatches(p, values || {});
+  return (
+    (stale
+      ? "<p class=\"note\" data-preview-stale=\"1\">" + badge("unverified", "out of date") +
+        " The cadence on screen has changed since this preview was taken, so these instants are " +
+        "the previous cadence's. Preview again before saving.</p>"
+      : "<p class=\"note\" data-canonical=\"" + esc(String(answer.schedule || "")) + "\">" +
+        "This cadence compiles to <code>" + esc(String(answer.schedule || "")) + "</code>, and " +
+        "that expression is what gets saved.</p>") +
+    nextRunsPanel({
+      runs: answer.runs,
+      timeZone: answer.timeZone,
+      tzdb: answer.tzdb,
+      heading: "The next " + String(PREVIEW_COUNT) + " firings of this draft",
+    })
+  );
+}
+
+// ------------------------------------------------------- Back up now
+
+// THE INTENT, AND WHY IT LIVES IN THIS MODULE'S MEMORY.
+//
+// A manual run has NO NAME UNTIL THE SERVER DERIVES ONE, so the trick every
+// other create on this page uses -- creating the same name twice is
+// `AlreadyExists`, which IS the idempotence -- is not available. What replaces
+// it is the product API's `Idempotency-Key`: the same key returns the same
+// run, with `replayed: true`, however many times it is sent.
+//
+// ONE KEY PER INTENT, NOT PER CLICK AND NOT PER REQUEST. The key is minted
+// when a person first asks for a run of this schedule and kept for as long as
+// that intent lives, so a double click, a retry after a timeout and a "Check
+// status" on an unknown outcome all resend the SAME key and all get the SAME
+// run. A DELIBERATE second backup is a new intent and therefore a new key --
+// which is the acceptance criterion's other half: repeated clicks make one
+// run, and a later backup makes another.
+//
+// A RELOAD LOSES IT, AND THAT IS NOT A BUG THIS PAGE CAN FIX. There is no
+// browser storage anywhere in this tree -- `scripts/check-ui-offline.sh` fails
+// the build over the byte sequences that would introduce one -- so a key
+// cannot survive a refresh, and a key derived from the clock or from the form
+// would not be one key per intent. What the page does instead is SHOW THE RUN:
+// after a reload the panel lists the manual runs of this schedule that already
+// exist, newest first, so the person sees the run their click made rather than
+// wondering and clicking again. D1 section 8.5's "After refresh" row is this
+// behaviour, and the sentence below is on screen.
+const intents = new Map();
+let intentCounter = 0;
+
+/** The idempotency intent for `key`, minted on first use. */
+export function intentFor(key) {
+  let held = intents.get(key);
+  if (held === undefined) {
+    intentCounter += 1;
+    held = "logweir-ui.manual." + String(intentCounter) + "." + String(key);
+    // The product API takes 8 to 128 visible ASCII characters. A long
+    // namespace and a long schedule name together can exceed that, so an
+    // over-long composition is shortened deterministically rather than
+    // truncated -- truncation would make two intents one key.
+    if (held.length > 128) {
+      held = "logweir-ui.manual." + String(intentCounter) + ".h" +
+        String(key.length) + "." + String(key).slice(0, 80);
+    }
+    intents.set(key, held);
+  }
+  return held;
+}
+
+/** Abandons the intent held for `key`, so the next click is a NEW run. Called
+ *  when a person deliberately asks for another backup, and when a `409
+ *  policy_changed` is confirmed against the revision that is now in force. */
+export function newIntent(key) {
+  intents.delete(key);
+  return intentFor(key);
+}
+
+/** Forgets every intent. The suite's reset; nothing on the page calls it. */
+export function resetIntents() {
+  intents.clear();
+  intentCounter = 0;
+}
+
+/** What a manual run is, and what it is not. */
+export const RUN_NOW_SENTENCE =
+  "A manual run creates one Backup right now, with the topics, archive and deadline of this " +
+  "schedule's CURRENT revision, copied at the moment it is created. It does not move the " +
+  "schedule: no slot is consumed, no missed slot is caught up, and the next scheduled run is " +
+  "the one it was going to be.";
+
+/** Why a suspended schedule still offers the button. */
+export const SUSPENDED_NOTICE =
+  "This schedule is suspended, so it admits no slots of its own. A manual run is still allowed " +
+  "-- nothing about a schedule blocks one -- and running it does NOT resume the schedule. " +
+  "Confirm below if that is what you mean.";
+
+/** Why an active run does not block one either. */
+export const ACTIVE_RUN_NOTICE =
+  "A run of this schedule is already active. A manual run is neither counted against " +
+  "concurrencyPolicy nor blocked by it, so this would be a second run against the same topics " +
+  "at the same time.";
+
+/** What the page says when readiness was never checked. */
+export const READINESS_NOT_CHECKED =
+  "Readiness not checked; the run reports its own prerequisites.";
+
+/** What a refresh costs, on screen. */
+export const AFTER_REFRESH_SENTENCE =
+  "Reloading this page forgets the idempotency key a click holds, because nothing in this " +
+  "console is stored in the browser. The manual runs below are what already exists: read them " +
+  "before clicking again, because a new click after a reload is a deliberate NEW run.";
+
+/** The manual runs of one schedule, newest first, from the Backups this page
+ *  read. A run is manual when its own recorded trigger says so. */
+export function manualRunsOf(schedule, backups) {
+  const name = String(schedule || "");
+  return itemsOf(backups)
+    .filter((backup) => {
+      const spec = (backup || {}).spec || {};
+      const trigger = spec.trigger || {};
+      return trigger.kind === "Manual" && ((spec.scheduleRef || {}).name === name);
+    })
+    .slice()
+    .sort((a, b) => String(((b || {}).metadata || {}).creationTimestamp || "")
+      .localeCompare(String(((a || {}).metadata || {}).creationTimestamp || "")));
+}
+
+/** THE "BACK UP NOW" PANEL for one schedule.
+ *
+ *  `view` is `{ns, name, object, state, mayOperate, unavailable,
+ *  unavailableReason, readiness, acknowledged, runs, result}`.
+ *
+ *  THE BUTTON'S FIRST STATE IS DISABLED WHEN SOMETHING IS WRONG, AND THE WORDS
+ *  BESIDE IT ARE THE OBJECT'S OWN. A suspended schedule and a not-ready
+ *  preflight are the two cases; neither is a refusal -- the API gates on
+ *  neither, by design -- so what the panel does is require a second, explicit
+ *  confirmation and carry the reason THE CONTROLLER OR THE CHECK RECORDED
+ *  rather than a sentence this page composed. Confirming a not-ready verdict
+ *  sends it as `readinessAcknowledgement`, which becomes an annotation on the
+ *  run: a backup taken past a red check says so, for ever, on the object. */
+export function renderRunNowPanel(view) {
+  const v = view || {};
+  const name = String(v.name || "");
+  const object = v.object || {};
+  const spec = object.spec || {};
+  const status = object.status || {};
+  const state = v.state || {};
+  const pending = state.phase === "pending";
+  const runs = Array.isArray(v.runs) ? v.runs : [];
+  const suspended = spec.suspend === true;
+  const active = Array.isArray(status.activeRuns) && status.activeRuns.length > 0;
+  const readiness = v.readiness || null;
+  const verdict = readiness === null ? null : readiness.state;
+  const mustConfirm = suspended || verdict === "notReady";
+  const acknowledged = v.acknowledged === true;
+  const first = runs.length === 0 && status.lastFireTime === undefined;
+  if (v.mayOperate === false) {
+    return (
+      "<section class=\"run-now\" data-run-now=\"" + esc(name) + "\"><h4>Back up now</h4>" +
+      "<p class=\"note\">This login may read this schedule and not create a run in this " +
+      "namespace.</p></section>"
+    );
+  }
+  return (
+    "<section class=\"run-now\" data-run-now=\"" + esc(name) + "\"><h4>" +
+    (first ? "Run first backup now" : "Back up now") + "</h4>" +
+    "<p class=\"note\">" + esc(RUN_NOW_SENTENCE) + "</p>" +
+    (v.unavailable === true
+      ? "<p class=\"note\" data-run-now-unavailable=\"" + esc(name) + "\">" +
+        cell(v.unavailableReason) + "</p>"
+      : "<form class=\"run-now-form\" data-name=\"" + esc(name) + "\" novalidate" +
+        (pending ? " aria-busy=\"true\"" : "") + ">" +
+        (suspended
+          ? "<p class=\"note\" data-suspended-notice=\"" + esc(name) + "\">" +
+            badge("pending", "suspended") + " " + esc(SUSPENDED_NOTICE) + "</p>"
+          : "") +
+        (active
+          ? "<p class=\"note\" data-active-notice=\"" + esc(name) + "\">" +
+            badge("pending", String(status.activeRuns.length) + " active") + " " +
+            esc(ACTIVE_RUN_NOTICE) + "</p>"
+          : "") +
+        (readiness === null
+          ? "<p class=\"note\" data-readiness=\"unchecked\">" + esc(READINESS_NOT_CHECKED) + "</p>"
+          : renderPreflight(readiness)) +
+        (mustConfirm
+          ? "<div class=\"field\"><label><input type=\"checkbox\" name=\"acknowledge\"" +
+            (acknowledged ? " checked" : "") + " data-acknowledge=\"" + esc(name) + "\"> " +
+            esc(verdict === "notReady"
+              ? "Run anyway. The check above says a prerequisite is not met; the run will " +
+                "record that it was taken past that verdict."
+              : "Run anyway. This schedule is suspended and will stay suspended.") +
+            "</label></div>"
+          : "") +
+        "<div class=\"actions\"><button type=\"submit\"" +
+        (pending || (mustConfirm && !acknowledged) ? " disabled" : "") + ">" +
+        (first ? "Run first backup now" : "Back up now") + "</button></div>" +
+        "<div class=\"form-status\" data-run-now-status=\"" + esc(name) + "\" tabindex=\"-1\">" +
+        mutationStatus(state, { kind: "Backup", name: "" }, null) + "</div>" +
+        "</form>") +
+    renderRunNowResult(v.ns, v.result) +
+    "<p class=\"note\">" + esc(AFTER_REFRESH_SENTENCE) + "</p>" +
+    renderManualRuns(v.ns, runs, spec) +
+    "</section>"
+  );
+}
+
+/** The durable run a click produced: its name as a link, what kind of run it
+ *  is, and which revision of the schedule it copied. */
+export function renderRunNowResult(ns, result) {
+  const r = result || null;
+  if (r === null) {
+    return "";
+  }
+  const run = r.run || {};
+  const meta = run.metadata || {};
+  const spec = run.spec || {};
+  const context = r.schedule || null;
+  return (
+    "<p class=\"run-now-result\" data-replayed=\"" + (r.replayed === true ? "true" : "false") +
+    "\">" +
+    (r.replayed === true
+      ? badge("pending", "already started") +
+        " That click had already started this run, so the API answered with the run it made " +
+        "the first time rather than starting a second one. "
+      : badge("green", "started") + " ") +
+    detailLink("backups", String(ns || meta.namespace || ""), String(meta.name || "")) + " " +
+    triggerBadge(spec.trigger) + " " + revisionLine(spec.scheduleRef) +
+    (context === null
+      ? ""
+      : " The schedule it copied is revision <code>g" + String(context.generation) +
+        "</code>" + (context.suspended === true ? " and is suspended" : "") + ".") +
+    "</p>"
+  );
+}
+
+/** The manual runs that already exist, so a reload shows the run rather than
+ *  inviting a second click. */
+export function renderManualRuns(ns, runs, spec) {
+  const maxRetries = ((spec || {}).retry || {}).maxRetries;
+  const rows = runs.map((run) => {
+    const meta = run.metadata || {};
+    const s = run.spec || {};
+    return [
+      detailLink("backups", String(ns || meta.namespace || ""), String(meta.name || "")),
+      triggerBadge(s.trigger, maxRetries),
+      revisionLine(s.scheduleRef),
+      phaseBadge((run.status || {}).phase),
+      cell(meta.creationTimestamp),
+    ];
+  });
+  return table(
+    ["RUN", "TRIGGER", "REVISION", "PHASE", "CREATED"],
+    rows,
+    "no manual run of this schedule exists in this namespace",
+  );
+}
+
+// ------------------------------------------- what the schedule last decided
+
+/** What happened to the most recent slot, from `status.lastSlot`, or the
+ *  sentence that says this build does not publish it.
+ *
+ *  A DISPOSITION IS PRINTED, NEVER JUDGED. `Missed`, `Blocked`,
+ *  `NameUnavailable` and `Exhausted` are things that happened and the reason
+ *  beside each is the `Ready` reason the controller recorded with it; this
+ *  page does not decide which of them is bad. */
+export function renderLastSlot(object) {
+  const status = (object || {}).status || {};
+  const slot = status.lastSlot;
+  const missed = status.missedSlots;
+  if ((slot === undefined || slot === null) && (missed === undefined || missed === null)) {
+    const absent = ((object || {}).__contract || {}).absent;
+    return Array.isArray(absent) && absent.indexOf("status.lastSlot") !== -1
+      ? "<p class=\"note\" data-last-slot=\"absent\">" + esc(LAST_SLOT_NOT_PUBLISHED) + "</p>"
+      : "";
+  }
+  const rows = [];
+  if (slot !== undefined && slot !== null) {
+    rows.push(["last slot", "<code>" + cell(slot.slot) + "</code>"]);
+    rows.push(["due at", cell(slot.dueAt)]);
+    rows.push(["attempt", cell(slot.attempt)]);
+    rows.push(["disposition", badge("pending", String(slot.disposition || ""))]);
+    rows.push(["reason", cell(slot.reason)]);
+    rows.push(["decided at", cell(slot.decidedAt)]);
+    rows.push(["backup", cell((slot.backupRef || {}).name)]);
+  }
+  if (missed !== undefined && missed !== null) {
+    rows.push([
+      "missed slots",
+      cell(missed.count) + (missed.countCapped === true
+        ? " " + badge("unverified", "a floor, not a total") +
+          " <span class=\"note\">an evaluation stopped at its 1000-slot cap, so this counts at " +
+          "least this many.</span>"
+        : ""),
+    ]);
+    rows.push(["last evaluated slot", cell(missed.lastEvaluatedSlot)]);
+  }
+  return "<div class=\"last-slot\" data-last-slot=\"1\">" + facts(rows) + "</div>";
+}
+
+/** Why the console cannot show what the last slot did. */
+export const LAST_SLOT_NOT_PUBLISHED =
+  "What happened to this schedule's most recent slot -- whether it was admitted, caught up, " +
+  "missed, blocked or exhausted -- and how many slots have been skipped are recorded by the " +
+  "controller in status.lastSlot and status.missedSlots. This build's product API projects " +
+  "neither, so the console has nothing to render; read the schedule with kubectl, or use the " +
+  "kubectl-proxy mode, which reads the object itself.";
+
+/** The runs of this schedule that are in flight right now, each with the
+ *  revision it FROZE -- which is the point of the panel.
+ *
+ *  A RUNNING RUN KEEPS SHOWING ITS OWN REVISION. Saving a new policy moves the
+ *  schedule's generation; it does not touch a Backup that already exists, its
+ *  frozen inputs or its Job. So this table reads the runs and not the
+ *  schedule, and the two numbers being different on screen is the invariant
+ *  PLAT-05.1 is about rather than a rendering mistake. */
+export function renderActiveRuns(ns, object, backups) {
+  const status = (object || {}).status || {};
+  const spec = (object || {}).spec || {};
+  const listed = status.activeRuns;
+  if (listed === undefined || listed === null) {
+    const absent = ((object || {}).__contract || {}).absent;
+    return Array.isArray(absent) && absent.indexOf("status.activeRuns") !== -1
+      ? "<p class=\"note\" data-active-runs=\"absent\">This build does not publish which runs " +
+        "of this schedule are active; an absent list is not an empty one.</p>"
+      : "";
+  }
+  const byName = Object.create(null);
+  for (const backup of itemsOf(backups)) {
+    byName[String(((backup || {}).metadata || {}).name || "")] = backup;
+  }
+  const rows = listed.map((run) => {
+    const object2 = byName[String(run.name || "")];
+    const s = (object2 || {}).spec || {};
+    return [
+      detailLink("backups", String(ns || ""), String(run.name || "")),
+      triggerBadge(s.trigger === undefined ? { kind: run.kind, attempt: run.attempt } : s.trigger,
+        (spec.retry || {}).maxRetries),
+      revisionLine(s.scheduleRef),
+    ];
+  });
+  return (
+    "<div class=\"active-runs\" data-active-runs=\"" + String(listed.length) + "\">" +
+    "<p class=\"note\">A run already created keeps the revision it froze. Editing the policy " +
+    "above changes what the NEXT admission carries and touches none of these.</p>" +
+    table(["RUN", "TRIGGER", "FROZEN REVISION"], rows,
+      "no run of this schedule is active") + "</div>"
+  );
+}
+
+// ---------------------------------------------------- the wiring, one card
+
+/** Repaints ONE card in place, so a preview taken on one schedule does not
+ *  discard a draft being typed into another. */
+function repaintCard(node, ns, parse, lifecycle, api, object, backups, extra) {
+  if (!active(lifecycle)) {
+    return;
+  }
+  const name = ((object.metadata || {}).name) || "";
+  const own = extra.cards[name] || {};
+  const policySlot = node.querySelector("[data-policy-slot=\"" + name + "\"]");
+  if (policySlot !== null) {
+    replace(
+      policySlot,
+      parse(renderPolicyForm(policyFormView(ns, object, own, extra.destinations, extra.mayOperate))),
+    );
+  }
+  const runSlot = node.querySelector("[data-run-now-slot=\"" + name + "\"]");
+  if (runSlot !== null) {
+    replace(runSlot, parse(renderRunNowPanel({
+      ns: ns,
+      name: name,
+      object: object,
+      state: mutationFor(formKey(ns, RUN_NOW_FORM, name)).state,
+      mayOperate: extra.mayOperate,
+      readiness: own.readiness || null,
+      acknowledged: own.acknowledged === true,
+      runs: manualRunsOf(name, backups),
+      result: own.result || null,
+    })));
+  }
+  wirePolicy(node, ns, parse, lifecycle, api, object, backups, extra);
+  wireRunNow(node, ns, parse, lifecycle, api, object, backups, extra);
+}
+
+/** The policy form's values, read from the DOM. Every input is a string, and
+ *  the fields a preset does not use simply are not there. */
+export function readPolicyValues(form) {
+  const values = Object.create(null);
+  for (const field of POLICY_DRAFT_FIELDS) {
+    const input = form.elements[field];
+    values[field] = input === undefined || input === null ? "" : String(input.value);
+  }
+  return values;
+}
+
+/** One schedule's policy form: the cadence selector repaints the parameters,
+ *  the preview button asks the API, and the submit replaces the policy. */
+function wirePolicy(node, ns, parse, lifecycle, api, object, backups, extra) {
+  const name = ((object.metadata || {}).name) || "";
+  const form = node.querySelector("form.policy-form[data-name=\"" + name + "\"]");
+  if (form === null) {
+    return;
+  }
+  const key = formKey(ns, POLICY_FORM, name);
+  const mutation = mutationFor(key);
+  const own = extra.cards[name] || (extra.cards[name] = {});
+  const remember = () => keepDraft(key, readPolicyValues(form), POLICY_DRAFT_FIELDS);
+
+  watchMutation(node, key, mutation, () => {
+    repaintCard(node, ns, parse, lifecycle, api, object, backups, extra);
+  }, lifecycle);
+
+  // THE CADENCE SELECTOR AND THE SELECTION SELECTOR CHANGE WHICH INPUTS EXIST,
+  // so a change on either keeps the draft and repaints the card rather than
+  // leaving inputs on screen that the chosen shape has no field for.
+  for (const field of ["mode", "selection"]) {
+    const control = form.elements[field];
+    if (control !== undefined && control !== null) {
+      listen(control, "change", () => {
+        remember();
+        repaintCard(node, ns, parse, lifecycle, api, object, backups, extra);
+      }, lifecycle);
+    }
+  }
+  for (const input of form.querySelectorAll("input, select")) {
+    listen(input, "input", remember, lifecycle);
+  }
+
+  const preview = node.querySelector("button[data-preview=\"" + name + "\"]");
+  if (preview !== null) {
+    listen(preview, "click", () => {
+      if (!active(lifecycle)) {
+        return;
+      }
+      const values = readPolicyValues(form);
+      keepDraft(key, values, POLICY_DRAFT_FIELDS);
+      const problems = validatePolicy(values);
+      const query = previewQueryFor(values);
+      if (query === null) {
+        own.preview = {
+          query: null,
+          error: invalidInput(problems, "this cadence is not complete enough to preview"),
+        };
+        repaintCard(node, ns, parse, lifecycle, api, object, backups, extra);
+        return;
+      }
+      preview.disabled = true;
+      api.previewCadence(query, readOptions(lifecycle)).then(
+        (answer) => {
+          if (!active(lifecycle)) {
+            return;
+          }
+          own.preview = { query: query, answer: answer, error: null };
+          repaintCard(node, ns, parse, lifecycle, api, object, backups, extra);
+        },
+        (error) => {
+          if (!cancelled(error, lifecycle) && active(lifecycle)) {
+            own.preview = { query: query, answer: null, error: error };
+            repaintCard(node, ns, parse, lifecycle, api, object, backups, extra);
+          }
+        },
+      );
+    }, lifecycle);
+  }
+
+  listen(form, "submit", (event) => {
+    event.preventDefault();
+    if (!active(lifecycle) || mutation.pending()) {
+      return;
+    }
+    const values = readPolicyValues(form);
+    keepDraft(key, values, POLICY_DRAFT_FIELDS);
+    mutation.run(() => submitPolicy(ns, object, values, own.preview, api));
+  }, lifecycle);
+}
+
+/** Checks a policy draft, decides which expression is being saved, and sends
+ *  the replace under the revision the form was opened at.
+ *
+ *  A PRESET IS SAVED AS THE EXPRESSION THE SERVER COMPILED IT TO, and nothing
+ *  else: if the preview on screen is not a preview of THESE values, this
+ *  refuses rather than sending a cron line the page made up or an expression
+ *  that answers a different question. */
+export async function submitPolicy(ns, object, values, preview, api) {
+  const problems = validatePolicy(values);
+  if (Object.keys(problems).length > 0) {
+    throw invalidInput(problems);
+  }
+  const generation = ((object || {}).metadata || {}).generation;
+  if (typeof generation !== "number") {
+    throw invalidInput({ cron: NO_GENERATION_SENTENCE });
+  }
+  let expression = String(values.cron || "").trim();
+  if (values.mode !== ADVANCED_CRON) {
+    if (!previewMatches(preview, values)) {
+      throw invalidInput({ mode: PREVIEW_BEFORE_SAVE });
+    }
+    expression = String((preview.answer || {}).schedule || "");
+  }
+  const name = ((object || {}).metadata || {}).name || "";
+  return api.editSchedulePolicy(ns, name, policyBody(values, generation, expression));
+}
+
+/** One schedule's manual-run panel: the acknowledgement checkbox, and the one
+ *  click that creates a run under an idempotency intent. */
+function wireRunNow(node, ns, parse, lifecycle, api, object, backups, extra) {
+  const name = ((object.metadata || {}).name) || "";
+  const form = node.querySelector("form.run-now-form[data-name=\"" + name + "\"]");
+  if (form === null) {
+    return;
+  }
+  const key = formKey(ns, RUN_NOW_FORM, name);
+  const mutation = mutationFor(key);
+  const own = extra.cards[name] || (extra.cards[name] = {});
+
+  watchMutation(node, key, mutation, (state) => {
+    if (state.phase === "succeeded") {
+      own.result = state.result;
+    }
+    repaintCard(node, ns, parse, lifecycle, api, object, backups, extra);
+  }, lifecycle);
+
+  const acknowledge = node.querySelector("input[data-acknowledge=\"" + name + "\"]");
+  if (acknowledge !== null) {
+    listen(acknowledge, "change", () => {
+      own.acknowledged = acknowledge.checked === true;
+      repaintCard(node, ns, parse, lifecycle, api, object, backups, extra);
+    }, lifecycle);
+  }
+
+  listen(form, "submit", (event) => {
+    event.preventDefault();
+    if (!active(lifecycle) || mutation.pending()) {
+      return;
+    }
+    mutation.run(() => submitRunNow(ns, object, own, api, intentFor(key)));
+  }, lifecycle);
+}
+
+/** Creates one manual run of `object` under the idempotency intent `key`.
+ *
+ *  THE BODY IS BODY A AND NOTHING ELSE: the schedule's name, and the revision
+ *  this card was rendered from. The API copies the source, the selection, the
+ *  archive and the deadline off the schedule at that generation, which is what
+ *  makes "the copied schedule revision" a fact about the run rather than a
+ *  form's guess -- a policy field in the body is a 422 by design.
+ *
+ *  `expectedGeneration` IS SENT WHEN THERE IS ONE. It turns a stale card into
+ *  a `409 policy_changed` naming the revision that is in force, instead of a
+ *  run quietly taken under a policy the person never saw. */
+export async function submitRunNow(ns, object, own, api, key) {
+  const name = ((object || {}).metadata || {}).name || "";
+  const generation = ((object || {}).metadata || {}).generation;
+  const scheduleRef = { name: name };
+  if (typeof generation === "number") {
+    scheduleRef.expectedGeneration = generation;
+  }
+  const body = { scheduleRef: scheduleRef };
+  const readiness = (own || {}).readiness || null;
+  if (readiness !== null && (readiness.state === "notReady" || readiness.state === "unknown")) {
+    body.readinessAcknowledgement = { preflight: String(readiness.id), state: readiness.state };
+  }
+  return api.runBackupNow(ns, body, key);
 }

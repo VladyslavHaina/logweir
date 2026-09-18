@@ -879,28 +879,34 @@ test("MUTANT_the_create_form_names_the_task_that_owes_a_schedule_destination", (
   );
 });
 
-test("the_edit_route_is_named_as_existing_and_as_out_of_this_pages_contract", () => {
-  // THE HONEST REASON. `PUT .../schedules/{name}` DOES take `destinationRef`
-  // under `expectedGeneration`. This page does not send it because `ui/api.js`
-  // exports `create` plus one narrow suspend patch and no replace at all, and
-  // `ui_lint::the_api_module_offers_no_delete_and_no_put` fails on the bare
-  // token for one. Saying "the field does not exist" would have been false;
-  // saying nothing would have left an operator looking for a control.
+test("the_edit_route_is_named_as_existing_and_as_this_pages_own_panel", () => {
+  // THIS ROW USED TO SAY "and as OUT OF this page's contract", and D1 W7 made
+  // that false: `ui/api.js` now carries exactly one replace, the page sends it
+  // from the Future policy panel, and `ui_lint` holds the module to that one.
+  // What did NOT change is the property the sentence exists for -- the route
+  // is a WHOLE-POLICY replace, so a reader has to be told that a blank field
+  // is a field being cleared before they use it.
   const html = renderScheduleForm({});
   assert.match(html, /id="schedule-destination-edit"/);
-  assert.match(EDIT_IS_A_REPLACE, /PUT \.\.\.\/schedules\/\{name\} takes destinationRef/);
-  assert.match(EDIT_IS_A_REPLACE, /expectedGeneration/);
-  assert.match(EDIT_IS_A_REPLACE, /a field omitted is removed/,
+  assert.match(EDIT_IS_A_REPLACE, /PUT \.\.\.\/schedules\/\{name\} under expectedGeneration/);
+  assert.match(EDIT_IS_A_REPLACE, /WHOLE future policy/);
+  assert.match(EDIT_IS_A_REPLACE, /a field omitted from the request is REMOVED/,
     "and why a partial edit from this page would be a destructive one");
-  assert.match(EDIT_IS_A_REPLACE, /D1 W7/, "with the form that owns that route named");
+  assert.match(EDIT_IS_A_REPLACE, /Future policy panel/,
+    "with the panel that owns that route named, and reachable from this page");
+  assert.doesNotMatch(
+    EDIT_IS_A_REPLACE,
+    /This page does not send it|no replace at all/,
+    "the pre-D1-W7 sentence said this page could not send the edit, which the panel makes false",
+  );
 });
 
-test("a_dynamic_selection_is_now_readable_and_its_coverage_still_is_not", () => {
-  // HALF LANDED. `ScheduleView.allUserTopics` arrived with D1 W6, so "which of
-  // the two shapes is this schedule" is answerable and the old two-shapes
-  // sentence is gone. `status.selection` / `coverage` did NOT arrive -- no API
-  // projection publishes either -- so `Coverage::label()` still cannot be
-  // rendered, and the page names who owes it instead of inventing a label.
+test("a_dynamic_schedule_carries_no_coverage_and_the_missing_projection_is_named", () => {
+  // A SCHEDULE HAS NO COVERAGE AND NEVER WILL. `status.selection` is written on
+  // a RUN, at the freeze, because what a dynamic policy covers is decided when
+  // the run starts. So this row's subject is a schedule and the answer is the
+  // sentence, not a label -- and the sentence now names the half that is still
+  // missing (the API's Backup projection) rather than a surface D1 W7 owed.
   const html = renderCoverageLine({
     spec: {
       topics: [],
@@ -913,9 +919,12 @@ test("a_dynamic_selection_is_now_readable_and_its_coverage_still_is_not", () => 
   assert.match(html, /data-coverage="dynamic"/);
   assert.match(html, /<code>Refuse<\/code>/, "the policy's own answer to incomplete visibility");
   assert.match(html, /Excluded: scratch, tmp-\*/, "and what the selection leaves out");
-  assert.match(html, /PLAT-09\.2 owes the projection and D1 W7 owes the surface/);
+  assert.match(html, /no status\.selection at all/,
+    "the projection that is missing is named by field");
+  assert.match(html, /will not infer a coverage from the mode/,
+    "and the inference the page refuses to make is named too");
   assert.doesNotMatch(html, /All user topics \(attested complete\)/,
-    "no coverage LABEL is rendered, because none is published");
+    "no coverage LABEL is rendered, because a schedule carries none");
 });
 
 test("a_schedule_with_neither_shape_is_now_named_exactly_rather_than_guessed_between", () => {
