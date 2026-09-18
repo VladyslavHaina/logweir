@@ -517,6 +517,13 @@ def l_04_2(H: Any) -> dict[str, Any]:
     )
 
     # Neither ever has more than one attempt-0 Backup per slot.
+    attempts_by_slot: dict[str, dict[str, list[str]]] = {}
+    for label, runs in (("dt-none", none_runs), ("dt-latest", latest_runs)):
+        per_slot: dict[str, list[str]] = {}
+        for backup in runs:
+            key = f"{backup['spec'].get('slot')}#{(backup['spec'].get('trigger') or {}).get('attempt', 0)}"
+            per_slot.setdefault(key, []).append(backup["metadata"]["name"])
+        attempts_by_slot[label] = per_slot
     for label, runs in (("dt-none", none_runs), ("dt-latest", latest_runs)):
         slots = attempt_zero_slots(runs)
         H.require(
@@ -583,6 +590,9 @@ def l_04_2(H: Any) -> dict[str, Any]:
                 k: ((v.get("status") or {}).get("policy") or {}).get("effectiveSince")
                 for k, v in observed.items()
             },
+            # The per-slot inventory the "one attempt-0 per slot" claim rests on,
+            # so a reader can re-derive it rather than trust it (review R-7).
+            "attemptsBySlot": attempts_by_slot,
             "previousAttemptCleared": reset,
             "slotDecisionsInTheWindow": after_restart,
             "caughtUpDecision": caught_up[0],
@@ -692,9 +702,14 @@ def l_04_5(H: Any) -> dict[str, Any]:
             "runs": {k: v for k, v in by_key.items()},
             "attemptsBySlot": attempts,
             "adoptionLogLines": adoption[:6],
+            # THE WHOLE CAPTURE, not a name and a timestamp (review R-7). A claim
+            # that "the proxy answered 409" is only checkable if the record
+            # carries the status code, the method and the path it answered.
             "proxy409Creates": [
-                {"name": c.get("name"), "at": c.get("at")} for c in conflicts[:6]
+                {k: c.get(k) for k in ("kind", "name", "method", "path", "response", "at")}
+                for c in conflicts[:6]
             ],
+            "adoptionLogFile": "logs/L-04-5-fenced-controllers.log",
         },
         "dumps": H.dump_objects("L-04-5", {"dup": ("backupschedule", "dup")}),
     }
@@ -1283,6 +1298,9 @@ def l_05_1_5(H: Any) -> dict[str, Any]:
             "newController": {k: new[k] for k in new if k.endswith(("Image", "Revision"))},
             "suspendedForRollback": ["roll"] + suspended_others,
             "objectsFrozen": len(frozen),
+            # The frozen map itself, so "not one resourceVersion moved" is
+            # checkable against the objects rather than asserted (review R-7).
+            "frozenResourceVersions": frozen,
             "createdWhileRolledBack": created_while_back,
             "resourceVersionsMoved": moved,
             "resumedRun": H.excerpt(resumed, "spec.slot", "spec.trigger.kind",
@@ -1444,6 +1462,10 @@ def l_05_2_3(H: Any) -> dict[str, Any]:
             },
             "allMigrated": len(migrated),
             "uidsUnchanged": True,
+            # The UIDs themselves, before and after, so "no Backup UID changed"
+            # is a comparison a reader can repeat (review R-7).
+            "uidsBefore": uids_before,
+            "uidsAfter": {n: o["metadata"]["uid"] for n, o in sorted(after.items())},
             "successfulPatchesPerRun": {k: len(v) for k, v in sorted(successes.items())},
             "historyRetained": H.condition(retained, "HistoryRetained"),
             "history": H.excerpt(retained, "status.history"),
@@ -1754,6 +1776,19 @@ def register(H: Any) -> None:
             detail = fn(H)
             if healed.keys() - {"at"}:
                 detail.setdefault("detail", {})["fenceHealedFirst"] = healed
+            # A PER-ROW proxy snapshot (review R-2). `unknownResources` used to
+            # be read once at setup and quoted as a whole-run measurement, but
+            # the proxy restarts with its pod and these rows scale the
+            # Deployment repeatedly, so that counter is reset many times and
+            # never re-read. Snapshotting per row is what makes "no unknown
+            # resource was forwarded" a statement about the run.
+            state = fenced.proxy_state(H)
+            if state is not None:
+                detail.setdefault("detail", {})["proxyAtRowEnd"] = {
+                    "unknownResources": state.get("unknownResources", {}),
+                    "namespace": state.get("namespace"),
+                    "counts": state.get("counts", {}),
+                }
             return detail
 
         return wrapped

@@ -2720,10 +2720,64 @@ if FENCED:
     _fence_rows.register(sys.modules[__name__])
 
 
+# What a row that did NOT run is blocked by once the fence EXISTS. The reasons
+# above were written for a wave that had no fenced controller and no proxy, and
+# every clause in them is false in a run that deployed both — `results.json` is
+# what a tracker update is written from, so a stale reason there is a false
+# blocker in the record (review R-5).
+FENCED_NOT_RUN_REASONS = {
+    "L-05.2-cap": (
+        "NOT blocked by the fence any more — the fence makes it reachable, and seeding it "
+        "here is no longer a denial of service against anyone, because this namespace has "
+        "its own controller. It was not run for BUDGET: >10 000 Backup objects "
+        "(MAX_INVENTORY_PAGES 20 x INVENTORY_PAGE_SIZE 500) at this run's measured seeding "
+        "rate (500 created and made terminal in 32.7 s) is about 15 minutes of seeding plus "
+        "the walk, on a host with ~22 GB free, and it did not fit this run's window. It is "
+        "the one row the fence unblocks that this run did not take."
+    ),
+    "L-09-3a": (
+        "NOT blocked by the fence or the proxy any more — this run held a migration PATCH "
+        "and injected a 503 through that same proxy. It is a PLAT-09.2 row, outside this "
+        "worker's brief, and it was not attempted. It is also blocked behind the defect "
+        "L-09-1 measured (the discovery Job names the compile-time image pin), which is "
+        "unchanged by this run."
+    ),
+}
+
+
+# A reason is stale if it asserts the absence of something this run built.
+STALE_WHEN_FENCED = ("was not deployed", "is unavailable", "was not deployed.")
+
+FENCE_EXISTS_PREFIX = (
+    "THE FENCE EXISTS IN THIS RUN — a fenced controller was deployed behind the scoping "
+    "proxy and both were used, so any claim below that the replica was not deployed or the "
+    "proxy unavailable is from the earlier unfenced wave and is FALSE here. This row was "
+    "simply not attempted in this namespace. The earlier wave's text is kept verbatim after "
+    "the marker so nothing is lost: "
+)
+
+
 def register_not_run() -> None:
+    """Record every row that did not run, with a reason true for THIS run.
+
+    NEVER RECORDS A STALE REASON. `NOT_RUN_REASONS` was written for a wave with
+    no fenced controller and no proxy, and it asserts that the replica "was not
+    deployed" and the proxy "is unavailable". In a run that deployed both, those
+    clauses are false — and `results.json` is what a tracker update is written
+    from, so a false blocker there becomes a false blocker in the tracker
+    (review R-5). A specific true reason is used where one is known; otherwise
+    the stale text is marked as stale rather than deleted, because throwing the
+    earlier wave's reasoning away would lose information too.
+    """
     for sid, (task, title, reason) in NOT_RUN_REASONS.items():
-        if sid not in STATE["scenarios"]:
-            not_run(sid, reason, task=task, title=title)
+        if sid in STATE["scenarios"]:
+            continue
+        if FENCED:
+            if sid in FENCED_NOT_RUN_REASONS:
+                reason = FENCED_NOT_RUN_REASONS[sid]
+            elif any(phrase in reason for phrase in STALE_WHEN_FENCED):
+                reason = FENCE_EXISTS_PREFIX + reason
+        not_run(sid, reason, task=task, title=title)
 
 
 def report() -> None:
