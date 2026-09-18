@@ -84,11 +84,11 @@ use serde_json::json;
 use tracing::{debug, info, warn};
 
 use logweir_core::check_contract::{
-    redact, topic_tsv_sha256, visibility, Attestation, CheckCode, CheckPlan, CheckPlanKind,
-    CheckRequest, ConnectionPlan, FrameExpectations, InventoryResult, TopicEntry,
-    TopicInventoryRequest, TruncationReason, Visibility, VisibilityBasis, VisibilitySignals,
-    CHECK_CONTRACT_VERSION, CHECK_PLAN_CONTRACT, DEFAULT_RELAY_BUDGET_BYTES,
-    TOPIC_INVENTORY_FORMAT,
+    redact, topic_tsv_sha256, visibility, Attestation, CheckCode, CheckOutcome, CheckPlan,
+    CheckPlanKind, CheckRequest, CheckState, ConnectionPlan, FrameExpectations, Gating,
+    InventoryResult, TopicEntry, TopicInventoryRequest, TruncationReason, Visibility,
+    VisibilityBasis, VisibilitySignals, CHECK_CONTRACT_VERSION, CHECK_PLAN_CONTRACT,
+    DEFAULT_RELAY_BUDGET_BYTES, TOPIC_INVENTORY_FORMAT,
 };
 
 use super::approval::ReconcileError;
@@ -570,6 +570,82 @@ impl std::fmt::Display for ResultRefusal {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(&self.0)
     }
+}
+
+/// What a relay that carried NO result document at all says — the one case the
+/// word "unreadable" still fits, because nothing was read.
+const NO_RESULT_DOCUMENT: &str = "the check Job's relay carries no result document, so neither a \
+     topic inventory nor a check outcome could be read; nothing is inferred from the exit code";
+
+/// A result document with no inventory AND no blocking check that is not
+/// `ready`. The document contradicts itself — everything it checked passed and
+/// it measured nothing — so there is nothing to project and nothing to store.
+const NO_INVENTORY_AND_NO_FAILURE: &str = "the check Job relayed a verified result that carries \
+     no topic inventory and no blocking check that is not ready; a topicInventory check that \
+     produced no inventory has nothing to store";
+
+/// The blocking check a no-inventory result is ABOUT — **pure**.
+///
+/// The precedence is [`logweir_core::check_contract::aggregate`]'s own, and is
+/// not re-invented here in a second spelling: `notReady` first, then `unknown`
+/// or `skipped`. That second arm is load-bearing rather than defensive —
+/// `MetadataTimeout` is an `unknown` code (`logweir::check::kinds::is_unknown_code`)
+/// and it is one of the two reasons D2 §14.4 S11 accepts for a timed-out
+/// discovery, so a rule that projected only `notReady` would leave exactly that
+/// scenario reading `ResultUnreadable`.
+///
+/// ADVISORY rows are excluded. An advisory `notReady` is a warning by
+/// definition (D2 §6.4) and a warning that became the terminal reason would
+/// name the wrong cause; execution-only rows are always `unknown` and describe
+/// a run that has not happened.
+fn blocking_failure(checks: &[CheckOutcome]) -> Option<&CheckOutcome> {
+    let blocking = || checks.iter().filter(|c| c.gating == Gating::Blocking);
+    blocking()
+        .find(|c| c.state == CheckState::NotReady)
+        .or_else(|| {
+            blocking().find(|c| matches!(c.state, CheckState::Unknown | CheckState::Skipped))
+        })
+}
+
+/// `status.reason` and `status.message` for a `Succeeded` check phase whose
+/// relay carried no topic inventory — **pure**. Defect `D2-RESULTUNREADABLE`.
+///
+/// `None` means no result document was relayed at all; `Some(checks)` is the
+/// document's own `checks` array, already redacted and capped by
+/// [`logweir_core::check_contract::CheckRelay::result`].
+///
+/// The reason is the failing check's [`CheckCode`], which is a CLOSED
+/// vocabulary — `BrokerUnreachable`, `MetadataTimeout`, `AuthenticationFailed`,
+/// … — every member of which is a valid `metav1.Condition` reason, so nothing a
+/// runner writes can reach `status.reason` as free text. The message carries
+/// the check id, the runner's sentence and its remedy; `terminal` redacts and
+/// caps the join at the CRD's 1,024 characters.
+fn no_inventory_verdict(checks: Option<&[CheckOutcome]>) -> (&'static str, String) {
+    let Some(checks) = checks else {
+        return (
+            CheckCode::ResultUnreadable.as_str(),
+            NO_RESULT_DOCUMENT.to_string(),
+        );
+    };
+    let Some(failed) = blocking_failure(checks) else {
+        return (
+            CheckCode::ResultUnreadable.as_str(),
+            NO_INVENTORY_AND_NO_FAILURE.to_string(),
+        );
+    };
+    let mut message = failed.id.as_str().to_string();
+    if !failed.message.is_empty() {
+        message.push_str(": ");
+        message.push_str(&failed.message);
+    }
+    if !failed.remedy.is_empty() {
+        if !message.ends_with('.') {
+            message.push('.');
+        }
+        message.push(' ');
+        message.push_str(&failed.remedy);
+    }
+    (failed.code.as_str(), message)
 }
 
 /// Hold the runner's result document to the frames it arrived with — **pure**.
@@ -1796,10 +1872,15 @@ async fn commit(
         .expect("check::classify returns a relay with every Succeeded phase");
 
     // The result DOCUMENT, parsed, bounds-checked and redacted by the pure
-    // crate. `None` or a parse failure is `ResultUnreadable`: a topic inventory
-    // whose counts nobody wrote is not a result.
-    let inventory = match relay.result() {
-        Some(Ok(result)) => result.inventory,
+    // crate. A parse failure is `ResultUnreadable`: a topic inventory whose
+    // counts nobody wrote is not a result.
+    //
+    // THE WHOLE DOCUMENT IS BOUND, not just `inventory` — defect
+    // `D2-RESULTUNREADABLE`. `result.checks` is where a runner that could not
+    // reach the broker puts its answer, and a binding that dropped it made
+    // every classified failure read `ResultUnreadable`.
+    let mut document = match relay.result() {
+        Some(Ok(result)) => Some(result),
         Some(Err(e)) => {
             return terminal(
                 discovery,
@@ -1818,14 +1899,22 @@ async fn commit(
         }
         None => None,
     };
+    let inventory = document.as_mut().and_then(|d| d.inventory.take());
     let Some(inventory) = inventory else {
+        // NO INVENTORY IS NOT THE SAME FACT AS NO RESULT. The runner emits one
+        // or the other and says so in `check::kinds::inventory`'s own module
+        // doc: "an unreachable broker produces a result document with no
+        // `inventory` block and one `connection.authenticated` row carrying the
+        // classified code … so the controller reads an actionable reason
+        // instead of `ResultUnreadable`". This is the half that reads it.
+        let (reason, message) =
+            no_inventory_verdict(document.as_ref().map(|d| d.checks.as_slice()));
         return terminal(
             discovery,
             api,
             PHASE_FAILED,
-            CheckCode::ResultUnreadable.as_str(),
-            "the check Job relayed a verified result that carries no topic inventory; a \
-             topicInventory check that produced no inventory has nothing to store",
+            reason,
+            &message,
             TopicDiscoveryStatus {
                 started_at,
                 observed_at: Some(observed_at),
