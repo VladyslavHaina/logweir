@@ -483,6 +483,16 @@ redacts `signerKeyId` inside the relayed frame and the controller compares the l
 owed: the source-connectivity check kind PLAT-07.2's "Test connection" consumes. Evidence
 `claude/artifacts/d2-live/20260918T030840Z/objects/s14/`, `results.json#E3,#E5`.
 
+**Partial record (2026-09-18) — PLAT-03.1: the source-connectivity check kind landed
+(`5bf6d25`…`33ff2eb`), the rostered-key refusal and the scopeless rows are fixed and
+closed live (D2-SIGNERID-REDACTED, lab-refresh-3), and S14b names the Secret and key;
+stays In progress on two live items.** Every listed test but one is now proven live:
+missing Secret, missing key (named), wrong credentials, storage denial, timeout, redaction;
+the acceptance's "with check time and scope" holds — every notReady row carries its
+authority's `scope`. Remaining: the image-failure case (S14e, needs a fenced controller
+whose runner image cannot pull — queued for the next refresh) and the new kind's live
+proof on the lab controller.
+
 ### PLAT-03.2 — Add restore-specific preflight and invalidation
 
 **Problem/implementation:** Cached reachability currently looks like completed
@@ -1354,6 +1364,23 @@ UID). Evidence `claude/artifacts/d2-live/20260918T030840Z/{selector,ui,api}/`. U
 "explicit connection test/refresh" — "Test connection" re-reads what the controller
 recorded and its own sentence says so (`ui/select.js:538`); nothing dials until PLAT-03.1
 delivers a source-connectivity check kind (only "Discover topics" starts a real check Job).
+
+**Partial record (2026-09-18) — PLAT-07.2: "Test connection" now dials (`5bf6d25`…`33ff2eb`,
+the source-connectivity check kind); the task stays In progress until that path is proved
+on the lab controller.** A `Preflight` with `operation: SourceConnection` and
+`sourceConnection.connectionRef` runs the `connection.*` rows through the existing check
+runner (no destination, no signer, no plan, no topic; `connection.topicsDescribable`
+deliberately not reported; D2 §4.2/§4.3/§6.2/§6.3/§8.3/§9 amended verbatim from the
+worker's proposal); the API accepts it with contract validation; the console's detail
+control creates one Preflight per click under a per-load random nonce composed with the
+click ordinal (two page loads → different keys; four clicks in one in-flight create → one
+Preflight; a later deliberate test → a new key — proved live by the review's API/UI
+journey), renders each row's state, code, remedy, scope and check time from the real
+object, and the list's per-row control is relabelled "Re-read probe" so one label no
+longer means two things. Review `claude/d2-source-check.review.md` ACCEPT after a fix
+round (a page-load ordinal had been reused as the key; a guard gap on the emitted row
+set); 20/20 mutants; 2797 tests. Remaining: the controller/runner half live on the lab
+(the lab's controller predates the operation until the next refresh), then Done.
 
 ## PLAT-08 — Save backup destinations instead of rebuilding storage inputs
 

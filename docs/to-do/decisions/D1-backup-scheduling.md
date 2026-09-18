@@ -465,6 +465,8 @@ Interruption safety: progress is derived from observation, not a cursor. Each pa
 
 Migration window, stated in the upgrade notes: until `HistoryRetained=True`, deleting the schedule with the default propagation can still garbage-collect unmigrated history. Use `kubectl --context <ctx> delete backupschedule <name> --cascade=orphan`, which is always safe, before or after migration.
 
+**Status across an upgrade (amended 2026-09-18, at the §13.1 fenced run of L-05.1-3).** The migration above is metadata-only and a terminal run's `spec`, `status.phase`, exit code, reason and `status.records` never change across an upgrade. Independently of the migration, D3's trust rule may add `signedAt` and `trust` to a terminal object's `status.evidence.verification` by ONE bounded, digest-checked re-read of its receipt (the TRUST-UPGRADE-SIGNEDAT repair), and may re-derive `trust`/`result` on a policy event; it never changes `result`, `matchedKeyId` or `verifiedAt` of a compared verdict without a read. L-05.1-3 asserts exactly that carve-out: nothing outside the migration fields and the verification block's additive trust fields moves.
+
 ### 6.3 Deletion semantics (tested)
 
 | Action | Before this task | After (migrated or new runs) |

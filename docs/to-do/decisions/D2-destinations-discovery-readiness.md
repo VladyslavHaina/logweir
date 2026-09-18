@@ -716,6 +716,7 @@ controller maps to `RunnerContractUnsupported` (§4.3).
 | `restorePreflight` | Plan bytes at `/check/plan.yaml` plus sha; target connection; source and evidence destinations; `backupId`; `manifestKey`; checks | §6.7 |
 | `destinationAccess` | destination; roles | archive list, evidence get of a nonexistent key (classifies denial vs not-found), optional marker |
 | `evidenceFetch` | destination role `evidenceRead`; ≤ 3 objects `{role, key, maxBytes}` (payload ≤ 1 MiB, sidecar ≤ 64 KiB) | get and relay |
+| `sourceConnection` | connection | One metadata read: `connection.authenticated`, beside the `runner.contract` row every kind emits. No destination, no signer, no plan, no topic. (Amended 2026-09-18, d2-source-check.) |
 
 **Exit codes:**
 
@@ -746,7 +747,7 @@ printed, only codes plus a redacted message:
 
 | Module | Responsibility |
 |---|---|
-| `job.rs` | `CheckJobSpec -> job::RunnerJobSpec`. **Name** `lwc-<k>-<first 20 hex of sha256(owner uid)>`, where `k` ∈ `td` (inventory), `rd` (readiness), `rp` (restore preflight), `da` (destination access) or `ev` (evidence, uid+attempt). The name is always ≤ 63 characters and independent of the owner name, so there is no `NameTooLong` path. **Labels** on the Job and pod template: `app.kubernetes.io/managed-by: weirkeeper`, `app.kubernetes.io/component: check`, `logweir.dev/check-kind: <kind>`, `logweir.dev/check-owner-uid: <uid>`. **Deadline** `activeDeadlineSeconds = request.timeoutSeconds + 90`. `backoffLimit: 0`, `restartPolicy: Never`, the existing `failure_policy()`, no ServiceAccount token, ServiceAccount from the PLAT-07.1 execution context or destination grant (default `logweir-runner`), and no TTL at creation. `job.rs` gains `labels` and `template_labels` fields only. |
+| `job.rs` | `CheckJobSpec -> job::RunnerJobSpec`. **Name** `lwc-<k>-<first 20 hex of sha256(owner uid)>`, where `k` ∈ `td` (inventory), `rd` (readiness), `rp` (restore preflight), `da` (destination access), `ev` (evidence, uid+attempt), `cs` (catalog sync — D3's `catalogSync`, which never reached this table) or `sc` (source connection; amended 2026-09-18). The name is always ≤ 63 characters and independent of the owner name, so there is no `NameTooLong` path. **Labels** on the Job and pod template: `app.kubernetes.io/managed-by: weirkeeper`, `app.kubernetes.io/component: check`, `logweir.dev/check-kind: <kind>`, `logweir.dev/check-owner-uid: <uid>`. **Deadline** `activeDeadlineSeconds = request.timeoutSeconds + 90`. `backoffLimit: 0`, `restartPolicy: Never`, the existing `failure_policy()`, no ServiceAccount token, ServiceAccount from the PLAT-07.1 execution context or destination grant (default `logweir-runner`), and no TTL at creation. `job.rs` gains `labels` and `template_labels` fields only. |
 | `plan.rs` | Renders `<job>-plan` as an **immutable** `ConfigMap` owned by the check CR (or the `Backup`/`Restore` for `ev`). Keys: `check-plan.json`, trust files (`source-ca.pem`, `target-ca.pem`, `archive-ca.pem`, `evidence-ca.pem`) and `plan.yaml` (verbatim restore bytes). The digest is pinned in the Job env. A 409 is accepted only if the existing object has a matching owner UID, digest and `immutable: true`; otherwise `CheckPlanConflict` (terminal). |
 | `pod.rs` | `find_owned_pod(ns, &job)` lists by `batch.kubernetes.io/job-name` and keeps only pods whose `ownerReferences` contain `{kind: Job, uid: job.uid, controller: true}`. It ignores and logs `ForeignPodIgnored`. No legacy-label fallback for check Jobs. Fixes G10 for new code. W10 switches the backup, restore and probe callers. |
 | `waiting.rs` | Pure classification of pod, Job and event state (table below). |
@@ -1123,7 +1124,9 @@ kind: Preflight
 metadata: {name: pf-9a1b…, namespace: team-a}
 spec:
   request:                                   # CEL: self == oldSelf
-    operation: Restore                       # enum [Backup, Restore, DestinationAccess]
+    operation: Restore                       # enum [Backup, Restore, DestinationAccess, SourceConnection]
+    sourceConnection:                        # SourceConnection only (amended 2026-09-18)
+      connectionRef: {name: source}          # the KafkaCluster to dial
     # exactly one of backup|restore|destinationAccess, matching operation (CEL)
     backup:
       sourceRef: {name: source}
@@ -1177,7 +1180,7 @@ status:
 |---|---|---|---|
 | P1 | `.spec.request` | `self == oldSelf` | `spec.request is immutable; create a new Preflight` |
 | P2 | `.spec` | `(!has(oldSelf.cancelRequested) \|\| !oldSelf.cancelRequested) \|\| (has(self.cancelRequested) && self.cancelRequested)` | `spec.cancelRequested may only change from false to true` |
-| P3 | `.spec.request` | `self.operation == 'Backup' ? (has(self.backup) && !has(self.restore) && !has(self.destinationAccess)) : self.operation == 'Restore' ? (has(self.restore) && !has(self.backup) && !has(self.destinationAccess)) : (has(self.destinationAccess) && !has(self.backup) && !has(self.restore))` | `exactly the block matching spec.request.operation may be set` |
+| P3 | `.spec.request` | `self.operation == 'Backup' ? (has(self.backup) && !has(self.restore) && !has(self.destinationAccess) && !has(self.sourceConnection)) : self.operation == 'Restore' ? (has(self.restore) && !has(self.backup) && !has(self.destinationAccess) && !has(self.sourceConnection)) : self.operation == 'DestinationAccess' ? (has(self.destinationAccess) && !has(self.backup) && !has(self.restore) && !has(self.sourceConnection)) : (has(self.sourceConnection) && !has(self.backup) && !has(self.restore) && !has(self.destinationAccess))` | `exactly the block matching spec.request.operation may be set` |
 | P4 | `.spec.request.backup` | `has(self.destinationRef) != has(self.legacyArchive)` | `set exactly one of destinationRef or legacyArchive` |
 | P5 | `.spec.request.restore` | `has(self.planBytes) != has(self.restoreRef)` | `set exactly one of planBytes (a draft) or restoreRef (an existing Restore)` |
 | P6 | `.spec.request.restore` | `!has(self.planBytes) \|\| (has(self.planHash) && has(self.targetRef))` | `a draft needs planHash and targetRef; the controller recomputes the hash` |
@@ -1222,6 +1225,15 @@ Operation `Backup` (the "Back up now" and schedule readiness contract, PLAT-06.2
 
 Operation `DestinationAccess` runs `destination.*`, `runner.*` and
 `configuration.policy` for the requested roles.
+
+Operation `SourceConnection` runs `connection.resolved`, `connection.credentialProjected`,
+`connection.authenticated`, `connection.clusterIdentity`, `runner.*`, `configuration.policy`
+and `configuration.egress` (execution-only), and nothing else. `connection.topicsDescribable`
+is **not** reported: the request names no topic, and that row's vocabulary is about a topic
+the requester named. On `connection.clusterIdentity`, `ClusterIdentityChanged` is blocking as
+everywhere else, but `SourceIsAllowlistedTarget` is a `Backup` verdict and is not reported
+here: whether a cluster may be backed up is a different question, guarded by the runner's
+phase −1 rail. (Amended 2026-09-18, d2-source-check.)
 
 Operation `Restore` runs the target equivalents (`target.resolved`,
 `target.credentialProjected`, `target.authenticated`) and destination roles
@@ -1554,6 +1566,12 @@ Unchanged: no verbs, and `automountServiceAccountToken: false`.
 // or {"operation": "backup", "backup": {"sourceConnection": "source", "destination": "primary", "topics": ["orders"], "schedule": null}}
 ```
 
+The fourth operation's spelling (amended 2026-09-18):
+
+```json
+{"operation": "sourceConnection", "sourceConnection": {"connectionRef": "source"}}
+```
+
 ```json
 // Preflight
 {"id": "pf-…", "operation": "restore", "state": "notReady",
@@ -1577,7 +1595,7 @@ Unchanged: no verbs, and `automountServiceAccountToken: false`.
 |---|---|
 | New `ui/pages/destinations.js`; route in `ui/app.js:26-35` | List and create (location, independent **transport** radio TLS/InsecureHTTP, **addressing** radio PathStyle/VirtualHosted, CA `ConfigMap`, four grants with existing-Secret or write-only new-credential entry). "Test access" shows the `Preflight` checks with observed time and scope. "Rotate access" uses `:update-access`. Credential inputs are never persisted in drafts (PLAT-13.2). |
 | `ui/pages/schedules.js:192-243` | Replace the archive URL and Secret inputs with a destination selector, defaulting to the namespace default destination. Legacy inline fields move behind "Advanced (legacy inline archive)". Readiness panel from `Preflight` `Backup`. Topic picker from the latest fresh discovery, with manual entry retained and stale, failed and limited states labelled. |
-| `ui/pages/clusters.js` (detail) | "Discover topics" panel: start, cancel, progress, visibility banner (`unknown`/`limited`/`attestedComplete` with basis), searchable paged table, stale badge, last successful versus latest attempt. Connection health (`status.reachable`) is labelled "connection probe", never "ready". |
+| `ui/pages/clusters.js` (detail) | "Discover topics" panel: start, cancel, progress, visibility banner (`unknown`/`limited`/`attestedComplete` with basis), searchable paged table, stale badge, last successful versus latest attempt. Connection health (`status.reachable`) is labelled "connection probe", never "ready". "Test connection" creates a `SourceConnection` `Preflight` and renders its rows; the list's per-row control is relabelled "Re-read probe" (amended 2026-09-18). |
 | `ui/pages/restore-wizard.js` | Step 1 takes the source destination from the recovery point's frozen destination (`locationDigest` match). Remove the per-restore endpoint, region and path-style fields (`:160-190`) for destination-backed points. Add an evidence destination selector. **Fix G5 now:** delete the `allowHttp` derivation at `:1142-1149`, or for legacy drafts replace it with an explicit "Allow insecure HTTP (explicit)" control defaulting off and independent of path-style. Step 5 becomes a real `Preflight` bound to the plan hash, with a stale banner on any edit and a re-run button. Replace the `preflightSentence` copy (`ui/render.js:223-230`). |
 | `ui/plan.js:262-276` | Unchanged grammar; storage fields are fed from the destination, never from the addressing checkbox. |
 | Legacy direct-CR mode | Read-only summaries only (§7.4). |
