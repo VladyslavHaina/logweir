@@ -26,6 +26,9 @@ sys.path.insert(0, str(ROOT / "scripts" / "fixtures"))
 
 import plat04_scope_proxy as proxy  # noqa: E402
 
+sys.path.insert(0, str(ROOT / "scripts" / "live" / "d1" / "fence"))
+import fenced  # noqa: E402
+
 NS = "d1fence-test"
 
 
@@ -254,6 +257,73 @@ def test_classify_names_the_requests_the_scenarios_hold() -> None:
         "",
         "",
     )
+
+
+# ---------------------------------------------------------------------------
+# The fenced Role's width (review R-12)
+# ---------------------------------------------------------------------------
+
+SHIPPED = [
+    {"apiGroups": ["logweir.dev"], "resources": ["backups"], "verbs": ["get", "list", "watch"]},
+    {"apiGroups": ["logweir.dev"], "resources": ["backups/status"], "verbs": ["patch"]},
+    {"apiGroups": [""], "resources": ["pods"], "verbs": ["list"]},
+]
+
+
+def test_role_delta_is_empty_when_the_fence_matches_the_shipped_role() -> None:
+    assert fenced.role_delta(SHIPPED, SHIPPED) == {}
+
+
+def test_role_delta_allows_update_on_status_and_nothing_else() -> None:
+    wider = [
+        {"apiGroups": ["logweir.dev"], "resources": ["backups"], "verbs": ["get", "list", "watch"]},
+        {"apiGroups": ["logweir.dev"], "resources": ["backups/status"],
+         "verbs": ["patch", "update"]},
+        {"apiGroups": [""], "resources": ["pods"], "verbs": ["list"]},
+    ]
+    assert fenced.role_delta(wider, SHIPPED) == {}, (
+        "`update` on a status subresource is the one declared delta and must be allowed"
+    )
+
+
+def test_role_delta_catches_every_kind_of_widening() -> None:
+    """The six undeclared grants review R-12 found, each on its own.
+
+    `secrets` is the one that matters most: `config/rbac/role.yaml` carries the
+    banner "NO VERB ON `secrets`, AT ALL, ANYWHERE IN THIS FILE", so a fence
+    that grants one has broken a named product invariant.
+    """
+    cases = {
+        "core/secrets": [{"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]}],
+        "core/pods": [{"apiGroups": [""], "resources": ["pods"], "verbs": ["list", "get"]}],
+        "logweir.dev/backups": [
+            {"apiGroups": ["logweir.dev"], "resources": ["backups"],
+             "verbs": ["get", "list", "watch", "delete"]}
+        ],
+    }
+    for expected_key, rules in cases.items():
+        delta = fenced.role_delta(rules, SHIPPED)
+        assert expected_key in delta, (expected_key, delta)
+    # `update` outside a status subresource is NOT declared and must be caught.
+    plain_update = [
+        {"apiGroups": ["logweir.dev"], "resources": ["backups"], "verbs": ["update"]}
+    ]
+    assert fenced.role_delta(plain_update, SHIPPED) == {"logweir.dev/backups": ["update"]}
+
+
+def test_the_fenced_role_grants_no_verb_on_secrets() -> None:
+    grants = fenced.rules_to_grants(fenced.namespaced_role("ns", {})["rules"])
+    offenders = sorted(k for k in grants if k[1].split("/")[0] == "secrets")
+    assert not offenders, (
+        "config/rbac/role.yaml: NO VERB ON `secrets`, AT ALL, ANYWHERE IN THIS FILE — "
+        f"the fenced Role has {offenders}"
+    )
+
+
+def test_the_fenced_role_declares_update_only_on_status() -> None:
+    grants = fenced.rules_to_grants(fenced.namespaced_role("ns", {})["rules"])
+    stray = sorted(k for k, v in grants.items() if "update" in v and not k[1].endswith("/status"))
+    assert not stray, f"`update` outside a status subresource: {stray}"
 
 
 def main() -> int:

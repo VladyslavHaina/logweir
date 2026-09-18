@@ -121,9 +121,24 @@ users:
 def namespaced_role(ns: str, labels: dict[str, str]) -> dict[str, Any]:
     """The shipped ClusterRole's namespaced rules, as a Role in one namespace.
 
-    Copied rule for rule from `config/rbac/role.yaml` (and verified against the
-    live `weirkeeper` ClusterRole) with the two cluster-scoped kinds removed —
-    they move to [`trust_cluster_role`], read-only.
+    ONE DELTA FROM `config/rbac/role.yaml`, AND IT IS LISTED HERE. An earlier
+    version of this function claimed to be "copied rule for rule" and was wider
+    than a shipped install in SEVEN places (review R-12): `+get` on `secrets`,
+    `+patch` on `restores`, `+get` on `pods`, `+watch` on `events`, `+list` on
+    `configmaps`, `+get` on `preflights`/`topicdiscoveries`/
+    `protectionpolicies`/`retentionpolicies`, and `+update` on the status
+    subresources. Six of those seven are now gone; the `secrets` one was the
+    worst of them, because `config/rbac/role.yaml` carries a banner — "NO VERB
+    ON `secrets`, AT ALL, ANYWHERE IN THIS FILE" — and a fence that quietly
+    broke a named product invariant is a fence that can launder a 403 into a
+    pass.
+
+    THE ONE THAT REMAINS is `update` alongside `patch` on the status
+    subresources, and it is there for the pre-upgrade image alone: see
+    [`trust_cluster_role`]'s neighbour comment and the report's RBAC finding.
+    The current controller never uses it — `patch` is the verb every one of its
+    status writes takes — so a row that passes here passes under the grants a
+    shipped install has, which is the only way a row's verdict transfers.
     """
     return {
         "apiVersion": "rbac.authorization.k8s.io/v1",
@@ -138,21 +153,26 @@ def namespaced_role(ns: str, labels: dict[str, str]) -> dict[str, Any]:
                     "backups",
                     "backupschedules",
                     "kafkaclusters",
-                    "preflights",
-                    "protectionpolicies",
                     "recoverycatalogs",
                     "rehearsalschedules",
                     "restores",
-                    "retentionpolicies",
-                    "topicdiscoveries",
                 ],
                 "verbs": ["get", "list", "watch"],
             },
             {
+                # `list, watch` and NOT `get`, exactly as shipped.
                 "apiGroups": ["logweir.dev"],
-                "resources": ["backups", "restores"],
-                "verbs": ["create", "patch"],
+                "resources": [
+                    "preflights",
+                    "protectionpolicies",
+                    "retentionpolicies",
+                    "topicdiscoveries",
+                ],
+                "verbs": ["list", "watch"],
             },
+            {"apiGroups": ["logweir.dev"], "resources": ["backups"],
+             "verbs": ["create", "patch"]},
+            {"apiGroups": ["logweir.dev"], "resources": ["restores"], "verbs": ["create"]},
             {
                 "apiGroups": ["logweir.dev"],
                 "resources": [
@@ -169,26 +189,15 @@ def namespaced_role(ns: str, labels: dict[str, str]) -> dict[str, Any]:
                     "retentionpolicies/status",
                     "topicdiscoveries/status",
                 ],
-                # `update` IS WIDER THAN THE SHIPPED ClusterRole, AND IT IS HERE
-                # FOR ONE REASON. The shipped role grants `patch` on the status
-                # subresources and deliberately grants no `update` anywhere, as
-                # `reservation_patch` says at length: "A PATCH AND NOT A PUT,
-                # AND THAT IS AN RBAC CONTRACT ... A reservation sent as a
-                # replace is therefore 403 on every shipped install".
-                #
-                # The main@4956785 build sends `Api::replace_status`, a PUT, and
-                # this fence reproduced that live: every reconcile of the
-                # `legacy` schedule under that image answered `cannot update
-                # resource "backupschedules/status"`, so it wrote no status and
-                # created no run. D1 §13.2's own L-05.1-3 anticipates it — "(W0
-                # fix applied only if required for it to fire)" — and this is
-                # that allowance, taken as a namespaced grant rather than a
-                # source change, because product code is read-only here.
-                #
-                # IT IS SCOPED TO THIS NAMESPACE AND TO THIS ServiceAccount. It
-                # changes nothing about what the SHIPPED install grants, and the
-                # current controller never uses it: `patch` is still the verb
-                # every one of its status writes takes.
+                # THE ONE DECLARED DELTA. The shipped role grants `patch` and
+                # deliberately grants no `update` anywhere: `reservation_patch`
+                # says so and calls a replace "403 on every shipped install".
+                # The main@4956785 build sends `Api::replace_status`, a PUT,
+                # which the API server authorises as `update`, so without this
+                # the conversion and rollback rows cannot make that build write
+                # a single status — which this fence measured, and which is the
+                # report's RBAC finding. D1 §13.2's L-05.1-3 allows it: "(W0 fix
+                # applied only if required for it to fire)".
                 "verbs": ["patch", "update"],
             },
             {
@@ -201,12 +210,74 @@ def namespaced_role(ns: str, labels: dict[str, str]) -> dict[str, Any]:
                 "resources": ["jobs"],
                 "verbs": ["create", "get", "list", "watch", "patch"],
             },
-            {"apiGroups": [""], "resources": ["pods"], "verbs": ["list", "get"]},
+            {"apiGroups": [""], "resources": ["pods"], "verbs": ["list"]},
             {"apiGroups": [""], "resources": ["pods/log"], "verbs": ["get"]},
-            {"apiGroups": [""], "resources": ["events"], "verbs": ["list", "watch"]},
-            {"apiGroups": [""], "resources": ["configmaps"], "verbs": ["create", "get", "list"]},
-            {"apiGroups": [""], "resources": ["secrets"], "verbs": ["get"]},
+            {"apiGroups": [""], "resources": ["events"], "verbs": ["list"]},
+            {"apiGroups": [""], "resources": ["configmaps"], "verbs": ["create", "get"]},
         ],
+    }
+
+
+# The ONLY verb the fenced Role may hold that the shipped ClusterRole does not.
+# Checked against the live `weirkeeper` ClusterRole before the controller is
+# deployed, so this cannot drift back to the seven-way divergence review R-12
+# found. `*` matches any resource whose name ends `/status`.
+DECLARED_ROLE_DELTAS: dict[str, frozenset[str]] = {"*/status": frozenset({"update"})}
+
+
+def rules_to_grants(rules: list[dict[str, Any]]) -> dict[tuple[str, str], set[str]]:
+    """`(apiGroup, resource) -> {verb}`, flattened out of a Role's rule list."""
+    grants: dict[tuple[str, str], set[str]] = {}
+    for rule in rules:
+        for group in rule.get("apiGroups") or [""]:
+            for resource in rule.get("resources") or []:
+                grants.setdefault((group, resource), set()).update(rule.get("verbs") or [])
+    return grants
+
+
+def role_delta(
+    fenced_rules: list[dict[str, Any]],
+    shipped_rules: list[dict[str, Any]],
+    *,
+    declared: dict[str, frozenset[str]] | None = None,
+) -> dict[str, list[str]]:
+    """Every verb the fenced Role holds that the shipped one does not, minus the declared ones.
+
+    A row that passes behind a wider-than-shipped grant does not prove the
+    shipped grant suffices for the behaviour it measured — and the RBAC finding
+    in this run's report is the proof that this can bite. So the fence states
+    its one deliberate delta and refuses to carry any other.
+    """
+    declared = DECLARED_ROLE_DELTAS if declared is None else declared
+    fenced_grants = rules_to_grants(fenced_rules)
+    shipped_grants = rules_to_grants(shipped_rules)
+    out: dict[str, list[str]] = {}
+    for (group, resource), verbs in sorted(fenced_grants.items()):
+        allowed = set(shipped_grants.get((group, resource), set()))
+        if resource.endswith("/status"):
+            allowed |= set(declared.get("*/status", frozenset()))
+        allowed |= set(declared.get(f"{group}/{resource}", frozenset()))
+        extra = verbs - allowed
+        if extra:
+            out[f"{group or 'core'}/{resource}"] = sorted(extra)
+    return out
+
+
+def check_role_is_not_wider_than_shipped(H: Any) -> dict[str, Any]:
+    """Refuse to deploy behind a Role wider than the shipped one, bar the declared delta."""
+    shipped = json.loads(H.run(H.K + ["get", "clusterrole", "weirkeeper", "-o", "json"]).stdout)
+    fenced_rules = namespaced_role(H.NS, dict(H.LABELS))["rules"]
+    delta = role_delta(fenced_rules, shipped["rules"])
+    if delta:
+        raise H.Failure(
+            "the fenced Role grants verbs the shipped `weirkeeper` ClusterRole does not, "
+            f"beyond the declared {sorted(DECLARED_ROLE_DELTAS)}: {delta}. A row that passes "
+            "behind a grant a shipped install lacks does not prove the shipped grant suffices."
+        )
+    return {
+        "shippedClusterRoleUid": shipped["metadata"]["uid"],
+        "declaredDeltas": {k: sorted(v) for k, v in DECLARED_ROLE_DELTAS.items()},
+        "undeclaredDeltas": delta,
     }
 
 
@@ -507,6 +578,7 @@ def deploy(H: Any, which: str = "new", *, replicas: int = 1) -> dict[str, Any]:
     labels = dict(H.LABELS)
     provenance = assert_source_matched(H, which)
     table = check_table_covers_the_cluster(H)
+    rbac = check_role_is_not_wider_than_shipped(H)
     proxy_source = (H.ROOT / "scripts/fixtures/plat04_scope_proxy.py").read_text()
     for manifest in (
         {
@@ -561,6 +633,7 @@ def deploy(H: Any, which: str = "new", *, replicas: int = 1) -> dict[str, Any]:
         "clusterRole": cluster_name,
         "replicas": replicas,
         "rewriteTable": table,
+        "rbac": rbac,
         **provenance,
         **pod_provenance(H),
     }
@@ -837,6 +910,22 @@ def prove(H: Any) -> dict[str, Any]:
         "counts": (state or {}).get("counts", {}),
         "unknownResources": (state or {}).get("unknownResources", {}),
     }
+    # WHICH READINGS GATE, SPELLED OUT (review R-1). Reading 2 — the real shared
+    # controller's own denials — is RECORDED and NOT GATED, because at `prove`
+    # time the namespace is seconds old and the shared controller has not tried
+    # to write into it yet; gating on it here would fail every run. It becomes
+    # true a minute later and the harness re-reads it into
+    # `logs/shared-controller-denials.log`. Saying "all three gate" would be
+    # false, so the proof says which is which.
+    proof["gatedReadings"] = [
+        "impersonatedCreate.denied",
+        "harnessCreate.created",
+        "proxy.reachable and proxy.namespace == this namespace",
+        "proxy.unknownResources is empty",
+    ]
+    proof["recordedNotGatedReadings"] = [
+        "sharedControllerDenials.matchedLines (0 at setup time is expected and not a failure)"
+    ]
     proof["fenced"] = bool(
         proof["impersonatedCreate"]["denied"]
         and proof["harnessCreate"]["created"]
