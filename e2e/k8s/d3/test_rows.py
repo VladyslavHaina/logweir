@@ -154,6 +154,24 @@ def test_an_unreadable_point_is_named_explained_and_never_a_candidate() -> None:
             d3.evaluation_point_ids({"status": {"lastEvaluation": also_candidate}})))
 
 
+def test_the_digest_prefix_defect_has_a_fingerprint_of_its_own() -> None:
+    same = "sha256:" + "a" * 64
+    bare = "a" * 64
+    row("the defect's own shape: two digests equal once the prefix is off",
+        d3.digest_prefix_signature(
+            f"page digest {bare} does not match published {same}"))
+    row("MUTANT: an absent catalog is not this defect",
+        not d3.digest_prefix_signature(
+            "namespace d3w14 has no RecoveryCatalog named secondary; retention evaluates "
+            "the catalog's bounded view and never a bucket walk of its own"))
+    row("MUTANT: two digests that genuinely differ are not this defect",
+        not d3.digest_prefix_signature(
+            f"page digest {bare} does not match published sha256:{'b' * 64}"))
+    row("MUTANT: one digest alone is not two compared",
+        not d3.digest_prefix_signature(f"page digest {same} is unreadable"))
+    row("MUTANT: an empty message decides nothing", not d3.digest_prefix_signature(""))
+
+
 def test_the_enforcer_is_in_the_shipped_runner_image() -> None:
     present = {"terminated": {"exitCode": 3, "reason": "Error",
                               "startedAt": "2026-09-18T18:48:40Z"}}

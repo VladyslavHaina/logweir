@@ -1091,15 +1091,34 @@ def retention_policy(
 
 
 def wait_evaluated(name: str, *, seconds: int = 300, generation: int | None = None):
-    def ready(o: dict[str, Any]) -> bool:
-        ev = condition(o, "Evaluated")
-        if ev.get("status") not in {"True", "False"}:
-            return False
+    """Wait for an Evaluated verdict, PREFERRING a settled `True`.
+
+    Any verdict used to do, because under RET-DIGEST-PREFIX no policy ever
+    reached `True` and a harness that insisted on one would have hung instead of
+    measuring the defect. With the defect closed that tolerance became a race:
+    re-running this phase in an existing namespace recreates the catalog, a
+    policy reconciled inside that window lands
+    `Evaluated=False/ViewUnreadable` naming the absent catalog, and the harness
+    read that half-second as the answer (observed 2026-09-18). So `True` is
+    waited for first, and a settled `False` is accepted only once most of the
+    window is gone — a policy that really cannot evaluate is still observed,
+    and still reported, just not mistaken for one that is mid-reconcile.
+    """
+    def settled(o: dict[str, Any], want_true: bool) -> bool:
         if generation is not None and o.get("status", {}).get("observedGeneration") != generation:
             return False
-        return True
+        state = condition(o, "Evaluated").get("status")
+        return state == "True" if want_true else state in {"True", "False"}
 
-    return wait_for("retentionpolicy", name, ready, seconds=seconds, what="an Evaluated verdict")
+    deadline = time.time() + seconds
+    try:
+        return wait_for("retentionpolicy", name, lambda o: settled(o, True),
+                        seconds=max(10, int(seconds * 0.6)), what="an Evaluated=True verdict")
+    except RuntimeError:
+        pass
+    return wait_for("retentionpolicy", name, lambda o: settled(o, False),
+                    seconds=max(10, int(deadline - time.time())),
+                    what="any settled Evaluated verdict")
 
 
 # `SkippedEntry.reason`'s closed vocabulary
@@ -1208,6 +1227,23 @@ def skipped_never_a_candidate(ev: dict[str, Any], ids: dict[str, set[str]]) -> b
     )
 
 
+DIGEST_HEX = re.compile(r"(?:sha256:)?([0-9a-f]{64})")
+
+
+def digest_prefix_signature(message: str) -> bool:
+    """The fingerprint RET-DIGEST-PREFIX left on every `ViewUnreadable` message.
+
+    `weirkeeper::catalog_view::page_digest` returned bare hex while
+    `status.pages[].sha256` is published `sha256:`-prefixed, and the two were
+    compared with `!=`. So the controller printed two digests side by side that
+    are EQUAL once the prefix is off, which no other cause of an unreadable view
+    produces — an absent catalog, a page that genuinely does not match, a
+    truncated index all print one digest or two different ones.
+    """
+    found = DIGEST_HEX.findall(message or "")
+    return len(found) >= 2 and len(set(found)) < len(found)
+
+
 def enforcer_is_in_the_image(state: dict[str, Any]) -> bool:
     """What a PRESENT `logweir-retention` looks like from a probe Job.
 
@@ -1293,39 +1329,60 @@ def retention() -> None:
     ev_b = (pol_b.get("status", {}) or {}).get("lastEvaluation") or {}
 
     # --- the defect that decides everything below ---------------------------
+    # THE DEFECT ROW, RE-POINTED AND NO LONGER A CATCH-ALL. It recorded a FAIL
+    # naming RET-DIGEST-PREFIX for ANY policy landing
+    # `Evaluated=False/ViewUnreadable`, which was right while that defect made
+    # every view unreadable and wrong the moment it was fixed: a re-run of this
+    # phase recreates the catalog, a policy reconciled inside that window lands
+    # `ViewUnreadable` naming the ABSENT catalog, and the row reported the fixed
+    # defect as back (observed 2026-09-18). The defect has a fingerprint no
+    # other cause produces — two digests printed side by side that are equal
+    # once the `sha256:` prefix is off — so that is what is looked for, and any
+    # other unreadable view is recorded as the different thing it is.
     unreadable = [
         (name, condition(pol, "Evaluated"))
         for name, pol in [("keep-a", pol_a), ("keep-b", pol_b)]
         if condition(pol, "Evaluated").get("reason") == "ViewUnreadable"
     ]
+    prefix_defect = [(n, c) for n, c in unreadable
+                     if digest_prefix_signature(c.get("message", ""))]
     if unreadable:
         pages = {
             name: [
                 {"configMapName": pg["configMapName"], "publishedSha256": pg["sha256"]}
-                for pg in (get("recoverycatalog", cat)["status"].get("pages") or [])
+                for pg in ((get_opt("recoverycatalog", cat) or {}).get("status", {}).get("pages")
+                           or [])
             ]
             for name, cat in [("keep-a", "primary"), ("keep-b", "secondary")]
         }
-        path = artifact(
+        evidence.append(artifact(
             "retention/view-unreadable.json",
-            {"conditions": {n: c for n, c in unreadable}, "catalogPages": pages},
-        )
-        record(
-            "retention-view-digest-prefix-defect",
-            "PLAT-16.1",
-            "FAIL",
-            "EVERY RetentionPolicy in this namespace lands `Ready=False/CatalogUnusable` + "
-            "`Evaluated=False/ViewUnreadable`, and the controller's own message prints the "
-            "two digests side by side as EQUAL apart from a prefix: "
-            + unreadable[0][1].get("message", "")
-            + ". `weirkeeper::catalog_view::page_digest` returns bare hex "
-            "(`logweir_core::ids::sha256_hex`) while `status.pages[].sha256` is published "
-            "`sha256:`-prefixed, and `controllers/retention_policy.rs:1345` compares the two "
-            "with `!=`. No plan can be rendered for any destination on this build, so "
-            "PLAT-16.1's report and PLAT-16.2's controller-driven enforcement are both "
-            "unreachable through the controller.",
-            [path],
-        )
+            {"conditions": {n: c for n, c in unreadable}, "catalogPages": pages,
+             "carriesTheDigestPrefixSignature": [n for n, _ in prefix_defect]},
+        ))
+    check(
+        "retention-view-digest-is-compared-without-its-prefix",
+        "PLAT-16.1",
+        not prefix_defect,
+        (
+            "`weirkeeper::catalog_view::page_digest` returns bare hex "
+            "(`logweir_core::ids::sha256_hex`) and `status.pages[].sha256` is published "
+            "`sha256:`-prefixed; RET-DIGEST-PREFIX was `retention_policy.rs` comparing the "
+            "two with `!=`, which made EVERY view unreadable and printed the two digests "
+            "side by side as equal apart from the prefix. "
+            + (
+                "THAT IS BACK: " + prefix_defect[0][1].get("message", "")
+                if prefix_defect
+                else "No policy's view is unreadable for that reason."
+            )
+            + (
+                f" (Other unreadable views, which are NOT this defect: "
+                f"{[(n, c.get('message', '')[:120]) for n, c in unreadable]})"
+                if unreadable and not prefix_defect else ""
+            )
+        ),
+        evidence,
+    )
 
     a_ids = evaluation_point_ids(pol_a)
     b_ids = evaluation_point_ids(pol_b)
