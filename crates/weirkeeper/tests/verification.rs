@@ -5313,3 +5313,124 @@ fn a_backoff_does_not_outlive_its_purpose() {
     );
     assert_ne!(revoked.verification["trust"]["basis"], json!("Unverified"));
 }
+
+/// **The re-verification's hardening nit.** A stored `trust.retryAfter` can
+/// only ever mean "at most `RETRY_AFTER_SECS` from now", so a hand-written
+/// far-future instant defers one window and is then rewritten to a real one.
+///
+/// A forged value was already fail-closed — a deferred pass still re-derives
+/// the verdict, so it can neither hold a `Valid`, nor render green, nor delay a
+/// `KeyCompromise` revocation (both asserted below). What the clamp removes is
+/// the remaining denial: "this object can never be repaired".
+///
+/// KILLS: "believe the stored instant" — the plan below would stay `Deferred`
+/// at every instant this century, and the block would carry `2099` for ever.
+#[test]
+fn a_stored_retry_after_is_clamped_to_one_window() {
+    let now = at("2026-09-19T12:00:00Z");
+    let mut forged = pre_signedat_status();
+    forged["evidence"]["verification"]["result"] = json!("NotAttempted");
+    forged["evidence"]["verification"]["detail"] = json!("the bucket did not answer");
+    forged["evidence"]["verification"]["trust"] = json!({
+        "basis": "Unverified",
+        "keyState": "Active",
+        "policy": {"name": "org-default", "uid": "uid-org-default", "generation": 4},
+        "retryAfter": "2099-01-01T00:00:00Z",
+    });
+
+    // ---- IT DEFERS NOTHING. A `min()` would have deferred for ever in
+    // ---- fifteen-minute steps, because the ceiling moves with `now`.
+    assert!(
+        matches!(
+            weirkeeper::verification::signing_time_need(Some(&forged), now),
+            weirkeeper::verification::ReadPlan::Read(_)
+        ),
+        "a value above the ceiling is not one this controller wrote, so it is honoured as no \
+         backoff at all and the read happens on this very pass — `2099` is not a denial this \
+         field may grant"
+    );
+    assert!(
+        matches!(
+            weirkeeper::verification::signing_time_need(
+                Some(&forged),
+                now + chrono::Duration::seconds(900)
+            ),
+            weirkeeper::verification::ReadPlan::Read(_)
+        ),
+        "…and at no later instant either"
+    );
+
+    // ---- and the attempt it does not defer writes a real instant -----------
+    let attempted = weirkeeper::verification::retrust_with(
+        &forged,
+        &org_default(),
+        backup_badge,
+        None,
+        Some(1),
+        now,
+        &weirkeeper::verification::SigningTime::Unreadable("the bucket did not answer".to_string()),
+    )
+    .expect("the forged instant differs from a real one, so it is rewritten");
+    assert_eq!(
+        attempted.verification["trust"]["retryAfter"],
+        json!("2026-09-19T12:15:00Z"),
+        "the object self-heals to the instant this controller would itself have written"
+    );
+    assert_eq!(
+        attempted.to, "NotAttempted",
+        "a forged backoff was fail-closed to begin with: the pass still re-derives"
+    );
+
+    // ---- a legitimate value is carried unchanged, so the pass stays silent --
+    let mut honest = forged.clone();
+    honest["evidence"]["verification"]["trust"]["retryAfter"] = json!("2026-09-19T12:10:00Z");
+    let first = weirkeeper::verification::retrust_with(
+        &honest,
+        &org_default(),
+        backup_badge,
+        None,
+        Some(1),
+        now,
+        &weirkeeper::verification::SigningTime::Deferred,
+    )
+    .expect("the stored detail names a different policy, so one patch settles it");
+    assert_eq!(
+        first.verification["trust"]["retryAfter"],
+        json!("2026-09-19T12:10:00Z"),
+        "below the ceiling, so carried verbatim"
+    );
+    let mut settled = honest.clone();
+    settled["evidence"]["verification"] = first.verification.clone();
+    assert!(
+        weirkeeper::verification::retrust_with(
+            &settled,
+            &org_default(),
+            backup_badge,
+            Some(&vec![first.verified.clone()]),
+            Some(1),
+            now + chrono::Duration::seconds(15),
+            &weirkeeper::verification::SigningTime::Deferred,
+        )
+        .is_none(),
+        "…and the next deferred reconcile renders the identical block and writes nothing"
+    );
+
+    // ---- the ratchet ignores it entirely -----------------------------------
+    let effective = at("2026-09-10T00:00:00Z");
+    let mut key = evidence_key();
+    key.state = KeyState::Revoked;
+    key.revoked_at = Some(effective);
+    key.revocation_reason = Some(RevocationReason::KeyCompromise);
+    key.revocation_effective_from = Some(effective);
+    let revoked = weirkeeper::verification::retrust_with(
+        &forged,
+        &Resolution::Trust(Box::new(resolved(&policy("org-default", &[], vec![key])))),
+        backup_badge,
+        None,
+        Some(1),
+        now,
+        &weirkeeper::verification::SigningTime::Deferred,
+    )
+    .expect("a compromise revocation always changes a NotAttempted verdict");
+    assert_eq!(revoked.to, "Untrusted");
+}

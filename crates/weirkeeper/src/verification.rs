@@ -1737,8 +1737,17 @@ pub fn retrust_with(
             // the instant would render a different block on every reconcile
             // and defeat the bound it is implementing.
             SigningTime::Deferred => {
-                if let Some(v) = stored.pointer("/trust/retryAfter") {
-                    object.insert("retryAfter".into(), v.clone());
+                // CLAMPED ON THE WAY OUT TOO, so a hand-written far-future
+                // instant is replaced by the ceiling on the pass that reads it
+                // rather than being carried forever. A legitimate value is
+                // already below the ceiling, so it is carried unchanged and the
+                // block stays byte-identical — which is what keeps a deferred
+                // pass silent.
+                if let Some(until) = deferred_until(stored, now) {
+                    object.insert(
+                        "retryAfter".into(),
+                        json!(until.to_rfc3339_opts(SecondsFormat::Secs, true)),
+                    );
                 }
                 if let Some(v) = stored.pointer("/trust/signingTimeRead") {
                     object.insert("signingTimeRead".into(), v.clone());
@@ -2089,15 +2098,53 @@ pub fn signing_time_need(status: Option<&Value>, now: DateTime<Utc>) -> ReadPlan
     // exactly the moment one read each is wanted, so process memory would
     // forget the bound at the only time it is expensive; the object remembers.
     let deferred = stored_verification(status)
-        .and_then(|b| b.pointer("/trust/retryAfter"))
-        .and_then(Value::as_str)
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .is_some_and(|until| now < until.with_timezone(&Utc));
+        .and_then(|block| deferred_until(block, now))
+        .is_some_and(|until| now < until);
     if deferred {
         ReadPlan::Deferred
     } else {
         ReadPlan::Read(need)
     }
+}
+
+/// The instant before which no re-read is attempted, **clamped to
+/// `now + RETRY_AFTER_SECS`**.
+///
+/// # Why a stored instant is not simply believed
+///
+/// `trust.retryAfter` is written by this controller, and everything else on the
+/// status that it writes is also something an operator with `patch` on the
+/// `status` subresource can hand-write. A far-future value is already
+/// fail-closed — a deferred pass still re-derives the verdict, so the worst it
+/// buys is that the object stays UNREPAIRED in the safe state, and it can
+/// neither hold a `Valid`, nor render green, nor delay a `KeyCompromise`
+/// revocation (`decide`'s compromise rows run before anything consults a
+/// claim). But "cannot be repaired, ever" is still a denial this field has no
+/// business granting, so the ceiling this controller would itself have written
+/// is the most any stored value can mean. A hand-written `2099` defers one more
+/// window and is then rewritten to a real instant.
+///
+/// # A `min()` WOULD NOT HAVE BEEN A CLAMP
+///
+/// The obvious spelling — `stored.min(now + RETRY_AFTER_SECS)` — bounds the
+/// instant and not the DENIAL: the ceiling moves with `now`, so a `2099` value
+/// is clamped to "fifteen minutes from now" on every pass and defers for ever
+/// in fifteen-minute steps. Nothing on the status says when the field was
+/// written, so the only sound reading is that a value ABOVE the ceiling is not
+/// one this controller wrote and is honoured as no backoff at all: the read
+/// happens on this pass, and the attempt rewrites the field to a real instant.
+/// A legitimate value is by construction at or below the ceiling and is
+/// honoured unchanged.
+///
+/// `None` when the block records no backoff, or records one this controller
+/// would never have written.
+fn deferred_until(stored: &Value, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    let stored_until = stored
+        .pointer("/trust/retryAfter")
+        .and_then(Value::as_str)
+        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+        .map(|t| t.with_timezone(&Utc))?;
+    (stored_until <= now + chrono::Duration::seconds(RETRY_AFTER_SECS)).then_some(stored_until)
 }
 
 /// The document a re-read would fetch, ignoring the backoff — the pure half of
