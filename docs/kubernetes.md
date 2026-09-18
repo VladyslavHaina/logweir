@@ -430,6 +430,16 @@ builds its object-store client from *every* `AWS_*` variable it finds — so a
 controller started with `AWS_ALLOW_HTTP=true` enables plaintext HTTP inside a
 runner whose approved plan says `allow_http: false`.
 
+**So the defect is closed for destination-backed runs and open for legacy
+inline-`archive` runs, by design.** Those four variables are how every existing
+installation points its runners at MinIO or Ceph; removing them would close the
+defect by breaking every upgrade at the moment of the upgrade. The route out is
+per object and not per release: create a `BackupDestination` (§3.12's
+`destinations:from-legacy` derives one from a succeeded run's own frozen
+inputs), then point the schedule at it. Until an operator does that for a given
+object, a controller-level `AWS_ALLOW_HTTP=true` is a cluster-wide setting that
+overrides that object's approved plan.
+
 A destination-backed Job instead carries a complete, explicit set computed from
 the `BackupDestination` alone:
 
@@ -443,6 +453,7 @@ the `BackupDestination` alone:
 | `LOGWEIR_ARCHIVE_CREDENTIALS` | `static` or `workloadIdentity`. |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN` | `valueFrom.secretKeyRef` into the grant's Secret and keys, resolved by the kubelet in the pod's own namespace. The session token only when the grant configures one. |
 | `LOGWEIR_ARCHIVE_CA_FILE` | Only with a `transport.caBundle`; the bytes are frozen into the run's own plan `ConfigMap`, so a rotation cannot change a run that already exists. |
+| `LOGWEIR_EVIDENCE_CREDENTIALS` | Which credential the run's **receipt** store uses. `archive` when `evidenceWrite` resolves to the same grant as `archiveWrite` — the default, because `evidenceWrite` falls back to it — and then nothing second is projected. `static` or `workloadIdentity` when an operator separated the principals, and then the three `LOGWEIR_EVIDENCE_AWS_*` references come with it. **The runner refuses a run that does not name it**: a backup writes its archive AND its signed receipt, and a store it cannot build is a local refusal, not a guess. |
 
 `AWS_ENDPOINT_URL` is **absent by construction**. The endpoint travels inside the
 plan's own `storage` block, which the runner reads explicitly, so there is no
@@ -499,6 +510,22 @@ Both destinations' CA bundles are copied into the run's own immutable plan
 `ConfigMap` would mean a root rotated mid-run changes what an approved run
 trusts. `restore.yaml` is still `spec.planBytes` verbatim.
 
+### 7f. A destination edited after the freeze changes nothing for a running run
+
+Every edit to a `BackupDestination` bumps its `metadata.generation`, and the
+frozen block records the generation it resolved. A pass that RE-CREATES a
+garbage-collected runner Job — a node lost, a controller restarted, the Job
+deleted — therefore never re-resolves the live object: it reads the frozen
+block, and the CA bytes beside it, back out of the run's own immutable plan
+`ConfigMap` and renders from those. Rotating an `archiveWrite` Secret name or
+adding an `evidenceRead` grant while a backup runs changes nothing about that
+run; the next admission picks the edit up.
+
+`status.execution` is what distinguishes the two passes: absent means nothing
+is frozen yet and the destination is resolved; present means the plan is the
+answer. The topic selection has had the same readback since D1 W5, for the
+same reason.
+
 ### 7e. What destination-backed execution does not do in this build
 
 - **A destination declaring `spec.transport.caBundle` is REFUSED for `Backup`
@@ -511,6 +538,32 @@ trusts. `restore.yaml` is still `spec.planBytes` verbatim.
   administrator who accepts the risk for their installation sets
   `engine.allowUnverifiedCustomCa` in the installation policy `ConfigMap`; the
   compiled constant flips only after the measurement.
+- **`ControllerIdentity` evidence reads and the engine-CA opt-in need the
+  installation policy `ConfigMap`, which the chart does not render yet.** With
+  no `LOGWEIR_POLICY_CONFIGMAP` on the controller Deployment every
+  installation-policy key reads its closed default: an EMPTY
+  `evidence.controllerIdentityLocations` and
+  `engine.allowUnverifiedCustomCa: false`. Both features therefore refuse —
+  correctly, closed — and the refusal SAYS SO rather than blaming an
+  administrator's allowlist, because on such an install nobody can list
+  anything. **D2 W11 owes exactly this**, and these are the keys:
+
+  ```yaml
+  # ConfigMap <release-namespace>/weirkeeper-policy, key policy.yaml
+  version: 1
+  evidence:
+    controllerIdentityLocations:        # each entry: bucket + endpoint + region
+      - bucket: lw-a
+        endpoint: https://minio-a.storage.svc:9000
+        region: us-east-1
+  engine:
+    allowUnverifiedCustomCa: false      # D2 §14 S2b sets this true, then back
+  ```
+
+  plus `LOGWEIR_POLICY_CONFIGMAP` (and/or `LOGWEIR_INSTALLATION_NAMESPACE`) on
+  the controller Deployment, or the `ConfigMap` is never read. Until that
+  lands, a destination-backed run's verification is `NotAttempted` on every
+  install and a destination declaring a `caBundle` cannot be used at all.
 - **A `SecretKeys` or `WorkloadIdentity` `evidenceRead` is not read.** That
   grant needs an evidence-fetch Job in the object's own namespace, because the
   controller holds no verb on `secrets` and must not. Such a run gets
@@ -526,6 +579,22 @@ trusts. `restore.yaml` is still `spec.planBytes` verbatim.
   catalogue cannot index a recovery point by its destination. The digest IS in
   the run's frozen `execution-inputs.json`, which is where a later reader will
   find it.
+- **A `WorkloadIdentity` grant REPLACES the Job's `serviceAccountName`**, with
+  any ServiceAccount the namespace operator names — bypassing the
+  chart-managed runner ServiceAccount. That is how the grant is meant to work:
+  the object store authenticates the pod's identity, and a cloud identity
+  webhook projects its own token volume regardless of
+  `automountServiceAccountToken: false`. It is inside the namespace's own trust
+  boundary (an operator who can create a `BackupDestination` can already create
+  a Job under that SA), but the chart's `identity.authorizedRunnerNamespaces`
+  machinery governs the DEFAULT runner SA and not this override. **W11/W14 to
+  confirm and record in `docs/install.md` §4.**
+- **`status.records` is still never written**, so the `RECORDS` printer column
+  is blank. The count is in the signed receipt; the observation this branch
+  makes carries the window and the digest and not the document. PLAT-14.1
+  (D3 W2) widens the observation. Note for after that merge: a
+  destination-backed run whose `evidenceRead` is not `ControllerIdentity`
+  observes nothing at all, so `RECORDS` stays blank for it either way.
 - **A destination-backed `BackupSchedule` gets no retention report.** The
   controller's one global archive handle is for objects without a
   `destinationRef` (§9); a report computed through it would describe another

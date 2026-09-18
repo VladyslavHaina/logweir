@@ -466,6 +466,27 @@ and host load change these figures; they are not release budgets.
 
 ## Recorded rulings that have no ADR yet
 
+### A `Backup` frozen against a saved destination is REFUSED by an older controller, not run
+
+A `Backup` that names `spec.destinationRef` freezes a `destination` block into
+its immutable `execution-inputs.json`. Every struct in that grammar is
+`deny_unknown_fields`, so a controller rolled back to a release that predates
+destination-backed execution **refuses such a run** rather than executing it.
+
+That is deliberate and it is the safe direction: an older controller cannot
+render the complete explicit `AWS_*` set the frozen block describes, so running
+the plan would address the store with whatever happened to be in the
+controller's own environment — which is the defect saved destinations exist to
+close. The same rollback also meets the sentinel `archive.url`
+(`logweir-destination://<name>`), which the old `storage_url_for` refuses as an
+unknown scheme, so the run ends terminally as `ArchiveUrlUnreadable` before any
+POST.
+
+**Planning a downgrade:** let destination-backed runs reach a terminal phase
+first, or expect them to end `Failed` with that reason. Nothing is written to
+the wrong place either way, and legacy inline-`archive` objects are unaffected.
+See `docs/kubernetes.md` §7e and §10.
+
 ### Exit 3 has one documented exception: phase 0's `LogAppendTime` override probe
 
 Exit 3 means "refused by a guard, before anything runs", and there is exactly one write that
