@@ -92,7 +92,93 @@ render() {
   "$KUBECTL" kustomize config
 }
 
+# THE ENFORCEMENT JOB'S IMAGE CARRIES THE ENFORCEMENT BINARY — defect
+# RET-NOIMAGE, found live on docker-desktop 2026-09-18.
+#
+# WHAT WENT WRONG. `logweir.yaml` installs a controller that, for a
+# `RetentionPolicy` in `mode: Enforce`, creates a Job whose image is the
+# controller's runner image and whose command is `logweir-retention`. The
+# runner image is built by `Dockerfile`, and `Dockerfile` built `-p logweir`
+# only — so the file this script renders installed a control plane that asks
+# the kubelet for an executable no image this repository produces contains.
+# The failure is `exec: "logweir-retention": executable file not found in
+# $PATH`, exitCode 127, and NOTHING in the rendered YAML shows it: the
+# Deployment is healthy, the image reference is valid, and the defect appears
+# only the first time an administrator approves a plan.
+#
+# WHY THE CHECK LIVES HERE. This script is the one thing that produces the
+# install file, so it is the one place that can refuse to produce an install
+# file whose enforcement path cannot start. The three tokens below are the
+# whole of the chain, and each is read from the file that owns it:
+#
+#   1. the Job's command IS `logweir-retention`     — retention_policy.rs
+#   2. the Job's image IS the runner image          — retention_policy.rs
+#   3. the runner image BUILDS AND SHIPS that binary — Dockerfile
+#
+# Break any link and this refuses, naming the link. It is a tripwire on
+# spellings and says so: it reads source text and cannot prove the built image
+# runs. `.github/workflows/images.yml` runs the binary out of the built image,
+# which is the half a grep cannot do.
+#
+# COMMENT LINES ARE STRIPPED FIRST, in both files, because both explain this
+# defect at length and a grep over the prose would find the explanation and
+# call it the proof. `sed` deletes whole-line comments only and always exits 0,
+# so no exit code is masked and nothing is read through a pipe (STANDING
+# RULE 20).
+check_enforcement_image() {
+  retention_src="crates/weirkeeper/src/controllers/retention_policy.rs"
+  controller="$(sed '/^[[:space:]]*\/\//d' "$retention_src")"
+  dockerfile="$(sed '/^[[:space:]]*#/d' Dockerfile)"
+
+  case "$controller" in
+    *'RETENTION_BINARY: &str = "logweir-retention"'*) ;;
+    *)
+      echo "render-install: $retention_src no longer names \`logweir-retention\` as the" >&2
+      echo "  enforcement Job's binary. If the binary was renamed, rename it in Dockerfile" >&2
+      echo "  and in .github/workflows/images.yml too — this check is the link between them." >&2
+      exit 1
+      ;;
+  esac
+
+  case "$controller" in
+    *'image: self.ctx.runner_image.image'*) ;;
+    *)
+      echo "render-install: $retention_src no longer takes the enforcement Job's image from" >&2
+      echo "  \`self.ctx.runner_image\`. The check below proves the RUNNER image carries" >&2
+      echo "  \`logweir-retention\`; if enforcement now names a different image, this script" >&2
+      echo "  must check THAT image's recipe instead, or logweir.yaml goes back to" >&2
+      echo "  installing an enforcement path that exits 127." >&2
+      exit 1
+      ;;
+  esac
+
+  case "$dockerfile" in
+    *'-p logweir-retention'*) ;;
+    *)
+      echo "render-install: Dockerfile does not build \`-p logweir-retention\`." >&2
+      echo "  The controller this file installs creates enforcement Jobs that run" >&2
+      echo "  \`logweir-retention\` from the image Dockerfile builds. Without that package" >&2
+      echo "  the Job dies at the kubelet with exitCode 127 (\`executable file not found" >&2
+      echo "  in \$PATH\`) — observed live, defect RET-NOIMAGE. Refusing to render an" >&2
+      echo "  install file whose enforcement path cannot start." >&2
+      exit 1
+      ;;
+  esac
+
+  case "$dockerfile" in
+    *'/usr/local/bin/logweir-retention'*) ;;
+    *)
+      echo "render-install: Dockerfile builds \`logweir-retention\` but COPYs it nowhere on" >&2
+      echo "  PATH. The binary must land at /usr/local/bin/logweir-retention: that is the" >&2
+      echo "  bare name the controller sets as the container's command, and \$PATH is how" >&2
+      echo "  the kubelet resolves it. Refusing to render." >&2
+      exit 1
+      ;;
+  esac
+}
+
 if [ "${1:-}" = "--check" ]; then
+  check_enforcement_image
   # `mktemp` and not a fixed path: two agents running this at once must not
   # write the same temporary file.
   tmp="$(mktemp "${TMPDIR:-/tmp}/logweir-install-check.XXXXXX")"
@@ -124,5 +210,6 @@ if [ "$#" -ne 0 ]; then
   exit 2
 fi
 
+check_enforcement_image
 render > "$OUT"
 echo "render-install: wrote $OUT ($(grep -c '^kind:' "$OUT") documents)."

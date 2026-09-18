@@ -155,7 +155,20 @@ COPY . .
 # binary if someone removes it. `scripts/check-image.sh` check 6 asserts the
 # shipped binary's ELF e_machine anyway, because "cannot silently" is a claim
 # that deserves a machine check.
-RUN cargo build --release --target x86_64-unknown-linux-gnu -p logweir
+#
+# TWO PACKAGES, ONE COMPILE, AND `-p logweir-retention` IS NOT OPTIONAL.
+# `crates/weirkeeper/src/controllers/retention_policy.rs` renders every
+# enforcement Job with `command: ["logweir-retention"]` and takes the Job's
+# image from the controller's runner image — "retention runs a DIFFERENT
+# executable in the same image", as that file says beside the line that sets the
+# command. Until 2026-09-18 this build named `-p logweir` only, so the binary
+# the controller asks for existed in no image this repository produces and
+# `mode: Enforce` died at the kubelet with
+# `exec: "logweir-retention": executable file not found in $PATH`, exitCode 127
+# — observed live on docker-desktop (defect RET-NOIMAGE). One `cargo build`
+# with both packages, not two `RUN`s: they share the whole dependency graph, so
+# a second invocation would pay the link twice and cache as a separate layer.
+RUN cargo build --release --target x86_64-unknown-linux-gnu -p logweir -p logweir-retention
 
 # The engine, pinned BY DIGEST. Update this line and
 # third_party/kafka-backup-binary.digest together, never separately.
@@ -183,6 +196,29 @@ COPY --from=engine   /usr/local/bin/kafka-backup /usr/local/bin/kafka-backup
 # the builder stage: the architecture-qualified directory is what makes a
 # host-architecture binary impossible to copy by accident.
 COPY --from=builder  /src/target/x86_64-unknown-linux-gnu/release/logweir  /usr/local/bin/logweir
+# THE ENFORCEMENT BINARY, BESIDE THE EVERYDAY ONE AND NEVER INSTEAD OF IT.
+#
+# WHY IT IS IN THIS IMAGE AND NOT AN IMAGE OF ITS OWN. The controller names ONE
+# image for the enforcement Job — its runner image — and overrides only the
+# container's `command`. A second image would need a second value on the chart,
+# a second variable on the Deployment, a second publish job and a second digest
+# to keep in step with the first; the live wave that found RET-NOIMAGE proved
+# the fix by building exactly this image plus this one binary
+# (`e2e/k8s/d3/Dockerfile.retention`, a test fixture that this line retires).
+#
+# IT DOES NOT WIDEN THE DELETION BOUNDARY, and the boundary is a LINKAGE claim,
+# not an image one. `scripts/check-no-archive-write.sh` check 3 asserts from
+# `cargo metadata` that the set of workspace crates reaching `logweir-reaper` —
+# the one crate that can delete from an object store — is exactly
+# {logweir-retention}. `/usr/local/bin/logweir`, the image's ENTRYPOINT and the
+# binary every backup, restore, verify and check Job runs, still links no delete
+# path (`crates/weirkeeper/tests/retention_policy_controller.rs::the_everyday_binary_links_no_delete_path`).
+# What a pod can delete is decided by the credential the Job mounts: the
+# retention pod is the only one that mounts a delete-capable grant, and the
+# controller drops the destination's archive credential from that pod on purpose
+# (`retention_policy.rs`, `build_job`). This file ships an executable; it grants
+# nothing.
+COPY --from=builder  /src/target/x86_64-unknown-linux-gnu/release/logweir-retention  /usr/local/bin/logweir-retention
 COPY third_party/LICENSE-MIT /usr/share/licenses/kafka-backup/LICENSE
 COPY LICENSE NOTICE /usr/share/licenses/logweir/
 # THE GENERATED THIRD-PARTY INVENTORY — Task 29, interface I30, Global
