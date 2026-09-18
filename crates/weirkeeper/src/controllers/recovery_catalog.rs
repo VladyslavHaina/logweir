@@ -482,7 +482,40 @@ impl Pass<'_> {
                 return Some(SyncTrigger::Requested(token.clone()));
             }
         }
-        view::periodic_slot(self.ctx.now, self.interval()).map(SyncTrigger::Periodic)
+        let slot = view::periodic_slot(self.ctx.now, self.interval())?;
+        if self.slot_already_served(slot) {
+            return None;
+        }
+        Some(SyncTrigger::Periodic(slot))
+    }
+
+    /// Whether a sync has ALREADY FINISHED inside this interval slot — in which
+    /// case the slot is served and nothing is due.
+    ///
+    /// THE SECOND HALF OF CATALOG-RESYNC-NOT-HARVESTED. Without this, a
+    /// `syncRequest` that completed at 11:55 was followed one reconcile later
+    /// by the 12:00 slot's own sync, because the slot's Job name is not the
+    /// request's Job name and the tracked-name comparison therefore matched
+    /// nothing. That second Job wrote `Synced=Unknown/PodNotStarted` over the
+    /// `Synced=True/Succeeded` the publish had just written — which is why the
+    /// live harness could not use `Synced` as a completion signal and watched
+    /// `status.syncedAt` instead. `intervalSeconds` is a CADENCE, not an
+    /// alarm clock: a walk that finished inside the slot is the walk the slot
+    /// asked for, whatever started it.
+    ///
+    /// `lastSyncJob.finishedAt` and not `syncedAt`, deliberately: a sync that
+    /// ran and FAILED has also spent the slot's budget against the same
+    /// archive, and re-running it every reconcile until the slot rolls over is
+    /// the retry storm this controller's requeue is designed to avoid. The
+    /// failure is on `Synced` for an operator to act on.
+    fn slot_already_served(&self, slot: i64) -> bool {
+        self.catalog
+            .status
+            .as_ref()
+            .and_then(|s| s.last_sync_job.as_ref())
+            .and_then(|j| j.finished_at)
+            .and_then(|at| view::periodic_slot(at, self.interval()))
+            .is_some_and(|served| served >= slot)
     }
 
     // -----------------------------------------------------------------------
@@ -707,9 +740,36 @@ impl Pass<'_> {
             }
         }
 
+        // ==================================================================
+        // `lastSyncJob` IS REPLACED, NEVER MERGED INTO — CATALOG-RESYNC-NOT-HARVESTED
+        // ==================================================================
+        //
+        // The status write is an RFC 7386 MERGE patch, and a merge patch
+        // recurses into an object: `{"lastSyncJob": {"name": …}}` over a
+        // harvested `{"name": …, "startedAt": …, "finishedAt": …,
+        // "exitCode": …}` left the PREVIOUS Job's timestamps on the record of
+        // the NEW one. `run` decides whether a finished Job has been read from
+        // exactly one fact — `lastSyncJob.finishedAt` is set — so every sync
+        // after the first was born already looking harvested and was never
+        // read: its Job ran to `Complete`, the view was never republished, and
+        // the only way left to refresh a catalog was to delete and re-create
+        // it (D3 W14, 19 of 19 sync Jobs `Complete` and none harvested).
+        //
+        // `null` DELETES A KEY in a merge patch, so naming every other field
+        // of `LastSyncJob` here is what makes this ONE record of ONE Job
+        // rather than a union of two. A field added to `LastSyncJob` without a
+        // line here would resurrect this bug, which is why
+        // `the_started_record_names_every_field_of_last_sync_job` reads the
+        // struct's own schema and fails until it is added.
         let mut status = json!({
             "observedGeneration": self.generation(),
-            "lastSyncJob": { "name": stem },
+            "lastSyncJob": {
+                "name": stem,
+                "startedAt": Value::Null,
+                "finishedAt": Value::Null,
+                "exitCode": Value::Null,
+                "refusalReason": Value::Null,
+            },
         });
         // `observedSyncRequest` IS RECORDED AT CREATION, not at harvest. The
         // token records what this controller has ACTED on; recording it only
