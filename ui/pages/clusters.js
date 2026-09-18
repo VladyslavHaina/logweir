@@ -391,9 +391,9 @@ export const CONNECTION_CHECK_REFUSED_SENTENCE =
  *  ever set, which is a dead state in a panel whose whole job is to say what
  *  is true. There IS a real answer for it: the check routes are the product
  *  API's, the legacy proxy serves read-only summaries of the three D2 kinds
- *  (D2 §7.4) and `ui/api.js`'s `WRITABLE_PLURALS` does not carry `preflights`,
- *  so in that mode the control could only fail at the click. Saying so up
- *  front is what the discovery panel beside it already does. */
+ *  (D2 section 7.4) and creates none of them, so in that mode the control
+ *  could only fail at the click. Saying so up front is what the discovery
+ *  panel beside it already does. */
 export const CONNECTION_CHECK_LEGACY_SENTENCE =
   "This console is reading through a kubectl proxy, which serves read-only summaries of check " +
   "requests and creates none. A connection check needs the product API; the connection probe " +

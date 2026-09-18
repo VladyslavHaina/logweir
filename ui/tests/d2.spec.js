@@ -41,6 +41,7 @@ import {
 } from "../contract.js";
 import { keepDraft, readDraft } from "../lifecycle.js";
 import { createRouteLifecycle } from "../app.js";
+import { resetMode, selectMode } from "../client.js";
 import {
   ABSENT,
   ATTESTATION_DISCLAIMER,
@@ -1424,6 +1425,31 @@ test("a_follow_that_outlives_its_route_paints_nothing", async () => {
   assert.equal(reads, 0, "the route left during the wait, so no read was issued");
   assert.ok(atDeparture >= 0, "the follower did reach its first wait");
   assert.equal(painted.length, atDeparture, "and nothing was painted after it left");
+});
+
+test("a_legacy_console_seeds_the_panel_with_its_own_reason", async () => {
+  // THE WIRING, NOT ONLY THE BRANCH. The row below drives `renderConnectionCheck`
+  // with `unavailable: true` and pins what it renders; this one pins WHO decides
+  // it, because a branch nothing sets is the dead state F6 was about.
+  resetMode();
+  try {
+    await selectMode({ probe: async () => ({ ok: false, status: 403, body: null }) });
+    const painted = [];
+    const node = checkNode();
+    const routes = createRouteLifecycle();
+    await mountClusterDetail(node, "team-a", "legacy", (html) => { painted.push(html); return []; },
+      routes.begin(), {
+        get: async () => clusterObject("legacy"),
+        latestDiscoveries: async () => { throw new Error("kubectl proxy serves no check routes"); },
+      });
+    const html = painted[painted.length - 1];
+    assert.match(html, /id="connection-check-unavailable"/);
+    assert.match(html, /needs the product API/);
+    assert.doesNotMatch(html, /id="connection-check-form"/,
+      "no control is offered in a mode that cannot create one");
+  } finally {
+    resetMode();
+  }
 });
 
 test("a_kubectl_proxy_console_is_told_up_front_that_it_cannot_start_a_check", () => {
