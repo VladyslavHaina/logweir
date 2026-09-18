@@ -1577,9 +1577,9 @@ def s1() -> None:
             }
 
         # --- the receipt each run signed is in ITS OWN destination, and it
-        #     verifies against the roster's public signing key. The status
-        #     field cannot say so on this build (see S1.statusVerification);
-        #     the document itself can, and this reads the stored bytes.
+        #     verifies against the roster's public signing key. What the STATUS
+        #     says about it is S1.statusVerification's subject; this reads the
+        #     stored bytes and verifies them independently of the controller.
         keys = approver_material()
         for name, alias, bucket in (("bk-a", "a", "lw-a"), ("bk-b", "b", "lw-b")):
             evidence = results[name]["status"]["evidence"]
@@ -1700,36 +1700,67 @@ def s1() -> None:
 
 
 def s1b() -> None:
-    """The half of S1 this build cannot reach, recorded as unreachable."""
-    obj = get_opt("backup", "bk-a")
-    verification = (obj or {}).get("status", {}).get("evidence", {}).get("verification")
-    policy = get_opt("configmap", "weirkeeper-policy", LAB_NS)
-    identity_locations = None
-    if policy and "policy.json" in policy.get("data", {}):
-        identity_locations = json.loads(policy["data"]["policy.json"]).get(
-            "evidence", {}).get("controllerIdentityLocations")
-    record(
-        "S1.statusVerification",
-        "status.evidence.verification.result on a destination-backed Backup",
-        "notRun",
-        reason=(
-            "`crates/weirkeeper/src/controllers/backup.rs:1302` answers "
-            "`EvidenceSource::NotAttempted` for a destination whose evidenceRead is "
-            "`SecretKeys`, with the detail \"reads evidence with a grant only a pod may "
-            "hold (D2 §3.9's evidence-fetch Job), and THIS BUILD DOES NOT CREATE THAT "
-            "JOB\". The only other route, `ControllerIdentity`, needs an entry in the "
-            "shared installation policy's `evidence.controllerIdentityLocations`, which "
-            "lab-refresh-2 §6.1 deliberately left empty. So no verification block is "
-            "written at all — see the finding in the report: with `receipt_sha256` "
-            "absent the `if let` at backup.rs:3966 skips the second patch, so the "
-            "operator sees NO verification field rather than an explicit NotAttempted. "
-            "The receipt itself was verified independently from its stored bytes in S1."
-        ),
-        detail={
-            "observedVerificationField": verification,
-            "policyControllerIdentityLocations": identity_locations,
-        },
-    )
+    """The half of S1 the build could not reach, now that it reaches it.
+
+    D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN was that NO verification block was
+    written at all for a destination whose `evidenceRead` is `SecretKeys`: the
+    controller answered `EvidenceSource::NotAttempted`, but with
+    `receipt_sha256` absent the second status patch was skipped, so an operator
+    saw no verification field rather than an explicit `NotAttempted` with its
+    sentence. Silence and "we did not check" look identical to a console, which
+    is the whole reason `NotAttempted` exists as a verdict distinct from
+    `Invalid`.
+
+    This row hard-coded `notRun` and recorded the measurement beside it, so a
+    closed defect could not move its verdict — the block became real and the
+    row still said `notRun` (lab-refresh-3 §8.4). It asserts now.
+    """
+    with Scenario("S1.statusVerification",
+                  "status.evidence.verification on a destination-backed Backup") as sc:
+        obj = get_opt("backup", "bk-a")
+        check(obj is not None, "Backup/bk-a is absent; run S1 first")
+        verification = (obj.get("status", {}).get("evidence", {}) or {}).get("verification")
+        policy = get_opt("configmap", "weirkeeper-policy", LAB_NS)
+        identity_locations = None
+        if policy and "policy.json" in policy.get("data", {}):
+            identity_locations = json.loads(policy["data"]["policy.json"]).get(
+                "evidence", {}).get("controllerIdentityLocations")
+        sc.detail["observedVerificationField"] = verification
+        sc.detail["policyControllerIdentityLocations"] = identity_locations
+        artifact("objects/s1/status-verification.json",
+                 {"verification": verification,
+                  "policyControllerIdentityLocations": identity_locations,
+                  "destinationEvidenceRead": "SecretKeys"})
+        check(verification is not None,
+              "status.evidence.verification is absent: the operator sees silence where the "
+              "controller decided NotAttempted (D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN)")
+        check(verification.get("result") in {"Valid", "Invalid", "NotAttempted"},
+              f"verification.result is {verification.get('result')!r}, not one of the three "
+              f"published verdicts")
+        # WHY `NotAttempted` IS THE RIGHT ANSWER HERE, and not a failure to
+        # verify: dest-a's `evidenceRead` is `SecretKeys`, a grant only a pod may
+        # hold, and the only other route — `ControllerIdentity` — needs an entry
+        # in the shared installation policy's
+        # `evidence.controllerIdentityLocations`, which the lab deliberately
+        # leaves empty. If either of those changes this row fails and says so
+        # rather than quietly accepting a different verdict.
+        check(not identity_locations,
+              f"the installation policy now lists controllerIdentityLocations "
+              f"({identity_locations}); this row's premise no longer holds and its expected "
+              f"verdict must be re-derived")
+        check(verification.get("result") == "NotAttempted",
+              f"verification.result is {verification.get('result')!r} for a destination whose "
+              f"evidenceRead is SecretKeys with no controller identity location allowed; "
+              f"expected NotAttempted")
+        check(bool((verification.get("detail") or "").strip()),
+              "NotAttempted carries no detail: a verdict of 'we did not check' that does not "
+              "say why is the silence this defect was about")
+        check(verification.get("matchedKeyId") is None,
+              f"nothing was verified, yet a matchedKeyId is recorded: "
+              f"{verification.get('matchedKeyId')!r}")
+        sc.detail["notAttemptedDetail"] = verification.get("detail")
+        # The receipt itself is verified from its stored bytes in S1; this row
+        # is only about what the STATUS says.
 
 
 # --------------------------------------------------------------------------
@@ -2262,8 +2293,9 @@ def s5() -> None:
         sc.detail["evidenceKeys"] = evidence
         check(evidence.get("scorecardKey") and evidence.get("sidecarKey"),
               f"no scorecard evidence was recorded: {evidence}")
-        # The status cannot carry a verdict on this build (S1.statusVerification),
-        # so the signed document is verified from the bytes dest-b stores.
+        # The status's own verdict is S1.statusVerification's subject; here the
+        # signed document is verified independently, from the bytes dest-b
+        # stores, so this scenario does not rest on the controller's answer.
         keys = approver_material()
         payload = mc_get(f"b/lw-b/{evidence['scorecardKey']}")
         sidecar = mc_get(f"b/lw-b/{evidence['sidecarKey']}")
@@ -2713,16 +2745,51 @@ def s11() -> None:
         sc.detail["jobConditions"] = job_conditions
         sc.detail["relayedCheckResult"] = relayed
         artifact("objects/s11/td-timeout-relayed.json", relayed)
-        # Each D2 §14.4 S11 criterion, judged on its own, so a report can say
-        # which one this build misses instead of only that the scenario failed.
+        # THE FIFTH CRITERION, AND WHY IT IS RESTATED RATHER THAN DROPPED.
+        # D2 §14.4's S11 line ends "…; no chunk `ConfigMap`s; Job `Failed`." The
+        # requirements table two sections up splits the case in two: a Job
+        # `DeadlineExceeded` becomes `Failed/DeadlineExceeded`, and a KAFKA
+        # timeout becomes `Failed/BrokerUnreachable` via
+        # `check_cli::metadata_timeout_code`. This scenario is the second path,
+        # where the runner classifies the failure ITSELF — it relays a readable
+        # frame naming `BrokerUnreachable` and exits 0, so its Job completes.
+        # Requiring `Job Failed` here required the first path's shape from the
+        # second path's scenario, and D2-RESULTUNREADABLE being fixed is exactly
+        # what made the frame readable and the Job succeed (lab-refresh-3 §8.4).
+        # What the contract now says is asserted instead: the Job ENDED, and the
+        # reason on the object came from the runner's own blocking check rather
+        # than from the controller guessing at a dead Job. Asserting only "the
+        # Job ended" would accept a Job that merely finished, so the frame and
+        # the projection are required to agree.
+        #
+        # DEVIATION, RECORDED AND NOT SILENT: §14.4's literal "Job `Failed`"
+        # wording no longer describes a reachable state. It is carried in the
+        # scenario detail under `contractDeviation` for the doc's owner to amend.
+        job_terminal = [c for c in job_conditions
+                        if c["type"] in {"Complete", "Failed"} and c["status"] == "True"]
+        blocking = [c for c in ((relayed or {}).get("checks") or [])
+                    if isinstance(c, dict) and c.get("gating") == "blocking"
+                    and c.get("state") == "notReady"]
+        sc.detail["jobTerminalConditions"] = [c["type"] for c in job_terminal]
+        sc.detail["blockingNotReadyCodes"] = [c.get("code") for c in blocking]
+        sc.detail["contractDeviation"] = (
+            "D2 §14.4 S11 asks for `Job Failed`. The check Job SUCCEEDS on this path: the "
+            "runner relays a classified `notReady` frame and exits 0, and the controller "
+            "projects the reason from that frame. Only the Job-deadline path produces a "
+            "failed Job. This row asserts the reachable form — the Job ended and the "
+            "object's reason equals the relayed blocking check's code — and §14.4's "
+            "wording needs amending to match."
+        )
         criteria = {
             "phase == Failed": status["phase"] == "Failed",
             "status.reason in {BrokerUnreachable, MetadataTimeout}":
                 status.get("reason") in {"BrokerUnreachable", "MetadataTimeout"},
             "no chunks in status": not status.get("result", {}).get("chunks"),
             "no chunk ConfigMaps": not new_chunks,
-            "Job condition Failed":
-                any(c["type"] == "Failed" and c["status"] == "True" for c in job_conditions),
+            "the Job ended and the reason came from its relayed blocking check":
+                bool(job_terminal)
+                and bool(blocking)
+                and status.get("reason") in {c.get("code") for c in blocking},
         }
         sc.detail["criteria"] = criteria
         sc.detail["observedReason"] = status.get("reason")
