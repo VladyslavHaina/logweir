@@ -7260,6 +7260,16 @@ fn the_destination_backed_argv_is_one_the_cli_accepts_and_the_version_is_enforce
             weirkeeper::destination::STORE_CONTRACT_VERSION,
         )
         .env("LOGWEIR_ARCHIVE_CREDENTIALS", "static")
+        // THE REST OF THE CONTRACT, because the runner now builds its stores
+        // BEFORE it dials (see
+        // `the_destination_backed_job_env_drives_the_real_runner_past_its_store_builders`):
+        // a store that cannot be built is a local refusal and must not cost a
+        // socket to the production cluster to report. This row is about the
+        // ARGV, so it supplies what the kubelet would and lets the run reach
+        // the password boundary it asserts on.
+        .env("LOGWEIR_EVIDENCE_CREDENTIALS", "archive")
+        .env("AWS_ACCESS_KEY_ID", "test-access-key-id")
+        .env("AWS_SECRET_ACCESS_KEY", "test-secret-access-key")
         .env_remove("LOGWEIR_SOURCE_PASSWORD")
         .output()
         .expect("the runner binary runs");
@@ -7367,4 +7377,244 @@ fn a_retention_report_is_withheld_when_it_would_describe_another_bucket() {
         "the sentinel URL is not a bucket, and an unreadable URL is never the same bucket as \
          anything — the safe direction"
     );
+}
+
+/// **THE ENVIRONMENT A DESTINATION-BACKED JOB CARRIES DRIVES THE REAL RUNNER
+/// PAST ITS STORE BUILDERS** — the independent review's **C1**, closed
+/// end-to-end.
+///
+/// # What was broken, and why every other row was green
+///
+/// A backup writes two things: the archive, through `archiveWrite`, and its
+/// signed receipt, through `evidenceWrite` over Global Constraint 6's
+/// `logweir/` root. The runner builds two stores and refuses a run whose
+/// `LOGWEIR_EVIDENCE_CREDENTIALS` it does not recognise — including the empty
+/// string an unset variable produces. The controller never rendered that
+/// variable, so **every destination-backed run exited 3 at the store builder**,
+/// with the archive handles already open and nothing archived.
+///
+/// Its sibling row above drives the real binary too, and did not catch this:
+/// it asserts the run stops at `$LOGWEIR_SOURCE_PASSWORD is unset`, which
+/// happened *before* any store was built. So the runner now builds its stores
+/// in front of the Kafka client — a purely local act, and under the contract a
+/// refusal point, which this file's own rule ("every guard that can refuse
+/// locally, before a client exists") already required — and that same assertion
+/// becomes proof the stores were built.
+///
+/// # This row renders the Job and runs the binary on ITS env
+///
+/// Not on a hand-written list. `runner_job_spec_from_inputs` produces the
+/// literals a kubelet would set, and the two `secretKeyRef` names are the ones
+/// it would project — supplied here as values, since there is no kubelet. A
+/// variable this crate forgets to render is therefore a variable the real
+/// parser and the real store builders never see, which is the whole shape of
+/// erratum **E20**.
+///
+/// KILLS: dropping `evidence_job_env` from the rendered Job (the negative arm
+/// below IS that mutant, planted by removing the variable from the env this row
+/// passes); and moving the store construction back behind the Kafka client,
+/// which makes the positive arm stop proving anything — caught by the
+/// `refusal-reason` assertion on the negative arm, which would then never fire.
+#[test]
+fn the_destination_backed_job_env_drives_the_real_runner_past_its_store_builders() {
+    let dir = scratch_dir("d2w10-store-contract-e2e");
+    let spec = logweir_core::spec::BackupSpec {
+        source: logweir_core::spec::BackupSourceSpec {
+            bootstrap_servers: vec!["broker-0.prod:9093".to_string()],
+            auth: logweir_core::spec::AuthSpec::ScramSha512 {
+                username: "logweir".to_string(),
+                tls: true,
+            },
+            topics: vec!["orders".to_string()],
+        },
+        storage: logweir_core::engine::StorageUrl::S3 {
+            bucket: "lw-a".to_string(),
+            prefix: "team-a/prod".to_string(),
+            region: Some("us-east-1".to_string()),
+            endpoint: Some("https://minio-a.storage.svc:9000".to_string()),
+            path_style: true,
+            allow_http: false,
+        },
+        backup_id: "b1".to_string(),
+        backup: logweir_core::spec::BackupSettings::default(),
+    };
+    std::fs::write(
+        dir.join("backup.yaml"),
+        serde_yaml::to_string(&spec).expect("the stub spec serialises"),
+    )
+    .expect("the scratch spec is writable");
+    std::fs::write(
+        dir.join("allowed-clusters.json"),
+        serde_json::to_string(&logweir_core::spec::AllowedClusters {
+            allowed_cluster_ids: Vec::new(),
+            source_cluster_id: None,
+        })
+        .expect("the stub allowlist serialises"),
+    )
+    .expect("the scratch allowlist is writable");
+    std::fs::copy(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../e2e/fixtures/signed/signing.pem"),
+        dir.join("key.pem"),
+    )
+    .expect("a valid PKCS#8 signer is copied into the scratch mount path");
+
+    // === THE JOB THIS CONTROLLER WOULD CREATE ===========================
+    let rendered = destination_backed_job_env();
+    assert!(
+        rendered
+            .iter()
+            .any(|(n, _)| n == "LOGWEIR_EVIDENCE_CREDENTIALS"),
+        "C1: the rendered Job must name the credential its own runner refuses to start without. \
+         Got {rendered:?}"
+    );
+
+    let emitted = weirkeeper::backup_execution::runner_argv_with_store_contract(
+        ExecutionTrigger::Schedule,
+        "b1",
+    );
+    let argv = argv_against(&dir, &emitted);
+
+    let run = |env: &[(String, String)]| {
+        let mut command = std::process::Command::new(runner_binary());
+        command.args(&argv).env_remove("LOGWEIR_SOURCE_PASSWORD");
+        for (name, value) in env {
+            command.env(name, value);
+        }
+        // THE TWO VALUES A KUBELET WOULD PROJECT from the grant's Secret. The
+        // controller writes them as `secretKeyRef`s; there is no kubelet here,
+        // so the row supplies them — and `CredentialSource::StaticFromEnv`
+        // reads exactly these two NAMED variables and nothing else, which is
+        // the property that makes a stray `AWS_PROFILE` in the image harmless.
+        command
+            .env("AWS_ACCESS_KEY_ID", "test-access-key-id")
+            .env("AWS_SECRET_ACCESS_KEY", "test-secret-access-key");
+        let out = command.output().expect("the runner binary runs");
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).into_owned(),
+            String::from_utf8_lossy(&out.stderr).into_owned(),
+        )
+    };
+
+    // ---- POSITIVE: the complete rendered env gets PAST the stores -------
+    let (code, _stdout, stderr) = run(&rendered);
+    assert!(
+        !stderr.contains("LOGWEIR_EVIDENCE_CREDENTIALS is"),
+        "C1, closed: the run must not refuse for want of a variable the controller renders. \
+         stderr: {stderr}"
+    );
+    assert_eq!(
+        code,
+        Some(1),
+        "both stores are built from the rendered environment, and the run then stops at the \
+         credential projection — the first point a real broker would be needed. stderr: {stderr}"
+    );
+    assert!(
+        stderr
+            .lines()
+            .next()
+            .unwrap_or_default()
+            .contains("$LOGWEIR_SOURCE_PASSWORD is unset"),
+        "…and THAT is where it stops. stderr: {stderr}"
+    );
+
+    // ---- NEGATIVE: the defect itself, replanted ------------------------
+    //
+    // The same argv and the same env MINUS the one variable. This is the state
+    // of the world before the fix, and it must be loud.
+    let without: Vec<(String, String)> = rendered
+        .iter()
+        .filter(|(n, _)| n != "LOGWEIR_EVIDENCE_CREDENTIALS")
+        .cloned()
+        .collect();
+    let (code, stdout, stderr) = run(&without);
+    assert_eq!(
+        code,
+        Some(3),
+        "a Job that does not say which credential writes its receipt is REFUSED, not \
+         improvised. stderr: {stderr}"
+    );
+    assert!(
+        stdout.lines().any(|l| l.starts_with("refusal-reason=")),
+        "…and it refuses through Global Constraint 11's channel, so a controller can read the \
+         reason off the pod log. stdout: {stdout}"
+    );
+}
+
+/// The `env_literal` of the Job a destination-backed `Backup` would run, as the
+/// reconciler renders it.
+///
+/// A REAL RENDER, not a literal list: the row above is about what this crate
+/// EMITS, so a variable it forgets must be a variable the row never sets.
+fn destination_backed_job_env() -> Vec<(String, String)> {
+    let destination: weirkeeper::crds::backup_destination::BackupDestination =
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupDestination",
+            "metadata": {"name": "dest-a", "namespace": NS,
+                         "uid": "d0000000-0000-4000-8000-00000000000a",
+                         "generation": 1, "resourceVersion": "1"},
+            "spec": {
+                "storage": {"provider": "S3", "bucket": "lw-a", "prefix": "team-a/prod",
+                            "region": "us-east-1",
+                            "endpoint": "https://minio-a.storage.svc:9000",
+                            "addressing": "PathStyle"},
+                "transport": {"security": "TLS"},
+                "access": {"archiveWrite": {"mode": "SecretKeys", "secret": {
+                    "name": "lw-a-writer",
+                    "accessKeyIdKey": "access-key-id",
+                    "secretAccessKeyKey": "secret-access-key"}}}
+            },
+            "status": {"observedGeneration": 1,
+                       "conditions": [{"type": "Valid", "status": "True", "reason": "Valid",
+                                       "observedGeneration": 1}]}
+        }))
+        .expect("the fixture is a BackupDestination");
+    let role = |role| {
+        weirkeeper::destination::resolve(
+            &destination,
+            role,
+            &weirkeeper::check::policy::Policy::defaults(),
+        )
+        .expect("the fixture resolves")
+    };
+    let pair = weirkeeper::controllers::backup::BackupDestinations {
+        archive: role(weirkeeper::destination::DestinationRole::ArchiveWrite),
+        evidence: role(weirkeeper::destination::DestinationRole::EvidenceWrite),
+    };
+    let backup: weirkeeper::crds::backup::Backup = serde_json::from_value(serde_json::json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "Backup",
+        "metadata": {"name": "e2e", "namespace": NS,
+                     "uid": "b0000000-0000-4000-8000-00000000000e", "generation": 1},
+        "spec": {
+            "sourceRef": {"name": "prod"},
+            "topics": ["orders"],
+            "archive": {"url": "logweir-destination://dest-a"},
+            "destinationRef": {"name": "dest-a"},
+            "triggeredBy": "manual",
+            "deadlineSeconds": 3600
+        }
+    }))
+    .expect("the fixture is a Backup");
+    let cluster: weirkeeper::crds::kafka_cluster::KafkaCluster =
+        serde_json::from_value(serde_json::json!({
+            "apiVersion": "logweir.dev/v1alpha1", "kind": "KafkaCluster",
+            "metadata": {"name": "prod", "namespace": NS,
+                         "uid": "c0000000-0000-4000-8000-00000000000c"},
+            "spec": {"bootstrapServers": ["broker-0.prod:9093"],
+                     "auth": {"mode": "scramSha512", "username": "logweir", "tls": true,
+                              "secretRef": {"name": "prod-sasl"}},
+                     "role": "source"}
+        }))
+        .expect("the fixture is a KafkaCluster");
+    let frozen = weirkeeper::controllers::backup::desired_execution_inputs_for_destination(
+        &backup,
+        &cluster,
+        &weirkeeper::backup_execution::ResolvedSelection::named(&backup.spec),
+        Some(&pair),
+    )
+    .expect("the destination-backed inputs resolve");
+    weirkeeper::controllers::backup::runner_job_spec_from_inputs(&backup, &cluster, &frozen)
+        .expect("the Job renders")
+        .env_literal
 }

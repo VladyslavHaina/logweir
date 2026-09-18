@@ -9667,7 +9667,7 @@ use weirkeeper::check::policy::{IdentityLocation, Policy};
 use weirkeeper::controllers::backup::{
     admit_destination, desired_execution_inputs_for_destination, destination_hold_budget,
     destination_hold_expired, engine_custom_ca_allowed, engine_custom_ca_refusal,
-    DestinationAdmission, DESTINATION_HOLD_MAX_SECONDS,
+    BackupDestinations, DestinationAdmission, DESTINATION_HOLD_MAX_SECONDS,
 };
 use weirkeeper::crds::backup_destination::BackupDestination;
 use weirkeeper::destination::{
@@ -9774,6 +9774,17 @@ fn resolved(value: Value, role: DestinationRole) -> ResolvedDestination {
     resolve(&destination(value), role, &Policy::defaults()).expect("the fixture resolves")
 }
 
+/// The ONE object, resolved for BOTH roles a backup run needs — what
+/// `admit_destination` produces. `evidenceWrite` falls back to `archiveWrite`
+/// on both fixtures, so the two grants are equal and the Job is told
+/// `LOGWEIR_EVIDENCE_CREDENTIALS=archive`.
+fn both_roles(value: Value) -> BackupDestinations {
+    BackupDestinations {
+        archive: resolved(value.clone(), DestinationRole::ArchiveWrite),
+        evidence: resolved(value, DestinationRole::EvidenceWrite),
+    }
+}
+
 /// [`backup`], re-pointed at a saved destination: the sentinel `archive.url`
 /// the CEL rule requires, no `secretRef`, and the ref itself.
 fn destination_backed_backup(name: &str) -> Backup {
@@ -9809,12 +9820,13 @@ fn destination_backed_backup(name: &str) -> Backup {
 #[test]
 fn the_job_is_rendered_from_the_frozen_destination_and_not_from_the_object() {
     let backed = destination_backed_backup("dest-a");
-    let a = resolved(dest_a_value(), DestinationRole::ArchiveWrite);
+    let pair = both_roles(dest_a_value());
+    let a = &pair.archive;
     let frozen = desired_execution_inputs_for_destination(
         &backed,
         &prod_cluster(),
         &weirkeeper::backup_execution::ResolvedSelection::named(&backed.spec),
-        Some(&a),
+        Some(&pair),
     )
     .expect("the destination-backed inputs resolve");
 
@@ -9953,14 +9965,54 @@ fn two_destinations_share_no_bucket_credential_or_evidence_location() {
     // AND NO CREDENTIAL VALUE IS ANYWHERE IN EITHER RESOLUTION. A resolution is
     // serialised into a frozen plan `ConfigMap`, which has no encryption at
     // rest and a much wider read surface than a Secret.
+    //
+    // **THE ASSERTION IS STRUCTURAL, NOT A GREP.** The first version of this
+    // block searched the encoded snapshot for `AKIA` and `password` — strings
+    // no fixture in this file contains in any field, so it could not fail for
+    // the reason it named (the independent review's **L3**). What actually
+    // holds is that `ResolvedDestinationSnapshot` has NO VALUE-BEARING FIELD:
+    // a grant is a Secret NAME plus DATA KEY names, and the kubelet resolves
+    // the value in the pod. So the check is on the key set — every key the
+    // encoding emits is one of a closed list — which fails the moment somebody
+    // adds a field that could carry a value.
     for resolved in [&a, &b] {
-        let text = serde_json::to_string(&resolved.snapshot()).expect("the snapshot serialises");
-        for forbidden in ["AKIA", "secret-access-key-value", "password"] {
+        let encoded: Value = serde_json::from_slice(
+            &resolved
+                .snapshot()
+                .canonical_bytes()
+                .expect("the snapshot encodes"),
+        )
+        .expect("the snapshot is JSON");
+        let grant = encoded["grant"].as_object().expect("a grant object");
+        for key in grant.keys() {
             assert!(
-                !text.contains(forbidden),
-                "the frozen snapshot names references and never values: {text}"
+                [
+                    "mode",
+                    "secret",
+                    "accessKeyIdKey",
+                    "secretAccessKeyKey",
+                    "sessionTokenKey",
+                    "serviceAccountName",
+                ]
+                .contains(&key.as_str()),
+                "`{key}` is not one of the reference-only keys a frozen grant may carry; a \
+                 snapshot field that could hold a credential VALUE would reach a ConfigMap with \
+                 no encryption at rest. Got {grant:?}"
+            );
+            assert!(
+                !key.to_ascii_lowercase().contains("value"),
+                "and no key is a value: {key}"
             );
         }
+        // The one value-shaped thing a grant DOES carry is the name of a data
+        // key, which is public by construction — it is in the Secret's own
+        // `data` map, readable by anybody who can read the Secret at all.
+        assert_eq!(
+            grant.get("mode").and_then(Value::as_str),
+            Some("SecretKeys"),
+            "both fixtures use the mode whose encoding carries the most keys, so this row \
+             exercises the widest shape: {grant:?}"
+        );
     }
 }
 
@@ -10178,6 +10230,10 @@ fn a_frozen_ca_bundle_is_bound_to_the_digest_in_its_own_snapshot() {
         pem.as_bytes().to_vec(),
     ))
     .expect("the bundle is usable");
+    let with_ca = BackupDestinations {
+        evidence: with_ca.clone(),
+        archive: with_ca,
+    };
 
     let frozen = desired_execution_inputs_for_destination(
         &backed,
@@ -10210,5 +10266,397 @@ fn a_frozen_ca_bundle_is_bound_to_the_digest_in_its_own_snapshot() {
     assert!(
         unexpected.to_string().contains("commit"),
         "got {unexpected}"
+    );
+}
+
+// ===========================================================================
+// D2 W10 fix round 1 — the rows the independent review found missing
+// ===========================================================================
+
+use weirkeeper::backup_execution::stored_destination;
+use weirkeeper::controllers::backup::{
+    desired_execution_inputs_frozen, evidence_source_for, EvidenceSource,
+};
+use weirkeeper::destination::{
+    ARCHIVE_CREDENTIALS_ENV as ARCHIVE_CREDS, EVIDENCE_ACCESS_KEY_ID_ENV, EVIDENCE_CREDENTIALS_ENV,
+    EVIDENCE_SECRET_ACCESS_KEY_ENV,
+};
+
+/// A route table answering `GET …/backupdestinations/dest-x` with `value`.
+fn destination_route(name: &'static str, value: Value) -> Vec<Route> {
+    vec![Route {
+        method: "GET",
+        path_suffix: name,
+        status: 200,
+        body: value.to_string(),
+    }]
+}
+
+/// `dest-b` with an `evidenceRead` of the given mode.
+fn with_evidence_read(mode: Value) -> Value {
+    let mut value = dest_b_value();
+    value["spec"]["access"]["evidenceRead"] = mode;
+    value
+}
+
+/// **A DESTINATION-BACKED RUN'S EVIDENCE IS NEVER READ THROUGH THE
+/// CONTROLLER'S GLOBAL HANDLE.**
+///
+/// # The sentence this row exists to make true
+///
+/// D2 §3.10: "`Context::archive` is used only for objects without destination
+/// refs." The controller's one global store takes its bucket, region, endpoint
+/// AND credential from the controller's own process (grounding **G2**), so
+/// reading a second destination's receipt through it means the wrong bucket or
+/// the wrong principal — and the `NotAttempted` that results reads as "no
+/// evidence" rather than "wrong bucket". Worse, a document that IS found there
+/// is reported as this run's verification.
+///
+/// # Every arm, because the routing is the whole property
+///
+/// The independent review measured that making the `SecretKeys` /
+/// `WorkloadIdentity` arm return `GlobalHandle` left all 91 rows of this file
+/// green. Asserting on the VARIANT and not on the detail text is deliberate:
+/// the detail is prose and will be edited, the variant is the routing.
+#[tokio::test]
+async fn evidence_is_routed_by_grant_and_never_falls_back_to_the_global_handle() {
+    let now = utc(2026, 11, 9, 3, 17);
+    let global = |source: &EvidenceSource| matches!(source, EvidenceSource::GlobalHandle);
+
+    // ---- no ref: the legacy object, and ONLY the legacy object ----------
+    let (client, _r, _b) = mock_client_recording_bodies(Vec::new());
+    assert!(
+        global(
+            &evidence_source_for(None, &client, NS, now)
+                .await
+                .expect("no ref performs no read")
+        ),
+        "an object with no destinationRef keeps the handle it has always used"
+    );
+
+    // ---- evidenceRead ABSENT: a defined answer -------------------------
+    let reference = LocalRef {
+        name: "dest-b".to_string(),
+    };
+    let (client, _r, _b) = mock_client_recording_bodies(destination_route(
+        "/backupdestinations/dest-b",
+        dest_b_value(),
+    ));
+    match evidence_source_for(Some(&reference), &client, NS, now)
+        .await
+        .expect("the read succeeds")
+    {
+        EvidenceSource::NotAttempted { detail } => assert!(
+            detail.contains("evidenceRead"),
+            "the detail names the field an operator adds: {detail}"
+        ),
+        other => panic!("an absent evidenceRead is NotAttempted; got {other:?}"),
+    }
+
+    // ---- SecretKeys and WorkloadIdentity: NotAttempted, NEVER the handle
+    //
+    // THE ROW THE REVIEWER'S SURVIVING MUTANT NEEDED. Both of these grants are
+    // read by an evidence-fetch Job in the object's own namespace (D2 §3.9),
+    // because the controller holds no verb on `secrets` and must not. Until
+    // that Job exists the honest answer is `NotAttempted` naming the missing
+    // capability — and the one answer that must never be given is the global
+    // handle's, which is a different principal over a different bucket.
+    for mode in [
+        serde_json::json!({"mode": "SecretKeys", "secret": {
+            "name": "lw-b-evidence-reader",
+            "accessKeyIdKey": "id", "secretAccessKeyKey": "key"
+        }}),
+        serde_json::json!({"mode": "WorkloadIdentity",
+                           "workloadIdentity": {"serviceAccountName": "lw-b-reader"}}),
+    ] {
+        let (client, _r, _b) = mock_client_recording_bodies(destination_route(
+            "/backupdestinations/dest-b",
+            with_evidence_read(mode.clone()),
+        ));
+        let source = evidence_source_for(Some(&reference), &client, NS, now)
+            .await
+            .expect("the read succeeds");
+        assert!(
+            !global(&source),
+            "grounding G2: a grant only a pod may hold must NEVER route to the controller's own \
+             principal over the controller's own bucket. Mode {mode:?} gave {source:?}"
+        );
+        match source {
+            EvidenceSource::NotAttempted { detail } => assert!(
+                detail.contains("evidence-fetch Job"),
+                "the detail names the capability that is missing: {detail}"
+            ),
+            other => panic!("got {other:?}"),
+        }
+    }
+
+    // ---- ControllerIdentity, UNLISTED: refused, and it says why ---------
+    //
+    // AND IT SAYS WHICH CLOSED DOOR IT IS. With no policy `ConfigMap`
+    // configured on this installation, every key reads its closed default and
+    // NOBODY can list a location — a message blaming the administrator's
+    // allowlist would send an operator to edit an object that does not exist.
+    let (client, _r, _b) = mock_client_recording_bodies(destination_route(
+        "/backupdestinations/dest-b",
+        with_evidence_read(serde_json::json!({"mode": "ControllerIdentity"})),
+    ));
+    match evidence_source_for(Some(&reference), &client, NS, now)
+        .await
+        .expect("the read succeeds")
+    {
+        EvidenceSource::NotAttempted { detail } => {
+            assert!(
+                detail.contains("ControllerIdentityNotAllowlisted"),
+                "the resolver's own code: {detail}"
+            );
+            assert!(
+                detail.contains("LOGWEIR_POLICY_CONFIGMAP"),
+                "…and, because this installation renders no policy at all, the name of the \
+                 chart wiring that is missing (D2 W11): {detail}"
+            );
+        }
+        other => panic!("an unlisted location is NotAttempted; got {other:?}"),
+    }
+
+    // ---- a destination that no longer resolves --------------------------
+    //
+    // NOT a refusal: this runs AFTER a Job has finished, and a destination
+    // deleted or edited in the meantime must not turn an observed run into one.
+    let (client, _r, _b) = mock_client_recording_bodies(vec![Route {
+        method: "GET",
+        path_suffix: "/backupdestinations/dest-b",
+        status: 404,
+        body: serde_json::json!({
+            "kind": "Status", "apiVersion": "v1", "status": "Failure",
+            "reason": "NotFound", "code": 404, "message": "gone"
+        })
+        .to_string(),
+    }]);
+    let source = evidence_source_for(Some(&reference), &client, NS, now)
+        .await
+        .expect("a 404 is not an error here");
+    assert!(
+        matches!(source, EvidenceSource::NotAttempted { .. }),
+        "a destination deleted after the run finished is NotAttempted, never a refusal and \
+         never the global handle: {source:?}"
+    );
+}
+
+/// **A DESTINATION EDITED AFTER THE FREEZE CHANGES NOTHING FOR THE RUNNING
+/// RUN** — D2 §3.7, and the review's M1/M2.
+///
+/// # The defect, exactly
+///
+/// Every edit to a `BackupDestination` bumps `metadata.generation`, the frozen
+/// block records the generation it resolved, and `verify_frozen_config_map`
+/// compares that block WHOLE. So a pass that re-creates a garbage-collected Job
+/// by re-resolving the LIVE object terminates the run with a
+/// `PlanConfigMapConflict` — on an archive that may be half written — because
+/// somebody rotated a Secret name or added an `evidenceRead` grant while it
+/// ran. Fail-closed, and still exactly the thing D2 §3.7 says cannot happen.
+///
+/// `stored_destination` is the readback that fixes it, mirroring
+/// `stored_selection`, which has had one since D1 W5 for the same reason.
+///
+/// KILLS: dropping the readback (the re-created plan then differs from the
+/// stored one); `if false && frozen.inputs.destination != expected.destination`
+/// together with `view.destination = None` in `executable()` — the review's
+/// surviving mutant R3 — because this row asserts the plan the re-create
+/// renders is BYTE-IDENTICAL to the stored one, which no comparison-free
+/// controller can produce from an edited object.
+#[test]
+fn a_destination_edited_after_the_freeze_does_not_change_a_created_run() {
+    let backed = destination_backed_backup("dest-a");
+    let selection = weirkeeper::backup_execution::ResolvedSelection::named(&backed.spec);
+
+    // The plan this run was admitted with, and the ConfigMap that holds it.
+    let frozen = desired_execution_inputs_for_destination(
+        &backed,
+        &prod_cluster(),
+        &selection,
+        Some(&both_roles(dest_a_value())),
+    )
+    .expect("the freeze resolves");
+    let plan = weirkeeper::backup_execution::inputs_config_map(&backed, &frozen)
+        .expect("the plan renders");
+
+    // THE EDIT. A rotated writer Secret and a new read grant: two things an
+    // operator does while a backup runs, and both bump the generation.
+    let mut edited = dest_a_value();
+    edited["metadata"]["generation"] = serde_json::json!(4);
+    edited["status"]["observedGeneration"] = serde_json::json!(4);
+    edited["status"]["conditions"][0]["observedGeneration"] = serde_json::json!(4);
+    edited["spec"]["access"]["archiveWrite"]["secret"]["name"] =
+        serde_json::json!("lw-a-writer-v2");
+    let live = both_roles(edited);
+
+    // A re-resolution against the edited object is a DIFFERENT plan — which is
+    // what would terminate the run, and is why the readback has to exist.
+    let re_resolved =
+        desired_execution_inputs_for_destination(&backed, &prod_cluster(), &selection, Some(&live))
+            .expect("it resolves");
+    assert_ne!(
+        re_resolved.sha256, frozen.sha256,
+        "the premise: the edited destination resolves to different inputs, so a re-create that \
+         re-resolves would refuse the run"
+    );
+
+    // THE READBACK PATH. The plan the Job-gone pass renders is byte-identical
+    // to the one the run was admitted with.
+    let (snapshot, ca_pem) = stored_destination(&plan).expect("the plan carries its destination");
+    assert_eq!(
+        snapshot.generation, 3,
+        "the frozen generation, not the live one"
+    );
+    let recreated = desired_execution_inputs_frozen(
+        &backed,
+        &prod_cluster(),
+        &selection,
+        Some(&snapshot),
+        ca_pem,
+    )
+    .expect("the frozen inputs re-render");
+    assert_eq!(
+        recreated.canonical, frozen.canonical,
+        "a Job re-created after the destination was edited renders from the FROZEN block, so its \
+         plan is the plan the run was approved with, byte for byte"
+    );
+    assert_eq!(recreated.sha256, frozen.sha256);
+
+    // …AND `verify_frozen_config_map` ADMITS IT. This is the comparison the
+    // review's mutant R3 disabled with no row noticing.
+    weirkeeper::backup_execution::verify_frozen_config_map(&plan, &backed, &recreated, None)
+        .expect("the stored plan is admitted against the frozen re-render");
+    let refused =
+        weirkeeper::backup_execution::verify_frozen_config_map(&plan, &backed, &re_resolved, None)
+            .expect_err("and a plan resolved from the EDITED destination is refused");
+    assert!(
+        refused
+            .to_string()
+            .contains("froze a different resolved BackupDestination"),
+        "the refusal names the block: {refused}"
+    );
+}
+
+/// **A DESTINATION-BACKED BACKUP JOB CARRIES THE EVIDENCE CREDENTIAL ITS
+/// RUNNER REFUSES TO RUN WITHOUT** — the review's C1.
+///
+/// # What was broken, and how it hid
+///
+/// A backup writes TWO things: the archive through `archiveWrite`, and its
+/// signed receipt through `evidenceWrite` over Global Constraint 6's `logweir/`
+/// root. The runner builds two stores and refuses a run whose
+/// `LOGWEIR_EVIDENCE_CREDENTIALS` it does not recognise — including the empty
+/// string an unset variable produces. `render_job_env` never emitted it, so
+/// **every destination-backed run exited 3 at the store builder**, after the
+/// archive handles were opened and before a byte was archived. The erratum
+/// **E20** failure class, one layer further in.
+///
+/// It hid because the end-to-end row asserted the run stops at
+/// `$LOGWEIR_SOURCE_PASSWORD is unset`, which happens BEFORE any store is
+/// built. `schedule_controller::the_destination_backed_job_env_drives_the_real_runner_past_its_store_builders`
+/// is the row that closes that hole; this one is its unit half.
+///
+/// KILLS: dropping `evidence_job_env` from the rendered Job.
+#[test]
+fn a_destination_backed_backup_job_names_its_evidence_credential() {
+    let backed = destination_backed_backup("dest-a");
+    let selection = weirkeeper::backup_execution::ResolvedSelection::named(&backed.spec);
+
+    // ---- the common destination: one grant, one credential --------------
+    let frozen = desired_execution_inputs_for_destination(
+        &backed,
+        &prod_cluster(),
+        &selection,
+        Some(&both_roles(dest_a_value())),
+    )
+    .expect("the freeze resolves");
+    let spec =
+        runner_job_spec_from_inputs(&backed, &prod_cluster(), &frozen).expect("the Job renders");
+    let env: std::collections::BTreeMap<&str, &str> = spec
+        .env_literal
+        .iter()
+        .map(|(n, v)| (n.as_str(), v.as_str()))
+        .collect();
+    assert_eq!(
+        env.get(EVIDENCE_CREDENTIALS_ENV).copied(),
+        Some("archive"),
+        "`evidenceWrite` falls back to `archiveWrite` (D2 §3.4), so the receipt store reuses the \
+         archive grant and the pod carries ONE credential. Got {env:?}"
+    );
+    assert_eq!(env.get(ARCHIVE_CREDS).copied(), Some("static"));
+    assert!(
+        !spec
+            .env_from_secret
+            .iter()
+            .any(|e| e.name.starts_with("LOGWEIR_EVIDENCE_AWS_")),
+        "and nothing second is projected: {:?}",
+        spec.env_from_secret
+    );
+
+    // ---- a SEPARATE evidenceWrite principal: two, unshadowed ------------
+    let mut separated = dest_a_value();
+    separated["spec"]["access"]["evidenceWrite"] = serde_json::json!({
+        "mode": "SecretKeys",
+        "secret": {"name": "lw-a-evidence-writer",
+                   "accessKeyIdKey": "access-key-id",
+                   "secretAccessKeyKey": "secret-access-key"}
+    });
+    let frozen = desired_execution_inputs_for_destination(
+        &backed,
+        &prod_cluster(),
+        &selection,
+        Some(&both_roles(separated)),
+    )
+    .expect("the freeze resolves");
+    let snapshot = frozen
+        .inputs
+        .destination
+        .as_ref()
+        .expect("a destination-backed run freezes its destination");
+    assert!(
+        snapshot.evidence_grant.is_some(),
+        "an evidenceWrite that DIFFERS from archiveWrite is frozen, so a Job re-created after a \
+         restart still projects it"
+    );
+    let spec =
+        runner_job_spec_from_inputs(&backed, &prod_cluster(), &frozen).expect("the Job renders");
+    let env: std::collections::BTreeMap<&str, &str> = spec
+        .env_literal
+        .iter()
+        .map(|(n, v)| (n.as_str(), v.as_str()))
+        .collect();
+    assert_eq!(
+        env.get(EVIDENCE_CREDENTIALS_ENV).copied(),
+        Some("static"),
+        "two principals, so the receipt store gets its own: {env:?}"
+    );
+    let projected: std::collections::BTreeMap<&str, &str> = spec
+        .env_from_secret
+        .iter()
+        .map(|e| (e.name.as_str(), e.secret_name.as_str()))
+        .collect();
+    assert_eq!(
+        projected.get("AWS_ACCESS_KEY_ID").copied(),
+        Some("lw-a-writer"),
+        "the engine writes the archive with `archiveWrite`: {projected:?}"
+    );
+    assert_eq!(
+        projected.get(EVIDENCE_ACCESS_KEY_ID_ENV).copied(),
+        Some("lw-a-evidence-writer"),
+        "and the receipt with `evidenceWrite`, under a name that cannot shadow it: {projected:?}"
+    );
+    assert!(projected.contains_key(EVIDENCE_SECRET_ACCESS_KEY_ENV));
+
+    // ---- AND A LEGACY RUN CARRIES NEITHER -------------------------------
+    let legacy = runner_job_spec_from_inputs(&backup(), &prod_cluster(), &desired_for(&backup()))
+        .expect("the legacy Job renders");
+    assert!(
+        !legacy
+            .env_literal
+            .iter()
+            .any(|(n, _)| n.starts_with("LOGWEIR_EVIDENCE_")),
+        "the legacy runner builds its evidence store the way it always has: {:?}",
+        legacy.env_literal
     );
 }

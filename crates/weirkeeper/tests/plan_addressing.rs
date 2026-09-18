@@ -362,12 +362,18 @@ fn the_controller_environment_reaches_a_legacy_job_and_never_a_destination_backe
     );
 
     // ---- ARM 2: the destination-backed path forwards NOTHING -------------
-    let resolved = weirkeeper::destination::resolve(
-        &dest(),
-        weirkeeper::destination::DestinationRole::ArchiveWrite,
-        &weirkeeper::check::policy::Policy::defaults(),
-    )
-    .expect("the destination resolves");
+    let role = |role| {
+        weirkeeper::destination::resolve(
+            &dest(),
+            role,
+            &weirkeeper::check::policy::Policy::defaults(),
+        )
+        .expect("the destination resolves")
+    };
+    let resolved = weirkeeper::controllers::backup::BackupDestinations {
+        archive: role(weirkeeper::destination::DestinationRole::ArchiveWrite),
+        evidence: role(weirkeeper::destination::DestinationRole::EvidenceWrite),
+    };
     let backed = destination_backed();
     let frozen = desired_execution_inputs_for_destination(
         &backed,
