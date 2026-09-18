@@ -101,12 +101,13 @@ use crate::conditions::{
     TERMINAL_STATE_REFERENT_NOT_FOUND, TERMINAL_STATE_SCHEDULE_NOT_FOUND,
 };
 use crate::controllers::backup_selection;
-use crate::crds::backup::Backup;
+use crate::crds::backup::{Backup, FrozenDestination};
 use crate::crds::backup_schedule::BackupSchedule;
 use crate::crds::kafka_cluster::KafkaCluster;
 use crate::crds::Condition;
 use crate::destination::{
     self, DestinationRefusal, DestinationRole, ResolveError, ResolvedDestination,
+    ResolvedDestinationSnapshot,
 };
 use crate::diagnostics;
 use crate::job::{self, EnvFromSecret, RunnerJobSpec, RunnerOwner, SecretMount, CONTAINER_NAME};
@@ -2211,8 +2212,30 @@ pub fn carry_conditions(
     )
 }
 
+/// The `status.destination` projection of a frozen destination snapshot —
+/// D2 §3.7.
+///
+/// ONE PROJECTION, SO THE STATUS AND THE FROZEN DOCUMENT CANNOT DISAGREE, for
+/// the same reason `SelectionInputs::status` is one: a reader comparing
+/// `status.destination.locationDigest` against the plan is comparing two
+/// renderings of one value, not two digests.
+///
+/// It copies four fields and derives nothing. The snapshot's storage blocks,
+/// transport, addressing, CA digest and grant stay where they are: they are
+/// what the JOB is rendered from, and a second spelling of them on the object
+/// would be a second thing to keep true.
+#[must_use]
+pub fn frozen_destination_status(snapshot: &ResolvedDestinationSnapshot) -> FrozenDestination {
+    FrozenDestination {
+        name: snapshot.name.clone(),
+        uid: snapshot.uid.clone(),
+        generation: snapshot.generation,
+        location_digest: snapshot.location_digest.clone(),
+    }
+}
+
 /// The `/status` merge patch that records frozen inputs: `status.execution`,
-/// `status.selection`, and nothing else.
+/// `status.selection`, `status.destination`, and nothing else.
 ///
 /// SENT BEFORE THE JOB IS CREATED, and a merge of object keys: it replaces no
 /// array and so cannot drop a condition another writer owns.
@@ -2223,15 +2246,34 @@ pub fn carry_conditions(
 /// absent for exactly the window in which somebody is watching the run. It is
 /// absent for a `Backup` frozen under grammar `v1`, which is the documented
 /// absent-field behaviour and not a degraded state.
+///
+/// **`status.destination` IS WRITTEN AT THE FREEZE TOO** (D2 §3.7), from the
+/// same snapshot the plan is rendered from, and it is the only place this
+/// controller writes it. A later pass re-reads the STORED snapshot, renders
+/// this same patch and `patch_status_if_changed` sends nothing, so the block a
+/// recovery point publishes is the block its run was admitted with — a
+/// destination edited afterwards moves neither.
+///
+/// **An omitted key, never an explicit `null`.** A legacy inline-`archive` run
+/// has no destination and no `selection`, and a merge patch carrying
+/// `"destination": null` would be this controller asserting the absence on
+/// every pass of every legacy object. The absence is the object's, not a value
+/// this patch owns; `Backup.spec` is immutable, so neither key can ever need
+/// clearing.
 #[must_use]
 pub fn execution_status_patch(frozen: &FrozenInputs) -> Value {
-    match frozen.inputs.selection.as_ref() {
-        Some(selection) => json!({ "status": {
-            "execution": frozen.status(),
-            "selection": selection.status(),
-        }}),
-        None => json!({ "status": { "execution": frozen.status() } }),
+    let mut status = serde_json::Map::new();
+    status.insert("execution".to_string(), json!(frozen.status()));
+    if let Some(selection) = frozen.inputs.selection.as_ref() {
+        status.insert("selection".to_string(), json!(selection.status()));
     }
+    if let Some(destination) = frozen.inputs.destination.as_ref() {
+        status.insert(
+            "destination".to_string(),
+            json!(frozen_destination_status(destination)),
+        );
+    }
+    json!({ "status": Value::Object(status) })
 }
 
 /// Whether, and how, this pass observed the runner Job.

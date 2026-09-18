@@ -267,6 +267,59 @@ pub struct BackupExecution {
     pub inputs_sha256: String,
 }
 
+/// The saved `BackupDestination` this run was frozen against — D2 §3.7,
+/// projected onto the object so a recovery point publishes where it was
+/// written.
+///
+/// # Why this is on `status` at all, when the digest is already in the plan
+///
+/// The frozen `execution-inputs.json` is the authority, but it lives in a
+/// `ConfigMap` that the run's retention eventually collects, and reading it
+/// costs a second `get` against an object whose name a caller must derive.
+/// Restore selection (D2 §3.12), the `Preflight`'s `recoveryPoint.state` row
+/// (§6.3) and PLAT-15.1's catalog all need one value — the `locationDigest` —
+/// off the recovery point itself. This block is that value plus the identity
+/// that produced it, and nothing else: no storage settings, no credential, no
+/// CA bytes.
+///
+/// # Written once, at the freeze, and never rewritten
+///
+/// It is part of the same pre-Job `/status` patch as
+/// [`BackupExecution`](crate::crds::backup::BackupExecution), rendered from the
+/// SAME snapshot the plan was rendered from — so the two cannot disagree. A
+/// later pass re-reads the stored snapshot and renders the identical patch, and
+/// `patch_status_if_changed` sends nothing. A destination edited after the
+/// freeze changes neither the plan nor this block.
+///
+/// # Absent is a real value
+///
+/// A legacy inline-`archive` run has no destination and carries no block, as
+/// does every `Backup` frozen by a controller that predates this field. Absent
+/// therefore means "this recovery point publishes no frozen location", never
+/// "its location is unknown to be wrong" — which is why the `Preflight` answers
+/// `unknown` for such a point rather than `ready`.
+// Kept as four required fields, for the same reason `BackupExecution` keeps
+// three: a consumer must never have to guess which half of a partially written
+// block it is reading.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FrozenDestination {
+    /// The `BackupDestination`'s `metadata.name`, in this namespace.
+    pub name: String,
+    /// Its `metadata.uid` at resolution time. A destination deleted and
+    /// recreated under the same name is a different object, and this is what
+    /// says so.
+    pub uid: String,
+    /// Its `metadata.generation` at resolution time — the revision this run was
+    /// admitted against.
+    pub generation: i64,
+    /// `sha256:<lowercase hex>` over the canonical location, as
+    /// `logweir_core::destination::DestinationLocation::location_digest`
+    /// computes it and as `BackupDestination.status.locationDigest` publishes
+    /// it. **Where this recovery point's archive actually is.**
+    pub location_digest: String,
+}
+
 /// `Backup.spec`.
 #[derive(kube::CustomResource, Deserialize, Serialize, Clone, Debug, JsonSchema)]
 #[kube(
@@ -405,6 +458,15 @@ pub struct BackupStatus {
     /// predates frozen execution inputs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution: Option<BackupExecution>,
+    /// The saved `BackupDestination` this run was frozen against — WHERE THIS
+    /// RECOVERY POINT IS. Written in the same pre-Job patch as `execution` and
+    /// from the same snapshot, and never rewritten: a destination edited after
+    /// the freeze moves neither this block nor the plan. Absent for a legacy
+    /// inline-`archive` run and for any `Backup` frozen by a controller that
+    /// predates the field, which is the documented absent-field behaviour and
+    /// not a degraded state.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub destination: Option<FrozenDestination>,
     /// The object key of the manifest this run wrote.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub manifest_key: Option<String>,
