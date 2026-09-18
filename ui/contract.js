@@ -209,6 +209,29 @@ export function objectOf(shape) {
   };
 }
 
+/** The same, for a shape declared LATER in this file.
+ *
+ *  DECLARATION ORDER IS A REAL CONSTRAINT HERE and this is the one escape
+ *  from it. `objectOf(SHAPE)` reads `SHAPE` while the module is evaluating, so
+ *  a DTO can only carry a shape defined above it; `Connection.lastTest` is a
+ *  preflight view, and the preflight vocabulary is 600 lines below the
+ *  connection's. The alternatives were to hoist an exported vocabulary out of
+ *  the section it documents, or to spell the state list twice -- and a
+ *  vocabulary spelled twice is the defect every closed list in this file
+ *  exists to prevent. The thunk is resolved when a DOCUMENT is read, which is
+ *  long after every declaration has run.
+ *
+ *  @param {() => object} later a function returning the shape */
+export function objectOfLater(later) {
+  return {
+    what: "an object",
+    read(value, ctx, dto, path) {
+      const shape = later();
+      return readShape(shape, value, ctx, shape.name, path);
+    },
+  };
+}
+
 /** Declares a DTO: `required` fields whose absence is a contract failure, and
  *  `optional` fields whose absence is simply absence. A `null` in an optional
  *  field is absence too -- the product API spells "no value" that way, and a
@@ -392,7 +415,14 @@ const CONNECTION = shapeOf(
     role: str, bootstrapServers: listOf(str),
     auth: objectOf(CONNECTION_AUTH), reachability: objectOf(REACHABILITY),
   },
-  { createdAt: str, markerTopic: str },
+  // `lastTest` IS A DIFFERENT FACT FROM `reachability` and the page renders
+  // them apart: the reachability block is the controller's own probe on its
+  // own cadence, and this is a connectivity check somebody asked for, with its
+  // own instant and its own staleness. It is absent on a list and on a create
+  // -- the product API computes it only on the detail read -- so it is
+  // optional here, and `objectOfLater` is why a connection may carry a
+  // preflight view at all (see its own note).
+  { createdAt: str, markerTopic: str, lastTest: objectOfLater(() => LAST_TEST) },
 );
 
 const RETENTION = shapeOf("RetentionView", {}, { keepLast: int, keepDays: int });

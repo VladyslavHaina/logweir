@@ -546,6 +546,15 @@ function projectConnection(item) {
     }
   }
   object.status = status;
+  // THE LAST CONNECTIVITY CHECK IS NOT PART OF THE `KafkaCluster`, and it is
+  // deliberately not folded into `status`. `status` here is a projection of
+  // the CR's own status, which the legacy mode renders from the real object;
+  // a field the cluster does not have would make the two modes disagree about
+  // what a `KafkaCluster` is. It rides beside it under the product API's own
+  // name, and the page reads it only when the console served it.
+  if (item.lastTest !== null && item.lastTest !== undefined) {
+    object.lastTest = item.lastTest;
+  }
   return object;
 }
 

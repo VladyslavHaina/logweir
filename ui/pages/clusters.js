@@ -73,6 +73,7 @@ import {
   listFooter,
   mutationStatus,
   phaseBadge,
+  preflightVerdict,
   replace,
   table,
   visibilityLine,
@@ -441,8 +442,46 @@ export function connectionCheckRequest(name) {
   return { operation: "sourceConnection", sourceConnection: { connectionRef: String(name) } };
 }
 
-/** The panel: the control, the reason it is unavailable when it is, and the
- *  started check's own rows. */
+/** What a reload can still say about the last check.
+ *
+ *  A CONNECTIVITY CHECK OUTLIVES THE PAGE THAT STARTED IT. The panel's rows
+ *  live in the loaded page; the `Preflight` lives in the namespace until the
+ *  collector takes it. Until the API labelled these objects, a reload found
+ *  nothing at all and the panel read as though no check had ever run, which
+ *  invited a second one for an answer that already existed.
+ *
+ *  IT IS A SUMMARY AND NEVER THE ROWS. `lastTest` carries the id, the
+ *  aggregate, the instant and whether the verdict still applies -- no codes
+ *  and no remedies -- so it says what happened and points at the check rather
+ *  than reprinting a verdict the reader cannot act on from here. A STALE test
+ *  is labelled and never rendered as health: it is the same rule the probe
+ *  badge keeps one panel above. */
+export function renderLastConnectionCheck(test) {
+  const t = test || null;
+  if (t === null) {
+    return "<p class=\"note\" id=\"connection-check-last-none\">No connectivity check for this " +
+      "connection is recorded in this namespace. That is a statement about what is stored, not " +
+      "about the connection.</p>";
+  }
+  return (
+    "<div class=\"last-test\" id=\"connection-check-last\">" +
+    "<p>Last connectivity check: " + preflightVerdict(t.state) +
+    " <code>" + cell(t.preflightId) + "</code>, observed " + cell(t.observedAt) +
+    (t.stale === true
+      ? " " + badge("unverified", "stale: this verdict no longer describes the object as it is")
+      : "") +
+    ".</p>" +
+    (t.truncated === true
+      ? "<p class=\"note\">The search for the newest check hit its page bound, so this may not " +
+        "be the newest one. A last test that might not be last is worse than none, so it is " +
+        "labelled rather than presented as current.</p>"
+      : "") +
+    "</div>"
+  );
+}
+
+/** The panel: the control, the reason it is unavailable when it is, the last
+ *  check this namespace still holds, and the started check's own rows. */
 export function renderConnectionCheck(view) {
   const v = view || {};
   const state = v.state || {};
@@ -481,7 +520,11 @@ export function renderConnectionCheck(view) {
       ? "<p class=\"note\" id=\"connection-check-stopped\">" +
         esc(CONNECTION_CHECK_STOPPED_SENTENCE) + "</p>"
       : "") +
-    (result === null ? "" : renderPreflight(result)) +
+    // THE SUMMARY ONLY WHEN THERE ARE NO ROWS. Once this page has started a
+    // check, the rows below ARE the newest answer and are richer than the
+    // summary; printing both would show one verdict twice and invite a reader
+    // to compare them for a difference that cannot exist.
+    (result === null ? renderLastConnectionCheck(v.lastTest) : renderPreflight(result)) +
     "</section>"
   );
 }
@@ -1118,6 +1161,11 @@ function paintClusterDetail(node, ns, name, parse, lifecycle, api, object, disco
       mayOperate: mayOperate(ns),
       preflight: null,
       followStopped: false,
+      // THE OBJECT'S OWN, from the read this view already did. `lastTest` is
+      // the product API's summary of the newest connectivity check for this
+      // connection; in legacy mode it is simply absent, which the panel
+      // renders as "none recorded" rather than as "none ran".
+      lastTest: (object || {}).lastTest || null,
       // F6: the branch is no longer dead. `mode()` is `null` until the page
       // has decided, and an undecided page is not a legacy one -- the check is
       // deliberately `=== LEGACY` and not `!== CONSOLE`.
@@ -1207,6 +1255,32 @@ export function connectionNonce() {
   return loadNonce;
 }
 
+/** One started check, in the shape `mutationStatus` reads.
+ *
+ *  IT RENDERED `(uid )` WITH A HOLE IN IT, and the lab saw it. Every other
+ *  create on this page goes through `lifecycle.js`'s `createOnce`, which
+ *  answers with the stored OBJECT, so the status line reads
+ *  `result.object.metadata.{name,uid}`. A console create answers with the
+ *  product API's DTO instead, which carries the same two facts under its own
+ *  names -- `id` IS `metadata.name` and `uid` IS `metadata.uid`, as the
+ *  `Preflight` schema declares them -- so this projects them back rather than
+ *  teaching the shared status helper a second shape. `item` is kept beside it
+ *  because the panel's own watcher reads that.
+ *
+ *  A MISSING uid STAYS MISSING. Nothing here invents one: if the server ever
+ *  answered without it the line would say so rather than print a name twice. */
+export function startedPreflight(made) {
+  const m = made || {};
+  const item = m.item || null;
+  return {
+    item: item,
+    replayed: m.replayed === true,
+    object: item === null ? null : {
+      metadata: { name: item.id, uid: item.uid },
+    },
+  };
+}
+
 /** The token one accepted click carries: this load's nonce and this load's
  *  click ordinal. Exported so the suite can assert that two clicks in one load
  *  differ, that two loads differ, and that a double click mints one. */
@@ -1264,9 +1338,10 @@ function wireConnectionCheck(node, ns, name, parse, lifecycle, api, object, disc
     // random source becomes a refusal in the form's own status region -- the
     // mutation record catches a throwing executor -- rather than an exception
     // out of an event handler that nothing renders.
-    mutation.run(() => {
+    mutation.run(async () => {
       const attempt = nextConnectionAttempt(ns, name);
-      return api.startPreflight(ns, connectionCheckRequest(name), { attempt: attempt });
+      const made = await api.startPreflight(ns, connectionCheckRequest(name), { attempt: attempt });
+      return startedPreflight(made);
     });
   }, lifecycle);
 }

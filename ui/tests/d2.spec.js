@@ -49,6 +49,7 @@ import {
   applicabilityLine,
   checkScope,
   checkTable,
+  mutationStatus,
   destinationVerdict,
   executionOnlyBlock,
   preflightSentence,
@@ -83,6 +84,7 @@ import {
   CONNECTION_CHECK_SENTENCE,
   connectionCheckRequest,
   connectionNonce,
+  startedPreflight,
   connectionRefusal,
   mountClusterDetail,
   nextConnectionAttempt,
@@ -1466,4 +1468,86 @@ test("a_kubectl_proxy_console_is_told_up_front_that_it_cannot_start_a_check", ()
   assert.match(html, /needs the product API/);
   assert.doesNotMatch(html, /<button/, "no control at all, rather than one that cannot work");
   assert.match(CONNECTION_CHECK_LEGACY_SENTENCE, /kubectl proxy/);
+});
+
+// ===========================================================================
+// ui-conn-followups -- what a reload can still say, and the uid it prints
+// ===========================================================================
+
+test("a_reload_finds_the_last_connectivity_check_and_labels_a_stale_one", () => {
+  // A CHECK OUTLIVES THE PAGE THAT STARTED IT. Until the API labelled these
+  // objects the panel had no way to find one again, so a reload read as though
+  // nothing had ever run and invited a second check for an answer that already
+  // existed. `lastTest` is the product API's summary, computed on the detail
+  // read from `logweir.dev/connection-test`.
+  const fresh = renderConnectionCheck({
+    mayOperate: true, state: {}, preflight: null,
+    lastTest: {
+      preflightId: "pf-earlier", state: "notReady",
+      observedAt: "2026-09-18T20:52:31Z", stale: false, truncated: false,
+    },
+  });
+  assert.match(fresh, /id="connection-check-last"/);
+  assert.match(fresh, /pf-earlier/);
+  assert.match(fresh, /2026-09-18T20:52:31Z/);
+  assert.match(fresh, /badge-unverified">not ready/);
+  assert.doesNotMatch(fresh, /stale:/);
+
+  // A STALE TEST IS LABELLED AND NEVER RENDERED AS HEALTH -- the rule the
+  // probe badge one panel above already keeps.
+  const stale = renderConnectionCheck({
+    mayOperate: true, state: {}, preflight: null,
+    lastTest: {
+      preflightId: "pf-old", state: "ready",
+      observedAt: "2026-09-18T10:00:00Z", stale: true, truncated: false,
+    },
+  });
+  assert.match(stale, /stale: this verdict no longer describes the object as it is/);
+
+  // A BOUND THAT WAS HIT IS SAID, not swallowed: a last test that might not be
+  // last is worse than none.
+  const truncated = renderConnectionCheck({
+    mayOperate: true, state: {}, preflight: null,
+    lastTest: { preflightId: "pf-x", state: "ready", stale: false, truncated: true },
+  });
+  assert.match(truncated, /may not be the newest one/);
+
+  // NONE RECORDED IS NOT NONE RAN.
+  const empty = renderConnectionCheck({ mayOperate: true, state: {}, preflight: null });
+  assert.match(empty, /id="connection-check-last-none"/);
+  assert.match(empty, /a statement about what is stored, not about the connection/);
+
+  // AND ONCE THIS PAGE HAS ROWS, THE SUMMARY STANDS DOWN: the rows are the
+  // newer and richer answer, and one verdict printed twice invites a reader to
+  // look for a difference that cannot exist.
+  const withRows = renderConnectionCheck({
+    mayOperate: true, state: {}, preflight: preflight("preflight-not-ready.json"),
+    lastTest: { preflightId: "pf-earlier", state: "ready", stale: false, truncated: false },
+  });
+  assert.doesNotMatch(withRows, /id="connection-check-last"/);
+  assert.doesNotMatch(withRows, /pf-earlier/);
+});
+
+test("the_started_check_status_prints_the_uid_the_server_minted", () => {
+  // THE LAB SAW `Created Preflight pf-4zqwo4... (uid ).` -- a hole where the
+  // uid goes. Every other create on this page answers with the stored OBJECT,
+  // so `mutationStatus` reads `result.object.metadata`; a console create
+  // answers with the product API's DTO, which carries the same two facts under
+  // its own names.
+  const projected = startedPreflight({ item: { id: "pf-1", uid: "1f4c-2b8a" }, replayed: false });
+  assert.deepEqual(projected.object, { metadata: { name: "pf-1", uid: "1f4c-2b8a" } });
+  assert.equal(projected.item.id, "pf-1", "and the watcher's own field is still there");
+
+  const html = mutationStatus(
+    { phase: "succeeded", result: projected },
+    { kind: "Preflight", name: "pf-1" },
+    null,
+  );
+  assert.match(html, /Created Preflight pf-1 \(uid 1f4c-2b8a\)/);
+  assert.doesNotMatch(html, /\(uid \)/, "the hole the lab photographed");
+
+  // NOTHING IS INVENTED. An answer with no item projects no object, and the
+  // status line is not handed a name pretending to be a uid.
+  assert.equal(startedPreflight({}).object, null);
+  assert.equal(startedPreflight(null).item, null);
 });
