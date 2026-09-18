@@ -525,21 +525,77 @@ def image_revision(H: Any, image: str) -> str:
     return result.stdout.strip()
 
 
-def checkout_revision(H: Any) -> tuple[str, str]:
-    """The commit this checkout is testing, and the ref that named it.
+# Paths that cannot change what an image contains: the live harnesses
+# themselves, the fixtures they mount into their own pods, and prose. Anything
+# else is a product build input, and a change to one means the lab is running
+# different code from the code this checkout describes.
+#
+# DELIBERATELY AN ALLOWLIST. A product directory this list has never heard of
+# is refused rather than silently tolerated, which is the direction a guard
+# should fail in.
+NON_IMAGE_PATHS = ("scripts/live/", "scripts/fixtures/", "e2e/", "docs/")
 
-    `origin/main` before `HEAD`, and deliberately: a harness branch carries
-    test-only commits on top of the build the lab runs, and a HEAD comparison
-    would make every harness change un-runnable against a lab that is otherwise
-    exactly right. `e2e/k8s/d2/d2_live.py::revision_guard` already reads the
-    lab this way; this is the same rule. `HEAD` is the fallback for a checkout
-    with no remote.
+
+def assert_checkout_contains(H: Any, revision: str) -> dict[str, Any]:
+    """Refuse unless the product code in this checkout IS the build under test.
+
+    NOT `origin/main`: that ref moves the moment any worker's branch lands, and
+    a lab refreshed an hour earlier would then be "wrong" although nothing
+    about it had changed — observed mid-run on 2026-09-18, when origin/main
+    advanced past the commit the lab was built from and
+    `d2_live.py::revision_guard` refused a run that was measuring exactly the
+    right thing. A guard that a third party can break by pushing is the same
+    stale-pin failure this file already had, with the constant moved into a ref.
+
+    NOT `HEAD` either: a harness branch carries test-only commits over the
+    build the lab runs, and requiring equality would make every harness change
+    un-runnable against a lab that is otherwise exactly right.
+
+    What has to be true is narrower, and checkable: this checkout KNOWS the
+    commit the image was built from, CONTAINS it, and everything that has moved
+    since — committed or not — is a file no image contains.
     """
-    for ref in ("origin/main", "HEAD"):
-        result = H.run(["git", "rev-parse", ref], timeout=60, check=False, record=False)
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip(), ref
-    raise H.Failure("this checkout resolves neither origin/main nor HEAD; nothing can be source-matched")
+    head = H.run(["git", "rev-parse", "HEAD"], timeout=60, record=False).stdout.strip()
+    if H.run(["git", "cat-file", "-e", f"{revision}^{{commit}}"],
+             timeout=60, check=False, record=False).returncode:
+        raise H.Failure(
+            f"the image names revision {revision!r}, which this checkout does not have; it "
+            "cannot say what code that image contains. Fetch the commit, or rebuild the "
+            "image from one this checkout has"
+        )
+    if H.run(["git", "merge-base", "--is-ancestor", revision, "HEAD"],
+             timeout=60, check=False, record=False).returncode:
+        raise H.Failure(
+            f"the image was built from {revision!r}, which is not an ancestor of this "
+            f"checkout's HEAD {head!r}: the lab is running a build this branch does not "
+            "contain, so nothing measured here describes this code"
+        )
+    changed = [
+        line.strip()
+        for line in H.run(["git", "diff", "--name-only", revision, "HEAD"],
+                          timeout=120, record=False).stdout.splitlines()
+        if line.strip()
+    ]
+    dirty = [
+        line[3:].strip()
+        for line in H.run(["git", "status", "--porcelain"], timeout=120, record=False)
+        .stdout.splitlines()
+        if line.strip()
+    ]
+    product = sorted({p for p in changed + dirty if not p.startswith(NON_IMAGE_PATHS)})
+    if product:
+        raise H.Failure(
+            f"the lab runs {revision[:12]} and this checkout has moved product files since: "
+            f"{product[:8]}{' …' if len(product) > 8 else ''}. A run that measures one build "
+            "and asserts against another is not evidence — rebuild the lab images, or pass "
+            "`--fence-revision <sha>` if the difference is deliberate"
+        )
+    return {
+        "checkoutHead": head,
+        "imageRevisionInHistory": True,
+        "changedSinceImage": changed,
+        "uncommitted": dirty,
+    }
 
 
 def expected_revision(H: Any, which: str, observed: str) -> tuple[str, str]:
@@ -588,17 +644,11 @@ def assert_source_matched(H: Any, which: str) -> dict[str, str]:
         out[f"{label}Image"] = ref
         out[f"{label}ImageId"] = image_id
         out[f"{label}Revision"] = got
-    checkout, ref_name = checkout_revision(H)
-    out["checkoutRevision"] = checkout
-    out["checkoutRef"] = ref_name
-    if source == "label" and checkout != want:
-        raise H.Failure(
-            f"{IMAGES[which][0]} is revision {want!r} and this checkout ({ref_name}) is "
-            f"{checkout!r}; a run that measures one build and is written against another is "
-            f"not evidence. Rebuild the lab images from {checkout}, or pass "
-            f"`--fence-revision {want}` to say deliberately that {want} is the build under "
-            "test"
-        )
+    if source == "label":
+        out.update(assert_checkout_contains(H, want))
+    else:
+        out["checkoutHead"] = H.run(["git", "rev-parse", "HEAD"], timeout=60,
+                                    record=False).stdout.strip()
     return out
 
 

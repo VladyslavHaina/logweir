@@ -2771,14 +2771,16 @@ NOT_RUN_REASONS = {
     "L-09-3a": ("PLAT-09.2", "a topic deleted between freeze and execution",
                 "holds the runner Job POST. " + PROXY),
     "L-09-3b": ("PLAT-09.2", "the source changes between discovery and freeze",
-                "NOT blocked any more. It was blocked by the defect L-09-1 measured — the "
-                "discovery Job carried the compile-time image pin instead of the "
-                "LOGWEIR_RUNNER_IMAGE the process was given, no node held that pin, and "
+                "NO LONGER blocked by the defect L-09-1 measured — the discovery Job carried "
+                "the compile-time image pin, no node held it, and "
                 "`SourceChangedDuringResolution` is decided AFTER discovery succeeds, so the "
-                "case could not be reached. That defect (D1-DISCOVERY-IMAGE) is closed: "
-                "lab-refresh-3 §8.1 shows the discovery Job naming the configured image and "
-                "succeeding. The row is implemented and runnable; a run that did not take it "
-                "records it here as unrun for budget, never as blocked."),
+                "case could not be reached at all. D1-DISCOVERY-IMAGE is closed "
+                "(lab-refresh-3 §8.1) and the row now REACHES its case: run unfenced on "
+                "2026-09-18 it executed all three attempts and FAILED, because the discovery "
+                "window is a few seconds wide and the source swap has to land inside it. "
+                "That is the race this row has always been, and it is what "
+                "D1 §13.1's request-holding proxy is for. Recorded as a FAIL when it is run "
+                "unfenced, never as a pass, and as this reason only when it is not run at all."),
     "L-09-5": ("PLAT-09.2", "an ACL-limited principal",
                "needs a Kafka with StandardAuthorizer and a SCRAM principal without Describe "
                "on one topic. KRaft SCRAM credentials are bootstrapped at storage-format "

@@ -1358,10 +1358,30 @@ def report() -> None:
     print(json.dumps(counts, indent=2))
 
 
+# Paths that cannot change what an image contains: the live harnesses
+# themselves, the fixtures they mount, and prose. Everything else is a product
+# build input. DELIBERATELY AN ALLOWLIST — a product directory this list has
+# never heard of is refused rather than silently tolerated.
+NON_IMAGE_PATHS = ("scripts/live/", "scripts/fixtures/", "e2e/", "docs/")
+
+
 def revision_guard() -> None:
-    """Abort unless the lab's controller and runner images were built from the
-    same commit as this worktree's origin/main."""
-    head = run(["git", "rev-parse", "origin/main"], timeout=60).stdout.strip()
+    """Abort unless the product code in this checkout IS the build the lab runs.
+
+    This compared the images' revision label with `origin/main`, and that ref
+    moves the moment any worker's branch lands: on 2026-09-18 origin/main
+    advanced past the commit the lab had been refreshed to an hour earlier and
+    this guard refused a run that was measuring exactly the right thing. A
+    guard a third party can break by pushing is not a guard. Comparing with
+    `HEAD` instead would be worse in the other direction — a harness branch
+    carries test-only commits over the build the lab runs.
+
+    So the rule is the narrower, checkable one
+    (`scripts/live/d1/fence/fenced.py::assert_checkout_contains` states it the
+    same way): both images carry the SAME revision, this checkout knows and
+    contains that commit, and everything that has moved since — committed or
+    not — is a file no image contains.
+    """
     proc = run(
         ["docker", "image", "inspect", "weirkeeper:scram-reviewed", "logweir:scram-local",
          "--format", '{{index .Config.Labels "org.opencontainers.image.revision"}} {{.Id}}'],
@@ -1369,23 +1389,56 @@ def revision_guard() -> None:
     )
     lines = [line.split() for line in proc.stdout.strip().splitlines()]
     revisions = {line[0] for line in lines}
-    if revisions != {head}:
+    if len(revisions) != 1 or not revisions or "<no" in "".join(revisions):
         raise RuntimeError(
-            f"lab images are at {sorted(revisions)}, origin/main is {head}: refusing to run"
+            f"the lab's controller and runner carry revisions {sorted(revisions)}: a "
+            "controller and a runner from different commits, or an unlabelled image, are "
+            "not one build"
+        )
+    revision = revisions.pop()
+    head = run(["git", "rev-parse", "HEAD"], timeout=60).stdout.strip()
+    if run(["git", "cat-file", "-e", f"{revision}^{{commit}}"],
+           check=False, timeout=60).returncode:
+        raise RuntimeError(
+            f"the lab images name revision {revision}, which this checkout does not have"
+        )
+    if run(["git", "merge-base", "--is-ancestor", revision, "HEAD"],
+           check=False, timeout=60).returncode:
+        raise RuntimeError(
+            f"the lab images were built from {revision}, which is not an ancestor of HEAD "
+            f"{head}: the lab runs a build this branch does not contain"
+        )
+    changed = [ln.strip() for ln in
+               run(["git", "diff", "--name-only", revision, "HEAD"], timeout=120)
+               .stdout.splitlines() if ln.strip()]
+    dirty = [ln[3:].strip() for ln in
+             run(["git", "status", "--porcelain"], timeout=120).stdout.splitlines()
+             if ln.strip()]
+    product = sorted({p for p in changed + dirty if not p.startswith(NON_IMAGE_PATHS)})
+    if product:
+        raise RuntimeError(
+            f"the lab runs {revision[:12]} and this checkout has moved product files since: "
+            f"{product[:8]}{' …' if len(product) > 8 else ''}: refusing to run"
         )
     pods = get_list("pods", namespace=LAB_NS, selector="app.kubernetes.io/component=control-plane")
     image_ids = [
         st["imageID"] for pod in pods for st in pod["status"].get("containerStatuses", [])
     ]
-    state["revision"] = head
+    state["revision"] = revision
     state["images"] = {
         "controller": lines[0],
         "runner": lines[1],
         "controllerPodImageIds": image_ids,
     }
     save()
-    artifact("revision.json", state["images"] | {"originMain": head})
-    log(f"revision guard: lab images are {head}")
+    artifact(
+        "revision.json",
+        state["images"] | {"labRevision": revision, "checkoutHead": head,
+                           "originMain": run(["git", "rev-parse", "origin/main"],
+                                             check=False, timeout=60).stdout.strip(),
+                           "changedSinceImage": changed, "uncommitted": dirty},
+    )
+    log(f"revision guard: lab images are {revision}; HEAD {head} differs only outside the image")
 
 
 # --------------------------------------------------------------------------
