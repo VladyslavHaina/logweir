@@ -11,19 +11,25 @@ use axum::extract::State;
 use axum::response::Response;
 use http::{HeaderMap, StatusCode, Uri};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
+use kube::{Resource as _, ResourceExt as _};
 use weirkeeper::crds::kafka_cluster::{
     AuthBlock, AuthMode, CredentialSecretRef, KafkaCluster, KafkaClusterSpec, UnrecognizedFields,
 };
+use weirkeeper::crds::preflight::Preflight as PreflightCr;
 
-use super::{authorize, create_idempotent, get_object, json, list_page, list_query, ApiPath};
+use super::{
+    authorize, create_idempotent, get_object, json, list_page, list_query, ApiPath, MAX_LIMIT,
+};
 use crate::app::AppState;
 use crate::auth::Actor;
 use crate::authz::Action;
 use crate::contract::{
-    ConnectionAuthMode, ConnectionList, ConnectionResponse, ConnectionRole, CreateConnectionRequest,
+    ConnectionAuthMode, ConnectionList, ConnectionResponse, ConnectionRole,
+    CreateConnectionRequest, LastTestView,
 };
 use crate::http::{read_json, RequestId, MAX_JSON_BODY};
 use crate::idempotency::IdempotencyKey;
+use crate::kube::{KubeFailure, PageRequest};
 use crate::problem::{ApiError, FieldError};
 use crate::projection;
 use crate::validate;
@@ -35,6 +41,22 @@ pub const ROUTE_CREATE: &str = "POST /api/v1/namespaces/{ns}/connections";
 /// The deterministic name prefix. With 26 hash characters the name is 31
 /// characters, inside the 49 the probe Job name leaves a KafkaCluster.
 pub const NAME_PREFIX: &str = "conn-";
+
+/// The label a `SourceConnection` preflight carries, naming the connection it
+/// dialled.
+///
+/// ITS OWN LABEL, FOR `DESTINATION_TEST_LABEL`'s REASON. A connectivity check
+/// is the only object that carries it, so `last_test` below selects on it
+/// alone and can never pick up a Backup readiness check that happens to name
+/// the same source. The value is the connection's NAME, because that is what
+/// the requester named and what a label selector can be built from without a
+/// second read at create time; the UID check that makes it exact is done here,
+/// against the object this route already holds.
+pub const CONNECTION_TEST_LABEL: &str = "logweir.dev/connection-test";
+
+/// How many pages of preflights [`last_test`] will read before it gives up and
+/// says so. The same bound, for the same reason, as the destinations route's.
+pub const MAX_PAGES: usize = 8;
 
 /// `GET .../connections`.
 pub async fn list(
@@ -51,10 +73,107 @@ pub async fn list(
         StatusCode::OK,
         &ConnectionList {
             request_id,
-            items: items.iter().map(projection::connection).collect(),
+            // NO `lastTest` ON A LIST, and `destinations` makes the same
+            // choice: one detail read is one bounded label scan, and a page of
+            // N connections would be N of them.
+            items: items
+                .iter()
+                .map(|c| projection::connection(c, None))
+                .collect(),
             page,
         },
     ))
+}
+
+/// The newest `SourceConnection` preflight for one connection.
+///
+/// ONE SELECTOR, PAGED TO EXHAUSTION, BOUNDED — `destinations::last_test`'s
+/// shape, because it answers the same question about the other half of a run.
+/// [`CONNECTION_TEST_LABEL`] is set only by a connectivity check, the loop
+/// follows the continue token so a namespace with many checks cannot hide the
+/// newest one behind a first page in name order, and [`MAX_PAGES`] caps the
+/// work with the cap REPORTED rather than swallowed.
+///
+/// # A NAME IS NOT AN IDENTITY, AND THIS IS WHERE THAT IS ENFORCED
+///
+/// The label carries the connection's NAME, so a `KafkaCluster` deleted and
+/// recreated under that name would inherit its predecessor's checks — the
+/// exact substitution the console refuses everywhere else (a recreated cluster
+/// is a different set of brokers reached with a different credential). Every
+/// candidate is therefore matched against the UID of the object this route
+/// already read: a `Preflight` records every referent it resolved, with its
+/// UID, in `status.binding.referents`, so the comparison needs no extra read
+/// and no create-time resolution. A check whose binding names another UID —
+/// or names none, because it never got far enough to resolve one — is not this
+/// connection's last test and is skipped.
+async fn last_test(
+    state: &AppState,
+    namespace: &str,
+    name: &str,
+    cluster_uid: &str,
+) -> Result<Option<LastTestView>, ApiError> {
+    if cluster_uid.is_empty() {
+        return Ok(None);
+    }
+    let selector = format!("{CONNECTION_TEST_LABEL}={name}");
+    let mut continue_token = None;
+    let mut newest: Option<PreflightCr> = None;
+    let mut truncated = true;
+    for _ in 0..MAX_PAGES {
+        let page = PageRequest {
+            limit: MAX_LIMIT,
+            continue_token: continue_token.clone(),
+            label_selector: Some(selector.clone()),
+        };
+        let list = state
+            .kube()
+            .list::<PreflightCr>(namespace, &page)
+            .await
+            .map_err(KubeFailure::into_api_error)?;
+        for item in list.items {
+            if !binds_cluster(&item, cluster_uid) {
+                continue;
+            }
+            let newer = newest.as_ref().is_none_or(|current| {
+                item.meta().creation_timestamp > current.meta().creation_timestamp
+            });
+            if newer {
+                newest = Some(item);
+            }
+        }
+        continue_token = list.metadata.continue_.filter(|token| !token.is_empty());
+        if continue_token.is_none() {
+            truncated = false;
+            break;
+        }
+    }
+    let now = state.now();
+    let Some(newest) = newest else {
+        return Ok(None);
+    };
+    let live = super::preflights::read_live_binding(state, namespace, &newest).await;
+    let projected = super::preflights::project(&newest, now, None, Some(&live));
+    Ok(Some(LastTestView {
+        preflight_id: projected.id.clone(),
+        state: projected.state,
+        observed_at: projected.observed_at,
+        stale: projected.stale,
+        truncated,
+    }))
+}
+
+/// Whether a preflight's recorded binding names THIS `KafkaCluster` by UID.
+fn binds_cluster(preflight: &PreflightCr, cluster_uid: &str) -> bool {
+    preflight
+        .status
+        .as_ref()
+        .and_then(|s| s.binding.as_ref())
+        .and_then(|b| b.referents.as_ref())
+        .is_some_and(|referents| {
+            referents
+                .iter()
+                .any(|r| r.kind == "KafkaCluster" && r.uid.as_deref() == Some(cluster_uid))
+        })
 }
 
 /// `GET .../connections/{name}`.
@@ -68,12 +187,13 @@ pub async fn get_one(
     authorize(&state, &actor, &ns, Action::ReadConnections)?;
     crate::http::parse_query(uri.query(), &[])?;
     let object = get_object::<KafkaCluster>(&state, &actor, &ns, &name).await?;
+    let test = last_test(&state, &ns, &name, &object.uid().unwrap_or_default()).await?;
     Ok(json(
         StatusCode::OK,
         &ConnectionResponse {
             request_id,
             replayed: None,
-            item: projection::connection(&object),
+            item: projection::connection(&object, test),
         },
     ))
 }
@@ -258,7 +378,8 @@ pub async fn create(
         &ConnectionResponse {
             request_id,
             replayed: Some(created.replayed),
-            item: projection::connection(&created.object),
+            // A CONNECTION THAT HAS JUST BEEN CREATED HAS NO TEST.
+            item: projection::connection(&created.object, None),
         },
     ))
 }

@@ -1062,6 +1062,19 @@ fn labels_for(request: &CreatePreflightRequest) -> BTreeMap<String, String> {
             );
         }
     }
+    if let Some(connection) = &request.source_connection {
+        // ONE LABEL, NOT TWO. `destinationAccess` sets a general
+        // `logweir.dev/destination` beside its test label because Backup
+        // readiness checks share the first one and the "what uses this
+        // destination" view reads it. Nothing reads a general connection label
+        // on a `Preflight`, and a label nothing reads is a label that drifts,
+        // so a connectivity check carries exactly the one that finds it again:
+        // `connections::get_one`'s `lastTest`.
+        labels.insert(
+            super::connections::CONNECTION_TEST_LABEL.to_string(),
+            connection.connection_ref.clone(),
+        );
+    }
     labels
 }
 

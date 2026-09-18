@@ -281,6 +281,16 @@ pub struct Connection {
     pub marker_topic: Option<String>,
     /// The controller's reachability observation.
     pub reachability: ReachabilityView,
+    /// The newest `SourceConnection` preflight for this connection, when the
+    /// detail route found one.
+    ///
+    /// A DIFFERENT FACT FROM `reachability`, and the console renders them
+    /// apart. `reachability` is the controller's own probe on its own cadence;
+    /// this is a check somebody asked for, with its own instant and its own
+    /// staleness. Absent on a list and on a create: one detail read is one
+    /// bounded label scan, and a page of connections would be one per row.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_test: Option<LastTestView>,
 }
 
 // ======================================================================

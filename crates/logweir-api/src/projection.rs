@@ -19,11 +19,11 @@ use weirkeeper::crds::{ArchiveRef, LocalRef};
 use crate::contract::{
     ActiveRunView, AllUserTopics, Approval, ApprovalPacket, ArchiveView, Backup, CadenceAdjustment,
     CadencePreset, CatchUpPolicy, ConcurrencyPolicy, Connection, ConnectionAuthMode,
-    ConnectionAuthView, IncompleteDiscoveryPolicy, NameRef, NextRunView, ObservedAuthView,
-    ReachabilityState, ReachabilityView, RemovableSetView, Restore, RestoreMode, RestoreTargetView,
-    RetentionReportView, RetentionView, RetryPolicy, Schedule, SchedulePolicyView, ScheduleRefView,
-    ScheduleStatusView, SubjectRefView, TopicExclusions, TriggerKind, TriggerView,
-    VerifiedSubjectView, WindowCoveredView,
+    ConnectionAuthView, IncompleteDiscoveryPolicy, LastTestView, NameRef, NextRunView,
+    ObservedAuthView, ReachabilityState, ReachabilityView, RemovableSetView, Restore, RestoreMode,
+    RestoreTargetView, RetentionReportView, RetentionView, RetryPolicy, Schedule,
+    SchedulePolicyView, ScheduleRefView, ScheduleStatusView, SubjectRefView, TopicExclusions,
+    TriggerKind, TriggerView, VerifiedSubjectView, WindowCoveredView,
 };
 use crate::status::{backup_operation, condition_view, restore_operation, summary, MAX_CONDITIONS};
 use crate::validate::redact_url_userinfo;
@@ -50,7 +50,7 @@ fn created_at<K: kube::Resource>(object: &K) -> Option<chrono::DateTime<chrono::
 
 /// A `KafkaCluster` as a connection.
 #[must_use]
-pub fn connection(cluster: &KafkaCluster) -> Connection {
+pub fn connection(cluster: &KafkaCluster, last_test: Option<LastTestView>) -> Connection {
     let status = cluster.status.as_ref();
     let reachable = status.and_then(|s| s.reachable);
     Connection {
@@ -88,6 +88,7 @@ pub fn connection(cluster: &KafkaCluster) -> Connection {
             cluster_id: status.and_then(|s| s.cluster_id.clone()),
             observed_at: status.and_then(|s| s.observed_at),
         },
+        last_test,
     }
 }
 

@@ -1148,3 +1148,162 @@ async fn a_cancel_request_is_not_a_stale_reason() {
     );
     assert_eq!(item["state"], "running");
 }
+
+// ======================================================================
+// ui-conn-followups: finding a connectivity check again
+// ======================================================================
+
+fn seed_cluster(app: &TestApp, name: &str, uid: &str) {
+    app.fake.seed(
+        "kafkaclusters",
+        NS_A,
+        json!({
+            "metadata": {"name": name, "uid": uid, "generation": 1},
+            "spec": {
+                "bootstrapServers": ["kafka:9092"],
+                "auth": {"mode": "scramSha512", "username": "u", "secretRef": {"name": "s"}, "tls": false},
+                "role": "source"
+            }
+        }),
+    );
+}
+
+/// A connectivity check carries the one label that finds it again.
+///
+/// Until it did, a console reload found nothing at all for a connection and
+/// the panel read as though no check had ever run — which invites a second one
+/// for an answer that already exists.
+#[tokio::test]
+async fn a_source_connection_check_is_labelled_so_a_reload_can_find_it() {
+    let app = TestApp::new();
+    let response = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/preflights"),
+            Some("preflight-label-00001"),
+            &json!({"operation": "sourceConnection", "sourceConnection": {"connectionRef": "source"}})
+                .to_string(),
+        )
+        .await;
+    assert_eq!(response.status.as_u16(), 202, "{}", response.text());
+    let id = response.json()["item"]["id"].as_str().unwrap().to_string();
+    let labels = app.fake.object("preflights", NS_A, &id).unwrap()["metadata"]["labels"].clone();
+
+    assert_eq!(labels["logweir.dev/connection-test"], "source");
+    // ONE LABEL, AND NOT THE DESTINATION ONES. A connectivity check names no
+    // destination, so a `logweir.dev/destination` on it would put it in the
+    // "what uses this destination" view of a destination it never read.
+    assert!(labels["logweir.dev/destination"].is_null());
+    assert!(labels["logweir.dev/destination-test"].is_null());
+    assert_eq!(
+        labels.as_object().map(serde_json::Map::len),
+        Some(1),
+        "exactly the one label that finds it again: {labels}"
+    );
+}
+
+/// `lastTest` finds the newest connectivity check, and NEVER one that belongs
+/// to a `KafkaCluster` deleted and recreated under the same name.
+///
+/// The label carries the connection's NAME, because that is what a selector
+/// can be built from without a second read at create time. A recreated cluster
+/// is a different set of brokers reached with a different credential, so the
+/// UID recorded in each check's own binding is what makes the answer exact —
+/// the same substitution the console's list view refuses row by row.
+#[tokio::test]
+async fn last_test_finds_the_newest_check_and_refuses_a_predecessors() {
+    let app = TestApp::new();
+    seed_cluster(&app, "source", "uid-now");
+
+    let seed_check = |name: &str, created: &str, uid: Option<&str>, state: &str| {
+        let referents = match uid {
+            Some(uid) => json!([{"kind": "KafkaCluster", "name": "source", "uid": uid}]),
+            None => json!([]),
+        };
+        app.fake.seed(
+            "preflights",
+            NS_A,
+            json!({
+                "metadata": {
+                    "name": name,
+                    "labels": {"logweir.dev/connection-test": "source"},
+                    "creationTimestamp": created
+                },
+                "spec": {"request": {"operation": "SourceConnection", "sourceConnection": {"connectionRef": {"name": "source"}}, "timeoutSeconds": 120}, "cancelRequested": false},
+                "status": {
+                    "phase": "Completed", "observedAt": created,
+                    "binding": {"operation": "SourceConnection", "referents": referents},
+                    "result": {"state": state}
+                }
+            }),
+        );
+    };
+    // Sorts LAST by name, oldest by time, and belongs to the cluster that used
+    // to answer to this name.
+    seed_check(
+        "pf-zzzz",
+        "2026-09-18T23:00:00Z",
+        Some("uid-before"),
+        "ready",
+    );
+    seed_check(
+        "pf-aaaa",
+        "2026-09-18T21:00:00Z",
+        Some("uid-now"),
+        "notReady",
+    );
+    seed_check(
+        "pf-bbbb",
+        "2026-09-18T22:00:00Z",
+        Some("uid-now"),
+        "unknown",
+    );
+    // Never got far enough to resolve a referent: not this connection's test.
+    seed_check("pf-cccc", "2026-09-18T23:30:00Z", None, "ready");
+
+    let response = app
+        .get(&format!("/api/v1/namespaces/{NS_A}/connections/source"))
+        .await;
+    assert_eq!(response.status.as_u16(), 200, "{}", response.text());
+    let last = &response.json()["item"]["lastTest"];
+    assert_eq!(
+        last["preflightId"], "pf-bbbb",
+        "the newest check bound to THIS uid, not the newest by name and not a predecessor's"
+    );
+    assert_eq!(last["state"], "unknown");
+    assert_eq!(last["truncated"], false);
+
+    // ONE SELECTOR, and it is the connection-test one.
+    let selectors: Vec<String> = app
+        .fake
+        .requests()
+        .iter()
+        .filter(|r| r.path.ends_with("/preflights"))
+        .map(|r| r.query.clone())
+        .collect();
+    assert!(
+        !selectors.is_empty(),
+        "the detail read looked for checks at all"
+    );
+    assert!(
+        selectors
+            .iter()
+            .all(|q| q.contains("connection-test") || q.contains("connection-test%3Dsource")),
+        "lastTest selected on something other than the connectivity-test label: {selectors:?}"
+    );
+
+    // A CONNECTION WITH NO CHECK SAYS SO, and a LIST never pays for the scan.
+    seed_cluster(&app, "other", "uid-other");
+    let none = app
+        .get(&format!("/api/v1/namespaces/{NS_A}/connections/other"))
+        .await;
+    assert!(none.json()["item"]["lastTest"].is_null());
+    let list = app
+        .get(&format!("/api/v1/namespaces/{NS_A}/connections"))
+        .await;
+    for item in list.json()["items"].as_array().unwrap() {
+        assert!(
+            item["lastTest"].is_null(),
+            "a page of connections must not be a page of label scans"
+        );
+    }
+}
