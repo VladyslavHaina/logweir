@@ -7315,6 +7315,18 @@ fn the_destination_backed_argv_is_one_the_cli_accepts_and_the_version_is_enforce
          improvising its store configuration is how an approved plan reaches a different bucket. \
          stderr: {stderr}"
     );
+    // AND FOR THE RIGHT REASON. Exit 3 alone is not enough here, and the
+    // rebase onto D3 W2 is what proved it: the runner now builds its stores
+    // BEFORE it dials, so a mutant that admits any version reaches the store
+    // builders — which refuse for want of `LOGWEIR_ARCHIVE_CREDENTIALS` and
+    // exit 3 as well. The code was identical and the mutant survived. The
+    // MESSAGE is what separates "the version was refused" from "something else
+    // downstream was".
+    assert!(
+        stderr.contains("store contract version 2"),
+        "…and the refusal names the VERSION it does not implement, not some later failure that \
+         happens to share its exit code: {stderr}"
+    );
 
     // ---- NEGATIVE ARM 2: the flag and the variable disagree -------------
     let out = std::process::Command::new(runner_binary())
@@ -7323,11 +7335,17 @@ fn the_destination_backed_argv_is_one_the_cli_accepts_and_the_version_is_enforce
         .env_remove("LOGWEIR_SOURCE_PASSWORD")
         .output()
         .expect("the runner binary runs");
+    let stderr = String::from_utf8_lossy(&out.stderr).to_string();
     assert_eq!(
         out.status.code(),
         Some(3),
-        "two answers to which store contract is in force is no contract: {}",
-        String::from_utf8_lossy(&out.stderr)
+        "two answers to which store contract is in force is no contract: {stderr}"
+    );
+    assert!(
+        stderr.contains("is 1 and") && stderr.contains("is 7"),
+        "…and the refusal names BOTH answers, for the reason the arm above records: exit 3 is \
+         reachable from the store builders too, so the code alone does not say what refused: \
+         {stderr}"
     );
 
     let _ = std::fs::remove_dir_all(&dir);
