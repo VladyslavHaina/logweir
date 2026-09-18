@@ -2627,6 +2627,636 @@ def legal_hold() -> None:
 
 
 # ---------------------------------------------------------------------------
+# PLAT-16.1's two remaining tests: a credential that cannot read the bucket
+# lifecycle, and an evaluation that cannot complete
+# ---------------------------------------------------------------------------
+
+
+def external_lifecycle_is_unknown(policy: dict[str, Any]) -> dict[str, bool]:
+    """What a declared bucket rule may and may not claim, clause by clause.
+
+    D3 §6.6 and `retention_policy.rs::declare_external` are explicit: **Logweir
+    reads no lifecycle configuration** — `object_store` 0.14 exposes no such
+    API — so `ageExpiry` and `legalHold` are `ProviderEnforcedUnverified`,
+    which is the UNKNOWN answer, never `LogweirEnforced`; the three guarantees
+    a bucket rule cannot express are `NotEnforced` outright; and the policy
+    produces NO evaluation at all, because there is nothing to report about
+    what a rule nobody read would remove.
+
+    The clause that matters for "missing lifecycle permissions" is the last
+    one: a policy that produced an EMPTY evaluation would be claiming to know
+    that nothing will be deleted. `Evaluated=Unknown/NeverEvaluated` with no
+    `lastEvaluation` block is the honest shape, and it is the same shape
+    whether the credential could have read the rule or not — which is exactly
+    what makes a missing permission harmless here.
+    """
+    status = policy.get("status") or {}
+    guarantees = status.get("guarantees") or {}
+    evaluated = condition(policy, "Evaluated")
+    return {
+        "ageExpiry is provider-claimed and UNVERIFIED, never LogweirEnforced":
+            guarantees.get("ageExpiry") == "ProviderEnforcedUnverified",
+        "legalHold is provider-claimed and unverified":
+            guarantees.get("legalHold") == "ProviderEnforcedUnverified",
+        "the three guarantees a bucket rule cannot express are NotEnforced":
+            {guarantees.get(k) for k in
+             ("minUsablePoints", "activeRestoreProtection", "sharedSegments")} == {"NotEnforced"},
+        "Evaluated is Unknown/NeverEvaluated": (
+            evaluated.get("status") == "Unknown"
+            and evaluated.get("reason") == "NeverEvaluated"
+        ),
+        "no evaluation block claims to know what would be removed":
+            status.get("lastEvaluation") is None,
+        "Logweir deletes nothing under this policy":
+            condition(policy, "Enforced").get("status") == "False",
+    }
+
+
+def evaluation_failure_is_distinguishable(policy: dict[str, Any]) -> dict[str, bool]:
+    """An evaluation that cannot complete says so, and says nothing else.
+
+    THE POINT OF THE ROW IS THE LAST TWO CLAUSES. A policy that could not read
+    its view and answered `candidates: []` would be indistinguishable from one
+    that read it and found nothing to delete — the same status, opposite
+    meanings, and an operator acting on the wrong one deletes nothing while
+    believing the archive is under control. So the failure must carry its own
+    reason AND must not publish an evaluation at all.
+    """
+    status = policy.get("status") or {}
+    evaluated = condition(policy, "Evaluated")
+    ready = condition(policy, "Ready")
+    return {
+        "Evaluated is False with a named reason": (
+            evaluated.get("status") == "False" and bool(evaluated.get("reason"))
+        ),
+        "the reason is not a success reason":
+            evaluated.get("reason") not in {"EvaluationComplete", "NeverEvaluated"},
+        "the message says what could not be read":
+            bool((evaluated.get("message") or "").strip()),
+        "Ready is False, so a console cannot show this policy as working":
+            ready.get("status") == "False",
+        "no candidate list at all — not an empty one":
+            (status.get("lastEvaluation") or {}).get("candidates") is None,
+        "and no count that would read as `nothing to delete`":
+            (status.get("lastEvaluation") or {}).get("candidateCount") is None,
+    }
+
+
+def lifecycle() -> None:
+    """PLAT-16.1: a destination whose credential cannot read the bucket
+    lifecycle, and an evaluation that cannot complete."""
+    evidence: list[str] = []
+    # RE-RUNNABLE. Both halves of this phase put a policy on the same
+    # destination, one after the other, because two at once is a third refusal
+    # (`Ready=False/Conflict`) that neither row is about. A leftover from an
+    # earlier attempt would make the first half read that refusal instead.
+    for leftover in (f"{OWNER}-broken", f"{OWNER}-nolife"):
+        if get_opt("retentionpolicy", leftover) is not None:
+            run(KN + ["delete", "retentionpolicy", leftover, "--wait=true"], check=False)
+
+    # --- a credential that genuinely cannot read a bucket lifecycle --------
+    policy_doc = json.dumps(
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {"Effect": "Allow",
+                 "Action": ["s3:GetObject", "s3:PutObject", "s3:ListBucket"],
+                 "Resource": [f"arn:aws:s3:::{BUCKET_B}", f"arn:aws:s3:::{BUCKET_B}/*"]},
+            ],
+        }
+    )
+    nolife_secret = mint()
+    run(KN + ["exec", MC_POD, "--", "/bin/sh", "-c",
+              f"printf '%s' '{policy_doc}' > /tmp/nolife.json && "
+              f"mc admin policy create adm {OWNER}-nolife /tmp/nolife.json >/dev/null 2>&1; "
+              f"mc admin user add adm {OWNER}nolife {nolife_secret} >/dev/null 2>&1; "
+              f"mc admin policy attach adm {OWNER}-nolife --user {OWNER}nolife "
+              f">/dev/null 2>&1; echo done"],
+        check=False, timeout=120)
+    apply({"apiVersion": "v1", "kind": "Secret", "metadata": owned(f"{OWNER}-nolife-s3"),
+           "stringData": {"access-key-id": f"{OWNER}nolife",
+                          "secret-access-key": nolife_secret}})
+    # PROVE THE DENIAL rather than assume it. `mc ilm rule list` is the bucket
+    # lifecycle read, and this credential's policy grants no `s3:GetLifecycle*`.
+    probe = run(KN + ["exec", MC_POD, "--", "/bin/sh", "-c",
+                      f"mc alias set nolife {MINIO_ENDPOINT} {OWNER}nolife {nolife_secret} "
+                      f">/dev/null 2>&1; mc ilm rule list nolife/{BUCKET_B} 2>&1 | head -5"],
+                check=False, timeout=120)
+    denial = redact(probe.stdout.strip())
+    evidence.append(artifact("lifecycle/credential-probe.txt", denial))
+    check(
+        "retention-lifecycle-read-is-really-denied",
+        "PLAT-16.1",
+        "denied" in denial.lower() or "not allowed" in denial.lower()
+        or "no lifecycle" in denial.lower() or "unable" in denial.lower(),
+        f"the destination's credential cannot read the bucket lifecycle: "
+        f"`mc ilm rule list` answers {denial[:200]!r}. A row that asserted a missing "
+        f"permission without demonstrating it would be asserting its own fixture",
+        evidence,
+    )
+
+    dest = destination(f"{OWNER}-dest-nolife", BUCKET_B, write_secret=f"{OWNER}-nolife-s3")
+    dest["spec"]["storage"]["prefix"] = f"{DEST_PREFIX}-nolife"
+    apply(dest)
+    wait_for("backupdestination", f"{OWNER}-dest-nolife",
+             lambda o: condition(o, "Valid").get("status") is not None,
+             seconds=180, what="a Valid verdict on the lifecycle destination")
+    apply(
+        retention_policy(
+            f"{OWNER}-nolife", f"{OWNER}-dest-nolife", "secondary",
+            mode="ExternalLifecycle",
+            rules={"keepDays": 30, "minUsablePoints": 1},
+            external={"provider": "s3", "prefix": f"{DEST_PREFIX}-nolife",
+                      "ruleId": f"{OWNER}-nolife-rule", "expirationDays": 7},
+        )
+    )
+    declared = wait_for(
+        "retentionpolicy", f"{OWNER}-nolife",
+        lambda o: bool(condition(o, "Evaluated").get("status")),
+        seconds=240, what="a verdict on the lifecycle policy",
+    )
+    evidence.append(artifact("lifecycle/policy-nolife.json", declared))
+    clauses = external_lifecycle_is_unknown(declared)
+    evidence.append(artifact("lifecycle/unknown-clauses.json", clauses))
+    check(
+        "retention-missing-lifecycle-permission",
+        "PLAT-16.1",
+        all(clauses.values()),
+        "with a credential that cannot read the bucket lifecycle the report says the rule "
+        "is UNKNOWN and enforced by nobody Logweir can see: "
+        + "; ".join(f"{k}={v}" for k, v in clauses.items())
+        + f". guarantees={((declared.get('status') or {}).get('guarantees'))}; Evaluated="
+        f"{condition(declared, 'Evaluated').get('status')}/"
+        f"{condition(declared, 'Evaluated').get('reason')}. `declare_external` reads no "
+        f"lifecycle configuration at all — object_store 0.14 exposes no such API — so a "
+        f"missing permission changes nothing about what is claimed, which is the property "
+        f"this row exists to fix in place",
+        evidence,
+    )
+
+    # --- unrelated backups continue ---------------------------------------
+    started = now()
+    survivor = f"{OWNER}-lifecycle-survivor"
+    if get_opt("backup", survivor) is not None:
+        run(KN + ["delete", "backup", survivor, "--wait=true"])
+    # NOT `run_backup`: it RAISES on a phase that is not Succeeded, and a row
+    # that crashes where it should record a FAIL is a row that cannot fail.
+    create(backup_object(survivor, "dest-b"))
+    survived = wait_for("backup", survivor, terminal, seconds=600,
+                        what="a terminal phase on the unrelated Backup")
+    evidence.append(artifact("lifecycle/unrelated-backup.json", survived))
+    check(
+        "retention-lifecycle-policy-blocks-no-backup",
+        "PLAT-16.1",
+        survived.get("status", {}).get("phase") == "Succeeded",
+        f"a Backup to dest-b started at {started}, while the unreadable-lifecycle policy "
+        f"stood beside it, reached {survived.get('status', {}).get('phase')!r}: a policy "
+        f"that can report nothing blocks nothing",
+        evidence,
+    )
+
+    # --- an evaluation that cannot complete --------------------------------
+    # THE LIFECYCLE POLICY GOES FIRST. Two policies over one destination land
+    # `Ready=False/Conflict` and the controller writes NO `Evaluated` condition
+    # at all — a different refusal, and one this row must not be reading by
+    # accident. Removing it leaves the destination to a single policy whose
+    # catalog does not exist, which is the failure under test.
+    run(KN + ["delete", "retentionpolicy", f"{OWNER}-nolife", "--wait=true"], check=False)
+    # AND THE SCOPE MUST NARROW ITS OWN DESTINATION, or the refusal is
+    # `Ready=False/DestinationUnusable` — a THIRD not-ready state, beside
+    # `Conflict`, that this row would otherwise read by accident. That three
+    # distinct refusals are distinguishable at all is the property under test;
+    # the one this row is about is the evaluation that could not complete.
+    broken_policy = retention_policy(
+        f"{OWNER}-broken", f"{OWNER}-dest-nolife", f"{OWNER}-catalog-that-does-not-exist",
+        rules={"keepLast": 1, "minUsablePoints": 1},
+    )
+    broken_policy["spec"]["scope"] = {"prefix": f"{DEST_PREFIX}-nolife"}
+    apply(broken_policy)
+    broken = wait_for(
+        "retentionpolicy", f"{OWNER}-broken",
+        lambda o: condition(o, "Evaluated").get("status") == "False",
+        seconds=240, what="an evaluation failure",
+    )
+    evidence.append(artifact("lifecycle/policy-broken.json", broken))
+    failure = evaluation_failure_is_distinguishable(broken)
+    evidence.append(artifact("lifecycle/evaluation-failure-clauses.json", failure))
+    check(
+        "retention-evaluation-failure-is-distinguishable",
+        "PLAT-16.1",
+        all(failure.values()),
+        "an evaluation that cannot complete is its own state and never an empty "
+        "`nothing to delete`: "
+        + "; ".join(f"{k}={v}" for k, v in failure.items())
+        + f". Evaluated={condition(broken, 'Evaluated').get('status')}/"
+        f"{condition(broken, 'Evaluated').get('reason')} "
+        f"({(condition(broken, 'Evaluated').get('message') or '')[:160]}); Ready="
+        f"{condition(broken, 'Ready').get('status')}/"
+        f"{condition(broken, 'Ready').get('reason')}; lastEvaluation="
+        f"{(broken.get('status') or {}).get('lastEvaluation')}",
+        evidence,
+    )
+    run(KN + ["delete", "retentionpolicy", f"{OWNER}-broken", "--wait=true"], check=False)
+
+
+# ---------------------------------------------------------------------------
+# PLAT-16.2's remaining tests: shared segment, partial failure, bounded retry,
+# and the lock nobody can read
+# ---------------------------------------------------------------------------
+
+
+def shared_segment_contract(entries: list[dict[str, Any]], ev: dict[str, Any],
+                            guarantees: dict[str, Any]) -> dict[str, bool]:
+    """`sharedSegments` reports what is TRUE of the view it was computed from.
+
+    `retention_plan::evaluate` step 4 protects a candidate whose segment keys
+    appear in a RETAINED point's key set, with `SharedSegment`. It can only do
+    that when the point CARRIES its segment keys, and `point_facts` cannot
+    supply them: a catalog view entry has no segment field at all
+    (`retention_policy.rs`, "the catalog view entry has no segment field …
+    so on every view this build reads the honest answer is `NotEnforced`").
+
+    So the guarantee is DERIVED from the points rather than written as a
+    constant — the first landing wrote `LogweirEnforced` unconditionally, which
+    is the withdrawn-guarantee defect class on a status field. This row asserts
+    the derivation in both directions: no segment keys in the view means
+    `NotEnforced` and no `SharedSegment` protection; segment keys in the view
+    would mean `LogweirEnforced`. The day an entry carries them the row starts
+    testing the other branch with no edit.
+    """
+    visible = any(e.get("segmentKeys") for e in entries)
+    reasons = {p.get("reason") for p in (ev.get("protected") or [])}
+    return {
+        "the guarantee matches what the view can support": (
+            guarantees.get("sharedSegments") == ("LogweirEnforced" if visible else "NotEnforced")
+        ),
+        "no point is SharedSegment-protected unless the view carries segment keys":
+            visible or "SharedSegment" not in reasons,
+        "the guarantee is never a bare claim": (
+            guarantees.get("sharedSegments") in {"LogweirEnforced", "NotEnforced"}
+        ),
+    }
+
+
+def partial_failure_is_attributable(points: list[dict[str, str]], exit_code: int | None,
+                                    gone: set[str], remaining: set[str],
+                                    allowed_prefix: str, denied_prefix: str,
+                                    doc: dict[str, Any]) -> dict[str, bool]:
+    """One deletion denied mid-run: what the pass must still be able to say.
+
+    `logweir_retention`'s exit contract is explicit — **1** is "at least one
+    point did not complete: `Orphaned` or `Kept`, with its closed code" — and
+    `execute` walks every line of the plan and emits one `retention-point=` per
+    point, so the run KEEPS GOING and the denial is one point's verdict rather
+    than the run's.
+
+    The record then has to attribute exactly what happened, in its own
+    vocabulary: a total, a per-point count, the closed code on the point that
+    did not complete, and `remaining_keys` — which `logweir_reaper` documents
+    as "the keys that remain, if any — exactly what the next plan must name".
+    A partial failure that over-claims is worse than one that fails, and a
+    partial failure that cannot say what is left behind cannot be resumed.
+    """
+    reported = {p.get("retention-point"): p for p in points}
+    deleted = {k for k, v in reported.items() if v.get("state") == "Deleted"}
+    kept = {k for k, v in reported.items() if v.get("state") != "Deleted" and v.get("code")}
+    by_point = {pt.get("point_id"): pt for pt in (doc.get("points") or [])}
+    deleted_rows = [pt for pt in by_point.values() if pt.get("state") == "Deleted"]
+    kept_rows = [pt for pt in by_point.values() if pt.get("state") != "Deleted"]
+    leftovers = {k for pt in kept_rows for k in (pt.get("remaining_keys") or [])}
+    return {
+        "the run reported every point, not just the first": len(points) >= 2,
+        "exactly one point completed and one did not": len(deleted) == 1 and len(kept) == 1,
+        "the point that did not complete carries a closed code":
+            bool(kept_rows) and all(pt.get("code") for pt in kept_rows),
+        "exit 1 — work remains, and the run says so": exit_code == 1,
+        "only the permitted set's keys are gone": (
+            bool(gone) and all(k.startswith(allowed_prefix) for k in gone)
+        ),
+        "nothing under the denied set was removed":
+            not any(k.startswith(denied_prefix) for k in gone),
+        "the record's total is what actually went": doc.get("objects_deleted") == len(gone),
+        "the completed point's own count is what actually went":
+            len(deleted_rows) == 1 and deleted_rows[0].get("objects_deleted") == len(gone),
+        "the denied point claims to have removed nothing":
+            all(pt.get("objects_deleted") == 0 for pt in kept_rows),
+        "and names the leftovers exactly, for the next plan": (
+            bool(leftovers)
+            and all(k.startswith(denied_prefix) for k in leftovers)
+            and leftovers <= remaining
+        ),
+        "the record carries the run's own exit code": doc.get("exit_code") == exit_code,
+    }
+
+
+def bounded_retry_degrades(policy: dict[str, Any], failures: int,
+                           jobs_while_degraded: int) -> dict[str, bool]:
+    """D3 §6.5: after the retry budget, say so and stop until the spec changes.
+
+    `DEGRADED_AFTER_FAILURES` is 3 and a run that stopped on its own ceiling
+    (`BudgetExhausted`) deliberately does NOT count, so three ordinary bounded
+    runs on a large archive cannot degrade a healthy policy. What must degrade
+    it is three consecutive runs that genuinely failed.
+    """
+    degraded = condition(policy, "EnforcementDegraded")
+    return {
+        "three consecutive failures were counted": failures >= 3,
+        "EnforcementDegraded is True with a reason": (
+            degraded.get("status") == "True" and bool(degraded.get("reason"))
+        ),
+        "and it says why in words": bool((degraded.get("message") or "").strip()),
+        "no further retention Job is created while degraded": jobs_while_degraded == 0,
+    }
+
+
+def enforce_guards() -> None:
+    """PLAT-16.2: shared segment, partial failure, bounded retry, and lock."""
+    evidence: list[str] = []
+    entries = STATE.get("bEntries") or []
+    if not entries:
+        raise RuntimeError("run the `retention` phase first")
+    by_point = {e["pointId"]: e for e in entries}
+
+    # --- lock: recorded as unprovable, with the reason -----------------------
+    record(
+        "retention-legal-lock",
+        "PLAT-16.2",
+        "NOT-RUN",
+        "UNPROVABLE ON THIS PROVIDER, and not for want of a fixture. The `lock` half of "
+        "PLAT-16.2's `legal hold / lock` test asks that a provider object-lock be respected "
+        "and shown to be in force. `object_store` 0.14 exposes NO WORM readback, which is "
+        "why `retention_policy.rs` writes `legalHold: ProviderEnforcedUnverified` and never "
+        "`LogweirEnforced`: \"a provider refusal is authoritative and recorded\", never "
+        "\"Logweir knows the hold exists\" (D3 §16). A row asserting a lock is in force "
+        "would be asserting something no code in this build can observe. The HOLD half is "
+        "`retention-legal-hold`, which passes; the provider-lock half needs either an "
+        "object_store release with a lock readback or a provider probe outside Logweir.",
+        [],
+    )
+
+    # --- shared segment ------------------------------------------------------
+    pol = wait_evaluated("keep-b")
+    ev = (pol.get("status", {}) or {}).get("lastEvaluation") or {}
+    guarantees = (pol.get("status", {}) or {}).get("guarantees") or {}
+    segment_fields = sorted({k for e in entries for k in e})
+    clauses = shared_segment_contract(entries, ev, guarantees)
+    evidence.append(artifact("enforce/shared-segment.json", {
+        "viewEntryFields": segment_fields,
+        "entriesCarryingSegmentKeys": [e["pointId"] for e in entries if e.get("segmentKeys")],
+        "guarantees": guarantees, "protected": ev.get("protected"), "clauses": clauses,
+    }))
+    check(
+        "retention-shared-segment-guarantee-is-derived",
+        "PLAT-16.2",
+        all(clauses.values()),
+        "`sharedSegments` is computed from the view rather than claimed: the view's entries "
+        f"carry the fields {segment_fields} and "
+        f"{len([e for e in entries if e.get('segmentKeys')])} of {len(entries)} carry segment "
+        f"keys, so the guarantee reads {guarantees.get('sharedSegments')!r} and no point is "
+        f"protected with `SharedSegment` "
+        f"({sorted({p.get('reason') for p in (ev.get('protected') or [])})}). "
+        + "; ".join(f"{k}={v}" for k, v in clauses.items()),
+        evidence,
+    )
+    record(
+        "retention-shared-segment",
+        "PLAT-16.2",
+        "NOT-RUN",
+        "UNREACHABLE THROUGH THE CONTROLLER on this build. `evaluate` protects a candidate "
+        "whose segments a retained point also names, with `SharedSegment` — but only when "
+        "the point carries its segment keys, and `point_facts` cannot supply them because a "
+        "catalog view entry has no segment field at all. The observable half is "
+        "`retention-shared-segment-guarantee-is-derived`, which PASSES and pins the honest "
+        "`NotEnforced` to the view rather than to a constant; the day a view entry carries "
+        "its segment keys that row tests the other branch with no edit and this test becomes "
+        "runnable. It is a product gap, not a harness one.",
+        [],
+    )
+
+    # --- partial failure -----------------------------------------------------
+    image = retention_image("retention-partial-failure")
+    if image is None:
+        return
+    candidates = [c["pointId"] for c in (ev.get("candidates") or [])]
+    if len(candidates) < 2:
+        record("retention-partial-failure", "PLAT-16.2", "NOT-RUN",
+               f"needs two candidates in one plan and this evaluation has {len(candidates)}.",
+               evidence)
+        return
+    allowed_set = by_point[candidates[0]]["backupId"]
+    denied_set = by_point[candidates[1]]["backupId"]
+    allowed_prefix = f"{DEST_PREFIX}/{allowed_set}/"
+    denied_prefix = f"{DEST_PREFIX}/{denied_set}/"
+    policy_doc = json.dumps(
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {"Effect": "Allow",
+                 "Action": ["s3:GetObject", "s3:ListBucket", "s3:DeleteObject"],
+                 "Resource": [f"arn:aws:s3:::{BUCKET_B}", f"arn:aws:s3:::{BUCKET_B}/*"]},
+                {"Effect": "Deny", "Action": ["s3:DeleteObject"],
+                 "Resource": [f"arn:aws:s3:::{BUCKET_B}/{denied_prefix}*"]},
+            ],
+        }
+    )
+    partial_secret = mint()
+    run(KN + ["exec", MC_POD, "--", "/bin/sh", "-c",
+              f"printf '%s' '{policy_doc}' > /tmp/partial.json && "
+              f"mc admin policy create adm {OWNER}-partial /tmp/partial.json >/dev/null 2>&1; "
+              f"mc admin user add adm {OWNER}partial {partial_secret} >/dev/null 2>&1; "
+              f"mc admin policy attach adm {OWNER}-partial --user {OWNER}partial "
+              f">/dev/null 2>&1; echo done"],
+        check=False, timeout=120)
+    apply({"apiVersion": "v1", "kind": "Secret", "metadata": owned(f"{OWNER}-partial-s3"),
+           "stringData": {"access-key-id": f"{OWNER}partial",
+                          "secret-access-key": partial_secret}})
+    digest, plan = plan_from_evaluation(
+        {"candidates": [{"pointId": p} for p in candidates[:2]]},
+        "keep-b", "dest-b", by_point, f"{OWNER}-partial-plan", keep_last=2, min_usable=3)
+    evidence.append(artifact("enforce/partial-plan.json",
+                             {"plan": plan, "sha256": digest,
+                              "allowedPrefix": allowed_prefix, "deniedPrefix": denied_prefix}))
+    before = objects(BUCKET_B)
+    _job, logs, code = retention_job(
+        f"{OWNER}-partial", f"{OWNER}-partial-plan", dry_run=False, digest=digest, image=image,
+        delete_secret=f"{OWNER}-partial-s3",
+    )
+    after = objects(BUCKET_B)
+    gone = {o["key"] for o in before} - {o["key"] for o in after}
+    points = key_lines(logs, "retention-point=")
+    record_line = key_lines(logs, "retention-record=")
+    record_key = record_line[0]["retention-record"] if record_line else None
+    doc: dict[str, Any] = {}
+    if record_key:
+        doc = json.loads(cat(BUCKET_B, record_key).decode())
+        evidence.append(artifact("enforce/partial-record.json", doc))
+    remaining = {o["key"] for o in after}
+    evidence.append(artifact("enforce/partial-log.txt", logs))
+    evidence.append(artifact("enforce/partial-objects.json",
+                             {"gone": sorted(gone), "points": points,
+                              "deniedSetStillPresent": sorted(
+                                  k for k in remaining if k.startswith(denied_prefix))}))
+    partial = partial_failure_is_attributable(points, code, gone, remaining, allowed_prefix,
+                                              denied_prefix, doc)
+    check(
+        "retention-partial-failure",
+        "PLAT-16.2",
+        all(partial.values()),
+        f"one plan, two points, and a credential denied `s3:DeleteObject` under "
+        f"{denied_prefix}: the run exited {code} and reported {len(points)} per-point lines "
+        f"{[{k: v for k, v in p.items() if k != 'objects'} for p in points]}; "
+        f"{len(gone)} key(s) removed, all under {allowed_prefix} "
+        f"({all(k.startswith(allowed_prefix) for k in gone) if gone else False}), none under "
+        f"{denied_prefix}; the record at {record_key} totals "
+        f"{doc.get('objects_deleted')} deleted and names the denied point's leftovers "
+        f"{[pt.get('remaining_keys') for pt in (doc.get('points') or []) if pt.get('code')]}. "
+        + "; ".join(f"{k}={v}" for k, v in partial.items()),
+        evidence,
+    )
+    STATE["partialFailure"] = {"exitCode": code, "gone": sorted(gone),
+                               "recordKey": record_key, "clauses": partial}
+    save()
+
+
+
+def bounded_retry() -> None:
+    """PLAT-16.2's bounded retry, in its own phase because it is slow.
+
+    D3 §6.5 counts CONSECUTIVE failed runs, and a run that stopped on its own
+    ceiling (`BudgetExhausted`) deliberately does not count — three ordinary
+    bounded runs on a large archive must not degrade a healthy policy. So the
+    fixture is an `Enforce` policy on a cadence with a credential that can read
+    and list and cannot delete: every run genuinely fails.
+
+    IT IS SLOW, AND THE WINDOW IS STATED RATHER THAN GUESSED. The cron is
+    `* * * * *`, but an enforcement run is gated by the evaluation, the lease
+    and the plan, and the first observed run started about eight minutes after
+    the policy was created. Three of them is the budget, so the window is
+    thirty minutes and the row records how many it actually saw.
+    """
+    evidence: list[str] = []
+    window = int(os.environ.get("LOGWEIR_D3_DEGRADE_WINDOW", "1800"))
+    for leftover in ("keep-b", f"{OWNER}-degrade"):
+        if get_opt("retentionpolicy", leftover) is not None:
+            run(KN + ["delete", "retentionpolicy", leftover, "--wait=true"], check=False)
+    if get_opt("secret", "d3w14-readonly-s3") is None:
+        ro_policy = json.dumps({
+            "Version": "2012-10-17",
+            "Statement": [
+                {"Effect": "Allow", "Action": ["s3:GetObject", "s3:ListBucket"],
+                 "Resource": [f"arn:aws:s3:::{BUCKET_B}", f"arn:aws:s3:::{BUCKET_B}/*"]}
+            ],
+        })
+        ro_secret = mint()
+        run(KN + ["exec", MC_POD, "--", "/bin/sh", "-c",
+                  f"printf '%s' '{ro_policy}' > /tmp/ro.json && "
+                  f"mc admin policy create adm d3w14-ro /tmp/ro.json >/dev/null 2>&1; "
+                  f"mc admin user add adm d3w14reader {ro_secret} >/dev/null 2>&1; "
+                  f"mc admin policy attach adm d3w14-ro --user d3w14reader >/dev/null 2>&1; "
+                  f"echo done"], check=False, timeout=120)
+        apply({"apiVersion": "v1", "kind": "Secret", "metadata": owned("d3w14-readonly-s3"),
+               "stringData": {"access-key-id": "d3w14reader",
+                              "secret-access-key": ro_secret}})
+    created = apply(retention_policy(
+        f"{OWNER}-degrade", "dest-b", "secondary", mode="Enforce",
+        rules={"keepLast": 1, "minUsablePoints": 1},
+        enforcement={
+            "credentialSecretRef": {"name": "d3w14-readonly-s3"},
+            "schedule": "* * * * *",
+            "requireApprovedPlan": False,
+            "deadlineSeconds": 120,
+            "maxDeletionsPerRun": 2,
+            "maxObjectsPerRun": 200,
+        },
+    ))
+    policy_uid = created["metadata"]["uid"]
+
+    def owned_jobs() -> set[str]:
+        """The policy's OWN enforcement Jobs, by ownerReference.
+
+        Not every Job in the namespace: catalog syncs and backup runners are
+        created by other objects on their own cadence, and counting them would
+        make `no further Job while degraded` impossible to satisfy for reasons
+        that have nothing to do with retention.
+        """
+        return {
+            j["metadata"]["name"] for j in lst("jobs")
+            if any(o.get("uid") == policy_uid
+                   for o in (j["metadata"].get("ownerReferences") or []))
+        }
+
+    deadline = time.time() + window
+    policy: dict[str, Any] = {}
+    failures = 0
+    seen: list[dict[str, Any]] = []
+    while time.time() < deadline:
+        policy = get("retentionpolicy", f"{OWNER}-degrade")
+        status = policy.get("status") or {}
+        failures = status.get("consecutiveRunFailures") or 0
+        last = status.get("lastEnforcement") or {}
+        if last.get("runId") and last["runId"] not in {r.get("runId") for r in seen}:
+            seen.append({k: last.get(k) for k in
+                         ("runId", "exitCode", "startedAt", "finishedAt", "objectsDeleted")})
+        if condition(policy, "EnforcementDegraded").get("status") == "True":
+            break
+        time.sleep(15)
+    degraded_at = now()
+    jobs_at_degrade = owned_jobs()
+    time.sleep(180)
+    new_jobs = sorted(owned_jobs() - jobs_at_degrade)
+    evidence.append(artifact("enforce/bounded-retry-policy.json", policy))
+    evidence.append(artifact("enforce/bounded-retry-runs.json",
+                             {"windowSeconds": window, "degradedAt": degraded_at,
+                              "consecutiveRunFailures": failures, "runsObserved": seen,
+                              "ownedJobsAtDegrade": sorted(jobs_at_degrade),
+                              "ownedJobsAfter": new_jobs}))
+    retry = bounded_retry_degrades(policy, failures, len(new_jobs))
+    check(
+        "retention-bounded-retry",
+        "PLAT-16.2",
+        all(retry.values()),
+        f"an Enforce policy on a `* * * * *` cadence with a credential that cannot delete "
+        f"counted {failures} consecutive failed run(s) over {window}s "
+        f"({len(seen)} distinct run(s) observed: "
+        f"{[{k: r.get(k) for k in ('runId', 'exitCode')} for r in seen]}) and set "
+        f"EnforcementDegraded="
+        f"{condition(policy, 'EnforcementDegraded').get('status')}/"
+        f"{condition(policy, 'EnforcementDegraded').get('reason')} "
+        f"({(condition(policy, 'EnforcementDegraded').get('message') or '')[:140]}); over the "
+        f"180 s after that the policy created {len(new_jobs)} further enforcement Job(s) "
+        f"{new_jobs} of its own — retention stops until the spec changes. "
+        + "; ".join(f"{k}={v}" for k, v in retry.items()),
+        evidence,
+    )
+    # AND IT RESUMES ON A SPEC CHANGE, the other half of "until the spec
+    # changes": the stop is keyed on `observedGeneration == generation`.
+    before_gen = get("retentionpolicy", f"{OWNER}-degrade")["metadata"]["generation"]
+    patch_policy(f"{OWNER}-degrade", {"rules": {"keepLast": 2, "minUsablePoints": 1}})
+    resumed = wait_for(
+        "retentionpolicy", f"{OWNER}-degrade",
+        lambda o: o["metadata"]["generation"] > before_gen
+        and (o.get("status") or {}).get("observedGeneration") == o["metadata"]["generation"],
+        seconds=300, what="the policy to observe its new generation",
+    )
+    evidence.append(artifact("enforce/bounded-retry-after-spec-change.json", resumed))
+    check(
+        "retention-bounded-retry-resumes-on-a-spec-change",
+        "PLAT-16.2",
+        (resumed.get("status") or {}).get("observedGeneration")
+        == resumed["metadata"]["generation"]
+        and condition(resumed, "Evaluated").get("status") in {"True", "False"},
+        f"the stop is keyed on the observed generation, so an edit ends it: generation "
+        f"{before_gen} -> {resumed['metadata']['generation']}, observedGeneration "
+        f"{(resumed.get('status') or {}).get('observedGeneration')}, Evaluated="
+        f"{condition(resumed, 'Evaluated').get('status')}/"
+        f"{condition(resumed, 'Evaluated').get('reason')}, EnforcementDegraded="
+        f"{condition(resumed, 'EnforcementDegraded').get('status')}",
+        evidence,
+    )
+    run(KN + ["delete", "retentionpolicy", f"{OWNER}-degrade", "--wait=true"], check=False)
+
+
+# ---------------------------------------------------------------------------
 # PLAT-19.1 — trust lifecycle against a terminal, already-verified Backup
 # ---------------------------------------------------------------------------
 
@@ -3359,7 +3989,8 @@ def cleanup() -> None:
 
 
 PHASES = [
-    "setup", "catalog", "catalog_cases", "retention", "legal_hold", "packaging", "preview",
+    "setup", "catalog", "catalog_cases", "retention", "legal_hold", "lifecycle",
+    "enforce_guards", "bounded_retry", "packaging", "preview",
     "enforce", "wrong_prefix", "denied_deletion", "no_evidence_credential", "trust",
     "signed_at_probe", "notify", "control", "report", "cleanup",
 ]
