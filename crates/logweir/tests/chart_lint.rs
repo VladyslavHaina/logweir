@@ -2791,6 +2791,8 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         "admissionPolicy.enabled",
         "admissionPolicy.consoleServiceAccountName",
         "admissionPolicy.extraPrincipals",
+        // D3 W14 / NOTIFY-INSECURE-SINK-UNEXPOSED — the installation-only hatch.
+        "notify.allowInsecureSinks",
     ] {
         let mut node = &values;
         for segment in path.split('.') {

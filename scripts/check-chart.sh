@@ -384,7 +384,7 @@ fi
 
 # ---------------------------------------------------------------- 6. the schema
 echo "== 6. values.schema.json refuses a non-boolean flag =="
-for flag in demoKafka.enabled minio.enabled ui.enabled identity.enabled admissionPolicy.enabled; do
+for flag in demoKafka.enabled minio.enabled ui.enabled identity.enabled admissionPolicy.enabled notify.allowInsecureSinks; do
   helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} --set "$flag=yes" > /dev/null 2> "$tmp/schema-$flag.err"
   rc=$?
   if [ "$rc" -eq 0 ]; then
