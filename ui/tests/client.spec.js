@@ -1059,3 +1059,51 @@ test("a_connectivity_checks_key_is_per_deliberate_test_and_never_per_subject", a
     wire.restore();
   }
 });
+
+test("a_console_connection_carries_its_last_connectivity_check", async () => {
+  // A CHECK OUTLIVES THE PAGE THAT STARTED IT, so the detail read is where the
+  // console learns that one happened. The product API computes `lastTest` from
+  // the `logweir.dev/connection-test` label; this asserts the client carries it
+  // through to the page rather than dropping a field the panel then cannot
+  // render.
+  await console_();
+  const document = fixture("console/connection.json");
+  document.item.lastTest = {
+    preflightId: "pf-earlier",
+    state: "notReady",
+    observedAt: "2026-09-18T20:52:31Z",
+    stale: false,
+    truncated: false,
+  };
+  const wire = transport(() => ({ status: 200, body: document }));
+  try {
+    const object = await apiClient().get("team-a", "kafkaclusters", "orders-prod");
+    assert.equal(object.kind, "KafkaCluster");
+    // The decoded value is a null-prototype object, as every shape this module
+    // reads is, so the fields are compared rather than the objects.
+    assert.deepEqual(
+      Object.assign({}, object.lastTest),
+      document.item.lastTest,
+      "every field the summary carries reaches the page",
+    );
+    // IT IS NOT FOLDED INTO `status`. That block is a projection of the CR's
+    // own status, which the legacy mode renders from the real object; a field
+    // the cluster does not have would make the two modes disagree about what a
+    // `KafkaCluster` is.
+    assert.equal(object.status.lastTest, undefined);
+    assert.equal(object.status.reachable, true);
+  } finally {
+    wire.restore();
+  }
+
+  // AND AN ABSENT ONE IS ABSENT, not an empty object the panel would render as
+  // a check that ran and said nothing.
+  const none = fixture("console/connection.json");
+  const second = transport(() => ({ status: 200, body: none }));
+  try {
+    const object = await apiClient().get("team-a", "kafkaclusters", "orders-prod");
+    assert.equal(object.lastTest, undefined);
+  } finally {
+    second.restore();
+  }
+});
