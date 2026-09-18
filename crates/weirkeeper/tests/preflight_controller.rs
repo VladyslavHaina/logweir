@@ -323,6 +323,7 @@ fn every_controller_row_has_a_catalogue_entry() {
         PreflightOperation::Backup,
         PreflightOperation::Restore,
         PreflightOperation::DestinationAccess,
+        PreflightOperation::SourceConnection,
     ] {
         let rows = controller_rows(operation);
         assert!(!rows.is_empty(), "{operation:?} owns no row at all");
@@ -810,6 +811,42 @@ fn a_source_on_the_restore_allowlist_is_refused_before_the_run() {
         "the runner's phase -1 rail refuses to back up a restore target; reporting it here is \
          how an operator learns before the run instead of from an exit code"
     );
+
+    // REVIEW F4. THAT IS A `Backup` VERDICT, AND ONLY A `Backup` VERDICT. A
+    // connectivity check asks whether the connection answers; it did. Reported
+    // for `SourceConnection` it made a successful dial to a legitimate restore
+    // target read `not ready` under a remedy advising a backup nobody asked
+    // for — the panel's whole job is to say what the dial found.
+    let connectivity = cluster_identity_row(
+        PreflightOperation::SourceConnection,
+        Some("scratch-id"),
+        Some("scratch-id"),
+        &["scratch-id".to_string()],
+        None,
+        false,
+        now(),
+    );
+    assert_eq!(connectivity.code, CheckCode::ClusterIdentityMatches);
+    assert_eq!(connectivity.state, CheckState::Ready);
+    assert_eq!(
+        connectivity.facts.get("clusterId").map(String::as_str),
+        Some("scratch-id")
+    );
+
+    // AND THE ROW STILL BLOCKS ON THE FACT THAT IS ABOUT THE CONNECTION: a
+    // broker naming a different cluster than the object records is a
+    // connectivity finding whatever the operation.
+    let moved = cluster_identity_row(
+        PreflightOperation::SourceConnection,
+        Some("observed-id"),
+        Some("recorded-id"),
+        &[],
+        None,
+        false,
+        now(),
+    );
+    assert_eq!(moved.code, CheckCode::ClusterIdentityChanged);
+    assert_eq!(moved.state, CheckState::NotReady);
 }
 
 #[test]
@@ -1570,6 +1607,29 @@ fn a_source_connection_check_reports_no_destination_row_at_all() {
             "`{absent}` is a claim about something this operation does not name"
         );
     }
+
+    // REVIEW F3 / MUTANT R1. `unrendered_job_rows` is the OTHER list of
+    // Job-sourced rows — the one used when no check plan could be rendered at
+    // all, which is the console's commonest failure path (a connection that
+    // does not resolve). The reviewer's mutant added
+    // `connection.topicsDescribable` there and SURVIVED the whole suite: §3.2's
+    // claim was held on three sides and not on this fourth one, so a future
+    // edit could publish `topicsDescribable unknown/BlockedByPrerequisite` on a
+    // check that named no topic and every other row would stay green.
+    assert_eq!(
+        pf::unrendered_job_rows(PreflightOperation::SourceConnection),
+        [CheckId::RunnerContract, CheckId::ConnectionAuthenticated]
+            .into_iter()
+            .collect::<BTreeSet<CheckId>>(),
+        "the rows a connectivity check would have asked the Job for are the two it emits, and \
+         `connection.topicsDescribable` is not one of them on this path either"
+    );
+    // The unrendered list can never exceed what a rendered plan would ask for:
+    // a row listed here and never emitted is a permanent blocking `unknown`.
+    assert!(
+        pf::unrendered_job_rows(PreflightOperation::SourceConnection)
+            .is_subset(&job_rows(&runner_source_connection_request(), false))
+    );
 }
 
 /// PLAT-03.1's "timeout": the deadline is the Job's, the dependents are

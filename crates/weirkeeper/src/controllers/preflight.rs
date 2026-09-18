@@ -1209,7 +1209,21 @@ pub fn cluster_identity_row(
             // scratch cluster, and the runner's phase −1 rail refuses to back
             // one up. Reporting it here is how an operator learns before the
             // run rather than from an exit code.
-            if allowed_cluster_ids.iter().any(|a| a == observed) {
+            //
+            // IT IS A `Backup` VERDICT AND ONLY A `Backup` VERDICT (review
+            // F4). A `SourceConnection` check asks whether the connection
+            // answers; whether the cluster may be backed up is a different
+            // question, asked by a different operation, and the phase −1 rail
+            // it cites guards a run this operation does not describe. Reported
+            // here it made a successful dial to a legitimate restore target
+            // read `not ready`, under a remedy — "Back up the production
+            // cluster, not the scratch target" — advising about a backup
+            // nobody had asked for. `ClusterIdentityChanged` above stays
+            // blocking for both: dialling a DIFFERENT cluster than the object
+            // records is a fact about the connection itself.
+            if operation == PreflightOperation::Backup
+                && allowed_cluster_ids.iter().any(|a| a == observed)
+            {
                 return outcome(
                     operation,
                     id,
