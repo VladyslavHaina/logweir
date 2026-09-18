@@ -1503,6 +1503,33 @@ def mc_get(alias_path: str) -> bytes:
     return base64.b64decode("".join(proc.stdout.split()))
 
 
+LOGWEIR_BIN_ENV = "LOGWEIR_BIN"
+
+
+def logweir_cli() -> str:
+    """The shipped CLI this harness verifies stored documents with.
+
+    `target/debug/logweir` was hard-coded, so a checkout carrying a release
+    build and no debug build — the normal shape on a host that is short of disk
+    — failed S1 and the approval helper on a missing file rather than on
+    anything the product did. The env var comes first so a caller can name the
+    binary it means; the two build directories are then tried in the order a
+    developer produces them.
+    """
+    override = os.environ.get(LOGWEIR_BIN_ENV)
+    if override:
+        if not pathlib.Path(override).is_file():
+            raise RuntimeError(f"{LOGWEIR_BIN_ENV}={override!r} is not a file")
+        return override
+    for candidate in (ROOT / "target/debug/logweir", ROOT / "target/release/logweir"):
+        if candidate.is_file():
+            return str(candidate)
+    raise RuntimeError(
+        "no `logweir` binary under target/debug or target/release: build one "
+        f"(`cargo build -p logweir`) or set {LOGWEIR_BIN_ENV} to its path"
+    )
+
+
 def verify_document(payload: bytes, sidecar: bytes, public_key: pathlib.Path,
                     payload_type: str) -> dict[str, Any]:
     """Check a stored Logweir document's DSSE signature with the SHIPPED CLI,
@@ -1513,11 +1540,12 @@ def verify_document(payload: bytes, sidecar: bytes, public_key: pathlib.Path,
     sig = work / "document.sig"
     doc.write_bytes(payload)
     sig.write_bytes(sidecar)
-    proc = run([str(ROOT / "target/debug/logweir"), "drill", "verify",
+    proc = run([logweir_cli(), "drill", "verify",
                 "--scorecard", str(doc), "--signature", str(sig),
                 "--public-key", str(public_key),
                 "--payload-type", payload_type], check=False, timeout=120)
     return {
+        "verifierBinary": logweir_cli(),
         "exitCode": proc.returncode,
         "stdout": redact(proc.stdout)[:2000],
         "stderr": redact(proc.stderr)[:2000],
@@ -2217,7 +2245,7 @@ def mint_approval(name: str, subject: str, plan: dict[str, Any], *, ticket: str 
     work.mkdir(mode=0o700, parents=True, exist_ok=True)
     plan_bytes = json.dumps(plan, indent=2) + "\n"
     (work / "plan.json").write_text(plan_bytes)
-    run([str(ROOT / "target/debug/logweir"), "drill", "approve",
+    run([logweir_cli(), "drill", "approve",
          "--spec", str(work / "plan.json"),
          "--key", str(keys["approver"]),
          "--approver", "d2w14",

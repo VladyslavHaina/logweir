@@ -2870,13 +2870,14 @@ USAGE = """usage: d3_live.py <phase> [--retention-image <ref>]
 
 phases: {phases}
 
---retention-image <ref>   the image carrying `logweir-retention`, which NO image
-                          this repository builds contains (defect RET-NOIMAGE).
-                          Required by preview, enforce, wrong-prefix,
-                          denied-deletion and no-evidence-credential; those
-                          scenarios record NOT-RUN without it. Build one with
-                          e2e/k8s/d3/Dockerfile.retention. May also be given as
-                          {env}.
+--retention-image <ref>   the image carrying `logweir-retention`, used by
+                          preview, enforce, wrong-prefix, denied-deletion and
+                          no-evidence-credential. OPTIONAL: the product runner
+                          image carries that binary now (RET-NOIMAGE closed), so
+                          the default is the controller's own
+                          LOGWEIR_RUNNER_IMAGE. Give this to measure a build the
+                          lab is not running; e2e/k8s/d3/Dockerfile.retention
+                          builds one. May also be given as {env}.
 """
 
 
