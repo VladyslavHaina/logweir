@@ -157,7 +157,8 @@ Wave 2 resumes every branch in place with the prompts under
 | PLAT-12.1 (immediate slice), PLAT-12.2 (subject slice) | In progress (slices landed) | ui-correct | The guided submit, idempotent durable Restore and subject binding landed with PLAT-13.2 (records under each task); remaining: PLAT-11.2/13.2-backed selection flow and PLAT-19.2 policy routing for 12.1, retry identity for 12.2. |
 | PLAT-17.2 (stage 2) | In progress (stage landed) | plat17-2-authz, plat17-2-authz-review | Partial record under PLAT-17.2. Integrated into main as `24752f4..90ecd0c`. Shared mode is implemented and live-verified locally but not deployable or declarable secure until D0 stages 5 and 7. |
 | PLAT-17.1 (stages 1 and 3) | In progress (stages landed) | plat17-api-finish, plat17-api-review | Partial record under PLAT-17.1. Integrated into main as `4b571d1..de0207c`. Remaining for Done: console image and chart with the API's own RBAC (D0 stage 7), transient-check cancellation once PLAT-03/09.1 exist, `POST …/backups` (PLAT-06.2), SSE (PLAT-14.1), a browser journey through the API, and PLAT-17.2. |
-| PLAT-04.2, 05.x, 06.2, 09.2 | In progress (W1, W2, W3a, W3b, W4, W5, W6 landed; W8 live run 2026-09-18 — no task Done, see the live validation records and D1-DISCOVERY-IMAGE) | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. W1 (the pure cadence engine) landed in main as `6eedc0a..4b54a5c` after review; see the PLAT-04.2 partial record. W3a (the `Backup` run contract: `spec.trigger`, `spec.scheduleRef` with generation and `runPolicySha256`, the selection type with `allUserTopics` requiring `incompleteDiscovery`, `status.selection`, `src/identity.rs`, `src/policy.rs`, the §3.4 vocabulary) landed in `696c81a`/`b334a98` inside `crds-shapes`; a `Backup` naming both `topics` and `allUserTopics` is refused by CEL and, terminally, by admission. W3b (the reconciler consumes the contract; grammar `v2`) landed at `397e37d`; see the PLAT-04.2 partial record. W2 (editable policy, the §4.5 scheduler; `destinationRef` editable) landed at `98257f8`; see the PLAT-05.1/04.2 partial record. W5 (dynamic selection per run through the check runner) landed at `7072b9d`; see the PLAT-09.2 partial record. W6 (cadence previews, `PUT schedules`, `POST backups`) landed at `72751ab`; see the PLAT-06.2 partial record. W4 (retained history; runs detached from the schedule's ownerReference) landed at `6845ffb`; see the PLAT-05.2 partial record. W7, W8 remain. |
+| PLAT-05.2 | Done | d1w4, d1w8, d1-fence (+ reviews) | Completion record under PLAT-05.2; live on docker-desktop 2026-09-18 behind D1 §13.1's fence. |
+| PLAT-04.2, 05.1, 06.2, 09.2 | In progress (W1, W2, W3a, W3b, W4, W5, W6 landed; W8 live run + the §13.1 fenced run 2026-09-18 — PLAT-05.2 Done; 04.2 waits on W7's console slice, 05.1 on TRUST-UPGRADE-SIGNEDAT, 09.2 on the discovery-image fix's live proof) | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. W1 (the pure cadence engine) landed in main as `6eedc0a..4b54a5c` after review; see the PLAT-04.2 partial record. W3a (the `Backup` run contract: `spec.trigger`, `spec.scheduleRef` with generation and `runPolicySha256`, the selection type with `allUserTopics` requiring `incompleteDiscovery`, `status.selection`, `src/identity.rs`, `src/policy.rs`, the §3.4 vocabulary) landed in `696c81a`/`b334a98` inside `crds-shapes`; a `Backup` naming both `topics` and `allUserTopics` is refused by CEL and, terminally, by admission. W3b (the reconciler consumes the contract; grammar `v2`) landed at `397e37d`; see the PLAT-04.2 partial record. W2 (editable policy, the §4.5 scheduler; `destinationRef` editable) landed at `98257f8`; see the PLAT-05.1/04.2 partial record. W5 (dynamic selection per run through the check runner) landed at `7072b9d`; see the PLAT-09.2 partial record. W6 (cadence previews, `PUT schedules`, `POST backups`) landed at `72751ab`; see the PLAT-06.2 partial record. W4 (retained history; runs detached from the schedule's ownerReference) landed at `6845ffb`; see the PLAT-05.2 partial record. W7, W8 remain. |
 | PLAT-03.x, 08.x, 09.1 | In progress (W1, W2, W3, W4, W5, W6a, W6b, W7, W8, W9, W12, W13, W11, W10 landed; W14 live run 2026-09-18 — no task Done, five defects D2-*) | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. W1 (pure check contract and destination model) and W2 (explicit store options) landed as `c13b0cc..56bd074` after review (ACCEPT after two high and three medium fixes: JSON-form redaction bypass, ambient credentials inheriting the environment). W3 (`logweir_kafka::inventory`: bounded targeted describe, broker count, validate-only `CreateTopics`, error classification where an observed authorization failure makes visibility `limited` and anything unknown is failure, with a real admin-client fault capture because rdkafka 0.36 never invokes `ClientContext::error` for a metadata-only workflow — D2 §4.2 `[VERIFY U5]` corrected) and W5 (`weirkeeper::check`: check Jobs mirroring the execution pod, pod selection by controller owner UID only, framed-stdout relay through the W1 decoder, the full waiting-code table, TTL, plan/chunk/limit modules, the installation policy loader failing closed) landed as `23cec50..b8e62d1` after review (ACCEPT after one high and three medium fixes; 19 mutants killed; the rebase over PLAT-07.1 then routed the inventory client through the reader's `client_config`, removing a drifted copy that could upgrade plaintext to TLS when a CA was present — re-checked ACCEPT; weirkeeper 435, kafka 57). RBAC still owed by W11: `events: list` plus its `manifest_lint` row, the three new kinds' verbs, and a decision on `gc.rs`'s deletes. The reviewers' SEC-PODLOG finding against `controllers::backup::select_job_pod` is closed by `secpodlog` (see the defects table). W6a and W6b (the three Amendment F kinds and the destination sentinel on existing kinds) landed in `46880a3`/`88232f5`/`b334a98` inside `crds-shapes`; W7 (destination resolver, controller, evidence store cache) landed as `27fb924..0b25e95` (see the PLAT-08.1 partial record); W4 (runner `logweir check run`) landed at `537657d` (see the PLAT-03 partial record); W8 (`TopicDiscovery` controller) and W12 (API routes) are in review or in progress. W9, W10, W11, W13, W14 remain. |
 | PLAT-14.x, 15.x, 16.x, 19.1 | In progress (W0, W1, W3, W4, W8, W5, W6, W10, W7, W9, W2 landed; W14 live run 2026-09-18 — no task Done, RET-DIGEST-PREFIX, RET-NOIMAGE, CATALOG-RESYNC-NOT-HARVESTED, TRUST-UPGRADE-SIGNEDAT) | [D3](decisions/D3-status-catalog-retention-trust.md) | Operation states, protection freshness, rehearsals, durable catalog, retention enforcement boundary, trust lifecycle; fifteen worker tasks. W4 (`d3-notify`: the shared notification module and `logweir notify deliver`) landed after review (ACCEPT after two high fixes); W3 (`d3-catalog-writer`: signed catalog point records, `list_page`, `logweir catalog sync|list`) landed after review (see the PLAT-15.1 partial record); W0 (the five Amendment G kinds, additive run status, `Restore.spec` additions, the `Approval` enum) landed in `496451a`/`88232f5`/`b334a98` inside `crds-shapes`; W1 (trust lifecycle core, `TrustPolicy` controller, `trust export|migrate-roster`, G8) landed as `64fcd38..5fc1a72` (see the PLAT-19.1 partial record); W8 (`RecoveryCatalog` controller) in progress. W2, W5, W6, W7, W9, W10, W11, W12, W13, W14 remain. |
 
@@ -817,6 +818,35 @@ gap, as is L-04-2's catch-up half, which the reviewer found reachable by backdat
 `status.policy.effectiveSince` the way L-04-cap already does). Nothing measured
 contradicts the contract.
 
+**Live validation record (2026-09-18) — PLAT-04.2: every listed test now PASSES live; the task stays In progress for its console slice only.** Source landed on main as D1 W1
+(the pure cadence engine), W2 (cadence, deadline, catch-up and retry in the schedule
+controller), W3a/W3b (the run contract the controller consumes) and W6 (the cadence
+preview routes) — see the partial records above — and was proved live on docker-desktop
+against images built from `e7d0e79` in two runs. D1 W8 (`claude/artifacts/d1-live/
+20260918t0330z/`): time-zone evaluation with its UTC negative control and
+`status.nextRuns` (L-04-1); the cadence preview through a real `logweir-api`
+(L-04-preview); `missedSlots.countCapped` (L-04-cap); an unparseable cron refusing,
+admitting nothing for two periods, then recovering (L-04-3); the full retry chain —
+attempt 0 `Failed`, `-r1` 60 s later with `trigger {kind: Retry, attempt: 1, retryOf}`,
+`-r2`, no `-r3`, `lastSlot {disposition: Exhausted, reason: RetryExhausted}`, and a second
+slot whose `-r1` succeeded once the store came back, with the receipt read from the
+archive (L-04-4); two of L-04-6's three clauses. The fenced-controller run
+(`20260918t1209z/`, harness `scripts/live/d1/` with `fence/`, landed as `8e8df63`): L-04-2 long downtime —
+a 503 s outage, restart +79 s, the missed slots recorded and the durable `lastSlot`
+`Admitted/Scheduled` (the `CaughtUp` disposition is transient) — and L-04-5, two replicas reconciling one schedule without a
+duplicate run. Independent reviews `claude/d1w8.review.md` and `claude/d1-fence.review.md`
+reproduced the fence and re-ran rows. Acceptance ("users can predict the next runs and the
+outcome of downtime; every slot is accounted for") and all five listed tests (time zones,
+downtime, retries, invalid cron, concurrency cap) are satisfied live. Deviation: L-04-6's Allow-cap clause (`Ready` reason `ActiveRunLimit`) is proved by its unit truth
+table, not live — holding ten runs open needs a large seeded topic; the orchestrator
+accepted the unit proof and records it here. The policy truth table is published
+(`docs/kubernetes.md`, "The policy truth table"). Residue before Done: the task's own text
+asks for interval presets and next-run previews in the product, and the console does not
+yet expose the W6 preview or `preset` (`ui/contract.js` declares neither) — D1 W7's schedule
+slice (presets, next runs, time zone on the schedule form) is the one remaining item.
+Migration: a schedule without `activeRuns` is bootstrapped once; never downgrade the CRD
+(D1 §5.7).
+
 ## PLAT-05 — Edit future protection without losing recovery history
 
 **Priority P1 · Proposed.** Immutable schedules force replacement, and their
@@ -848,6 +878,25 @@ the schema and refused by the controller with no admissions (L-05.1-4). Unmet: L
 L-05.1-3 (conversion from main@4956785 — needs a swappable controller image) and L-05.1-5
 (rollback) — all D1 §13.1 isolation the shared lab could not provide while other waves ran.
 Evidence `claude/artifacts/d1-live/20260918t0330z/`.
+
+**Live validation record (2026-09-18, fenced run) — PLAT-05.1: the three rows the first
+wave could not reach were run behind D1 §13.1's fence; one PASS, one PARTIAL, one FAIL on
+a product defect; stays In progress.** Harness `scripts/live/d1/` with `fence/` (landed as
+`8e8df63`): a source-matched controller in an isolated namespace behind the
+namespace-rewriting proxy, the shared controller fenced out by a ValidatingAdmissionPolicy
+(its own log carries the denials; `unknownResources: {}`), the negative control NEG-1
+failing as required. Evidence `claude/artifacts/d1-live/20260918t1209z/`; review
+`claude/d1-fence.review.md` (fence reproduced; L-05.1-2 re-run PASS 192.7 s). L-05.1-2
+(concurrent edit and fire — the held reservation 409s, the fired run carries the
+generation it reserved) PASS; L-05.1-5 (rollback) PARTIAL — its legacy-owner clause is
+vacuous by construction and is re-attributed to L-05.1-3's dumps; L-05.1-3 (conversion
+from main@4956785) FAIL: the upgrade flips a pre-upgrade receipt `Valid` → `Untrusted`
+because its status predates `signedAt` (TRUST-UPGRADE-SIGNEDAT, owned by PLAT-19.1 and
+being fixed on `claude/fix-trust-upgrade`); the same run showed 4956785's own controller
+`update`s `backupschedules/status` under a role that grants `patch` — the P0-RESERVE
+defect already fixed on main, restated as an upgrade consequence. Residue before Done:
+re-run L-05.1-3 after the trust-upgrade fix, and D1 W7's schedule slice (edit path showing
+the applied revision on the form).
 
 ### PLAT-05.2 — Decouple schedule deletion from retained history
 
@@ -928,6 +977,34 @@ cost by request counting) and the >10 000-`Backup` capped walk (`MAX_INVENTORY_P
 walk must not be seeded against a controller other waves use; within L-05.2-1 the "every
 migration PATCH carries `metadata.resourceVersion`" clause and within L-05.2-2 the
 "unfrozen" sub-case are unverified. Evidence `claude/artifacts/d1-live/20260918t0330z/`.
+
+**Completion record — Done (2026-09-18), PLAT-05.2.** Source landed on main as D1 W4
+(`58d68f6`, `ee842cd`, `321d18e`/`faf19a0`, `58ee9d1`/`a01b188`, `3738a37`/`3f7657e`, `f35c7cf` — see the partial record above: retained history decoupled from schedule deletion — legacy
+owner references migrated once with a resourceVersion precondition, the UID label and
+marker annotation, all three cascade modes leaving every run, plan ConfigMap and Job
+alive, a same-name recreation a different schedule down to `NameUnavailable`, the
+bounded ownership walk) and was proved live on docker-desktop against images built from
+`e7d0e79` in two runs: D1 W8 (`claude/artifacts/d1-live/20260918t0330z/`: L-05.2-1
+migration preserving a foreign owner, a label and an annotation byte-for-byte; L-05.2-2
+deletion under `background`, `foreground` and `orphan` with active runs finishing and
+verifying; L-05.2-4 same-name recreation; L-05.2-5 unrelated resources unmoved;
+`ownershipScanComplete` true on a small history) and the fenced-controller run
+(`20260918t1209z/`, harness `scripts/live/d1/` with `fence/`, landed as `8e8df63` — the shared controller
+fenced out of the namespace by a ValidatingAdmissionPolicy, proved by its own log's
+denials, and a source-matched controller behind the namespace-rewriting proxy: L-05.2-3
+migration interrupted by an injected 409 and resumed without a duplicate write, L-05.2-6
+read cost — zero `LIST backups`, 2.55 `GET`s per reconcile — L-05.2-1's "every migration
+PATCH carries `metadata.resourceVersion`" clause (22/22 independently), and L-05.2-2's
+unfrozen sub-case). Independent reviews `claude/d1w8.review.md` and
+`claude/d1-fence.review.md` re-ran the deletion journey, L-05.2-3 and the resourceVersion
+count and reproduced the worker's figures. Acceptance ("deleting a schedule never deletes
+history; history survives and stays attributable") and every listed test are satisfied.
+Stated deviation: the >10 000-`Backup` capped walk (`MAX_INVENTORY_PAGES` ×
+`INVENTORY_PAGE_SIZE`) is proved by its unit truth table (`schedule_history.rs:1801`),
+not live — seeding ten thousand objects against a shared controller is a denial of
+service, not a test; the reviewer judged the unit proof sufficient. Migration: a schedule
+reconciled by an older controller has no marker and is migrated once on first reconcile;
+rollback per D1 §5.7. The console's schedule-history view (D1 W7) is not part of this task's acceptance; it belongs to PLAT-10.2.
 
 ## PLAT-06 — Make manual backup a normal operation
 
