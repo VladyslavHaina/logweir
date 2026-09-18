@@ -815,26 +815,52 @@ sixth plan kind of the one check runner (`docs/stability.md`). An `Index` sync
 walks day shards of `logweir/catalog/v1/log/` **newest first, always starting at
 today**: the view is rebuilt from this body on every sync, so a walk that
 resumed at an old cursor would publish a window of old points and call it the
-catalog. `status.cursor.indexShard` is therefore read as a **floor** — the
-oldest day the previous walk reached, minus one day of overlap — and never as a
-start; with no cursor the floor is 400 days back. A `Full` rescan pages
-`logweir/catalog/v1/points/` and *does* resume strictly after
-`status.cursor.rescanStartAfter`, and reports no cursor at all once it finishes.
+catalog.
 
-`catalog-counts.total` counts every point the walk **saw** — one listing per day
-shard establishes it, at no cost per point — while the availability and
-signature buckets count every point the walk **examined**, which costs two to
-four `get`s each and is bounded by `viewLimit`, by `spec.sync.maxObjectsPerRun`
-and by the check's own clock. On a complete walk the two are equal; on a
-budgeted one the buckets sum to less than `total`, `catalog-cursor` says
-`complete: false`, the `Synced` condition reads `ScanIncomplete` and the view
-reports `truncated: true`. Inventing bucket numbers for points nothing fetched
-would be the only worse answer.
+**Its floor is the archive's own oldest day, and one listing establishes it.**
+The log key path sorts by day and then by millisecond, so the smallest key under
+`logweir/catalog/v1/log/` IS the oldest point; the walk runs from today to that
+day and reports `complete: true` when it gets there, whatever the archive's age.
+`status.cursor.indexShard` is therefore **reported and not consumed** — it says
+how far the last walk reached. A floor derived from the previous reach receded
+one day per sync for ever, and once it passed the shard bound `complete` was
+never true again: every sync then published `ScanIncomplete` on a healthy,
+fully-walked archive. A floor read from the archive cannot recede. One sync
+lists at most 3 660 day shards; a walk that hits that bound says
+`catalogStoppedFor: shardBudget` rather than blaming the object budget.
+
+A `Full` rescan pages `logweir/catalog/v1/points/` and *does* resume strictly
+after `status.cursor.rescanStartAfter`. It reports no cursor once it finishes —
+and it always reports one when it has not, whatever stopped it.
+
+**The buckets sum to `catalog-counts.total`, on every walk, by construction.** A
+point is begun only when all four of its objects — the record, the receipt, its
+sidecar and the manifest — can be afforded, and it is COUNTED only when it is
+examined. `spec.sync.viewLimit` bounds the entry LINES the body carries and
+nothing else: a walk with `viewLimit: 2000` over a 20 000-point archive
+manifest-checks all 20 000 and relays the newest 2 000. Nothing is ever counted
+that was not examined, so "no conflicts in 50 000 points" cannot be a report
+about 2 000 of them.
+
+What a walk does NOT reach is said by the fence instead. `catalog-cursor`'s
+`complete` means **the walk listed its whole range and examined every point it
+counted**; `false` comes with the cursor to resume from, the `Synced` condition
+reads `ScanIncomplete`, and the check result names which bound stopped it
+(`catalogStoppedFor: objectBudget` or `shardBudget`). A point the budget never
+reached is unexamined — **not** `Unreadable`, which is a fact about permissions
+or transport and which the controller renders as `PartialScan`.
 
 **A point whose record could not be read is counted and not listed.** An entry
 line's required fields are the receipt-derived facts, and there is no honest
 value for any of them when the record is `Missing` or `Unreadable`; the counts
 carry the fact and a row of zeroes would carry a fiction.
+
+**`Deleted` and `Partial` are in the table and this build cannot produce
+either.** `Deleted` needs D3 §6's retention tombstones and `Partial` needs
+segment sampling, and neither exists; they are listed because they are the
+vocabulary a reader of a page must be able to interpret, not because a sync can
+report one today. An operator waiting for a `Deleted` row is waiting for
+something that cannot arrive.
 
 **`deepCheck: SegmentSample` is admitted and not implemented.** A plan naming it
 is honoured as `ManifestDigest` and the check result says so
