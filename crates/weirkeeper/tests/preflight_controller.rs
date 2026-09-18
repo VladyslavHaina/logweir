@@ -1519,6 +1519,59 @@ fn a_destination_access_check_reports_no_connection_credential_row() {
     assert!(ids.contains(&CheckId::DestinationCredentialProjected));
 }
 
+/// A source-connection check names NO destination, so it reports no
+/// destination credential row.
+///
+/// MUTANT: put `destination.credentialProjected` back in `pod_rows`'
+/// unconditional base. It is BLOCKING, nothing answers it for this operation,
+/// and `assemble` renders an unanswered row as a blocking `unknown` — so every
+/// connection test would be pinned at `unknown` for ever, with a row reading
+/// "the check Job did not report this row" about a destination nobody named.
+/// That is reviewer finding F1's exact shape in a new operation.
+#[test]
+fn a_source_connection_check_reports_no_destination_row_at_all() {
+    let pod: BTreeSet<CheckId> = pf::pod_rows(PreflightOperation::SourceConnection)
+        .iter()
+        .map(|r| r.id)
+        .collect();
+    assert!(
+        pod.contains(&CheckId::ConnectionCredentialProjected),
+        "it dials, so the connection credential has to be projected"
+    );
+    assert!(!pod.contains(&CheckId::DestinationCredentialProjected));
+    assert!(!pod.contains(&CheckId::TargetCredentialProjected));
+
+    let all: BTreeSet<CheckId> = pf::controller_rows(PreflightOperation::SourceConnection)
+        .iter()
+        .map(|r| r.id)
+        .collect();
+    assert_eq!(
+        all,
+        [
+            CheckId::ConnectionResolved,
+            CheckId::ConnectionClusterIdentity,
+            CheckId::ConfigurationPolicy,
+            CheckId::ConfigurationEgress,
+            CheckId::RunnerImage,
+            CheckId::RunnerPod,
+            CheckId::ConnectionCredentialProjected,
+        ]
+        .into_iter()
+        .collect::<BTreeSet<CheckId>>(),
+        "D2 §6.3's Backup catalogue minus every row about what the connection would be USED for"
+    );
+    for absent in [
+        CheckId::DestinationResolved,
+        CheckId::SignerRostered,
+        CheckId::ConnectionTopicsReadable,
+    ] {
+        assert!(
+            !all.contains(&absent),
+            "`{absent}` is a claim about something this operation does not name"
+        );
+    }
+}
+
 /// PLAT-03.1's "timeout": the deadline is the Job's, the dependents are
 /// `BlockedByPrerequisite`, and NOTHING is reported as ready.
 #[test]
@@ -3879,6 +3932,25 @@ fn each_operation_runs_its_own_plan_kind() {
         pf::plan_kind(PreflightOperation::DestinationAccess),
         CheckPlanKind::DestinationAccess
     );
+    assert_eq!(
+        pf::plan_kind(PreflightOperation::SourceConnection),
+        CheckPlanKind::SourceConnection
+    );
+    // Four operations, four Jobs for one subject: the discriminator is in the
+    // name, so a connectivity test cannot land on a readiness check's Job.
+    let names: BTreeSet<String> = [
+        PreflightOperation::Backup,
+        PreflightOperation::Restore,
+        PreflightOperation::DestinationAccess,
+        PreflightOperation::SourceConnection,
+    ]
+    .into_iter()
+    .map(|op| check::job::check_job_name(pf::plan_kind(op), PF_UID))
+    .collect();
+    assert_eq!(names.len(), 4);
+    assert!(
+        check::job::check_job_name(CheckPlanKind::SourceConnection, PF_UID).starts_with("lwc-sc-")
+    );
 }
 
 // ===========================================================================
@@ -3903,6 +3975,16 @@ fn each_operation_runs_its_own_plan_kind() {
 /// controller's idea of the runner's rows drifted from the runner's and nothing
 /// could see it. Either side moving now breaks a test.
 fn runner_pinned_ids(test_fn: &str) -> BTreeSet<String> {
+    runner_pinned_ids_at_least(test_fn, 8)
+}
+
+/// The same, with the floor the caller's literal actually has.
+///
+/// THE FLOOR IS WHAT KEEPS THIS FROM PASSING VACUOUSLY: if the extractor stops
+/// matching, an empty set would equal an empty set. Eight is right for the two
+/// big catalogues; a `sourceConnection` check pins TWO rows, and a floor of
+/// eight there would refuse a correct literal.
+fn runner_pinned_ids_at_least(test_fn: &str, floor: usize) -> BTreeSet<String> {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .and_then(std::path::Path::parent)
@@ -3925,7 +4007,7 @@ fn runner_pinned_ids(test_fn: &str) -> BTreeSet<String> {
         .map(ToString::to_string)
         .collect();
     assert!(
-        ids.len() >= 8,
+        ids.len() >= floor,
         "only {} ids were extracted from `{test_fn}`; the literal's shape changed and this \
          guard would pass vacuously: {ids:?}",
         ids.len()
@@ -3960,6 +4042,14 @@ fn runner_readiness_request() -> CheckRequest {
 
 /// The `restore_plan` fixture the runner's healthy-restore test drives, as a
 /// `CheckRequest`. `evidence_destination: None`, target mode `scratch`.
+/// The plan `crates/logweir/tests/check_cli.rs` drives its
+/// `a_source_connection_check_reports_every_row_it_owns` with.
+fn runner_source_connection_request() -> CheckRequest {
+    CheckRequest::SourceConnection(logweir_core::check_contract::SourceConnectionRequest {
+        connection: fixture_connection_plan(),
+    })
+}
+
 fn runner_restore_request(evidence: Option<()>) -> CheckRequest {
     CheckRequest::RestorePreflight(Box::new(
         logweir_core::check_contract::RestorePreflightRequest {
@@ -4022,6 +4112,13 @@ fn the_expected_rows_are_the_rows_the_runner_emits() {
         ids_of(&job_rows(&runner_restore_request(None), true)),
         runner_pinned_ids("a_healthy_restore_preflight_reports_every_row_it_owns"),
         "`job_rows` and the runner disagree about a `restorePreflight` plan"
+    );
+    assert_eq!(
+        ids_of(&job_rows(&runner_source_connection_request(), false)),
+        runner_pinned_ids_at_least("a_source_connection_check_reports_every_row_it_owns", 2),
+        "`job_rows` and the runner disagree about a `sourceConnection` plan. The runner emits \
+         two rows and `connection.topicsDescribable` is deliberately not one of them; a mirror \
+         that listed it would pin every connection test at `unknown`."
     );
 }
 
@@ -4182,6 +4279,70 @@ fn rendered_backup_shape(rich: bool) -> weirkeeper::controllers::preflight::JobS
         &weirkeeper::job::RunnerImage::default(),
     )
     .expect("the shape renders")
+}
+
+/// The rendered `sourceConnection` plan carries the resolved connection and
+/// the pod is given no signing key and no destination env.
+///
+/// MUTANT: make `Inputs::signs()` true for `SourceConnection` (its previous
+/// spelling, `self.operation != PreflightOperation::DestinationAccess`, does
+/// exactly that). The check pod would mount the installation's signing Secret
+/// to answer a question about a broker — a credential in a pod that has no use
+/// for it, which is the blast-radius argument D2 §6.1 accepts the check Job on
+/// in the first place.
+#[test]
+fn a_source_connection_plan_carries_the_connection_and_projects_no_signer() {
+    let cluster: weirkeeper::crds::kafka_cluster::KafkaCluster =
+        serde_json::from_value(kafka_cluster("source", Some("prod-id"))).expect("fixture");
+    let policy = weirkeeper::check::policy::Policy::defaults();
+    let inputs = Inputs {
+        operation: PreflightOperation::SourceConnection,
+        namespace: NS.to_string(),
+        timeout_seconds: 120,
+        policy_digest: policy.digest(),
+        cluster_name: Some("source".to_string()),
+        cluster_uid: Some(CLUSTER_UID.to_string()),
+        connection: Some(weirkeeper::connection::resolve(
+            &cluster,
+            weirkeeper::connection::ConnectionUse::PreflightSource,
+        )),
+        ..Inputs::default()
+    };
+    assert!(!inputs.signs(), "nothing would be signed by a dial");
+
+    let shape = weirkeeper::controllers::preflight::build_job_shape(
+        &inputs,
+        &weirkeeper::job::RunnerOwner {
+            api_version: "logweir.dev/v1alpha1".to_string(),
+            kind: "Preflight".to_string(),
+            name: "pf-1".to_string(),
+            uid: PF_UID.to_string(),
+        },
+        &weirkeeper::job::RunnerImage::default(),
+    )
+    .expect("the shape renders");
+
+    let CheckRequest::SourceConnection(r) = &shape.plan.request else {
+        panic!("a sourceConnection plan, got {:?}", shape.plan.kind())
+    };
+    assert_eq!(r.connection.principal, "User:backup");
+    // THE NAME, NEVER THE VALUE — the same rule every rendered plan keeps.
+    assert!(r.connection.password_env.is_some());
+    let rendered = String::from_utf8(shape.documents.check_plan.clone()).expect("utf-8");
+    assert!(!rendered.contains("destination"), "{rendered}");
+
+    assert_eq!(shape.spec.kind, CheckPlanKind::SourceConnection);
+    assert!(
+        shape
+            .spec
+            .secret_mounts
+            .iter()
+            .all(|m| m.secret_name != "logweir-signing-key"),
+        "no signing key in a pod that signs nothing: {:?}",
+        shape.spec.secret_mounts
+    );
+    assert!(shape.documents.archive_ca.is_none());
+    assert!(shape.documents.restore_plan.is_none());
 }
 
 /// **F3.** `spec.readiness.writeProbe: CreateOnlyMarker` is a shipped,

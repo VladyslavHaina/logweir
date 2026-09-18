@@ -40,6 +40,7 @@ import {
   isContractFailure,
 } from "../contract.js";
 import { keepDraft, readDraft } from "../lifecycle.js";
+import { createRouteLifecycle } from "../app.js";
 import {
   ATTESTATION_DISCLAIMER,
   CREDENTIALS_CLEARED_CLAUSE,
@@ -73,7 +74,13 @@ import {
   validateGrants,
 } from "../pages/destinations.js";
 import {
-  NO_CONNECTIVITY_CHECK_KIND,
+  CONNECTION_CHECK_NO_TOPICS_SENTENCE,
+  CONNECTION_CHECK_POLLS,
+  CONNECTION_CHECK_SENTENCE,
+  connectionCheckRequest,
+  connectionRefusal,
+  mountClusterDetail,
+  renderConnectionCheck,
   renderDiscovery,
   renderDiscoveryPanel,
   renderTopicTable,
@@ -940,11 +947,20 @@ test("the_wizard_names_the_task_that_owes_a_recovery_points_frozen_destination",
   assert.match(SOURCE_DESTINATION_NOT_PUBLISHED, /neither destinationRef nor locationDigest/);
 });
 
-test("the_clusters_page_names_the_task_that_owes_a_connectivity_check_kind", () => {
-  assert.match(NO_CONNECTIVITY_CHECK_KIND, /PLAT-03\.1 owes a source-connectivity check kind/);
-  assert.match(NO_CONNECTIVITY_CHECK_KIND, /PLAT-07\.2 consumes it/);
+test("the_clusters_page_no_longer_says_no_check_kind_can_dial", () => {
+  // THE SENTENCE IS GONE BECAUSE THE CONTROL CHANGED, and this asserts the
+  // pair. `NO_CONNECTIVITY_CHECK_KIND` read "it cannot make anything dial,
+  // because no check kind does that on its own"; `sourceConnection` is that
+  // kind, so the note and its `id` went with the claim.
   const panel = renderDiscoveryPanel({ mayOperate: true, filters: {}, state: {} });
-  assert.match(panel, /id="no-connectivity-check"/);
+  assert.doesNotMatch(panel, /id="no-connectivity-check"/);
+  assert.doesNotMatch(panel, /no check kind does that on its own/);
+  assert.doesNotMatch(panel, /PLAT-03\.1 owes/);
+
+  // And the control that replaced it says what it does.
+  assert.match(CONNECTION_CHECK_SENTENCE, /starts a Preflight/);
+  assert.match(CONNECTION_CHECK_SENTENCE, /dials these brokers now/);
+  assert.match(CONNECTION_CHECK_SENTENCE, /a ready verdict authorises nothing/);
 });
 
 // ------------------------------------------------- the rotation, after F3
@@ -1037,4 +1053,303 @@ test("MUTANT_every_credential_field_name_is_outside_the_draft_allowlist_includin
   assert.equal(kept.bucket, "kafka-backups");
   assert.equal(kept.archiveWriteSessionToken, undefined);
   assert.doesNotMatch(JSON.stringify(readDraft("d2-draft/token")), /session-token-value/);
+});
+
+// ===========================================================================
+// D2-SOURCECHECK -- "Test connection" dials (PLAT-03.1's kind, PLAT-07.2's
+// control)
+// ===========================================================================
+
+test("the_connection_check_sends_one_reference_and_no_field_it_does_not_ask_about", () => {
+  const body = connectionCheckRequest("orders-prod");
+  assert.deepEqual(body, {
+    operation: "sourceConnection",
+    sourceConnection: { connectionRef: "orders-prod" },
+  });
+  // THE BODY THE PAGE BUILDS IS CHECKED AGAINST THE SHAPE THE SERVER
+  // PUBLISHES, which is what `ui/tests/contract.spec.js` does for every other
+  // route. An unknown field here is a 422 from the product API, so a shape
+  // that admitted one would be a console that could not tell a refusal from a
+  // wider check.
+  const decoded = decodeRequest("preflights", body);
+  assert.deepEqual(decoded.unknown, [], "no field outside the published contract");
+});
+
+test("the_connection_check_panel_renders_the_objects_own_rows_and_claims_nothing_else", () => {
+  const preflight = {
+    id: "pf-1", namespace: "team-a", uid: "u", resourceVersion: "9",
+    operation: "sourceConnection", state: "notReady", terminal: true,
+    binding: { referents: [{ kind: "KafkaCluster", name: "orders-prod" }] },
+    applicable: true, stale: false, staleReasons: [], staleBasis: ["KafkaCluster/orders-prod"],
+    observedAt: "2026-09-18T09:00:00Z", expiresAt: "2026-09-18T09:15:00Z",
+    checks: [{
+      id: "connection.authenticated", state: "notReady", gating: "blocking",
+      code: "AuthenticationFailed", message: "the broker refused the SASL exchange",
+      remedy: "Check the SASL mechanism, the username and the projected password key.",
+      authority: "checkJob", scope: { kind: "KafkaCluster", name: "User:backup" },
+      observedAt: "2026-09-18T09:00:00Z", expiresAt: "2026-09-18T09:15:00Z",
+    }],
+    warnings: [], executionOnly: [], detailsAvailable: false, conditions: [],
+  };
+  const html = renderConnectionCheck({ mayOperate: true, state: {}, preflight: preflight });
+
+  // EVERY FIELD THE BRIEF NAMES, FROM THE OBJECT: state, code, remedy and the
+  // instant it was observed. None of them is computed here.
+  assert.match(html, /connection\.authenticated/);
+  assert.match(html, /not ready/);
+  assert.match(html, /AuthenticationFailed/);
+  assert.match(html, /Check the SASL mechanism/);
+  assert.match(html, /2026-09-18T09:00:00Z/);
+  assert.match(html, /2026-09-18T09:15:00Z/);
+
+  // AND IT CLAIMS NOTHING ABOUT TOPICS. The check names none, so the panel
+  // says so rather than leaving a reader to read "connection ready" as "I can
+  // see my topics".
+  assert.match(html, /id="connection-check-no-topics"/);
+  assert.match(CONNECTION_CHECK_NO_TOPICS_SENTENCE, /reports nothing about which topics/);
+  assert.doesNotMatch(html, /topicsDescribable/);
+});
+
+test("a_refused_connection_disables_the_control_and_prints_the_controllers_own_reason", () => {
+  // THE DISABLED STATE NAMES THE CONTROLLER'S REASON. PLAT-07.1's resolver
+  // refuses before any credential is renderable, so `build_job_shape` would
+  // return "the source connection did not resolve" and the Preflight would
+  // land on `phase: Failed` with no row at all -- a pod spent to say what the
+  // object already says.
+  const html = renderConnectionCheck({
+    mayOperate: true, state: {}, preflight: null,
+    refusedReason: "CredentialNotRenderable",
+  });
+  assert.match(html, /id="connection-check-refused"/);
+  assert.match(html, /<code>CredentialNotRenderable<\/code>/);
+  assert.match(html, /the credential this connection needs cannot be rendered/,
+    "the gloss is beside the reason, never instead of it");
+  assert.match(html, /<button type="submit" disabled>Test connection<\/button>/);
+
+  // A HEALTHY CONNECTION LEAVES IT ENABLED, and a reason this build does not
+  // know is not treated as a refusal: failing open costs a pod, failing closed
+  // hides the control an operator needs.
+  const ok = renderConnectionCheck({ mayOperate: true, state: {}, preflight: null });
+  assert.match(ok, /<button type="submit">Test connection<\/button>/);
+  // The filtering belongs to `connectionRefusal`, which reads `status.reason`
+  // and matches it against the RESOLVER's own list. A reason this build does
+  // not know answers `""`, so the control stays enabled and the check reports
+  // what it finds: failing open costs one pod, failing closed hides the
+  // control an operator needs precisely when something is wrong.
+  assert.equal(
+    connectionRefusal({ status: { reason: "CredentialNotRenderable" } }),
+    "CredentialNotRenderable",
+  );
+  assert.equal(connectionRefusal({ status: { reason: "SomethingNewerSaid" } }), "");
+  assert.equal(connectionRefusal({ status: { reason: "Reachable" } }), "");
+  assert.equal(connectionRefusal({}), "");
+});
+
+test("a_viewer_is_told_it_may_read_a_check_and_not_start_one", () => {
+  const html = renderConnectionCheck({ mayOperate: false, state: {}, preflight: null });
+  assert.match(html, /id="connection-check-forbidden"/);
+  assert.doesNotMatch(html, /<button/, "no control at all, rather than one that 403s");
+});
+
+// --- the mount half: one click, one Preflight, one key ---------------------
+
+/** A node stand-in that hands out a fresh element per selector on every paint
+ *  and remembers the FIRST one, so a test can fire an event at the control the
+ *  operator would have clicked rather than at whichever repaint happened last.
+ *  `node --test` has no DOM and this tree has no shim (Global Constraint 21). */
+const fakeParse = (html) => [{ html: html }];
+
+function checkNode() {
+  const first = new Map();
+  const made = [];
+  const element = (selector) => {
+    const el = {
+      selector: selector,
+      handlers: [],
+      disabled: false,
+      elements: {},
+      addEventListener(type, handler) { this.handlers.push([type, handler]); },
+      removeEventListener() {},
+      querySelector() { return null; },
+      querySelectorAll() { return []; },
+      focus() {},
+    };
+    made.push(el);
+    if (!first.has(selector)) {
+      first.set(selector, el);
+    }
+    return el;
+  };
+  return {
+    children: [],
+    first: first,
+    made: made,
+    appendChild(child) { this.children.push(child); return child; },
+    removeChild() { return this.children.shift(); },
+    get firstChild() { return this.children.length === 0 ? null : this.children[0]; },
+    querySelector(selector) {
+      return selector === "#connection-check-form" ? element(selector) : null;
+    },
+    querySelectorAll() { return []; },
+    fire(selector, type) {
+      const el = first.get(selector);
+      assert.ok(el !== undefined, "no " + selector + " was rendered");
+      for (const [t, handler] of el.handlers) {
+        if (t === type) {
+          handler({ preventDefault() {} });
+        }
+      }
+    },
+  };
+}
+
+function clusterObject(name) {
+  return {
+    apiVersion: "logweir.dev/v1alpha1",
+    kind: "KafkaCluster",
+    metadata: { name: name, namespace: "team-a", uid: "uid-" + name },
+    spec: { bootstrapServers: ["b:9092"], role: "source", auth: { mode: "plaintext" } },
+    status: { reachable: true, clusterId: "CID", observedAt: "2026-09-18T08:00:00Z", reason: "Reachable" },
+  };
+}
+
+function preflightItem(id, state, terminal) {
+  return {
+    id: id, namespace: "team-a", uid: "pf-uid", resourceVersion: "1",
+    operation: "sourceConnection", state: state, terminal: terminal,
+    binding: { referents: [] }, applicable: true, stale: false,
+    staleReasons: [], staleBasis: [], checks: [], warnings: [],
+    executionOnly: [], detailsAvailable: false, conditions: [],
+  };
+}
+
+test("a_double_click_makes_one_preflight_and_a_second_test_makes_a_new_one", async () => {
+  const started = [];
+  const node = checkNode();
+  let release;
+  const held = new Promise((done) => { release = done; });
+  const api = {
+    get: async () => clusterObject("dbl"),
+    latestDiscoveries: async () => ({ latestAttempt: null, lastSuccessful: null }),
+    startPreflight: async (ns, request, options) => {
+      started.push({ ns: ns, request: request, attempt: (options || {}).attempt });
+      await held;
+      return { item: preflightItem("pf-" + started.length, "ready", true), replayed: false };
+    },
+    preflight: async () => { throw new Error("terminal on arrival: nothing to follow"); },
+    wait: async () => {},
+  };
+  const routes = createRouteLifecycle();
+  await mountClusterDetail(node, "team-a", "dbl", fakeParse, routes.begin(), api);
+
+  // TWO SUBMIT EVENTS, ONE REQUEST. The guard is the mutation record, which is
+  // shared by every mount of this form in this namespace -- so the refusal
+  // holds across a re-render too, which a boolean in the handler's closure
+  // would not.
+  node.fire("#connection-check-form", "submit");
+  node.fire("#connection-check-form", "submit");
+  assert.equal(started.length, 1, "a double click is one deliberate test");
+  assert.deepEqual(started[0].request, {
+    operation: "sourceConnection",
+    sourceConnection: { connectionRef: "dbl" },
+  });
+  assert.ok(typeof started[0].attempt === "string" && started[0].attempt.length > 0,
+    "the click carried a token for the idempotency key");
+
+  release();
+  await new Promise((done) => { setTimeout(done, 0); });
+
+  // A DELIBERATE SECOND TEST IS A DIFFERENT KEY. Without it the product API
+  // would replay the first verdict for ever, which is exactly the re-read this
+  // control stopped being.
+  node.fire("#connection-check-form", "submit");
+  assert.equal(started.length, 2, "the record settled, so a new test is accepted");
+  assert.notEqual(started[1].attempt, started[0].attempt,
+    "two clicks compose two idempotency keys; a stable one would replay the first answer");
+});
+
+test("a_started_check_is_followed_until_it_is_terminal_and_the_rows_are_repainted", async () => {
+  const painted = [];
+  const answers = ["running", "running", "notReady"];
+  let read = 0;
+  const node = checkNode();
+  const api = {
+    get: async () => clusterObject("follow"),
+    latestDiscoveries: async () => ({ latestAttempt: null, lastSuccessful: null }),
+    startPreflight: async () => ({ item: preflightItem("pf-f", "pending", false), replayed: false }),
+    preflight: async () => {
+      const state = answers[Math.min(read, answers.length - 1)];
+      read += 1;
+      return { item: preflightItem("pf-f", state, state === "notReady") };
+    },
+    wait: async () => {},
+  };
+  const routes = createRouteLifecycle();
+  const lifecycle = routes.begin();
+  const parse = (html) => { painted.push(html); return []; };
+  await mountClusterDetail(node, "team-a", "follow", parse, lifecycle, api);
+  node.fire("#connection-check-form", "submit");
+  await new Promise((done) => { setTimeout(done, 0); });
+
+  assert.equal(read, 3, "it stopped at the terminal answer and not at the budget");
+  const last = painted[painted.length - 1];
+  assert.match(last, /pf-f/);
+  assert.match(last, /not ready/, "the aggregate the object recorded, not a guess");
+  assert.doesNotMatch(last, /id="connection-check-stopped"/);
+});
+
+test("a_check_that_never_settles_is_left_alone_and_the_page_says_it_stopped_reading", async () => {
+  const painted = [];
+  let read = 0;
+  const node = checkNode();
+  const api = {
+    get: async () => clusterObject("slow"),
+    latestDiscoveries: async () => ({ latestAttempt: null, lastSuccessful: null }),
+    startPreflight: async () => ({ item: preflightItem("pf-s", "pending", false), replayed: false }),
+    preflight: async () => {
+      read += 1;
+      return { item: preflightItem("pf-s", "running", false) };
+    },
+    wait: async () => {},
+  };
+  const routes = createRouteLifecycle();
+  const parse = (html) => { painted.push(html); return []; };
+  await mountClusterDetail(node, "team-a", "slow", parse, routes.begin(), api);
+  node.fire("#connection-check-form", "submit");
+  await new Promise((done) => { setTimeout(done, 0); });
+
+  // BOUNDED, AND IT SAYS SO. An unbounded timer would keep reading a namespace
+  // for as long as a tab is open; a spinner that stopped silently would be a
+  // page that looks like it is still watching.
+  assert.equal(read, CONNECTION_CHECK_POLLS, "the read budget, and not one read more");
+  assert.match(painted[painted.length - 1], /id="connection-check-stopped"/);
+  assert.match(painted[painted.length - 1], /was not cancelled/);
+});
+
+test("a_follow_that_outlives_its_route_paints_nothing", async () => {
+  // PLAT-13.1, for the one loop this panel adds: an answer for a view that has
+  // left must not paint a check from namespace A over namespace B.
+  const node = checkNode();
+  let reads = 0;
+  const routes = createRouteLifecycle();
+  const lifecycle = routes.begin();
+  const painted = [];
+  const api = {
+    get: async () => clusterObject("gone"),
+    latestDiscoveries: async () => ({ latestAttempt: null, lastSuccessful: null }),
+    startPreflight: async () => ({ item: preflightItem("pf-g", "pending", false), replayed: false }),
+    preflight: async () => { reads += 1; return { item: preflightItem("pf-g", "running", false) }; },
+    wait: async () => {
+      routes.begin();
+      atDeparture = painted.length;
+    },
+  };
+  let atDeparture = -1;
+  await mountClusterDetail(node, "team-a", "gone", (html) => { painted.push(html); return []; },
+    lifecycle, api);
+  node.fire("#connection-check-form", "submit");
+  await new Promise((done) => { setTimeout(done, 0); });
+  assert.equal(reads, 0, "the route left during the wait, so no read was issued");
+  assert.ok(atDeparture >= 0, "the follower did reach its first wait");
+  assert.equal(painted.length, atDeparture, "and nothing was painted after it left");
 });

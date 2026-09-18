@@ -177,6 +177,124 @@ async fn the_block_must_match_the_operation_and_the_exclusive_pairs_hold() {
     assert!(app.fake.requests().is_empty());
 }
 
+/// D2-SOURCECHECK: the connectivity check the console's "Test connection"
+/// creates, and the two ways of asking for it wrongly.
+///
+/// BOTH WRONG WAYS ARE A 422 NAMING A FIELD, and neither is a quietly wider
+/// check. An omitted block is the route's own block/operation table; an
+/// omitted `connectionRef` is `read_json`'s `Category::Data` arm, which is the
+/// reason the field is REQUIRED on the DTO rather than an `Option` this
+/// function would have to remember to look at.
+///
+/// MUTANT: give `SourceConnectionPreflightRequest.connection_ref` a
+/// `#[serde(default)]` and an `Option<String>`. The second arm below stops
+/// being a 422 and a `Preflight` is created whose `connectionRef.name` is
+/// empty — an object the controller then reports `ConnectionNotFound` about,
+/// which spends a reconcile to say what the API already knew.
+#[tokio::test]
+async fn a_source_connection_check_needs_a_connection_and_nothing_else() {
+    let app = TestApp::new();
+    let path = format!("/api/v1/namespaces/{NS_A}/preflights");
+
+    // The block is missing entirely.
+    let response = app
+        .post(
+            &path,
+            Some("preflight-sc-00001"),
+            &json!({"operation": "sourceConnection"}).to_string(),
+        )
+        .await;
+    response.assert_problem(422, "validation_failed");
+    assert!(field_names(&response.json()).contains(&"sourceConnection".to_string()));
+
+    // The block is there and the one field it has is not.
+    let response = app
+        .post(
+            &path,
+            Some("preflight-sc-00002"),
+            &json!({"operation": "sourceConnection", "sourceConnection": {}}).to_string(),
+        )
+        .await;
+    response.assert_problem(422, "validation_failed");
+    assert!(
+        field_names(&response.json()).contains(&"connectionRef".to_string()),
+        "{:?}",
+        field_names(&response.json())
+    );
+
+    // A reference that is not a Kubernetes name.
+    let response = app
+        .post(
+            &path,
+            Some("preflight-sc-00003"),
+            &json!({"operation": "sourceConnection", "sourceConnection": {"connectionRef": "Not A Name"}})
+                .to_string(),
+        )
+        .await;
+    assert!(field_names(&response.json()).contains(&"sourceConnection.connectionRef".to_string()));
+
+    // A field this check does not ask about is a refusal, not a wider check.
+    let response = app
+        .post(
+            &path,
+            Some("preflight-sc-00004"),
+            &json!({
+                "operation": "sourceConnection",
+                "sourceConnection": {"connectionRef": "source", "destination": "primary"}
+            })
+            .to_string(),
+        )
+        .await;
+    response.assert_problem(422, "validation_failed");
+    assert_eq!(response.json()["errors"][0]["code"], "unknown_field");
+
+    // Another operation's block beside it.
+    let response = app
+        .post(
+            &path,
+            Some("preflight-sc-00005"),
+            &json!({
+                "operation": "sourceConnection",
+                "sourceConnection": {"connectionRef": "source"},
+                "destinationAccess": {"destination": "primary", "roles": ["archiveRead"]}
+            })
+            .to_string(),
+        )
+        .await;
+    response.assert_problem(422, "validation_failed");
+    assert!(field_names(&response.json()).contains(&"destinationAccess".to_string()));
+
+    assert_eq!(app.fake.count("preflights", NS_A), 0, "nothing was created");
+
+    // And the request the console actually sends.
+    let response = app
+        .post(
+            &path,
+            Some("preflight-sc-00006"),
+            &json!({"operation": "sourceConnection", "sourceConnection": {"connectionRef": "source"}})
+                .to_string(),
+        )
+        .await;
+    assert_eq!(response.status.as_u16(), 202, "{}", response.text());
+    let v = response.json();
+    assert_eq!(v["item"]["operation"], "sourceConnection");
+    assert_eq!(v["item"]["state"], "pending");
+    let id = v["item"]["id"].as_str().unwrap().to_string();
+
+    let stored = app.fake.object("preflights", NS_A, &id).unwrap();
+    assert_eq!(stored["spec"]["request"]["operation"], "SourceConnection");
+    assert_eq!(
+        stored["spec"]["request"]["sourceConnection"]["connectionRef"]["name"],
+        "source"
+    );
+    // THE ABSENCES REACH THE STORED OBJECT TOO: P3 refuses a second block at
+    // admission, and nothing here writes one.
+    assert!(stored["spec"]["request"]["backup"].is_null());
+    assert!(stored["spec"]["request"]["destinationAccess"].is_null());
+    assert_eq!(stored["spec"]["request"]["timeoutSeconds"], 120);
+    app.fake.assert_strict();
+}
+
 #[tokio::test]
 async fn a_duplicate_request_replays_and_a_changed_one_conflicts() {
     let app = TestApp::new();

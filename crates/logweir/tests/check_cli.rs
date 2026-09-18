@@ -1782,6 +1782,168 @@ fn a_denied_marker_put_is_reported_with_the_store_code() {
     assert_eq!(row.state, CheckState::NotReady);
 }
 
+// ===========================================================================
+// 4a. `sourceConnection` (D2-SOURCECHECK): PLAT-03.1's source-connectivity kind
+// ===========================================================================
+
+fn source_connection_plan() -> CheckPlan {
+    plan_of(CheckRequest::SourceConnection(
+        logweir_core::check_contract::SourceConnectionRequest {
+            connection: connection(),
+        },
+    ))
+}
+
+#[test]
+fn a_source_connection_check_reports_every_row_it_owns() {
+    let m = mount(&source_connection_plan());
+    let run = drive(
+        &m,
+        &FakeWiring::default().with_probe(FakeProbe::new().with_topics(&[("orders", 6)])),
+    );
+    assert_eq!(run.code, ExitCode::Ok);
+    let got: BTreeSet<&str> = ids(&run.result()).into_iter().collect();
+    let want: BTreeSet<&str> = ["runner.contract", "connection.authenticated"]
+        .into_iter()
+        .collect();
+    assert_eq!(
+        got, want,
+        "a connectivity check emits the two rows its request can ask about, and no other"
+    );
+    assert_eq!(
+        logweir_core::check_contract::aggregate(&run.result().checks),
+        logweir_core::check_contract::OverallState::Ready
+    );
+
+    // THE TWO FACTS D2 §6.3 puts on this row, and the `clusterIdentity`
+    // VERDICT that stays the controller's: a Job holding a credential is given
+    // no Kubernetes read, so it can publish what the broker said and not what
+    // `KafkaCluster.status.clusterId` says.
+    let auth = run.row(CheckId::ConnectionAuthenticated);
+    assert_eq!(auth.state, CheckState::Ready);
+    assert_eq!(auth.code, CheckCode::Authenticated);
+    assert_eq!(
+        auth.facts.get("clusterId").map(String::as_str),
+        Some("M29I2S7FQPyHBEX12Vx7XA")
+    );
+    assert_eq!(auth.facts.get("brokerCount").map(String::as_str), Some("3"));
+    assert!(!run.has(CheckId::ConnectionClusterIdentity));
+
+    // THE SCOPE IS ON THE ROW, because D2 §6.3's acceptance sentence is "check
+    // time AND scope" and a status row with `scope: null` is a finding about
+    // nothing an operator can match against an ACL export.
+    let scope = auth.scope.clone().expect("the row carries its scope");
+    assert_eq!(scope.kind, "KafkaCluster");
+    assert_eq!(scope.name, connection().principal);
+    assert!(
+        auth.observed_at.is_some(),
+        "and the instant it was observed"
+    );
+    assert!(auth.expires_at.is_some(), "and when it stops counting");
+}
+
+/// The row this kind must NOT publish.
+///
+/// MUTANT: emit `connection.topicsDescribable` from
+/// `kinds::source_connection::run` — for instance by delegating to
+/// `readiness::topics_describable` over the empty slice, which returns a READY
+/// `TopicsDescribable` row. This test fails, and so does
+/// `the_expected_rows_are_the_rows_the_runner_emits` in `weirkeeper`, because
+/// the controller's mirror does not list it.
+///
+/// The claim is not stylistic. `TopicNotFound` and `TopicNotAuthorized` are
+/// facts about a topic the requester NAMED; over an empty selection `ready`
+/// would be a green verdict about the empty set and `unknown` on a blocking
+/// row would pin every connection test at `unknown` for ever.
+#[test]
+fn a_source_connection_check_makes_no_claim_about_topics() {
+    let m = mount(&source_connection_plan());
+    let run = drive(
+        &m,
+        &FakeWiring::default().with_probe(
+            FakeProbe::new()
+                .with_topics(&[("orders", 6)])
+                .default_presence(TopicPresence::Present { partitions: 6 }),
+        ),
+    );
+    assert!(
+        !run.has(CheckId::ConnectionTopicsDescribable),
+        "this request names no topic, so no topic row has an honest answer: {:?}",
+        ids(&run.result())
+    );
+    assert!(!run.has(CheckId::ConnectionTopicsReadable));
+    for row in &run.result().checks {
+        assert_ne!(
+            row.code,
+            CheckCode::TopicsDescribable,
+            "`{}` published a topic verdict",
+            row.id
+        );
+    }
+    // AND NO TOPIC LINE REACHES THE RELAY. The inventory frames are a
+    // `topicInventory` fact; a connectivity check that relayed a topic list
+    // would be a discovery nobody asked for, over a bound nobody set.
+    assert_eq!(run.topic_frame_count(), 0);
+}
+
+/// A broker that does not answer is `connection.authenticated notReady`, with
+/// the broker's own classified code, a remedy, and the scope still on it.
+///
+/// MUTANT: drop `.with_scope(scope)` from the `Err` arm of
+/// `kinds::source_connection::run`. The row an operator actually reads is the
+/// failing one, and it is the one that used to reach a status with
+/// `scope: null` (the same defect `readiness::authenticated` records).
+#[test]
+fn a_source_connection_check_reports_the_dial_that_failed() {
+    let m = mount(&source_connection_plan());
+    let run = drive(
+        &m,
+        &FakeWiring::default().broker_fails(CheckCode::AuthenticationFailed, "SASL rejected"),
+    );
+    assert_eq!(
+        run.code,
+        ExitCode::Ok,
+        "a verdict is not an operational failure"
+    );
+    let row = run.row(CheckId::ConnectionAuthenticated);
+    assert_eq!(row.state, CheckState::NotReady);
+    assert_eq!(row.code, CheckCode::AuthenticationFailed);
+    assert!(
+        row.remedy.contains("SASL"),
+        "every code the runner emits carries its remedy: {:?}",
+        row.remedy
+    );
+    assert_eq!(
+        row.scope.as_ref().map(|s| s.name.clone()),
+        Some(connection().principal),
+        "the row an operator reads is the failing one, and it carries the scope too"
+    );
+    assert_eq!(
+        logweir_core::check_contract::aggregate(&run.result().checks),
+        logweir_core::check_contract::OverallState::NotReady
+    );
+}
+
+/// A metadata timeout is `unknown`, never `notReady`: "I could not tell" and
+/// "it said no" are different facts and D2 §6.3 gives them different columns.
+#[test]
+fn a_source_connection_timeout_is_unknown_and_not_a_refusal() {
+    let m = mount(&source_connection_plan());
+    let run = drive(
+        &m,
+        &FakeWiring::default().with_probe(
+            FakeProbe::new().failing_cluster_id(CheckCode::MetadataTimeout, "no metadata"),
+        ),
+    );
+    let row = run.row(CheckId::ConnectionAuthenticated);
+    assert_eq!(row.state, CheckState::Unknown);
+    assert_eq!(row.code, CheckCode::MetadataTimeout);
+    assert_eq!(
+        logweir_core::check_contract::aggregate(&run.result().checks),
+        logweir_core::check_contract::OverallState::Unknown
+    );
+}
+
 /// `runner.contract` is Ready by construction: the plan parsed at this exact
 /// contract version, which is the proof.
 #[test]

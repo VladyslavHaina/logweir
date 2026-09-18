@@ -947,8 +947,16 @@ test("the_clusters_list_offers_a_test_connection_per_row_and_names_the_row_by_ui
   const html = renderClusterList(clusters, "team-a", NOW);
   assert.ok(html.includes("data-cluster-uid=\"uid-a\""), "each row carries its identity: " + html);
   assert.ok(html.includes("data-probe-uid=\"uid-b\""));
-  assert.ok(html.includes("<button type=\"submit\">Test connection</button>"));
-  assert.match(html, /The browser never dials a broker/, "and says what the control actually does");
+  // THE LIST's CONTROL IS A RE-READ AND NOW SAYS SO. It used to be labelled
+  // "Test connection", which is a sentence about a broker; it reads a
+  // `KafkaCluster` and shows what the controller recorded. The control that
+  // really dials is the cluster page's, which starts a `sourceConnection`
+  // `Preflight` -- and two controls under one label would have been the same
+  // lie in a second place.
+  assert.ok(html.includes("<button type=\"submit\">Re-read probe</button>"));
+  assert.ok(!html.includes(">Test connection</button>"), "the label moved to the dial");
+  assert.match(html, /It dials nothing/, "and says what the control actually does");
+  assert.match(html, /The control that really dials is Test connection/);
 
   // AND THE MOUNT HALF WIRES ONE PER ROW, against the list it just read.
   const wired = [];

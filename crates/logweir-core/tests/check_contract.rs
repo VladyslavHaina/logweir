@@ -16,10 +16,11 @@ use logweir_core::check_contract::{
     CheckOutcome, CheckPlan, CheckPlanError, CheckPlanKind, CheckRequest, CheckResult,
     CheckResultError, CheckState, ConnectionPlan, CredentialMode, DestinationAccessRequest,
     DestinationPlan, EndFrame, EvidenceFetchRequest, EvidenceObjectRequest, ExpectedSummary,
-    FrameExpectations, Gating, OverallState, Referent, RosterRef, StaleReason, Stream, TopicEntry,
-    TopicInventoryRequest, TruncationReason, VisibilityBasis, VisibilitySignals, VisibilityState,
-    CHECK_CONTRACT_VERSION, CHECK_PLAN_CONTRACT, CHECK_RESULT_CONTRACT, FRAME_MAX_BYTES,
-    MAX_CHECK_ENTRIES, MESSAGE_MAX_CHARS, PART_MAX_BASE64_CHARS, REDACTED,
+    FrameExpectations, Gating, OverallState, Referent, RosterRef, SourceConnectionRequest,
+    StaleReason, Stream, TopicEntry, TopicInventoryRequest, TruncationReason, VisibilityBasis,
+    VisibilitySignals, VisibilityState, CHECK_CONTRACT_VERSION, CHECK_PLAN_CONTRACT,
+    CHECK_RESULT_CONTRACT, FRAME_MAX_BYTES, MAX_CHECK_ENTRIES, MESSAGE_MAX_CHARS,
+    PART_MAX_BASE64_CHARS, REDACTED,
 };
 use logweir_core::destination::{
     Addressing, DestinationLocation, DestinationRole, StorageProvider, TransportSecurity,
@@ -112,6 +113,8 @@ fn plan_kind_discriminators_are_distinct() {
     assert_eq!(CheckPlanKind::TopicInventory.job_discriminator(), "td");
     assert_eq!(CheckPlanKind::RestorePreflight.job_discriminator(), "rp");
     assert_eq!(CheckPlanKind::EvidenceFetch.job_discriminator(), "ev");
+    assert_eq!(CheckPlanKind::SourceConnection.job_discriminator(), "sc");
+    assert_eq!(CheckPlanKind::SourceConnection.as_str(), "sourceConnection");
 }
 
 // ---------------------------------------------------------------- the plan
@@ -351,6 +354,66 @@ fn a_destination_access_plan_needs_between_one_and_four_roles() {
     };
     r.roles.clear();
     assert!(plan.validate().is_err());
+}
+
+/// A `sourceConnection` plan carries ONE connection and there is no field on
+/// it for anything else.
+///
+/// THE ABSENCES ARE THE CONTRACT, and this is where they are enforced. A
+/// connectivity check is the one kind whose whole promise is negative — it
+/// reads no destination, loads no signing key and names no topic — so the
+/// promise is kept by a type with one field and `deny_unknown_fields`, refused
+/// in the runner's step 4 before a socket exists.
+///
+/// MUTANT: delete `deny_unknown_fields` from `SourceConnectionRequest`. Both
+/// arms below start parsing, and a controller that rendered a destination into
+/// a connectivity plan would have it silently dropped instead of refused —
+/// which is a check that did LESS than the controller believed it did, the
+/// exact failure `an_unknown_plan_field_is_refused` exists for.
+#[test]
+fn a_source_connection_plan_carries_a_connection_and_nothing_else() {
+    let plan = CheckPlan {
+        contract: CHECK_PLAN_CONTRACT.into(),
+        contract_version: CHECK_CONTRACT_VERSION,
+        subject_uid: "u".into(),
+        timeout_seconds: 120,
+        policy_digest: None,
+        request: CheckRequest::SourceConnection(SourceConnectionRequest {
+            connection: connection(),
+        }),
+    };
+    assert!(plan.validate().is_ok());
+    assert_eq!(plan.kind(), CheckPlanKind::SourceConnection);
+
+    let bytes = plan_bytes(&plan);
+    let round: CheckPlan =
+        CheckPlan::parse_and_verify(&bytes, &sha256_prefixed(&bytes), "u").expect("it parses");
+    assert_eq!(round.request, plan.request);
+
+    // The wire name is the kind's, once: `CheckRequest` is externally tagged.
+    let v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert!(v["request"]["sourceConnection"]["connection"].is_object());
+    assert!(v["request"]["sourceConnection"]["destination"].is_null());
+
+    for field in ["destination", "signerPath", "topics"] {
+        let mut v: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        v["request"]["sourceConnection"][field] = serde_json::json!("anything");
+        let bytes = serde_json::to_vec(&v).unwrap();
+        let err = CheckPlan::parse_and_verify(&bytes, &sha256_prefixed(&bytes), "u").unwrap_err();
+        assert!(
+            matches!(err, CheckPlanError::Parse(_)),
+            "`{field}` in a sourceConnection request must be a REFUSAL, not a field the runner              drops on the floor: {err:?}"
+        );
+    }
+
+    // The plan-wide budget is still the only ceiling it has, and it is real.
+    let mut plan = plan;
+    plan.timeout_seconds = 0;
+    assert!(plan.validate().is_err());
+    plan.timeout_seconds = 601;
+    assert!(plan.validate().is_err());
+    plan.timeout_seconds = 600;
+    assert!(plan.validate().is_ok());
 }
 
 // ------------------------------------------------------------------ frames
