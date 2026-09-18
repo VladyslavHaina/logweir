@@ -386,4 +386,26 @@ fn the_policy_template_names_both_cross_field_rules_in_its_refusals() {
         "the refusal says WHY it is a render-time error and not a runtime one: a policy the \
          parser refuses discards every attestation and every evidence location silently"
     );
+
+    // AND THE CONDITIONS ARE LIVE. Pinning the MESSAGES alone was not enough
+    // and a mutant proved it: replacing `{{- if lt $maxTotal $maxNs -}}` with
+    // `{{- if false -}}` leaves both `fail`s and both message strings exactly
+    // where they were, so a text scan passes over a template that refuses
+    // nothing. `scripts/check-chart.sh` renders the two inverted pairs and is
+    // the live proof; this is the cheap half that says which comparison each
+    // `fail` hangs off.
+    for condition in [
+        "{{- if lt $maxTotal $maxNs -}}",
+        "{{- if gt $defaultMax $hardMax -}}",
+    ] {
+        assert!(
+            code.contains(condition),
+            "templates/policy.yaml must guard its refusal with `{condition}`; a `fail` behind a \
+             condition that cannot fire is a message nobody ever reads"
+        );
+    }
+    assert!(
+        !code.contains("{{- if false -}}"),
+        "a disabled guard in the policy template"
+    );
 }
