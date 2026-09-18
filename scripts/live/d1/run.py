@@ -40,14 +40,25 @@ from typing import Any, Callable
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import fixture  # noqa: E402
+from fence import fenced  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 STAMP = os.environ.get("LOGWEIR_D1_STAMP") or dt.datetime.now(dt.timezone.utc).strftime(
     "%Y%m%dt%H%M%Sz"
 )
-OWNER = "d1w8"
+# The owner label and namespace are settable so that a second wave can run the
+# same scenarios under its own fence without pretending to be the first one.
+# Defaults are W8's, so an unparameterised invocation behaves exactly as it did.
+OWNER = os.environ.get("LOGWEIR_D1_OWNER") or "d1w8"
 NS = os.environ.get("LOGWEIR_D1_NS") or f"{OWNER}-{STAMP}"
+FENCED = os.environ.get("LOGWEIR_D1_FENCE") == "1"
 LABELS = {"logweir.dev/test-owner": OWNER, "d1.logweir.dev/run": STAMP}
+if FENCED:
+    # The namespaceSelector the ValidatingAdmissionPolicyBinding matches on.
+    # It is set here, on the namespace itself, so the fence is in force from
+    # the instant the namespace exists rather than from the instant the
+    # controller is deployed into it.
+    LABELS["d1fence.logweir.dev/fenced"] = STAMP
 OUT = pathlib.Path(
     os.environ.get("LOGWEIR_D1_OUT")
     or f"/tmp/logweir-roadmap-run/claude/artifacts/d1-live/{STAMP}"
@@ -624,6 +635,19 @@ def setup() -> None:
     kn("rollout", "status", "deploy/kafka", "--timeout=240s", timeout=260)
     kn("wait", "--for=condition=Ready", "pod/d1-mc", "--timeout=180s", timeout=200)
     STATE["environment"]["kafkaPod"] = kafka_pod_name()
+
+    if FENCED:
+        # Before the first object whose status a controller must write. With
+        # the fence up, the shared release cannot write here, so nothing in
+        # this namespace reaches a ready condition until OUR controller runs.
+        STATE["environment"]["fencedController"] = fenced.deploy(sys.modules[__name__])
+        STATE["environment"]["fenceProof"] = fenced.prove(sys.modules[__name__])
+        artifact("fence-proof.json", STATE["environment"]["fenceProof"])
+        if not STATE["environment"]["fenceProof"]["fenced"]:
+            raise RuntimeError(
+                "the fence is not proven; refusing to run scenarios that assume it: "
+                + json.dumps(STATE["environment"]["fenceProof"], sort_keys=True)[:800]
+            )
 
     dest = apply(fixture.destination(NS, DEST, dict(LABELS), f"d1/{STAMP}"))
     STATE["environment"]["destinationUid"] = dest["metadata"]["uid"]
@@ -2621,7 +2645,15 @@ TASK_SCENARIOS = {
 # next runs"; "policy never creates an unbounded backlog") that D1 §13.2 does
 # not give an L- number. Counted separately so it can never flatter a
 # scenario table.
-ACCEPTANCE_EVIDENCE = {"PLAT-04.2": ["L-04-preview", "L-04-cap"]}
+# `L-04-2b`, `L-05.2-1rv` and `L-05.2-2u` are here and NOT in `TASK_SCENARIOS`
+# on purpose. The first measures the same decision as L-04-2's catch-up half
+# without a real outage, so it must never stand in for it; the other two are
+# clauses INSIDE numbered rows that already have their own line, so counting
+# them again would inflate PLAT-05.2's table.
+ACCEPTANCE_EVIDENCE = {
+    "PLAT-04.2": ["L-04-preview", "L-04-cap", "L-04-2b"],
+    "PLAT-05.2": ["L-05.2-1rv", "L-05.2-2u"],
+}
 
 # Why a scenario could not be measured in THIS environment. Each of these is a
 # missing capability, named exactly, not a judgement that the behaviour is
@@ -2677,6 +2709,15 @@ NOT_RUN_REASONS = {
                "time, which the apache/kafka entrypoint does not do from environment alone; "
                "building that broker was out of this run's budget and is PLAT-07's ground."),
 }
+
+
+# The eight environment-limited rows, registered only when the fence is up:
+# without it they stay `not-run` with the reason above, which is the honest
+# record and the one this import must not quietly overwrite.
+if FENCED:
+    from fence import rows as _fence_rows  # noqa: E402
+
+    _fence_rows.register(sys.modules[__name__])
 
 
 def register_not_run() -> None:
@@ -2825,11 +2866,34 @@ def cleanup() -> None:
     log(f"cleanup: {proof['state']}, after={proof['afterDelete']}")
 
 
+def fence_pre() -> None:
+    """Create the cluster-scoped half of the fence BEFORE the namespace exists.
+
+    Order matters and this is why it is its own phase: the binding selects the
+    namespace by a label, so if the namespace were created first there would be
+    a window — however short — in which the shared controller could see and
+    write objects here. Requires the cluster lock.
+    """
+    STATE["environment"]["fence"] = fenced.create_fence(sys.modules[__name__])
+    save()
+    log(f"fence: {STATE['environment']['fence']}")
+
+
+def fence_teardown() -> None:
+    STATE["environment"]["fenceTeardown"] = fenced.teardown(sys.modules[__name__])
+    save()
+    log(f"fence teardown: {STATE['environment']['fenceTeardown']}")
+
+
 def main(argv: list[str]) -> int:
     load()
     phases = argv or ["setup"]
     for phase in phases:
-        if phase == "setup":
+        if phase == "fence-pre":
+            fence_pre()
+        elif phase == "fence-teardown":
+            fence_teardown()
+        elif phase == "setup":
             setup()
         elif phase == "report":
             report()

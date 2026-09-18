@@ -92,9 +92,37 @@ NAMESPACED_OTHER: dict[str, frozenset[str]] = {
     "events.k8s.io/v1": frozenset({"events"}),
 }
 
+def parse_arm(query: str) -> dict[str, object] | None:
+    """Build an arming record from a `/__arm` query string.
+
+    `PLAT04_ARM` sets one BEFORE the first request, which is the only way to
+    hold a request the controller sends in the first second after a restart:
+    the proxy and the controller start in the same pod, so a scenario that
+    armed over the control API would always be racing it. L-05.2-3 needs
+    exactly that — "the proxy answers the FIRST migration PATCH after restart
+    with 409" — and a race would silently turn it into "some later PATCH".
+    """
+    if not query:
+        return None
+    values = urllib.parse.parse_qs(query.lstrip("?"))
+    kind = values.get("kind", [""])[0]
+    if not kind:
+        return None
+    return {
+        "kind": kind,
+        "name": values.get("name", [""])[0],
+        "mode": values.get("mode", ["pause"])[0],
+        "code": int(values.get("code", ["503"])[0]),
+        "after": int(values.get("after", ["0"])[0]),
+        "repeat": values.get("repeat", ["false"])[0] == "true",
+        "seen": 0,
+        "fired": 0,
+    }
+
+
 LOCK = threading.Lock()
 RELEASE = threading.Event()
-ARM: dict[str, object] | None = None
+ARM: dict[str, object] | None = parse_arm(os.environ.get("PLAT04_ARM", ""))
 FAULT_404_NAME: str | None = None
 CAPTURES: list[dict[str, object]] = []
 COUNTS: dict[str, int] = {}
@@ -375,17 +403,7 @@ class Handler(BaseHTTPRequestHandler):
             self.json_response(200, {"reset": True, "at": time.time()})
             return True
         if parsed.path == "/__arm":
-            query = urllib.parse.parse_qs(parsed.query)
-            armed: dict[str, object] = {
-                "kind": query.get("kind", [""])[0],
-                "name": query.get("name", [""])[0],
-                "mode": query.get("mode", ["pause"])[0],
-                "code": int(query.get("code", ["503"])[0]),
-                "after": int(query.get("after", ["0"])[0]),
-                "repeat": query.get("repeat", ["false"])[0] == "true",
-                "seen": 0,
-                "fired": 0,
-            }
+            armed = parse_arm(parsed.query) or {}
             with LOCK:
                 ARM = armed
                 FORWARDED.clear()
