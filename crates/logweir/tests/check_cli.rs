@@ -1934,6 +1934,38 @@ fn a_connection_that_does_not_authenticate_blocks_the_topic_row() {
     assert_eq!(blocked.state, CheckState::Unknown);
 }
 
+/// **D2 §6.3's acceptance sentence names "check time AND scope".** The row an
+/// operator reads is the one that FAILED, and both of `authenticated`'s early
+/// returns used to drop the scope on the floor — so `connection.authenticated
+/// notReady` reached the live status with `scope: null` while the blocked
+/// `topicsDescribable` beside it carried one
+/// (`objects/s14/notready-rows.json`).
+///
+/// Both probes, because the two returns are separate lines and a fix to one is
+/// not a fix to the other.
+#[test]
+fn a_connection_row_that_fails_still_names_its_principal() {
+    for probe in [
+        FakeProbe::new().failing_cluster_id(CheckCode::BrokerUnreachable, "no broker answered"),
+        FakeProbe::new().failing_listing(CheckCode::AuthenticationFailed, "the broker refused"),
+    ] {
+        let m = mount(&readiness_plan(vec!["orders"], false, None));
+        let run = drive(&m, &FakeWiring::default().with_probe(probe));
+        let row = run.row(CheckId::ConnectionAuthenticated);
+        assert_eq!(row.state, CheckState::NotReady, "{:?}", row.code);
+        let scope = row
+            .scope
+            .as_ref()
+            .unwrap_or_else(|| panic!("`{}` carries no scope", row.code));
+        assert_eq!(scope.kind, "KafkaCluster");
+        assert_eq!(
+            scope.name,
+            connection().principal,
+            "the scope names the identity this check actually exercised"
+        );
+    }
+}
+
 #[test]
 fn a_metadata_timeout_is_unknown_and_not_not_ready() {
     let m = mount(&readiness_plan(vec![], false, None));
@@ -2166,7 +2198,16 @@ fn an_evidence_fetch_whose_handle_fails_relays_nothing() {
 // ===========================================================================
 
 const PLAN_FILE: &str = "/check/plan.yaml";
-const MANIFEST_KEY: &str = "kafka-backups/20260915T030000Z/manifest.json";
+/// The destination's `storage.prefix`, as `location()` declares it.
+const ARCHIVE_PREFIX: &str = "kafka-backups";
+/// The manifest key the CONTROLLER renders into a check plan: `<backupId>/
+/// manifest.json`, the archive's own convention, RELATIVE to the prefix
+/// (`build_job_shape`, and `Store::qualify`'s header). The runner joins the
+/// prefix — this fixture used to carry it already, which is exactly how
+/// D2-PREFLIGHT-PREFIX went unnoticed by every test in this file.
+const MANIFEST_KEY: &str = "20260915T030000Z/manifest.json";
+/// Where that manifest actually IS in the bucket.
+const MANIFEST_OBJECT_KEY: &str = "kafka-backups/20260915T030000Z/manifest.json";
 const BACKUP_ID: &str = "20260915T030000Z";
 
 /// A restore spec whose recovery point sits inside the fixture manifest's
@@ -2267,8 +2308,8 @@ fn restore_plan(yaml: &str, sha_override: Option<&str>) -> CheckPlan {
 /// segments, under the destination's prefix.
 fn archive_objects(manifest: &serde_json::Value) -> FakeObjects {
     let mut o = FakeObjects::new()
-        .with_prefix("kafka-backups")
-        .with_object(MANIFEST_KEY, &serde_json::to_vec(manifest).unwrap());
+        .with_prefix(ARCHIVE_PREFIX)
+        .with_object(MANIFEST_OBJECT_KEY, &serde_json::to_vec(manifest).unwrap());
     for i in 0..2 {
         o = o.with_object(
             &format!("kafka-backups/{BACKUP_ID}/topics/orders/partition=0/segment-{i}.bin"),
@@ -2559,8 +2600,8 @@ fn a_segment_the_manifest_names_and_the_archive_lacks_is_reported_with_details()
     let m = mount(&restore_plan(&yaml, None));
     let manifest = manifest_json();
     let partial = FakeObjects::new()
-        .with_prefix("kafka-backups")
-        .with_object(MANIFEST_KEY, &serde_json::to_vec(&manifest).unwrap())
+        .with_prefix(ARCHIVE_PREFIX)
+        .with_object(MANIFEST_OBJECT_KEY, &serde_json::to_vec(&manifest).unwrap())
         .with_object(
             &format!("kafka-backups/{BACKUP_ID}/topics/orders/partition=0/segment-0.bin"),
             b"segment",
@@ -2585,6 +2626,139 @@ fn a_segment_the_manifest_names_and_the_archive_lacks_is_reported_with_details()
     )
     .unwrap();
     assert!(details.contains("segment-1.bin"), "{details}");
+    // D2-REDACT-OVERBROAD: the details document exists to carry the key an
+    // operator has to go and recover, and it used to read `[redacted].bin`.
+    assert!(
+        details.contains(&format!(
+            "kafka-backups/{BACKUP_ID}/topics/orders/partition=0/segment-1.bin"
+        )),
+        "the missing segment's whole key must reach the details stream: {details}"
+    );
+}
+
+/// **D2-PREFLIGHT-PREFIX.** A destination with a `storage.prefix` — which is
+/// every destination the live run used — gets the same answers as a
+/// prefix-less one.
+///
+/// The live finding (`d2w14.result.md` §5.2, `objects/s16/preflight-pf-flat.
+/// json`): `dest-a` with `prefix: team/prod` answered `archive.backupSet
+/// notReady/AccessDenied` for a manifest `mc` reads as the same principal at
+/// `lw-a/team/prod/<id>/manifest.json`, while `dest-c` with no prefix answered
+/// `ready/ManifestReadable` for the same set. No restore preflight could be
+/// green for any prefixed destination, so a green preview was reachable only
+/// prefix-less.
+///
+/// The fixture places every object where the backup engine writes it —
+/// `<prefix>/<backupId>/…`, with the manifest naming its segments RELATIVE —
+/// and hands the request the relative `manifest_key` the controller renders.
+#[test]
+fn a_prefixed_destination_reads_its_manifest_and_its_segments() {
+    let yaml = restore_yaml(&ms_to_rfc3339(INSIDE_MS), &["orders"], "scratch");
+    let m = mount(&restore_plan(&yaml, None));
+    let probe = FakeProbe::new()
+        .with_presence("logweir.scratch", TopicPresence::Present { partitions: 1 })
+        .default_presence(TopicPresence::NotFound);
+
+    // A DEEP, MULTI-SEGMENT PREFIX, because a one-component one would pass a
+    // `trim`-shaped fix by accident.
+    let prefix = "team/prod/archives";
+    let manifest = manifest_json();
+    let mut objects = FakeObjects::new().with_prefix(prefix).with_object(
+        &format!("{prefix}/{MANIFEST_KEY}"),
+        &serde_json::to_vec(&manifest).unwrap(),
+    );
+    for i in 0..2 {
+        objects = objects.with_object(
+            &format!("{prefix}/{BACKUP_ID}/topics/orders/partition=0/segment-{i}.bin"),
+            b"segment",
+        );
+    }
+    let run = drive(
+        &m,
+        &FakeWiring::default()
+            .with_file(PLAN_FILE, yaml.as_bytes())
+            .with_probe(probe)
+            .with_role(DestinationRole::ArchiveRead, objects),
+    );
+
+    let set = run.row(CheckId::ArchiveBackupSet);
+    assert_eq!(
+        set.code,
+        CheckCode::ManifestReadable,
+        "a prefixed destination could not read its own manifest: {}",
+        set.message
+    );
+    assert_eq!(set.state, CheckState::Ready);
+    assert_eq!(
+        run.row(CheckId::ArchiveSegments).code,
+        CheckCode::SegmentsPresent,
+        "`expected` and `listed` were compared in two different key spaces"
+    );
+    assert_eq!(run.row(CheckId::ArchiveCoverage).state, CheckState::Ready);
+
+    // THE NEGATIVE HALF, in the same key space: the manifest is there and one
+    // segment is not, so the row is `SegmentMissing` and names the PREFIXED
+    // key. A fix that simply stopped listing would pass the row above.
+    let mut partial = FakeObjects::new().with_prefix(prefix).with_object(
+        &format!("{prefix}/{MANIFEST_KEY}"),
+        &serde_json::to_vec(&manifest).unwrap(),
+    );
+    partial = partial.with_object(
+        &format!("{prefix}/{BACKUP_ID}/topics/orders/partition=0/segment-0.bin"),
+        b"segment",
+    );
+    let run = drive(
+        &m,
+        &FakeWiring::default()
+            .with_file(PLAN_FILE, yaml.as_bytes())
+            .with_probe(FakeProbe::new())
+            .with_role(DestinationRole::ArchiveRead, partial),
+    );
+    let row = run.row(CheckId::ArchiveSegments);
+    assert_eq!(row.code, CheckCode::SegmentMissing);
+    assert_eq!(row.detail.as_ref().unwrap()["count"], 1);
+    let details = String::from_utf8(
+        run.relay
+            .as_ref()
+            .unwrap()
+            .stream(Stream::Details)
+            .unwrap()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        details.contains(&format!(
+            "{prefix}/{BACKUP_ID}/topics/orders/partition=0/segment-1.bin"
+        )),
+        "the missing key is the one an operator must go and look for: {details}"
+    );
+}
+
+/// The manifest key a refusal NAMES is the qualified one, so an operator can
+/// paste it into `mc` — which is exactly how the live run established that the
+/// object was readable and the check was wrong.
+#[test]
+fn an_unreadable_manifest_names_the_prefixed_key() {
+    let yaml = restore_yaml(&ms_to_rfc3339(INSIDE_MS), &["orders"], "scratch");
+    let m = mount(&restore_plan(&yaml, None));
+    let run = drive(
+        &m,
+        &FakeWiring::default()
+            .with_file(PLAN_FILE, yaml.as_bytes())
+            .with_probe(FakeProbe::new())
+            .with_role(
+                DestinationRole::ArchiveRead,
+                FakeObjects::new().with_prefix(ARCHIVE_PREFIX),
+            ),
+    );
+    let row = run.row(CheckId::ArchiveBackupSet);
+    assert_eq!(row.code, CheckCode::BackupSetNotFound);
+    assert!(
+        row.message.contains(MANIFEST_OBJECT_KEY),
+        "the message names `{}` rather than the key that was read: {}",
+        MANIFEST_OBJECT_KEY,
+        row.message
+    );
 }
 
 /// The bound arithmetic is the execution guard's, including the
@@ -4269,8 +4443,8 @@ fn the_details_stream_is_redacted_like_every_other_stream() {
         format!("{BACKUP_ID}/topics/orders/partition=0/segment-{PLANTED_KEY_ID}.bin"),
     );
     let partial = FakeObjects::new()
-        .with_prefix("kafka-backups")
-        .with_object(MANIFEST_KEY, &serde_json::to_vec(&manifest).unwrap())
+        .with_prefix(ARCHIVE_PREFIX)
+        .with_object(MANIFEST_OBJECT_KEY, &serde_json::to_vec(&manifest).unwrap())
         .with_object(
             &format!("kafka-backups/{BACKUP_ID}/topics/orders/partition=0/segment-0.bin"),
             b"segment",
@@ -4549,8 +4723,9 @@ fn a_marker_row_says_whether_create_only_was_enforced() {
     );
 }
 
-/// **F7.** The two readiness-marker messages name the key FAMILY, which
-/// survives redaction, rather than the whole key, which does not.
+/// **F7.** The two readiness-marker messages name the key FAMILY rather than
+/// the whole key — and, since D2-REDACT-OVERBROAD, the whole key survives the
+/// redactor too.
 #[test]
 fn the_marker_messages_name_a_family_that_survives_redaction() {
     let family = logweir::check::store::MARKER_PREFIX;
@@ -4559,10 +4734,19 @@ fn the_marker_messages_name_a_family_that_survives_redaction() {
         family,
         "the key family must survive redaction or the message says nothing"
     );
-    // The whole key does NOT, which is the finding: `/`, `-` and a UUID's hex
-    // are all in the base64 alphabet, so the long-run rule eats it.
+    // F7's ORIGINAL finding was that the whole key did not survive: `/`, `-`
+    // and a UUID's hex are all in the base64 alphabet, so the long-run rule ate
+    // `logweir/readiness/<uid>` entire. That is the same rule that blanked the
+    // missing segment's path and the `signerKeyId` in the D2 live run, and it
+    // now exempts a run whose `/` components are public identifiers. The
+    // message still names the family — an operator wants the family, not one
+    // probe's UID — but redaction is no longer the reason.
     let whole = logweir::check::store::absent_probe_key(DEST_UID);
-    assert_ne!(logweir_core::check_contract::redact(&whole), whole);
+    assert_eq!(
+        logweir_core::check_contract::redact(&whole),
+        whole,
+        "an object key built from a UUID is a public identifier"
+    );
 
     let m = mount(&access_plan(
         vec![

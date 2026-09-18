@@ -60,13 +60,23 @@ pub fn authenticated(
     scope: Option<logweir_core::check_contract::CheckScope>,
     now: chrono::DateTime<chrono::Utc>,
 ) -> (CheckOutcome, Option<String>) {
+    // THE SCOPE IS ON THE FAILURE ROWS TOO. It used to be applied only after
+    // both probes came back, so the row that carried the scope was always the
+    // one that had nothing to say and `connection.authenticated
+    // notReady/BrokerUnreachable` — the row an operator reads — reached the
+    // status with `scope: null` (D2 §6.3's acceptance sentence names "check
+    // time AND scope"; `objects/s14/notready-rows.json`).
+    let scoped = |row: CheckOutcome| match scope.clone() {
+        Some(s) => row.with_scope(s),
+        None => row,
+    };
     let cluster_id = match probe.cluster_id() {
         Ok(c) => c,
-        Err(f) => return (from_broker_failure(id, &f, now), None),
+        Err(f) => return (scoped(from_broker_failure(id, &f, now)), None),
     };
     let listing = match probe.list_topics() {
         Ok(l) => l,
-        Err(f) => return (from_broker_failure(id, &f, now), cluster_id),
+        Err(f) => return (scoped(from_broker_failure(id, &f, now)), cluster_id),
     };
     let mut row = ready(id, CheckCode::Authenticated, now)
         .with_message("the broker answered a metadata request for this principal")
@@ -151,7 +161,11 @@ pub fn topics_describable(
 /// does not redact, and a rule with two exceptions is a rule a reader has to
 /// remember. It is [`crate::check::redact_path`] rather than the whole-string
 /// form, because a sample is a segment key or a topic name and the long-run
-/// rule would eat an ordinary key entire (reviewer finding F7).
+/// rule used to eat an ordinary key entire (reviewer finding F7). Since
+/// D2-REDACT-OVERBROAD the whole-string form keeps an object key as well; the
+/// per-segment form stays because it is the STRICTER of the two — it still
+/// redacts a forty-character component inside a path that the whole-string
+/// rule would read as anchored.
 #[must_use]
 pub fn detail(names: &[String]) -> serde_json::Value {
     serde_json::json!({

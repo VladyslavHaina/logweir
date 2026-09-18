@@ -267,7 +267,23 @@ fn archive_checks(
         }
     };
 
-    let bytes = match access.get(&req.manifest_key) {
+    // THE PREFIX IS JOINED HERE, ONCE, AND EVERY LATER KEY IS DERIVED FROM
+    // THE RESULT. `RestorePreflightRequest::manifest_key` is the archive's own
+    // convention — `<backupId>/manifest.json`, RELATIVE to the destination's
+    // `storage.prefix`, which is how the backup engine writes it and how the
+    // manifest names its own segments — and `ObjectAccess::get` and
+    // `list_page` operate in the fully-qualified key space. Reading it
+    // unqualified made every restore preflight against a prefixed destination
+    // answer `archive.backupSet notReady AccessDenied` for a manifest the same
+    // principal reads with `mc`, because the object is not at the bucket root
+    // and listing the root is denied (D2-PREFLIGHT-PREFIX; `d2w14.result.md`
+    // §5.2, `objects/s16/preflight-pf-flat.json`). It is the same fix
+    // `Store::segment_keys_for` already carries, in the one place that had
+    // been left out, and `segment_keys_for_topics` below has always qualified
+    // — so `expected` and `listed` were being compared in two different key
+    // spaces as well.
+    let manifest_key = access.qualify(&req.manifest_key);
+    let bytes = match access.get(&manifest_key) {
         Ok(b) => b,
         Err(e) => {
             let class = store::classify(&e);
@@ -284,9 +300,9 @@ fn archive_checks(
                 checks.push(
                     catalogue::outcome(CheckId::ArchiveBackupSet, state_for(code), code, now)
                         .with_message(&format!(
-                            "the backup manifest `{}` on destination `{}` could not be read: \
-                             {class}",
-                            req.manifest_key, dest.name
+                            "the backup manifest `{manifest_key}` on destination `{}` could not \
+                             be read: {class}",
+                            dest.name
                         ))
                         .with_remedy(remedy_for(code))
                         .with_scope(scope),
@@ -314,8 +330,7 @@ fn archive_checks(
                         now,
                     )
                     .with_message(&format!(
-                        "the object at `{}` is not a backup manifest",
-                        req.manifest_key
+                        "the object at `{manifest_key}` is not a backup manifest"
                     ))
                     .with_remedy(remedy_for(CheckCode::ManifestUnreadable))
                     .with_scope(scope),
@@ -475,10 +490,15 @@ fn segments_row(
     let expected = archive::segment_keys_for_topics(manifest, &spec.source.topics, want, &|k| {
         access.qualify(k)
     });
-    // `<prefix>/<backupId>` — the manifest key's own directory, so the listing
-    // and the manifest cannot disagree about which set is being checked.
-    let set_prefix = req
-        .manifest_key
+    // `<storage.prefix>/<backupId>` — the QUALIFIED manifest key's own
+    // directory, so the listing and the manifest cannot disagree about which
+    // set is being checked, and neither can the listing and `expected`:
+    // `segment_keys_for_topics` above qualifies every key it lifts out of the
+    // manifest body, so a set prefix taken from the unqualified request would
+    // have compared two different key spaces and reported every segment of a
+    // present set as missing (D2-PREFLIGHT-PREFIX).
+    let set_prefix = access
+        .qualify(&req.manifest_key)
         .trim_end_matches("/manifest.json")
         .to_string();
     let listed = match access.list_bounded(&set_prefix, SEGMENT_LIST_LIMIT + 1) {
