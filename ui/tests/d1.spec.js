@@ -566,6 +566,35 @@ test("the_intent_is_a_field_of_the_draft_and_a_reload_genuinely_ends_it", () => 
   dropDraft(key);
 });
 
+test("two_page_loads_never_mint_the_same_first_intent", async () => {
+  // THE ARM THAT CAN ACTUALLY SEE REVIEW F3, and the reason it is separate.
+  // Within ONE page load a counter is unique too -- a zero-padded counter is
+  // even 32 hex-legal characters -- so the shape check and the no-duplicates
+  // check above both pass for the defect. What the defect IS is that a SECOND
+  // page load starts the counter again and reproduces the first key.
+  //
+  // A SECOND MODULE INSTANCE IS A SECOND PAGE LOAD. Importing the page module
+  // under a distinct specifier gives it its own module state -- its own
+  // counter, if it had one -- and dropping the draft between the two is the
+  // other half of a reload, because the draft registry does not survive one
+  // either. Nothing here touches the network or a DOM.
+  const loadA = await import("../pages/schedules.js?pageLoad=A");
+  const loadB = await import("../pages/schedules.js?pageLoad=B");
+  assert.notEqual(loadA, loadB, "two distinct module instances");
+  const key = formKey("two-loads-ns", RUN_NOW_FORM, "nightly");
+  const first = loadA.intentFor(key);
+  dropDraft(key); // the reload
+  const second = loadB.intentFor(key);
+  assert.notEqual(second, first,
+    "the FIRST intent of a new page load is not the first intent of the old one. A counter " +
+      "that resets on load makes those two equal, which is what made 'a click after a reload " +
+      "is a new run' false in every place this product says it");
+  assert.notEqual(loadA.mintIntent(), loadB.mintIntent(),
+    "and the mint itself is not order-dependent: the nth mint of one load is not the nth mint " +
+      "of another");
+  dropDraft(key);
+});
+
 test("the_body_is_the_schedule_and_the_revision_and_no_policy_at_all", async () => {
   let sent = null;
   let key = null;
