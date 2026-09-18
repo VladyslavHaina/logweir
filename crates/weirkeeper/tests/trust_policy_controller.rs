@@ -1247,3 +1247,174 @@ fn the_status_shape_is_the_crds_own() {
     assert!(status.keys.is_none());
     assert!(status.conflicts.is_none());
 }
+
+// ---------------------------------------------------------------------------
+// TRUST-EXPIRY-LAG — the requeue arithmetic, and what a policy's clock owes
+// ---------------------------------------------------------------------------
+
+/// [`requeue_before`]'s four rows, and the bound that makes it safe.
+///
+/// KILLS: "believe the deadline whatever it is" — a deadline in the past would
+/// become `Action::requeue(0)` and spin this controller against the API server;
+/// and "ignore the deadline", which is the shipped behaviour the defect names.
+#[test]
+fn a_boundary_requeue_is_bounded_at_both_ends() {
+    use weirkeeper::controllers::trust_policy::{requeue_before, HEARTBEAT, MIN_REQUEUE};
+    let now = at("2026-09-18T21:00:00Z");
+
+    assert_eq!(
+        requeue_before(None, now),
+        HEARTBEAT,
+        "no deadline is the plain heartbeat, which is what keeps `evaluatedAt` moving"
+    );
+    assert_eq!(
+        requeue_before(Some(now + chrono::Duration::seconds(120)), now),
+        std::time::Duration::from_secs(120),
+        "a deadline inside the heartbeat is waited for EXACTLY — no slack, because the window \
+         is half-open and a pass at the instant already computes the refusal"
+    );
+    assert_eq!(
+        requeue_before(Some(now + chrono::Duration::days(30)), now),
+        HEARTBEAT,
+        "a distant deadline does not wake this controller early"
+    );
+    assert_eq!(
+        requeue_before(Some(now - chrono::Duration::seconds(1)), now),
+        HEARTBEAT,
+        "A DEADLINE IN THE PAST IS NOT A DEADLINE. The pass that computed it already wrote the \
+         post-boundary verdict, so re-arming would be a hot loop against the API server"
+    );
+    assert_eq!(
+        requeue_before(Some(now + chrono::Duration::milliseconds(10)), now),
+        MIN_REQUEUE,
+        "…and a deadline already upon us is floored rather than becoming requeue(0)"
+    );
+    // The stated range, over a sweep rather than at the four corners.
+    for secs in [-86_400, -1, 0, 1, 59, 299, 300, 301, 86_400] {
+        let d = requeue_before(Some(now + chrono::Duration::seconds(secs)), now);
+        assert!(
+            d >= MIN_REQUEUE && d <= HEARTBEAT,
+            "requeue_before is always in [MIN_REQUEUE, HEARTBEAT]; {secs} s gave {d:?}"
+        );
+    }
+}
+
+/// The earliest instant a policy's own status changes with nobody editing it.
+///
+/// KILLS: "watch `notAfter` only" — a key that becomes valid, or one crossing
+/// the `ExpiringSoon` horizon, are transitions this controller writes and no
+/// edit announces either; and "take the earliest boundary, past ones included",
+/// which would peg the requeue at the floor for every expired key for ever.
+#[test]
+fn a_policy_wakes_at_the_next_instant_its_own_status_changes() {
+    use weirkeeper::controllers::trust_policy::next_clock_change;
+    let now = at("2026-09-18T21:00:00Z");
+    let soon = at("2026-09-18T21:10:55Z");
+
+    // notAfter tomorrow: the ExpiringSoon horizon is 30 days BEHIND us, so the
+    // next change is the expiry itself.
+    let expiring = weirkeeper::trust::from_policy(&policy(
+        "p",
+        &[],
+        true,
+        vec![TrustedKey {
+            not_after: soon,
+            ..evidence_key()
+        }],
+    ));
+    assert_eq!(next_clock_change(&expiring.keys, now), Some(soon));
+
+    // A key whose window has not opened: `notBefore` comes first.
+    let later = at("2026-09-18T21:05:00Z");
+    let staged = weirkeeper::trust::from_policy(&policy(
+        "p",
+        &[],
+        true,
+        vec![TrustedKey {
+            not_before: later,
+            not_after: at("2027-01-01T00:00:00Z"),
+            ..evidence_key()
+        }],
+    ));
+    assert_eq!(
+        next_clock_change(&staged.keys, now),
+        Some(later),
+        "§7.6 step 1 stages a successor before the cutover, and the cutover is a status change"
+    );
+
+    // A distant key: the ExpiringSoon horizon is the next thing that moves.
+    let far = at("2027-06-01T00:00:00Z");
+    let distant = weirkeeper::trust::from_policy(&policy(
+        "p",
+        &[],
+        true,
+        vec![TrustedKey {
+            not_after: far,
+            ..evidence_key()
+        }],
+    ));
+    assert_eq!(
+        next_clock_change(&distant.keys, now),
+        Some(far - chrono::Duration::days(30)),
+        "`ExpiringSoon` is a condition this controller writes on a timer nobody edits"
+    );
+
+    // Everything already past: nothing left for a clock to change.
+    let done = weirkeeper::trust::from_policy(&policy(
+        "p",
+        &[],
+        true,
+        vec![TrustedKey {
+            not_before: at("2020-01-01T00:00:00Z"),
+            not_after: at("2020-06-01T00:00:00Z"),
+            ..evidence_key()
+        }],
+    ));
+    assert_eq!(
+        next_clock_change(&done.keys, now),
+        None,
+        "an expired key has no future boundary, so its policy settles on the heartbeat"
+    );
+    assert!(next_clock_change(&[], now).is_none());
+}
+
+/// The policy reconciler actually USES the deadline it can compute.
+///
+/// A SOURCE SCAN, because `reconcile` is private, needs a client, and the
+/// property is structural: this entry point must not hand back a bare
+/// `HEARTBEAT` while a function that knows the next boundary sits beside it.
+/// The window scanned is the reconciler's own body, so an unrelated `HEARTBEAT`
+/// elsewhere in the file is invisible to it.
+///
+/// KILLS: "leave the policy on the plain heartbeat" — `status.keys[].effectiveState`
+/// would then read `Active` for up to five minutes after the window it names
+/// has closed, which is the same defect the approval had, on the object an
+/// operator is told to consult for exactly this question.
+#[test]
+fn the_policy_reconcile_requeues_at_its_next_boundary() {
+    let src = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/controllers/trust_policy.rs"),
+    )
+    .expect("the reconciler's own source");
+    let start = src
+        .find("async fn reconcile(policy:")
+        .expect("the kube::runtime entry point");
+    let end = src[start..]
+        .find("\n/// Requeue on an error")
+        .map(|i| start + i)
+        .expect("the error policy follows it");
+    let body = &src[start..end];
+    assert!(
+        body.contains("next_clock_change("),
+        "the reconciler has to ASK for the next boundary. Body:\n{body}"
+    );
+    assert!(
+        body.contains("requeue_before("),
+        "…and requeue by it. Body:\n{body}"
+    );
+    assert!(
+        !body.contains("Action::requeue(HEARTBEAT)"),
+        "a bare heartbeat here is the lag `TRUST-EXPIRY-LAG` records, on the object an operator \
+         is told to consult for a key's state. Body:\n{body}"
+    );
+}

@@ -2520,3 +2520,254 @@ fn every_approval_refusal_reason_is_a_condition_reason_that_explains_itself() {
          docs/kubernetes.md §8, which is the one place they are all named."
     );
 }
+
+// ---------------------------------------------------------------------------
+// TRUST-EXPIRY-LAG — the boundary is an instant, not an interval
+// ---------------------------------------------------------------------------
+
+/// One simulated run of this controller across a key's `notAfter`.
+///
+/// **THE VERDICT IS THE REAL ONE AND SO IS THE SCHEDULE.** Each wakeup calls
+/// `approval::evaluate` at that instant — check 6, `may_sign_new`, the whole
+/// chain — and the next wakeup is whatever
+/// `trust_policy::requeue_before(outcome.valid_until(), now)` asks for. Nothing
+/// about the boundary is modelled by hand, so a change to either side moves
+/// this simulation.
+///
+/// Returns the instants the controller woke at, each with the verdict it wrote.
+fn replay_across(not_after: DateTime<Utc>, until: DateTime<Utc>) -> Vec<(DateTime<Utc>, bool)> {
+    let roster = roster_spec(
+        vec![key(APPROVER_KEY_ID, APPROVER_PEM, Some(not_after))],
+        vec![],
+    );
+    let mut written = Vec::new();
+    let mut at = now();
+    while at <= until {
+        let outcome = match evaluate(
+            APPROVAL_DOC.as_bytes(),
+            good_sidecar().as_bytes(),
+            &roster,
+            at,
+            "Restore",
+            PLAN_BYTES.as_bytes(),
+        ) {
+            Ok(v) => ApprovalOutcome::Verified(v),
+            Err(r) => ApprovalOutcome::Refused(r),
+        };
+        written.push((at, outcome.is_verified()));
+        let wait = weirkeeper::controllers::trust_policy::requeue_before(outcome.valid_until(), at);
+        at += Duration::from_std(wait).expect("a requeue is a positive, bounded duration");
+    }
+    written
+}
+
+/// What the OBJECT read at `sample` — the verdict the most recent completed
+/// reconcile wrote, which is what `kubectl get` and every client sees.
+fn read_at(written: &[(DateTime<Utc>, bool)], sample: DateTime<Utc>) -> bool {
+    written
+        .iter()
+        .filter(|(at, _)| *at <= sample)
+        .next_back()
+        .map(|(_, verified)| *verified)
+        .expect("the first reconcile precedes every sample")
+}
+
+/// **The row lab-refresh-4 measured.** Sampling every second across the
+/// approver key's `notAfter`, the object is never read as verified at or after
+/// that instant.
+///
+/// The boundary is placed deliberately mid-heartbeat — `notAfter` at 13:07 with
+/// wakeups that would otherwise fall at 13:00, 13:05 and 13:10 — which is the
+/// shape of the live finding: **22 consecutive samples over 2 m 35 s read
+/// `verified: true` at one unchanged `resourceVersion`** after the key expired.
+///
+/// KILLS: "requeue at the heartbeat regardless" — the shipped behaviour. The
+/// samples between 13:07:00 and 13:10:00 then read the 13:05 verdict, which is
+/// `Verified=True` for an expired key, and PLAT-19.1's acceptance calls stale
+/// expiry information *unknown, not valid*.
+#[test]
+fn no_sample_at_or_after_not_after_reads_verified() {
+    let not_after = now() + Duration::minutes(7);
+    let end = now() + Duration::minutes(20);
+    let written = replay_across(not_after, end);
+
+    let mut samples = 0;
+    let mut stale = Vec::new();
+    let mut t = now();
+    while t <= end {
+        samples += 1;
+        if t >= not_after && read_at(&written, t) {
+            stale.push(t);
+        }
+        t += Duration::seconds(1);
+    }
+    assert!(
+        samples > 1000,
+        "the sweep has to be dense enough to see a gap: {samples}"
+    );
+    assert!(
+        stale.is_empty(),
+        "an expired key read as verified at {} instant(s), the first at {} ({} s after notAfter). \
+         Wakeups: {:?}",
+        stale.len(),
+        stale[0],
+        (stale[0] - not_after).num_seconds(),
+        written
+    );
+    // …and it genuinely read verified BEFORE the boundary, so the sweep is not
+    // passing because the fixture never verified at all.
+    assert!(
+        read_at(&written, not_after - Duration::seconds(1)),
+        "inside the window the approval is verified, or this row proves nothing: {written:?}"
+    );
+}
+
+/// **One wakeup at the boundary, and none earlier than needed.**
+///
+/// KILLS: "requeue at the deadline every time" — a verdict that is not
+/// time-limited would then wake at `MIN_REQUEUE` for ever; and "shorten the
+/// heartbeat instead", which is the other way to close the lag and costs a
+/// write-free reconcile on every approval in the cluster for ever.
+#[test]
+fn the_boundary_costs_exactly_one_extra_wakeup() {
+    let not_after = now() + Duration::minutes(7);
+    let end = now() + Duration::minutes(20);
+    let written = replay_across(not_after, end);
+    let wakeups: Vec<DateTime<Utc>> = written.iter().map(|(at, _)| *at).collect();
+
+    assert_eq!(
+        wakeups.iter().filter(|at| **at == not_after).count(),
+        1,
+        "exactly one wakeup lands ON the boundary: {wakeups:?}"
+    );
+    // THE WHOLE SCHEDULE, because it is deterministic and it is the claim.
+    // A bare heartbeat would wake at 13:00, 13:05, 13:10, 13:15, 13:20; the
+    // deadline replaces the 13:10 wakeup with one at 13:07 and the cadence
+    // resumes from there. So the boundary is not paid for with an extra
+    // reconcile at all over this span — it is paid for with a shifted one.
+    let expected: Vec<DateTime<Utc>> = ["13:00:00", "13:05:00", "13:07:00", "13:12:00", "13:17:00"]
+        .iter()
+        .map(|t| {
+            DateTime::parse_from_rfc3339(&format!("2026-09-09T{t}Z"))
+                .expect("a literal instant")
+                .with_timezone(&Utc)
+        })
+        .collect();
+    assert_eq!(
+        wakeups, expected,
+        "the deadline moves the 13:10 heartbeat to 13:07 and the cadence resumes; it does not \
+         add reconciles and it does not wake early"
+    );
+    for pair in wakeups.windows(2) {
+        let gap = pair[1] - pair[0];
+        assert!(
+            gap >= Duration::seconds(1),
+            "no wakeup is closer than MIN_REQUEUE to the last: {pair:?}"
+        );
+        assert!(
+            gap <= Duration::seconds(300),
+            "and none is later than the heartbeat, so `evaluatedAt` still moves: {pair:?}"
+        );
+    }
+    // …and once the key is expired the deadline is gone, so the cadence is the
+    // plain heartbeat again rather than a boundary this pass keeps re-arming.
+    let after: Vec<DateTime<Utc>> = wakeups
+        .iter()
+        .copied()
+        .filter(|at| *at >= not_after)
+        .collect();
+    for pair in after.windows(2) {
+        assert_eq!(
+            pair[1] - pair[0],
+            Duration::seconds(300),
+            "a past boundary is not a deadline, and must not become a hot loop: {after:?}"
+        );
+    }
+}
+
+/// Only a verdict a CLOCK can withdraw carries a deadline.
+///
+/// KILLS: "give every outcome the matched key's window" — a refusal has no
+/// matched key to speak of, and giving refusals a deadline would wake the
+/// controller early for a verdict that can only change by an edit.
+#[test]
+fn only_a_verified_outcome_is_time_limited() {
+    let not_after = now() + Duration::minutes(7);
+    let roster = roster_spec(
+        vec![key(APPROVER_KEY_ID, APPROVER_PEM, Some(not_after))],
+        vec![],
+    );
+    let verified = evaluate(
+        APPROVAL_DOC.as_bytes(),
+        good_sidecar().as_bytes(),
+        &roster,
+        now(),
+        "Restore",
+        PLAN_BYTES.as_bytes(),
+    )
+    .expect("inside the window");
+    assert_eq!(
+        verified.valid_until, not_after,
+        "the MATCHED key's own window, which is what check 6 asked about"
+    );
+    assert_eq!(
+        ApprovalOutcome::Verified(verified).valid_until(),
+        Some(not_after)
+    );
+
+    let refused = evaluate(
+        APPROVAL_DOC.as_bytes(),
+        good_sidecar().as_bytes(),
+        &roster,
+        not_after + Duration::seconds(1),
+        "Restore",
+        PLAN_BYTES.as_bytes(),
+    )
+    .expect_err("past the window");
+    assert_eq!(
+        ApprovalOutcome::Refused(refused).valid_until(),
+        None,
+        "a refusal becomes a pass only through an edit, and an edit wakes this controller \
+         anyway — waking early for one would be a cost with no verdict behind it"
+    );
+}
+
+/// The approval reconciler actually USES the deadline its outcome carries.
+///
+/// A SOURCE SCAN, for the reason the policy's twin gives: `reconcile` is
+/// private and needs a client, and the property is structural. **It is here
+/// because the simulation above does not cover it** — `replay_across` drives
+/// `requeue_before` directly, so a reconciler that computed a deadline and then
+/// threw it away would leave every assertion in this file green while the live
+/// object lagged exactly as it did on lab-refresh-4. That is the shape of gap
+/// this defect came through.
+///
+/// KILLS: "`Ok(Action::requeue(Duration::from_secs(300)))`" — the shipped line.
+#[test]
+fn the_approval_reconcile_requeues_at_its_keys_not_after() {
+    let src = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/controllers/approval.rs"),
+    )
+    .expect("the reconciler's own source");
+    let start = src
+        .find("async fn reconcile(approval:")
+        .expect("the kube::runtime entry point");
+    let end = src[start..]
+        .find("\n/// Requeue on an error")
+        .map(|i| start + i)
+        .expect("the error policy follows it");
+    let body = &src[start..end];
+    assert!(
+        body.contains("valid_until()"),
+        "the reconciler has to ask the outcome when it stops being true. Body:\n{body}"
+    );
+    assert!(
+        body.contains("requeue_before("),
+        "…and requeue by it. Body:\n{body}"
+    );
+    assert!(
+        !body.contains("Duration::from_secs(300)"),
+        "a bare five-minute requeue here is the 2 m 35 s of `Verified=True` over an expired key \
+         that lab-refresh-4 sampled 22 times. Body:\n{body}"
+    );
+}

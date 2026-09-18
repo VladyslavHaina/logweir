@@ -256,6 +256,38 @@ signer fails closed.** There is no trusted timestamping service in this
 release; that is future work, and until it exists the honest answer for
 evidence this installation never observed is a refusal.
 
+### When a verdict is re-derived, and why the boundary is an instant
+
+A verdict about a key is a function of the key's declared history **and of the
+clock**, and nothing writes to the object when the clock crosses a boundary. So
+the controllers wake at the boundary itself:
+
+* an `Approval` that verified requeues at its **matched approver key's
+  `notAfter`** — the instant `may_sign_new` starts refusing it;
+* a `TrustPolicy` requeues at the earliest future `notBefore`, `notAfter`, or
+  `notAfter` minus thirty days among its keys — the three instants at which
+  `status.keys[].effectiveState` or the `ExpiringSoon` condition changes with
+  nobody editing anything.
+
+Both keep the five-minute heartbeat as the ceiling, so `evaluatedAt` still moves
+and "stale" stays distinguishable from "stopped"; the deadline only ever brings
+a wakeup **forward**, and a boundary already in the past is not re-armed.
+
+**Why this is a correctness rule and not a tuning knob.** On a lab run an
+approval whose approver key had expired read `Verified=True` across 22
+consecutive samples over 2 m 35 s, at one unchanged `resourceVersion`, before
+the next heartbeat re-derived it to `KeyIdExpired`. An expired key shown as a
+valid authorisation is exactly what *"treat unevaluated or stale expiry
+information as unknown, not valid"* forbids. Shortening the heartbeat would have
+traded the lag for a permanent write-free reconcile on every object of these
+kinds and still left a window; waking at the boundary costs one reconcile per
+key lifetime and leaves none.
+
+The asymmetry is deliberate: only a verdict a clock can **withdraw** carries a
+deadline. A refusal that an edit would turn into a pass — a roster installed, a
+key added — waits for the heartbeat, because a closed door left closed a few
+minutes too long is not the failure this rule is about.
+
 ### Key usage separation
 
 A key declares what it may do, **exactly one** of the three uses below, enforced

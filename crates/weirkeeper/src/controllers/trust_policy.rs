@@ -91,6 +91,87 @@ pub const HEARTBEAT: Duration = Duration::from_secs(300);
 /// `kubectl get`, and the cost of it being tight is an expiry nobody planned.
 pub const EXPIRING_SOON_DAYS: i64 = 30;
 
+/// The floor under a boundary requeue, so a deadline that is already upon us
+/// cannot become `Action::requeue(0)`.
+///
+/// A ZERO REQUEUE IS THE ONE WAY THIS COULD SPIN, and it is reachable only in
+/// the sub-second window before a boundary. The floor costs at most one second
+/// of overshoot, and only for a pass that woke inside that window — which is
+/// itself the rare case, since the previous pass aimed at the boundary exactly.
+pub const MIN_REQUEUE: Duration = Duration::from_secs(1);
+
+/// The requeue for a status a CLOCK can change: at `deadline` if that is
+/// sooner than [`HEARTBEAT`], and at `HEARTBEAT` otherwise.
+///
+/// # Why a deadline and not a shorter heartbeat — defect `TRUST-EXPIRY-LAG`
+///
+/// A verdict about a key is a function of the key's declared history AND of
+/// the clock, and nothing writes to the object when the clock passes a
+/// boundary. On lab-refresh-4 an `Approval` whose approver key's `notAfter`
+/// had passed read `Verified=True` across **22 consecutive samples over
+/// 2 m 35 s**, at one unchanged `resourceVersion`, before the next heartbeat
+/// re-derived it to `KeyIdExpired`. PLAT-19.1's acceptance says to treat
+/// unevaluated or stale expiry information as **unknown, not valid**, and a
+/// green condition is neither.
+///
+/// Shortening the heartbeat would trade the lag for a permanent write-free
+/// reconcile on every object of these kinds — the hot loop erratum E11(d)
+/// exists to prevent — and would still leave a window. Waking exactly at the
+/// boundary costs ONE extra reconcile per key lifetime and closes it.
+///
+/// # The wakeup lands ON the boundary, not after it
+///
+/// The windows are half-open — `may_sign_new` refuses at `now >= notAfter` — so
+/// a pass that wakes exactly at the instant already computes the post-boundary
+/// verdict, and no slack is added. **Scheduler jitter is self-correcting rather
+/// than padded for:** a pass that wakes a hair EARLY re-derives the same
+/// verdict and asks for `deadline - now` again, which is now milliseconds, so
+/// it converges on the boundary instead of falling back to a whole
+/// [`HEARTBEAT`]. Padding would have been the other choice and it is strictly
+/// worse — it guarantees a window in which the verdict reads stale, which is
+/// the defect.
+///
+/// # Bounded, and never a hot loop
+///
+/// A deadline in the past is not a deadline: the transition has already been
+/// applied by the pass that computed it, so this returns [`HEARTBEAT`] rather
+/// than requeueing at zero, and one in the sub-second window is floored at
+/// [`MIN_REQUEUE`]. The result is therefore always in
+/// `[MIN_REQUEUE, HEARTBEAT]`, and the caller cannot spin however wrong its
+/// deadline is.
+#[must_use]
+pub fn requeue_before(deadline: Option<DateTime<Utc>>, now: DateTime<Utc>) -> Duration {
+    let Some(deadline) = deadline else {
+        return HEARTBEAT;
+    };
+    let Ok(until) = (deadline - now).to_std() else {
+        // Already past: the verdict this pass wrote is the post-boundary one.
+        return HEARTBEAT;
+    };
+    until.max(MIN_REQUEUE).min(HEARTBEAT)
+}
+
+/// The earliest future instant at which one of these keys changes state **by
+/// the clock alone** — `notBefore`, `notAfter`, or the `ExpiringSoon` horizon.
+///
+/// All three are transitions this controller writes and no edit announces:
+/// `NotYetValid -> Active`, `Active -> Expired`, and `NotExpiring ->
+/// ExpiringSoon`. A key already past all three contributes nothing, so a
+/// policy whose keys are all expired settles on [`HEARTBEAT`].
+#[must_use]
+pub fn next_clock_change(keys: &[ResolvedKey], now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    keys.iter()
+        .flat_map(|k| {
+            [
+                k.trust.not_before,
+                k.trust.not_after,
+                k.trust.not_after - chrono::Duration::days(EXPIRING_SOON_DAYS),
+            ]
+        })
+        .filter(|at| *at > now)
+        .min()
+}
+
 /// The condition type reporting that every key parsed.
 pub const CONDITION_LOADED: &str = "Loaded";
 /// The condition type reporting which namespaces this policy governs.
@@ -755,7 +836,16 @@ async fn reconcile(policy: Arc<TrustPolicy>, ctx: Arc<Context>) -> Result<Action
     // whose `notAfter` passes at 03:00 must become `Expired` without anybody
     // editing the object, and `evaluatedAt` must keep moving for D3 §7.7's
     // fifteen-minute staleness rule to distinguish "stale" from "stopped".
-    Ok(Action::requeue(HEARTBEAT))
+    //
+    // …AND 03:00 IS WHEN, NOT "SOMETIME IN THE NEXT FIVE MINUTES" (defect
+    // `TRUST-EXPIRY-LAG`). The heartbeat keeps `evaluatedAt` moving; the
+    // deadline makes the boundary itself exact, so `status.keys[].effectiveState`
+    // never reads `Active` after the window it names has closed.
+    let now = Utc::now();
+    // THE POLICY'S OWN KEYS, read from the object this pass just reconciled —
+    // no second API call, and the same translation `reconcile_policy` used.
+    let deadline = next_clock_change(&crate::trust::from_policy(&policy).keys, now);
+    Ok(Action::requeue(requeue_before(deadline, now)))
 }
 
 /// Requeue on an error, naming it.

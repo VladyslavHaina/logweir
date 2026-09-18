@@ -340,6 +340,21 @@ pub struct Verified {
     /// signature — the value [`verify_detached`] RETURNED, never
     /// `sidecar.signatures[0].keyid`.
     pub matched_key_id: String,
+    /// **The instant this verdict stops being true on its own** — the matched
+    /// key's `notAfter`, and the whole of defect `TRUST-EXPIRY-LAG`.
+    ///
+    /// A verified approval is not a fact, it is a fact WITH A DEADLINE: check 6
+    /// asked whether the matched key may sign something new, and
+    /// `may_sign_new` refuses at `now >= notAfter`. Nothing writes to the
+    /// object when the clock crosses that instant, so on lab-refresh-4 an
+    /// approval read `Verified=True` across 22 samples over 2 m 35 s after its
+    /// approver key expired, at one unchanged `resourceVersion`.
+    ///
+    /// Carrying it here is what lets [`reconcile`] requeue AT the boundary
+    /// instead of at the next heartbeat. It is deliberately not written to the
+    /// status: the condition already says everything an operator reads, and a
+    /// new status field would be a CRD change for a lag a requeue closes.
+    pub valid_until: DateTime<Utc>,
     /// The approver named inside the signed bytes.
     pub approver: String,
     /// The change ticket named inside the signed bytes.
@@ -626,6 +641,14 @@ pub fn evaluate(
         .is_some_and(|k| k.trust.has_usage(KeyUsage::EvidenceSigning));
 
     Ok(Verified {
+        // THE MATCHED KEY'S OWN WINDOW, and it is present by construction:
+        // check 6 above resolved this id through `may_sign_new_for`, which
+        // refuses `UntrustedSigner` when the policy does not carry it. The
+        // fallback is a deadline that never fires rather than a panic, because
+        // an admission path may not abort on an invariant it merely believes.
+        valid_until: trust
+            .key(&matched_key_id)
+            .map_or(chrono::DateTime::<Utc>::MAX_UTC, |k| k.trust.not_after),
         matched_key_id,
         approver: doc.approver,
         ticket: doc.ticket,
@@ -882,6 +905,26 @@ impl ApprovalOutcome {
     #[must_use]
     pub const fn is_verified(&self) -> bool {
         matches!(self, Self::Verified(_))
+    }
+
+    /// **The instant this outcome stops being true on its own** — `None` for an
+    /// outcome no clock can withdraw.
+    ///
+    /// ONLY A `Verified` HAS ONE, and that asymmetry is the point. A refusal
+    /// can only become a pass through an EDIT — a roster installed, a key
+    /// added, a referent created — and an edit wakes this controller through
+    /// its watch or through the heartbeat, which is what the five-minute
+    /// interval is for. A pass, on the other hand, becomes a refusal with
+    /// nobody touching anything, and that is the direction that must never be
+    /// late: `KeyNotYetValid` reading refused for a few minutes too long is a
+    /// closed door left closed; `KeyIdExpired` reading verified for a few
+    /// minutes too long is an expired key authorising a restore.
+    #[must_use]
+    pub const fn valid_until(&self) -> Option<DateTime<Utc>> {
+        match self {
+            Self::Verified(v) => Some(v.valid_until),
+            Self::Refused(_) | Self::Referent(_) => None,
+        }
     }
 
     /// The `message` this outcome writes into the `Verified` condition.
@@ -1338,14 +1381,25 @@ pub async fn reconcile_approval(
 
 /// The `kube::runtime` reconcile entry point.
 async fn reconcile(approval: Arc<Approval>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
-    reconcile_approval(&approval, &ctx.client).await?;
+    let outcome = reconcile_approval(&approval, &ctx.client).await?;
     // NOT `Action::await_change()`. `TrustRoster` is a different kind and this
     // controller does not watch it, so a roster that arrives after the
     // approval would otherwise never be noticed: an `Approval` refused with
     // `RosterNotFound` at 09:00 would still say so at 17:00 with the roster
     // installed at 09:05. Five minutes is the interval at which "install the
     // roster, then look again" is self-healing.
-    Ok(Action::requeue(std::time::Duration::from_secs(300)))
+    //
+    // …AND FIVE MINUTES IS THE WRONG ANSWER IN THE OTHER DIRECTION (defect
+    // `TRUST-EXPIRY-LAG`). "Install the roster, then look again" may wait; "the
+    // approver key expired thirty seconds ago" may not, and the heartbeat made
+    // an expired key read `Verified=True` for 2 m 35 s on lab-refresh-4. A
+    // verified outcome therefore requeues at its own `notAfter`, and everything
+    // else keeps the heartbeat — see `ApprovalOutcome::valid_until` for why the
+    // asymmetry is the safe one.
+    Ok(Action::requeue(super::trust_policy::requeue_before(
+        outcome.valid_until(),
+        Utc::now(),
+    )))
 }
 
 /// Requeue on an error, naming it. Never a panic and never a drop.
