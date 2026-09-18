@@ -1059,6 +1059,74 @@ pub fn verified_condition(
     )
 }
 
+/// The keys [`VerificationResult::to_status_value`] omits
+/// when the verdict does not hold them — the ones a merge PATCH has to null.
+///
+/// `signedAt` and `trust` are written only for a verdict that carried a trust
+/// projection; `matchedKeyId` and `detail` only for one that has them.
+const VERIFICATION_CLEARED_KEYS: [&str; 4] = ["matchedKeyId", "detail", "signedAt", "trust"];
+
+/// One rendered `status.evidence.verification` block, **as a merge PATCH**:
+/// every field this verdict does not hold written as an explicit `null`.
+///
+/// # Why this exists, and why it is not inside [`VerificationResult::to_status_value`]
+///
+/// A JSON merge patch (RFC 7386) LEAVES AN OMITTED KEY IN PLACE and DELETES a
+/// key sent as `null`. `to_status_value` builds a fresh block and simply omits
+/// `matchedKeyId`, `detail`, `signedAt` and `trust` when the verdict has none
+/// — so a block that replaced a stored one carrying a `matchedKeyId` would
+/// leave that key id sitting under the new verdict. `retrust`
+/// (`verification.rs`, guarded by `has_trust_verdict`) re-derives `Valid` or
+/// `Untrusted` from a stored `matchedKeyId`, so a stale one under a
+/// `NotAttempted` is a trust decision about a document this controller never
+/// fetched. The D3 W2 record's clause — *"every write a
+/// resourceVersion-preconditioned merge PATCH with explicit `null` for a field
+/// that no longer holds"* — and seam **S7** are the rule; this is its second
+/// half.
+///
+/// **THE NULLS BELONG TO THE PATCH AND NOT TO THE RENDERED BLOCK.**
+/// [`valid_verification`] reads `trust` with
+/// `None => compatible, Some(malformed) => Untrusted`, so a `trust: null`
+/// inside the value the badge is computed over would turn a legacy `Valid`
+/// with no trust projection into `Untrusted`. The badge is computed over
+/// `to_status_value`'s block, unchanged; this wrapper is applied on the way
+/// into [`second_patch`] and nowhere else.
+///
+/// **IT CANNOT CAUSE A WRITE STORM.** `conditions::apply_merge_patch` removes
+/// a key sent as `null` and does nothing when it was already absent, so
+/// `status_unchanged` still answers "unchanged" for a verdict that has not
+/// moved — which is erratum **E11(d)**'s whole argument, kept.
+///
+/// # Both writers take it
+///
+/// The second patch ([`crate::controllers::backup`] and
+/// [`crate::controllers::restore`]) and [`Retrust::patch`]. Review finding
+/// **R4**: the re-trust patch was the one that had NOT been wrapped, and it is
+/// the one where the staleness is reachable — see that method.
+///
+/// # Reachability, stated rather than assumed
+///
+/// **On the second patch there is no producer today.** `status_is_terminal`
+/// short-circuits every pass after the terminal patch, so that patch runs at
+/// most once per object and no `NotAttempted` block is ever merged over a
+/// `Valid` one. The nulls are written there anyway, because the argument that
+/// makes them unnecessary is an argument about a DIFFERENT function
+/// (`status_is_terminal`) that the next change to it would silently retire.
+///
+/// **On [`Retrust::patch`] a producer exists**, which is why finding R4 is not
+/// hypothetical: `apply_retrust` runs on TERMINAL objects, repeatedly, every
+/// time a `TrustRoster` or policy edit re-derives a stored verdict.
+#[must_use]
+pub fn verification_patch_value(block: Value) -> Value {
+    let Value::Object(mut map) = block else {
+        return block;
+    };
+    for key in VERIFICATION_CLEARED_KEYS {
+        map.entry(key.to_string()).or_insert(Value::Null);
+    }
+    Value::Object(map)
+}
+
 /// The SECOND `/status` merge patch: `status.evidence.verification` plus the
 /// full condition list with `Verified` merged into it.
 ///
@@ -1410,9 +1478,34 @@ impl Retrust {
     /// A merge patch replaces arrays (RFC 7386), so a patch carrying only
     /// `[Verified]` would delete the terminal `Complete`/`Failed` condition.
     /// `existing` is the object's current condition list.
+    ///
+    /// # The block is written as a PATCH, with explicit nulls
+    ///
+    /// Review finding **R4**. [`retrust`] builds a fresh block and omits
+    /// `detail`, `signedAt` and `trust` when the re-derived verdict has none,
+    /// and a merge patch leaves an omitted key in place — so an
+    /// `Untrusted -> Valid` re-derivation after a policy edit used to leave the
+    /// stale *"the trust policy X does not accept it"* sentence sitting under
+    /// `result: Valid`, and a `Trust -> Conflict/Unconfigured` one left a stale
+    /// `trust` block under `NotAttempted`.
+    ///
+    /// **THIS IS THE WRITER WHERE THAT IS REACHABLE.** The second patch runs at
+    /// most once per object (`status_is_terminal` short-circuits every later
+    /// pass); `apply_retrust` runs on TERMINAL objects, repeatedly, every time a
+    /// `TrustRoster` or an installation policy changes. So the same
+    /// [`verification_patch_value`] both reconcilers apply is applied here, and
+    /// for a stronger reason.
+    ///
+    /// The badge is NOT recomputed from the nulled value: [`retrust`] computes
+    /// it over the rendered block, before this method is reached, for the
+    /// reason [`verification_patch_value`] gives.
     #[must_use]
     pub fn patch(&self, existing: &[Condition]) -> Value {
-        second_patch(existing, self.verified.clone(), self.verification.clone())
+        second_patch(
+            existing,
+            self.verified.clone(),
+            verification_patch_value(self.verification.clone()),
+        )
     }
 }
 

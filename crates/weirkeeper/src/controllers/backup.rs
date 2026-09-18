@@ -3133,63 +3133,6 @@ async fn find_pod(
 /// # Errors
 ///
 /// [`BackupError`] for anything that is not an outcome.
-/// The keys [`crate::verification::VerificationResult::to_status_value`] omits
-/// when the verdict does not hold them — the ones a merge PATCH has to null.
-///
-/// `signedAt` and `trust` are written only for a verdict that carried a trust
-/// projection; `matchedKeyId` and `detail` only for one that has them.
-const VERIFICATION_CLEARED_KEYS: [&str; 4] = ["matchedKeyId", "detail", "signedAt", "trust"];
-
-/// One rendered `status.evidence.verification` block, **as a merge PATCH**:
-/// every field this verdict does not hold written as an explicit `null`.
-///
-/// # Why this exists, and why it is not inside `to_status_value`
-///
-/// A JSON merge patch (RFC 7386) LEAVES AN OMITTED KEY IN PLACE and DELETES a
-/// key sent as `null`. `to_status_value` builds a fresh block and simply omits
-/// `matchedKeyId`, `detail`, `signedAt` and `trust` when the verdict has none
-/// — so a block that replaced a stored one carrying a `matchedKeyId` would
-/// leave that key id sitting under the new verdict. `retrust`
-/// (`verification.rs`, guarded by `has_trust_verdict`) re-derives `Valid` or
-/// `Untrusted` from a stored `matchedKeyId`, so a stale one under a
-/// `NotAttempted` is a trust decision about a document this controller never
-/// fetched. The D3 W2 record's clause — *"every write a
-/// resourceVersion-preconditioned merge PATCH with explicit `null` for a field
-/// that no longer holds"* — and seam **S7** are the rule; this is its second
-/// half.
-///
-/// **THE NULLS BELONG TO THE PATCH AND NOT TO THE RENDERED BLOCK.**
-/// `verification::valid_verification` reads `trust` with
-/// `None => compatible, Some(malformed) => Untrusted`, so a `trust: null`
-/// inside the value the badge is computed over would turn a legacy `Valid`
-/// with no trust projection into `Untrusted`. The badge is computed over
-/// `to_status_value`'s block, unchanged; this wrapper is applied on the way
-/// into [`second_patch`] and nowhere else.
-///
-/// **IT CANNOT CAUSE A WRITE STORM.** `conditions::apply_merge_patch` removes
-/// a key sent as `null` and does nothing when it was already absent, so
-/// `status_unchanged` still answers "unchanged" for a verdict that has not
-/// moved — which is erratum **E11(d)**'s whole argument, kept.
-///
-/// # Reachability, stated rather than assumed
-///
-/// There is no producer today: `status_is_terminal` short-circuits every pass
-/// after the terminal patch, so this second patch runs at most once per
-/// object and no `NotAttempted` block is ever merged over a `Valid` one. The
-/// nulls are written anyway, because the argument that makes them unnecessary
-/// is an argument about a DIFFERENT function (`status_is_terminal`) that the
-/// next change to it would silently retire.
-#[must_use]
-pub fn verification_patch_value(block: Value) -> Value {
-    let Value::Object(mut map) = block else {
-        return block;
-    };
-    for key in VERIFICATION_CLEARED_KEYS {
-        map.entry(key.to_string()).or_insert(Value::Null);
-    }
-    Value::Object(map)
-}
-
 pub async fn reconcile_backup(
     backup: &Backup,
     client: &kube::Client,
@@ -4144,7 +4087,7 @@ async fn reconcile_backup_inner(
         let mut evidence_patch = second_patch(
             &conditions_in(&terminal),
             verified,
-            verification_patch_value(block),
+            crate::verification::verification_patch_value(block),
         );
         if result.result == VerificationVerdict::Valid {
             if let Some(status) = evidence_patch

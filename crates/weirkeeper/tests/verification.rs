@@ -3954,3 +3954,154 @@ async fn a_namespace_a_policy_governs_reads_no_roster() {
         "and with no roster either, that is today's RosterNotFound"
     );
 }
+
+// ===========================================================================
+// Fix round 2, R4 — the re-trust patch clears what the new verdict does not hold
+// ===========================================================================
+
+/// **AN `Untrusted -> Valid` RE-DERIVATION TAKES ITS REFUSAL SENTENCE WITH IT**
+/// — review finding **R4**.
+///
+/// # The staleness, and why THIS writer is the one that matters
+///
+/// `retrust` builds a fresh block and OMITS `detail`, `signedAt` and `trust`
+/// when the re-derived verdict has none — and `untrusted_detail` returns `None`
+/// for a trust verdict that is `Valid`. A JSON merge patch (RFC 7386) leaves an
+/// omitted key in place, so an administrator who adds the signer's public half
+/// used to get `result: Valid` with the previous pass's *"the trust policy …
+/// does not accept it"* sentence still sitting under it: a green verdict
+/// carrying its own refusal.
+///
+/// The second patch has the same shape and no producer — `status_is_terminal`
+/// short-circuits every pass after the terminal write, so it runs at most once
+/// per object. **`apply_retrust` has one.** It runs on TERMINAL objects,
+/// repeatedly, every time a `TrustRoster` or an installation policy changes,
+/// which is exactly when a verdict moves. That is why R4 is reachable where R3
+/// was hypothetical.
+///
+/// # What is asserted
+///
+/// The scenario is `a_key_added_after_an_untrusted_verdict_is_re_granted_with_a_reason`'s
+/// two arms — the same fixtures, because the property is about what the SECOND
+/// pass's patch does to what the FIRST pass wrote. Then: the patch carries
+/// `detail: null`, applying it as the API server would REMOVES the sentence,
+/// the fields the new verdict DOES hold are untouched, and the re-grant is
+/// still green.
+///
+/// KILLS: dropping `verification_patch_value` from `Retrust::patch`; turning
+/// its `or_insert` into an `insert`, which would null the `trust` block this
+/// verdict legitimately carries.
+#[test]
+fn a_re_granted_verdict_does_not_keep_the_sentence_that_refused_it() {
+    // PASS 1 — the policy does not carry the signer: `Untrusted`, with a reason.
+    let status = verified_status("2026-09-04T00:00:00Z");
+    let untrusted = weirkeeper::verification::retrust(
+        &status,
+        &Resolution::Trust(Box::new(resolved(&policy(
+            "team-b",
+            &["team-b"],
+            vec![policy_key(
+                "some-other-key",
+                vec![SpecUsage::EvidenceSigning],
+            )],
+        )))),
+        backup_badge,
+        None,
+        Some(1),
+        at("2026-09-12T08:00:00Z"),
+    )
+    .expect("a policy that does not carry the signer changes the verdict");
+    let refusal = untrusted.verification["detail"]
+        .as_str()
+        .expect("the Untrusted verdict carries its reason")
+        .to_string();
+
+    // The object as it stands after pass 1, built the way the API server would.
+    let mut stored = status.clone();
+    let first = untrusted.patch(&[]);
+    weirkeeper::conditions::apply_merge_patch(&mut stored, &first["status"]);
+    assert_eq!(
+        stored["evidence"]["verification"]["detail"].as_str(),
+        Some(refusal.as_str()),
+        "pass 1 really did put the sentence on the object: {stored}"
+    );
+
+    // PASS 2 — the administrator adds the key, Retired, over a window that
+    // covers the signature. The verdict goes back to `Valid`.
+    let mut added = evidence_key();
+    added.state = KeyState::Retired;
+    added.retired_at = Some(at("2026-09-10T00:00:00Z"));
+    let regranted = weirkeeper::verification::retrust(
+        &stored,
+        &Resolution::Trust(Box::new(resolved(&policy(
+            "team-b",
+            &["team-b"],
+            vec![added],
+        )))),
+        backup_badge,
+        None,
+        Some(1),
+        at("2026-09-12T09:00:00Z"),
+    )
+    .expect("adding the signer's public half changes the verdict back");
+    assert_eq!(
+        (regranted.from.as_str(), regranted.to.as_str()),
+        ("Untrusted", "Valid")
+    );
+
+    // ---- 1. THE PATCH NULLS THE SENTENCE -----------------------------
+    let patch = regranted.patch(&[]);
+    let block = &patch["status"]["evidence"]["verification"];
+    assert_eq!(
+        block.get("detail"),
+        Some(&Value::Null),
+        "R4: an OMITTED `detail` leaves the refusal in place — a merge patch only deletes what \
+         it sends as null. Got: {block}"
+    );
+
+    // ---- 2. AND THE SENTENCE IS ACTUALLY GONE ------------------------
+    let mut after = stored.clone();
+    weirkeeper::conditions::apply_merge_patch(&mut after, &patch["status"]);
+    let settled = &after["evidence"]["verification"];
+    assert_eq!(settled["result"], json!("Valid"));
+    assert_eq!(
+        settled.get("detail"),
+        None,
+        "a green verdict must not carry the sentence that refused it — an operator reading \
+         `Valid` beside \"does not accept it\" cannot tell which is current: {settled}"
+    );
+
+    // ---- 3. THE FIELDS THE NEW VERDICT HOLDS ARE UNTOUCHED -----------
+    //
+    // `or_insert` writes only into a VACANT entry, so a present value is never
+    // overwritten. This re-grant legitimately carries a `trust` block and a
+    // `matchedKeyId`; nulling either would erase the re-derivation itself.
+    assert_eq!(
+        settled["trust"]["basis"],
+        json!("Historical"),
+        "signed while the key was valid, and the key has since been retired: {settled}"
+    );
+    assert!(
+        settled["matchedKeyId"]
+            .as_str()
+            .is_some_and(|k| !k.is_empty()),
+        "the key the signature matched survives: {settled}"
+    );
+    assert_eq!(
+        settled["verifiedAt"],
+        json!("2026-09-04T00:00:00Z"),
+        "and the re-grant still does not re-observe"
+    );
+
+    // ---- 4. THE BADGE IS THE UN-NULLED BLOCK'S -----------------------
+    //
+    // `retrust` computes the condition over the rendered block, BEFORE
+    // `Retrust::patch` wraps it — `valid_verification` reads `trust` as
+    // `None => compatible` but `Some(unreadable) => Untrusted`, so a badge
+    // computed over the nulled form would refuse a legacy `Valid`.
+    assert_eq!(
+        regranted.verified.status, "True",
+        "the re-grant is green: {:?}",
+        regranted.verified
+    );
+}

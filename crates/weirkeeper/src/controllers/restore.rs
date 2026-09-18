@@ -4423,12 +4423,12 @@ async fn reconcile_restore_inner(
             restore,
             &name,
             // EXPLICIT NULLS FOR THE FIELDS THIS VERDICT DOES NOT HOLD — see
-            // `backup::verification_patch_value`. One rule, one helper, both
-            // reconcilers.
+            // `verification::verification_patch_value`. One rule, one helper,
+            // both reconcilers and the re-trust patch.
             second_patch(
                 &conditions_in(&terminal),
                 verified,
-                backup::verification_patch_value(block),
+                crate::verification::verification_patch_value(block),
             ),
         )
         .await?;

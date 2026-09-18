@@ -11013,8 +11013,7 @@ async fn a_run_that_wrote_no_artifact_still_writes_no_verification_block() {
 // ===========================================================================
 
 use weirkeeper::conditions::status_unchanged;
-use weirkeeper::controllers::backup::verification_patch_value;
-use weirkeeper::verification::backup_badge;
+use weirkeeper::verification::{backup_badge, verification_patch_value};
 
 /// **A VERDICT THAT HOLDS NO KEY CLEARS THE ONE THAT WAS THERE** — review
 /// finding **R3**, seam **S7** and the D3 W2 record's clause: *"every write a
