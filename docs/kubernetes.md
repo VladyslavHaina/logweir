@@ -1228,6 +1228,31 @@ API response, so reading a stranger's is defect `SEC-PODLOG`. Only the seven
 `notify-result=` values this build knows are read; nothing else from a pod log
 can reach a status.
 
+**A sink must be `https://`, and the one way round it is the INSTALLATION's.**
+`logweir notify deliver` refuses a non-`https://` webhook or Slack URL **before
+it dials**, so an in-cluster echo sink on `http://` receives nothing and the
+delivery is recorded `<sink>:failed`. The documented escape hatch,
+`NOTIFY_ALLOW_INSECURE_SINKS`, was set by nothing — not by the spec and not by
+the delivery Job — which made a laptop-cluster rehearsal of the notification
+path impossible (`NOTIFY-INSECURE-SINK-UNEXPOSED`). It is now
+`notify.allowInsecureSinks` in `charts/logweir/values.yaml`, default `false`:
+when true the chart renders `LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS=1` on the
+`weirkeeper` Deployment, the controller reads it **once at startup** (an
+explicit `1`/`true`/`yes` only, so an empty `value:` is off) and forwards
+`NOTIFY_ALLOW_INSECURE_SINKS=1` into every delivery Job's literal env. When it
+is unset nothing at all is rendered — not the variable with a falsy value — so
+the Job, the install file and the chart's rendered output are byte-identical to
+what they were before the value existed. **A `ProtectionPolicy` cannot enable
+it.** The spec is a namespaced object any namespace operator may write, and a
+field there would let whoever creates a policy downgrade their own alerts'
+transport to cleartext — carrying the event, the policy's name, its health and,
+on Slack, a bearer credential in the URL. The switch is on the controller
+Deployment, which is the cluster administrator's, and the answer is the same for
+every policy in the cluster. The Job's command line still names no URL either
+way: the sink URL reaches the pod as a `secretKeyRef` and the hatch is a literal
+`1`. **Production leaves it `false`**; it is a local-development setting, and an
+installation that turns it on logs one `WARN` at startup saying so.
+
 **`verificationScope` is `sampled`, `degraded` or `none` — never `complete`.**
 Logweir compares a sample of records. The value reaches a PagerDuty incident
 title and a Slack channel where someone decides, during an incident, whether an

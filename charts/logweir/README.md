@@ -51,7 +51,7 @@ install document; this README is the chart's own.
 |---|---|---|
 | the fourteen `CustomResourceDefinition`s under `logweir.dev/v1alpha1` | always — from `crds/`, **once**, on `helm install` | Helm never upgrades or deletes the contents of `crds/`; see *Upgrading the CRDs* below |
 | `ServiceAccount`, `ClusterRole`, `ClusterRoleBinding` `weirkeeper` | always | the one API client in the design; every granted verb has a caller and every call has a grant, no verb on `secrets`, no `update` on anything, and `delete` on **exactly** `topicdiscoveries` and `preflights` — the transient check kinds, whose retention windows nothing else can enforce ([`docs/kubernetes.md`](../../docs/kubernetes.md) §22.3). Status writes are merge `PATCH`es carrying a `metadata.resourceVersion` precondition. Since PLAT-05.2 it also holds `patch` on `backups`, for the one caller that detaches a terminal run from its schedule so that deleting the schedule stops collecting its history: metadata only, never `backups/status` (a separate resource string), and never a CEL-sealed `spec` (see §9 and §13) |
-| `Deployment` `weirkeeper` | always | the control plane. Image `controllerImage`, pull policy `imagePullPolicy`, `LOGWEIR_RUNNER_IMAGE` from `runnerImage`, `LOGWEIR_RUNNER_PULL_POLICY` from `runnerImagePullPolicy`, the archive env from `archive.*`, and `LOGWEIR_POLICY_CONFIGMAP` / `LOGWEIR_INSTALLATION_NAMESPACE` for the policy below |
+| `Deployment` `weirkeeper` | always | the control plane. Image `controllerImage`, pull policy `imagePullPolicy`, `LOGWEIR_RUNNER_IMAGE` from `runnerImage`, `LOGWEIR_RUNNER_PULL_POLICY` from `runnerImagePullPolicy`, the archive env from `archive.*`, and `LOGWEIR_POLICY_CONFIGMAP` / `LOGWEIR_INSTALLATION_NAMESPACE` for the policy below, plus `LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS` when `notify.allowInsecureSinks` is true |
 | `ConfigMap` `weirkeeper-policy` | always | the installation policy — check ceilings, retention windows, discovery bounds, completeness attestations, the evidence allowlist and the legacy addressing. Rendered from `checks.*`, `engine.*`, `evidence.*` and `archive.s3.*`; see *The installation policy* below |
 | `ClusterRole`s `logweir-viewer`, `logweir-operator`, `logweir-approver`, `logweir-trust-admin` | always, **unbound** | the four human roles; who may act where is your decision. `logweir-trust-admin` is cluster-scoped and needs a `ClusterRoleBinding` |
 | `ValidatingAdmissionPolicy` + binding `logweir-console-credentials-only` | `admissionPolicy.enabled` | fences the console API's `create secrets` to the two Logweir credential types. **Kubernetes 1.30+ only** — see below |
@@ -192,6 +192,27 @@ it does and does not prove, including the live check that has **not** been run.
   recommendation.
 * **`ui.enabled`** — *serve the page from the cluster.* Read *The UI's
   authority* before turning it on.
+
+## `notify.allowInsecureSinks` — the one notification setting
+
+| value | default | what it decides |
+|---|---|---|
+| `notify.allowInsecureSinks` | `false` | whether a delivery Job may POST an alert to a `http://` webhook or Slack URL |
+
+`logweir notify deliver` refuses a non-`https://` sink **before it dials**, so
+a scratch receiver on `http://echo.<ns>.svc:8080` receives nothing on a default
+install. Set this true and the chart renders
+`LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS=1` on the `weirkeeper` Deployment; the
+controller forwards `NOTIFY_ALLOW_INSECURE_SINKS=1` into every delivery Job.
+Left alone it renders **nothing** — not the variable with a falsy value — so
+the Deployment and the Jobs are byte-identical to what they were before the
+value existed.
+
+It is an **installation** setting and a `ProtectionPolicy` cannot turn it on: a
+namespaced object that could would let whoever creates a policy downgrade their
+own alerts' transport to cleartext, carrying the event, the policy's name, its
+health and — on Slack, where the URL *is* the credential — a bearer token.
+**Local development only; production leaves it `false`.**
 
 ## The five-minute path
 

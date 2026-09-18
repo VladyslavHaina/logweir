@@ -691,6 +691,38 @@ accepted) and one of type `kubernetes.io/service-account-token` (must be
 rejected, naming the policy's message), then show the second succeeding once
 the binding is deleted.
 
+### 5c. Notification sinks on a laptop cluster (`notify.allowInsecureSinks`)
+
+`logweir notify deliver` **refuses a non-`https://` webhook or Slack URL before
+it dials**. A scratch receiver on `http://echo.<ns>.svc:8080` therefore receives
+nothing on a default install, and the alert is recorded as
+`<sink>:failed` — the sink never saw a request.
+
+The escape hatch is an **installation** setting and is off:
+
+```bash
+helm upgrade --install logweir charts/logweir -n logweir-system \
+  --set notify.allowInsecureSinks=true      # LOCAL DEVELOPMENT ONLY
+```
+
+It renders `LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS=1` on the `weirkeeper`
+Deployment and the controller forwards `NOTIFY_ALLOW_INSECURE_SINKS=1` into
+every delivery Job it creates. Left at its default, the chart renders **no**
+such variable and the delivery Job is byte-identical to the one it rendered
+before the value existed.
+
+**A `ProtectionPolicy` cannot turn it on**, and that is the point: the spec is a
+namespaced object any namespace operator may write, and a field there would let
+whoever creates a policy downgrade their own alerts' transport to cleartext —
+the protection event, the policy's name, its health, and on Slack a bearer
+credential carried in the URL itself. The only place to set it is the
+controller Deployment, which is the cluster administrator's.
+
+**Production leaves it `false`.** Turning it on does not weaken TLS for an
+`https://` sink and changes nothing else about the Job; it removes one refusal,
+and that refusal is the only thing standing between an alert and a cleartext
+POST.
+
 ---
 
 ## Upgrade CRDs before upgrading the controller

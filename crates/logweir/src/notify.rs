@@ -634,6 +634,19 @@ pub const RESULT_UNCONFIGURED: &str = "unconfigured";
 /// own laptop should not have to mint a certificate first. It is a deliberate,
 /// greppable act in a Job spec — not a default, and not a loopback special
 /// case that would also cover a host on the pod network.
+///
+/// # Who sets it in a cluster
+///
+/// The INSTALLATION, and only the installation: `charts/logweir`'s
+/// `notify.allowInsecureSinks` (default `false`) renders
+/// `LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS=1` on the controller Deployment, and
+/// `weirkeeper::controllers::protection_policy::delivery_job_spec` forwards
+/// THIS variable into a delivery Job only when that is set. A
+/// `ProtectionPolicy` carries no field that can turn it on — it is a
+/// namespaced object, and the hatch is the cluster administrator's. Until
+/// W13 nothing set it at all, so an in-cluster `http://` echo sink could
+/// never receive a POST (`NOTIFY-INSECURE-SINK-UNEXPOSED`); the reading below
+/// is unchanged by that fix.
 pub const ALLOW_INSECURE_SINKS_ENV: &str = "NOTIFY_ALLOW_INSECURE_SINKS";
 
 /// The `webhook` sink's name in a [`NOTIFY_RESULT_LINE`].
