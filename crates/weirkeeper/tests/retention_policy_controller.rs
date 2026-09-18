@@ -1531,12 +1531,13 @@ fn the_published_and_bare_spellings_differ_only_in_the_prefix() {
     );
 }
 
-/// Compatibility: a page published by a catalog that wrote the BARE spelling is
-/// still read, so an upgrade needs no catalog resync and a rollback loses
-/// nothing. Both spellings are accepted deliberately; see `bare_hex` in the
-/// controller.
+/// A page published in the BARE spelling is still read. This is defensive
+/// breadth, **not** history: no released build has written that spelling
+/// (`catalog_view::seal` has always used `sha256_prefixed` — review finding
+/// L3). What it buys is that the accepted set only ever grew, so upgrade and
+/// rollback need no catalog resync. See `bare_hex` in the controller.
 #[tokio::test]
-async fn a_page_published_in_the_legacy_bare_spelling_is_still_read() {
+async fn a_page_published_in_the_bare_spelling_is_still_read() {
     let entries = six_points();
     let bare = bare_page_digest_of(&entries);
     assert!(!bare.starts_with("sha256:"));
@@ -1551,9 +1552,24 @@ async fn a_page_published_in_the_legacy_bare_spelling_is_still_read() {
 /// whose hex is wrong is still refused, and so is a bare value whose hex is
 /// wrong. Without this the fix could be written as "accept anything that starts
 /// with `sha256:`" and no row above would notice.
+///
+/// **THE MATCH IS FULL-LENGTH, NOT A PREFIX MATCH** (review finding L6). The
+/// last two values are the CORRECT digest truncated to half its hex, in both
+/// spellings: every other value here differs in its first character, so a
+/// comparison degraded to `found.starts_with(bare_hex(expected))` — the
+/// reviewer's surviving mutant R2 — passed the whole suite, and a catalog that
+/// published a truncated digest would have verified against bytes it does not
+/// describe. A prefix of a digest is not a digest.
 #[tokio::test]
 async fn a_wrong_digest_is_refused_in_either_spelling() {
-    for published in [format!("sha256:{}", "e".repeat(64)), "e".repeat(64)] {
+    let correct = bare_page_digest_of(&six_points());
+    let half = &correct[..correct.len() / 2];
+    for published in [
+        format!("sha256:{}", "e".repeat(64)),
+        "e".repeat(64),
+        format!("sha256:{half}"),
+        half.to_string(),
+    ] {
         let entries = six_points();
         let f = fixture(routes_publishing_digest(&entries, &published));
         let outcome = run(&f, &policy(json!({}), json!({}))).await;
