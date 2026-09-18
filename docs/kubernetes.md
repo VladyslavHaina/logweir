@@ -1348,13 +1348,25 @@ symptom was exact: the Job's pod terminated `ContainerCannotRun`, exitCode 127,
 `exec: "logweir-retention": executable file not found in $PATH`, with the
 policy's own status unchanged. Two checks now stand between that and an
 operator: `./scripts/render-install.sh --check` refuses to render an install
-file whose enforcement chain is broken, and the image workflow runs
-`logweir-retention --version` out of the built image, by bare name so the
-container runtime resolves it through `PATH` exactly as the kubelet does, before
-anything is pushed. **Shipping the binary widens no boundary**: what a pod may
-delete is decided by the credential it mounts, `logweir` still links no delete
-path, and `scripts/check-no-archive-write.sh` check 3 still holds the set of
-crates reaching `logweir-reaper` to exactly `{logweir-retention}`.
+file whose enforcement chain is broken, and `scripts/check-image.sh` check 7 —
+run by `just smoke` and by the image workflow, on the local tag and again on the
+digest the registry returns — runs `logweir-retention --version` out of the
+image by bare name, so the container runtime resolves it through `PATH` exactly
+as the kubelet does, and asserts that the binary names *itself*. **Shipping the
+binary widens no boundary in the control plane**: `logweir` still links no
+delete path and `scripts/check-no-archive-write.sh` check 3 still holds the set
+of crates reaching `logweir-reaper` to exactly `{logweir-retention}`.
+
+**Where the margin actually is, stated exactly.** `logweir-retention` reads its
+archive credential from unprefixed `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` —
+the same variable names an ordinary destination-backed Job is given, which is
+why the controller filters those two out of the retention pod. The executable is
+now present in every runner pod, so what stops a deletion from one is **not** the
+absence of a binary and not the absence of a credential name: it is that the
+destination's archive grant does not carry `s3:DeleteObject`. That is a
+deployment property. **An operator who grants `DeleteObject` on the archive
+prefix to the ordinary backup credential loses this margin**, and should either
+not do that or run enforcement from a separately built image.
 
 **This controller does not function live until the retention ServiceAccount
 exists.** Every Job it builds requests `logweir-retention`, and the chart does

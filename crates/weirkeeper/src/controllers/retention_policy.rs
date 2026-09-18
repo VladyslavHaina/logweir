@@ -392,11 +392,20 @@ pub struct Outcome {
 /// defect rather than remove it. The reader is the side that has to accept
 /// what the contract says is published.
 ///
-/// BOTH SPELLINGS ARE ACCEPTED, and that is the compatibility rule: a page
-/// published by an older catalog that wrote bare hex still verifies, so an
-/// upgrade needs no catalog resync and a rollback loses nothing. A value that
-/// is neither — a truncated digest, a different algorithm — is returned
-/// unchanged and fails the comparison, which is the behaviour that matters.
+/// BOTH SPELLINGS ARE ACCEPTED, DEFENSIVELY AND NOT FOR COMPATIBILITY — and
+/// the difference is worth stating, because the weaker claim is the one that
+/// gets quoted. **No released build has ever published the bare spelling**:
+/// `catalog_view::seal` has written `sha256_prefixed` since the catalog
+/// controller first landed (review finding L3). Accepting the bare form costs
+/// nothing — the hex must still match the page's bytes — and means a writer
+/// that ever emitted it would be read rather than refused. What follows from
+/// this function is only that upgrade and rollback need no catalog resync,
+/// which is true because the accepted set only grew.
+///
+/// The prefix is the ONLY thing stripped. A value that is neither spelling — a
+/// truncated digest, an upper-case one, a different algorithm — is returned
+/// unchanged and fails the full-length comparison at the call site, which is
+/// the behaviour that matters.
 fn bare_hex(published: &str) -> &str {
     published.strip_prefix("sha256:").unwrap_or(published)
 }
