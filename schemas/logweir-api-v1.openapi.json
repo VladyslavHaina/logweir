@@ -5297,6 +5297,12 @@
             },
             "nullable": true
           },
+          "sourceConnection": {
+            "description": "The source-connection block.",
+            "default": null,
+            "$ref": "#/components/schemas/SourceConnectionPreflightRequest",
+            "nullable": true
+          },
           "timeoutSeconds": {
             "description": "The check budget in seconds, 30 to 600.",
             "default": null,
@@ -6867,6 +6873,13 @@
             "enum": [
               "destinationAccess"
             ]
+          },
+          {
+            "description": "A source connection on its own: does this `KafkaCluster` answer, as this principal, right now (D2-SOURCECHECK). It names no destination, no plan and no topic, which is what lets the console's \"Test connection\" start one with nothing but the cluster the reader is looking at.",
+            "type": "string",
+            "enum": [
+              "sourceConnection"
+            ]
           }
         ]
       },
@@ -8359,6 +8372,20 @@
           "suspended": {
             "description": "The desired value of the schedule's one mutable field.",
             "type": "boolean"
+          }
+        },
+        "additionalProperties": false
+      },
+      "SourceConnectionPreflightRequest": {
+        "description": "The source-connection half of a preflight request.",
+        "type": "object",
+        "required": [
+          "connectionRef"
+        ],
+        "properties": {
+          "connectionRef": {
+            "description": "The `KafkaCluster` to dial, in this namespace. REQUIRED: a connectivity check with no connection is not a smaller check, it is no check, and the absence is refused as `422 connectionRef required` rather than defaulted to anything.",
+            "type": "string"
           }
         },
         "additionalProperties": false

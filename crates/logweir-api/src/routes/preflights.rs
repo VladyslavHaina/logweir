@@ -44,7 +44,8 @@ use weirkeeper::crds::preflight::Referent;
 use weirkeeper::crds::preflight::{
     BackupPreflightRequest as CrdBackupRequest, DestinationAccessRequest, Preflight as PreflightCr,
     PreflightOperation, PreflightRequest, PreflightSpec,
-    RestorePreflightRequest as CrdRestoreRequest, UidRef,
+    RestorePreflightRequest as CrdRestoreRequest,
+    SourceConnectionPreflightRequest as CrdSourceConnectionRequest, UidRef,
 };
 use weirkeeper::crds::restore::Restore as RestoreCr;
 use weirkeeper::crds::{ArchiveRef, LocalRef};
@@ -102,6 +103,7 @@ fn operation_dto(operation: PreflightOperation) -> PreflightOperationDto {
         PreflightOperation::Backup => PreflightOperationDto::Backup,
         PreflightOperation::Restore => PreflightOperationDto::Restore,
         PreflightOperation::DestinationAccess => PreflightOperationDto::DestinationAccess,
+        PreflightOperation::SourceConnection => PreflightOperationDto::SourceConnection,
     }
 }
 
@@ -428,6 +430,7 @@ fn core_operation(operation: PreflightOperation) -> CoreCheckOperation {
         PreflightOperation::Backup => CoreCheckOperation::Backup,
         PreflightOperation::Restore => CoreCheckOperation::Restore,
         PreflightOperation::DestinationAccess => CoreCheckOperation::DestinationAccess,
+        PreflightOperation::SourceConnection => CoreCheckOperation::SourceConnection,
     }
 }
 
@@ -739,11 +742,13 @@ pub fn validate_create(request: &CreatePreflightRequest) -> Result<(), ApiError>
         ("backup", request.backup.is_some()),
         ("restore", request.restore.is_some()),
         ("destinationAccess", request.destination_access.is_some()),
+        ("sourceConnection", request.source_connection.is_some()),
     ];
     let expected = match request.operation {
         PreflightOperationDto::Backup => "backup",
         PreflightOperationDto::Restore => "restore",
         PreflightOperationDto::DestinationAccess => "destinationAccess",
+        PreflightOperationDto::SourceConnection => "sourceConnection",
     };
     for (name, present) in blocks {
         if present && name != expected {
@@ -896,6 +901,19 @@ pub fn validate_create(request: &CreatePreflightRequest) -> Result<(), ApiError>
             ));
         }
     }
+    if let Some(connection) = &request.source_connection {
+        // THE ONE FIELD, AND IT IS A REFERENCE. An absent `connectionRef` is
+        // refused by `deny_unknown_fields`' sibling rule — a missing required
+        // field is `Category::Data`, which `read_json` turns into a 422 naming
+        // `connectionRef` — and a present one that is not a Kubernetes name is
+        // refused here, before an object with an unresolvable reference is
+        // created for a controller to report `ConnectionNotFound` about.
+        check_reference(
+            "sourceConnection.connectionRef",
+            &connection.connection_ref,
+            &mut errors,
+        );
+    }
     if let Some(skip) = &request.skip_checks {
         if skip.len() > 32 {
             errors.push(FieldError::new(
@@ -972,6 +990,7 @@ pub fn build(
                     PreflightOperationDto::DestinationAccess => {
                         PreflightOperation::DestinationAccess
                     }
+                    PreflightOperationDto::SourceConnection => PreflightOperation::SourceConnection,
                 },
                 backup: request.backup.as_ref().map(|b| CrdBackupRequest {
                     source_ref: local(&b.source_connection),
@@ -1002,6 +1021,11 @@ pub fn build(
                     DestinationAccessRequest {
                         destination_ref: local(&d.destination),
                         roles: d.roles.iter().copied().map(crd_role).collect(),
+                    }
+                }),
+                source_connection: request.source_connection.as_ref().map(|c| {
+                    CrdSourceConnectionRequest {
+                        connection_ref: local(&c.connection_ref),
                     }
                 }),
                 skip_checks: request.skip_checks.clone(),
@@ -1132,6 +1156,7 @@ pub async fn start_destination_access(
             destination: destination.to_string(),
             roles: roles.to_vec(),
         }),
+        source_connection: None,
         skip_checks: None,
         timeout_seconds: Some(weirkeeper::crds::preflight::DEFAULT_TIMEOUT_SECONDS),
     };
@@ -1519,6 +1544,7 @@ mod tests {
                     backup: None,
                     restore: None,
                     destination_access: None,
+                    source_connection: None,
                     skip_checks: None,
                     timeout_seconds: 120,
                 },

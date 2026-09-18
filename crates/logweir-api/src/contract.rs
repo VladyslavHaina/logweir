@@ -2034,6 +2034,11 @@ pub enum PreflightOperationDto {
     Restore,
     /// An explicit destination access test.
     DestinationAccess,
+    /// A source connection on its own: does this `KafkaCluster` answer, as
+    /// this principal, right now (D2-SOURCECHECK). It names no destination, no
+    /// plan and no topic, which is what lets the console's "Test connection"
+    /// start one with nothing but the cluster the reader is looking at.
+    SourceConnection,
 }
 
 /// The aggregate a preflight reports.
@@ -2389,6 +2394,17 @@ pub struct DestinationAccessPreflightRequest {
     pub roles: Vec<DestinationRoleDto>,
 }
 
+/// The source-connection half of a preflight request.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct SourceConnectionPreflightRequest {
+    /// The `KafkaCluster` to dial, in this namespace. REQUIRED: a connectivity
+    /// check with no connection is not a smaller check, it is no check, and
+    /// the absence is refused as `422 connectionRef required` rather than
+    /// defaulted to anything.
+    pub connection_ref: String,
+}
+
 /// `POST .../preflights`.
 #[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
@@ -2404,6 +2420,9 @@ pub struct CreatePreflightRequest {
     /// The destination-access block.
     #[serde(default)]
     pub destination_access: Option<DestinationAccessPreflightRequest>,
+    /// The source-connection block.
+    #[serde(default)]
+    pub source_connection: Option<SourceConnectionPreflightRequest>,
     /// Blocking checks to skip, at most 32. A skipped blocking check keeps the
     /// aggregate `unknown`.
     #[serde(default)]
