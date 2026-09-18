@@ -751,7 +751,87 @@ async fn the_harvested_record_names_every_field_of_last_sync_job() {
     )
     .await;
     assert_eq!(outcome.phase, ctrl::CatalogPhase::Published);
-    assert_names_every_last_sync_job_field("harvest", &f.patched_status()["lastSyncJob"]);
+    assert_names_every_last_sync_job_field(
+        "harvest (published)",
+        &f.patched_status()["lastSyncJob"],
+    );
+
+    // ---- and the harvest whose Job supplies NEITHER ----------------------
+    //
+    // A SUCCESSFUL harvest writes `startedAt` and `exitCode` from the Job and
+    // its pod, so the seeded nulls for those two are invisible on that path
+    // and a mutant that drops them survives the case above. They are not
+    // decoration: a Job with no `startTime`, whose pod is gone before the
+    // controller reads it, supplies neither — and on the upgrade path the
+    // stuck record's OWN `startedAt` and `exitCode`, from a different Job,
+    // are what would survive in their place. This is that Job.
+    let bare = leak(format!("{stem}-bare"));
+    let f2 = fixture(vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        route(
+            "GET",
+            job_path(bare),
+            json!({
+                "apiVersion": "batch/v1", "kind": "Job",
+                "metadata": {
+                    "name": bare, "namespace": NS, "uid": JOB_UID_2,
+                    "resourceVersion": "556",
+                    "ownerReferences": [{
+                        "apiVersion": "logweir.dev/v1alpha1", "kind": "RecoveryCatalog",
+                        "name": NAME, "uid": UID, "controller": true,
+                        "blockOwnerDeletion": true
+                    }]
+                },
+                "spec": {"template": {"spec": {"containers": [{
+                    "name": "runner",
+                    "env": [{"name": check::job::PLAN_SHA256_ENV, "value": "sha256:x"}]
+                }]}}},
+                // No `startTime`, no `completionTime` — finished by condition
+                // alone, which is all `job_finished` reads.
+                "status": {"conditions": [{"type": "Complete", "status": "True"}]}
+            })
+            .to_string(),
+        ),
+        // The pod is gone, so there is no relay and no exit code.
+        route(
+            "GET",
+            "/pods",
+            json!({"apiVersion": "v1", "kind": "PodList", "metadata": {}, "items": []}).to_string(),
+        ),
+        status_route(),
+    ]);
+    let outcome = run_at(
+        &f2,
+        &catalog(
+            json!({"syncRequest": "token-1"}),
+            json!({
+                "observedGeneration": 1,
+                "observedSyncRequest": "token-1",
+                "lastSyncJob": {"name": bare},
+                "conditions": []
+            }),
+        ),
+        now(),
+    )
+    .await;
+    assert_eq!(
+        outcome.phase,
+        ctrl::CatalogPhase::Failed,
+        "a finished Job with no pod has no relay, which is ResultUnreadable and not a guess"
+    );
+    let written = f2.patched_status()["lastSyncJob"].clone();
+    assert_names_every_last_sync_job_field("harvest (no pod)", &written);
+    assert_eq!(
+        written["startedAt"],
+        Value::Null,
+        "the Job supplies no startTime, so the record must say so rather than keep another \
+         Job's: {written}"
+    );
+    assert_eq!(written["exitCode"], Value::Null, "{written}");
+    assert!(
+        written["refusalReason"].is_string(),
+        "the refusal that IS this Job's is still recorded: {written}"
+    );
 }
 
 /// Every field `LastSyncJob` serialises must appear in `written`, by the
