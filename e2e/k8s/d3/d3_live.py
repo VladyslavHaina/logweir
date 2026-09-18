@@ -536,6 +536,10 @@ def controller_facts() -> dict[str, Any]:
         "image": (pod.get("spec", {}).get("containers") or [{}])[0].get("image"),
         "runnerImage": env.get("LOGWEIR_RUNNER_IMAGE"),
         "policyConfigMap": env.get("LOGWEIR_POLICY_CONFIGMAP"),
+        # The documented escape hatch for a non-https webhook. It decides
+        # whether a plaintext sink is dialled at all, so a notification row that
+        # did not read it would be asserting against an unread configuration.
+        "allowInsecureSinks": env.get("LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS"),
         "startedAt": pod.get("status", {}).get("startTime"),
         "recordedAt": now(),
     }
@@ -1098,13 +1102,30 @@ def wait_evaluated(name: str, *, seconds: int = 300, generation: int | None = No
     return wait_for("retentionpolicy", name, ready, seconds=seconds, what="an Evaluated verdict")
 
 
-def evaluation_backup_ids(policy: dict[str, Any]) -> dict[str, set[str]]:
+# `SkippedEntry.reason`'s closed vocabulary
+# (`crates/weirkeeper/src/crds/retention_policy.rs`). A row that only counted
+# entries would not notice a controller inventing a reason.
+SKIPPED_REASONS = {"Unreadable", "UnsupportedFormat", "Conflict"}
+
+
+def evaluation_point_ids(policy: dict[str, Any]) -> dict[str, set[str]]:
+    """Every point id the evaluation names, per bucket.
+
+    IT IS `pointId`, AND `kept` IS A LIST OF BARE IDS. This read used to ask
+    each row for a `backupId` no bucket has ever carried, so every set came back
+    empty and `retention-two-destinations` asserted set relations between four
+    empty sets — a row that could not fail, passing on the first evaluation the
+    controller was ever able to produce (lab-refresh-3 §8.2). `kept` is
+    `Vec<String>`; the other three are structs keyed by `pointId`.
+    """
     ev = policy.get("status", {}).get("lastEvaluation", {}) or {}
     out: dict[str, set[str]] = {}
     for bucket in ["candidates", "protected", "skipped", "kept"]:
         rows = ev.get(bucket) or []
         out[bucket] = {
-            r.get("backupId") for r in rows if isinstance(r, dict) and r.get("backupId")
+            row if isinstance(row, str) else row.get("pointId")
+            for row in rows
+            if (row if isinstance(row, str) else row.get("pointId"))
         }
     return out
 
@@ -1194,50 +1215,96 @@ def retention() -> None:
             [path],
         )
 
-    a_ids = evaluation_backup_ids(pol_a)
-    b_ids = evaluation_backup_ids(pol_b)
-    a_universe = {e["backupId"] for e in (STATE.get("viewEntriesAfterCrLoss") or [])}
-    b_universe = {e["backupId"] for e in b_entries}
+    a_ids = evaluation_point_ids(pol_a)
+    b_ids = evaluation_point_ids(pol_b)
+    a_universe = {e["pointId"] for e in (STATE.get("viewEntriesAfterCrLoss") or [])}
+    b_universe = {e["pointId"] for e in b_entries}
     a_seen = set().union(*a_ids.values()) if a_ids else set()
     b_seen = set().union(*b_ids.values()) if b_ids else set()
+    # BOTH SIDES MUST NAME SOMETHING. Without the two emptiness clauses this is
+    # a set-disjointness assertion that an evaluation naming nothing at all
+    # satisfies, which is exactly how it passed while reading a key no bucket
+    # carries. dest-a is NOT required to be a subset of its recorded universe:
+    # the `keeps-running` schedule keeps adding points to it after the view was
+    # captured. dest-b is closed, so it is.
     check(
         "retention-two-destinations",
         "PLAT-16.1",
         bool(ev_a) and bool(ev_b)
+        and bool(a_seen) and bool(b_seen)
         and b_seen <= b_universe
         and not (b_seen & a_universe)
         and not (a_seen & b_universe)
         and ev_b.get("pointsEvaluated") == len(b_entries),
-        f"keep-a (dest-a) names {len(a_seen)} backupIds and keep-b (dest-b) names "
-        f"{len(b_seen)}; dest-a holds {len(a_universe)} and dest-b {len(b_universe)}. "
-        f"keep-b pointsEvaluated={ev_b.get('pointsEvaluated')}. "
+        f"keep-a (dest-a) names {len(a_seen)} pointIds and keep-b (dest-b) names "
+        f"{len(b_seen)}; dest-a's recorded view holds {len(a_universe)} and dest-b "
+        f"{len(b_universe)}. keep-b pointsEvaluated={ev_b.get('pointsEvaluated')}. "
         + ("NO EVALUATION EXISTS: see `retention-view-digest-prefix-defect`."
-           if not (ev_a and ev_b) else "No id crosses between the two reports."),
+           if not (ev_a and ev_b)
+           else "Neither report is empty and no id crosses between them."),
         evidence,
     )
 
+    # WHAT `protected` COUNTS. D3 L9 asks for "exactly 3 candidates and
+    # `protected` lists the `minUsablePoints` OVERRIDES" — the points a
+    # guarantee pulled back out of the rules' reach, not the whole retained set.
+    # With `keepLast: 2` and `minUsablePoints: 3` over 6 points, 4 are beyond the
+    # keep rule and exactly one of them is pulled back to make the third usable
+    # point: `candidates` 3, `kept` 3, `protected` 1. This row demanded
+    # `protected == 3`, the other reading, and failed on the first evaluation the
+    # controller was ever able to produce (lab-refresh-3 §8.2). The arithmetic is
+    # written out rather than hard-coded so the row says why 3 and 1.
+    keep_last, min_usable = 2, 3
+    b_points = len(b_entries)
+    want_kept = max(keep_last, min_usable)
+    want_candidates = b_points - want_kept
+    want_protected = min_usable - keep_last
+    b_candidates = ev_b.get("candidates") or []
+    b_kept = ev_b.get("kept") or []
+    b_protected = ev_b.get("protected") or []
     check(
         "retention-overlapping-keep-rules",
         "PLAT-16.2",
-        len(ev_b.get("candidates") or []) == 3
-        and len(ev_b.get("protected") or []) == 3
-        and all(p.get("reason") == "MinUsablePoints" for p in (ev_b.get("protected") or [])),
-        f"6 points, keepLast=2, minUsablePoints=3: {len(ev_b.get('candidates') or [])} "
-        f"candidates and {len(ev_b.get('protected') or [])} protected with reasons "
-        f"{sorted({p.get('reason') for p in (ev_b.get('protected') or [])})}"
+        ev_b.get("pointsEvaluated") == b_points
+        and len(b_candidates) == want_candidates
+        and {c.get("reason") for c in b_candidates} == {"BeyondKeepLast"}
+        and len(b_kept) == want_kept
+        and len(b_protected) == want_protected
+        and {p.get("reason") for p in b_protected} == {"MinUsablePoints"}
+        and b_ids["protected"] <= b_ids["kept"]
+        and not (b_ids["candidates"] & b_ids["kept"]),
+        f"{b_points} points, keepLast={keep_last}, minUsablePoints={min_usable}: "
+        f"{len(b_candidates)} candidates (expected {want_candidates}, reasons "
+        f"{sorted({c.get('reason') for c in b_candidates})}), {len(b_kept)} kept (expected "
+        f"{want_kept}) and {len(b_protected)} protected (expected {want_protected}, reasons "
+        f"{sorted({p.get('reason') for p in b_protected})}). `protected` is the subset of "
+        f"`kept` a guarantee saved beyond the keep rule, not the retained set; every "
+        f"protected id is kept ({b_ids['protected'] <= b_ids['kept']}) and no candidate is "
+        f"({not (b_ids['candidates'] & b_ids['kept'])})"
         + ("" if ev_b else " — no evaluation was produced at all"),
         evidence,
     )
 
-    skipped_states = {s.get("state") for s in (ev_a.get("skipped") or [])}
+    # `SkippedEntry` is `{pointId | key, reason}` — `reason`, not `state`, and
+    # `pointId`, not `backupId`. Reading two absent keys made both sides `{None}`
+    # and the intersection non-empty, so this failed on exactly the evidence that
+    # proves it (lab-refresh-3 §8.2). It now also requires every skipped row to
+    # identify what it skipped and to give a reason from the published
+    # vocabulary: a row that could not be classified AND could not be named
+    # would be an unreadable point silently dropped.
+    skipped = ev_a.get("skipped") or []
+    skipped_reasons = {row.get("reason") for row in skipped}
     check(
         "retention-unreadable-point-never-a-candidate",
         "PLAT-16.1",
-        bool(ev_a.get("skipped"))
-        and not ({s.get("backupId") for s in (ev_a.get("skipped") or [])}
-                 & {c.get("backupId") for c in (ev_a.get("candidates") or [])}),
-        f"dest-a's degraded points ({len(ev_a.get('skipped') or [])} rows, states "
-        f"{sorted(skipped_states)}) are skipped and none is a candidate"
+        bool(skipped)
+        and all(row.get("pointId") or row.get("key") for row in skipped)
+        and skipped_reasons <= SKIPPED_REASONS
+        and not (a_ids["skipped"] & a_ids["candidates"]),
+        f"dest-a's degraded points ({len(skipped)} rows, reasons {sorted(skipped_reasons)}, "
+        f"ids {sorted(a_ids['skipped'])}) are skipped and none is a candidate "
+        f"({sorted(a_ids['candidates'])}); {len(a_ids['skipped'] - set(ev_a.get('kept') or []))}"
+        f" of them is outside `kept` too"
         + ("" if ev_a else " — no evaluation was produced at all"),
         evidence,
     )
@@ -1321,26 +1388,48 @@ def retention() -> None:
                            rules={"keepLast": 2, "minUsablePoints": 3}))
     wait_evaluated("keep-b", seconds=240)
 
-    # scheduled backups continue throughout
-    children = [
-        b for b in lst("backups")
-        if b["metadata"]["name"].startswith("logweir-backup-keeps-running")
-    ]
-    finished = [b for b in children if b.get("status", {}).get("phase") == "Succeeded"]
+    # AN EXPLICIT WINDOW, NOT A TIMEOUT'S SHADOW. This row used to count
+    # whatever the `* * * * *` schedule had produced by the time the line above
+    # returned. Before RET-DIGEST-PREFIX was fixed that call sat out its whole
+    # 240 s — a policy stuck at `Evaluated=False/ViewUnreadable` never settles —
+    # so the schedule had four minutes and the row saw 25 children. The fixed
+    # controller evaluates in seconds, the borrowed window collapsed to about a
+    # minute, the single child created had not finished yet, and the row failed
+    # on its own clock rather than on anything a retention verdict did
+    # (lab-refresh-3 §8.2). The window is now stated and waited for: three slots
+    # of a one-minute schedule plus a run's worth of slack, ended early by the
+    # first Succeeded child.
+    scheduled_window_seconds = 240
+    window_deadline = time.time() + scheduled_window_seconds
+    children: list[dict[str, Any]] = []
+    finished: list[dict[str, Any]] = []
+    while True:
+        children = [
+            b for b in lst("backups")
+            if b["metadata"]["name"].startswith("logweir-backup-keeps-running")
+        ]
+        finished = [b for b in children if b.get("status", {}).get("phase") == "Succeeded"]
+        if finished or time.time() >= window_deadline:
+            break
+        time.sleep(5)
     evidence.append(
         artifact(
             "retention/scheduled-during-evaluation.json",
-            {"since": started, "children": [b["metadata"]["name"] for b in children],
-             "succeeded": [b["metadata"]["name"] for b in finished]},
+            {"since": started, "until": now(), "windowSeconds": scheduled_window_seconds,
+             "children": [b["metadata"]["name"] for b in children],
+             "succeeded": [b["metadata"]["name"] for b in finished],
+             "phases": {b["metadata"]["name"]: b.get("status", {}).get("phase")
+                        for b in children}},
         )
     )
     check(
         "retention-scheduled-backups-continue",
         "PLAT-16.1",
         len(finished) >= 1,
-        f"a `* * * * *` BackupSchedule on dest-a ran through the whole evaluation window: "
-        f"{len(children)} children, {len(finished)} Succeeded — a retention verdict, "
-        f"including a refused one, blocks no backup",
+        f"a `* * * * *` BackupSchedule on dest-a ran through the evaluation and an explicit "
+        f"{scheduled_window_seconds}s window after it: {len(children)} children, "
+        f"{len(finished)} Succeeded — a retention verdict, including a refused one, blocks "
+        f"no backup",
         evidence,
     )
     run(KN + ["patch", "backupschedule", "keeps-running", "--type=merge",
@@ -1357,42 +1446,55 @@ def plan_document(policy: dict[str, Any]) -> tuple[str, dict[str, Any]]:
 
 PLAN_MEDIA_TYPE = "application/vnd.logweir.retention-plan+json;version=1.0.0"
 
-# THE IMAGE THAT CARRIES THE ENFORCER. `Dockerfile` builds `-p logweir` only, so
-# no image this repository ships contains `/usr/local/bin/logweir-retention`;
-# this is an image built from the SAME commit with that one binary added. See
-# the README, and the `retention-enforcer-ships-in-no-image` row.
-# THE ENFORCER'S IMAGE — A REQUIRED INPUT WITH NO DEFAULT (defect RET-NOIMAGE).
+# THE IMAGE THAT CARRIES THE ENFORCER.
 #
 # `retention_policy.rs` renders every enforcement Job's command as
-# `logweir-retention` out of the controller's `LOGWEIR_RUNNER_IMAGE`, and NO
-# image this repository builds contains that binary (`packaging` proves it live:
-# exit 127, executable not found). Every scenario below that runs the enforcer
-# therefore needs an image this tree does not produce, and `Dockerfile.retention`
-# beside this file is the recipe for one.
+# `logweir-retention` out of the controller's `LOGWEIR_RUNNER_IMAGE`. RET-NOIMAGE
+# was that no image this repository built contained that binary, so the
+# enforcement rows needed one built by hand from the same commit
+# (`Dockerfile.retention` beside this file) and a default here would have been a
+# lie — it would have made the phases look runnable and then failed with
+# `ErrImageNeverPull` instead of saying why.
 #
-# A DEFAULT HERE WOULD BE A LIE. It would make the phases look runnable from a
-# clean checkout and fail with `ErrImageNeverPull` instead of saying why, so the
-# value comes from `--retention-image <ref>` or `LOGWEIR_D3_RETENTION_IMAGE` and
-# from nowhere else; without it the enforcement scenarios record NOT-RUN naming
-# the defect, which is the honest verdict and not a skip.
+# THAT DEFECT IS CLOSED. `Dockerfile` builds `logweir-retention` beside
+# `logweir`, and `scripts/check-image.sh` check 7 refuses a runner image that
+# does not carry it (lab-refresh-3 §2.3 ran the gate on the published image, and
+# §8.3 ran the binary out of it). So the default is now the runner image the
+# controller ITSELF names — the image every enforcement Job would really use,
+# read off the live Deployment rather than assumed. `--retention-image <ref>` or
+# LOGWEIR_D3_RETENTION_IMAGE still override it, which is how a build the lab is
+# not running gets measured. Only when neither can be resolved does a scenario
+# record NOT-RUN, which is still an honest verdict and not a skip.
 RETENTION_IMAGE_ENV = "LOGWEIR_D3_RETENTION_IMAGE"
 RETENTION_IMAGE: str | None = os.environ.get(RETENTION_IMAGE_ENV)
 
+# `logweir_retention::EXIT_REFUSED` (crates/logweir-retention/src/lib.rs). The
+# enforcer's own refusal: it parsed its arguments, found no usable plan, and
+# said so. A binary that is not there cannot produce it — that is 127, or a
+# kubelet `CreateContainerError` before any exit code exists at all.
+RETENTION_EXIT_REFUSED = 3
+
 RET_NOIMAGE = (
-    "NOT RUN: no image in this tree ships `logweir-retention` (defect RET-NOIMAGE). "
-    "`Dockerfile` builds `-p logweir` and copies one binary, there is no product "
-    "`Dockerfile.retention`, `.github/workflows/images.yml` builds three images and none "
-    "is a retention image, and `charts/logweir/values.yaml` carries no retention image "
-    "value — while `retention_policy.rs` names `logweir-retention` as every enforcement "
-    "Job's command. Build one with `e2e/k8s/d3/Dockerfile.retention` (see its header) and "
-    f"pass `--retention-image <ref>` or {RETENTION_IMAGE_ENV}=<ref> to run this scenario."
+    "NOT RUN: no enforcer image could be resolved. `retention_policy.rs` names "
+    "`logweir-retention` as every enforcement Job's command, out of the controller's "
+    "`LOGWEIR_RUNNER_IMAGE`; this run could not read that value off the shared "
+    "Deployment and no override was given. Pass `--retention-image <ref>` or "
+    f"{RETENTION_IMAGE_ENV}=<ref>."
 )
+
+_RESOLVED_RETENTION_IMAGE: list[str] = []
 
 
 def retention_image(scenario: str, task: str = "PLAT-16.2") -> str | None:
-    """The image, or a recorded NOT-RUN and `None`."""
+    """The image every enforcement row runs, or a recorded NOT-RUN and `None`."""
     if RETENTION_IMAGE:
         return RETENTION_IMAGE
+    if not _RESOLVED_RETENTION_IMAGE:
+        shipped = controller_facts().get("runnerImage")
+        if shipped:
+            _RESOLVED_RETENTION_IMAGE.append(shipped)
+    if _RESOLVED_RETENTION_IMAGE:
+        return _RESOLVED_RETENTION_IMAGE[0]
     record(scenario, task, "NOT-RUN", RET_NOIMAGE, [])
     return None
 
@@ -1739,9 +1841,9 @@ def enforce() -> None:
 
 
 def packaging() -> None:
-    """The enforcer binary is in no image this repository builds, and the
-    retention controller names it out of `LOGWEIR_RUNNER_IMAGE`. This is the
-    live proof, not an argument from the Dockerfile."""
+    """The enforcer binary IS in the image the retention controller names out of
+    `LOGWEIR_RUNNER_IMAGE`. This is the live proof, not an argument from the
+    Dockerfile — the same probe that used to prove the opposite."""
     evidence: list[str] = []
     facts = controller_facts()
     shipped = facts["runnerImage"]
@@ -1795,19 +1897,37 @@ def packaging() -> None:
                  {"runnerImage": shipped, "containerState": state, "controller": facts})
     )
     message = json.dumps(state)
+    terminated = state.get("terminated") or {}
+    waiting = state.get("waiting") or {}
+    absent = "not found" in message.lower() or "no such file" in message.lower()
+    # THE ROW IS INVERTED, AND THE INVERSION IS THE PROOF. It used to require
+    # the container state to say `not found` — the shape of RET-NOIMAGE — and it
+    # now requires the opposite, because the defect is closed: `Dockerfile`
+    # builds `logweir-retention` and `scripts/check-image.sh` check 7 refuses a
+    # runner image without it. What a present binary looks like from here is a
+    # container that STARTED and then exited with the enforcer's own refusal
+    # (`EXIT_REFUSED`, no plan and no credentials were given to this probe). What
+    # an absent one looks like is 127, or a kubelet `CreateContainerError` with
+    # no exit code at all — and the old assertion is kept as the thing that must
+    # now be false, so a regression to a runner built `-p logweir` fails here
+    # first.
     check(
-        "retention-enforcer-ships-in-no-image",
+        "retention-enforcer-ships-in-the-runner-image",
         "PLAT-16.2",
-        "not found" in message or "no such file" in message.lower(),
+        bool(terminated)
+        and not waiting
+        and not absent
+        and terminated.get("exitCode") == RETENTION_EXIT_REFUSED,
         f"a Job running `logweir-retention` out of the image the shared controller names "
-        f"({shipped}) cannot start: {message[:260]}. `Dockerfile` builds `-p logweir` and "
-        f"copies one binary; there is no `Dockerfile.retention` and no retention image value "
-        f"in `charts/logweir/values.yaml`, while `retention_policy.rs` renders every "
-        f"enforcement Job's command as `logweir-retention` out of `LOGWEIR_RUNNER_IMAGE`. "
-        f"Every enforcement row in this run was produced with an image built from THIS "
-        f"commit with that binary added ({RETENTION_IMAGE or '<--retention-image not given>'}"
-        f"), run as the operator Job "
-        f"docs/kubernetes.md §7f prescribes",
+        f"({shipped}) starts and runs: {message[:260]}. Exit "
+        f"{terminated.get('exitCode')!r} is the enforcer's own refusal "
+        f"(logweir_retention::EXIT_REFUSED = {RETENTION_EXIT_REFUSED}; this probe gives it "
+        f"no plan), which only a binary that exists and resolved by bare name through $PATH "
+        f"can produce — an absent one is 127 or a CreateContainerError with no exit code. "
+        f"Formerly `retention-enforcer-ships-in-no-image`, which asserted `not found` here "
+        f"and is the defect RET-NOIMAGE closed. The enforcement rows in this run used "
+        f"{RETENTION_IMAGE or shipped}, run as the operator Job docs/kubernetes.md §7f "
+        f"prescribes",
         evidence,
     )
 
@@ -2479,18 +2599,39 @@ def notify() -> None:
         evidence,
     )
     unchanged = {n: r for n, r in backups_before.items() if backups_after.get(n) == r}
+    # THE HATCH DECIDES THE POST COUNT, AND THE ROW READS IT. This asserted
+    # `posts_after == posts_before` — zero POSTs, because `logweir notify
+    # deliver` refuses a non-https webhook before it dials. That is still the
+    # DEFAULT, but it is a configuration and not an invariant: with
+    # `LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS` set on the controller — the
+    # documented escape hatch, which the lab now sets — the sink is dialled and
+    # D3 L5's "an in-cluster echo sink records exactly 1 POST" becomes
+    # observable. The row asserted the unconfigured half as if it were the whole
+    # contract and failed the moment the hatch was opened (lab-refresh-3 §8.3).
+    # It now asserts the delivery outcome the controller's own environment
+    # implies, in both configurations, and keeps the clause that IS the
+    # invariant: whatever a notification does, it never rewrites a Backup.
+    facts = controller_facts()
+    hatch = facts.get("allowInsecureSinks")
+    hatch_open = str(hatch).strip().lower() in {"1", "true", "yes"}
+    posts = posts_after - posts_before
+    delivered = delivery.get("state") == "Delivered"
+    evidence.append(artifact("notify/controller-facts.json", facts))
     check(
-        "notify-failure-never-rewrites-a-backup",
+        "notify-delivery-never-rewrites-a-backup",
         "PLAT-14.2",
-        posts_after == posts_before
+        posts == (1 if hatch_open else 0)
+        and delivered == hatch_open
         and len(unchanged) == len(backups_before),
-        f"the plaintext sink received {posts_after - posts_before} POST(s) — `logweir notify "
-        f"deliver` refuses a non-https webhook before it dials (NOTIFY_ALLOW_INSECURE_SINKS "
-        f"is the documented escape hatch and nothing in the ProtectionPolicy or the delivery "
-        f"Job spec sets it), so the failure is visible on ProtectionPolicy.status and "
-        f"nowhere else — and every one of the {len(backups_before)} Backups in this "
-        f"namespace still carries the resourceVersion it had before the protection "
-        f"controller ran ({len(unchanged)} unchanged)",
+        f"LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS={hatch!r} on the controller, so a plaintext "
+        f"sink is {'dialled' if hatch_open else 'refused before the dial'} and exactly "
+        f"{1 if hatch_open else 0} POST(s) are expected: the sink received {posts}, the "
+        f"alert records delivery {delivery.get('state')!r} after "
+        f"{delivery.get('attempts')} attempt(s) — and every one of the "
+        f"{len(backups_before)} Backups in this namespace still carries the resourceVersion "
+        f"it had before the protection controller ran ({len(unchanged)} unchanged). "
+        f"Formerly `notify-failure-never-rewrites-a-backup`, which required zero POSTs and "
+        f"so encoded the hatch being shut as if it were the contract",
         evidence,
     )
 

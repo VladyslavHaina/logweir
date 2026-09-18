@@ -19,9 +19,11 @@ nothing and it has no fixture mode.
 - `minio/mc:latest` and `busybox:latest` present on the node
   (`imagePullPolicy: Never`).
 - **An image carrying `logweir-retention`**, for the five enforcement phases
-  only. No image this repository builds contains that binary — see
-  §"The enforcer's image" — so it is a required input with no default, and the
-  scenarios that need it record **NOT-RUN** naming the defect when it is absent.
+  only. The product runner image now carries it, so the default is the
+  `LOGWEIR_RUNNER_IMAGE` the shared controller itself names — see
+  §"The enforcer's image". `--retention-image` overrides it to measure a build
+  the lab is not running; a phase records **NOT-RUN** only when neither can be
+  resolved.
 - A python3 with no third-party packages.
 
 ## Running it
@@ -29,14 +31,15 @@ nothing and it has no fixture mode.
 ```bash
 export LOGWEIR_D3_STAMP=$(date -u +%Y%m%dt%H%Mz)
 export LOGWEIR_D3_OUT=/tmp/d3-live/$LOGWEIR_D3_STAMP
-RET=logweir:scram-local-d3w14      # see "The enforcer's image" below
+RET=logweir:scram-local            # optional; the default is the controller's
+                                   # own LOGWEIR_RUNNER_IMAGE — see below
 
 python3 e2e/k8s/d3/d3_live.py setup            # namespace, destinations, buckets
 python3 e2e/k8s/d3/d3_live.py catalog          # PLAT-15.1: reconstruction after CR loss
 python3 e2e/k8s/d3/d3_live.py catalog-cases    # duplicate identity, Missing, stale index, format
 python3 e2e/k8s/d3/d3_live.py retention        # PLAT-16.1: two destinations, honest reports
 python3 e2e/k8s/d3/d3_live.py legal-hold       # PLAT-16.2: spec.holds[]
-python3 e2e/k8s/d3/d3_live.py packaging        # proves the shipped image cannot run the enforcer
+python3 e2e/k8s/d3/d3_live.py packaging        # proves the shipped image DOES carry the enforcer
 python3 e2e/k8s/d3/d3_live.py preview                 --retention-image $RET
 python3 e2e/k8s/d3/d3_live.py no-evidence-credential  --retention-image $RET
 python3 e2e/k8s/d3/d3_live.py enforce                 --retention-image $RET
@@ -72,20 +75,31 @@ controller's `LOGWEIR_RUNNER_IMAGE`; it never writes it.
 
 `crates/weirkeeper/src/controllers/retention_policy.rs` renders every
 enforcement Job's command as `logweir-retention` and takes that Job's image from
-the controller's `LOGWEIR_RUNNER_IMAGE`. **No image this repository builds
-contains that binary**: the product `Dockerfile` runs `cargo build … -p logweir`
-and copies `/usr/local/bin/logweir`, there is no product `Dockerfile.retention`,
-`.github/workflows/images.yml` builds three images and none is a retention
-image, and `charts/logweir/values.yaml` has no retention image value. So
-`mode: Enforce` produces a Job that dies at the kubelet — which the `packaging`
-phase proves live, exit 127, `executable file not found`. That is defect
-**RET-NOIMAGE** against PLAT-16.2, and it is the product's to fix.
+the controller's `LOGWEIR_RUNNER_IMAGE`.
 
-`Dockerfile.retention` beside this file is the *test* recipe for the image the
-enforcement phases need. It starts from the product `Dockerfile`'s own `builder`
-stage rather than copying it, so there is no second home for the cross-compile
-setup to drift in, and it changes neither the product `Dockerfile` nor the
-chart. Nothing in `justfile` or CI references it:
+**RET-NOIMAGE was that no image this repository built contained that binary** —
+the product `Dockerfile` ran `cargo build … -p logweir` and copied
+`/usr/local/bin/logweir` alone, so `mode: Enforce` produced a Job that died at
+the kubelet with exit 127, `executable file not found`, which the `packaging`
+phase proved live.
+
+**That defect is closed.** `Dockerfile` builds `logweir-retention` beside
+`logweir`, and `scripts/check-image.sh` check 7 refuses a runner image that does
+not carry it. `packaging` now proves the inverse from the same probe: the
+container starts and exits `3`, `logweir_retention::EXIT_REFUSED` — the
+enforcer's own refusal when it is given no plan, which only a binary that exists
+and resolves by bare name through `$PATH` can produce. The row is named
+`retention-enforcer-ships-in-the-runner-image`; it was
+`retention-enforcer-ships-in-no-image` and asserted `not found` here. So the
+enforcement phases default to the controller's own `LOGWEIR_RUNNER_IMAGE` and
+need no hand-built image.
+
+`Dockerfile.retention` beside this file stays as the *test* recipe for an
+enforcer image the lab is not running — a build under review, or one from
+another commit — reached with `--retention-image`. It starts from the product
+`Dockerfile`'s own `builder` stage rather than copying it, so there is no second
+home for the cross-compile setup to drift in, and it changes neither the product
+`Dockerfile` nor the chart. Nothing in `justfile` or CI references it:
 
 ```bash
 docker build --platform linux/amd64 --target builder \
@@ -108,9 +122,9 @@ other way to say which commit it came from, and `WORKER-RULES.md` requires it.
 shared controller's image. `docs/kubernetes.md` §7f says the real per-candidate
 object count comes from an operator running `logweir-retention run … --dry-run`;
 this harness runs that, and the enforced pass beside it, as Jobs in its own
-namespace against the plan it wrote. Without `--retention-image` those five
-phases record NOT-RUN with RET-NOIMAGE as the reason — the honest verdict, and
-not a skip.
+namespace against the plan it wrote. Those five phases record NOT-RUN only when
+no image can be resolved at all — neither an override nor the controller's own
+`LOGWEIR_RUNNER_IMAGE` — which is the honest verdict, and not a skip.
 
 ## Safety rules it enforces in code, not in prose
 
