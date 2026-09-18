@@ -1130,6 +1130,118 @@ def evaluation_point_ids(policy: dict[str, Any]) -> dict[str, set[str]]:
     return out
 
 
+# ---------------------------------------------------------------------------
+# The row decisions, as named functions
+#
+# Each of these is the boolean a `check()` below rests on, lifted out of the
+# call site so it can be fed a recorded object without a cluster —
+# `e2e/k8s/d3/test_rows.py` runs every one of them against the shape the
+# product publishes today AND against the shape it published before the defect
+# was fixed, and requires the second to be refused. A row whose decision cannot
+# be made to say False is not a row.
+# ---------------------------------------------------------------------------
+
+
+def reports_are_disjoint(ev_a: dict[str, Any], ev_b: dict[str, Any],
+                         a_seen: set[str], b_seen: set[str],
+                         a_universe: set[str], b_universe: set[str],
+                         b_points: int) -> bool:
+    """Two destinations, two reports, no id in common — and neither empty.
+
+    The emptiness clauses are the point: without them this is a disjointness
+    claim that an evaluation naming nothing at all satisfies. dest-a is not
+    required to be inside its recorded universe, because a schedule keeps
+    adding points to it after the view was captured; dest-b is closed.
+    """
+    return (
+        bool(ev_a) and bool(ev_b)
+        and bool(a_seen) and bool(b_seen)
+        and b_seen <= b_universe
+        and not (b_seen & a_universe)
+        and not (a_seen & b_universe)
+        and ev_b.get("pointsEvaluated") == b_points
+    )
+
+
+def keep_rule_expectation(points: int, keep_last: int, min_usable: int) -> dict[str, int]:
+    """What `keepLast` and `minUsablePoints` together mean for one evaluation.
+
+    The newest `max(keepLast, minUsablePoints)` points stay; everything beyond
+    the keep rule is a candidate; and `protected` is only the OVERRIDE — the
+    points `minUsablePoints` pulled back out of the keep rule's reach, which is
+    what D3 L9 means by "`protected` lists the `minUsablePoints` overrides".
+    """
+    kept = max(keep_last, min_usable)
+    return {"kept": kept, "candidates": points - kept, "protected": min_usable - keep_last}
+
+
+def overlapping_keep_rules_ok(ev: dict[str, Any], ids: dict[str, set[str]],
+                              want: dict[str, int], points: int) -> bool:
+    candidates = ev.get("candidates") or []
+    kept = ev.get("kept") or []
+    protected = ev.get("protected") or []
+    return (
+        ev.get("pointsEvaluated") == points
+        and len(candidates) == want["candidates"]
+        and {c.get("reason") for c in candidates} == {"BeyondKeepLast"}
+        and len(kept) == want["kept"]
+        and len(protected) == want["protected"]
+        and {p.get("reason") for p in protected} == {"MinUsablePoints"}
+        and ids["protected"] <= ids["kept"]
+        and not (ids["candidates"] & ids["kept"])
+    )
+
+
+def skipped_never_a_candidate(ev: dict[str, Any], ids: dict[str, set[str]]) -> bool:
+    """A point the evaluation could not classify is named, explained, and safe.
+
+    `SkippedEntry` is `{pointId | key, reason}`. Requiring the identity as well
+    as the reason is what stops an unreadable point being dropped silently:
+    a row with neither is an object nobody can go and look at.
+    """
+    skipped = ev.get("skipped") or []
+    return (
+        bool(skipped)
+        and all(row.get("pointId") or row.get("key") for row in skipped)
+        and {row.get("reason") for row in skipped} <= SKIPPED_REASONS
+        and not (ids["skipped"] & ids["candidates"])
+    )
+
+
+def enforcer_is_in_the_image(state: dict[str, Any]) -> bool:
+    """What a PRESENT `logweir-retention` looks like from a probe Job.
+
+    A container that started and exited with the enforcer's own refusal. An
+    ABSENT one is 127, or a kubelet `waiting` state with no exit code at all,
+    and the `not found` text the pre-fix row required is required to be gone.
+    """
+    terminated = state.get("terminated") or {}
+    waiting = state.get("waiting") or {}
+    message = json.dumps(state).lower()
+    return (
+        bool(terminated)
+        and not waiting
+        and "not found" not in message
+        and "no such file" not in message
+        and terminated.get("exitCode") == RETENTION_EXIT_REFUSED
+    )
+
+
+def hatch_is_open(value: Any) -> bool:
+    """`LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS` as the controller reads it."""
+    return str(value).strip().lower() in {"1", "true", "yes"}
+
+
+def notify_delivery_ok(hatch_open: bool, posts: int, delivered: bool,
+                       unchanged: int, total: int) -> bool:
+    """What the controller's own environment implies, and the invariant under it.
+
+    The POST count is a consequence of the escape hatch and not a contract; the
+    Backups' resourceVersions are the contract, whichever way delivery went.
+    """
+    return posts == (1 if hatch_open else 0) and delivered == hatch_open and unchanged == total
+
+
 def schedule_object(name: str, dest: str) -> dict[str, Any]:
     return {
         "apiVersion": "logweir.dev/v1alpha1",
@@ -1230,12 +1342,8 @@ def retention() -> None:
     check(
         "retention-two-destinations",
         "PLAT-16.1",
-        bool(ev_a) and bool(ev_b)
-        and bool(a_seen) and bool(b_seen)
-        and b_seen <= b_universe
-        and not (b_seen & a_universe)
-        and not (a_seen & b_universe)
-        and ev_b.get("pointsEvaluated") == len(b_entries),
+        reports_are_disjoint(ev_a, ev_b, a_seen, b_seen, a_universe, b_universe,
+                             len(b_entries)),
         f"keep-a (dest-a) names {len(a_seen)} pointIds and keep-b (dest-b) names "
         f"{len(b_seen)}; dest-a's recorded view holds {len(a_universe)} and dest-b "
         f"{len(b_universe)}. keep-b pointsEvaluated={ev_b.get('pointsEvaluated')}. "
@@ -1256,27 +1364,18 @@ def retention() -> None:
     # written out rather than hard-coded so the row says why 3 and 1.
     keep_last, min_usable = 2, 3
     b_points = len(b_entries)
-    want_kept = max(keep_last, min_usable)
-    want_candidates = b_points - want_kept
-    want_protected = min_usable - keep_last
+    want = keep_rule_expectation(b_points, keep_last, min_usable)
     b_candidates = ev_b.get("candidates") or []
     b_kept = ev_b.get("kept") or []
     b_protected = ev_b.get("protected") or []
     check(
         "retention-overlapping-keep-rules",
         "PLAT-16.2",
-        ev_b.get("pointsEvaluated") == b_points
-        and len(b_candidates) == want_candidates
-        and {c.get("reason") for c in b_candidates} == {"BeyondKeepLast"}
-        and len(b_kept) == want_kept
-        and len(b_protected) == want_protected
-        and {p.get("reason") for p in b_protected} == {"MinUsablePoints"}
-        and b_ids["protected"] <= b_ids["kept"]
-        and not (b_ids["candidates"] & b_ids["kept"]),
+        overlapping_keep_rules_ok(ev_b, b_ids, want, b_points),
         f"{b_points} points, keepLast={keep_last}, minUsablePoints={min_usable}: "
-        f"{len(b_candidates)} candidates (expected {want_candidates}, reasons "
+        f"{len(b_candidates)} candidates (expected {want['candidates']}, reasons "
         f"{sorted({c.get('reason') for c in b_candidates})}), {len(b_kept)} kept (expected "
-        f"{want_kept}) and {len(b_protected)} protected (expected {want_protected}, reasons "
+        f"{want['kept']}) and {len(b_protected)} protected (expected {want['protected']}, reasons "
         f"{sorted({p.get('reason') for p in b_protected})}). `protected` is the subset of "
         f"`kept` a guarantee saved beyond the keep rule, not the retained set; every "
         f"protected id is kept ({b_ids['protected'] <= b_ids['kept']}) and no candidate is "
@@ -1297,10 +1396,7 @@ def retention() -> None:
     check(
         "retention-unreadable-point-never-a-candidate",
         "PLAT-16.1",
-        bool(skipped)
-        and all(row.get("pointId") or row.get("key") for row in skipped)
-        and skipped_reasons <= SKIPPED_REASONS
-        and not (a_ids["skipped"] & a_ids["candidates"]),
+        skipped_never_a_candidate(ev_a, a_ids),
         f"dest-a's degraded points ({len(skipped)} rows, reasons {sorted(skipped_reasons)}, "
         f"ids {sorted(a_ids['skipped'])}) are skipped and none is a candidate "
         f"({sorted(a_ids['candidates'])}); {len(a_ids['skipped'] - set(ev_a.get('kept') or []))}"
@@ -1898,8 +1994,6 @@ def packaging() -> None:
     )
     message = json.dumps(state)
     terminated = state.get("terminated") or {}
-    waiting = state.get("waiting") or {}
-    absent = "not found" in message.lower() or "no such file" in message.lower()
     # THE ROW IS INVERTED, AND THE INVERSION IS THE PROOF. It used to require
     # the container state to say `not found` — the shape of RET-NOIMAGE — and it
     # now requires the opposite, because the defect is closed: `Dockerfile`
@@ -1914,10 +2008,7 @@ def packaging() -> None:
     check(
         "retention-enforcer-ships-in-the-runner-image",
         "PLAT-16.2",
-        bool(terminated)
-        and not waiting
-        and not absent
-        and terminated.get("exitCode") == RETENTION_EXIT_REFUSED,
+        enforcer_is_in_the_image(state),
         f"a Job running `logweir-retention` out of the image the shared controller names "
         f"({shipped}) starts and runs: {message[:260]}. Exit "
         f"{terminated.get('exitCode')!r} is the enforcer's own refusal "
@@ -2613,16 +2704,14 @@ def notify() -> None:
     # invariant: whatever a notification does, it never rewrites a Backup.
     facts = controller_facts()
     hatch = facts.get("allowInsecureSinks")
-    hatch_open = str(hatch).strip().lower() in {"1", "true", "yes"}
+    hatch_open = hatch_is_open(hatch)
     posts = posts_after - posts_before
     delivered = delivery.get("state") == "Delivered"
     evidence.append(artifact("notify/controller-facts.json", facts))
     check(
         "notify-delivery-never-rewrites-a-backup",
         "PLAT-14.2",
-        posts == (1 if hatch_open else 0)
-        and delivered == hatch_open
-        and len(unchanged) == len(backups_before),
+        notify_delivery_ok(hatch_open, posts, delivered, len(unchanged), len(backups_before)),
         f"LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS={hatch!r} on the controller, so a plaintext "
         f"sink is {'dialled' if hatch_open else 'refused before the dial'} and exactly "
         f"{1 if hatch_open else 0} POST(s) are expected: the sink received {posts}, the "

@@ -1780,6 +1780,67 @@ def s1() -> None:
         check(not leaks, f"credential values leaked: {leaks}")
 
 
+# ---------------------------------------------------------------------------
+# The row decisions, as named functions
+#
+# Lifted out of their call sites so they can be fed a recorded object without a
+# cluster: `e2e/k8s/d2/test_rows.py` runs each against the shape the product
+# publishes today AND the shape it published before the defect was fixed, and
+# requires the second to be refused. A decision that cannot be made to say
+# False is not a decision.
+# ---------------------------------------------------------------------------
+
+
+def s11_criteria(status: dict[str, Any], job_conditions: list[dict[str, Any]],
+                 relayed: Any, new_chunks: list[str]) -> dict[str, bool]:
+    """D2 §14.4's S11 criteria, each judged on its own.
+
+    The fifth one is restated, and the reason is in `s11()`: the check Job
+    SUCCEEDS on this path, because the runner classifies the timeout itself,
+    relays a readable frame and exits 0. What is asserted instead is that the
+    Job ended AND the reason on the object is the code of the runner's own
+    blocking check — "the Job ended" alone would accept a Job that merely
+    finished.
+    """
+    blocking = [c for c in ((relayed or {}).get("checks") or [])
+                if isinstance(c, dict) and c.get("gating") == "blocking"
+                and c.get("state") == "notReady"]
+    terminal = [c for c in job_conditions
+                if c.get("type") in {"Complete", "Failed"} and c.get("status") == "True"]
+    return {
+        "phase == Failed": status.get("phase") == "Failed",
+        "status.reason in {BrokerUnreachable, MetadataTimeout}":
+            status.get("reason") in {"BrokerUnreachable", "MetadataTimeout"},
+        "no chunks in status": not (status.get("result") or {}).get("chunks"),
+        "no chunk ConfigMaps": not new_chunks,
+        "the Job ended and the reason came from its relayed blocking check":
+            bool(terminal) and bool(blocking)
+            and status.get("reason") in {c.get("code") for c in blocking},
+    }
+
+
+def not_attempted_is_honest(verification: Any,
+                            identity_locations: Any) -> dict[str, bool]:
+    """Each clause S1.statusVerification rests on, judged on its own.
+
+    `NotAttempted` exists as a verdict distinct from `Invalid` precisely so an
+    operator can tell "we did not check" from "it did not verify"; a block that
+    is absent altogether says neither, which is the defect. The premise is a
+    clause too: the verdict is only predictable while the installation policy
+    allows the controller's own identity nowhere.
+    """
+    block = verification if isinstance(verification, dict) else {}
+    return {
+        "a verification block exists": verification is not None,
+        "the verdict is one of the three published":
+            block.get("result") in {"Valid", "Invalid", "NotAttempted"},
+        "no controller identity location is allowed": not identity_locations,
+        "the verdict is NotAttempted": block.get("result") == "NotAttempted",
+        "NotAttempted says why": bool((block.get("detail") or "").strip()),
+        "nothing was verified, so no key matched": block.get("matchedKeyId") is None,
+    }
+
+
 def s1b() -> None:
     """The half of S1 the build could not reach, now that it reaches it.
 
@@ -1812,34 +1873,24 @@ def s1b() -> None:
                  {"verification": verification,
                   "policyControllerIdentityLocations": identity_locations,
                   "destinationEvidenceRead": "SecretKeys"})
-        check(verification is not None,
-              "status.evidence.verification is absent: the operator sees silence where the "
-              "controller decided NotAttempted (D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN)")
-        check(verification.get("result") in {"Valid", "Invalid", "NotAttempted"},
-              f"verification.result is {verification.get('result')!r}, not one of the three "
-              f"published verdicts")
         # WHY `NotAttempted` IS THE RIGHT ANSWER HERE, and not a failure to
         # verify: dest-a's `evidenceRead` is `SecretKeys`, a grant only a pod may
         # hold, and the only other route — `ControllerIdentity` — needs an entry
         # in the shared installation policy's
         # `evidence.controllerIdentityLocations`, which the lab deliberately
-        # leaves empty. If either of those changes this row fails and says so
-        # rather than quietly accepting a different verdict.
-        check(not identity_locations,
-              f"the installation policy now lists controllerIdentityLocations "
-              f"({identity_locations}); this row's premise no longer holds and its expected "
-              f"verdict must be re-derived")
-        check(verification.get("result") == "NotAttempted",
-              f"verification.result is {verification.get('result')!r} for a destination whose "
-              f"evidenceRead is SecretKeys with no controller identity location allowed; "
-              f"expected NotAttempted")
-        check(bool((verification.get("detail") or "").strip()),
-              "NotAttempted carries no detail: a verdict of 'we did not check' that does not "
-              "say why is the silence this defect was about")
-        check(verification.get("matchedKeyId") is None,
-              f"nothing was verified, yet a matchedKeyId is recorded: "
-              f"{verification.get('matchedKeyId')!r}")
-        sc.detail["notAttemptedDetail"] = verification.get("detail")
+        # leaves empty. The premise is a clause of its own, so a policy that
+        # started listing one fails this row instead of quietly changing what it
+        # means.
+        criteria = not_attempted_is_honest(verification, identity_locations)
+        sc.detail["criteria"] = criteria
+        sc.detail["notAttemptedDetail"] = (verification or {}).get("detail")
+        failed = sorted(name for name, ok in criteria.items() if not ok)
+        check(not failed,
+              "S1.statusVerification: " + "; ".join(failed)
+              + f". Observed {json.dumps(verification)} with "
+              f"controllerIdentityLocations={identity_locations!r}. An absent block is the "
+              "silence D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN was about: the operator cannot "
+              "tell 'we did not check' from 'nobody wrote anything'")
         # The receipt itself is verified from its stored bytes in S1; this row
         # is only about what the STATUS says.
 
@@ -2846,12 +2897,13 @@ def s11() -> None:
         # DEVIATION, RECORDED AND NOT SILENT: §14.4's literal "Job `Failed`"
         # wording no longer describes a reachable state. It is carried in the
         # scenario detail under `contractDeviation` for the doc's owner to amend.
-        job_terminal = [c for c in job_conditions
-                        if c["type"] in {"Complete", "Failed"} and c["status"] == "True"]
         blocking = [c for c in ((relayed or {}).get("checks") or [])
                     if isinstance(c, dict) and c.get("gating") == "blocking"
                     and c.get("state") == "notReady"]
-        sc.detail["jobTerminalConditions"] = [c["type"] for c in job_terminal]
+        sc.detail["jobTerminalConditions"] = [
+            c["type"] for c in job_conditions
+            if c.get("type") in {"Complete", "Failed"} and c.get("status") == "True"
+        ]
         sc.detail["blockingNotReadyCodes"] = [c.get("code") for c in blocking]
         sc.detail["contractDeviation"] = (
             "D2 §14.4 S11 asks for `Job Failed`. The check Job SUCCEEDS on this path: the "
@@ -2861,17 +2913,7 @@ def s11() -> None:
             "object's reason equals the relayed blocking check's code — and §14.4's "
             "wording needs amending to match."
         )
-        criteria = {
-            "phase == Failed": status["phase"] == "Failed",
-            "status.reason in {BrokerUnreachable, MetadataTimeout}":
-                status.get("reason") in {"BrokerUnreachable", "MetadataTimeout"},
-            "no chunks in status": not status.get("result", {}).get("chunks"),
-            "no chunk ConfigMaps": not new_chunks,
-            "the Job ended and the reason came from its relayed blocking check":
-                bool(job_terminal)
-                and bool(blocking)
-                and status.get("reason") in {c.get("code") for c in blocking},
-        }
+        criteria = s11_criteria(status, job_conditions, relayed, new_chunks)
         sc.detail["criteria"] = criteria
         sc.detail["observedReason"] = status.get("reason")
         sc.detail["observedMessage"] = status.get("message")

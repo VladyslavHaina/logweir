@@ -976,6 +976,65 @@ def l_09_6() -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Two row decisions, as named functions
+#
+# Lifted out of their call sites so they can be fed a recorded object without a
+# cluster: `scripts/live/d1/test_rows.py` runs each against the shape the
+# controller publishes today AND the shape the rows used to look for, and
+# requires the second to be refused. A decision that cannot be made to say
+# False is not a decision.
+# ---------------------------------------------------------------------------
+
+
+def selection_counts_agree(sel: dict[str, Any], status_sel: dict[str, Any]) -> dict[str, bool]:
+    """Where the discovery's accounting lives, judged clause by clause.
+
+    The frozen plan carries it under `selection.discovery` as `{count, names}`
+    pairs with a bounded name sample; `status.selection` carries the same two
+    numbers flattened and no names at all. The two must agree: a status that
+    disagreed with the plan it was frozen from would be the worse defect.
+    """
+    discovery = sel.get("discovery") or {}
+    internal = discovery.get("internalExcluded") or {}
+    by_rule = discovery.get("excludedByRule") or {}
+    return {
+        "the plan counts at least the one internal topic the fixture made":
+            isinstance(internal.get("count"), int) and internal.get("count") >= 1,
+        "the internal exclusion names __consumer_offsets":
+            "__consumer_offsets" in (internal.get("names") or []),
+        "the plan counts the two rule exclusions and names them":
+            by_rule.get("count") == 2
+            and sorted(by_rule.get("names") or []) == ["pfx-a", "skip-me"],
+        "the status flattens the plan's own two numbers":
+            status_sel.get("internalExcludedCount") == internal.get("count")
+            and status_sel.get("excludedByRuleCount") == by_rule.get("count"),
+        "no unbounded name list reached the status":
+            "names" not in status_sel and "__consumer_offsets" not in json.dumps(status_sel),
+    }
+
+
+def selection_empty_refusal(status: dict[str, Any], failed: dict[str, Any],
+                            resolved: dict[str, Any]) -> dict[str, bool]:
+    """D1 §3.4's shape for a discovery terminal state, clause by clause.
+
+    `Failed=True` carrying the reason, `TopicsResolved=False` carrying the same
+    one, `exitReason: operational`, and NO `exitCode` — an exit code would claim
+    a runner ran, and for `SelectionEmpty` none is ever created.
+    """
+    return {
+        "phase is Failed": status.get("phase") == "Failed",
+        "Failed=True/SelectionEmpty":
+            failed.get("status") == "True" and failed.get("reason") == "SelectionEmpty",
+        "TopicsResolved=False/SelectionEmpty":
+            resolved.get("status") == "False" and resolved.get("reason") == "SelectionEmpty",
+        "a controller refusal is operational with no exitCode":
+            status.get("exitReason") == "operational" and status.get("exitCode") is None,
+        "the refusal says no runner Job follows":
+            "no runner Job is created" in (failed.get("message") or ""),
+    }
+
+
 @scenario("L-09-1", "PLAT-09.2", "dynamic resolution: exclusions, internal topics and coverage")
 def l_09_1() -> dict[str, Any]:
     create_topics(["skip-me", "pfx-a"])
@@ -1063,25 +1122,6 @@ def l_09_1() -> dict[str, Any]:
     discovery = sel.get("discovery") or {}
     internal_block = discovery.get("internalExcluded") or {}
     by_rule_block = discovery.get("excludedByRule") or {}
-    internal = internal_block.get("count")
-    by_rule = by_rule_block.get("count")
-    require(
-        isinstance(internal, int) and internal >= 1,
-        f"selection.discovery.internalExcluded.count is {internal!r}; expected at least the "
-        f"one internal topic the fixture made ({sel})",
-        obj=inputs,
-    )
-    require(
-        "__consumer_offsets" in (internal_block.get("names") or []),
-        f"the internal exclusion does not name __consumer_offsets: {internal_block}",
-        obj=inputs,
-    )
-    require(
-        by_rule == 2 and sorted(by_rule_block.get("names") or []) == ["pfx-a", "skip-me"],
-        f"selection.discovery.excludedByRule is {by_rule_block}, expected count 2 naming "
-        f"skip-me and pfx-a",
-        obj=inputs,
-    )
     yaml_topics = re.findall(r"^\s*-\s*(\S+)\s*$", plan["backupYaml"], flags=re.M)
     require(
         [x for x in yaml_topics if x in {"t1", "t2", "skip-me", "pfx-a", "__consumer_offsets"}]
@@ -1101,22 +1141,14 @@ def l_09_1() -> dict[str, Any]:
         f"status.selection.resolvedTopicCount is {status_sel.get('resolvedTopicCount')}",
         obj=done,
     )
-    # The status is the flattened view of the plan it was frozen from. A status
-    # that disagreed with its own plan would be the worse defect, so the two are
-    # compared rather than each being read alone.
+    counts = selection_counts_agree(sel, status_sel)
     require(
-        status_sel.get("internalExcludedCount") == internal
-        and status_sel.get("excludedByRuleCount") == by_rule,
-        f"status.selection says internalExcludedCount="
-        f"{status_sel.get('internalExcludedCount')!r}/excludedByRuleCount="
-        f"{status_sel.get('excludedByRuleCount')!r} while the frozen plan says "
-        f"{internal!r}/{by_rule!r}",
+        all(counts.values()),
+        "the discovery accounting is not where the controller publishes it: "
+        + "; ".join(sorted(k for k, ok in counts.items() if not ok))
+        + f". Plan selection.discovery={discovery}, status.selection={status_sel}",
         obj=done,
-    )
-    require(
-        "names" not in status_sel and "__consumer_offsets" not in json.dumps(status_sel),
-        f"an unbounded name list reached the status: {status_sel}",
-        obj=done,
+        dumps={"inputsSelection": sel, "statusSelection": status_sel},
     )
     return {
         "uids": {"backup": uid, "discoveryJob": jobs[0]["metadata"]["uid"]},
@@ -1126,7 +1158,8 @@ def l_09_1() -> dict[str, Any]:
             "frozenTopics": inputs["topics"],
             "inputsSelection": sel,
             "discoveryCounts": {"internalExcluded": internal_block,
-                                "excludedByRule": by_rule_block},
+                                "excludedByRule": by_rule_block,
+                                "clauses": counts},
             "statusSelection": status_sel,
             "backupYamlTopics": yaml_topics,
             "receiptTopics": receipt["source"]["topics"],
@@ -1206,7 +1239,6 @@ def l_09_4() -> dict[str, Any]:
     )
     uid = obj["metadata"]["uid"]
     done = wait_for("backup", "empty-run", terminal, timeout=420, what="to reach a terminal phase")
-    require(done["status"]["phase"] == "Failed", f"phase is {done['status']['phase']}", obj=done)
     # WHERE THE REASON LIVES. D1 §3.4 defines the discovery terminal states as
     # `Failed=True` CONDITIONS carrying the reason, with `exitReason:
     # operational` and no `exitCode` — an `exitCode` would claim a runner ran,
@@ -1218,29 +1250,16 @@ def l_09_4() -> dict[str, Any]:
     # resolution verdict have to tell one story.
     failed = condition(done, "Failed") or {}
     resolved = condition(done, "TopicsResolved") or {}
+    refusal = selection_empty_refusal(done["status"], failed, resolved)
     require(
-        failed.get("status") == "True" and failed.get("reason") == "SelectionEmpty",
-        f"the Failed condition is {failed.get('status')!r}/{failed.get('reason')!r}, "
-        f"expected True/SelectionEmpty",
-        obj=done,
-    )
-    require(
-        resolved.get("status") == "False" and resolved.get("reason") == "SelectionEmpty",
-        f"the TopicsResolved condition is {resolved.get('status')!r}/"
-        f"{resolved.get('reason')!r}, expected False/SelectionEmpty",
-        obj=done,
-    )
-    require(
-        done["status"].get("exitReason") == "operational"
-        and done["status"].get("exitCode") is None,
-        f"a controller refusal is exitReason=operational with no exitCode; this one is "
+        all(refusal.values()),
+        "the empty resolution is not refused the way D1 §3.4 says: "
+        + "; ".join(sorted(k for k, ok in refusal.items() if not ok))
+        + f". phase={done['status'].get('phase')!r}, "
         f"exitReason={done['status'].get('exitReason')!r}, "
-        f"exitCode={done['status'].get('exitCode')!r}",
-        obj=done,
-    )
-    require(
-        "no runner Job is created" in (failed.get("message") or ""),
-        f"the refusal does not say that no runner Job follows: {failed.get('message')!r}",
+        f"exitCode={done['status'].get('exitCode')!r}, "
+        f"Failed={failed.get('status')!r}/{failed.get('reason')!r}, "
+        f"TopicsResolved={resolved.get('status')!r}/{resolved.get('reason')!r}",
         obj=done,
     )
     jobs = discovery_jobs(uid)
@@ -1256,6 +1275,7 @@ def l_09_4() -> dict[str, Any]:
         "uids": {"backup": uid},
         "asserted": {
             "phase": done["status"]["phase"],
+            "refusalClauses": refusal,
             "failedCondition": {k: failed.get(k) for k in ("status", "reason", "message")},
             "topicsResolvedCondition": {k: resolved.get(k) for k in ("status", "reason")},
             "exitReason": done["status"].get("exitReason"),
