@@ -184,7 +184,7 @@ arrives as a reviewable diff. Do not hand-edit those files.
 | `TrustRoster` | **Cluster** | **DEPRECATED** in favour of `TrustPolicy`, and still served and reconciled. The keys that may authorise (`approverKeys`) and the keys that may attest (`signingKeys`) — **both carrying public key material** — plus `allowedClusterIds`. Cluster-scoped so a namespace tenant cannot widen its own allowlist. With no `TrustPolicy` in the cluster the controller synthesises `legacy-roster-v1` from `TrustRoster/default`, so nothing has to be migrated on upgrade. |
 | `BackupDestination` | Namespaced | Where archives live, saved once and referenced by name (ADR 0008 Amendment F). `spec.storage` and `spec.transport.security` are **immutable**; the description, the CA `ConfigMap` reference and all four credential references are mutable, so rotation needs no new object. It holds **no credential value** — only Secret and `ConfigMap` names and key names. |
 | `TopicDiscovery` | Namespaced | One bounded observation of the topics a saved connection can see, run as an isolated Job with no Kubernetes token. `spec.request` is immutable; `spec.cancelRequested` moves `false` → `true` only. The result is **advisory**. |
-| `Preflight` | Namespaced | One bounded readiness observation for a `Backup`, a `Restore` or a destination's grants, run the same way. `spec.request` is immutable; `spec.cancelRequested` moves `false` → `true` only. A `ready` verdict **authorises nothing**: every execution-time guard still runs. |
+| `Preflight` | Namespaced | One bounded readiness observation for a `Backup`, a `Restore`, a destination's grants or a source connection on its own, run the same way. `spec.request` is immutable; `spec.cancelRequested` moves `false` → `true` only. A `ready` verdict **authorises nothing**: every execution-time guard still runs. |
 | `TrustPolicy` | **Cluster** | The keys that may authorise and the keys that may attest, with an explicit **lifecycle** (ADR 0008 Amendment G). The policy names the namespaces it governs; a namespace never names its own trust, and one claimed by two policies resolves to **nothing**. The spec is mutable and every change is one-way: keys are append-only with identical public material, `notAfter` only shortens, `state` moves `Active → Retired → Revoked` and never back, and the revocation instants are write-once. |
 | `ProtectionPolicy` | Namespaced | The recovery objective a set of schedules is meant to meet, and who hears about it when they do not. **The one kind with no CEL seal**: it is evaluation policy, never an execution input, so editing it changes what Logweir *says* about results and never the results. Notification channels are `secretKeyRef` references; no credential value appears in the spec. |
 | `RehearsalSchedule` | Namespaced | A recurring recovery rehearsal on a cron. `spec.suspend` is the only mutable field, because the standing authorisation binds a sha256 of this spec minus `suspend` — an editable template would authorise work nobody approved. The controller deletes no topic; teardown is the runner's phase 9 inside a prefix guard. |
@@ -5485,6 +5485,79 @@ kubectl --context docker-desktop get preflight -n team-a
 # NAME    OPERATION   PHASE       RESULT     EXPIRES   AGE
 # pf-9a1b Restore     Completed   notReady   14m       28s
 ```
+
+### 21.0 The four operations
+
+`spec.request.operation` names what the check is about, and CEL rule P3 ties
+exactly one block to it.
+
+| `operation` | Block | What it needs | What it runs |
+|---|---|---|---|
+| `Backup` | `backup` | a source `KafkaCluster`, a destination or a legacy archive, 1–1000 **named** topics | the whole D2 §6.3 Backup catalogue |
+| `Restore` | `restore` | a draft plan or an existing `Restore`, a target, the source and evidence destinations, the recovery point | the target, plan, archive and approval rows |
+| `DestinationAccess` | `destinationAccess` | a `BackupDestination` and 1–4 roles | the `destination.*` rows for those roles |
+| `SourceConnection` | `sourceConnection` | one `connectionRef` — and nothing else | `connection.resolved`, `connection.credentialProjected`, `connection.authenticated`, `connection.clusterIdentity`, `runner.*`, `configuration.policy` |
+
+```yaml
+apiVersion: logweir.dev/v1alpha1
+kind: Preflight
+metadata: {name: pf-conn-1, namespace: team-a}
+spec:
+  request:
+    operation: SourceConnection
+    sourceConnection:
+      connectionRef: {name: source}
+```
+
+**Why `SourceConnection` is its own operation and not a narrower `Backup`.**
+"Does this connection answer?" is the question a console's *Test connection*
+control asks, and until this build nothing could answer it: a `Backup` check
+reaches `connection.authenticated`, but its request cannot be rendered without
+a destination and at least one named topic, so asking an operator to supply
+those in order to test a connection would have been a different question
+wearing the same label. The check plan it renders (`sourceConnection`) carries
+one connection and has no field for anything else, so a plan that tried to
+smuggle a destination into a connectivity test is refused by the runner before
+it opens a socket.
+
+**What it does not report.** `connection.topicsDescribable` is **absent**, and
+deliberately. That row's whole vocabulary is about a topic the requester NAMED
+— `TopicNotFound` is an existence fact about one name and `TopicNotAuthorized`
+a visibility fact about one name — so over an empty selection `ready` would be
+a green verdict about the empty set and `unknown` on a blocking row would pin
+every connection test at `unknown` for ever. What this principal can see is a
+`TopicDiscovery` question (§20), not this one.
+
+**The pod is narrower too.** No destination credential is projected, no CA
+bundle is mounted and **no signing key is mounted**: nothing would be signed by
+a dial, and a check pod holding the installation's signing key to answer a
+question about a broker is blast radius bought for nothing. `signer.rostered`
+and `destination.*` are therefore not reported either — a row about a key or a
+grant the pod was never given is not a verdict.
+
+**Upgrade and rollback.** The block and the enum value are ADDITIVE to the
+CRD: every existing `Preflight` is byte-for-byte unaffected, no conversion is
+written and nothing is re-reconciled. Apply the CRDs before rolling the
+controller forward, as §"Upgrade, rollback and legacy Jobs" says for every
+additive field, and roll the controller and runner images **together** — a
+runner image without the `sourceConnection` plan kind refuses the plan in its
+contract step and the check lands on `Failed / CheckContractMismatch`, visibly,
+rather than doing something narrower.
+
+Rolling BACK is the one direction that needs an action. A `SourceConnection`
+value is a new member of a CLOSED enum, so a previous controller cannot decode
+a `Preflight` carrying it — unlike an additive field, which it would ignore.
+Before rolling the controller back, delete the connectivity checks:
+
+```bash
+kubectl --context docker-desktop get preflights -A \
+  -o jsonpath='{range .items[?(@.spec.request.operation=="SourceConnection")]}{.metadata.namespace}{" "}{.metadata.name}{"\n"}{end}'
+kubectl --context docker-desktop delete preflight -n <ns> <name>
+```
+
+They are transient by construction — the garbage collector removes terminal
+ones after `policy.preflight.retentionSeconds` anyway — so there is nothing to
+preserve. Their Jobs and `ConfigMap`s go with them through the owner cascade.
 
 ### 21.1 A `ready` verdict authorizes nothing
 

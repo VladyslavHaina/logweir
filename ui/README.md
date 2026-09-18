@@ -602,17 +602,47 @@ in the **future** is stale too -- there the arithmetic itself cannot be trusted,
 and an untrustworthy number presented as current is the same defect wearing a
 different hat. (No `observedAt` at all is `never observed`, above, not stale.)
 
-**"Test connection" is a read, and the control says so.** The page has no
-authority to make the controller dial anything: `KafkaCluster.spec` is
-immutable, this page's whole write surface is five creates and one suspend
-patch, and the re-probe cadence is the probe Job's own
-`ttlSecondsAfterFinished`. So the control **re-reads the object** and renders
-the newest observation the controller has recorded since -- which is what
-"test the connection" can honestly mean from a browser holding no execution
-authority. On the list each row's control re-reads **that** cluster and repaints
-**that** row's probe cell, after checking that the name still answers to the
-same UID; on the detail view it re-renders the panel. A read that answers after
-the route has left paints nothing (PLAT-13.1).
+**"Test connection" dials, and "Re-read probe" reads.** Two things a console
+can honestly do about a connection, and each control now wears the label of
+the one it does.
+
+*Re-read probe*, on the list and in the probe panel, **re-reads the object**
+and renders the newest observation the controller has recorded since. It dials
+nothing: `KafkaCluster.spec` is immutable and the re-probe cadence is the probe
+Job's own `ttlSecondsAfterFinished`. Each row's control re-reads **that**
+cluster and repaints **that** row's probe cell, after checking that the name
+still answers to the same UID. Until D2-SOURCECHECK this control was labelled
+"Test connection", which is the defect PLAT-07.2's row named: the only honest
+reading of that label is "dial the broker now", and nothing in the console
+could.
+
+*Test connection*, on a cluster's own page, creates a `Preflight` with
+`operation: SourceConnection`. The controller resolves the connection, renders
+a check plan carrying it and nothing else, and runs one isolated Job that
+projects this connection's own credential and dials the brokers. The panel
+renders that object's own rows -- state, code, message, remedy, observed and
+expires -- and computes none of them. It makes **no claim about topics**: the
+check names none, so `connection.topicsDescribable` is not reported and the
+panel says as much, pointing at *Discover topics* instead.
+
+* **One click, one Preflight.** The guard is the form's mutation record, which
+  every mount of the form in this namespace shares, so a double click is one
+  check even across a re-render.
+* **One idempotency key per deliberate test.** The key carries a token minted
+  when a click is ACCEPTED. A key composed from the connection alone would
+  replay the first verdict for ever, which is the re-read this control stopped
+  being.
+* **A refused connection disables the control** and prints the controller's
+  own reason verbatim beside its gloss. PLAT-07.1's resolver refuses before any
+  credential is renderable, so the check would be created, fail to render a
+  plan and record no row at all.
+* **The follow is bounded and says when it stops.** The panel re-reads the
+  started check at most twelve times, about thirty seconds, and then says so:
+  the check is still the controller's and was not cancelled. An unbounded timer
+  would keep reading a namespace for as long as a tab is open.
+
+A read that answers after the route has left paints nothing (PLAT-13.1), and
+that holds for every read of the follow loop as well.
 
 ### Connection contract v1 in the cluster form
 

@@ -527,6 +527,35 @@ that was skipped keeps the aggregate `unknown` — skipping a question is not
 answering it — and a `Completed` check with no recorded aggregate reads
 `unknown`, never `ready`.
 
+**Four operations, and exactly one block.** `operation` is `backup`,
+`restore`, `destinationAccess` or `sourceConnection`, and the body carries the
+matching block and no other; anything else is `422 validation_failed` naming
+both fields. The fourth is the narrowest:
+
+```http
+POST /api/v1/namespaces/team-a/preflights
+Idempotency-Key: <one per deliberate test>
+
+{"operation": "sourceConnection", "sourceConnection": {"connectionRef": "source"}}
+```
+
+It asks "does this connection answer, as this principal, right now" and takes
+nothing else: no destination, no plan, no topic list. `connectionRef` is
+REQUIRED — an omitted block is `422 sourceConnection required` and an omitted
+reference is `422 connectionRef required`, because a connectivity check with no
+connection is not a smaller check. Every request body on this API is
+`deny_unknown_fields`, so a destination or a topic list added to that block is
+`422 unknown_field` rather than a wider check nobody asked for.
+
+**The idempotency key of a connectivity test is per deliberate test, not per
+subject.** For a readiness check over an unchanged plan the subject IS the
+question, so a retry after a lost response replays. A connectivity test's
+subject is a broker that may answer differently a minute later, so a client that
+composed its key from the connection name alone would replay its first verdict
+for ever — and a control that did that would be a re-read wearing a dial's
+label. Mint a fresh key per click and let the in-flight guard, not the key,
+collapse a double click.
+
 **`staleReasons` is typed and closed, and it is RECOMPUTED, not reported.**
 On every read of a preflight this service reads back each object
 `status.binding.referents[]` names — `kind`, `name`, `uid`, `generation` are
