@@ -1007,3 +1007,55 @@ test("a_session_grant_that_omits_its_roles_is_a_contract_failure", async () => {
     "a session document that is not one leaves the page in legacy mode rather than half-read",
   );
 });
+
+test("a_connectivity_checks_key_is_per_deliberate_test_and_never_per_subject", async () => {
+  // THE KEY IS THE WHOLE DIFFERENCE BETWEEN A DIAL AND A RE-READ. For a
+  // readiness check over an unchanged plan the subject IS the question, so a
+  // retry after a lost response must replay. A connectivity test's subject is
+  // a broker that may answer differently a minute later, so a key composed
+  // from the connection alone would replay the first verdict for ever -- and
+  // "Test connection" would be a re-read again, which is exactly the defect
+  // `sourceConnection` exists to close.
+  await console_();
+  const item = {
+    id: "pf-1", namespace: "team-a", uid: "u", resourceVersion: "1",
+    operation: "sourceConnection", state: "pending", terminal: false,
+    binding: { referents: [] }, applicable: false, stale: false,
+    staleReasons: [], staleBasis: [], checks: [], warnings: [],
+    executionOnly: [], detailsAvailable: false, conditions: [],
+  };
+  const wire = transport((u, init) =>
+    init.method === "POST" ? { status: 202, body: { requestId: "r", item: item } } : undefined);
+  try {
+    const api = apiClient();
+    const request = { operation: "sourceConnection", sourceConnection: { connectionRef: "source" } };
+    await api.startPreflight("team-a", request, { attempt: "team-a.source.attempt-1" });
+    await api.startPreflight("team-a", request, { attempt: "team-a.source.attempt-2" });
+    await api.startPreflight("team-a", request, { attempt: "team-a.source.attempt-1" });
+    await api.startPreflight("team-a", request);
+
+    const keys = wire.seen.map((s) => s.init.headers["Idempotency-Key"]);
+    assert.equal(wire.seen.length, 4);
+    assert.equal(wire.seen[0].url, "/api/v1/namespaces/team-a/preflights");
+    assert.notEqual(keys[0], keys[1],
+      "two deliberate tests of one connection are two checks, so two keys");
+    assert.equal(keys[0], keys[2],
+      "and a RETRY of one test composes the same key, so a lost response replays");
+    assert.notEqual(keys[0], keys[3],
+      "the token is what makes them differ; without one the key is the subject's alone");
+
+    // The subject is still in every key: a token cannot make two connections
+    // look like one check.
+    for (const key of keys) {
+      assert.match(key, /^logweir-ui\.preflights\.team-a\./);
+    }
+    const other = { operation: "sourceConnection", sourceConnection: { connectionRef: "target" } };
+    await api.startPreflight("team-a", other, { attempt: "team-a.source.attempt-1" });
+    assert.notEqual(
+      wire.seen[4].init.headers["Idempotency-Key"], keys[0],
+      "a different connection under the same token is a different check",
+    );
+  } finally {
+    wire.restore();
+  }
+});
