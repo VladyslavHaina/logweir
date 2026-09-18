@@ -1337,6 +1337,25 @@ intent tombstone cannot be written is not deleted, and neither is any point
 after it*. Either way nothing is removed unattributably; only the exit code
 differs (3 against 1).
 
+**The enforcement Job's image is the runner image, and it carries two
+binaries.** The controller renders the Job from its own `LOGWEIR_RUNNER_IMAGE`
+(the chart's `runnerImage`) and overrides only the container's command, which is
+`logweir-retention` and never `logweir`. That binary ships in the runner image
+beside the everyday one — `Dockerfile` builds `-p logweir -p logweir-retention`
+and copies both to `/usr/local/bin/` — so there is no `retentionImage` value to
+set and nothing extra to publish. It did **not** ship before 2026-09-18, and the
+symptom was exact: the Job's pod terminated `ContainerCannotRun`, exitCode 127,
+`exec: "logweir-retention": executable file not found in $PATH`, with the
+policy's own status unchanged. Two checks now stand between that and an
+operator: `./scripts/render-install.sh --check` refuses to render an install
+file whose enforcement chain is broken, and the image workflow runs
+`logweir-retention --version` out of the built image, by bare name so the
+container runtime resolves it through `PATH` exactly as the kubelet does, before
+anything is pushed. **Shipping the binary widens no boundary**: what a pod may
+delete is decided by the credential it mounts, `logweir` still links no delete
+path, and `scripts/check-no-archive-write.sh` check 3 still holds the set of
+crates reaching `logweir-reaper` to exactly `{logweir-retention}`.
+
 **This controller does not function live until the retention ServiceAccount
 exists.** Every Job it builds requests `logweir-retention`, and the chart does
 not create it yet (`retention.enabled` and the SA are the wave-4 RBAC worker's).

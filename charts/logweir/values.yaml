@@ -15,6 +15,13 @@ kubernetes:
 
 # ----------------------------------------------------------------- images
 controllerImage: docker.io/vladyslavhaina/weirkeeper:latest
+# `runnerImage` is ALSO the retention enforcement image: there is no separate
+# `retentionImage`, because the image below carries both binaries. The
+# controller renders enforcement Jobs from this value and overrides only the
+# container's command (`logweir-retention`, beside the `logweir` entrypoint the
+# backup, restore and check Jobs run). Point this at an image built from a tree
+# whose Dockerfile does not build `-p logweir-retention` and `mode: Enforce`
+# Jobs die at the kubelet with exitCode 127.
 runnerImage: docker.io/vladyslavhaina/logweir:latest
 imagePullPolicy: Always         # controller container: Always | IfNotPresent | Never
 runnerImagePullPolicy: Always   # runner Jobs; Never only for images loaded onto the node

@@ -55,6 +55,17 @@ on a native amd64 builder use `LOGWEIR_IMAGE_PLATFORM=linux/amd64 just image-wei
 The controller cannot be cross-compiled by the shipped Dockerfile. Images are
 loaded into the local Docker store; the cluster must be able to use that store.
 
+The runner image carries **two** binaries. `logweir` is its entrypoint and is
+what every backup, restore, verify and check Job runs; `logweir-retention` sits
+beside it on `PATH` and is the command the controller gives a `RetentionPolicy`
+enforcement Job (`docs/kubernetes.md` §7f). There is no separate retention image
+and no separate chart value: the image `runnerImage` — or `LOGWEIR_RUNNER_IMAGE`
+below — names is the image an `Enforce` run will pull. A runner image built from
+a tree whose `Dockerfile` does not build `-p logweir-retention` leaves every
+other Job working and makes that one exit 127, `executable file not found in
+$PATH`; `./scripts/render-install.sh --check` refuses such a tree and the image
+workflow runs the binary out of the built image before publishing it.
+
 Apply the controller overlay, then give the freshly built controller the local
 runner image explicitly. The overlay cannot rewrite a Rust constant:
 
