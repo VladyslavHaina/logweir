@@ -140,7 +140,7 @@ Wave 2 resumes every branch in place with the prompts under
 | PLAT-17.2 (stage 2) | In progress (stage landed) | plat17-2-authz, plat17-2-authz-review | Partial record under PLAT-17.2. Integrated into main as `24752f4..90ecd0c`. Shared mode is implemented and live-verified locally but not deployable or declarable secure until D0 stages 5 and 7. |
 | PLAT-17.1 (stages 1 and 3) | In progress (stages landed) | plat17-api-finish, plat17-api-review | Partial record under PLAT-17.1. Integrated into main as `4b571d1..de0207c`. Remaining for Done: console image and chart with the API's own RBAC (D0 stage 7), transient-check cancellation once PLAT-03/09.1 exist, `POST …/backups` (PLAT-06.2), SSE (PLAT-14.1), a browser journey through the API, and PLAT-17.2. |
 | PLAT-04.2, 05.x, 06.2, 09.2 | Contract decided | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. W1 (the pure cadence engine) landed in main as `6eedc0a..4b54a5c` after review; see the PLAT-04.2 partial record. W3a (the `Backup` run contract: `spec.trigger`, `spec.scheduleRef` with generation and `runPolicySha256`, the selection type with `allUserTopics` requiring `incompleteDiscovery`, `status.selection`, `src/identity.rs`, `src/policy.rs`, the §3.4 vocabulary) landed in `696c81a`/`b334a98` inside `crds-shapes`; a `Backup` naming both `topics` and `allUserTopics` is refused by CEL and, terminally, by admission. W3b (the reconciler consumes the contract; grammar `v2`) landed at `397e37d`; see the PLAT-04.2 partial record. W2 (editable policy, the §4.5 scheduler; `destinationRef` editable) landed at `98257f8`; see the PLAT-05.1/04.2 partial record. W5 (dynamic selection per run through the check runner) landed at `7072b9d`; see the PLAT-09.2 partial record. W6 (cadence previews, `PUT schedules`, `POST backups`) landed at `72751ab`; see the PLAT-06.2 partial record. W4 (retained history; runs detached from the schedule's ownerReference) landed at `6845ffb`; see the PLAT-05.2 partial record. W7, W8 remain. |
-| PLAT-03.x, 08.x, 09.1 | In progress (W1, W2, W3, W4, W5, W6a, W6b, W7, W8, W9, W12, W13 landed) | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. W1 (pure check contract and destination model) and W2 (explicit store options) landed as `c13b0cc..56bd074` after review (ACCEPT after two high and three medium fixes: JSON-form redaction bypass, ambient credentials inheriting the environment). W3 (`logweir_kafka::inventory`: bounded targeted describe, broker count, validate-only `CreateTopics`, error classification where an observed authorization failure makes visibility `limited` and anything unknown is failure, with a real admin-client fault capture because rdkafka 0.36 never invokes `ClientContext::error` for a metadata-only workflow — D2 §4.2 `[VERIFY U5]` corrected) and W5 (`weirkeeper::check`: check Jobs mirroring the execution pod, pod selection by controller owner UID only, framed-stdout relay through the W1 decoder, the full waiting-code table, TTL, plan/chunk/limit modules, the installation policy loader failing closed) landed as `23cec50..b8e62d1` after review (ACCEPT after one high and three medium fixes; 19 mutants killed; the rebase over PLAT-07.1 then routed the inventory client through the reader's `client_config`, removing a drifted copy that could upgrade plaintext to TLS when a CA was present — re-checked ACCEPT; weirkeeper 435, kafka 57). RBAC still owed by W11: `events: list` plus its `manifest_lint` row, the three new kinds' verbs, and a decision on `gc.rs`'s deletes. The reviewers' SEC-PODLOG finding against `controllers::backup::select_job_pod` is closed by `secpodlog` (see the defects table). W6a and W6b (the three Amendment F kinds and the destination sentinel on existing kinds) landed in `46880a3`/`88232f5`/`b334a98` inside `crds-shapes`; W7 (destination resolver, controller, evidence store cache) landed as `27fb924..0b25e95` (see the PLAT-08.1 partial record); W4 (runner `logweir check run`) landed at `537657d` (see the PLAT-03 partial record); W8 (`TopicDiscovery` controller) and W12 (API routes) are in review or in progress. W9, W10, W11, W13, W14 remain. |
+| PLAT-03.x, 08.x, 09.1 | In progress (W1, W2, W3, W4, W5, W6a, W6b, W7, W8, W9, W12, W13, W11 landed) | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. W1 (pure check contract and destination model) and W2 (explicit store options) landed as `c13b0cc..56bd074` after review (ACCEPT after two high and three medium fixes: JSON-form redaction bypass, ambient credentials inheriting the environment). W3 (`logweir_kafka::inventory`: bounded targeted describe, broker count, validate-only `CreateTopics`, error classification where an observed authorization failure makes visibility `limited` and anything unknown is failure, with a real admin-client fault capture because rdkafka 0.36 never invokes `ClientContext::error` for a metadata-only workflow — D2 §4.2 `[VERIFY U5]` corrected) and W5 (`weirkeeper::check`: check Jobs mirroring the execution pod, pod selection by controller owner UID only, framed-stdout relay through the W1 decoder, the full waiting-code table, TTL, plan/chunk/limit modules, the installation policy loader failing closed) landed as `23cec50..b8e62d1` after review (ACCEPT after one high and three medium fixes; 19 mutants killed; the rebase over PLAT-07.1 then routed the inventory client through the reader's `client_config`, removing a drifted copy that could upgrade plaintext to TLS when a CA was present — re-checked ACCEPT; weirkeeper 435, kafka 57). RBAC still owed by W11: `events: list` plus its `manifest_lint` row, the three new kinds' verbs, and a decision on `gc.rs`'s deletes. The reviewers' SEC-PODLOG finding against `controllers::backup::select_job_pod` is closed by `secpodlog` (see the defects table). W6a and W6b (the three Amendment F kinds and the destination sentinel on existing kinds) landed in `46880a3`/`88232f5`/`b334a98` inside `crds-shapes`; W7 (destination resolver, controller, evidence store cache) landed as `27fb924..0b25e95` (see the PLAT-08.1 partial record); W4 (runner `logweir check run`) landed at `537657d` (see the PLAT-03 partial record); W8 (`TopicDiscovery` controller) and W12 (API routes) are in review or in progress. W9, W10, W11, W13, W14 remain. |
 | PLAT-14.x, 15.x, 16.x, 19.1 | In progress (W0, W1, W3, W4, W8, W5, W6, W10, W7 landed) | [D3](decisions/D3-status-catalog-retention-trust.md) | Operation states, protection freshness, rehearsals, durable catalog, retention enforcement boundary, trust lifecycle; fifteen worker tasks. W4 (`d3-notify`: the shared notification module and `logweir notify deliver`) landed after review (ACCEPT after two high fixes); W3 (`d3-catalog-writer`: signed catalog point records, `list_page`, `logweir catalog sync|list`) landed after review (see the PLAT-15.1 partial record); W0 (the five Amendment G kinds, additive run status, `Restore.spec` additions, the `Approval` enum) landed in `496451a`/`88232f5`/`b334a98` inside `crds-shapes`; W1 (trust lifecycle core, `TrustPolicy` controller, `trust export|migrate-roster`, G8) landed as `64fcd38..5fc1a72` (see the PLAT-19.1 partial record); W8 (`RecoveryCatalog` controller) in progress. W2, W5, W6, W7, W9, W10, W11, W12, W13, W14 remain. |
 
 ### Decision records
@@ -1276,6 +1276,53 @@ consumed by PLAT-07.2). Schedule EDITING is deliberately not wired here — the
 say so on screen. Migration: none — additive pages; the legacy in-cluster UI mode is
 unchanged.
 
+**Partial record (2026-09-17) — D2 W11: RBAC, the chart, the policy `ConfigMap`,
+the admission policy and the delete decision landed (PLAT-03.x, 08.x, 09.1 chart and
+grant halves; closes owed items from D2 W8, W9 and W12); the tasks stay In progress
+until W14 proves eight named grants live and D0 stage 7 creates the console
+ServiceAccount the admission policy names.** Landed in main as `a319a19` (roles),
+`bc65236`/`0f9ec45` (chart), `2aefaf3`/`25a963f`/`4796348` (tests) and `b7777b2`/`9b9471c`
+(docs). Decisions recorded: `delete` is granted on EXACTLY `topicdiscoveries`
+and `preflights` — transient check kinds (D2 §4.3/§5.8: 24 h retention, keep-last-five
+per connection) — and on nothing else; `manifest_lint`'s two delete assertions are
+narrowed to "only from `gc.rs`, only these two kinds" with a crate-wide source scan
+that fails on a planted `Api::delete` anywhere else (the review planted one in the
+Preflight reconciler and it survived until the scan was made symmetric); `gc.rs` is
+wired into both reconcilers with a bounded per-pass cap and never touches a
+non-terminal object; `check-no-archive-write` stays green because `gc.rs` deletes
+Kubernetes objects, never archive bytes. The `weirkeeper-policy` `ConfigMap` is
+rendered by `charts/logweir/templates/policy.yaml` from values under a schema whose
+bounds are pinned to the code's constants by a test that reads both (`hardMaxTopics`
+≤ `MAX_TOPICS_CEILING`; the two cross-field rules refused by named template
+`fail`s), lives in the release namespace only, and carries the attestation entries
+that make `attestedComplete` reachable (principal + cluster id + an unexpired entry;
+a blank field fails closed), the legacy addressing block D2 §3.12 (b) needs, and the
+check pool limits; a policy the controller refuses is now WARNED, not silently
+dropped (the review found an install that succeeded while every attestation vanished).
+A `ValidatingAdmissionPolicy` + binding lets the console ServiceAccount `create` a
+Secret only when its `type` is one of the two Logweir credential types and it carries
+the API's owner label, fail-closed; its CEL compiles on docker-desktop
+(`--dry-run=server`, nothing persisted); unset `consoleServiceAccountName` is
+refused by the schema rather than rendering a binding that matches nobody; "no
+`update`/`patch`/`delete` on `secrets` for any Logweir ServiceAccount" is
+pinned by `manifest_lint`. Human roles gain READ on the eight new kinds; the
+trust-admin role is administrator-only and cluster-scoped for `TrustPolicy` alone;
+the legacy UI proxy gains its reads; `topicdiscoveries: get` is NOT granted (no
+caller). Verified at `e15ddd2` on main: weirkeeper + logweir 1971/1971,
+`manifest_lint` 31, `chart_policy` 8, `preflight_controller` 83, strict clippy
+and fmt, `check-no-archive-write`, `crds-check`, `chart-check`,
+`schema-check`, `render-install --check`, `links`, `just lint`;
+twenty-five planted mutants killed. Independent review `claude/d2w11.review.md`:
+ACCEPT-WITH-FIXES (two medium: the values schema looser than `Policy::validate`;
+the delete narrowing enforced for one kind only; four low) then ACCEPT. Not closed,
+with reasons: `Api<Event>` wiring stays the discovery controller's; the demo
+destination values (D2 §10) and `logweir-retention-admin` are D3 W13's; the console
+ServiceAccount the policy names arrives with D0 stage 7, so the admission policy is
+inert until then (documented); keep-last-five is keyed on the connection, not the
+creator, for the reason recorded in docs. Live: none — W14 owes the eight grant proofs.
+Migration: additive grants and one new ConfigMap rendered from values; an existing
+install without the values keeps today's behaviour.
+
 ## PLAT-09 — Discover topics and resolve all-user-topic policies
 
 **Priority P1 · Proposed.** Scope: dynamic topic-data selection, not complete
@@ -1337,7 +1384,7 @@ then ACCEPT with nothing outstanding. Live: none here — W14 owes D2 §14 S7–
 cluster, timeout, refresh with credential rotation, cancel) and the `[VERIFY
 U3]`/`[VERIFY U4]` measurements. Deviations recorded: `gc.rs` (24 h retention,
 keep-last-five per connection) is pure and tested but unwired because the
-control plane grants `delete` on nothing and `manifest_lint` asserts that twice —
+control plane grants `delete` on nothing but the two transient check kinds (`topicdiscoveries`, `preflights`) since D2 W11 and `manifest_lint` asserts that twice —
 narrowing it is W11's RBAC decision, so terminal objects accumulate until then;
 W12 computes `stale` from `freshUntil` plus binding drift plus supersession and
 serves `latestAttempt` and `lastSuccessful` separately; W13 renders `unknown` as
