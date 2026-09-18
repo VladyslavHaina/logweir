@@ -4836,11 +4836,84 @@ destinations in the namespace: a live one is shown with the location it writes
 to, a schedule naming a destination that is not there any more is a refusal to
 say where it writes rather than a guess at the object now holding that name,
 and a schedule with no reference is labelled as carrying an inline archive. The
-console does **not** write that field. `POST .../schedules` has no
-`destinationRef`, and `PUT .../schedules/{name}` -- which does -- replaces the
-whole future policy, while `ui/api.js` offers `create` plus one narrow suspend
-patch and no replace at all. Bind an existing schedule to a destination with
-`kubectl` or with the schedule policy form (D1 W7) that owns that route.
+console does **not** write that field on a CREATE: `POST .../schedules` has no
+`destinationRef`. An EXISTING schedule is bound to one from the Future policy
+panel below, which sends `PUT .../schedules/{name}` -- the route that does take
+it -- or with `kubectl`.
+
+### The schedule policy, its previews and manual runs are console-only too
+
+D1 W7 added three surfaces to `#/schedules` and one column to `#/backups`, over
+routes that exist only on `logweir-api`:
+
+| surface | routes it uses |
+|---|---|
+| Future policy panel (per schedule) | `PUT /api/v1/namespaces/{ns}/schedules/{name}` |
+| Preview next runs | `GET /api/v1/cadence-previews` |
+| Back up now / Run first backup now | `POST /api/v1/namespaces/{ns}/backups` |
+
+**The policy panel replaces, it does not patch.** `PUT .../schedules/{name}`
+takes the whole future policy under an `expectedGeneration` precondition, and a
+field omitted from the request is REMOVED from the schedule. The panel therefore
+shows every field of the policy and sends every one of them, states that above
+its button, and prints the documented default beside each input rather than
+prefilling it -- a blank input means "do not set this field", and prefilling
+`3600` would turn every save into a schedule that pins what it used to inherit.
+`sourceRef` is never sent: the route carries it only to refuse it. A schedule
+whose `generation` this build does not publish gets no form at all, because the
+precondition IS that revision.
+
+**The browser evaluates no cron.** A preset is compiled to its canonical
+expression by `GET /api/v1/cadence-previews`, against the same `chrono-tz`
+database the controller schedules with, and that expression is what is saved;
+the page holds the preset catalogue as parameter bounds and no cron template at
+all. A saved schedule's `status.nextRuns` and a draft's preview render through
+one renderer, because they are one shape. A fixed local time inside a repeated
+hour shows BOTH firings with their offsets and the controller's own
+`RepeatedLocalTimeFirst` / `RepeatedLocalTimeSecond` markers; a local time that
+does not exist shows `NonexistentLocalTimeShifted` at the end of the gap. An
+absent `nextRuns` is not an empty one, and the only staleness signal the page
+reads is `nextRuns[0].at` in the past -- **not** `status.policy.evaluatedAt`,
+which is when the status last moved and stands still on a healthy schedule.
+
+**A manual run is one run per intent.** The console holds one
+`Idempotency-Key` per draft in memory, so a double click, a retry after a
+timeout and a "Check status" all return the same run with `replayed: true`; a
+deliberate later backup is a new intent and a new run. A reload cannot keep the
+key -- nothing in this console is stored in the browser -- so the panel lists
+the manual runs of that schedule that already exist instead, and says that a
+click after a reload is a new run. Nothing blocks a manual run: a suspended
+schedule and an active run are notices, and a suspended schedule stays
+suspended. A suspended schedule or a `notReady` preflight requires a second
+explicit confirmation carrying the object's own recorded reason, and confirming
+a red verdict sends `readinessAcknowledgement`, which the API records as the
+annotation `logweir.dev/readiness-ack` -- the API reads no preflight and gates
+on nothing.
+
+**In `kubectl proxy` mode all three are refused by name.** There is no preview
+route in front of the proxy and the browser will not evaluate cron to fill the
+gap; the replace is built on the product API's `expectedGeneration`
+precondition, which a JSON-merge patch against kube-apiserver would not have;
+and a manual run's name is derived by the API from the authenticated subject
+(issuer, subject, namespace, route, key), which the browser does not hold -- so
+a browser-minted name would not be the name `kubectl create -f` and the API
+produce. The in-cluster UI ServiceAccount also has no `create` on `backups`;
+`charts/logweir/templates/ui/ui.yaml` grants `create` on approvals,
+`kafkaclusters`, `backupschedules` and `restores` and nothing else, and adding
+that verb is a chart change with its own review (D1 section 8.5).
+
+**What the console can and cannot say about a run.** `Backup`'s projection
+carries `trigger` and `scheduleRef`, so the Backups table renders the run kind
+from `spec.trigger.kind` alone -- `Scheduled`, `CatchUp`, `Retry`, `Manual` --
+and a run frozen before PLAT-05.1 says its trigger was not recorded rather than
+being rendered as `Scheduled` from the coarser `triggeredBy`. The projection
+carries **no `status.selection`**, so a run's coverage label cannot be rendered
+in console mode; the page says so and names PLAT-09.2 for the projection, and
+renders the label, the selection mode, the counts and the `TopicsResolved=False`
+reason wherever the object does carry them, which in `kubectl proxy` mode is
+every run. `ScheduleStatusView` likewise carries `policy`, `nextRuns` and
+`activeRuns` and not `lastSlot`, `missedSlots`, `pendingRun` or `history`, and
+the card names those four rather than leaving empty rows.
 
 ### The gates that keep it that way
 

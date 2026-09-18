@@ -211,8 +211,14 @@ test("a_repeated_local_hour_shows_both_firings_with_their_offsets", () => {
   assert.match(html, /2026-10-25T01:30:00Z/);
   assert.match(html, /2026-10-25T02:30:00\+02:00/);
   assert.match(html, /2026-10-25T02:30:00\+01:00/);
-  assert.match(html, /RepeatedLocalTimeFirst/);
-  assert.match(html, /RepeatedLocalTimeSecond/);
+  // THE MARKER IS IN THE ROW AND THE SENTENCE IS UNDER THE TABLE, and both are
+  // asserted. The first cut of this row checked only the sentence, and a
+  // mutant that emptied the DST cell survived it: a reader scanning the table
+  // would have seen two identical-looking rows and no reason for the second.
+  assert.match(html, /<span class="badge badge-pending">RepeatedLocalTimeFirst<\/span>/,
+    "the DST cell of the first row carries the marker");
+  assert.match(html, /<span class="badge badge-pending">RepeatedLocalTimeSecond<\/span>/,
+    "and the second row carries the other one");
   assert.ok(html.indexOf(ADJUSTMENT_WORDS.RepeatedLocalTimeFirst) !== -1,
     "and each marker carries the sentence that says what it means for that instant");
   assert.ok(html.indexOf(ADJUSTMENT_WORDS.RepeatedLocalTimeSecond) !== -1);
@@ -224,7 +230,7 @@ test("a_nonexistent_local_time_says_the_run_is_at_the_end_of_the_gap", () => {
   const html = nextRunsPanel({ runs: answer.runs, timeZone: answer.timeZone });
   assert.match(html, /2027-03-28T01:00:00Z/);
   assert.match(html, /2027-03-28T03:00:00\+02:00/);
-  assert.match(html, /NonexistentLocalTimeShifted/);
+  assert.match(html, /<span class="badge badge-pending">NonexistentLocalTimeShifted<\/span>/);
   assert.ok(html.indexOf(ADJUSTMENT_WORDS.NonexistentLocalTimeShifted) !== -1);
 });
 

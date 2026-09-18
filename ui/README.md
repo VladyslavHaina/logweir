@@ -293,8 +293,8 @@ the adapter records what it cannot supply on every object it projects, under
 | kind | absent in console mode |
 |---|---|
 | `KafkaCluster` | `status.conditions` (the reachability observation is projected; the condition list is not exposed); `spec.auth.secretRef.passwordKey` and `spec.auth.tlsCa` (connection contract v1's two references, which `ConnectionAuthView` does not carry) |
-| `BackupSchedule` | the per-manifest `status.retentionReport.skipped` entries (the API reports their **count**) |
-| `Backup` | `status.manifestSha256`, `status.jobRef` |
+| `BackupSchedule` | the per-manifest `status.retentionReport.skipped` entries (the API reports their **count**); `status.lastSlot`, `status.missedSlots`, `status.pendingRun` and `status.history` (D1 W7: `ScheduleStatusView` carries `policy`, `nextRuns` and `activeRuns` and stops there) |
+| `Backup` | `status.manifestSha256`, `status.jobRef`, `status.selection` and `status.conditions` (D1 W7: the run's coverage label and its `TopicsResolved` condition) |
 | `Restore` | `status.integrity`, `status.jobRef` |
 
 Two further differences are worth stating outright, because they are not
@@ -770,21 +770,18 @@ Each sentence below is also **on the page**, beside the control it is about,
 with the task that owes the missing piece named in it. A "not available yet"
 sentence with no owner is how a gap becomes a permanent feature.
 
-* **A NEW schedule cannot name a destination; an existing one can, and this
-  page still does not send it.** `CreateScheduleRequest` requires an inline
+* **A NEW schedule still cannot name a destination; an existing one now can,
+  from the Future policy panel.** `CreateScheduleRequest` requires an inline
   `archive` and has no `destinationRef` (**PLAT-06.2** owes that one). The
   create form says so and keeps the inline fields; it does **not** derive an
   inline archive from a chosen destination, because a destination carries an
   endpoint, a region, an addressing mode and a CA bundle that an inline archive
   does not, and dropping four of those silently would write to the wrong place.
   `PUT .../schedules/{name}` **does** take `destinationRef` under
-  `expectedGeneration` -- and this page cannot use it, for a reason of its own
-  rather than a missing field: that route replaces the **whole future policy**
-  (a field omitted is removed), and `api.js` exports `create` plus exactly one
-  narrow suspend patch and no replace at all, which
-  `ui_lint::the_api_module_offers_no_delete_and_no_put` holds. The schedule
-  policy form (**D1 W7**) owns that route. What this page does do is **read**
-  it: the schedules table has a DESTINATION column resolving
+  `expectedGeneration`, and D1 W7's Future policy panel sends it -- with the
+  whole policy, because that route replaces rather than patches. What this page
+  also does is **read** it: the schedules table has a DESTINATION column
+  resolving
   `spec.destinationRef` by name against the destinations it read, showing the
   location a live one writes to, refusing to say where a vanished one writes,
   and naming an inline archive as one. The selector itself lives in the
@@ -797,13 +794,20 @@ sentence with no owner is how a gap becomes a permanent feature.
   whose projection owes it. The CRD already has the field; this is a projection
   gap, not a model gap.
 * **A coverage label needs a field the console does not publish.** The three
-  strings are `Coverage::label()`'s, verbatim. `ScheduleView.allUserTopics`
-  landed with D1 W6, so the page can now say **which selection shape** a
-  schedule uses, what its `incompleteDiscovery` policy is and what it excludes.
-  No API projection publishes `status.selection` or any `coverage`, so what a
-  RUN actually covered still cannot be labelled: the page says so and names
-  **PLAT-09.2** for the projection and **D1 W7** for the surface. Guessing "all
-  user topics" from an empty list would invent the very claim the labels bound.
+  strings are `Coverage::label()`'s, verbatim, and D1 W7 built the surface:
+  wherever an object carries `status.selection`, the page renders its
+  `coverage`, its `mode` ("the policy asked for named topics" / "all user
+  topics") and its counts, with the `limitedTopicCount` this block exists to
+  make visible, and the `TopicsResolved=False` reason and message beside it.
+  In **legacy mode that is every run**. In console mode it is none of them:
+  `Backup`'s projection publishes `trigger` and `scheduleRef` and no
+  `status.selection` at all, so there is nothing to read, and the page says so
+  and names **PLAT-09.2** for the projection. It does not infer a coverage from
+  the selection mode, the frozen topic list or a successful phase -- guessing
+  "all user topics" from an empty `topics` would invent the very claim the
+  labels bound. **A schedule never carries a coverage**: coverage is decided at
+  a run's freeze, so the schedule card shows the policy and the run shows what
+  it got.
 * **There is no source-connectivity check kind.** D2 section 4.2's plan kinds
   are `topicInventory`, `operationReadiness`, `restorePreflight`,
   `destinationAccess` and `evidenceFetch`; none of them is "dial this connection
@@ -813,6 +817,165 @@ sentence with no owner is how a gap becomes a permanent feature.
   "Discover topics", and names **PLAT-03.1** for the check kind and
   **PLAT-07.2** for the control that would consume it.
 
+
+## A schedule's future policy, its next runs, and Back up now
+
+D1 W7. Three routes, four surfaces, and one rule underneath all of them: the
+browser evaluates no cron and infers no state.
+
+### The policy panel is a REPLACE, and the form is built around that
+
+`PUT .../schedules/{name}` replaces a schedule's **whole future policy** under
+an `expectedGeneration` precondition. A field omitted from the request is
+**removed from the schedule**. A panel that showed three fields and sent three
+fields would therefore silently clear the other nine, so every field of the
+policy is on screen -- the cadence, the time zone, the selection in both its
+shapes, the location, the deadlines, the catch-up and retry policies, the
+concurrency policy, retention and suspension -- and every one of them is sent.
+The sentence above the button says exactly that.
+
+An input left **blank** sends nothing for that field, which removes it and
+returns the schedule to the documented default. That is why the inputs are not
+prefilled with the defaults: prefilling `3600` would turn every save into a
+schedule that explicitly pins what it used to inherit. The default is printed
+in the help text beside each input instead -- `timeZone` UTC,
+`startingDeadlineSeconds` 3600, `catchUpPolicy` `None`, `retry` none,
+`retry.delaySeconds` 300 when a retry policy is set without one,
+`activeDeadlineSeconds` 3600.
+
+`sourceRef` is never sent. The route carries it only to refuse it (`422
+sourceRef: field_immutable`, before any read), and this page has no reason to
+ask for that refusal.
+
+**A schedule whose revision this build does not publish gets no form at all.**
+The precondition IS the generation; a request without one would ask the API to
+replace whatever revision happens to be current when it lands, which is the
+lost update the precondition exists to prevent. The panel says so and points at
+`kubectl`, which carries its own `resourceVersion` precondition.
+
+### A preset is compiled by the server, and the browser computes nothing
+
+The five presets are D1 section 4.2's catalogue -- `hourly`, `everyNHours`,
+`daily`, `weekly`, `monthly` -- and everything else is **Advanced cron**. The
+form holds the kinds and their parameter bounds and **no `cronTemplate`**:
+filling one in would be a browser-side cron compiler, which is the second
+implementation the decision forbids. `ui/tests/d1.spec.js` compares the form's
+catalogue with `ui/tests/fixtures/cadence-presets.json`, which
+`crates/weirkeeper/tests/cadence.rs` generates from
+`weirkeeper::cadence::presets`, so the two cannot drift.
+
+**Preview next runs** sends the preset's parameters (or the typed expression)
+and the time zone to `GET /api/v1/cadence-previews`, which compiles the preset
+against the controller's own tz database and returns the canonical expression
+and the next five firings. **That expression is what gets saved.** A preset
+whose parameters have changed since the last preview cannot be saved until it
+is previewed again -- not as a nag, but because this page has no expression to
+save until the server has produced one. The identity of a preview is its
+QUERY, so changing retention or the archive does not invalidate it and changing
+the zone does.
+
+The panel renders `status.nextRuns` on a saved schedule and the preview's
+`runs` on a draft through **one** renderer, because they are one shape.
+
+* **A repeated local hour fires TWICE and both rows are shown**, each with its
+  own offset (`+02:00` then `+01:00`) and the controller's own PascalCase
+  marker, `RepeatedLocalTimeFirst` / `RepeatedLocalTimeSecond`. Hiding the
+  second would make the page disagree with the cluster about how many backups
+  happen that night.
+* **A local time that does not exist** is `NonexistentLocalTimeShifted`, at the
+  end of the gap.
+* **Blank means UTC, and the page says so** rather than leaving it implied.
+* **An empty list is an answer** ("no further firing"); an **absent** list is
+  not the same thing and is rendered as "this build has not computed any".
+* **Staleness is `nextRuns[0].at` in the past, and nothing else.**
+  `status.policy.evaluatedAt` is when the status last MOVED -- the controller
+  writes nothing when nothing changed -- so comparing it with the requeue
+  interval would label every healthy schedule stale. With no clock supplied the
+  page renders the table and makes no staleness claim at all.
+
+### The revision, and what a running run keeps showing
+
+The card prints the generation in force with the run-policy digest beside it. A
+suspend flip moves the generation and leaves the digest unchanged, which is why
+both are printed. When `status.observedGeneration` is behind
+`metadata.generation` the card says the controller has not evaluated the saved
+policy yet.
+
+**A run already created keeps the revision it froze.** Saving a new policy does
+not touch a `Backup` that exists, its frozen inputs or its Job, so the active-run
+table reads the RUNS and not the schedule: the schedule at g9 beside a run that
+froze g7 is the PLAT-05.1 invariant on screen, not a rendering mistake. A run
+with no recorded revision says **"revision not recorded"** -- never revision 0,
+and `g0` IS a revision, so it is the absence of the field that means this.
+
+### Back up now, and the one intent behind it
+
+`POST .../backups` requires an `Idempotency-Key`, and that key is what makes a
+double click, a retry after a timeout and a "Check status" one run. The page
+mints **one intent per draft**, holds it in this module's memory, and resends
+the same string for every attempt of it; the API answers the second one `200`
+with `replayed: true` and the first run's uid. A **deliberate** later backup is
+a new intent and therefore a new run, which is the acceptance criterion's other
+half.
+
+**A reload loses the intent, and the page does not pretend otherwise.** There is
+no browser storage anywhere in this tree, so a key cannot survive a refresh.
+What the panel does instead is list the manual runs of this schedule that
+already exist, newest first, with their triggers and frozen revisions -- so the
+reader sees the run their click made rather than clicking again -- and says that
+a click after a reload is a deliberate new run.
+
+**Nothing blocks a manual run, and the page reflects that.** A suspended
+schedule and an active run are notices, not refusals: D1 section 8.3 is explicit
+that nothing about a schedule blocks one, and running a manual backup does not
+resume a suspended schedule. What a suspended schedule or a `notReady` preflight
+does is require a second, explicit confirmation, carrying **the object's own
+recorded reason**; confirming a red verdict sends it as
+`readinessAcknowledgement`, which the API stores as an annotation, so a backup
+taken past a failed check says so on the object for ever. The API itself never
+reads that check and gates on nothing.
+
+The body is the schedule's name and the revision this card was rendered from,
+and no policy field at all -- a policy field in that body is a `422` by design,
+because the API copies the schedule's own revision. That is what makes "the
+copied schedule revision" a fact about the run rather than a form's guess. A
+`409 policy_changed` carries the revision that is in force now, and the page
+shows it.
+
+### The trigger column, and the ceiling it will not invent
+
+The Backups table reads `spec.trigger.kind` and nothing else: `Scheduled`,
+`CatchUp`, `Retry` and `Manual`. `spec.triggeredBy` -- the older
+`manual | schedule` string -- is still rendered on a run's detail as the
+separate fact it is, and is never read as a kind, because it cannot tell a
+catch-up or a retry from an ordinary slot. A run frozen before PLAT-05.1
+carries no trigger and says so.
+
+A retry renders **"Retry, attempt 2"** in the Backups table and **"Retry 2 of
+3"** on the schedule's own card. The ceiling is the schedule's CURRENT
+`retry.maxRetries`, a run carries no copy of it, and the table does not read
+schedules -- so where the number is not at hand it is not printed.
+
+### What is not here, in either mode
+
+`Back up now` is **console-only**. In `kubectl proxy` mode it is refused by
+name, for two reasons that are both about the mode: a manual run's name is
+derived from the authenticated subject as the product API knows it (issuer,
+subject, namespace, route, key), which a browser does not hold, so a
+browser-minted name would not be the name the canonical path produces; and the
+in-cluster UI ServiceAccount has no `create` on `backups` (D1 section 8.5 adds
+that grant, and it is a chart change with its own review). The cadence preview
+and the policy replace are console-only too: there is no preview route in front
+of `kubectl proxy`, and the replace is built on the product API's
+`expectedGeneration` precondition, which a JSON-merge patch against
+kube-apiserver would not have.
+
+`Schedule.generation` is **optional in the published schema and always emitted
+by this build**. D1 W6 left it out of the schema's `required` set so that
+tightening it would be one cross-side commit; `ui/tests/contract.spec.js`
+compares this client's required set with the schema's, so moving it here alone
+turns that arm red. The tightening needs `crates/logweir-api/src/contract.rs` in
+the same commit.
 
 ## The three rules, each with a gate
 
