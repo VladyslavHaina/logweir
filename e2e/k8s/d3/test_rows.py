@@ -226,6 +226,88 @@ def test_notification_delivery_follows_the_hatch_and_never_rewrites_a_backup() -
         and d3.notify_delivery_ok(True, 0, d3.expected_posts(True, 0), True, 7, 7))
 
 
+# --- PLAT-16.2's two controller-side guards ---------------------------------
+# The recorded shapes are this branch's own live run of 2026-09-18: 6 points on
+# dest-b, keepLast 2, minUsablePoints 3, one held by `spec.holds[]` and one
+# whose set a nonterminal Restore names.
+HELD = "lwp1-c7632434ab586a67359dd5d86af68f83"
+RESTORED = "lwp1-ffaebc76ef7a6c9e95b01edfc279513a"
+CANDIDATE = "lwp1-900afc610438ad76e0dcd0658bd7a3d1"
+GUARDED = {
+    "pointsEvaluated": 6,
+    "candidates": [{"pointId": CANDIDATE, "reason": "BeyondKeepLast"}],
+    "kept": ["lwp1-aaa", "lwp1-bbb", "lwp1-ccc", HELD, RESTORED],
+    "protected": [
+        {"pointId": RESTORED, "reason": "ActiveRestore"},
+        {"pointId": "lwp1-ccc", "reason": "MinUsablePoints"},
+        {"pointId": HELD, "reason": "Hold"},
+    ],
+    "skipped": [],
+}
+GUARD_PLAN = {"lines": [{"point_id": CANDIDATE, "set_prefix": "archive/set-c/"}]}
+OBJECTS_BEFORE = [{"key": k} for k in (
+    "archive/set-held/manifest.json", "archive/set-held/s0.bin.zst",
+    "archive/set-restored/manifest.json", "archive/set-c/manifest.json",
+    "archive/set-c/s0.bin.zst", "logweir/retention/rec.json")]
+OBJECTS_AFTER = [o for o in OBJECTS_BEFORE if not o["key"].startswith("archive/set-c/")]
+PROTECTED_PREFIXES = {"archive/set-held/", "archive/set-restored/"}
+
+
+def test_a_held_point_and_a_restored_one_are_kept_with_their_reason() -> None:
+    held = d3.protection_verdict(GUARDED, HELD)
+    restored = d3.protection_verdict(GUARDED, RESTORED)
+    row("the verdict reads all three buckets for one point",
+        held == {"pointId": HELD, "isCandidate": False, "isKept": True,
+                 "protectReason": "Hold"}, str(held))
+    row("`spec.holds[]` is reported as Hold, kept, and not a candidate",
+        d3.point_is_protected(held, "Hold"))
+    row("a set a nonterminal Restore names is reported as ActiveRestore",
+        d3.point_is_protected(restored, "ActiveRestore"))
+    row("MUTANT: the right reason on a point that is STILL a candidate",
+        not d3.point_is_protected(
+            {"isCandidate": True, "isKept": True, "protectReason": "Hold"}, "Hold"))
+    row("MUTANT: protected but not kept — a plan that contradicts itself",
+        not d3.point_is_protected(
+            {"isCandidate": False, "isKept": False, "protectReason": "Hold"}, "Hold"))
+    row("MUTANT: kept with NO reason is a retention decision nobody can audit",
+        not d3.point_is_protected(
+            {"isCandidate": False, "isKept": True, "protectReason": None}, "Hold"))
+    row("MUTANT: `LegalHold` is a provider refusal, not what `spec.holds[]` writes",
+        not d3.point_is_protected(held, "LegalHold"))
+    row("MUTANT: a point the evaluation never mentions is absent, not protected",
+        not d3.point_is_protected(d3.protection_verdict(GUARDED, "lwp1-never"), "Hold"))
+    row("MUTANT: the two guards are not interchangeable",
+        not d3.point_is_protected(held, "ActiveRestore")
+        and not d3.point_is_protected(restored, "Hold"))
+
+
+def test_a_protected_point_never_reaches_the_enforcer() -> None:
+    row("the plan omits both protected points",
+        d3.plan_omits(GUARD_PLAN, {HELD, RESTORED}))
+    row("MUTANT: a held point that reached the plan",
+        not d3.plan_omits({"lines": [{"point_id": HELD}]}, {HELD, RESTORED}))
+    row("MUTANT: an actively-restored point that reached the plan",
+        not d3.plan_omits({"lines": GUARD_PLAN["lines"] + [{"point_id": RESTORED}]},
+                          {HELD, RESTORED}))
+    row("an empty plan omits everything, trivially",
+        d3.plan_omits({"lines": []}, {HELD, RESTORED}))
+
+
+def test_the_protected_objects_survive_an_enforced_pass() -> None:
+    row("every object under both protected sets is still there afterwards",
+        d3.survived_enforcement(OBJECTS_BEFORE, OBJECTS_AFTER, PROTECTED_PREFIXES))
+    lost = [o for o in OBJECTS_AFTER if o["key"] != "archive/set-held/s0.bin.zst"]
+    row("MUTANT: one segment of the held set was deleted",
+        not d3.survived_enforcement(OBJECTS_BEFORE, lost, PROTECTED_PREFIXES))
+    gone = [o for o in OBJECTS_AFTER if not o["key"].startswith("archive/set-restored/")]
+    row("MUTANT: the actively-restored set was removed whole",
+        not d3.survived_enforcement(OBJECTS_BEFORE, gone, PROTECTED_PREFIXES))
+    row("MUTANT: a run in which the protected sets had no objects to begin with "
+        "proves nothing",
+        not d3.survived_enforcement([{"key": "archive/set-c/manifest.json"}],
+                                    OBJECTS_AFTER, PROTECTED_PREFIXES))
+
+
 def main() -> int:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

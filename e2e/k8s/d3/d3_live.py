@@ -1759,6 +1759,7 @@ def retention_job(
     run_id: str | None = None,
     approver: str = "d3w14-live-acceptance",
     max_deletions: int = 50,
+    generation: int | None = None,
 ):
     """One `logweir-retention` run, as the operator Job docs/kubernetes.md §7f
     describes. The whole binding travels in the environment, never in argv."""
@@ -1769,7 +1770,13 @@ def retention_job(
         {"name": "LOGWEIR_RETENTION_PLAN_SHA256", "value": digest},
         {"name": "LOGWEIR_RETENTION_POLICY_UID",
          "value": get("retentionpolicy", "keep-b")["metadata"]["uid"]},
-        {"name": "LOGWEIR_RETENTION_POLICY_GENERATION", "value": "1"},
+        # THE LIVE GENERATION, not a constant. It goes into the record
+        # (`lib.rs`: "the generation, for the record"), and a record that named
+        # generation 1 for a plan rendered at generation 3 — which is what a
+        # `spec.holds[]` patch produces — would misattribute the run.
+        {"name": "LOGWEIR_RETENTION_POLICY_GENERATION",
+         "value": str(generation if generation is not None
+                      else get("retentionpolicy", "keep-b")["metadata"]["generation"])},
         {"name": "LOGWEIR_RETENTION_SCOPE_PREFIX", "value": DEST_PREFIX},
         {"name": "LOGWEIR_RETENTION_RUN_ID", "value": run_id or f"d3w14-{int(time.time())}"},
         {"name": "LOGWEIR_RETENTION_APPROVER", "value": approver},
@@ -2273,29 +2280,249 @@ def no_evidence_credential() -> None:
     )
 
 
+# ---------------------------------------------------------------------------
+# PLAT-16.2's two controller-side guards: `spec.holds[]` and an in-flight Restore
+# ---------------------------------------------------------------------------
+
+
+def patch_policy(name: str, spec_patch: dict[str, Any]) -> dict[str, Any]:
+    """Merge-patch a `RetentionPolicy`'s spec and return the patched object.
+
+    THIS FUNCTION NEVER EXISTED. `legal_hold` called it twice and
+    `git log -S "def patch_policy"` finds no commit that ever defined it, so
+    the phase raised `NameError` on its first live line and PLAT-16.2's legal
+    hold / lock test has never been exercised by this harness (lab-refresh-4
+    §9.3). A merge patch is what `spec.holds[]` wants: the field is mutable
+    because, as the CRD says, "a legal hold arrives on a Tuesday".
+    """
+    return json.loads(
+        run(
+            KN + ["patch", "retentionpolicy", name, "--type=merge",
+                  "-p", json.dumps({"spec": spec_patch}), "-o", "json"]
+        ).stdout
+    )
+
+
+def awaiting_approval_restore(name: str, backup_id: str, dest: str = "dest-b") -> dict[str, Any]:
+    """A `Restore` that is nonterminal, creates nothing, and reads nothing.
+
+    D3 §6.4 step 4 protects every point whose SET a nonterminal `Restore`
+    names, and `retention_policy.rs::active_restore_sets` skips only restores
+    whose phase is `Succeeded`, `Failed` or `Refused`. So the fixture has to be
+    a restore that is genuinely in flight and genuinely harmless.
+
+    `spec.approvalRef` naming an `Approval` that does not exist is exactly
+    that: `restore.rs::admit` step 2 answers `ApprovalNotVerified`, which
+    `is_terminal()` returns **false** for — the object holds at
+    `phase: Pending` with one `Admitted=False` condition, is requeued every
+    `ADMISSION_REQUEUE_SECS`, and **no Job is created until the approval is
+    verified**. An EMPTY `approvalRef` would be `ApprovalNotReceived` and
+    terminal, which is why the name is present and simply unfulfilled.
+
+    Nothing here is a shortcut around authorisation: the restore never runs.
+    It exists so the retention controller can see a set that is being read.
+    """
+    return {
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "Restore",
+        "metadata": owned(name),
+        "spec": {
+            "approvalRef": {"name": f"{name}-approval-never-minted"},
+            "sourceDestinationRef": {"name": dest},
+            "evidenceDestinationRef": {"name": dest},
+            "sourceArchive": {"url": f"logweir-destination://{dest}"},
+            "backupSetRef": backup_id,
+            "planBytes": json.dumps(
+                {"note": "a plan nobody approved; this Restore never runs",
+                 "backupSetRef": backup_id},
+                sort_keys=True,
+            ),
+            "pointInTime": now(),
+            "deadlineSeconds": 600,
+            "target": {
+                "clusterRef": {"name": "source"},
+                "mode": "scratch",
+                "topicNaming": {"prefix": f"{OWNER}-hold-drill-"},
+            },
+        },
+    }
+
+
+def protection_verdict(ev: dict[str, Any], point_id: str) -> dict[str, Any]:
+    """Where one point landed in an evaluation, as the three buckets say it."""
+    protected = {p.get("pointId"): p for p in (ev.get("protected") or [])}
+    return {
+        "pointId": point_id,
+        "isCandidate": point_id in {c.get("pointId") for c in (ev.get("candidates") or [])},
+        "isKept": point_id in set(ev.get("kept") or []),
+        "protectReason": protected.get(point_id, {}).get("reason"),
+    }
+
+
+def point_is_protected(verdict: dict[str, Any], reason: str) -> bool:
+    """A guard held this point: named, kept, reasoned, and never a candidate.
+
+    All four, and the first is what makes the other three worth reading — a
+    point the evaluation does not mention at all is not protected, it is
+    absent. `Kept` without a reason is a retention decision nobody can audit,
+    and a point that is BOTH kept and a candidate is a plan that contradicts
+    itself.
+    """
+    return (
+        verdict.get("protectReason") == reason
+        and verdict.get("isKept") is True
+        and verdict.get("isCandidate") is False
+    )
+
+
+def plan_omits(plan: dict[str, Any], point_ids: set[str]) -> bool:
+    """No protected point reached the plan the enforcer is given."""
+    return not ({line.get("point_id") for line in (plan.get("lines") or [])} & point_ids)
+
+
+def survived_enforcement(before: list[dict[str, Any]], after: list[dict[str, Any]],
+                         prefixes: set[str]) -> bool:
+    """Every object under a protected point's set prefix is still there."""
+    keys_before = {o["key"] for o in before if any(o["key"].startswith(p) for p in prefixes)}
+    keys_after = {o["key"] for o in after}
+    return bool(keys_before) and keys_before <= keys_after
+
+
+def plan_from_evaluation(ev: dict[str, Any], policy_name: str, dest: str,
+                         by_point: dict[str, dict[str, Any]], cm_name: str,
+                         *, keep_last: int, min_usable: int) -> tuple[str, dict[str, Any]]:
+    """A plan whose lines are exactly the CONTROLLER's own candidate list.
+
+    NOT the controller's own plan DOCUMENT, and the reason is worth recording:
+    in `mode: Report` the evaluation publishes `planSha256` but **no
+    `planRef`**. The plan `ConfigMap` is rendered only on the enforcement path
+    (`retention_policy.rs:1559`), behind a lease — and that path refuses
+    outright while a nonterminal `Restore` reads the destination
+    (`StartOutcome::ActiveRestore`, `:1555`), which is the very fixture this
+    phase installs. So the document is not retrievable here; `plan_document()`
+    in this file reads `planRef` and is unreachable for a Report-mode policy.
+
+    What IS retrievable is the verdict, and the verdict is what a guard test
+    needs: the lines are the controller's candidates, one for one, and nothing
+    else. A protected point cannot reach the enforcer because the controller
+    did not call it a candidate — which is exactly the claim.
+    """
+    pol = get("retentionpolicy", policy_name)
+    lines = []
+    for candidate in ev.get("candidates") or []:
+        entry = by_point[candidate["pointId"]]
+        lines.append(
+            {
+                "point_id": entry["pointId"],
+                "backup_id": entry["backupId"],
+                "reason": "KeepLast",
+                "recovery_point_at_ms": entry["recoveryPointAtMs"],
+                "manifest_key": entry["manifestKey"],
+                "set_prefix": f"{DEST_PREFIX}/{entry['backupId']}/",
+                "enumerate_set": True,
+                "object_keys": [entry["manifestKey"]],
+            }
+        )
+    plan = {
+        "format": PLAN_MEDIA_TYPE,
+        "format_version": "1.0.0",
+        "policy_namespace": NS,
+        "policy_name": policy_name,
+        "policy_uid": pol["metadata"]["uid"],
+        "location_id": get("backupdestination", dest)["status"]["canonicalUrl"],
+        "scope_prefix": DEST_PREFIX,
+        "keep_last": keep_last,
+        "keep_days": None,
+        "min_usable_points": min_usable,
+        "lines": lines,
+    }
+    digest, _ = write_plan(cm_name, plan)
+    return digest, plan
+
+
 def legal_hold() -> None:
-    """`spec.holds[]` names a point that may not be removed whatever the rules
-    say. The evaluation must move it out of the candidate list."""
+    """PLAT-16.2's two controller-side guards, and the enforced pass that
+    proves they hold.
+
+    `spec.holds[]` names a point that may not be removed whatever the rules
+    say, and a nonterminal `Restore` names a SET that is being read. Both must
+    leave the candidate list, both must be reported kept with their reason, and
+    an enforced pass over the controller's own plan must leave every one of
+    their objects where it is.
+    """
     evidence: list[str] = []
+    entries = STATE.get("bEntries") or []
+    if not entries:
+        raise RuntimeError("run the `retention` phase first")
+    by_point = {e["pointId"]: e for e in entries}
+
     pol = wait_evaluated("keep-b")
     candidates = ((pol.get("status", {}) or {}).get("lastEvaluation") or {}).get(
         "candidates"
     ) or []
-    if not candidates:
+    if len(candidates) < 3:
         record(
             "retention-legal-hold",
             "PLAT-16.2",
             "NOT-RUN",
-            "`spec.holds[]` is applied by the controller's EVALUATION, and this build renders "
-            "no evaluation for any destination: Evaluated=False/"
-            f"{condition(pol, 'Evaluated').get('reason')} (see "
-            "`retention-view-digest-prefix-defect`). There is no candidate list for a hold to "
-            "remove a point from, so the hold cannot be observed either way — it is not "
-            "reported as working and not reported as broken.",
+            "`spec.holds[]` and `ActiveRestore` are applied by the controller's EVALUATION, "
+            f"and this run has {len(candidates)} candidate(s) — fewer than the three the "
+            "fixture needs to hold one, restore one and still leave a plan with something "
+            "in it. Evaluated="
+            f"{condition(pol, 'Evaluated').get('status')}/"
+            f"{condition(pol, 'Evaluated').get('reason')}. Neither guard can be observed "
+            "either way, so neither is reported as working and neither as broken.",
             [artifact("enforce/legal-hold-not-run.json", pol)],
         )
+        record("retention-active-restore-protection", "PLAT-16.2", "NOT-RUN",
+               "see `retention-legal-hold`: the same evaluation is the input.", [])
+        record("retention-protected-points-survive-enforcement", "PLAT-16.2", "NOT-RUN",
+               "see `retention-legal-hold`: the same evaluation is the input.", [])
         return
+
     held = candidates[0]["pointId"]
+    restored = candidates[-1]["pointId"]
+    restored_set = by_point[restored]["backupId"]
+    evidence.append(artifact("enforce/guards-input.json", {
+        "candidatesBefore": [c.get("pointId") for c in candidates],
+        "heldPoint": held, "activeRestorePoint": restored,
+        "activeRestoreBackupSet": restored_set,
+    }))
+
+    # --- the in-flight Restore, created BEFORE the hold so one re-evaluation
+    #     settles both and the two guards are read from one object ----------
+    restore_name = f"{OWNER}-hold-drill"
+    if get_opt("restore", restore_name) is not None:
+        run(KN + ["delete", "restore", restore_name, "--wait=true"])
+    created = apply(awaiting_approval_restore(restore_name, restored_set))
+    in_flight = wait_for(
+        "restore", restore_name,
+        lambda o: (o.get("status", {}) or {}).get("phase") is not None,
+        seconds=180, what="a phase on the awaiting-approval Restore",
+    )
+    restore_phase = in_flight["status"].get("phase")
+    evidence.append(artifact("enforce/active-restore-object.json", in_flight))
+    check(
+        "retention-active-restore-is-really-in-flight",
+        "PLAT-16.2",
+        restore_phase not in {"Succeeded", "Failed", "Refused"}
+        and not [
+            j for j in lst("jobs")
+            if any(o.get("uid") == created["metadata"]["uid"]
+                   for o in (j["metadata"].get("ownerReferences") or []))
+        ]
+        and (in_flight["status"].get("jobRef") is None)
+        and (condition(in_flight, "Admitted").get("status") == "False"),
+        f"the fixture Restore {restore_name} (uid {created['metadata']['uid']}) is "
+        f"phase={restore_phase!r} with Admitted="
+        f"{condition(in_flight, 'Admitted').get('status')}/"
+        f"{condition(in_flight, 'Admitted').get('reason')} — nonterminal, so the retention "
+        f"controller must see it, and no Job exists because the approval it names was never "
+        f"minted. A row that protected a point with a TERMINAL restore would be proving "
+        f"nothing",
+        evidence,
+    )
+
     generation = get("retentionpolicy", "keep-b")["metadata"]["generation"] + 1
     patch_policy(
         "keep-b",
@@ -2303,19 +2530,99 @@ def legal_hold() -> None:
     )
     after = wait_evaluated("keep-b", generation=generation, seconds=300)
     ev = after["status"]["lastEvaluation"]
-    protected = {p["pointId"]: p for p in (ev.get("protected") or [])}
     evidence.append(artifact("enforce/legal-hold.json", after))
+    held_verdict = protection_verdict(ev, held)
+    restored_verdict = protection_verdict(ev, restored)
+    evidence.append(artifact("enforce/guard-verdicts.json",
+                             {"hold": held_verdict, "activeRestore": restored_verdict,
+                              "candidatesAfter": [c.get("pointId")
+                                                  for c in (ev.get("candidates") or [])],
+                              "protected": ev.get("protected"), "kept": ev.get("kept")}))
+    guarantees = after["status"].get("guarantees") or {}
     check(
         "retention-legal-hold",
         "PLAT-16.2",
-        held not in {c["pointId"] for c in (ev.get("candidates") or [])}
-        and held in protected,
-        f"the held point {held} left the candidate list and is reported protected with "
-        f"reason {protected.get(held, {}).get('reason')!r}; guarantees.legalHold is "
-        f"{after['status']['guarantees'].get('legalHold')} (never `LogweirEnforced`: "
-        f"object_store 0.14 exposes no WORM readback)",
+        point_is_protected(held_verdict, "Hold"),
+        f"the held point {held} left the candidate list and is reported kept and protected "
+        f"with reason {held_verdict['protectReason']!r} (`spec.holds[]` is `Hold`; "
+        f"`LegalHold` is the code a PROVIDER refusal records). Verdict {held_verdict}; "
+        f"guarantees.legalHold is {guarantees.get('legalHold')} — never `LogweirEnforced`, "
+        f"because object_store 0.14 exposes no WORM readback",
         evidence,
     )
+    check(
+        "retention-active-restore-protection",
+        "PLAT-16.2",
+        point_is_protected(restored_verdict, "ActiveRestore"),
+        f"the point {restored}, whose set {restored_set} a nonterminal Restore names, left "
+        f"the candidate list and is reported kept and protected with reason "
+        f"{restored_verdict['protectReason']!r}. Verdict {restored_verdict}; "
+        f"guarantees.activeRestoreProtection is "
+        f"{guarantees.get('activeRestoreProtection')}",
+        evidence,
+    )
+
+    # --- and the enforced pass, over the CONTROLLER's own plan -------------
+    image = retention_image("retention-protected-points-survive-enforcement")
+    if image is None:
+        patch_policy("keep-b", {"holds": []})
+        return
+    digest, plan = plan_from_evaluation(ev, "keep-b", "dest-b", by_point,
+                                       f"{OWNER}-guard-plan", keep_last=2, min_usable=3)
+    protected_ids = {held, restored}
+    protected_prefixes = {
+        f"{DEST_PREFIX}/{by_point[pid]['backupId']}/" for pid in protected_ids
+    }
+    candidate_ids = {c.get("pointId") for c in (ev.get("candidates") or [])}
+    evidence.append(artifact("enforce/guard-plan.json",
+                             {"plan": plan, "sha256": digest,
+                              "controllerCandidates": sorted(candidate_ids),
+                              "controllerPlanSha256": ev.get("planSha256"),
+                              "controllerPlanRef": ev.get("planRef"),
+                              "protectedPrefixes": sorted(protected_prefixes)}))
+    before = objects(BUCKET_B)
+    _job, logs, code = retention_job(
+        f"{OWNER}-guard-enforce", f"{OWNER}-guard-plan", dry_run=False, digest=digest,
+        image=image, generation=get("retentionpolicy", "keep-b")["metadata"]["generation"],
+    )
+    after_objects = objects(BUCKET_B)
+    evidence.append(artifact("enforce/guard-enforce-log.txt", logs))
+    evidence.append(artifact("enforce/guard-objects-before.json", before))
+    evidence.append(artifact("enforce/guard-objects-after.json", after_objects))
+    record_line = key_lines(logs, "retention-record=")
+    record_key = record_line[0]["retention-record"] if record_line else None
+    doc: dict[str, Any] = {}
+    if record_key:
+        raw = cat(BUCKET_B, record_key)
+        doc = json.loads(raw.decode())
+        evidence.append(artifact("enforce/guard-enforcement-record.json", doc))
+    attributed = {pt.get("point_id") or pt.get("pointId") for pt in (doc.get("points") or [])}
+    gone = {o["key"] for o in before} - {o["key"] for o in after_objects}
+    check(
+        "retention-protected-points-survive-enforcement",
+        "PLAT-16.2",
+        {ln["point_id"] for ln in plan["lines"]} == candidate_ids
+        and bool(candidate_ids)
+        and plan_omits(plan, protected_ids)
+        and code == 0
+        and survived_enforcement(before, after_objects, protected_prefixes)
+        and not (attributed & protected_ids),
+        f"a plan whose lines ARE the controller's candidate list ({sorted(candidate_ids)}; "
+        f"digest {digest}) names neither protected point "
+        f"({plan_omits(plan, protected_ids)}) — the controller published "
+        f"planSha256={ev.get('planSha256')} and no planRef, because a Report-mode policy "
+        f"renders no plan ConfigMap; one enforced pass exited {code}, "
+        f"removed {len(gone)} object(s), and every object under the held and "
+        f"actively-restored sets {sorted(protected_prefixes)} is still present "
+        f"({survived_enforcement(before, after_objects, protected_prefixes)}); the "
+        f"enforcement record at {record_key} attributes {sorted(attributed)} and neither "
+        f"protected point",
+        evidence,
+    )
+    STATE["guards"] = {"held": held_verdict, "activeRestore": restored_verdict,
+                       "planPointIds": [ln.get("point_id") for ln in (plan.get("lines") or [])],
+                       "recordKey": record_key, "gone": sorted(gone), "exitCode": code}
+    save()
     patch_policy("keep-b", {"holds": []})
 
 
