@@ -418,9 +418,10 @@ resolves both and checks the approved plan against them (§7d). A schedule
 propagates its `destinationRef` to the `Backup`s it creates.
 
 What is NOT in this build is listed in §7e: the evidence-fetch Job for a
-`SecretKeys` or `WorkloadIdentity` `evidenceRead`, the frozen destination on
-`Backup.status`, and a destination carrying a `transport.caBundle` for a
-Backup or Restore — that last one is refused, not ignored.
+`SecretKeys` or `WorkloadIdentity` `evidenceRead`, and a destination carrying a
+`transport.caBundle` for a Backup or Restore — that last one is refused, not
+ignored. The frozen destination now DOES reach `Backup.status.destination`;
+§10 says what it holds and §21.8 what the `Preflight` does with it.
 
 The controller's own environment reaches no destination-backed runner Job. That
 is not a convention — it is the defect the design closes. The legacy inline path
@@ -504,6 +505,16 @@ nobody approved.
 `spec.transport.security` are immutable on a `BackupDestination`, so the plan
 bytes cannot go stale through an edit; only preflights do (§21).
 
+**And the recovery point has to be IN the source destination.** Checks 7 and 8
+hold the plan to the destination; what holds the *archive* to it is the
+recovery point's own frozen `status.destination.locationDigest` (§10), compared
+against the source destination in the `Preflight`'s `recoveryPoint.state` row.
+A point written to the other destination is `RecoveryPointLocationMismatch`
+with both digests named, and a point archived before that field existed is
+`unknown` rather than green — §21.8 has the full table and the upgrade case.
+Nothing in this controller's checks 5–9 changed: a preflight reports, it does
+not admit.
+
 Both destinations' CA bundles are copied into the run's own immutable plan
 `ConfigMap`, beside `restore.yaml`, and `LOGWEIR_ARCHIVE_CA_FILE` /
 `LOGWEIR_EVIDENCE_CA_FILE` point there. Mounting the destination's own
@@ -575,12 +586,16 @@ same reason.
   `evidenceRead: ControllerIdentity` at an allowlisted location IS read, through
   the bounded store cache, and verified by the same verifier every other path
   uses.
-- **The frozen destination does not reach `Backup.status`.** `BackupStatus` has
-  no field for it in this CRD revision, so `Preflight`'s
-  `RecoveryPointLocationMismatch` still has no digest to compare (§21.8) and the
-  catalogue cannot index a recovery point by its destination. The digest IS in
-  the run's frozen `execution-inputs.json`, which is where a later reader will
-  find it.
+- **The frozen destination DOES reach `Backup.status` now**, as
+  `status.destination` — four fields, `{name, uid, generation, locationDigest}`,
+  written at the freeze from the same snapshot the plan is rendered from (§10).
+  `Preflight`'s `RecoveryPointLocationMismatch` has a digest to compare at last
+  (§21.8). What is still NOT published is the storage block: the plan carries
+  `archiveStorage` as an internally tagged enum whose variants have
+  incompatible required fields, which a structural CRD schema cannot hold
+  without re-spelling it, so the bucket, endpoint, region and addressing stay in
+  the run's frozen `execution-inputs.json`, which is where the Job is rendered
+  from and where a reader that needs them will find them.
 - **A `WorkloadIdentity` grant REPLACES the Job's `serviceAccountName`**, with
   any ServiceAccount the namespace operator names — bypassing the
   chart-managed runner ServiceAccount. That is how the grant is meant to work:
@@ -3232,6 +3247,38 @@ kubectl --context docker-desktop -n <ns> get backup <name> -o jsonpath='{.status
 # {"id":"…","inputsRef":{"name":"<name>-plan"},"inputsSha256":"sha256:…"}
 ```
 
+### `status.destination`: where this recovery point actually is
+
+A destination-backed run publishes a second block in that **same** pre-Job
+patch, from the **same** snapshot:
+
+```bash
+kubectl --context docker-desktop -n <ns> get backup <name> -o jsonpath='{.status.destination}'
+# {"name":"prod","uid":"…","generation":3,"locationDigest":"sha256:…"}
+```
+
+Four fields and no more. `locationDigest` is the digest of the canonical
+location — the value `BackupDestination.status.locationDigest` publishes for
+the same object — and it is what a restore, a preflight and PLAT-15's catalog
+identify a recovery point's location by. The storage settings, the transport,
+the addressing, the CA digest and the grant stay in the `destination` block of
+`execution-inputs.json` above, because that is what the **Job** is rendered
+from and a second spelling of them here would be a second thing to keep true.
+There is no credential value and no CA byte in either place.
+
+**Written once, at the freeze, and never rewritten.** A later pass re-reads the
+stored snapshot and renders the identical patch, so nothing is sent; a
+destination edited afterwards — an access-key rotation, a CA rotation, a new
+generation — moves neither the plan nor this block. That is the property a
+recovery point needs: it says where the run *wrote*, not where the object
+called `prod` points today.
+
+**Absent is a real value.** A legacy inline-`archive` run carries no block at
+all, and neither does any `Backup` a controller frozen before this field
+reconciled — the key is omitted, never written as `null`. Absent means "this
+recovery point publishes no frozen location", which is a different fact from
+"its location disagrees", and §21.8 is where the two get different answers.
+
 **What a later pass does with it.** Every pass that would create a Job
 re-resolves the inputs from the spec, the referenced `KafkaCluster` and this
 controller's addressing, and admits the existing ConfigMap only when all of
@@ -5661,12 +5708,29 @@ so `approval.state` is `skipped` with `SubjectNotCreated` and the verdict is
   Such a request is reported `phase: Failed` with `ArchiveUrlUnreadable` and a
   message saying to create a `BackupDestination` and use `destinationRef`. It
   is never a verdict about the operation.
-- **`recoveryPoint.state` cannot report `RecoveryPointLocationMismatch`.** The
-  frozen destination snapshot reaches the run's immutable
-  `execution-inputs.json` (§10) but not `Backup.status`: `BackupStatus` carries
-  no field for it in this CRD revision. So there is still no digest on the
-  object to compare, and the comparison is skipped rather than guessed at.
-  Closing it means one additive status field and one read.
+- **`recoveryPoint.state` compares the two locations, and this is what it
+  answers.** A recovery point is only restorable from the destination it was
+  written to. The point's frozen `locationDigest` (`Backup.status.destination`,
+  §10) is compared with the digest this check resolved for the source
+  destination — never with a digest re-derived from the live
+  `BackupDestination`, because an edit after the freeze must not be able to make
+  a moved point look settled.
+
+  | The point's block | This check's source destination | Answer |
+  |---|---|---|
+  | present, equal | present | `ready`, `RecoveryPointSucceeded` |
+  | present, different | present | `notReady`, `RecoveryPointLocationMismatch`, with BOTH digests in the message |
+  | **absent** | present | `unknown`, `RecoveryPointLocationUnknown` |
+  | present or absent | absent | `ready` — this check makes no location claim, and `plan.bindings` is the row that holds a legacy plan's location to account |
+
+  **A recovery point archived before this field existed publishes no location**,
+  so the third row is the upgrade case and it is deliberately `unknown` rather
+  than `ready`: a blocking row that answered `ready` would be reporting a
+  comparison nobody made. As a blocking `unknown` it holds the whole verdict at
+  `unknown` until somebody confirms by hand which destination that point is in,
+  or restores from one archived through the destination. Nothing is refused
+  that was not refused before — an `unknown` verdict authorises nothing, exactly
+  as a `skipped` blocking row does.
 - **`gc.rs` IS wired, since D2 W11.** A terminal `Preflight` is collected an
   hour after `result.expiresAt` (or after `observedAt`, when it never produced
   a verdict with an expiry), by the reconciler's own hourly pass, with a UID
