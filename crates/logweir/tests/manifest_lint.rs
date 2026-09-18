@@ -202,7 +202,7 @@ fn rules_of(rel: &str, role_name: &str) -> Vec<(Vec<String>, Vec<String>, Vec<St
             assert!(
                 r.get("resourceNames").is_none(),
                 "{rel}: {role_name} has a rule with `resourceNames`; the four-role table in \
-                 `the_four_cluster_roles_are_exactly_as_specified` does not model it"
+                 `the_five_cluster_roles_are_exactly_as_specified` does not model it"
             );
             (take("apiGroups"), take("resources"), take("verbs"))
         })
@@ -763,6 +763,179 @@ fn every_granted_verb_has_a_caller() {
     );
 }
 
+/// Every delete the control plane can issue is the check collector's, and it
+/// carries a UID precondition — review finding **F2**, fix round 1.
+///
+/// # What was wrong with the narrowing this replaces
+///
+/// [`every_granted_verb_has_a_caller`] narrows `delete` by TYPE: the only
+/// handles deleted through may be `TopicDiscovery` and `Preflight`. A
+/// per-controller source scan in
+/// `topic_discovery_controller::the_reconciler_names_no_grant_this_role_does_not_hold`
+/// additionally pinned, for **that file only**, that there is exactly one
+/// `.delete(`, that it is inside `collect_expired`, and that it carries
+/// `preconditions` and a `uid`.
+///
+/// **`controllers/preflight.rs` had no counterpart**, and the reviewer proved
+/// it: a second `Api<Preflight>::delete` planted above `collect_expired`, with
+/// **no** `DeleteParams` at all, survived `manifest_lint` (29/29),
+/// `preflight_controller` (82/82), `topic_discovery_controller` (54/54) and
+/// `linkage` (17/17). A delete by NAME removes whatever holds that name — a
+/// same-named `Preflight` created between the LIST and the DELETE is somebody
+/// else's verdict — while `config/rbac/role.yaml`'s header, the doc comment
+/// above, and the worker's own report all claimed "the two call sites are…".
+///
+/// # Why this one is in `manifest_lint` and not in a controller suite
+///
+/// Because the claim is about the CRATE, not about a file. A per-file test
+/// only ever covers the files somebody remembered to write one for, which is
+/// exactly how the gap arose. This walks **every** `.rs` under
+/// `crates/weirkeeper/src` — including the two files
+/// `no_execution_path_reads_preflight_or_discovery` excludes from its own scan
+/// — and holds all three delete spellings to one shape:
+///
+/// 1. `delete_opt` appears **nowhere**. It takes no `DeleteParams`, so a
+///    delete written that way cannot carry a precondition at all.
+/// 2. every `.delete(` and every `DeleteParams` sits inside a function named
+///    `collect_expired`, in one of the two check controllers;
+/// 3. every such function carries `preconditions` and `uid:`.
+///
+/// A mirror test in `preflight_controller.rs` states the same thing beside the
+/// code it is about; this is the one that cannot be forgotten for a new file.
+///
+/// # What it cannot catch
+///
+/// A delete issued through an untyped handle (`Api<DynamicObject>`,
+/// `client.request(…)`) or a raw HTTP verb. None exists — `weirkeeper` declares
+/// no `reqwest`/`hyper` edge (Global Constraint 38) — and
+/// [`every_call_site_has_a_grant`] is what sees a typed one.
+#[test]
+fn every_delete_in_the_control_plane_is_the_check_collectors() {
+    /// The one function that may delete, and the two files it may live in.
+    const COLLECTOR: &str = "collect_expired";
+    const OWNERS: [&str; 2] = [
+        "crates/weirkeeper/src/controllers/topic_discovery.rs",
+        "crates/weirkeeper/src/controllers/preflight.rs",
+    ];
+
+    // A free item at column 0 opens a new region; `impl` methods are indented,
+    // so a delete inside one is attributed to the enclosing item and fails
+    // below — which is the safe direction.
+    let opens_fn = |line: &str| -> Option<String> {
+        let rest = line
+            .strip_prefix("pub ")
+            .or_else(|| line.strip_prefix("pub(crate) "))
+            .or_else(|| line.strip_prefix("pub(super) "))
+            .unwrap_or(line);
+        let rest = rest.strip_prefix("async ").unwrap_or(rest);
+        let rest = rest.strip_prefix("fn ")?;
+        Some(
+            rest.chars()
+                .take_while(|c| c.is_alphanumeric() || *c == '_')
+                .collect(),
+        )
+    };
+
+    let mut sites: Vec<(String, usize, String, String)> = Vec::new();
+    let mut files_walked = 0usize;
+    for path in files_under("crates/weirkeeper/src") {
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        files_walked += 1;
+        let rel = path
+            .strip_prefix(repo())
+            .expect("a path under the repository")
+            .to_string_lossy()
+            .to_string();
+        let src = std::fs::read_to_string(&path).expect("a readable .rs");
+        let mut current = String::from("<file scope>");
+        for (n, line) in src.lines().enumerate() {
+            if let Some(name) = opens_fn(line) {
+                current = name;
+            }
+            // Prose is not code. This design REQUIRES doc comments that talk
+            // about deleting — `role.yaml`'s header, this very test — so a
+            // comment strip is what keeps the scan about calls.
+            let code = line.trim_start();
+            if code.starts_with("//") {
+                continue;
+            }
+            for token in [".delete(", ".delete_opt(", "DeleteParams"] {
+                if line.contains(token) {
+                    sites.push((rel.clone(), n + 1, current.clone(), token.to_string()));
+                }
+            }
+        }
+    }
+    assert!(
+        files_walked >= 20,
+        "only {files_walked} source files were walked; this scan has gone quiet"
+    );
+
+    // 1. `delete_opt` NOWHERE.
+    for (file, line, func, token) in &sites {
+        assert_ne!(
+            token, ".delete_opt(",
+            "{file}:{line} (`{func}`) calls `delete_opt`, which takes no `DeleteParams` and \
+             therefore cannot carry a UID precondition. The collector uses `delete` with \
+             `DeleteParams {{ preconditions: {{ uid }} }}`; a delete written this way removes \
+             whatever currently holds the name."
+        );
+    }
+
+    // 2. Every delete is the collector's, in one of the two check controllers.
+    for (file, line, func, token) in &sites {
+        assert!(
+            func == COLLECTOR && OWNERS.contains(&file.as_str()),
+            "{file}:{line} names `{token}` inside `{func}`. The ONLY delete the `weirkeeper` \
+             ClusterRole authorises is the check GC's, on the two transient check kinds (D2 \
+             §4.3), and the only function that may issue it is `{COLLECTOR}` in {OWNERS:?}. A \
+             delete anywhere else is a capability nobody reviewed — and one written without \
+             `DeleteParams` removes whatever holds the name rather than the object that was \
+             listed."
+        );
+    }
+
+    // 3. BOTH collectors exist, and each carries the precondition. Without
+    //    this the assertions above pass vacuously on a tree where somebody
+    //    deleted the collectors.
+    for owner in OWNERS {
+        let src = read(owner);
+        let from = src
+            .find(&format!("async fn {COLLECTOR}("))
+            .unwrap_or_else(|| {
+                panic!("{owner} has no `{COLLECTOR}`; the delete grant has no caller")
+            });
+        let region = &src[from..];
+        let to = region[1..].find("\n}").map_or(region.len(), |r| r + 2);
+        let body = &region[..to];
+        assert!(
+            body.contains("api.delete("),
+            "{owner}'s `{COLLECTOR}` issues its delete on the typed handle itself (`api`): an \
+             alias hides the call from `every_granted_verb_has_a_caller`'s `Api<T>`-region \
+             scan, and a store-shaped receiver would trip \
+             `scripts/check-no-archive-write.sh`"
+        );
+        assert!(
+            body.contains("preconditions:") && body.contains("uid:"),
+            "{owner}'s `{COLLECTOR}` must delete with `DeleteParams {{ preconditions: {{ uid }} \
+             }}`. A name is not an identity: without it, a same-named object created between \
+             the LIST and the DELETE is what goes."
+        );
+    }
+
+    // 4. And the count is the two collectors' own, so a SECOND delete inside
+    //    one of them — a shape assertions 1-3 would all accept — is still a
+    //    diff somebody has to argue for.
+    let deletes = sites.iter().filter(|(_, _, _, t)| t == ".delete(").count();
+    assert_eq!(
+        deletes, 2,
+        "the control plane makes EXACTLY TWO delete calls, one per check kind; it makes \
+         {deletes}: {sites:?}"
+    );
+}
+
 /// The OTHER direction: every **call site's** (resource, verb) is granted by
 /// the role every install actually ships.
 ///
@@ -982,13 +1155,15 @@ fn every_call_site_has_a_grant() {
 /// set of each role: an extra rule is as much a defect as a wrong verb, and a
 /// per-rule assertion cannot see one.
 ///
-/// FIVE SINCE D2 W11. `logweir-trust-admin` (D3 §9) is the cluster-scoped
-/// `TrustPolicy` writer, and it is a role of its own precisely so it is not
-/// held by whoever holds `logweir-operator`: an operator who could edit a trust
-/// policy could add their own key and then approve their own restore. The name
-/// of this function keeps the word "four" nowhere.
+/// FIVE SINCE D2 W11, AND THE NAME SAYS SO. `logweir-trust-admin` (D3 §9) is
+/// the cluster-scoped `TrustPolicy` writer, and it is a role of its own
+/// precisely so it is not held by whoever holds `logweir-operator`: an operator
+/// who could edit a trust policy could add their own key and then approve their
+/// own restore. The function was renamed in fix round 1 (review finding F3):
+/// it had been left as `…four…` while asserting five, which is exactly the kind
+/// of stale claim the rest of this file exists to refuse.
 #[test]
-fn the_four_cluster_roles_are_exactly_as_specified() {
+fn the_five_cluster_roles_are_exactly_as_specified() {
     // --- `weirkeeper` (interface I28) -------------------------------------
     //
     // Three places where this differs from the letter of the task brief, each
@@ -1363,6 +1538,136 @@ fn the_four_cluster_roles_are_exactly_as_specified() {
             }
         }
     }
+}
+
+/// **No role this repository ships grants `update`, `patch` or `delete` on
+/// `secrets` to anything** — review finding **F5**, fix round 1.
+///
+/// # Why the VAP is not enough on its own
+///
+/// `charts/logweir/templates/admission-policy.yaml` fences the console API's
+/// `create` on Secrets to the two Logweir credential types, and its header
+/// says "`logweir-api` holds no update, delete or read verb on Secrets, so
+/// there is no other operation to fence". That is true today and **nothing
+/// pinned it**: the policy matches `CREATE` only, so the day a console role
+/// lands carrying `patch` or `update` on `secrets`, the fence is bypassed in
+/// full and no test anywhere fails. A credential the console could PATCH is a
+/// credential it can overwrite with one it chose, which is the whole
+/// write-only property gone.
+///
+///  What is asserted, and the one grant that is allowed to exist
+///
+/// Across every shipped manifest — `logweir.yaml`, `config/rbac/`,
+/// `config/samples/` and every rendered chart file — no `Role` or `ClusterRole`
+/// rule names `secrets` (or `*`) with:
+///
+/// * `delete`, `deletecollection` or `*`, **ever**, however scoped; or
+/// * `update`, `patch`, `get`, `list` or `watch` **without a non-empty
+///   `resourceNames`**.
+///
+/// The one grant that passes is the identity bootstrap's
+/// (`templates/identity.yaml`): `get` and `patch` on `secrets`,
+/// `resourceNames`-scoped to `logweir-signing-key`, which is how a one-shot Job
+/// provisions or adopts the installation signer. Scoped to one name it is not
+/// a capability over anybody's credential; unscoped, the same verb is every
+/// Secret in the namespace.
+///
+/// `logweir-api`'s future `create` passes too: `create` cannot name a
+/// `resourceName` at all (the object does not exist yet), which is exactly why
+/// the ValidatingAdmissionPolicy — not RBAC — is what bounds its SHAPE.
+///
+/// MUTANTS: add `patch` on `secrets` to any role without `resourceNames`; drop
+/// the `resourceNames` from the bootstrap Role; add `delete` to it even
+/// scoped. Each fails naming the file, the role and the verb.
+#[test]
+fn no_shipped_role_may_write_or_read_a_secret_it_does_not_name() {
+    /// Refused at ANY scope, `resourceNames` or not. `update`/`patch` and the
+    /// read verbs are refused separately, and only when UNSCOPED — see the doc
+    /// comment: the identity bootstrap legitimately holds `get`/`patch` on the
+    /// one Secret it names.
+    const FORBIDDEN: [&str; 3] = ["delete", "deletecollection", "*"];
+    let mut files: Vec<String> = vec!["logweir.yaml".to_string()];
+    for dir in ["config/rbac", "config/samples", "charts/logweir/rendered"] {
+        for path in files_under(dir) {
+            if path.extension().and_then(|e| e.to_str()) != Some("yaml") {
+                continue;
+            }
+            files.push(
+                path.strip_prefix(repo())
+                    .expect("a path under the repository")
+                    .to_string_lossy()
+                    .to_string(),
+            );
+        }
+    }
+    assert!(
+        files.len() >= 12,
+        "only {} manifest files were walked: {files:?}",
+        files.len()
+    );
+
+    let mut secret_rules = 0usize;
+    for file in &files {
+        for m in manifests_in(&repo().join(file)) {
+            if m.kind != "Role" && m.kind != "ClusterRole" {
+                continue;
+            }
+            let Some(rules) = m.value["rules"].as_sequence() else {
+                continue;
+            };
+            for rule in rules {
+                let strings = |k: &str| -> Vec<String> {
+                    rule[k]
+                        .as_sequence()
+                        .map(|s| {
+                            s.iter()
+                                .filter_map(|v| v.as_str().map(str::to_string))
+                                .collect()
+                        })
+                        .unwrap_or_default()
+                };
+                let resources = strings("resources");
+                if !resources.iter().any(|r| r == "secrets" || r == "*") {
+                    continue;
+                }
+                secret_rules += 1;
+                let verbs = strings("verbs");
+                let named = !strings("resourceNames").is_empty();
+                let name = m.name();
+                for bad in FORBIDDEN {
+                    assert!(
+                        !verbs.iter().any(|v| v == bad),
+                        "{file}: {} `{name}` grants `{bad}` on {resources:?}. Removing a Secret \
+                         is not a capability any Logweir component has, at any scope: a \
+                         credential this tree created is the operator's to remove. The console \
+                         admission policy (D2 §7.3) matches CREATE only, so a destructive verb \
+                         here bypasses it entirely and silently.",
+                        m.kind
+                    );
+                }
+                let scoped_verbs = ["update", "patch", "get", "list", "watch"]; // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+                for scoped in scoped_verbs {
+                    if verbs.iter().any(|v| v == scoped) {
+                        assert!(
+                            named,
+                            "{file}: {} `{name}` grants `{scoped}` on {resources:?} without a \
+                             `resourceNames`, i.e. over EVERY Secret it can reach. The only \
+                             such grant this tree ships is the identity bootstrap's, scoped to \
+                             `logweir-signing-key`. Unscoped, `patch` on a credential Secret \
+                             overwrites a value the write-only contract says nobody can read \
+                             back, and the console admission policy cannot see it at all \
+                             because that policy matches CREATE only.",
+                            m.kind
+                        );
+                    }
+                }
+            }
+        }
+    }
+    assert!(
+        secret_rules >= 1,
+        "no rule anywhere names `secrets`; this test would be asserting nothing"
+    );
 }
 
 /// What an operator may change on a `BackupSchedule` is the CRD's CEL rule, and

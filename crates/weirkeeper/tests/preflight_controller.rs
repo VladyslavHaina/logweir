@@ -2332,7 +2332,9 @@ async fn a_cancel_request_collapses_the_job_deadline_and_nothing_else() {
     let seen = recorder.lock().expect("recorder");
     assert!(
         !seen.iter().any(|r| r.method == "DELETE"),
-        "the weirkeeper ClusterRole grants `delete` on nothing; a cancel is a collapsed deadline"
+        "the weirkeeper ClusterRole grants `delete` only on the two transient check kinds, and \
+         only from the collector (D2 §4.3); a CANCEL is a collapsed deadline and never a delete \
+         of anything"
     );
     let bodies = bodies.lock().expect("bodies");
     let patch = bodies
@@ -3021,6 +3023,119 @@ fn preflight_controller_never_reads_topicdiscovery() {
             );
         }
     }
+}
+
+/// **The one destructive call this file makes is the collector's** — the
+/// mirror of
+/// `topic_discovery_controller::the_reconciler_names_no_grant_this_role_does_not_hold`,
+/// and review finding **F2**, fix round 1.
+///
+/// # Why this did not exist, and what it cost
+///
+/// The discovery controller got a source-level pin when the `delete` grant
+/// landed; this file did not, and `manifest_lint`'s own narrowing was by TYPE
+/// (`Api<Preflight>` may be deleted through) rather than by CALL SITE. The
+/// reviewer planted a second `Api<Preflight>::delete` above `collect_expired`
+/// — `api.delete(name, &DeleteParams::default())`, with **no UID
+/// precondition** — and it survived every guard in the tree: `manifest_lint`
+/// 29/29, this suite 82/82, `topic_discovery_controller` 54/54, `linkage`
+/// 17/17.
+///
+/// A delete by name removes whatever holds the name. A `Preflight` deleted
+/// without its UID is, in the window between a LIST and a DELETE, somebody
+/// else's verdict about somebody else's plan.
+///
+/// `manifest_lint::every_delete_in_the_control_plane_is_the_check_collectors`
+/// is the authoritative version and walks every file in the crate, so a NEW
+/// file cannot slip through the gap this one closes for this file. Both exist
+/// because a claim about this reconciler belongs beside this reconciler.
+///
+/// MUTANT: re-plant the reviewer's stray delete — anywhere in this file,
+/// inside `collect_expired` or not — and the count below fails.
+#[test]
+fn the_preflight_reconciler_deletes_only_from_its_collector_and_only_by_uid() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/controllers/preflight.rs"),
+    )
+    .expect("the controller source is readable");
+    // Prose is not code: this file's own doc comments talk about deleting.
+    let code: String = source
+        .lines()
+        .filter(|l| {
+            let t = l.trim_start();
+            !(t.starts_with("//") || t.starts_with("///") || t.starts_with("*"))
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+
+    assert!(
+        !code.contains(".delete_opt("),
+        "`delete_opt` takes no `DeleteParams`, so a delete written that way carries NO UID \
+         precondition at all"
+    );
+    assert_eq!(
+        code.matches(".delete(").count(),
+        1,
+        "this file makes EXACTLY ONE delete call — the check GC's. A second one is a second \
+         capability nobody reviewed, and the reviewer's planted one carried no precondition"
+    );
+
+    // …and it is inside `collect_expired`, on the typed handle, with the UID.
+    let from = code
+        .find("async fn collect_expired(")
+        .expect("the collector is in this file");
+    let region = &code[from..];
+    let to = region[1..].find("\n}").map_or(region.len(), |r| r + 2);
+    let body = &region[..to];
+
+    // EVERY mention of `DeleteParams` is inside that body. The count is two
+    // and not one because the struct-update form names the type twice
+    // (`DeleteParams { … ..DeleteParams::default() }`); what matters is that
+    // the file's total and the collector's total are the same number, so a
+    // `DeleteParams` built anywhere else is a diff.
+    assert_eq!(
+        code.matches("DeleteParams").count(),
+        body.matches("DeleteParams").count(),
+        "every `DeleteParams` in this file belongs to `collect_expired`; one built elsewhere is \
+         a delete being prepared outside the collector"
+    );
+    assert!(
+        body.contains("api.delete("),
+        "the one delete call moved out of `collect_expired`, or changed receiver: `api` is the \
+         spelling `manifest_lint`'s `Api<T>`-region scan can see and the one \
+         `scripts/check-no-archive-write.sh`'s store-anchored token does not match"
+    );
+    assert!(
+        body.contains("preconditions:") && body.contains("uid: Some(uid.clone())"),
+        "the collector's delete must carry `DeleteParams {{ preconditions: {{ uid }} }}` — a \
+         name is not an identity"
+    );
+    // AND THE LISTING IT DELETES FROM IS NAMESPACED. `Api::all` is legitimate
+    // in this file — `controller()` builds the cluster-wide WATCH, which is
+    // how a controller sees every namespace at all — so the assertion is
+    // scoped to the collector: one built over `Api::all` would make a
+    // per-namespace cohort rule reach every tenant's objects at once, and the
+    // per-pass cap would then be the ONLY thing between a bad rule and the
+    // whole cluster.
+    assert!(
+        !body.contains("Api::all"),
+        "`collect_expired` must never build a cluster-wide handle: its caller passes the \
+         `Api::namespaced` handle for the object's own namespace"
+    );
+    assert!(
+        body.contains(".list("),
+        "the collector LISTS and then deletes what the rule named; it never deletes by name \
+         alone"
+    );
+    let terminal = code
+        .find("if terminal {")
+        .expect("the terminal branch is where the collector runs");
+    let window = &code[terminal..terminal + 1400.min(code.len() - terminal)];
+    assert!(
+        window.contains("Api::namespaced(client.clone(), &namespace)"),
+        "the handle the terminal branch hands `collect_expired` is namespaced to THIS object's \
+         namespace"
+    );
 }
 
 /// The reconciler holds no `Api<Secret>`, and the whole crate's invariant is

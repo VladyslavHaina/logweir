@@ -2450,6 +2450,16 @@ fn chart_lint_the_gate_script_carries_every_arm() {
         // time, where the operator is still looking.
         "--set 'checks.discovery.keepPerConnection=0'",
         "--set-string 'checks.discovery.visibilityAttestations[0].id=att-partial'",
+        // Fix round 1, review F1 and F4. The three bounds `Policy::validate`
+        // enforces that an install used to walk straight past, and the two
+        // spellings of "the admission policy's subject is missing" — `--set`
+        // for a real null (which used to render `%!s(<nil>)`) and
+        // `--set-string` for the empty string.
+        "'checks.discovery.hardMaxTopics=100000'",
+        "'checks.maxActiveTotal=2'",
+        "'checks.discovery.defaultMaxTopics=60000'",
+        "--set 'admissionPolicy.consoleServiceAccountName=null'",
+        "--set-string 'admissionPolicy.consoleServiceAccountName='",
     ] {
         assert!(
             script.contains(needle),

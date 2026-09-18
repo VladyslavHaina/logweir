@@ -185,3 +185,205 @@ fn an_unknown_key_is_refused_which_is_what_makes_the_shape_assertions_matter() {
         "keeping none would delete a discovery the moment it finished"
     );
 }
+
+/// **The chart's schema bounds are the parser's own rules** — review finding
+/// **F1**, fix round 1.
+///
+/// # The defect this closes
+///
+/// `values.schema.json` bounded `hardMaxTopics` at `maximum: 200000` while
+/// [`logweir_core::check_contract::MAX_TOPICS_CEILING`] — which
+/// `Policy::validate` enforces — is **50 000**. So
+/// `helm install --set checks.discovery.hardMaxTopics=100000` SUCCEEDED,
+/// rendered `weirkeeper-policy`, and every policy read afterwards was
+/// `PolicyLoad::Unreadable` → `Policy::fail_closed()`: every
+/// `visibilityAttestations` entry and every `controllerIdentityLocations`
+/// entry the administrator configured silently discarded, `attestedComplete`
+/// unreachable, retention back to the compiled-in defaults — with one advisory
+/// row on a `Preflight` as the only signal. Both operator docs tell the reader
+/// to validate a hand-written policy *against this schema*, so the documented
+/// remedy did not catch it either.
+///
+/// # What is asserted, and why a literal is not enough
+///
+/// The bound is compared with the CONSTANT, not with `50000`: a schema that
+/// merely happens to agree today is a schema that drifts the next time the
+/// ceiling moves. The same for the preflight timeout's `1..=600`.
+///
+/// MUTANT: set `"maximum": 200000` back on `hardMaxTopics`, or change
+/// `MAX_TOPICS_CEILING`, and this fails naming both numbers.
+#[test]
+fn the_schema_bounds_are_the_parsers_own_rules() {
+    let schema: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(repo().join("charts/logweir/values.schema.json"))
+            .expect("the chart schema is readable"),
+    )
+    .expect("the chart schema is JSON");
+    let discovery = &schema["properties"]["checks"]["properties"]["discovery"]["properties"];
+    assert_eq!(
+        discovery["hardMaxTopics"]["maximum"].as_u64(),
+        Some(u64::from(logweir_core::check_contract::MAX_TOPICS_CEILING)),
+        "values.schema.json's `hardMaxTopics` bound must EQUAL \
+         `check_contract::MAX_TOPICS_CEILING` ({}), which is what `Policy::validate` \
+         enforces. A looser schema lets `helm install` succeed on a document the \
+         controller then refuses — and a refused policy fails CLOSED and silently.",
+        logweir_core::check_contract::MAX_TOPICS_CEILING
+    );
+    let preflight = &schema["properties"]["checks"]["properties"]["preflight"]["properties"];
+    assert_eq!(
+        preflight["defaultTimeoutSeconds"]["minimum"].as_u64(),
+        Some(1)
+    );
+    assert_eq!(
+        preflight["defaultTimeoutSeconds"]["maximum"].as_u64(),
+        Some(600),
+        "`Policy::validate` enforces the contract's 1..=600"
+    );
+    // Every field `validate()` bounds at >= 1 is bounded at >= 1 here too.
+    let checks = &schema["properties"]["checks"]["properties"];
+    for field in [
+        "maxActivePerNamespace",
+        "maxActiveTotal",
+        "maxActiveDiscoveriesPerConnection",
+        "maxEvidenceFetchActivePerNamespace",
+    ] {
+        assert_eq!(
+            checks[field]["minimum"].as_u64(),
+            Some(1),
+            "`checks.{field}` must be bounded at >= 1, as `Policy::validate` bounds it"
+        );
+    }
+    for field in ["keepPerConnection", "defaultMaxTopics", "hardMaxTopics"] {
+        assert_eq!(
+            discovery[field]["minimum"].as_u64(),
+            Some(1),
+            "`checks.discovery.{field}` must be bounded at >= 1"
+        );
+    }
+}
+
+/// **A document at every schema extreme is a document the parser accepts.**
+///
+/// The other direction of [`the_schema_bounds_are_the_parsers_own_rules`]: the
+/// bounds above are compared one at a time, so a schema that is too STRICT —
+/// refusing an install the controller would have been happy with — would pass
+/// them. This builds the largest and the smallest document the schema admits
+/// and runs both through the real parser.
+///
+/// MUTANT: lower `hardMaxTopics`'s maximum below the ceiling and the maximal
+/// document still parses but the pin above fails; raise it above and this one
+/// fails, because `validate()` refuses the document the schema now admits.
+#[test]
+fn the_extremes_the_schema_admits_are_documents_the_parser_accepts() {
+    let ceiling = u64::from(logweir_core::check_contract::MAX_TOPICS_CEILING);
+    let at = |maxima: bool| -> serde_json::Value {
+        let n = |lo: u64, hi: u64| if maxima { hi } else { lo };
+        serde_json::json!({
+            "version": 1,
+            "checks": {
+                "maxActivePerNamespace": n(1, 4),
+                "maxActiveTotal": n(1, 1_000_000),
+                "maxActiveDiscoveriesPerConnection": n(1, 1_000_000),
+                "maxEvidenceFetchActivePerNamespace": n(1, 1_000_000)
+            },
+            "discovery": {
+                "freshSeconds": n(1, 1_000_000),
+                "retentionSeconds": n(1, 1_000_000),
+                "keepPerConnection": n(1, 1_000_000),
+                "defaultMaxTopics": n(1, ceiling),
+                "hardMaxTopics": n(1, ceiling),
+                "visibilityAttestations": []
+            },
+            "preflight": {
+                "defaultTimeoutSeconds": n(1, 600),
+                "retentionSeconds": n(1, 1_000_000)
+            },
+            "engine": {"allowUnverifiedCustomCa": false},
+            "evidence": {"controllerIdentityLocations": []},
+            "legacyArchiveAddressing": {"endpoint": "", "region": "",
+                                        "allowHttp": false, "virtualHostedStyle": false}
+        })
+    };
+    for maxima in [false, true] {
+        let doc = at(maxima);
+        policy::parse(doc.to_string().as_bytes()).unwrap_or_else(|e| {
+            panic!(
+                "a document at the schema's {} is refused by the parser: {e}\n{doc}",
+                if maxima {
+                    "upper bounds"
+                } else {
+                    "lower bounds"
+                }
+            )
+        });
+    }
+}
+
+/// **The two cross-field rules `Policy::validate` enforces are real**, so the
+/// `fail`s `charts/logweir/templates/policy.yaml` carries for them are not
+/// belt-and-braces over a rule that does not exist.
+///
+/// JSON Schema draft-07 cannot compare two sibling values, which is why they
+/// are refused at render time instead. This is the half that proves the rules
+/// they mirror.
+#[test]
+fn the_two_rules_the_schema_cannot_express_are_rules_the_parser_enforces() {
+    let base: serde_json::Value = serde_json::from_str(
+        &rendered_policies("default")
+            .remove("weirkeeper-policy")
+            .expect("the default render carries a policy"),
+    )
+    .expect("it is JSON");
+
+    let mut inverted_pool = base.clone();
+    inverted_pool["checks"]["maxActiveTotal"] = serde_json::json!(1);
+    inverted_pool["checks"]["maxActivePerNamespace"] = serde_json::json!(4);
+    assert!(
+        policy::parse(inverted_pool.to_string().as_bytes()).is_err(),
+        "`maxActiveTotal` below `maxActivePerNamespace` must be refused; \
+         templates/policy.yaml fails the render for it"
+    );
+
+    let mut inverted_topics = base;
+    inverted_topics["discovery"]["defaultMaxTopics"] = serde_json::json!(50_000);
+    inverted_topics["discovery"]["hardMaxTopics"] = serde_json::json!(100);
+    assert!(
+        policy::parse(inverted_topics.to_string().as_bytes()).is_err(),
+        "`defaultMaxTopics` above `hardMaxTopics` must be refused; \
+         templates/policy.yaml fails the render for it"
+    );
+}
+
+/// **The chart's own template refuses both cross-field pairs**, named, at
+/// render time — asserted over the template text because `chart_lint` is the
+/// crate that runs `helm` and this one does not.
+#[test]
+fn the_policy_template_names_both_cross_field_rules_in_its_refusals() {
+    let template = std::fs::read_to_string(repo().join("charts/logweir/templates/policy.yaml"))
+        .expect("the policy template is readable");
+    let code: String = template
+        .lines()
+        .filter(|l| !l.trim_start().starts_with('#'))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(
+        code.matches("{{- fail (printf").count(),
+        2,
+        "two cross-field rules, two named refusals"
+    );
+    for needle in [
+        "checks.maxActiveTotal (%d) must be at least checks.maxActivePerNamespace",
+        "checks.discovery.defaultMaxTopics (%d) must be at most checks.discovery.hardMaxTopics",
+    ] {
+        assert!(
+            code.contains(needle),
+            "templates/policy.yaml must refuse the render naming the rule and both values; \
+             `{needle}` is missing"
+        );
+    }
+    assert!(
+        code.contains("fails CLOSED"),
+        "the refusal says WHY it is a render-time error and not a runtime one: a policy the \
+         parser refuses discards every attestation and every evidence location silently"
+    );
+}
