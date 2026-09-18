@@ -1099,17 +1099,43 @@ refusal reported that as a fact about the documents.
 **The ruling.** A status that predates `signedAt` and a document that claims no
 signing time are different facts and get different answers.
 
-* A stored block with **no `signedAt` and no `trust`** was written by an older
-  controller. On a policy event the controller performs **one** bounded `get`
-  of the run's own receipt or scorecard, through the same evidence path that
-  produced the original verdict, checks the bytes against the `sha256` the run
-  recorded, and takes `signedAt` from the document exactly as a fresh run does.
-  The signature is not re-checked: it was checked over these same bytes when
-  the run finished, and the digest is what says they are the same bytes.
-* A stored block with **no `signedAt` but a `trust` object** was written by a
-  controller that has both fields and wrote no signing time, which it does only
-  when the document carries none. That stays `Untrusted` /
-  `SignedOutsideValidity`, and the fail-closed rule is unchanged.
+The question is never *which build wrote this block* — nothing on the status
+says so — but **is this block evidence that a signing time was ever compared to
+the key's validity window?** Exactly two answers mean yes:
+
+* `trust.basis: Current` or `trust.basis: Historical`. Both are reachable only
+  through the window comparison, and the comparison is unreachable without a
+  claim, so such a block had one. It stays `Untrusted` /
+  `SignedOutsideValidity` if it carries no `signedAt`, and the fail-closed rule
+  is unchanged.
+* **Anything else** — no `trust` block, a `trust` block with no `basis`,
+  `basis: None`, `basis: Unverified`, or a spelling a later build invents —
+  compared nothing. On a policy event the controller performs **one** bounded
+  `get` of the run's own receipt or scorecard, through the same evidence path
+  that produced the original verdict, checks the bytes against the `sha256` the
+  run recorded, and takes `signedAt` from the document exactly as a fresh run
+  does. The signature is not re-checked: it was checked over these same bytes
+  when the run finished, and the digest is what says they are the same bytes.
+
+**Enumerating the bases that mean something, rather than the shapes that do
+not, took three lab runs.** Two earlier attempts keyed on the presence of a
+`trust` block and then on the literal string `Unverified`, and the objects in
+the field matched neither: an intermediate build had already re-derived them
+and stamped `{basis: "None", keyState: "Active", policy: {name:
+legacy-roster-v1}}` with no `signedAt`, so they read as "a document that claims
+nothing", no re-read was scheduled, and three consecutive upgrades reported the
+same five objects `Untrusted`. The allow-list form is the one that stays
+correct under a build nobody has written yet.
+
+**What it costs.** A document that genuinely carries no signing time is written
+by a current build as `basis: None` with no `signedAt` — the same bytes as that
+legacy re-stamp. The two are indistinguishable on the status, so such a document
+is re-read too. The read answers with the document's own absence, the verdict
+does not move, the re-rendered block is identical and **no patch is sent**: one
+`get` per policy event, zero writes, for as long as the object exists. That is
+the price of the only thing that can tell the two apart, which is reading the
+document; guessing the other way is what left five sound archives marked
+`Untrusted`.
 
 Until the read succeeds, the object is neither withdrawn nor presented:
 `result` becomes **`NotAttempted`** — no verification was attempted under this

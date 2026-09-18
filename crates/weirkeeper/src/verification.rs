@@ -1792,63 +1792,92 @@ fn unverified_detail(
 ///
 /// # Two absences, and telling them apart is `TRUST-UPGRADE-SIGNEDAT`
 ///
-/// A block with no `signedAt` is one of two very different things, and this
-/// function decides which by looking at whether the block carries a `trust`
-/// object at all:
+/// A block with no `signedAt` is one of two very different things:
 ///
-/// * **no `trust` either** — the block was written by a controller that
-///   predates PLAT-19.1, which wrote neither field. Nothing about the document
-///   is in doubt; this installation simply never recorded the instant. That is
-///   [`ClaimAbsence::NotRecorded`], and [`decide`] returns an UNDECIDED verdict
-///   for it rather than a refusal.
-/// * **`trust` present** — a build that knows both fields wrote this block and
-///   wrote no `signedAt`, which it does exactly when the DOCUMENT carries no
-///   readable signing time. That is [`ClaimAbsence::FieldAbsent`] and it fails
-///   closed, as it always has.
+/// * **this installation never recorded the instant** — the status was written,
+///   or last re-derived, by a build that did not have the field. Nothing about
+///   the document is in doubt and nobody has read it. That is
+///   [`ClaimAbsence::NotRecorded`], and [`decide`] answers it with an UNDECIDED
+///   verdict whose contract is one bounded re-read.
+/// * **the DOCUMENT carries no readable signing time** — a build that knows the
+///   field read the document and found none. That is
+///   [`ClaimAbsence::FieldAbsent`] and it fails closed, as it always has.
 ///
-/// # Why `trust` is the discriminator and not, say, the object's age
+/// # THE DISCRIMINATOR IS THE BASIS, AND IT TOOK THREE LAB RUNS TO GET RIGHT
 ///
-/// Because it is the one field whose presence is IMPLIED BY THE WRITER.
-/// [`VerificationResult::to_status_value`] inserts `trust` for every verdict
-/// that carried a trust projection, and a trust projection is present for
-/// exactly the verdicts that carry a `matchedKeyId` — so on any block this
-/// build wrote, `matchedKeyId` present and `trust` absent is unreachable.
-/// `a_matched_key_is_always_written_beside_a_trust_block` asserts that
-/// implication over the whole fresh path, which is what makes the inverse safe
-/// to read as "an older controller wrote this".
+/// The question is never "which build wrote this block" — nothing on the status
+/// says so — but **"is this block evidence that a signing time was ever
+/// compared to the key's validity window?"** Exactly two bases can only have
+/// been reached from a real claim: [`TRUST_BASIS_CURRENT`] and
+/// [`TRUST_BASIS_HISTORICAL`] both require `claim.signed_at` inside
+/// [`decide`]'s window rows. Everything else — no `trust` block, no `basis`
+/// inside one, `None`, `Unverified`, or a spelling a later build invents — is a
+/// block that compared nothing, and the honest answer for it is "not yet
+/// asked".
 ///
-/// A creation timestamp would have been the obvious discriminator and is the
-/// wrong one: an object's age says when it was CREATED, not which build last
-/// wrote its status, and a cluster upgraded twice would misclassify on it.
+/// Three shapes have been seen in the field and all three are `NotRecorded`:
+///
+/// | shape | written by |
+/// |---|---|
+/// | no `trust` block at all | a controller predating PLAT-19.1 |
+/// | `trust.basis: Unverified` | this build, waiting on its own re-read |
+/// | `trust.basis: None`, no `signedAt` | the intermediate `e7d0e79` build's re-derivation |
+///
+/// **The third is the one that shipped broken.** Two earlier attempts keyed on
+/// the PRESENCE of a `trust` block and then on the literal string
+/// `Unverified`, and the lab's five 2026-09-14 objects matched neither: the
+/// `e7d0e79` controller had already re-stamped them with
+/// `{basis: "None", keyState: "Active", policy: {name: legacy-roster-v1}}` and
+/// no `signedAt`, so they classified `FieldAbsent`, no re-read was ever
+/// scheduled, and three consecutive lab refreshes reported the same five
+/// objects `Untrusted` (`lab-refresh-3.result.md` §9). Enumerating the bases
+/// that MEAN something, rather than the shapes that do not, is what makes the
+/// rule closed under builds nobody has written yet.
+///
+/// # What this costs, and why it is the right side to err on
+///
+/// A document that genuinely carries no signing time is written by a current
+/// build as `basis: None` with no `signedAt` — **the same bytes** as the lab's
+/// legacy re-stamp. They are indistinguishable on the status, so this rule
+/// re-reads that document too. The read answers with the document's own
+/// absence, [`decide`] refuses it exactly as before, the re-rendered block is
+/// identical and **no patch is sent** ([`retrust_with`] returns `None`). The
+/// cost is therefore one `Store::get` per policy event and zero writes, and it
+/// buys the only thing that can tell the two apart: reading the document.
+/// Guessing the other way is what left five sound archives marked `Untrusted`.
 fn stored_claim(stored: &Value) -> EvidenceClaim {
-    let carries = |key: &str| stored.get(key).is_some_and(|v| !v.is_null());
-    // AND THE PASS'S OWN OUTPUT IS STILL A PRE-`signedAt` STATUS — review
-    // finding **F2**, high.
-    //
-    // The undecided write inserts a `trust` block (it must: `valid_verification`
-    // reads an ABSENT `trust` as the additive-compatibility case and would
-    // render such a block green), which on the next event looked like "a build
-    // that knows both fields wrote this" and answered `FieldAbsent`. The
-    // documented retry therefore never happened: one transient archive blip
-    // during an upgrade baked in `Untrusted` and *"the document carries no
-    // signing-time field"* forever, and a pod-only grant — which can never be
-    // repaired by this controller — degraded to the same wrong sentence after
-    // exactly one event.
-    //
-    // `basis: Unverified` is this pass's own mark for "I have not read the
-    // document yet", so it is read back as exactly that. It is written only
-    // here, only for a `NotRecorded` claim, and it disappears the moment a real
-    // `signedAt` lands.
-    let undecided =
-        stored.pointer("/trust/basis").and_then(Value::as_str) == Some(TRUST_BASIS_UNVERIFIED);
     match stored.get("signedAt").and_then(Value::as_str) {
-        None if !carries("trust") || undecided => EvidenceClaim::absent(ClaimAbsence::NotRecorded),
+        None if !compared_a_claim(stored) => EvidenceClaim::absent(ClaimAbsence::NotRecorded),
         None => EvidenceClaim::absent(ClaimAbsence::FieldAbsent),
         Some(text) => match DateTime::parse_from_rfc3339(text) {
             Ok(t) => EvidenceClaim::at(t.with_timezone(&Utc)),
             Err(_) => EvidenceClaim::absent(ClaimAbsence::Unparseable),
         },
     }
+}
+
+/// Whether a stored block is evidence that a signing time was read out of the
+/// document and compared to the key's validity window.
+///
+/// **AN ALLOW-LIST, NOT A DENY-LIST**, and that is the whole lesson of
+/// `TRUST-UPGRADE-SIGNEDAT`. [`decide`] reaches [`TRUST_BASIS_CURRENT`] and
+/// [`TRUST_BASIS_HISTORICAL`] only through its window rows, and both of those
+/// rows are unreachable without `claim.signed_at` — so a block carrying either
+/// one had a real claim, and a block carrying anything else did not. Listing
+/// the bases that must NOT re-read is the form that stays correct when a build
+/// nobody has written yet invents a sixth spelling; listing the ones that must
+/// is the form that shipped twice and missed the field twice.
+///
+/// `RecordedBeforeRevocation` is deliberately NOT on this list. It is reached
+/// from the independent observation and never from the claim, so a block
+/// carrying it has compared nothing either; re-reading such an object cannot
+/// change its verdict — the compromise rows run first — but it does fill in the
+/// `signedAt` the record should have had, once, after which it is settled.
+fn compared_a_claim(stored: &Value) -> bool {
+    matches!(
+        stored.pointer("/trust/basis").and_then(Value::as_str),
+        Some(TRUST_BASIS_CURRENT | TRUST_BASIS_HISTORICAL)
+    )
 }
 
 // ---------------------------------------------------------------------------

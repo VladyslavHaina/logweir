@@ -4157,14 +4157,16 @@ fn pre_signedat_status() -> Value {
     })
 }
 
-/// The same object once a build that KNOWS both fields has written it, over a
-/// document that genuinely carries no signing time: `trust` present,
-/// `signedAt` absent.
-fn document_claims_nothing_status() -> Value {
+/// The lab's own shape, verbatim, with `basis` replaced.
+///
+/// `None` is `lab-refresh-3.result.md` §9's five objects; `Current` and
+/// `Historical` are the two bases that can only have been reached from a real
+/// claim and therefore must NOT be re-read.
+fn basis_status(basis: &str, result: &str) -> Value {
     let mut status = pre_signedat_status();
-    status["evidence"]["verification"]["result"] = json!("Untrusted");
+    status["evidence"]["verification"]["result"] = json!(result);
     status["evidence"]["verification"]["trust"] = json!({
-        "basis": "None",
+        "basis": basis,
         "keyState": "Active",
         "policy": {"name": "org-default", "uid": "uid-org-default", "generation": 4},
     });
@@ -4211,6 +4213,14 @@ fn retrust_row(status: &Value, signing_time: &weirkeeper::verification::SigningT
 /// catches because the green rule reads the basis the claim produced.
 #[test]
 fn a_pre_signedat_object_is_repaired_to_valid_by_one_bounded_read() {
+    // THE WHOLE CHAIN, NOT ONLY ITS LAST LINK. Feeding `Recovered` straight in
+    // proves what the pass does with a claim; it proves nothing about the pass
+    // ever ASKING for one, and a discriminator that never fires makes the rest
+    // of this row unreachable in production.
+    assert!(
+        weirkeeper::verification::signing_time_need(Some(&pre_signedat_status())).is_some(),
+        "a block with no `trust` at all compared nothing, so the read has to be asked for"
+    );
     let outcome = weirkeeper::verification::retrust_with(
         &pre_signedat_status(),
         &org_default(),
@@ -4374,13 +4384,31 @@ fn an_unread_archive_neither_withdraws_nor_presents_a_verdict() {
 /// green against a retired key, the exact fail-open `decide`'s rule exists for.
 #[test]
 fn a_document_that_claims_no_signing_time_is_still_untrusted() {
-    // ---- the stored block was written by a build that knows both fields ----
-    let stored = document_claims_nothing_status();
-    assert!(
-        weirkeeper::verification::signing_time_need(Some(&stored)).is_none(),
-        "a block carrying `trust` was written by a build that would have written `signedAt` if \
-         the document had one, so there is nothing an archive read could repair"
-    );
+    // ---- A BASIS THAT COULD ONLY HAVE COME FROM A REAL CLAIM -------------
+    //
+    // `Current` and `Historical` are reached only through `decide`'s window
+    // rows, and both of those rows are unreachable without `claim.signed_at`.
+    // A block carrying one has already compared a signing time to the key's
+    // window, so there is nothing an archive read could add — it stays
+    // `FieldAbsent` and fails closed, with no `get`.
+    for basis in ["Current", "Historical"] {
+        let compared = basis_status(basis, "Untrusted");
+        assert!(
+            weirkeeper::verification::signing_time_need(Some(&compared)).is_none(),
+            "{basis}: this block is evidence that a claim WAS compared, so re-reading it would \
+             be a `get` that can change nothing"
+        );
+        let refused = retrust_row(&compared, &weirkeeper::verification::SigningTime::NotNeeded);
+        assert_eq!(refused["to"], json!("Untrusted"), "{basis}");
+        assert!(
+            refused["verification"]["detail"]
+                .as_str()
+                .is_some_and(|d| d.contains("the document carries no signing-time field")),
+            "{basis}: the absence is still reported as the document's. Got {}",
+            refused["verification"]["detail"]
+        );
+    }
+    let stored = basis_status("Current", "Untrusted");
     let row = retrust_row(&stored, &weirkeeper::verification::SigningTime::NotNeeded);
     assert_eq!(row["to"], json!("Untrusted"));
     assert_eq!(row["verification"]["trust"]["basis"], json!("None"));
@@ -4484,20 +4512,21 @@ fn a_re_read_is_asked_for_only_when_it_can_be_done_safely() {
     no_match["evidence"]["verification"]["matchedKeyId"] = json!("");
     let mut null_signed_at = pre_signedat_status();
     null_signed_at["evidence"]["verification"]["signedAt"] = json!(null);
-    null_signed_at["evidence"]["verification"]["trust"] = json!({"basis": "None"});
+    null_signed_at["evidence"]["verification"]["trust"] = json!({"basis": "Current"});
     for (label, status) in [
         ("the block already carries a signing time", with_signed_at),
         ("no digest, so nothing safe to read", no_digest),
         ("no document key", no_key),
         ("no signature was ever matched", no_match),
         (
-            "an explicit null `signedAt` beside a `trust` block is a document's own absence",
+            "an explicit null `signedAt` beside a basis that compared a claim",
             null_signed_at,
         ),
         (
-            "a block a build that knows both fields wrote",
-            document_claims_nothing_status(),
+            "a basis reached from a real claim",
+            basis_status("Current", "Untrusted"),
         ),
+        ("the other such basis", basis_status("Historical", "Valid")),
         ("no status at all", json!({})),
     ] {
         assert!(
@@ -4854,4 +4883,268 @@ fn an_evidence_path_api_failure_does_not_abort_the_re_trust_pass() {
     );
     assert!(detail.contains("no re-read was attempted"), "{detail}");
     assert!(detail.contains("next policy event"), "{detail}");
+}
+
+// ===========================================================================
+// TRUST-UPGRADE-SIGNEDAT, the THIRD shape — lab-refresh-3 §9
+// ===========================================================================
+
+/// The key id the lab's five 2026-09-14 objects name, as
+/// `artifacts/lab-refresh-3/trust-selfheal/*.json` record it.
+const LAB_MATCHED_KEY_ID: &str = "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe";
+
+/// The `detail` the intermediate `e7d0e79` build stamped on all five, verbatim
+/// — the sentence this defect exists to stop being told about sound archives.
+fn lab_detail(payload_type: &str) -> String {
+    format!(
+        "the signature over this document verified under key {LAB_MATCHED_KEY_ID}, and the trust \
+         policy legacy-roster-v1 does not accept it (SignedOutsideValidity): the document \
+         carries no signing-time field for its payload type, so the key's validity window could \
+         not be checked ({payload_type})"
+    )
+}
+
+/// **`Backup/rotated-secret-backup`, verbatim** from
+/// `artifacts/lab-refresh-3/trust-selfheal/backup-rotated-secret-backup.json`:
+/// `result: Untrusted`, a `trust` block whose `basis` is the literal string
+/// `"None"`, and **no `signedAt`**. The digest is the checked-in receipt
+/// fixture's so the repaired path can be exercised end to end; every other
+/// field is the lab's own.
+fn lab_backup_status() -> Value {
+    json!({
+        "phase": "Succeeded",
+        "exitCode": 0,
+        "exitReason": "Ok",
+        "backupId": "6424f937-7554-4976-9c1f-b02410e3c22a",
+        "evidence": {
+            "receiptKey": "logweir/backups/6424f937-7554-4976-9c1f-b02410e3c22a/01M2H5KH9G29EM0RANHYD4F4H9.receipt.json",
+            "receiptSha256": sha256_prefixed(receipt_bytes().as_bytes()),
+            "sidecarKey": "logweir/backups/6424f937-7554-4976-9c1f-b02410e3c22a/01M2H5KH9G29EM0RANHYD4F4H9.receipt.sig",
+            "verification": {
+                "detail": lab_detail("application/vnd.logweir.backup-receipt+json;version=1.0.0"),
+                "matchedKeyId": FIXTURE_KEY_ID,
+                "payloadType": "application/vnd.logweir.backup-receipt+json;version=1.0.0",
+                "result": "Untrusted",
+                "trust": {
+                    "basis": "None",
+                    "keyState": "Active",
+                    "policy": {"name": "legacy-roster-v1"},
+                },
+                "verifiedAt": "2026-09-14T23:56:31Z",
+            }
+        }
+    })
+}
+
+/// **`Restore/scram-record-restore`, verbatim** from the same directory — the
+/// same third shape on the other kind, whose evidence keys are
+/// `scorecardKey`/`scorecardSha256`.
+fn lab_restore_status() -> Value {
+    json!({
+        "phase": "Succeeded",
+        "outcome": "pass",
+        "exitCode": 0,
+        "exitReason": "Ok",
+        "evidence": {
+            "offsetReportKey": "logweir/drills/01M2H5MMSKY5JR6RW108EGN954.offsets.json",
+            "scorecardKey": "logweir/drills/01M2H5MMSKY5JR6RW108EGN954.json",
+            "scorecardSha256": sha256_prefixed(read("e2e/fixtures/signed/scorecard.json").as_bytes()),
+            "sidecarKey": "logweir/drills/01M2H5MMSKY5JR6RW108EGN954.sig",
+            "verification": {
+                "detail": lab_detail("application/vnd.logweir.drill-scorecard+json;version=1.0.0"),
+                "matchedKeyId": FIXTURE_KEY_ID,
+                "payloadType": "application/vnd.logweir.drill-scorecard+json;version=1.0.0",
+                "result": "Untrusted",
+                "trust": {
+                    "basis": "None",
+                    "keyState": "Active",
+                    "policy": {"name": "legacy-roster-v1"},
+                },
+                "verifiedAt": "2026-09-14T23:57:10Z",
+            }
+        }
+    })
+}
+
+/// **THE ROW THREE LAB REFRESHES FAILED.** The five objects
+/// `lab-refresh-3.result.md` §9 measured carry a `trust` block whose `basis` is
+/// the literal `"None"` — stamped by the intermediate `e7d0e79` build's own
+/// re-derivation, not by a document that claims nothing — and they end `Valid`
+/// with the document's own `signedAt` after one bounded re-read, on both kinds.
+///
+/// KILLS: "a `trust` block means a build that knows `signedAt` wrote this" (the
+/// first shipped discriminator) and "only the literal `Unverified` means
+/// undecided" (the second). Under either, `signing_time_need` below returns
+/// `None`, no `get` is ever issued, and these five objects stay `Untrusted`
+/// forever — which is exactly what three consecutive lab runs reported.
+#[test]
+fn the_labs_intermediate_build_shape_is_repaired_by_one_read() {
+    /// One lab object: its name, its verbatim status, its kind's badge rule,
+    /// the document it owns and that document's own claimed signing time.
+    type LabRow = (
+        &'static str,
+        Value,
+        fn(&Value) -> weirkeeper::verification::Badge,
+        &'static str,
+        &'static str,
+    );
+    let rows: [LabRow; 2] = [
+        (
+            "Backup/rotated-secret-backup",
+            lab_backup_status(),
+            backup_badge,
+            "logweir/backups/6424f937-7554-4976-9c1f-b02410e3c22a/01M2H5KH9G29EM0RANHYD4F4H9.receipt.json",
+            RECEIPT_FINISHED_AT,
+        ),
+        (
+            "Restore/scram-record-restore",
+            lab_restore_status(),
+            restore_badge,
+            "logweir/drills/01M2H5MMSKY5JR6RW108EGN954.json",
+            SCORECARD_SIGNED_AT,
+        ),
+    ];
+    for (label, stored, badge, key, signed_at) in rows {
+        // ---- EVENT 1: the archive does not answer -----------------------
+        let need =
+            weirkeeper::verification::signing_time_need(Some(&stored)).unwrap_or_else(|| {
+                panic!(
+                    "{label}: `basis: None` with no `signedAt` is the intermediate build's own \
+                 re-derivation, not a document that claims nothing — and reading it as the \
+                 latter is what left five sound archives Untrusted across three refreshes"
+                )
+            });
+        assert_eq!(need.payload_key, key, "{label}: its OWN document");
+
+        let first = weirkeeper::verification::retrust_with(
+            &stored,
+            &org_default(),
+            badge,
+            None,
+            Some(1),
+            at("2026-09-19T09:00:00Z"),
+            &weirkeeper::verification::SigningTime::Unreadable(
+                "the evidence object is not in the archive; nothing was verified".to_string(),
+            ),
+        )
+        .unwrap_or_else(|| panic!("{label}: an undecided verdict differs from the stored one"));
+        assert_eq!(first.from, "Untrusted", "{label}");
+        assert_eq!(
+            first.to, "NotAttempted",
+            "{label}: nothing was read, so nothing is claimed and nothing is refused"
+        );
+        assert_eq!(
+            first.verification["trust"]["basis"],
+            json!("Unverified"),
+            "{label}"
+        );
+        assert!(
+            !first.verification["detail"]
+                .as_str()
+                .is_some_and(|d| d.contains("the document carries no signing-time field")),
+            "{label}: the sentence that was never true of these receipts is gone. Got {}",
+            first.verification["detail"]
+        );
+
+        // ---- EVENT 2: the archive answers, and the object is repaired ----
+        let mut after_first = stored.clone();
+        after_first["evidence"]["verification"] = first.verification.clone();
+        assert!(
+            weirkeeper::verification::signing_time_need(Some(&after_first)).is_some(),
+            "{label}: and the retry survives its own output (review F2)"
+        );
+        let second = weirkeeper::verification::retrust_with(
+            &after_first,
+            &org_default(),
+            badge,
+            Some(&vec![first.verified.clone()]),
+            Some(1),
+            at("2026-09-19T09:30:00Z"),
+            &weirkeeper::verification::SigningTime::Recovered(at(signed_at)),
+        )
+        .unwrap_or_else(|| panic!("{label}: the read succeeded, so the verdict changes"));
+        assert_eq!(second.to, "Valid", "{label}: repaired");
+        assert_eq!(second.verification["signedAt"], json!(signed_at), "{label}");
+        assert_eq!(
+            second.verification["trust"]["basis"],
+            json!("Current"),
+            "{label}"
+        );
+        assert_eq!(
+            second.verified.status, "True",
+            "{label}: and it renders green"
+        );
+        assert_eq!(
+            second.verification["verifiedAt"], stored["evidence"]["verification"]["verifiedAt"],
+            "{label}: two events and still no re-observation"
+        );
+
+        // ---- AND IT SETTLES: no third read, no third write ---------------
+        let mut repaired = stored.clone();
+        repaired["evidence"]["verification"] = second.verification.clone();
+        assert!(
+            weirkeeper::verification::signing_time_need(Some(&repaired)).is_none(),
+            "{label}: a repaired object never asks for the archive again"
+        );
+    }
+}
+
+/// A document that genuinely claims no signing time is written by a CURRENT
+/// build as `basis: None` with no `signedAt` — the same bytes as the lab's
+/// legacy re-stamp — so it is re-read too. This is the honest cost of the rule,
+/// and it is bounded: the read answers with the document's own absence, the
+/// verdict does not move, and **no patch is sent**.
+///
+/// KILLS: "settle it by writing something different after a fruitless read" —
+/// any such marker would have to be a new basis value, and the assertion below
+/// would then see a second write per policy event instead of none.
+#[test]
+fn a_fruitless_re_read_costs_one_get_and_no_write() {
+    let absent = || {
+        weirkeeper::verification::SigningTime::Absent(
+            logweir_core::trust::ClaimAbsence::FieldAbsent,
+        )
+    };
+    // PASS 1 — the read comes back with the document's own absence. The block
+    // settles on `Untrusted` / basis `None`, which is where it already was in
+    // substance; this pass only rewrites the policy's own name into the
+    // sentence.
+    let first = weirkeeper::verification::retrust_with(
+        &lab_backup_status(),
+        &org_default(),
+        backup_badge,
+        None,
+        Some(1),
+        at("2026-09-19T09:00:00Z"),
+        &absent(),
+    )
+    .expect("the fixture's stored detail names a different policy, so one patch settles it");
+    assert_eq!(first.to, "Untrusted");
+    assert_eq!(first.verification["trust"]["basis"], json!("None"));
+
+    // PASS 2 — the SAME fruitless read over the settled block renders
+    // identical bytes, so nothing is sent. The cost of not being able to tell
+    // the two shapes apart on the status is one `get`, never a write.
+    let mut settled = lab_backup_status();
+    settled["evidence"]["verification"] = first.verification.clone();
+    let second = weirkeeper::verification::retrust_with(
+        &settled,
+        &org_default(),
+        backup_badge,
+        Some(&vec![first.verified.clone()]),
+        Some(1),
+        at("2026-09-19T10:00:00Z"),
+        &absent(),
+    );
+    assert!(
+        second.is_none(),
+        "the re-read confirmed what the block already said, so erratum E11(d) sends no patch. \
+         Got {second:?}"
+    );
+    // …and the next policy event asks for the same one `get`, forever, which is
+    // the price of not being able to tell the two shapes apart on the status.
+    assert!(
+        weirkeeper::verification::signing_time_need(Some(&settled)).is_some(),
+        "documented in docs/stability.md: one `Store::get` per policy event, zero writes"
+    );
 }
