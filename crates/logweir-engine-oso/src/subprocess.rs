@@ -35,6 +35,11 @@ pub const SYSTEM_CA_BUNDLE: &str = "/etc/ssl/certs/ca-certificates.crt";
 /// directory.
 pub const ENGINE_TRUST_BUNDLE: &str = "/work/trust/archive-bundle.pem";
 
+/// The `stream` label [`engine_trust_bundle`]'s own lines carry. Not `stdout`
+/// or `stderr`: those two are the engine CHILD's, and a reader correlating a
+/// run's output with the child's must be able to tell them apart.
+pub const LOGWEIR_STREAM: &str = "logweir";
+
 /// The trust bundle this process hands the engine child, or `None` when no
 /// destination CA was projected — D2 §3.5's "engine trust bundle".
 ///
@@ -57,20 +62,88 @@ pub const ENGINE_TRUST_BUNDLE: &str = "/work/trust/archive-bundle.pem";
 /// half returns `None` WITH a line on the caller's log rather than an error —
 /// the engine then uses the platform store alone and fails its handshake with
 /// the engine's own message, which is no worse than not having tried.
+/// # The log sink
+///
+/// `on_line` is the CALLER's, the same sink the engine child's own output goes
+/// to — `logweir-engine-oso` declares no logging dependency, and adding one for
+/// three warnings would put a package decision in front of a diagnostic. The
+/// stream label is `logweir`, not `stdout`/`stderr`, because these lines are
+/// this process's and not the child's.
 #[must_use]
-pub fn engine_trust_bundle() -> Option<PathBuf> {
+pub fn engine_trust_bundle(on_line: &mut dyn FnMut(&str, &str)) -> Option<PathBuf> {
     let destination = std::env::var(ARCHIVE_CA_FILE_ENV)
         .ok()
         .filter(|v| !v.is_empty())?;
-    let extra = std::fs::read(&destination).ok()?;
-    let mut merged = std::fs::read(SYSTEM_CA_BUNDLE).unwrap_or_default();
+    let extra = match std::fs::read(&destination) {
+        Ok(bytes) => bytes,
+        Err(e) => {
+            // THE PLAN SAID THERE IS A ROOT AND THE MOUNT DOES NOT HAVE IT.
+            // Running anyway is the right call — the engine may not need it —
+            // but doing so SILENTLY is how the opaque handshake failure U1
+            // warns about arrives with nothing in the log to explain it.
+            on_line(
+                LOGWEIR_STREAM,
+                &format!(
+                    "warn: {ARCHIVE_CA_FILE_ENV}={destination} cannot be read ({e}); the engine \
+                     child runs against the platform trust store alone, and a private-CA \
+                     endpoint will fail its TLS handshake with the engine's own message"
+                ),
+            );
+            return None;
+        }
+    };
+    // THE SYSTEM BUNDLE IS THE BASE AND ITS ABSENCE IS NOT A DETAIL.
+    // `SSL_CERT_FILE` REPLACES the trust store rather than adding to it, so a
+    // merged file built on an empty base is the private root ALONE — the engine
+    // would then reject every public certificate, including the source
+    // cluster's on an installation where only the archive is private. Refusing
+    // to write the file at all leaves the platform store in place, which is
+    // strictly the better of the two failures.
+    let mut merged =
+        match std::fs::read(SYSTEM_CA_BUNDLE) {
+            Ok(bytes) if !bytes.is_empty() => bytes,
+            other => {
+                on_line(
+                    LOGWEIR_STREAM,
+                    &format!(
+                    "warn: the platform trust store {SYSTEM_CA_BUNDLE} is missing or empty ({}), \
+                     so no merged bundle is written: SSL_CERT_FILE REPLACES the trust store, and \
+                     a file holding only the destination root would leave the engine unable to \
+                     verify any public certificate at all",
+                    other.err().map_or_else(|| "empty".to_string(), |e| e.to_string())
+                ),
+                );
+                return None;
+            }
+        };
     if !merged.ends_with(b"\n") {
         merged.push(b'\n');
     }
     merged.extend_from_slice(&extra);
     let path = PathBuf::from(ENGINE_TRUST_BUNDLE);
-    std::fs::create_dir_all(path.parent()?).ok()?;
-    std::fs::write(&path, &merged).ok()?;
+    let parent = path.parent()?;
+    if let Err(e) = std::fs::create_dir_all(parent) {
+        on_line(
+            LOGWEIR_STREAM,
+            &format!(
+                "warn: {} cannot be created ({e}); the engine child runs against the platform \
+                 trust store alone",
+                parent.display()
+            ),
+        );
+        return None;
+    }
+    if let Err(e) = std::fs::write(&path, &merged) {
+        on_line(
+            LOGWEIR_STREAM,
+            &format!(
+                "warn: {} cannot be written ({e}); the engine child runs against the platform \
+                 trust store alone",
+                path.display()
+            ),
+        );
+        return None;
+    }
     Some(path)
 }
 
@@ -150,7 +223,7 @@ pub fn run_engine(
     // destination CA explicitly through `StoreOptions::with_root_certificate`.
     // Setting it on this process would change what those clients trust as a
     // side effect of running the engine.
-    if let Some(bundle) = engine_trust_bundle() {
+    if let Some(bundle) = engine_trust_bundle(on_line) {
         command.env("SSL_CERT_FILE", &bundle);
     }
     let out = command

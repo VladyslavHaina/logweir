@@ -850,6 +850,96 @@ pub fn run(args: &BackupRunArgs) -> ExitCode {
         Err(e) => return report(&run_id, Err(e)),
     };
 
+    // === THE THREE OBJECT STORES, BEFORE ANY KAFKA CLIENT EXISTS ===
+    //
+    // **MOVED IN FRONT OF `RdKafkaReader::connect` DELIBERATELY**, for this
+    // function's own stated rule: *every guard that can refuse locally, before
+    // a client exists*. Building a store is a purely local act — a location
+    // parsed, a credential provider chosen, a CA file read — and under the
+    // store contract it is also a REFUSAL point: a run whose store
+    // configuration is not what the contract describes exits 3 here. Below the
+    // reader, that refusal came after librdkafka's broker threads had already
+    // begun dialling the SOURCE cluster, i.e. the production one, which is the
+    // last cluster a refused run should touch. It is the same argument
+    // `phase_minus1_admit::local` and the pinned-approver guard are placed by.
+    //
+    // It is also what makes the contract END-TO-END testable without a broker:
+    // `weirkeeper::tests::schedule_controller` drives this binary with the env
+    // a rendered Job carries and asserts it gets PAST these constructors —
+    // which is where a Job missing `LOGWEIR_EVIDENCE_CREDENTIALS` used to exit
+    // 3 with the archive already open and nothing archived.
+    //
+    // READ-ONLY over the archive (Global Constraint 6): the handle physically
+    // cannot put, and `Store::from_url` would refuse to build over an archive
+    // prefix at all, since an archive is never under `logweir/`. Two handles,
+    // because `Store` is not `Clone` and `OsoCliEngine` takes ownership of the
+    // one it reads through while `phase_run` reads the manifest bytes through
+    // the other. Both are read-only.
+    //
+    // UNDER THE STORE CONTRACT, EXPLICITLY (D2 §3.5). `read_only_with` takes
+    // the credential provider the controller NAMED and the CA it projected;
+    // location, region, endpoint, addressing and transport come from the plan's
+    // own `storage` block at both arities. `read_only_from_url` is the legacy
+    // constructor and still honours `AWS_ENDPOINT_URL` and friends — which is
+    // exactly why a destination-backed run does not use it.
+    let (store, engine_archive) = if contract {
+        let options = match store_contract::archive_options() {
+            Ok(options) => options,
+            Err(refusal) => return report(&run_id, Err(refusal.into())),
+        };
+        match (
+            Store::read_only_with(&inputs.spec.storage, &options),
+            Store::read_only_with(&inputs.spec.storage, &options),
+        ) {
+            (Ok(a), Ok(b)) => (a, b),
+            (Err(e), _) | (_, Err(e)) => {
+                return report(&run_id, Err(store_error(e)));
+            }
+        }
+    } else {
+        match (
+            Store::read_only_from_url(&inputs.spec.storage),
+            Store::read_only_from_url(&inputs.spec.storage),
+        ) {
+            (Ok(a), Ok(b)) => (a, b),
+            (Err(e), _) | (_, Err(e)) => {
+                return report(&run_id, Err(BackupError::Operational(e.to_string())))
+            }
+        }
+    };
+
+    // THE EVIDENCE HANDLE — the only writable store this command holds, and
+    // the only one it puts through (**GC6**).
+    //
+    // It is derived from the archive's own location with the prefix replaced
+    // by `logweir/`, because `Backup.spec` (`config/crd/backups.yaml`) carries
+    // ONE object-store URL — the archive root — and `BackupSpec` mirrors it.
+    // There is no second bucket to name, and inventing a spec field for one
+    // would be a format change this task has no mandate for. `Store::from_url`
+    // refuses any evidence prefix that is not exactly `logweir/`
+    // (`crates/logweir-store/src/lib.rs:194-205`), so the derivation cannot
+    // point at the archive's own keys even by accident.
+    let evidence_url = evidence_location(&inputs.spec.storage);
+    let evidence = if contract {
+        let archive_options = match store_contract::archive_options() {
+            Ok(options) => options,
+            Err(refusal) => return report(&run_id, Err(refusal.into())),
+        };
+        let options = match store_contract::evidence_options(&archive_options) {
+            Ok(options) => options,
+            Err(refusal) => return report(&run_id, Err(refusal.into())),
+        };
+        match Store::from_url_with(&evidence_url, &options) {
+            Ok(s) => s,
+            Err(e) => return report(&run_id, Err(store_error(e))),
+        }
+    } else {
+        match Store::from_url(&evidence_url) {
+            Ok(s) => s,
+            Err(e) => return report(&run_id, Err(BackupError::Operational(e.to_string()))),
+        }
+    };
+
     // NO SCRATCH NAMESPACE IS SET ON THIS READER, ever — GC18(c) rail 2. An
     // unscoped reader can delete nothing at all: the deleting method refuses
     // every name it is handed until a scratch namespace has been configured
@@ -915,80 +1005,9 @@ pub fn run(args: &BackupRunArgs) -> ExitCode {
         Err(e) => return report(&run_id, Err(e.into())),
     };
 
-    // READ-ONLY over the archive (Global Constraint 6): the handle physically
-    // cannot put, and `Store::from_url` would refuse to build over an archive
-    // prefix at all, since an archive is never under `logweir/`. Two handles,
-    // because `Store` is not `Clone` and `OsoCliEngine` takes ownership of the
-    // one it reads through while `phase_run` reads the manifest bytes through
-    // the other. Both are read-only.
-    //
-    // UNDER THE STORE CONTRACT, EXPLICITLY (D2 §3.5). `read_only_with` takes
-    // the credential provider the controller NAMED and the CA it projected;
-    // location, region, endpoint, addressing and transport come from the plan's
-    // own `storage` block at both arities. `read_only_from_url` is the legacy
-    // constructor and still honours `AWS_ENDPOINT_URL` and friends — which is
-    // exactly why a destination-backed run does not use it.
-    let (store, engine_archive) = if contract {
-        let options = match store_contract::archive_options() {
-            Ok(options) => options,
-            Err(refusal) => return report(&run_id, Err(refusal.into())),
-        };
-        match (
-            Store::read_only_with(&inputs.spec.storage, &options),
-            Store::read_only_with(&inputs.spec.storage, &options),
-        ) {
-            (Ok(a), Ok(b)) => (a, b),
-            (Err(e), _) | (_, Err(e)) => {
-                return report(&run_id, Err(store_error(e)));
-            }
-        }
-    } else {
-        match (
-            Store::read_only_from_url(&inputs.spec.storage),
-            Store::read_only_from_url(&inputs.spec.storage),
-        ) {
-            (Ok(a), Ok(b)) => (a, b),
-            (Err(e), _) | (_, Err(e)) => {
-                return report(&run_id, Err(BackupError::Operational(e.to_string())))
-            }
-        }
-    };
-
     let engine = match build_engine(engine_archive) {
         Ok(e) => e,
         Err(e) => return report(&run_id, Err(e)),
-    };
-
-    // THE EVIDENCE HANDLE — the only writable store this command holds, and
-    // the only one it puts through (**GC6**).
-    //
-    // It is derived from the archive's own location with the prefix replaced
-    // by `logweir/`, because `Backup.spec` (`config/crd/backups.yaml`) carries
-    // ONE object-store URL — the archive root — and `BackupSpec` mirrors it.
-    // There is no second bucket to name, and inventing a spec field for one
-    // would be a format change this task has no mandate for. `Store::from_url`
-    // refuses any evidence prefix that is not exactly `logweir/`
-    // (`crates/logweir-store/src/lib.rs:194-205`), so the derivation cannot
-    // point at the archive's own keys even by accident.
-    let evidence_url = evidence_location(&inputs.spec.storage);
-    let evidence = if contract {
-        let archive_options = match store_contract::archive_options() {
-            Ok(options) => options,
-            Err(refusal) => return report(&run_id, Err(refusal.into())),
-        };
-        let options = match store_contract::evidence_options(&archive_options) {
-            Ok(options) => options,
-            Err(refusal) => return report(&run_id, Err(refusal.into())),
-        };
-        match Store::from_url_with(&evidence_url, &options) {
-            Ok(s) => s,
-            Err(e) => return report(&run_id, Err(store_error(e))),
-        }
-    } else {
-        match Store::from_url(&evidence_url) {
-            Ok(s) => s,
-            Err(e) => return report(&run_id, Err(BackupError::Operational(e.to_string()))),
-        }
     };
 
     let outcome = execute_with_signer(

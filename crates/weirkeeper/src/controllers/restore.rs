@@ -791,7 +791,8 @@ fn ca_text(resolved: &ResolvedDestination, pem: &[u8]) -> Result<String, Restore
         RestoreError::Refused(
             TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
             format!(
-                "the CA bundle of BackupDestination {}/{} is not UTF-8, so it cannot be written                  into the immutable plan ConfigMap the runner mounts",
+                "the CA bundle of BackupDestination {}/{} is not UTF-8, so it cannot be written \
+                 into the immutable plan ConfigMap the runner mounts",
                 resolved.namespace, resolved.name
             ),
         )
@@ -3871,38 +3872,38 @@ async fn reconcile_restore_inner(
         // reason — an operator who is still creating the destination is in the
         // position of an approver who has not signed yet — and it is not capped:
         // a `Restore` waits for a human either way.
-        let destinations = match admit_restore_destinations(restore, client, &namespace, now)
-            .await?
-        {
-            RestoreDestinationAdmission::NotRequested => None,
-            RestoreDestinationAdmission::Resolved(pair) => Some(pair),
-            RestoreDestinationAdmission::Holding { reason, message } => {
-                info!(
-                    restore = %name,
-                    namespace = %namespace,
-                    reason,
-                    detail = %message,
-                    "no Job exists until both of this Restore's BackupDestinations resolve and                      report Valid=True; holding for {ADMISSION_REQUEUE_SECS}s"
-                );
-                patch_status_if_changed(
-                    &restores,
-                    restore,
-                    &name,
-                    destination_hold_patch(restore, reason, &message, now),
-                )
-                .await?;
-                return Ok(RestoreOutcome {
-                    job_name,
-                    created: false,
-                    admission: None,
-                    exit_code: None,
-                    terminal_state: None,
-                    keys: RestoreEvidenceKeys::default(),
-                    ttl_patched: false,
-                    requeue: Requeue::After(ADMISSION_REQUEUE_SECS),
-                });
-            }
-        };
+        let destinations =
+            match admit_restore_destinations(restore, client, &namespace, now).await? {
+                RestoreDestinationAdmission::NotRequested => None,
+                RestoreDestinationAdmission::Resolved(pair) => Some(pair),
+                RestoreDestinationAdmission::Holding { reason, message } => {
+                    info!(
+                        restore = %name,
+                        namespace = %namespace,
+                        reason,
+                        detail = %message,
+                        "no Job exists until both of this Restore's BackupDestinations resolve and \
+                         report Valid=True; holding for {ADMISSION_REQUEUE_SECS}s"
+                    );
+                    patch_status_if_changed(
+                        &restores,
+                        restore,
+                        &name,
+                        destination_hold_patch(restore, reason, &message, now),
+                    )
+                    .await?;
+                    return Ok(RestoreOutcome {
+                        job_name,
+                        created: false,
+                        admission: None,
+                        exit_code: None,
+                        terminal_state: None,
+                        keys: RestoreEvidenceKeys::default(),
+                        ttl_patched: false,
+                        requeue: Requeue::After(ADMISSION_REQUEUE_SECS),
+                    });
+                }
+            };
 
         let trust = resolve_trust(client, &namespace).await?;
         let matched_key_id = approval

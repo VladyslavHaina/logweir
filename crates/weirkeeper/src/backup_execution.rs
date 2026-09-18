@@ -75,7 +75,7 @@ use crate::crds::backup::{Backup, BackupExecution, BackupSpec as BackupCrdSpec, 
 use crate::crds::kafka_cluster::KafkaCluster;
 use crate::crds::selection::{Coverage, IncompleteDiscovery, SelectionMode, SelectionStatus};
 use crate::crds::LocalRef;
-use crate::destination::{ResolvedDestination, ResolvedDestinationSnapshot, ARCHIVE_CA_PLAN_KEY};
+use crate::destination::{ResolvedDestinationSnapshot, ARCHIVE_CA_PLAN_KEY};
 use logweir_core::engine::StorageUrl;
 use logweir_core::ids::sha256_prefixed;
 use logweir_core::spec::{AllowedClusters, AuthSpec, BackupSettings, BackupSourceSpec, BackupSpec};
@@ -829,8 +829,34 @@ pub struct ResolvedSelection {
 ///
 /// `None` for a `ConfigMap` with no snapshot, an unparseable one, or a `v1`
 /// snapshot — `v1` predates dynamic selection, so its run is a named allowlist
-/// and the fresh resolution of it is the same list.
-#[must_use]
+/// The resolved `BackupDestination` a frozen plan carries, and the CA bytes
+/// frozen beside it — the readback that makes "a destination edited after the
+/// freeze changes nothing for the running run" true.
+///
+/// # The defect this closes
+///
+/// Every edit to a `BackupDestination` bumps `metadata.generation`, and the
+/// frozen block records the generation it resolved. Without this readback, a
+/// pass that re-creates a garbage-collected Job re-resolves the LIVE object and
+/// `verify_frozen_config_map` then refuses the run as a
+/// `PlanConfigMapConflict` — on an archive that may be half written — because
+/// an operator rotated a Secret name while it ran. `stored_selection` has had
+/// this readback since D1 W5, for the same reason and with the same shape.
+///
+/// `None` for a legacy plan, for a plan this controller cannot parse, and for a
+/// `Backup` whose plan `ConfigMap` is gone — in which case the caller
+/// re-resolves and re-freezes, which is the only thing left to do.
+pub fn stored_destination(
+    existing: &ConfigMap,
+) -> Option<(ResolvedDestinationSnapshot, Option<String>)> {
+    let data = existing.data.as_ref()?;
+    let stored = data.get(INPUTS_KEY)?;
+    let inputs: BackupExecutionInputs = serde_json::from_str(stored).ok()?;
+    let destination = inputs.destination?;
+    Some((destination, data.get(ARCHIVE_CA_PLAN_KEY).cloned()))
+}
+
+/// The topic selection a frozen plan carries.
 pub fn stored_selection(existing: &ConfigMap) -> Option<ResolvedSelection> {
     let stored = existing.data.as_ref()?.get(INPUTS_KEY)?;
     let inputs: BackupExecutionInputs = serde_json::from_str(stored).ok()?;
@@ -997,7 +1023,7 @@ pub fn resolve_inputs(
     cluster: &KafkaCluster,
     addressing_env: &[(String, String)],
     selection: &ResolvedSelection,
-    destination: Option<&ResolvedDestination>,
+    destination: Option<&ResolvedDestinationSnapshot>,
 ) -> Result<BackupExecutionInputs, ExecutionRefusal> {
     let name = backup.name_any();
     let cluster_name = cluster.name_any();
@@ -1046,7 +1072,11 @@ pub fn resolve_inputs(
     //
     // A legacy run resolves the URL exactly as it always has.
     let storage = match destination {
-        Some(resolved) => resolved.plan_storage(),
+        // THE SNAPSHOT AND NOT A LIVE RESOLUTION, so that a pass which RE-CREATES
+        // a garbage-collected Job renders the same storage block the run was
+        // admitted with. `controllers::backup` reads the snapshot back out of
+        // the immutable plan on any pass where `status.execution` exists.
+        Some(frozen) => frozen.archive_storage.clone(),
         None => crate::retention::storage_url_for(&backup.spec.archive.url).map_err(|e| {
             ExecutionRefusal::new(
                 TERMINAL_STATE_ARCHIVE_URL_UNREADABLE,
@@ -1125,7 +1155,7 @@ pub fn resolve_inputs(
         schedule_ref: schedule_ref_inputs(backup),
         run_policy_sha256: Some(crate::policy::run_policy_sha256(&backup.spec)),
         selection: Some(selection.selection.clone()),
-        destination: destination.map(ResolvedDestination::snapshot),
+        destination: destination.cloned(),
         source: SourceInputs {
             cluster: ObjectIdentity {
                 namespace: cluster
@@ -1297,18 +1327,22 @@ impl FrozenInputs {
                 let computed = sha256_prefixed(bytes.as_bytes());
                 if computed != digest {
                     return Err(ExecutionRefusal::conflict(format!(
-                        "the frozen destination names CA digest {digest} and the bundle beside it                          digests to {computed}; the bytes a run trusts are the bytes its snapshot                          commits to"
+                        "the frozen destination names CA digest {digest} and the bundle beside it \
+                         digests to {computed}; the bytes a run trusts are the bytes its snapshot \
+                         commits to"
                     )));
                 }
             }
             (Some(digest), None) => {
                 return Err(ExecutionRefusal::conflict(format!(
-                    "the frozen destination names CA digest {digest} and no {ARCHIVE_CA_PLAN_KEY}                      travels with it; a Job would mount no CA while the snapshot says it has one"
+                    "the frozen destination names CA digest {digest} and no {ARCHIVE_CA_PLAN_KEY} \
+                     travels with it; a Job would mount no CA while the snapshot says it has one"
                 )));
             }
             (None, Some(_)) => {
                 return Err(ExecutionRefusal::conflict(format!(
-                    "a {ARCHIVE_CA_PLAN_KEY} was handed to the freeze and the snapshot names no                      destination CA; nothing in the frozen document would commit to those bytes"
+                    "a {ARCHIVE_CA_PLAN_KEY} was handed to the freeze and the snapshot names no \
+                     destination CA; nothing in the frozen document would commit to those bytes"
                 )));
             }
         }

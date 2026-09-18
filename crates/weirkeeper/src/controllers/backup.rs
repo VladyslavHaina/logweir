@@ -105,7 +105,9 @@ use crate::crds::backup::Backup;
 use crate::crds::backup_schedule::BackupSchedule;
 use crate::crds::kafka_cluster::KafkaCluster;
 use crate::crds::Condition;
-use crate::destination::{self, DestinationRole, ResolveError, ResolvedDestination};
+use crate::destination::{
+    self, DestinationRefusal, DestinationRole, ResolveError, ResolvedDestination,
+};
 use crate::diagnostics;
 use crate::job::{self, EnvFromSecret, RunnerJobSpec, RunnerOwner, SecretMount, CONTAINER_NAME};
 use crate::policy::SelectionShape;
@@ -113,6 +115,7 @@ use crate::verification::{
     backup_badge, conditions_in, second_patch, stored_verification, verified_condition,
     EvidenceRef, VerificationVerdict, VerifyOracle,
 };
+use logweir_core::check_contract::CheckCode;
 use logweir_core::ids::sha256_prefixed;
 use logweir_store::Store;
 
@@ -445,18 +448,8 @@ pub fn desired_execution_inputs_for_destination(
     backup: &Backup,
     cluster: &KafkaCluster,
     selection: &ResolvedSelection,
-    destination: Option<&ResolvedDestination>,
+    destination: Option<&BackupDestinations>,
 ) -> Result<FrozenInputs, BackupError> {
-    let identity = execution_identity(backup).map_err(refused)?;
-    let inputs = resolve_inputs(
-        backup,
-        identity,
-        cluster,
-        &archive_addressing_env(),
-        selection,
-        destination,
-    )
-    .map_err(refused)?;
     // THE BYTES TRAVEL WITH THE SNAPSHOT, NOT INSIDE IT (D2 §3.7). `ca_pem` is
     // read here, from the resolution the reconciler already made, so the plan
     // `ConfigMap` and the digest in the frozen document are written in one act
@@ -469,18 +462,67 @@ pub fn desired_execution_inputs_for_destination(
     // digest rather than about the bundle. `check_ca_bundle` has already
     // refused anything that is not a PEM bundle; this is the second rail, and
     // it names the real problem.
-    let ca_pem = match destination.and_then(|d| d.ca_pem.as_ref()) {
+    let ca_pem = match destination.and_then(|d| d.archive.ca_pem.as_ref()) {
         None => None,
         Some(bytes) => Some(String::from_utf8(bytes.clone()).map_err(|_| {
             BackupError::Refused(
                 TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
                 format!(
-                    "the CA bundle of the BackupDestination this Backup names is not UTF-8, so it                      cannot be written into the immutable plan ConfigMap a runner mounts ({}                      bytes)",
+                    "the CA bundle of the BackupDestination this Backup names is not UTF-8, so \
+                     it cannot be written into the immutable plan ConfigMap a runner mounts \
+                     ({} bytes)",
                     bytes.len()
                 ),
             )
         })?),
     };
+    desired_execution_inputs_frozen(
+        backup,
+        cluster,
+        selection,
+        destination.map(BackupDestinations::snapshot).as_ref(),
+        ca_pem,
+    )
+}
+
+/// [`desired_execution_inputs_for_destination`] for a run whose destination has
+/// ALREADY been frozen — the readback path.
+///
+/// # Why a frozen run never re-resolves its destination
+///
+/// Every edit to a `BackupDestination` bumps `metadata.generation`, and the
+/// frozen block records the generation it resolved, so `verify_frozen_config_map`
+/// compares it. A pass that re-creates a garbage-collected Job by RESOLVING the
+/// live object would therefore terminate a running backup because somebody
+/// rotated a Secret name while it ran — fail-closed, and still exactly the
+/// thing D2 §3.7 says cannot happen ("later destination edits cannot affect a
+/// created run"). `backup_execution::stored_destination` reads the snapshot
+/// back out of the immutable plan, and this is what renders from it.
+///
+/// `ca_pem` is the `archive-ca.pem` key of that same plan, so the digest bind
+/// in `FrozenInputs::freeze_with_ca` is evaluated against the bytes a kubelet
+/// would actually mount.
+///
+/// # Errors
+///
+/// Whatever [`desired_execution_inputs_for_destination`] refuses.
+pub fn desired_execution_inputs_frozen(
+    backup: &Backup,
+    cluster: &KafkaCluster,
+    selection: &ResolvedSelection,
+    destination: Option<&crate::destination::ResolvedDestinationSnapshot>,
+    ca_pem: Option<String>,
+) -> Result<FrozenInputs, BackupError> {
+    let identity = execution_identity(backup).map_err(refused)?;
+    let inputs = resolve_inputs(
+        backup,
+        identity,
+        cluster,
+        &archive_addressing_env(),
+        selection,
+        destination,
+    )
+    .map_err(refused)?;
     FrozenInputs::freeze_with_ca(inputs, ca_pem).map_err(refused)
 }
 
@@ -768,15 +810,50 @@ pub fn destination_hold_expired(backup: &Backup, now: DateTime<Utc>) -> bool {
     (now - created.0).num_seconds() >= destination_hold_budget(backup)
 }
 
+/// The ONE `BackupDestination` a `Backup` names, resolved for BOTH roles a
+/// backup run needs.
+///
+/// # A BACKUP WRITES TWO THINGS, AND THEY MAY BE TWO PRINCIPALS
+///
+/// The archive, through `archiveWrite`; and its signed receipt, through
+/// `evidenceWrite` over Global Constraint 6's `logweir/` root of the same
+/// bucket. `evidenceWrite` falls back to `archiveWrite` (D2 §3.4), so on the
+/// common destination these are the same grant and the Job carries one
+/// credential plus `LOGWEIR_EVIDENCE_CREDENTIALS=archive`. An operator who
+/// separates the principals gets two.
+///
+/// **THE RUNNER REFUSES A RUN THAT DOES NOT SAY WHICH.** Before this struct
+/// existed the Backup path resolved only `archiveWrite` and rendered no
+/// evidence variable at all, and every destination-backed run exited 3 at the
+/// store builder with `LOGWEIR_EVIDENCE_CREDENTIALS is \`\``, after the archive
+/// handles were built and before a byte was archived — the erratum **E20**
+/// failure class, one layer further in.
+#[derive(Debug)]
+pub struct BackupDestinations {
+    /// Resolved for [`DestinationRole::ArchiveWrite`], with its CA bundle read.
+    pub archive: ResolvedDestination,
+    /// The same object resolved for [`DestinationRole::EvidenceWrite`]. Only
+    /// its `grant` differs from [`Self::archive`], and often not even that.
+    pub evidence: ResolvedDestination,
+}
+
+impl BackupDestinations {
+    /// The block this run freezes — the archive resolution, carrying the
+    /// evidence grant when it differs.
+    #[must_use]
+    pub fn snapshot(&self) -> crate::destination::ResolvedDestinationSnapshot {
+        self.archive.snapshot_with_evidence(&self.evidence.grant)
+    }
+}
+
 /// What destination admission decided for one `Backup`.
 #[derive(Debug)]
 pub enum DestinationAdmission {
     /// The `Backup` names no `destinationRef`: a legacy inline-`archive` run,
     /// unchanged in every respect.
     NotRequested,
-    /// One `BackupDestination`, resolved for [`DestinationRole::ArchiveWrite`]
-    /// with its CA bundle read.
-    Resolved(Box<ResolvedDestination>),
+    /// One `BackupDestination`, resolved for both roles with its CA bundle read.
+    Resolved(Box<BackupDestinations>),
     /// The destination is absent or not yet `Valid`, and the hold budget has
     /// not run out. NOTHING IS CREATED while this is the answer.
     Holding {
@@ -822,62 +899,183 @@ pub async fn admit_destination(
     let Some(reference) = backup.spec.destination_ref.as_ref() else {
         return Ok(DestinationAdmission::NotRequested);
     };
-    // THE POLICY IS READ ONLY ON THIS PATH. A legacy `Backup` performs no
-    // extra `get` at all, which is what keeps every route-table double in
-    // `tests/backup_controller.rs` unchanged — and what keeps an installation
-    // that has never created a `BackupDestination` from depending on a
-    // `ConfigMap` in the release namespace to run a backup.
+    // THE POLICY IS READ ONLY ON THIS PATH, THROUGH ONE PROCESS-WIDE CACHE. A
+    // legacy `Backup` performs no extra `get` at all, which is what keeps every
+    // route-table double in `tests/backup_controller.rs` unchanged — and what
+    // keeps an installation that has never created a `BackupDestination` from
+    // depending on a `ConfigMap` in the release namespace to run a backup.
     let load = crate::check::policy::load(
         client,
         super::topic_discovery::configured_policy_ref().as_ref(),
-        &crate::check::policy::PolicyCache::new(),
+        installation_policy_cache(),
         now,
     )
     .await
     .map_err(BackupError::Api)?;
-    let resolved = destination::resolve_ref(
-        client,
-        namespace,
-        &reference.name,
-        DestinationRole::ArchiveWrite,
-        load.policy(),
-    )
-    .await;
-    match resolved {
-        Ok(resolved) => {
-            // THE JOB RUNS WHERE THE REFERENCES RESOLVE, AND NOWHERE ELSE.
-            // Every reference the resolution carries is a bare object name, and
-            // the kubelet resolves a bare name in the POD's namespace; a Job
-            // placed elsewhere would project whichever Secret happens to carry
-            // that name THERE. `resolve_ref` is namespace-local, so this can
-            // only fail on a hand-built resolution — and it is checked anyway,
-            // because the consequence is a silent credential substitution.
-            if let Err(refusal) = resolved.check_job_namespace(namespace) {
-                return Err(BackupError::Refused(refusal.reason(), refusal.message));
-            }
-            // D2 §3.5's U1 gate. TERMINAL: `spec.transport.caBundle` is
-            // immutable on the destination, so a requeue would never succeed —
-            // the operator either drops the bundle, uses a public root, or an
-            // administrator opts the installation in.
-            if resolved.ca_bundle.is_some() && !engine_custom_ca_allowed(load.policy()) {
-                return Err(BackupError::Refused(
-                    logweir_core::check_contract::CheckCode::CaBundleUnsupportedByEngine.as_str(),
-                    engine_custom_ca_refusal(&resolved.namespace, &resolved.name),
-                ));
-            }
-            Ok(DestinationAdmission::Resolved(Box::new(resolved)))
-        }
-        Err(ResolveError::Api(e)) => Err(BackupError::Api(e)),
-        Err(ResolveError::Refused(refusal)) => {
+    // ONE `get` OF THE OBJECT, TWO RESOLUTIONS OF IT, ONE `get` OF ITS CA.
+    // `resolve_ref` would do the archive half in one call, and then the
+    // evidence half would need a second read of the same object on every pass
+    // — so the read is opened out here and `resolve` (pure) is called twice
+    // over the bytes it returned. Both resolutions therefore describe the SAME
+    // revision of the same object, which a second `get` could not promise.
+    let object = match resolve_destination_object(client, namespace, &reference.name).await? {
+        Ok(object) => object,
+        Err(refusal) => {
             if refusal.is_hold() && !destination_hold_expired(backup, now) {
                 return Ok(DestinationAdmission::Holding {
                     reason: refusal.reason(),
                     message: refusal.message,
                 });
             }
-            Err(BackupError::Refused(refusal.reason(), refusal.message))
+            return Err(BackupError::Refused(refusal.reason(), refusal.message));
         }
+    };
+    let archive = match destination::resolve(&object, DestinationRole::ArchiveWrite, load.policy())
+    {
+        Ok(archive) => archive,
+        Err(refusal) => {
+            if refusal.is_hold() && !destination_hold_expired(backup, now) {
+                return Ok(DestinationAdmission::Holding {
+                    reason: refusal.reason(),
+                    message: refusal.message,
+                });
+            }
+            return Err(BackupError::Refused(refusal.reason(), refusal.message));
+        }
+    };
+    let observation = destination::read_ca_bundle(client, &archive)
+        .await
+        .map_err(BackupError::Api)?;
+    let archive = archive
+        .with_ca(&observation)
+        .map_err(|refusal| BackupError::Refused(refusal.reason(), refusal.message))?;
+    // THE JOB RUNS WHERE THE REFERENCES RESOLVE, AND NOWHERE ELSE. Every
+    // reference the resolution carries is a bare object name, and the kubelet
+    // resolves a bare name in the POD's namespace; a Job placed elsewhere would
+    // project whichever Secret happens to carry that name THERE. `resolve_ref`
+    // is namespace-local, so this can only fail on a hand-built resolution —
+    // and it is checked anyway, because the consequence is a silent credential
+    // substitution.
+    if let Err(refusal) = archive.check_job_namespace(namespace) {
+        return Err(BackupError::Refused(refusal.reason(), refusal.message));
     }
+    // D2 §3.5's U1 gate. TERMINAL: `spec.transport.caBundle` is immutable on
+    // the destination, so a requeue would never succeed — the operator either
+    // drops the bundle, uses a public root, or an administrator opts the
+    // installation in.
+    if archive.ca_bundle.is_some() && !engine_custom_ca_allowed(load.policy()) {
+        return Err(BackupError::Refused(
+            CheckCode::CaBundleUnsupportedByEngine.as_str(),
+            format!(
+                "{}{}",
+                engine_custom_ca_refusal(&archive.namespace, &archive.name),
+                policy_reachability_note(&load)
+            ),
+        ));
+    }
+    // THE SECOND ROLE, FROM THE SAME OBJECT AND THE SAME READ. A backup writes
+    // its receipt through `evidenceWrite`, and the runner refuses a run that
+    // does not say which credential that store uses. `resolve` is pure over the
+    // object `resolve_ref` already fetched, so this costs no API call — but it
+    // CAN refuse (an `evidenceWrite` naming a Secret with a blank name, say),
+    // and that refusal is terminal for the same reason the archive one is.
+    let evidence = destination::resolve(&object, DestinationRole::EvidenceWrite, load.policy())
+        .map_err(|refusal| BackupError::Refused(refusal.reason(), refusal.message))?
+        .with_ca(&observation)
+        .map_err(|refusal| BackupError::Refused(refusal.reason(), refusal.message))?;
+    // AND THE TWO MUST BE SATISFIABLE BY ONE POD. `evidence_env` owns that
+    // question — one pod has one ServiceAccount — and refusing here means the
+    // conflict is a terminal `ExecutionContextConflict` before anything is
+    // frozen, rather than a Job the API server accepts and the runner cannot
+    // authenticate.
+    if let Err(refusal) = evidence.evidence_env(&archive) {
+        return Err(BackupError::Refused(refusal.reason(), refusal.message));
+    }
+    Ok(DestinationAdmission::Resolved(Box::new(
+        BackupDestinations { archive, evidence },
+    )))
+}
+
+/// The `BackupDestination` a `destinationRef` names, or the refusal that says
+/// why there is none.
+///
+/// `Ok(Err(refusal))` rather than `Err` for a `DestinationNotFound`: whether an
+/// absent object is a hold or a terminal refusal is the CALLER's decision (it
+/// depends on the hold budget), and this function does not know the budget.
+///
+/// # Errors
+///
+/// [`BackupError::Api`] for a read that failed for any reason other than 404.
+async fn resolve_destination_object(
+    client: &kube::Client,
+    namespace: &str,
+    name: &str,
+) -> Result<
+    Result<crate::crds::backup_destination::BackupDestination, DestinationRefusal>,
+    BackupError,
+> {
+    let api: Api<crate::crds::backup_destination::BackupDestination> =
+        Api::namespaced(client.clone(), namespace);
+    match api.get_opt(name).await.map_err(BackupError::Api)? {
+        Some(object) => Ok(Ok(object)),
+        None => Ok(Err(DestinationRefusal {
+            code: CheckCode::DestinationNotFound,
+            field: "spec.destinationRef.name".to_string(),
+            message: format!(
+                "namespace {namespace} has no BackupDestination named {name}; a destinationRef \
+                 is namespace-local and is never resolved in another namespace"
+            ),
+        })),
+    }
+}
+
+/// The ONE installation-policy cache this controller holds.
+///
+/// # Why a process-wide cache and not a fresh one per call
+///
+/// `PolicyCache::get` answers from an entry younger than its TTL; a cache
+/// constructed at the call site always misses, so the policy `ConfigMap` was
+/// re-read on every reconcile pass of every destination-backed object — twice
+/// per `Backup` pass, once for admission and once for the evidence source.
+/// `controllers::preflight` and `controllers::topic_discovery` hold theirs in
+/// their context; this controller's `Context` is shared with every route-table
+/// double in `tests/backup_controller.rs`, so a `OnceLock` beside the store
+/// cache is the same fix without reshaping a struct three test files build.
+fn installation_policy_cache() -> &'static crate::check::policy::PolicyCache {
+    static CACHE: std::sync::OnceLock<crate::check::policy::PolicyCache> =
+        std::sync::OnceLock::new();
+    CACHE.get_or_init(crate::check::policy::PolicyCache::new)
+}
+
+/// A sentence naming the chart wiring, when the installation configured no
+/// policy `ConfigMap` at all — D2 W11's dependency, said on the object.
+///
+/// # FAIL CLOSED, AND SAY WHICH CLOSED DOOR IT IS
+///
+/// With no `LOGWEIR_POLICY_CONFIGMAP` (and no `LOGWEIR_INSTALLATION_NAMESPACE`)
+/// on the controller Deployment, `configured_ref` is `None` and every load is
+/// `Policy::defaults()`: an EMPTY `evidence.controllerIdentityLocations` and
+/// `engine.allowUnverifiedCustomCa: false`. Both features this task ships
+/// therefore refuse — correctly, closed — but the refusal would read as "your
+/// administrator did not list this location" when the truth is "this
+/// installation renders no policy at all, so nobody can list anything". An
+/// operator who cannot tell those apart edits the wrong object.
+///
+/// Empty when a policy IS configured: then the refusal's own message is the
+/// whole story.
+fn policy_reachability_note(load: &crate::check::policy::PolicyLoad) -> String {
+    if crate::controllers::topic_discovery::configured_policy_ref().is_some() {
+        return String::new();
+    }
+    let _ = load;
+    format!(
+        ". NOTE: this installation configures no policy ConfigMap — {} is unset on the \
+         controller Deployment — so every installation-policy key reads its closed default and \
+         no administrator can change one. The chart must render the `{}` ConfigMap and that \
+         environment variable (D2 W11)",
+        crate::check::policy::POLICY_CONFIGMAP_ENV,
+        crate::check::policy::DEFAULT_POLICY_NAME
+    )
 }
 
 /// The `/status` patch a holding `Backup` carries — `phase: Pending` and one
@@ -940,6 +1138,13 @@ pub const EVIDENCE_READ_NOT_CONFIGURED_SUFFIX: &str =
     " has no spec.access.evidenceRead; run the printed logweir drill verify command instead";
 
 /// Where this run's evidence is read from, for ONE reconcile pass.
+///
+/// `Debug` is HAND-WRITTEN, because [`Self::Destination`] holds a `Store` and
+/// `Store` is deliberately not `Debug` — a derived one would put a handle's
+/// configuration, and one day its credential provider, into whatever log line
+/// formatted it. What a reader needs is WHICH ARM, which is what the routing
+/// property is about; `evidence_is_routed_by_grant_and_never_falls_back_to_the_global_handle`
+/// asserts on the arm and never on the handle.
 pub enum EvidenceSource {
     /// A legacy inline-`archive` run: the controller's ONE global handle, as
     /// it has always been. D2 §3.10 confines that handle to exactly this case.
@@ -958,6 +1163,19 @@ pub enum EvidenceSource {
         /// What is missing, and what to do about it. Never a credential.
         detail: String,
     },
+}
+
+impl std::fmt::Debug for EvidenceSource {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::GlobalHandle => f.write_str("GlobalHandle"),
+            Self::Destination(_) => f.write_str("Destination(<read-only store>)"),
+            Self::NotAttempted { detail } => f
+                .debug_struct("NotAttempted")
+                .field("detail", detail)
+                .finish(),
+        }
+    }
 }
 
 /// Which handle this `Backup`'s evidence is read through — D2 §3.9.
@@ -1027,7 +1245,7 @@ pub async fn evidence_source_for(
     let load = crate::check::policy::load(
         client,
         super::topic_discovery::configured_policy_ref().as_ref(),
-        &crate::check::policy::PolicyCache::new(),
+        installation_policy_cache(),
         now,
     )
     .await?;
@@ -1043,9 +1261,14 @@ pub async fn evidence_source_for(
         Ok(resolved) => resolved,
         Err(ResolveError::Api(e)) => return Err(e),
         Err(ResolveError::Refused(refusal)) => {
+            // FAIL CLOSED, AND SAY WHICH CLOSED DOOR IT IS. A
+            // `ControllerIdentityNotAllowlisted` on an installation that
+            // renders no policy `ConfigMap` at all reads as "your
+            // administrator did not list this location" when the truth is that
+            // nobody CAN list one — see `policy_reachability_note`.
             return Ok(EvidenceSource::NotAttempted {
-                detail: refusal.to_string(),
-            })
+                detail: format!("{refusal}{}", policy_reachability_note(&load)),
+            });
         }
     };
     match &resolved.grant {
@@ -1082,7 +1305,7 @@ pub async fn evidence_source_for(
             match cache.get_or_build(&resolved, load.policy()).await {
                 Ok(store) => Ok(EvidenceSource::Destination(store)),
                 Err(refusal) => Ok(EvidenceSource::NotAttempted {
-                    detail: refusal.to_string(),
+                    detail: format!("{refusal}{}", policy_reachability_note(&load)),
                 }),
             }
         }
@@ -1633,8 +1856,20 @@ pub fn runner_job_spec_from_inputs(
     // inline-`archive` run, `job_env` is never called, and the Job this
     // function returns is byte-identical to the one it returned before
     // destinations existed — which is what the untouched goldens assert.
+    //
+    // TWO HALVES, BECAUSE A BACKUP WRITES TWO THINGS. `job_env` is the ARCHIVE
+    // store the engine writes segments through; `evidence_job_env` is the
+    // receipt store, over Global Constraint 6's `logweir/` root of the same
+    // bucket. The runner builds BOTH and refuses a run that does not name the
+    // second one's credential — before this line existed, every
+    // destination-backed run exited 3 there with the archive already opened and
+    // nothing archived.
     let destination_env = inputs.destination.as_ref().map(|d| d.job_env());
-    if let Some(env) = destination_env.as_ref() {
+    let evidence_env = inputs.destination.as_ref().map(|d| d.evidence_job_env());
+    for env in [destination_env.as_ref(), evidence_env.as_ref()]
+        .into_iter()
+        .flatten()
+    {
         env_from_secret.extend(env.from_secret.iter().cloned());
     }
     // ONE POD, ONE ServiceAccount. A workload-identity grant REPLACES the
@@ -1646,6 +1881,11 @@ pub fn runner_job_spec_from_inputs(
     let service_account_name = destination_env
         .as_ref()
         .and_then(|env| env.service_account_name.clone())
+        .or_else(|| {
+            evidence_env
+                .as_ref()
+                .and_then(|env| env.service_account_name.clone())
+        })
         .unwrap_or_else(|| connection.execution.service_account_name.clone());
 
     Ok(RunnerJobSpec {
@@ -1684,8 +1924,11 @@ pub fn runner_job_spec_from_inputs(
                     .iter()
                     .map(|v| (v.name.clone(), v.value.clone())),
             );
-            if let Some(destination) = destination_env.as_ref() {
-                env.extend(destination.literals.iter().cloned());
+            for block in [destination_env.as_ref(), evidence_env.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                env.extend(block.literals.iter().cloned());
             }
             env.extend(projection.env_literal);
             env
@@ -2601,11 +2844,11 @@ async fn require_schedule_for_scheduled_run(
 /// that is absent, unreadable or `v1` is `Ok(None)`, not an error:
 /// [`freeze_execution_inputs`] owns the decision about a missing or
 /// unacceptable plan, and owns it with the recorded digest in hand.
-async fn frozen_selection(
+async fn frozen_plan(
     backup: &Backup,
     client: &kube::Client,
     namespace: &str,
-) -> Result<Option<ResolvedSelection>, BackupError> {
+) -> Result<Option<ConfigMap>, BackupError> {
     if backup
         .status
         .as_ref()
@@ -2615,14 +2858,9 @@ async fn frozen_selection(
         return Ok(None);
     }
     let maps: Api<ConfigMap> = Api::namespaced(client.clone(), namespace);
-    let Some(existing) = maps
-        .get_opt(&plan_config_map_name(&backup.name_any()))
+    maps.get_opt(&plan_config_map_name(&backup.name_any()))
         .await
-        .map_err(BackupError::Api)?
-    else {
-        return Ok(None);
-    };
-    Ok(backup_execution::stored_selection(&existing))
+        .map_err(BackupError::Api)
 }
 
 /// Freeze this run's inputs in the plan ConfigMap, or admit the frozen inputs
@@ -3167,8 +3405,74 @@ async fn reconcile_backup_inner(
         // `discovery_job` is `Some` ONLY on the pass that resolved the names
         // from a runner. It is what D1 §7.2 R9's last line is patched on, after
         // the freeze's status write — never on a pass that read the plan back.
+        // THE PLAN THIS RUN WAS ADMITTED WITH, READ ONCE. Both readbacks below
+        // come out of it: the topic selection (D1 W5) and the resolved
+        // destination (D2 §3.7). One `get` rather than two, and — more to the
+        // point — one revision of one object, so the two answers cannot come
+        // from different passes.
+        let stored_plan = frozen_plan(backup, client, &namespace).await?;
+        let stored_destination = stored_plan
+            .as_ref()
+            .and_then(backup_execution::stored_destination);
+
+        // === THE DESTINATION, BEFORE ANYTHING IS CREATED (D2 §3.6) ===
+        //
+        // **IN FRONT OF THE SELECTION BLOCK, AND THAT POSITION IS THE CLAIM.**
+        // `backup_selection::resolve` CREATES a discovery Job against the
+        // production cluster. With the admission below it, a `Backup` naming a
+        // destination that does not exist yet ran that Job first and only then
+        // held — so "nothing is created while this holds" was false on the
+        // dynamic path, and the hold budget (measured from
+        // `creationTimestamp`) had already been spent on discovery. Here,
+        // nothing at all is created until the destination resolves.
+        //
+        // **AND IT IS SKIPPED ENTIRELY ONCE THE RUN IS FROZEN.** A pass that
+        // re-creates a garbage-collected Job renders from `stored_destination`,
+        // never from a fresh resolution: every edit to a `BackupDestination`
+        // bumps its generation, the frozen block records the generation, and
+        // `verify_frozen_config_map` compares the block whole — so re-resolving
+        // would terminate a running backup because somebody rotated a Secret
+        // name while it ran. D2 §3.7 says a later edit "cannot affect a created
+        // run"; this is what makes that true rather than fail-closed.
+        let destination = match &stored_destination {
+            Some(_) => None,
+            None => match admit_destination(backup, client, &namespace, now).await? {
+                DestinationAdmission::NotRequested => None,
+                DestinationAdmission::Resolved(resolved) => Some(resolved),
+                DestinationAdmission::Holding { reason, message } => {
+                    info!(
+                        backup = %name,
+                        namespace = %namespace,
+                        reason,
+                        detail = %message,
+                        "holding: this Backup's BackupDestination is not usable yet, and no \
+                         discovery Job, no plan, no ConfigMap and no runner Job are created \
+                         while it is not"
+                    );
+                    patch_status_if_changed(
+                        &backups,
+                        backup,
+                        &name,
+                        destination_hold_patch(&view, reason, &message, now),
+                    )
+                    .await?;
+                    return Ok(BackupOutcome {
+                        job_name,
+                        created: false,
+                        exit_code: None,
+                        terminal_state: None,
+                        keys: EvidenceKeys::default(),
+                        ttl_patched: false,
+                    });
+                }
+            },
+        };
+
         let mut discovery_job: Option<String> = None;
-        let selection = match frozen_selection(backup, client, &namespace).await? {
+        let selection = match stored_plan
+            .as_ref()
+            .and_then(backup_execution::stored_selection)
+        {
             Some(frozen) => frozen,
             None => match shape {
                 SelectionShape::SelectedTopics => ResolvedSelection::named(&backup.spec),
@@ -3216,53 +3520,28 @@ async fn reconcile_backup_inner(
             },
         };
 
-        // === THE DESTINATION, BEFORE THE FREEZE (D2 §3.6) ===
-        //
-        // NOTHING IS CREATED WHILE THIS HOLDS. A `destinationRef` naming an
-        // object that does not exist yet, or one whose own reconciler has not
-        // reached a `Valid=True` for its current generation, is a race an
-        // operator resolves with a second `apply` — so it is a requeue with the
-        // reason on the object, not a terminal refusal of an immutable spec.
-        // Everything else the resolver refuses is terminal, and so is a hold
-        // that has used its whole budget.
-        let destination = match admit_destination(backup, client, &namespace, now).await? {
-            DestinationAdmission::NotRequested => None,
-            DestinationAdmission::Resolved(resolved) => Some(resolved),
-            DestinationAdmission::Holding { reason, message } => {
-                info!(
-                    backup = %name,
-                    namespace = %namespace,
-                    reason,
-                    detail = %message,
-                    "holding: this Backup's BackupDestination is not usable yet, and no plan, no                      ConfigMap and no Job are created while it is not"
-                );
-                patch_status_if_changed(
-                    &backups,
-                    backup,
-                    &name,
-                    destination_hold_patch(&view, reason, &message, now),
-                )
-                .await?;
-                return Ok(BackupOutcome {
-                    job_name,
-                    created: false,
-                    exit_code: None,
-                    terminal_state: None,
-                    keys: EvidenceKeys::default(),
-                    ttl_patched: false,
-                });
-            }
-        };
-
         // Resolve once: the plan and credential must describe the same
         // KafkaCluster used by the connection probe, including its Secret.
         let cluster = plan_source_cluster(backup, client, &namespace).await?;
-        let desired = desired_execution_inputs_for_destination(
-            backup,
-            &cluster,
-            &selection,
-            destination.as_deref(),
-        )?;
+        let desired = match stored_destination {
+            // THE READBACK PATH. The bytes beside the snapshot are read back
+            // too, so the digest bind in `freeze_with_ca` is evaluated against
+            // what a kubelet would mount rather than against what the
+            // controller wishes were there.
+            Some((snapshot, ca_pem)) => desired_execution_inputs_frozen(
+                backup,
+                &cluster,
+                &selection,
+                Some(&snapshot),
+                ca_pem,
+            )?,
+            None => desired_execution_inputs_for_destination(
+                backup,
+                &cluster,
+                &selection,
+                destination.as_deref(),
+            )?,
+        };
 
         // THE PLAN CONFIGMAP, IN THIS SAME PASS AND BEFORE THE JOB `POST`
         // (errata E5a) — and now the freeze boundary. The Job mounts

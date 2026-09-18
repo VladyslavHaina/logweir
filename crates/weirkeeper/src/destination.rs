@@ -1215,93 +1215,55 @@ impl ResolvedDestination {
         archive: &ResolvedDestination,
     ) -> Result<DestinationEnv, DestinationRefusal> {
         archive.check_job_namespace(&self.namespace)?;
-        let mut env = DestinationEnv::default();
-        if self.ca_bundle.is_some() {
-            env.literals.push((
-                EVIDENCE_CA_FILE_ENV.to_string(),
-                format!("{PLAN_MOUNT_PATH}/{EVIDENCE_CA_PLAN_KEY}"),
-            ));
-        }
-        match (&self.grant, &archive.grant) {
-            (a, b) if a == b => {
-                env.literals.push((
-                    EVIDENCE_CREDENTIALS_ENV.to_string(),
-                    CREDENTIALS_ARCHIVE.to_string(),
-                ));
-            }
-            (
-                ResolvedGrant::SecretKeys {
-                    secret,
-                    access_key_id_key,
-                    secret_access_key_key,
-                    session_token_key,
-                },
-                _,
-            ) => {
-                env.literals.push((
-                    EVIDENCE_CREDENTIALS_ENV.to_string(),
-                    CREDENTIALS_STATIC.to_string(),
-                ));
-                env.from_secret.push(EnvFromSecret {
-                    name: EVIDENCE_ACCESS_KEY_ID_ENV.to_string(),
-                    secret_name: secret.clone(),
-                    key: access_key_id_key.clone(),
-                });
-                env.from_secret.push(EnvFromSecret {
-                    name: EVIDENCE_SECRET_ACCESS_KEY_ENV.to_string(),
-                    secret_name: secret.clone(),
-                    key: secret_access_key_key.clone(),
-                });
-                if let Some(token) = session_token_key {
-                    env.from_secret.push(EnvFromSecret {
-                        name: EVIDENCE_SESSION_TOKEN_ENV.to_string(),
-                        secret_name: secret.clone(),
-                        key: token.clone(),
-                    });
-                }
-            }
-            (
-                ResolvedGrant::WorkloadIdentity {
-                    service_account_name,
-                },
-                other,
-            ) => {
-                if let Some(archive_sa) = other.service_account_name() {
-                    if archive_sa != service_account_name {
-                        return Err(DestinationRefusal::new(
-                            CheckCode::ExecutionContextConflict,
-                            "spec.access",
-                            format!(
-                                "the archive grant of BackupDestination {}/{} runs as \
-                                 ServiceAccount {archive_sa} and the evidence grant of \
-                                 BackupDestination {}/{} runs as {service_account_name}; one \
-                                 pod has one ServiceAccount, so these two grants cannot be \
-                                 satisfied by one Job",
-                                archive.namespace, archive.name, self.namespace, self.name
-                            ),
-                        ));
-                    }
-                }
-                env.literals.push((
-                    EVIDENCE_CREDENTIALS_ENV.to_string(),
-                    CREDENTIALS_WORKLOAD_IDENTITY.to_string(),
-                ));
-                env.service_account_name = Some(service_account_name.clone());
-            }
-            (ResolvedGrant::ControllerIdentity | ResolvedGrant::NotConfigured, _) => {
+        // THE ONE REFUSAL THAT NEEDS THE OBJECTS, AND IT STAYS HERE. A pod has
+        // exactly one ServiceAccount, so two different workload identities
+        // cannot be satisfied by one Job — and the message has to name both
+        // destinations, which a renderer working from grants alone cannot do.
+        // Everything below it is a pure function of the two grants, so it is
+        // `render_evidence_env`: see there for why there is exactly one.
+        if let (
+            ResolvedGrant::WorkloadIdentity {
+                service_account_name,
+            },
+            Some(archive_sa),
+        ) = (&self.grant, archive.grant.service_account_name())
+        {
+            if archive_sa != service_account_name {
                 return Err(DestinationRefusal::new(
-                    CheckCode::DestinationRoleNotConfigured,
-                    "spec.access.evidenceWrite",
+                    CheckCode::ExecutionContextConflict,
+                    "spec.access",
                     format!(
-                        "BackupDestination {}/{} has no evidence-write grant a Job could use \
-                         ({:?})",
-                        self.namespace, self.name, self.grant
+                        "the archive grant of BackupDestination {}/{} runs as ServiceAccount \
+                         {archive_sa} and the evidence grant of BackupDestination {}/{} runs as \
+                         {service_account_name}; one pod has one ServiceAccount, so these two \
+                         grants cannot be satisfied by one Job",
+                        archive.namespace, archive.name, self.namespace, self.name
                     ),
                 ));
             }
         }
-        env.literals.sort_by(|a, b| a.0.cmp(&b.0));
-        Ok(env)
+        if matches!(
+            self.grant,
+            ResolvedGrant::ControllerIdentity | ResolvedGrant::NotConfigured
+        ) {
+            return Err(DestinationRefusal::new(
+                CheckCode::DestinationRoleNotConfigured,
+                "spec.access.evidenceWrite",
+                format!(
+                    "BackupDestination {}/{} has no evidence-write grant a Job could use ({:?})",
+                    self.namespace, self.name, self.grant
+                ),
+            ));
+        }
+        // THE EVIDENCE DESTINATION'S OWN ROOT, ALWAYS, INCLUDING IN THE
+        // `archive` ARM. The two destinations may be different objects with
+        // different bundles even when they share a credential, and the runner
+        // ADDS this root to whatever the archive options already carry.
+        let ca_file = self
+            .ca_bundle
+            .is_some()
+            .then(|| format!("{PLAN_MOUNT_PATH}/{EVIDENCE_CA_PLAN_KEY}"));
+        Ok(render_evidence_env(&self.grant, &archive.grant, ca_file))
     }
 
     /// The value a run FREEZES — seam **S4**.
@@ -1318,7 +1280,32 @@ impl ResolvedDestination {
             addressing: self.location.addressing,
             ca_sha256: self.ca_sha256.clone(),
             grant: self.grant.clone(),
+            evidence_grant: None,
         }
+    }
+
+    /// [`ResolvedDestination::snapshot`] with the `evidenceWrite` grant this
+    /// run's evidence store is built from — D2 §3.5.
+    ///
+    /// # WHY A BACKUP NEEDS THIS AT ALL
+    ///
+    /// A backup run writes TWO things: the archive, through `archiveWrite`, and
+    /// its signed receipt, through `evidenceWrite` over Global Constraint 6's
+    /// `logweir/` root of the same bucket. The runner builds two stores and
+    /// refuses a run that does not say which credential the second one uses —
+    /// so a Job rendered from a snapshot carrying only the archive grant exits
+    /// 3 before a byte is archived. That was the defect this method closes.
+    ///
+    /// `evidence` is recorded only when it DIFFERS from
+    /// [`ResolvedDestination::grant`]; see
+    /// [`ResolvedDestinationSnapshot::evidence_grant`].
+    #[must_use]
+    pub fn snapshot_with_evidence(&self, evidence: &ResolvedGrant) -> ResolvedDestinationSnapshot {
+        let mut snapshot = self.snapshot();
+        if *evidence != self.grant {
+            snapshot.evidence_grant = Some(evidence.clone());
+        }
+        snapshot
     }
 }
 
@@ -1443,6 +1430,105 @@ fn render_job_env(
     env
 }
 
+/// The EVIDENCE-side environment one grant pair contributes to a runner Job —
+/// D2 §3.5's restore paragraph, and the Backup Job's receipt store.
+///
+/// # ONE RENDERER, THREE CALLERS, FOR `render_job_env`'s REASON
+///
+/// [`ResolvedDestination::evidence_env`] renders it at the freeze from two live
+/// resolutions; [`ResolvedDestinationSnapshot::evidence_job_env`] renders it on
+/// every later pass from the FROZEN block. A second implementation would be a
+/// second answer to "which credential writes this run's evidence", and the
+/// answer that lost would be the one an approved run was admitted with.
+///
+/// # The three cases
+///
+/// * **The evidence grant IS the archive grant** (same Secret and keys, or the
+///   same ServiceAccount): `LOGWEIR_EVIDENCE_CREDENTIALS=archive`, and no second
+///   credential is projected. This is the DEFAULT on the Backup path, because
+///   `evidenceWrite` falls back to `archiveWrite` (D2 §3.4).
+/// * **A different Secret**: `=static`, plus the three `LOGWEIR_EVIDENCE_AWS_*`
+///   variables. They are SEPARATELY NAMED so neither store's credential can
+///   shadow the other's — `AWS_*` is the archive's.
+/// * **A workload identity beside a static archive grant**:
+///   `=workloadIdentity`, and the runner builds the evidence store WITHOUT
+///   `from_env`, copying only the web-identity and container-credential
+///   variables. Otherwise object_store's chain would put the static archive
+///   keys first (**G16**).
+///
+/// `ca_file` is the plan path of a root the EVIDENCE store needs of its own.
+/// `None` where it inherits the archive's — a Backup whose evidence grant IS
+/// the archive grant, so the runner clones options that already carry it.
+///
+/// **IT CANNOT REFUSE.** The two refusals `evidence_env` makes — two
+/// ServiceAccounts in one pod, and a grant no Job can use — need the OBJECTS to
+/// name, and they are made before this is reached. A `ControllerIdentity` or
+/// `NotConfigured` grant that arrived here anyway renders nothing rather than
+/// panicking: a Job with no evidence credential is one the runner refuses at
+/// exit 3 with the variable named, which is a worse outcome than the refusal
+/// above and a better one than a controller that crashes.
+#[must_use]
+fn render_evidence_env(
+    evidence_grant: &ResolvedGrant,
+    archive_grant: &ResolvedGrant,
+    ca_file: Option<String>,
+) -> DestinationEnv {
+    let mut env = DestinationEnv::default();
+    if let Some(path) = ca_file {
+        env.literals.push((EVIDENCE_CA_FILE_ENV.to_string(), path));
+    }
+    match evidence_grant {
+        _ if evidence_grant == archive_grant => {
+            env.literals.push((
+                EVIDENCE_CREDENTIALS_ENV.to_string(),
+                CREDENTIALS_ARCHIVE.to_string(),
+            ));
+        }
+        ResolvedGrant::SecretKeys {
+            secret,
+            access_key_id_key,
+            secret_access_key_key,
+            session_token_key,
+        } => {
+            env.literals.push((
+                EVIDENCE_CREDENTIALS_ENV.to_string(),
+                CREDENTIALS_STATIC.to_string(),
+            ));
+            env.from_secret.push(EnvFromSecret {
+                name: EVIDENCE_ACCESS_KEY_ID_ENV.to_string(),
+                secret_name: secret.clone(),
+                key: access_key_id_key.clone(),
+            });
+            env.from_secret.push(EnvFromSecret {
+                name: EVIDENCE_SECRET_ACCESS_KEY_ENV.to_string(),
+                secret_name: secret.clone(),
+                key: secret_access_key_key.clone(),
+            });
+            if let Some(token) = session_token_key {
+                env.from_secret.push(EnvFromSecret {
+                    name: EVIDENCE_SESSION_TOKEN_ENV.to_string(),
+                    secret_name: secret.clone(),
+                    key: token.clone(),
+                });
+            }
+        }
+        ResolvedGrant::WorkloadIdentity {
+            service_account_name,
+        } => {
+            env.literals.push((
+                EVIDENCE_CREDENTIALS_ENV.to_string(),
+                CREDENTIALS_WORKLOAD_IDENTITY.to_string(),
+            ));
+            env.service_account_name = Some(service_account_name.clone());
+        }
+        // See the doc comment: refused upstream, and rendering nothing here is
+        // the least harmful of the three ways to react to the impossible.
+        ResolvedGrant::ControllerIdentity | ResolvedGrant::NotConfigured => {}
+    }
+    env.literals.sort_by(|a, b| a.0.cmp(&b.0));
+    env
+}
+
 /// The region one frozen archive `StorageUrl` names, or `None`.
 ///
 /// S3 IS THE ONLY BACKEND WITH ONE. A destination is `StorageProvider::S3` by
@@ -1536,6 +1622,25 @@ pub struct ResolvedDestinationSnapshot {
     pub ca_sha256: Option<String>,
     /// The grant for the role this snapshot was resolved for.
     pub grant: ResolvedGrant,
+    /// The `evidenceWrite` grant, when it DIFFERS from [`Self::grant`].
+    ///
+    /// # `None` MEANS "THE SAME GRANT", AND THAT IS NOT A SHORTCUT
+    ///
+    /// `evidenceWrite` falls back to `archiveWrite` (D2 §3.4), so on the common
+    /// destination it IS [`Self::grant`] and the runner is told
+    /// `LOGWEIR_EVIDENCE_CREDENTIALS=archive` — one credential, projected once.
+    /// Recording it a second time would put the same Secret name in the frozen
+    /// document twice and make two spellings of one fact.
+    ///
+    /// **LAST IN DECLARATION ORDER, AND OMITTED WHEN ABSENT.**
+    /// `logweir_core::det_json` emits struct fields in declaration order and
+    /// this is `skip_serializing_if`, so a snapshot without a separate evidence
+    /// grant re-encodes to exactly the bytes it encoded before this field
+    /// existed — which is what keeps
+    /// `destination_controller::the_snapshot_key_spellings_are_pinned` green
+    /// and every frozen plan re-verifiable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_grant: Option<ResolvedGrant>,
 }
 
 impl ResolvedDestinationSnapshot {
@@ -1565,6 +1670,31 @@ impl ResolvedDestinationSnapshot {
             self.ca_sha256.is_some(),
             &self.grant,
         )
+    }
+
+    /// The EVIDENCE-side environment a Job rendered from THIS FROZEN BLOCK
+    /// carries — D2 §3.5, and the half a Backup Job was missing.
+    ///
+    /// # The CA file, and why the `archive` case has none
+    ///
+    /// A Backup names ONE destination, so the archive store and the receipt
+    /// store trust the same root — the bytes frozen at
+    /// [`ARCHIVE_CA_PLAN_KEY`]. When the evidence grant IS the archive grant
+    /// the runner CLONES the archive's options, which already carry that root,
+    /// so naming a file would add it twice and naming
+    /// [`EVIDENCE_CA_PLAN_KEY`] would name a key this plan does not have.
+    /// When the grants differ the runner builds fresh options, and then the
+    /// root has to be named — at the archive's own key, because there is one
+    /// destination and one bundle.
+    ///
+    /// It is [`render_evidence_env`], the same renderer
+    /// [`ResolvedDestination::evidence_env`] uses.
+    #[must_use]
+    pub fn evidence_job_env(&self) -> DestinationEnv {
+        let evidence = self.evidence_grant.as_ref().unwrap_or(&self.grant);
+        let ca_file = (self.ca_sha256.is_some() && *evidence != self.grant)
+            .then(|| format!("{PLAN_MOUNT_PATH}/{ARCHIVE_CA_PLAN_KEY}"));
+        render_evidence_env(evidence, &self.grant, ca_file)
     }
 
     /// The ONE canonical encoding of this block — `logweir_core::det_json`, the
