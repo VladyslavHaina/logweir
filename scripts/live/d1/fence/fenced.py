@@ -169,7 +169,27 @@ def namespaced_role(ns: str, labels: dict[str, str]) -> dict[str, Any]:
                     "retentionpolicies/status",
                     "topicdiscoveries/status",
                 ],
-                "verbs": ["patch"],
+                # `update` IS WIDER THAN THE SHIPPED ClusterRole, AND IT IS HERE
+                # FOR ONE REASON. The shipped role grants `patch` on the status
+                # subresources and deliberately grants no `update` anywhere, as
+                # `reservation_patch` says at length: "A PATCH AND NOT A PUT,
+                # AND THAT IS AN RBAC CONTRACT ... A reservation sent as a
+                # replace is therefore 403 on every shipped install".
+                #
+                # The main@4956785 build sends `Api::replace_status`, a PUT, and
+                # this fence reproduced that live: every reconcile of the
+                # `legacy` schedule under that image answered `cannot update
+                # resource "backupschedules/status"`, so it wrote no status and
+                # created no run. D1 §13.2's own L-05.1-3 anticipates it — "(W0
+                # fix applied only if required for it to fire)" — and this is
+                # that allowance, taken as a namespaced grant rather than a
+                # source change, because product code is read-only here.
+                #
+                # IT IS SCOPED TO THIS NAMESPACE AND TO THIS ServiceAccount. It
+                # changes nothing about what the SHIPPED install grants, and the
+                # current controller never uses it: `patch` is still the verb
+                # every one of its status writes takes.
+                "verbs": ["patch", "update"],
             },
             {
                 "apiGroups": ["logweir.dev"],

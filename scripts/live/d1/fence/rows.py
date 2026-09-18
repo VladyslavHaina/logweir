@@ -1662,6 +1662,9 @@ def heal(H: Any) -> dict[str, Any]:
     nothing armed.
     """
     state: dict[str, Any] = {"at": H.now()}
+    # Re-apply the Role: a run that picks up a changed grant must not depend on
+    # having been set up after the change.
+    H.apply(fenced.namespaced_role(H.NS, dict(H.LABELS)))
     deployment = H.get_opt("deployment", fenced.CONTROLLER)
     if deployment is None:
         raise H.Failure("the fenced controller Deployment is gone; run `setup` again")
