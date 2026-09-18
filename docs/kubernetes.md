@@ -4879,13 +4879,34 @@ like an attestation somebody can rely on, which is why
 verifies the statement**: the UI renders "attested by *X* at *T*; not verified
 by Logweir".
 
-**A document the controller refuses fails closed, and quietly.** It is parsed
-with unknown fields rejected and ten range rules applied. A refusal produces
-empty attestations and an empty evidence allowlist, plus one advisory
-`configuration.policy notReady PolicyUnreadable` row on a `Preflight` — and
-nothing else goes red. So: render it with `helm template` and copy the result,
-or validate a hand-written file against the chart's schema. The digest of the
-policy that was actually in force is recorded on every check's
+**A document the controller refuses fails closed.** It is parsed with unknown
+fields rejected and ten range rules applied. A refusal produces empty
+attestations and an empty evidence allowlist, plus one advisory
+`configuration.policy notReady PolicyUnreadable` row on a `Preflight`. **It
+also writes one `WARN` line naming the failing rule** —
+`the installation policy ConfigMap was REFUSED` — so
+`kubectl -n logweir-system logs deploy/weirkeeper | grep REFUSED` is the answer
+to "why did my attestation not work?". That line is the only signal outside a
+`Preflight`, and it is there because everything else about a refused policy
+looks healthy.
+
+**Three things validate this document, and they check different halves.**
+
+| layer | what it can check | when |
+|---|---|---|
+| `charts/logweir/values.schema.json` | every **per-field** bound, with `hardMaxTopics` pinned to `check_contract::MAX_TOPICS_CEILING` and the preflight timeout to the contract's `1..=600`. Required fields, the attestation's nine, `additionalProperties: false`. | `helm install` / `helm template`, before anything is applied |
+| `charts/logweir/templates/policy.yaml` | the **two cross-field** rules JSON Schema draft-07 cannot express — `maxActiveTotal >= maxActivePerNamespace` and `defaultMaxTopics <= hardMaxTopics`. A named `fail`, quoting both values. | the same moment |
+| `weirkeeper::check::policy::parse` | all of the above, plus `deny_unknown_fields`, and it is the **authority**. | every 30 s in the controller |
+
+So a **chart** install cannot produce a document the controller then refuses;
+that gap was real until fix round 1 (the schema admitted `hardMaxTopics` up to
+200 000 while the parser refused anything above 50 000, and `helm install`
+succeeded). For a **hand-written** file the schema is still the thing to
+validate against, and the `WARN` line is the backstop.
+`crates/weirkeeper/tests/chart_policy.rs` reads the schema and the constants
+together so the two cannot drift apart again.
+
+The digest of the policy that was actually in force is recorded on every check's
 `status.binding.policyDigest`, so a verdict can be traced to the document it was
 computed under.
 
@@ -4917,6 +4938,33 @@ Four bounds make that safe, and each has a test:
 A failed delete is logged and the pass continues — garbage collection is never
 the reason a check's own reconcile reports an error. The result `ConfigMap`s
 and the check Job go with the object by owner cascade.
+
+**Keep-last-five is per namespace and per connection, so it is a housekeeping
+bound and also a small authority.** Anyone who can create a `TopicDiscovery` in
+a namespace can retire that namespace's older observations of the same
+connection by creating six more — `logweir-operator` holds `create` on the kind
+and `delete` on nothing, so this is the one thing an operator can make the
+controller remove. It is bounded and it is worth knowing:
+
+* it never crosses a namespace — the collector lists through `Api::namespaced`,
+  never `Api::all`;
+* it never reaches a non-terminal check, so a running observation cannot be
+  displaced;
+* it is **not spoofable**. The cohort key is `status.binding.connectionUid`,
+  which only the controller writes and only through the `/status` subresource,
+  a grant no human role holds. A creator can flood their own connection's
+  cohort; they cannot claim somebody else's.
+
+**Why the cohort is not additionally keyed on the creator.** It would need a
+trustworthy creator identity on the object, and there is none: `TopicDiscovery.spec`
+is `request` and `cancelRequested`, and any `metadata` label or annotation is
+written by whoever creates the object. Keying on a value the flooder chooses
+makes the rule *weaker*, not stronger — vary the annotation and every
+observation is its own cohort of one, so keep-last-five never fires and the
+namespace fills for the full 24 hours instead. A real per-creator bound needs
+either an admission-time identity stamp or a quota on the kind, both of which
+are larger decisions than this rule; the retention window is what bounds the
+worst case meanwhile.
 
 **To keep a verdict or an inventory, copy it out.** There is no per-object
 retention override; the windows are installation-wide, in the document only an
@@ -4958,6 +5006,26 @@ principal (kustomize). **It is off by default for one reason and it is not a
 security opinion:** `admissionregistration.k8s.io/v1`
 `ValidatingAdmissionPolicy` is Kubernetes 1.30+ and Logweir's floor is 1.29,
 where the document is rejected with `no matches for kind`.
+
+**It is INERT in this build, and that is not a defect — it is the order the
+work lands in.** The chart ships no `logweir-api` ServiceAccount and no console
+`create secrets` grant: `console.*` is D0 stage 7 and has not landed. So the
+subject list names a principal that does not exist yet, and the policy fences
+nothing until it does. Enable it anyway if you like — it costs one object and
+becomes load-bearing the moment the console arrives — but do not read an
+enabled policy as evidence that a grant is fenced today. When `console.*` does
+land, its ServiceAccount name must match
+`admissionPolicy.consoleServiceAccountName`, or the fence keeps pointing at the
+wrong subject.
+
+**A `create`-only fence assumes there is nothing else to fence.** The policy
+matches `CREATE`, because `create` is the only verb on `secrets` any Logweir
+principal has ever held. `manifest_lint::no_shipped_role_may_write_or_read_a_secret_it_does_not_name`
+is what keeps that true: no shipped role may carry `delete` on `secrets` at any
+scope, and `update`/`patch`/`get`/`list`/`watch` only with a `resourceNames`
+naming exactly which object (the identity bootstrap's signing key is the one
+such grant). A console role that arrived with an unscoped `patch` would bypass
+this policy completely, and that test fails instead.
 
 **What it does not do.** A cluster administrator can delete the policy — it
 raises the cost of a mistake and of a compromised console, not of a deliberate

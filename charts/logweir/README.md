@@ -95,6 +95,18 @@ reference; this is what the values do.
 | `engine.allowUnverifiedCustomCa` | `false` | whether a destination may carry a CA the archive engine cannot verify |
 | `evidence.controllerIdentityLocations` | `[]` | where the controller's own identity may read evidence from. An unlisted location is refused |
 
+**`helm install` refuses what the controller would refuse.** Every per-field
+bound in `values.schema.json` is pinned to the constant the parser uses —
+`hardMaxTopics` to `check_contract::MAX_TOPICS_CEILING` (50 000), the preflight
+timeout to `1..=600` — and `templates/policy.yaml` fails the render, naming both
+values, for the two rules JSON Schema cannot express:
+`checks.maxActiveTotal >= checks.maxActivePerNamespace` and
+`checks.discovery.defaultMaxTopics <= checks.discovery.hardMaxTopics`. That
+matters because a document the controller refuses fails **closed and almost
+silently**: every attestation and every evidence location is discarded, the
+ceilings revert to the compiled-in defaults, and the only signals are one
+advisory row on a `Preflight` and one `WARN` line in the controller log.
+
 **The two empty lists are the safe direction, not an oversight.** With no
 attestation nothing can ever be `attestedComplete`; with no allowlist an
 unlisted evidence location is refused with
@@ -146,6 +158,15 @@ admissionPolicy:
   extraPrincipals:                                 # full subjects, for other namespaces
     - system:serviceaccount:team-a:logweir-api
 ```
+
+**It is inert until D0 stage 7 lands `console.*`**: this chart ships no
+`logweir-api` ServiceAccount, so the subject list names a principal that does
+not exist yet. Enabling it early costs one object and it becomes load-bearing
+the moment the console arrives — but "enabled" is not "fenced" before then, and
+the console's ServiceAccount name must then equal
+`admissionPolicy.consoleServiceAccountName` (which is REQUIRED and non-empty:
+an absent, empty or null one renders a subject that matches nobody, so the
+schema and the template both refuse it).
 
 It requires that a Secret the console creates carries one of the two Logweir
 credential types (`logweir.dev/object-store-credential`,

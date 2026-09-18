@@ -605,13 +605,28 @@ ConfigMap in the release namespace is a chart or cluster administrator;
 `logweir-operator` names no `configmaps` at all and cannot. That is what makes
 an attestation an administrator statement rather than a self-assessment.
 
-**A document the controller refuses fails closed and says so quietly.** It is
-parsed with unknown fields rejected and ten range rules applied; a refusal
-yields empty attestations and an empty evidence allowlist plus one advisory
+**A document the controller refuses fails closed.** It is parsed with unknown
+fields rejected and ten range rules applied; a refusal yields empty attestations
+and an empty evidence allowlist plus one advisory
 `configuration.policy notReady PolicyUnreadable` row on a `Preflight`. Nothing
-else goes red. If you hand-write the file, validate it against
-`charts/logweir/values.schema.json`'s `checks`/`engine`/`evidence` blocks, or
-render one with `helm template` and copy the result.
+else goes red — but it **does** log, once per 30-second cache miss:
+
+```bash
+kubectl --context docker-desktop -n logweir-system logs deploy/weirkeeper | grep REFUSED
+```
+
+That line names the failing rule, and it is the answer to "my attestation is
+configured and the discovery still says `unknown`".
+
+**A Helm install cannot produce a document the controller then refuses.**
+`values.schema.json` carries every per-field bound, pinned to the same
+constants the parser uses; `templates/policy.yaml` refuses the two cross-field
+rules JSON Schema cannot express (`maxActiveTotal >= maxActivePerNamespace`,
+`defaultMaxTopics <= hardMaxTopics`) with a named `fail` at render time. If you
+**hand-write** the file, validate it against
+`charts/logweir/values.schema.json`'s `checks`/`engine`/`evidence` blocks *and*
+check those two pairs yourself — or render one with `helm template` and copy
+the result, which is the shortest safe path.
 
 ### 5b. Fencing the console's `create secrets` (Kubernetes 1.30+)
 
@@ -642,12 +657,23 @@ kubectl --context docker-desktop apply \
 `no matches for kind` and the whole apply fails. Turn it on wherever the API
 server has the kind.
 
+**It is inert until the console chart stage lands.** This chart ships no
+`logweir-api` ServiceAccount and no console `create secrets` grant — `console.*`
+is D0 stage 7 — so today the policy's subject list names a principal that does
+not exist and it fences nothing. Enabling it early is harmless and it becomes
+load-bearing the moment the console arrives; just do not read "enabled" as
+"fenced" before then. When `console.*` lands, its ServiceAccount name must equal
+`admissionPolicy.consoleServiceAccountName`.
+
 **What it does not do.** A cluster administrator can delete the policy; it
 raises the cost of a mistake and of a compromised console, not of a deliberate
 administrator. It says nothing about what the console does with a credential it
 legitimately creates, and it is not what keeps the value unreadable — that is
-the missing read verb. **[UNVERIFIED — neither document has been applied to a
-live API server]**. What would verify it: on a 1.30+ cluster, as the console
+the missing read verb. The policy matches `CREATE` only, which is safe exactly
+as long as no role holds another verb on `secrets`; that is pinned by
+`manifest_lint::no_shipped_role_may_write_or_read_a_secret_it_does_not_name`
+rather than left as an assumption. **[UNVERIFIED — neither document has been
+applied to a live API server]**. What would verify it: on a 1.30+ cluster, as the console
 ServiceAccount, create a Secret of type
 `logweir.dev/object-store-credential` carrying the managed-by label (must be
 accepted) and one of type `kubernetes.io/service-account-token` (must be
