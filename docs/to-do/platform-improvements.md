@@ -2105,6 +2105,32 @@ expiry after the Job is collected). Gaps: `legacyArchive` sources are
 Migration: two additive RBAC grants and one additive CEL rule on a kind nothing
 had created yet; no existing object is affected.
 
+**Addendum (2026-09-17) — the `catalogSync` plan kind landed in the one check
+runner (D-SEAMS S1), closing the gap the W8 record named.** Landed in main as
+`9293402` (`CheckPlanKind::CatalogSync` and its request shape, additive in
+`logweir_core::check_contract`), `0c05ed2` (the runner kind), `6addd01` (the
+controller's local constants replaced by the core variant; its "not yet in the
+vocabulary" alarm retired), `80b708c`/`aa864dd` (tests), `cc69b7a` (docs) and `528ffb3`
+(review fixes). The kind reads the destination through the read-only
+`archiveRead` grant with explicit options (S5), walks the durable catalog records
+from the cursor within the byte and entry budgets, reports each record's signature
+verdict and signer key id without judging trust, availability per location, and
+emits the §7d grammar — `catalog-format=1` first, ≤ 64 signers, ≤ 16 locations per
+entry, no repeated summary line, the fence cursor last, `complete` meaning every
+point was examined (the review found a full rescan stopping at the view limit while
+claiming completion, and an index walk advancing one day per sync so an old archive
+could never complete); an unreadable record is `Unreadable`, never `Missing`,
+and budget exhaustion is its own outcome with the cursor, never a transport failure.
+The wire is guarded both ways with no dependency edge: the runner reads the
+controller's grammar constants and the controller parses the runner's pinned body and
+round-trips its plan document through `parse_and_verify`. The `catalogSync`
+ceiling is 1800 s (the framework's 600 s refused every 900 s sync plan). Verified at
+`5205090` on main: the three-crate suite 2238/2238, strict clippy and fmt, pure-core,
+no-archive-write, no-oso, one-signer, verifier-parity, one compose-MinIO end-to-end
+row; fifty-six planted mutants killed. Independent review `claude/d3w8b.review.md`:
+ACCEPT-WITH-FIXES (three high on completeness reporting; two medium; five low) then
+the verdict in its re-verification. Live: none — W14 owes a real sync.
+
 ## PLAT-16 — Make retention promises and destination scope accurate
 
 **Priority P2 · Proposed.** Current keep-count/day fields report recommendations;
