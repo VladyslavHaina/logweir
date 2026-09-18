@@ -1237,6 +1237,14 @@ fn unkeyed_secret_material_is_still_removed() {
             "relayed dGhpc2lzYXNlY3JldHZhbHVlZm9ydGVzdA=abcdef refused",
             "dGhpc2lzYXNlY3JldHZhbHVlZm9ydGVzdA",
         ),
+        // … nor a key half longer than a fact name, even when the value half IS
+        // a digest. This is the only shape `FACT_KEY_MAX` still guards once the
+        // value half is digests and UUIDs alone (review F2), and without it the
+        // cap has no mutant: M10 lifts it to 4096 and dies here.
+        (
+            "relayed dGhpc2lzYXNlY3JldHZhbHVlZm9ydGVzdA=6feecc8c16c5551d9feb3eb5f77e2da773bf68bd9ef9c52927ceb2c86e56892b refused",
+            "dGhpc2lzYXNlY3JldHZhbHVlZm9ydGVzdA",
+        ),
         // **F2.** An unkeyed `k=v` whose key name is not on `SECRET_KEYWORDS`.
         // The fact clause exists for what `entry_of` folds into a message, and
         // every one of those values is a digest or a UUID; accepting a
