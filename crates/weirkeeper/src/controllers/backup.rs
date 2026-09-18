@@ -3963,16 +3963,31 @@ async fn reconcile_backup_inner(
     // patch above is what makes that an ordering guarantee rather than a
     // comment.
     //
-    // ATTEMPTED ONLY WHEN THERE IS SOMETHING TO VERIFY. Both keys and the
-    // digest have to be present: at exits 1, 3 and 4 the contract says no
-    // artifact was written (GC11), so there is no document to have an opinion
-    // about and no verification block is written at all.
-    if let (Some(payload_key), Some(sidecar_key), Some(digest)) = (
+    // ATTEMPTED ONLY WHEN AN ARTIFACT WAS WRITTEN, AND **BOTH KEYS ARE WHAT
+    // SAYS SO** — D2 §3.9 step 2, "if both keys are present, choose by
+    // `evidenceRead` mode". At exits 1, 3 and 4 the contract says no artifact
+    // was written (GC11), the runner prints no key lines, and there is no
+    // document to have an opinion about: no verification block is written at
+    // all. That absence is the GC11 distinction and it is DELIBERATELY kept.
+    //
+    // THE DIGEST IS REQUIRED BY THE PATHS THAT VERIFY BYTES, AND BY THEM ONLY.
+    // A `NotAttempted` source fetched nothing, so `receipt_sha256` is `None`
+    // BY CONSTRUCTION (`observed` is `None` for it, above) — and while the
+    // digest was demanded of every source this whole block was skipped for it,
+    // so an operator whose destination reads evidence with a grant only a pod
+    // may hold (`SecretKeys`, `WorkloadIdentity`) saw NO
+    // `status.evidence.verification` at all rather than the honest
+    // `NotAttempted` and the sentence naming why. That is defect
+    // D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN: the sentence existed and reached
+    // nobody. NOTHING IS INVENTED HERE — the only verdict writable without
+    // bytes is `NotAttempted`, and `Valid`/`Invalid`/`Untrusted` still come
+    // only from a verifier that read the document.
+    let reference = match (
         keys.receipt.as_deref(),
         keys.sidecar.as_deref(),
         receipt_sha256.as_deref(),
     ) {
-        let reference = EvidenceRef {
+        (Some(payload_key), Some(sidecar_key), Some(digest)) => Some(EvidenceRef {
             // PLAT-19.1: trust is resolved PER NAMESPACE, and this is
             // `metadata.namespace` read off the object being reconciled —
             // never a name the subject supplied.
@@ -3981,28 +3996,37 @@ async fn reconcile_backup_inner(
             payload_sha256: digest.to_string(),
             sidecar_key: sidecar_key.to_string(),
             payload_type: logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT,
-        };
-        let result = match &evidence_from {
-            EvidenceSource::GlobalHandle => verify(reference).await,
-            // THE SAME VERIFIER, ON THE DESTINATION'S OWN HANDLE — D2 §3.9's
-            // "no second verification path". `verify_oracle` already takes the
-            // store it reads through, resolves this namespace's trust and runs
-            // `verify_resolved` inside one `spawn_blocking`; handing it another
-            // handle is the whole change. Digest, DSSE and the trust
-            // projection are D3 W10's and are not re-decided here.
-            EvidenceSource::Destination(store) => {
-                crate::verification::verify_oracle(Some(Arc::clone(store)), client.clone())(
-                    reference,
-                )
-                .await
-            }
-            EvidenceSource::NotAttempted { detail } => {
-                crate::verification::VerificationResult::not_attempted(
-                    reference.payload_type,
-                    detail.clone(),
-                )
-            }
-        };
+        }),
+        _ => None,
+    };
+    let verdict = match (&evidence_from, reference) {
+        // THE DECISION IS ALREADY MADE AND IT IS RECORDED. `evidence_source`
+        // answered with the reason there is no reader for this run's evidence;
+        // the guard is `keys.complete()` and not the digest, because the
+        // question this arm answers is "was a receipt written", which the keys
+        // say and the digest — which only a fetch produces — cannot.
+        (EvidenceSource::NotAttempted { detail }, _) if keys.complete() => {
+            Some(crate::verification::VerificationResult::not_attempted(
+                logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT,
+                detail.clone(),
+            ))
+        }
+        (EvidenceSource::GlobalHandle, Some(reference)) => Some(verify(reference).await),
+        // THE SAME VERIFIER, ON THE DESTINATION'S OWN HANDLE — D2 §3.9's
+        // "no second verification path". `verify_oracle` already takes the
+        // store it reads through, resolves this namespace's trust and runs
+        // `verify_resolved` inside one `spawn_blocking`; handing it another
+        // handle is the whole change. Digest, DSSE and the trust
+        // projection are D3 W10's and are not re-decided here.
+        (EvidenceSource::Destination(store), Some(reference)) => Some(
+            crate::verification::verify_oracle(Some(Arc::clone(store)), client.clone())(reference)
+                .await,
+        ),
+        // GC11's no-artifact case, and a fetch that returned no digest: no
+        // document, no opinion, no block.
+        _ => None,
+    };
+    if let Some(result) = verdict {
         let current = backup
             .status
             .as_ref()
