@@ -1025,13 +1025,43 @@ fn view_entry(id: &str, age_days: i64) -> Value {
     })
 }
 
-/// The digest the catalog publishes for a page, computed the way the controller
-/// recomputes it.
+/// The digest the catalog publishes for a page, **in the spelling production
+/// publishes it in**: `sha256:<lowercase hex>`.
 ///
 /// A page with NO published digest is now a view failure (review `d3w9` M4), so
 /// every fixture that wants a readable view has to publish one — which is the
 /// production shape: `catalog_view::materialise` always writes it.
-fn page_digest_of(entries: &[Value]) -> String {
+///
+/// THE PREFIX IS THE POINT, AND ITS ABSENCE WAS A LIVE DEFECT. This helper used
+/// to return `catalog_view::page_digest`'s bare hex, which
+/// `catalog_view::seal` never writes and the CRD does not document
+/// (`config/crd/recoverycatalogs.yaml`: "`sha256:<lowercase hex>` over its
+/// entry lines"). Every route table below therefore published a spelling no
+/// catalog produces, the positive path was green in CI and red in every
+/// cluster, and RET-DIGEST-PREFIX — `Evaluated=False/ViewUnreadable` for every
+/// `RetentionPolicy` on the build, so no retention report at all — survived six
+/// tests that all read the view. The fixture is now the production shape, so
+/// the whole happy path is the regression row.
+///
+/// It is built from `sha256_prefixed` over the page bytes rather than by
+/// prefixing `page_digest`'s answer, so the fixture agrees with
+/// `catalog_view::seal` by construction and not by a second re-derivation of
+/// the same idea.
+fn published_page_digest_of(entries: &[Value]) -> String {
+    let body: String = entries
+        .iter()
+        .map(|e| {
+            format!(
+                "{}\n",
+                serde_json::to_string(e).expect("an entry serialises")
+            )
+        })
+        .collect();
+    logweir_core::ids::sha256_prefixed(body.as_bytes())
+}
+
+/// The same digest in the LEGACY bare spelling, for the compatibility row.
+fn bare_page_digest_of(entries: &[Value]) -> String {
     let bodies: Vec<String> = entries
         .iter()
         .map(|e| serde_json::to_string(e).expect("an entry serialises"))
@@ -1223,7 +1253,7 @@ fn happy_routes(entries: &[Value]) -> Vec<Route> {
                 json!([{
                     "configMapName": "page-0", "index": 0,
                     "count": entries.len(),
-                    "sha256": page_digest_of(entries)
+                    "sha256": published_page_digest_of(entries)
                 }]),
             ),
         ),
@@ -1432,6 +1462,112 @@ async fn a_page_that_does_not_match_its_published_digest_is_refused() {
         .as_str()
         .expect("a message")
         .contains("digests to"));
+}
+
+/// The page route table, with one hand-chosen `status.pages[].sha256`.
+fn routes_publishing_digest(entries: &[Value], sha256: &str) -> Vec<Route> {
+    let mut routes = happy_routes(entries);
+    routes.retain(|r| r.path_suffix != "/recoverycatalogs/primary");
+    routes.push(route(
+        "GET",
+        "/recoverycatalogs/primary",
+        catalog_body(
+            Some(DEST),
+            json!([{
+                "configMapName": "page-0", "index": 0, "count": entries.len(),
+                "sha256": sha256
+            }]),
+        ),
+    ));
+    routes
+}
+
+/// **RET-DIGEST-PREFIX.** A page whose published digest carries the `sha256:`
+/// prefix — which is the ONLY spelling `catalog_view::seal` writes and the only
+/// one `config/crd/recoverycatalogs.yaml` documents — is read, not refused.
+///
+/// WHY THIS ROW EXISTS AS ITS OWN TEST when `happy_routes` already publishes
+/// that spelling: the fixture can be changed back by accident, and this row
+/// says in its name and in its body which spelling is production's. Before the
+/// fix the controller compared `catalog_view::page_digest`'s bare hex against
+/// this value with `!=`, so it was unequal for every page any real catalog ever
+/// published and every `RetentionPolicy` in a cluster answered
+/// `Evaluated=False/ViewUnreadable` — no retention report for any destination,
+/// which is the whole of PLAT-16.1 and the controller half of PLAT-16.2. It was
+/// green in CI only because the fixture published the bare form.
+#[tokio::test]
+async fn a_page_published_with_the_sha256_prefix_is_read_not_refused() {
+    let entries = six_points();
+    let published = published_page_digest_of(&entries);
+    assert!(
+        published.starts_with("sha256:"),
+        "the fixture must publish the production spelling, or this row asserts nothing: {published}"
+    );
+    let f = fixture(routes_publishing_digest(&entries, &published));
+    let outcome = run(&f, &policy(json!({}), json!({}))).await;
+
+    assert_eq!(
+        outcome.phase,
+        ctrl::RetentionPhase::Evaluated,
+        "the view is readable: {}",
+        f.condition(ctrl::CONDITION_EVALUATED)["message"]
+    );
+    assert_ne!(outcome.ready_reason, ctrl::REASON_CATALOG_UNUSABLE);
+    assert_eq!(
+        f.condition(ctrl::CONDITION_EVALUATED)["status"],
+        json!("True")
+    );
+    assert_eq!(outcome.points_evaluated, 6);
+}
+
+/// The two spellings are the same digest over the same bytes, so the row below
+/// is about the PREFIX and not about a page whose contents differ.
+#[test]
+fn the_published_and_bare_spellings_differ_only_in_the_prefix() {
+    let entries = six_points();
+    assert_eq!(
+        published_page_digest_of(&entries),
+        format!("sha256:{}", bare_page_digest_of(&entries))
+    );
+}
+
+/// Compatibility: a page published by a catalog that wrote the BARE spelling is
+/// still read, so an upgrade needs no catalog resync and a rollback loses
+/// nothing. Both spellings are accepted deliberately; see `bare_hex` in the
+/// controller.
+#[tokio::test]
+async fn a_page_published_in_the_legacy_bare_spelling_is_still_read() {
+    let entries = six_points();
+    let bare = bare_page_digest_of(&entries);
+    assert!(!bare.starts_with("sha256:"));
+    let f = fixture(routes_publishing_digest(&entries, &bare));
+    let outcome = run(&f, &policy(json!({}), json!({}))).await;
+
+    assert_eq!(outcome.phase, ctrl::RetentionPhase::Evaluated);
+    assert_eq!(outcome.points_evaluated, 6);
+}
+
+/// And the normalisation strips a PREFIX, never a digest: a prefixed value
+/// whose hex is wrong is still refused, and so is a bare value whose hex is
+/// wrong. Without this the fix could be written as "accept anything that starts
+/// with `sha256:`" and no row above would notice.
+#[tokio::test]
+async fn a_wrong_digest_is_refused_in_either_spelling() {
+    for published in [format!("sha256:{}", "e".repeat(64)), "e".repeat(64)] {
+        let entries = six_points();
+        let f = fixture(routes_publishing_digest(&entries, &published));
+        let outcome = run(&f, &policy(json!({}), json!({}))).await;
+        assert_eq!(
+            outcome.ready_reason,
+            ctrl::REASON_CATALOG_UNUSABLE,
+            "published {published}"
+        );
+        assert_eq!(
+            f.condition(ctrl::CONDITION_EVALUATED)["reason"],
+            ctrl::REASON_VIEW_UNREADABLE,
+            "published {published}"
+        );
+    }
 }
 
 /// An entry this build cannot read refuses the whole view: a view it cannot

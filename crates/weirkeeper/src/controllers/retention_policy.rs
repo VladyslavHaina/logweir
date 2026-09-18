@@ -371,6 +371,36 @@ pub struct Outcome {
     pub deletes_performed: u32,
 }
 
+/// A digest the catalog published, reduced to the bare lowercase hex the
+/// recomputation produces.
+///
+/// **THE TWO SPELLINGS ARE THE SAME DIGEST AND THIS IS THE ONLY PLACE THAT
+/// KNOWS IT.** `RecoveryCatalog.status.pages[].sha256` is documented in the
+/// CRD (`config/crd/recoverycatalogs.yaml`: "`sha256:<lowercase hex>` over its
+/// entry lines") and written that way by `catalog_view::seal`, while
+/// `catalog_view::page_digest` — the function this controller recomputes the
+/// page with, and the one the runner's own `catalog-page=… sha256=<hex>`
+/// header is checked against — returns BARE hex. Comparing the two literally
+/// is never equal, so every `RetentionPolicy` in a real cluster answered
+/// `Evaluated=False/ViewUnreadable` and no retention report was rendered for
+/// any destination (defect RET-DIGEST-PREFIX, reproduced live 2026-09-18; the
+/// controller's own message printed both values, equal apart from the prefix).
+///
+/// NORMALISING HERE AND NOT AT THE WRITER is deliberate: `page_digest` has a
+/// second caller (`catalog_view.rs`'s check of the runner's header, documented
+/// bare) that is already consistent, so prefixing the function would move the
+/// defect rather than remove it. The reader is the side that has to accept
+/// what the contract says is published.
+///
+/// BOTH SPELLINGS ARE ACCEPTED, and that is the compatibility rule: a page
+/// published by an older catalog that wrote bare hex still verifies, so an
+/// upgrade needs no catalog resync and a rollback loses nothing. A value that
+/// is neither — a truncated digest, a different algorithm — is returned
+/// unchanged and fails the comparison, which is the behaviour that matters.
+fn bare_hex(published: &str) -> &str {
+    published.strip_prefix("sha256:").unwrap_or(published)
+}
+
 fn refused(reason: &'static str) -> Outcome {
     Outcome {
         phase: RetentionPhase::Refused,
@@ -1342,7 +1372,7 @@ impl Pass<'_> {
             };
             let lines: Vec<&str> = body.lines().filter(|l| !l.trim().is_empty()).collect();
             let found = view::page_digest(&lines);
-            if found != expected {
+            if found != bare_hex(expected) {
                 return Ok(Err(format!(
                     "catalog page {} digests to {found} and the catalog published \
                      {expected}; the view is not what the catalog says it is",
