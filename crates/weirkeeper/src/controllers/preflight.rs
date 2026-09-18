@@ -867,6 +867,20 @@ impl RosterFacts {
     }
 }
 
+/// Whether a relayed string is a signing key id at all.
+///
+/// The sha256 of a SubjectPublicKeyInfo DER, lowercase hex —
+/// `logweir_core::trust::TrustedKey::key_id`'s form, and what
+/// `TrustRoster.spec.signingKeys[*].keyId` is written in. Nothing else is
+/// comparable against the roster.
+#[must_use]
+pub fn is_signer_key_id(value: &str) -> bool {
+    value.len() == 64
+        && value
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 /// `signer.rostered` — D2 §6.3.
 ///
 /// # Why the key id is `unknown` and not `notReady` before the pod runs
@@ -877,6 +891,14 @@ impl RosterFacts {
 /// Secret. So the first pass — and every pass where the pod has not relayed —
 /// can only say `SignerKeyIdNotObserved`, and saying `SignerNotRostered`
 /// instead would be a claim about a key nobody has seen.
+///
+/// # The scope is the `TrustRoster`
+///
+/// Every answer this row can give — not found, empty, not listed, expired,
+/// rostered — is a statement about the one cluster-scoped `TrustRoster`, and
+/// the remedy for four of the five is "edit that object". It carries the
+/// roster's UID once one was read, so a verdict taken against a roster that has
+/// since been replaced is visibly about a different object.
 #[must_use]
 pub fn signer_rostered_row(
     operation: PreflightOperation,
@@ -885,6 +907,11 @@ pub fn signer_rostered_row(
     now: DateTime<Utc>,
 ) -> CheckOutcome {
     let id = CheckId::SignerRostered;
+    let roster_scope = CheckScope {
+        kind: "TrustRoster".to_string(),
+        name: crate::ROSTER_NAME.to_string(),
+        uid: (roster.found && !roster.uid.is_empty()).then(|| roster.uid.clone()),
+    };
     if operation == PreflightOperation::Restore {
         // See `RESTORE_CONTROLLER_ROWS`: the restore check plan carries no
         // signer path, so no pod reports a key id and there is nothing to match
@@ -904,7 +931,8 @@ pub fn signer_rostered_row(
         .with_remedy(
             "The runner still validates its signer before it writes anything (PLAT-02.2), and \
              `TrustRoster.spec.signingKeys` is what makes that evidence verifiable.",
-        );
+        )
+        .with_scope(roster_scope);
     }
     if !roster.found {
         return outcome(
@@ -918,7 +946,8 @@ pub fn signer_rostered_row(
         .with_remedy(
             "Create the TrustRoster and add the runner's PUBLIC signing key to \
              `spec.signingKeys`; evidence signed by an unrostered key verifies nowhere.",
-        );
+        )
+        .with_scope(roster_scope);
     }
     if roster.signing_keys.is_empty() {
         return outcome(
@@ -929,8 +958,26 @@ pub fn signer_rostered_row(
             now,
         )
         .with_message("the TrustRoster carries no signing key")
-        .with_remedy("Add the runner's public signing key to `spec.signingKeys`.");
+        .with_remedy("Add the runner's public signing key to `spec.signingKeys`.")
+        .with_scope(roster_scope);
     }
+    // A RELAYED VALUE THAT IS NOT A KEY ID IS NOT A KEY ID. D2-SIGNERID-
+    // REDACTED: the runner's `signerKeyId` fact went through the redactor's
+    // long-run rule, which replaced it with the literal `[redacted]`, and this
+    // comparison then asked the roster whether it listed a key called
+    // `[redacted]`. It never does, so `signer.rostered` answered
+    // `notReady/SignerNotRostered` for a key whose SPKI sha256 IS on the roster
+    // — a permanent, blocking false negative on every Backup preflight, while
+    // `signer.privateKeyUsable` on the same Job said `ready`.
+    //
+    // The redactor now keeps a key id ([`logweir_core::check_contract::
+    // redact`]'s public-identifier exemption), and this is the belt: the roster
+    // is written in sha256 of a SubjectPublicKeyInfo DER, so anything that is
+    // not 64 lowercase hex characters did not come out of `ValidatedSigner`,
+    // whatever it came out of. The honest answer for it is `unknown` — the same
+    // one a pod that has not reported gets — and NOT a blocking refusal about a
+    // key nobody has actually seen.
+    let observed_key_id = observed_key_id.filter(|k| is_signer_key_id(k));
     let Some(key_id) = observed_key_id else {
         return outcome(
             operation,
@@ -942,7 +989,8 @@ pub fn signer_rostered_row(
         .with_message(
             "the check pod has not reported which signing key it holds, so it cannot be \
              matched against the roster",
-        );
+        )
+        .with_scope(roster_scope);
     };
     let Some((_, not_after)) = roster.signing_keys.iter().find(|(k, _)| k == key_id) else {
         return outcome(
@@ -958,7 +1006,8 @@ pub fn signer_rostered_row(
         .with_remedy(
             "Add this key id to `TrustRoster.spec.signingKeys`, or project the signing key \
              the roster already trusts.",
-        );
+        )
+        .with_scope(roster_scope);
     };
     if not_after.is_some_and(|t| t <= now) {
         return cap_expiry(
@@ -973,7 +1022,8 @@ pub fn signer_rostered_row(
                 "the roster entry for signing key `{key_id}` expired at {}",
                 not_after.map(|t| t.to_rfc3339()).unwrap_or_default()
             ))
-            .with_remedy("Rotate the runner's signing key and roster the new public half."),
+            .with_remedy("Rotate the runner's signing key and roster the new public half.")
+            .with_scope(roster_scope),
             *not_after,
         );
     }
@@ -986,7 +1036,8 @@ pub fn signer_rostered_row(
             now,
         )
         .with_message(&format!("signing key `{key_id}` is on the TrustRoster"))
-        .with_fact("signerKeyId", key_id),
+        .with_fact("signerKeyId", key_id)
+        .with_scope(roster_scope),
         *not_after,
     )
 }
@@ -2097,6 +2148,72 @@ pub fn assemble(
     }
     out.sort_by_key(|c| c.id);
     out
+}
+
+/// The objects a row's `scope` names when the row itself did not name one.
+///
+/// One per AUTHORITY, because the authority IS the statement about who
+/// observed the thing: `podStatus` is the kubelet reporting on a Pod,
+/// `checkJob` is the runner reporting from inside a Job, and `controller` is
+/// this process reporting about the `Preflight` it is reconciling. A row that
+/// knows a better referent — the `KafkaCluster` a connection dialled, the
+/// `BackupDestination` a grant belongs to, the `TrustRoster` a key is or is not
+/// on — sets its own and keeps it.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScopeReferents {
+    /// The `Preflight` being reconciled. Always known.
+    pub subject: Option<CheckScope>,
+    /// The check Job, once one exists.
+    pub job: Option<CheckScope>,
+    /// The check pod, once the Job has one.
+    pub pod: Option<CheckScope>,
+}
+
+impl ScopeReferents {
+    /// The referent for one authority, falling back outward: a pod row with no
+    /// pod is still about the Job that would have made one, and everything
+    /// falls back to the subject.
+    #[must_use]
+    pub fn for_authority(&self, authority: Authority) -> Option<&CheckScope> {
+        let chain: [&Option<CheckScope>; 3] = match authority {
+            Authority::PodStatus => [&self.pod, &self.job, &self.subject],
+            Authority::CheckJob => [&self.job, &self.subject, &self.subject],
+            Authority::Controller => [&self.subject, &self.subject, &self.subject],
+        };
+        chain.into_iter().flatten().next()
+    }
+}
+
+/// Give every row that carries no `scope` the referent its authority implies.
+///
+/// D2 §6.3's acceptance sentence is "the UI names each failed prerequisite and
+/// its remedy, with check time **and scope**", and the live run found six
+/// `notReady` rows with `scope: null` — the `podStatus` credential rows, the
+/// `checkJob` connection rows and the `controller` `signer.rostered` rows
+/// (`objects/s14/notready-rows.json`). Those are exactly the rows an operator
+/// reads, and "which object is this about" was blank on all of them.
+///
+/// It runs AFTER [`assemble`] rather than inside it because `assemble` decides
+/// which rows exist and this decides what a row that exists is about; and
+/// because [`assemble`]'s own placeholders — the rows nobody answered and the
+/// rows the request skipped — need a referent too, and they are built there.
+pub fn fill_scopes(checks: &mut [CheckOutcome], referents: &ScopeReferents) {
+    for c in checks.iter_mut() {
+        if c.scope.is_some() {
+            continue;
+        }
+        c.scope = referents.for_authority(c.authority).cloned();
+    }
+}
+
+/// The `Preflight` itself, as a scope.
+#[must_use]
+pub fn subject_scope(pf: &Preflight) -> CheckScope {
+    CheckScope {
+        kind: Preflight::kind(&()).to_string(),
+        name: pf.name_any(),
+        uid: pf.uid(),
+    }
 }
 
 /// The overall state's wire spelling.
@@ -3804,13 +3921,23 @@ pub async fn reconcile_preflight(
             .join("; ");
         // NO PLAN WAS RENDERED, so there is no request to derive the expected
         // rows from.
-        let checks = assemble(
+        let mut checks = assemble(
             probe,
             Vec::new(),
             true,
             &unrendered_job_rows(operation),
             &inputs.skip,
             now,
+        );
+        // NO JOB AND NO POD EXIST on this path, so every row that named no
+        // object of its own is about the `Preflight` itself.
+        fill_scopes(
+            &mut checks,
+            &ScopeReferents {
+                subject: Some(subject_scope(pf)),
+                job: None,
+                pod: None,
+            },
         );
         let status = status_for(
             pf,
@@ -4085,13 +4212,29 @@ pub async fn reconcile_preflight(
         &shape.plan.request,
         inputs.plan.as_ref().is_some_and(PlanFacts::scratch),
     );
-    let checks = assemble(
+    let mut checks = assemble(
         controller,
         relayed_checks,
         blocked_by_pod,
         &expected,
         &inputs.skip,
         now,
+    );
+    fill_scopes(
+        &mut checks,
+        &ScopeReferents {
+            subject: Some(subject_scope(pf)),
+            job: Some(CheckScope {
+                kind: "Job".to_string(),
+                name: job_name.clone(),
+                uid: (!job_uid.is_empty()).then(|| job_uid.clone()),
+            }),
+            pod: pod.as_ref().map(|p| CheckScope {
+                kind: "Pod".to_string(),
+                name: p.name_any(),
+                uid: p.uid(),
+            }),
+        },
     );
     let (result, dropped) = result_for(&checks, details);
     let expires_at = result.expires_at;

@@ -36,9 +36,10 @@ use serde_json::{json, Value};
 use weirkeeper::check::{self, Projections, Waiting};
 use weirkeeper::controllers::preflight::{
     self as pf, assemble, cluster_identity_row, connection_row, controller_rows, destination_row,
-    entry_of, job_rows, plan_bindings_row, plan_names_row, plan_parse_row, pod_outcomes,
-    recovery_point_row, result_for, signer_rostered_row, stale_against_status, unrendered_job_rows,
-    ApprovalFacts, BindingFacts, Inputs, PlanFacts, RecoveryPointFacts, RosterFacts,
+    entry_of, fill_scopes, job_rows, plan_bindings_row, plan_names_row, plan_parse_row,
+    pod_outcomes, recovery_point_row, result_for, signer_rostered_row, stale_against_status,
+    unrendered_job_rows, ApprovalFacts, BindingFacts, Inputs, PlanFacts, RecoveryPointFacts,
+    RosterFacts, ScopeReferents,
 };
 use weirkeeper::controllers::Context;
 use weirkeeper::crds::preflight::{Preflight, PreflightOperation};
@@ -51,6 +52,14 @@ const DEST_UID: &str = "cccccccc-0000-4000-8000-00000000000c";
 const ROSTER_UID: &str = "dddddddd-0000-4000-8000-00000000000d";
 const JOB_UID: &str = "eeeeeeee-0000-4000-8000-00000000000e";
 const POD_UID: &str = "ffffffff-0000-4000-8000-00000000000f";
+/// The runner's PUBLIC signing key id, in the form the roster is actually
+/// written in: the sha256 of a SubjectPublicKeyInfo DER, 64 lowercase hex
+/// characters (`logweir_core::trust::TrustedKey::key_id`). These fixtures used
+/// to say `runner-key-1`, which is not one, and D2-SIGNERID-REDACTED turned on
+/// exactly that difference: the value the controller compared was `[redacted]`.
+const RUNNER_KEY_ID: &str = "11d4c0d6a5fd4c5c9b2d7e6f8a90b1c2d3e4f5061728394a5b6c7d8e9f0a1b2c";
+/// A key id the roster does NOT list — a key id all the same.
+const OTHER_KEY_ID: &str = "22e5d1e7b60e5d6dac3e8f709ab1c2d3e4f5061728394a5b6c7d8e9f0a1b2c3d";
 const BACKUP_UID: &str = "99999999-0000-4000-8000-000000000009";
 
 /// The value that must never appear in a status, a request body or a rendered
@@ -524,7 +533,7 @@ fn the_egress_row_is_unknown_forever_and_names_the_ports() {
 
 #[test]
 fn the_signer_row_walks_the_whole_roster_table() {
-    let key = "runner-key-1";
+    let key = RUNNER_KEY_ID;
     let empty = RosterFacts::default();
     assert_eq!(
         signer_rostered_row(PreflightOperation::Backup, &empty, Some(key), now()).code,
@@ -551,7 +560,13 @@ fn the_signer_row_walks_the_whole_roster_table() {
          so `SignerNotRostered` before the pod ran would be a claim about a key nobody saw"
     );
     assert_eq!(
-        signer_rostered_row(PreflightOperation::Backup, &loaded, Some("other"), now()).code,
+        signer_rostered_row(
+            PreflightOperation::Backup,
+            &loaded,
+            Some(OTHER_KEY_ID),
+            now()
+        )
+        .code,
         CheckCode::SignerNotRostered
     );
     let expired = RosterFacts {
@@ -568,6 +583,214 @@ fn the_signer_row_walks_the_whole_roster_table() {
         (CheckState::Ready, CheckCode::SignerRostered)
     );
     assert_eq!(ok.facts.get("signerKeyId").map(String::as_str), Some(key));
+
+    // EVERY ANSWER NAMES THE OBJECT ITS REMEDY IS ABOUT. Four of the five ask
+    // the operator to edit the `TrustRoster`, and the live run published all of
+    // them with `scope: null`.
+    for row in [
+        signer_rostered_row(PreflightOperation::Backup, &empty, Some(key), now()),
+        signer_rostered_row(PreflightOperation::Backup, &no_keys, Some(key), now()),
+        signer_rostered_row(PreflightOperation::Backup, &loaded, None, now()),
+        signer_rostered_row(
+            PreflightOperation::Backup,
+            &loaded,
+            Some(OTHER_KEY_ID),
+            now(),
+        ),
+        signer_rostered_row(PreflightOperation::Backup, &expired, Some(key), now()),
+        ok,
+        signer_rostered_row(PreflightOperation::Restore, &loaded, Some(key), now()),
+    ] {
+        let scope = row
+            .scope
+            .as_ref()
+            .unwrap_or_else(|| panic!("`{}` carries no scope", row.code));
+        assert_eq!(scope.kind, "TrustRoster");
+        assert_eq!(scope.name, "default");
+    }
+    // The UID is the roster that was actually READ, so a verdict taken against
+    // a roster that has since been replaced is visibly about another object.
+    let identified = RosterFacts {
+        found: true,
+        uid: ROSTER_UID.to_string(),
+        signing_keys: vec![(key.to_string(), None)],
+        ..RosterFacts::default()
+    };
+    assert_eq!(
+        signer_rostered_row(PreflightOperation::Backup, &identified, Some(key), now())
+            .scope
+            .and_then(|s| s.uid)
+            .as_deref(),
+        Some(ROSTER_UID)
+    );
+    assert_eq!(
+        signer_rostered_row(PreflightOperation::Backup, &empty, Some(key), now())
+            .scope
+            .and_then(|s| s.uid),
+        None,
+        "a roster that does not exist has no UID to name"
+    );
+}
+
+/// **D2-SIGNERID-REDACTED, the controller half.** A relayed `signerKeyId` that
+/// is not a key id is not compared against the roster at all.
+///
+/// The live run (`results.json#E5`) recorded `signer.rostered
+/// notReady/SignerNotRostered` for a key whose SPKI sha256 IS the roster's,
+/// because the fact reached this comparison as the literal `[redacted]` and the
+/// roster does not list a key by that name. The redactor no longer blanks a key
+/// id; this is the belt, and it matters because the two failures are opposite
+/// in kind: `SignerNotRostered` is a BLOCKING refusal about a key, and
+/// `SignerKeyIdNotObserved` is `unknown` about nothing.
+#[test]
+fn a_relayed_signer_key_id_that_is_not_a_key_id_is_not_observed() {
+    let loaded = RosterFacts {
+        found: true,
+        uid: ROSTER_UID.to_string(),
+        signing_keys: vec![(RUNNER_KEY_ID.to_string(), None)],
+        ..RosterFacts::default()
+    };
+    for bad in [
+        "[redacted]",
+        "",
+        "runner-key-1",
+        // Right alphabet, wrong width.
+        &RUNNER_KEY_ID[..63],
+        &format!("{RUNNER_KEY_ID}0"),
+        // Right width, wrong alphabet: upper case is not the roster's form.
+        &RUNNER_KEY_ID.to_uppercase(),
+    ] {
+        let row = signer_rostered_row(PreflightOperation::Backup, &loaded, Some(bad), now());
+        assert_eq!(
+            (row.state, row.code),
+            (CheckState::Unknown, CheckCode::SignerKeyIdNotObserved),
+            "`{bad}` was compared against the roster and refused as a key"
+        );
+        assert!(
+            !row.message.contains(bad) || bad.is_empty(),
+            "a value that is not a key id is not quoted back as one: {}",
+            row.message
+        );
+    }
+    // And the real thing still answers.
+    let row = signer_rostered_row(
+        PreflightOperation::Backup,
+        &loaded,
+        Some(RUNNER_KEY_ID),
+        now(),
+    );
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::Ready, CheckCode::SignerRostered)
+    );
+}
+
+/// **D2 §6.3's "with check time AND scope", for the rows that had none.**
+///
+/// The live run published six `notReady` rows with `scope: null`
+/// (`objects/s14/notready-rows.json`): `connection.credentialProjected`
+/// (`podStatus`), `connection.authenticated` (`checkJob`) and `signer.rostered`
+/// (`controller`). Each authority is a statement about WHO observed the thing,
+/// so each has a referent the controller knows, and a row that named its own
+/// object keeps it.
+#[test]
+fn every_row_without_a_scope_gets_the_referent_its_authority_implies() {
+    let referents = ScopeReferents {
+        subject: Some(logweir_core::check_contract::CheckScope {
+            kind: "Preflight".to_string(),
+            name: "pf-1".to_string(),
+            uid: Some(PF_UID.to_string()),
+        }),
+        job: Some(logweir_core::check_contract::CheckScope {
+            kind: "Job".to_string(),
+            name: "lw-check-pf-1".to_string(),
+            uid: Some(JOB_UID.to_string()),
+        }),
+        pod: Some(logweir_core::check_contract::CheckScope {
+            kind: "Pod".to_string(),
+            name: "lw-check-pf-1-abcde".to_string(),
+            uid: Some(POD_UID.to_string()),
+        }),
+    };
+    let row = |id: CheckId, authority: Authority| {
+        CheckOutcome::new(
+            id,
+            CheckState::NotReady,
+            Gating::Blocking,
+            authority,
+            CheckCode::BlockedByPrerequisite,
+        )
+    };
+    let mut checks = vec![
+        row(CheckId::ConnectionCredentialProjected, Authority::PodStatus),
+        row(CheckId::ConnectionAuthenticated, Authority::CheckJob),
+        row(CheckId::SignerRostered, Authority::Controller),
+        // A row that DID name its own object keeps it: the referent is the
+        // better answer where a row has one.
+        row(CheckId::DestinationResolved, Authority::Controller).with_scope(
+            logweir_core::check_contract::CheckScope {
+                kind: "BackupDestination".to_string(),
+                name: "prod-archive".to_string(),
+                uid: Some(DEST_UID.to_string()),
+            },
+        ),
+    ];
+    fill_scopes(&mut checks, &referents);
+    let kinds: Vec<(&str, &str)> = checks
+        .iter()
+        .map(|c| {
+            let s = c
+                .scope
+                .as_ref()
+                .unwrap_or_else(|| panic!("`{}` carries no scope", c.id));
+            assert!(s.uid.is_some(), "`{}`'s scope names no UID", c.id);
+            (c.id.as_str(), s.kind.as_str())
+        })
+        .collect();
+    assert_eq!(
+        kinds,
+        vec![
+            ("connection.credentialProjected", "Pod"),
+            ("connection.authenticated", "Job"),
+            ("signer.rostered", "Preflight"),
+            ("destination.resolved", "BackupDestination"),
+        ]
+    );
+
+    // BEFORE THE JOB HAS A POD, a pod-authority row is still about the Job that
+    // would have made one; before either exists, everything is about the
+    // `Preflight`. A row with nothing to name would be the bug again.
+    let mut checks = vec![
+        row(CheckId::ConnectionCredentialProjected, Authority::PodStatus),
+        row(CheckId::ConnectionAuthenticated, Authority::CheckJob),
+    ];
+    fill_scopes(
+        &mut checks,
+        &ScopeReferents {
+            pod: None,
+            ..referents.clone()
+        },
+    );
+    assert!(checks
+        .iter()
+        .all(|c| c.scope.as_ref().unwrap().kind == "Job"));
+
+    let mut checks = vec![
+        row(CheckId::ConnectionCredentialProjected, Authority::PodStatus),
+        row(CheckId::ConnectionAuthenticated, Authority::CheckJob),
+        row(CheckId::SignerRostered, Authority::Controller),
+    ];
+    fill_scopes(
+        &mut checks,
+        &ScopeReferents {
+            subject: referents.subject.clone(),
+            job: None,
+            pod: None,
+        },
+    );
+    assert!(checks
+        .iter()
+        .all(|c| c.scope.as_ref().unwrap().kind == "Preflight"));
 }
 
 #[test]
@@ -888,7 +1111,7 @@ fn approver_roster(not_after: Option<DateTime<Utc>>) -> RosterFacts {
         found: true,
         uid: ROSTER_UID.to_string(),
         generation: 4,
-        signing_keys: vec![("runner-key-1".to_string(), None)],
+        signing_keys: vec![(RUNNER_KEY_ID.to_string(), None)],
         approver_keys: vec![("approver-1".to_string(), not_after)],
         allowed_cluster_ids: Vec::new(),
     }
@@ -1372,7 +1595,7 @@ fn a_facts_bearing_row_keeps_its_facts_in_the_message() {
     let row = signer_rostered_row(
         PreflightOperation::Backup,
         &approver_roster(None),
-        Some("runner-key-1"),
+        Some(RUNNER_KEY_ID),
         now(),
     );
     let entry = entry_of(&row);
@@ -1381,7 +1604,7 @@ fn a_facts_bearing_row_keeps_its_facts_in_the_message() {
             .message
             .as_deref()
             .unwrap_or_default()
-            .contains("signerKeyId=runner-key-1"),
+            .contains(&format!("signerKeyId={RUNNER_KEY_ID}")),
         "the shipped CRD carries neither `facts` nor `detail`; dropping them silently would lose \
          the one non-secret fact an operator most often needs"
     );
@@ -1611,7 +1834,7 @@ fn referent_routes(cluster_id: Option<&str>, allowed: Vec<&str>) -> Vec<Route> {
         route(
             "GET",
             "/trustrosters/default",
-            roster("runner-key-1", allowed).to_string(),
+            roster(RUNNER_KEY_ID, allowed).to_string(),
         ),
         route(
             "GET",
@@ -1742,6 +1965,61 @@ async fn a_relayed_backup_readiness_publishes_a_verdict_with_codes_and_scopes() 
         "a verdict that cannot say what it was about is worthless"
     );
     assert!(status["result"]["expiresAt"].as_str().is_some());
+
+    // …AND SCOPES, which this test is named for and did not assert. D2 §6.3's
+    // acceptance sentence is "with check time and scope"; the live run
+    // published six `notReady` rows with `scope: null`.
+    let mut authorities: BTreeSet<&str> = BTreeSet::new();
+    for c in status["result"]["checks"].as_array().expect("checks") {
+        let scope = c["scope"]
+            .as_object()
+            .unwrap_or_else(|| panic!("`{}` carries no scope: {c}", c["id"]));
+        assert!(
+            scope.get("kind").and_then(Value::as_str).is_some(),
+            "`{}`'s scope names no kind",
+            c["id"]
+        );
+        assert!(
+            scope.get("name").and_then(Value::as_str).is_some(),
+            "`{}`'s scope names no object",
+            c["id"]
+        );
+        assert!(
+            scope.get("uid").and_then(Value::as_str).is_some(),
+            "`{}`'s scope names no UID: {c}",
+            c["id"]
+        );
+        authorities.insert(c["authority"].as_str().unwrap_or_default());
+    }
+    assert_eq!(
+        authorities,
+        BTreeSet::from(["checkJob", "controller", "podStatus"]),
+        "one scoped row per authority, which is what the fix has to cover"
+    );
+    assert_eq!(
+        check_entry(&status, "signer.rostered")["scope"]["kind"],
+        "TrustRoster"
+    );
+    assert_eq!(
+        check_entry(&status, "runner.pod")["scope"]["kind"],
+        "Pod",
+        "a pod-status row is about the Pod the kubelet reported on"
+    );
+    assert_eq!(
+        check_entry(&status, "runner.contract")["scope"]["kind"],
+        "Job",
+        "a check-Job row that named no object of its own is about the Job"
+    );
+    // D2-SIGNERID-REDACTED, end to end: the key id the pod relayed reaches the
+    // roster comparison and the published message as itself.
+    assert!(
+        check_entry(&status, "signer.rostered")["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(RUNNER_KEY_ID),
+        "the key id an operator must roster was not published: {}",
+        check_entry(&status, "signer.rostered")["message"]
+    );
 }
 
 /// PLAT-03.1's "missing Secret/key", end to end: the kubelet's message, the
@@ -1794,6 +2072,21 @@ async fn a_missing_credential_secret_cancels_the_job_and_names_the_row() {
         check_entry(&status, "connection.authenticated")["code"],
         "BlockedByPrerequisite",
         "a pod that never started answered nothing, and nothing may read as ready"
+    );
+    // The row an operator reads names the object the kubelet reported on…
+    assert_eq!(row["scope"]["kind"], "Pod");
+    assert_eq!(row["scope"]["uid"], POD_UID);
+    // …and the kubelet's own sentence keeps the Secret's NAME (D2 §6.5: a
+    // Secret name is a public reference). The live S14a/S14b rows read
+    // `secret [redacted] not found` and `key password [redacted]]] Secret
+    // [redacted]`.
+    assert!(
+        row["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("kafka-src"),
+        "the Secret an operator has to create is not named: {}",
+        row["message"]
     );
 
     let seen = recorder.lock().expect("recorder");
@@ -2367,7 +2660,7 @@ fn restore_referent_routes() -> Vec<Route> {
         route(
             "GET",
             "/trustrosters/default",
-            roster("runner-key-1", vec!["target-id"]).to_string(),
+            roster(RUNNER_KEY_ID, vec!["target-id"]).to_string(),
         ),
         route(
             "GET",
@@ -2505,7 +2798,7 @@ async fn an_expired_approver_key_is_reported_before_the_restore_is_submitted() {
                 "spkiPem": "-----BEGIN PUBLIC KEY-----\nAA\n-----END PUBLIC KEY-----",
                 "notAfter": "2026-09-16T11:00:00Z"
             }],
-            "signingKeys": [{"keyId": "runner-key-1", "spkiPem": "-----BEGIN PUBLIC KEY-----\nBB\n-----END PUBLIC KEY-----"}],
+            "signingKeys": [{"keyId": RUNNER_KEY_ID, "spkiPem": "-----BEGIN PUBLIC KEY-----\nBB\n-----END PUBLIC KEY-----"}],
             "allowedClusterIds": ["target-id"]
         }
     });
@@ -3886,7 +4179,7 @@ fn relay_from(ids: &BTreeSet<String>) -> Vec<CheckOutcome> {
                 Gating::Blocking,
             );
             match id {
-                CheckId::SignerPrivateKeyUsable => row.with_fact("signerKeyId", "runner-key-1"),
+                CheckId::SignerPrivateKeyUsable => row.with_fact("signerKeyId", RUNNER_KEY_ID),
                 CheckId::ConnectionAuthenticated | CheckId::TargetAuthenticated => {
                     row.with_fact("clusterId", "prod-id")
                 }
@@ -3907,7 +4200,7 @@ async fn a_healthy_backup_readiness_reports_ready() {
         route(
             "GET",
             "/trustrosters/default",
-            roster("runner-key-1", vec![]).to_string(),
+            roster(RUNNER_KEY_ID, vec![]).to_string(),
         ),
         route(
             "GET",
@@ -4017,7 +4310,7 @@ async fn a_healthy_restore_preflight_reports_ready() {
         route(
             "GET",
             "/trustrosters/default",
-            roster("runner-key-1", vec!["prod-id"]).to_string(),
+            roster(RUNNER_KEY_ID, vec!["prod-id"]).to_string(),
         ),
         route("GET", "/restores/r-1", restore_object.to_string()),
         route("GET", "/approvals/ap-1", approval.to_string()),
@@ -4091,7 +4384,7 @@ async fn the_binding_is_recorded_before_the_plan_and_the_job_are_created() {
         route(
             "GET",
             "/trustrosters/default",
-            roster("runner-key-1", vec![]).to_string(),
+            roster(RUNNER_KEY_ID, vec![]).to_string(),
         ),
         route(
             "GET",

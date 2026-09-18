@@ -2529,14 +2529,47 @@ fn is_key_component(c: &str) -> bool {
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'='))
 }
 
+/// `<factName>=<public identifier>` — a fact rendered into a message.
+///
+/// The shipped `Preflight` CRD carries no `facts` map, so the controller folds
+/// them into `message` as `[key=value; …]` and the whole sentence goes through
+/// [`redact`] again. `=` is in the run alphabet, so `signerKeyId=` plus a
+/// SHA-256 is ONE run of 76 characters and the digest half would otherwise be
+/// unreachable by any of the forms above.
+///
+/// The key half is deliberately narrow — lower camel case, letters and digits
+/// only, at most 24 characters, exactly one `=`, a non-empty value — because
+/// the alternative (allowing any short mixed-case component) would let
+/// `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` through. An AWS secret access key
+/// is 30 random bytes as 40 unpadded base64 characters and contains no `=` at
+/// all; a padded base64 blob's `=` is trailing, which leaves the whole blob on
+/// the KEY side of the split, where `+`, `/` and the 24-character cap refuse
+/// it.
+const FACT_KEY_MAX: usize = 24;
+
+fn is_fact_pair(c: &str) -> bool {
+    if c.bytes().filter(|b| *b == b'=').count() != 1 {
+        return false;
+    }
+    let Some((key, value)) = c.split_once('=') else {
+        return false;
+    };
+    let key_ok = !key.is_empty()
+        && key.len() <= FACT_KEY_MAX
+        && key.as_bytes()[0].is_ascii_lowercase()
+        && key.bytes().all(|b| b.is_ascii_alphanumeric());
+    key_ok && !value.is_empty() && (is_hex_digest(value) || is_uuid(value) || is_public_name(value))
+}
+
 /// Whether a long run is a public identifier rather than material.
 ///
 /// The run is split on `/` — an object key's own separator — and answered two
 /// ways:
 ///
-/// * **every component is a public FORM**: a SHA-256/512 digest, a UUID, or a
-///   lower-case name. This is what lets a bare `signerKeyId`, an `imageID`'s
-///   digest, a Secret `<ns>/<name>` and a prefix-joined manifest key through.
+/// * **every component is a public FORM**: a SHA-256/512 digest, a UUID, a
+///   lower-case name, or a `<factName>=<identifier>` pair. This is what lets a
+///   bare `signerKeyId`, an `imageID`'s digest, a Secret `<ns>/<name>` and a
+///   prefix-joined manifest key through.
 /// * **or the run is ANCHORED** by a component that is a UUID or a digest — a
 ///   backup set id or a content digest — which makes the run an object key
 ///   rather than a token, and the rest of it is then read as key components.
@@ -2547,10 +2580,9 @@ fn is_key_component(c: &str) -> bool {
 /// (and often `+`), and nothing in it is a UUID or a digest.
 fn is_public_identifier(run: &str) -> bool {
     let components: Vec<&str> = run.split('/').collect();
-    if components
-        .iter()
-        .all(|c| c.is_empty() || is_hex_digest(c) || is_uuid(c) || is_public_name(c))
-    {
+    if components.iter().all(|c| {
+        c.is_empty() || is_hex_digest(c) || is_uuid(c) || is_public_name(c) || is_fact_pair(c)
+    }) {
         return true;
     }
     components.iter().any(|c| is_uuid(c) || is_hex_digest(c))

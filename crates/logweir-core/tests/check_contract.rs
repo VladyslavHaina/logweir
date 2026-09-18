@@ -1147,6 +1147,18 @@ fn a_public_identifier_survives_redaction() {
             r#"secret "missing-secret" not found"#.to_string(),
             "missing-secret".to_string(),
         ),
+        // The shipped CRD carries no `facts` map, so the controller folds them
+        // into the message and redacts the whole sentence again. `=` is in the
+        // run alphabet, which makes `signerKeyId=<sha256>` ONE 76-character
+        // run — the shape the live `[signerKeyId=[redacted]]` came from.
+        (
+            format!("the projected signing key parsed, signed a probe and verified it [signerKeyId={KEY_ID}]"),
+            format!("signerKeyId={KEY_ID}"),
+        ),
+        (
+            format!("the check pod ran [imageID=docker-pullable://weirkeeper/logweir-runner@sha256:{KEY_ID}; podUID={SET}]"),
+            format!("podUID={SET}"),
+        ),
     ];
 
     for (input, witness) in cases {
@@ -1203,6 +1215,18 @@ fn unkeyed_secret_material_is_still_removed() {
         // A UUID-anchored run may not carry a forty-character component.
         (
             "3f0ada8f-1a2b-4c3d-9e8f-0123456789ab/wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY01",
+            "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY01",
+        ),
+        // The `<factName>=<identifier>` clause reaches neither a long key half
+        // — a padded base64 blob leaves the whole blob on the key side, where
+        // the 24-character cap refuses it …
+        (
+            "relayed dGhpc2lzYXNlY3JldHZhbHVlZm9ydGVzdGluZ29ubHk= refused",
+            "dGhpc2lzYXNlY3JldHZhbHVlZm9ydGVzdGluZ29ubHk",
+        ),
+        // … nor a value half that is not a public form in its own right.
+        (
+            "relayed sessionkey=wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY01 refused",
             "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY01",
         ),
     ];
