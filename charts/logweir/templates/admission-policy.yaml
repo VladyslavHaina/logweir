@@ -44,7 +44,20 @@ managed-by label — ACCEPTED — and (b) a Secret of type
 `kubernetes.io/service-account-token` — REJECTED with the message below — and
 show (b) succeeding once the binding is deleted. D2 W14 owns that evidence.
 */ -}}
-{{- $sa := printf "system:serviceaccount:%s:%s" .Release.Namespace .Values.admissionPolicy.consoleServiceAccountName -}}
+{{- /*
+THE NAME IS REQUIRED, IN TWO PLACES, AND THAT IS NOT BELT AND BRACES.
+`values.schema.json` lists `consoleServiceAccountName` under
+`admissionPolicy.required` and gives it `minLength: 1`, which refuses an absent
+key and an empty string. A **null** passes a draft-07 `required` check in
+Helm's evaluator, and `printf "%s"` renders it as the literal `%!s(<nil>)` — a
+principal that exists nowhere. The policy then installs, reads as enabled, and
+fences NOBODY: `matchConditions` is the whole of its effect, so a subject list
+that matches no request is a silent no-op with a green install behind it.
+`required` below is what closes that, and it names the value rather than
+failing with a Go formatting artefact.
+*/ -}}
+{{- $name := required "admissionPolicy.consoleServiceAccountName must be set (a non-empty ServiceAccount name in the release namespace) whenever admissionPolicy.enabled is true: the policy's only effect is its matchConditions subject list, and an empty or null name renders a principal that matches no request at all — the fence would install, look enabled, and protect nothing." .Values.admissionPolicy.consoleServiceAccountName -}}
+{{- $sa := printf "system:serviceaccount:%s:%s" .Release.Namespace $name -}}
 {{- $principals := prepend .Values.admissionPolicy.extraPrincipals $sa | uniq -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy

@@ -80,7 +80,7 @@
     "checks": {
       "type": "object",
       "additionalProperties": false,
-      "description": "The check-pool ceilings and the two per-kind retention blocks of the installation policy (D2 \u00a74.4), rendered into the `weirkeeper-policy` ConfigMap. Every field is REQUIRED here because `weirkeeper::check::policy` parses the document with `deny_unknown_fields` and no per-field default inside `checks`, `discovery` or `preflight`: a half-written block is a policy the controller refuses at load, and it refuses it fail-closed (no attestations, no allowlist).",
+      "description": "The check-pool ceilings and the two per-kind retention blocks of the installation policy (D2 \u00a74.4), rendered into the `weirkeeper-policy` ConfigMap. Every field is REQUIRED here because `weirkeeper::check::policy` parses the document with `deny_unknown_fields` and no per-field default inside `checks`, `discovery` or `preflight`: a half-written block is a policy the controller refuses at load, and it refuses it fail-closed (no attestations, no allowlist). TWO OF `Policy::validate`'s RULES CANNOT BE WRITTEN HERE, because JSON Schema draft-07 cannot compare two sibling values: `maxActiveTotal >= maxActivePerNamespace` and `discovery.defaultMaxTopics <= discovery.hardMaxTopics`. `templates/policy.yaml` refuses both with a named `fail` at render time, which is the same moment and the same audience.",
       "required": ["maxActivePerNamespace", "maxActiveTotal", "maxActiveDiscoveriesPerConnection", "maxEvidenceFetchActivePerNamespace", "discovery", "preflight"],
       "properties": {
         "maxActivePerNamespace": { "type": "integer", "minimum": 1 },
@@ -96,7 +96,7 @@
             "retentionSeconds": { "type": "integer", "minimum": 1 },
             "keepPerConnection": { "type": "integer", "minimum": 1 },
             "defaultMaxTopics": { "type": "integer", "minimum": 1 },
-            "hardMaxTopics": { "type": "integer", "minimum": 1, "maximum": 200000 },
+            "hardMaxTopics": { "type": "integer", "minimum": 1, "maximum": 50000, "description": "PINNED TO `logweir_core::check_contract::MAX_TOPICS_CEILING`. `Policy::validate` refuses anything above it, and a refused policy fails CLOSED — every attestation and every evidence location is discarded while the install looks healthy — so this bound must equal the constant, never merely resemble it. `weirkeeper::tests::chart_policy::the_schema_bounds_are_the_parsers_own_rules` reads both and fails if they drift." },
             "visibilityAttestations": {
               "type": "array",
               "items": { "$ref": "#/definitions/visibilityAttestation" }
@@ -138,8 +138,8 @@
     "admissionPolicy": {
       "type": "object",
       "additionalProperties": false,
-      "description": "The ValidatingAdmissionPolicy that fences the console API ServiceAccount's `create` on Secrets to the two Logweir credential types (D2 \u00a77.3). `enabled` is false by default for ONE reason and it is written down: `admissionregistration.k8s.io/v1` ValidatingAdmissionPolicy is Kubernetes 1.30+ and this chart's floor is 1.29, where the document would be rejected with `no matches for kind`. It is not a security opinion.",
-      "required": ["enabled"],
+      "description": "The ValidatingAdmissionPolicy that fences the console API ServiceAccount's `create` on Secrets to the two Logweir credential types (D2 \u00a77.3). `enabled` is false by default for ONE reason and it is written down: `admissionregistration.k8s.io/v1` ValidatingAdmissionPolicy is Kubernetes 1.30+ and this chart's floor is 1.29, where the document would be rejected with `no matches for kind`. It is not a security opinion. `consoleServiceAccountName` is REQUIRED and non-empty: the policy's whole effect is its `matchConditions` subject list, and a null or empty name renders a principal string that matches nobody — a fence that installs, reads as enabled, and protects nothing. The template refuses it a second time with `required`, because a values file that omits the key entirely is a different path from one that nulls it.",
+      "required": ["enabled", "consoleServiceAccountName"],
       "properties": {
         "enabled": { "type": "boolean" },
         "consoleServiceAccountName": { "type": "string", "minLength": 1, "maxLength": 253, "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$" },

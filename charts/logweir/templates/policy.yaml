@@ -42,6 +42,35 @@ install and hand `:from-legacy` a plaintext-HTTP fact nobody configured, which
 is D-SEAMS S5 (transport security is never derived) failing in the one
 direction that matters.
 */ -}}
+{{- /*
+THE TWO RULES `values.schema.json` CANNOT CARRY, REFUSED HERE INSTEAD.
+
+`Policy::validate` enforces `maxActiveTotal >= maxActivePerNamespace` and
+`discovery.defaultMaxTopics <= discovery.hardMaxTopics`. Both compare two
+SIBLING values, and JSON Schema draft-07 — which is what Helm evaluates — has
+no way to express that; `additionalProperties`, `minimum` and `maximum` are
+per-field or nothing.
+
+WHY THEY MUST BE REFUSED AT RENDER TIME AND NOT LEFT TO THE CONTROLLER. A
+document the parser refuses fails CLOSED and SILENTLY: `Policy::fail_closed()`
+discards EVERY `visibilityAttestation` and EVERY `controllerIdentityLocation`
+the administrator configured, `attestedComplete` becomes unreachable, retention
+reverts to the compiled-in defaults, and the only signal is one advisory
+`configuration.policy notReady PolicyUnreadable` row on a `Preflight` nobody
+is necessarily looking at. `helm install` would have said nothing at all. So
+the refusal happens where the operator is still watching, naming the rule and
+both values.
+*/ -}}
+{{- $maxNs := int .Values.checks.maxActivePerNamespace -}}
+{{- $maxTotal := int .Values.checks.maxActiveTotal -}}
+{{- if lt $maxTotal $maxNs -}}
+{{- fail (printf "checks.maxActiveTotal (%d) must be at least checks.maxActivePerNamespace (%d). weirkeeper::check::policy::Policy::validate refuses the rendered document otherwise, and a refused policy fails CLOSED: every visibilityAttestation and every controllerIdentityLocation is discarded and the install still looks healthy." $maxTotal $maxNs) -}}
+{{- end -}}
+{{- $defaultMax := int .Values.checks.discovery.defaultMaxTopics -}}
+{{- $hardMax := int .Values.checks.discovery.hardMaxTopics -}}
+{{- if gt $defaultMax $hardMax -}}
+{{- fail (printf "checks.discovery.defaultMaxTopics (%d) must be at most checks.discovery.hardMaxTopics (%d). weirkeeper::check::policy::Policy::validate refuses the rendered document otherwise, and a refused policy fails CLOSED: every visibilityAttestation and every controllerIdentityLocation is discarded and the install still looks healthy." $defaultMax $hardMax) -}}
+{{- end -}}
 {{- $endpoint := include "logweir.archive.endpoint" . -}}
 {{- $region := include "logweir.archive.region" . -}}
 {{- $explicit := ne .Values.archive.s3.endpoint "" -}}

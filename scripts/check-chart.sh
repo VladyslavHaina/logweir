@@ -434,6 +434,64 @@ else
   echo "   rc=$rc  (a partial visibility attestation refused, as it must be)"
 fi
 
+# D2 W11 fix round 1 (review F1) — THE THREE BOUNDS `Policy::validate` ENFORCES
+# THAT AN INSTALL USED TO WALK STRAIGHT PAST.
+#
+#   hardMaxTopics > MAX_TOPICS_CEILING   the schema said 200 000, the parser
+#                                        says 50 000
+#   maxActiveTotal < maxActivePerNamespace       cross-field
+#   defaultMaxTopics > hardMaxTopics             cross-field
+#
+# The two cross-field rules cannot be written in JSON Schema draft-07 at all
+# (it cannot compare two siblings), so `templates/policy.yaml` refuses them
+# with a named `fail`. All three are here because the failure they prevent is
+# the silent one: `helm install` succeeds, `weirkeeper-policy` renders, the
+# parser refuses it, and `Policy::fail_closed()` discards every attestation and
+# every evidence location while the install looks healthy.
+for bad in \
+  'checks.discovery.hardMaxTopics=100000' \
+  'checks.maxActiveTotal=2' \
+  'checks.discovery.defaultMaxTopics=60000'; do
+  helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+    --set "$bad" > /dev/null 2> "$tmp/schema-policy-bound.err"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "FAIL: \`--set $bad\` rendered; Policy::validate refuses it and a refused policy fails CLOSED and silently" >&2
+    fail=1
+  else
+    echo "   rc=$rc  (--set $bad refused, as it must be)"
+  fi
+done
+
+# AND THE ADMISSION POLICY'S SUBJECT, WHICH IS ITS WHOLE EFFECT (review F4). A
+# null name used to render `%!s(<nil>)`: the fence installed, read as enabled,
+# and matched no principal at all.
+# `--set` for the NULL case and `--set-string` for the EMPTY one, deliberately:
+# `--set-string x=null` sets the three-character STRING "null", which is a
+# perfectly legal ServiceAccount name and proves nothing. The reviewer's
+# reproduction used `--set`, which sets an actual YAML null — the value that
+# used to reach `printf "%s"` and render `%!s(<nil>)`.
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  --set admissionPolicy.enabled=true --set 'admissionPolicy.consoleServiceAccountName=null' \
+  > /dev/null 2> "$tmp/schema-vap-null.err"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+  echo "FAIL: a NULL admissionPolicy.consoleServiceAccountName rendered an enabled policy whose subject list matches nobody" >&2
+  fail=1
+else
+  echo "   rc=$rc  (a null admissionPolicy.consoleServiceAccountName refused, as it must be)"
+fi
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  --set admissionPolicy.enabled=true --set-string 'admissionPolicy.consoleServiceAccountName=' \
+  > /dev/null 2> "$tmp/schema-vap-empty.err"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+  echo "FAIL: an EMPTY admissionPolicy.consoleServiceAccountName rendered an enabled policy whose subject list matches nobody" >&2
+  fail=1
+else
+  echo "   rc=$rc  (an empty admissionPolicy.consoleServiceAccountName refused, as it must be)"
+fi
+
 echo
 if [ "$fail" -ne 0 ]; then
   echo "FAIL: the chart is not what the tree says it is; the lines above name what drifted." >&2

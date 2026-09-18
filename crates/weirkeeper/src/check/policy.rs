@@ -566,6 +566,40 @@ pub async fn load(
         Some(cm) => from_data(cm.data.as_ref()),
         None => PolicyLoad::Defaulted(Policy::defaults()),
     };
+    // A REFUSED POLICY SAYS SO, ONCE PER CACHE MISS — D2 W11 fix round 1,
+    // review finding F1.
+    //
+    // THE FAILURE THIS CLOSES IS THE QUIET ONE. A document this loader refuses
+    // becomes `Policy::fail_closed()`, which discards EVERY
+    // `visibilityAttestation` and EVERY `controllerIdentityLocation` the
+    // administrator wrote: `attestedComplete` becomes unreachable, the
+    // evidence allowlist becomes empty, and the ceilings and retention windows
+    // revert to the compiled-in defaults. Until this line the only signal
+    // anywhere was one advisory `configuration.policy notReady
+    // PolicyUnreadable` row on a `Preflight` — which nobody sees unless they
+    // happen to run one and read it. The controller log is where an operator
+    // looks when an attestation "did not work", so the reason belongs there,
+    // naming the failing rule.
+    //
+    // ONCE PER CACHE MISS AND NOT PER RECONCILE: this runs only past the
+    // 30-second cache, so a permanently bad document costs two lines a minute
+    // rather than one per pass of every check in the installation.
+    //
+    // THE REASON IS ALREADY REDACTED. `unreadable()` runs `redact` over the
+    // `PolicyError`'s `Display`, and a policy document is administrator-authored
+    // configuration that carries no credential by construction — but a parse
+    // error can quote the content it choked on, so the redaction stays on the
+    // path to the log as well as to the status.
+    if let PolicyLoad::Unreadable { reason, .. } = &load {
+        tracing::warn!(
+            namespace = %namespace,
+            config_map = %name,
+            reason = %reason,
+            "the installation policy ConfigMap was REFUSED; every completeness attestation and \
+             every evidence location in it is being ignored, and the compiled-in defaults apply \
+             until it is fixed"
+        );
+    }
     cache.record(now, load.clone());
     Ok(load)
 }
