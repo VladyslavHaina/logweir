@@ -716,7 +716,7 @@ pub fn plan_config_map(backup: &Backup, cluster: &KafkaCluster) -> Result<Config
 // ---------------------------------------------------------------------------
 
 /// Whether the pinned engine has been PROVED to honour a destination's custom
-/// CA bundle — D2 §3.5's `[UNVERIFIED — U1]`.
+/// CA bundle — D2 §3.5's `[UNVERIFIED — U1: whether the engine honours a custom CA file]`.
 ///
 /// # `false`, AND IT STAYS `false` UNTIL SOMEBODY MEASURES IT
 ///

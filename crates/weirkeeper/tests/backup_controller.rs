@@ -10093,8 +10093,8 @@ async fn an_absent_destination_holds_within_its_budget_and_then_fails() {
 /// **A DESTINATION THAT DECLARES A CA BUNDLE IS REFUSED FOR AN ENGINE-DRIVEN
 /// RUN UNTIL SOMEBODY MEASURES THE ENGINE.**
 ///
-/// D2 §3.5's `[UNVERIFIED — U1]`. The claim is that the engine honours
-/// `SSL_CERT_FILE`; it is plausible and undemonstrated, and if it is wrong the
+/// D2 §3.5's `[UNVERIFIED — U1: whether the engine honours a custom CA file]`.
+/// The claim is that the engine honours `SSL_CERT_FILE`; it is plausible and undemonstrated, and if it is wrong the
 /// observable failure is a TLS handshake inside the engine child reported as
 /// an opaque operational error with no mention of certificates.
 ///
