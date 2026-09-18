@@ -4610,9 +4610,25 @@ fn a_slash_bearing_credential_is_not_an_object_key() {
             }
         }
     }
+    // A base64 component carrying `+` — base64's 63rd character, which no
+    // object key contains — inside an otherwise key-shaped path, and short
+    // enough that the free-component cap alone would let it through. This is
+    // what the `[A-Za-z0-9._=-]` alphabet clause is for; without a row for it,
+    // mutant M29 deleted the clause and survived.
+    for value in [
+        "team/prod/n4bQgYhMfWWaL+qgxVrQFaO/manifest.json".to_string(),
+        serde_json::json!({"missingSegment": "team/prod/n4bQgYhMfWWaL+qgxVrQFaO/manifest.json"})
+            .to_string(),
+    ] {
+        assert!(value.len() >= 40);
+        let out = logweir::check::redact_path(&value);
+        if out.contains("n4bQgYhMfWWaL+qgxVrQFaO") {
+            leaked.push(format!("a `+`-bearing component: {out}"));
+        }
+    }
     assert!(
         leaked.is_empty(),
-        "`redact_path` returned a credential whole ({} of 18):\n  {}",
+        "`redact_path` returned a credential whole ({} of 20):\n  {}",
         leaked.len(),
         leaked.join("\n  ")
     );
