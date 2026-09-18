@@ -1081,6 +1081,54 @@ and by phase 6 the admission guard has passed, the plan has been rendered and th
 `validate-restore` has already executed. The ADR that would normally record this decision is gated
 on an open question and is deferred; this section is the record.
 
+### Upgrading past `signedAt`: a run that finished on an older controller is re-read once, not re-judged
+
+`status.evidence.verification.signedAt` and `.trust` arrived with the trust
+lifecycle. A `Backup` or `Restore` that finished before them carries neither,
+and the new rule compares a key's validity window against a signing time — so
+on those objects there is nothing on the status to compare.
+
+**Measured, not predicted.** On the 2026-09-18 lab upgrade, five objects
+written on 2026-09-14 (three `Backup`s, two `Restore`s) moved from `Valid` to
+`Untrusted` with the reason *"the document carries no signing-time field"*,
+while their phase, exit code and `status.reason` did not move at all. No
+archive had been read and no signature re-checked. Nothing was wrong with those
+receipts; their *status shape* predated the field the rule needs, and the
+refusal reported that as a fact about the documents.
+
+**The ruling.** A status that predates `signedAt` and a document that claims no
+signing time are different facts and get different answers.
+
+* A stored block with **no `signedAt` and no `trust`** was written by an older
+  controller. On a policy event the controller performs **one** bounded `get`
+  of the run's own receipt or scorecard, through the same evidence path that
+  produced the original verdict, checks the bytes against the `sha256` the run
+  recorded, and takes `signedAt` from the document exactly as a fresh run does.
+  The signature is not re-checked: it was checked over these same bytes when
+  the run finished, and the digest is what says they are the same bytes.
+* A stored block with **no `signedAt` but a `trust` object** was written by a
+  controller that has both fields and wrote no signing time, which it does only
+  when the document carries none. That stays `Untrusted` /
+  `SignedOutsideValidity`, and the fail-closed rule is unchanged.
+
+Until the read succeeds, the object keeps the verdict it already had with
+`trust.basis: Unverified`. That basis is **never green**: the badge is the
+literal word `unverified` and the `Verified` condition is `False` with reason
+`VerificationNotAttempted`. An unreachable archive leaves the object there and
+the next policy event tries once more — one attempt per event, no retry loop.
+A destination whose `evidenceRead` grant only a pod may hold is never repaired
+by the controller, and the `detail` says so.
+
+**What does not wait for the read.** An unlisted signer, a key-usage mismatch
+and a `KeyCompromise` revocation still change a pre-`signedAt` object's verdict
+immediately. None of those rows consults the signing time, so none of them is
+delayed by an archive that will not answer.
+
+**Rollback** is unaffected: both fields are additive, an older controller
+ignores them and reports the `result` it finds, and a repaired object reads as
+`Valid` there too. The operator-facing detail is in `docs/kubernetes.md`
+§15.2c.
+
 ### Guard G-PITR: upstream's six point-in-time tests contain zero assertions, so Logweir proves the boundary itself
 
 `kafka-backup` 0.21.0 declares six point-in-time tests —

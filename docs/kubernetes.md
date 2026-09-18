@@ -4410,7 +4410,7 @@ Two new fields sit beside it, both additive:
 ```yaml
 signedAt: 2026-09-03T09:00:00Z          # the document's OWN claimed signing time
 trust:
-  basis: Current                        # Current | Historical | RecordedBeforeRevocation | None
+  basis: Current                        # Current | Historical | RecordedBeforeRevocation | Unverified | None
   keyState: Active                      # Active | Retired | Expired | Revoked | Unknown
   policy: {name: org-default, uid: …, generation: 4}
 ```
@@ -4432,10 +4432,12 @@ An object that is **already terminal** is not re-read (that is the rule that
 keeps this controller quiet), so its verdict does not change by itself. When it
 is re-derived, it is re-derived from what is already on the status: the stored
 `matchedKeyId`, `signedAt` and `verifiedAt` are the three facts the decision
-takes, so there is **no storage read, no signature check and no Job**. Such a
-pass writes `evidence.verification.{result,trust,detail}` and the `Verified`
+takes, so there is **no storage read, no signature check and no Job** — with
+the one bounded exception in §15.2c, which exists because a status written
+before `signedAt` existed carries only two of those three facts. Such a pass
+writes `evidence.verification.{result,trust,detail}` and the `Verified`
 condition that says the same thing, and touches `phase`, `exitCode`, `outcome`,
-the evidence keys, `matchedKeyId`, `signedAt` and `verifiedAt` not at all.
+the evidence keys, `matchedKeyId` and `verifiedAt` not at all.
 
 `verifiedAt` in particular is **never** refreshed by a trust change. It is the
 one independent observation this installation has about when it saw the
@@ -4465,6 +4467,72 @@ controllers from reconciling anything else.
 answer for "what does this cluster think of this key now": it reports every
 key's `effectiveState` and `usableForVerification` without waiting for a
 reconcile.
+
+### 15.2c Upgrading past `signedAt`: what happens to objects written before it
+
+**This is the only case in which a terminal object is read from storage.**
+
+`signedAt` and `trust` are additive status fields introduced with the trust
+lifecycle. A `Backup` or `Restore` that finished on an older controller carries
+neither: its verification block is `result`, `matchedKeyId`, `payloadType` and
+`verifiedAt`, and nothing more. The new rule compares the key's validity window
+against the document's claimed signing time — and on such an object there is no
+recorded instant to compare.
+
+Refusing it as though the *document* carried no signing time is wrong, and
+measurably so: it reports this cluster's own upgrade history as a finding about
+somebody's archive. So the controller distinguishes the two:
+
+| the stored block | what it means | what the controller does |
+|---|---|---|
+| no `signedAt`, no `trust` | an older controller wrote it | one bounded re-read, then decide |
+| no `signedAt`, `trust` present | a current controller wrote it, over a document that carries no signing time | `Untrusted`, `SignedOutsideValidity`, as before |
+
+On a policy event for an object in the first row, and only if the status also
+records the document's key and its `sha256`, the controller performs **one**
+`get` of that document through the same evidence path the original verdict came
+from — the controller's own read-only handle for a legacy inline-`archive` run,
+or the destination's handle for a destination-backed one. The bytes are checked
+against the digest the run recorded before anything is read out of them, so a
+signing time taken this way is exactly as trustworthy as the verdict being
+repaired; the signature is not re-checked, because it was checked over these
+same bytes when the run finished. `signedAt` then comes from the receipt's
+`finished_at` (or the scorecard's last phase), exactly as a fresh run derives
+it, and the verdict is re-derived with it.
+
+Until that read succeeds the object keeps **the verdict it already had**, with
+`trust.basis: Unverified` and a `detail` saying why:
+
+```yaml
+result: Valid                # unchanged - nothing has been read, so nothing is withdrawn
+trust:
+  basis: Unverified          # and nothing is claimed either
+detail: "the signature over this document verified under key <id>, and the trust policy
+         <name> has not been applied to it yet (Unverified): ..."
+```
+
+`Unverified` is **never green**. The badge renders the literal word `unverified`
+and the `Verified` condition reads `False` with reason
+`VerificationNotAttempted` — not `VerificationUntrusted`, because nothing has
+been refused. If the archive is unreachable the object stays there and the next
+policy event tries once more; there is no retry loop and no queue. A
+destination whose `evidenceRead` grant only a pod may hold (D2 §3.9) is never
+repaired by this controller at all, and its `detail` says so — the printed
+`logweir drill verify` command is the answer there, as everywhere else.
+
+**Three things this does not do.** It does not touch `verifiedAt`, which stays
+the independent observation it has always been. It does not delay a revocation:
+an unlisted signer, a usage mismatch and a `KeyCompromise` revocation still
+change a pre-`signedAt` object's verdict immediately, with no read, because none
+of those rows consults the signing time. And it does not repeat: once `signedAt`
+is on the status the object is an ordinary one, and a further policy event
+writes nothing unless the verdict actually changes.
+
+**Rollback.** An older controller reached by rollback ignores `signedAt` and
+`trust` entirely and reports the `result` it finds, so a repaired object reads
+as `Valid` there too. An object left on `Unverified` reads as its stored
+`result` with a `trust` block the old controller does not parse — additive,
+and no worse than the pre-upgrade state it came from.
 
 ### 15.3 What the controller actually checks, in order
 
