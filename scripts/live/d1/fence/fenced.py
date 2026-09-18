@@ -42,18 +42,42 @@ KUBECONFIG_CONFIGMAP = "d1fence-kubeconfig"
 POLICY_CONFIGMAP = "weirkeeper-policy"
 FENCE_LABEL = "d1fence.logweir.dev/fenced"
 
-# The two source-matched controller images this lab holds, with the commit each
-# one was built from. Asserted against the image's OCI revision label before a
-# single scenario runs: evidence for "the main@4956785 controller" that cannot
-# name the revision it measured is not evidence.
+# The two source-matched controller image PAIRS this lab holds. The second
+# element is the commit the pair must have been built from, or `None` when that
+# commit is discovered rather than written down.
+#
+# `old` is pinned, and stays pinned: `weirkeeper:plat0102-4956785` is a frozen
+# build kept solely so the downgrade rows have something older to swap to. It is
+# never rebuilt, so a constant describes it exactly.
+#
+# `new` is NOT pinned, and the reason is a failure this file caused. Its tags
+# (`weirkeeper:scram-reviewed`, `logweir:scram-local`) are mutable and every lab
+# refresh moves them; a constant written beside them is a claim about a tag that
+# has since changed. lab-refresh-3 refreshed the lab to `c6422a7` and the
+# constant here still said `e7d0e79`, so `assert_source_matched` refused and D1
+# L-05.1-3 could not run at all (lab-refresh-3 §9.1) — the refusal was right and
+# the expectation was stale. The expectation is now taken from the running
+# image's own `org.opencontainers.image.revision` label, and then required to
+# name the commit THIS CHECKOUT is testing: a discovered expectation that agreed
+# with nothing would be no expectation at all. `--fence-revision <sha>` on
+# `run.py` overrides it for a deliberate measurement of some other build.
 IMAGES = {
-    "new": ("weirkeeper:scram-reviewed", "e7d0e790f31796dbe1a80dd8348a7d53c8792596"),
+    "new": ("weirkeeper:scram-reviewed", None),
     "old": ("weirkeeper:plat0102-4956785", "4956785d00d74fe960c84d396d2eff852c68ebd8"),
 }
 RUNNER_IMAGES = {
-    "new": ("logweir:scram-local", "e7d0e790f31796dbe1a80dd8348a7d53c8792596"),
+    "new": ("logweir:scram-local", None),
     "old": ("logweir:plat0102-4956785", "4956785d00d74fe960c84d396d2eff852c68ebd8"),
 }
+
+# Set from `run.py --fence-revision <sha>` / `--fence-old-revision <sha>` before
+# any phase runs. An explicit pin still has to match the image's label: the flag
+# names an expectation, it does not suspend the check.
+REVISION_OVERRIDE: dict[str, str] = {}
+
+# `docker inspect --format '{{index .Config.Labels "..."}}'` prints this when the
+# label is absent. An unlabelled image can never be source-matched.
+NO_LABEL = "<no value>"
 
 
 def policy_json(ns: str) -> str:
@@ -501,21 +525,80 @@ def image_revision(H: Any, image: str) -> str:
     return result.stdout.strip()
 
 
+def checkout_revision(H: Any) -> tuple[str, str]:
+    """The commit this checkout is testing, and the ref that named it.
+
+    `origin/main` before `HEAD`, and deliberately: a harness branch carries
+    test-only commits on top of the build the lab runs, and a HEAD comparison
+    would make every harness change un-runnable against a lab that is otherwise
+    exactly right. `e2e/k8s/d2/d2_live.py::revision_guard` already reads the
+    lab this way; this is the same rule. `HEAD` is the fallback for a checkout
+    with no remote.
+    """
+    for ref in ("origin/main", "HEAD"):
+        result = H.run(["git", "rev-parse", ref], timeout=60, check=False, record=False)
+        if result.returncode == 0 and result.stdout.strip():
+            return result.stdout.strip(), ref
+    raise H.Failure("this checkout resolves neither origin/main nor HEAD; nothing can be source-matched")
+
+
+def expected_revision(H: Any, which: str, observed: str) -> tuple[str, str]:
+    """The revision this run requires, and where that requirement came from.
+
+    Three sources, in order: an explicit `--fence-revision`, the constant beside
+    a frozen image, and — for the mutable `new` tags — the running image's own
+    OCI label. Only the discovered case is cross-checked against the checkout,
+    because it is the only one whose expectation the image itself supplied.
+    """
+    if which in REVISION_OVERRIDE:
+        return REVISION_OVERRIDE[which], "flag"
+    pinned = IMAGES[which][1]
+    if pinned:
+        return pinned, "pinned"
+    if not observed or observed == NO_LABEL:
+        raise H.Failure(
+            f"{IMAGES[which][0]} carries no org.opencontainers.image.revision label, so the "
+            "revision it was built from cannot be discovered; rebuild it with "
+            "`--label org.opencontainers.image.revision=$(git rev-parse HEAD)` or pass "
+            "`--fence-revision <sha>`"
+        )
+    return observed, "label"
+
+
 def assert_source_matched(H: Any, which: str) -> dict[str, str]:
-    image, revision = IMAGES[which]
-    runner, runner_revision = RUNNER_IMAGES[which]
-    out: dict[str, str] = {}
-    for label, (ref, want) in (("controller", (image, revision)), ("runner", (runner, runner_revision))):
-        line = image_revision(H, ref)
-        image_id, _, got = line.partition(" ")
-        if got.strip() != want:
+    """Refuse to measure a build this run cannot name.
+
+    The refusal is unchanged in force and moved in target: it used to compare
+    the image's label with a constant, and now compares it with the commit this
+    checkout is testing. Both images of a pair must carry the same revision —
+    a controller and a runner from different commits are not one build.
+    """
+    observed: dict[str, tuple[str, str, str]] = {}
+    for label, ref in (("controller", IMAGES[which][0]), ("runner", RUNNER_IMAGES[which][0])):
+        image_id, _, got = image_revision(H, ref).partition(" ")
+        observed[label] = (ref, image_id, got.strip())
+    want, source = expected_revision(H, which, observed["controller"][2])
+    out: dict[str, str] = {"revisionSource": source}
+    for label, (ref, image_id, got) in observed.items():
+        if got != want:
             raise H.Failure(
-                f"{label} image {ref} is revision {got.strip()!r}, not {want!r}; "
-                "a run that cannot name the revision it measured is not evidence"
+                f"{label} image {ref} is revision {got!r}, not {want!r} (expected from the "
+                f"{source}); a run that cannot name the revision it measured is not evidence"
             )
         out[f"{label}Image"] = ref
         out[f"{label}ImageId"] = image_id
-        out[f"{label}Revision"] = got.strip()
+        out[f"{label}Revision"] = got
+    checkout, ref_name = checkout_revision(H)
+    out["checkoutRevision"] = checkout
+    out["checkoutRef"] = ref_name
+    if source == "label" and checkout != want:
+        raise H.Failure(
+            f"{IMAGES[which][0]} is revision {want!r} and this checkout ({ref_name}) is "
+            f"{checkout!r}; a run that measures one build and is written against another is "
+            f"not evidence. Rebuild the lab images from {checkout}, or pass "
+            f"`--fence-revision {want}` to say deliberately that {want} is the build under "
+            "test"
+        )
     return out
 
 

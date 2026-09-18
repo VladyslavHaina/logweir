@@ -2939,9 +2939,42 @@ def fence_teardown() -> None:
     log(f"fence teardown: {STATE['environment']['fenceTeardown']}")
 
 
+# `--fence-revision <sha>` / `--fence-old-revision <sha>`: the revision the
+# fenced rows must find on the image pair they swap in. Without them the `new`
+# pair's expectation comes from its own OCI label and must equal this checkout's
+# `origin/main` (fenced.py::assert_source_matched); with them it is whatever the
+# operator names, and the image must still carry it. A flag names an
+# expectation; it never suspends the check.
+FENCE_REVISION_FLAGS = {"--fence-revision": "new", "--fence-old-revision": "old"}
+
+
+def split_fence_flags(argv: list[str]) -> list[str]:
+    """Strip the revision flags out of the phase list, recording each pin."""
+    phases: list[str] = []
+    pending: str | None = None
+    for token in argv:
+        if pending is not None:
+            fenced.REVISION_OVERRIDE[FENCE_REVISION_FLAGS[pending]] = token
+            pending = None
+            continue
+        flag, sep, value = token.partition("=")
+        if flag in FENCE_REVISION_FLAGS:
+            if sep:
+                fenced.REVISION_OVERRIDE[FENCE_REVISION_FLAGS[flag]] = value
+            else:
+                pending = flag
+            continue
+        phases.append(token)
+    if pending is not None:
+        raise SystemExit(f"{pending} needs a commit sha")
+    if fenced.REVISION_OVERRIDE:
+        STATE["environment"]["fenceRevisionOverride"] = dict(fenced.REVISION_OVERRIDE)
+    return phases
+
+
 def main(argv: list[str]) -> int:
     load()
-    phases = argv or ["setup"]
+    phases = split_fence_flags(argv) or ["setup"]
     for phase in phases:
         if phase == "fence-pre":
             fence_pre()
