@@ -889,8 +889,9 @@ under the `OwnerReferencesPermissionEnforcement` admission plugin, which this
 removes the Job, garbage collection removes everything it owns. Each successful
 sync publishes a new set and the previous one ages out.
 
-**How many generations coexist, exactly.** One Job lives per slot, so the number
-alive at once is `ttl / intervalSeconds` — **three** at an hourly cadence, and
+**How many generations coexist, exactly.** At most one Job lives per slot (a
+slot in which a sync finished has no Job of its own), so the number alive at
+once is at most `ttl / intervalSeconds` — **three** at an hourly cadence, and
 **twelve** at `spec.sync.intervalSeconds: 300`, which a CEL rule on the CRD
 enforces as the floor (`intervalSeconds` is `0`, meaning manual only, or at
 least 300). The worst case per catalog is therefore 12 generations × (≤ 8 page
