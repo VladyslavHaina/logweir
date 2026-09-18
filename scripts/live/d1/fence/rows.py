@@ -322,6 +322,34 @@ def seed_legacy_runs(
     }
 
 
+def runs_of(H: Any, name: str, uid: str) -> list[dict[str, Any]]:
+    """Every run of this schedule, in any of the three shapes it can carry.
+
+    `run.py`'s `backups_of` matches `spec.scheduleRef.uid`, which the
+    main@4956785 build does not write: it writes `scheduleRef: {name}` alone and
+    attaches a `BackupSchedule` controller ownerReference — which is precisely
+    the legacy shape the migration exists to detach. A row that swaps to that
+    image and keeps the new membership rule sees none of the runs it just made.
+
+    The three rules are D1 §3.1's own: the UID on the ref (current), the owner
+    entry (pre-upgrade), and the `logweir.dev/schedule-uid` label (migrated).
+    """
+    out = []
+    for backup in H.lst("backups"):
+        ref = backup["spec"].get("scheduleRef") or {}
+        meta = backup["metadata"]
+        owners = [
+            o
+            for o in (meta.get("ownerReferences") or [])
+            if o.get("kind") == "BackupSchedule" and o.get("uid") == uid
+        ]
+        labelled = (meta.get("labels") or {}).get("logweir.dev/schedule-uid") == uid
+        by_name = ref.get("name") == name and meta["name"].startswith(f"logweir-backup-{name}-")
+        if ref.get("uid") == uid or owners or labelled or by_name:
+            out.append(backup)
+    return sorted(out, key=lambda b: b["metadata"]["name"])
+
+
 def schedule_owner(backup: dict[str, Any]) -> list[dict[str, Any]]:
     return [
         o
@@ -973,7 +1001,7 @@ def l_05_1_3(H: Any) -> dict[str, Any]:
     )
     run = H.wait_until(
         lambda: next(
-            (b for b in H.backups_of(uid) if H.terminal(b)),
+            (b for b in runs_of(H, "legacy", uid) if H.terminal(b)),
             None,
         ),
         timeout=600,
@@ -991,7 +1019,7 @@ def l_05_1_3(H: Any) -> dict[str, Any]:
     backup_uid = pre["backup"]["metadata"]["uid"]
     spec_before = json.dumps(pre["backup"]["spec"], sort_keys=True)
     status_before = json.dumps(pre["backup"].get("status"), sort_keys=True)
-    slots_before = attempt_zero_slots(H.backups_of(uid))
+    slots_before = attempt_zero_slots(runs_of(H, "legacy", uid))
 
     new = fenced.swap_image(H, "new")
     after_schedule = H.wait_for(
@@ -1018,7 +1046,7 @@ def l_05_1_3(H: Any) -> dict[str, Any]:
         lambda: next(
             (
                 b
-                for b in H.backups_of(uid)
+                for b in runs_of(H, "legacy", uid)
                 if b["spec"].get("slot") not in set(slots_before)
                 and int((b["spec"].get("trigger") or {}).get("attempt", 0)) == 0
             ),
