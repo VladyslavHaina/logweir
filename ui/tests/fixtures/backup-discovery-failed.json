@@ -1,0 +1,63 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "Backup",
+  "metadata": {
+    "creationTimestamp": "2026-09-18T03:28:17Z",
+    "generation": 1,
+    "labels": {
+      "d1.logweir.dev/run": "20260918t0330z",
+      "logweir.dev/test-owner": "d1w8"
+    },
+    "name": "dyn-run",
+    "namespace": "d1w8-20260918t0330z",
+    "resourceVersion": "2587258",
+    "uid": "1188ac2c-65dd-4cde-a5b9-c6277c7954d2"
+  },
+  "spec": {
+    "allUserTopics": {
+      "exclude": {
+        "prefixes": [
+          "pfx-"
+        ],
+        "topics": [
+          "skip-me"
+        ]
+      },
+      "incompleteDiscovery": "BackUpVisibleTopics"
+    },
+    "archive": {
+      "url": "logweir-destination://dest"
+    },
+    "deadlineSeconds": 600,
+    "destinationRef": {
+      "name": "dest"
+    },
+    "sourceRef": {
+      "name": "source"
+    },
+    "topics": [],
+    "triggeredBy": "manual"
+  },
+  "status": {
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-18T03:33:18.019110254Z",
+        "message": "the topic discovery Job lwd-1188ac2c-65dd-4cde-a5b9-c6277c7954d2 for dyn-run did not produce a usable result (DeadlineExceeded): the check Job reached its activeDeadlineSeconds",
+        "observedGeneration": 1,
+        "reason": "DiscoveryFailed",
+        "status": "True",
+        "type": "Failed"
+      },
+      {
+        "lastTransitionTime": "2026-09-18T03:33:18.019110254Z",
+        "message": "the topic discovery Job [redacted] for dyn-run did not produce a usable result (DeadlineExceeded): the check Job reached its activeDeadlineSeconds",
+        "observedGeneration": 1,
+        "reason": "DiscoveryFailed",
+        "status": "False",
+        "type": "TopicsResolved"
+      }
+    ],
+    "exitReason": "operational",
+    "phase": "Failed"
+  }
+}

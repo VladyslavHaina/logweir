@@ -1,0 +1,83 @@
+{
+  "item": {
+    "activeDeadlineSeconds": 600,
+    "archive": {
+      "url": "logweir-destination://dest"
+    },
+    "catchUpPolicy": "Latest",
+    "concurrencyPolicy": "Forbid",
+    "createdAt": "2026-09-18T03:19:36Z",
+    "destinationRef": {
+      "name": "dest"
+    },
+    "generation": 7,
+    "name": "tz",
+    "namespace": "d1w8-20260918t0330z",
+    "preset": {
+      "hour": 2,
+      "kind": "daily",
+      "minute": 0
+    },
+    "resourceVersion": "2583966",
+    "retry": {
+      "delaySeconds": 60,
+      "maxRetries": 2
+    },
+    "schedule": "0 2 * * *",
+    "sourceRef": {
+      "name": "source"
+    },
+    "startingDeadlineSeconds": 900,
+    "status": {
+      "activeRuns": [],
+      "lastFireTime": "2026-09-18T03:22:00Z",
+      "lastMissedSlot": "20260917-032200",
+      "nextFireTime": "2026-09-19T03:22:00Z",
+      "nextRuns": [
+        {
+          "at": "2026-09-19T03:22:00Z",
+          "localTime": "2026-09-19T09:07:00+05:45"
+        },
+        {
+          "at": "2026-09-20T03:22:00Z",
+          "localTime": "2026-09-20T09:07:00+05:45"
+        },
+        {
+          "at": "2026-09-21T03:22:00Z",
+          "localTime": "2026-09-21T09:07:00+05:45"
+        },
+        {
+          "at": "2026-09-22T03:22:00Z",
+          "localTime": "2026-09-22T09:07:00+05:45"
+        },
+        {
+          "at": "2026-09-23T03:22:00Z",
+          "localTime": "2026-09-23T09:07:00+05:45"
+        }
+      ],
+      "observedGeneration": 7,
+      "policy": {
+        "effectiveSince": "2026-09-18T03:19:36.194183971Z",
+        "evaluatedAt": "2026-09-18T03:22:36.260140346Z",
+        "generation": 7,
+        "runPolicySha256": "sha256:9ef58d8263c0dad64731cdf35d6950829558ea7b8593d4bf4b6c2eabe1847565",
+        "timeZone": "Asia/Kathmandu",
+        "tzdb": "chrono-tz 0.10.4"
+      },
+      "ready": {
+        "lastTransitionTime": "2026-09-18T03:22:06.230022763Z",
+        "message": "slot 20260918-032200 was fired at 2026-09-18T03:22:00Z; nothing further is due, and the next firing is 2026-09-19T03:22:00Z",
+        "reason": "Scheduled",
+        "status": "True",
+        "type": "Ready"
+      }
+    },
+    "suspended": false,
+    "timeZone": "Asia/Kathmandu",
+    "topics": [
+      "t1"
+    ],
+    "uid": "da5684b3-4f07-45a6-9fb9-1bed7222021c"
+  },
+  "requestId": "01M2QRB8TMSFV19CVBADPCMD1B"
+}

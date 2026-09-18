@@ -1,0 +1,131 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "BackupSchedule",
+  "metadata": {
+    "creationTimestamp": "2026-09-18T03:19:36Z",
+    "generation": 1,
+    "labels": {
+      "d1.logweir.dev/run": "20260918t0330z",
+      "logweir.dev/test-owner": "d1w8"
+    },
+    "name": "tz",
+    "namespace": "d1w8-20260918t0330z",
+    "resourceVersion": "2583966",
+    "uid": "da5684b3-4f07-45a6-9fb9-1bed7222021c"
+  },
+  "spec": {
+    "activeDeadlineSeconds": 600,
+    "archive": {
+      "url": "logweir-destination://dest"
+    },
+    "concurrencyPolicy": "Forbid",
+    "destinationRef": {
+      "name": "dest"
+    },
+    "schedule": "7 9 * * *",
+    "sourceRef": {
+      "name": "source"
+    },
+    "suspend": false,
+    "timeZone": "Asia/Kathmandu",
+    "topics": [
+      "t1"
+    ]
+  },
+  "status": {
+    "activeRuns": [],
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-18T03:22:06.230022763Z",
+        "message": "slot 20260918-032200 was fired at 2026-09-18T03:22:00Z; nothing further is due, and the next firing is 2026-09-19T03:22:00Z",
+        "observedGeneration": 1,
+        "reason": "Scheduled",
+        "status": "True",
+        "type": "Ready"
+      },
+      {
+        "lastTransitionTime": "2026-09-18T03:22:06.230022763Z",
+        "message": "History is retained: no run is owned by this schedule, so deleting it leaves all 0 run(s), their plan ConfigMaps and their archives in place.",
+        "observedGeneration": 1,
+        "reason": "Retained",
+        "status": "True",
+        "type": "HistoryRetained"
+      }
+    ],
+    "history": {
+      "estimatedBytes": 0,
+      "inventoriedAt": "2026-09-18T03:19:36.194183971Z",
+      "legacyMigratableRuns": 0,
+      "legacyOwnedRuns": 0,
+      "ownershipScanComplete": true,
+      "runCount": 0,
+      "runCountCapped": false
+    },
+    "lastFireTime": "2026-09-18T03:22:00Z",
+    "lastMissedSlot": "20260917-032200",
+    "lastSlot": {
+      "attempt": 0,
+      "backupRef": {
+        "name": "logweir-backup-tz-20260918-032200"
+      },
+      "decidedAt": "2026-09-18T03:22:06.230022763Z",
+      "disposition": "Admitted",
+      "dueAt": "2026-09-18T03:22:00Z",
+      "reason": "Scheduled",
+      "slot": "20260918-032200"
+    },
+    "missedSlots": {
+      "count": 1,
+      "countCapped": false,
+      "lastEvaluatedSlot": "20260918-032200",
+      "recent": [
+        {
+          "reason": "PastStartingDeadline",
+          "recordedAt": "2026-09-18T03:19:36.194183971Z",
+          "slot": "20260917-032200"
+        }
+      ]
+    },
+    "nextFireTime": "2026-09-19T03:22:00Z",
+    "nextRuns": [
+      {
+        "at": "2026-09-19T03:22:00Z",
+        "localTime": "2026-09-19T09:07:00+05:45"
+      },
+      {
+        "at": "2026-09-20T03:22:00Z",
+        "localTime": "2026-09-20T09:07:00+05:45"
+      },
+      {
+        "at": "2026-09-21T03:22:00Z",
+        "localTime": "2026-09-21T09:07:00+05:45"
+      },
+      {
+        "at": "2026-09-22T03:22:00Z",
+        "localTime": "2026-09-22T09:07:00+05:45"
+      },
+      {
+        "at": "2026-09-23T03:22:00Z",
+        "localTime": "2026-09-23T09:07:00+05:45"
+      }
+    ],
+    "observedGeneration": 1,
+    "policy": {
+      "effectiveSince": "2026-09-18T03:19:36.194183971Z",
+      "evaluatedAt": "2026-09-18T03:22:36.260140346Z",
+      "generation": 1,
+      "runPolicySha256": "sha256:9ef58d8263c0dad64731cdf35d6950829558ea7b8593d4bf4b6c2eabe1847565",
+      "timeZone": "Asia/Kathmandu",
+      "tzdb": "chrono-tz 0.10.4"
+    },
+    "retentionReport": {
+      "awsCli": [],
+      "evaluatedAt": "2026-09-18T03:19:36.194183971Z",
+      "mcCli": [],
+      "note": "this schedule writes to a saved BackupDestination, and the controller's single archive handle only evaluates schedules that do not name one; retention for this destination is reported by a RetentionPolicy",
+      "setsKept": [],
+      "setsThatWouldBeRemoved": [],
+      "skipped": []
+    }
+  }
+}

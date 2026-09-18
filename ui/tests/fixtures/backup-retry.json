@@ -1,0 +1,104 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "Backup",
+  "metadata": {
+    "creationTimestamp": "2026-09-18T05:07:45Z",
+    "generation": 1,
+    "labels": {
+      "logweir.dev/attempt": "1",
+      "logweir.dev/schedule": "retry",
+      "logweir.dev/schedule-uid": "f3430cc7-dff4-4263-9150-6f1ef1aec966",
+      "logweir.dev/slot": "20260918-050600",
+      "logweir.dev/trigger": "retry"
+    },
+    "name": "logweir-backup-retry-20260918-050600-r1",
+    "namespace": "d1w8-20260918t0330z",
+    "resourceVersion": "2684621",
+    "uid": "257e18f0-0baf-41f3-a23c-0fce875aba0f"
+  },
+  "spec": {
+    "archive": {
+      "url": "logweir-destination://dest"
+    },
+    "deadlineSeconds": 300,
+    "destinationRef": {
+      "name": "dest"
+    },
+    "scheduleRef": {
+      "generation": 1,
+      "name": "retry",
+      "runPolicySha256": "sha256:5221d2fdeb130d0b4a9bdb34dcb45e80cd2650c3e5b4dbfa4dbea68b1a57d8b3",
+      "uid": "f3430cc7-dff4-4263-9150-6f1ef1aec966"
+    },
+    "slot": "20260918-050600",
+    "sourceRef": {
+      "name": "source"
+    },
+    "topics": [
+      "t1"
+    ],
+    "trigger": {
+      "attempt": 1,
+      "kind": "Retry",
+      "retryOf": {
+        "name": "logweir-backup-retry-20260918-050600"
+      }
+    },
+    "triggeredBy": "schedule"
+  },
+  "status": {
+    "backupId": "f3430cc7-dff4-4263-9150-6f1ef1aec966-20260918-050600-r1",
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-18T05:08:09.861139333Z",
+        "message": "the runner exited 1 (operational); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+        "observedGeneration": 1,
+        "reason": "Operational",
+        "status": "True",
+        "type": "Failed"
+      },
+      {
+        "lastTransitionTime": "2026-09-18T05:07:47.490792129Z",
+        "message": "the `runner` container has been seen running or terminated",
+        "observedGeneration": 1,
+        "reason": "RunnerStarted",
+        "status": "True",
+        "type": "RunnerReady"
+      }
+    ],
+    "execution": {
+      "id": "f3430cc7-dff4-4263-9150-6f1ef1aec966-20260918-050600-r1",
+      "inputsRef": {
+        "name": "logweir-backup-retry-20260918-050600-r1-plan"
+      },
+      "inputsSha256": "sha256:9158800a499cff5f691ed9bb4dec79fe27892f551c961f3a973dd7e86a3529e3"
+    },
+    "exitCode": 1,
+    "exitReason": "operational",
+    "jobRef": {
+      "name": "logweir-backup-retry-20260918-050600-r1"
+    },
+    "phase": "Failed",
+    "progress": {
+      "lastTransitionTime": "2026-09-18T05:08:09.861139333Z",
+      "message": "the runner exited 1 (operational); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+      "reason": "Operational",
+      "runner": {
+        "containerState": "Terminated",
+        "jobName": "logweir-backup-retry-20260918-050600-r1",
+        "podName": "logweir-backup-retry-20260918-050600-r1-wschq",
+        "podPhase": "Failed",
+        "scheduled": true,
+        "startedAt": "2026-09-18T05:07:45Z",
+        "waitingReason": "ContainerCreating"
+      },
+      "stage": "Finished"
+    },
+    "selection": {
+      "coverage": "NamedTopics",
+      "mode": "SelectedTopics",
+      "resolvedTopicBytes": 2,
+      "resolvedTopicCount": 1
+    }
+  }
+}

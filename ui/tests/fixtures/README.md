@@ -93,6 +93,50 @@ never computes a cadence, it renders what the controller or the API returned). `
 it is the drift bait: parameter ranges alone would still match a `compile` that put the fields in
 the wrong order.
 
+## The D1 W7 fixtures: where every byte came from
+
+The nine fixtures `ui/tests/d1.spec.js` reads are captures, and each one names its capture.
+
+**The five console answers are the bytes `logweir-api` returned in D1 W6's live localAdmin smoke**
+(`/tmp/logweir-roadmap-run/claude/artifacts/d1w6/`, namespace `lw-d1w6-20260917131854`), with the
+trailing `HTTP <status>` line of the capture file removed and nothing else changed:
+
+| fixture | capture | what it is |
+|---|---|---|
+| `console/cadence-preview-repeated.json` | `s1-preview-berlin-fallback.json` | `30 2 * * *` in `Europe/Berlin` across 2026-10-25: **two** firings of one local time, `+02:00` then `+01:00`, marked `RepeatedLocalTimeFirst` and `RepeatedLocalTimeSecond` |
+| `console/cadence-preview-gap.json` | `s1b-preview-berlin-gap.json` | the same expression across 2027-03-28: `NonexistentLocalTimeShifted`, at the end of the gap |
+| `console/manual-backup.json` | `s2-create.json` | `201` from `POST .../backups`, with the run, its `trigger`, the copied `scheduleRef` and the schedule's own suspended state |
+| `console/manual-backup-replayed.json` | `s3-replay.json` | `200` with `replayed: true` and **the same uid** -- the second click, live |
+| `console/problem-policy-changed.json` | `s6-policy-changed.json` | `409 policy_changed` with its one extension member, `policy.currentGeneration` |
+
+**The two console schedules are the live `BackupSchedule` from D1 W8's acceptance run**
+(`artifacts/d1-live/20260918t0330z/objects/L-04-1/tz.json`, namespace `d1w8-20260918t0330z`),
+projected into the shape `schemas/logweir-api-v1.openapi.json` publishes -- the same values, in
+the API's spelling. `schedule-policy.json` is that object with `startingDeadlineSeconds`,
+`catchUpPolicy` and `retry` set, so the form has every field to render; `schedule-preset.json` is
+the same schedule at generation 7 whose expression the API matched to the `daily` preset, which is
+what makes the form open on a preset rather than on Advanced cron. `session-manual-backups.json`
+is `session.json` with `manualBackupCreate` flipped to `true` -- the flag D1 W6 turned from
+permanently `false` into `implemented && allowed`; both values are answers this build sends.
+
+**The legacy custom resources are copied whole** from the same acceptance run, with only the
+volatile `metadata` keys dropped:
+
+| fixture | capture |
+|---|---|
+| `schedule-policy.json` | `L-04-1/tz.json`: `timeZone: Asia/Kathmandu`, five `nextRuns` with their `+05:45` local times, `status.policy`, `lastSlot` (`Admitted`), `missedSlots` (one, `PastStartingDeadline`) |
+| `backup-retry.json` | `L-04-4/r1.json`: `trigger {kind: Retry, attempt: 1, retryOf}` |
+| `backup-catchup.json` | `20260918t1209z/L-04-2/catchUp.json`: `trigger {kind: CatchUp}` |
+| `backup-discovery-failed.json` | `L-09-1/failure.json`: `TopicsResolved=False`, reason `DiscoveryFailed`, with the controller's own message |
+
+**One fixture is not a capture, and this is the disclosure.** `backup-visible-only.json` is
+`L-09-1/failure.json`'s object -- a real dynamic run, with its real `spec.allUserTopics` -- whose
+`status` carries a `selection` block filled in from the CRD's own declared shape. No live run
+reached `coverage: VisibleUserTopicsOnly`: D1's L-09-5 (the ACL-limited row) is the scenario that
+produces one, and W8's dynamic runs ended at their discovery deadline instead. It is the only
+place in the D1 W7 fixtures where a VALUE was not observed; the shape is the CRD's and
+`config/crd/backups.yaml` is where each field of it is declared.
+
 ## The preview fixtures
 
 `preview/` is what `ui/tests/preview-server.js` answers the page's API reads from, and nothing in

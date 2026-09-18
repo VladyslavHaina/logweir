@@ -1,0 +1,12 @@
+{
+  "code": "policy_changed",
+  "detail": "The schedule's policy changed after the revision this request named. Read the schedule again; confirming runs the new revision under a new Idempotency-Key.",
+  "policy": {
+    "currentGeneration": 1
+  },
+  "requestId": "01M2QRC48DE9V331YHZ68XN04C",
+  "retryable": false,
+  "status": 409,
+  "title": "Schedule policy changed",
+  "type": "https://logweir.dev/problems/policy-changed"
+}

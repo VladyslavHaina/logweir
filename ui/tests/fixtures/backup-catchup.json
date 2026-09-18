@@ -1,0 +1,145 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "Backup",
+  "metadata": {
+    "creationTimestamp": "2026-09-18T12:45:25Z",
+    "generation": 1,
+    "labels": {
+      "logweir.dev/attempt": "0",
+      "logweir.dev/schedule": "dt-latest",
+      "logweir.dev/schedule-uid": "6175d649-d031-4ccc-8988-af9d3f8944af",
+      "logweir.dev/slot": "20260918-124400",
+      "logweir.dev/trigger": "catch-up"
+    },
+    "name": "logweir-backup-dt-latest-20260918-124400",
+    "namespace": "d1fence-20260918t1209z",
+    "resourceVersion": "2744711",
+    "uid": "84a4eff3-7df0-450a-b875-6267f56468f0"
+  },
+  "spec": {
+    "archive": {
+      "secretRef": {
+        "name": "logweir-s3"
+      },
+      "url": "s3://d1-archive/fence/dt-latest"
+    },
+    "deadlineSeconds": 600,
+    "scheduleRef": {
+      "generation": 1,
+      "name": "dt-latest",
+      "runPolicySha256": "sha256:ac1ea3c3e0d5c6fece20bb70edc7897e2c12650788ad28dcd73979f3c5efdca0",
+      "uid": "6175d649-d031-4ccc-8988-af9d3f8944af"
+    },
+    "slot": "20260918-124400",
+    "sourceRef": {
+      "name": "source"
+    },
+    "topics": [
+      "t1"
+    ],
+    "trigger": {
+      "attempt": 0,
+      "kind": "CatchUp"
+    },
+    "triggeredBy": "schedule"
+  },
+  "status": {
+    "backupId": "6175d649-d031-4ccc-8988-af9d3f8944af-20260918-124400",
+    "capture": {
+      "finishedAt": "2026-09-18T12:45:28.035864757Z",
+      "startedAt": "2026-09-18T12:45:27.526529173Z"
+    },
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-18T12:45:30.971732842Z",
+        "message": "the runner exited 0 (ok); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+        "observedGeneration": 1,
+        "reason": "Ok",
+        "status": "True",
+        "type": "Complete"
+      },
+      {
+        "lastTransitionTime": "2026-09-18T12:45:30.971732842Z",
+        "message": "both `receipt-key=` and `sidecar-key=` were read off the pod log and are on status.evidence",
+        "observedGeneration": 1,
+        "reason": "EvidenceKeysRecorded",
+        "status": "True",
+        "type": "EvidenceRecorded"
+      },
+      {
+        "lastTransitionTime": "2026-09-18T12:45:28.904186216Z",
+        "message": "the `runner` container has been seen running or terminated",
+        "observedGeneration": 1,
+        "reason": "RunnerStarted",
+        "status": "True",
+        "type": "RunnerReady"
+      },
+      {
+        "lastTransitionTime": "2026-09-18T12:45:30.971732842Z",
+        "message": "verified by weirkeeper at 2026-09-18T12:45:31Z against key 2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe",
+        "observedGeneration": 1,
+        "reason": "Verified",
+        "status": "True",
+        "type": "Verified"
+      }
+    ],
+    "evidence": {
+      "receiptKey": "logweir/backups/6175d649-d031-4ccc-8988-af9d3f8944af-20260918-124400/01M2T8SRVZP53QWMYT6813BDAB.receipt.json",
+      "receiptSha256": "sha256:881a973aadca51bf66c4cfb6125c7389d0b80c37719cf6e046e2b27a7d3d5148",
+      "sidecarKey": "logweir/backups/6175d649-d031-4ccc-8988-af9d3f8944af-20260918-124400/01M2T8SRVZP53QWMYT6813BDAB.receipt.sig",
+      "verification": {
+        "matchedKeyId": "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe",
+        "payloadType": "application/vnd.logweir.backup-receipt+json;version=1.0.0",
+        "result": "Valid",
+        "signedAt": "2026-09-18T12:45:28Z",
+        "trust": {
+          "basis": "Current",
+          "keyState": "Active",
+          "policy": {
+            "name": "legacy-roster-v1"
+          }
+        },
+        "verifiedAt": "2026-09-18T12:45:31Z"
+      }
+    },
+    "execution": {
+      "id": "6175d649-d031-4ccc-8988-af9d3f8944af-20260918-124400",
+      "inputsRef": {
+        "name": "logweir-backup-dt-latest-20260918-124400-plan"
+      },
+      "inputsSha256": "sha256:b0ccfdc1323681bec5a97d6a65fb8225fa2996488f56ab92ed00737ab5347aeb"
+    },
+    "exitCode": 0,
+    "exitReason": "ok",
+    "jobRef": {
+      "name": "logweir-backup-dt-latest-20260918-124400"
+    },
+    "phase": "Succeeded",
+    "progress": {
+      "lastTransitionTime": "2026-09-18T12:45:30.971732842Z",
+      "message": "the runner exited 0 (ok); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+      "reason": "Ok",
+      "runner": {
+        "containerState": "Terminated",
+        "jobName": "logweir-backup-dt-latest-20260918-124400",
+        "podName": "logweir-backup-dt-latest-20260918-124400-wpzbj",
+        "podPhase": "Succeeded",
+        "scheduled": true,
+        "startedAt": "2026-09-18T12:45:27Z",
+        "waitingReason": "ContainerCreating"
+      },
+      "stage": "Finished"
+    },
+    "records": 5,
+    "selection": {
+      "coverage": "NamedTopics",
+      "mode": "SelectedTopics",
+      "resolvedTopicBytes": 2,
+      "resolvedTopicCount": 1
+    },
+    "windowCovered": {
+      "fromMs": 1789733419877,
+      "toMs": 1789733419892
+    }
+  }
+}

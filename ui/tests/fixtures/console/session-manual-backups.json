@@ -1,0 +1,59 @@
+{
+  "actor": {
+    "displayName": "Local administrator",
+    "id": "localAdmin#admin",
+    "issuer": "localAdmin",
+    "subject": "admin"
+  },
+  "authenticationMode": "localAdmin",
+  "bindingRevision": "",
+  "capabilities": {
+    "approvalPacketRead": true,
+    "approvalSubmit": false,
+    "approvalsRead": true,
+    "backupsRead": true,
+    "connectionCreate": true,
+    "connectionTest": false,
+    "connectionsRead": true,
+    "credentialWrite": true,
+    "destinations": true,
+    "manualBackupCreate": true,
+    "operationEvents": false,
+    "operationsRead": true,
+    "preflight": true,
+    "restoreCreate": true,
+    "restoresRead": true,
+    "scheduleCreate": true,
+    "scheduleSetSuspension": true,
+    "schedulesRead": true,
+    "topicDiscovery": true
+  },
+  "namespaces": [
+    {
+      "capabilities": {
+        "approvalPacketRead": true,
+        "approvalSubmit": false,
+        "approvalsRead": true,
+        "backupsRead": true,
+        "connectionCreate": true,
+        "connectionTest": false,
+        "connectionsRead": true,
+        "credentialWrite": true,
+        "destinations": true,
+        "manualBackupCreate": true,
+        "operationEvents": false,
+        "operationsRead": true,
+        "preflight": true,
+        "restoreCreate": true,
+        "restoresRead": true,
+        "scheduleCreate": true,
+        "scheduleSetSuspension": true,
+        "schedulesRead": true,
+        "topicDiscovery": true
+      },
+      "name": "team-a",
+      "roles": []
+    }
+  ],
+  "requestId": "01M2N5SHWR0N2E7SDCW2H22Z8W"
+}

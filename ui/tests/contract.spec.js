@@ -184,13 +184,27 @@ const CONSOLE_FIXTURES = [
   ["detail-page.json", "DetailPageResponse"],
   ["problem-legacy-unknown.json", "Problem"],
   ["problem-rotation-conflict.json", "Problem"],
+
+  // D1 W7: the cadence policy, its previews and a manual run. The five
+  // console answers here are the BYTES `logweir-api` returned in D1 W6's live
+  // smoke (`artifacts/d1w6/s1`, `s1b`, `s2`, `s3`, `s6`); the two schedules
+  // are the live `BackupSchedule` from D1 W8's run projected into the shape
+  // this document publishes. See `ui/tests/fixtures/README.md`.
+  ["session-manual-backups.json", "SessionResponse"],
+  ["schedule-policy.json", "ScheduleResponse"],
+  ["schedule-preset.json", "ScheduleResponse"],
+  ["cadence-preview-repeated.json", "CadencePreviewResponse"],
+  ["cadence-preview-gap.json", "CadencePreviewResponse"],
+  ["manual-backup.json", "ManualBackupResponse"],
+  ["manual-backup-replayed.json", "ManualBackupResponse"],
+  ["problem-policy-changed.json", "Problem"],
 ];
 
 test("console_fixtures_are_instances_of_the_published_schema", () => {
   // AN EQUALITY, NOT A FLOOR (review F8). A floor stays green when a fixture is
   // deleted together with the row that used it, which is exactly the change
   // this arm exists to notice.
-  assert.equal(CONSOLE_FIXTURES.length, 44, "the console fixture set covers both halves");
+  assert.equal(CONSOLE_FIXTURES.length, 52, "the console fixture set covers both halves");
   for (const [name, schema] of CONSOLE_FIXTURES) {
     assert.ok(DEFINITIONS[schema] !== undefined, schema + " is published");
     const findings = [];

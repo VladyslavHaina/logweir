@@ -1,0 +1,52 @@
+{
+  "item": {
+    "archive": {
+      "credentialRef": {
+        "name": "logweir-s3"
+      },
+      "url": "s3://kafka-backups/logweir"
+    },
+    "createdAt": "2026-09-17T13:19:37Z",
+    "deadlineSeconds": 3600,
+    "name": "logweir-manual-pehgrdiecje5dy3a5ze2mmbglq",
+    "namespace": "lw-d1w6-20260917131854",
+    "operation": {
+      "state": "refused",
+      "stateReason": "ReferentNotFound",
+      "terminal": true,
+      "verificationState": "noEvidence",
+      "verifiedSuccess": false
+    },
+    "resourceVersion": "2494333",
+    "schedule": "nightly",
+    "scheduleRef": {
+      "generation": 1,
+      "name": "nightly",
+      "runPolicySha256": "sha256:0bc972dc35e876abb576f8213bab3c88ee8a6bdd5f80286e518405c666219ac5",
+      "uid": "73ce6531-c0c1-4430-ae81-971e99bca975"
+    },
+    "sourceRef": {
+      "name": "source"
+    },
+    "topics": [
+      "orders",
+      "payments"
+    ],
+    "trigger": {
+      "attempt": 0,
+      "kind": "Manual"
+    },
+    "triggeredBy": "manual",
+    "uid": "bf50a90d-93c4-4e9f-aa04-ace937808841"
+  },
+  "replayed": true,
+  "requestId": "01M2QRBKM1V3NVGYCBXFY2FRRM",
+  "schedule": {
+    "activeRuns": [],
+    "generation": 1,
+    "name": "nightly",
+    "runPolicySha256": "sha256:0bc972dc35e876abb576f8213bab3c88ee8a6bdd5f80286e518405c666219ac5",
+    "suspended": true,
+    "uid": "73ce6531-c0c1-4430-ae81-971e99bca975"
+  }
+}
