@@ -75,7 +75,7 @@ pub const MAX_CHECK_TIMEOUT_SECONDS: u32 = 600;
 /// answers. `weirkeeper::controllers::recovery_catalog::SYNC_TIMEOUT_SECONDS`
 /// is 900, which the single 600-second ceiling would have refused at step 4
 /// with `CheckContractMismatch` — every sync Job, on every cadence, before a
-/// credential was read. `the_controllers_sync_plan_is_one_this_runner_accepts`
+/// credential was read. `the_controllers_sync_plan_is_one_the_runner_accepts`
 /// is the guard that would have caught it.
 pub const MAX_CATALOG_SYNC_TIMEOUT_SECONDS: u32 = 1800;
 
@@ -1163,7 +1163,8 @@ impl CheckPlan {
                     return Err(CheckPlanError::field(
                         "request.catalogSync.maxObjectsPerRun",
                         format!(
-                            "{} is outside                              {MIN_CATALOG_OBJECTS_PER_RUN}..={MAX_CATALOG_OBJECTS_PER_RUN}",
+                            "{} is outside \
+                             {MIN_CATALOG_OBJECTS_PER_RUN}..={MAX_CATALOG_OBJECTS_PER_RUN}",
                             r.max_objects_per_run
                         ),
                     ));

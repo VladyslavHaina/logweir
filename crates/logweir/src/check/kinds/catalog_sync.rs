@@ -57,13 +57,20 @@
 //! `EvidenceObjectResult::key`, for the same reason, and it is bounded the
 //! same way:
 //!
-//! * every string copied out of the archive passes [`redact_reference`], which
-//!   is every redaction rule EXCEPT the long-run one — so a `s3://k:secret@b`
-//!   location or an `AKIA…` inside a key is still removed;
-//! * the two FREE-TEXT fields, an entry's `remedy` and a signer's
-//!   `principalHint`, pass the whole `check_contract::redact`, cap included;
-//! * nothing else is emitted. The remedies are a fixed table in this file and
-//!   carry no adopter bytes at all.
+//! * the THREE values that are 40-plus hex by definition — `receiptSha256`,
+//!   `manifestSha256` and `signerKeyId` — pass [`redact_digest`], which is
+//!   every rule EXCEPT the long-run one, so a `s3://k:secret@b` shape or an
+//!   `AKIA…` is still removed from them;
+//! * object keys and the `s3://bucket/prefix` location pass
+//!   [`crate::check::redact_path`], whose long-run clause is applied per path
+//!   SEGMENT — applying it whole would redact an ordinary archive key;
+//! * **everything else copied out of the archive passes the whole
+//!   `check_contract::redact`**, long-run clause included: a `pointId` is 37
+//!   characters and a `backupId` or `runId` shorter still, so the clause costs
+//!   nothing there and catches a credential planted in one;
+//! * the entry's `remedy` is a fixed table in this file and a signer's
+//!   `principalHint` is never emitted at all, so no adopter free text is
+//!   relayed.
 //!
 //! # Budgets
 //!
@@ -93,7 +100,7 @@ use super::Wiring;
 use crate::catalog::reader::{self, CrossCheck, RecordVerdict};
 use crate::catalog::record::{self, CatalogPoint};
 use crate::check::store::{self as check_store, ObjectAccess};
-use crate::check::{catalogue, Deadline, Emission};
+use crate::check::{catalogue, redact_path, Deadline, Emission};
 
 // ===========================================================================
 // The grammar — the spellings `weirkeeper::catalog_view` parses
@@ -147,22 +154,40 @@ pub const PAGE_ENTRY_TARGET: usize = 1_000;
 // The walk's own bounds
 // ===========================================================================
 
-/// How many day shards back an `Index` walk looks when no cursor names a
-/// floor.
+/// The most day shards one `Index` walk lists.
 ///
-/// FOUR HUNDRED, the same number `status.histogram` can carry, so a first sync
-/// of an archive with a year of history publishes a histogram that is not
-/// already truncated by the walk.
-pub const DEFAULT_LOOKBACK_DAYS: i64 = 400;
+/// TEN YEARS OF DAYS. It is a bound on REQUESTS and not on correctness: the
+/// walk's floor is the archive's own oldest day (see [`archive_floor`]), so an
+/// archive inside this bound is walked whole in one sync and reports
+/// `complete: true` whatever its age. A walk that hits this stops, says
+/// `complete: false`, names `catalogShardBudgetReached` on its row, and leaves
+/// the day it stopped at in the cursor.
+///
+/// **It replaced a 1 000-day cap that was a correctness bound, and that cap was
+/// review finding F3.** The floor used to be derived from the previous walk's
+/// reported cursor minus a day, so it receded one day per sync; once it passed
+/// 1 000 days the loop could never reach it, `complete` was never true again,
+/// and every sync published `ScanIncomplete` — "the object budget ran out" — on
+/// a healthy, fully-walked archive whose budget was never touched. A floor read
+/// FROM THE ARCHIVE cannot recede.
+pub const MAX_SHARDS_PER_SYNC: i64 = 3_660;
 
-/// The hard ceiling on day shards examined in one `Index` walk, whatever the
-/// cursor says.
+/// How many objects one point's examination may spend: the record, the
+/// receipt, its sidecar and the manifest.
 ///
-/// An empty shard costs one `list` and a catalog whose newest point is five
-/// years old would otherwise spend a whole sync listing nothing. The walk
-/// stops and says `complete: false`, which is the honest answer and the one
-/// that leaves a cursor to resume from.
-pub const MAX_LOOKBACK_DAYS: i64 = 1_000;
+/// The walk checks it can afford ALL FOUR before it starts a point, so a point
+/// is either examined whole or not begun. That is review finding **F5**: a
+/// point abandoned half way used to be reported `Unreadable`, whose remedy
+/// names the grant and the network, and whose bucket the controller reads as
+/// `PartialScan` — "a permission or transport failure" — for what is the
+/// designed, normal state of a budget-bounded walk.
+pub const OBJECTS_PER_POINT: i64 = 4;
+
+/// How many keys the floor listing asks for.
+///
+/// EIGHT, not one, so that "the oldest day" is a minimum this function takes
+/// rather than a position in a page — see [`archive_floor`].
+pub const ARCHIVE_FLOOR_PAGE_KEYS: usize = 8;
 
 /// How many keys one day shard's listing asks for.
 ///
@@ -398,24 +423,32 @@ pub struct CursorReport {
 /// two strings are equal.
 pub const LONG_RUN_RULE: &str = "long-base64-or-hex-run";
 
-/// Every redaction rule EXCEPT the long-run one, over a value that is a
-/// reference or a digest.
+/// Every redaction rule EXCEPT the long-run one — for a **DIGEST**, and for
+/// nothing else.
 ///
-/// # Why the long-run rule is the one that is dropped
+/// # Why the long-run rule is dropped, and why only here
 ///
 /// It removes any base64-or-hex run of 40 characters or more, and a
-/// `sha256:<64 hex>` binding, a 64-hex signer key id and a 32-hex point id
-/// suffix are exactly that shape. Applying it would delete the three fields a
-/// later restore re-checks and leave a body the controller cannot use. Every
-/// other rule — PEM blocks, S3 XML bodies, URL userinfo, `secret…=value` forms
-/// and `AKIA`/`ASIA` key ids — is applied WHOLE and unweakened, so a location
-/// or a key that really does carry a credential shape is still removed.
+/// `sha256:<64 hex>` binding and a 64-hex signer key id are exactly that shape.
+/// Applying it would delete the fields a later restore re-checks and leave a
+/// body the controller cannot use. Every other rule — PEM blocks, S3 XML
+/// bodies, URL userinfo, `secret…=value` forms and `AKIA`/`ASIA` key ids — is
+/// applied WHOLE and unweakened.
+///
+/// **It used to be applied to every archive-derived string, and that was review
+/// question F11.** `backupId`, `runId` and `formatVersion` are not digests and
+/// do not need the exemption, so a 40-character credential planted in a
+/// record's `backup_id` by anyone who can write a new key under the archive
+/// prefix travelled verbatim into an immutable page `ConfigMap`. Those fields
+/// now take the WHOLE [`redact`]; the object keys and the location id take
+/// [`crate::check::redact_path`], whose long-run clause is per path SEGMENT so
+/// a key is not eaten whole; and only the three digests come here.
 ///
 /// # Panics
 /// Never in practice: only if [`LONG_RUN_RULE`] names no rule, which
 /// `the_long_run_rule_is_named_once` fails on first.
 #[must_use]
-pub fn redact_reference(value: &str) -> String {
+pub fn redact_digest(value: &str) -> String {
     let shape: Vec<_> = redaction_rules()
         .iter()
         .filter(|r| r.name != LONG_RUN_RULE)
@@ -512,6 +545,54 @@ impl Observation {
     }
 }
 
+/// Why a walk ended.
+///
+/// **ONE value, decided once, read once** — and that shape is the fix for a
+/// dead guard the fix-round campaign found. `complete` used to be assigned
+/// `!budget_stopped` at each of four exits, and every budget path `return`ed or
+/// `break`ed before reaching one of them, so the negation was unreachable in
+/// both modes: two mutants that hardcoded `complete = true` there survived a
+/// campaign, which is precisely what "a guard without a mutant is not a guard"
+/// is about. Now nothing assigns `complete` at all; [`cursor_document`] derives
+/// it from this, so there is exactly one place a mutant can attack and every
+/// incomplete-walk row attacks it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WalkStop {
+    /// The walk listed its whole range and examined every point it counted.
+    #[default]
+    Range,
+    /// `maxObjectsPerRun`, or the check's own clock.
+    ObjectBudget,
+    /// [`MAX_SHARDS_PER_SYNC`].
+    ShardBudget,
+    /// A day shard would not list, so a day is missing from this walk. Not a
+    /// budget and not a failed sync: the days already read are true.
+    ShardUnreadable,
+}
+
+impl WalkStop {
+    /// Whether the walk finished its range.
+    #[must_use]
+    pub const fn complete(self) -> bool {
+        matches!(self, Self::Range)
+    }
+
+    /// The `catalogStoppedFor` fact, or `None` for a walk that finished.
+    ///
+    /// `catalog-cursor.complete: false` says only THAT a walk stopped short,
+    /// and the controller's message for it names the object budget — so a shard
+    /// bound or a shard that would not list has to say so itself.
+    #[must_use]
+    pub const fn fact(self) -> Option<&'static str> {
+        match self {
+            Self::Range => None,
+            Self::ObjectBudget => Some("objectBudget"),
+            Self::ShardBudget => Some("shardBudget"),
+            Self::ShardUnreadable => Some("shardUnreadable"),
+        }
+    }
+}
+
 /// The state one walk accumulates.
 struct Walk {
     entries: Vec<CatalogEntry>,
@@ -523,11 +604,13 @@ struct Walk {
     /// Point ids already emitted, so one point seen in two shards costs one
     /// examination.
     seen: std::collections::BTreeSet<String>,
-    complete: bool,
     oldest_day: Option<NaiveDate>,
     last_record_key: Option<String>,
     /// How many index rows could not be read at all.
     unreadable_rows: i64,
+    /// Why the walk ended. The walk's own outcome, and never a point's
+    /// (review findings F3 and F5).
+    stop: WalkStop,
 }
 
 impl Walk {
@@ -539,16 +622,28 @@ impl Walk {
             signers: BTreeMap::new(),
             objects: 0,
             seen: std::collections::BTreeSet::new(),
-            complete: false,
             oldest_day: None,
             last_record_key: None,
             unreadable_rows: 0,
+            stop: WalkStop::Range,
         }
     }
 
     /// Whether another object may be spent.
     fn affordable(&self, budget: i64, deadline: Deadline) -> bool {
         self.objects < budget && deadline.has_room()
+    }
+
+    /// Whether a WHOLE point can be afforded — all [`OBJECTS_PER_POINT`] of
+    /// it.
+    ///
+    /// Asked before a point is begun, never in the middle of one, so a point
+    /// is examined whole or not begun. That is what makes the availability and
+    /// signature buckets sum to `total` BY CONSTRUCTION (review finding F2):
+    /// nothing is counted that was not examined, and nothing is examined that
+    /// was not counted.
+    fn affordable_point(&self, budget: i64, deadline: Deadline) -> bool {
+        self.objects.saturating_add(OBJECTS_PER_POINT) <= budget && deadline.has_room()
     }
 }
 
@@ -609,22 +704,39 @@ pub fn run(req: &CatalogSyncRequest, wiring: &dyn Wiring, deadline: Deadline) ->
         now,
     )
     .with_message(&format!(
-        "the durable catalog was walked: {} points seen, {} examined, {} relayed",
+        "the durable catalog was walked: {} points examined, {} relayed, walk {}",
         walk.counts.total,
-        examined(&walk.counts),
-        walk.entries.len()
+        walk.entries.len(),
+        if walk.stop.complete() {
+            "complete"
+        } else {
+            "incomplete — the cursor says where it stopped"
+        }
     ))
     .with_fact("catalogPoints", &walk.counts.total.to_string())
     .with_fact("catalogExamined", &examined(&walk.counts).to_string())
     .with_fact("catalogEntries", &walk.entries.len().to_string())
     .with_fact("catalogPages", &body.pages.to_string())
     .with_fact("catalogObjectsRead", &walk.objects.to_string())
-    .with_fact("catalogWalkComplete", &walk.complete.to_string())
+    .with_fact("catalogWalkComplete", &walk.stop.complete().to_string())
     .with_fact("catalogTrustKeys", &trust.len().to_string());
     if walk.unreadable_rows > 0 {
         row = row.with_fact(
             "catalogUnreadableIndexRows",
             &walk.unreadable_rows.to_string(),
+        );
+    }
+    // THE THREE WAYS A WALK CAN END SHORT, EACH NAMED (review findings F3 and
+    // F5). `catalog-cursor.complete: false` says only THAT the walk did not
+    // finish; the controller's message for it names the object budget, so a
+    // shard budget or a shard that would not list has to say so itself.
+    if let Some(reason) = walk.stop.fact() {
+        row = row.with_fact("catalogStoppedFor", reason);
+    }
+    if walk.stop == WalkStop::ShardBudget {
+        row = row.with_fact(
+            "catalogShardBudgetReached",
+            &MAX_SHARDS_PER_SYNC.to_string(),
         );
     }
     if body.dropped_for_space > 0 {
@@ -658,6 +770,15 @@ pub fn run(req: &CatalogSyncRequest, wiring: &dyn Wiring, deadline: Deadline) ->
     }
 }
 
+/// The availability buckets, summed.
+///
+/// **It equals `counts.total`, always, and that is an invariant this build
+/// makes true by construction rather than an accident to be checked**: nothing
+/// is counted that was not examined, because a point is begun only when all
+/// [`OBJECTS_PER_POINT`] objects can be afforded. It is published as a FACT so
+/// an operator can see the invariant hold rather than take it on trust, and
+/// `the_buckets_sum_to_total_on_every_walk` asserts it over a fixture larger
+/// than one page and larger than the view limit (review finding F2).
 fn examined(counts: &CatalogCounts) -> i64 {
     counts
         .available
@@ -735,18 +856,73 @@ fn pem_blocks(text: &str) -> Vec<String> {
     out
 }
 
+/// The oldest day the durable index holds a point for — **one listing**.
+///
+/// `logweir/catalog/v1/log/<yyyy>/<mm>/<dd>/<ms:013>-<pointId>.json` sorts
+/// lexicographically by day and then by millisecond, and
+/// [`ObjectAccess::list_page`] returns the SMALLEST keys under a prefix, so a
+/// page of one key IS the oldest point in the archive. One request buys the
+/// walk's floor.
+///
+/// **This is review finding F3's fix, and it is a fix at the root.** The floor
+/// used to be a function of the PREVIOUS walk's reported cursor, minus a day of
+/// overlap — so it receded one day on every sync, for ever, on an archive that
+/// never changed. A floor that is a fact about the archive cannot recede, which
+/// makes `complete: true` reachable for an archive of any age and makes the
+/// reported cursor stable instead of a ratchet.
+///
+/// `None` when the index holds nothing, or when the listing failed — the caller
+/// treats the first as an empty archive and the second as a refusal.
+fn archive_floor(access: &dyn ObjectAccess) -> Result<Option<NaiveDate>, StoreError> {
+    let keys = access.list_page(record::LOG_PREFIX, None, ARCHIVE_FLOOR_PAGE_KEYS)?;
+    // THE MINIMUM, over a page of several, and not the first of a page of one.
+    // `Store::list_page` sorts, but `object_store` contracts no list ordering
+    // at all — it says so above `list_with_offset` itself — so taking the
+    // smallest DAY is a property of this function rather than one inherited
+    // from whichever backend is configured. A page of one would also make the
+    // direction untestable: `first()` and `last()` are the same expression
+    // there, which is how a mutant that read the NEWEST day as the floor
+    // survived a campaign.
+    Ok(keys.iter().filter_map(|k| day_of_log_key(k)).min())
+}
+
+/// The UTC day a log key's shard names, or `None` when the key is not one of
+/// ours. `logweir/catalog/v1/log/2026/09/15/…` -> 2026-09-15.
+fn day_of_log_key(key: &str) -> Option<NaiveDate> {
+    let rest = key.strip_prefix(record::LOG_PREFIX)?;
+    let mut parts = rest.split('/');
+    let y: i32 = parts.next()?.parse().ok()?;
+    let m: u32 = parts.next()?.parse().ok()?;
+    let d: u32 = parts.next()?.parse().ok()?;
+    NaiveDate::from_ymd_opt(y, m, d)
+}
+
 /// `Index`: day shards of `logweir/catalog/v1/log/`, newest first.
 ///
-/// # The walk always starts at TODAY, and the cursor is a FLOOR
+/// # The walk starts at today and ends at the ARCHIVE's oldest day
 ///
 /// The view the controller publishes is the newest `viewLimit` points, and it
-/// is rebuilt from this body wholesale on every sync. A walk that resumed at
-/// an old cursor would therefore publish a window of old points and call it
-/// the catalog. So the start is always today and `indexShard` is read as the
-/// oldest day the PREVIOUS walk reached, minus one day of overlap — D3 §5.3's
-/// "day shards at or after the recorded cursor, minus one day of overlap",
-/// read against a newest-first walk. The floor bounds the cost; it never moves
-/// the window.
+/// is rebuilt from this body wholesale on every sync. A walk that resumed at an
+/// old cursor would therefore publish a window of old points and call it the
+/// catalog. So the start is always today — and the END is [`archive_floor`],
+/// one listing, a fact about the archive rather than a token fed back from the
+/// last sync.
+///
+/// The plan's `indexShard` is therefore **reported and not consumed**. It was
+/// consumed, as a floor derived from the previous reach, and that is exactly
+/// what review finding F3 found ratcheting: the floor receded a day per sync
+/// until it passed the shard cap, after which `complete` was never true again.
+/// The field stays in the request shape because the controller sends it and a
+/// plan is parsed with `deny_unknown_fields`; what it carries now is how far
+/// the last walk got, for an operator and for `status.cursor`.
+///
+/// # Everything counted is examined
+///
+/// A point is begun only when all [`OBJECTS_PER_POINT`] objects can be
+/// afforded, and it is COUNTED only when it is examined. `viewLimit` bounds the
+/// entries the body EMITS and nothing else — bounding examination by a view
+/// parameter is review finding F1, and it is why a `complete` walk could leave
+/// 18 000 of 20 000 points deep-checked by nobody.
 fn walk_index(
     req: &CatalogSyncRequest,
     access: &dyn ObjectAccess,
@@ -756,32 +932,33 @@ fn walk_index(
     walk: &mut Walk,
 ) -> Result<(), check_store::StoreFailure> {
     let today = now.date_naive();
-    let floor = req
-        .index_shard
-        .as_deref()
-        .and_then(parse_day)
-        .and_then(|d| d.pred_opt())
-        .unwrap_or_else(|| {
-            today
-                .checked_sub_days(chrono::Days::new(
-                    u64::try_from(DEFAULT_LOOKBACK_DAYS).unwrap_or(0),
-                ))
-                .unwrap_or(today)
-        });
+    walk.objects = walk.objects.saturating_add(1);
+    let floor = match archive_floor(access) {
+        Ok(Some(day)) => day.min(today),
+        // AN EMPTY INDEX IS A COMPLETE WALK OF NOTHING, not a failure: an
+        // archive with no catalog records really does hold no points.
+        Ok(None) => return Ok(()),
+        Err(e) => return Err(listing_failure(&e, &req.destination.name)),
+    };
     let view_limit = usize::try_from(req.view_limit).unwrap_or(0);
-    let mut first_listing = true;
 
-    for back in 0..MAX_LOOKBACK_DAYS {
+    for back in 0.. {
         let Some(day) = today.checked_sub_days(chrono::Days::new(u64::try_from(back).unwrap_or(0)))
         else {
-            walk.complete = true;
             break;
         };
         if day < floor {
-            walk.complete = true;
+            // THE WHOLE RANGE WAS LISTED. Nothing sets `complete` here or
+            // anywhere: `walk.stop` already says why the walk ended, and one
+            // value decided once is what makes it a guard.
+            break;
+        }
+        if back >= MAX_SHARDS_PER_SYNC {
+            walk.stop = WalkStop::ShardBudget;
             break;
         }
         if !walk.affordable(req.max_objects_per_run, deadline) {
+            walk.stop = WalkStop::ObjectBudget;
             break;
         }
         let shard = format!(
@@ -794,60 +971,53 @@ fn walk_index(
         walk.objects = walk.objects.saturating_add(1);
         let keys = match access.list_page(&shard, None, SHARD_PAGE_KEYS) {
             Ok(k) => k,
-            Err(e) if first_listing => {
-                return Err(listing_failure(&e, &req.destination.name));
-            }
-            // A LATER SHARD THAT WOULD NOT LIST IS ONE DAY THIS WALK COULD NOT
-            // SEE, not a sync that failed: the days already read are true, and
-            // the cursor says the walk did not complete.
+            // A SHARD THAT WOULD NOT LIST IS ONE DAY THIS WALK COULD NOT SEE,
+            // not a sync that failed: the days already read are true. The
+            // walk cannot be `complete` with a day missing from it.
             Err(_) => {
                 walk.unreadable_rows = walk.unreadable_rows.saturating_add(1);
+                walk.stop = WalkStop::ShardUnreadable;
                 walk.oldest_day = Some(day);
-                continue;
+                break;
             }
         };
-        first_listing = false;
         walk.oldest_day = Some(day);
         // Newest first WITHIN the shard: the log key's fixed-width millisecond
         // makes the largest key the newest one.
         for key in keys.into_iter().rev() {
             // THE POINT ID COMES OUT OF THE KEY AND NOT OUT OF A `get`.
-            // `log_key` is `<ms:013>-<pointId>.json`, so counting the archive
-            // costs ONE list per day shard and nothing per point — which is
-            // what lets `catalog-counts.total` cover the whole walk while only
-            // the newest `viewLimit` points are fetched. It is also the safer
-            // reading: `read_log_entry` exists partly to refuse a row whose
-            // `record_key` is not the one its `point_id` implies (D3 W3's
-            // finding F6), and deriving the key from the id cannot be lied to
-            // at all.
+            // `log_key` is `<ms:013>-<pointId>.json`, so a day shard names
+            // every point it holds for the price of its one listing. It is
+            // also the safer reading: `read_log_entry` exists partly to refuse
+            // a row whose `record_key` is not the one its `point_id` implies
+            // (D3 W3's finding F6), and deriving the key from the id cannot be
+            // lied to at all.
             let Some(point_id) = point_id_of_log_key(&key) else {
                 walk.unreadable_rows = walk.unreadable_rows.saturating_add(1);
                 continue;
             };
-            if !walk.seen.insert(point_id.clone()) {
+            if walk.seen.contains(&point_id) {
                 continue;
             }
+            if !walk.affordable_point(req.max_objects_per_run, deadline) {
+                // NOT COUNTED, NOT EXAMINED, NOT BLAMED ON THE ARCHIVE.
+                walk.stop = WalkStop::ObjectBudget;
+                return Ok(());
+            }
+            walk.seen.insert(point_id.clone());
             walk.counts.total = walk.counts.total.saturating_add(1);
             *walk
                 .by_day
                 .entry(day.format("%Y-%m-%d").to_string())
                 .or_insert(0) += 1;
-            if walk.entries.len() >= view_limit {
-                // COUNTED AND NOT FETCHED. The window is full; every further
-                // point still contributes to `total` and to the histogram,
-                // which is what makes `truncated` a fact about the archive.
-                continue;
-            }
-            if !walk.affordable(req.max_objects_per_run, deadline) {
-                return Ok(());
-            }
+            let emit = walk.entries.len() < view_limit;
             examine_and_push(
                 req,
                 access,
                 trust,
-                deadline,
                 walk,
                 &record::record_key(&point_id),
+                emit,
             );
         }
     }
@@ -882,6 +1052,7 @@ fn walk_full(
     let mut first_listing = true;
     loop {
         if !walk.affordable(req.max_objects_per_run, deadline) {
+            walk.stop = WalkStop::ObjectBudget;
             return Ok(());
         }
         walk.objects = walk.objects.saturating_add(1);
@@ -889,11 +1060,13 @@ fn walk_full(
             match access.list_page(record::POINTS_PREFIX, cursor.as_deref(), RESCAN_PAGE_KEYS) {
                 Ok(k) => k,
                 Err(e) if first_listing => return Err(listing_failure(&e, &req.destination.name)),
-                Err(_) => return Ok(()),
+                Err(_) => {
+                    walk.stop = WalkStop::ShardUnreadable;
+                    return Ok(());
+                }
             };
         first_listing = false;
         if keys.is_empty() {
-            walk.complete = true;
             return Ok(());
         }
         // A SHORT PAGE IS THE END OF THE PREFIX. `ObjectAccess::list_page`
@@ -908,34 +1081,29 @@ fn walk_full(
             if !key.ends_with("/record.json") {
                 continue;
             }
-            if !walk.affordable(req.max_objects_per_run, deadline) {
+            if walk.seen.contains(&key) {
+                continue;
+            }
+            // EXAMINATION IS BOUNDED BY THE OBJECT BUDGET AND BY NOTHING ELSE
+            // (review finding F1). It used to stop at `viewLimit` — a VIEW
+            // parameter — while the walk kept counting and then reported
+            // `complete: true` with no cursor, so on a 20 000-point archive
+            // with the default `viewLimit: 2000` the other 18 000 points were
+            // never manifest-checked and never would be, on any cadence.
+            if !walk.affordable_point(req.max_objects_per_run, deadline) {
+                walk.stop = WalkStop::ObjectBudget;
                 return Ok(());
             }
             walk.last_record_key = Some(key.clone());
-            if !walk.seen.insert(key.clone()) {
-                continue;
-            }
+            walk.seen.insert(key.clone());
             walk.counts.total = walk.counts.total.saturating_add(1);
-            if walk.entries.len() >= view_limit {
-                continue;
-            }
-            examine_and_push(req, access, trust, deadline, walk, &key);
+            let emit = walk.entries.len() < view_limit;
+            examine_and_push(req, access, trust, walk, &key, emit);
         }
         if exhausted {
-            walk.complete = true;
             return Ok(());
         }
     }
-}
-
-/// `YYYY-MM-DD` -> a UTC day, or `None`.
-///
-/// `logweir_core::check_contract::is_iso_day` has already refused anything that
-/// is not ten characters of the right shape at plan-validation time; this is
-/// the calendar half, and a day like `2026-02-30` that passes the shape check
-/// fails here and simply means "no floor was named".
-fn parse_day(day: &str) -> Option<NaiveDate> {
-    NaiveDate::parse_from_str(day, "%Y-%m-%d").ok()
 }
 
 fn listing_failure(e: &StoreError, destination: &str) -> check_store::StoreFailure {
@@ -951,15 +1119,19 @@ fn listing_failure(e: &StoreError, destination: &str) -> check_store::StoreFailu
 }
 
 /// Examine one point and, if it fits the window, push its entry.
+/// `emit` is whether this point's entry line still fits the body's
+/// `viewLimit`. It bounds the LINES and never the examination: the buckets
+/// cover every point the walk counted, by construction (review findings F1 and
+/// F2).
 fn examine_and_push(
     req: &CatalogSyncRequest,
     access: &dyn ObjectAccess,
     trust: &[VerifyingKey],
-    deadline: Deadline,
     walk: &mut Walk,
     record_key: &str,
+    emit: bool,
 ) {
-    let observation = examine(req, access, deadline, trust, walk, record_key);
+    let observation = examine(req, access, walk, trust, record_key);
     walk.counts.count_availability(observation.availability);
     walk.counts.count_signature(observation.signature);
     if req.mode == CatalogSyncMode::Full {
@@ -982,29 +1154,40 @@ fn examine_and_push(
     if let Some(key_id) = observation.signer_key_id.as_deref() {
         *walk.signers.entry(key_id.to_string()).or_insert(0) += 1;
     }
-    if let Some(entry) = build_entry(&observation) {
-        walk.entries.push(entry);
+    if emit {
+        if let Some(entry) = build_entry(&observation) {
+            walk.entries.push(entry);
+        }
     }
 }
 
 /// One point's two axes.
+///
+/// **It spends up to [`OBJECTS_PER_POINT`] objects and asks no budget question
+/// of its own.** The caller established that all four are affordable before it
+/// began, so a point here is examined whole. That is review finding F5: the
+/// guards used to live inside, and a point abandoned between its record and its
+/// receipt was reported `Availability::Unreadable` — a bucket whose fixed
+/// remedy names the `archiveRead` grant and the network, and which the
+/// controller reads as `PartialScan`, "a permission or transport failure". A
+/// budget-bounded walk is the designed, normal state the cursor exists for, and
+/// it is now the WALK's outcome and never a point's.
 fn examine(
     req: &CatalogSyncRequest,
     access: &dyn ObjectAccess,
-    deadline: Deadline,
-    trust: &[VerifyingKey],
     walk: &mut Walk,
+    trust: &[VerifyingKey],
     record_key: &str,
 ) -> Observation {
-    if !walk.affordable(req.max_objects_per_run, deadline) {
-        return Observation::bare(Availability::Unreadable);
-    }
     walk.objects = walk.objects.saturating_add(1);
     let record_bytes = match access.get(record_key) {
         Ok(b) => b,
         Err(StoreError::NotFound(_)) => return Observation::bare(Availability::Missing),
         Err(_) => return Observation::bare(Availability::Unreadable),
     };
+    if oversized(&record_bytes) {
+        return Observation::bare(Availability::Unreadable);
+    }
     let point = match reader::read_record(&record_bytes) {
         RecordVerdict::Point(p) => p,
         RecordVerdict::UnsupportedFormat { format_version } => {
@@ -1029,10 +1212,12 @@ fn examine(
         .clone();
 
     // -- the receipt: the verification root (D3 §5.2 rule 3) ---------------
-    if !walk.affordable(req.max_objects_per_run, deadline) {
-        observation.availability = Availability::Unreadable;
-        return observation;
-    }
+    //
+    // ITS THREE OUTCOMES ARE THREE DIFFERENT FACTS, and review finding F4 is
+    // that only one of them had a test: a `NotFound` is `Missing`, ANY OTHER
+    // failure is `Unreadable`, and bytes that are not a receipt are
+    // `Unreadable` too. `a_receipt_that_cannot_be_read_is_never_missing`
+    // exercises each with a key-scoped fault.
     walk.objects = walk.objects.saturating_add(1);
     let receipt_bytes = match access.get(&point.receipt.key) {
         Ok(b) => b,
@@ -1045,6 +1230,10 @@ fn examine(
             return observation;
         }
     };
+    if oversized(&receipt_bytes) {
+        observation.availability = Availability::Unreadable;
+        return observation;
+    }
     let Ok(receipt) = serde_json::from_slice::<BackupReceipt>(&receipt_bytes) else {
         observation.availability = Availability::Unreadable;
         return observation;
@@ -1059,17 +1248,14 @@ fn examine(
     }
 
     // -- the signature: a verdict and a key id, never a trust decision ------
-    if walk.affordable(req.max_objects_per_run, deadline) {
-        walk.objects = walk.objects.saturating_add(1);
-        let (verdict, key_id) = classify_signature(access, &point, &receipt_bytes, trust);
-        observation.signature = verdict;
-        observation.signer_key_id = key_id;
-    }
+    walk.objects = walk.objects.saturating_add(1);
+    let (verdict, key_id) = classify_signature(access, &point, &receipt_bytes, trust);
+    observation.signature = verdict;
+    observation.signer_key_id = key_id;
 
     // -- the manifest digest -----------------------------------------------
     if observation.availability == Availability::Available
         && req.deep_check != CatalogDeepCheck::None
-        && walk.affordable(req.max_objects_per_run, deadline)
     {
         walk.objects = walk.objects.saturating_add(1);
         match access.get(&point.archive.manifest_key) {
@@ -1089,6 +1275,31 @@ fn examine(
     }
 
     observation
+}
+
+/// The most bytes a catalog RECORD, a receipt or a DSSE sidecar may carry
+/// before this walk refuses to parse it — review question **F12**.
+///
+/// A record is about 1.5 KiB and a sidecar a few hundred bytes, so 256 KiB is
+/// generous by two orders of magnitude and is a ceiling only a planted object
+/// reaches. An oversized document is `Unreadable`: "this build could not tell",
+/// which is what it is.
+///
+/// **What this does NOT do, said plainly.** `ObjectAccess::get` reads an object
+/// whole — `logweir-store` exposes no ranged read — so this bounds what reaches
+/// the BODY and the page `ConfigMap`s, not what reaches memory. A multi-gigabyte
+/// object under `logweir/catalog/v1/points/…` can still exhaust the Job's
+/// memory, which the pod's own limit turns into a kill the controller reports
+/// through D2 §4.3 rather than into a wrong view. Closing that needs a ranged
+/// `get` on the store crate, which is D2 W2's surface and not this kind's; it is
+/// recorded as a gap rather than half-fixed here. The manifest is deliberately
+/// NOT capped: its size is the adopter's backup set, a legitimate manifest is
+/// megabytes, and the read is inherently whole-object because the check IS its
+/// digest.
+pub const MAX_CATALOG_DOCUMENT_BYTES: usize = 256 * 1024;
+
+fn oversized(bytes: &[u8]) -> bool {
+    bytes.len() > MAX_CATALOG_DOCUMENT_BYTES
 }
 
 /// The signature verdict and the key id it belongs to.
@@ -1157,10 +1368,28 @@ fn classify_signature(
 fn build_entry(observation: &Observation) -> Option<CatalogEntry> {
     let point = observation.point.as_ref()?;
     let availability = observation.availability;
+    // THREE CLASSES, AND EACH FIELD IS IN THE NARROWEST ONE IT CAN BE
+    // (review question F11):
+    //
+    //   * `redact`        — the whole rule set, long-run clause included, for
+    //                       every value that is neither a key nor a digest.
+    //                       A `pointId` is 37 characters and a real `backupId`
+    //                       or `runId` is shorter still, so the 40-character
+    //                       clause costs nothing here and catches a credential
+    //                       planted in one by anyone who can write a new key
+    //                       under the archive prefix.
+    //   * `redact_path`   — the same rules, with the long-run clause applied
+    //                       per path SEGMENT, for object keys and the
+    //                       `s3://bucket/prefix` location. Applying it whole
+    //                       would redact an ordinary archive key, which is the
+    //                       defect `check::redact_path` itself exists for.
+    //   * `redact_digest` — the long-run clause dropped, for the THREE values
+    //                       that are 40-plus hex by definition and that a later
+    //                       restore re-checks.
     let mut entry = CatalogEntry {
-        point_id: redact_reference(&point.point_id),
-        backup_id: redact_reference(&point.backup_id),
-        run_id: redact_reference(&point.run_id),
+        point_id: redact(&point.point_id),
+        backup_id: redact(&point.backup_id),
+        run_id: redact(&point.run_id),
         recovery_point_at_ms: point.capture.started_at.timestamp_millis(),
         covered_from_ms: point.covered.from_ms,
         covered_to_ms: point.covered.to_ms,
@@ -1169,18 +1398,18 @@ fn build_entry(observation: &Observation) -> Option<CatalogEntry> {
         // locations; `MAX_ENTRY_LOCATIONS` is the cap that merge must respect
         // and this side can only ever contribute one row to it.
         locations: vec![EntryLocation {
-            location_id: redact_reference(&point.archive.location_id),
+            location_id: redact_path(&point.archive.location_id),
             availability,
         }],
-        receipt_key: redact_reference(&point.receipt.key),
-        receipt_sha256: redact_reference(&point.receipt.sha256),
-        manifest_key: Some(redact_reference(&point.archive.manifest_key)),
-        manifest_sha256: Some(redact_reference(&point.archive.manifest_sha256)),
+        receipt_key: redact_path(&point.receipt.key),
+        receipt_sha256: redact_digest(&point.receipt.sha256),
+        manifest_key: Some(redact_path(&point.archive.manifest_key)),
+        manifest_sha256: Some(redact_digest(&point.archive.manifest_sha256)),
         recorded_at: Some(point.recorded_at.to_rfc3339_opts(SecondsFormat::Secs, true)),
-        format_version: observation.format_version.as_deref().map(redact_reference),
+        format_version: observation.format_version.as_deref().map(redact),
         availability,
         signature: observation.signature,
-        signer_key_id: observation.signer_key_id.as_deref().map(redact_reference),
+        signer_key_id: observation.signer_key_id.as_deref().map(redact_digest),
         remedy: remedy_for(availability, observation.signature)
             .map(redact)
             .filter(|r| !r.is_empty()),
@@ -1342,7 +1571,7 @@ fn signers_document(walk: &Walk) -> Vec<CatalogSigner> {
         .signers
         .iter()
         .map(|(key_id, points)| CatalogSigner {
-            key_id: redact_reference(key_id),
+            key_id: redact_digest(key_id),
             // The record carries no principal, so there is no hint to give.
             // An invented one would be unsigned metadata presented as a fact.
             principal_hint: None,
@@ -1360,24 +1589,34 @@ fn signers_document(walk: &Walk) -> Vec<CatalogSigner> {
     rows
 }
 
+/// The fence.
+///
+/// `complete` means **the walk listed its whole range and examined every point
+/// it counted** — not "the walk ended". A walk stopped by the object budget,
+/// the clock, the shard budget or a shard that would not list is
+/// `complete: false` WITH a cursor to resume from, whichever mode it is in.
+/// `Full` used to report `complete: true` and no cursor whenever it ran out of
+/// `viewLimit`, which is review finding **F1**: the rest of the archive was
+/// never deep-checked and there was nothing left to resume from.
 fn cursor_document(req: &CatalogSyncRequest, walk: &Walk) -> CursorReport {
     match req.mode {
         CatalogSyncMode::Index => CursorReport {
             index_shard: walk.oldest_day.map(|d| d.format("%Y-%m-%d").to_string()),
             rescan_start_after: None,
-            complete: walk.complete,
+            complete: walk.stop.complete(),
         },
         CatalogSyncMode::Full => CursorReport {
             index_shard: None,
             // A COMPLETE RESCAN REPORTS NO CURSOR. Leaving the last key on a
             // finished walk would make the next one resume past the whole
-            // archive and publish an empty view of a full one.
-            rescan_start_after: if walk.complete {
+            // archive and publish an empty view of a full one. An INCOMPLETE
+            // one always reports where it got to, whatever stopped it.
+            rescan_start_after: if walk.stop.complete() {
                 None
             } else {
-                walk.last_record_key.clone().map(|k| redact_reference(&k))
+                walk.last_record_key.clone().map(|k| redact_path(&k))
             },
-            complete: walk.complete,
+            complete: walk.stop.complete(),
         },
     }
 }
