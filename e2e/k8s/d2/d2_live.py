@@ -3594,6 +3594,64 @@ def e5() -> None:
               "string `[redacted]`.")
 
 
+
+def e6() -> None:
+    """The closest a draft restore preflight gets to green on this build."""
+    with Scenario("E6", "a restore preflight whose every prerequisite is satisfied") as sc:
+        # ITS OWN BACKUP: S16 deletes a segment of `bk-c` on purpose, and a
+        # preflight over a knowingly-damaged set is not the question here.
+        if get_opt("backup", "bk-c2") is None:
+            apply(backup("bk-c2", source="source-admin", topics=["payments"],
+                         destination_ref="dest-c", deadline=600))
+        made = wait_backup("bk-c2", timeout=720)
+        check(made["status"].get("phase") == "Succeeded",
+              f"bk-c2 is {made['status'].get('phase')!r}")
+        facts = backup_facts_flat("bk-c2", "a", "lw-c")
+        sc.detail["sourceBackup"] = facts
+        plan = restore_plan(facts["backupId"], facts["pointInTime"], "d2w14-green-")
+        plan["source"]["topics"] = ["payments"]
+        flat = {
+            "backend": "s3", "bucket": "lw-c", "prefix": "",
+            "region": "us-east-1", "endpoint": f"http://minio-a.{NS}.svc:9000",
+            "path_style": True, "allow_http": True,
+        }
+        plan["source"]["storage"] = flat
+        plan["evidence"] = dict(flat, prefix="logweir/")
+        plan_bytes = json.dumps(plan, indent=2) + "\n"
+        name = f"pf-green-{attempt('e6Attempt')}"
+        apply(preflight(name, restore_preflight_request(
+            plan_bytes, source_destination="dest-c", evidence_destination="dest-c"),
+            timeout_seconds=180))
+        obj = wait_preflight(name, timeout=600)
+        artifact(f"objects/e6/preflight-{name}.json", obj)
+        result = obj["status"]["result"]
+        checks = checks_by_id(obj)
+        blocking_not_ready = {
+            k: {"state": v.get("state"), "code": v.get("code"), "message": v.get("message")}
+            for k, v in checks.items()
+            if v.get("gating") == "blocking" and v.get("state") != "ready"
+        }
+        sc.detail["overallState"] = result.get("state")
+        sc.detail["blockingRowsNotReady"] = blocking_not_ready
+        sc.detail["allChecks"] = {k: {"state": v.get("state"), "code": v.get("code")}
+                                  for k, v in checks.items()}
+        # D2 §6.3: a DRAFT's `approval.state` is `skipped (SubjectNotCreated)`, and
+        # §6.4 says a skipped blocking check keeps the overall state `unknown` —
+        # never `ready`. So the acceptance question is whether anything ELSE is
+        # blocking, not whether the aggregate reads green.
+        unexpected = {k: v for k, v in blocking_not_ready.items() if k != "approval.state"}
+        check(not unexpected,
+              "a restore preflight with every referent satisfied still has blocking rows "
+              f"that are not ready: {json.dumps(unexpected, indent=1)[:1500]}")
+        check(checks.get("approval.state", {}).get("state") == "skipped",
+              "the draft's approval row is not `skipped`: "
+              f"{checks.get('approval.state')}")
+        check(result.get("state") in {"unknown", "ready"},
+              f"with only the draft's approval row skipped the aggregate is "
+              f"{result.get('state')!r}; D2 §6.4 says a skipped blocking check keeps it "
+              "`unknown`")
+
+
 def phase_table() -> dict[str, Callable[[], None]]:
     """Every scenario is a module-level function named exactly as its phase, so
     the list of runnable phases is the list of things this file defines and
