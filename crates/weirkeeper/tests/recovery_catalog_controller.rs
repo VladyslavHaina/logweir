@@ -27,7 +27,15 @@
 //!    write that flipped the condition, and why the live harness had to watch
 //!    `status.syncedAt` instead.
 //!    Rows: `a_completed_sync_serves_its_interval_slot_and_synced_stays_true`,
-//!    `the_next_slot_starts_one_sync_and_it_is_harvested`.
+//!    `the_next_slot_starts_one_sync_and_it_is_harvested`,
+//!    `a_failed_sync_spends_its_slot_and_is_not_re_created_every_pass`.
+//!
+//! Both writes of a `lastSyncJob` record — `start`'s and the harvest's — are
+//! held to naming every field of the struct, by
+//! `the_started_record_names_every_field_of_last_sync_job` and
+//! `the_harvested_record_names_every_field_of_last_sync_job`. The harvest one
+//! is reachable only on the upgrade path, where a harvest is not preceded by
+//! this build's `start`.
 //!
 //! EVERY TEST HERE IS A `mock_client` TEST. Nothing dials a socket and nothing
 //! waits on a Job; the double PANICS on a request it holds no route for, which
@@ -705,20 +713,64 @@ async fn the_started_record_names_every_field_of_last_sync_job() {
     .await;
     assert_eq!(outcome.phase, ctrl::CatalogPhase::Started);
 
+    assert_names_every_last_sync_job_field("start", &f.patched_status()["lastSyncJob"]);
+}
+
+/// **The same guard on the HARVEST write — review finding L1.** `start` is not
+/// the only place a `lastSyncJob` record is written, and it is not the one that
+/// matters on the path this branch added: a harvest is normally preceded by
+/// this build's `start`, which has already cleared the record, but a catalog
+/// stuck by the defect is harvested with NO such `start` in front of it. A
+/// field the harvest closure does not name therefore survives from whatever the
+/// stuck record held — a `refusalReason` from the one sync that did refuse,
+/// republished beside `exitCode: 0` and `Synced=True/Succeeded`, describing two
+/// different Jobs as one record.
+#[tokio::test]
+async fn the_harvested_record_names_every_field_of_last_sync_job() {
+    let stem = leak(request_stem("token-1"));
+    let plan_sha = format!("sha256:{}", "3".repeat(64));
+    let f = fixture(harvest_routes(
+        stem,
+        JOB_UID_1,
+        &plan_sha,
+        (now() - chrono::Duration::seconds(240), now()),
+        framed(&plan_sha, &body_with(1)),
+    ));
+    let outcome = run_at(
+        &f,
+        &catalog(
+            json!({"syncRequest": "token-1"}),
+            json!({
+                "observedGeneration": 1,
+                "observedSyncRequest": "token-1",
+                "lastSyncJob": {"name": stem},
+                "conditions": []
+            }),
+        ),
+        now() + chrono::Duration::seconds(30),
+    )
+    .await;
+    assert_eq!(outcome.phase, ctrl::CatalogPhase::Published);
+    assert_names_every_last_sync_job_field("harvest", &f.patched_status()["lastSyncJob"]);
+}
+
+/// Every field `LastSyncJob` serialises must appear in `written`, by the
+/// struct's own schema and not by a list typed here — a field added to the
+/// struct without a line in the writer fails at the writer that forgot it.
+fn assert_names_every_last_sync_job_field(writer: &str, written: &Value) {
     let every_field = serde_json::to_value(LastSyncJob {
-        name: Some(stem.to_string()),
+        name: Some("j".to_string()),
         started_at: Some(now()),
         finished_at: Some(now()),
         exit_code: Some(0),
         refusal_reason: Some("Refused".to_string()),
     })
     .expect("a LastSyncJob serialises");
-    let written = f.patched_status()["lastSyncJob"].clone();
     for field in every_field.as_object().expect("an object").keys() {
         assert!(
             written.get(field).is_some(),
-            "`start` writes `lastSyncJob` as a MERGE patch, so a field it does not name keeps \
-             the previous Job's value. `{field}` is on LastSyncJob and not in the patch: \
+            "`{writer}` writes `lastSyncJob` as a MERGE patch, so a field it does not name \
+             keeps the previous Job's value. `{field}` is on LastSyncJob and not in the patch: \
              {written}"
         );
     }
@@ -809,6 +861,125 @@ async fn a_completed_sync_serves_its_interval_slot_and_synced_stays_true() {
         f.seen()
     );
     assert_no_delete(&f);
+}
+
+/// **A sync that ran and FAILED spends its slot too — review finding M1.**
+///
+/// `slot_already_served` reads `lastSyncJob.finishedAt` and NOT `syncedAt`, and
+/// the difference is only visible here: a failed harvest records the Job but
+/// never writes `syncedAt`, so a slot guard sourced from `syncedAt` would leave
+/// a failed sync's slot unserved and re-create the Job on **every** reconcile
+/// until the slot rolled over — a 60-second requeue against a destination that
+/// just refused, with each Job's `ttlSecondsAfterFinished` piling the previous
+/// ones up. The failure belongs on `Synced`, for an operator to act on, and not
+/// in a retry loop this controller never bounds.
+///
+/// The catalog here has **no `syncedAt` at all** — its first sync is the one
+/// that failed — so a guard reading `syncedAt` finds nothing to be served by.
+/// The route table holds no `POST /jobs`: a pass that started one is refused by
+/// name in the double.
+#[tokio::test]
+async fn a_failed_sync_spends_its_slot_and_is_not_re_created_every_pass() {
+    let stem = leak(request_stem("token-1"));
+    let failed_at = at(2026, 9, 16, 12, 2, 0);
+    // A refusal, recorded: exit 3 with its `refusal-reason=`, no view, no
+    // `syncedAt`, and `Synced=False` carrying the code.
+    let status = json!({
+        "observedGeneration": 1,
+        "observedSyncRequest": "token-1",
+        "lastSyncJob": {
+            "name": stem,
+            "startedAt": stamp(failed_at - chrono::Duration::seconds(60)),
+            "finishedAt": stamp(failed_at),
+            "exitCode": 3,
+            "refusalReason": "DestinationUnreachable"
+        },
+        "conditions": [
+            {"type": "Ready", "status": "Unknown", "reason": "NeverSynced",
+             "message": "no sync has published a view yet; the durable catalog in object \
+    storage is unaffected",
+             "observedGeneration": 1, "lastTransitionTime": stamp(failed_at)},
+            {"type": "Synced", "status": "False", "reason": "DestinationUnreachable",
+             "message": "the destination refused the walk", "observedGeneration": 1,
+             "lastTransitionTime": stamp(failed_at)}
+        ]
+    });
+
+    let job = job_body(
+        stem,
+        JOB_UID_1,
+        "sha256:first",
+        Some((failed_at - chrono::Duration::seconds(60), failed_at)),
+    );
+    let f = fixture(vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        route("GET", job_path(stem), job),
+        status_route(),
+    ]);
+    let outcome = run_at(
+        &f,
+        &catalog(json!({"syncRequest": "token-1"}), status.clone()),
+        at(2026, 9, 16, 12, 3, 0),
+    )
+    .await;
+
+    assert_eq!(
+        outcome.phase,
+        ctrl::CatalogPhase::Idle,
+        "the slot is spent by the walk that RAN, not by the one that succeeded; a guard \
+         sourced from `syncedAt` re-creates this Job on every pass for the rest of the hour"
+    );
+    assert!(f.posted("/jobs").is_empty());
+    assert!(
+        !f.read_a_pod_log(),
+        "the failed Job was harvested once and is not read again: {:?}",
+        f.seen()
+    );
+    let patches = f.status_patches();
+    assert!(!patches.is_empty(), "this pass does write a status");
+    for patch in patches {
+        let synced = condition(&patch["status"], "Synced");
+        assert_eq!(
+            synced["status"], "False",
+            "the refusal stands until something replaces it: {synced}"
+        );
+        assert_eq!(synced["reason"], "DestinationUnreachable");
+    }
+
+    // And the slot still rolls over: the failure delays the next walk by the
+    // cadence, it does not end it.
+    let periodic = leak(slot_stem(at(2026, 9, 16, 13, 0, 0)));
+    let f2 = fixture(vec![
+        route("GET", "/trustrosters/default", roster_body()),
+        route(
+            "GET",
+            job_path(stem),
+            job_body(
+                stem,
+                JOB_UID_1,
+                "sha256:first",
+                Some((failed_at - chrono::Duration::seconds(60), failed_at)),
+            ),
+        ),
+        route("GET", "/backupdestinations/archive", destination_body()),
+        route("POST", "/configmaps", empty_config_map()),
+        route("POST", "/jobs", created_job(periodic, JOB_UID_2)),
+        status_route(),
+    ]);
+    let next = run_at(
+        &f2,
+        &catalog(json!({"syncRequest": "token-1"}), status),
+        at(2026, 9, 16, 13, 0, 0),
+    )
+    .await;
+    assert_eq!(next.phase, ctrl::CatalogPhase::Started);
+    let jobs = f2.posted("/jobs");
+    assert_eq!(
+        jobs.len(),
+        1,
+        "one slot is one walk, after a failure as well"
+    );
+    assert_eq!(jobs[0]["metadata"]["name"], periodic);
 }
 
 /// The other side of the same rule: when the slot DOES roll over, exactly one
