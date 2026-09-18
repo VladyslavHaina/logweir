@@ -848,6 +848,28 @@ field**, and the controller records the one it acted on in
 `status.observedSyncRequest`, so asking twice is one sync and a new token is not
 mistaken for a retry.
 
+**Every sync is harvested, including the second one.** `status.lastSyncJob` is
+the record of ONE Job and is **replaced** when a sync starts, not merged into:
+the `/status` write is an RFC 7386 merge patch, so a record that named only the
+new Job would keep the previous one's `finishedAt` — and `finishedAt` is the one
+fact that says a Job's result has been read. Until 2026-09-18 it did keep it,
+and the consequence was that every sync after the first ran to `Complete` and
+was never looked at: `spec.syncRequest` was inert, an `intervalSeconds: 300`
+catalog stopped refreshing past its first interval, and the only way to refresh
+a view was to delete and re-create the `RecoveryCatalog`.
+
+**`intervalSeconds` is a cadence, not an alarm clock.** A sync that finished
+inside the current interval slot has served it, whatever started it, so a
+`spec.syncRequest` that completes at 11:55 is not followed by the 12:00 slot's
+own walk one reconcile later. That matters for what `Synced` means: **after a
+view is published, `Synced` stays `True/Succeeded` until a new `syncRequest` or
+the next slot starts a sync**, and it is usable as a completion signal.
+`Synced=Unknown/SyncInProgress`, or a waiting code such as
+`Unknown/PodNotStarted`, means a sync is running right now — while
+`Ready=True/ViewReady` says the previous view is still usable, because `Ready`
+is about the view and `Synced` is about the walk. `status.syncedAt` remains the
+timestamp to compare when you want to know which walk a view came from.
+
 **What the view is bounded by.**
 
 | Bound | Value | Why |
