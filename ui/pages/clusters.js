@@ -41,7 +41,7 @@
 // agree about what an observation means and about what is too old to present as
 // current.
 
-import { apiClient, mayOperate } from "../client.js";
+import { LEGACY, apiClient, mayOperate, mode } from "../client.js";
 import {
   active,
   cancelled,
@@ -55,6 +55,7 @@ import {
   mutationFor,
   readDraft,
   readOptions,
+  refusal,
   watchMutation,
 } from "../lifecycle.js";
 import {
@@ -383,6 +384,20 @@ export const CONNECTION_CHECK_REFUSED_SENTENCE =
   "The controller has refused this connection, so there is nothing to dial with: a check would " +
   "be created, fail to render a plan and record no row. Fix the object first; the controller's " +
   "own reason is beside this sentence.";
+
+/** Why a `kubectl proxy` console has no control here.
+ *
+ *  REVIEW F6. `renderConnectionCheck` had an `unavailable` branch that nothing
+ *  ever set, which is a dead state in a panel whose whole job is to say what
+ *  is true. There IS a real answer for it: the check routes are the product
+ *  API's, the legacy proxy serves read-only summaries of the three D2 kinds
+ *  (D2 §7.4) and `ui/api.js`'s `WRITABLE_PLURALS` does not carry `preflights`,
+ *  so in that mode the control could only fail at the click. Saying so up
+ *  front is what the discovery panel beside it already does. */
+export const CONNECTION_CHECK_LEGACY_SENTENCE =
+  "This console is reading through a kubectl proxy, which serves read-only summaries of check " +
+  "requests and creates none. A connection check needs the product API; the connection probe " +
+  "above is what this mode can show.";
 
 /** What the follower says when it stops reading. */
 export const CONNECTION_CHECK_STOPPED_SENTENCE =
@@ -1103,6 +1118,11 @@ function paintClusterDetail(node, ns, name, parse, lifecycle, api, object, disco
       mayOperate: mayOperate(ns),
       preflight: null,
       followStopped: false,
+      // F6: the branch is no longer dead. `mode()` is `null` until the page
+      // has decided, and an undecided page is not a legacy one -- the check is
+      // deliberately `=== LEGACY` and not `!== CONSOLE`.
+      unavailable: mode() === LEGACY,
+      unavailableReason: CONNECTION_CHECK_LEGACY_SENTENCE,
     },
     remembered || {},
     check || {},
@@ -1126,18 +1146,85 @@ function paintClusterDetail(node, ns, name, parse, lifecycle, api, object, disco
 
 // THE ATTEMPT TOKEN. One per ACCEPTED click, minted here and carried into the
 // idempotency key `ui/client.js` composes. A double click cannot mint two,
-// because the second event is refused by the record's own `pending()` guard
-// before this counter is read; a DELIBERATE second test -- the whole point of
-// the control -- mints a new one, so the product API creates a new `Preflight`
-// instead of replaying the first for ever. That replay is precisely the
-// re-read this control stopped being.
+// because the second event is refused by the record's own machine before this
+// is reached; a DELIBERATE second test -- the whole point of the control --
+// mints a new one, so the product API creates a new `Preflight` instead of
+// replaying the first for ever. That replay is precisely the re-read this
+// control stopped being.
+//
+// AN ORDINAL ALONE IS NOT A TOKEN, AND THAT WAS REVIEW FINDING F1. The first
+// cut composed `"<ns>.<name>.attempt-" + <module counter>`, and a module
+// counter starts at zero on every page load -- so the FIRST click in one load
+// and the FIRST click in the next composed the same key, byte for byte. The
+// product API names a created object `sha256(issuer, subject, ns, route, key)`,
+// so a repeated key with an identical body is a REPLAY: an operator who read
+// `AuthenticationFailed`, fixed the Secret, reloaded and clicked again got the
+// first check's stale rows back as the new verdict, for as long as the old
+// object lived (`policy.preflight.retentionSeconds`, default an hour). The
+// reviewer reproduced the collision across two browser sessions.
+//
+// So the token is a per-LOAD nonce composed with the per-click ordinal. The
+// nonce makes two loads differ; the ordinal makes two clicks in one load
+// differ. Neither alone is enough, and neither is a clock: two tabs opened in
+// the same millisecond collide, which is the argument `schedules.js`'s
+// `mintIntent` already records for the manual-run intent.
 let attempts = 0;
+let loadNonce = null;
 
-/** The token one accepted click carries. Exported so the suite can assert that
- *  two clicks compose two keys and one double click composes one. */
+/** How many hex characters the per-load nonce carries. Sixteen bytes, as
+ *  `mintIntent`'s: the composed token is digested into the key by
+ *  `ui/client.js`, so the budget is not the constraint -- collision resistance
+ *  across page loads is. */
+export const CONNECTION_NONCE_BYTES = 16;
+
+/** Mints this page load's nonce, once.
+ *
+ *  A BROWSER WITH NO RANDOM SOURCE GETS A REFUSAL AND NOT A WEAKER TOKEN, for
+ *  `mintIntent`'s reason in this control's own terms: a token this page could
+ *  not make unique is a token that silently replays a verdict about a broker
+ *  that has changed since. There is no counter fallback, because the counter
+ *  fallback IS the defect F1 named. It is minted lazily rather than at module
+ *  scope so that importing this page in a context without `crypto` is not
+ *  itself a throw. */
+export function connectionNonce() {
+  if (loadNonce !== null) {
+    return loadNonce;
+  }
+  const source = globalThis.crypto;
+  if (source === undefined || source === null || typeof source.getRandomValues !== "function") {
+    throw refusal(
+      "this page will not start a connection check here: minting an idempotency key needs the " +
+        "platform's random source, and it is unavailable. Without a unique key a second test " +
+        "would return the earlier check instead of dialling again.",
+    );
+  }
+  const bytes = source.getRandomValues(new Uint8Array(CONNECTION_NONCE_BYTES));
+  let hex = "";
+  for (const byte of bytes) {
+    hex += byte.toString(16).padStart(2, "0");
+  }
+  loadNonce = hex;
+  return loadNonce;
+}
+
+/** The token one accepted click carries: this load's nonce and this load's
+ *  click ordinal. Exported so the suite can assert that two clicks in one load
+ *  differ, that two loads differ, and that a double click mints one. */
 export function nextConnectionAttempt(ns, name) {
+  const mint = connectionNonce();
   attempts += 1;
-  return String(ns) + "." + String(name) + ".attempt-" + String(attempts);
+  return String(ns) + "." + String(name) + "." + mint + "-" + String(attempts);
+}
+
+/** Forgets this load's nonce and its click ordinal.
+ *
+ *  THE SUITE'S SEAM, and nothing else calls it -- `ui/client.js`'s `resetMode`
+ *  is the same shape for the same reason. A page load mints one nonce; a page
+ *  that could re-mint mid-life would be a page whose two clicks could compose
+ *  one key, which is the bug this exists to let the suite reproduce. */
+export function resetConnectionAttempts() {
+  attempts = 0;
+  loadNonce = null;
 }
 
 /** The "Test connection" control: create one `sourceConnection` `Preflight`,
@@ -1173,11 +1260,14 @@ function wireConnectionCheck(node, ns, name, parse, lifecycle, api, object, disc
     if (!active(lifecycle) || mutation.pending() || connectionRefusal(object).length > 0) {
       return;
     }
-    const attempt = nextConnectionAttempt(ns, name);
-    mutation.run(
-      () => api.startPreflight(ns, connectionCheckRequest(name), { attempt: attempt }),
-      { about: { attempt: attempt } },
-    );
+    // THE TOKEN IS MINTED INSIDE THE EXECUTOR so that a platform with no
+    // random source becomes a refusal in the form's own status region -- the
+    // mutation record catches a throwing executor -- rather than an exception
+    // out of an event handler that nothing renders.
+    mutation.run(() => {
+      const attempt = nextConnectionAttempt(ns, name);
+      return api.startPreflight(ns, connectionCheckRequest(name), { attempt: attempt });
+    });
   }, lifecycle);
 }
 

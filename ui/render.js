@@ -611,14 +611,40 @@ export function checkTable(checks, empty) {
     cell(c.code),
     cell(c.message),
     cell(c.remedy),
+    checkScope(c.scope),
     cell(c.observedAt),
     cell(c.expiresAt),
   ]);
   return table(
-    ["CHECK", "VERDICT", "GATING", "CODE", "MESSAGE", "REMEDY", "OBSERVED", "EXPIRES"],
+    ["CHECK", "VERDICT", "GATING", "CODE", "MESSAGE", "REMEDY", "SCOPE", "OBSERVED", "EXPIRES"],
     rows,
     empty,
   );
+}
+
+/** What a row is ABOUT, as `Kind/name`.
+ *
+ *  PLAT-03.1's acceptance sentence is "names each failed prerequisite and its
+ *  remedy, with check time **and scope**", and until review F5 this table
+ *  rendered the first two and dropped the third: the controller fills every
+ *  row's `scope`, the typed client declares it, and no console surface printed
+ *  it. A `notReady` row whose subject is invisible makes an operator guess
+ *  which of two connections or two destinations a refusal is about.
+ *
+ *  A scope with no `kind` and no `name` prints [`ABSENT`] like every other
+ *  unrecorded field -- a verdict stored by an older controller carries none,
+ *  and inventing one would be a guess about which object was checked. */
+export function checkScope(scope) {
+  const s = scope || {};
+  const kind = typeof s.kind === "string" ? s.kind : "";
+  const name = typeof s.name === "string" ? s.name : "";
+  if (kind.length === 0 && name.length === 0) {
+    return ABSENT;
+  }
+  if (kind.length === 0 || name.length === 0) {
+    return esc(kind + name);
+  }
+  return esc(kind + "/" + name);
 }
 
 /** The execution-only list, with the sentence that says what "ready" does not

@@ -42,9 +42,11 @@ import {
 import { keepDraft, readDraft } from "../lifecycle.js";
 import { createRouteLifecycle } from "../app.js";
 import {
+  ABSENT,
   ATTESTATION_DISCLAIMER,
   CREDENTIALS_CLEARED_CLAUSE,
   applicabilityLine,
+  checkScope,
   checkTable,
   destinationVerdict,
   executionOnlyBlock,
@@ -74,12 +76,16 @@ import {
   validateGrants,
 } from "../pages/destinations.js";
 import {
+  CONNECTION_CHECK_LEGACY_SENTENCE,
   CONNECTION_CHECK_NO_TOPICS_SENTENCE,
   CONNECTION_CHECK_POLLS,
   CONNECTION_CHECK_SENTENCE,
   connectionCheckRequest,
+  connectionNonce,
   connectionRefusal,
   mountClusterDetail,
+  nextConnectionAttempt,
+  resetConnectionAttempts,
   renderConnectionCheck,
   renderDiscovery,
   renderDiscoveryPanel,
@@ -612,7 +618,28 @@ test("the_check_table_prints_an_absent_field_rather_than_a_guess", () => {
   assert.match(html, /<code>a\.b<\/code>/);
   assert.match(html, /badge-pending">unknown/);
   const cells = html.split("<td").length - 1;
-  assert.equal(cells, 8, "every column is rendered even when the producer recorded nothing");
+  assert.equal(cells, 9, "every column is rendered even when the producer recorded nothing");
+});
+
+test("the_check_table_names_what_each_row_is_about", () => {
+  // REVIEW F5. PLAT-03.1's acceptance is "names each failed prerequisite and
+  // its remedy, with check time AND SCOPE". The controller fills every row's
+  // scope and `CHECK_ENTRY` declares it; this table used to drop it, so a
+  // `notReady` row's subject was invisible and an operator with two
+  // connections had to guess which one a refusal was about.
+  const html = checkTable([{
+    id: "connection.authenticated", state: "notReady", code: "AuthenticationFailed",
+    scope: { kind: "KafkaCluster", name: "User:backup" },
+  }], "none");
+  assert.match(html, /<th scope="col">SCOPE<\/th>/);
+  assert.match(html, /KafkaCluster\/User:backup/);
+
+  // An older controller's verdict carries no scope, and an absent field prints
+  // as absent rather than as a guess about which object was checked.
+  assert.equal(checkScope(undefined), ABSENT);
+  assert.equal(checkScope({}), ABSENT);
+  assert.equal(checkScope({ kind: "Pod" }), "Pod");
+  assert.equal(checkScope({ name: "lwc-sc-1" }), "lwc-sc-1");
 });
 
 test("the_execution_intention_sentence_no_longer_calls_itself_a_check", () => {
@@ -1223,7 +1250,52 @@ function preflightItem(id, state, terminal) {
   };
 }
 
+test("two_page_loads_mint_different_tokens_for_their_first_click", () => {
+  // REVIEW F1. The first cut composed `"<ns>.<name>.attempt-" + <counter>`,
+  // and a module counter starts at zero on every page load -- so the FIRST
+  // click of one load and the FIRST click of the next composed the same token,
+  // hence (through `preflightTag`) the same `Idempotency-Key`, hence the same
+  // object name, hence a REPLAY. An operator who read `AuthenticationFailed`,
+  // fixed the Secret, reloaded and clicked again got the first check's stale
+  // rows back as the new verdict. The reviewer reproduced the collision across
+  // two browser sessions.
+  //
+  // `resetConnectionAttempts` is a page load: it forgets the nonce AND the
+  // ordinal, which is exactly what a reload does.
+  resetConnectionAttempts();
+  const firstLoad = [nextConnectionAttempt("team-a", "orders"), nextConnectionAttempt("team-a", "orders")];
+  resetConnectionAttempts();
+  const secondLoad = [nextConnectionAttempt("team-a", "orders"), nextConnectionAttempt("team-a", "orders")];
+
+  assert.notEqual(firstLoad[0], secondLoad[0],
+    "the FIRST click of two loads is the collision F1 named; a nonce is what separates them");
+  assert.notEqual(firstLoad[1], secondLoad[1]);
+  assert.notEqual(firstLoad[0], firstLoad[1],
+    "and two clicks within ONE load are still two tests");
+  assert.equal(new Set(firstLoad.concat(secondLoad)).size, 4);
+
+  // THE NONCE IS PER LOAD AND NOT PER CLICK. Both tokens of one load carry it,
+  // so a reader can tell two clicks of one session apart from two sessions.
+  resetConnectionAttempts();
+  const mint = connectionNonce();
+  assert.match(mint, /^[0-9a-f]{32}$/, "sixteen bytes of the platform's own random source");
+  assert.equal(connectionNonce(), mint, "minted once per load, not once per call");
+  assert.ok(nextConnectionAttempt("team-a", "orders").includes(mint));
+  assert.ok(nextConnectionAttempt("team-a", "orders").includes(mint));
+
+  // The subject is still in the token, so two connections never look like one
+  // check however the nonce falls.
+  assert.ok(nextConnectionAttempt("team-a", "orders").includes("team-a.orders."));
+  assert.ok(nextConnectionAttempt("team-b", "orders").includes("team-b.orders."));
+
+  // `client.spec.js`'s
+  // `a_connectivity_checks_key_is_per_deliberate_test_and_never_per_subject`
+  // carries the other half: a different token composes a different
+  // `Idempotency-Key` on the wire. The two rows together are the claim.
+});
+
 test("a_double_click_makes_one_preflight_and_a_second_test_makes_a_new_one", async () => {
+  resetConnectionAttempts();
   const started = [];
   const node = checkNode();
   let release;
@@ -1352,4 +1424,20 @@ test("a_follow_that_outlives_its_route_paints_nothing", async () => {
   assert.equal(reads, 0, "the route left during the wait, so no read was issued");
   assert.ok(atDeparture >= 0, "the follower did reach its first wait");
   assert.equal(painted.length, atDeparture, "and nothing was painted after it left");
+});
+
+test("a_kubectl_proxy_console_is_told_up_front_that_it_cannot_start_a_check", () => {
+  // REVIEW F6. The `unavailable` branch used to be dead: nothing set it, so a
+  // session that cannot create a Preflight was offered a control whose click
+  // failed at the API. The legacy proxy serves read-only summaries of the
+  // three D2 kinds and creates none, which is a fact the page knows before the
+  // click -- and the discovery panel beside it already says so.
+  const html = renderConnectionCheck({
+    mayOperate: true, state: {}, preflight: null,
+    unavailable: true, unavailableReason: CONNECTION_CHECK_LEGACY_SENTENCE,
+  });
+  assert.match(html, /id="connection-check-unavailable"/);
+  assert.match(html, /needs the product API/);
+  assert.doesNotMatch(html, /<button/, "no control at all, rather than one that cannot work");
+  assert.match(CONNECTION_CHECK_LEGACY_SENTENCE, /kubectl proxy/);
 });
