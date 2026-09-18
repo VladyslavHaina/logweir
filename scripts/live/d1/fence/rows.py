@@ -383,7 +383,7 @@ def l_04_2(H: Any) -> dict[str, Any]:
     )
     up = fenced.scale(H, 1)
     started = up.get("controllerStartedAt") or []
-    up_at = H.parse(started[0]) if started else dt.datetime.now(dt.timezone.utc)
+    up_at = parse_ts(started[0]) if started else dt.datetime.now(dt.timezone.utc)
     since_slot = (up_at - slot).total_seconds()
     H.require(
         70 <= since_slot <= 110,
@@ -577,7 +577,7 @@ def l_04_5(H: Any) -> dict[str, Any]:
             [
                 b
                 for b in H.backups_of(uid)
-                if H.parse(b["metadata"]["creationTimestamp"]) > started
+                if parse_ts(b["metadata"]["creationTimestamp"]) > started
             ]
         )
         >= 2,
