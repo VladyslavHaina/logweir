@@ -2366,7 +2366,7 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: 'One bounded readiness observation for a Backup, a Restore or a BackupDestination''s grants, executed as an isolated Job with no Kubernetes token. `spec.request` is immutable and `spec.cancelRequested` may only move from false to true. The verdict is ADVISORY: a `ready` result authorizes nothing and every execution-time guard still runs.'
+        description: 'One bounded readiness observation for a Backup, a Restore, a BackupDestination''s grants or a source connection on its own, executed as an isolated Job with no Kubernetes token. `spec.request` is immutable and `spec.cancelRequested` may only move from false to true. The verdict is ADVISORY: a `ready` result authorizes nothing and every execution-time guard still runs.'
         properties:
           spec:
             description: '`Preflight.spec`.'
@@ -2482,6 +2482,7 @@ spec:
                     - Backup
                     - Restore
                     - DestinationAccess
+                    - SourceConnection
                     type: string
                   restore:
                     description: 'The restore block, for `operation: Restore`.'
@@ -2594,6 +2595,22 @@ spec:
                     maxItems: 32
                     nullable: true
                     type: array
+                  sourceConnection:
+                    description: 'The connection block, for `operation: SourceConnection`.'
+                    nullable: true
+                    properties:
+                      connectionRef:
+                        description: The `KafkaCluster` to dial.
+                        properties:
+                          name:
+                            description: The referenced object's `metadata.name`, in this namespace.
+                            type: string
+                        required:
+                        - name
+                        type: object
+                    required:
+                    - connectionRef
+                    type: object
                   timeoutSeconds:
                     default: 120
                     description: The in-Job budget.
@@ -2608,7 +2625,7 @@ spec:
                 - message: spec.request is immutable; create a new Preflight
                   rule: self == oldSelf
                 - message: exactly the block matching spec.request.operation may be set
-                  rule: 'self.operation == ''Backup'' ? (has(self.backup) && !has(self.restore) && !has(self.destinationAccess)) : self.operation == ''Restore'' ? (has(self.restore) && !has(self.backup) && !has(self.destinationAccess)) : (has(self.destinationAccess) && !has(self.backup) && !has(self.restore))'
+                  rule: 'self.operation == ''Backup'' ? (has(self.backup) && !has(self.restore) && !has(self.destinationAccess) && !has(self.sourceConnection)) : self.operation == ''Restore'' ? (has(self.restore) && !has(self.backup) && !has(self.destinationAccess) && !has(self.sourceConnection)) : self.operation == ''DestinationAccess'' ? (has(self.destinationAccess) && !has(self.backup) && !has(self.restore) && !has(self.sourceConnection)) : (has(self.sourceConnection) && !has(self.backup) && !has(self.restore) && !has(self.destinationAccess))'
             required:
             - request
             type: object

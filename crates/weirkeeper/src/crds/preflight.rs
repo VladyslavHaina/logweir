@@ -50,7 +50,7 @@ pub const P2_CANCEL_MONOTONIC_RULE: &str = super::topic_discovery::CANCEL_MONOTO
 pub const P2_CANCEL_MONOTONIC_MESSAGE: &str = super::topic_discovery::CANCEL_MONOTONIC_MESSAGE;
 
 /// P3 — exactly the block matching `operation` is set.
-pub const P3_OPERATION_BLOCK_RULE: &str = "self.operation == 'Backup' ? (has(self.backup) && !has(self.restore) && !has(self.destinationAccess)) : self.operation == 'Restore' ? (has(self.restore) && !has(self.backup) && !has(self.destinationAccess)) : (has(self.destinationAccess) && !has(self.backup) && !has(self.restore))";
+pub const P3_OPERATION_BLOCK_RULE: &str = "self.operation == 'Backup' ? (has(self.backup) && !has(self.restore) && !has(self.destinationAccess) && !has(self.sourceConnection)) : self.operation == 'Restore' ? (has(self.restore) && !has(self.backup) && !has(self.destinationAccess) && !has(self.sourceConnection)) : self.operation == 'DestinationAccess' ? (has(self.destinationAccess) && !has(self.backup) && !has(self.restore) && !has(self.sourceConnection)) : (has(self.sourceConnection) && !has(self.backup) && !has(self.restore) && !has(self.destinationAccess))";
 /// P3's message.
 pub const P3_OPERATION_BLOCK_MESSAGE: &str =
     "exactly the block matching spec.request.operation may be set";
@@ -164,6 +164,15 @@ pub enum PreflightOperation {
     Restore,
     /// A destination's grants, on their own.
     DestinationAccess,
+    /// A source connection, on its own: does this `KafkaCluster` answer, as
+    /// this principal, right now (D2-SOURCECHECK).
+    ///
+    /// IT IS NOT A NARROWER `Backup`. A Backup readiness check needs a
+    /// destination and one to a thousand named topics before it can be
+    /// rendered at all, and a console control that asked an operator for those
+    /// in order to test a connection would be a different question wearing the
+    /// "Test connection" label.
+    SourceConnection,
 }
 
 /// A reference to an object with its UID, so a same-named replacement is not
@@ -248,6 +257,18 @@ pub struct DestinationAccessRequest {
     pub roles: Vec<logweir_core::destination::DestinationRole>,
 }
 
+/// What a source-connectivity check needs to know.
+///
+/// ONE REFERENCE, AND THE ABSENCES ARE THE POINT: no destination, no plan, no
+/// topic list and no signer. The check dials the connection this names with
+/// that connection's own credential and reports whether the broker answered.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SourceConnectionPreflightRequest {
+    /// The `KafkaCluster` to dial.
+    pub connection_ref: LocalRef,
+}
+
 /// What to check. Sealed by P1 once created.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -263,6 +284,9 @@ pub struct PreflightRequest {
     /// The destination block, for `operation: DestinationAccess`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub destination_access: Option<DestinationAccessRequest>,
+    /// The connection block, for `operation: SourceConnection`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_connection: Option<SourceConnectionPreflightRequest>,
     /// Checks to leave out. **A skipped blocking check keeps the overall state
     /// `unknown`**: skipping a question is not answering it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -280,7 +304,7 @@ pub struct PreflightRequest {
     group = "logweir.dev",
     version = "v1alpha1",
     kind = "Preflight",
-    doc = "One bounded readiness observation for a Backup, a Restore or a BackupDestination's grants, executed as an isolated Job with no Kubernetes token. `spec.request` is immutable and `spec.cancelRequested` may only move from false to true. The verdict is ADVISORY: a `ready` result authorizes nothing and every execution-time guard still runs.",
+    doc = "One bounded readiness observation for a Backup, a Restore, a BackupDestination's grants or a source connection on its own, executed as an isolated Job with no Kubernetes token. `spec.request` is immutable and `spec.cancelRequested` may only move from false to true. The verdict is ADVISORY: a `ready` result authorizes nothing and every execution-time guard still runs.",
     plural = "preflights",
     singular = "preflight",
     namespaced,

@@ -3263,8 +3263,8 @@ fn a_preflight_carries_only_the_block_its_operation_names() {
     let request = at(spec_schema(&doc), &["properties", "request"]);
     assert_eq!(
         enum_values(at(request, &["properties", "operation"])),
-        vec!["Backup", "Restore", "DestinationAccess"],
-        "three operations, and P3 ties the block to the value"
+        vec!["Backup", "Restore", "DestinationAccess", "SourceConnection"],
+        "four operations, and P3 ties the block to the value"
     );
     assert_eq!(
         required(request),
@@ -3291,6 +3291,37 @@ fn a_preflight_carries_only_the_block_its_operation_names() {
         (
             "Backup with no block at all",
             yaml("operation: Backup\n"),
+            false,
+        ),
+        // D2-SOURCECHECK's fourth operation, and the pair that proves P3's
+        // last arm is a real arm and not the fall-through it used to be: the
+        // rule ended `: (has(self.destinationAccess) && …)`, so ANY value the
+        // enum grew would have demanded the destination block. A
+        // `SourceConnection` request carrying `sourceConnection` has to be
+        // admitted and one carrying `destinationAccess` refused.
+        (
+            "SourceConnection with sourceConnection",
+            req("SourceConnection", "sourceConnection"),
+            true,
+        ),
+        (
+            "SourceConnection with destinationAccess",
+            req("SourceConnection", "destinationAccess"),
+            false,
+        ),
+        (
+            "SourceConnection with backup",
+            req("SourceConnection", "backup"),
+            false,
+        ),
+        (
+            "SourceConnection with no block at all",
+            yaml("operation: SourceConnection\n"),
+            false,
+        ),
+        (
+            "DestinationAccess with sourceConnection",
+            req("DestinationAccess", "sourceConnection"),
             false,
         ),
     ] {

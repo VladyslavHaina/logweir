@@ -355,6 +355,43 @@ pub const RESTORE_CONTROLLER_ROWS: &[Row] = &[
     ),
 ];
 
+/// The **C** and **E** rows of a `SourceConnection` check (D2-SOURCECHECK).
+///
+/// D2 §6.3's Backup catalogue MINUS everything that is about something the
+/// connection is used FOR. No `destination.*`, because the request names none;
+/// no `signer.*`, because nothing would be signed and projecting a signing key
+/// into a connectivity test would widen the pod's blast radius past the
+/// question; no `connection.topicsReadable`, because no topic was selected for
+/// anything to be readable from. What is left is the connection itself, and
+/// `configuration.*`, which is about the installation and not about the
+/// operation.
+pub const SOURCE_CONNECTION_CONTROLLER_ROWS: &[Row] = &[
+    row(
+        CheckId::ConnectionResolved,
+        Gating::Blocking,
+        Authority::Controller,
+        Some(EXPIRY_DEFAULT),
+    ),
+    row(
+        CheckId::ConnectionClusterIdentity,
+        Gating::Blocking,
+        Authority::Controller,
+        Some(EXPIRY_DEFAULT),
+    ),
+    row(
+        CheckId::ConfigurationPolicy,
+        Gating::Advisory,
+        Authority::Controller,
+        Some(EXPIRY_DEFAULT),
+    ),
+    row(
+        CheckId::ConfigurationEgress,
+        Gating::ExecutionOnly,
+        Authority::Controller,
+        None,
+    ),
+];
+
 /// The **P** rows — answered from pod status by `check::waiting`, never by a
 /// process inside the pod.
 #[must_use]
@@ -372,15 +409,23 @@ pub fn pod_rows(operation: PreflightOperation) -> Vec<Row> {
             Authority::PodStatus,
             Some(EXPIRY_DEFAULT),
         ),
-        row(
+    ];
+    // A DESTINATION CREDENTIAL ROW NEEDS A DESTINATION. It used to be
+    // unconditional, which was harmless while every operation named one; a
+    // `SourceConnection` check names none, and an unconditional row would have
+    // reported `destination.credentialProjected unknown/PodNotStarted` —
+    // BLOCKING — about a destination nobody asked for, pinning every
+    // connection test at `unknown`.
+    if operation != PreflightOperation::SourceConnection {
+        out.push(row(
             CheckId::DestinationCredentialProjected,
             Gating::Blocking,
             Authority::PodStatus,
             Some(EXPIRY_DEFAULT),
-        ),
-    ];
+        ));
+    }
     match operation {
-        PreflightOperation::Backup => out.push(row(
+        PreflightOperation::Backup | PreflightOperation::SourceConnection => out.push(row(
             CheckId::ConnectionCredentialProjected,
             Gating::Blocking,
             Authority::PodStatus,
@@ -406,6 +451,7 @@ pub fn controller_rows(operation: PreflightOperation) -> Vec<Row> {
         PreflightOperation::Backup => BACKUP_CONTROLLER_ROWS,
         PreflightOperation::Restore => RESTORE_CONTROLLER_ROWS,
         PreflightOperation::DestinationAccess => DESTINATION_ACCESS_CONTROLLER_ROWS,
+        PreflightOperation::SourceConnection => SOURCE_CONNECTION_CONTROLLER_ROWS,
     };
     let mut out = base.to_vec();
     out.extend(pod_rows(operation));
@@ -452,6 +498,9 @@ pub fn job_rows(request: &CheckRequest, restore_target_is_scratch: bool) -> BTre
             push(CheckId::RunnerContract);
             match r.operation {
                 CheckOperation::Restore => push(CheckId::TargetAuthenticated),
+                // `readiness::connection_ids`' own table, mirrored: a
+                // source-connection operation has no topic row.
+                CheckOperation::SourceConnection => push(CheckId::ConnectionAuthenticated),
                 CheckOperation::Backup | CheckOperation::DestinationAccess => {
                     push(CheckId::ConnectionAuthenticated);
                     push(CheckId::ConnectionTopicsDescribable);
@@ -474,6 +523,15 @@ pub fn job_rows(request: &CheckRequest, restore_target_is_scratch: bool) -> BTre
             for role in &r.roles {
                 out.insert(destination_row_for(*role));
             }
+        }
+        // TWO ROWS, AND `connection.topicsDescribable` IS NOT ONE OF THEM.
+        // `kinds::source_connection::run` emits exactly these; the row it
+        // deliberately omits is argued there, and this mirror is what
+        // `the_expected_rows_are_the_rows_the_runner_emits` holds against the
+        // runner's own fixtures.
+        CheckRequest::SourceConnection(_) => {
+            out.insert(CheckId::RunnerContract);
+            out.insert(CheckId::ConnectionAuthenticated);
         }
         CheckRequest::RestorePreflight(r) => {
             let wanted: BTreeSet<CheckId> = r.checks.iter().copied().collect();
@@ -556,6 +614,11 @@ pub fn unrendered_job_rows(operation: PreflightOperation) -> BTreeSet<CheckId> {
         ]
         .into_iter()
         .collect(),
+        PreflightOperation::SourceConnection => {
+            [CheckId::RunnerContract, CheckId::ConnectionAuthenticated]
+                .into_iter()
+                .collect()
+        }
         PreflightOperation::Restore => [
             CheckId::RunnerContract,
             // `plan.parse` is deliberately absent: the CONTROLLER answers it
@@ -581,6 +644,7 @@ pub fn plan_kind(operation: PreflightOperation) -> CheckPlanKind {
         PreflightOperation::Backup => CheckPlanKind::OperationReadiness,
         PreflightOperation::Restore => CheckPlanKind::RestorePreflight,
         PreflightOperation::DestinationAccess => CheckPlanKind::DestinationAccess,
+        PreflightOperation::SourceConnection => CheckPlanKind::SourceConnection,
     }
 }
 
@@ -591,6 +655,7 @@ pub fn check_operation(operation: PreflightOperation) -> CheckOperation {
         PreflightOperation::Backup => CheckOperation::Backup,
         PreflightOperation::Restore => CheckOperation::Restore,
         PreflightOperation::DestinationAccess => CheckOperation::DestinationAccess,
+        PreflightOperation::SourceConnection => CheckOperation::SourceConnection,
     }
 }
 
@@ -2418,6 +2483,7 @@ pub fn binding_status(inputs: &BindingInputs) -> PreflightBinding {
                 CheckOperation::Backup => "Backup",
                 CheckOperation::Restore => "Restore",
                 CheckOperation::DestinationAccess => "DestinationAccess",
+                CheckOperation::SourceConnection => "SourceConnection",
             }
             .to_string(),
         ),
@@ -2829,12 +2895,18 @@ impl Inputs {
 
     /// Whether this operation's pod needs the signing key.
     ///
-    /// A DESTINATION-ACCESS CHECK DOES NOT, and that is the point of the
-    /// distinction: it exercises grants, so projecting a signing key into it
-    /// would widen the pod's blast radius past the question being asked.
+    /// A DESTINATION-ACCESS CHECK DOES NOT, and neither does a
+    /// SOURCE-CONNECTION CHECK. That is the point of the distinction: one
+    /// exercises grants and the other dials a broker, so projecting a signing
+    /// key into either would widen the pod's blast radius past the question
+    /// being asked. Only the two operations that would really sign something —
+    /// a backup's receipt, a restore's evidence — get the key.
     #[must_use]
     pub fn signs(&self) -> bool {
-        self.operation != PreflightOperation::DestinationAccess
+        matches!(
+            self.operation,
+            PreflightOperation::Backup | PreflightOperation::Restore
+        )
     }
 
     /// `destination.resolved`, over BOTH destinations — see the call site.
@@ -2881,6 +2953,12 @@ impl Inputs {
             &self.store_ports(),
             now,
         ));
+        // THE CONNECTION ROWS BELONG TO THE OPERATIONS THAT DIAL, and the
+        // SIGNER ROW to the ones that sign. They used to be one `if`, because
+        // `DestinationAccess` was the only operation that did neither;
+        // `SourceConnection` dials and does not sign, which is what splits
+        // them. Pushing `signer.rostered` for it would have published a
+        // BLOCKING controller row about a key the pod was never given.
         if op != PreflightOperation::DestinationAccess {
             out.push(connection_row(
                 op,
@@ -2897,6 +2975,8 @@ impl Inputs {
                 self.plan.as_ref().is_some_and(PlanFacts::scratch),
                 now,
             ));
+        }
+        if self.signs() {
             out.push(signer_rostered_row(
                 op,
                 &self.roster,
@@ -3112,6 +3192,12 @@ pub fn build_job_shape(
                 write_probe: inputs.write_probe,
                 skip_checks: skip.clone(),
             }))
+        }
+        PreflightOperation::SourceConnection => {
+            let c = connection.ok_or("the source connection did not resolve")?;
+            CheckRequest::SourceConnection(logweir_core::check_contract::SourceConnectionRequest {
+                connection: connection_plan(c),
+            })
         }
         PreflightOperation::DestinationAccess => {
             let d = archive.ok_or("the destination did not resolve")?;
@@ -3379,6 +3465,10 @@ pub async fn resolve(
             r.and_then(|r| r.target_ref.as_ref())
                 .map(|t| t.name.clone())
         }
+        PreflightOperation::SourceConnection => request
+            .source_connection
+            .as_ref()
+            .map(|c| c.connection_ref.name.clone()),
         PreflightOperation::DestinationAccess => None,
     };
 
@@ -3462,6 +3552,10 @@ pub async fn resolve(
                 None,
             )
         }
+        // NO DESTINATION AND NO ROLE. Every `None` here is a question this
+        // operation does not ask, so nothing is resolved, nothing is projected
+        // and no `destination.*` row is expected of the Job.
+        PreflightOperation::SourceConnection => (None, None, Vec::new(), None),
     };
     inputs.roles = roles;
     inputs.legacy_archive = legacy;
@@ -3479,6 +3573,11 @@ pub async fn resolve(
             })
             .unwrap_or(DestinationRole::ArchiveRead),
         PreflightOperation::Backup => DestinationRole::ArchiveWrite,
+        // Unreachable in practice: the arm above left `archive_ref` `None`, so
+        // nothing is resolved with this role. It is spelled rather than
+        // wildcarded so that an operation added later cannot inherit a grant
+        // by falling through.
+        PreflightOperation::SourceConnection => DestinationRole::ArchiveRead,
     };
     if let Some(name) = archive_ref {
         let resolved = resolve_destination(client, namespace, &name, archive_role, &policy)
@@ -3737,7 +3836,9 @@ pub async fn resolve(
                 }
             }
         }
-        PreflightOperation::DestinationAccess => {}
+        // Neither names a plan or a topic set: a destination-access check is
+        // about grants and a source-connection check is about one dial.
+        PreflightOperation::DestinationAccess | PreflightOperation::SourceConnection => {}
     }
     Ok(inputs)
 }
