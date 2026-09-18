@@ -1448,27 +1448,32 @@ def l_05_2_2u(H: Any) -> dict[str, Any]:
     H.await_schedule_observed("unfroz", timeout=180)
     before = {b["metadata"]["name"] for b in H.backups_of(uid)}
     fenced.arm(H, "configmap_create", "", "status", code=503, repeat=True)
-    run = H.wait_until(
-        lambda: next(
-            (b for b in H.backups_of(uid) if b["metadata"]["name"] not in before), None
-        ),
-        timeout=260,
-        interval=2.0,
-        what="a new run whose plan ConfigMap POST the proxy will refuse",
-    )
+    # THE RUN IS THE ONE WHOSE POST WAS ACTUALLY REFUSED, not the first new one.
+    # A slot can fire between the schedule being observed and the arming taking
+    # effect, and on the first attempt at this row that earlier run reached
+    # `Succeeded` normally while the assertions were pointed at it — a red for a
+    # run the injection never touched. The blocked capture names the plan
+    # ConfigMap, and a plan ConfigMap is `<backup name>-plan`.
     blocked = H.wait_until(
         lambda: next(
             (
                 c
                 for c in fenced.captures(H, "configmap_create")
                 if c.get("injected") == "status 503"
+                and str(c.get("name", "")).startswith("logweir-backup-unfroz-")
             ),
             None,
         ),
-        timeout=200,
+        timeout=300,
         interval=2.0,
-        what="the plan ConfigMap POST to be answered 503",
+        what="a plan ConfigMap POST for this schedule to be answered 503",
     )
+    run_name = str(blocked["name"]).removesuffix("-plan")
+    H.require(
+        run_name not in before,
+        f"the blocked plan ConfigMap belongs to {run_name}, which existed before the arming",
+    )
+    run = H.get("backup", run_name)
     H.kn("delete", "backupschedule", "unfroz", "--wait=true", timeout=120)
     fenced.release(H)
     fenced.disarm(H)
@@ -1510,6 +1515,7 @@ def l_05_2_2u(H: Any) -> dict[str, Any]:
         "detail": {
             "injection": INJECTIONS["L-05.2-3/L-05.2-2u"],
             "run": run["metadata"]["name"],
+            "runsThatPredateTheArming": sorted(before),
             "blockedRequest": {
                 k: blocked.get(k) for k in ("kind", "name", "method", "path", "injected")
             },
