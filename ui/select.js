@@ -535,24 +535,27 @@ export const PROBE_SENTENCE =
   "about right now -- an observation older than the freshness budget is labelled stale, and a " +
   "connection the controller refused to dial at all is labelled with its own reason.";
 
-/** The sentence the "Test connection" control carries.
+/** The sentence the re-read control carries.
  *
- *  IT SAYS WHAT THE BUTTON DOES, WHICH IS A READ. This page has no authority to
- *  make the controller dial anything: `KafkaCluster.spec` is immutable, the
- *  page's whole write surface is five creates and one suspend patch, and the
- *  re-probe cadence is the probe Job's own `ttlSecondsAfterFinished` in
- *  `weirkeeper`. So the control re-reads the object and shows the newest
- *  observation the controller has recorded -- which is what "test the
- *  connection" can honestly mean from a browser holding no execution
- *  authority. Saying otherwise would be the same class of lie as rendering a
- *  stale probe as current. */
+ *  IT SAYS WHAT THE BUTTON DOES, WHICH IS A READ, AND IT NAMES THE CONTROL
+ *  THAT DIALS. This surface has no authority to make the controller dial:
+ *  `KafkaCluster.spec` is immutable and the re-probe cadence is the probe Job's
+ *  own `ttlSecondsAfterFinished` in `weirkeeper`. So this control re-reads the
+ *  object and shows the newest observation the controller recorded.
+ *
+ *  UNTIL D2-SOURCECHECK THE BUTTON SAID "Test connection" AND DID THIS, which
+ *  was the defect PLAT-07.2's row named: the only honest reading of that label
+ *  is "dial the broker now", and nothing in the console could. There is now a
+ *  check kind that can (`sourceConnection`), so the DIAL took the label and
+ *  this control took the name of what it actually does. Two controls with one
+ *  label would have been the same lie in a second place. */
 export const TEST_CONNECTION_SENTENCE =
-  "Test connection re-reads this KafkaCluster and shows the newest connection probe the " +
-  "controller has recorded. The browser never dials a broker: the controller owns the probe " +
-  "and re-runs it on its own cadence, so this reports its latest result rather than forcing a " +
-  "new dial.";
+  "Re-read probe re-reads this KafkaCluster and shows the newest connection probe the " +
+  "controller has recorded. It dials nothing: the controller owns the probe and re-runs it on " +
+  "its own cadence. The control that really dials is Test connection on a cluster's own page, " +
+  "which starts a check Job against this connection's credential.";
 
-/** The "Test connection" control for one cluster, identified by UID.
+/** The re-read control for one cluster, identified by UID.
  *
  *  A BUTTON IN ITS OWN FORM, so a keyboard submit reaches it and so the page
  *  can find it again by the UID rather than by counting rows. `pending`
@@ -563,13 +566,13 @@ export function renderTestConnection(cluster, pending) {
   return (
     "<form class=\"probe-test\" data-probe-uid=\"" + esc(uid) + "\" data-probe-name=\"" +
     esc(clusterName(cluster)) + "\"" + (pending === true ? " aria-busy=\"true\"" : "") + ">" +
-    "<button type=\"submit\"" + (pending === true ? " disabled" : "") + ">Test connection</button>" +
+    "<button type=\"submit\"" + (pending === true ? " disabled" : "") + ">Re-read probe</button>" +
     "</form>"
   );
 }
 
 /** THE PROBE PANEL for one cluster: the badges, the observation, the reason,
- *  the capability label, and the Test connection control. */
+ *  the capability label, and the re-read control. */
 export function renderProbePanel(cluster, view) {
   const v = view || {};
   const state = probeState(cluster, v.now, v.freshSeconds);

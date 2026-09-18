@@ -986,8 +986,16 @@ export const PREFLIGHT_STATES = Object.freeze([
   "pending", "queued", "running", "ready", "notReady", "unknown", "failed", "cancelled",
 ]);
 
-/** What a preflight is about. */
-export const PREFLIGHT_OPERATIONS = Object.freeze(["backup", "restore", "destinationAccess"]);
+/** What a preflight is about.
+ *
+ *  `sourceConnection` IS THE ONE THAT NAMES NOTHING ELSE (D2-SOURCECHECK). The
+ *  other three each need something the connection would be used FOR -- a
+ *  destination, a plan, a topic list -- and a console control that asked for
+ *  one of those in order to find out whether a broker answers would be a
+ *  different question wearing the same label. */
+export const PREFLIGHT_OPERATIONS = Object.freeze([
+  "backup", "restore", "destinationAccess", "sourceConnection",
+]);
 
 /** One check's verdict. `skipped` never counts as a pass. */
 export const CHECK_VERDICTS = Object.freeze(["ready", "notReady", "unknown", "skipped"]);
@@ -1356,6 +1364,13 @@ const DESTINATION_ACCESS_PREFLIGHT_REQUEST = shapeOf("DestinationAccessPreflight
   destination: str, roles: listOf(oneOf(DESTINATION_ROLES)),
 });
 
+// ONE REQUIRED FIELD AND NO OPTIONAL ONE. The absences are the contract: a
+// source-connectivity check names no destination, no plan and no topic, and a
+// body that carried one would be a `422 unknown_field` from the product API.
+const SOURCE_CONNECTION_PREFLIGHT_REQUEST = shapeOf("SourceConnectionPreflightRequest", {
+  connectionRef: str,
+});
+
 const CREATE_PREFLIGHT_REQUEST = shapeOf(
   "CreatePreflightRequest",
   { operation: oneOf(PREFLIGHT_OPERATIONS) },
@@ -1363,6 +1378,7 @@ const CREATE_PREFLIGHT_REQUEST = shapeOf(
     backup: objectOf(BACKUP_PREFLIGHT_REQUEST),
     restore: objectOf(RESTORE_PREFLIGHT_REQUEST),
     destinationAccess: objectOf(DESTINATION_ACCESS_PREFLIGHT_REQUEST),
+    sourceConnection: objectOf(SOURCE_CONNECTION_PREFLIGHT_REQUEST),
     skipChecks: listOf(str), timeoutSeconds: int,
   },
 );
@@ -1540,6 +1556,7 @@ export const CONSOLE_SHAPES = Object.freeze({
   BackupPreflightRequest: BACKUP_PREFLIGHT_REQUEST,
   RestorePreflightRequest: RESTORE_PREFLIGHT_REQUEST,
   DestinationAccessPreflightRequest: DESTINATION_ACCESS_PREFLIGHT_REQUEST,
+  SourceConnectionPreflightRequest: SOURCE_CONNECTION_PREFLIGHT_REQUEST,
   CreatePreflightRequest: CREATE_PREFLIGHT_REQUEST,
 });
 

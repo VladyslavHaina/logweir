@@ -1457,11 +1457,13 @@ const consoleChecks = Object.freeze({
     );
     return decoded.value;
   },
-  async startPreflight(ns, request) {
+  async startPreflight(ns, request, options) {
     requireOperator(ns, "preflights", "start a readiness check");
     const body = sending("preflights", request);
     const answer = await consoleCreate(ns, "preflights", body, {
-      idempotencyKey: idempotencyKey("preflights", ns, preflightTag(body)),
+      idempotencyKey: idempotencyKey(
+        "preflights", ns, preflightTag(body, (options || {}).attempt),
+      ),
       token: tokenNow(),
     });
     const decoded = decodeConsoleItem("preflights", answer);
@@ -1534,9 +1536,23 @@ function discoveryTag(body) {
 // block that names what it is about. A second click on "Check readiness" for
 // the SAME plan is the same check; an edited plan is a different one, because
 // the plan hash is inside the digest.
-function preflightTag(body) {
+//
+// `attempt` IS THE CALLER'S "THIS IS A NEW ONE", and it is what the header of
+// this section already anticipates: "A DELIBERATELY NEW operation is a new
+// name, and a new name is a new key." A readiness check over an unchanged plan
+// is the same question and passes none, so its key is unchanged and a retry
+// replays. A connectivity test is the opposite: its whole subject is a broker
+// that may answer differently a minute later, so the page that owns the
+// control mints one token per accepted CLICK and passes it here. Without it
+// "Test connection" would replay its first answer for ever -- which is the
+// re-read this control exists to stop being.
+function preflightTag(body, attempt) {
   const block = body[body.operation];
-  return body.operation + "." + digest32(JSON.stringify(block === undefined ? null : block));
+  const subject = body.operation + "." +
+    digest32(JSON.stringify(block === undefined ? null : block));
+  return typeof attempt === "string" && attempt.length > 0
+    ? subject + "." + digest32(attempt)
+    : subject;
 }
 
 function consolePlural(plural) {
@@ -1835,8 +1851,8 @@ export function apiClient() {
     cancelDiscovery(ns, id) {
       return dispatchChecks((api) => api.cancelDiscovery(ns, id));
     },
-    startPreflight(ns, request) {
-      return dispatchChecks((api) => api.startPreflight(ns, request));
+    startPreflight(ns, request, options) {
+      return dispatchChecks((api) => api.startPreflight(ns, request, options));
     },
     preflight(ns, id, options) {
       return dispatchChecks((api) => api.preflight(ns, id, options));

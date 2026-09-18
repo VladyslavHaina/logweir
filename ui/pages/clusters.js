@@ -77,7 +77,9 @@ import {
   visibilityLine,
 } from "../render.js";
 import {
+  CONNECTION_REFUSAL_REASONS,
   PROBE_SENTENCE,
+  REFUSAL_GLOSS,
   TEST_CONNECTION_SENTENCE,
   clusterUid,
   probeBadge,
@@ -87,6 +89,7 @@ import {
   renderTestConnection,
   staleBadge,
 } from "../select.js";
+import { renderPreflight } from "./destinations.js";
 
 const PLURAL = "kafkaclusters";
 
@@ -284,10 +287,10 @@ export function renderClusterList(input, ns, now, freshSeconds) {
   );
 }
 
-/** One cluster, in full: its probe panel with the Test connection control, and
- *  then the saved connection contract v1 carries -- every reference by name,
- *  no value of anything. */
-export function renderClusterDetail(object, now, freshSeconds, pending, discovery) {
+/** One cluster, in full: its probe panel with the re-read control, the Test
+ *  connection panel that really dials, and then the saved connection contract
+ *  v1 carries -- every reference by name, no value of anything. */
+export function renderClusterDetail(object, now, freshSeconds, pending, discovery, check) {
   const spec = (object && object.spec) || {};
   const status = (object && object.status) || {};
   const servers = Array.isArray(spec.bootstrapServers) ? spec.bootstrapServers : [];
@@ -316,11 +319,155 @@ export function renderClusterDetail(object, now, freshSeconds, pending, discover
       ["probe freshness", esc(String(state.freshSeconds)) + "s budget"],
       ["uid", "<code id=\"cluster-uid\">" + esc(clusterUid(object)) + "</code>"],
     ]) +
+    // THE CONNECTION CHECK IS PART OF THE DETAIL FOR THE SAME REASON THE
+    // DISCOVERY PANEL IS: what a `connection.authenticated` row is about --
+    // which brokers, which principal, which recorded cluster id -- is the
+    // block directly above it.
+    (check === undefined || check === null ? "" : renderConnectionCheck(check)) +
     // THE DISCOVERY PANEL IS PART OF THE DETAIL AND NOT A SECOND VIEW, because
     // what it is about -- which principal, which cluster id, how fresh -- is
     // the block directly above it, and a reader who had to change routes to
     // compare them would be comparing from memory.
     (discovery === undefined || discovery === null ? "" : renderDiscoveryPanel(discovery))
+  );
+}
+
+// ===========================================================================
+// THE "TEST CONNECTION" PANEL (PLAT-03.1's check kind, PLAT-07.2's control)
+// ===========================================================================
+//
+// WHAT IT DOES NOW. It creates a `Preflight` of operation `sourceConnection`:
+// the controller resolves this `KafkaCluster`, renders a check plan carrying
+// that connection and nothing else, and runs ONE isolated Job that projects
+// this connection's own credential and dials the brokers. What comes back is
+// `connection.resolved`, `connection.credentialProjected`,
+// `connection.authenticated`, `connection.clusterIdentity`, `runner.*` and
+// `configuration.policy`, each with its own state, closed-vocabulary code,
+// remedy and the instant it was observed. None of it is computed here.
+//
+// AND WHAT IT STILL IS NOT. A `ready` verdict authorises nothing (D2 section
+// 6.8) and it is a statement about the moment the Job ran, which is why every
+// row carries its own `observedAt` and `expiresAt` and why they are rendered.
+// The connection probe panel above is a different fact: the controller's own
+// cadence, recorded minutes ago.
+//
+// AND IT ASKS NOTHING ABOUT TOPICS. `connection.topicsDescribable` is about
+// NAMED topics -- `TopicNotFound` and `TopicNotAuthorized` are facts about a
+// name the requester chose -- and this request names none, so the runner emits
+// no such row and this panel claims none. "Discover topics" below is the
+// control that answers what this principal can see.
+
+/** The identity of the connection check in the mutation registry. */
+export const CONNECTION_CHECK_FORM = "connection-check";
+
+/** What the control does, in the control's own words. */
+export const CONNECTION_CHECK_SENTENCE =
+  "Test connection starts a Preflight: an isolated Job that projects this connection's own " +
+  "credential and dials these brokers now. The rows below are that Job's own recorded result, " +
+  "each with the instant it was observed. It is not a promise about the next run, and a ready " +
+  "verdict authorises nothing: every execution-time guard still runs.";
+
+/** What the panel says instead of a topic claim. */
+export const CONNECTION_CHECK_NO_TOPICS_SENTENCE =
+  "This check names no topic, so it reports nothing about which topics this principal can " +
+  "describe. That is what Discover topics below is for.";
+
+/** What a controller refusal means for this control.
+ *
+ *  THE CONTROL IS DISABLED AND THE CONTROLLER'S OWN REASON IS PRINTED. A
+ *  `KafkaCluster` the resolver has refused has no renderable credential, so the
+ *  Preflight would be created, fail to render a check plan and land on
+ *  `phase: Failed` with no row at all -- a worse answer than this one, and one
+ *  that costs a Job. */
+export const CONNECTION_CHECK_REFUSED_SENTENCE =
+  "The controller has refused this connection, so there is nothing to dial with: a check would " +
+  "be created, fail to render a plan and record no row. Fix the object first; the controller's " +
+  "own reason is beside this sentence.";
+
+/** What the follower says when it stops reading. */
+export const CONNECTION_CHECK_STOPPED_SENTENCE =
+  "This page stopped following the check after its read budget. The check itself was not " +
+  "cancelled and is still the controller's; press Test connection again for a new one, or " +
+  "reload this page to read this one's result.";
+
+/** How many times the panel re-reads a started check before it stops.
+ *
+ *  BOUNDED, because an unbounded timer keeps reading a namespace for as long
+ *  as a tab is open. Twelve reads at [`CONNECTION_CHECK_INTERVAL_MS`] is about
+ *  thirty seconds, which is the upper end of D2 section 6.1's "typically
+ *  10-40 s" for one check pod, and the panel says in words when it stops
+ *  rather than leaving a spinner that means nothing. */
+export const CONNECTION_CHECK_POLLS = 12;
+
+/** How long between those reads, in milliseconds. */
+export const CONNECTION_CHECK_INTERVAL_MS = 2500;
+
+/** The controller's refusal reason for this connection, or `""`.
+ *
+ *  READ FROM `status.reason` AND MATCHED AGAINST THE RESOLVER'S OWN LIST. A
+ *  reason this build does not know is NOT treated as a refusal: the control
+ *  stays enabled and the check itself reports what it finds, which is the
+ *  failing-open direction that costs a Job rather than the one that hides a
+ *  control an operator needs. */
+export function connectionRefusal(object) {
+  const status = (object && object.status) || {};
+  const reason = typeof status.reason === "string" ? status.reason : "";
+  return CONNECTION_REFUSAL_REASONS.includes(reason) ? reason : "";
+}
+
+/** The body `POST .../preflights` is given for one cluster.
+ *
+ *  EXPORTED SO THE SUITE CAN ASSERT THE SHAPE the product API's own contract
+ *  declares: the operation, one block, one reference, and no field this check
+ *  does not ask about. `CreatePreflightRequest` is `deny_unknown_fields`, so a
+ *  destination or a topic list smuggled in here is a 422 and not a wider
+ *  check. */
+export function connectionCheckRequest(name) {
+  return { operation: "sourceConnection", sourceConnection: { connectionRef: String(name) } };
+}
+
+/** The panel: the control, the reason it is unavailable when it is, and the
+ *  started check's own rows. */
+export function renderConnectionCheck(view) {
+  const v = view || {};
+  const state = v.state || {};
+  const pending = state.phase === "pending";
+  const result = v.preflight || null;
+  const refused = typeof v.refusedReason === "string" ? v.refusedReason : "";
+  const gloss = REFUSAL_GLOSS[refused];
+  return (
+    "<section class=\"connection-check\" id=\"connection-check\"><h3>Test connection</h3>" +
+    "<p class=\"note\">" + esc(CONNECTION_CHECK_SENTENCE) + "</p>" +
+    "<p class=\"note\" id=\"connection-check-no-topics\">" +
+    esc(CONNECTION_CHECK_NO_TOPICS_SENTENCE) + "</p>" +
+    (v.unavailable === true
+      ? "<p class=\"note\" id=\"connection-check-unavailable\">" + cell(v.unavailableReason) +
+        "</p>"
+      : (v.mayOperate === false
+        ? "<p class=\"note\" id=\"connection-check-forbidden\">This login may read connection " +
+          "checks in this namespace and not start one.</p>"
+        : "<form id=\"connection-check-form\" novalidate" +
+          (pending ? " aria-busy=\"true\"" : "") + ">" +
+          "<fieldset class=\"form-body\"" +
+          (pending || refused.length > 0 ? " disabled" : "") + ">" +
+          "<div class=\"actions\"><button type=\"submit\"" +
+          (pending || refused.length > 0 ? " disabled" : "") + ">Test connection</button>" +
+          "</div></fieldset>" +
+          (refused.length === 0
+            ? ""
+            : "<p class=\"refusal\" id=\"connection-check-refused\">" +
+              esc(CONNECTION_CHECK_REFUSED_SENTENCE) + " Controller reason: <code>" +
+              esc(refused) + "</code>" +
+              (gloss === undefined ? "" : " -- " + esc(gloss)) + ".</p>") +
+          "<div class=\"form-status\" id=\"connection-check-status\" tabindex=\"-1\">" +
+          mutationStatus(state, { kind: "Preflight", name: (result || {}).id || "" }, null) +
+          "</div></form>")) +
+    (v.followStopped === true
+      ? "<p class=\"note\" id=\"connection-check-stopped\">" +
+        esc(CONNECTION_CHECK_STOPPED_SENTENCE) + "</p>"
+      : "") +
+    (result === null ? "" : renderPreflight(result)) +
+    "</section>"
   );
 }
 
@@ -358,24 +505,6 @@ export function renderClusterDetail(object, now, freshSeconds, pending, discover
 
 /** The identity of the discovery form in the draft and mutation registries. */
 export const DISCOVERY_FORM = "topic-discovery";
-
-/** Why "Test connection" on this page is still a re-read, and who owes the
- *  check kind that would make it a dial.
- *
- *  D2 section 4.2's plan kinds are `topicInventory`, `operationReadiness`,
- *  `restorePreflight`, `destinationAccess` and `evidenceFetch`. None of them
- *  is "dial this connection and tell me whether it answers": a backup
- *  readiness check reaches `connection.authenticated`, but its request REQUIRES
- *  one to a thousand named topics, so asking an operator to name a topic in
- *  order to test a connection would be a different control with the same
- *  label. The tracker's own PLAT-07.2 row already reads "'Test connection'
- *  cannot yet force a re-probe". */
-export const NO_CONNECTIVITY_CHECK_KIND =
-  "\"Test connection\" above re-reads what the controller recorded; it cannot make anything " +
-  "dial, because no check kind does that on its own. PLAT-03.1 owes a source-connectivity check " +
-  "kind and PLAT-07.2 consumes it. Until then the only control on this page that really dials " +
-  "is \"Discover topics\" below, which runs a check Job against this connection's own " +
-  "credential and reports the broker's own error code when it cannot.";
 
 /** What a short page means, rendered beside one. */
 export const SCAN_INCOMPLETE_SENTENCE =
@@ -503,8 +632,6 @@ export function renderDiscoveryPanel(view) {
     "credential and asks the broker for metadata. It is the only control on this page that " +
     "makes anything dial; the connection probe above re-reads what the controller already " +
     "recorded.</p>" +
-    "<p class=\"note\" id=\"no-connectivity-check\">" + esc(NO_CONNECTIVITY_CHECK_KIND) +
-    "</p>" +
     (v.unavailable === true
       ? "<p class=\"note\" id=\"discovery-unavailable\">" + cell(v.unavailableReason) + "</p>"
       : "") +
@@ -956,12 +1083,151 @@ async function readDiscoveries(api, ns, name, lifecycle) {
   }
 }
 
-function paintClusterDetail(node, ns, name, parse, lifecycle, api, object, discovery) {
+// THE STARTED CHECK'S OWN RESULT, REMEMBERED PER CLUSTER FOR THE LIFE OF THE
+// LOADED PAGE. Every other control on this view repaints the whole detail --
+// the re-read, a discovery, a topic page -- and each of those calls
+// `paintClusterDetail` with no check view of its own. Without this the first
+// such repaint would wipe a verdict the operator had just asked for, leaving a
+// `succeeded` mutation status over an empty panel: the record says a check was
+// made and the panel shows none. It is keyed exactly like the mutation record
+// it belongs beside.
+const checkViews = new Map();
+
+function paintClusterDetail(node, ns, name, parse, lifecycle, api, object, discovery, check) {
   const key = formKey(ns, DISCOVERY_FORM, name);
   const view = Object.assign({ state: mutationFor(key).state }, discovery || {});
-  replace(node, parse(renderClusterDetail(object, undefined, undefined, undefined, view)));
-  wireDetailProbe(node, ns, name, parse, lifecycle, api, view);
+  const checkKey = formKey(ns, CONNECTION_CHECK_FORM, name);
+  const remembered = checkViews.get(checkKey);
+  const checkView = Object.assign(
+    {
+      mayOperate: mayOperate(ns),
+      preflight: null,
+      followStopped: false,
+    },
+    remembered || {},
+    check || {},
+    {
+      state: mutationFor(checkKey).state,
+      refusedReason: connectionRefusal(object),
+    },
+  );
+  checkViews.set(checkKey, {
+    preflight: checkView.preflight,
+    followStopped: checkView.followStopped,
+  });
+  replace(
+    node,
+    parse(renderClusterDetail(object, undefined, undefined, undefined, view, checkView)),
+  );
+  wireDetailProbe(node, ns, name, parse, lifecycle, api, view, checkView);
+  wireConnectionCheck(node, ns, name, parse, lifecycle, api, object, view, checkView);
   wireDiscovery(node, ns, name, parse, lifecycle, api, object, view);
+}
+
+// THE ATTEMPT TOKEN. One per ACCEPTED click, minted here and carried into the
+// idempotency key `ui/client.js` composes. A double click cannot mint two,
+// because the second event is refused by the record's own `pending()` guard
+// before this counter is read; a DELIBERATE second test -- the whole point of
+// the control -- mints a new one, so the product API creates a new `Preflight`
+// instead of replaying the first for ever. That replay is precisely the
+// re-read this control stopped being.
+let attempts = 0;
+
+/** The token one accepted click carries. Exported so the suite can assert that
+ *  two clicks compose two keys and one double click composes one. */
+export function nextConnectionAttempt(ns, name) {
+  attempts += 1;
+  return String(ns) + "." + String(name) + ".attempt-" + String(attempts);
+}
+
+/** The "Test connection" control: create one `sourceConnection` `Preflight`,
+ *  then follow it until it is terminal or the read budget is spent.
+ *
+ *  THE DOUBLE-CLICK GUARD IS THE MUTATION RECORD, not a boolean in this
+ *  closure: it is the same record every mount of this form in this namespace
+ *  reads, so a second click while the first create is in flight is refused
+ *  even across a re-render. */
+function wireConnectionCheck(node, ns, name, parse, lifecycle, api, object, discovery, check) {
+  const form = node.querySelector("#connection-check-form");
+  if (form === null) {
+    return;
+  }
+  const key = formKey(ns, CONNECTION_CHECK_FORM, name);
+  const mutation = mutationFor(key);
+  watchMutation(node, key, mutation, (state) => {
+    if (!active(lifecycle)) {
+      return;
+    }
+    if (state.phase === "succeeded") {
+      const made = (state.result || {}).item || null;
+      const next = Object.assign({}, check, { preflight: made, followStopped: false });
+      paintClusterDetail(node, ns, name, parse, lifecycle, api, object, discovery, next);
+      followConnectionCheck(node, ns, name, parse, lifecycle, api, object, discovery, next);
+      return;
+    }
+    paintClusterDetail(node, ns, name, parse, lifecycle, api, object, discovery, check);
+  }, lifecycle);
+
+  listen(form, "submit", (event) => {
+    event.preventDefault();
+    if (!active(lifecycle) || mutation.pending() || connectionRefusal(object).length > 0) {
+      return;
+    }
+    const attempt = nextConnectionAttempt(ns, name);
+    mutation.run(
+      () => api.startPreflight(ns, connectionCheckRequest(name), { attempt: attempt }),
+      { about: { attempt: attempt } },
+    );
+  }, lifecycle);
+}
+
+/** Re-reads a started check until it is terminal or the budget is spent.
+ *
+ *  EVERY READ IS GUARDED BY THE ROUTE (PLAT-13.1) and the loop is BOUNDED. The
+ *  wait is `api.wait` when the caller supplies one, so the behaviour suite runs
+ *  this without a clock; in a browser it is one `setTimeout` per read and
+ *  nothing is left running when the route leaves, because the next read checks
+ *  `active` before it issues. */
+async function followConnectionCheck(node, ns, name, parse, lifecycle, api, object, discovery, check) {
+  const wait = typeof api.wait === "function"
+    ? api.wait
+    : (ms) => new Promise((done) => { globalThis.setTimeout(done, ms); });
+  let current = check.preflight;
+  for (let read = 0; read < CONNECTION_CHECK_POLLS; read += 1) {
+    if (current === null || current === undefined || current.terminal === true) {
+      return;
+    }
+    await wait(CONNECTION_CHECK_INTERVAL_MS);
+    if (!active(lifecycle)) {
+      return;
+    }
+    let answer;
+    try {
+      answer = await api.preflight(ns, current.id, readOptions(lifecycle));
+    } catch (error) {
+      if (cancelled(error, lifecycle) || !active(lifecycle)) {
+        return;
+      }
+      // A FAILED RE-READ IS NOT A VERDICT. The rows already on screen are left
+      // exactly as they are and the reader is told the page stopped following.
+      paintClusterDetail(node, ns, name, parse, lifecycle, api, object, discovery,
+        Object.assign({}, check, { preflight: current, followStopped: true }));
+      return;
+    }
+    if (!active(lifecycle)) {
+      return;
+    }
+    current = answer.item;
+    paintClusterDetail(node, ns, name, parse, lifecycle, api, object, discovery,
+      Object.assign({}, check, { preflight: current, followStopped: false }));
+    if (current !== null && current !== undefined && current.terminal === true) {
+      return;
+    }
+  }
+  if (active(lifecycle)) {
+    paintClusterDetail(node, ns, name, parse, lifecycle, api, object, discovery,
+      Object.assign({}, check, { preflight: current, followStopped: true }));
+  }
 }
 
 /** The discovery panel's three controls: start, cancel, and read a page of the
@@ -1110,7 +1376,7 @@ function readTopics(node, ns, name, parse, lifecycle, api, object, view, filters
  *  IT IS BOUND TO THE ROUTE'S LIFETIME LIKE EVERY OTHER READ (PLAT-13.1): the
  *  answer is dropped when the view is gone, so a slow re-read cannot paint a
  *  probe from namespace A over namespace B. */
-function wireDetailProbe(node, ns, name, parse, lifecycle, api, discovery) {
+function wireDetailProbe(node, ns, name, parse, lifecycle, api, discovery, check) {
   const form = node.querySelector("form.probe-test");
   if (form === null) {
     return;
@@ -1132,7 +1398,7 @@ function wireDetailProbe(node, ns, name, parse, lifecycle, api, discovery) {
         if (!active(lifecycle)) {
           return;
         }
-        paintClusterDetail(node, ns, name, parse, lifecycle, api, object, discovery);
+        paintClusterDetail(node, ns, name, parse, lifecycle, api, object, discovery, check);
       },
       (error) => {
         reading = false;
