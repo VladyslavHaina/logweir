@@ -164,6 +164,72 @@ pub const SLACK_WEBHOOK_URL_ENV: &str = "NOTIFY_SLACK_WEBHOOK_URL";
 /// that does not hold their account and never sees a page.
 pub const PAGERDUTY_ENDPOINT_ENV: &str = "PAGERDUTY_ENDPOINT";
 
+/// `NOTIFY_ALLOW_INSECURE_SINKS` — the variable a delivery Job carries when
+/// THIS INSTALLATION has turned the escape hatch on, spelt exactly as
+/// `logweir::notify`'s `ALLOW_INSECURE_SINKS_ENV` reads it inside that Job.
+///
+/// It is a literal `1` and it is not a credential: the sink URL stays in the
+/// `Secret` the kubelet resolves, so neither the Job's command line nor its
+/// env names a URL. Without it `logweir notify deliver` refuses a
+/// non-`https://` webhook or Slack URL BEFORE it dials, which is why an
+/// in-cluster echo sink on a laptop cluster received zero POSTs
+/// (`NOTIFY-INSECURE-SINK-UNEXPOSED`): the hatch was documented and set by
+/// nothing.
+pub const ALLOW_INSECURE_SINKS_ENV: &str = "NOTIFY_ALLOW_INSECURE_SINKS";
+
+/// The variable THIS PROCESS reads to decide whether the Jobs it creates
+/// carry [`ALLOW_INSECURE_SINKS_ENV`]. `charts/logweir` renders it from
+/// `notify.allowInsecureSinks`, and nothing else sets it.
+///
+/// # Why it is an INSTALLATION setting and never a policy field
+///
+/// A `ProtectionPolicy` is a namespaced object any namespace operator may
+/// write. If the hatch lived in its spec, whoever could create a policy could
+/// downgrade their own alerts' transport to cleartext — carrying the event,
+/// the policy's name, its health and (on Slack) a bearer credential in the
+/// URL — and the administrator who installed Logweir would have nowhere to
+/// say no. Here the only way to set it is an edit to the controller
+/// Deployment, which is the installation's own boundary: the same one
+/// [`crate::job::RUNNER_IMAGE_ENV`] and the archive addressing already sit on.
+/// The answer is therefore the same for every policy in the cluster, and
+/// `a_policy_cannot_turn_the_insecure_sink_hatch_on` is the row that holds it.
+///
+/// # Why the two names differ
+///
+/// Every variable this controller reads FOR ITSELF is `LOGWEIR_`-prefixed and
+/// every variable it writes into a runner Job is not. They are also different
+/// decisions — whether an installation allows the hatch at all, versus what
+/// one Job was told — and one name for both would make a `grep` in a cluster
+/// unable to tell the controller's setting from a Job's.
+pub const CONTROLLER_ALLOW_INSECURE_SINKS_ENV: &str = "LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS";
+
+/// [`CONTROLLER_ALLOW_INSECURE_SINKS_ENV`]'s value as a decision.
+///
+/// **AN EXPLICIT AFFIRMATIVE ONLY** — `1`, `true` or `yes`, trimmed and
+/// case-insensitive. Everything else is "no": `0`, `false`, an absent
+/// variable, and the empty string a Kubernetes `env:` entry with an empty
+/// `value:` actually produces (plan erratum **E19(e)**). That is the same
+/// reading `logweir::notify::SinkRoutes::from_lookup` gives the Job-side
+/// variable and the same one `weirkeeper::retention`'s flag parser gives its
+/// own, so an operator who switches the value off does not discover it was
+/// still on — and a hatch that defaults open is not a hatch.
+///
+/// # Why it takes the `Result`
+///
+/// So a test can hand it `Ok(String::new())` — the exact value the E19(e)
+/// defect is about — without mutating process-global state the rest of the
+/// binary shares. The predicate is the whole of the decision; [`controller`]
+/// supplies the read, exactly once per process.
+#[must_use]
+pub fn configured_allow_insecure_sinks(raw: Result<String, std::env::VarError>) -> bool {
+    raw.is_ok_and(|value| {
+        matches!(
+            value.trim().to_ascii_lowercase().as_str(),
+            "1" | "true" | "yes"
+        )
+    })
+}
+
 /// How long before an errored reconcile is retried.
 pub const ERROR_REQUEUE_SECONDS: u64 = 30;
 /// How long before a pass that has an in-flight or deferred delivery looks
@@ -196,6 +262,10 @@ pub struct ProtectionContext {
     pub client: kube::Client,
     /// The image and pull policy the delivery Jobs name.
     pub runner_image: RunnerImage,
+    /// Whether THIS INSTALLATION allows a delivery Job to POST to a
+    /// non-`https://` sink — [`CONTROLLER_ALLOW_INSECURE_SINKS_ENV`], read
+    /// once by [`controller`] and never from a policy's spec.
+    pub allow_insecure_sinks: bool,
 }
 
 /// What one pass did — the shape the tests assert over.
@@ -463,6 +533,7 @@ pub async fn reconcile_policy(
                 .as_ref()
                 .and_then(|n| n.routes.as_deref()),
             &ctx.runner_image,
+            ctx.allow_insecure_sinks,
         );
         // THE JOB FIRST, AND THE ConfigMap IT MOUNTS SECOND — review F7, and
         // the shape `controllers/recovery_catalog.rs` already uses for its
@@ -1221,6 +1292,14 @@ pub const COMPONENT_NOTIFICATION: &str = "notification";
 /// the first one only. The alternative — a Job per route — contradicts D3
 /// §3.4's "ONE Job per event" and would multiply the pages a single transition
 /// produces.
+///
+/// # `allow_insecure_sinks`
+///
+/// The INSTALLATION's answer, threaded from [`ProtectionContext`] and never
+/// from `routes`: `true` adds [`ALLOW_INSECURE_SINKS_ENV`]`=1` to the literal
+/// env and `false` adds nothing at all, so a default install renders exactly
+/// the Job it rendered before this parameter existed. See
+/// [`CONTROLLER_ALLOW_INSECURE_SINKS_ENV`] for why a policy cannot set it.
 #[must_use]
 pub fn delivery_job_spec(
     job_name: &str,
@@ -1229,6 +1308,7 @@ pub fn delivery_job_spec(
     config_map_name: &str,
     routes: Option<&[NotificationRoute]>,
     image: &RunnerImage,
+    allow_insecure_sinks: bool,
 ) -> RunnerJobSpec {
     let routes = routes.unwrap_or_default();
     let mut env_from_secret: Vec<EnvFromSecret> = Vec::new();
@@ -1237,6 +1317,21 @@ pub fn delivery_job_spec(
         // competes with the `notify-result=` lines for the log's byte budget.
         ("RUST_LOG".to_string(), "warn".to_string()),
     ];
+
+    // THE INSTALLATION'S ESCAPE HATCH, AND ONLY WHEN IT IS ON. The argument
+    // comes from the CONTROLLER's environment
+    // ([`CONTROLLER_ALLOW_INSECURE_SINKS_ENV`]) and `routes` cannot reach this
+    // line: a policy is a namespaced object and this is the cluster
+    // administrator's switch.
+    //
+    // WHEN IT IS OFF, NOTHING IS PUSHED — not the variable with a falsy value.
+    // A rendered Job is then byte-identical to the one this function built
+    // before the value existed, which is what makes the default install's
+    // goldens unmoved and what keeps `logweir notify deliver`'s own reading
+    // ("an explicit affirmative only") the single place the answer is decided.
+    if allow_insecure_sinks {
+        env_literal.push((ALLOW_INSECURE_SINKS_ENV.to_string(), "1".to_string()));
+    }
 
     if let Some((route, channel)) = routes
         .iter()
@@ -1861,9 +1956,30 @@ pub fn controller(
 ) -> impl std::future::Future<Output = ()> + Send {
     let api: Api<ProtectionPolicy> = Api::all(client.clone());
     let jobs: Api<Job> = Api::all(client.clone());
+    // THE READ, ONCE PER PROCESS, and the only read of this variable in the
+    // crate. It is here rather than in `fn main` because it belongs to this
+    // reconciler alone — no other controller creates a delivery Job — and the
+    // DECISION is `configured_allow_insecure_sinks`, a pure predicate a test
+    // can drive without mutating process-global state.
+    let allow_insecure_sinks =
+        configured_allow_insecure_sinks(std::env::var(CONTROLLER_ALLOW_INSECURE_SINKS_ENV));
+    if allow_insecure_sinks {
+        // ONE LINE, AND IT IS A WARNING. An installation that allows cleartext
+        // alert delivery should say so in its own logs: the POST carries the
+        // protection event, the policy's name and — on Slack, where the URL is
+        // the credential — a bearer token, and the operator who set this on a
+        // laptop is not always the one reading the controller a month later.
+        warn!(
+            env = CONTROLLER_ALLOW_INSECURE_SINKS_ENV,
+            "this installation ALLOWS INSECURE notification sinks: every delivery Job created \
+             here carries NOTIFY_ALLOW_INSECURE_SINKS=1 and may POST a protection event over \
+             cleartext http. It is a local-development setting; production leaves it unset"
+        );
+    }
     let ctx = Arc::new(ProtectionContext {
         client,
         runner_image,
+        allow_insecure_sinks,
     });
     async move {
         Controller::new(api, watcher::Config::default())

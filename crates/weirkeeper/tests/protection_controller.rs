@@ -71,10 +71,18 @@ fn at(offset_hours: i64) -> String {
     p::rfc3339(now() - Duration::hours(offset_hours))
 }
 
-fn context(client: kube::Client) -> ProtectionContext {
+/// The reconciler's context, with the INSTALLATION's insecure-sink hatch
+/// named.
+///
+/// `false` is the default every other test here drives, and it is the shipped
+/// one: `notify.allowInsecureSinks` is `false` in `charts/logweir/values.yaml`
+/// and `LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS` is rendered by nothing until an
+/// administrator sets it.
+fn context_with(client: kube::Client, allow_insecure_sinks: bool) -> ProtectionContext {
     ProtectionContext {
         client,
         runner_image: RunnerImage::default(),
+        allow_insecure_sinks,
     }
 }
 
@@ -1442,13 +1450,24 @@ fn drive_at(
     routes: Vec<Route>,
     at: DateTime<Utc>,
 ) -> (pp::Outcome, Recorder, BodyRecorder) {
+    drive_in(policy, routes, at, false)
+}
+
+/// [`drive_at`] with the installation's insecure-sink hatch named — the one
+/// knob that is NOT on the policy and NOT on the clock.
+fn drive_in(
+    policy: &ProtectionPolicy,
+    routes: Vec<Route>,
+    at: DateTime<Utc>,
+    allow_insecure_sinks: bool,
+) -> (pp::Outcome, Recorder, BodyRecorder) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("a current-thread runtime");
     runtime.block_on(async {
         let (client, recorder, bodies) = mock_client_recording_bodies(routes);
-        let outcome = pp::reconcile_policy(policy, &context(client), at)
+        let outcome = pp::reconcile_policy(policy, &context_with(client, allow_insecure_sinks), at)
             .await
             .expect("the reconcile did not error");
         (outcome, recorder, bodies)
@@ -2043,6 +2062,7 @@ fn a_sink_credential_value_never_reaches_the_status() {
             .as_ref()
             .and_then(|n| n.routes.as_deref()),
         &RunnerImage::default(),
+        false,
     );
     assert!(
         job_spec.secret_mounts.is_empty(),
@@ -2374,6 +2394,7 @@ fn the_delivery_job_is_the_documented_invocation() {
             .as_ref()
             .and_then(|n| n.routes.as_deref()),
         &RunnerImage::default(),
+        false,
     );
     assert_eq!(
         job_spec.args,
