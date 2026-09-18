@@ -619,7 +619,11 @@ fn blocking_failure(checks: &[CheckOutcome]) -> Option<&CheckOutcome> {
 /// … — every member of which is a valid `metav1.Condition` reason, so nothing a
 /// runner writes can reach `status.reason` as free text. The message carries
 /// the check id, the runner's sentence and its remedy; `terminal` redacts and
-/// caps the join at the CRD's 1,024 characters.
+/// caps the join. The EFFECTIVE bound is [`logweir_core::check_contract::MESSAGE_MAX_CHARS`]
+/// — 512 — and not the CRD's `maxLength: 1024`, because `status_with_condition`
+/// is `cap_message(&redact(…))` and `redact` itself ends in `cap`. Both live
+/// joins are inside it (S11 ~210 characters, S12 ~430); a longer one loses its
+/// tail to `…` rather than 422-ing the patch.
 fn no_inventory_verdict(checks: Option<&[CheckOutcome]>) -> (&'static str, String) {
     let Some(checks) = checks else {
         return (
