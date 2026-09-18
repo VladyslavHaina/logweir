@@ -281,7 +281,13 @@ valid authorisation is exactly what *"treat unevaluated or stale expiry
 information as unknown, not valid"* forbids. Shortening the heartbeat would have
 traded the lag for a permanent write-free reconcile on every object of these
 kinds and still left a window; waking at the boundary costs one reconcile per
-key lifetime and leaves none.
+key lifetime and closes the scheduled part of it. What remains is stated, not
+hidden: the 1 s requeue floor plus reconcile latency, a controller outage that
+spans the boundary (the timer re-arms on restart, but nothing re-derives while
+the controller is down), and clock skew between the controller and whatever
+wrote `notAfter`. A reader that must never act on a stale `Verified=True` treats
+a verdict whose key window has closed as unknown until re-derived — that
+reader-side rule, not this timer, is what closes those gaps.
 
 The asymmetry is deliberate: only a verdict a clock can **withdraw** carries a
 deadline. A refusal that an edit would turn into a pass — a roster installed, a
