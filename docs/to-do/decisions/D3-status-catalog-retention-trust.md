@@ -1333,7 +1333,13 @@ The same record carries two constraint amendments:
   `logweir/`, create-only") is extended with: *a separately linked, separately credentialed,
   optional retention worker may delete objects under an explicitly configured archive prefix,
   never under `logweir/`, only from an administrator-approved plan, and only with an attributable
-  signed record.* `logweir-store` remains delete-free, the control plane remains delete-free, and
+  record.* (**Amended 2026-09-17 at W9's fix round:** the word "signed" is struck here, as it is
+  in `docs/architecture.md`'s copy of the same amendment and in §6.5 — the record is create-only
+  and UNSIGNED, because signing would make `logweir-retention` link `logweir-evidence`, whose
+  reaching set `scripts/check-one-signer.sh` holds to `{logweir, e2e}`. This instance survived the
+  first correction pass only because the phrase wrapped across a line and the gate was line-based;
+  `scripts/check-withdrawn-claim.sh` now matches across wraps and found it.)
+  `logweir-store` remains delete-free, the control plane remains delete-free, and
   G-RET becomes a linkage gate as well as a source-text gate (§6.5). Tag 1's statement "no Logweir
   component holds any delete capability against object storage" becomes version-scoped: it is true
   wherever `RetentionPolicy.mode != Enforce`, and `docs/stability.md`, `docs/kubernetes.md` §9 and

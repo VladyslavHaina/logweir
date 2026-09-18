@@ -1030,8 +1030,20 @@ is observable on the object or in the cluster:
    created.
 2. `spec.enforcement.approvedPlanSha256` must equal
    `status.lastEvaluation.planSha256`, and the plan must be younger than
-   `planMaxAgeSeconds`. The digest covers the policy's `metadata.generation`, so
-   **any spec edit invalidates an approval** — nothing has to remember to.
+   `planMaxAgeSeconds`.
+
+   **The digest covers what would be deleted, and nothing that moves on its
+   own.** It is over the policy's identity, the destination, the scope, the
+   rules as applied and the exact lines — no instant, no `metadata.generation`,
+   no counter. So **content invalidates an approval and counters do not**: a
+   `rules` edit, a `holds` edit or a new backup changes the lines and therefore
+   the digest, while an edit to `deadlineSeconds`, `schedule`,
+   `credentialSecretRef` or `mode` leaves an approval standing, because none of
+   them changes one key. That is deliberate and it is load-bearing:
+   `approvedPlanSha256` is itself a `spec` field, so a digest over
+   `metadata.generation` would be changed by the very act of approving it, and
+   no approval could ever match. `planMaxAgeSeconds` is what bounds a stale
+   approval; the digest is what bounds a wrong one.
 3. The controller writes `status.lease` with a resourceVersion-preconditioned
    PATCH — **and it must land**; a 409 aborts the pass before any Job exists —
    and *then* performs a consistent, non-cached, cluster-wide list of

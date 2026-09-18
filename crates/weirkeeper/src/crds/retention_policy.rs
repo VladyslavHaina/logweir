@@ -16,9 +16,11 @@
 //! `ExternalLifecycle` nothing is deleted by Logweir at all; `Enforce` opts in
 //! to a separately linked, separately credentialed worker that may delete under
 //! an explicitly configured archive prefix, **never under `logweir/`**, only
-//! from an administrator-approved plan, and only with an attributable signed
-//! record. `logweir-store` stays delete-free and the control plane stays
-//! delete-free either way.
+//! from an administrator-approved plan, and only with an attributable record —
+//! create-only under `logweir/`, written by a credential that cannot delete
+//! there, and **unsigned in this build** (`docs/stability.md`).
+//! `logweir-store` stays delete-free and the control plane stays delete-free
+//! either way.
 //!
 //! `ExternalLifecycle` is a **declaration**, not an enforcement: it records
 //! that a bucket lifecycle rule exists so the console can stop claiming
