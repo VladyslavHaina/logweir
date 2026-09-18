@@ -951,8 +951,26 @@ def l_05_1_3(H: Any) -> dict[str, Any]:
     reset_schedules(H, ["legacy"])
     old = fenced.swap_image(H, "old")
     H.apply(s3_schedule(H, "legacy", schedule="*/2 * * * *"))
-    observed = H.await_schedule_observed("legacy", timeout=300)
+    # NOT `await_schedule_observed`. That waits for `status.policy.effectiveSince`,
+    # and `status.policy` is a D1 field the main@4956785 build does not know:
+    # waiting for it under the pre-upgrade image waits forever. What the old
+    # controller does write is a `Ready` condition and `lastFireTime`, so that
+    # is what "the old controller has seen this schedule" means here — and its
+    # ABSENCE after the upgrade is one of the things the row then measures.
+    observed = H.wait_for(
+        "backupschedule",
+        "legacy",
+        lambda o: (H.condition(o, "Ready") or {}).get("status") == "True",
+        timeout=300,
+        what="to be observed by the main@4956785 controller (Ready=True)",
+    )
     uid = observed["metadata"]["uid"]
+    H.require(
+        ((observed.get("status") or {}).get("policy") or {}).get("effectiveSince") is None,
+        "the pre-upgrade controller wrote status.policy, which did not exist at 4956785 — "
+        "is this really the old image?",
+        obj=observed,
+    )
     run = H.wait_until(
         lambda: next(
             (b for b in H.backups_of(uid) if H.terminal(b)),
