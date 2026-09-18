@@ -969,30 +969,64 @@ fn bundle_object(
 /// The trusted-public-keys member, standing-only — D3 §4.3(e).
 pub const AUTHORIZATION_KEYS_FILE: &str = "authorization-keys.json";
 
+/// The SIGNED standing rehearsal authorization, at
+/// `/approval/standing-authorization.json`.
+///
+/// ITS OWN NAME, AND NOT `approval.json`. The runner verifies `approval.json`
+/// under `PAYLOAD_TYPE_APPROVAL`; a standing document is signed under its own
+/// payload type, so putting it in the per-run slot makes a correctly signed
+/// rehearsal look like a substituted approval. This is the path D3 W5's landed
+/// fixture mounts and the one `--standing-authorization` points at.
+pub const STANDING_AUTHORIZATION_FILE: &str = "standing-authorization.json";
+
+/// Its detached DSSE sidecar, at `/approval/standing-authorization.sig`.
+///
+/// The runner DERIVES this path from [`STANDING_AUTHORIZATION_FILE`] by
+/// replacing the extension — one flag fewer to get wrong — so the two names
+/// must differ only in that extension.
+pub const STANDING_AUTHORIZATION_SIG_FILE: &str = "standing-authorization.sig";
+
 /// D3 §4.3(e)'s bundle, for a `Restore` authorised by a STANDING document.
 ///
-/// # What is in it, and why the envelope is written under `approval.json`
-///
-/// Five members. Four of them are the five-member v1 bundle minus the plan
-/// (which lives in its own ConfigMap, exactly as it does for the per-run arm),
-/// and the fifth is the keyring:
+/// # Seven members, and the standing document has its OWN name
 ///
 /// | file | bytes |
 /// |---|---|
-/// | `approval.json` | the SIGNED standing envelope, copied verbatim from `Approval.spec.approvalBytes` |
-/// | `approval.sig` | its DSSE sidecar, copied verbatim |
-/// | `approver.pub.pem` | the public SPKI of the key the `Approval` verified under |
-/// | `allowed-clusters.json` | **exactly** `[scope.targetClusterId]` |
+/// | `standing-authorization.json` | the SIGNED standing envelope, copied verbatim from `Approval.spec.approvalBytes` |
+/// | `standing-authorization.sig` | its DSSE sidecar, copied verbatim — the runner DERIVES this path from the one above |
 /// | `authorization-keys.json` | every key this namespace's trust currently lets authorise |
+/// | `allowed-clusters.json` | **exactly** `[scope.targetClusterId]` |
+/// | `approver.pub.pem` | the public SPKI of the key the `Approval` verified under |
+/// | `approval.json` | **the per-run approval SLOT — see below** |
+/// | `approval.sig` | its sidecar, likewise |
 ///
-/// The envelope is written under `approval.json` and not under a sixth name
-/// because there is ONE document here and two contracts that name it. The
-/// runner's mandatory five-member check reads `approval.json`/`approval.sig`
-/// and the standing check reads `--standing-authorization <path>` with its
-/// sidecar DERIVED as `<path>` with the extension replaced — which is
-/// `approval.sig` for exactly this path. Writing the same bytes twice under two
-/// names would let a future edit change one copy and not the other, and the two
-/// digests in the Job template would then disagree about one signature.
+/// **The standing document is NOT written as `approval.json`, and an earlier
+/// revision of this function got that wrong.** The runner reads `approval.json`
+/// into `bundle.approval` and hands it to
+/// `phase1_approval::verify_bytes`, which verifies under
+/// `PAYLOAD_TYPE_APPROVAL`; a standing sidecar carries
+/// `PAYLOAD_TYPE_STANDING_AUTHORIZATION`, so `verify_detached` returns
+/// `Error::Verify("payload_type mismatch…")` — a variant whose own doc comment
+/// calls it *evidence of substitution*. A correctly signed, correctly scoped
+/// rehearsal would have been reported to the operator as a TAMPERED APPROVAL.
+/// D3 W5's landed fixture (`crates/logweir/tests/execution_contract_v2.rs`)
+/// mounts the standing document at `standing-authorization.json` with its
+/// sidecar derived at `.sig`, BESIDE a genuine per-run approval, and that is the
+/// layout written here.
+///
+/// # `approval.json` is a SLOT this controller cannot fill, and says so
+///
+/// The runner's standing check sits BESIDE the per-run approval rather than
+/// replacing it: `load_startup_inputs` calls `phase1_approval::verify_bytes`
+/// unconditionally, and that document must bind `sha256(plan bytes)` — which
+/// only a human with a signing key can produce, and `weirkeeper` links no
+/// signer (Global Constraint 27). Until **PLAT-14.3b** decides whether
+/// `--approval` becomes optional under `AUTHORIZATION_KIND=standing`, this
+/// controller writes the standing envelope and its sidecar into that slot as a
+/// PLACEHOLDER, so the bundle is a complete, digest-consistent v2 contract with
+/// exactly one unresolved question rather than three missing files. Nothing
+/// executes under it today in any case: `admit` refuses a standing `Restore`
+/// terminally with `ApprovalNotReceived` before a Job exists.
 ///
 /// # The allowlist is EQUALITY, not membership
 ///
@@ -1011,17 +1045,48 @@ pub const AUTHORIZATION_KEYS_FILE: &str = "authorization-keys.json";
 ///
 /// # Errors
 ///
-/// [`RestoreError`] for an object with no namespace or UID, for a key id the
-/// resolved trust does not carry, and for a keyring that will not serialise.
+/// [`RestoreError`] for an object with no namespace or UID, for a BLANK
+/// `approval_uid` (the runner treats a present-and-blank environment value as
+/// missing and refuses the whole contract), for a key id the resolved trust does
+/// not carry, and for a keyring that will not serialise.
+/// Everything about a VERIFIED standing authorization that
+/// [`standing_bundle_config_map`] writes into the bundle.
+///
+/// A struct rather than six more parameters, and not only for clippy's sake:
+/// these six values are ONE decision — "this document, signed by this key, for
+/// this cluster, under this `Approval`" — and a caller that could pass five of
+/// them from one authorization and the sixth from another would be writing a
+/// bundle that binds two different grants.
+#[derive(Debug, Clone, Copy)]
+pub struct StandingInputs<'a> {
+    /// The signed envelope, verbatim from `Approval.spec.approvalBytes`.
+    pub envelope: &'a str,
+    /// Its DSSE sidecar, verbatim from `Approval.spec.sidecarBytes`.
+    pub sidecar: &'a str,
+    /// The `Approval` object's `metadata.uid`. **Never blank** — see the
+    /// function's `# Errors`.
+    pub approval_uid: &'a str,
+    /// The key id the `Approval` verified under.
+    pub key_id: &'a str,
+    /// D3 §4.3(e)'s trusted public keys.
+    pub keyring: &'a logweir_core::execution_contract::AuthorizationKeyring,
+    /// The cluster id inside the SIGNED scope — the whole allowlist.
+    pub target_cluster_id: &'a str,
+}
+
 pub fn standing_bundle_config_map(
     restore: &Restore,
-    envelope: &str,
-    sidecar: &str,
-    key_id: &str,
-    keyring: &logweir_core::execution_contract::AuthorizationKeyring,
+    signed: &StandingInputs<'_>,
     trust: &crate::trust::ResolvedTrust,
-    target_cluster_id: &str,
 ) -> Result<ConfigMap, RestoreError> {
+    let StandingInputs {
+        envelope,
+        sidecar,
+        approval_uid,
+        key_id,
+        keyring,
+        target_cluster_id,
+    } = *signed;
     let name = restore.name_any();
     let namespace = restore
         .namespace()
@@ -1034,6 +1099,19 @@ pub fn standing_bundle_config_map(
             "the Restore {name} carries no spec.authorization, so it is not standing-authorised"
         ))
     })?;
+    // A BLANK UID IS NOT A UID. `LOGWEIR_EXECUTION_APPROVAL_UID` is one of the
+    // thirteen mandatory contract values, and the runner's own `required()`
+    // treats a present-and-blank value as missing and refuses the entire
+    // contract before phase 0. Catching it here, where the bundle is written,
+    // means the operator reads a controller message naming the `Approval`
+    // rather than a Job that aborts.
+    if approval_uid.trim().is_empty() {
+        return Err(RestoreError::Materialization(format!(
+            "the Approval {} carries no metadata.uid, and the execution contract's \
+             APPROVAL_UID may not be blank; no bundle is written",
+            authorization.approval_ref.name
+        )));
+    }
     let key = trust.key(key_id).ok_or_else(|| {
         RestoreError::Materialization(format!(
             "the standing authorization verified under key {key_id}, which {} does not carry",
@@ -1074,6 +1152,10 @@ pub fn standing_bundle_config_map(
             BUNDLE_APPROVAL_NAME_ANNOTATION.to_string(),
             authorization.approval_ref.name.clone(),
         ),
+        (
+            BUNDLE_APPROVAL_UID_ANNOTATION.to_string(),
+            approval_uid.to_string(),
+        ),
     ]
     .into_iter()
     .collect();
@@ -1083,11 +1165,20 @@ pub fn standing_bundle_config_map(
         restore_uid,
         annotations,
         [
+            (
+                STANDING_AUTHORIZATION_FILE.to_string(),
+                envelope.to_string(),
+            ),
+            (
+                STANDING_AUTHORIZATION_SIG_FILE.to_string(),
+                sidecar.to_string(),
+            ),
+            (AUTHORIZATION_KEYS_FILE.to_string(), keyring_bytes),
+            (ALLOWED_CLUSTERS_FILE.to_string(), allowed_bytes),
+            (APPROVER_KEY_FILE.to_string(), key.spki_pem.clone()),
+            // The per-run slot PLAT-14.3b owns — see this function's header.
             (APPROVAL_DOC_FILE.to_string(), envelope.to_string()),
             (APPROVAL_SIG_FILE.to_string(), sidecar.to_string()),
-            (APPROVER_KEY_FILE.to_string(), key.spki_pem.clone()),
-            (ALLOWED_CLUSTERS_FILE.to_string(), allowed_bytes),
-            (AUTHORIZATION_KEYS_FILE.to_string(), keyring_bytes),
         ]
         .into_iter()
         .collect(),
@@ -1095,15 +1186,31 @@ pub fn standing_bundle_config_map(
 }
 
 /// The execution contract v2 environment a STANDING-authorised Restore Job
-/// carries — the thirteen mandatory names plus D3 §4.3's five.
+/// carries — the thirteen mandatory names plus D3 §4.3's four.
 ///
-/// # Why `AUTHORIZATION_SHA256` equals `APPROVAL_SHA256` here
+/// # Every value is NON-BLANK, and that is the contract and not tidiness
 ///
-/// Because they pin the same bytes, which is the point: there is one signed
-/// document, it is mounted once, and the two contracts name it differently
-/// (see [`standing_bundle_config_map`]). Emitting a second digest over a second
-/// copy would create a way for the two to disagree and no way for the runner to
-/// tell which one the approver signed.
+/// The runner's own `required()` filters on `!value.trim().is_empty()` before
+/// it decides a mandatory name is present, so a variable emitted
+/// PRESENT-AND-BLANK is a variable the runner reports as MISSING, and the whole
+/// contract is refused with `GuardRefusal: incomplete Restore execution
+/// contract` before phase 0. An earlier revision of this function read
+/// `APPROVAL_UID` out of the bundle's annotations with `.unwrap_or_default()`
+/// while the standing bundle did not write that annotation at all: every
+/// standing rehearsal Job would have aborted, and the twenty mutants planted
+/// against this file did not catch it because the test asserted only that the
+/// KEY was present. Both halves are now errors, at the bundle and here, and
+/// `the_rendered_bundle_is_what_the_runner_loads` asserts non-blankness by the
+/// same rule `required()` applies.
+///
+/// # `AUTHORIZATION_*_SHA256` are over the standing document's OWN members
+///
+/// `standing-authorization.json` and `standing-authorization.sig`, not
+/// `approval.json`/`approval.sig` — see [`standing_bundle_config_map`] for why
+/// the standing document has its own name. The per-run slot is pinned
+/// separately by `APPROVAL_SHA256` / `APPROVAL_SIDECAR_SHA256`, which is what
+/// keeps this a complete thirteen-name contract while PLAT-14.3b decides what
+/// that slot should hold.
 ///
 /// `POLICY_SNAPSHOT_SHA256` and `CONFIRMATION_KEY_SHA256` are deliberately NOT
 /// set: PLAT-19.2 owns both halves, and the runner refuses a mounted member
@@ -1112,7 +1219,8 @@ pub fn standing_bundle_config_map(
 ///
 /// # Errors
 ///
-/// As [`standing_bundle_config_map`], plus a missing bundle member.
+/// As [`standing_bundle_config_map`], plus a missing bundle member and a bundle
+/// that carries no `APPROVAL_UID` annotation.
 pub fn standing_execution_contract_env(
     restore: &Restore,
     bundle: &ConfigMap,
@@ -1142,9 +1250,27 @@ pub fn standing_execution_contract_env(
             "the Restore {name} carries no spec.authorization, so it is not standing-authorised"
         ))
     })?;
+    // THE UID THE BUNDLE COMMITTED TO, and an error rather than a default: see
+    // this function's header for what a blank one costs.
+    let approval_uid = bundle
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(BUNDLE_APPROVAL_UID_ANNOTATION))
+        .map(String::as_str)
+        .filter(|uid| !uid.trim().is_empty())
+        .ok_or_else(|| {
+            RestoreError::Materialization(format!(
+                "the rendered approval bundle carries no non-blank \
+                 {BUNDLE_APPROVAL_UID_ANNOTATION} annotation, and the runner treats a blank \
+                 {} as missing",
+                contract::APPROVAL_UID_ENV
+            ))
+        })?
+        .to_string();
     let digest = |bytes: &[u8]| sha256_prefixed(bytes);
-    let envelope = digest(get(APPROVAL_DOC_FILE)?.as_bytes());
-    let envelope_sidecar = digest(get(APPROVAL_SIG_FILE)?.as_bytes());
+    let standing = digest(get(STANDING_AUTHORIZATION_FILE)?.as_bytes());
+    let standing_sidecar = digest(get(STANDING_AUTHORIZATION_SIG_FILE)?.as_bytes());
 
     Ok(vec![
         (
@@ -1166,24 +1292,18 @@ pub fn standing_execution_contract_env(
             contract::APPROVAL_NAME_ENV.to_string(),
             authorization.approval_ref.name.clone(),
         ),
-        (
-            contract::APPROVAL_UID_ENV.to_string(),
-            bundle
-                .metadata
-                .annotations
-                .as_ref()
-                .and_then(|a| a.get(BUNDLE_APPROVAL_UID_ANNOTATION))
-                .cloned()
-                .unwrap_or_default(),
-        ),
+        (contract::APPROVAL_UID_ENV.to_string(), approval_uid),
         (
             contract::PLAN_SHA256_ENV.to_string(),
             digest(restore.spec.plan_bytes.as_bytes()),
         ),
-        (contract::APPROVAL_SHA256_ENV.to_string(), envelope.clone()),
+        (
+            contract::APPROVAL_SHA256_ENV.to_string(),
+            digest(get(APPROVAL_DOC_FILE)?.as_bytes()),
+        ),
         (
             contract::APPROVAL_SIDECAR_SHA256_ENV.to_string(),
-            envelope_sidecar.clone(),
+            digest(get(APPROVAL_SIG_FILE)?.as_bytes()),
         ),
         (
             contract::APPROVER_KEY_SHA256_ENV.to_string(),
@@ -1197,10 +1317,10 @@ pub fn standing_execution_contract_env(
             contract::AUTHORIZATION_KIND_ENV.to_string(),
             contract::AUTHORIZATION_KIND_STANDING.to_string(),
         ),
-        (contract::AUTHORIZATION_SHA256_ENV.to_string(), envelope),
+        (contract::AUTHORIZATION_SHA256_ENV.to_string(), standing),
         (
             contract::AUTHORIZATION_SIDECAR_SHA256_ENV.to_string(),
-            envelope_sidecar,
+            standing_sidecar,
         ),
         (
             contract::AUTHORIZATION_KEYS_SHA256_ENV.to_string(),

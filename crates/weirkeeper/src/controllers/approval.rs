@@ -919,6 +919,16 @@ pub enum ReconcileError {
     NoNamespace(String),
     /// The referent carries no UID. Unreachable for a persisted API object.
     NoUid(String),
+    /// A referent's sealed spec could not be rendered as the canonical bytes
+    /// its digest is taken over, or those bytes were not UTF-8.
+    ///
+    /// ITS OWN VARIANT, AND NOT `NoUid` CARRYING A MESSAGE ABOUT SOMETHING
+    /// ELSE (review finding F7). `to_deterministic_json` always emits UTF-8, so
+    /// this is unreachable — which is precisely why it must not be a silent
+    /// default: an empty string here would make check 7 compare `sha256("")`
+    /// against the signed `plan_hash`, and that comparison would be fail-closed
+    /// by arithmetic luck rather than by construction, in an admission path.
+    Canonicalization(String),
     /// The API server could not be talked to. Requeue.
     Api(kube::Error),
 }
@@ -930,6 +940,7 @@ impl fmt::Display for ReconcileError {
                 write!(f, "the object {name} carries no metadata.namespace")
             }
             Self::NoUid(name) => write!(f, "the object {name} carries no metadata.uid"),
+            Self::Canonicalization(detail) => write!(f, "{detail}"),
             Self::Api(e) => write!(f, "kubernetes API error: {e}"),
         }
     }
@@ -938,7 +949,7 @@ impl fmt::Display for ReconcileError {
 impl std::error::Error for ReconcileError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
-            Self::NoNamespace(_) | Self::NoUid(_) => None,
+            Self::NoNamespace(_) | Self::NoUid(_) | Self::Canonicalization(_) => None,
             Self::Api(e) => Some(e),
         }
     }
@@ -1119,14 +1130,25 @@ pub async fn decide(
                     }
                     let bytes = crate::rehearsal::template_bytes(&schedule.spec).map_err(|e| {
                         // Unreachable for this type, which carries no float.
-                        // Reported as a referent problem rather than panicking:
-                        // an admission path is not a place to abort.
-                        ReconcileError::NoUid(format!(
+                        // Reported rather than panicking: an admission path is
+                        // not a place to abort.
+                        ReconcileError::Canonicalization(format!(
                             "the RehearsalSchedule {} spec could not be canonicalised: {e}",
                             subject.name
                         ))
                     })?;
-                    (String::from_utf8(bytes).unwrap_or_default(), Some(current))
+                    // PROPAGATED, NEVER DEFAULTED. `to_deterministic_json`
+                    // always emits UTF-8, so this cannot fire — and a silent
+                    // `""` would make check 7 compare `sha256("")` against the
+                    // signed `plan_hash`, which is fail-closed by arithmetic
+                    // luck rather than by construction.
+                    let text = String::from_utf8(bytes).map_err(|e| {
+                        ReconcileError::Canonicalization(format!(
+                            "the RehearsalSchedule {}'s canonical spec bytes are not UTF-8: {e}",
+                            subject.name
+                        ))
+                    })?;
+                    (text, Some(current))
                 }
                 Err(kube::Error::Api(e)) if e.code == 404 => {
                     return Ok(ApprovalOutcome::Referent(

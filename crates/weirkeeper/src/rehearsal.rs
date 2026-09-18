@@ -514,7 +514,15 @@ pub fn select_point(
     let before = set.len();
     set.retain(|c| match c.topics.as_ref() {
         Some(known) => rules.topics.iter().all(|t| known.contains(t)),
-        None => false,
+        // AN UNRECORDED TOPIC SET REFUSES A CLAIM, AND AN EMPTY REQUIREMENT
+        // MAKES NO CLAIM. D3 §4.1 requires `spec.point.topics` to be a subset of
+        // the chosen point's, and a point whose own set nobody recorded cannot
+        // be shown to contain them — so it is refused rather than assumed. When
+        // the schedule requires NO topics the subset claim is vacuous: there is
+        // nothing to prove, and refusing anyway is over-strict rather than
+        // fail-closed. It also mattered: it locked every topic-agnostic
+        // schedule, and PLAT-15.2's disaster path, out of the catalog entirely.
+        None => rules.topics.is_empty(),
     });
     if set.is_empty() {
         return Err(Skip::new(
@@ -522,7 +530,8 @@ pub fn select_point(
             format!(
                 "none of the {before} available points covers every topic in spec.point.topics \
                  [{}] — a point whose own topic set was never recorded cannot be proven to \
-                 contain them and is refused rather than assumed",
+                 contain them and is refused rather than assumed (a schedule that requires no \
+                 topics makes no such claim, and such a point is admitted)",
                 rules.topics.join(", ")
             ),
         ));
@@ -947,6 +956,25 @@ mod tests {
         let skip = select_point(&[only], &rules(&topics), at(9_000)).expect_err("no point");
         assert_eq!(skip.reason, SkipReason::NoQualifyingPoint);
         assert!(skip.detail.contains("never recorded"), "{skip}");
+    }
+
+    /// The OTHER arm of the same rule, and the one the first revision got
+    /// wrong: with no required topics there is no subset claim to prove, so a
+    /// point whose topic set nobody recorded — every catalog-only point — is
+    /// admitted. Refusing it was over-strict, not fail-closed, and it locked
+    /// PLAT-15.2's disaster path out of the catalog entirely.
+    #[test]
+    fn a_schedule_that_requires_no_topics_may_rehearse_a_point_that_records_none() {
+        let none: Vec<String> = Vec::new();
+        let mut only = candidate("lwp1-a", 1_000);
+        only.topics = None;
+        let chosen =
+            select_point(&[only], &rules(&none), at(9_000)).expect("no claim, nothing to refuse");
+        assert_eq!(chosen.point.point_id, "lwp1-a");
+
+        // …and a point that DOES record its topics is still admitted.
+        let known = candidate("lwp1-b", 1_000);
+        assert!(select_point(&[known], &rules(&none), at(9_000)).is_ok());
     }
 
     #[test]
