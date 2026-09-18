@@ -1070,10 +1070,150 @@ fn redaction_is_idempotent_and_total() {
         "password=",
         "AKIA",
         "AKIAIOSFODNN7EXAMPL",
+        // D2-REDACT-OVERBROAD, the bracket half. Every published row is
+        // redacted at least twice — `with_message` and again when the
+        // controller renders the entry — and the value scanner used to stop at
+        // the marker's own `]`, rewrite `[redacted` and leave the bracket
+        // behind. Live statuses read `key password [redacted]]] Secret`.
+        "password=hunter2",
+        "sasl.password: hunter2",
+        r#"{"password":"hunter2"}"#,
+        "--token hunter2",
+        "password: [redacted]",
     ];
     for i in inputs {
         let once = redact(i);
         assert_eq!(redact(&once), once, "not idempotent for `{i}`");
+        assert_eq!(redact(&redact(&once)), once, "not idempotent for `{i}`");
+    }
+}
+
+/// **D2-SIGNERID-REDACTED and D2-REDACT-OVERBROAD, the keeping half.**
+///
+/// Each row is a sentence the live D2 run published with the acting part blank
+/// (`d2w14.result.md` §5.3, §5.4; `objects/s14/notready-rows.json`,
+/// `objects/s16/details.jsonl`). The witness is what an operator has to read in
+/// order to do the thing the remedy asks: roster THIS key, recover THIS object,
+/// add THIS key to THAT Secret.
+#[test]
+fn a_public_identifier_survives_redaction() {
+    // A SHA-256 of a SubjectPublicKeyInfo DER — a `signerKeyId`, and what the
+    // TrustRoster is written in.
+    const KEY_ID: &str = "6feecc8c16c5551d9feb3eb5f77e2da773bf68bd9ef9c52927ceb2c86e56892b";
+    const SET: &str = "3f0ada8f-1a2b-4c3d-9e8f-0123456789ab";
+
+    let cases: Vec<(String, String)> = vec![
+        (
+            format!("the runner holds signing key `{KEY_ID}`, which the TrustRoster does not list"),
+            KEY_ID.to_string(),
+        ),
+        (
+            format!("signing key `{KEY_ID}` is on the TrustRoster"),
+            KEY_ID.to_string(),
+        ),
+        (
+            format!("the container started [imageID=docker-pullable://weirkeeper/logweir-runner@sha256:{KEY_ID}]"),
+            KEY_ID.to_string(),
+        ),
+        // The manifest key, prefix-joined exactly as the runner reads it.
+        (
+            format!("the backup manifest `team/prod/{SET}/manifest.json` could not be read: AccessDenied"),
+            format!("team/prod/{SET}/manifest.json"),
+        ),
+        // The segment path, in the `detailsRef` document that exists to carry
+        // it. This is the remedy "do not restore until the objects are
+        // recovered" becoming actionable.
+        (
+            format!(r#"{{"check":"archive.segments","missingSegment":"{SET}/topics/payments/partition=2/segment-00000000000000000000.bin.zst"}}"#),
+            format!("{SET}/topics/payments/partition=2/segment-00000000000000000000.bin.zst"),
+        ),
+        // A Kafka topic may carry upper case; the run is anchored by the set
+        // id, so the whole key is read as an object key.
+        (
+            format!(r#"{{"missingSegment":"team/prod/{SET}/topics/payments-EU/partition=2/segment-00000000000000000000.bin.zst"}}"#),
+            "payments-EU".to_string(),
+        ),
+        // S14b: the kubelet named the Secret and the data key, and the product
+        // removed both.
+        (
+            "couldn't find key password in Secret lw-fix-runner-checks-20260918t051200z/kafka-credentials".to_string(),
+            "lw-fix-runner-checks-20260918t051200z/kafka-credentials".to_string(),
+        ),
+        (
+            "couldn't find key password in Secret lw-fix-runner-checks-20260918t051200z/kafka-credentials".to_string(),
+            "key password in Secret".to_string(),
+        ),
+        (
+            r#"secret "missing-secret" not found"#.to_string(),
+            "missing-secret".to_string(),
+        ),
+    ];
+
+    for (input, witness) in cases {
+        assert!(
+            input.contains(&witness),
+            "the fixture must carry `{witness}`"
+        );
+        let out = redact(&input);
+        assert!(
+            out.contains(&witness),
+            "`{witness}` did not survive the redactor: {out}"
+        );
+        // And it still survives the second pass the controller makes.
+        assert!(redact(&out).contains(&witness), "second pass: {out}");
+    }
+}
+
+/// **The other direction, on the same rule.** Loosening the long-run rule must
+/// not let an unkeyed credential through, so every shape that reaches it
+/// without a key name is asserted to die. `every_redaction_rule_has_a_mutant_
+/// that_leaks` pins the rule's existence; this pins its reach.
+#[test]
+fn unkeyed_secret_material_is_still_removed() {
+    let cases = [
+        // An AWS secret access key: exactly 40 characters, no separator.
+        (
+            "signature over wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY01 rejected",
+            "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY01",
+        ),
+        // The same, in the `/`-bearing form ~72% of real keys take. Splitting
+        // a run on `/` and passing short components is exactly the mistake
+        // this fixture exists to catch.
+        (
+            "creds wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY refused",
+            "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+        ),
+        // base64 with padding and `+`.
+        (
+            "body n4bQgYhMfWWaL+qgxVrQFaO/TxsrC4Is0V1sFbDwCgg= refused",
+            "n4bQgYhMfWWaL+qgxVrQFaO",
+        ),
+        // All lower case, all letters, forty characters: a name-shaped run is
+        // public only BELOW the threshold.
+        (
+            "blob qwertyuiopasdfghjklzxcvbnmqwertyuiopasdfg refused",
+            "qwertyuiopasdfghjklzxcvbnmqwertyuiopasdfg",
+        ),
+        // A SHA-1-width hex run is NOT a digest this product prints, and it is
+        // the width several hosted services use for bearer tokens.
+        (
+            "bearer 0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c refused",
+            "0f1e2d3c4b5a69788796a5b4c3d2e1f00f1e2d3c",
+        ),
+        // A UUID-anchored run may not carry a forty-character component.
+        (
+            "3f0ada8f-1a2b-4c3d-9e8f-0123456789ab/wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY01",
+            "wJalrXUtnFEMIK7MDENGbPxRfiCYEXAMPLEKEY01",
+        ),
+    ];
+    for (input, witness) in cases {
+        assert!(
+            input.contains(witness),
+            "the fixture must carry `{witness}`"
+        );
+        let out = redact(input);
+        assert!(!out.contains(witness), "`{witness}` leaked: {out}");
+        assert!(out.contains(REDACTED), "`{input}` produced {out}");
     }
 }
 

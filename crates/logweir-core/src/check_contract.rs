@@ -2116,9 +2116,17 @@ pub fn redaction_rules() -> &'static [RedactionRule] {
 /// a log line or an API response (D2 §4.1, §6.5).
 ///
 /// It removes URL userinfo, AWS access key ids, secret/password/token value
-/// forms, PEM blocks, S3 XML bodies (keeping only `<Code>`) and base64 or hex
-/// runs of 40 characters or more, then caps the result at
+/// forms, PEM blocks, S3 XML bodies (keeping only `<Code>`) and unstructured
+/// base64 or hex runs of 40 characters or more, then caps the result at
 /// [`MESSAGE_MAX_CHARS`] characters.
+///
+/// # What it deliberately KEEPS
+///
+/// Redaction is by key NAME and by secret SHAPE, never by "any long token".
+/// A public identifier an operator needs in order to act — a `signerKeyId`, a
+/// content digest, an `imageID`, a Secret or data-key name, an object key, a
+/// segment path — survives whole; see [`is_public_identifier`]. A credential
+/// VALUE does not, whichever of the six rules catches it.
 #[must_use]
 pub fn redact(s: &str) -> String {
     cap(&apply_rules(s, redaction_rules()))
@@ -2291,12 +2299,26 @@ const SECRET_KEYWORDS: [(&str, KeywordForm); 8] = [
 ///   details `ConfigMap`, the API and the UI. Values of 40+ base64/hex
 ///   characters were still caught by the long-run rule; `password` and
 ///   `sasl.password` are exactly the short ones.
-/// - `--token hunter2` — a bare whitespace separator, argv form.
+/// - `--token hunter2` — a bare whitespace separator, **argv form only**: the
+///   keyword must sit in flag position, immediately after a `-`. An earlier
+///   version accepted whitespace after ANY occurrence of the keyword, so the
+///   kubelet's own `couldn't find key password in Secret <ns>/<name>` lost the
+///   word `in` and became `key password [redacted] Secret …`. That sentence is
+///   the one an operator acts on, the following word is English and not a
+///   value, and a credential written as bare prose (`password hunter2`, no
+///   flag, no separator) is not a form any config, log or API body uses.
 /// - `sessionToken=abcdef` — the keyword as a SUFFIX of a longer identifier.
 ///   The first version required the preceding byte to be non-alphanumeric and
 ///   its comment claimed `mypassword` was caught; it was not. Matching a
 ///   suffix over-redacts (`notoken=1` loses its `1`), which is the safe
 ///   direction.
+/// - `password=[redacted]` — a value that is ALREADY the marker is copied
+///   whole. Without that clause the `]` terminated the value one byte early,
+///   the scanner re-wrote `[redacted` as `[redacted]` and left the old `]`
+///   behind, so every extra pass grew another bracket. [`redact`] runs at
+///   least twice on any published row — once in `CheckOutcome::with_message`
+///   and again when the controller renders the entry — which is how live
+///   statuses came to read `key password [redacted]]] Secret`.
 ///
 /// The keyword must NOT be a prefix of a longer identifier — `tokenizer` is a
 /// word, not a key — which is what keeps `the tokenizer failed` intact.
@@ -2336,8 +2358,14 @@ fn redact_key_values(s: &str) -> String {
                 2
             } else if matches!(bytes.get(p), Some(b'=') | Some(b':')) {
                 1
-            } else if had_ws && !quoted_key && form == KeywordForm::Any {
-                // `--token hunter2`: whitespace alone separates them.
+            } else if had_ws
+                && !quoted_key
+                && form == KeywordForm::Any
+                && i > 0
+                && bytes[i - 1] == b'-'
+            {
+                // `--token hunter2`: whitespace alone separates them, and
+                // ONLY in flag position. See the doc comment.
                 0
             } else {
                 continue;
@@ -2345,6 +2373,14 @@ fn redact_key_values(s: &str) -> String {
             p += sep;
             while matches!(bytes.get(p), Some(b' ') | Some(b'\t')) {
                 p += 1;
+            }
+            // Already redacted: copy the marker whole, brackets included, so a
+            // second pass is a no-op rather than another `]`.
+            if s[p..].starts_with(REDACTED) {
+                let end = p + REDACTED.len();
+                out.push_str(&s[i..end]);
+                i = end;
+                continue 'outer;
             }
             let (value_start, terminator): (usize, fn(u8) -> bool) = match bytes.get(p) {
                 Some(b'"') => (p + 1, |c| c == b'"'),
@@ -2412,9 +2448,24 @@ fn redact_access_key_ids(s: &str) -> String {
     out
 }
 
-/// A run of 40 or more characters from the base64 / hex alphabet, unbroken by
-/// anything else. An AWS secret access key is EXACTLY 40 characters of
-/// `[A-Za-z0-9/+=]`, which is what sets the threshold.
+/// The length at which an unkeyed run is treated as material.
+///
+/// FORTY. An AWS secret access key is EXACTLY 40 characters of
+/// `[A-Za-z0-9/+=]`, which is what sets it, and nothing shorter is redacted by
+/// shape alone — the short forms are [`redact_key_values`]'s, by key name.
+const LONG_RUN_MIN: usize = 40;
+
+/// A run of 40 or more characters from the base64 / hex alphabet that carries
+/// no PUBLIC structure.
+///
+/// The threshold is an AWS secret access key's length; the EXEMPTION is D2
+/// §6.5's other half. A key id, a content digest, an image id, a backup set's
+/// UUID, an object key and a segment path are all longer than forty characters
+/// and all public — they are on the `TrustRoster`, in the manifest, in the
+/// bucket listing — and a remedy that names none of them ("do not restore
+/// until `[redacted]` is recovered") cannot be acted on. Redaction is by key
+/// NAME ([`redact_key_values`]) and by known secret SHAPE (PEM, S3 bodies,
+/// URL userinfo, AWS access key ids); "any long token" is not a shape.
 fn redact_long_runs(s: &str) -> String {
     fn is_run_char(c: char) -> bool {
         c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=' || c == '_' || c == '-'
@@ -2433,8 +2484,83 @@ fn redact_long_runs(s: &str) -> String {
     out
 }
 
+/// A lowercase hex string of SHA-256 or SHA-512 width.
+///
+/// The two widths Logweir prints, and only those: a `signerKeyId` is the
+/// SHA-256 of a SubjectPublicKeyInfo DER, an `imageID` and a `manifestSha256`
+/// are SHA-256, and `sha512` is the one other digest the formats allow. A
+/// forty-character hex run is NOT exempt — that is a SHA-1 nobody here prints
+/// and the width several hosted services use for bearer tokens, so it keeps
+/// the conservative answer.
+fn is_hex_digest(c: &str) -> bool {
+    matches!(c.len(), 64 | 128) && c.bytes().all(|b| b.is_ascii_hexdigit())
+}
+
+/// `8-4-4-4-12` hex — a Kubernetes UID or a backup set id.
+fn is_uuid(c: &str) -> bool {
+    let groups: Vec<&str> = c.split('-').collect();
+    groups.len() == 5
+        && [8usize, 4, 4, 4, 12]
+            .iter()
+            .zip(&groups)
+            .all(|(n, g)| g.len() == *n && g.bytes().all(|b| b.is_ascii_hexdigit()))
+}
+
+/// A NAME rather than material: lower case, and short enough that it cannot be
+/// a secret on its own.
+///
+/// DNS-1123 object names, Kafka topic names, `partition=2`,
+/// `segment-00000000000000000000` and `manifest` are all of this form. Upper
+/// case is what separates it from base64 — a forty-character base64 run with no
+/// upper-case letter at all has probability `(38/64)^40 ≈ 2e-9` — and `+` is
+/// excluded for the same reason.
+fn is_public_name(c: &str) -> bool {
+    c.len() < LONG_RUN_MIN
+        && c.bytes().all(|b| {
+            b.is_ascii_lowercase() || b.is_ascii_digit() || matches!(b, b'.' | b'-' | b'_' | b'=')
+        })
+}
+
+/// Anything an object key may hold once the run is known to BE an object key:
+/// no `+`, and no component long enough to be a credential.
+fn is_key_component(c: &str) -> bool {
+    c.len() < LONG_RUN_MIN
+        && c.bytes()
+            .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b'_' | b'='))
+}
+
+/// Whether a long run is a public identifier rather than material.
+///
+/// The run is split on `/` — an object key's own separator — and answered two
+/// ways:
+///
+/// * **every component is a public FORM**: a SHA-256/512 digest, a UUID, or a
+///   lower-case name. This is what lets a bare `signerKeyId`, an `imageID`'s
+///   digest, a Secret `<ns>/<name>` and a prefix-joined manifest key through.
+/// * **or the run is ANCHORED** by a component that is a UUID or a digest — a
+///   backup set id or a content digest — which makes the run an object key
+///   rather than a token, and the rest of it is then read as key components.
+///   Kafka topic names may carry upper case, and the strict form above would
+///   have redacted the whole segment path for `payments-EU`.
+///
+/// An AWS secret access key satisfies neither: its components carry upper case
+/// (and often `+`), and nothing in it is a UUID or a digest.
+fn is_public_identifier(run: &str) -> bool {
+    let components: Vec<&str> = run.split('/').collect();
+    if components
+        .iter()
+        .all(|c| c.is_empty() || is_hex_digest(c) || is_uuid(c) || is_public_name(c))
+    {
+        return true;
+    }
+    components.iter().any(|c| is_uuid(c) || is_hex_digest(c))
+        && components
+            .iter()
+            .all(|c| c.is_empty() || is_key_component(c))
+}
+
 fn flush_run(out: &mut String, run: &mut String) {
-    if run.chars().count() >= 40 {
+    if run.chars().count() >= LONG_RUN_MIN && !is_public_identifier(run) {
         out.push_str(REDACTED);
     } else {
         out.push_str(run);
