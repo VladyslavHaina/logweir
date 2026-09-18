@@ -3397,6 +3397,15 @@ is the documented absent-field behaviour and not a degraded state.
 | `runnerPhase` | the runner's own phase, from its `progress-phase=<n>:<name>` lines |
 | `diagnostics[]` | at most eight, newest first, deduplicated on `(code, object.kind, object.name)` |
 
+**`diagnostics[].count` counts minutes, not occurrences.** It moves with
+`lastSeen`, and `lastSeen` moves at most once per 60 s — so `count: 7` means
+"this has been true for about seven minutes", not "this happened seven times".
+The alternative would be to increment it once per 15-second reconcile, which
+would make every pass over a diagnosing object a status write and lose E11(d)'s
+"zero patches between heartbeats" for exactly the objects an operator is
+watching. The CRD field's own description still reads "How many times" and is
+owed a correction by the shapes owner, together with `RunnerPhase.contract`.
+
 Two timestamps and not one clock read per pass: a reconciler's own status patch
 is what wakes it, so a field carrying a fresh instant every pass would make
 every pass a write. A run whose state has not changed issues **zero** API
@@ -3427,16 +3436,34 @@ none is invented.
 ### Failing fast, and what it costs
 
 When a **non-transient** diagnostic has held continuously for
-`failFastSeconds` (default 300, floor 60) and the runner container has **never**
-started, the controller collapses the Job's `activeDeadlineSeconds` rather than
-waiting for it. The Job fails with `DeadlineExceeded`, the existing crashed-Job
-path runs, and the terminal reason is the recorded diagnostic. No data-plane
-process ever started, so no approval, plan or archive state was consumed; a new
-attempt is a new `Backup` or `Restore`, never a mutation of the old one.
+`LOGWEIR_FAIL_FAST_SECONDS` (default 300, floor 60) and the runner container has
+**never** started, the controller collapses the Job's `activeDeadlineSeconds`
+rather than waiting for it. The Job fails with `DeadlineExceeded`, the existing
+crashed-Job path runs, and the terminal reason is the recorded diagnostic. No
+data-plane process ever started, so no approval, plan or archive state was
+consumed; a new attempt is a new `Backup` or `Restore`, never a mutation of the
+old one.
 
 `PodUnschedulable` is **never** failed fast, and that is a decision: a node can
 join a cluster, a pod can be preempted, and a cluster autoscaler exists. It is
-reported and left to the Job's own deadline.
+reported and left to the Job's own deadline. The same holds for
+`RunnerImagePullFailed`.
+
+**This behaviour is on by default, and here is how to change it.** Set
+`LOGWEIR_FAIL_FAST_SECONDS` to a larger number of seconds to wait longer, or to
+**`0` to switch fail-fast off entirely** — every Job then runs to its own
+`activeDeadlineSeconds`, exactly as before this behaviour existed. `0` means
+*never*, not *immediately*; a value between 1 and 59 is raised to the 60-second
+floor. The case this lever is for is a cluster where an external controller
+(external-secrets, a vault injector) materialises a Secret a few minutes behind
+the Job, where an otherwise healthy run would be cancelled at the default.
+
+> **Both of these are environment variables on the controller Deployment, and
+> neither is a Helm value yet.** D3 §9 assigns `controller.failFastSeconds` and
+> `controller.jobTtlSeconds` to the chart worker (W13) and they are **not** in
+> `charts/logweir/values.yaml` today. Until they land, set
+> `LOGWEIR_FAIL_FAST_SECONDS` and `LOGWEIR_JOB_TTL_SECONDS` directly on the
+> controller Deployment — there is no other supported lever.
 
 ### Diagnostics are derived from Events, which are best effort
 
@@ -3457,13 +3484,29 @@ installation accepts attested to, not a number anybody who can write to the
 bucket chose. The per-topic breakdown stays in the receipt, where it is
 attested; a status is not a second copy of a signed document.
 
+**What happens to them when trust is withdrawn, decided rather than inherited.**
+A `TrustPolicy` change can re-evaluate a stored verdict from `Valid` to
+`Untrusted` (§7.4) without re-fetching anything. `status.records` and
+`status.capture` are **left in place** by that pass, for the same reason
+`exitCode`, `outcome` and `windowCovered` are: they are a record of what was
+observed and attested *at the time*, and a re-trust pass changes no run fact.
+Rewriting history to match a policy that changed afterwards would destroy the
+evidence an operator needs to work out what was relied upon and when.
+
+The consequence is one a console must not get wrong: **a record count is only
+ever as trustworthy as the verification badge beside it.** The RECORDS column
+means "this many records, attested by a key that was accepted when the run
+finished" — never "by a key this installation accepts now". Any surface that
+renders the count without the badge is misrepresenting it, which is the same
+rule §8 already applies to a `succeeded` result with `notAttempted` evidence.
+
 ### Completed Job cleanup, and its repair
 
 The order is unchanged and load bearing: **terminal status first, TTL second**.
 A status patch that did not return 200 leaves the reconcile before any TTL
 exists, so pod garbage collection cannot start on a run whose exit code was
 never recorded. The TTL value is `LOGWEIR_JOB_TTL_SECONDS` (default 604800,
-floor 3600; chart value `controller.jobTtlSeconds`).
+floor 3600).
 
 If that second patch failed, the run is already terminal and no later pass
 re-reads its pod — so nothing would ever set the TTL and the finished Job would
