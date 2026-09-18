@@ -28,6 +28,7 @@ sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 import run as d1  # noqa: E402
 from fence import fenced  # noqa: E402
+from fence import rows as fence_rows  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 FAILURES: list[str] = []
@@ -126,6 +127,77 @@ def test_an_empty_resolution_is_refused_on_the_conditions() -> None:
         not all(d1.selection_empty_refusal(
             EMPTY_RUN_STATUS, dict(FAILED_CONDITION, reason="DiscoveryFailed"),
             RESOLVED_CONDITION).values()))
+
+
+# --- L-05.1-3: D1 §6.2 as amended, and how wide its carve-out is ------------
+# The recorded shapes are this branch's own fenced run of 2026-09-18: a Backup
+# written by `main@4956785`, read before and after the swap to `c6422a7`.
+VERIFICATION_BEFORE_UPGRADE = {
+    "result": "Valid",
+    "matchedKeyId": "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe",
+    "payloadType": "application/vnd.logweir.backup-receipt+json;version=1.0.0",
+    "verifiedAt": "2026-09-18T18:54:36Z",
+}
+VERIFICATION_AFTER_UPGRADE = dict(
+    VERIFICATION_BEFORE_UPGRADE,
+    signedAt="2026-09-18T18:54:31Z",
+    trust={"basis": "Current", "keyState": "Active", "policy": {"name": "legacy-roster-v1"}},
+)
+
+
+def _status(verification: dict) -> dict:
+    return {
+        "phase": "Succeeded",
+        "exitCode": 0,
+        "backupId": "95154a1a-e730-4536-9898-92f8405c2c0d",
+        "evidence": {
+            "receiptKey": "logweir/backups/95154a1a-…/01M2TXXH98XY8XFH2AJDE11CBH.receipt.json",
+            "receiptSha256": "sha256:" + "f1" * 32,
+            "sidecarKey": "logweir/backups/95154a1a-…/01M2TXXH98XY8XFH2AJDE11CBH.receipt.sig",
+            "verification": verification,
+        },
+    }
+
+
+BEFORE = _status(VERIFICATION_BEFORE_UPGRADE)
+AFTER = _status(VERIFICATION_AFTER_UPGRADE)
+
+
+def _carve(before: dict, after: dict) -> bool:
+    clauses, _ = fence_rows.status_delta_is_only_a_trust_reread(before, after)
+    return all(clauses.values())
+
+
+def test_the_upgrade_may_add_signedAt_and_trust_and_nothing_else() -> None:
+    row("L-05.1-3: the trust re-read ADDS signedAt and trust, verdict untouched",
+        _carve(BEFORE, AFTER))
+    row("an upgrade that moved nothing at all is allowed too", _carve(BEFORE, BEFORE))
+
+    # THE MUTANT THE CARVE-OUT EXISTS FOR: a verdict that moved without a read.
+    verdict_moved = _status(dict(VERIFICATION_AFTER_UPGRADE, result="Untrusted"))
+    row("MUTANT: `result` changed across the upgrade", not _carve(BEFORE, verdict_moved))
+    row("MUTANT: `matchedKeyId` changed across the upgrade",
+        not _carve(BEFORE, _status(dict(VERIFICATION_AFTER_UPGRADE, matchedKeyId="0" * 64))))
+    row("MUTANT: `verifiedAt` restamped by a pass that verified nothing",
+        not _carve(BEFORE,
+                   _status(dict(VERIFICATION_AFTER_UPGRADE,
+                                verifiedAt="2026-09-18T18:55:10Z"))))
+    row("MUTANT: `signedAt` REWRITTEN rather than added — not a re-read of an absence",
+        not _carve(_status(dict(VERIFICATION_BEFORE_UPGRADE, signedAt="2026-01-01T00:00:00Z")),
+                   AFTER))
+    row("MUTANT: a third verification field added under cover of the carve-out",
+        not _carve(BEFORE, _status(dict(VERIFICATION_AFTER_UPGRADE, payloadType=None,
+                                        somethingElse="x"))))
+    receipt_moved = json.loads(json.dumps(AFTER))
+    receipt_moved["evidence"]["receiptKey"] = "logweir/backups/elsewhere/receipt.json"
+    row("MUTANT: the evidence's own keys moved beside the verification",
+        not _carve(BEFORE, receipt_moved))
+    phase_moved = json.loads(json.dumps(AFTER))
+    phase_moved["phase"] = "Failed"
+    row("MUTANT: a status field outside `evidence` moved", not _carve(BEFORE, phase_moved))
+    row("MUTANT: the whole verification block appearing where none existed is not this "
+        "carve-out",
+        not _carve(_status({}), AFTER))
 
 
 # --- the fence's source matching --------------------------------------------

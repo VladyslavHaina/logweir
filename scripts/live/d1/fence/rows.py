@@ -989,6 +989,78 @@ def l_05_1_2(H: Any) -> dict[str, Any]:
     }
 
 
+# D1 §6.2 AS AMENDED (orchestrator decision, 2026-09-18). An upgrade's
+# migration stays metadata-only, with ONE carve-out: D3's trust rule may add
+# `signedAt` and `trust` to a terminal object's `status.evidence.verification`
+# by a single bounded, digest-checked re-read, and may never change `result`,
+# `matchedKeyId` or `verifiedAt` of a compared verdict without a read.
+#
+# This row measured the un-amended rule and failed on the carve-out
+# (harness-refresh §6): `Valid` -> `Valid`, `verifiedAt` untouched to the
+# second, and `signedAt` + `trust: {basis: Current, keyState: Active, policy:
+# {name: legacy-roster-v1}}` added to an object `main@4956785` had written with
+# no trust block at all. That is the self-heal working; the assertion was older
+# than the rule.
+#
+# The carve-out is written here EXACTLY as wide as it is. Only `evidence` may
+# move at the top level, only `verification` inside it, only those two keys
+# inside that, and only by appearing where nothing was: a re-read that rewrote
+# a field it found is not an addition, and a verdict that moved without a read
+# is the thing the rule forbids.
+TRUST_REREAD_MAY_ADD = ("signedAt", "trust")
+VERDICT_A_REREAD_NEVER_MOVES = ("result", "matchedKeyId", "verifiedAt")
+
+
+def _same(a: Any, b: Any) -> bool:
+    return json.dumps(a, sort_keys=True) == json.dumps(b, sort_keys=True)
+
+
+def _changed_keys(before: dict[str, Any], after: dict[str, Any]) -> list[str]:
+    return sorted(k for k in set(before) | set(after) if not _same(before.get(k), after.get(k)))
+
+
+def status_delta_is_only_a_trust_reread(
+    before: dict[str, Any] | None, after: dict[str, Any] | None
+) -> tuple[dict[str, bool], dict[str, Any]]:
+    """Whether a terminal object's status moved only as the trust re-read may move it.
+
+    Five clauses, each judged on its own so a failure names the rule it broke.
+    The last one is deliberately implied by the third — a `result` that moved
+    would already be outside the two-key allowlist — and is kept because the
+    invariant deserves to be stated where it is read, not inferred from a set
+    difference.
+    """
+    before = before or {}
+    after = after or {}
+    top = _changed_keys(before, after)
+    ev_before = before.get("evidence") or {}
+    ev_after = after.get("evidence") or {}
+    evidence = _changed_keys(ev_before, ev_after)
+    ver_before = ev_before.get("verification") or {}
+    ver_after = ev_after.get("verification") or {}
+    verification = _changed_keys(ver_before, ver_after)
+    added = [k for k in verification if k not in ver_before and k in ver_after]
+    clauses = {
+        "nothing but `evidence` moved in the status": set(top) <= {"evidence"},
+        "nothing but `verification` moved in the evidence": set(evidence) <= {"verification"},
+        "the re-read touched only signedAt and trust":
+            set(verification) <= set(TRUST_REREAD_MAY_ADD),
+        "it ADDED them where nothing was, and rewrote nothing":
+            set(verification) == set(added),
+        "the compared verdict — result, matchedKeyId, verifiedAt — is unchanged":
+            all(_same(ver_before.get(k), ver_after.get(k))
+                for k in VERDICT_A_REREAD_NEVER_MOVES),
+    }
+    return clauses, {
+        "statusFieldsChanged": top,
+        "evidenceFieldsChanged": evidence,
+        "verificationFieldsChanged": verification,
+        "verificationFieldsAdded": added,
+        "verdictBefore": {k: ver_before.get(k) for k in VERDICT_A_REREAD_NEVER_MOVES},
+        "verdictAfter": {k: ver_after.get(k) for k in VERDICT_A_REREAD_NEVER_MOVES},
+    }
+
+
 def l_05_1_3(H: Any) -> dict[str, Any]:
     """Conversion: objects written by main@4956785, then the current controller."""
     reset_schedules(H, ["legacy"])
@@ -1098,20 +1170,20 @@ def l_05_1_3(H: Any) -> dict[str, Any]:
         obj=after_backup,
         dumps={"before": pre["backup"], "after": after_backup},
     )
-    status_delta = sorted(
-        k
-        for k in set(json.loads(status_before) or {}) | set(after_backup.get("status") or {})
-        if json.dumps((json.loads(status_before) or {}).get(k), sort_keys=True)
-        != json.dumps((after_backup.get("status") or {}).get(k), sort_keys=True)
+    status_clauses, status_observed = status_delta_is_only_a_trust_reread(
+        json.loads(status_before), after_backup.get("status")
     )
     H.require(
-        not status_delta,
-        "the pre-upgrade Backup's status changed across the upgrade, outside D1 §6.2's "
-        f"migration fields (metadata only): {status_delta}. Verification went "
-        f"{((json.loads(status_before) or {}).get('evidence') or {}).get('verification', {}).get('result')!r}"
-        f" -> {((after_backup.get('status') or {}).get('evidence') or {}).get('verification', {}).get('result')!r}",
+        all(status_clauses.values()),
+        "the pre-upgrade Backup's status moved in a way D1 §6.2 does not allow — the "
+        "migration is metadata-only, and the one carve-out is D3's trust rule ADDING "
+        "`signedAt` and `trust` to `status.evidence.verification` by one bounded, "
+        "digest-checked re-read. Broken: "
+        + "; ".join(sorted(k for k, ok in status_clauses.items() if not ok))
+        + f". {status_observed}",
         obj=after_backup,
-        dumps={"before": pre["backup"], "after": after_backup},
+        dumps={"before": pre["backup"], "after": after_backup,
+               "statusClauses": status_clauses, "statusObserved": status_observed},
     )
     changed = _metadata_delta(pre["backup"], after_backup)
     allowed = {
@@ -1146,6 +1218,8 @@ def l_05_1_3(H: Any) -> dict[str, Any]:
             "postUpgradeRun": H.excerpt(next_run, "spec.slot", "spec.trigger.kind",
                                         "spec.scheduleRef.generation"),
             "metadataFieldsChangedOnTheOldRun": sorted(changed),
+            "statusCarveOut": status_clauses,
+            "statusDelta": status_observed,
             "historyRetained": H.excerpt(after_schedule, "status.history"),
         },
         "dumps": H.dump_objects(
