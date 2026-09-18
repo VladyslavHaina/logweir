@@ -18,8 +18,8 @@ use weirkeeper::conditions::{
 };
 use weirkeeper::crds::{Condition, Diagnostic, DiagnosticObject, RunProgress, RunnerPhase};
 use weirkeeper::diagnostics::{
-    apply, apply_finished, bounded, derive, held_for, merge_diagnostics, parse_progress,
-    parse_progress_after, recorded_terminal_state, sanitize, should_fail_fast,
+    apply, apply_finished, bounded, derive, fail_fast_window, held_for, merge_diagnostics,
+    parse_progress, parse_progress_after, recorded_terminal_state, sanitize, should_fail_fast,
     should_read_progress, terminal_state, Code, Diagnosis, Facts, Progress, Severity, Stage, Write,
     DIAGNOSTICS_MAX, FAIL_FAST_NEVER, FAIL_FAST_SECONDS_DEFAULT, FAIL_FAST_SECONDS_MIN,
     MESSAGE_MAX_BYTES, MOUNT_TRANSIENT_FOR, OBSERVED_HEARTBEAT, PROGRESS_LINE_MAX_BYTES,
@@ -1731,8 +1731,47 @@ fn a_configured_zero_switches_fail_fast_off_rather_than_cancelling_on_sight() {
     assert_eq!(
         bounded(Some("0"), FAIL_FAST_SECONDS_DEFAULT, FAIL_FAST_SECONDS_MIN),
         FAIL_FAST_SECONDS_MIN,
-        "…and `bounded` alone would clamp ZERO up too, which is exactly why \
-         `fail_fast_seconds` reads the raw value BEFORE the floor: 0 is not a short patience, \
-         it is a different answer"
+        "…and `bounded` ALONE would clamp ZERO up too, which is exactly why the window is \
+         decided before the floor is applied: 0 is not a short patience, it is a different \
+         answer"
+    );
+
+    // THE DECISION ITSELF, which is what the assertions above are only about
+    // indirectly. MUTANT: comparing the raw value against anything but
+    // `FAIL_FAST_NEVER` — including applying the floor first.
+    assert_eq!(
+        fail_fast_window(Some("0")),
+        None,
+        "MUTANT: `0` switches fail-fast OFF. Clamped through the floor it would come back as \
+         60 seconds — the most aggressive setting the build allows — which is the exact \
+         opposite of what an operator typing 0 asked for"
+    );
+    assert_eq!(
+        fail_fast_window(Some(" 0 ")),
+        None,
+        "whitespace is trimmed here too, or the one value that disables a behaviour would \
+         depend on how a YAML string was quoted"
+    );
+    assert_eq!(
+        fail_fast_window(Some("900")),
+        Some(Duration::from_secs(900)),
+        "a configured patience is honoured"
+    );
+    assert_eq!(
+        fail_fast_window(Some("1")),
+        Some(Duration::from_secs(FAIL_FAST_SECONDS_MIN)),
+        "…and every other small value still meets the floor, which is the distinction the \
+         special case exists to make"
+    );
+    assert_eq!(
+        fail_fast_window(None),
+        Some(Duration::from_secs(FAIL_FAST_SECONDS_DEFAULT)),
+        "unset is the default, and the default is ON"
+    );
+    assert_eq!(
+        fail_fast_window(Some("off")),
+        Some(Duration::from_secs(FAIL_FAST_SECONDS_DEFAULT)),
+        "and an unparseable value is the DEFAULT, not `never`: a typo must not silently \
+         disable a behaviour an operator believes is running"
     );
 }

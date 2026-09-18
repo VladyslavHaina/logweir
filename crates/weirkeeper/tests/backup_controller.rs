@@ -9594,3 +9594,62 @@ async fn a_steady_backup_that_is_diagnosing_also_issues_no_second_status_patch()
          starts carrying a clock"
     );
 }
+
+/// **F2, the half a pure row cannot reach: a window with no phase line of its
+/// own does not retract the phase the object already carries.**
+///
+/// A run prints one `progress-phase=` line per phase. A phase that lasts two
+/// minutes therefore has eight reconciles whose fifty-line window holds only
+/// ordinary output — and because `apply` writes the WHOLE `progress` object,
+/// anything the read does not return is erased rather than left alone. So
+/// "no new phase line" has to mean "the phase has not changed", never "there
+/// is no phase".
+///
+/// MUTANT: dropping the carry in `read_progress`.
+#[tokio::test]
+async fn a_log_window_carrying_no_phase_line_does_not_blank_the_stored_phase() {
+    // The object is mid-run and already knows its phase.
+    let mut running = frozen_backup();
+    running.status.as_mut().expect("a status").progress = Some(
+        serde_json::from_value(json!({
+            "stage": "Running",
+            "reason": "RunnerStarted",
+            "lastTransitionTime": utc(2026, 11, 9, 3, 18),
+            "lastObservedTime": utc(2026, 11, 9, 3, 18),
+            "runnerPhase": {"number": -1, "name": "readback"},
+        }))
+        .expect("a RunProgress"),
+    );
+
+    // Its log window is ordinary output: the announcement and every phase line
+    // scrolled away long ago.
+    let (client, _seen, bodies) = mock_client_recording_bodies(running_routes_with(
+        pod_list_running(),
+        "consuming partition 3\nconsuming partition 4\nflushed 10000 records\n".to_string(),
+    ));
+    reconcile_backup(
+        &running,
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        // Past the heartbeat, so the log IS read on this pass.
+        utc(2026, 11, 9, 3, 20),
+    )
+    .await
+    .expect("the reconcile succeeds");
+    let status = &patched_statuses(&bodies.lock().expect("the body recorder is readable"))[0];
+    assert_eq!(
+        status["progress"]["runnerPhase"]["name"].as_str(),
+        Some("readback"),
+        "MUTANT: the phase must SURVIVE a window that says nothing about it. Without the carry \
+         `runnerPhase` blinks out on every pass of a long phase — and because D3 §2.5's \
+         `Verifying` stage is a pure function of it, `readback` blanking is the API losing \
+         `verifying` for the rest of the run. Got: {}",
+        status["progress"]
+    );
+    assert_eq!(
+        status["progress"]["stage"].as_str(),
+        Some("Verifying"),
+        "…which is the consequence: `readback` is one of D3 §2.5's three backup verifying steps"
+    );
+}

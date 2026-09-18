@@ -148,20 +148,30 @@ pub const FAIL_FAST_NEVER: u64 = 0;
 /// healthy run would otherwise be cancelled at the 300 s default.
 #[must_use]
 pub fn fail_fast_seconds() -> Option<Duration> {
-    // READ BEFORE THE FLOOR IS APPLIED. `bounded` clamps 1..59 UP to the
-    // minimum, which is right for a configured patience and wrong for a
-    // request to switch the behaviour off — 0 would come back as 60.
-    if std::env::var(FAIL_FAST_SECONDS_ENV)
-        .ok()
-        .as_deref()
-        .map(str::trim)
-        .and_then(|v| v.parse::<u64>().ok())
-        == Some(FAIL_FAST_NEVER)
-    {
+    fail_fast_window(std::env::var(FAIL_FAST_SECONDS_ENV).ok().as_deref())
+}
+
+/// [`fail_fast_seconds`]'s decision, as a PURE function of the configured
+/// text — the same split [`bounded`] has, and for the same reason: `set_var`
+/// is process-global and unusable in a suite that runs tests in parallel, so a
+/// rule that lives only behind an environment read is a rule with no mutant.
+///
+/// Three answers, and the order matters:
+///
+/// 1. exactly [`FAIL_FAST_NEVER`] → `None`, **read before the floor is
+///    applied**. [`bounded`] clamps 1..59 UP to the minimum, which is right
+///    for a configured patience and wrong for a request to switch the
+///    behaviour off — `0` would otherwise come back as 60, which is the
+///    opposite of what was asked for;
+/// 2. anything else parseable → [`bounded`]'s answer, floor included;
+/// 3. absent or unparseable → the default.
+#[must_use]
+pub fn fail_fast_window(raw: Option<&str>) -> Option<Duration> {
+    if raw.map(str::trim).and_then(|v| v.parse::<u64>().ok()) == Some(FAIL_FAST_NEVER) {
         return None;
     }
-    Some(Duration::from_secs(bounded_env(
-        FAIL_FAST_SECONDS_ENV,
+    Some(Duration::from_secs(bounded(
+        raw,
         FAIL_FAST_SECONDS_DEFAULT,
         FAIL_FAST_SECONDS_MIN,
     )))
