@@ -644,13 +644,39 @@ controller never dials a broker itself and never reads a Secret.
 | `Queued` | Over an installation concurrency ceiling (`reason: ConcurrencyLimited`). Retried every ten seconds; nothing was created. |
 | `Running` | The check Job exists and has not finished. `reason` carries what the pod is waiting for. |
 | `Succeeded` | A verified relay was decoded and its chunks committed. |
-| `Failed` | Terminal, with a closed code in `reason` — `ConnectionNotFound`, `ConnectionInvalid`, `DeadlineExceeded`, `ResultUnreadable`, `CheckPlanConflict`, `ResultStorageConflict`, `Stalled`, or a pod-waiting code such as `CredentialSecretNotFound`. |
+| `Failed` | Terminal, with a closed code in `reason`. A check Job that RAN and relayed a classified failure projects **that check's own code** — `BrokerUnreachable`, `AuthenticationFailed`, `TlsHandshakeFailed`, `MetadataTimeout`, `ClusterAuthorizationFailed`, … — and its message and remedy in `status.message`. Otherwise the code is the controller's own: `ConnectionNotFound`, `ConnectionInvalid`, `DeadlineExceeded`, `ResultUnreadable`, `CheckPlanConflict`, `ResultStorageConflict`, `Stalled`, or a pod-waiting code such as `CredentialSecretNotFound`. |
 | `Cancelled` | `spec.cancelRequested` reached a non-terminal object. The Job's deadline was collapsed and **no chunks were written**. |
 
 `ConnectionNotFound` and `ConnectionInvalid` are terminal rather than retried,
 because `spec.request` is immutable: the object can never name a different
 connection, so a later pass would ask the same question. Create the
 `KafkaCluster`, then create a new `TopicDiscovery`.
+
+**A relayed failure keeps its own code.** `logweir check run` does not exit 1 on
+an unreachable broker: an operational failure is a RESULT, so the runner prints a
+result document with no `inventory` block and one `connection.authenticated` row
+carrying the classified code, its message and its remedy. The controller projects
+that row — the first **blocking** check that is not `ready`, taking a `notReady`
+one before an `unknown` or `skipped` one, exactly as D2 §6.4 aggregates — into
+`status.reason` and `status.message`. So an unreachable bootstrap reads
+`BrokerUnreachable` and a password the broker no longer accepts reads
+`AuthenticationFailed`, and an operator can tell the two apart without reading a
+pod log. An **advisory** row is a warning by definition and is never the terminal
+reason.
+
+`ResultUnreadable` is reserved for what the word says: the relay did not decode,
+the result document did not verify, its counts or its `topicsSha256` are not the
+ones the frames carry, no result document was relayed at all, or the document
+carries neither an inventory nor a blocking check that is not `ready`. Before
+2026-09-18 every classified failure read `ResultUnreadable` as well (defect
+`D2-RESULTUNREADABLE`, found by the D2 live run at S11/S12), which made an
+unreachable broker and a rejected credential indistinguishable in the console.
+
+**The check Job's own condition stays `Complete` on that path**, and that is not
+a contradiction: the runner performed the check, relayed the answer and exited 0,
+so Kubernetes marks the Job complete while the `TopicDiscovery` is `Failed`. The
+verdict lives on the `TopicDiscovery`; the Job condition says only whether the
+pod ran to completion.
 
 **`unknown` is not a degraded answer, it is the true one.** An all-topics Kafka
 metadata request silently omits every topic the principal may not `DESCRIBE`, and
