@@ -129,8 +129,26 @@ COUNTS: dict[str, int] = {}
 REQUESTS: list[dict[str, object]] = []
 UNKNOWN: dict[str, int] = {}
 FORWARDED: dict[str, int] = {}
-MAX_CAPTURES = 400
-MAX_REQUESTS = 20000
+# Captures are the request-by-request record a scenario reads back, so they
+# hold bodies and are capped. `other` is NOT captured: a reconciling controller
+# issues thousands of uninteresting reads, and keeping them would evict the
+# twenty migration PATCHes L-05.2-1's resourceVersion clause is checked over
+# within a minute of them being sent. Everything is still COUNTED.
+MAX_CAPTURES = 2000
+MAX_REQUESTS = 40000
+CAPTURED_KINDS = frozenset(
+    {
+        "reservation",
+        "schedule_final",
+        "backup_create",
+        "backup_get",
+        "backup_patch",
+        "backup_status",
+        "migration_patch",
+        "configmap_create",
+        "job_create",
+    }
+)
 
 
 def parse_path(path: str) -> dict[str, object]:
@@ -328,6 +346,8 @@ def capture(kind: str, name: str, schedule: str, method: str, path: str, body: b
             item["body"] = json.loads(body)
         except json.JSONDecodeError:
             item["bodyUnparseable"] = True
+    if kind not in CAPTURED_KINDS:
+        return item
     with LOCK:
         CAPTURES.append(item)
         if len(CAPTURES) > MAX_CAPTURES:
