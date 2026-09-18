@@ -11175,4 +11175,51 @@ async fn the_verification_patch_nulls_every_field_the_verdict_does_not_hold() {
          `Untrusted`. That is why `verification_patch_value` is applied ONLY on the way into \
          `second_patch`. Got: {nulled}"
     );
+
+    // ---- 5. AND THE RECONCILER STILL GOES GREEN ----------------------
+    //
+    // The same property THROUGH the controller, because arm 4 is a pure check
+    // and a misplaced wrapper is a call-site mistake. `valid_evidence` answers
+    // `Valid` with `trust: None` — the legacy shape — over an observation that
+    // carries a digest, so this run takes the `GlobalHandle` arm and must end
+    // `Verified=True`. Moving `verification_patch_value` onto `projected`
+    // flips it to `Untrusted` and this assertion is what says so.
+    let observation = |_keys: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
+        Box::pin(async move {
+            Some(ArchiveObservation {
+                presence: EvidencePresence {
+                    payload: true,
+                    sidecar: true,
+                },
+                covered: None,
+                receipt_sha256: Some("sha256:deadbeef".to_string()),
+                records: None,
+                capture: None,
+            })
+        })
+    };
+    let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes(
+        &pod_list_terminated(0),
+        log_body(&i7_tail()),
+        200,
+        "Complete",
+    ));
+    reconcile_backup(
+        &frozen_backup(),
+        &client,
+        &observation,
+        &valid_evidence,
+        utc(2026, 11, 9, 3, 20),
+    )
+    .await
+    .expect("the reconcile succeeds");
+    let statuses = patched_statuses(&bodies.lock().expect("the body recorder is readable"));
+    let verified = statuses.last().expect("the verification patch");
+    let (state, ..) = condition_named(verified, "Verified").expect("the Verified condition");
+    assert_eq!(
+        state.as_str(),
+        "True",
+        "a `Valid` verdict with no trust projection is GREEN through the reconciler, and the \
+         nulls the patch carries do not change that: {verified}"
+    );
 }
