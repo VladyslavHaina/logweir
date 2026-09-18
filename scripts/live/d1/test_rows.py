@@ -239,6 +239,10 @@ def _matched(labels: dict[str, str], which: str = "new") -> tuple[bool, str]:
         return False, str(exc)
 
 
+def _provenance(labels: dict[str, str], which: str = "new") -> dict[str, str]:
+    return fenced.assert_source_matched(_Harness(labels), which)
+
+
 def test_the_fence_matches_its_source_without_a_written_down_revision() -> None:
     head = _head()
     ok, why = _matched({"weirkeeper:scram-reviewed": head, "logweir:scram-local": head})
@@ -267,6 +271,33 @@ def test_the_fence_matches_its_source_without_a_written_down_revision() -> None:
             "expected from the flag" in str(exc), str(exc))
     finally:
         fenced.REVISION_OVERRIDE.clear()
+
+
+def test_the_evidence_says_which_door_a_run_came_through() -> None:
+    """`--fence-revision` and the `old` pin SUSPEND the drift check; the label
+    match they cannot suspend. The provenance has to say so, because a reader of
+    `results.json` otherwise cannot tell a compared run from an uncompared one
+    (review L-4)."""
+    head = _head()
+    fenced.REVISION_OVERRIDE.clear()
+    out = _provenance({"weirkeeper:scram-reviewed": head, "logweir:scram-local": head})
+    row("a discovered expectation records the drift check as enforced",
+        out["revisionSource"] == "label" and out["driftCheck"] == "enforced"
+        and out["checkoutHead"] == head, str(out))
+    out = _provenance({"weirkeeper:plat0102-4956785": "4956785d00d74fe960c84d396d2eff852c68ebd8",
+                       "logweir:plat0102-4956785": "4956785d00d74fe960c84d396d2eff852c68ebd8"},
+                      "old")
+    row("the frozen `old` pin records the drift check as suspended",
+        out["revisionSource"] == "pinned" and out["driftCheck"].startswith("suspended"),
+        str(out))
+    fenced.REVISION_OVERRIDE["new"] = head
+    try:
+        out = _provenance({"weirkeeper:scram-reviewed": head, "logweir:scram-local": head})
+    finally:
+        fenced.REVISION_OVERRIDE.clear()
+    row("--fence-revision records the drift check as suspended, naming the flag",
+        out["revisionSource"] == "flag" and out["driftCheck"] == "suspended: the expected "
+        "revision came from the flag", str(out))
 
 
 def test_the_non_image_allowlist_is_what_lets_a_harness_branch_run() -> None:

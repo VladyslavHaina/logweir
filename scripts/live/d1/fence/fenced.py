@@ -587,8 +587,10 @@ def assert_checkout_contains(H: Any, revision: str) -> dict[str, Any]:
         raise H.Failure(
             f"the lab runs {revision[:12]} and this checkout has moved product files since: "
             f"{product[:8]}{' …' if len(product) > 8 else ''}. A run that measures one build "
-            "and asserts against another is not evidence — rebuild the lab images, or pass "
-            "`--fence-revision <sha>` if the difference is deliberate"
+            "and asserts against another is not evidence. REBUILD THE LAB IMAGES. "
+            f"`--fence-revision {revision[:12]}…` also clears this, and it clears it by "
+            "SUSPENDING the comparison rather than satisfying it — take that door only when "
+            "the difference is deliberate and you want the older build measured"
         )
     return {
         "checkoutHead": head,
@@ -624,10 +626,24 @@ def expected_revision(H: Any, which: str, observed: str) -> tuple[str, str]:
 def assert_source_matched(H: Any, which: str) -> dict[str, str]:
     """Refuse to measure a build this run cannot name.
 
-    The refusal is unchanged in force and moved in target: it used to compare
-    the image's label with a constant, and now compares it with the commit this
-    checkout is testing. Both images of a pair must carry the same revision —
-    a controller and a runner from different commits are not one build.
+    TWO CHECKS, AND ONLY ONE OF THEM IS UNCONDITIONAL.
+
+    1. **The label match** always runs: both images of a pair must carry the
+       revision this run expects, whatever the expectation came from. A flag
+       cannot make an image that carries something else pass.
+    2. **The drift check** (`assert_checkout_contains`) runs only when the
+       expectation was DISCOVERED from the image's own label. A pinned
+       expectation — `IMAGES["old"]`, or `--fence-revision` — stands it down,
+       and that is what the pin is for: `weirkeeper:plat0102-4956785` is
+       deliberately an older build than this checkout, and an operator whose
+       checkout is deliberately ahead of the lab needs the same door.
+
+    So `--fence-revision` SUSPENDS DRIFT DETECTION. It is not a way to silence
+    a refusal you did not expect — a run taken through it measures one build
+    and asserts against another, and the only thing that makes that evidence is
+    an operator who meant it. `revisionSource` and `driftCheck` go into the
+    row's provenance either way, so the record says which door the run came
+    through (review L-4).
     """
     observed: dict[str, tuple[str, str, str]] = {}
     for label, ref in (("controller", IMAGES[which][0]), ("runner", RUNNER_IMAGES[which][0])):
@@ -645,8 +661,13 @@ def assert_source_matched(H: Any, which: str) -> dict[str, str]:
         out[f"{label}ImageId"] = image_id
         out[f"{label}Revision"] = got
     if source == "label":
+        out["driftCheck"] = "enforced"
         out.update(assert_checkout_contains(H, want))
     else:
+        # STOOD DOWN, AND SAID SO IN THE EVIDENCE. A reader of `results.json`
+        # can see that this run's checkout was never compared with the build it
+        # measured, and why.
+        out["driftCheck"] = f"suspended: the expected revision came from the {source}"
         out["checkoutHead"] = H.run(["git", "rev-parse", "HEAD"], timeout=60,
                                     record=False).stdout.strip()
     return out
