@@ -424,9 +424,11 @@ spec:
                         properties:
                           basis:
                             description: |-
-                              `Current`, `Historical`, `RecordedBeforeRevocation` or `None`.
+                              `Current`, `Historical`, `RecordedBeforeRevocation`, `Unverified` or `None`.
 
                               **`Historical` is a pass, not a downgrade**: the key was valid when it signed and has since been retired, which is what key rotation is supposed to look like. The console renders it as "verified against retired key `<id>` (signed before retirement)" and never as a warning.
+
+                              **`Unverified` is not a verdict at all**: the status was written by a controller that predates `signedAt`, so the key's validity window has not been compared to anything yet and the controller owes this object one bounded re-read of its own receipt. It is written only beside `result: NotAttempted`, it is never green, and it disappears as soon as the read supplies a real `signedAt`. See `docs/kubernetes.md` §15.2c.
                             nullable: true
                             type: string
                           keyState:

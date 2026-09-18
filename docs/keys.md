@@ -243,6 +243,7 @@ signing time:
 | `Revoked` with `KeyCompromise`, no such observation | `Untrusted`, `Revoked` |
 | key absent from the policy | `Untrusted`, `UntrustedSigner` |
 | usage mismatch | `Untrusted`, `KeyUsageMismatch` |
+| a status written before `signedAt` existed, document not yet re-read | `NotAttempted`, `trust.basis: Unverified` — never green, and never `Untrusted` either: nothing has been compared. One bounded re-read of the run's own receipt repairs it (`docs/kubernetes.md` §15.2c) |
 
 Retirement and revocation are **different actions**. Retire a key you are
 finished with; revoke one whose private half may be in someone else's hands,

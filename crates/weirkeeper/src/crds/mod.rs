@@ -254,15 +254,37 @@ pub struct EvidenceVerification {
 /// Every old reader treats anything that is not `Valid` as unverified
 /// (`ui/pages/backups.js`'s `validVerification`), so the new value fails
 /// closed on every surface that predates it.
+///
+/// # THAT SENTENCE IS A CONSTRAINT ON WRITERS, NOT A DESCRIPTION
+///
+/// `TRUST-UPGRADE-SIGNEDAT`, review finding **F1**. Three surfaces read
+/// `result` and nothing else — `ui/pages/backups.js`'s `validVerification`,
+/// `logweir_api::status`'s projection, and the `SIGNED` printer column on
+/// `Backup` and `Restore` — so `result` is the ONLY field a new state may use
+/// to fail closed on them. A verdict that meant "not verified" while leaving
+/// `Valid` on `result` put a green *"verified by weirkeeper at … against key
+/// …"* badge on the console, whatever it wrote beside it.
+///
+/// [`Self::basis`] `Unverified` is therefore always written with
+/// `result: NotAttempted` and never with `Valid`. The basis refines an
+/// already-safe result; it never rescues an unsafe one.
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct TrustBasis {
-    /// `Current`, `Historical`, `RecordedBeforeRevocation` or `None`.
+    /// `Current`, `Historical`, `RecordedBeforeRevocation`, `Unverified` or
+    /// `None`.
     ///
     /// **`Historical` is a pass, not a downgrade**: the key was valid when it
     /// signed and has since been retired, which is what key rotation is
     /// supposed to look like. The console renders it as "verified against
     /// retired key `<id>` (signed before retirement)" and never as a warning.
+    ///
+    /// **`Unverified` is not a verdict at all**: the status was written by a
+    /// controller that predates `signedAt`, so the key's validity window has
+    /// not been compared to anything yet and the controller owes this object
+    /// one bounded re-read of its own receipt. It is written only beside
+    /// `result: NotAttempted`, it is never green, and it disappears as soon as
+    /// the read supplies a real `signedAt`. See `docs/kubernetes.md` §15.2c.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub basis: Option<String>,
     /// `Active`, `Retired`, `Expired`, `Revoked` or `Unknown` — the signing
