@@ -1602,7 +1602,54 @@ ROWS = [
 ]
 
 
+def heal(H: Any) -> dict[str, Any]:
+    """Put the fence back the way a row expects to find it.
+
+    These rows stop the controller, run two of it, swap its image and arm its
+    proxy. A row that raises in the middle of any of that leaves the next one
+    measuring a namespace with no controller in it — and a red for a product
+    that was never asked anything is the worst result this harness can produce.
+    Every row therefore starts from one replica, on the current image, with
+    nothing armed.
+    """
+    state: dict[str, Any] = {"at": H.now()}
+    deployment = H.get_opt("deployment", fenced.CONTROLLER)
+    if deployment is None:
+        raise H.Failure("the fenced controller Deployment is gone; run `setup` again")
+    container = next(
+        c
+        for c in deployment["spec"]["template"]["spec"]["containers"]
+        if c["name"] == "weirkeeper"
+    )
+    wanted = fenced.IMAGES["new"][0]
+    if container["image"] != wanted:
+        state["restoredImage"] = fenced.swap_image(H, "new")
+    if any(
+        e["name"] == "PLAT04_ARM"
+        for c in deployment["spec"]["template"]["spec"]["containers"]
+        if c["name"] == "scope-proxy"
+        for e in c.get("env", [])
+    ):
+        fenced.set_initial_arm(H, "")
+        state["clearedInitialArm"] = True
+    if int(deployment["spec"].get("replicas", 0)) != 1 or len(fenced.pods(H)) != 1:
+        state["rescaled"] = fenced.scale(H, 1)
+    fenced.disarm(H)
+    return state
+
+
 def register(H: Any) -> None:
     """Bind every row to the harness module so it can use its plumbing."""
+
+    def bind(fn: Any) -> Any:
+        def wrapped() -> dict[str, Any]:
+            healed = heal(H)
+            detail = fn(H)
+            if healed.keys() - {"at"}:
+                detail.setdefault("detail", {})["fenceHealedFirst"] = healed
+            return detail
+
+        return wrapped
+
     for sid, task, title, fn in ROWS:
-        H.scenario(sid, task, title)(lambda fn=fn: fn(H))
+        H.scenario(sid, task, title)(bind(fn))
