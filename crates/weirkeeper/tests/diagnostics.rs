@@ -19,10 +19,11 @@ use weirkeeper::conditions::{
 use weirkeeper::crds::{Condition, Diagnostic, DiagnosticObject, RunProgress, RunnerPhase};
 use weirkeeper::diagnostics::{
     apply, apply_finished, bounded, derive, held_for, merge_diagnostics, parse_progress,
-    recorded_terminal_state, sanitize, should_fail_fast, should_read_progress, terminal_state,
-    Code, Diagnosis, Facts, Progress, Severity, Stage, Write, DIAGNOSTICS_MAX,
-    FAIL_FAST_SECONDS_DEFAULT, FAIL_FAST_SECONDS_MIN, MESSAGE_MAX_BYTES, MOUNT_TRANSIENT_FOR,
-    OBSERVED_HEARTBEAT, PROGRESS_LINE_MAX_BYTES, WAITING_FOR_POD_GRACE,
+    parse_progress_after, recorded_terminal_state, sanitize, should_fail_fast,
+    should_read_progress, terminal_state, Code, Diagnosis, Facts, Progress, Severity, Stage, Write,
+    DIAGNOSTICS_MAX, FAIL_FAST_NEVER, FAIL_FAST_SECONDS_DEFAULT, FAIL_FAST_SECONDS_MIN,
+    MESSAGE_MAX_BYTES, MOUNT_TRANSIENT_FOR, OBSERVED_HEARTBEAT, PROGRESS_LINE_MAX_BYTES,
+    WAITING_FOR_POD_GRACE,
 };
 
 const NS: &str = "logweir-d3w2";
@@ -94,6 +95,7 @@ fn facts<'a>(pod: Option<&'a Pod>, events: &'a [EventFact], now: DateTime<Utc>) 
         job: Box::leak(Box::new(job())),
         pod,
         events,
+        contested: 0,
         runner_phase: None,
         now,
     }
@@ -504,6 +506,7 @@ fn the_verifying_stage_comes_from_the_runners_phase() {
             job: &j,
             pod: Some(&running),
             events: &[],
+            contested: 0,
             runner_phase: phase.as_ref(),
             now: at(5, 0),
         })
@@ -1356,8 +1359,12 @@ fn the_progress_read_is_throttled_and_a_throttled_pass_carries_the_stored_phase(
         "20 s after the last observation the log is not read again"
     );
     assert!(
-        should_read_progress(Some(&stored), true, at(1, 40)),
-        "…and 40 s after it is"
+        !should_read_progress(Some(&stored), true, at(1, 40)),
+        "…nor 40 s after. The clock this compares against is the STORED field's, and that field          moves once per `OBSERVED_HEARTBEAT` — review finding F3.          `the_progress_read_happens_once_per_heartbeat_and_not_three_times` walks the whole cycle"
+    );
+    assert!(
+        should_read_progress(Some(&stored), true, at(2, 0)),
+        "…and one heartbeat later it is"
     );
     assert!(
         !should_read_progress(Some(&stored), false, at(9, 0)),
@@ -1448,5 +1455,284 @@ fn the_written_progress_block_is_the_crd_type() {
             .map(|o: &DiagnosticObject| o.kind.as_str()),
         Some("Pod"),
         "`kind` is a closed enum of `Pod` and `Job` on the CRD"
+    );
+}
+
+// ===========================================================================
+// Review round 1 — the findings, each with the mutant it exists to kill
+// ===========================================================================
+
+/// **F2: the gate has a memory, so it outlives its own 50-line window.**
+///
+/// `progress-contract=` is printed ONCE at the top of the run and the
+/// controller reads the last fifty lines. A gate with no memory therefore
+/// decides "there is no channel" the moment a chatty run scrolls the
+/// announcement away — writing `runnerPhase: null` over a phase it had already
+/// recorded and making D3 §2.5's `Verifying` row unreachable for the rest of
+/// the run.
+///
+/// MUTANT: dropping `&& !announced` from the gate.
+#[test]
+fn a_run_whose_contract_line_scrolled_out_of_the_tail_keeps_its_phase() {
+    // The window a long run's tail actually looks like: no announcement.
+    let late_window = "progress-phase=7:verify\nconsuming partition 3\n";
+
+    // With no memory the channel is closed and the phase is dropped — this is
+    // the old behaviour, and it is still right for a runner that never
+    // announced anything at all.
+    assert!(
+        parse_progress_after(late_window, false).phase.is_none(),
+        "an OLD runner prints phase lines with no announcement, and D3 §2.4 says that yields no \
+         progress and no error"
+    );
+
+    // With a phase already on the object — which can only have been published
+    // THROUGH this gate — the channel is known to have announced itself.
+    let p = parse_progress_after(late_window, true);
+    assert_eq!(
+        p.phase.as_ref().and_then(|p| p.number),
+        Some(7),
+        "a stored phase IS proof the channel announced itself: nothing else could have put one \
+         there. Without this the field blinks out on every pass of a long run"
+    );
+    assert!(
+        p.contract.is_none(),
+        "…and the version is still absent from THIS window, which is simply true"
+    );
+}
+
+/// …and the consequence the finding is really about: `Verifying` stays
+/// reachable.
+#[test]
+fn the_verifying_stage_survives_a_tail_that_no_longer_carries_the_announcement() {
+    let running = pod(json!({
+        "phase": "Running",
+        "conditions": [{"type": "PodScheduled", "status": "True",
+                        "lastTransitionTime": "2026-11-09T03:00:05Z"}],
+        "containerStatuses": [
+            {"name": "runner", "ready": true, "restartCount": 0, "image": "x", "imageID": "x",
+             "state": {"running": {"startedAt": "2026-11-09T03:00:12Z"}}},
+        ],
+    }));
+    let j = job();
+    let phase = parse_progress_after("progress-phase=7:verify\n", true)
+        .phase
+        .expect("the remembered channel publishes the phase");
+    let stage = derive(&Facts {
+        job: &j,
+        pod: Some(&running),
+        events: &[],
+        contested: 0,
+        runner_phase: Some(&phase),
+        now: at(9, 0),
+    })
+    .stage;
+    assert_eq!(
+        stage,
+        Stage::Verifying,
+        "D3 §2.5's `Verifying` row is a pure function of `runner_phase`. With the gate amnesiac \
+         this state was unreachable for every run long enough to scroll its own announcement \
+         away, so the API could never report `verifying`"
+    );
+}
+
+/// **F3: the throttle is the rate its own doc claims.**
+///
+/// The stored clock moves once per minute (E11(d)); comparing it against a
+/// thirty-second bound made the predicate true at +30 s, +45 s **and** +60 s
+/// of every cycle — three 64 KiB `pods/log` GETs a minute where §2.4 allows
+/// two.
+///
+/// MUTANT: comparing against `PROGRESS_READ_INTERVAL` instead of
+/// `OBSERVED_HEARTBEAT`.
+#[test]
+fn the_progress_read_happens_once_per_heartbeat_and_not_three_times() {
+    let stored = RunProgress {
+        stage: Stage::Running.as_str().to_string(),
+        reason: Some(REASON_RUNNER_STARTED.to_string()),
+        message: None,
+        last_transition_time: Some(at(1, 0)),
+        last_observed_time: Some(at(1, 0)),
+        runner: None,
+        runner_phase: Some(RunnerPhase {
+            number: Some(6),
+            name: Some("restore".into()),
+        }),
+        diagnostics: None,
+    };
+    // Every reconcile of one heartbeat cycle, at `REQUEUE_SECS` = 15.
+    for (secs, expected) in [
+        (15, false),
+        (30, false),
+        (45, false),
+        (59, false),
+        (60, true),
+    ] {
+        assert_eq!(
+            should_read_progress(
+                Some(&stored),
+                true,
+                at(1, 0) + chrono::Duration::seconds(secs)
+            ),
+            expected,
+            "+{secs}s after the stored observation: the clock this compares against is the \
+             STORED field's, and that field moves once a minute. +30 and +45 were both `true` \
+             before review finding F3, which is three reads a minute"
+        );
+    }
+    assert_eq!(OBSERVED_HEARTBEAT, Duration::from_secs(60));
+}
+
+/// **F5: the 96-byte bound has its own mutant.**
+///
+/// The original case padded the phase NAME, so the closed vocabulary rejected
+/// it whether or not the byte bound existed — the length rule was never the
+/// reason the line was ignored. The bound is genuinely load-bearing for the
+/// **contract** line, which has no vocabulary check at all: without it a
+/// 200-byte `progress-contract=` line from anything that can write to the
+/// runner's stdout opens the channel, and with F2's memory would keep it open.
+///
+/// MUTANT: `if line.len() > PROGRESS_LINE_MAX_BYTES` → `if false`.
+#[test]
+fn an_overlong_contract_line_does_not_open_the_channel() {
+    let log = format!(
+        "progress-contract={}\nprogress-phase=6:restore\n",
+        "2".repeat(PROGRESS_LINE_MAX_BYTES)
+    );
+    let p = parse_progress(&log);
+    assert!(
+        p.contract.is_none(),
+        "a line longer than {PROGRESS_LINE_MAX_BYTES} bytes cannot have come from the runner's \
+         formatter, and the contract line is the one with NO vocabulary behind it — the bound \
+         is the whole of its guard"
+    );
+    assert!(
+        p.phase.is_none(),
+        "…so the channel never opens, and the WELL-FORMED phase line beside it is not published \
+         either. That is the pairing the old row was missing: its only overlong line was also \
+         outside the vocabulary, so it proved nothing about the bound"
+    );
+    // The same line one byte shorter IS accepted, so the bound is the reason.
+    let ok = format!(
+        "progress-contract={}\nprogress-phase=6:restore\n",
+        "2".repeat(PROGRESS_LINE_MAX_BYTES - "progress-contract=".len())
+    );
+    assert!(
+        parse_progress(&ok).phase.is_some(),
+        "at exactly the bound the line is read — which is what makes the assertion above about \
+         LENGTH and not about anything else"
+    );
+    assert_eq!(
+        PROGRESS_LINE_MAX_BYTES, 96,
+        "the runner's own bound, mirrored"
+    );
+}
+
+/// **F11: the `WaitingForPod` message must not deny pods that plainly exist.**
+///
+/// A contested Job gets `pod: None` from the owner-verified seam — the right
+/// access decision — and "no pod it controls has appeared" is then the
+/// opposite of what an operator is looking at.
+#[test]
+fn a_contested_job_says_so_rather_than_claiming_no_pod_appeared() {
+    let j = job();
+    let contested = derive(&Facts {
+        job: &j,
+        pod: None,
+        events: &[],
+        contested: 2,
+        runner_phase: None,
+        now: at(5, 0),
+    })
+    .diagnosis
+    .expect("a diagnosis");
+    assert_eq!(contested.code, Code::WaitingForPod);
+    assert!(
+        contested.message.contains("2 pods claim"),
+        "pods EXIST; what does not exist is one this Job can be proved to own. Got: {}",
+        contested.message
+    );
+    assert!(
+        !contested
+            .message
+            .contains("no pod it controls has appeared"),
+        "and it must not say the opposite of what happened on the one path defect SEC-PODLOG \
+         exists for: {}",
+        contested.message
+    );
+    // The uncontested wording is unchanged.
+    let quiet = derive(&facts(None, &[], at(5, 0)))
+        .diagnosis
+        .expect("a diagnosis");
+    assert!(
+        quiet.message.contains("no pod it controls has appeared"),
+        "got: {}",
+        quiet.message
+    );
+}
+
+/// **F10: `held_for` matches the whole dedup key.**
+///
+/// MUTANT: dropping `object.kind` from the comparison.
+#[test]
+fn held_for_matches_the_kind_as_well_as_the_code_and_the_name() {
+    let on_job = Diagnosis {
+        code: Code::WaitingForPod,
+        message: String::new(),
+        object_kind: "Job",
+        object_name: "same-name".to_string(),
+    };
+    let on_pod = Diagnosis {
+        object_kind: "Pod",
+        ..on_job.clone()
+    };
+    let stored = RunProgress {
+        stage: Stage::Queued.as_str().to_string(),
+        reason: None,
+        message: None,
+        last_transition_time: None,
+        last_observed_time: None,
+        runner: None,
+        runner_phase: None,
+        diagnostics: merge_diagnostics(None, Some(&on_job), at(1, 0)),
+    };
+    assert_eq!(
+        held_for(Some(&stored), &on_job, at(6, 0)),
+        Some(Duration::from_secs(300)),
+        "the entry that is there"
+    );
+    assert_eq!(
+        held_for(Some(&stored), &on_pod, at(6, 0)),
+        None,
+        "MUTANT: a Pod and a Job of the same name must not share one `firstSeen`. \
+         \"Continuously observed for failFastSeconds\" is the fail-fast PRECONDITION, and \
+         measuring it from another object's clock is how a healthy run gets cancelled"
+    );
+}
+
+/// **F8's third step: `failFastSeconds: 0` means never.**
+///
+/// The controller half, ready for the chart value W13 owes (report gap G3).
+#[test]
+fn a_configured_zero_switches_fail_fast_off_rather_than_cancelling_on_sight() {
+    assert_eq!(
+        FAIL_FAST_NEVER, 0,
+        "zero, and the constant carries the note saying why it is the opposite of `0 seconds \
+         of patience`"
+    );
+    // The floor still applies to every other small value, which is the
+    // distinction the special case exists to make.
+    assert_eq!(
+        bounded(Some("1"), FAIL_FAST_SECONDS_DEFAULT, FAIL_FAST_SECONDS_MIN),
+        FAIL_FAST_SECONDS_MIN,
+        "one second of patience is clamped UP — a fail-fast that fired inside an image pull \
+         would cancel every healthy run on a cold node"
+    );
+    assert_eq!(
+        bounded(Some("0"), FAIL_FAST_SECONDS_DEFAULT, FAIL_FAST_SECONDS_MIN),
+        FAIL_FAST_SECONDS_MIN,
+        "…and `bounded` alone would clamp ZERO up too, which is exactly why \
+         `fail_fast_seconds` reads the raw value BEFORE the floor: 0 is not a short patience, \
+         it is a different answer"
     );
 }

@@ -2102,8 +2102,8 @@ fn every_exit_code_maps_to_its_wire_reason() {
     );
     assert_eq!(
         TERMINAL_STATES.len(),
-        39,
-        "the thirty-nine terminal states that are NOT an exit code — the original ten, plus \
+        40,
+        "the forty terminal states that are NOT an exit code — the original ten, plus \
          `NameTooLong` (errata E5d) and `ReferentNotFound` / `PlanConfigMapConflict` / \
          `ApprovalBundleConflict` / `ApprovalSubjectMismatch` / `JobNameConflict` / \
          `ArchiveUrlUnreadable` (errata E5a), plus `PlanHashMismatch` / `ClusterNotReachable` \
@@ -2126,7 +2126,10 @@ fn every_exit_code_maps_to_its_wire_reason() {
          `RunnerImageUnavailable` / `PodCreationForbidden`, the `RunnerReady=False` reasons that \
          cannot get better on their own. Each REPLACES `NoExitCode` only when the matching \
          diagnostic was recorded before the Job ended, so `crash_terminal_state`'s existing \
-         table is unchanged and `exitCode` stays absent in all four; \
+         table is unchanged and `exitCode` stays absent in all four, plus D3 §5.5 step 6's \
+         `PointBindingMismatch` — W5's hand-off, DECLARED here and not yet produced by any \
+         runner (see the constant's note for the two `logweir-core`/`logweir` edits that make \
+         it reachable); \
          got {TERMINAL_STATES:?}"
     );
     // D3 §2.2's four are the `RunnerReady` PROJECTION of a diagnosis and not
@@ -9303,4 +9306,291 @@ fn the_progress_read_is_bounded_and_its_vocabularies_are_the_runners() {
             "`{name}` has to survive `<n>:<name>` and the CRD's 32-byte bound"
         );
     }
+}
+
+// ===========================================================================
+// Review round 1 — F1, F4 and Q1
+// ===========================================================================
+
+/// **F1: every terminal builder carries `RunnerReady` forward.**
+///
+/// D3 §2.2: "Every terminal builder carries `RunnerReady` and `Verified`
+/// forward". It did not. A JSON merge patch REPLACES arrays, so the terminal
+/// patch that RECORDS a failure was deleting the one condition that says what
+/// the failure was — and a terminal object is never reconciled again, so no
+/// later pass rewrote it. D3 §15's L1 asserts that condition live, **after**
+/// the fail-fast terminal patch.
+///
+/// MUTANT: dropping `CONDITION_RUNNER_READY` from `backup::carry_conditions`.
+#[tokio::test]
+async fn no_terminal_patch_deletes_the_condition_that_says_why_the_run_failed() {
+    let stored_runner_ready = json!([{
+        "type": "RunnerReady",
+        "status": "False",
+        "reason": "CredentialReferenceMissing",
+        "message": "secret \"logweir-archive\" not found",
+        "lastTransitionTime": "2026-11-09T03:15:00Z",
+    }]);
+
+    // Every terminal path, through the reconciler, with the condition already
+    // on the object exactly as the progress path left it.
+    let cases: Vec<(&str, String, &str)> = vec![
+        (
+            "the crashed-Job path (what a fail-fast cancellation produces)",
+            pod_list_untermined(
+                r#""phase":"Pending","containerStatuses":[
+                   {"name":"runner","ready":false,"restartCount":0,"image":"x","imageID":"x",
+                    "state":{"waiting":{"reason":"CreateContainerConfigError"}}}]"#,
+            ),
+            "Failed",
+        ),
+        (
+            "the ordinary finished path, exit 0",
+            pod_list_terminated(0),
+            "Complete",
+        ),
+        (
+            "the ordinary finished path, exit 2",
+            pod_list_terminated(2),
+            "Failed",
+        ),
+    ];
+
+    for (label, pods, condition) in cases {
+        let mut object = frozen_backup();
+        let status = object.status.as_mut().expect("a status");
+        status.conditions =
+            Some(serde_json::from_value(stored_runner_ready.clone()).expect("conditions"));
+        let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes(
+            &pods,
+            log_body(&i7_tail()),
+            200,
+            condition,
+        ));
+        reconcile_backup(
+            &object,
+            &client,
+            &unobserved_archive,
+            &unverified_evidence,
+            utc(2026, 11, 9, 3, 25),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("[{label}] the reconcile succeeds: {e}"));
+        let statuses = patched_statuses(&bodies.lock().expect("the body recorder is readable"));
+        for (n, status) in statuses.iter().enumerate() {
+            let (state, reason, _) = condition_named(status, "RunnerReady").unwrap_or_else(|| {
+                panic!(
+                    "[{label}] patch {n} dropped `RunnerReady`. A merge patch replaces arrays, \
+                     so the terminal patch that records the failure would delete the only \
+                     condition that says what the failure WAS — and a terminal object is never \
+                     reconciled again, so nothing rewrites it. Got: {status}"
+                )
+            });
+            assert_eq!(
+                (state.as_str(), reason.as_str()),
+                ("False", "CredentialReferenceMissing"),
+                "[{label}] patch {n} carries it VERBATIM — the terminal builder does not own \
+                 this condition and must not re-derive it from a pod that may already be \
+                 collected"
+            );
+        }
+    }
+}
+
+/// …and the refusal path, which never reaches a Job at all.
+#[tokio::test]
+async fn a_controller_refusal_carries_the_runner_ready_condition_too() {
+    let mut object = backup();
+    object.metadata.name = Some("x".repeat(crate_name_limit() + 1));
+    object.status = Some(BackupStatus {
+        conditions: Some(
+            serde_json::from_value(json!([{
+                "type": "RunnerReady", "status": "True", "reason": "RunnerStarted",
+                "message": "the `runner` container has been seen running or terminated",
+                "lastTransitionTime": "2026-11-09T03:15:00Z",
+            }]))
+            .expect("conditions"),
+        ),
+        ..BackupStatus::default()
+    });
+    let (client, _seen, bodies) = mock_client_recording_bodies(vec![Route {
+        method: "PATCH",
+        path_suffix: "/status",
+        status: 200,
+        body: backup_json(),
+    }]);
+    reconcile_backup(
+        &object,
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 25),
+    )
+    .await
+    .expect("a self-decided refusal is an outcome, not an error");
+    let status = &patched_statuses(&bodies.lock().expect("the body recorder is readable"))[0];
+    assert!(
+        condition_named(status, "RunnerReady").is_some(),
+        "`refused_status_patch` owns `Failed` and nothing else; every other condition on the \
+         object is a debt it owes. Got: {status}"
+    );
+}
+
+/// `slot::NAME_LIMIT`, without importing the module into this file's namespace.
+fn crate_name_limit() -> usize {
+    weirkeeper::slot::NAME_LIMIT
+}
+
+/// **F4: the STATUS-RECORDS guard refuses every verdict that is not `Valid`.**
+///
+/// The shipped code was already correct; the GUARD was not. The reviewer's
+/// mutant widened `== Valid` to `!= NotAttempted` and survived, because the
+/// only negative arm used `unverified_evidence` — which answers `NotAttempted`
+/// — so `Invalid` and `Untrusted`, the two verdicts that mean *a receipt was
+/// presented and this installation refused it*, were never exercised.
+///
+/// MUTANT: any widening of the condition beyond `Valid`.
+#[tokio::test]
+async fn a_receipt_this_installation_refuses_never_populates_the_records_column() {
+    let bytes = serde_json::to_vec(&receipt_document()).expect("the receipt serialises");
+    let observation = move |_keys: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
+        let doc: Value = serde_json::from_slice(&bytes).expect("JSON");
+        Box::pin(async move {
+            Some(ArchiveObservation {
+                presence: EvidencePresence {
+                    payload: true,
+                    sidecar: true,
+                },
+                covered: covered_from_receipt(&doc),
+                receipt_sha256: Some("sha256:deadbeef".to_string()),
+                records: records_from_receipt(&doc),
+                capture: capture_from_receipt(&doc),
+            })
+        })
+    };
+
+    // EVERY verdict that is not `Valid`, each with what it means.
+    let refused: Vec<(&str, VerificationVerdict, &str)> = vec![
+        (
+            "Invalid",
+            VerificationVerdict::Invalid,
+            "the bytes do not match the signature — the receipt is not the document that was \
+             signed",
+        ),
+        (
+            "Untrusted",
+            VerificationVerdict::Untrusted,
+            "the signature verifies and the key is one this installation will NOT accept — \
+             revoked, unknown, or holding the wrong usage",
+        ),
+        (
+            "NotAttempted",
+            VerificationVerdict::NotAttempted,
+            "no credential, or the document could not be fetched at all",
+        ),
+    ];
+
+    for (label, verdict, means) in refused {
+        let oracle = move |r: EvidenceRef| -> BoxFuture<'static, VerificationResult> {
+            Box::pin(async move {
+                VerificationResult {
+                    result: verdict,
+                    matched_key_id: None,
+                    payload_type: r.payload_type.to_string(),
+                    verified_at: utc(2026, 11, 9, 3, 20),
+                    detail: Some(means.to_string()),
+                    trust: None,
+                }
+            })
+        };
+        let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes(
+            &pod_list_terminated(0),
+            log_body(&i7_tail()),
+            200,
+            "Complete",
+        ));
+        reconcile_backup(
+            &frozen_backup(),
+            &client,
+            &observation,
+            &oracle,
+            utc(2026, 11, 9, 3, 20),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("[{label}] the reconcile succeeds: {e}"));
+        for (n, status) in patched_statuses(&bodies.lock().expect("the body recorder is readable"))
+            .iter()
+            .enumerate()
+        {
+            assert!(
+                status["records"].is_null() && status["capture"].is_null(),
+                "[{label}] patch {n}: {means}. A count in the RECORDS column has to be one some \
+                 key this installation ACCEPTS attested to — that is the entire justification \
+                 for the field, and `{label}` is precisely the case where no such key exists. \
+                 Got: {status}"
+            );
+        }
+    }
+}
+
+/// **Q1: a DIAGNOSING steady object is as quiet as a healthy one.**
+///
+/// `merge_diagnostics` rewrites `message` and `severity` on every pass, outside
+/// the heartbeat. If a D2 `waiting` message ever embedded a moving token — a
+/// kubelet backoff duration, an event instant — every reconcile of a
+/// diagnosing object would become a status write and E11(d)'s "zero patches
+/// between heartbeats" would be lost for exactly the objects an operator is
+/// watching. No current message moves; this row is what notices if one starts.
+#[tokio::test]
+async fn a_steady_backup_that_is_diagnosing_also_issues_no_second_status_patch() {
+    let pods = pod_list_waiting(
+        "ImagePullBackOff",
+        "Back-off pulling image \\\"logweir:x\\\"",
+    );
+    let (client, _seen, bodies) =
+        mock_client_recording_bodies(running_routes_with(pods.clone(), String::new()));
+    reconcile_backup(
+        &frozen_backup(),
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 20),
+    )
+    .await
+    .expect("the first reconcile succeeds");
+    let first = bodies
+        .lock()
+        .expect("the body recorder is readable")
+        .clone();
+    assert_eq!(status_patch_count(&first), 1, "the first pass records it");
+    assert_eq!(
+        patched_statuses(&first)[0]["progress"]["diagnostics"][0]["code"].as_str(),
+        Some("RunnerImagePullFailed"),
+        "…and it IS diagnosing, or this row proves nothing"
+    );
+
+    let mut stored = serde_json::to_value(frozen_backup().status).expect("the status serialises");
+    apply_merge_patch(&mut stored, &patched_statuses(&first)[0]);
+    let mut steady = frozen_backup();
+    steady.status = Some(serde_json::from_value::<BackupStatus>(stored).expect("a BackupStatus"));
+
+    let (client, _seen, bodies) =
+        mock_client_recording_bodies(running_routes_with(pods, String::new()));
+    reconcile_backup(
+        &steady,
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 20) + chrono::Duration::seconds(15),
+    )
+    .await
+    .expect("the second reconcile succeeds");
+    assert_eq!(
+        status_patch_count(&bodies.lock().expect("the body recorder is readable")),
+        0,
+        "a diagnosing object is as quiet as a healthy one between heartbeats. `count` and \
+         `lastSeen` move together and only on the heartbeat; `message` and `severity` are \
+         recomputed every pass, so this is the row that fails if a classification message ever \
+         starts carrying a clock"
+    );
 }

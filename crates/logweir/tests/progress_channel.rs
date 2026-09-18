@@ -177,7 +177,7 @@ fn no_teardown_key_is_printed_when_the_attestation_was_not_persisted() {
 
 /// **F5: the new lines must fit in the controller's key-scan window.**
 ///
-/// `weirkeeper::controllers::backup::KEY_SCAN_TAIL_LINES = 8` is how many
+/// `weirkeeper::controllers::backup::KEY_SCAN_TAIL_LINES = 16` is how many
 /// trailing pod-log lines the controller reads when it scans for evidence keys
 /// BY NAME. That constant lives in `weirkeeper` (D3 W2/W13's file) and is not
 /// edited here; it is MIRRORED below so that a runner-side change which
@@ -188,15 +188,20 @@ fn no_teardown_key_is_printed_when_the_attestation_was_not_persisted() {
 /// Measured for a passing restore at the time `teardown-key=` landed: summary,
 /// `topic-preflight=`, `teardown-key=`, `scorecard-key=`, `sidecar-key=`,
 /// `offset-report-key=` — six, plus the `drill finished` tracing line that
-/// production emits and this in-process seam does not, for **seven of eight**.
-/// One slot of the two the constant's own doc comment reserves as tolerance is
-/// now spent, and the orchestrator carries "raise the constant" to W2.
+/// production emits and this in-process seam does not, for **seven**. At the
+/// original window of eight that was seven of eight, with one slot left; W2
+/// raised it to sixteen for that reason (review finding F5), and the
+/// controller side states the same seven as `BUDGETED_TRAILING_LINES` and
+/// asserts the margin. **Both numbers below are mirrors: change one and the
+/// other's test tells you.**
 #[test]
 fn the_trailing_lines_a_passing_restore_prints_fit_the_controllers_scan_window() {
     /// MIRRORED from `weirkeeper::controllers::backup::KEY_SCAN_TAIL_LINES`.
     /// A `weirkeeper` dependency here would invert the crate layering, so the
-    /// number is copied and this comment is the join.
-    const KEY_SCAN_TAIL_LINES: usize = 8;
+    /// number is copied and this comment is the join. Raised 8 → 16 by D3 W2,
+    /// whose `the_key_scan_window_has_room_for_the_runners_trailing_block`
+    /// holds the other half of the budget.
+    const KEY_SCAN_TAIL_LINES: usize = 16;
     /// The `drill finished` line `tracing` emits in production. `run_with`
     /// installs no subscriber (its own doc comment says why), so the child
     /// below does not print it and the budget must account for it by hand.
@@ -223,7 +228,13 @@ fn the_trailing_lines_a_passing_restore_prints_fit_the_controllers_scan_window()
     );
     // And every key a controller reads IS inside the window, counted from the
     // end exactly as the controller counts.
-    let window = &lines[lines.len() - (KEY_SCAN_TAIL_LINES - PRODUCTION_TRACING_LINES)..];
+    // SATURATING, because the window is now wider than this child's whole
+    // stdout. The controller's own `tail_lines` saturates for the same reason
+    // (`backup.rs`: `all.len().saturating_sub(KEY_SCAN_TAIL_LINES)`), so this
+    // mirrors the real scan rather than panicking on a short log.
+    let window = &lines[lines
+        .len()
+        .saturating_sub(KEY_SCAN_TAIL_LINES - PRODUCTION_TRACING_LINES)..];
     for prefix in [
         "topic-preflight=",
         wire::TEARDOWN_KEY_PREFIX,
