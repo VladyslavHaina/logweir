@@ -124,8 +124,8 @@ use std::fmt;
 use chrono::{DateTime, SecondsFormat, Utc};
 use logweir_core::ids::sha256_prefixed;
 use logweir_core::trust::{
-    decide, EvidenceClaim, IndependentObservation, KeyUsage, TrustBasis, TrustResult, TrustedKey,
-    UntrustReason, Verdict,
+    decide, ClaimAbsence, EvidenceClaim, IndependentObservation, KeyUsage, TrustBasis, TrustResult,
+    TrustedKey, UntrustReason, Verdict,
 };
 use logweir_store::{Store, StoreError};
 use logweir_verify::{verify_detached, Sidecar, VerifyingKey};
@@ -976,6 +976,13 @@ fn valid_verification(status: &Value) -> Result<(&str, &str, bool), &'static str
         Some(trust) => match trust.get("basis").and_then(Value::as_str) {
             Some(TRUST_BASIS_CURRENT) => false,
             Some(TRUST_BASIS_HISTORICAL) => true,
+            // THE VERDICT IS THE OLD ONE AND THE POLICY HAS NOT BEEN APPLIED
+            // TO IT YET — `TRUST-UPGRADE-SIGNEDAT`. Not green, and the reason
+            // an operator reads is the honest one: nothing was attempted. The
+            // arm below would render `VerificationUntrusted` over a `Valid`
+            // result nobody has refused, which is the same dishonesty in the
+            // other direction from a green badge.
+            Some(TRUST_BASIS_UNVERIFIED) => return Err(REASON_VERIFICATION_NOT_ATTEMPTED),
             _ => return Err(REASON_VERIFICATION_UNTRUSTED),
         },
     };
@@ -987,6 +994,11 @@ const TRUST_BASIS_CURRENT: &str = "Current";
 /// `trust.basis` for a verdict reached against a key that has since been
 /// retired, expired or superseded.
 const TRUST_BASIS_HISTORICAL: &str = "Historical";
+
+/// `trust.basis` for a stored verdict NO policy has been applied to yet,
+/// because the status predates `signedAt` and the document has not been
+/// re-read — [`logweir_core::trust::TrustBasis::Unverified`].
+const TRUST_BASIS_UNVERIFIED: &str = "Unverified";
 
 /// **Interface I21, the `Backup` half.** Green ⟺ `verification.result ==
 /// Valid` AND `status.exitCode == 0`.
@@ -1540,6 +1552,50 @@ pub fn retrust(
     observed_generation: Option<i64>,
     now: DateTime<Utc>,
 ) -> Option<Retrust> {
+    retrust_with(
+        status,
+        resolution,
+        badge,
+        existing,
+        observed_generation,
+        now,
+        &SigningTime::NotNeeded,
+    )
+}
+
+/// [`retrust`], with the outcome of one bounded re-read of the document in
+/// hand — `TRUST-UPGRADE-SIGNEDAT`.
+///
+/// # What `signing_time` changes, and what it deliberately does not
+///
+/// It supplies exactly ONE missing input: the document's own claimed signing
+/// time, for a status written before this controller recorded it. Everything
+/// else is still re-derived from the status — the `matchedKeyId`, the
+/// `verifiedAt` observation, the payload type — and no signature is re-checked
+/// here. `signing_time_in` compares the bytes against the digest the run
+/// recorded, which is what makes a claim read out of the archive exactly as
+/// trustworthy as the verdict being repaired.
+///
+/// * [`SigningTime::Recovered`] — the claim is the document's, the block gains
+///   a `signedAt`, and the verdict is the one a fresh run would reach.
+/// * [`SigningTime::Absent`] — the document was read and genuinely claims no
+///   signing time. It refuses exactly as it always has, now for a reason that
+///   is true of the document.
+/// * [`SigningTime::Unreadable`] / [`SigningTime::NotAttempted`] /
+///   [`SigningTime::NotNeeded`] — nothing was learned, so **the stored result
+///   is kept verbatim** on a [`TrustBasis::Unverified`] basis with the reason
+///   said out loud. Not `Untrusted`, because nothing was read; not `Valid`
+///   under the new policy either, because [`Badge`] refuses that basis.
+#[must_use]
+pub fn retrust_with(
+    status: &Value,
+    resolution: &Resolution,
+    badge: fn(&Value) -> Badge,
+    existing: Option<&Vec<Condition>>,
+    observed_generation: Option<i64>,
+    now: DateTime<Utc>,
+    signing_time: &SigningTime,
+) -> Option<Retrust> {
     let stored = status.pointer("/evidence/verification")?;
     let matched_key_id = stored.get("matchedKeyId").and_then(Value::as_str)?;
     let payload_type = stored.get("payloadType").and_then(Value::as_str)?;
@@ -1551,34 +1607,52 @@ pub fn retrust(
             namespace,
             policies,
         } => (
-            VerificationVerdict::NotAttempted,
+            VerificationVerdict::NotAttempted.as_str().to_string(),
             Some(trust_policy_conflict_detail(namespace, policies)),
             None,
         ),
         Resolution::Unconfigured => (
-            VerificationVerdict::NotAttempted,
+            VerificationVerdict::NotAttempted.as_str().to_string(),
             Some(NO_SIGNING_KEYS_DETAIL.to_string()),
             None,
         ),
         Resolution::Trust(resolved) => {
             let projection = TrustProjection {
                 key: resolved.key(matched_key_id).map(|k| k.trust.clone()),
-                // THE STORED CLAIM, NOT A FRESH READ. The document is not
-                // fetched, so `signedAt` is whatever the verification that DID
-                // fetch it recorded — and an object written by a controller
-                // that predates `signedAt` carries none, which fails closed
-                // under `decide`'s rule with the absence named.
-                claim: stored_claim(stored),
+                // THE STORED CLAIM, OR THE ONE BOUNDED RE-READ THE CALLER
+                // PERFORMED. The document is not fetched HERE, and on every
+                // path but the pre-`signedAt` repair it is not fetched at all:
+                // `signedAt` is whatever the verification that DID fetch it
+                // recorded, and an absence the document itself carries fails
+                // closed under `decide`'s rule with the absence named.
+                claim: match signing_time {
+                    SigningTime::Recovered(at) => EvidenceClaim::at(*at),
+                    SigningTime::Absent(absence) => EvidenceClaim::absent(*absence),
+                    SigningTime::NotNeeded
+                    | SigningTime::Unreadable(_)
+                    | SigningTime::NotAttempted(_) => stored_claim(stored),
+                },
                 policy: policy_ref(&resolved.source),
             };
             let verdict = projection.verdict(&VerificationResult::observation(Some(stored)), now);
-            let result = match verdict.result {
-                TrustResult::Valid => VerificationVerdict::Valid,
-                TrustResult::Untrusted => VerificationVerdict::Untrusted,
-            };
-            let detail = untrusted_detail(&verdict, &projection, matched_key_id);
             let trust = Some(projection.to_status_value(&verdict));
-            (result, detail, trust)
+            // NOTHING WAS READ, SO NOTHING IS WITHDRAWN. The stored result is
+            // carried across verbatim; only the basis and the sentence change,
+            // and the badge stops being green on the basis alone.
+            if verdict.awaits_signing_time() {
+                (
+                    from.clone(),
+                    Some(unverified_detail(&projection, matched_key_id, signing_time)),
+                    trust,
+                )
+            } else {
+                let result = match verdict.result {
+                    TrustResult::Valid => VerificationVerdict::Valid,
+                    TrustResult::Untrusted => VerificationVerdict::Untrusted,
+                };
+                let detail = untrusted_detail(&verdict, &projection, matched_key_id);
+                (result.as_str().to_string(), detail, trust)
+            }
         }
     };
 
@@ -1587,15 +1661,24 @@ pub fn retrust(
     // same bytes for the same verdict. `serde_json` preserves insertion order
     // in this workspace, and `conditions::status_unchanged` is what decides
     // whether a patch is sent at all.
-    block.insert("result".into(), json!(result.as_str()));
+    block.insert("result".into(), json!(result));
     block.insert("matchedKeyId".into(), json!(matched_key_id));
     block.insert("payloadType".into(), json!(payload_type));
     if let Some(d) = &detail {
         block.insert("detail".into(), json!(d));
     }
-    // CARRIED VERBATIM, NEVER RECOMPUTED — see this type's header.
-    if let Some(v) = stored.get("signedAt") {
+    // CARRIED VERBATIM, NEVER RECOMPUTED — see this type's header. The one
+    // exception is the pre-PLAT-19.1 repair: a block that carries no signing
+    // time at all takes the one the bounded re-read read out of the document,
+    // rendered in the same `SecondsFormat::Secs` spelling the fresh path uses
+    // so the two produce identical bytes for the same receipt.
+    if let Some(v) = stored.get("signedAt").filter(|v| !v.is_null()) {
         block.insert("signedAt".into(), v.clone());
+    } else if let SigningTime::Recovered(at) = signing_time {
+        block.insert(
+            "signedAt".into(),
+            json!(at.to_rfc3339_opts(SecondsFormat::Secs, true)),
+        );
     }
     if let Some(t) = trust {
         block.insert("trust".into(), t);
@@ -1638,19 +1721,275 @@ pub fn retrust(
         verification,
         verified,
         from,
-        to: result.as_str().to_string(),
+        to: result,
     })
+}
+
+/// The `detail` for a stored verdict no policy has been applied to yet.
+///
+/// IT NAMES THE KEY, THE POLICY AND WHAT HAPPENS NEXT, like every other
+/// `detail` in this module — and it never says the document is untrusted,
+/// because nothing about the document has been examined. An operator reading
+/// it should be able to tell that this is their own upgrade and not their
+/// archive.
+fn unverified_detail(
+    projection: &TrustProjection,
+    matched_key_id: &str,
+    signing_time: &SigningTime,
+) -> String {
+    let policy = projection
+        .policy
+        .name
+        .as_deref()
+        .unwrap_or("this namespace's trust");
+    let why = match signing_time {
+        SigningTime::NotNeeded => "the document has not been re-read yet".to_string(),
+        SigningTime::Unreadable(detail) => {
+            format!("the archive was read for it and did not answer: {detail}")
+        }
+        SigningTime::NotAttempted(detail) => format!("no re-read was attempted: {detail}"),
+        // UNREACHABLE THROUGH `retrust_with`, which reaches this function only
+        // for a claim that is still `NotRecorded` — and both of these arms
+        // replace the claim. A sentence rather than a panic, because a
+        // `detail` is not the place to abort a reconcile.
+        SigningTime::Recovered(_) | SigningTime::Absent(_) => {
+            "the re-read produced no usable claim".to_string()
+        }
+    };
+    format!(
+        "the signature over this document verified under key {matched_key_id}, and the trust \
+         policy {policy} has not been applied to it yet (Unverified): this status was written \
+         before the controller recorded the document's own signing time, so the key's validity \
+         window has not been checked and nothing about the document is in doubt. {why}. The \
+         previous verdict is kept, it is not rendered as verified, and the document is re-read \
+         on the next policy event"
+    )
 }
 
 /// The claim a stored verification block carries, with the absence NAMED when
 /// it carries none.
+///
+/// # Two absences, and telling them apart is `TRUST-UPGRADE-SIGNEDAT`
+///
+/// A block with no `signedAt` is one of two very different things, and this
+/// function decides which by looking at whether the block carries a `trust`
+/// object at all:
+///
+/// * **no `trust` either** — the block was written by a controller that
+///   predates PLAT-19.1, which wrote neither field. Nothing about the document
+///   is in doubt; this installation simply never recorded the instant. That is
+///   [`ClaimAbsence::NotRecorded`], and [`decide`] returns an UNDECIDED verdict
+///   for it rather than a refusal.
+/// * **`trust` present** — a build that knows both fields wrote this block and
+///   wrote no `signedAt`, which it does exactly when the DOCUMENT carries no
+///   readable signing time. That is [`ClaimAbsence::FieldAbsent`] and it fails
+///   closed, as it always has.
+///
+/// # Why `trust` is the discriminator and not, say, the object's age
+///
+/// Because it is the one field whose presence is IMPLIED BY THE WRITER.
+/// [`VerificationResult::to_status_value`] inserts `trust` for every verdict
+/// that carried a trust projection, and a trust projection is present for
+/// exactly the verdicts that carry a `matchedKeyId` — so on any block this
+/// build wrote, `matchedKeyId` present and `trust` absent is unreachable.
+/// `a_matched_key_is_always_written_beside_a_trust_block` asserts that
+/// implication over the whole fresh path, which is what makes the inverse safe
+/// to read as "an older controller wrote this".
+///
+/// A creation timestamp would have been the obvious discriminator and is the
+/// wrong one: an object's age says when it was CREATED, not which build last
+/// wrote its status, and a cluster upgraded twice would misclassify on it.
 fn stored_claim(stored: &Value) -> EvidenceClaim {
+    let carries = |key: &str| stored.get(key).is_some_and(|v| !v.is_null());
     match stored.get("signedAt").and_then(Value::as_str) {
-        None => EvidenceClaim::absent(logweir_core::trust::ClaimAbsence::FieldAbsent),
+        None if !carries("trust") => EvidenceClaim::absent(ClaimAbsence::NotRecorded),
+        None => EvidenceClaim::absent(ClaimAbsence::FieldAbsent),
         Some(text) => match DateTime::parse_from_rfc3339(text) {
             Ok(t) => EvidenceClaim::at(t.with_timezone(&Utc)),
-            Err(_) => EvidenceClaim::absent(logweir_core::trust::ClaimAbsence::Unparseable),
+            Err(_) => EvidenceClaim::absent(ClaimAbsence::Unparseable),
         },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The signing-time recovery — TRUST-UPGRADE-SIGNEDAT
+// ---------------------------------------------------------------------------
+
+/// The `status.evidence` key pairs that name a signed document and the digest
+/// the run recorded for it: a `Backup`'s receipt, and a `Restore`'s scorecard.
+///
+/// THE DIGEST IS NOT OPTIONAL. It is what makes reading a signing time out of
+/// the archive as trustworthy as the verdict that is being repaired: the bytes
+/// that digest to what the status recorded are the bytes whose signature was
+/// verified. Without it this would be "believe whatever is in the bucket now",
+/// which is precisely the substitution [`verify_evidence`]'s step 3 exists to
+/// catch.
+const EVIDENCE_DOCUMENT_FIELDS: [(&str, &str); 2] = [
+    ("receiptKey", "receiptSha256"),
+    ("scorecardKey", "scorecardSha256"),
+];
+
+/// The one document a re-trust pass may re-read, and the digest that makes the
+/// read safe.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SigningTimeNeed {
+    /// The object key of the signed payload, off `status.evidence`.
+    pub payload_key: String,
+    /// `sha256:<hex>` as the run recorded it.
+    pub payload_sha256: String,
+    /// The media type the stored block recorded, so the signing time is read
+    /// out of the field THAT type keeps it in.
+    pub payload_type: String,
+}
+
+/// What one bounded re-read of the document produced.
+///
+/// # Four answers, and only one of them moves a verdict to `Valid`
+///
+/// The point of the enum is that "the archive did not answer" and "the
+/// document answered, and it carries no signing time" are not the same fact
+/// and must not produce the same status. The first keeps the previous verdict
+/// on an [`logweir_core::trust::TrustBasis::Unverified`] basis and is retried;
+/// the second is the document's own absence and refuses exactly as it always
+/// has.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum SigningTime {
+    /// Nothing was read, because nothing needed to be: the stored block
+    /// already carries a `signedAt`, or it is not a pre-PLAT-19.1 block.
+    NotNeeded,
+    /// The document was read, its digest matched, and this is its own claimed
+    /// signing time — derived by [`logweir_core::trust::read_claimed_signing_time`],
+    /// the same function the fresh path uses.
+    Recovered(DateTime<Utc>),
+    /// The document was read and its digest matched, and it genuinely carries
+    /// no readable signing time. The absence is the DOCUMENT's now.
+    Absent(ClaimAbsence),
+    /// The archive was reached for and did not answer — no object, a storage
+    /// error, bytes that are not the bytes the run recorded. Bounded: one
+    /// attempt, and the next policy event tries again.
+    Unreadable(String),
+    /// No read was attempted at all, and why: this controller holds no
+    /// evidence credential, or the destination reads evidence with a grant
+    /// only a pod may hold (D2 §3.9).
+    NotAttempted(String),
+}
+
+/// Whether a stored status needs one bounded re-read before its verdict can be
+/// re-derived, and what to read — `None` when it does not.
+///
+/// # The three things that all have to be true
+///
+/// A `matchedKeyId` (there is a signature to have an opinion about), a claim
+/// that is [`ClaimAbsence::NotRecorded`] (the status predates `signedAt`), and
+/// a document key WITH its recorded digest on `status.evidence`. An object
+/// missing the third cannot be repaired — there is nothing safe to read — and
+/// it stays on the previous verdict with the reason said out loud rather than
+/// being flipped on a field that did not exist when it was written.
+#[must_use]
+pub fn signing_time_need(status: Option<&Value>) -> Option<SigningTimeNeed> {
+    let block = stored_verification(status)?;
+    block
+        .get("matchedKeyId")
+        .and_then(Value::as_str)
+        .filter(|id| !id.is_empty())?;
+    if stored_claim(block).absence != Some(ClaimAbsence::NotRecorded) {
+        return None;
+    }
+    let payload_type = block.get("payloadType").and_then(Value::as_str)?;
+    let evidence = status?.get("evidence")?;
+    let (key, digest) = EVIDENCE_DOCUMENT_FIELDS.iter().find_map(|(k, d)| {
+        let key = evidence
+            .get(k)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())?;
+        let digest = evidence
+            .get(d)
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())?;
+        Some((key, digest))
+    })?;
+    Some(SigningTimeNeed {
+        payload_key: key.to_string(),
+        payload_sha256: digest.to_string(),
+        payload_type: payload_type.to_string(),
+    })
+}
+
+/// The signing time in `bytes`, **after** checking them against the digest the
+/// status recorded.
+///
+/// PURE, so every row of the table above is a unit test with no bucket
+/// anywhere.
+#[must_use]
+pub fn signing_time_in(bytes: &[u8], need: &SigningTimeNeed) -> SigningTime {
+    let computed = sha256_prefixed(bytes);
+    if computed != need.payload_sha256 {
+        return SigningTime::Unreadable(format!(
+            "digest mismatch at {}: the status records {} and the bytes in the archive are \
+             {computed}; no signing time is taken from a document that is not the one this run \
+             reported writing",
+            need.payload_key, need.payload_sha256
+        ));
+    }
+    let Ok(json) = serde_json::from_slice::<Value>(bytes) else {
+        return SigningTime::Absent(ClaimAbsence::Unparseable);
+    };
+    match logweir_core::trust::read_claimed_signing_time(&need.payload_type, &json) {
+        Ok(at) => SigningTime::Recovered(at),
+        Err(absence) => SigningTime::Absent(absence),
+    }
+}
+
+/// ONE `get` through the read-only handle, then [`signing_time_in`].
+///
+/// # Interface I13
+///
+/// Synchronous on purpose: this is the body of a `spawn_blocking` closure, for
+/// the reason this module's header gives. It is named in
+/// `tests/retention.rs::STORE_CALL_TOKENS` because it holds a `Store::get`
+/// while its callers name no `Store` at all — the same blindness that let a
+/// planted call survive that guard once.
+#[must_use]
+pub fn read_signing_time(store: Option<&Store>, need: &SigningTimeNeed) -> SigningTime {
+    let Some(store) = store else {
+        return SigningTime::NotAttempted(NO_CREDENTIAL_DETAIL.to_string());
+    };
+    match store.get(&need.payload_key) {
+        Ok((bytes, _version)) => signing_time_in(&bytes, need),
+        Err(e) => SigningTime::Unreadable(store_detail(&e)),
+    }
+}
+
+/// [`read_signing_time`] on a blocking thread — the seam both reconcilers call.
+///
+/// `unread` is the evidence path's own refusal when there is no handle to read
+/// through (`EvidenceSource::NotAttempted`'s detail): a destination that
+/// declares no `evidenceRead`, one whose grant only a pod may hold, or a
+/// location no installation policy allowlists. It is passed through verbatim
+/// rather than re-derived, so the sentence an operator reads here is the one
+/// the fresh path would have written.
+///
+/// **Exactly one attempt.** There is no retry loop, no backoff and no queue:
+/// if the archive does not answer, the object keeps its previous verdict on an
+/// `Unverified` basis and the NEXT policy event tries once more. A loop here
+/// would turn one unreachable bucket into a controller that never finishes a
+/// reconcile.
+pub async fn recover_signing_time(
+    handle: Option<std::sync::Arc<Store>>,
+    unread: Option<String>,
+    need: SigningTimeNeed,
+) -> SigningTime {
+    if let Some(detail) = unread {
+        return SigningTime::NotAttempted(detail);
+    }
+    let Some(handle) = handle else {
+        return SigningTime::NotAttempted(NO_CREDENTIAL_DETAIL.to_string());
+    };
+    match tokio::task::spawn_blocking(move || read_signing_time(Some(&handle), &need)).await {
+        Ok(recovered) => recovered,
+        Err(e) => {
+            SigningTime::Unreadable(format!("the signing-time re-read did not complete: {e}"))
+        }
     }
 }
 
@@ -1785,6 +2124,7 @@ pub async fn apply_retrust<K>(
     resolution: &Resolution,
     badge: fn(&Value) -> Badge,
     now: DateTime<Utc>,
+    signing_time: &SigningTime,
 ) -> Result<Option<Retrust>, kube::Error>
 where
     K: kube::Resource + Clone + serde::de::DeserializeOwned + std::fmt::Debug + serde::Serialize,
@@ -1801,13 +2141,14 @@ where
         .get("conditions")
         .and_then(|c| serde_json::from_value(c.clone()).ok())
         .unwrap_or_default();
-    let Some(result) = retrust(
+    let Some(result) = retrust_with(
         status,
         resolution,
         badge,
         Some(&conditions),
         object.meta().generation,
         now,
+        signing_time,
     ) else {
         return Ok(None);
     };
@@ -1829,12 +2170,26 @@ where
             "metadata".to_string(),
             json!({ "name": name, "resourceVersion": resource_version }),
         );
+    // AN HONEST LOG LINE ON BOTH PATHS. The sentence below used to promise
+    // "no storage read", which is true of every pass but the pre-PLAT-19.1
+    // repair — and a log that says a read did not happen while one did is the
+    // same defect as a status that says it.
+    let how = match signing_time {
+        SigningTime::Recovered(_) | SigningTime::Absent(_) => {
+            "re-deriving after ONE bounded re-read of the document, which supplied the signing \
+             time this status was written without"
+        }
+        SigningTime::NotNeeded | SigningTime::Unreadable(_) | SigningTime::NotAttempted(_) => {
+            "re-deriving from the stored matchedKeyId, signedAt and verifiedAt — no storage \
+             read and no signature check"
+        }
+    };
     tracing::info!(
         object = %name,
         from = %result.from,
         to = %result.to,
-        "the resolved trust policy changed this object's verdict; re-deriving from the stored \
-         matchedKeyId, signedAt and verifiedAt — no storage read and no signature check"
+        how,
+        "the resolved trust policy changed this object's verdict"
     );
     api.patch_status(
         &name,

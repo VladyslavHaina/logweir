@@ -4260,12 +4260,35 @@ async fn reconcile_with_trust(
                 let resolution =
                     crate::trust::resolve_with(&snapshot, &ctx.client, &namespace).await?;
                 let api: Api<Backup> = Api::namespaced(ctx.client.clone(), &namespace);
+                // ONE BOUNDED RE-READ FOR A STATUS THAT PREDATES `signedAt`
+                // (TRUST-UPGRADE-SIGNEDAT). It happens only for a block that
+                // carries a matched key, no signing time and no `trust` at all
+                // — a pre-PLAT-19.1 write — and it goes through THE SAME
+                // evidence path the original verdict came from, so a
+                // destination-backed run reads its own bucket and one whose
+                // grant only a pod may hold reads nothing and says so.
+                let signing_time = match crate::verification::signing_time_need(status) {
+                    None => crate::verification::SigningTime::NotNeeded,
+                    Some(need) => {
+                        let (handle, unread) =
+                            match evidence_source(&backup, &ctx.client, &namespace, Utc::now())
+                                .await
+                                .map_err(BackupError::Api)?
+                            {
+                                EvidenceSource::GlobalHandle => (ctx.archive.clone(), None),
+                                EvidenceSource::Destination(store) => (Some(store), None),
+                                EvidenceSource::NotAttempted { detail } => (None, Some(detail)),
+                            };
+                        crate::verification::recover_signing_time(handle, unread, need).await
+                    }
+                };
                 crate::verification::apply_retrust(
                     &api,
                     &*backup,
                     &resolution,
                     crate::verification::backup_badge,
                     Utc::now(),
+                    &signing_time,
                 )
                 .await?;
             }
