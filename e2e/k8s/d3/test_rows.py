@@ -169,6 +169,13 @@ def test_the_digest_prefix_defect_has_a_fingerprint_of_its_own() -> None:
             f"page digest {bare} does not match published sha256:{'b' * 64}"))
     row("MUTANT: one digest alone is not two compared",
         not d3.digest_prefix_signature(f"page digest {same} is unreadable"))
+    row("MUTANT: the SAME digest printed twice, both prefixed, is somebody else's "
+        "equality bug",
+        not d3.digest_prefix_signature(f"expected {same} got {same}"))
+    row("MUTANT: the same digest printed twice, both bare, likewise",
+        not d3.digest_prefix_signature(f"expected {bare} got {bare}"))
+    row("the fingerprint survives the other order — prefixed first, bare second",
+        d3.digest_prefix_signature(f"published {same} does not match computed {bare}"))
     row("MUTANT: an empty message decides nothing", not d3.digest_prefix_signature(""))
 
 
@@ -211,6 +218,12 @@ def test_notification_delivery_follows_the_hatch_and_never_rewrites_a_backup() -
         not d3.notify_delivery_ok(False, 1, d3.expected_posts(False, 1), True, 7, 7))
     row("MUTANT: delivery rewrote a Backup",
         not d3.notify_delivery_ok(True, 1, d3.expected_posts(True, 1), True, 6, 7))
+    # The weak case is real and is why the row says so in its own message
+    # (review L-6): with no transition owed, the POST half is `0 == 0` and a
+    # swallowed delivery would look identical.
+    row("the re-used-namespace case owes nothing, and so observes nothing",
+        d3.expected_posts(True, 0) == 0
+        and d3.notify_delivery_ok(True, 0, d3.expected_posts(True, 0), True, 7, 7))
 
 
 def main() -> int:

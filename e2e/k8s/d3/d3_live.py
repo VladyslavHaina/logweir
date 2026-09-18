@@ -1227,7 +1227,7 @@ def skipped_never_a_candidate(ev: dict[str, Any], ids: dict[str, set[str]]) -> b
     )
 
 
-DIGEST_HEX = re.compile(r"(?:sha256:)?([0-9a-f]{64})")
+DIGEST_HEX = re.compile(r"(sha256:)?([0-9a-f]{64})")
 
 
 def digest_prefix_signature(message: str) -> bool:
@@ -1235,13 +1235,18 @@ def digest_prefix_signature(message: str) -> bool:
 
     `weirkeeper::catalog_view::page_digest` returned bare hex while
     `status.pages[].sha256` is published `sha256:`-prefixed, and the two were
-    compared with `!=`. So the controller printed two digests side by side that
-    are EQUAL once the prefix is off, which no other cause of an unreadable view
-    produces — an absent catalog, a page that genuinely does not match, a
-    truncated index all print one digest or two different ones.
+    compared with `!=`. So the controller printed one digest TWICE — once bare,
+    once prefixed — and called the two different. That is the whole fingerprint,
+    and it is narrower than "two equal digests": a message printing
+    `expected sha256:X got sha256:X` is a genuine equality bug in something
+    else, and reporting it as this defect would be the mis-attribution this
+    function exists to end (review L-1). One body, both spellings, or it is not
+    this.
     """
-    found = DIGEST_HEX.findall(message or "")
-    return len(found) >= 2 and len(set(found)) < len(found)
+    spellings: dict[str, set[bool]] = {}
+    for prefix, body in DIGEST_HEX.findall(message or ""):
+        spellings.setdefault(body, set()).add(bool(prefix))
+    return any(seen == {True, False} for seen in spellings.values())
 
 
 def enforcer_is_in_the_image(state: dict[str, Any]) -> bool:
@@ -2788,7 +2793,22 @@ def notify() -> None:
     notified_after = sum(a.get("notifiedTransition") or 0 for a in alerts)
     new_transitions = max(0, notified_after - notified_before)
     want_posts = expected_posts(hatch_open, new_transitions)
-    evidence.append(artifact("notify/controller-facts.json", facts))
+    # THE ROW'S HONEST WEAK CASE, NAMED IN ITS OWN MESSAGE. On a re-used
+    # namespace whose alert is already open this window owes no POST, so the
+    # POST half of the row reduces to `0 == 0` and observes no delivery at all
+    # (review L-6). The resourceVersion invariant and
+    # `notify-stale-point-alerts-exactly-once` still hold, but a green row here
+    # must not read as "a delivery was seen".
+    nothing_to_deliver = (
+        "" if new_transitions else
+        " NOTHING WAS DELIVERED IN THIS WINDOW: the policy's alert was already open, so no "
+        "transition and no POST were owed and none was observed. This run proves the "
+        "resourceVersion invariant and nothing about delivery — run `notify` on a fresh "
+        "namespace for a delivery observation."
+    )
+    evidence.append(artifact("notify/controller-facts.json",
+                             dict(facts, newTransitions=new_transitions,
+                                  deliveryObserved=bool(new_transitions))))
     check(
         "notify-delivery-never-rewrites-a-backup",
         "PLAT-14.2",
@@ -2803,7 +2823,7 @@ def notify() -> None:
         f"{len(backups_before)} Backups in this namespace still carries the resourceVersion "
         f"it had before the protection controller ran ({len(unchanged)} unchanged). "
         f"Formerly `notify-failure-never-rewrites-a-backup`, which required zero POSTs and "
-        f"so encoded the hatch being shut as if it were the contract",
+        f"so encoded the hatch being shut as if it were the contract." + nothing_to_deliver,
         evidence,
     )
 
