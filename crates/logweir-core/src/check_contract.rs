@@ -2467,20 +2467,50 @@ const LONG_RUN_MIN: usize = 40;
 /// NAME ([`redact_key_values`]) and by known secret SHAPE (PEM, S3 bodies,
 /// URL userinfo, AWS access key ids); "any long token" is not a shape.
 fn redact_long_runs(s: &str) -> String {
+    redact_runs_where(s, is_public_identifier)
+}
+
+/// The long-run rule as `logweir::check::redact_path` applies it: the same
+/// scanner, the same threshold, and one extra way for a run to be public —
+/// [`is_object_key_shaped`].
+///
+/// `redact_path`'s values are archive object keys and Kafka topic names, often
+/// already wrapped in a JSON line, so the decision has to be made RUN BY RUN
+/// exactly as [`redact`] makes it. Its previous spelling split the value on `/`
+/// and ran the rule over each piece, which lowered every piece below the
+/// threshold and let a `/`-bearing credential through whole.
+#[must_use]
+pub fn redact_long_runs_in_keys(s: &str) -> String {
+    redact_runs_where(s, |run| {
+        is_public_identifier(run) || is_object_key_shaped(run)
+    })
+}
+
+/// The scanner both spellings share: maximal runs of the base64/hex alphabet,
+/// replaced at [`LONG_RUN_MIN`] unless `keep` calls the run public.
+fn redact_runs_where(s: &str, keep: impl Fn(&str) -> bool) -> String {
     fn is_run_char(c: char) -> bool {
         c.is_ascii_alphanumeric() || c == '+' || c == '/' || c == '=' || c == '_' || c == '-'
     }
     let mut out = String::with_capacity(s.len());
     let mut run = String::new();
+    let flush = |out: &mut String, run: &mut String| {
+        if run.chars().count() >= LONG_RUN_MIN && !keep(run) {
+            out.push_str(REDACTED);
+        } else {
+            out.push_str(run);
+        }
+        run.clear();
+    };
     for c in s.chars() {
         if is_run_char(c) {
             run.push(c);
             continue;
         }
-        flush_run(&mut out, &mut run);
+        flush(&mut out, &mut run);
         out.push(c);
     }
-    flush_run(&mut out, &mut run);
+    flush(&mut out, &mut run);
     out
 }
 
@@ -2619,13 +2649,33 @@ fn is_public_identifier(run: &str) -> bool {
         && components.iter().filter(|c| !public(c)).count() <= 1
 }
 
-fn flush_run(out: &mut String, run: &mut String) {
-    if run.chars().count() >= LONG_RUN_MIN && !is_public_identifier(run) {
-        out.push_str(REDACTED);
-    } else {
-        out.push_str(run);
-    }
-    run.clear();
+/// Whether a VALUE is shaped like an object key: `/`-separated components,
+/// none of them long enough to be a credential on its own, and **at most one**
+/// that is not a public form.
+///
+/// This is [`is_public_identifier`]'s anchored clause with the anchor
+/// requirement dropped, and it exists for exactly one caller —
+/// `logweir::check::redact_path`, which is applied to values already known to
+/// be archive object keys and Kafka topic names rather than to prose. A message
+/// may say anything, so [`redact`] insists on a UUID or a digest before it will
+/// read a run as a key; a `missingSegment` value cannot, so the same run may be
+/// read as a key on the strength of its shape alone.
+///
+/// The ONE non-public component is the adopter-chosen one: a backup set id like
+/// `20260915T030000Z`, which carries upper case and is neither a UUID nor a
+/// digest, or a topic name like `payments-EU`. A credential is refused by the
+/// same two clauses that refuse it in [`is_public_identifier`]: unsliced it is
+/// 40 characters and fails the length cap, and its own `/` characters —
+/// base64's 64th — split it into two or three components that are all
+/// non-public.
+#[must_use]
+pub fn is_object_key_shaped(value: &str) -> bool {
+    let components: Vec<&str> = value.split('/').collect();
+    let public = |c: &str| {
+        c.is_empty() || is_hex_digest(c) || is_uuid(c) || is_public_name(c) || is_fact_pair(c)
+    };
+    components.iter().all(|c| public(c) || is_key_component(c))
+        && components.iter().filter(|c| !public(c)).count() <= 1
 }
 
 // --------------------------------------------------------------- visibility

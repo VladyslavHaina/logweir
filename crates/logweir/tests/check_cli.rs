@@ -4545,6 +4545,94 @@ fn a_planted_key_in_a_key_path_is_still_redacted() {
     );
 }
 
+/// **The `redact_path` half of review finding F1.** A credential whose own `/`
+/// characters split it is not an object key, and this function used to say it
+/// was.
+///
+/// `redact_path` split the value on `/` and ran the long-run rule over each
+/// piece. `/` is base64's 64th character, so the canonical AWS secret access key
+/// `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` — 40 characters, split into 13, 7
+/// and 18 — had no piece the rule could see, and came through untouched while
+/// `redact` replaced it. Roughly 45% of real keys carry at least one `/`. The
+/// header excused the gap by asserting what this function is applied to; nothing
+/// checked the assertion, which is the shape of mistake the whole finding is
+/// about.
+///
+/// The DIE half is every form of the key, alone and inside the values
+/// `redact_path` really receives: a `missingSegment` JSON line and a catalog
+/// `receiptKey`. The KEEP half is the reason the function exists at all, so
+/// both are here — a fix that redacted the keys would re-open F7.
+#[test]
+fn a_slash_bearing_credential_is_not_an_object_key() {
+    const AWS: &str = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    const AWS_ONE_SLASH: &str = concat!("wJalrXUtnFEMIK7MDENGb/", "PxRfiCYEXAMPLEKEY0");
+    const AWS_NO_SLASH: &str = concat!("wJalrXUtnFEMIK7MDENGb", "PxRfiCYEXAMPLEKEY01");
+    const SET: &str = "3f0ada8f-1a2b-4c3d-9e8f-0123456789ab";
+    const DIGEST: &str = "6feecc8c16c5551d9feb3eb5f77e2da773bf68bd9ef9c52927ceb2c86e56892b";
+
+    // --- DIE: no shape of the key survives, in any wrapper ------------------
+    let mut leaked: Vec<String> = Vec::new();
+    for key in [AWS, AWS_ONE_SLASH, AWS_NO_SLASH] {
+        for (shape, value) in [
+            ("bare", key.to_string()),
+            ("under a prefix", format!("kafka-backups/{key}")),
+            ("anchored by a set id", format!("kafka-backups/{SET}/{key}")),
+            ("anchored by a digest", format!("{DIGEST}/{key}")),
+            (
+                "inside a details line",
+                serde_json::json!({"check": "archive.segments", "missingSegment": key}).to_string(),
+            ),
+            (
+                "inside a catalog receiptKey",
+                serde_json::json!({"receiptKey": format!("logweir/backups/{SET}/{key}")})
+                    .to_string(),
+            ),
+        ] {
+            let out = logweir::check::redact_path(&value);
+            if out.contains(key) {
+                leaked.push(format!("{shape}: {out}"));
+            }
+        }
+    }
+    assert!(
+        leaked.is_empty(),
+        "`redact_path` returned a credential whole ({} of 18):\n  {}",
+        leaked.len(),
+        leaked.join("\n  ")
+    );
+
+    // --- KEEP: a real object path still survives, whole ---------------------
+    // The two anchors an archive key actually carries. If a fix closes the leak
+    // by redacting these, it has re-opened F7 — the `detailsRef` ConfigMap
+    // saying "3 missing segments: [redacted], [redacted], [redacted]".
+    for keep in [
+        format!("team/prod/{SET}/topics/payments/partition=2/segment-00000000000000000000.bin.zst"),
+        format!(
+            "team/prod/{SET}/topics/payments-EU/partition=2/segment-00000000000000000000.bin.zst"
+        ),
+        format!("logweir/backups/{SET}/run-a.receipt.json"),
+        format!("logweir/blobs/{DIGEST}/manifest.json"),
+        format!("kafka-backups/{DIGEST}"),
+        "kafka-backups/20260915T030000Z/topics/orders/partition=0/segment-1.bin".to_string(),
+    ] {
+        assert_eq!(
+            logweir::check::redact_path(&keep),
+            keep,
+            "an object key an operator has to act on was redacted"
+        );
+        // …and inside the JSON line `details_stream` really applies it to,
+        // which is where the per-RUN decision matters: the first `/`-piece of
+        // that line is `{"check":"archive.segments","missingSegment":"team`.
+        let line =
+            serde_json::json!({"check": "archive.segments", "missingSegment": keep}).to_string();
+        let out = logweir::check::redact_path(&line);
+        assert!(out.contains(&keep), "the details line lost its key: {out}");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&out).expect("a details line stays JSON");
+        assert_eq!(parsed["missingSegment"], keep);
+    }
+}
+
 /// `redact_path` splits exactly ONE rule out of the set, by name, and the name
 /// still matches exactly one rule.
 ///

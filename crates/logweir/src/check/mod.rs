@@ -333,17 +333,46 @@ pub const LONG_RUN_RULE: &str = "long-base64-or-hex-run";
 /// * **every SHAPE rule over the WHOLE string**, exactly as `redact` applies
 ///   it: PEM blocks, S3 XML bodies, URL userinfo, `secret…=value` forms and
 ///   `AKIA`/`ASIA` key ids. None of them is weakened at all.
-/// * **the long-run rule per segment**, which is the only one that cannot tell
-///   an archive key from a secret.
+/// * **the long-run rule with the object-key allowance**
+///   ([`redact_long_runs_in_keys`][logweir_core::check_contract::redact_long_runs_in_keys]),
+///   which is the only one that cannot tell an archive key from a secret.
 ///
-/// **What that gives up, stated rather than implied:** a base64 secret that
-/// happens to contain `/` — base64's 64th character — is split into pieces
-/// shorter than 40 and the long-run rule no longer sees it. The values this is
-/// applied to are archive object keys and Kafka topic names: a topic name
-/// cannot contain `/` at all, and an object key is adopter-chosen structure,
-/// not a place a credential is carried. Everything the runner writes that
-/// COULD carry one — every message, remedy and fact — still goes through the
-/// whole-string `redact`.
+/// **And the per-segment pass is not reached for a value that is not a key.**
+/// That trade used to be stated and taken: "a base64 secret that happens to
+/// contain `/` — base64's 64th character — is split into pieces shorter than 40
+/// and the long-run rule no longer sees it", excused on the grounds that the
+/// values here are object keys and topic names. The canonical AWS secret access
+/// key `wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY` is 40 characters split by its
+/// own slashes into 13, 7 and 18, so it came through this function untouched
+/// while `redact` replaced it — a hole in a redactor, excused by an assumption
+/// about the caller that nothing checked (review round 1, the `redact_path`
+/// half of finding **F1**; roughly 45% of real keys carry at least one `/`).
+///
+/// There is no `/` split any more. The long-run rule is applied to the WHOLE
+/// string, run by run, exactly as [`redact`] applies it, with one extra way for
+/// a run to be public:
+/// [`is_object_key_shaped`][logweir_core::check_contract::is_object_key_shaped]
+/// — `/`-separated components, none long enough to be a credential on its own,
+/// and at most ONE that is not a public form. That one is the adopter-chosen
+/// component: a backup set id like `20260915T030000Z`, which carries upper case
+/// and is neither a UUID nor a digest, or a topic name like `payments-EU`. A
+/// credential fails both clauses — unsliced it is 40 characters and over the
+/// length cap, and sliced it is two or three non-public components.
+///
+/// Asking per RUN rather than per value is not a detail: `details_stream`
+/// applies this to a whole JSON line, whose first `/`-piece is
+/// `{"check":"archive.segments","missingSegment":"kafka-backups`. A
+/// value-level test would call that not-a-key and redact the key inside it.
+///
+/// The result is that this function is never MORE permissive than the
+/// chokepoint about what is material. It is more permissive about exactly two
+/// things, both deliberate: the cap (below), and the one non-public component
+/// that makes an unanchored archive key readable.
+///
+/// What it gives up against the old `/`-splitting form: a run holding a
+/// component of 40 characters or more is now redacted whole rather than
+/// segment by segment. Such a component is the shape the threshold exists for,
+/// so losing the run around it is the conservative answer.
 ///
 /// # It does NOT cap, and that is the difference from [`redact`]
 ///
@@ -371,7 +400,10 @@ pub const LONG_RUN_RULE: &str = "long-base64-or-hex-run";
 ///
 /// # Panics
 /// Never in practice: only if [`LONG_RUN_RULE`] names no rule, which
-/// `the_long_run_rule_is_the_only_one_applied_per_segment` fails on first.
+/// `the_long_run_rule_is_the_only_one_applied_per_segment` fails on first. The
+/// name still has to match exactly one rule: if it matched none, `shape` would
+/// carry the STRICT long-run rule and the object-key allowance would be applied
+/// to an already-redacted string, restoring F7.
 #[must_use]
 pub fn redact_path(value: &str) -> String {
     use logweir_core::check_contract::{apply_rules, redaction_rules};
@@ -389,16 +421,14 @@ pub fn redact_path(value: &str) -> String {
     assert_eq!(
         long.len(),
         1,
-        "`{LONG_RUN_RULE}` names {} redaction rules, not one; the per-segment clause is \
+        "`{LONG_RUN_RULE}` names {} redaction rules, not one; the object-key clause is \
          applying the wrong thing",
         long.len()
     );
-    let whole = apply_rules(value, &shape);
-    whole
-        .split('/')
-        .map(|segment| apply_rules(segment, &long))
-        .collect::<Vec<_>>()
-        .join("/")
+    // THE THRESHOLD IS THE RUN'S, exactly as `redact` applies it. The value is
+    // often already a JSON line, so the question "is this an object key" is
+    // asked of each RUN and never of the whole string.
+    logweir_core::check_contract::redact_long_runs_in_keys(&apply_rules(value, &shape))
 }
 
 /// What one plan kind produced.
