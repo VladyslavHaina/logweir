@@ -195,12 +195,52 @@ pub const TERMINAL_STATES: &[&str] = &[
     TERMINAL_STATE_CREDENTIAL_REFERENCE_MISSING,
     TERMINAL_STATE_RUNNER_IMAGE_UNAVAILABLE,
     TERMINAL_STATE_POD_CREATION_FORBIDDEN,
+    // D3 §5.5 step 6, W5's hand-off — DECLARED AND NOT YET PRODUCED. See the
+    // constant's own note for the two runner-side edits that make it
+    // reachable; it is here so the controller does not have to grow a second
+    // reason vocabulary when they land.
+    TERMINAL_STATE_POINT_BINDING_MISMATCH,
 ];
 
 // ===========================================================================
 // D3 §2.2 — the `RunnerReady` condition, and the states a run reaches when
 // its runner container never starts
 // ===========================================================================
+
+/// D3 §5.5 step 6: the archive holds a recovery point whose receipt is not the
+/// one the approver signed a binding to — **W5's hand-off**, review finding F6.
+///
+/// # What it means
+///
+/// Execution contract v2 binds a `Restore` to a specific recovery point
+/// (`source.point{point_id, receipt_key, receipt_sha256, manifest_sha256}`)
+/// inside the plan bytes the approval's signature covers. The runner
+/// re-verifies that binding against the bytes actually in the bucket before
+/// any data-plane work and refuses with exit 3 when they disagree. So this
+/// state means the archive changed under an approved restore — the one shape
+/// that is a tampering signal and not a configuration mistake, and the one an
+/// operator must never have to tell apart from an ordinary guard refusal by
+/// reading a pod log.
+///
+/// # It is declared here and NOT YET PRODUCED, and that is the hand-off
+///
+/// `crates/logweir/src/drill/binding.rs` says in so many words that
+/// `logweir_core::guard::TERMINAL_STATES` "is a closed three-element list owned
+/// elsewhere … until that list grows (it is the status worker's to extend) the
+/// refusal classifies as the general `GuardRefused`". `logweir-core` is not in
+/// this worker's D3 §14 ownership row, so the controller half lands here and
+/// the runner half is recorded as an explicit hand-off rather than reached for:
+///
+/// 1. add `PointBindingMismatch` (and D3 §4.3's `RehearsalScopeViolation`) to
+///    `logweir_core::guard::TERMINAL_STATES`;
+/// 2. prefix `binding.rs`'s two refusal messages with `<State>: `, which is
+///    what `guard::terminal_state` matches on.
+///
+/// Until both land, `refusal_state` reads `GuardRefused` off the log and this
+/// constant is never written. Declaring it now is what makes the controller
+/// side ready and keeps the `metav1` reason vocabulary in one place; it is not
+/// a claim that the state is reachable today.
+pub const TERMINAL_STATE_POINT_BINDING_MISMATCH: &str = "PointBindingMismatch";
 
 /// The condition carrying whether the one runner pod's `runner` container has
 /// started — D3 §2.2, PLAT-14.1.

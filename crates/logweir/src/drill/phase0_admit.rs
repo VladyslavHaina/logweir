@@ -90,11 +90,14 @@ pub struct TopicPreflight {
 ///
 /// ONE LINE, NOT THREE. A pod log is stdout and stderr merged in
 /// nondeterministic order, so every controller-side reader in this plan scans
-/// a BOUNDED TAIL (`weirkeeper::controllers::backup::KEY_SCAN_TAIL_LINES`, 8
-/// lines) and matches by key name (plan erratum **E4**). Three separate
-/// `topic-preflight-*=` lines would spend three of those eight on one fact and
-/// crowd out interface I8's own three keys on a run that also wrote an offset
-/// report. One line carrying a JSON object costs one.
+/// a BOUNDED TAIL (`weirkeeper::controllers::backup::KEY_SCAN_TAIL_LINES`, 16
+/// lines since D3 W2 raised it from 8) and matches by key name (plan erratum
+/// **E4**). Three separate `topic-preflight-*=` lines would spend three of
+/// those on one fact and crowd out interface I8's own three keys on a run that
+/// also wrote an offset report — which is what the argument was when the
+/// window was eight and seven of them were already spoken for. One line
+/// carrying a JSON object costs one, and the reasoning does not depend on the
+/// window's size.
 pub const TOPIC_PREFLIGHT_KEY_PREFIX: &str = "topic-preflight=";
 
 impl TopicPreflight {

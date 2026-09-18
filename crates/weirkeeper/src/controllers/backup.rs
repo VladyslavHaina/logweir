@@ -89,16 +89,16 @@ use crate::conditions::{
     current_condition, merge_condition, reason_for_exit, status_unchanged, wire_reason_for_exit,
     CONDITION_COMPLETE, CONDITION_EVIDENCE_RECORDED, CONDITION_EXECUTION_INPUTS_UNVERIFIED,
     CONDITION_FAILED, CONDITION_JOB_CREATED, CONDITION_REASON_GUARD_REFUSED,
-    CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED, CONDITION_TOPICS_RESOLVED, PHASE_FAILED,
-    PHASE_RUNNING, PHASE_SUCCEEDED, REASON_EVIDENCE_KEYS_RECORDED, REASON_EVIDENCE_KEYS_UNREADABLE,
-    REASON_JOB_INPUTS_MISMATCH, REASON_LEGACY_EXECUTION, REASON_OPERATIONAL,
-    REASON_RUNNER_ARGV_ANNOTATION_IGNORED, REASON_RUNNER_ARGV_ANNOTATION_MALFORMED,
-    TERMINAL_STATE_DISRUPTED_MID_DRILL, TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON,
-    TERMINAL_STATE_INVALID_TOPIC_SELECTION, TERMINAL_STATE_JOB_NAME_CONFLICT,
-    TERMINAL_STATE_NAME_TOO_LONG, TERMINAL_STATE_NO_EXIT_CODE, TERMINAL_STATE_ORPHANED_SCORECARD,
-    TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT, TERMINAL_STATE_POD_OWNERSHIP_CONTESTED,
-    TERMINAL_STATE_POD_UNSCHEDULABLE, TERMINAL_STATE_REFERENT_NOT_FOUND,
-    TERMINAL_STATE_SCHEDULE_NOT_FOUND,
+    CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED, CONDITION_RUNNER_READY, CONDITION_TOPICS_RESOLVED,
+    CONDITION_VERIFIED, PHASE_FAILED, PHASE_RUNNING, PHASE_SUCCEEDED,
+    REASON_EVIDENCE_KEYS_RECORDED, REASON_EVIDENCE_KEYS_UNREADABLE, REASON_JOB_INPUTS_MISMATCH,
+    REASON_LEGACY_EXECUTION, REASON_OPERATIONAL, REASON_RUNNER_ARGV_ANNOTATION_IGNORED,
+    REASON_RUNNER_ARGV_ANNOTATION_MALFORMED, TERMINAL_STATE_DISRUPTED_MID_DRILL,
+    TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON, TERMINAL_STATE_INVALID_TOPIC_SELECTION,
+    TERMINAL_STATE_JOB_NAME_CONFLICT, TERMINAL_STATE_NAME_TOO_LONG, TERMINAL_STATE_NO_EXIT_CODE,
+    TERMINAL_STATE_ORPHANED_SCORECARD, TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
+    TERMINAL_STATE_POD_OWNERSHIP_CONTESTED, TERMINAL_STATE_POD_UNSCHEDULABLE,
+    TERMINAL_STATE_REFERENT_NOT_FOUND, TERMINAL_STATE_SCHEDULE_NOT_FOUND,
 };
 use crate::controllers::backup_selection;
 use crate::crds::backup::Backup;
@@ -1370,14 +1370,28 @@ pub fn running_status_patch(backup: &Backup, job_name: &str, now: DateTime<Utc>)
 /// The condition types a `Backup` patch builder carries without owning them:
 /// the execution-contract observations
 /// ([`CONDITION_EXECUTION_INPUTS_UNVERIFIED`],
-/// [`CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED`]) and, last,
-/// [`crate::conditions::CONDITION_VERIFIED`].
+/// [`CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED`]), D1's
+/// [`CONDITION_TOPICS_RESOLVED`], and last
+/// [`crate::conditions::CONDITION_VERIFIED`] and
+/// [`crate::conditions::CONDITION_RUNNER_READY`].
 ///
 /// A MERGE PATCH REPLACES ARRAYS, so a builder that writes `conditions` owes
 /// the parts it does not own — the hot loop `verification::carry_verified`
 /// documents is the same one a dropped observation would start. The order is
-/// fixed (the builder's own, then the two observations, then `Verified`) so a
-/// steady object computes the same array on every pass and sends nothing.
+/// fixed (the builder's own, then the three observations, then `Verified` and
+/// `RunnerReady`) so a steady object computes the same array on every pass and
+/// sends nothing.
+///
+/// # `RunnerReady` is carried, and review finding F1 is why
+///
+/// D3 §2.2 says every terminal builder carries `RunnerReady` and `Verified`
+/// forward. It did not. The condition is written by the progress path and by
+/// nothing else, so the terminal patch that RECORDS a failure was deleting the
+/// one condition that says what the failure was — and a terminal object is
+/// never reconciled again, so no later pass rewrote it. A `Backup` whose
+/// Secret is missing showed `RunnerReady=False/CredentialReferenceMissing` for
+/// five minutes and then, at the fail-fast cancellation, showed nothing at
+/// all. D3 §15's L1 asserts that condition live, AFTER the terminal patch.
 #[must_use]
 pub fn carry_conditions(
     existing: Option<&Vec<Condition>>,
@@ -1404,7 +1418,11 @@ pub fn carry_conditions(
             conditions.push(json!(c));
         }
     }
-    crate::verification::carry_verified(existing, conditions)
+    crate::verification::carry_conditions(
+        existing,
+        conditions,
+        &[CONDITION_VERIFIED, CONDITION_RUNNER_READY],
+    )
 }
 
 /// The `/status` merge patch that records frozen inputs: `status.execution`,

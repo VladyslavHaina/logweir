@@ -124,14 +124,47 @@ pub fn bounded(raw: Option<&str>, default: u64, min: u64) -> u64 {
     }
 }
 
-/// [`FAIL_FAST_SECONDS_ENV`]'s effective value.
+/// The one configured value that means **never fail fast** — review round 1,
+/// finding F8's third step.
+///
+/// Zero, and not a sentinel word, because the value is a number of seconds
+/// everywhere else and "0 seconds of patience" is the one reading of zero that
+/// would be actively dangerous: cancel on sight. Giving it the OPPOSITE
+/// meaning is a decision, which is why it is a named constant carrying this
+/// note rather than a bare `0` in a comparison.
+///
+/// **The chart value does not exist yet.** `controller.failFastSeconds` is
+/// W13's (report gap G3). This is the controller half, ready for it, so that
+/// when the value lands its semantics are already written down and tested
+/// rather than invented at the point of use.
+pub const FAIL_FAST_NEVER: u64 = 0;
+
+/// [`FAIL_FAST_SECONDS_ENV`]'s effective value, or `None` for **never**.
+///
+/// `None` is [`FAIL_FAST_NEVER`]: fail-fast is disabled and every Job runs to
+/// its own `activeDeadlineSeconds`. That is the lever for the case the review
+/// identified — a cluster where an external controller (external-secrets, a
+/// vault injector) materialises a Secret a few minutes behind the Job, where a
+/// healthy run would otherwise be cancelled at the 300 s default.
 #[must_use]
-pub fn fail_fast_seconds() -> Duration {
-    Duration::from_secs(bounded_env(
+pub fn fail_fast_seconds() -> Option<Duration> {
+    // READ BEFORE THE FLOOR IS APPLIED. `bounded` clamps 1..59 UP to the
+    // minimum, which is right for a configured patience and wrong for a
+    // request to switch the behaviour off — 0 would come back as 60.
+    if std::env::var(FAIL_FAST_SECONDS_ENV)
+        .ok()
+        .as_deref()
+        .map(str::trim)
+        .and_then(|v| v.parse::<u64>().ok())
+        == Some(FAIL_FAST_NEVER)
+    {
+        return None;
+    }
+    Some(Duration::from_secs(bounded_env(
         FAIL_FAST_SECONDS_ENV,
         FAIL_FAST_SECONDS_DEFAULT,
         FAIL_FAST_SECONDS_MIN,
-    ))
+    )))
 }
 
 /// [`JOB_TTL_SECONDS_ENV`]'s effective value, as the Job field's own type.
@@ -529,6 +562,15 @@ pub struct Facts<'a> {
     /// Events for the Job and the pod, in any order. An EMPTY slice is a legal
     /// input and means "none were read", never "none exist".
     pub events: &'a [EventFact],
+    /// How many pods claimed this Job when more than one did — review finding
+    /// **F11**.
+    ///
+    /// `find_owned_pod_by_selectors` answers a CONTESTED Job with `pod: None`,
+    /// which is the right ACCESS decision (nothing is read) and the wrong
+    /// thing to say out loud: "no pod has appeared" is the opposite of what
+    /// happened. This is what lets the message tell the truth on the one path
+    /// defect SEC-PODLOG exists for.
+    pub contested: usize,
     /// The runner's own phase, from the progress channel — [`parse_progress`].
     pub runner_phase: Option<&'a RunnerPhase>,
     /// This pass's instant. An argument, never a clock read.
@@ -645,13 +687,27 @@ fn waiting_for_pod(facts: &Facts<'_>) -> Option<Diagnosis> {
     if age < WAITING_FOR_POD_GRACE {
         return None;
     }
+    let secs = WAITING_FOR_POD_GRACE.as_secs();
+    let message = if facts.contested > 0 {
+        // PODS EXIST. What does not exist is one this Job can be PROVED to
+        // own, and the terminal answer for that is `PodOwnershipContested`,
+        // which `crash_terminal_state` writes when the Job ends. Saying "no
+        // pod has appeared" here would contradict the namespace the operator
+        // is looking at.
+        format!(
+            "{} pods claim this runner Job as their controller owner and none of them could be \
+             proved to be its own, so none was read and nothing they printed is trusted",
+            facts.contested
+        )
+    } else {
+        format!(
+            "the runner Job has existed for more than {secs} seconds and no pod it controls has \
+             appeared; no Event explains why"
+        )
+    };
     Some(Diagnosis {
         code: Code::WaitingForPod,
-        message: sanitize(&format!(
-            "the runner Job has existed for more than {} seconds and no pod it controls has \
-             appeared; no Event explains why",
-            WAITING_FOR_POD_GRACE.as_secs()
-        )),
+        message: sanitize(&message),
         object_kind: "Job",
         object_name: facts.job.name_any(),
     })
@@ -891,6 +947,32 @@ pub struct Progress {
 ///   is in 3.
 #[must_use]
 pub fn parse_progress(log: &str) -> Progress {
+    parse_progress_after(log, false)
+}
+
+/// [`parse_progress`], told whether the channel has **already** announced
+/// itself on an earlier pass — review finding **F2**.
+///
+/// # Why the gate needs a memory
+///
+/// `progress-contract=` is printed ONCE, at the top of the run
+/// (`docs/stability.md`: "printed once, before the first `progress-phase=`
+/// line"). This controller reads the last [`PROGRESS_TAIL_LINES`] lines. So
+/// the moment a run's merged stdout and stderr pass fifty lines — a matter of
+/// how chatty the run is, not whether — the announcement is outside every
+/// window this controller will ever read, and a gate with no memory would then
+/// decide there is no channel, write `runnerPhase: null` over a phase it had
+/// already recorded, and make D3 §2.5's `Verifying` row unreachable for the
+/// rest of the run.
+///
+/// **A stored phase is itself proof the channel announced itself**, because a
+/// phase can only have been published through this gate. That is the memory,
+/// and it needs no new status field: `announced` is
+/// `stored.runner_phase.is_some()`. Publishing the version (gap G1) would also
+/// fix it and is the better long-term answer; this is what makes that field
+/// optional rather than urgent.
+#[must_use]
+pub fn parse_progress_after(log: &str, announced: bool) -> Progress {
     let mut out = Progress::default();
     for line in log.lines().map(|l| l.trim_end_matches('\r')) {
         if line.len() > PROGRESS_LINE_MAX_BYTES {
@@ -924,7 +1006,7 @@ pub fn parse_progress(log: &str) -> Progress {
     // so the line is used for the one thing it can be used for without a
     // schema change — deciding whether there IS a progress channel — and the
     // field is reported to the shapes owner.
-    if out.contract.is_none() {
+    if out.contract.is_none() && !announced {
         out.phase = None;
     }
     out
@@ -959,12 +1041,24 @@ const CARRIED: &str = "<carried>";
 /// per 30 s, while `RunnerReady=True` and not finished".
 ///
 /// The throttle is keyed on `progress.lastObservedTime`, the only per-object
-/// clock this controller stores. That makes the effective interval the
-/// [`OBSERVED_HEARTBEAT`] of sixty seconds rather than thirty — which
-/// satisfies "at most once per 30 s" strictly, and is the honest consequence
-/// of refusing to add a second timestamp field to a status for the sake of a
-/// log read. A reconciler that kept the interval in memory would lose it on
-/// every restart and read on every pass after one.
+/// clock this controller stores, and it is compared against
+/// [`OBSERVED_HEARTBEAT`] — the interval at which that field actually MOVES.
+///
+/// # Why not against [`PROGRESS_READ_INTERVAL`] — review finding F3
+///
+/// Because the clock is not the reconcile's; it is the stored field's, and
+/// that field is rewritten at most once a minute (E11(d)). Comparing a
+/// once-a-minute timestamp against a thirty-second bound makes the predicate
+/// true at +30 s, +45 s **and** +60 s of every heartbeat cycle — with
+/// `REQUEUE_SECS = 15`, three 64 KiB `pods/log` GETs a minute where §2.4
+/// allows at most two. The first version of this function did exactly that
+/// while its own doc comment claimed the opposite.
+///
+/// So the effective rate is one read per minute. That satisfies "at most once
+/// per 30 s" strictly, and it is the honest consequence of refusing to add a
+/// second timestamp field to a status for the sake of a log read: a reconciler
+/// that kept the interval in memory would lose it on every restart and then
+/// read on every pass until the next heartbeat.
 #[must_use]
 pub fn should_read_progress(
     stored: Option<&RunProgress>,
@@ -977,12 +1071,25 @@ pub fn should_read_progress(
     let Some(last) = stored.and_then(|p| p.last_observed_time) else {
         return true;
     };
-    (now - last)
-        .to_std()
-        .is_ok_and(|d| d >= PROGRESS_READ_INTERVAL)
+    (now - last).to_std().is_ok_and(|d| d >= OBSERVED_HEARTBEAT)
 }
 
 /// The progress read itself — D3 §2.4's bounded `LogParams`.
+///
+/// # The read looks for NEW lines, and an absence is not a retraction
+///
+/// Review finding **F2**. Three things about this window are true at once: the
+/// contract announcement is printed once at the very top of the run and
+/// scrolls out of it; a phase line is printed once per phase and scrolls out
+/// of it too; and [`apply`] writes the WHOLE `progress` object, so whatever
+/// this function does not return is erased rather than left alone.
+///
+/// So `stored` is consulted twice. It supplies the gate's memory (a stored
+/// phase proves the channel announced itself — [`parse_progress_after`]), and
+/// it supplies the answer whenever this window carries no phase line of its
+/// own: a run that has been in phase 6 for two minutes prints nothing new, and
+/// "nothing new" means the phase has not changed, never that there is no
+/// phase.
 ///
 /// # Errors
 ///
@@ -990,8 +1097,13 @@ pub fn should_read_progress(
 /// channel is optional by contract, the pod may have just been garbage
 /// collected, and a reconcile that failed because an optional log read 404ed
 /// would turn a cosmetic field into an outage. The failure is logged and the
-/// answer is an empty [`Progress`].
-pub async fn read_progress(client: &kube::Client, namespace: &str, pod_name: &str) -> Progress {
+/// answer is what the object already said.
+pub async fn read_progress(
+    client: &kube::Client,
+    namespace: &str,
+    pod_name: &str,
+    stored: Option<&RunProgress>,
+) -> Progress {
     let pods: kube::Api<Pod> = kube::Api::namespaced(client.clone(), namespace);
     let params = kube::api::LogParams {
         tail_lines: Some(PROGRESS_TAIL_LINES),
@@ -1000,7 +1112,14 @@ pub async fn read_progress(client: &kube::Client, namespace: &str, pod_name: &st
     };
     match pods.logs(pod_name, &params).await {
         Ok(log) => {
-            let progress = parse_progress(&log);
+            let mut progress =
+                parse_progress_after(&log, stored.is_some_and(|p| p.runner_phase.is_some()));
+            if progress.phase.is_none() {
+                // NO NEW PHASE LINE IN THE WINDOW is not "no phase" — see this
+                // function's header. Carrying is what keeps `runnerPhase` from
+                // blinking out on every pass of a long phase.
+                progress.phase = stored.and_then(|p| p.runner_phase.clone());
+            }
             if progress.ignored > 0 {
                 // D3 §2.4: ignored, never a failure. It is a LOG LINE and not
                 // a `status.progress.diagnostics` entry, and the reason is
@@ -1023,10 +1142,10 @@ pub async fn read_progress(client: &kube::Client, namespace: &str, pod_name: &st
                 namespace,
                 pod = pod_name,
                 %error,
-                "the optional progress read did not return a log; no phase is recorded and \
-                 nothing about the run changes"
+                "the optional progress read did not return a log; the phase the object already \
+                 carries stands and nothing about the run changes"
             );
-            Progress::default()
+            Progress::carried(stored)
         }
     }
 }
@@ -1445,10 +1564,19 @@ pub fn held_for(
         .diagnostics
         .as_ref()?
         .iter()
+        // THE WHOLE DEDUP KEY — `(code, object.kind, object.name)`, D3 §2.3's,
+        // and review finding F10. Matching on the name alone would let a Job
+        // and a Pod of the same name share one `firstSeen`, and "continuously
+        // observed for `failFastSeconds`" would then be measured from another
+        // object's clock. Unreachable today (a Job's pod always carries the
+        // generated suffix) and it is the fail-fast PRECONDITION, so it is
+        // written as the whole key rather than as most of it.
         .find(|d| {
             d.code == diagnosis.code.as_str()
-                && d.object.as_ref().map(|o| o.name.as_str())
-                    == Some(diagnosis.object_name.as_str())
+                && d.object
+                    .as_ref()
+                    .map(|o| (o.kind.as_str(), o.name.as_str()))
+                    == Some((diagnosis.object_kind, diagnosis.object_name.as_str()))
         })?
         .first_seen?;
     (now - first).to_std().ok()
@@ -1552,17 +1680,19 @@ pub async fn observe(
         job,
         pod,
         events: &events,
+        contested: found.contested.len(),
         runner_phase: None,
         now,
     });
     let progress = match (&pod_name, should_read_progress(stored, first.started, now)) {
-        (Some(name), true) => read_progress(client, namespace, name).await,
+        (Some(name), true) => read_progress(client, namespace, name, stored).await,
         _ => Progress::carried(stored),
     };
     let derived = derive(&Facts {
         job,
         pod,
         events: &events,
+        contested: found.contested.len(),
         runner_phase: progress.phase.as_ref(),
         now,
     });
@@ -1598,13 +1728,15 @@ pub async fn fail_fast(
     let Some(diagnosis) = run.derived.diagnosis.as_ref() else {
         return Ok(None);
     };
+    // OFF IS OFF, AND IT IS CHECKED FIRST. `None` means the installation asked
+    // for no fail-fast at all, so no Job is cancelled and every run reaches
+    // its own `activeDeadlineSeconds` exactly as it did before this behaviour
+    // existed.
+    let Some(window) = fail_fast_seconds() else {
+        return Ok(None);
+    };
     let held = held_for(stored, diagnosis, now);
-    if !should_fail_fast(
-        Some(diagnosis),
-        run.derived.started,
-        held,
-        fail_fast_seconds(),
-    ) {
+    if !should_fail_fast(Some(diagnosis), run.derived.started, held, window) {
         return Ok(None);
     }
     let Some(state) = terminal_state(diagnosis) else {
