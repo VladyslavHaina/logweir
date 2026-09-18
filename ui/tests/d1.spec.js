@@ -62,8 +62,12 @@ import {
   cadenceModeOf,
   coverageCell,
   discoveryFailure,
+  RUN_AGAIN_SENTENCE,
+  RUN_NOW_DRAFT_FIELDS,
+  RUN_NOW_FORM,
   intentFor,
   manualRunsOf,
+  mintIntent,
   newIntent,
   policyBody,
   policyValuesOf,
@@ -76,14 +80,17 @@ import {
   renderPolicyForm,
   renderRunNowPanel,
   renderRunNowResult,
+  renderRunNowConflict,
   renderScheduleRevision,
-  resetIntents,
+  offersAnotherRun,
   submitPolicy,
   submitRunNow,
   validatePolicy,
 } from "../pages/schedules.js";
+import { mountSchedules } from "../pages/schedules.js";
 import { renderBackupDetail, renderBackupList } from "../pages/backups.js";
 import { apiClient, resetMode, selectMode } from "../client.js";
+import { dropDraft, formKey, mutationFor, readDraft } from "../lifecycle.js";
 import { decodeCadencePreview, decodeManualBackup, decodePolicyChanged } from "../contract.js";
 
 const FIXTURES = fileURLToPath(new URL("./fixtures/", import.meta.url));
@@ -504,19 +511,59 @@ test("a_login_that_may_not_operate_gets_words_and_not_a_disabled_control", () =>
 // ===========================================================================
 
 test("one_intent_is_one_key_however_many_times_it_is_sent", () => {
-  resetIntents();
-  const first = intentFor("ns/schedule-run-now/nightly");
-  const again = intentFor("ns/schedule-run-now/nightly");
+  const key = formKey("intent-ns", RUN_NOW_FORM, "nightly");
+  dropDraft(key);
+  const first = intentFor(key);
+  const again = intentFor(key);
   assert.equal(first, again,
     "a double click, a retry after a timeout and a Check status all resend ONE key");
   assert.ok(first.length >= 8 && first.length <= 128,
     "the product API takes 8 to 128 visible characters");
-  const other = intentFor("ns/schedule-run-now/weekly");
+  const other = intentFor(formKey("intent-ns", RUN_NOW_FORM, "weekly"));
   assert.notEqual(first, other, "a different schedule is a different intent");
-  const deliberate = newIntent("ns/schedule-run-now/nightly");
+  const deliberate = newIntent(key);
   assert.notEqual(first, deliberate,
     "and a DELIBERATE later backup is a new intent and therefore a new run");
-  resetIntents();
+  dropDraft(key);
+  dropDraft(formKey("intent-ns", RUN_NOW_FORM, "weekly"));
+});
+
+test("the_intent_is_a_field_of_the_draft_and_a_reload_genuinely_ends_it", () => {
+  // REVIEW F3. The first cut composed the key from a module-level counter that
+  // reset on every page load, so the FIRST intent minted after a reload
+  // reproduced the first intent minted before it, byte for byte -- and the
+  // page, `ui/README.md` and `docs/kubernetes.md` all said the opposite. The
+  // row that "held" that sentence asserted only that it was ON SCREEN.
+  //
+  // A RELOAD IS THE DRAFT REGISTRY GOING AWAY, which is what `dropDraft` is
+  // here: there is no browser storage in this tree, so the draft and the
+  // intent are lost together, and the intent is what the draft holds.
+  const key = formKey("reload-ns", RUN_NOW_FORM, "nightly");
+  dropDraft(key);
+  const before = intentFor(key);
+  assert.deepEqual(Object.keys(readDraft(key)), RUN_NOW_DRAFT_FIELDS.slice(),
+    "the intent IS the draft, and the draft holds nothing else");
+  assert.equal(readDraft(key).intent, before);
+  assert.equal(intentFor(key), before, "the same draft keeps its key");
+
+  dropDraft(key); // the reload
+  const after = intentFor(key);
+  assert.notEqual(after, before,
+    "a new draft after a reload is a new intent, so a click after a reload is a NEW run");
+
+  // AND IT IS NOT ORDER-DEPENDENT. The defect was that the key's body was a
+  // counter, so `mint()` twice in two sessions collided. Sixty-four mints are
+  // sixty-four distinct keys.
+  const minted = new Set();
+  for (let i = 0; i < 64; i += 1) {
+    const one = mintIntent();
+    assert.ok(one.length >= 8 && one.length <= 128, "inside the API's budget");
+    assert.match(one, /^logweir-ui\.manual\.[0-9a-f]{32}$/,
+      "random hex, not a counter and not a clock");
+    minted.add(one);
+  }
+  assert.equal(minted.size, 64, "no two mints collide");
+  dropDraft(key);
 });
 
 test("the_body_is_the_schedule_and_the_revision_and_no_policy_at_all", async () => {
@@ -649,7 +696,10 @@ test("a_reload_is_answered_with_the_runs_that_exist_and_not_with_a_replayed_key"
   assert.match(html, /logweir-manual-b/);
   assert.equal(html.indexOf("logweir-backup-tz-20260918-032200"), -1,
     "a scheduled run is not a manual one");
-  assert.match(html, /a new click after a reload is a deliberate NEW run/);
+  assert.match(html, /a click after a reload is a deliberate NEW run and will create a second one/);
+  assert.match(html, /The intent is random, not counted/,
+    "and the sentence now says WHY a new session cannot reproduce an old key -- which is the " +
+      "half review F3 found to be false when the key's body was a counter");
 });
 
 test("a_policy_changed_refusal_carries_the_revision_that_is_in_force_now", () => {
@@ -1080,4 +1130,345 @@ test("legacy_mode_refuses_the_preview_and_the_replace_by_name_and_sends_nothing"
     net.restore();
     resetMode();
   }
+});
+
+// ===========================================================================
+// 9. the mount half: what a save, a second backup and a refusal do to the page
+// ===========================================================================
+//
+// THE THREE ROWS BELOW DRIVE THE REAL WIRING, and they exist because a
+// reviewer's live browser journey found two defects that every pure-function
+// row above was blind to: a successful save left the pre-edit policy on screen
+// at a superseded revision (F1), and a deliberate second manual backup had no
+// path at all (F2). Both are in the mount half, so the mount half is what they
+// assert -- through the same kind of fake node `mutation.spec.js` uses, which
+// keeps the markup the page adopted and answers selectors from it.
+
+function attributesOf(tag) {
+  const out = Object.create(null);
+  const pattern = /([a-zA-Z][\w-]*)(?:="([^"]*)")?/g;
+  const body = tag.replace(/^<\w+/, "").replace(/>$/, "");
+  let match;
+  while ((match = pattern.exec(body)) !== null) {
+    out[match[1]] = match[2] === undefined
+      ? ""
+      : match[2].replace(/&lt;/g, "<").replace(/&gt;/g, ">").replace(/&quot;/g, "\"")
+        .replace(/&#39;/g, "'").replace(/&amp;/g, "&");
+  }
+  return out;
+}
+
+/** `tag`, `#id`, `.class`, `[attr="value"]` and any concatenation of them,
+ *  plus a comma list. Enough for every selector the schedules page uses, and
+ *  no more: a matcher that guessed would make a row pass for the wrong reason. */
+function matches(element, selector) {
+  for (const one of selector.split(",").map((t) => t.trim())) {
+    const tag = /^[a-zA-Z][\w-]*/.exec(one);
+    if (tag !== null && element.tagName !== tag[0].toUpperCase()) {
+      continue;
+    }
+    let ok = true;
+    const rest = one.slice(tag === null ? 0 : tag[0].length);
+    const pattern = /#([\w-]+)|\.([\w-]+)|\[([\w-]+)="([^"]*)"\]/g;
+    let part;
+    while ((part = pattern.exec(rest)) !== null) {
+      if (part[1] !== undefined && element.attributes.id !== part[1]) {
+        ok = false;
+      } else if (part[2] !== undefined &&
+        String(element.attributes.class || "").split(/\s+/).indexOf(part[2]) === -1) {
+        ok = false;
+      } else if (part[3] !== undefined && element.attributes[part[3]] !== part[4]) {
+        ok = false;
+      }
+    }
+    if (ok) {
+      return true;
+    }
+  }
+  return false;
+}
+
+class Fake {
+  constructor(tag, attributes, view) {
+    this.tagName = tag.toUpperCase();
+    this.attributes = attributes;
+    this.view = view;
+    this.children = [];
+    this.listeners = [];
+    this.value = "";
+    this.checked = false;
+    this.disabled = "disabled" in attributes;
+  }
+  get firstChild() { return this.children.length === 0 ? null : this.children[0]; }
+  removeChild(child) { this.children.splice(this.children.indexOf(child), 1); return child; }
+  appendChild(child) {
+    this.children.push(child);
+    if (child && typeof child.html === "string") {
+      this.view.adopt(child.html, this.isRoot === true, this);
+    }
+    return child;
+  }
+  addEventListener(type, handler) { this.listeners.push({ type: type, handler: handler }); }
+  setAttribute(name, value) { this.attributes[name] = String(value); }
+  getAttribute(name) { return name in this.attributes ? this.attributes[name] : null; }
+  focus() {}
+  querySelector(selector) { return this.view.find(selector); }
+  querySelectorAll(selector) { return this.view.findAll(selector); }
+  async dispatch(type) {
+    for (const entry of this.listeners.slice()) {
+      if (entry.type === type) {
+        await entry.handler({ preventDefault() {} });
+      }
+    }
+  }
+}
+
+function fakeView() {
+  const view = {
+    chunks: [],
+    adopt(html, fromRoot, owner) {
+      if (fromRoot) {
+        view.chunks = [];
+      } else if (owner !== undefined && owner.slotOf !== undefined) {
+        // A slot replace supersedes whatever that slot held before.
+        view.chunks = view.chunks.filter((c) => c.slot !== owner.slotOf);
+      }
+      view.chunks.push({
+        html: html, elements: null, slot: owner === undefined ? null : (owner.slotOf || null),
+      });
+    },
+    html() { return view.chunks.map((c) => c.html).join(""); },
+    elementsOf(chunk) {
+      if (chunk.elements !== null) {
+        return chunk.elements;
+      }
+      const elements = [];
+      const tag = /<(input|select|button|form|div|section|p)\b[^>]*>/g;
+      let match;
+      while ((match = tag.exec(chunk.html)) !== null) {
+        const element = new Fake(match[1], attributesOf(match[0]), view);
+        element.start = match.index;
+        if (match[1] === "input") {
+          element.value = element.attributes.value || "";
+          element.checked = "checked" in element.attributes;
+        } else if (match[1] === "select") {
+          const end = chunk.html.indexOf("</select>", match.index);
+          const chosen = /<option value="([^"]*)" selected>/.exec(chunk.html.slice(match.index, end)) ||
+            /<option value="([^"]*)"/.exec(chunk.html.slice(match.index, end));
+          element.value = chosen === null ? "" : chosen[1];
+        } else if (match[1] === "form") {
+          element.end = chunk.html.indexOf("</form>", match.index);
+        } else if (match[1] === "div" &&
+          (element.attributes["data-policy-slot"] || element.attributes["data-run-now-slot"])) {
+          element.slotOf = element.attributes["data-policy-slot"] === undefined
+            ? "run:" + element.attributes["data-run-now-slot"]
+            : "policy:" + element.attributes["data-policy-slot"];
+        }
+        elements.push(element);
+      }
+      for (const form of elements.filter((e) => e.tagName === "FORM")) {
+        const inside = elements.filter((e) => e.start > form.start && e.start < form.end);
+        form.elements = Object.create(null);
+        for (const control of inside) {
+          if (["INPUT", "SELECT"].indexOf(control.tagName) !== -1 && control.attributes.name) {
+            form.elements[control.attributes.name] = control;
+          }
+        }
+        form.querySelectorAll = (selector) => inside.filter((e) => matches(e, selector));
+      }
+      chunk.elements = elements;
+      return elements;
+    },
+    find(selector) {
+      for (let i = view.chunks.length - 1; i >= 0; i -= 1) {
+        const found = view.elementsOf(view.chunks[i]).find((e) => matches(e, selector));
+        if (found !== undefined) {
+          return found;
+        }
+      }
+      return null;
+    },
+    findAll(selector) {
+      const all = [];
+      for (const chunk of view.chunks) {
+        for (const element of view.elementsOf(chunk)) {
+          if (matches(element, selector)) {
+            all.push(element);
+          }
+        }
+      }
+      return all;
+    },
+  };
+  const root = new Fake("main", Object.create(null), view);
+  root.isRoot = true;
+  view.root = root;
+  return view;
+}
+
+const parse = (html) => [{ html: html }];
+// The route token `createRouteLifecycle` hands a mount: a signal and the
+// question "is this still the current route". Built by hand here rather than
+// imported so these rows carry no navigation of their own.
+const LIFE = () => ({ generation: 1, signal: undefined, isCurrent: () => true });
+
+/** A schedules page mounted over a stubbed adapter. `objects` is called for
+ *  each `list(backupschedules)`, so a re-read can answer differently. */
+function mountedPage(ns, objects, overrides) {
+  const view = fakeView();
+  const calls = { list: 0 };
+  const api = Object.assign({
+    list(namespace, plural) {
+      if (plural === "backupschedules") {
+        calls.list += 1;
+        return Promise.resolve({ items: [objects(calls.list)] });
+      }
+      return Promise.resolve({ items: [] });
+    },
+    destinations() { return Promise.reject(new Error("no destinations route in this stub")); },
+  }, overrides || {});
+  return { view: view, api: api, calls: calls, ns: ns };
+}
+
+test("a_successful_policy_save_re_reads_and_shows_the_stored_revision", async () => {
+  // REVIEW F1, MEASURED LIVE: the form and the card kept showing the pre-edit
+  // policy at g3 while the API server held g4. `wirePolicy`'s success arm
+  // repainted from the object captured at mount; the suspend toggle has always
+  // re-read instead, and now so does this.
+  const at = (generation, expression) => {
+    const object = JSON.parse(JSON.stringify(SCHEDULE));
+    object.metadata.generation = generation;
+    object.spec.schedule = expression;
+    object.status.observedGeneration = generation;
+    object.status.policy.generation = generation;
+    return object;
+  };
+  const saved = at(4, "15 4 * * *");
+  const page = mountedPage("f1-ns", (n) => (n === 1 ? at(3, "7 9 * * *") : saved), {
+    editSchedulePolicy() { return Promise.resolve(saved); },
+  });
+  await mountSchedules(page.view.root, page.ns, parse, LIFE(), page.api);
+  assert.equal(page.calls.list, 1);
+  assert.match(page.view.html(), /data-editing-generation="3"/, "the form opened at g3");
+
+  const form = page.view.find("form.policy-form[data-name=\"tz\"]");
+  assert.ok(form !== null, "the policy form is on the page");
+  await form.dispatch("submit");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+
+  assert.equal(page.calls.list, 2, "a successful save RE-READS rather than repainting a stale copy");
+  const html = page.view.html();
+  assert.match(html, /data-editing-generation="4"/,
+    "and the form is now open at the revision the response carried");
+  assert.match(html, /revision g4/);
+  assert.equal(html.indexOf("data-editing-generation=\"3\""), -1,
+    "the superseded revision is gone from the page, not merely outnumbered");
+  assert.match(html, /15 4 \* \* \*/, "and the stored expression is what is rendered");
+});
+
+test("a_deliberate_second_backup_mints_a_new_intent_and_creates_another_run", async () => {
+  // REVIEW F2. PLAT-06.2's acceptance is "repeated clicks create one requested
+  // run; A DELIBERATE LATER BACKUP CREATES ANOTHER". `newIntent` existed,
+  // was unit-tested and was called by nothing, so the second clause had no
+  // path: every click on a schedule resent the one intent it ever had, and a
+  // console could take exactly one manual backup of it, ever.
+  const answer = console_("manual-backup.json");
+  const keys = [];
+  const object = JSON.parse(JSON.stringify(SCHEDULE));
+  const page = mountedPage("f2-ns", () => object, {
+    runBackupNow(ns, body, key) {
+      keys.push(key);
+      return Promise.resolve({
+        replayed: keys.length > 1 && keys[keys.length - 1] === keys[keys.length - 2],
+        schedule: answer.schedule,
+        run: {
+          metadata: { name: "logweir-manual-" + String(keys.length), namespace: ns },
+          spec: { trigger: { kind: "Manual", attempt: 0 }, scheduleRef: answer.item.scheduleRef },
+        },
+      });
+    },
+  });
+  await mountSchedules(page.view.root, page.ns, parse, LIFE(), page.api);
+
+  const form = page.view.find("form.run-now-form[data-name=\"tz\"]");
+  assert.ok(form !== null);
+  await form.dispatch("submit");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(keys.length, 1);
+  assert.match(page.view.html(), /logweir-manual-1/, "the run is on screen");
+
+  // A SECOND SUBMIT WITHOUT THE CONTROL IS THE SAME REQUEST. That half was
+  // already true and stays true: the intent has not ended.
+  const again = page.view.find("form.run-now-form[data-name=\"tz\"]");
+  await again.dispatch("submit");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.deepEqual(keys[1], keys[0], "a repeat click resends the one intent");
+
+  // AND THE CONTROL IS WHAT ENDS IT.
+  const another = page.view.find("button[data-run-again=\"tz\"]");
+  assert.ok(another !== null, "the panel offers Back up again once a run exists");
+  await another.dispatch("click");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const third = page.view.find("form.run-now-form[data-name=\"tz\"]");
+  await third.dispatch("submit");
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(keys.length, 3);
+  assert.notEqual(keys[2], keys[0],
+    "a deliberate later backup is a NEW intent, so the API creates a second run");
+  assert.match(page.view.html(), /logweir-manual-3/);
+});
+
+test("a_policy_changed_refusal_shows_the_revision_in_force_and_offers_a_new_intent", () => {
+  // REVIEW F2's other half. `ui/client.js` decoded the 409's one extension
+  // member onto the error and no page read it, so D1 section 8.5's Conflict row
+  // -- "show the new revision; confirmation starts a new intent" -- was
+  // unimplemented in both halves.
+  const conflict = {
+    phase: "failed",
+    kind: "conflict",
+    error: {
+      reason: "policy_changed",
+      message: "the schedule's policy changed",
+      policy: { currentGeneration: 9, currentRunPolicySha256: "sha256:abc123" },
+    },
+  };
+  const line = renderRunNowConflict(conflict);
+  assert.match(line, /data-run-now-conflict="policy_changed"/);
+  assert.match(line, /revision g9/, "the revision that is in force NOW, from the extension member");
+  assert.match(line, /sha256:abc123/);
+  assert.match(line, /expectedGeneration exists to prevent/);
+  assert.ok(offersAnotherRun({ state: conflict }),
+    "and the control that mints a new intent is offered, because that is the only answer");
+
+  const used = {
+    phase: "failed", kind: "conflict",
+    error: { reason: "idempotency_conflict", message: "already used with a different request" },
+  };
+  assert.match(renderRunNowConflict(used), /data-run-now-conflict="idempotency_conflict"/);
+  assert.match(renderRunNowConflict(used), /Back up again mints a new intent/);
+  assert.ok(offersAnotherRun({ state: used }));
+
+  // EVERY OTHER REFUSAL IS THE GENERIC ONE, and offers no new intent: a 403 or
+  // a 422 is not answered by spending a fresh key on the same bad request.
+  const forbidden = { phase: "failed", kind: "rejected", error: { reason: "forbidden" } };
+  assert.equal(renderRunNowConflict(forbidden), "");
+  assert.equal(offersAnotherRun({ state: forbidden }), false);
+  assert.equal(offersAnotherRun({ state: { phase: "idle" } }), false);
+  assert.ok(RUN_AGAIN_SENTENCE.indexOf("starts a SECOND run") !== -1);
+});
+
+test("an_unknown_outcome_on_a_manual_run_names_the_key_and_no_empty_name", () => {
+  // REVIEW F4. `mutationStatus`'s unknown-outcome copy was written for creates
+  // whose name IS their idempotence. A manual run has no name until the server
+  // derives one, so the rendered sentence read "it reuses the name , and" --
+  // an empty name, and the wrong reason it is safe to click again.
+  const html = renderRunNowPanel({
+    ns: "ns", name: "tz", object: SCHEDULE, mayOperate: true, runs: [],
+    state: { phase: "failed", kind: "unknown", timedOut: true, error: { message: "no answer" } },
+  });
+  assert.match(html, /whether Backup was created is unknown/);
+  assert.match(html, /resends the idempotency key this click is holding/);
+  assert.equal(html.indexOf("it reuses the name"), -1,
+    "the name sentence is false of this route and is not rendered for it");
+  assert.equal(html.indexOf("Backup :"), -1, "and no sentence carries an empty name");
 });

@@ -822,11 +822,18 @@ export function mutationStatus(state, subject, unmatched) {
   const who = subject || {};
   const kind = esc(who.kind);
   const name = esc(who.name);
+  // A SUBJECT WITH NO NAME IS A KIND, NOT A KIND AND A GAP (review F4). Every
+  // create in this tree until D1 W7 named its object BEFORE sending it -- that
+  // name is what made the create idempotent -- so `kind + " " + name` was
+  // always two words. A manual `Backup` has no name until the server derives
+  // one from the authenticated subject, so its subject carries `name: ""` and
+  // every sentence below would have read "Backup : sent" with a hole in it.
+  const subject_ = name.length > 0 ? kind + " " + name : kind;
   const patch = who.verb === "patch";
   if (s.phase === "pending") {
     return statusRegion(
       "pending",
-      "<p>" + kind + " " + name + ": sent, waiting for the API server. Submitting again is " +
+      "<p>" + subject_ + ": sent, waiting for the API server. Submitting again is " +
         "disabled until it answers, so one click makes one request.</p>",
     );
   }
@@ -839,8 +846,8 @@ export function mutationStatus(state, subject, unmatched) {
     if (patch) {
       return statusRegion(
         "succeeded",
-        "<p>" + esc(who.field) + " is now " + esc(String(who.value)) + " on " + kind + " " +
-          name + ". Nothing was created.</p>",
+        "<p>" + esc(who.field) + " is now " + esc(String(who.value)) + " on " + subject_ +
+          ". Nothing was created.</p>",
       );
     }
     return statusRegion(
@@ -864,7 +871,7 @@ export function mutationStatus(state, subject, unmatched) {
       : "No answer reached this page";
     return statusRegion(
       "unknown",
-      "<p>" + silence + ", so " + unknownOutcome(who, patch, kind, name) + "</p>" +
+      "<p>" + silence + ", so " + unknownOutcome(who, patch, kind, name, subject_) + "</p>" +
         errorBlock(error, false),
     );
   }
@@ -883,7 +890,7 @@ export function mutationStatus(state, subject, unmatched) {
   if (s.kind === "invalid") {
     return statusRegion(
       "failed",
-      "<p>" + kind + " " + name + (patch
+      "<p>" + subject_ + (patch
         ? " was not changed: the API server refused the change."
         : " was not created: fix the fields marked below." + kept) + "</p>" +
         extra + (typeof error.status === "number" ? errorBlock(error, false) : ""),
@@ -897,17 +904,31 @@ export function mutationStatus(state, subject, unmatched) {
   }
   return statusRegion(
     "failed",
-    "<p>The API server refused " + (patch ? "the change to " : "") + kind + " " + name + "." +
+    "<p>The API server refused " + (patch ? "the change to " : "") + subject_ + "." +
       (patch ? " Nothing was changed." : kept) + "</p>" + extra + errorBlock(error, false),
   );
 }
 
 /** What an unknown outcome leaves undecided, and what repeating the request
  *  would actually do. One sentence per verb, each true of its own request. */
-function unknownOutcome(who, patch, kind, name) {
+function unknownOutcome(who, patch, kind, name, subject_) {
+  // AND FOR A ROUTE WHOSE IDEMPOTENCE IS A KEY, THE SENTENCE IS ABOUT THE KEY
+  // (review F4). "It reuses the name" is true of every create this page made
+  // until D1 W7 and is false of a manual `Backup`: the product API derives
+  // that name itself, and what makes the resend safe is the `Idempotency-Key`
+  // the click is holding. Rendering the name sentence there printed an empty
+  // name AND told an operator the wrong reason it was safe to click again.
+  if (who.idempotencyKey === true) {
+    return (
+      "whether " + subject_ + " was created is unknown." + keptClause(who) + " Submitting again " +
+      "is safe, and it is the RIGHT thing to do: it resends the idempotency key this click is " +
+      "holding, and the API answers a repeat of that key with the run the first request made " +
+      "rather than starting a second one."
+    );
+  }
   if (patch) {
     return (
-      "whether " + kind + " " + name + " was changed is unknown. Nothing was created either " +
+      "whether " + subject_ + " was changed is unknown. Nothing was created either " +
       "way: the request sets " + esc(who.field) + " to " + esc(String(who.value)) + " on an " +
       "object that already exists. Sending it again sets the same field to the same value, so " +
       "it either makes the change or finds it already made."
@@ -915,13 +936,13 @@ function unknownOutcome(who, patch, kind, name) {
   }
   if (who.resubmits === false) {
     return (
-      "whether " + kind + " " + name + " was created is unknown. The values on this page have " +
+      "whether " + subject_ + " was created is unknown. The values on this page have " +
       "changed since it was sent, so submitting now is a DIFFERENT request under a different " +
       "name and would not settle this one; " + name + " stays unknown until it is opened."
     );
   }
   return (
-    "whether " + kind + " " + name + " was created is unknown." + keptClause(who) + " Submitting " +
+    "whether " + subject_ + " was created is unknown." + keptClause(who) + " Submitting " +
     "again is safe: it reuses the name " + name + ", and an object that already exists with " +
     "exactly this content is recognised instead of duplicated."
   );

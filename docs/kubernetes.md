@@ -4861,7 +4861,11 @@ prefilling it -- a blank input means "do not set this field", and prefilling
 `3600` would turn every save into a schedule that pins what it used to inherit.
 `sourceRef` is never sent: the route carries it only to refuse it. A schedule
 whose `generation` this build does not publish gets no form at all, because the
-precondition IS that revision.
+precondition IS that revision. A successful save RE-READS the schedule and
+renders what the API server then holds, the way the suspend toggle does: the
+revision the panel was opened at is superseded by the save itself, and a second
+save from a stale screen would be refused `412` with nothing on screen saying
+why.
 
 **The browser evaluates no cron.** A preset is compiled to its canonical
 expression by `GET /api/v1/cadence-previews`, against the same `chrono-tz`
@@ -4876,13 +4880,21 @@ absent `nextRuns` is not an empty one, and the only staleness signal the page
 reads is `nextRuns[0].at` in the past -- **not** `status.policy.evaluatedAt`,
 which is when the status last moved and stands still on a healthy schedule.
 
-**A manual run is one run per intent.** The console holds one
-`Idempotency-Key` per draft in memory, so a double click, a retry after a
-timeout and a "Check status" all return the same run with `replayed: true`; a
-deliberate later backup is a new intent and a new run. A reload cannot keep the
-key -- nothing in this console is stored in the browser -- so the panel lists
-the manual runs of that schedule that already exist instead, and says that a
-click after a reload is a new run. Nothing blocks a manual run: a suspended
+**A manual run is one run per intent, and the intent is a field of the form's
+draft.** Its value is `logweir-ui.manual.` plus 32 random hex characters, so a
+double click, a retry after a timeout and a "Check status" all read the same
+field, send the same key and return the same run with `replayed: true`. A
+reload loses the draft and therefore the intent -- nothing in this console is
+stored in the browser, and a random body cannot be reproduced by a later
+session the way a counter could -- so a click after a reload is a deliberate
+NEW run and creates a second one; the panel lists the manual runs that already
+exist so the reader sees the first before deciding. **"Back up again"** is the
+only control that mints a new intent, and it appears once a run exists or once
+the API has refused with a `409`; that is PLAT-06.2's "a deliberate later
+backup creates another". A `409 policy_changed` renders the revision in force
+now, from the problem document's one extension member, and a `409
+idempotency_conflict` says the intent was spent on a different request; both
+offer that control, and no other refusal does. Nothing blocks a manual run: a suspended
 schedule and an active run are notices, and a suspended schedule stays
 suspended. A suspended schedule or a `notReady` preflight requires a second
 explicit confirmation carrying the object's own recorded reason, and confirming

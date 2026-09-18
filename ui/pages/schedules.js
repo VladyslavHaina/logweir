@@ -53,6 +53,7 @@ import {
   mutationFor,
   readDraft,
   readOptions,
+  refusal,
   watchMutation,
 } from "../lifecycle.js";
 import { INCOMPLETE_DISCOVERY_POLICIES } from "../contract.js";
@@ -2436,7 +2437,7 @@ export function renderPolicyPreview(preview, values) {
 
 // ------------------------------------------------------- Back up now
 
-// THE INTENT, AND WHY IT LIVES IN THIS MODULE'S MEMORY.
+// THE INTENT IS A FIELD OF THE DRAFT, AND ITS LIFETIME IS THE DRAFT'S.
 //
 // A manual run has NO NAME UNTIL THE SERVER DERIVES ONE, so the trick every
 // other create on this page uses -- creating the same name twice is
@@ -2444,57 +2445,94 @@ export function renderPolicyPreview(preview, values) {
 // it is the product API's `Idempotency-Key`: the same key returns the same
 // run, with `replayed: true`, however many times it is sent.
 //
-// ONE KEY PER INTENT, NOT PER CLICK AND NOT PER REQUEST. The key is minted
-// when a person first asks for a run of this schedule and kept for as long as
-// that intent lives, so a double click, a retry after a timeout and a "Check
-// status" on an unknown outcome all resend the SAME key and all get the SAME
-// run. A DELIBERATE second backup is a new intent and therefore a new key --
-// which is the acceptance criterion's other half: repeated clicks make one
-// run, and a later backup makes another.
+// THE FIRST CUT OF THIS COMPOSED THE KEY FROM A MODULE-LEVEL COUNTER, and that
+// was a defect a live review caught (review F3). `intentCounter` resets on
+// every page load, so the FIRST intent minted after a reload reproduced the
+// first intent minted before it, byte for byte -- and the second one did not.
+// A click after a reload was therefore sometimes a replay of the earlier run,
+// sometimes a `409 idempotency_conflict`, and sometimes a new run, decided by
+// the order the previous page load happened to mint intents in. The page's own
+// sentence, `ui/README.md` and `docs/kubernetes.md` section 16 all said the
+// opposite, and the row that "held" it asserted only that the sentence was ON
+// SCREEN, never that it was true.
 //
-// A RELOAD LOSES IT, AND THAT IS NOT A BUG THIS PAGE CAN FIX. There is no
-// browser storage anywhere in this tree -- `scripts/check-ui-offline.sh` fails
-// the build over the byte sequences that would introduce one -- so a key
-// cannot survive a refresh, and a key derived from the clock or from the form
-// would not be one key per intent. What the page does instead is SHOW THE RUN:
-// after a reload the panel lists the manual runs of this schedule that already
-// exist, newest first, so the person sees the run their click made rather than
-// wondering and clicking again. D1 section 8.5's "After refresh" row is this
-// behaviour, and the sentence below is on screen.
-const intents = new Map();
-let intentCounter = 0;
+// SO THE KEY IS NOW A DRAFT FIELD, WITH A RANDOM BODY.
+//
+//   * ONE INTENT PER DRAFT. `lifecycle.js`'s draft registry is keyed by
+//     `formKey(ns, RUN_NOW_FORM, schedule)`, which is exactly the scope an
+//     intent has. Every resend of that intent -- a double click, a retry after
+//     a timeout, a "Check status" on an unknown outcome -- reads the same
+//     field and sends the same key, and the API answers with the same run.
+//   * A RELOAD LOSES IT, GENUINELY. The draft registry is module state and
+//     there is no browser storage anywhere in this tree
+//     (`scripts/check-ui-offline.sh` fails the build over the byte sequences
+//     that would introduce one), so the draft and the key go together -- and
+//     because the body is RANDOM rather than a counter, a new page load cannot
+//     reproduce an old key even by accident. The sentence "a click after a
+//     reload is a deliberate NEW run" is now true.
+//   * A DURABLE RUN ENDS THE DRAFT. Once a run exists the panel offers "Back
+//     up again", which drops the draft and therefore mints a new intent --
+//     PLAT-06.2's second acceptance clause, "a deliberate later backup creates
+//     another", which was unreachable before (review F2).
+//
+// PLAT-13.2's draft rules apply unchanged: the field is a declared one, it is
+// a string, and it is no more a credential than a Secret's name is.
 
-/** The idempotency intent for `key`, minted on first use. */
-export function intentFor(key) {
-  let held = intents.get(key);
-  if (held === undefined) {
-    intentCounter += 1;
-    held = "logweir-ui.manual." + String(intentCounter) + "." + String(key);
-    // The product API takes 8 to 128 visible ASCII characters. A long
-    // namespace and a long schedule name together can exceed that, so an
-    // over-long composition is shortened deterministically rather than
-    // truncated -- truncation would make two intents one key.
-    if (held.length > 128) {
-      held = "logweir-ui.manual." + String(intentCounter) + ".h" +
-        String(key.length) + "." + String(key).slice(0, 80);
-    }
-    intents.set(key, held);
+/** The one field a manual-run draft keeps: the idempotency intent. */
+export const RUN_NOW_DRAFT_FIELDS = Object.freeze(["intent"]);
+
+/** A fresh intent. `logweir-ui.manual.` plus 32 random hex characters -- 50
+ *  characters, well inside the product API's 8-to-128 budget.
+ *
+ *  RANDOM, NOT ORDERED AND NOT TIMED. A counter collides across page loads
+ *  (review F3) and a clock collides between two tabs opened in the same
+ *  millisecond; `getRandomValues` does neither, and it is available in an
+ *  insecure context, unlike `randomUUID`, so this does not narrow where the
+ *  page can be served from.
+ *
+ *  A BROWSER WITH NO `crypto` GETS A REFUSAL AND NOT A WEAKER KEY. There is no
+ *  fallback here on purpose: a key this page could not make unique is a key
+ *  that could silently replay somebody else's run, and refusing to mint one is
+ *  the only honest answer. Nothing in this tree can reach that branch --
+ *  `ui/plan.js` already refuses to load outside a secure context -- and it is
+ *  written down rather than assumed. */
+export function mintIntent() {
+  const source = globalThis.crypto;
+  if (source === undefined || source === null || typeof source.getRandomValues !== "function") {
+    throw refusal(
+      "this page will not create a manual backup here: minting an idempotency key needs the " +
+        "platform's random source, and it is unavailable. Without a unique key a second click " +
+        "could return somebody else's run instead of starting yours.",
+    );
   }
-  return held;
+  const bytes = source.getRandomValues(new Uint8Array(16));
+  let hex = "";
+  for (const byte of bytes) {
+    hex += byte.toString(16).padStart(2, "0");
+  }
+  return "logweir-ui.manual." + hex;
 }
 
-/** Abandons the intent held for `key`, so the next click is a NEW run. Called
- *  when a person deliberately asks for another backup, and when a `409
- *  policy_changed` is confirmed against the revision that is now in force. */
+/** The idempotency intent held by the draft at `key`, minted on first use and
+ *  kept in that draft for as long as it lives. */
+export function intentFor(key) {
+  const draft = readDraft(key);
+  const held = draft === null ? undefined : draft.intent;
+  if (typeof held === "string" && held.length >= 8) {
+    return held;
+  }
+  const minted = mintIntent();
+  keepDraft(key, { intent: minted }, RUN_NOW_DRAFT_FIELDS);
+  return minted;
+}
+
+/** Ends the intent at `key` and mints the next one. This is what "Back up
+ *  again" does: the run the previous intent made still exists and is still on
+ *  screen, and the next click is a DIFFERENT request that creates a second
+ *  run. */
 export function newIntent(key) {
-  intents.delete(key);
+  dropDraft(key);
   return intentFor(key);
-}
-
-/** Forgets every intent. The suite's reset; nothing on the page calls it. */
-export function resetIntents() {
-  intents.clear();
-  intentCounter = 0;
 }
 
 /** What a manual run is, and what it is not. */
@@ -2522,9 +2560,11 @@ export const READINESS_NOT_CHECKED =
 
 /** What a refresh costs, on screen. */
 export const AFTER_REFRESH_SENTENCE =
-  "Reloading this page forgets the idempotency key a click holds, because nothing in this " +
-  "console is stored in the browser. The manual runs below are what already exists: read them " +
-  "before clicking again, because a new click after a reload is a deliberate NEW run.";
+  "Reloading this page forgets the idempotency intent a click holds, because that intent is a " +
+  "field of this form's draft and nothing in this console is stored in the browser. The intent " +
+  "is random, not counted, so a new page load cannot reproduce an old one by accident. The manual " +
+  "runs below are what already exists: read them before clicking again, because a click after a " +
+  "reload is a deliberate NEW run and will create a second one.";
 
 /** The manual runs of one schedule, newest first, from the Backups this page
  *  read. A run is manual when its own recorded trigger says so. */
@@ -2539,6 +2579,75 @@ export function manualRunsOf(schedule, backups) {
     .slice()
     .sort((a, b) => String(((b || {}).metadata || {}).creationTimestamp || "")
       .localeCompare(String(((a || {}).metadata || {}).creationTimestamp || "")));
+}
+
+/** What "Back up again" does, said before it is clicked. */
+export const RUN_AGAIN_SENTENCE =
+  "Back up again starts a SECOND run. The run below keeps its own identity and its own frozen " +
+  "revision; this mints a new idempotency intent, so the API treats the next click as the new " +
+  "request it is rather than as a repeat of the one that made that run.";
+
+/** What a `409 policy_changed` means here, in the words D1 section 8.5 uses. */
+export const POLICY_CHANGED_SENTENCE =
+  "The schedule's policy moved after the revision this panel was rendered at, so nothing was " +
+  "created: a manual run copies the revision it names, and running a revision you have not seen " +
+  "is exactly what expectedGeneration exists to prevent. Reload the page to see the policy that " +
+  "is in force, then Back up again to run it.";
+
+/** What a `409 idempotency_conflict` means here. */
+export const INTENT_USED_SENTENCE =
+  "The idempotency intent this panel is holding was already spent on a DIFFERENT request, so the " +
+  "API refused rather than guessing which of the two you meant. Back up again mints a new intent, " +
+  "which is the answer the problem document asks for.";
+
+/** THE REFUSAL THAT CARRIES A FACT, RENDERED (review F2).
+ *
+ *  `ui/client.js` decodes the `policy` extension member of a
+ *  `409 policy_changed` onto the error -- the only extension member this API
+ *  defines -- and until this existed no page read it. The revision that is in
+ *  force NOW is the one thing a person needs in order to decide what to do
+ *  next, so it is on screen, and both 409s are followed by the control that
+ *  makes the next click a new request. */
+export function renderRunNowConflict(state) {
+  const s = state || {};
+  if (s.phase !== "failed") {
+    return "";
+  }
+  const error = s.error || {};
+  if (error.reason === "policy_changed") {
+    const policy = error.policy || null;
+    return (
+      "<p class=\"note\" data-run-now-conflict=\"policy_changed\">" +
+      badge("unverified", "policy changed") + " " + esc(POLICY_CHANGED_SENTENCE) +
+      (policy === null
+        ? ""
+        : " The revision in force now is " + revisionLine({
+          generation: policy.currentGeneration,
+          runPolicySha256: policy.currentRunPolicySha256,
+        }) + ".") +
+      "</p>"
+    );
+  }
+  if (error.reason === "idempotency_conflict") {
+    return (
+      "<p class=\"note\" data-run-now-conflict=\"idempotency_conflict\">" +
+      badge("unverified", "intent already used") + " " + esc(INTENT_USED_SENTENCE) + "</p>"
+    );
+  }
+  return "";
+}
+
+/** Whether the panel should offer "Back up again": a run this click produced,
+ *  or a refusal whose only answer is a new intent. */
+export function offersAnotherRun(view) {
+  const v = view || {};
+  if (v.result !== null && v.result !== undefined) {
+    return true;
+  }
+  const state = v.state || {};
+  const reason = (state.error || {}).reason;
+  return state.phase === "failed" &&
+    (reason === "policy_changed" || reason === "idempotency_conflict");
 }
 
 /** THE "BACK UP NOW" PANEL for one schedule.
@@ -2569,6 +2678,7 @@ export function renderRunNowPanel(view) {
   const verdict = readiness === null ? null : readiness.state;
   const mustConfirm = suspended || verdict === "notReady";
   const acknowledged = v.acknowledged === true;
+  const another = offersAnotherRun(v);
   const first = runs.length === 0 && status.lastFireTime === undefined;
   if (v.mayOperate === false) {
     return (
@@ -2609,9 +2719,26 @@ export function renderRunNowPanel(view) {
           : "") +
         "<div class=\"actions\"><button type=\"submit\"" +
         (pending || (mustConfirm && !acknowledged) ? " disabled" : "") + ">" +
-        (first ? "Run first backup now" : "Back up now") + "</button></div>" +
+        (first ? "Run first backup now" : "Back up now") + "</button>" +
+        // THE SECOND RUN'S CONTROL, AND THE ONLY THING THAT MINTS A NEW INTENT
+        // (review F2). PLAT-06.2's acceptance is "repeated clicks create one
+        // requested run; a DELIBERATE LATER BACKUP CREATES ANOTHER", and until
+        // this button existed the second clause had no route at all: every
+        // click on a schedule resent the one intent that schedule ever had, so
+        // a console could take exactly one manual backup of it, ever.
+        (another
+          ? "<button type=\"button\" data-run-again=\"" + esc(name) + "\"" +
+            (pending ? " disabled" : "") + ">Back up again</button>"
+          : "") +
+        "</div>" +
+        (another ? "<p class=\"help\">" + esc(RUN_AGAIN_SENTENCE) + "</p>" : "") +
         "<div class=\"form-status\" data-run-now-status=\"" + esc(name) + "\" tabindex=\"-1\">" +
-        mutationStatus(state, { kind: "Backup", name: "" }, null) + "</div>" +
+        // `idempotencyKey: true` PICKS THE SENTENCE THAT IS TRUE OF THIS ROUTE
+        // (review F4): what makes a resend safe here is the key this click
+        // holds, not a name -- there is no name until the server derives one.
+        mutationStatus(state, { kind: "Backup", name: "", idempotencyKey: true }, null) +
+        renderRunNowConflict(state) +
+        "</div>" +
         "</form>") +
     renderRunNowResult(v.ns, v.result) +
     "<p class=\"note\">" + esc(AFTER_REFRESH_SENTENCE) + "</p>" +
@@ -2823,7 +2950,21 @@ function wirePolicy(node, ns, parse, lifecycle, api, object, backups, extra) {
   const own = extra.cards[name] || (extra.cards[name] = {});
   const remember = () => keepDraft(key, readPolicyValues(form), POLICY_DRAFT_FIELDS);
 
-  watchMutation(node, key, mutation, () => {
+  watchMutation(node, key, mutation, (state) => {
+    // A SUCCESSFUL SAVE RE-READS, EXACTLY AS THE SUSPEND TOGGLE DOES
+    // (review F1). `repaintCard` renders from `object`, which is the copy this
+    // mount captured BEFORE the edit, so repainting on success showed the
+    // operator the policy they had just replaced, at a revision that no longer
+    // existed, with nothing saying so -- and a second save from that screen
+    // resent the pre-edit policy under a stale `expectedGeneration` and was
+    // refused `412` for a reason the reader could not see. The answer is not a
+    // cleverer repaint: it is to read the object the API server now holds. The
+    // record is cleared first so the remount does not re-enter this arm.
+    if (state.phase === "succeeded") {
+      mutation.clear();
+      mountSchedules(node, ns, parse, lifecycle, api);
+      return;
+    }
     repaintCard(node, ns, parse, lifecycle, api, object, backups, extra);
   }, lifecycle);
 
@@ -2941,6 +3082,24 @@ function wireRunNow(node, ns, parse, lifecycle, api, object, backups, extra) {
   if (acknowledge !== null) {
     listen(acknowledge, "change", () => {
       own.acknowledged = acknowledge.checked === true;
+      repaintCard(node, ns, parse, lifecycle, api, object, backups, extra);
+    }, lifecycle);
+  }
+
+  // BACK UP AGAIN: drop this draft, which ends its intent, and clear the
+  // record so the panel goes back to an idle control. The run that exists is
+  // still listed and still on screen; what changes is that the NEXT click is a
+  // different request rather than a repeat of the one that made it.
+  const again = node.querySelector("button[data-run-again=\"" + name + "\"]");
+  if (again !== null) {
+    listen(again, "click", () => {
+      if (!active(lifecycle) || mutation.pending()) {
+        return;
+      }
+      newIntent(key);
+      own.result = null;
+      own.acknowledged = false;
+      mutation.clear();
       repaintCard(node, ns, parse, lifecycle, api, object, backups, extra);
     }, lifecycle);
   }

@@ -847,6 +847,15 @@ in the help text beside each input instead -- `timeZone` UTC,
 sourceRef: field_immutable`, before any read), and this page has no reason to
 ask for that refusal.
 
+**A successful save re-reads.** The panel is opened at the revision the card
+was rendered from, and saving moves that revision -- so on a 2xx the page reads
+the schedule again and renders what the API server now holds, exactly as the
+suspend toggle has always done. Repainting from the copy captured at mount
+would leave an operator looking at the policy they had just replaced, opened at
+a revision that no longer exists, and a second save from that screen would
+resend the pre-edit policy under a stale `expectedGeneration` and be refused
+`412` for a reason nothing on screen explained.
+
 **A schedule whose revision this build does not publish gets no form at all.**
 The precondition IS the generation; a request without one would ask the API to
 replace whatever revision happens to be current when it lands, which is the
@@ -911,19 +920,51 @@ and `g0` IS a revision, so it is the absence of the field that means this.
 ### Back up now, and the one intent behind it
 
 `POST .../backups` requires an `Idempotency-Key`, and that key is what makes a
-double click, a retry after a timeout and a "Check status" one run. The page
-mints **one intent per draft**, holds it in this module's memory, and resends
-the same string for every attempt of it; the API answers the second one `200`
-with `replayed: true` and the first run's uid. A **deliberate** later backup is
-a new intent and therefore a new run, which is the acceptance criterion's other
-half.
+double click, a retry after a timeout and a "Check status" one run.
 
-**A reload loses the intent, and the page does not pretend otherwise.** There is
-no browser storage anywhere in this tree, so a key cannot survive a refresh.
-What the panel does instead is list the manual runs of this schedule that
-already exist, newest first, with their triggers and frozen revisions -- so the
-reader sees the run their click made rather than clicking again -- and says that
-a click after a reload is a deliberate new run.
+**The intent is a field of the draft, and its lifetime is the draft's.** The
+manual-run form's draft (`formKey(ns, "schedule-run-now", <schedule>)`) holds
+exactly one declared field, `intent`, whose value is `logweir-ui.manual.` plus
+**32 random hex characters** -- `crypto.getRandomValues`, not a counter and not
+a clock. Every attempt of that intent reads the same field and sends the same
+key, and the API answers the second one `200` with `replayed: true` and the
+first run's uid.
+
+**A reload genuinely ends the intent.** The draft registry is module state and
+there is no browser storage anywhere in this tree, so the draft and its key are
+lost together; because the body is random rather than ordered, a new session
+cannot reproduce an old key even by accident. A click after a reload is
+therefore a deliberate NEW run and will create a second one -- which is what
+this page, this file and `docs/kubernetes.md` section 16 all say. (An earlier cut
+composed the key from a module-level counter that reset on every load, so the
+first intent after a reload reproduced the first intent before it and every one
+of those sentences was false; a live review caught it.) The panel also lists
+the manual runs of this schedule that already exist, newest first, with their
+triggers and frozen revisions, so the reader sees the run their click made
+before deciding to make another.
+
+**"Back up again" is the only thing that mints a new intent**, and it appears
+once a run exists or once the API has refused with a conflict. It drops the
+draft, which ends the intent, and clears the mutation record; the run that
+exists stays on screen and keeps its own identity. That is PLAT-06.2's second
+acceptance clause -- *a deliberate later backup creates another* -- and without
+that control a console could take exactly one manual backup of a schedule,
+ever.
+
+**A `409` carries a fact and the page renders it.** `policy_changed` shows the
+revision that is in force NOW, from the problem document's one extension
+member, and says that running a revision you have not seen is what
+`expectedGeneration` exists to prevent; `idempotency_conflict` says the intent
+was spent on a different request. Both are followed by "Back up again", which
+is the answer the problem document itself asks for. Every other refusal -- a
+403, a 422 -- gets the generic message and no new intent: spending a fresh key
+on the same bad request is not an answer.
+
+**A save that could not be confirmed says the right thing.** For every other
+create in this tree the object's NAME is its idempotence, so "submitting again
+reuses the name" is true; for a manual run the server derives the name and the
+KEY is the idempotence, so the unknown-outcome sentence names the key instead
+and no sentence carries an empty name.
 
 **Nothing blocks a manual run, and the page reflects that.** A suspended
 schedule and an active run are notices, not refusals: D1 section 8.3 is explicit
