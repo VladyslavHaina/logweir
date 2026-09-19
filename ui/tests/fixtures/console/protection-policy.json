@@ -1,0 +1,131 @@
+{
+  "item": {
+    "alerts": [
+      {
+        "delivery": {
+          "attempts": 1,
+          "lastAttemptAt": "2026-09-19T01:48:26.100000000Z",
+          "state": "Delivered"
+        },
+        "key": "logweir-protection-c8a19161-2797-407f-a9f6-c26cdede6886-Staleness",
+        "kind": "Staleness",
+        "notifiedTransition": 2,
+        "openedAt": "2026-09-19T01:45:20.787859014Z",
+        "resolvedAt": "2026-09-19T01:48:25.623545543Z",
+        "state": "Resolved",
+        "transition": 2
+      }
+    ],
+    "availabilityBasis": "Catalog",
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-19T01:45:20.787859014Z",
+        "message": "there is no available recovery point for this policy at all",
+        "reason": "Evaluated",
+        "status": "True",
+        "type": "Ready"
+      },
+      {
+        "lastTransitionTime": "2026-09-19T01:45:20.787859014Z",
+        "message": "the newest available recovery point is inside the objective",
+        "reason": "WithinObjective",
+        "status": "True",
+        "type": "Protected"
+      },
+      {
+        "lastTransitionTime": "2026-09-19T01:45:25.387353835Z",
+        "message": "1 alert transition(s) were delivered to every configured sink",
+        "reason": "Delivered",
+        "status": "True",
+        "type": "NotificationsDelivered"
+      }
+    ],
+    "consecutiveFailedRuns": 0,
+    "createdAt": "2026-09-19T01:45:20Z",
+    "evaluatedAt": "2026-09-19T01:48:25.623545543Z",
+    "evaluationIntervalSeconds": 60,
+    "generation": 1,
+    "health": "Healthy",
+    "lastAttempt": {
+      "at": "2026-09-19T01:11:38Z",
+      "backupRef": {
+        "name": "logweir-backup-keeps-running-20260919-011100"
+      },
+      "phase": "Succeeded",
+      "reason": "ok"
+    },
+    "lastAvailablePoint": {
+      "ageSeconds": 94,
+      "backupRef": {
+        "name": "logweir-backup-keeps-running-20260919-011100"
+      },
+      "evidence": "Valid",
+      "newestRecordAt": "2026-09-19T01:09:17.276Z",
+      "pointId": "lwp1-c9fd2dc9272a1d1a44fa2d982ca4aba9",
+      "recoveryPointAt": "2026-09-19T01:10:11.287Z",
+      "topics": [
+        "orders",
+        "payments"
+      ],
+      "topicsTruncated": false
+    },
+    "name": "protect-healthy",
+    "namespace": "d3w14-lr520260919t0109z",
+    "notifications": {
+      "kinds": [
+        "Staleness",
+        "BackupFailure",
+        "ArchiveUnavailable"
+      ],
+      "renotifyAfterSeconds": 86400,
+      "routes": [
+        {
+          "name": "local-sink",
+          "pagerDuty": false,
+          "slack": false,
+          "webhook": true
+        }
+      ],
+      "sendResolved": true
+    },
+    "objectives": {
+      "maxConsecutiveFailedRuns": 1,
+      "maxRecoveryPointAgeSeconds": 300,
+      "requireCatalogAvailability": true,
+      "requireVerifiedEvidence": true
+    },
+    "observedGeneration": 1,
+    "protects": {
+      "catalogRef": {
+        "name": "primary"
+      },
+      "destinationRef": {
+        "name": "dest-a"
+      },
+      "scheduleRefs": [
+        {
+          "name": "keeps-running"
+        }
+      ],
+      "sourceRef": {
+        "name": "source"
+      },
+      "topics": [
+        "orders",
+        "payments"
+      ]
+    },
+    "resourceVersion": "4537262",
+    "schedules": [
+      {
+        "name": "keeps-running",
+        "nextFireTime": "2026-09-19T01:12:00Z",
+        "ready": "True",
+        "suspended": false
+      }
+    ],
+    "sinceLastFire": 0,
+    "uid": "c8a19161-2797-407f-a9f6-c26cdede6886"
+  },
+  "requestId": "01M2N5SHWR0N2E7SDCW2H22Z8W"
+}

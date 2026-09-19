@@ -1163,9 +1163,23 @@ run whose evidence is `NotAttempted` is never rendered as a verified success.
 
 The green rule gained one clause and the not-green caption gained a word.
 
-**Green** is `evidence.verification.result == "Valid"` **and** a trust basis
-that leaves the verdict standing **and** the kind's own success field
-(`exitCode == 0` for a Backup, `outcome == "pass"` for a Restore).
+**In console mode the verdict arrives already combined.** `OperationTrust.state`
+is D3 section 2.5's own word -- `verified`, `verifiedHistorical`, `untrusted`,
+`invalid`, `notAttempted`, `notApplicable`, `pending` -- computed by
+`logweir-api` from the controller's `result` and its `trust.basis`. The page
+reads that word; re-deriving it would be the normalizing API's own table
+implemented a second time in a browser. Beside it, and never instead of it,
+`OperationVerification.state` is the SIGNATURE result: an authentic signature
+under a key this installation does not accept is `verification: valid` and
+`trust: untrusted`, and only the second one decides the badge.
+
+**In legacy mode there is no such word**, so the page keeps its own rule over
+the custom resource. Two documents, two rules, each reading what its own
+document carries.
+
+**That rule: green** is `evidence.verification.result == "Valid"` **and** a
+trust basis that leaves the verdict standing **and** the kind's own success
+field (`exitCode == 0` for a Backup, `outcome == "pass"` for a Restore).
 
 **Three bases leave it standing, and they are three different facts:**
 `Current`, `Historical`, and *no basis at all* -- which arrives two ways. An

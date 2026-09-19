@@ -198,13 +198,38 @@ const CONSOLE_FIXTURES = [
   ["manual-backup.json", "ManualBackupResponse"],
   ["manual-backup-replayed.json", "ManualBackupResponse"],
   ["problem-policy-changed.json", "Problem"],
+
+  // D3 W12, reconciled against the API branch. These WERE this client's own
+  // assumption about shapes the document did not publish yet; they are now
+  // instances of the published schemas, held to them by the arm below like
+  // every other console fixture. That is what closed the reconciliation: there
+  // is no bucket of assumed names left to be quietly wrong in.
+  ["operation-backup-preparing.json", "OperationViewResponse"],
+  ["operation-unknown.json", "OperationViewResponse"],
+  ["operation-restore-completed.json", "OperationViewResponse"],
+  ["operation-restore-scratch.json", "OperationViewResponse"],
+  ["operation-restore-no-record-check.json", "OperationViewResponse"],
+  ["operation-restore-untrusted.json", "OperationViewResponse"],
+  ["protection-policy.json", "ProtectionPolicyResponse"],
+  ["protection-policy-unknown.json", "ProtectionPolicyResponse"],
+  ["protection-policies-list.json", "ProtectionPolicyList"],
+  ["catalog.json", "CatalogResponse"],
+  ["catalogs-list.json", "CatalogList"],
+  ["catalog-points.json", "PointPageResponse"],
+  ["catalog-points-states.json", "PointPageResponse"],
+  ["catalog-signers.json", "SignerPageResponse"],
+  ["retention-policy-enforce.json", "RetentionPolicyResponse"],
+  ["retention-policies-list.json", "RetentionPolicyList"],
+  ["trust-policy.json", "TrustPolicyResponse"],
+  ["trust-policies-list.json", "TrustPolicyList"],
 ];
 
 test("console_fixtures_are_instances_of_the_published_schema", () => {
   // AN EQUALITY, NOT A FLOOR (review F8). A floor stays green when a fixture is
   // deleted together with the row that used it, which is exactly the change
   // this arm exists to notice.
-  assert.equal(CONSOLE_FIXTURES.length, 52, "the console fixture set covers both halves");
+  assert.equal(CONSOLE_FIXTURES.length, 70,
+    "the console fixture set covers PLAT-17.1, D1, D2 and D3");
   for (const [name, schema] of CONSOLE_FIXTURES) {
     assert.ok(DEFINITIONS[schema] !== undefined, schema + " is published");
     const findings = [];

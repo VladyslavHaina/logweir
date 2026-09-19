@@ -65,7 +65,6 @@ import {
   listFooter,
   mutationStatus,
   replace,
-  rfc3339,
   table,
 } from "../render.js";
 import {
@@ -101,11 +100,17 @@ export const NO_POINT_SENTENCE =
   "This catalog's view holds no point. That is a statement about the VIEW: check the sync " +
   "conditions above before concluding anything about the archive.";
 
-/** The two sync modes the connect form offers, and what each one costs.
- *  `Full` is what "connect an existing archive" needs: it walks receipts and
+/** The two sync modes the connect form offers, in the REQUEST's own spelling.
+ *
+ *  LOWERCASE, AND THAT IS NOT A STYLE CHOICE. `RecoveryCatalog.spec.sync.mode`
+ *  is `Index`/`Full` on the custom resource and the request body spells the
+ *  same two `index`/`full`; the API translates once. Sending the CRD's
+ *  spelling here would be a `422` the form could not place.
+ *
+ *  `full` is what "connect an existing archive" needs: it walks receipts and
  *  manifests rather than only the catalog index a Logweir writer would have
  *  left behind. */
-export const SYNC_MODES = Object.freeze(["Full", "Index"]);
+export const SYNC_MODES = Object.freeze(["full", "index"]);
 
 /** What connecting an archive does, and what it does not. */
 export const CONNECT_SENTENCE =
@@ -278,7 +283,9 @@ export function renderCatalogStatus(object) {
     facts([
       ["synced at", cell(status.syncedAt)],
       ["view expires at", cell(status.viewExpiresAt)],
+      ["points materialised in this view", cell(status.viewPoints)],
       ["truncated", cell(status.truncated)],
+      ["view expired", cell(status.viewExpired)],
       ["walk complete", cell(cursor.complete)],
       ["index shard reached", cell(cursor.indexShard)],
       ["last sync job", cell(job.name) + " exit " + cell(job.exitCode) + " " +
@@ -301,25 +308,40 @@ export function renderCatalogStatus(object) {
   );
 }
 
-/** THE ROUTE A "Restore this point" LINK CARRIES.
+/** THE ROUTE A "Restore this point" LINK CARRIES: the point's identity, the
+ *  catalog that holds it, and THE PLAN BINDING.
  *
- *  The point's own identity, the catalog that holds it, and THE FROZEN
- *  LOCATION -- `locationDigest` when the entry publishes one, and the
- *  `locationId` of the location that can serve it otherwise. The digest is
- *  what binds a restore to the exact destination snapshot the point was
- *  written under, which is the check D2 asks a restore's source step to make
- *  and the one a bare bucket URL cannot support. */
-export function restorePointRoute(ns, catalog, entry) {
+ *  D3 section 5.5 step 4's plan carries `source.point {point_id, receipt_key,
+ *  receipt_sha256, manifest_sha256}`, and the runner re-checks that binding
+ *  before it constructs a client -- a mismatch is exit 3
+ *  `PointBindingMismatch`. Those four are REQUIRED fields of a published point
+ *  (three of them; the manifest digest is optional and travels when it is
+ *  there), so the link can carry what a plan is built from rather than a name
+ *  and a hope.
+ *
+ *  IT CARRIES NO `locationDigest`, and this is the reconciliation's one
+ *  surrendered field. The catalog's view entry has never held one -- the
+ *  frozen destination digest is a fact about a BACKUP's own destination
+ *  snapshot, not about a point read out of a bucket -- so the API publishes
+ *  none and this page invents none. What names the location instead is the
+ *  CATALOG's `destinationRef` (one destination per catalog, immutable by CEL)
+ *  plus the `locationId` of the location that can serve the point. */
+export function restorePointRoute(ns, catalog, entry, destination) {
   const e = entry || {};
   const location = bestLocation(e);
+  const at = (name, value) =>
+    (typeof value === "string" && value.length > 0
+      ? "&" + name + "=" + encodeURIComponent(value)
+      : "");
   return (
     "#/restore?ns=" + encodeURIComponent(String(ns || "")) +
     "&catalog=" + encodeURIComponent(String(catalog || "")) +
     "&point=" + encodeURIComponent(String(e.pointId || "")) +
-    (typeof e.locationDigest === "string" && e.locationDigest.length > 0
-      ? "&locationDigest=" + encodeURIComponent(e.locationDigest)
-      : "") +
-    (location === null ? "" : "&location=" + encodeURIComponent(String(location.locationId || "")))
+    at("receiptKey", e.receiptKey) +
+    at("receiptSha256", e.receiptSha256) +
+    at("manifestSha256", e.manifestSha256) +
+    at("destination", typeof destination === "string" ? destination : "") +
+    (location === null ? "" : at("location", String(location.locationId || "")))
   );
 }
 
@@ -341,18 +363,19 @@ export function bestLocation(entry) {
 
 /** What the restore link can and cannot carry today. */
 export const POINT_BINDING_SENTENCE =
-  "This link carries the point id, its catalog and the frozen location the point was written " +
-  "under. Binding a restore plan to that point -- `source.point {point_id, receipt_key, " +
-  "receipt_sha256, manifest_sha256}` -- is the restore wizard's own step (PLAT-15.2), and the " +
-  "runner re-checks the binding before it constructs a client.";
+  "This link carries the whole plan binding: the point id, its receipt key and digest, the " +
+  "manifest digest where the catalog has one, and the destination the catalog reads. Building " +
+  "the plan around `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}` is " +
+  "the restore wizard's own step (PLAT-15.2), and the runner re-checks that binding before it " +
+  "constructs a client: a mismatch is a refusal, not a restore of something else.";
 
 /** ONE POINT AS A ROW: the two axes, the signer, and the remedy. */
-export function pointRow(entry, ns, catalog) {
+export function pointRow(entry, ns, catalog, destination) {
   const e = entry || {};
   const location = bestLocation(e);
   return [
     "<code>" + cell(e.pointId) + "</code>",
-    cell(rfc3339(e.recoveryPointAtMs)),
+    cell(e.recoveryPointAt),
     badge(e.availability === "Available" ? "green" : "unverified", String(e.availability || "")),
     badge(
       e.verification === "Verified" || e.verification === "VerifiedHistorical"
@@ -364,13 +387,14 @@ export function pointRow(entry, ns, catalog) {
     "<code>" + cell(e.signerKeyId) + "</code>",
     cell(e.remedy),
     e.selectable === true
-      ? "<a href=\"" + esc(restorePointRoute(ns, catalog, e)) + "\">Restore this point</a>"
+      ? "<a href=\"" + esc(restorePointRoute(ns, catalog, e, destination)) +
+        "\">Restore this point</a>"
       : ABSENT,
   ];
 }
 
 /** The point table. Every entry, with its exact state. */
-export function renderPoints(page, ns, catalog) {
+export function renderPoints(page, ns, catalog, destination) {
   const entries = itemsOf(page);
   return (
     "<section class=\"points\"><h3>Recovery points</h3>" +
@@ -378,7 +402,7 @@ export function renderPoints(page, ns, catalog) {
     table(
       ["POINT", "RECOVERY POINT", "AVAILABILITY", "VERIFICATION", "LOCATION", "SIGNER", "REMEDY",
         "RESTORE"],
-      entries.map((entry) => pointRow(entry, ns, catalog)),
+      entries.map((entry) => pointRow(entry, ns, catalog, destination)),
       NO_POINT_SENTENCE,
     ) +
     // ONE HTTP PAGE, SAID AS ONE. `CATALOG_WINDOW_SENTENCE` above is about the
@@ -413,8 +437,8 @@ export const MORE_POINTS_SENTENCE =
  *  rendered and never submitted -- the same shape `ui/pages/keys.js` has for
  *  the roster, for the same reason. */
 export function renderSigners(signers) {
-  const list = Array.isArray((signers || {}).signers)
-    ? signers.signers
+  const list = Array.isArray((signers || {}).items)
+    ? signers.items
     : (Array.isArray(signers) ? signers : []);
   const untrusted = list.filter((s) => (s || {}).trusted !== true);
   const rows = list.map((s) => {
@@ -442,7 +466,13 @@ export function renderSigners(signers) {
         esc(NO_ONE_CLICK_TRUST_SENTENCE) + "</p>" +
         "<p class=\"note\">Run this against the PUBLIC half the key's holder gives you and " +
         "compare the digest with the KEY ID column above.</p>" +
-        copyBlock([FINGERPRINT_COMMAND]) +
+        // THE API SENDS THE COMMAND AND THE PAGE PREFERS IT. One string, one
+        // place: a page that printed its own copy could drift from the digest
+        // the installation actually computes a key id with.
+        copyBlock([typeof (signers || {}).fingerprintCommand === "string" &&
+          signers.fingerprintCommand.length > 0
+          ? signers.fingerprintCommand
+          : FINGERPRINT_COMMAND]) +
         renderTrustSnippet(untrusted)) +
     "</section>"
   );
@@ -597,7 +627,7 @@ export function renderCatalogDetail(view) {
     (v.pointsError
       ? "<section class=\"points\"><h3>Recovery points</h3>" +
         errorBlock(v.pointsError, false) + "</section>"
-      : renderPoints(v.points, v.ns, meta.name)) +
+      : renderPoints(v.points, v.ns, meta.name, (spec.destinationRef || {}).name)) +
     (v.signersError
       ? "<section class=\"signers\"><h3>Who signed these points</h3>" +
         errorBlock(v.signersError, false) + "</section>"

@@ -5261,6 +5261,50 @@ back to the roster, by name, with the API server's own refusal rendered. Adding
 chart change with its own review and its own exact-rule table in
 `crates/logweir/tests/chart_lint.rs`.
 
+### What the console publishes, and what it deliberately does not
+
+The four D3 tabs read the product API's own **flat** views -- a
+`ProtectionPolicyView` carries its identity and its facts at the top level, with
+no `spec`/`status` pair -- and the custom resource in legacy mode. The console
+projects one into the other so a reader sees the same page either way.
+
+**Three facts the API does not publish, and what stands in each place.**
+
+* **No Job name and no pod name.** `progress.runner` is infrastructure detail
+  and the console contract does not carry it; the operation view says so and
+  points at the diagnoses, each of which names the object it is about
+  (`{kind, name}` IS published, because PLAT-14.1 asks for resource-scoped
+  errors).
+* **No ConfigMap names.** A catalog's materialised pages live in ConfigMaps the
+  sync Job owns; the console's facts about the view are `viewPoints`,
+  `truncated` and `viewExpired`.
+* **No frozen `locationDigest` on a recovery point.** That digest is a fact
+  about a Backup's own destination snapshot, not about a point read out of a
+  bucket, so no document carries one for a point. "Restore this point" carries
+  D3 §5.5's own plan binding instead: the point id, the receipt key and digest,
+  the manifest digest where the catalog has one, and the catalog's destination.
+
+**A word a controller writes stays an open string.** Eight D3 vocabularies are
+published as typed enums; the rest -- a health, an availability, a diagnosis
+code, an effective key state -- are `string`, because a closed enum over a
+status field would turn a forward-compatible controller into a 500. The console
+validates membership to pick a badge colour and renders an unrecognised word
+**verbatim**, which is also what "unknown is not valid" requires.
+
+**The trust evaluation is the API's decision.** `GET /api/v1/trust-policies`
+publishes `evaluation {state, reason, serverTime, freshWithinSeconds,
+ageSeconds}`, so the freshness verdict §7.7 asks for is made once, against the
+API's own clock, with the arithmetic on screen. The console renders it and says
+who decided; in legacy mode, where there is no such view, it decides for itself
+against the `Date` header of the answer that carried the object.
+
+**Reading a TrustPolicy needs an administrator binding.** `GET
+/api/v1/trust-policies` is Administrator-only and serves a policy only when it
+governs a namespace the actor administers, or is the installation default;
+inside a served policy the namespace lists are filtered to that administered set
+and `namespacesFiltered` says when they were. The keys page renders that flag,
+because "these are the namespaces" is not a claim this reader can make.
+
 ### The gates that keep it that way
 
 `just lint` runs `scripts/check-ui-offline.sh`, which reads every shipped byte

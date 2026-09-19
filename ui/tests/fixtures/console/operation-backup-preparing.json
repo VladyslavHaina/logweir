@@ -10,7 +10,7 @@
         "type": "RunnerReady"
       }
     ],
-    "createdAt": "2026-09-04T08:55:00Z",
+    "createdAt": "2026-09-19T01:11:44Z",
     "diagnostics": [
       {
         "code": "CredentialSecretNotFound",
@@ -27,7 +27,7 @@
     ],
     "evidence": {},
     "kind": "backup",
-    "lastUpdate": "2026-09-19T01:12:46Z",
+    "lastUpdatedAt": "2026-09-19T01:12:46Z",
     "message": "the runner container cannot start: the Secret named by the archive credential does not exist",
     "name": "d3w12-waiting",
     "namespace": "team-a",
@@ -36,30 +36,31 @@
       "lastTransitionTime": "2026-09-19T01:11:46Z",
       "message": "the runner container cannot start",
       "reason": "CredentialReferenceMissing",
-      "runner": {
-        "containerState": "Waiting",
-        "jobName": "d3w12-waiting",
-        "podName": "d3w12-waiting-hk29p",
-        "podPhase": "Pending",
-        "scheduled": true,
-        "waitingReason": "CreateContainerConfigError"
-      },
-      "stage": "Preparing"
+      "stage": "preparing"
     },
     "readiness": {
       "basis": "notImplemented",
       "state": "unknown"
     },
-    "resourceVersion": "60110",
+    "resourceVersion": "4537100",
     "result": {
       "status": "pending"
     },
+    "stage": "preparing",
+    "stale": false,
     "state": "preparing",
     "stateReason": "CredentialReferenceMissing",
     "terminal": false,
-    "uid": "0f6e7d8c-1a2b-4c3d-9e8f-0a1b2c3d4e51",
+    "trust": {
+      "basis": "None",
+      "state": "pending"
+    },
+    "uid": "7f0e5e92-6a41-4ff2-9c4b-1d6a0e8f5c33",
     "verification": {
       "state": "pending"
+    },
+    "verificationScope": {
+      "level": "none"
     },
     "verifiedSuccess": false
   },

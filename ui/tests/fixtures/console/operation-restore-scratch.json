@@ -1,0 +1,109 @@
+{
+  "item": {
+    "awaitingApproval": false,
+    "completion": {
+      "integrityLevel": "consume-only",
+      "newTopics": [
+        {
+          "name": "d3w12-scratch-orders",
+          "partitions": 3
+        }
+      ],
+      "recordsExpected": 200,
+      "recordsRestored": 200,
+      "recordsSampled": 64,
+      "recordsSampledMatching": 64
+    },
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-19T01:12:20Z",
+        "message": "the approval verified",
+        "reason": "ApprovalVerified",
+        "status": "True",
+        "type": "Admitted"
+      },
+      {
+        "lastTransitionTime": "2026-09-19T01:14:02Z",
+        "message": "the runner exited 0 (ok)",
+        "reason": "Ok",
+        "status": "True",
+        "type": "Complete"
+      }
+    ],
+    "createdAt": "2026-09-19T01:12:20Z",
+    "diagnostics": [],
+    "evidence": {
+      "offsetReportKey": "logweir/drills/01M2VKDDD95HA4NQTHGFRJ2WCJ.offsets.json",
+      "payloadKey": "logweir/drills/01M2VKDDD95HA4NQTHGFRJ2WCJ.scorecard.json",
+      "payloadSha256": "sha256:0d90834b30c02e3f21a382d82e63c4f611b409fde6ad2cfd0199d63865598a95",
+      "sidecarKey": "logweir/drills/01M2VKDDD95HA4NQTHGFRJ2WCJ.scorecard.sig"
+    },
+    "kind": "restore",
+    "lastUpdatedAt": "2026-09-19T01:14:05Z",
+    "message": "the runner exited 0 (ok)",
+    "name": "d3w12-scratch-restore",
+    "namespace": "team-a",
+    "progress": {
+      "lastTransitionTime": "2026-09-19T01:14:02Z",
+      "message": "the runner exited 0 (ok)",
+      "reason": "Ok",
+      "runnerPhase": {
+        "name": "teardown",
+        "number": 9
+      },
+      "stage": "finished"
+    },
+    "readiness": {
+      "basis": "notImplemented",
+      "state": "unknown"
+    },
+    "resourceVersion": "4537200",
+    "result": {
+      "exitCode": 0,
+      "exitReason": "ok",
+      "lastPhaseCompleted": 9,
+      "outcome": "pass",
+      "status": "pass"
+    },
+    "stage": "finished",
+    "stale": false,
+    "state": "succeeded",
+    "stateReason": "Ok",
+    "targetMode": "scratch",
+    "teardown": {
+      "attestationKey": "logweir/drills/01M2VKDDD95HA4NQTHGFRJ2WCJ.teardown.json",
+      "deleted": [
+        "d3w12-restore-orders",
+        "d3w12-restore-payments"
+      ],
+      "deletedTruncated": false,
+      "failed": [
+        {
+          "error": "the broker answered UNKNOWN_TOPIC_OR_PARTITION",
+          "topic": "d3w12-restore-payments-dlq"
+        }
+      ]
+    },
+    "terminal": true,
+    "trust": {
+      "basis": "Current",
+      "keyState": "Active",
+      "state": "verified"
+    },
+    "uid": "16d1d1cf-3fd5-4b02-8f38-5df96ca7cc2d",
+    "verification": {
+      "matchedKeyId": "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe",
+      "payloadType": "application/vnd.logweir.drill-scorecard+json;version=1.0.0",
+      "state": "valid",
+      "verifiedAt": "2026-09-19T01:14:05Z"
+    },
+    "verificationScope": {
+      "level": "degraded",
+      "recordsExpected": 200,
+      "recordsSampled": 64,
+      "recordsSampledMatching": 64
+    },
+    "verifiedSuccess": true
+  },
+  "requestId": "01M2N5SHWR0N2E7SDCW2H22Z8W"
+}

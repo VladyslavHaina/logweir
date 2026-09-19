@@ -3,13 +3,9 @@
     {
       "availability": "Available",
       "backupId": "591ce3c2-1ddb-40be-8f90-99f6c0efadd3",
-      "coveredFromMs": 1789514948259,
-      "coveredToMs": 1789514957277,
-      "destinationRef": {
-        "name": "dest-a"
-      },
+      "coveredFrom": "2026-09-15T23:29:08.259000Z",
+      "coveredTo": "2026-09-15T23:29:17.277000Z",
       "formatVersion": "1.0.0",
-      "locationDigest": "sha256:a81c1aa15c13335c7174df25e4b390ef73bb5a09ca3b5ce4a845ceafc0d47954",
       "locations": [
         {
           "availability": "Available",
@@ -21,7 +17,7 @@
       "pointId": "lwp1-c9fd2dc9272a1d1a44fa2d982ca4aba9",
       "receiptKey": "[redacted].receipt.json",
       "receiptSha256": "sha256:c9fd2dc9272a1d1a44fa2d982ca4aba934a07891f17224c7afefd17bd172969c",
-      "recoveryPointAtMs": 1789780211287,
+      "recoveryPointAt": "2026-09-19T01:10:11.287000Z",
       "runId": "01M2VKDDD95HA4NQTHGFRJ2WCJ",
       "selectable": true,
       "signerKeyId": "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe",
@@ -30,10 +26,9 @@
     {
       "availability": "Available",
       "backupId": "591ce3c2-1ddb-40be-8f90-99f6c0efadd3",
-      "coveredFromMs": 1789514948259,
-      "coveredToMs": 1789514957277,
+      "coveredFrom": "2026-09-15T23:29:08.259000Z",
+      "coveredTo": "2026-09-15T23:29:17.277000Z",
       "formatVersion": "1.0.0",
-      "locationDigest": "sha256:a81c1aa15c13335c7174df25e4b390ef73bb5a09ca3b5ce4a845ceafc0d47954",
       "locations": [
         {
           "availability": "Available",
@@ -41,8 +36,7 @@
         },
         {
           "availability": "Unreadable",
-          "locationId": "s3://d3w14-lr520260919t0109z-b/archive",
-          "remedy": "this copy answered 403; the point is still served by the first location"
+          "locationId": "s3://d3w14-lr520260919t0109z-b/archive"
         }
       ],
       "manifestKey": "archive/591ce3c2-1ddb-40be-8f90-99f6c0efadd3/manifest.json",
@@ -50,7 +44,7 @@
       "pointId": "lwp1-2e1f8a4c9b0d63751e2f3a4b5c6d7e8f",
       "receiptKey": "[redacted].receipt.json",
       "receiptSha256": "sha256:c9fd2dc9272a1d1a44fa2d982ca4aba934a07891f17224c7afefd17bd172969c",
-      "recoveryPointAtMs": 1789780211287,
+      "recoveryPointAt": "2026-09-19T01:10:11.287000Z",
       "runId": "01M2VKDDD95HA4NQTHGFRJ2WCJ",
       "selectable": true,
       "signerKeyId": "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe",
@@ -59,8 +53,8 @@
     {
       "availability": "Available",
       "backupId": "591ce3c2-1ddb-40be-8f90-99f6c0efadd3",
-      "coveredFromMs": 1789514948259,
-      "coveredToMs": 1789514957277,
+      "coveredFrom": "2026-09-15T23:29:08.259000Z",
+      "coveredTo": "2026-09-15T23:29:17.277000Z",
       "formatVersion": "1.0.0",
       "locations": [
         {
@@ -73,7 +67,7 @@
       "pointId": "lwp1-9c3b7d18ea5f42609b8c7d6e5f4a3b2c",
       "receiptKey": "[redacted].receipt.json",
       "receiptSha256": "sha256:c9fd2dc9272a1d1a44fa2d982ca4aba934a07891f17224c7afefd17bd172969c",
-      "recoveryPointAtMs": 1789780211287,
+      "recoveryPointAt": "2026-09-19T01:10:11.287000Z",
       "remedy": "the receipt verifies under a key this namespace's TrustPolicy does not list; compare its fingerprint out of band and have an administrator add it",
       "runId": "01M2VKDDD95HA4NQTHGFRJ2WCJ",
       "selectable": false,
@@ -83,8 +77,8 @@
     {
       "availability": "Conflict",
       "backupId": "591ce3c2-1ddb-40be-8f90-99f6c0efadd3",
-      "coveredFromMs": 1789514948259,
-      "coveredToMs": 1789514957277,
+      "coveredFrom": "2026-09-15T23:29:08.259000Z",
+      "coveredTo": "2026-09-15T23:29:17.277000Z",
       "formatVersion": "1.0.0",
       "locations": [
         {
@@ -97,7 +91,7 @@
       "pointId": "lwp1-4d5e6f708192a3b4c5d6e7f809a1b2c3",
       "receiptKey": "[redacted].receipt.json",
       "receiptSha256": "sha256:c9fd2dc9272a1d1a44fa2d982ca4aba934a07891f17224c7afefd17bd172969c",
-      "recoveryPointAtMs": 1789780211287,
+      "recoveryPointAt": "2026-09-19T01:10:11.287000Z",
       "remedy": "two records disagree about this identity, so the catalog cannot say which copy is the record",
       "runId": "01M2VKDDD95HA4NQTHGFRJ2WCJ",
       "selectable": false,
@@ -107,8 +101,8 @@
     {
       "availability": "Deleted",
       "backupId": "591ce3c2-1ddb-40be-8f90-99f6c0efadd3",
-      "coveredFromMs": 1789514948259,
-      "coveredToMs": 1789514957277,
+      "coveredFrom": "2026-09-15T23:29:08.259000Z",
+      "coveredTo": "2026-09-15T23:29:17.277000Z",
       "formatVersion": "1.0.0",
       "locations": [
         {
@@ -121,7 +115,7 @@
       "pointId": "lwp1-5f60718293a4b5c6d7e8f90a1b2c3d4e",
       "receiptKey": "[redacted].receipt.json",
       "receiptSha256": "sha256:c9fd2dc9272a1d1a44fa2d982ca4aba934a07891f17224c7afefd17bd172969c",
-      "recoveryPointAtMs": 1789780211287,
+      "recoveryPointAt": "2026-09-19T01:10:11.287000Z",
       "remedy": "a completed tombstone exists for this point; its evidence under logweir/ is untouched",
       "runId": "01M2VKDDD95HA4NQTHGFRJ2WCJ",
       "selectable": false,
@@ -131,8 +125,8 @@
     {
       "availability": "Missing",
       "backupId": "e1c4ff19-62fb-4d76-9a3f-2177d6fd9d4a",
-      "coveredFromMs": 1789514948259,
-      "coveredToMs": 1789514957277,
+      "coveredFrom": "2026-09-15T23:29:08.259000Z",
+      "coveredTo": "2026-09-15T23:29:17.277000Z",
       "formatVersion": "1.0.0",
       "locations": [
         {
@@ -145,7 +139,7 @@
       "pointId": "lwp1-7f8a53278110d46fd4f14ecaccc45cc4",
       "receiptKey": "[redacted].receipt.json",
       "receiptSha256": "sha256:7f8a53278110d46fd4f14ecaccc45cc4d653b1e507f2eddedc1fe26c9806d914",
-      "recoveryPointAtMs": 1789780191192,
+      "recoveryPointAt": "2026-09-19T01:09:51.192000Z",
       "remedy": "The archive does not hold the objects this recovery point names. Restore from another point, or recover the objects from your own backup of the bucket.. this point is readable, and 1 of its 1 location(s) is not: s3://d3w14-lr520260919t0109z-a/archive is Missing",
       "runId": "01M2VKCST7EF12EW5T2Y7SJ86Q",
       "selectable": false,
@@ -158,5 +152,7 @@
     "nextCursor": null,
     "snapshot": "4538000"
   },
-  "requestId": "req-d3w12-states"
+  "requestId": "01M2N5SHWR0N2E7SDCW2H22Z8W",
+  "truncated": false,
+  "viewExpired": false
 }

@@ -38,6 +38,7 @@
 import {
   ABSENT,
   COMPLETION_GUIDANCE,
+  GREEN_TRUST_STATES,
   HISTORICAL_SUFFIX,
   LEGACY_OPERATION_SENTENCE,
   STATE_UNKNOWN_SENTENCE,
@@ -55,6 +56,7 @@ import {
   stateBadge,
   table,
   unverifiedCaption,
+  unverifiedTrustCaption,
   verificationScopeSentence,
 } from "../render.js";
 import { active, cancelled } from "../lifecycle.js";
@@ -130,20 +132,29 @@ export function operationFacts(document, console_) {
       uid: o.uid || "",
       state: typeof o.state === "string" ? o.state : null,
       terminal: o.terminal === true,
+      stale: o.stale === true,
       reason: o.stateReason || null,
       message: o.message || null,
-      lastUpdate: o.lastUpdate || o.lastUpdatedAt || null,
+      lastUpdate: o.lastUpdatedAt || null,
       createdAt: o.createdAt || null,
       awaitingApproval: o.awaitingApproval === true,
       readiness: o.readiness || null,
+      stage: o.stage || null,
       progress: o.progress || null,
       diagnostics: diagnosesOf(o),
       result: o.result || null,
       evidence: o.evidence || null,
       verification: o.verification || null,
-      evidenceVerification: o.evidenceVerification || null,
+      // THE CONSOLE'S VERDICT IS ONE WORD AND IT ARRIVES COMBINED (D3
+      // section 2.5). `trust.state` is the API's own answer over the
+      // controller's `result` and `trust.basis`; the basis, the key state and
+      // the policy travel beside it as the facts behind that answer.
+      trust: o.trust || null,
+      trustState: (o.trust || {}).state || null,
+      evidenceVerification: null,
       verifiedSuccess: o.verifiedSuccess === true,
       verificationScope: o.verificationScope || null,
+      capture: o.capture || null,
       completion: o.completion || null,
       teardown: o.teardown || null,
       targetMode: o.targetMode || null,
@@ -169,9 +180,14 @@ export function operationFacts(document, console_) {
     createdAt: meta.creationTimestamp || null,
     awaitingApproval: status.phase === "Pending",
     readiness: null,
+    stale: false,
+    stage: progress === null ? null : progress.stage || null,
+    trust: null,
+    trustState: null,
     progress: progress,
     diagnostics: diagnosesOf(o),
     phase: status.phase || null,
+    capture: status.capture || null,
     result: {
       exitCode: status.exitCode,
       exitReason: status.exitReason,
@@ -202,6 +218,21 @@ function diagnosesOf(document) {
   return Array.isArray(progress.diagnostics) ? progress.diagnostics : [];
 }
 
+/** The runner facts, and there are none in console mode.
+ *
+ *  `progress.runner` IS NOT PUBLISHED, DELIBERATELY. A Job name and a pod name
+ *  are infrastructure detail; D0's visible list is reason, message, exit code,
+ *  last phase, timestamps and evidence references, and a structural test on the
+ *  API side keeps them off the contract. The custom resource DOES carry them
+ *  and legacy mode renders them, because there the page is reading the object
+ *  itself. What replaces them in console mode is the same thing an incident
+ *  needs: `progress.reason`, `progress.message`, and a DIAGNOSTIC's own
+ *  `object {kind, name}`, which IS published. */
+export const NO_RUNNER_DETAIL_SENTENCE =
+  "The product API publishes no Job or pod name for a run: they are infrastructure detail and " +
+  "the console contract does not carry them. What the controller could see is in the diagnoses " +
+  "below, each naming the object it is about.";
+
 /** The state cell: the API's own word, or the sentence that says there is none
  *  in this mode. */
 export function renderState(v) {
@@ -228,24 +259,31 @@ export function renderProgress(v) {
       "and not a stalled run, and no stage is inferred from it.</p></section>"
     );
   }
-  const runner = p.runner || {};
+  const runner = p.runner || null;
   const phase = p.runnerPhase || {};
+  const rows = [
+    ["stage", cell(p.stage)],
+    ["reason", cell(p.reason)],
+    ["message", cell(p.message)],
+    ["last transition", cell(p.lastTransitionTime)],
+    ["last observed", cell(p.lastObservedTime)],
+    ["runner phase", typeof phase.name === "string" && phase.name.length > 0
+      ? cell(phase.number) + " " + cell(phase.name)
+      : ABSENT],
+  ];
+  if (runner !== null) {
+    rows.push(["job", cell(runner.jobName)]);
+    rows.push(["pod", cell(runner.podName) + " " + cell(runner.podPhase)]);
+    rows.push(["container", cell(runner.containerState) + " " + cell(runner.waitingReason)]);
+    rows.push(["runner started", cell(runner.startedAt)]);
+  }
   return (
     "<section class=\"progress\"><h3>Progress</h3>" +
-    facts([
-      ["stage", cell(p.stage)],
-      ["reason", cell(p.reason)],
-      ["message", cell(p.message)],
-      ["last transition", cell(p.lastTransitionTime)],
-      ["last observed", cell(p.lastObservedTime)],
-      ["runner phase", typeof phase.name === "string" && phase.name.length > 0
-        ? cell(phase.number) + " " + cell(phase.name)
-        : ABSENT],
-      ["job", cell(runner.jobName)],
-      ["pod", cell(runner.podName) + " " + cell(runner.podPhase)],
-      ["container", cell(runner.containerState) + " " + cell(runner.waitingReason)],
-      ["runner started", cell(runner.startedAt)],
-    ]) +
+    facts(rows) +
+    (runner === null
+      ? "<p class=\"note\" data-no-runner-detail=\"true\">" +
+        esc(NO_RUNNER_DETAIL_SENTENCE) + "</p>"
+      : "") +
     "</section>"
   );
 }
@@ -288,38 +326,57 @@ export function renderResult(v) {
  *  the SIGNER. They are never flattened into one word here. */
 export function renderEvidence(v) {
   const e = v.evidence || {};
-  const ver = v.evidenceVerification || {};
-  const trust = ver.trust || {};
+  // TWO DOCUMENTS, TWO RULES, EACH READING WHAT ITS OWN DOCUMENT CARRIES.
+  //
+  // In CONSOLE mode the verdict arrives already combined: `trust.state` is D3
+  // section 2.5's own word, which `logweir-api` computed from the controller's
+  // `result` and its `trust.basis`. Reading it is the whole point of asking a
+  // normalizing API for a normalized status, and re-deriving it here would be
+  // that table implemented a second time in a browser.
+  //
+  // In LEGACY mode there is no such word -- the custom resource carries
+  // `result` and a PascalCase `basis` -- so the page keeps its own rule, which
+  // is the same rule the badge on `#/backups` and `#/history` uses.
+  const console_ = v.console === true;
+  const trust = (console_ ? v.trust : ((v.evidenceVerification || {}).trust)) || {};
+  const ver = (console_ ? v.verification : v.evidenceVerification) || {};
   const policy = trust.policy || {};
-  // THE SAME CLAUSE AS THE BADGE RULE, AND IT READS THE SAME FUNCTION. An
-  // explicit `basis: "None"` is what D3 section 12 says a DTO carries for an
-  // object whose controller wrote no trust block; it is an absence, not a
-  // downgrade, and a second spelling of the rule here is how the two halves
-  // would come to disagree.
-  const green = ver.result === "Valid" && basisAllowsGreen(trust.basis);
+  const green = console_
+    ? GREEN_TRUST_STATES.indexOf(v.trustState) !== -1
+    : (ver.result === "Valid" && basisAllowsGreen(trust.basis));
+  const historical = console_
+    ? v.trustState === "verifiedHistorical"
+    : trust.basis === "Historical";
   const mark = green
     ? badge(
       "green",
       "verified by weirkeeper at " + String(ver.verifiedAt || "") + " against key " +
-        String(ver.matchedKeyId || "") +
-        (trust.basis === "Historical" ? HISTORICAL_SUFFIX : ""),
+        String(ver.matchedKeyId || "") + (historical ? HISTORICAL_SUFFIX : ""),
     )
-    : badge("unverified", unverifiedCaption(ver, v.verifiedSuccess));
+    : badge(
+      "unverified",
+      console_
+        ? unverifiedTrustCaption(v.trustState, v.verifiedSuccess)
+        : unverifiedCaption(ver, v.verifiedSuccess),
+    );
   return (
     "<section class=\"evidence\"><h3>Evidence</h3>" +
     mark +
     facts([
-      ["recorded result", cell(ver.result)],
+      ["recorded result", cell(console_ ? v.trustState : ver.result)],
+      ["signature result", cell(console_ ? ver.state : null)],
       ["matched key id", cell(ver.matchedKeyId)],
       ["payload type", cell(ver.payloadType)],
       ["verified at", cell(ver.verifiedAt)],
-      ["signed at (the document's own claim)", cell(ver.signedAt)],
+      ["signed at (the document's own claim)", cell(trust.signedAt || ver.signedAt)],
+      ["signing time read", cell(trust.signingTimeRead)],
       ["trust basis", cell(trust.basis)],
       ["key state", cell(trust.keyState)],
       ["trust policy", cell(policy.name) +
         (typeof policy.generation === "number" ? " g" + String(policy.generation) : "")],
       ["detail", cell(ver.detail)],
       ["receipt key", cell(e.receiptKey || e.payloadKey)],
+      ["receipt sha256", cell(e.receiptSha256 || e.payloadSha256)],
       ["scorecard key", cell(e.scorecardKey)],
       ["sidecar key", cell(e.sidecarKey)],
       ["offset report key", cell(e.offsetReportKey)],
@@ -379,7 +436,12 @@ export function renderTeardown(v) {
     "<section class=\"teardown\"><h3>Teardown</h3>" +
     facts([
       ["attestation key", cell(t.attestationKey)],
+      // A LIST AND NOT A COUNT, and the flag beside it says when the list is
+      // the bounded head of a longer one: "which topics went" is the incident
+      // question, and a truncated list that did not say so would answer it
+      // wrongly and confidently.
       ["deleted", deleted.length === 0 ? ABSENT : esc(deleted.join(", "))],
+      ["deleted list truncated", cell(t.deletedTruncated)],
     ]) +
     table(
       ["TOPIC", "ERROR"],
@@ -417,6 +479,8 @@ export function renderOperation(view) {
       ["created", cell(f.createdAt)],
       ["uid", "<code>" + cell(f.uid) + "</code>"],
       ["awaiting approval", f.awaitingApproval ? "yes" : "no"],
+      ["stage", cell(f.stage)],
+      ["status too old to believe", f.console ? cell(f.stale) : ABSENT],
       ["object", f.name.length === 0
         ? ABSENT
         : detailLink(f.kind === "backup" ? "backups" : "history", String(v.ns || ""), f.name)],

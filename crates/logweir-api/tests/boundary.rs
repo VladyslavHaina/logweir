@@ -470,10 +470,16 @@ fn shipped_ui_files() -> Vec<String> {
 async fn every_shipped_asset_is_served_byte_for_byte() {
     let app = TestApp::new();
     let files = shipped_ui_files();
+    // TWENTY-SIX SINCE D3 W12, which added `operation-watch.js` and the three
+    // pages `#/operations`, `#/protection` and `#/catalog` are rendered by.
+    // The number is asserted rather than taken from the tree for the reason
+    // `scripts/check-image-ui.sh` states beside its own copy: a count read from
+    // the same directory the server serves from stays green when files are
+    // deleted from both sides at once.
     assert_eq!(
         files.len(),
-        22,
-        "the shipped UI is twenty-two files: {files:?}"
+        26,
+        "the shipped UI is twenty-six files: {files:?}"
     );
     for rel in &files {
         let source = std::fs::read(support::repo_root().join(rel)).unwrap();

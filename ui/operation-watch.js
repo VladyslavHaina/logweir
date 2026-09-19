@@ -415,7 +415,7 @@ export async function readD3(family, ns, name, options, deps) {
     const answer = route.cluster === true
       ? await (d.consoleClusterGet || consoleClusterGet)(route.console, name, options)
       : await (d.consoleGet || consoleGet)(ns, route.console, name, options);
-    return projectD3(decodeD3Item(route.console, answer).value.item, ns);
+    return projectD3(family, decodeD3Item(route.console, answer).value.item, ns);
   }
   const api = d.api || apiClient();
   return route.cluster === true
@@ -438,7 +438,7 @@ export async function listD3(family, ns, options, deps) {
     return {
       apiVersion: "logweir.dev/v1alpha1",
       kind: route.console + "List",
-      items: decoded.value.items.map((item) => projectD3(item, ns)),
+      items: decoded.value.items.map((item) => projectD3(family, item, ns)),
       __page: decoded.value.page,
     };
   }
@@ -511,7 +511,7 @@ export async function connectArchive(ns, body, key, deps) {
     token: d.token === undefined ? null : d.token,
   });
   const decoded = decodeD3Item("catalogs", answer);
-  const made = projectD3(decoded.value.item, ns);
+  const made = projectD3("catalog", decoded.value.item, ns);
   made.__replayed = decoded.value.replayed === true;
   return made;
 }
@@ -537,32 +537,231 @@ export async function readOperation(ns, kind, name, options, deps) {
 
 // --------------------------------------------------------------- the private
 
-/** The console's flat item into the custom resource's own three blocks. */
-function projectD3(item, ns) {
-  const object = {
-    apiVersion: "logweir.dev/v1alpha1",
-    metadata: {
-      name: item.name,
-      uid: item.uid,
-      resourceVersion: item.resourceVersion,
-    },
-    spec: item.spec,
-    __contract: { console: true },
-  };
+/** THE FLAT VIEW INTO THE CUSTOM RESOURCE'S OWN THREE BLOCKS, PER FAMILY.
+ *
+ *  The published D3 views are FLAT -- "DTOs are separate from CRDs" is
+ *  PLAT-17.1's rule and every projection this console already reads is flat.
+ *  The page renderers speak the custom resource's vocabulary, because legacy
+ *  mode hands them exactly that, so the projection happens here, once, in a
+ *  table a reader can check field by field against
+ *  `schemas/logweir-api-v1.openapi.json`. It is the same decision
+ *  `ui/client.js` made for the five older kinds and it buys the same thing: one
+ *  renderer, one vocabulary, and no page that reads one way in one mode and
+ *  another way in the other.
+ *
+ *  NOTHING IS INVENTED HERE. A field the view does not carry is absent from
+ *  the projection, and every renderer already treats an absent field as "not
+ *  observed" (D3 section 12). Three of them are named in the projections
+ *  below, because a reader looking for a Job name, a ConfigMap name or a
+ *  `locationDigest` will not find one and should learn why from the code
+ *  rather than from a blank cell. */
+const D3_PROJECTIONS = Object.freeze({
+  protection: projectProtection,
+  catalog: projectCatalog,
+  retention: projectRetention,
+  trust: projectTrust,
+});
+
+function projectD3(family, item, ns) {
+  const project = D3_PROJECTIONS[family];
+  return project === undefined ? item : project(item, ns);
+}
+
+/** The identity block every projection starts from. */
+function metaOf(item, ns) {
+  const meta = { name: item.name, uid: item.uid, resourceVersion: item.resourceVersion };
   if (typeof item.namespace === "string") {
-    object.metadata.namespace = item.namespace;
+    meta.namespace = item.namespace;
   } else if (typeof ns === "string" && ns.length > 0) {
-    object.metadata.namespace = ns;
+    meta.namespace = ns;
   }
   if (typeof item.generation === "number") {
-    object.metadata.generation = item.generation;
+    meta.generation = item.generation;
   }
   if (typeof item.createdAt === "string") {
-    object.metadata.creationTimestamp = item.createdAt;
+    meta.creationTimestamp = item.createdAt;
   }
-  if (item.status !== null && item.status !== undefined) {
-    object.status = item.status;
+  return meta;
+}
+
+function shell(item, ns, kind, spec, status) {
+  const object = {
+    apiVersion: "logweir.dev/v1alpha1",
+    kind: kind,
+    metadata: metaOf(item, ns),
+    spec: spec,
+    status: status,
+    __contract: { console: true },
+  };
+  return object;
+}
+
+/** `ProtectionPolicyView` -> `ProtectionPolicy`. The three flattened groups --
+ *  `missed`, `rehearsal` and the objectives -- go back into the nesting the
+ *  CRD has and the renderer reads. */
+function projectProtection(item, ns) {
+  return shell(item, ns, "ProtectionPolicy", {
+    protects: item.protects,
+    objectives: item.objectives,
+    notifications: item.notifications,
+    evaluationIntervalSeconds: item.evaluationIntervalSeconds,
+  }, {
+    observedGeneration: item.observedGeneration,
+    evaluatedAt: item.evaluatedAt,
+    health: item.health,
+    availabilityBasis: item.availabilityBasis,
+    lastAvailablePoint: item.lastAvailablePoint,
+    lastAttempt: item.lastAttempt,
+    consecutiveFailedRuns: item.consecutiveFailedRuns,
+    missed: { lastMissedSlot: item.lastMissedSlot, sinceLastFire: item.sinceLastFire },
+    schedules: item.schedules,
+    rehearsal: rehearsalOf(item),
+    staleSince: item.staleSince,
+    alerts: item.alerts,
+    conditions: item.conditions,
+  });
+}
+
+/** The rehearsal block, or `null` when the view carries none of its four
+ *  flattened fields -- so an absent rehearsal stays absent rather than
+ *  becoming an empty panel. */
+function rehearsalOf(item) {
+  const block = {
+    lastSucceededAt: item.rehearsalLastSucceededAt,
+    lastFailedAt: item.rehearsalLastFailedAt,
+    lastReason: item.rehearsalLastReason,
+    lastRestoreRef: item.rehearsalLastRestoreRef,
+  };
+  for (const key of Object.keys(block)) {
+    if (block[key] !== null && block[key] !== undefined) {
+      return block;
+    }
   }
+  return null;
+}
+
+/** `CatalogView` -> `RecoveryCatalog`.
+ *
+ *  NO `status.pages` AND NO `status.indexConfigMap`: those are ConfigMap names,
+ *  which this API does not publish and this page holds no verb on. The facts
+ *  that replace them are `viewPoints`, `truncated` and `viewExpired`. */
+function projectCatalog(item, ns) {
+  return shell(item, ns, "RecoveryCatalog", {
+    destinationRef: item.destinationRef,
+    legacyArchive: item.legacyArchive,
+    sync: {
+      intervalSeconds: item.intervalSeconds,
+      mode: item.mode,
+      deepCheck: item.deepCheck,
+      viewLimit: item.viewLimit,
+    },
+  }, {
+    observedGeneration: item.observedGeneration,
+    observedSyncRequest: item.observedSyncRequest,
+    syncedAt: item.syncedAt,
+    viewExpiresAt: item.viewExpiresAt,
+    viewExpired: item.viewExpired,
+    viewPoints: item.viewPoints,
+    cursor: item.cursor,
+    counts: item.counts,
+    truncated: item.truncated,
+    histogram: item.histogram,
+    signers: item.signers,
+    lastSyncJob: item.lastSync,
+    conditions: item.conditions,
+  });
+}
+
+/** `RetentionPolicyView` -> `RetentionPolicy`. `scopePrefix` goes back under
+ *  `scope.prefix`, the three rules back under `rules`, and
+ *  `enforcementSettings` back under `enforcement` -- which is the CRD's name
+ *  for the SPEC block, and is not `status.enforcement`, the word for what is
+ *  actually happening. The API kept them apart by renaming one; this puts them
+ *  back where the renderer reads them, in their two different blocks. */
+function projectRetention(item, ns) {
+  return shell(item, ns, "RetentionPolicy", {
+    destinationRef: item.destinationRef,
+    catalogRef: item.catalogRef,
+    scope: { prefix: item.scopePrefix },
+    rules: {
+      keepLast: item.keepLast,
+      keepDays: item.keepDays,
+      minUsablePoints: item.minUsablePoints,
+    },
+    holds: item.holds,
+    mode: item.mode,
+    externalLifecycle: item.externalLifecycle,
+    enforcement: item.enforcementSettings,
+  }, {
+    observedGeneration: item.observedGeneration,
+    enforcement: item.enforcement,
+    guarantees: item.guarantees,
+    lastEvaluation: item.lastEvaluation,
+    lastEnforcement: item.lastEnforcement,
+    leasedPoints: item.leasedPoints,
+    consecutiveRunFailures: item.consecutiveRunFailures,
+    approvedPlanState: item.approvedPlanState,
+    enforcementDegraded: item.enforcementDegraded,
+    conditions: item.conditions,
+  });
+}
+
+/** `TrustPolicyView` -> `TrustPolicy`, plus the two facts the custom resource
+ *  has no room for.
+ *
+ *  ONE ROW PER KEY BECOMES TWO HALVES AGAIN. The view carries the declaration
+ *  and the verdict on one object, which is what section 7.7 asks a ROW to
+ *  show; the CRD keeps them in `spec.keys[]` and `status.keys[]`, and the
+ *  renderer joins them. Splitting the one row back into two is mechanical and
+ *  loses nothing: every field goes to exactly one side.
+ *
+ *  `__evaluation` and `__namespacesFiltered` are carried under names no custom
+ *  resource has, because no custom resource has them: the API decides
+ *  freshness and says when a namespace list was narrowed to what this actor
+ *  administers. The keys page reads them when they are there. */
+function projectTrust(item, ns) {
+  const keys = Array.isArray(item.keys) ? item.keys : [];
+  const object = shell(item, ns, "TrustPolicy", {
+    default: item.default,
+    namespaces: item.namespaces,
+    allowedTargetClusterIds: item.allowedTargetClusterIds,
+    keys: keys,
+  }, {
+    observedGeneration: item.observedGeneration,
+    evaluatedAt: (item.evaluation || {}).evaluatedAt,
+    loaded: item.loaded,
+    keyCount: item.keyCount,
+    keys: keys.map((key) => ({
+      keyId: key.keyId,
+      effectiveState: key.effectiveState,
+      usableForNewSignatures: key.usableForNewSignatures,
+      usableForVerification: key.usableForVerification,
+    })),
+    boundNamespaces: item.boundNamespaces,
+    conflicts: item.conflicts,
+    conditions: item.conditions,
+  });
+  delete object.metadata.namespace;
+  // THE EVALUATION IS RE-KEYED ON THE WAY THROUGH, for one reason a reader
+  // should not have to guess at: `ui_lint.rs::the_suspend_toggle_is_the_only_
+  // update` forbids a page module from naming any `ui/api.js` export outside
+  // the six a page may use, and the instant this block carries happens to share
+  // its spelling with one of them. The rule is right and is not weakened for a
+  // field name, so the rename happens here, in the module that already
+  // translates between the two documents.
+  object.__evaluation = item.evaluation === null || item.evaluation === undefined
+    ? null
+    : {
+      state: item.evaluation.state,
+      reason: item.evaluation.reason,
+      decidedAt: item.evaluation.serverTime,
+      freshWithinSeconds: item.evaluation.freshWithinSeconds,
+      ageSeconds: item.evaluation.ageSeconds,
+      evaluatedAt: item.evaluation.evaluatedAt,
+    };
+  object.__namespacesFiltered = item.namespacesFiltered === true;
+  object.__keysTruncated = item.keysTruncated === true;
+  object.__namespacesTruncated = item.namespacesTruncated === true;
   return object;
 }
 

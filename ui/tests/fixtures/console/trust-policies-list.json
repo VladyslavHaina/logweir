@@ -1,0 +1,261 @@
+{
+  "items": [
+    {
+      "allowedTargetClusterIds": 0,
+      "boundNamespaces": [
+        "d3w14-20260918t0316z"
+      ],
+      "conditions": [
+        {
+          "lastTransitionTime": "2026-09-18T04:32:25.450297674Z",
+          "message": "every spkiPem on this policy parsed, hashes to its own keyId and matches its declared algorithm: 1 keys",
+          "reason": "Loaded",
+          "status": "True",
+          "type": "Loaded"
+        },
+        {
+          "lastTransitionTime": "2026-09-18T04:32:25.450297674Z",
+          "message": "this policy governs 1 namespace(s)",
+          "reason": "Bound",
+          "status": "True",
+          "type": "Bound"
+        },
+        {
+          "lastTransitionTime": "2026-09-18T04:32:25.450297674Z",
+          "message": "no Active key reaches its notAfter within 30 days",
+          "reason": "NotExpiring",
+          "status": "False",
+          "type": "ExpiringSoon"
+        }
+      ],
+      "conflicts": [],
+      "createdAt": "2026-09-18T04:32:25Z",
+      "default": false,
+      "evaluation": {
+        "ageSeconds": 35,
+        "evaluatedAt": "2026-09-18T04:42:25Z",
+        "freshWithinSeconds": 900,
+        "reason": "evaluated",
+        "serverTime": "2026-09-18T04:43:00Z",
+        "state": "fresh"
+      },
+      "generation": 1,
+      "keyCount": 4,
+      "keys": [
+        {
+          "algorithm": "p256",
+          "effectiveState": "Active",
+          "keyId": "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe",
+          "notAfter": "2027-07-01T00:00:00Z",
+          "notBefore": "2026-01-01T00:00:00Z",
+          "principal": {
+            "display": "the lab signing key",
+            "id": "signing@scram-local.invalid"
+          },
+          "state": "Active",
+          "usableForNewSignatures": true,
+          "usableForVerification": "Full",
+          "usages": [
+            "EvidenceSigning"
+          ]
+        },
+        {
+          "algorithm": "p256",
+          "effectiveState": "Retired",
+          "keyId": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
+          "notAfter": "2027-01-01T00:00:00Z",
+          "notBefore": "2026-01-01T00:00:00Z",
+          "principal": {
+            "display": "the signer this one replaced",
+            "id": "install:previous"
+          },
+          "retiredAt": "2026-06-01T00:00:00Z",
+          "state": "Retired",
+          "usableForNewSignatures": false,
+          "usableForVerification": "Historical",
+          "usages": [
+            "EvidenceSigning"
+          ]
+        },
+        {
+          "algorithm": "p256",
+          "effectiveState": "Revoked",
+          "keyId": "3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b",
+          "notAfter": "2027-07-01T00:00:00Z",
+          "notBefore": "2026-01-01T00:00:00Z",
+          "principal": {
+            "display": "a key withdrawn after an incident",
+            "id": "install:compromised"
+          },
+          "retiredAt": "2026-08-01T00:00:00Z",
+          "revocationEffectiveFrom": "2026-07-25T00:00:00Z",
+          "revocationReason": "KeyCompromise",
+          "revokedAt": "2026-08-02T00:00:00Z",
+          "state": "Revoked",
+          "usableForNewSignatures": false,
+          "usableForVerification": "None",
+          "usages": [
+            "EvidenceSigning"
+          ]
+        },
+        {
+          "algorithm": "p256",
+          "effectiveState": "Revoked",
+          "keyId": "5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+          "notAfter": "2027-07-01T00:00:00Z",
+          "notBefore": "2026-01-01T00:00:00Z",
+          "principal": {
+            "display": "rotated out, not compromised",
+            "id": "install:superseded"
+          },
+          "revocationEffectiveFrom": "2026-09-01T00:00:00Z",
+          "revocationReason": "Superseded",
+          "revokedAt": "2026-09-01T00:00:00Z",
+          "state": "Revoked",
+          "usableForNewSignatures": false,
+          "usableForVerification": "Historical",
+          "usages": [
+            "GovernedApproval"
+          ]
+        }
+      ],
+      "keysTruncated": false,
+      "loaded": true,
+      "name": "org-default",
+      "namespaces": [
+        "d3w14-20260918t0316z"
+      ],
+      "namespacesFiltered": false,
+      "namespacesTruncated": false,
+      "observedGeneration": 1,
+      "resourceVersion": "2677816",
+      "uid": "5ddde3f8-9e79-4321-b1a1-02b29e1c9cbd"
+    },
+    {
+      "allowedTargetClusterIds": 0,
+      "boundNamespaces": [
+        "d3w14-20260918t0316z"
+      ],
+      "conditions": [
+        {
+          "lastTransitionTime": "2026-09-18T04:32:25.450297674Z",
+          "message": "every spkiPem on this policy parsed, hashes to its own keyId and matches its declared algorithm: 1 keys",
+          "reason": "Loaded",
+          "status": "True",
+          "type": "Loaded"
+        },
+        {
+          "lastTransitionTime": "2026-09-18T04:32:25.450297674Z",
+          "message": "this policy governs 1 namespace(s)",
+          "reason": "Bound",
+          "status": "True",
+          "type": "Bound"
+        },
+        {
+          "lastTransitionTime": "2026-09-18T04:32:25.450297674Z",
+          "message": "no Active key reaches its notAfter within 30 days",
+          "reason": "NotExpiring",
+          "status": "False",
+          "type": "ExpiringSoon"
+        }
+      ],
+      "conflicts": [
+        {
+          "namespace": "team-a",
+          "policies": [
+            "org-default",
+            "org-stale"
+          ]
+        }
+      ],
+      "createdAt": "2026-09-18T04:32:25Z",
+      "default": false,
+      "evaluation": {
+        "ageSeconds": 35,
+        "evaluatedAt": "2026-09-18T04:42:25Z",
+        "freshWithinSeconds": 900,
+        "reason": "generationBehind",
+        "serverTime": "2026-09-18T04:43:00Z",
+        "state": "unknown"
+      },
+      "generation": 3,
+      "keyCount": 1,
+      "keys": [
+        {
+          "algorithm": "p256",
+          "effectiveState": "Active",
+          "keyId": "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe",
+          "notAfter": "2027-07-01T00:00:00Z",
+          "notBefore": "2026-01-01T00:00:00Z",
+          "principal": {
+            "display": "the lab signing key",
+            "id": "signing@scram-local.invalid"
+          },
+          "state": "Active",
+          "usages": [
+            "EvidenceSigning"
+          ]
+        }
+      ],
+      "keysTruncated": false,
+      "loaded": true,
+      "name": "org-stale",
+      "namespaces": [
+        "d3w14-20260918t0316z"
+      ],
+      "namespacesFiltered": false,
+      "namespacesTruncated": false,
+      "observedGeneration": 2,
+      "resourceVersion": "2677816",
+      "uid": "5ddde3f8-9e79-4321-b1a1-02b29e1c9cbd"
+    },
+    {
+      "allowedTargetClusterIds": 0,
+      "boundNamespaces": [],
+      "conditions": [],
+      "conflicts": [],
+      "createdAt": "2026-09-18T04:32:25Z",
+      "default": false,
+      "evaluation": {
+        "freshWithinSeconds": 900,
+        "reason": "notEvaluated",
+        "serverTime": "2026-09-18T04:43:00Z",
+        "state": "unknown"
+      },
+      "generation": 1,
+      "keyCount": 1,
+      "keys": [
+        {
+          "algorithm": "p256",
+          "effectiveState": "unknown",
+          "keyId": "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe",
+          "notAfter": "2027-07-01T00:00:00Z",
+          "notBefore": "2026-01-01T00:00:00Z",
+          "principal": {
+            "display": "the lab signing key",
+            "id": "signing@scram-local.invalid"
+          },
+          "state": "Active",
+          "usages": [
+            "EvidenceSigning"
+          ]
+        }
+      ],
+      "keysTruncated": false,
+      "name": "org-unevaluated",
+      "namespaces": [
+        "d3w14-20260918t0316z"
+      ],
+      "namespacesFiltered": true,
+      "namespacesTruncated": false,
+      "resourceVersion": "2677816",
+      "uid": "5ddde3f8-9e79-4321-b1a1-02b29e1c9cbd"
+    }
+  ],
+  "page": {
+    "limit": 50,
+    "nextCursor": null,
+    "snapshot": "2677816"
+  },
+  "requestId": "01M2N5SHWR0N2E7SDCW2H22Z8W"
+}

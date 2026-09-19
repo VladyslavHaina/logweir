@@ -1,0 +1,305 @@
+{
+  "items": [
+    {
+      "approvedPlanState": "notApplicable",
+      "catalogRef": {
+        "name": "primary"
+      },
+      "conditions": [
+        {
+          "lastTransitionTime": "2026-09-19T01:11:38.529476883Z",
+          "message": "the destination and the catalog resolve",
+          "reason": "PolicyReady",
+          "status": "True",
+          "type": "Ready"
+        },
+        {
+          "lastTransitionTime": "2026-09-19T01:11:38.529476883Z",
+          "message": "5 point(s) evaluated at this destination: 1 kept, 3 candidate(s), 0 protected, 1 skipped. This catalog view carries no segment keys, so shared-segment                          protection is NotEnforced and the plan names each set's key prefix                          rather than its objects: candidates[].objects is omitted rather than guessed, and `logweir-retention --dry-run` enumerates the real count. 3 point(s) would be removed.",
+          "reason": "EvaluationComplete",
+          "status": "True",
+          "type": "Evaluated"
+        },
+        {
+          "lastTransitionTime": "2026-09-19T01:11:38.529476883Z",
+          "message": "this policy reports what would be removed and removes nothing; set spec.mode: Enforce and approve a plan digest to change that",
+          "reason": "RecommendationOnly",
+          "status": "False",
+          "type": "Enforced"
+        },
+        {
+          "lastTransitionTime": "2026-09-19T01:11:38.529476883Z",
+          "message": "no bucket lifecycle rule is declared for this destination",
+          "reason": "NoConflict",
+          "status": "False",
+          "type": "ExternalLifecycleConflict"
+        }
+      ],
+      "createdAt": "2026-09-19T01:11:38Z",
+      "destinationRef": {
+        "name": "dest-a"
+      },
+      "enforcement": "RecommendationOnly",
+      "enforcementDegraded": false,
+      "generation": 1,
+      "guarantees": {
+        "activeRestoreProtection": "LogweirEnforced",
+        "ageExpiry": "NotEnforced",
+        "legalHold": "ProviderEnforcedUnverified",
+        "minUsablePoints": "LogweirEnforced",
+        "sharedSegments": "NotEnforced"
+      },
+      "holds": 0,
+      "keepLast": 1,
+      "lastEvaluation": {
+        "at": "2026-09-19T01:49:15.729621386Z",
+        "candidateCount": 3,
+        "candidates": [
+          {
+            "pointId": "lwp1-c9fd2dc9272a1d1a44fa2d982ca4aba9",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-09-19T01:10:11.287Z"
+          },
+          {
+            "pointId": "lwp1-6a6ca28b7421d0cbb7eb51f597cc8b42",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-09-19T01:10:04.349Z"
+          },
+          {
+            "pointId": "lwp1-43b00a99286b5be768958bc5e3c65d1c",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-09-19T01:09:38.842Z"
+          }
+        ],
+        "kept": [
+          "lwp1-6644d0fed75c151caf8da68a8062aa3a"
+        ],
+        "planExpiresAt": "2026-09-19T02:15:47.469707845Z",
+        "planSha256": "sha256:0d90834b30c02e3f21a382d82e63c4f611b409fde6ad2cfd0199d63865598a95",
+        "pointsEvaluated": 5,
+        "protected": [],
+        "skipped": [
+          {
+            "pointId": "lwp1-7f8a53278110d46fd4f14ecaccc45cc4",
+            "reason": "Unreadable"
+          }
+        ],
+        "truncated": false
+      },
+      "leasedPoints": 0,
+      "minUsablePoints": 1,
+      "mode": "Report",
+      "name": "keep-a",
+      "namespace": "d3w14-lr520260919t0109z",
+      "observedGeneration": 1,
+      "resourceVersion": "4542357",
+      "scopePrefix": "archive",
+      "uid": "7b022a02-cf4f-47ce-8896-fc8c58b71f91"
+    },
+    {
+      "approvedPlanState": "approved",
+      "catalogRef": {
+        "name": "primary"
+      },
+      "conditions": [
+        {
+          "lastTransitionTime": "2026-09-19T01:11:38.529476883Z",
+          "message": "the destination and the catalog resolve",
+          "reason": "PolicyReady",
+          "status": "True",
+          "type": "Ready"
+        },
+        {
+          "lastTransitionTime": "2026-09-19T01:11:38.529476883Z",
+          "message": "5 point(s) evaluated at this destination: 1 kept, 3 candidate(s), 0 protected, 1 skipped. This catalog view carries no segment keys, so shared-segment                          protection is NotEnforced and the plan names each set's key prefix                          rather than its objects: candidates[].objects is omitted rather than guessed, and `logweir-retention --dry-run` enumerates the real count. 3 point(s) would be removed.",
+          "reason": "EvaluationComplete",
+          "status": "True",
+          "type": "Evaluated"
+        },
+        {
+          "lastTransitionTime": "2026-09-19T01:11:38.529476883Z",
+          "message": "the newest enforcement run exited 1",
+          "reason": "RunFailed",
+          "status": "False",
+          "type": "Enforced"
+        },
+        {
+          "lastTransitionTime": "2026-09-19T01:11:38.529476883Z",
+          "message": "no bucket lifecycle rule is declared for this destination",
+          "reason": "NoConflict",
+          "status": "False",
+          "type": "ExternalLifecycleConflict"
+        },
+        {
+          "lastTransitionTime": "2026-09-19T04:17:44Z",
+          "message": "three consecutive enforcement runs failed; scheduling is stopped until the spec changes",
+          "reason": "ConsecutiveRunFailures",
+          "status": "True",
+          "type": "EnforcementDegraded"
+        }
+      ],
+      "createdAt": "2026-09-19T01:11:38Z",
+      "destinationRef": {
+        "name": "dest-a"
+      },
+      "enforcement": "LogweirWorker",
+      "enforcementDegraded": true,
+      "enforcementSettings": {
+        "approvedPlanSha256": "sha256:0d90834b30c02e3f21a382d82e63c4f611b409fde6ad2cfd0199d63865598a95",
+        "credentialConfigured": true,
+        "deadlineSeconds": 1800,
+        "maxDeletionsPerRun": 50,
+        "maxObjectsPerRun": 20000,
+        "planMaxAgeSeconds": 3600,
+        "requireApprovedPlan": true,
+        "schedule": "17 4 * * *"
+      },
+      "generation": 1,
+      "guarantees": {
+        "activeRestoreProtection": "LogweirEnforced",
+        "ageExpiry": "LogweirEnforced",
+        "legalHold": "ProviderEnforcedUnverified",
+        "minUsablePoints": "LogweirEnforced",
+        "sharedSegments": "NotEnforced"
+      },
+      "holds": 0,
+      "keepLast": 1,
+      "lastEnforcement": {
+        "deleted": [],
+        "deletedTruncated": false,
+        "exitCode": 1,
+        "finishedAt": "2026-09-19T04:17:44Z",
+        "objectsDeleted": 0,
+        "planSha256": "sha256:0d90834b30c02e3f21a382d82e63c4f611b409fde6ad2cfd0199d63865598a95",
+        "recordKey": "logweir/retention/7b022a02-cf4f-47ce-8896-fc8c58b71f91/01M2VKZ0000000000000000000.json",
+        "recordSha256": "sha256:2f0f5a9d4a3b6c7d8e9f0a1b2c3d4e5f60718293a4b5c6d7e8f90a1b2c3d4e5f",
+        "runId": "01M2VKZ0000000000000000000",
+        "startedAt": "2026-09-19T04:17:00Z"
+      },
+      "lastEvaluation": {
+        "at": "2026-09-19T01:49:15.729621386Z",
+        "candidateCount": 3,
+        "candidates": [
+          {
+            "pointId": "lwp1-c9fd2dc9272a1d1a44fa2d982ca4aba9",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-09-19T01:10:11.287Z"
+          },
+          {
+            "pointId": "lwp1-6a6ca28b7421d0cbb7eb51f597cc8b42",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-09-19T01:10:04.349Z"
+          },
+          {
+            "pointId": "lwp1-43b00a99286b5be768958bc5e3c65d1c",
+            "reason": "BeyondKeepLast",
+            "recoveryPointAt": "2026-09-19T01:09:38.842Z"
+          }
+        ],
+        "kept": [
+          "lwp1-6644d0fed75c151caf8da68a8062aa3a"
+        ],
+        "planExpiresAt": "2026-09-19T02:15:47.469707845Z",
+        "planSha256": "sha256:0d90834b30c02e3f21a382d82e63c4f611b409fde6ad2cfd0199d63865598a95",
+        "pointsEvaluated": 5,
+        "protected": [],
+        "skipped": [
+          {
+            "pointId": "lwp1-7f8a53278110d46fd4f14ecaccc45cc4",
+            "reason": "Unreadable"
+          }
+        ],
+        "truncated": false
+      },
+      "leasedPoints": 0,
+      "minUsablePoints": 1,
+      "mode": "Enforce",
+      "name": "enforce-a",
+      "namespace": "d3w14-lr520260919t0109z",
+      "observedGeneration": 1,
+      "resourceVersion": "4542357",
+      "scopePrefix": "archive",
+      "uid": "7b022a02-cf4f-47ce-8896-fc8c58b71f91"
+    },
+    {
+      "approvedPlanState": "notApplicable",
+      "catalogRef": {
+        "name": "secondary"
+      },
+      "conditions": [
+        {
+          "lastTransitionTime": "2026-09-19T01:49:16.212026595Z",
+          "message": "deletion at this destination is performed by the bucket lifecycle rule `d3w14-rule`; Logweir reports and cannot protect individual points here",
+          "reason": "PolicyReady",
+          "status": "True",
+          "type": "Ready"
+        },
+        {
+          "lastTransitionTime": "2026-09-19T01:49:16.212026595Z",
+          "message": "an ExternalLifecycle policy produces no Logweir evaluation: nothing here reads the provider's rule, so there is nothing to report about what it would remove",
+          "reason": "NeverEvaluated",
+          "status": "Unknown",
+          "type": "Evaluated"
+        },
+        {
+          "lastTransitionTime": "2026-09-19T01:49:15.925897970Z",
+          "message": "Logweir deletes nothing under this policy",
+          "reason": "RecommendationOnly",
+          "status": "False",
+          "type": "Enforced"
+        },
+        {
+          "lastTransitionTime": "2026-09-19T01:49:16.212026595Z",
+          "message": "the declared lifecycle rule expires objects after 7 days and this policy's rules keep points for 30 days; the bucket wins, and Logweir cannot protect an individual point here",
+          "reason": "DeclaredExpiryConflicts",
+          "status": "True",
+          "type": "ExternalLifecycleConflict"
+        },
+        {
+          "lastTransitionTime": "2026-09-19T01:49:16.212026595Z",
+          "message": "no enforcement run has been attempted",
+          "reason": "Healthy",
+          "status": "False",
+          "type": "EnforcementDegraded"
+        }
+      ],
+      "createdAt": "2026-09-19T01:49:15Z",
+      "destinationRef": {
+        "name": "dest-b"
+      },
+      "enforcement": "ExternalLifecycleDeclared",
+      "enforcementDegraded": false,
+      "externalLifecycle": {
+        "expirationDays": 7,
+        "prefix": "archive",
+        "provider": "s3",
+        "ruleId": "d3w14-rule"
+      },
+      "generation": 1,
+      "guarantees": {
+        "activeRestoreProtection": "NotEnforced",
+        "ageExpiry": "ProviderEnforcedUnverified",
+        "legalHold": "ProviderEnforcedUnverified",
+        "minUsablePoints": "NotEnforced",
+        "sharedSegments": "NotEnforced"
+      },
+      "holds": 0,
+      "keepDays": 30,
+      "leasedPoints": 0,
+      "minUsablePoints": 1,
+      "mode": "ExternalLifecycle",
+      "name": "declared-c",
+      "namespace": "d3w14-lr520260919t0109z",
+      "observedGeneration": 1,
+      "resourceVersion": "4542389",
+      "scopePrefix": "archive",
+      "uid": "b3f721e5-4957-4d96-857c-0c553e9aa27c"
+    }
+  ],
+  "page": {
+    "limit": 50,
+    "nextCursor": null,
+    "snapshot": "4542357"
+  },
+  "requestId": "01M2N5SHWR0N2E7SDCW2H22Z8W"
+}

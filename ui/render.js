@@ -1306,6 +1306,51 @@ export const VERIFICATION_CASES = Object.freeze({
   RunNotSucceeded: "the document verified and the run itself did not succeed",
 });
 
+/** THE TWO TRUST STATES A GREEN BADGE MAY CARRY, in the CONSOLE's vocabulary.
+ *
+ *  `OperationTrust.state` is D3 section 2.5's own word and it arrives ALREADY
+ *  COMBINED: `logweir-api` computed it from the controller's `result` and its
+ *  `trust.basis`, which is exactly the normalization a console asks an API
+ *  for. So in console mode the page reads the word instead of re-deriving it,
+ *  and the two-document rule stays honest: legacy mode has no such word and
+ *  keeps the page's own rule over `result` + PascalCase `basis`. */
+export const GREEN_TRUST_STATES = Object.freeze(["verified", "verifiedHistorical"]);
+
+/** Each non-green trust state, named by what it is a claim ABOUT -- the same
+ *  distinction [`VERIFICATION_CASES`] draws for a custom resource, in the
+ *  words the API publishes. */
+export const TRUST_STATE_CASES = Object.freeze({
+  untrusted:
+    "untrusted signer -- the bytes are authentic and this installation does not accept the key",
+  invalid: "invalid -- the signature did not verify, or a digest did not match",
+  notAttempted: "not attempted -- the controller could not check this document",
+  notApplicable: "not applicable -- this run writes no signed document",
+  pending: "pending -- the run has not finished, or its verdict is not written yet",
+});
+
+/** Which non-green case a console trust state is, as a word. A state this
+ *  build does not know renders AS ITSELF rather than as a neighbour: the
+ *  vocabulary is closed on the wire and a word outside it is still a word the
+ *  API chose to say. */
+export function trustStateCase(state, runSucceeded) {
+  if (GREEN_TRUST_STATES.indexOf(state) !== -1) {
+    return runSucceeded === true ? "" : VERIFICATION_CASES.RunNotSucceeded;
+  }
+  const named = TRUST_STATE_CASES[state];
+  if (typeof named === "string") {
+    return named;
+  }
+  return typeof state === "string" && state.length > 0
+    ? state
+    : VERIFICATION_CASES.NotRecorded;
+}
+
+/** The caption a console badge that is not green carries. */
+export function unverifiedTrustCaption(state, runSucceeded) {
+  const said = trustStateCase(state, runSucceeded);
+  return said.length === 0 ? UNVERIFIED : UNVERIFIED + ": " + said;
+}
+
 /** THE BASIS THAT MEANS "NO TRUST EVALUATION WAS RECORDED", AND WHY IT IS NOT
  *  A DOWNGRADE.
  *

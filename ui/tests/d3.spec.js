@@ -41,15 +41,18 @@ import { SERVER_TIME_MAX_AGE_MS } from "../api.js";
 import {
   D3_ENUMS,
   D3_SHAPES,
+  D3_WORDS,
   decodeCatalogPoints,
   decodeCatalogRequest,
   decodeCatalogSigners,
+  decodeD3List,
   decodeD3Operation,
   decodeLegacyObject,
   isContractFailure,
 } from "../contract.js";
 import {
   BACKOFF_MS,
+  readD3,
   CONNECTS_BEFORE_POLLING,
   ERRORS_BEFORE_SLOWING,
   POLL_MS,
@@ -64,6 +67,7 @@ import {
   ENFORCEMENT_SENTENCES,
   EVALUATION_UNKNOWN,
   GREEN_BASES,
+  GREEN_TRUST_STATES,
   HISTORICAL_SUFFIX,
   TRUST_BASIS_NOT_OBSERVED,
   IRREVERSIBLE_SENTENCE,
@@ -77,7 +81,9 @@ import {
   basisAllowsGreen,
   healthBadge,
   stateBadge,
+  trustStateCase,
   unverifiedCaption,
+  unverifiedTrustCaption,
   verificationCase,
   verificationScopeSentence,
 } from "../render.js";
@@ -121,6 +127,7 @@ import {
   renderPoints,
   renderSigners,
   MORE_POINTS_SENTENCE,
+  SYNC_MODES,
   cursorOf,
   isIntentConflict,
   mountCatalog,
@@ -132,6 +139,7 @@ import {
   EVALUATION_FRESHNESS_MS,
   FINGERPRINT_COMMAND,
   evaluationFreshness,
+  evaluationOf,
   mountKeys,
   renderKeysPage,
   renderPolicyFacts,
@@ -151,7 +159,14 @@ import {
 const d3 = (name) =>
   JSON.parse(readFileSync(new URL("./fixtures/d3/" + name, import.meta.url), "utf8"));
 
-const operationOf = (name) => decodeD3Operation(d3(name)).value.item;
+/** The PRODUCT API's own documents. They live under `fixtures/console/` with
+ *  every other one, and `contract.spec.js` holds each of them to the published
+ *  schema -- which is what the reconciliation bought: these were this client's
+ *  assumption and are now instances. */
+const con = (name) =>
+  JSON.parse(readFileSync(new URL("./fixtures/console/" + name, import.meta.url), "utf8"));
+
+const operationOf = (name) => decodeD3Operation(con(name)).value.item;
 
 function decode(html) {
   return html
@@ -166,41 +181,59 @@ function decode(html) {
 // PLAT-14.1 -- the operation contract, and what the two modes each carry
 // ===========================================================================
 
-test("the_extended_operation_decoder_reads_every_d3_field_and_refuses_an_unknown_stage", () => {
+test("the_operation_decoder_reads_the_published_view_and_refuses_an_unknown_stage", () => {
   const item = operationOf("operation-backup-preparing.json");
   assert.equal(item.state, "preparing");
-  assert.equal(item.progress.stage, "Preparing");
-  assert.equal(item.progress.runner.waitingReason, "CreateContainerConfigError");
+  assert.equal(item.stage, "preparing", "the stage is on the view, camelCase");
+  assert.equal(item.progress.stage, "preparing");
+  assert.equal(item.progress.runner, undefined,
+    "there is NO runner block: a Job name and a pod name are infrastructure detail and the " +
+      "console contract does not carry them");
   assert.equal(item.diagnostics[0].code, "CredentialSecretNotFound");
   assert.equal(item.diagnostics[0].severity, "Error");
-  assert.equal(item.diagnostics[0].object.kind, "Pod");
+  assert.equal(item.diagnostics[0].object.kind, "Pod",
+    "what replaces the runner block is the diagnosis' own object");
 
   // A STAGE THIS BUILD DOES NOT KNOW IS A CONTRACT FAILURE AND NOT A BLANK.
-  const broken = d3("operation-backup-preparing.json");
-  broken.item.progress.stage = "Thinking";
+  // `OperationStage` is one of the eight D3 vocabularies the document
+  // publishes as a TYPED enum, so a word outside it is a body this client
+  // refuses rather than renders.
+  const broken = con("operation-backup-preparing.json");
+  broken.item.progress.stage = "thinking";
   assert.throws(
     () => decodeD3Operation(broken),
     (error) => {
       assert.ok(isContractFailure(error), "it is a contract failure");
-      assert.match(error.message, /expected one of Admission, Queued/);
+      assert.match(error.message, /expected one of admission, queued/);
       return true;
     },
   );
-
-  // And so is a diagnosis code outside the closed thirteen.
-  const invented = d3("operation-backup-preparing.json");
-  invented.item.diagnostics[0].code = "SomethingWentWrong";
-  assert.throws(() => decodeD3Operation(invented), isContractFailure);
 });
 
-test("the_diagnosis_vocabulary_is_the_closed_thirteen_and_not_a_fourteenth", () => {
-  assert.equal(D3_ENUMS.DiagnosisCode.length, 13);
-  assert.ok(D3_ENUMS.DiagnosisCode.indexOf("DisruptedMidRun") !== -1,
+test("a_word_the_document_publishes_as_a_string_is_rendered_and_never_refused", () => {
+  // THE RECONCILIATION'S OWN RULE, AND IT CUTS BOTH WAYS. Eight D3
+  // vocabularies are typed enums and a word outside one is refused (above).
+  // The other twenty are published as `string`, because each is a word a
+  // CONTROLLER writes into a status field the API passes through: a closed
+  // enum there would turn a forward-compatible status into a 500, so this
+  // client declares them `str` and keeps the lists as RENDERING vocabularies.
+  //
+  // A code from a newer controller therefore DECODES, and renders as itself.
+  const invented = con("operation-backup-preparing.json");
+  invented.item.diagnostics[0].code = "SomethingThisBuildHasNeverSeen";
+  const item = decodeD3Operation(invented).value.item;
+  assert.equal(item.diagnostics[0].code, "SomethingThisBuildHasNeverSeen");
+  const html = decode(renderDiagnostics(operationFacts(item, true)));
+  assert.match(html, /SomethingThisBuildHasNeverSeen/,
+    "and the page prints the word the controller wrote rather than dropping the row");
+
+  // The thirteen stay as the list that picks a colour and nothing else.
+  assert.equal(D3_WORDS.diagnosisCode.length, 13);
+  assert.ok(D3_WORDS.diagnosisCode.indexOf("DisruptedMidRun") !== -1,
     "D2's DisruptedMidCheck under the name a RUN gives it");
-  assert.equal(D3_ENUMS.DiagnosisCode.indexOf("DisruptedMidCheck"), -1,
+  assert.equal(D3_WORDS.diagnosisCode.indexOf("DisruptedMidCheck"), -1,
     "and not both spellings");
-  assert.ok(D3_ENUMS.DiagnosisCode.indexOf("WaitingForPod") !== -1);
-  assert.equal(D3_ENUMS.DiagnosisCode.indexOf("DeadlineExceeded"), -1,
+  assert.equal(D3_WORDS.diagnosisCode.indexOf("DeadlineExceeded"), -1,
     "the Job's own clock running out is the consequence, not a diagnosis");
 });
 
@@ -225,6 +258,7 @@ test("the_operation_view_computes_no_state_in_legacy_mode_and_says_so", () => {
 
 test("the_operation_view_prints_the_apis_own_word_in_console_mode", () => {
   const item = operationOf("operation-unknown.json");
+  assert.equal(item.stale, true, "the API says the status itself is too old to believe");
   const html = renderOperation({
     ns: "team-a", kind: "backup", name: item.name, uid: "",
     document: item, console: true, meta: { transport: "stream", attempt: 0 },
@@ -251,7 +285,10 @@ test("a_uid_that_does_not_answer_refuses_instead_of_switching_runs", () => {
 test("the_result_and_the_evidence_are_two_sections_and_a_succeeded_run_is_not_a_verified_one", () => {
   const item = operationOf("operation-restore-no-record-check.json");
   assert.equal(item.result.status, "pass", "the RUN passed");
-  assert.equal(item.evidenceVerification.result, "NotAttempted", "and nothing verified it");
+  assert.equal(item.trust.state, "notAttempted",
+    "and nothing verified it -- one word, computed by the API from the controller's result " +
+      "and its trust basis, which is the normalization a console asks an API for");
+  assert.equal(item.verification.state, "notAttempted", "beside the signature result itself");
 
   const facts = operationFacts(item, true);
   const result = renderResult(facts);
@@ -568,8 +605,8 @@ test("the_protection_list_says_what_an_empty_namespace_means", () => {
 // ===========================================================================
 
 test("availability_and_verification_are_two_columns_and_selectable_is_read_not_recomputed", () => {
-  const page = decodeCatalogPoints(d3("catalog-points-states.json")).value;
-  const html = renderPoints(page, "team-a", "primary");
+  const page = decodeCatalogPoints(con("catalog-points-states.json")).value;
+  const html = renderPoints(page, "team-a", "primary", "dest-a");
   assert.match(html, /<th scope="col">AVAILABILITY<\/th>/);
   assert.match(html, /<th scope="col">VERIFICATION<\/th>/);
   assert.match(decode(html), /that judgement is the catalog's own `selectable` field/);
@@ -579,11 +616,11 @@ test("availability_and_verification_are_two_columns_and_selectable_is_read_not_r
   // (Verified | VerifiedHistorical)` would offer a restore for a point the
   // catalog had already decided is not selectable. Flip the materialised bit
   // and the row must lose its link, whatever the two enums say.
-  const flipped = d3("catalog-points-states.json");
+  const flipped = con("catalog-points-states.json");
   assert.equal(flipped.items[0].availability, "Available");
   assert.equal(flipped.items[0].verification, "Verified");
   flipped.items[0].selectable = false;
-  const out = renderPoints(decodeCatalogPoints(flipped).value, "team-a", "primary");
+  const out = renderPoints(decodeCatalogPoints(flipped).value, "team-a", "primary", "dest-a");
   const row = out.slice(out.indexOf(flipped.items[0].pointId));
   assert.equal(row.slice(0, row.indexOf("</tr>")).indexOf("Restore this point"), -1,
     "the row offers no restore when the catalog says the point is not selectable, even " +
@@ -591,8 +628,8 @@ test("availability_and_verification_are_two_columns_and_selectable_is_read_not_r
 });
 
 test("nothing_is_hidden_and_every_state_carries_its_remedy", () => {
-  const page = decodeCatalogPoints(d3("catalog-points-states.json")).value;
-  const html = decode(renderPoints(page, "team-a", "primary"));
+  const page = decodeCatalogPoints(con("catalog-points-states.json")).value;
+  const html = decode(renderPoints(page, "team-a", "primary", "dest-a"));
   for (const word of ["Available", "Missing", "Conflict", "Deleted", "UntrustedSigner"]) {
     assert.ok(html.indexOf(word) !== -1, word + " is listed rather than dropped");
   }
@@ -602,7 +639,7 @@ test("nothing_is_hidden_and_every_state_carries_its_remedy", () => {
 });
 
 test("one_point_in_two_buckets_is_one_row_and_the_degraded_location_is_named", () => {
-  const page = decodeCatalogPoints(d3("catalog-points-states.json")).value;
+  const page = decodeCatalogPoints(con("catalog-points-states.json")).value;
   const twoLocations = page.items.filter((e) => e.locations.length === 2);
   assert.equal(twoLocations.length, 1);
   const entry = twoLocations[0];
@@ -614,29 +651,41 @@ test("one_point_in_two_buckets_is_one_row_and_the_degraded_location_is_named", (
   assert.equal(best.locationId, "s3://d3w14-lr520260919t0109z-a/archive");
 });
 
-test("the_restore_link_carries_the_frozen_location_digest", () => {
-  const page = decodeCatalogPoints(d3("catalog-points-states.json")).value;
+test("the_restore_link_carries_the_whole_plan_binding", () => {
+  // RECONCILED. The link used to carry an assumed `locationDigest`; the
+  // catalog's view entry has never held one -- the frozen destination digest is
+  // a fact about a BACKUP's own destination snapshot, not about a point read
+  // out of a bucket -- so the API publishes none and this page invents none.
+  // What it carries instead is what a plan is actually built from: D3
+  // section 5.5 step 4's `source.point {point_id, receipt_key, receipt_sha256,
+  // manifest_sha256}`, plus the catalog's own destination.
+  const page = decodeCatalogPoints(con("catalog-points-states.json")).value;
   const entry = page.items[0];
-  assert.ok(typeof entry.locationDigest === "string" && entry.locationDigest.length > 0);
-  const route = restorePointRoute("team-a", "primary", entry);
+  assert.ok(entry.receiptKey.length > 0 && entry.receiptSha256.length > 0,
+    "the two binding fields a point cannot be restored without are REQUIRED on the view");
+  const route = restorePointRoute("team-a", "primary", entry, "dest-a");
   assert.ok(route.indexOf("point=" + entry.pointId) !== -1);
   assert.ok(route.indexOf("catalog=primary") !== -1);
-  assert.ok(route.indexOf("locationDigest=" + encodeURIComponent(entry.locationDigest)) !== -1,
-    "the frozen destination digest travels with the point, which is what binds a restore " +
-      "to the exact snapshot the point was written under");
+  assert.ok(route.indexOf("receiptKey=" + encodeURIComponent(entry.receiptKey)) !== -1);
+  assert.ok(route.indexOf("receiptSha256=" + encodeURIComponent(entry.receiptSha256)) !== -1);
+  assert.ok(route.indexOf("manifestSha256=" + encodeURIComponent(entry.manifestSha256)) !== -1);
+  assert.ok(route.indexOf("destination=dest-a") !== -1,
+    "and the destination the catalog reads, which is what names the location now");
+  assert.equal(route.indexOf("locationDigest="), -1,
+    "no digest is invented for a field no document publishes");
   assert.ok(POINT_BINDING_SENTENCE.indexOf("receipt_sha256") !== -1);
 
-  // A point whose view published no digest says nothing rather than inventing
-  // one: the link still carries the location it can be served from.
-  const noDigest = JSON.parse(JSON.stringify(entry));
-  delete noDigest.locationDigest;
-  const bare = restorePointRoute("team-a", "primary", noDigest);
-  assert.equal(bare.indexOf("locationDigest="), -1);
-  assert.ok(bare.indexOf("location=") !== -1);
+  // A point whose view carries no manifest digest says nothing rather than
+  // inventing one; the link is still well formed.
+  const noManifest = JSON.parse(JSON.stringify(entry));
+  delete noManifest.manifestSha256;
+  const bare = restorePointRoute("team-a", "primary", noManifest, "dest-a");
+  assert.equal(bare.indexOf("manifestSha256="), -1);
+  assert.ok(bare.indexOf("receiptSha256=") !== -1);
 });
 
 test("the_untrusted_signer_panel_offers_no_one_click_trust", () => {
-  const signers = decodeCatalogSigners(d3("catalog-signers.json")).value;
+  const signers = decodeCatalogSigners(con("catalog-signers.json")).value;
   const html = renderSigners(signers);
   const text = decode(html);
   assert.match(html, /data-untrusted-signers="1"/);
@@ -695,8 +744,11 @@ test("the_connect_archive_form_is_a_durable_submission_and_checks_its_body_befor
   assert.deepEqual(Object.keys(validateConnect({})).sort(), ["destination", "name"]);
   assert.deepEqual(validateConnect({ name: "primary", destination: "dest-a" }), {});
 
-  const body = connectBody({ name: "primary", destination: "dest-a", syncMode: "Full" });
-  assert.deepEqual(body, { name: "primary", destinationRef: { name: "dest-a" }, syncMode: "Full" });
+  const body = connectBody({ name: "primary", destination: "dest-a", syncMode: "full" });
+  assert.deepEqual(body, { name: "primary", destinationRef: { name: "dest-a" }, syncMode: "full" });
+  assert.deepEqual(SYNC_MODES.slice(), ["full", "index"],
+    "the REQUEST spelling is lowercase; the CRD's `Index`/`Full` is the other side of the " +
+      "translation the API does once");
   assert.deepEqual(decodeCatalogRequest(body).unknown, [],
     "the body this form builds is exactly the published request shape");
 
@@ -976,13 +1028,10 @@ test("an_explicit_basis_None_is_an_ABSENCE_and_reads_by_the_pre_existing_rule", 
 
   // THE OPERATION VIEW'S EVIDENCE BLOCK READS THE SAME FUNCTION, so the two
   // halves of the rule cannot come to disagree.
-  const facts = operationFacts({
-    kind: "backup", name: "b", uid: "u", terminal: true, verifiedSuccess: true,
-    evidenceVerification: valid.status.evidence.verification,
-    result: { status: "pass" }, evidence: {}, conditions: [],
-  }, true);
+  const facts = operationFacts(valid, false);
+  assert.equal(facts.console, false, "a custom resource, read in legacy mode");
   assert.ok(decode(renderEvidence(facts)).indexOf("badge-green") !== -1,
-    "the operation view agrees with the badge");
+    "the operation view agrees with the badge, because both call basisAllowsGreen");
 });
 
 test("an_object_with_no_trust_block_at_all_stays_green", () => {
@@ -1139,10 +1188,11 @@ test("the_policy_covering_a_schedule_comes_from_the_controllers_own_supersededBy
 // the contract's own self-pinning arm
 // ===========================================================================
 
-/** THE ROUTES THIS CLIENT ASSUMES, exactly as `d3w12.result.md` section 4.1
- *  lists them. Every one must be a key of the published document's `paths`
- *  once the D3 family lands. */
-const ASSUMED_D3_ROUTES = Object.freeze([
+/** EVERY ROUTE THIS CLIENT ADDRESSES. Each must be a key of the published
+ *  document's `paths`; the arm below asserts it, so a route renamed on either
+ *  side is a red suite and not a 404 in front of an operator. */
+const D3_ROUTES_ADDRESSED = Object.freeze([
+  "/api/v1/namespaces/{ns}/operations/{kind}/{name}",
   "/api/v1/namespaces/{ns}/operations/{kind}/{name}/events",
   "/api/v1/namespaces/{ns}/protection-policies",
   "/api/v1/namespaces/{ns}/protection-policies/{name}",
@@ -1151,76 +1201,39 @@ const ASSUMED_D3_ROUTES = Object.freeze([
   "/api/v1/namespaces/{ns}/catalogs/{name}/points",
   "/api/v1/namespaces/{ns}/catalogs/{name}/signers",
   "/api/v1/namespaces/{ns}/retention-policies",
+  "/api/v1/namespaces/{ns}/retention-policies/{name}",
   "/api/v1/trust-policies",
 ]);
 
-/** The ONE route of the four families this document already publishes, and the
- *  sentinel for "the D3 API half has not landed yet". */
-const PUBLISHED_OPERATION_ROUTE = "/api/v1/namespaces/{ns}/operations/{kind}/{name}";
+/** The one query parameter the point route takes beyond paging, and the ONLY
+ *  filter this client may send with it. */
+const POINT_FILTERS = Object.freeze(["limit", "cursor", "selectable"]);
 
-/** THE SHAPE NAMES THIS CLIENT DECLARES THAT THE DOCUMENT DOES NOT PUBLISH YET
- *  -- checked in, sorted, and compared for EQUALITY below.
- *
- *  REVIEW F2. The first version of this arm let an unpublished name fall into
- *  an `assumed` bucket whose only assertion was a tautology, so a DTO the
- *  document published under a DIFFERENT name stayed in that bucket and the arm
- *  went green having pinned nothing -- which is the empty cell the typed
- *  contract exists to prevent, one level up. An equality against this list
- *  makes a name joining it, leaving it or changing its spelling a diff a
- *  reviewer reads, and makes the day `d3w11` lands a RED suite rather than a
- *  quiet one. */
-const ASSUMED_D3_SHAPES = Object.freeze([
-  "AlertDeliveryView",
-  "AlertView",
-  "CatalogPointList",
-  "CatalogPointResponse",
-  "CatalogPointView",
-  "CatalogSignerView",
-  "CatalogSignersResponse",
-  "CompletionView",
-  "CreateCatalogRequest",
-  "D3Operation",
-  "D3OperationResponse",
-  "DiagnosticView",
-  "EvidenceVerificationView",
-  "KeyVerdictView",
-  "ProgressView",
-  "ProtectionPolicy",
-  "ProtectionPolicyList",
-  "ProtectionPolicyResponse",
-  "ProtectionPolicyStatusView",
-  "RecoveryCatalog",
-  "RecoveryCatalogList",
-  "RecoveryCatalogResponse",
-  "RecoveryCatalogStatusView",
-  "RetentionPolicy",
-  "RetentionPolicyList",
-  "RetentionPolicyResponse",
-  "RetentionPolicyStatusView",
-  "TeardownView",
-  "TrustKeyView",
-  "TrustPolicy",
-  "TrustPolicyList",
-  "TrustPolicyResponse",
-  "TrustPolicyStatusView",
-  "VerificationScopeView",
-  "VerificationTrustView",
-]);
-
-test("every_d3_shape_and_enum_is_declared_and_pins_itself_once_the_api_publishes_it", () => {
+test("every_d3_shape_route_and_vocabulary_is_pinned_against_the_published_document", () => {
+  // RECONCILED, AND THERE IS NO ASSUMED BUCKET LEFT.
+  //
+  // The first version of this arm let an unpublished name fall into an
+  // `assumed` list; the review's F2 made that list an equality so a rename
+  // could not hide in it, and this round emptied it: the API branch is in the
+  // tree, every name below is the document's own, and the arm now HARD-FAILS on
+  // any shape, route or vocabulary this client names that the document does
+  // not. A client with something left to assume is a client whose decoders are
+  // pinned against nothing.
   const schema = JSON.parse(readFileSync(
     new URL("../../schemas/logweir-api-v1.openapi.json", import.meta.url), "utf8"));
   const definitions = schema.components.schemas;
   const paths = schema.paths || {};
 
-  const assumed = [];
+  // (1) EVERY SHAPE. Name published, `required` equal field for field, and no
+  // field decoded here that the schema does not declare.
   let pinned = 0;
   for (const name of Object.keys(D3_SHAPES)) {
     const published = definitions[name];
-    if (published === undefined) {
-      assumed.push(name);
-      continue;
-    }
+    assert.ok(
+      published !== undefined,
+      name + " is not a schema this document publishes. Nothing this client decodes may be " +
+        "assumed: take the published name from schemas/logweir-api-v1.openapi.json.",
+    );
     if (published.oneOf !== undefined) {
       pinned += 1;
       continue;
@@ -1242,62 +1255,65 @@ test("every_d3_shape_and_enum_is_declared_and_pins_itself_once_the_api_publishes
     }
     pinned += 1;
   }
+  assert.equal(pinned, Object.keys(D3_SHAPES).length, "every declared shape is pinned");
+  assert.ok(pinned >= 55,
+    "every D3 response DTO, list envelope, nested view and request body is declared; pinned=" +
+      String(pinned));
 
-  // (1) THE ASSUMED SET IS AN EQUALITY AND NOT A BUCKET. A name renamed on
-  // either side lands here, whichever side moved it.
-  assert.deepEqual(
-    assumed.slice().sort(),
-    ASSUMED_D3_SHAPES.slice().sort(),
-    "the set of D3 shapes this client declares that the published document does NOT name has " +
-      "changed. If `d3w11` landed, empty ASSUMED_D3_SHAPES in the same change and let the " +
-      "per-shape pin above do its work; if a shape was renamed HERE, rename it there too. A " +
-      "name silently sitting in this bucket is a decoder pinned against nothing.",
+  // (2) EVERY ROUTE.
+  for (const route of D3_ROUTES_ADDRESSED) {
+    assert.ok(paths[route] !== undefined,
+      route + " is a route this client addresses and the document does not publish");
+  }
+  const connect = paths["/api/v1/namespaces/{ns}/catalogs"].post;
+  assert.ok(connect !== undefined, "connecting an archive is a POST on the catalogs collection");
+  assert.ok(
+    (connect.parameters || []).some((p) => p.name === "Idempotency-Key"),
+    "and it REQUIRES an idempotency key, which is what makes the submission durable",
   );
+  const pointParams = (paths["/api/v1/namespaces/{ns}/catalogs/{name}/points"].get.parameters || [])
+    .map((p) => p.name)
+    .filter((name) => name !== "ns" && name !== "name");
+  assert.deepEqual(pointParams.slice().sort(), POINT_FILTERS.slice().sort(),
+    "the point route's query surface is exactly what this client may send; an `availability=` " +
+      "or `verification=` filter it invented would be a parameter the API does not declare");
 
-  // (2) ONCE THE D3 FAMILY IS PUBLISHED, NOTHING MAY STILL BE ASSUMED. The
-  // sentinel is any of the routes section 4.1 names beyond the one the document
-  // already carried, so this arm arms itself the moment the API half lands
-  // rather than waiting for somebody to remember it.
-  const landed = ASSUMED_D3_ROUTES.filter((route) => paths[route] !== undefined);
-  assert.ok(paths[PUBLISHED_OPERATION_ROUTE] !== undefined,
-    "the operation read this client has always used is still published");
-  if (landed.length > 0) {
-    assert.deepEqual(
-      ASSUMED_D3_ROUTES.filter((route) => paths[route] === undefined),
-      [],
-      "the D3 route family is published and these routes this client addresses are not in it",
-    );
-    assert.deepEqual(assumed, [],
-      "the D3 routes are published, so every D3 shape must be pinned against the document; " +
-        "these are still assumed: " + assumed.join(", "));
-    assert.ok(pinned >= 30, "and every declared shape is pinned; pinned=" + String(pinned));
-  }
-
-  assert.equal(assumed.length + pinned, Object.keys(D3_SHAPES).length);
-  assert.ok(Object.keys(D3_SHAPES).length >= 35,
-    "every D3 response DTO, list envelope and request body this client builds is declared");
-
-  // (3) THE VOCABULARIES, ON THE SAME TERMS.
-  const enumsAssumed = [];
+  // (3) EVERY TYPED VOCABULARY, member for member.
   for (const name of Object.keys(D3_ENUMS)) {
-    assert.ok(Array.isArray(D3_ENUMS[name]) && D3_ENUMS[name].length > 0,
-      name + " is a closed, non-empty vocabulary");
     const published = definitions[name];
-    if (published === undefined) {
-      enumsAssumed.push(name);
-      continue;
-    }
+    assert.ok(published !== undefined, name + " is a vocabulary the document publishes");
+    const members = [];
     if (Array.isArray(published.enum)) {
-      assert.deepEqual(D3_ENUMS[name].slice().sort(), published.enum.slice().sort(), name);
+      members.push(...published.enum);
     }
-  }
-  if (landed.length > 0) {
-    assert.deepEqual(enumsAssumed, [],
-      "the D3 routes are published, so every D3 vocabulary must be pinned; these are not: " +
-        enumsAssumed.join(", "));
+    for (const option of published.oneOf || []) {
+      members.push(...(option.enum || []));
+    }
+    assert.deepEqual(D3_ENUMS[name].slice().sort(), members.slice().sort(), name);
   }
   assert.equal(D3_ENUMS.VerificationScopeLevel.indexOf("complete"), -1,
     "`complete` does not exist as a level in v1 and is absent from the vocabulary on purpose");
+
+  // (4) AND THE OPEN ONES ARE OPEN ON BOTH SIDES. A word a CONTROLLER writes
+  // is published as `string`, because a closed enum there would turn a
+  // forward-compatible status into a 500; this client declares it `str` for the
+  // same reason and keeps the list only to pick a colour. If the document ever
+  // closes one, this says so.
+  for (const name of Object.keys(D3_WORDS)) {
+    assert.ok(Array.isArray(D3_WORDS[name]) && D3_WORDS[name].length > 0,
+      name + " is a non-empty rendering vocabulary");
+  }
+  for (const [holder, field] of [
+    ["ProtectionPolicyView", "health"], ["PointView", "availability"],
+    ["PointView", "verification"], ["TrustKeyView", "effectiveState"],
+    ["DiagnosticView", "code"], ["OperationTrust", "basis"],
+  ]) {
+    const property = (definitions[holder].properties || {})[field];
+    assert.equal(property.type, "string",
+      holder + "." + field + " is published as an open string; a page that refused an " +
+        "unrecognised value would turn a newer controller's status into a rendered failure");
+    assert.equal(property.enum, undefined);
+  }
 });
 
 test("the_four_d3_custom_resources_decode_in_legacy_mode_and_refuse_a_missing_required_field", () => {
@@ -1357,6 +1373,18 @@ function fakeNode(form) {
 
 const fakeParse = (html) => [{ html: html }];
 
+/** A `CatalogView` the decoder accepts, built from the published fixture so a
+ *  fake create answers the shape the real route does. A stub that answered
+ *  less would make these rows pass over a body the client would refuse. */
+function fakeCatalogView(ns, body, uid) {
+  const item = JSON.parse(JSON.stringify(con("catalog.json").item));
+  item.name = body.name;
+  item.namespace = ns;
+  item.uid = uid;
+  item.destinationRef = body.destinationRef;
+  return item;
+}
+
 function fakeForm(values) {
   const listeners = [];
   return {
@@ -1389,16 +1417,12 @@ test("the_connect_form_sends_one_request_per_intent_and_a_second_click_while_pen
         sent.push({ ns: ns, plural: plural, body: body, key: options.idempotencyKey });
         return new Promise((resolve) => {
           resolveCreate = () => resolve({
-            item: {
-              name: body.name, namespace: ns, uid: "u1", resourceVersion: "1",
-              spec: { destinationRef: body.destinationRef },
-            },
-            requestId: "r2",
+            item: fakeCatalogView(ns, body, "u1"), requestId: "r2",
           });
         });
       },
     };
-    const form = fakeForm({ name: "primary", destination: "dest-a", syncMode: "Full" });
+    const form = fakeForm({ name: "primary", destination: "dest-a", syncMode: "full" });
     const node = fakeNode(form);
     await mountCatalog(node, "d3-mount-a", fakeParse, null, deps);
     assert.ok(node.html.indexOf("Connect an existing archive") !== -1, "the form is on screen");
@@ -1408,7 +1432,7 @@ test("the_connect_form_sends_one_request_per_intent_and_a_second_click_while_pen
     assert.equal(sent.length, 1, "one request");
     assert.equal(sent[0].plural, "catalogs");
     assert.deepEqual(sent[0].body,
-      { name: "primary", destinationRef: { name: "dest-a" }, syncMode: "Full" });
+      { name: "primary", destinationRef: { name: "dest-a" }, syncMode: "full" });
     assert.ok(sent[0].key.indexOf("logweir-ui.catalog.") === 0,
       "under an idempotency intent this draft holds");
 
@@ -1451,7 +1475,7 @@ test("one_draft_holds_one_intent_across_every_resend_of_it", async () => {
       throw failure;
     },
   };
-  const form = fakeForm({ name: "primary", destination: "dest-a", syncMode: "Full" });
+  const form = fakeForm({ name: "primary", destination: "dest-a", syncMode: "full" });
   const node = fakeNode(form);
   await mountCatalog(node, "d3-mount-c", fakeParse, null, deps);
   for (let i = 0; i < 3; i += 1) {
@@ -1473,7 +1497,7 @@ test("the_connect_form_refuses_an_empty_field_before_anything_is_sent", async ()
       return {};
     },
   };
-  const form = fakeForm({ name: "", destination: "", syncMode: "Full" });
+  const form = fakeForm({ name: "", destination: "", syncMode: "full" });
   const node = fakeNode(form);
   await mountCatalog(node, "d3-mount-b", fakeParse, null, deps);
   form.submit();
@@ -1615,7 +1639,7 @@ test("the_stream_is_CLOSED_on_a_settled_document_and_on_disposal", async () => {
       this.addEventListener = made.addEventListener.bind(made);
       this.close = made.close.bind(this);
       queueMicrotask(() => {
-        made.state.handlers.operation({ data: JSON.stringify(d3("operation-restore-completed.json")) });
+        made.state.handlers.operation({ data: JSON.stringify(con("operation-restore-completed.json")) });
       });
     }
   }
@@ -1678,15 +1702,12 @@ test("a_durable_result_empties_the_form_and_re_reads_the_list", async () => {
       };
     },
     consoleCreate: async (ns, plural, body) => {
-      const item = {
-        name: body.name, namespace: ns, uid: "u" + String(created.length + 1),
-        resourceVersion: "1", spec: { destinationRef: body.destinationRef },
-      };
+      const item = fakeCatalogView(ns, body, "u" + String(created.length + 1));
       created.push(item);
       return { item: item, requestId: "c1" };
     },
   };
-  const form = fakeForm({ name: "primary", destination: "dest-a", syncMode: "Full" });
+  const form = fakeForm({ name: "primary", destination: "dest-a", syncMode: "full" });
   const node = fakeNode(form);
   await mountCatalog(node, "d3-fix-a", fakeParse, null, deps);
   assert.equal(lists, 1);
@@ -1720,13 +1741,7 @@ test("a_corrected_body_mints_a_new_intent_rather_than_spending_the_old_one", asy
       if (failWith !== null) {
         throw failWith;
       }
-      return {
-        item: {
-          name: body.name, namespace: ns, uid: "u1", resourceVersion: "1",
-          spec: { destinationRef: body.destinationRef },
-        },
-        requestId: "c1",
-      };
+      return { item: fakeCatalogView(ns, body, "u1"), requestId: "c1" };
     },
   };
   const refusal = new Error("the destination dest-typo does not exist");
@@ -1734,7 +1749,7 @@ test("a_corrected_body_mints_a_new_intent_rather_than_spending_the_old_one", asy
   refusal.reason = "validation_failed";
   failWith = refusal;
 
-  const form = fakeForm({ name: "primary", destination: "dest-typo", syncMode: "Full" });
+  const form = fakeForm({ name: "primary", destination: "dest-typo", syncMode: "full" });
   const node = fakeNode(form);
   await mountCatalog(node, "d3-fix-b", fakeParse, null, deps);
 
@@ -1777,15 +1792,15 @@ test("a_spent_intent_is_explained_and_not_left_as_a_bare_refusal", () => {
 });
 
 test("the_point_table_says_when_it_is_one_page_of_a_larger_view", () => {
-  const one = decodeCatalogPoints(d3("catalog-points.json")).value;
+  const one = decodeCatalogPoints(con("catalog-points.json")).value;
   assert.equal(cursorOf(one), null);
-  assert.equal(renderPoints(one, "team-a", "primary").indexOf("data-more-points"), -1);
+  assert.equal(renderPoints(one, "team-a", "primary", "dest-a").indexOf("data-more-points"), -1);
 
-  const more = d3("catalog-points.json");
+  const more = con("catalog-points.json");
   more.page.nextCursor = "opaque-cursor";
   const page = decodeCatalogPoints(more).value;
   assert.equal(cursorOf(page), "opaque-cursor");
-  const html = decode(renderPoints(page, "team-a", "primary"));
+  const html = decode(renderPoints(page, "team-a", "primary", "dest-a"));
   assert.match(html, /data-more-points="true"/);
   assert.match(html, /That is a different truncation from the window above/,
     "the HTTP page and the Kubernetes view limit are two truncations and read as two");
@@ -1816,4 +1831,196 @@ test("a_server_instant_too_old_to_be_now_is_reported_as_none", () => {
   const object = d3("trustpolicy-active.json");
   assert.deepEqual(evaluationFreshness(object, null),
     { fresh: false, reason: "NoServerClock" });
+});
+
+// ===========================================================================
+// the reconciliation: two documents, two rules, one renderer
+// ===========================================================================
+
+test("the_console_evidence_rule_reads_the_apis_own_combined_word", () => {
+  // D3 section 2.5 makes the evidence verdict ONE WORD, computed by
+  // `logweir-api` from the controller's `result` and its `trust.basis`. In
+  // console mode the page reads it; re-deriving it here would be that table
+  // implemented a second time in a browser, which is what a normalizing API
+  // exists to prevent.
+  assert.deepEqual(GREEN_TRUST_STATES.slice(), ["verified", "verifiedHistorical"]);
+
+  const historical = operationFacts(operationOf("operation-restore-completed.json"), true);
+  assert.equal(historical.trustState, "verifiedHistorical");
+  const green = decode(renderEvidence(historical));
+  assert.ok(green.indexOf("badge-green") !== -1, "a historical verdict is a PASS");
+  assert.match(green, /signed before that key was retired/);
+  assert.match(green, /trust basis/);
+  assert.match(green, /Historical/);
+
+  const notAttempted = operationFacts(
+    operationOf("operation-restore-no-record-check.json"), true);
+  assert.equal(notAttempted.trustState, "notAttempted");
+  const grey = decode(renderEvidence(notAttempted));
+  assert.ok(grey.indexOf("badge-green") === -1, "and a pass with nothing checked is not one");
+  assert.ok(grey.indexOf("unverified") !== -1, "the word every older surface reads");
+  assert.match(grey, /not attempted -- the controller could not check/);
+
+  // EACH NON-GREEN STATE IS NAMED BY WHAT IT IS A CLAIM ABOUT.
+  assert.match(decode(unverifiedTrustCaption("untrusted", true)),
+    /untrusted signer -- the bytes are authentic/);
+  assert.match(decode(unverifiedTrustCaption("invalid", true)),
+    /invalid -- the signature did not verify/);
+  assert.match(decode(unverifiedTrustCaption("notApplicable", true)),
+    /this run writes no signed document/);
+  assert.equal(trustStateCase("verified", true), "",
+    "a verified verdict over a successful run has no case to name");
+  assert.match(trustStateCase("verified", false), /the run itself did not succeed/);
+
+  // AND A WORD THIS BUILD DOES NOT KNOW RENDERS AS ITSELF.
+  assert.equal(trustStateCase("somethingNewer", true), "somethingNewer");
+
+  // THE CASE THE TWO FIELDS DISAGREE, WHICH IS WHY THERE ARE TWO. The
+  // signature VERIFIED -- `verification.state: "valid"` -- and this
+  // installation does not accept the key that made it, so the combined verdict
+  // is `untrusted`. A badge that read the signature result alone would paint
+  // this green, which is D3 section 7.4's whole point: the two are different
+  // questions and the console must read the one that is about trust.
+  const untrusted = operationFacts(operationOf("operation-restore-untrusted.json"), true);
+  assert.equal(untrusted.verification.state, "valid", "the bytes are authentic");
+  assert.equal(untrusted.trustState, "untrusted", "and the key is not one this policy lists");
+  const refused = decode(renderEvidence(untrusted));
+  assert.equal(refused.indexOf("badge-green"), -1,
+    "an authentic signature under a key this installation does not accept is NOT a pass");
+  assert.match(refused, /untrusted signer -- the bytes are authentic/);
+  assert.match(refused, /signature result/,
+    "and the signature result is on screen beside it, because it is a fact and not the verdict");
+});
+
+test("the_console_operation_carries_no_runner_detail_and_the_page_says_why", () => {
+  // `progress.runner` IS NOT PUBLISHED. A Job name and a pod name are
+  // infrastructure detail; what an incident needs instead is the reason, the
+  // message and a DIAGNOSTIC's own object, which IS published.
+  const facts = operationFacts(operationOf("operation-backup-preparing.json"), true);
+  const html = decode(renderProgress(facts));
+  assert.match(html, /data-no-runner-detail="true"/);
+  assert.match(html, /they are infrastructure detail/);
+  assert.equal(html.indexOf("d3w12-waiting-hk29p"), -1,
+    "no pod name reaches the progress block in console mode");
+  assert.match(decode(renderDiagnostics(facts)), /Pod d3w12-waiting-hk29p/,
+    "and the diagnosis that names one DOES render it, because that is a resource-scoped error");
+
+  // The custom resource DOES carry the block and legacy mode renders it,
+  // because there the page is reading the object itself.
+  const legacy = operationFacts(d3("backup-progress-waiting.json"), false);
+  const out = decode(renderProgress(legacy));
+  assert.match(out, /d3w12-waiting-hk29p/);
+  assert.equal(out.indexOf("data-no-runner-detail"), -1);
+});
+
+test("the_flat_views_project_into_the_custom_resources_own_vocabulary", async () => {
+  // ONE RENDERER, ONE VOCABULARY. The published views are flat; the page
+  // renderers speak the custom resource's shape because legacy mode hands them
+  // exactly that, so the projection happens once in `ui/operation-watch.js`.
+  // These rows drive the real read and assert that what comes out is what the
+  // renderers already read -- including the three groups the API flattened.
+  const protection = await readD3("protection", "team-a", "protect-healthy", undefined, {
+    modeOf: () => "console",
+    consoleGet: async () => con("protection-policy.json"),
+  });
+  assert.equal(protection.metadata.name, "protect-healthy");
+  assert.equal(protection.metadata.namespace, "d3w14-lr520260919t0109z");
+  assert.equal(protection.spec.objectives.maxRecoveryPointAgeSeconds, 300);
+  assert.equal(protection.status.health, "Healthy");
+  assert.equal(protection.status.lastAvailablePoint.recoveryPointAt, "2026-09-19T01:10:11.287Z");
+  assert.equal(protection.status.missed.sinceLastFire, 0, "`sinceLastFire` un-flattened");
+  assert.ok(decode(renderProtectionDetail(protection, "team-a"))
+    .indexOf("newest archived record") !== -1, "and the renderer reads it unchanged");
+
+  const catalog = await readD3("catalog", "team-a", "primary", undefined, {
+    modeOf: () => "console",
+    consoleGet: async () => con("catalog.json"),
+  });
+  assert.equal(catalog.spec.sync.mode, "Full", "`intervalSeconds`/`mode` back under `sync`");
+  assert.equal(catalog.status.counts.total, 5);
+  assert.equal(catalog.status.lastSyncJob.exitCode, 0, "`lastSync` is the renderer's lastSyncJob");
+  assert.equal(catalog.status.viewPoints, 4);
+  assert.equal(catalog.status.pages, undefined,
+    "no ConfigMap names: they are not published and this page holds no verb on them");
+
+  const retention = await readD3("retention", "team-a", "enforce-a", undefined, {
+    modeOf: () => "console",
+    consoleGet: async () => con("retention-policy-enforce.json"),
+  });
+  assert.equal(retention.spec.scope.prefix, "archive", "`scopePrefix` back under `scope`");
+  assert.equal(retention.spec.rules.keepLast, 1, "and the three rules back under `rules`");
+  assert.equal(retention.spec.enforcement.requireApprovedPlan, true,
+    "`enforcementSettings` is the SPEC block and goes back to its CRD name");
+  assert.equal(retention.status.enforcement, "LogweirWorker",
+    "while `status.enforcement` stays the word for what is actually happening");
+  assert.ok(decode(renderEnforcement({}, retention)).indexOf("Deletion is not reversible") !== -1);
+
+  const trust = await readD3("trust", "", "org-default", undefined, {
+    modeOf: () => "console",
+    consoleClusterGet: async () => con("trust-policy.json"),
+  });
+  assert.equal(trust.metadata.namespace, undefined, "a TrustPolicy is cluster-scoped");
+  assert.equal(trust.spec.keys.length, 4);
+  assert.equal(trust.status.keys.length, 4, "one published row becomes the CRD's two halves");
+  assert.equal(trust.status.keys[1].effectiveState, "Retired");
+  assert.equal(trust.spec.keys[1].state, "Retired");
+});
+
+test("the_keys_view_renders_the_apis_own_freshness_verdict_in_console_mode", async () => {
+  // THE RECONCILIATION'S MOST CONSEQUENTIAL FIELD. `TrustPolicyView.evaluation`
+  // is D3 section 7.7's decision, made by `logweir-api` against its own clock
+  // and published with the instant it used -- so the console and the controller
+  // cannot disagree about freshness, because only one of them decides it.
+  const fresh = await readD3("trust", "", "org-default", undefined, {
+    modeOf: () => "console",
+    consoleClusterGet: async () => con("trust-policy.json"),
+  });
+  const decided = evaluationOf(fresh, null, EVALUATION_FRESHNESS_MS);
+  assert.deepEqual(
+    { fresh: decided.fresh, reason: decided.reason, decidedBy: decided.decidedBy },
+    { fresh: true, reason: null, decidedBy: "api" },
+  );
+  assert.equal(decided.decidedAt, "2026-09-18T04:43:00Z",
+    "the instant the API decided against travels with the verdict, so the arithmetic is " +
+      "checkable; it is re-keyed on the way through because a page module may not name an " +
+      "api.js export and this field shares a spelling with one");
+
+  // AND IT IS RENDERED AS A VERDICT, with `null` handed in as the page's own
+  // clock -- which proves the page did not fall back to deciding it itself.
+  const html = decode(renderPolicyKeys(fresh, null));
+  assert.match(html, /badge-green">Active</);
+  assert.match(html, /data-evaluation-fresh="true"/);
+  assert.match(decode(renderPolicyFacts(fresh, null)), /the product API, against its own clock/);
+
+  // AN `unknown` FROM THE API IS THE API'S REASON, NOT THIS PAGE'S GUESS.
+  const list = decodeD3List("trust-policies", con("trust-policies-list.json")).value;
+  const behind = list.items[1];
+  assert.equal(behind.evaluation.reason, "generationBehind");
+  const projected = await readD3("trust", "", behind.name, undefined, {
+    modeOf: () => "console",
+    consoleClusterGet: async () => ({ item: behind, requestId: "r" }),
+  });
+  const stale = evaluationOf(projected, Date.now(), EVALUATION_FRESHNESS_MS);
+  assert.equal(stale.fresh, false);
+  assert.equal(stale.reason, "GenerationBehind");
+  assert.match(decode(renderPolicyKeys(projected, Date.now())),
+    /computed from an earlier spec/);
+
+  // AND LEGACY MODE STILL DECIDES IT ITSELF, against the SERVER instant of the
+  // answer that carried the object. Two documents, two rules.
+  const custom = d3("trustpolicy-active.json");
+  assert.equal(custom.__evaluation, undefined);
+  assert.equal(evaluationOf(custom, null, EVALUATION_FRESHNESS_MS).decidedBy, "page");
+  assert.equal(evaluationOf(custom, null, EVALUATION_FRESHNESS_MS).reason, "NoServerClock");
+});
+
+test("the_signer_panel_reads_the_published_envelope_and_the_apis_own_command", () => {
+  const signers = decodeCatalogSigners(con("catalog-signers.json")).value;
+  assert.equal(signers.items.length, 2, "the array is `items`, the console's own convention");
+  assert.equal(signers.untrustedPoints, 2);
+  const html = decode(renderSigners(signers));
+  assert.match(html, /data-untrusted-signers="1"/);
+  assert.match(html, /openssl pkey -pubin -outform DER/,
+    "and the command is the API's own, so one installation computes a key id one way");
+  assert.equal(html.indexOf("<button"), -1, "still no one-click trust");
 });

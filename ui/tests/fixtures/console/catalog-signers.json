@@ -1,6 +1,6 @@
 {
-  "requestId": "req-d3w12-signers",
-  "signers": [
+  "fingerprintCommand": "openssl pkey -pubin -outform DER -in <key>.pub.pem | openssl dgst -sha256",
+  "items": [
     {
       "keyId": "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe",
       "points": 4,
@@ -13,5 +13,7 @@
       "principalHint": "install:another",
       "trusted": false
     }
-  ]
+  ],
+  "requestId": "01M2N5SHWR0N2E7SDCW2H22Z8W",
+  "untrustedPoints": 2
 }

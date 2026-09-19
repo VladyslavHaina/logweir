@@ -1,0 +1,43 @@
+{
+  "item": {
+    "awaitingApproval": false,
+    "conditions": [],
+    "diagnostics": [],
+    "evidence": {},
+    "kind": "backup",
+    "lastUpdatedAt": "2026-09-19T01:12:46Z",
+    "message": "the active stage's last observation is older than 300 seconds",
+    "name": "d3w12-unknown",
+    "namespace": "team-a",
+    "progress": {
+      "lastObservedTime": "2026-09-19T01:05:00Z",
+      "reason": "StatusStale",
+      "stage": "running"
+    },
+    "readiness": {
+      "basis": "notImplemented",
+      "state": "unknown"
+    },
+    "resourceVersion": "4537101",
+    "result": {
+      "status": "unknown"
+    },
+    "stale": true,
+    "state": "unknown",
+    "stateReason": "StatusStale",
+    "terminal": false,
+    "trust": {
+      "basis": "None",
+      "state": "pending"
+    },
+    "uid": "7f0e5e92-6a41-4ff2-9c4b-1d6a0e8f5c34",
+    "verification": {
+      "state": "pending"
+    },
+    "verificationScope": {
+      "level": "none"
+    },
+    "verifiedSuccess": false
+  },
+  "requestId": "01M2N5SHWR0N2E7SDCW2H22Z8W"
+}

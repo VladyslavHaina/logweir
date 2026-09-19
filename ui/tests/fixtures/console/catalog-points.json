@@ -3,8 +3,8 @@
     {
       "availability": "Available",
       "backupId": "591ce3c2-1ddb-40be-8f90-99f6c0efadd3",
-      "coveredFromMs": 1789514948259,
-      "coveredToMs": 1789514957277,
+      "coveredFrom": "2026-09-15T23:29:08.259000Z",
+      "coveredTo": "2026-09-15T23:29:17.277000Z",
       "formatVersion": "1.0.0",
       "locations": [
         {
@@ -17,7 +17,7 @@
       "pointId": "lwp1-c9fd2dc9272a1d1a44fa2d982ca4aba9",
       "receiptKey": "[redacted].receipt.json",
       "receiptSha256": "sha256:c9fd2dc9272a1d1a44fa2d982ca4aba934a07891f17224c7afefd17bd172969c",
-      "recoveryPointAtMs": 1789780211287,
+      "recoveryPointAt": "2026-09-19T01:10:11.287000Z",
       "runId": "01M2VKDDD95HA4NQTHGFRJ2WCJ",
       "selectable": true,
       "signerKeyId": "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe",
@@ -26,8 +26,8 @@
     {
       "availability": "Available",
       "backupId": "591ce3c2-1ddb-40be-8f90-99f6c0efadd3",
-      "coveredFromMs": 1789514948259,
-      "coveredToMs": 1789514957277,
+      "coveredFrom": "2026-09-15T23:29:08.259000Z",
+      "coveredTo": "2026-09-15T23:29:17.277000Z",
       "formatVersion": "1.0.0",
       "locations": [
         {
@@ -40,7 +40,7 @@
       "pointId": "lwp1-6a6ca28b7421d0cbb7eb51f597cc8b42",
       "receiptKey": "[redacted].receipt.json",
       "receiptSha256": "sha256:6a6ca28b7421d0cbb7eb51f597cc8b4251f0a1d87face33333eedf3339ede06b",
-      "recoveryPointAtMs": 1789780204349,
+      "recoveryPointAt": "2026-09-19T01:10:04.349000Z",
       "runId": "01M2VKD6M78GR6M013V41Q93BV",
       "selectable": true,
       "signerKeyId": "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe",
@@ -49,8 +49,8 @@
     {
       "availability": "Missing",
       "backupId": "e1c4ff19-62fb-4d76-9a3f-2177d6fd9d4a",
-      "coveredFromMs": 1789514948259,
-      "coveredToMs": 1789514957277,
+      "coveredFrom": "2026-09-15T23:29:08.259000Z",
+      "coveredTo": "2026-09-15T23:29:17.277000Z",
       "formatVersion": "1.0.0",
       "locations": [
         {
@@ -63,7 +63,7 @@
       "pointId": "lwp1-7f8a53278110d46fd4f14ecaccc45cc4",
       "receiptKey": "[redacted].receipt.json",
       "receiptSha256": "sha256:7f8a53278110d46fd4f14ecaccc45cc4d653b1e507f2eddedc1fe26c9806d914",
-      "recoveryPointAtMs": 1789780191192,
+      "recoveryPointAt": "2026-09-19T01:09:51.192000Z",
       "remedy": "The archive does not hold the objects this recovery point names. Restore from another point, or recover the objects from your own backup of the bucket.. this point is readable, and 1 of its 1 location(s) is not: s3://d3w14-lr520260919t0109z-a/archive is Missing",
       "runId": "01M2VKCST7EF12EW5T2Y7SJ86Q",
       "selectable": false,
@@ -73,8 +73,8 @@
     {
       "availability": "Available",
       "backupId": "a97f49e0-a48a-40b4-831d-12a1219cc0f2",
-      "coveredFromMs": 1789514948259,
-      "coveredToMs": 1789514957277,
+      "coveredFrom": "2026-09-15T23:29:08.259000Z",
+      "coveredTo": "2026-09-15T23:29:17.277000Z",
       "formatVersion": "1.0.0",
       "locations": [
         {
@@ -87,7 +87,7 @@
       "pointId": "lwp1-43b00a99286b5be768958bc5e3c65d1c",
       "receiptKey": "[redacted].receipt.json",
       "receiptSha256": "sha256:43b00a99286b5be768958bc5e3c65d1c1e86ecb65ef3a39f328daa7326666413",
-      "recoveryPointAtMs": 1789780178842,
+      "recoveryPointAt": "2026-09-19T01:09:38.842000Z",
       "runId": "01M2VKCDQBZJ34Q5J12KJBE05A",
       "selectable": true,
       "signerKeyId": "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe",
@@ -99,5 +99,8 @@
     "nextCursor": null,
     "snapshot": "4537912"
   },
-  "requestId": "req-d3w12-points"
+  "requestId": "01M2N5SHWR0N2E7SDCW2H22Z8W",
+  "truncated": true,
+  "viewExpired": false,
+  "viewExpiresAt": "2026-09-19T02:10:29Z"
 }

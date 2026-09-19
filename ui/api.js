@@ -819,11 +819,13 @@ const SUB_FILTERS = Object.freeze([
   "check",
   // GET .../connections/{name}/topic-discoveries
   "latest",
-  // GET .../catalogs/{name}/points (D3 section 10). The two AXES a point carries and
-  // the materialised judgement over them. `selectable` is a filter and never a
-  // computation: the catalog decides it, the route filters on it, and no page
-  // in this tree recomputes `Available AND (Verified|VerifiedHistorical)`.
-  "availability", "verification", "selectable",
+  // GET .../catalogs/{name}/points. ONE FILTER, which is the materialised
+  // judgement and not either axis: the catalog decides `selectable`, the route
+  // filters on it, and no page in this tree recomputes
+  // `Available AND (Verified|VerifiedHistorical)`. The published route takes
+  // `limit`, `cursor` and this; an `availability=` or `verification=` this
+  // client invented would be a query parameter the API does not declare.
+  "selectable",
 ]);
 
 // The header name that carries the product API's synchroniser token on an

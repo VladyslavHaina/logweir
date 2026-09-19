@@ -139,6 +139,49 @@ export function evaluationFreshness(object, now, windowMs) {
     : { fresh: true, reason: null };
 }
 
+/** THE FRESHNESS ANSWER FOR ONE POLICY, FROM WHICHEVER DOCUMENT IT CAME.
+ *
+ *  **Console mode: the API decided it.** `TrustPolicyView.evaluation` carries
+ *  `state` (`fresh` or `unknown`), `reason` (one of D3 section 7.7's five
+ *  causes), the server instant it decided against, `freshWithinSeconds` and the
+ *  evaluation's own age -- so the arithmetic is checkable and the page renders
+ *  the answer rather than a second opinion. That is the whole point of asking a
+ *  normalizing API: the console and the controller cannot disagree about
+ *  freshness if only one of them decides it.
+ *
+ *  **Legacy mode: the page decides it**, by [`evaluationFreshness`], against
+ *  the `Date` header of the answer that carried the object -- still a SERVER
+ *  clock, still never the browser's. Two documents, two rules.
+ *
+ *  Returns `{fresh, reason, decidedBy}`. `reason` is a key of
+ *  [`EVALUATION_UNKNOWN_REASONS`]; the API's five map onto four of them one for
+ *  one, and `evaluated` never reaches a reason because it only accompanies
+ *  `fresh`. */
+export const API_EVALUATION_REASONS = Object.freeze({
+  notEvaluated: "NoStatus",
+  generationBehind: "GenerationBehind",
+  noEvaluationTime: "NoStatus",
+  stale: "Stale",
+  evaluated: "NoVerdict",
+});
+
+export function evaluationOf(object, now, windowMs) {
+  const published = (object || {}).__evaluation;
+  if (published !== null && published !== undefined && typeof published === "object") {
+    const fresh = published.state === "fresh";
+    return {
+      fresh: fresh,
+      reason: fresh ? null : (API_EVALUATION_REASONS[published.reason] || "NoVerdict"),
+      decidedBy: "api",
+      decidedAt: published.decidedAt,
+      ageSeconds: published.ageSeconds,
+      freshWithinSeconds: published.freshWithinSeconds,
+    };
+  }
+  const own = evaluationFreshness(object, now, windowMs);
+  return { fresh: own.fresh, reason: own.reason, decidedBy: "page" };
+}
+
 /** The verdict recorded for one key id, or `null`. */
 export function verdictFor(status, keyId) {
   for (const verdict of Array.isArray((status || {}).keys) ? status.keys : []) {
@@ -187,7 +230,7 @@ export function usabilityCell(freshness, verdict) {
 export function renderPolicyKeys(object, now) {
   const spec = (object && object.spec) || {};
   const status = (object && object.status) || {};
-  const freshness = evaluationFreshness(object, now, EVALUATION_FRESHNESS_MS);
+  const freshness = evaluationOf(object, now, EVALUATION_FRESHNESS_MS);
   const rows = (Array.isArray(spec.keys) ? spec.keys : []).map((k) => {
     const entry = k || {};
     const verdict = verdictFor(status, entry.keyId);
@@ -248,7 +291,7 @@ export function renderPolicyFacts(object, now) {
   const spec = (object && object.spec) || {};
   const status = (object && object.status) || {};
   const meta = (object && object.metadata) || {};
-  const freshness = evaluationFreshness(object, now, EVALUATION_FRESHNESS_MS);
+  const freshness = evaluationOf(object, now, EVALUATION_FRESHNESS_MS);
   const conflicts = Array.isArray(status.conflicts) ? status.conflicts : [];
   const bound = Array.isArray(status.boundNamespaces) ? status.boundNamespaces : [];
   return (
@@ -261,12 +304,25 @@ export function renderPolicyFacts(object, now) {
         ? badge("green", "fresh")
         : badge("flat", EVALUATION_UNKNOWN) + " " +
           esc(EVALUATION_UNKNOWN_REASONS[freshness.reason] || "")],
+      ["freshness decided by", freshness.decidedBy === "api"
+        ? esc("the product API, against its own clock " + String(freshness.decidedAt || "") +
+          ", within " + String(freshness.freshWithinSeconds || "") + "s")
+        : esc("this page, against the server instant of the answer that carried this object")],
       ["loaded", cell(status.loaded)],
       ["default policy", cell(spec.default)],
       ["namespaces it claims", Array.isArray(spec.namespaces) && spec.namespaces.length > 0
         ? esc(spec.namespaces.join(", "))
         : ABSENT],
       ["namespaces it governs", bound.length === 0 ? ABSENT : esc(bound.join(", "))],
+      // THE LIST MAY BE PARTIAL AND SAYS SO. The product API serves a policy to
+      // an administrator of any namespace it governs and filters the namespace
+      // lists to that administered set, so "these are the namespaces" would be
+      // a claim this reader cannot make. `namespacesTruncated` is the separate,
+      // ordinary row bound.
+      ["namespace lists narrowed to what you administer",
+        object.__namespacesFiltered === true ? "yes" : "no"],
+      ["namespace list truncated", object.__namespacesTruncated === true ? "yes" : "no"],
+      ["key list truncated", object.__keysTruncated === true ? "yes" : "no"],
       ["allowed target cluster ids",
         Array.isArray(spec.allowedTargetClusterIds) && spec.allowedTargetClusterIds.length > 0
           ? esc(spec.allowedTargetClusterIds.join(", "))
