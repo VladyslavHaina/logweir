@@ -6840,6 +6840,19 @@ metadata:
     helm.sh/chart: logweir-0.1.0
     app.kubernetes.io/component: control-plane
 ---
+# Source: logweir/templates/ui/api-rbac.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: logweir-api
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: api
+---
 # Source: logweir/templates/policy.yaml
 apiVersion: v1
 kind: ConfigMap
@@ -7170,6 +7183,95 @@ rules:
     resources: ["retentionpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
 ---
+# Source: logweir/templates/ui/api-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: logweir-api
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: api
+rules:
+  # `ProductResource`, the whole sealed set: every projection the API serves is
+  # a `list` or a `get` on one of these eight.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - approvals
+      - backupdestinations
+      - backups
+      - backupschedules
+      - kafkaclusters
+      - preflights
+      - restores
+      - topicdiscoveries
+    verbs: ["get", "list"]
+  # `create`: seven of the eight. `approvals` is absent — `approval.submit` is
+  # NOT implemented (D0 keeps a governed approval off the API until PLAT-19.2),
+  # so a `create` on it would be a verb with no route.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - backupdestinations
+      - backups
+      - backupschedules
+      - kafkaclusters
+      - preflights
+      - restores
+      - topicdiscoveries
+    verbs: ["create"]
+  # `patch`: the two named merge patches `linkage.rs` pins by resource
+  # (`backupschedules` suspension/policy, `backupdestinations` access), and the
+  # `CancellableCheck` seal — the only two kinds whose `spec.cancelRequested`
+  # may be raised. `Backup` and `Restore` have no cancel in v1 and are absent.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - backupdestinations
+      - backupschedules
+      - preflights
+      - topicdiscoveries
+    verbs: ["patch"]
+  # D3 W11 — the four NAMESPACED kinds Amendment G added. READ ONLY.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - protectionpolicies
+      - recoverycatalogs
+      - rehearsalschedules
+      - retentionpolicies
+    verbs: ["get", "list"]
+  # …and D3's ONE write: `catalog.connect`, PLAT-15.2's "connect existing
+  # archive". No `patch`: `catalogs/{name}:sync` and
+  # `rehearsal-schedules/{name}:set-suspension` have no route in this build,
+  # and `retention-policies/{name}:approve-plan` is an administrator path D3
+  # §10 leaves to `kubectl`.
+  - apiGroups: ["logweir.dev"]
+    resources: ["recoverycatalogs"]
+    verbs: ["create"]
+  # The two core objects, one verb each. See this file's header.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+# Source: logweir/templates/ui/api-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: logweir-api-trustpolicies
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: api
+rules:
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustpolicies"]
+    verbs: ["get", "list"]
+---
 # Source: logweir/templates/clusterrolebinding.yaml
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
@@ -7188,6 +7290,26 @@ roleRef:
 subjects:
   - kind: ServiceAccount
     name: weirkeeper
+    namespace: logweir-system
+---
+# Source: logweir/templates/ui/api-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: logweir-api-trustpolicies
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: logweir-api-trustpolicies
+subjects:
+  - kind: ServiceAccount
+    name: logweir-api
     namespace: logweir-system
 ---
 # Source: logweir/templates/identity.yaml
@@ -7320,6 +7442,48 @@ subjects:
   - kind: ServiceAccount
     name: logweir-identity-distributor
     namespace: recoveries
+---
+# Source: logweir/templates/ui/api-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: logweir-api
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: logweir-api
+subjects:
+  - kind: ServiceAccount
+    name: logweir-api
+    namespace: logweir-system
+---
+# Source: logweir/templates/ui/api-rbac.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: logweir-api
+  namespace: recoveries
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: logweir-api
+subjects:
+  - kind: ServiceAccount
+    name: logweir-api
+    namespace: logweir-system
 ---
 # Source: logweir/templates/deployment.yaml
 apiVersion: apps/v1

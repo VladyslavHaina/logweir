@@ -1,0 +1,59 @@
+{{/*
+`retention.enabled` — THE ENFORCEMENT JOB'S IDENTITY, AND NOTHING ELSE.
+
+ONE ServiceAccount: `logweir-retention`, the name
+`weirkeeper::controllers::retention_policy::SERVICE_ACCOUNT` compiles in and
+puts on every `mode: Enforce` Job it builds. Until this renders, that Job is
+admitted by nobody — `serviceAccountName` names an account the API server
+cannot find, the pod never starts, and the whole enforcement path is
+fail-closed by accident rather than by decision. That is the merge-ordering
+constraint `controllers/retention_policy.rs`'s own header records against W13.
+
+NO Role, NO RoleBinding, NO ClusterRole. **The retention worker makes zero
+Kubernetes API calls.** It reads a plan out of a mounted ConfigMap, talks to an
+object store and exits, exactly as the backup and restore runners do; the
+delete capability that makes this the one irreversible component in the product
+is an OBJECT-STORE credential scoped to the policy's own prefix, and no
+Kubernetes verb can widen or narrow it. A binding here would be a line an
+operator has to audit for no benefit — `config/rbac/backup-runner-serviceaccount.yaml`
+makes the same argument for `logweir-runner` and it holds twice as hard for the
+pod that can delete.
+
+`automountServiceAccountToken: false`, on the account AND on the PodSpec
+`weirkeeper::job::build` writes. The pod that holds a delete-capable storage
+credential is the last pod in the installation that should also carry a cluster
+token.
+
+SO WHY A SEPARATE ACCOUNT AT ALL, IF IT IS GRANTED NOTHING? Because a
+ServiceAccount is what an audit trail, a NetworkPolicy podSelector and a
+`kubectl get pods -o wide` can name. `logweir-runner` runs backups, restores,
+checks, catalog syncs and notification deliveries; `logweir-retention` runs the
+one thing that removes data, and keeping the names apart is what lets an
+operator ask "what has run as the deleter" and get an answer. It also carries
+its own `imagePullSecrets`, so a private registry does not have to widen the
+runner's.
+
+AND IT IS OFF BY DEFAULT, like every other optional component. Turning it on
+renders this account and nothing else; it creates no policy, approves no plan
+and deletes nothing. `charts/logweir/README.md` lists the other three gates a
+deletion still has to pass.
+
+NOT RENDERED PER NAMESPACE, and that is the same shape `logweir-runner` has:
+retention Jobs run in the namespace of the `RetentionPolicy` that produced
+them, so this copy serves the release namespace and every other namespace
+applies the account itself (`docs/install.md` step 4).
+*/}}
+{{- if .Values.retention.enabled }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: logweir-retention
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: retention
+automountServiceAccountToken: false
+{{- with (include "logweir.imagePullSecrets" .) }}
+{{ . }}
+{{- end }}
+{{- end }}

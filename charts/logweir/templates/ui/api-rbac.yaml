@@ -1,0 +1,243 @@
+{{/*
+`api.enabled` — THE CONSOLE/API PRINCIPAL'S GRANTS, AND ONLY ITS GRANTS.
+
+READ `ui.yaml`'s HEADER FIRST. The `<release>-ui` account beside this one is
+the LEGACY LOCAL ADMIN PROXY (D0's `legacyLocalAdminProxy`): a `kubectl proxy`
+that attaches its own token to every request a BROWSER makes, whose authority
+is therefore anyone who can reach its Service, and whose role is measured from
+`ui/api.js` and `ui/pages/*.js`. This file is a different principal with a
+different argument, and the two must not be confused:
+
+  * `<release>-ui` acts for whoever reached the Service. It is bounded by
+    `--accept-paths`, it holds `get`/`list` on the kinds the page renders plus
+    the four `create`s and the one `patch` the page issues, and it deliberately
+    holds NO verb on `configmaps` and NO verb on `secrets`.
+  * `<release>-api` acts for the console SERVICE, which authenticates and
+    authorizes every request itself (`crates/logweir-api/src/authz.rs`: roles
+    are a table, bindings are exact strings, and a capability is advertised
+    only when the route exists AND the actor's role allows it). Its Kubernetes
+    grants are the UNION of what every route may ever need; the per-actor
+    narrowing is the service's job and is not expressible in RBAC at all.
+
+So this role is WIDER than the proxy's, and that is not a widening of anybody's
+access: it is the floor under a service that does its own authorization, and
+the grant is bounded by a seal in the code rather than by a page's forms.
+
+---------------------------------------------------------------------------
+WHY THE GRANT CAN BE CHECKED AND NOT JUST ASSERTED
+---------------------------------------------------------------------------
+`crates/logweir-api/src/kube.rs` is the ONE adapter every route goes through,
+and it is sealed twice over: `ProductResource` is a closed set of namespaced
+custom resources no other crate can extend, `ClusterResource` is the
+cluster-scoped half (`TrustPolicy`, read-only), `CancellableCheck` is the
+smaller seal inside the first for the two kinds whose `spec.cancelRequested`
+may be raised, and the two CORE objects each have exactly one method. The
+adapter calls FOUR kube verbs — `list`, `get`, `create`, `patch` — and
+`logweir-api`'s `linkage.rs` pins the `(verb, resource)` pairs at the point the
+adapter names them.
+
+Every rule below is that pin, transcribed. `scripts/render-install.sh --check`
+re-derives the seal from `kube.rs` and refuses when this file and the seal
+disagree, in both directions; `chart_lint.rs` holds the rendered role to the
+table verb for verb.
+
+**NO `watch`, ANYWHERE.** D3 §10's event stream is server-sent events built on
+the service's own polling, not on a Kubernetes watch, and the adapter has no
+`watch` method to call. A `watch` here would be a verb with no caller (critique
+B M18) and would also be the one verb that opens a long-lived connection per
+browser tab.
+
+**NO `delete`, ANYWHERE.** No route deletes a Kubernetes object; the transient
+check kinds are collected by the controller's own UID-preconditioned GC.
+
+**NO READ VERB ON `secrets`.** `create` and nothing else, which is what makes a
+console-written credential write-only: the value is created and no route can
+read it back. `create` cannot name a `resourceNames`, which is exactly why the
+SHAPE of that create is fenced by a ValidatingAdmissionPolicy instead
+(`admissionPolicy.enabled`, D2 §7.3) — RBAC cannot express "this Secret shape",
+and the policy's `matchConditions` names THIS ServiceAccount. Set
+`admissionPolicy.consoleServiceAccountName` to the account this file renders.
+
+**`get` ON `configmaps`, AND NOTHING ELSE ON THEM.** A check's stored result
+and a catalog view's pages are ConfigMaps; the adapter's projection drops
+`binaryData` and verifies the owner UID, immutability and digest before it
+serves a byte. No `list`: a console that could page through every ConfigMap in
+a namespace is an inventory of somebody else's configuration.
+
+---------------------------------------------------------------------------
+D3 W11's SIX NEW ACTIONS, AND WHAT THEY COST IN VERBS
+---------------------------------------------------------------------------
+`protection.read`, `rehearsal.read`, `catalog.read`, `catalog.connect`,
+`retention.read` and `trustPolicy.read`. Five of the six are reads, so the D3
+rules below are `get`/`list` on the four namespaced kinds plus the
+cluster-scoped `TrustPolicy`, and there is exactly ONE D3 write: `create` on
+`recoverycatalogs`, which is PLAT-15.2's "connect existing archive".
+
+TRUST WRITES ARE NOT HERE AND CANNOT BE ADDED BY ACCIDENT. D3 §10 keeps them
+off the API in v1 (`capabilities.trustAdministration: false`), the supported
+path is `kubectl apply` under `logweir-trust-admin`, and the cluster-scoped
+role below carries `get` and `list` only. A console that could write a
+`TrustPolicy` would be a console that could decide whose keys may sign an
+approval.
+
+AND NO `/status` SUBRESOURCE IS NAMED, WHICH IS NOT AN OMISSION. `get` on
+`recoverycatalogs` returns the whole object, status included; the status
+subresource exists so a WRITER can be authorised separately, not so a reader
+can be denied. `config/rbac/viewer_role.yaml`'s header makes the same argument
+at length. Naming `recoverycatalogs/status` here would grant this service
+nothing it does not already have and would read, to an auditor, as though the
+console could write one.
+
+---------------------------------------------------------------------------
+WHAT THIS FILE IS NOT
+---------------------------------------------------------------------------
+There is no Deployment, no Service, no image and no Ingress here. The console's
+image and its deployment are PLAT-17.1's own stage; this is the RBAC half, so
+that an installation that runs the console out of band has a supported,
+reviewed identity to run it as instead of inventing one. Turning `api.enabled`
+on therefore starts nothing: it creates an account with no pod, which costs one
+ServiceAccount and grants nobody anything until something runs as it.
+*/}}
+{{- if .Values.api.enabled }}
+{{- $name := printf "%s-api" .Release.Name }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+{{- with (include "logweir.imagePullSecrets" .) }}
+{{ . }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+rules:
+  # `ProductResource`, the whole sealed set: every projection the API serves is
+  # a `list` or a `get` on one of these eight.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - approvals
+      - backupdestinations
+      - backups
+      - backupschedules
+      - kafkaclusters
+      - preflights
+      - restores
+      - topicdiscoveries
+    verbs: ["get", "list"]
+  # `create`: seven of the eight. `approvals` is absent — `approval.submit` is
+  # NOT implemented (D0 keeps a governed approval off the API until PLAT-19.2),
+  # so a `create` on it would be a verb with no route.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - backupdestinations
+      - backups
+      - backupschedules
+      - kafkaclusters
+      - preflights
+      - restores
+      - topicdiscoveries
+    verbs: ["create"]
+  # `patch`: the two named merge patches `linkage.rs` pins by resource
+  # (`backupschedules` suspension/policy, `backupdestinations` access), and the
+  # `CancellableCheck` seal — the only two kinds whose `spec.cancelRequested`
+  # may be raised. `Backup` and `Restore` have no cancel in v1 and are absent.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - backupdestinations
+      - backupschedules
+      - preflights
+      - topicdiscoveries
+    verbs: ["patch"]
+  # D3 W11 — the four NAMESPACED kinds Amendment G added. READ ONLY.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - protectionpolicies
+      - recoverycatalogs
+      - rehearsalschedules
+      - retentionpolicies
+    verbs: ["get", "list"]
+  # …and D3's ONE write: `catalog.connect`, PLAT-15.2's "connect existing
+  # archive". No `patch`: `catalogs/{name}:sync` and
+  # `rehearsal-schedules/{name}:set-suspension` have no route in this build,
+  # and `retention-policies/{name}:approve-plan` is an administrator path D3
+  # §10 leaves to `kubectl`.
+  - apiGroups: ["logweir.dev"]
+    resources: ["recoverycatalogs"]
+    verbs: ["create"]
+  # The two core objects, one verb each. See this file's header.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["create"]
+---
+{{/*
+The cluster-scoped half: `TrustPolicy` is the only kind in `ClusterResource`,
+it is read-only there, and no RoleBinding can convey a cluster-scoped read.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $name }}-trustpolicies
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+rules:
+  - apiGroups: ["logweir.dev"]
+    resources: ["trustpolicies"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $name }}-trustpolicies
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}-trustpolicies
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ .Release.Namespace }}
+{{- range $ns := (include "logweir.api.namespaces" . | fromJsonArray) }}
+---
+{{/*
+ONE RoleBinding PER NAMESPACE, AND NEVER A ClusterRoleBinding OF THE
+NAMESPACED ROLE. The console's own authorizer refuses an ungranted namespace
+before any Kubernetes call, but a ClusterRoleBinding would mean a defect in
+that check reaches every namespace in the cluster instead of the configured
+ones. The namespace list is the chart's, and it is the SAME shape
+`logweir.ui.namespaces` has: the release namespace, plus `api.namespaces`, or
+`kubernetes.namespace` when that list is empty.
+*/}}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $name }}
+  namespace: {{ $ns }}
+  labels:
+    {{- include "logweir.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: api
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $name }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $name }}
+    namespace: {{ $.Release.Namespace }}
+{{- end }}
+{{- end }}

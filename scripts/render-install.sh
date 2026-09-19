@@ -177,8 +177,164 @@ check_enforcement_image() {
   esac
 }
 
+# ---------------------------------------------------------------------------
+# THE CONSOLE PRINCIPAL CAN DO WHAT THE CONSOLE DOES — `auth can-i`, offline
+# ---------------------------------------------------------------------------
+# WHAT THIS CLOSES, AND WHY IT IS IN THIS SCRIPT. `logweir.yaml` and the chart
+# install one control plane between them: an administrator applies this file
+# and then, if they run the console, turns `api.enabled` on. The console's
+# grants are part of THIS installation's RBAC even though they are not in this
+# file — and until now nothing asked, anywhere, the one question an operator
+# would ask on a live cluster:
+#
+#   kubectl auth can-i <verb> <resource> \
+#     --as system:serviceaccount:<namespace>:<release>-api
+#
+# So it is asked here, offline, against the checked-in render, in BOTH
+# directions — which is what makes it an audit rather than a spot check:
+#
+#   1. every (verb, resource) the sealed adapter spends is granted. A `no` here
+#      is a route that 403s in production while every route-table test in
+#      `logweir-api` stays green. That exact defect shipped once already, on the
+#      controller: see `config/rbac/role.yaml`'s header, "EVERY CALL HAS A
+#      GRANT, WHICH COST A P0".
+#   2. every (verb, resource) granted is one the adapter spends. A `yes` to a
+#      question no route asks is a capability nobody audits (critique B M18),
+#      on the one service in this product that holds `create` on Secrets.
+#
+# `crates/logweir/tests/chart_lint.rs` holds the same render to the same table
+# from Rust, and derives the read half from the adapter's own seals. This is the
+# half that needs no cargo and that refuses BEFORE the install file is written.
+#
+# EVERY EXIT STATUS IS READ DIRECTLY (STANDING RULE 20). `awk`, `sort` and
+# `comm` write to files; nothing load-bearing is tested through a pipeline.
+console_grants() {
+  awk '
+    function inline(l,   t, c, i) {
+      t = l; sub(/^[^[]*\[/, "", t); sub(/\].*$/, "", t); gsub(/[",]/, " ", t)
+      c = split(t, parts, " "); n = 0
+      for (i = 1; i <= c; i++) if (parts[i] != "") res[++n] = parts[i]
+    }
+    /^kind: ClusterRole$/                 { isrole = 1; inrole = 0; next }
+    /^kind: /                             { isrole = 0; inrole = 0; next }
+    /^  name: logweir-api$/               { if (isrole) inrole = 1; next }
+    /^  name: logweir-api-trustpolicies$/ { if (isrole) inrole = 1; next }
+    inrole && /^    resources: \[/        { inline($0); collecting = 0; next }
+    inrole && /^    resources:$/          { n = 0; collecting = 1; next }
+    inrole && collecting && /^      - /   { sub(/^      - /, ""); res[++n] = $0; next }
+    inrole && /^    verbs: \[/ {
+      collecting = 0
+      line = $0
+      sub(/^[^[]*\[/, "", line); sub(/\].*$/, "", line); gsub(/[",]/, " ", line)
+      vc = split(line, verbs, " ")
+      for (i = 1; i <= vc; i++)
+        if (verbs[i] != "")
+          for (j = 1; j <= n; j++) print verbs[i] " " res[j]
+      next
+    }
+  ' "$1"
+}
+
+check_console_grants() {
+  render_file="charts/logweir/rendered/demo.yaml"
+  adapter="crates/logweir-api/src/kube.rs"
+  dir="$(mktemp -d "${TMPDIR:-/tmp}/logweir-console-cani.XXXXXX")"
+
+  # THE ANSWER SHEET: one line per question, and the whole of what may be
+  # answered `yes`. The eight kinds sealed into `ProductResource`, the seven
+  # with a POST route (`approvals` has none — `approval.submit` is not
+  # implemented), the two named merge patches plus the two `CancellableCheck`
+  # kinds, D3 W11's four namespaced reads and its ONE write, the cluster-scoped
+  # `TrustPolicy` read, and the two core objects with one verb each.
+  printf '%s\n' \
+    'get approvals'          'list approvals' \
+    'get backupdestinations' 'list backupdestinations' 'create backupdestinations' 'patch backupdestinations' \
+    'get backups'            'list backups'            'create backups' \
+    'get backupschedules'    'list backupschedules'    'create backupschedules'    'patch backupschedules' \
+    'get kafkaclusters'      'list kafkaclusters'      'create kafkaclusters' \
+    'get preflights'         'list preflights'         'create preflights'         'patch preflights' \
+    'get restores'           'list restores'           'create restores' \
+    'get topicdiscoveries'   'list topicdiscoveries'   'create topicdiscoveries'   'patch topicdiscoveries' \
+    'get protectionpolicies' 'list protectionpolicies' \
+    'get recoverycatalogs'   'list recoverycatalogs'   'create recoverycatalogs' \
+    'get rehearsalschedules' 'list rehearsalschedules' \
+    'get retentionpolicies'  'list retentionpolicies' \
+    'get trustpolicies'      'list trustpolicies' \
+    'get configmaps' \
+    'create secrets' \
+    > "$dir/expected.raw"
+  sort "$dir/expected.raw" > "$dir/expected"
+  console_grants "$render_file" > "$dir/granted.raw"
+  sort "$dir/granted.raw" > "$dir/granted"
+
+  if [ ! -s "$dir/granted" ]; then
+    rm -rf "$dir"
+    echo "render-install: no console ClusterRole rule was found in $render_file." >&2
+    echo "  Either \`api.enabled\` is no longer on in charts/logweir/examples/demo.values.yaml," >&2
+    echo "  or the render is stale (\`bash scripts/check-chart.sh --write\`). A gate that reads" >&2
+    echo "  nothing answers \`yes\` to every question." >&2
+    exit 1
+  fi
+
+  comm -23 "$dir/expected" "$dir/granted" > "$dir/missing"
+  if [ -s "$dir/missing" ]; then
+    echo "render-install: the console principal CANNOT do what the console does." >&2
+    echo "  \`kubectl auth can-i\` would answer \`no\` for each pair below, and each one is a" >&2
+    echo "  route that 403s in production while every route-table test stays green:" >&2
+    sed 's/^/    /' "$dir/missing" >&2
+    echo "  Widen charts/logweir/templates/ui/api-rbac.yaml deliberately, say why in its" >&2
+    echo "  header, and run \`bash scripts/check-chart.sh --write\`." >&2
+    rm -rf "$dir"
+    exit 1
+  fi
+
+  comm -13 "$dir/expected" "$dir/granted" > "$dir/extra"
+  if [ -s "$dir/extra" ]; then
+    echo "render-install: the console principal can do MORE than the console does." >&2
+    echo "  Each pair below is a \`yes\` to a question no route asks — a capability nobody" >&2
+    echo "  audits, on the one service that holds \`create\` on Secrets:" >&2
+    sed 's/^/    /' "$dir/extra" >&2
+    echo "  Narrow charts/logweir/templates/ui/api-rbac.yaml, or add the pair to the answer" >&2
+    echo "  sheet in this function TOGETHER WITH the route that spends it." >&2
+    rm -rf "$dir"
+    exit 1
+  fi
+
+  # THE FOUR VERBS ARE STILL THE ADAPTER'S FOUR. The sheet above is a list this
+  # file owns; these two arms read the ADAPTER, so a fifth kube verb reaching it
+  # cannot be authorised by editing one list.
+  adapter_src="$(sed '/^[[:space:]]*\/\//d' "$adapter")"
+  case "$adapter_src" in
+    *'pub trait ProductResource'*) ;;
+    *)
+      rm -rf "$dir"
+      echo "render-install: $adapter no longer seals its custom resources behind" >&2
+      echo "  \`ProductResource\`. The console's ClusterRole is written from that seal; without" >&2
+      echo "  it there is nothing to hold the grant to, and the answer sheet in this function" >&2
+      echo "  becomes a list nobody derives." >&2
+      exit 1
+      ;;
+  esac
+  for verb in delete deletecollection watch update; do
+    case "$(cat "$dir/granted")" in
+      *"$verb "*)
+        rm -rf "$dir"
+        echo "render-install: the console principal is granted \`$verb\`." >&2
+        echo "  The sealed adapter spends four kube verbs — list, get, create, patch — and has" >&2
+        echo "  no method that could issue this one. \`watch\` would additionally be a" >&2
+        echo "  long-lived connection per browser tab, and D3 §10's event stream is server-sent" >&2
+        echo "  events over this service's own reads. Remove the verb." >&2
+        exit 1
+        ;;
+    esac
+  done
+  rm -rf "$dir"
+  echo "render-install: the console principal's grants are the sealed adapter's, both ways."
+}
+
 if [ "${1:-}" = "--check" ]; then
   check_enforcement_image
+  check_console_grants
   # `mktemp` and not a fixed path: two agents running this at once must not
   # write the same temporary file.
   tmp="$(mktemp "${TMPDIR:-/tmp}/logweir-install-check.XXXXXX")"
@@ -211,5 +367,6 @@ if [ "$#" -ne 0 ]; then
 fi
 
 check_enforcement_image
+check_console_grants
 render > "$OUT"
 echo "render-install: wrote $OUT ($(grep -c '^kind:' "$OUT") documents)."

@@ -51,3 +51,11 @@ demoKafka:
   enabled: true
 ui:
   enabled: true
+# D3 W13. Both are RBAC-only: `retention` renders the ServiceAccount an
+# enforcement Job names (granted no verb; it deletes nothing on its own), and
+# `api` renders the console/API principal's account and roles. Neither starts a
+# pod, and the demo turns them on so the rendered file shows what they install.
+retention:
+  enabled: true
+api:
+  enabled: true

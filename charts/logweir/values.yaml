@@ -48,6 +48,8 @@ identity:
 # ------------------------------------------------------------- controller
 controller:
   logLevel: info                # RUST_LOG; below info the per-object lines are lost
+  failFastSeconds: ""           # D3: patience for a stuck run. "" = 300s; 0 = never; floor 60
+  jobTtlSeconds: ""             # D3: how long a finished Job is kept. "" = 604800s; floor 3600
   resources:
     requests: { cpu: 50m, memory: 128Mi }
     limits: { memory: 512Mi }
@@ -155,6 +157,18 @@ demoKafka:
   nodeSelector: {}
   tolerations: []
   affinity: {}
+
+# --------------------- retention.enabled — the enforcement Job's identity (D3)
+# Renders ONE ServiceAccount, `logweir-retention`, granted no Kubernetes verb.
+# It deletes nothing by itself; see charts/logweir/README.md for the other gates.
+retention:
+  enabled: false
+
+# ------------------------- api.enabled — the console/API principal's RBAC (D3)
+# ServiceAccount + roles only: no Deployment, no image, no Service (PLAT-17.1).
+api:
+  enabled: false
+  namespaces: []                # extra namespaces to bind in; defaults to kubernetes.namespace
 
 # ------------------------------------------- ui.enabled — the page, in-cluster
 # `kubectl proxy` with the ServiceAccount's own authority: anyone who reaches

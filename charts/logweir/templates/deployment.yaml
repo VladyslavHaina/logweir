@@ -111,6 +111,38 @@ spec:
             - name: LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS
               value: "1"
             {{- end }}
+            {{- /*
+            D3 §2.3 and §2.7's two controller-wide windows, RENDERED ONLY WHEN
+            CONFIGURED for the same reason the line above is: an install that
+            sets neither is byte-identical to `logweir.yaml`, and
+            `chart_lint_default_render_agrees_with_the_install_file` permits
+            four differences, not six.
+
+            THE EMPTY STRING IS "THE BUILD'S OWN DEFAULT", NOT ZERO, and the
+            distinction is load-bearing exactly once: `failFastSeconds: 0` is
+            `weirkeeper::diagnostics::FAIL_FAST_NEVER` — fail-fast disabled, so
+            every Job runs to its own `activeDeadlineSeconds` — which is the
+            lever for a cluster whose external secrets controller materialises
+            a Secret a few minutes behind the Job. `""` must therefore NOT
+            render `0`, and `ne (toString …) ""` is what keeps a configured
+            zero reaching the controller while an unset value renders nothing
+            at all.
+
+            THE FLOORS ARE THE CONTROLLER'S AND ARE NOT REPEATED HERE. A value
+            below `FAIL_FAST_SECONDS_MIN` (60) or `JOB_TTL_SECONDS_MIN` (3600)
+            is clamped UP by `weirkeeper::diagnostics::bounded`, which logs
+            what it used; an unparseable one is the default. A chart-side
+            `fail` would turn a typo into a failed upgrade of the whole
+            release, and the controller's answer is the safer one.
+            */ -}}
+            {{- if ne (toString .Values.controller.failFastSeconds) "" }}
+            - name: LOGWEIR_FAIL_FAST_SECONDS
+              value: {{ .Values.controller.failFastSeconds | toString | quote }}
+            {{- end }}
+            {{- if ne (toString .Values.controller.jobTtlSeconds) "" }}
+            - name: LOGWEIR_JOB_TTL_SECONDS
+              value: {{ .Values.controller.jobTtlSeconds | toString | quote }}
+            {{- end }}
             {{- if $endpoint }}
             - name: AWS_ENDPOINT_URL
               value: {{ $endpoint | quote }}

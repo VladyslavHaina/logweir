@@ -3,7 +3,14 @@
 # signer, scoped distributor RBAC, and NetworkPolicies. The distributor copies
 # the SAME installation signer and fails if a different signer is established.
 # If the in-cluster UI should operate there, list it separately under
-# ui.namespaces as well.
+# ui.namespaces as well — and the console/API principal under api.namespaces,
+# which is a SEPARATE key on purpose: the local proxy and the console are two
+# principals, and serving the console for a namespace is not a reason to widen
+# the proxy that acts for whoever reaches its Service.
 identity:
   authorizedRunnerNamespaces:
+    - recoveries
+api:
+  enabled: true
+  namespaces:
     - recoveries

@@ -131,6 +131,23 @@ and refuse the install.
 {{- end -}}
 
 {{- /*
+The namespaces the console/API ServiceAccount is bound in — the same shape, and
+a SEPARATE key on purpose. The legacy proxy and the console are two principals
+with two arguments (`templates/ui/api-rbac.yaml`'s header), and an installation
+that serves the console for ten namespaces while the local proxy is bound in
+one must be able to say so without widening the proxy. Empty `api.namespaces`
+falls back to `kubernetes.namespace` exactly as the proxy's does, so the common
+case still needs one key and not two.
+*/ -}}
+{{- define "logweir.api.namespaces" -}}
+{{- $extra := .Values.api.namespaces -}}
+{{- if and (not $extra) .Values.kubernetes.namespace -}}
+{{- $extra = list .Values.kubernetes.namespace -}}
+{{- end -}}
+{{- (prepend ($extra | default list) .Release.Namespace) | uniq | toJson -}}
+{{- end -}}
+
+{{- /*
 One `KafkaCluster.spec.auth` from the owner's flat `security:` shape. Takes the
 per-cluster values map. THE MAPPING IS THE CHART'S JOB, and every combination
 outside it is a `fail` at render time rather than an object that installs and

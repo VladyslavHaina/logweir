@@ -834,7 +834,7 @@ fn chart_lint_values_name_the_shipped_repositories_at_latest() {
          the place every explanation lives"
     );
     // The defaults are the shipped install: nothing optional on.
-    for flag in ["minio", "demoKafka", "ui"] {
+    for flag in ["minio", "demoKafka", "ui", "retention", "api"] {
         assert_eq!(
             Some(false),
             values[flag]["enabled"].as_bool(),
@@ -1629,6 +1629,534 @@ fn chart_lint_ui_renders_the_proxy_with_its_paths_and_a_narrow_role() {
         !docs.iter().any(|d| d.kind == "Ingress"),
         "the chart renders no Ingress: reachability of the Service is the authorisation boundary"
     );
+}
+
+// ================================================= D3 W13: the console/API principal
+
+/// The four kube verbs `crates/logweir-api/src/kube.rs` can spend. The adapter
+/// has no other method, and `logweir-api`'s
+/// `linkage.rs::the_adapter_calls_only_the_four_permitted_kubernetes_verbs`
+/// is what keeps that true crate-side.
+const CONSOLE_VERBS: [&str; 4] = ["create", "get", "list", "patch"];
+
+/// Rust type -> the RBAC plural an rule names it by, for every kind the console
+/// adapter's seals can carry.
+fn console_plural(ty: &str) -> &'static str {
+    match ty {
+        "KafkaCluster" => "kafkaclusters",
+        "BackupSchedule" => "backupschedules",
+        "Backup" => "backups",
+        "Restore" => "restores",
+        "Approval" => "approvals",
+        "BackupDestination" => "backupdestinations",
+        "TopicDiscovery" => "topicdiscoveries",
+        "Preflight" => "preflights",
+        "ProtectionPolicy" => "protectionpolicies",
+        "RehearsalSchedule" => "rehearsalschedules",
+        "RecoveryCatalog" => "recoverycatalogs",
+        "RetentionPolicy" => "retentionpolicies",
+        "TrustPolicy" => "trustpolicies",
+        other => panic!(
+            "`crates/logweir-api/src/kube.rs` seals the type `{other}`, which this test cannot \
+             map to an RBAC plural. Add the mapping — a sealed kind with no plural is a kind \
+             whose grant cannot be checked."
+        ),
+    }
+}
+
+/// Every `impl <trait> for <Type> {}` line in the console adapter, as plurals.
+///
+/// TEXTUAL, ON PURPOSE. `crates/logweir` cannot depend on `logweir-api` (it is
+/// the CLI), so the seal is read the way `manifest_lint`'s `api_callers` reads
+/// `weirkeeper`: from the source. A seal that stopped being spelled this way
+/// would empty the set, so every caller of this helper asserts a floor on its
+/// size.
+fn console_sealed(trait_name: &str) -> BTreeSet<String> {
+    let text = read("crates/logweir-api/src/kube.rs");
+    let needle = format!("impl {trait_name} for ");
+    let mut out = BTreeSet::new();
+    for line in text.lines() {
+        let line = line.trim();
+        let Some(rest) = line.strip_prefix(&needle) else {
+            continue;
+        };
+        let ty = rest
+            .trim_end_matches("{}")
+            .trim()
+            .rsplit("::")
+            .next()
+            .expect("a type name")
+            .trim();
+        out.insert(console_plural(ty).to_string());
+    }
+    out
+}
+
+/// **`api.enabled` renders the console/API principal, and its grants are the
+/// sealed adapter's `(verb, resource)` pairs — in both directions.**
+///
+/// # Why this role exists at all, and why it is wider than the proxy's
+///
+/// `<release>-ui` acts for WHOEVER REACHES ITS SERVICE, so its role is measured
+/// from the page's own request sites and is as small as the page. `<release>-api`
+/// acts for a SERVICE that authorizes every request itself
+/// (`crates/logweir-api/src/authz.rs`), so its role is the union of what every
+/// route may ever need and the per-actor narrowing happens above it. Neither
+/// shape can be used to justify the other, which is why the two are separate
+/// objects with separate arguments and this test never compares them.
+///
+/// # The two directions, and what each one catches
+///
+/// **Every call has a grant.** The adapter's three seals are read out of
+/// `kube.rs` and every sealed kind must be readable through this role;
+/// `CancellableCheck`'s two kinds must additionally be patchable. A kind added
+/// to `ProductResource` with no rule here is a console whose new route 403s in
+/// production while every route-table test stays green — the defect
+/// `manifest_lint::every_call_site_has_a_grant` exists for, on the other
+/// service.
+///
+/// **Every grant has a caller.** No resource outside the seals plus the two
+/// core objects, no verb outside the adapter's four, and every `(resource,
+/// verb)` pair that the seals do not yet explain is listed in
+/// [`GRANTED_AHEAD_OF_ITS_CALLER`] with its reason — and that list is
+/// SELF-LIQUIDATING: an entry whose kind has since reached the seal fails here,
+/// naming it, so the exemption cannot outlive the wave it was written for.
+///
+/// # Mutants
+///
+/// Drop the D3 read rule: direction two's floor and the exact table both fail.
+/// Add `watch` to any rule: the verb allowlist fails naming it. Add `get` on
+/// `secrets`: `no_shipped_role_may_write_or_read_a_secret_it_does_not_name` in
+/// `manifest_lint` fails over the rendered file, and the exact table here fails
+/// too. Add a ninth kind to `ProductResource` without a rule: direction one
+/// fails naming the plural.
+#[test]
+fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends() {
+    let docs = rendered("demo");
+    find(&docs, "ServiceAccount", "logweir-api");
+    let role = find(&docs, "ClusterRole", "logweir-api");
+    let cluster_role = find(&docs, "ClusterRole", "logweir-api-trustpolicies");
+
+    // --- the exact table ---------------------------------------------------
+    let eight_sealed = [
+        "approvals",
+        "backupdestinations",
+        "backups",
+        "backupschedules",
+        "kafkaclusters",
+        "preflights",
+        "restores",
+        "topicdiscoveries",
+    ];
+    let want: BTreeSet<(Vec<String>, Vec<String>, Vec<String>)> = BTreeSet::from([
+        (
+            vec!["logweir.dev".to_string()],
+            eight_sealed.iter().map(|s| s.to_string()).collect(),
+            vec!["get".to_string(), "list".to_string()], // engine-token-ok: an RBAC verb the console spends, never an engine subcommand
+        ),
+        (
+            vec!["logweir.dev".to_string()],
+            [
+                "backupdestinations",
+                "backups",
+                "backupschedules",
+                "kafkaclusters",
+                "preflights",
+                "restores",
+                "topicdiscoveries",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            vec!["create".to_string()],
+        ),
+        (
+            vec!["logweir.dev".to_string()],
+            [
+                "backupdestinations",
+                "backupschedules",
+                "preflights",
+                "topicdiscoveries",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            vec!["patch".to_string()],
+        ),
+        (
+            vec!["logweir.dev".to_string()],
+            [
+                "protectionpolicies",
+                "recoverycatalogs",
+                "rehearsalschedules",
+                "retentionpolicies",
+            ]
+            .iter()
+            .map(|s| s.to_string())
+            .collect(),
+            vec!["get".to_string(), "list".to_string()], // engine-token-ok: an RBAC verb the console spends, never an engine subcommand
+        ),
+        (
+            vec!["logweir.dev".to_string()],
+            vec!["recoverycatalogs".to_string()],
+            vec!["create".to_string()],
+        ),
+        (
+            vec![String::new()],
+            vec!["configmaps".to_string()],
+            vec!["get".to_string()],
+        ),
+        (
+            vec![String::new()],
+            vec!["secrets".to_string()],
+            vec!["create".to_string()],
+        ),
+    ]);
+    assert_eq!(
+        want,
+        rules_of(role),
+        "the console principal's namespaced ClusterRole carries exactly the sealed adapter's \
+         pairs"
+    );
+    assert_eq!(
+        BTreeSet::from([(
+            vec!["logweir.dev".to_string()],
+            vec!["trustpolicies".to_string()],
+            vec!["get".to_string(), "list".to_string()], // engine-token-ok: an RBAC verb the console spends, never an engine subcommand
+        )]),
+        rules_of(cluster_role),
+        "the cluster-scoped half is `TrustPolicy`, READ ONLY: D3 §10 keeps trust writes off the \
+         API in v1 and the supported path is `kubectl apply` under `logweir-trust-admin`"
+    );
+
+    // --- direction one: every call has a grant -----------------------------
+    let namespaced = console_sealed("ProductResource");
+    assert!(
+        namespaced.len() >= 8,
+        "the `ProductResource` scan over crates/logweir-api/src/kube.rs found only {} kinds; \
+         every assertion below would then be vacuous: {namespaced:?}",
+        namespaced.len()
+    );
+    let granted = |doc: &Doc, resource: &str, verb: &str| -> bool {
+        rules_of(doc).iter().any(|(_, resources, verbs)| {
+            resources.iter().any(|r| r == resource) && verbs.iter().any(|v| v == verb)
+        })
+    };
+    for plural in &namespaced {
+        for verb in ["get", "list"] {
+            assert!(
+                granted(role, plural, verb),
+                "`crates/logweir-api/src/kube.rs` seals `{plural}` into `ProductResource`, so \
+                 every route may `{verb}` one, and the console's ClusterRole grants no such \
+                 verb. A sealed kind with no rule is a route that 403s in production while \
+                 every route-table test stays green"
+            );
+        }
+    }
+    for plural in console_sealed("CancellableCheck") {
+        assert!(
+            granted(role, &plural, "patch"),
+            "`{plural}` is a `CancellableCheck` — its `spec.cancelRequested` may be raised — and \
+             the console's ClusterRole grants no `patch` on it"
+        );
+    }
+    for plural in console_sealed("ClusterResource") {
+        for verb in ["get", "list"] {
+            assert!(
+                granted(cluster_role, &plural, verb),
+                "`{plural}` is sealed into `ClusterResource` and the cluster-scoped half of the \
+                 console's RBAC grants no `{verb}` on it"
+            );
+        }
+    }
+
+    // --- direction two: every grant has a caller ---------------------------
+    //
+    // The `(resource, verb)` pairs granted AHEAD of the seal that will explain
+    // them, each with the wave that lands the caller. D3 W11's API is on its
+    // own branch; this wave lands the RBAC half so that merging it is not also
+    // an RBAC change, which is the split D3 §14 draws between W11 and W13.
+    //
+    // SELF-LIQUIDATING, asserted below: when the kind reaches the seal the
+    // entry must go, or this test fails naming it.
+    const GRANTED_AHEAD_OF_ITS_CALLER: [(&str, &str, &str); 11] = [
+        ("protectionpolicies", "get", "D3 W11 `protection.read`"),
+        ("protectionpolicies", "list", "D3 W11 `protection.read`"), // engine-token-ok: an RBAC verb, never an engine subcommand
+        ("rehearsalschedules", "get", "D3 W11 `rehearsal.read`"),
+        ("rehearsalschedules", "list", "D3 W11 `rehearsal.read`"), // engine-token-ok: an RBAC verb, never an engine subcommand
+        ("recoverycatalogs", "get", "D3 W11 `catalog.read`"),
+        ("recoverycatalogs", "list", "D3 W11 `catalog.read`"), // engine-token-ok: an RBAC verb, never an engine subcommand
+        ("recoverycatalogs", "create", "D3 W11 `catalog.connect`"),
+        ("retentionpolicies", "get", "D3 W11 `retention.read`"),
+        ("retentionpolicies", "list", "D3 W11 `retention.read`"), // engine-token-ok: an RBAC verb, never an engine subcommand
+        // The cluster-scoped half. `ClusterResource` — the second seal, which
+        // holds exactly this kind and holds it READ ONLY — arrives with the
+        // same wave, so on this tree the whole cluster role is ahead of its
+        // caller and says so rather than looking derived.
+        ("trustpolicies", "get", "D3 W11 `trustPolicy.read`"),
+        ("trustpolicies", "list", "D3 W11 `trustPolicy.read`"), // engine-token-ok: an RBAC verb, never an engine subcommand
+    ];
+    let sealed_now: BTreeSet<String> = namespaced
+        .union(&console_sealed("ClusterResource"))
+        .cloned()
+        .collect();
+    for (plural, _, wave) in GRANTED_AHEAD_OF_ITS_CALLER {
+        assert!(
+            !sealed_now.contains(plural),
+            "`{plural}` now reaches the console adapter's seal ({wave} has landed), so it is no \
+             longer granted ahead of its caller: remove its rows from \
+             GRANTED_AHEAD_OF_ITS_CALLER and let the mechanical rule above cover it. An \
+             exemption that outlives its reason is an exemption nobody re-reads"
+        );
+    }
+    let known: BTreeSet<String> = sealed_now
+        .iter()
+        .cloned()
+        .chain(["configmaps".to_string(), "secrets".to_string()])
+        .chain(
+            GRANTED_AHEAD_OF_ITS_CALLER
+                .iter()
+                .map(|(r, _, _)| (*r).to_string()),
+        )
+        .collect();
+    let mut checked = 0usize;
+    for doc in [role, cluster_role] {
+        for (groups, resources, verbs) in rules_of(doc) {
+            for g in &groups {
+                assert!(
+                    g == "logweir.dev" || g.is_empty(),
+                    "{}: a rule names the apiGroup `{g}`; the console adapter reaches \
+                     `logweir.dev` and core only",
+                    doc.name()
+                );
+            }
+            for r in &resources {
+                assert!(
+                    known.contains(r),
+                    "{}: grants a verb on `{r}`, which is neither a kind sealed into the \
+                     console adapter nor one of the two core objects nor a recorded \
+                     ahead-of-its-caller row. A grant with no caller is critique B M18",
+                    doc.name()
+                );
+                assert!(
+                    !r.contains('/'),
+                    "{}: names the subresource `{r}`. A reader gets `status` from the object \
+                     itself; naming `/status` grants nothing and reads, to an auditor, as \
+                     though this service could write one (`config/rbac/viewer_role.yaml`)",
+                    doc.name()
+                );
+            }
+            for v in &verbs {
+                assert!(
+                    CONSOLE_VERBS.contains(&v.as_str()),
+                    "{}: grants `{v}`, which the sealed adapter cannot spend — it calls \
+                     {CONSOLE_VERBS:?} and has no other method. `watch` in particular is a \
+                     long-lived connection this service never opens: D3 §10's event stream is \
+                     server-sent events over the service's own reads",
+                    doc.name()
+                );
+                checked += resources.len();
+            }
+        }
+    }
+    assert!(
+        checked >= 30,
+        "only {checked} (resource, verb) pairs were examined across the console's two \
+         ClusterRoles; the walk has gone quiet"
+    );
+
+    // --- the negatives, by name --------------------------------------------
+    for (groups, resources, verbs) in rules_of(role) {
+        if groups.iter().any(String::is_empty) && resources.iter().any(|r| r == "secrets") {
+            assert_eq!(
+                verbs,
+                vec!["create".to_string()],
+                "the console may CREATE a credential Secret and never read, patch or delete \
+                 one — that missing read verb is what makes a console-written credential \
+                 write-only, and the SHAPE of the create is fenced by the \
+                 ValidatingAdmissionPolicy because RBAC cannot express it"
+            );
+        }
+        if groups.iter().any(String::is_empty) && resources.iter().any(|r| r == "configmaps") {
+            assert_eq!(
+                verbs,
+                vec!["get".to_string()],
+                "the console GETs a named ConfigMap — a check's stored result, a catalog view's \
+                 page — and never lists them: a console that could page through every ConfigMap \
+                 in a namespace is an inventory of somebody else's configuration"
+            );
+        }
+    }
+
+    // --- the bindings ------------------------------------------------------
+    let bindings: Vec<&Doc> = docs
+        .iter()
+        .filter(|d| {
+            d.kind == "RoleBinding" && d.value["roleRef"]["name"].as_str() == Some("logweir-api")
+        })
+        .collect();
+    assert!(
+        !bindings.is_empty(),
+        "the namespaced role is bound by a RoleBinding and never by a ClusterRoleBinding: the \
+         console's own authorizer refuses an ungranted namespace, and a cluster-wide binding \
+         would mean a defect in that check reaches every namespace instead of the configured \
+         ones"
+    );
+    for rb in bindings {
+        assert_eq!(Some("ClusterRole"), rb.value["roleRef"]["kind"].as_str());
+        assert_eq!(
+            Some("logweir-api"),
+            rb.value["subjects"][0]["name"].as_str()
+        );
+    }
+    for crb in docs.iter().filter(|d| d.kind == "ClusterRoleBinding") {
+        let name = crb.value["roleRef"]["name"].as_str().unwrap_or_default();
+        assert_ne!("logweir-api", name, "the NAMESPACED role is never bound cluster-wide");
+        assert_ne!("cluster-admin", name);
+    }
+
+    // AND THE ADMISSION POLICY POINTS AT THIS ACCOUNT. The fence's whole effect
+    // is its `matchConditions` subject list; a default that named a different
+    // account would install, read as enabled, and fence nobody.
+    let values: Value =
+        serde_yaml::from_str(&read("charts/logweir/values.yaml")).expect("values.yaml parses");
+    assert_eq!(
+        Some("logweir-api"),
+        values["admissionPolicy"]["consoleServiceAccountName"].as_str(),
+        "`admissionPolicy.consoleServiceAccountName`'s default must be the account \
+         `api.enabled` renders under the default release name. They are two values that have \
+         to agree, and nothing else would notice if they stopped"
+    );
+
+    // AND NOTHING OF IT RENDERS WITH THE FLAG OFF.
+    for name in ["default", "minimal"] {
+        for d in rendered(name) {
+            assert!(
+                !d.name().starts_with("logweir-api"),
+                "rendered/{name}.yaml carries {}/{} with api.enabled off",
+                d.kind,
+                d.name()
+            );
+        }
+    }
+}
+
+/// **`retention.enabled` renders the enforcement Job's identity — an account
+/// with no token and no role — and nothing else.**
+///
+/// The name is `weirkeeper::controllers::retention_policy::SERVICE_ACCOUNT`,
+/// compiled into every `mode: Enforce` Job. Until it exists the Job's pod is
+/// admitted by nobody, which is fail-closed by accident; that is the
+/// merge-ordering constraint that controller's own header records against W13.
+///
+/// **NO Role AND NO RoleBinding, asserted.** The retention worker makes zero
+/// Kubernetes API calls: it reads a mounted plan, talks to an object store and
+/// exits. The delete capability that makes it the one irreversible component in
+/// the product is an object-store credential scoped to the policy's own prefix,
+/// and no Kubernetes verb widens or narrows it. A binding that appeared here
+/// would be a capability nobody asked for on the one pod that can delete.
+///
+/// MUTANT: give the account any RoleBinding, or set
+/// `automountServiceAccountToken: true` — each fails naming it.
+#[test]
+fn chart_lint_retention_renders_an_identity_with_no_grant_and_no_token() {
+    let docs = rendered("demo");
+    let sa = find(&docs, "ServiceAccount", "logweir-retention");
+    assert_eq!(
+        Some(false),
+        sa.value["automountServiceAccountToken"].as_bool(),
+        "the pod that holds a delete-capable storage credential is the last pod in the \
+         installation that should also carry a cluster token"
+    );
+    for d in &docs {
+        if matches!(d.kind.as_str(), "RoleBinding" | "ClusterRoleBinding") {
+            let subjects = d.value["subjects"].as_sequence().cloned().unwrap_or_default();
+            for s in subjects {
+                assert_ne!(
+                    Some("logweir-retention"),
+                    s["name"].as_str(),
+                    "{}/{} binds `logweir-retention` to `{}`. The retention worker makes zero \
+                     Kubernetes API calls; its delete capability is an object-store credential \
+                     and no Kubernetes verb reaches it",
+                    d.kind,
+                    d.name(),
+                    d.value["roleRef"]["name"].as_str().unwrap_or_default()
+                );
+            }
+        }
+        assert!(
+            !(d.kind == "ClusterRole" || d.kind == "Role") || d.name() != "logweir-retention",
+            "the chart renders a role named `logweir-retention`; it grants nothing and needs none"
+        );
+    }
+    for name in ["default", "minimal"] {
+        for d in rendered(name) {
+            assert_ne!(
+                "logweir-retention",
+                d.name(),
+                "rendered/{name}.yaml carries {}/logweir-retention with retention.enabled off",
+                d.kind
+            );
+        }
+    }
+}
+
+/// **`controller.failFastSeconds` and `controller.jobTtlSeconds` render the two
+/// environment variables the controller reads, and render NOTHING when unset.**
+///
+/// D3 §2.3 and §2.7. `weirkeeper::diagnostics` reads
+/// `LOGWEIR_FAIL_FAST_SECONDS` and `LOGWEIR_JOB_TTL_SECONDS`, clamps each to
+/// its floor and falls back to a compiled-in default; before this the two
+/// variables were set by nothing, so "configurable" was a property of the
+/// controller and of no installation.
+///
+/// THE EMPTY STRING IS NOT ZERO, and that is the one distinction this test is
+/// really about: `failFastSeconds: 0` is `FAIL_FAST_NEVER` — fail-fast
+/// disabled — while `""` means the build's own 300 s. A template that rendered
+/// `""` as `0` would silently disable fail-fast on every default install.
+///
+/// MUTANTS: render the variables unconditionally (the default render stops
+/// agreeing with `logweir.yaml`); use `if .Values…` instead of
+/// `ne (toString …) ""` (a configured `0` renders nothing and the operator's
+/// "never" becomes 300 s).
+#[test]
+fn chart_lint_the_two_controller_windows_render_only_when_configured() {
+    let values: Value =
+        serde_yaml::from_str(&read("charts/logweir/values.yaml")).expect("values.yaml parses");
+    for key in ["failFastSeconds", "jobTtlSeconds"] {
+        assert_eq!(
+            Some(""),
+            values["controller"][key].as_str(),
+            "`controller.{key}` ships as the EMPTY STRING — this build's own default — so a \
+             default install renders no environment variable and stays byte-identical to \
+             logweir.yaml"
+        );
+    }
+    for name in ["default", "minimal", "demo", "msk"] {
+        let docs = rendered(name);
+        let env = env_of(container(find(&docs, "Deployment", "weirkeeper")));
+        for var in ["LOGWEIR_FAIL_FAST_SECONDS", "LOGWEIR_JOB_TTL_SECONDS"] {
+            assert!(
+                !env.contains_key(var),
+                "rendered/{name}.yaml sets {var} although no example configures it; an unset \
+                 value must render nothing at all"
+            );
+        }
+    }
+    // AND THE TEMPLATE DISTINGUISHES `""` FROM `0`. Read as text, because a
+    // configured zero cannot be observed in a checked-in render that does not
+    // configure one, and `0` is the value whose meaning is inverted.
+    let template = read("charts/logweir/templates/deployment.yaml");
+    for var in ["failFastSeconds", "jobTtlSeconds"] {
+        assert!(
+            template.contains(&format!("ne (toString .Values.controller.{var}) \"\"")),
+            "templates/deployment.yaml must guard `controller.{var}` with \
+             `ne (toString …) \"\"` and never with a bare `if`: Helm's `if` is false for the \
+             number 0, and `failFastSeconds: 0` is FAIL_FAST_NEVER — the operator asking for \
+             fail-fast to be switched OFF. A bare `if` would render nothing and give them 300 \
+             seconds of patience instead of infinite"
+        );
+    }
 }
 
 /// **Every PodSpec of the optional components refuses a ServiceAccount token
@@ -2688,8 +3216,29 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
     // LINE PER KEY, no paragraphs, every explanation in
     // `charts/logweir/README.md`. The budget moved because the number of
     // OPTIONS moved, not because the prose did.
+    //
+    // RAISED FROM 170 TO 190 BY D3 W13, for FIVE keys and their two section
+    // headers, and the same rule decided each one. D3 introduced a great deal
+    // of configuration and almost none of it is an INSTALLATION setting: a
+    // catalog's sync interval, a protection policy's evaluation window, a
+    // rehearsal's budget and a retention policy's mode are per-OBJECT fields
+    // with defaults compiled into the CRD schema, so a chart value for any of
+    // them would render nothing and mean nothing. What did land here is the
+    // five that reach something:
+    //
+    //   * `controller.failFastSeconds` and `controller.jobTtlSeconds` — two
+    //     environment variables `weirkeeper::diagnostics` already read and that
+    //     nothing set (D3 §2.3, §2.7);
+    //   * `retention.enabled` — the ServiceAccount every enforcement Job names,
+    //     without which that path is admitted by nobody;
+    //   * `api.enabled` and `api.namespaces` — the console principal's identity
+    //     and the namespaces it is bound in.
+    //
+    // Twenty lines for five keys is the owner's own ratio: one short line per
+    // key plus a two-line section comment apiece, everything else in
+    // `charts/logweir/README.md`.
     assert!(
-        lines <= 170,
+        lines <= 190,
         "charts/logweir/values.yaml is {lines} lines. The owner asked for a values file that is \
          read, not skimmed past: one short line per key, no paragraphs, and every explanation \
          in charts/logweir/README.md"
@@ -2793,6 +3342,13 @@ fn chart_lint_values_yaml_is_short_and_shows_every_option() {
         "admissionPolicy.extraPrincipals",
         // D3 W14 / NOTIFY-INSECURE-SINK-UNEXPOSED — the installation-only hatch.
         "notify.allowInsecureSinks",
+        // D3 W13 — the two controller windows `weirkeeper::diagnostics` reads,
+        // and the two RBAC-only components.
+        "controller.failFastSeconds",
+        "controller.jobTtlSeconds",
+        "retention.enabled",
+        "api.enabled",
+        "api.namespaces",
     ] {
         let mut node = &values;
         for segment in path.split('.') {
