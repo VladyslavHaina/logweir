@@ -3747,6 +3747,146 @@ def cleared_block_is_not_re_read(after: dict[str, Any]) -> dict[str, bool]:
 
 
 # ---------------------------------------------------------------------------
+# PLAT-19.1's `unauthorized update`, as an RBAC result
+# ---------------------------------------------------------------------------
+
+# The roles the chart ships (`charts/logweir/templates/human-roles.yaml`).
+# `logweir-viewer` reads `trustpolicies`; `logweir-operator` creates backups and
+# patches schedules; only `logweir-trust-admin` may write a `trustpolicy`. A
+# realistic non-admin holds the first two.
+SHIPPED_NON_ADMIN_ROLES = ("logweir-viewer", "logweir-operator")
+TRUST_ADMIN_ROLE = "logweir-trust-admin"
+
+
+def rbac_refused_the_update(can_patch: str, can_read: str, refusal: str,
+                            admin_can_patch: str) -> dict[str, bool]:
+    """An edit refused by RBAC, and distinguishable from the other refusals.
+
+    PLAT-19.1's `unauthorized update` is about AUTHORIZATION, and the refusal
+    already proven — `trust-lifecycle-is-monotonic` — is the CRD's own CEL,
+    which fires for a cluster-admin too. The two look nothing alike and a row
+    that accepted either would prove neither, so this asserts the shape of the
+    RBAC one: the API server's `is forbidden` naming the subject and the verb,
+    with none of CEL's rule text in it.
+
+    The two control clauses are what stop it passing for the wrong reason. A
+    subject with no access at all would be refused for reading as well, and a
+    cluster where NOBODY may write a `trustpolicy` would refuse the admin too —
+    in either case the refusal would say nothing about this subject's authority.
+    """
+    return {
+        "the non-admin may not patch a TrustPolicy": can_patch.strip() == "no",
+        "the refusal is the API server's, naming the subject and the verb": (
+            "is forbidden" in refusal
+            and "cannot patch resource" in refusal
+            and "trustpolicies" in refusal
+        ),
+        "and it is NOT the CRD's CEL refusal": (
+            "never backwards" not in refusal and "Invalid value" not in refusal
+        ),
+        "the same subject MAY read one, so this is about the verb": can_read.strip() == "yes",
+        "and the shipped trust-admin role MAY patch one": admin_can_patch.strip() == "yes",
+    }
+
+
+def trust_rbac() -> None:
+    """A non-admin bound only to the shipped roles cannot edit trust.
+
+    CLUSTER-SCOPED, so it runs under the cluster lock: `trustpolicies` are
+    cluster-scoped and a ClusterRoleBinding is the only way to grant a subject
+    the shipped roles as an installation really would. Both bindings are this
+    run's own, named with the stamp, and deleted before the phase returns.
+    """
+    evidence: list[str] = []
+    sa = f"{OWNER}-nonadmin"
+    admin_sa = f"{OWNER}-trustadmin"
+    subject = f"system:serviceaccount:{NS}:{sa}"
+    admin_subject = f"system:serviceaccount:{NS}:{admin_sa}"
+    for name in (sa, admin_sa):
+        apply({"apiVersion": "v1", "kind": "ServiceAccount", "metadata": owned(name)})
+    created: list[str] = []
+    for role in SHIPPED_NON_ADMIN_ROLES:
+        binding = f"{OWNER}-{STAMP}-{role}"
+        apply({
+            "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRoleBinding",
+            "metadata": {"name": binding, "labels": dict(LABEL)},
+            "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole",
+                        "name": role},
+            "subjects": [{"kind": "ServiceAccount", "name": sa, "namespace": NS}],
+        })
+        created.append(binding)
+    admin_binding = f"{OWNER}-{STAMP}-{TRUST_ADMIN_ROLE}"
+    apply({
+        "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRoleBinding",
+        "metadata": {"name": admin_binding, "labels": dict(LABEL)},
+        "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole",
+                    "name": TRUST_ADMIN_ROLE},
+        "subjects": [{"kind": "ServiceAccount", "name": admin_sa, "namespace": NS}],
+    })
+    created.append(admin_binding)
+    try:
+        # A policy of this run's own to aim at, so nothing shared is even the
+        # target of a refused write.
+        if get_opt("trustpolicy", TRUST_POLICY, namespace="default") is None:
+            apply(trust_policy("Active"))
+        can_patch = run(K + ["auth", "can-i", "patch", "trustpolicies", "--as", subject],
+                        check=False).stdout
+        can_read = run(K + ["auth", "can-i", "get", "trustpolicies", "--as", subject],
+                       check=False).stdout
+        admin_can_patch = run(
+            K + ["auth", "can-i", "patch", "trustpolicies", "--as", admin_subject],
+            check=False).stdout
+        attempt = run(
+            K + ["patch", "trustpolicy", TRUST_POLICY, "--type=merge", "--as", subject,
+                 "-p", json.dumps({"metadata": {"annotations": {
+                     f"{OWNER}.logweir.dev/unauthorized-probe": "this write must be refused"}}})],
+            check=False)
+        refusal = redact((attempt.stdout + attempt.stderr).strip())
+        evidence.append(artifact("trust/rbac-unauthorized-update.json", {
+            "subject": subject, "boundTo": list(SHIPPED_NON_ADMIN_ROLES),
+            "adminSubject": admin_subject, "adminBoundTo": TRUST_ADMIN_ROLE,
+            "canPatch": can_patch.strip(), "canRead": can_read.strip(),
+            "adminCanPatch": admin_can_patch.strip(),
+            "exitCode": attempt.returncode, "refusal": refusal,
+            "clusterRoleBindings": created,
+        }))
+        clauses = rbac_refused_the_update(can_patch, can_read, refusal, admin_can_patch)
+        check(
+            "trust-unauthorized-update-is-refused-by-rbac",
+            "PLAT-19.1",
+            all(clauses.values()) and attempt.returncode != 0,
+            f"a ServiceAccount bound to the SHIPPED roles {list(SHIPPED_NON_ADMIN_ROLES)} and "
+            f"nothing else cannot edit a TrustPolicy: `auth can-i patch` says "
+            f"{can_patch.strip()!r}, the write exits {attempt.returncode} with "
+            f"{refusal[:220]!r}. It MAY read one ({can_read.strip()!r}), and a subject bound "
+            f"to {TRUST_ADMIN_ROLE} MAY patch one ({admin_can_patch.strip()!r}), so the "
+            f"refusal is about this subject's authority and not about the cluster. This is "
+            f"the AUTHORIZATION boundary: `trust-lifecycle-is-monotonic` proves the CRD's "
+            f"CEL refusal, which fires for a cluster-admin too. "
+            + "; ".join(f"{k}={v}" for k, v in clauses.items()),
+            evidence,
+        )
+    finally:
+        for binding in created:
+            run(K + ["delete", "clusterrolebinding", binding, "--ignore-not-found=true",
+                     "--wait=true"], check=False)
+        left = [b["metadata"]["name"] for b in json.loads(
+            run(K + ["get", "clusterrolebindings", "-o", "json"]).stdout)["items"]
+            if b["metadata"]["name"].startswith(f"{OWNER}-{STAMP}-")]
+        evidence.append(artifact("trust/rbac-cleanup.json",
+                                 {"deleted": created, "remaining": left}))
+        check(
+            "trust-rbac-fixture-is-cleaned-up",
+            "PLAT-19.1",
+            not left,
+            f"the {len(created)} ClusterRoleBindings this row created are deleted before it "
+            f"returns; remaining: {left}. They are cluster-scoped, so leaving one behind "
+            f"would hand a later run's ServiceAccount an authority nobody granted it",
+            evidence,
+        )
+
+
+# ---------------------------------------------------------------------------
 # PLAT-14.2 — a stale point alerts once, and a failed delivery rewrites nothing
 # ---------------------------------------------------------------------------
 
@@ -4186,7 +4326,7 @@ PHASES = [
     "setup", "catalog", "catalog_cases", "retention", "legal_hold", "lifecycle",
     "enforce_guards", "bounded_retry", "packaging", "preview",
     "enforce", "wrong_prefix", "denied_deletion", "no_evidence_credential", "trust",
-    "signed_at_probe", "notify", "control", "report", "cleanup",
+    "signed_at_probe", "trust_rbac", "notify", "control", "report", "cleanup",
 ]
 
 

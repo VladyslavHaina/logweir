@@ -522,6 +522,40 @@ def test_clearing_the_block_reads_no_archive() -> None:
             {"signedAt": "2026-09-19T01:55:00Z"}).values()))
 
 
+# --- PLAT-19.1's `unauthorized update`, as an RBAC result --------------------
+RBAC_REFUSAL = (
+    'Error from server (Forbidden): trustpolicies.logweir.dev "d3w14-x" is forbidden: '
+    'User "system:serviceaccount:d3w14-x:d3w14-nonadmin" cannot patch resource '
+    '"trustpolicies" in API group "logweir.dev" at the cluster scope'
+)
+# What the OTHER refusal looks like — the CRD's own CEL, which fires for a
+# cluster-admin too and is what `trust-lifecycle-is-monotonic` already proves.
+CEL_REFUSAL = (
+    'The TrustPolicy "d3w14-x" is invalid: * spec.keys[0]: Invalid value: "object": '
+    "a key's state moves Active -> Retired, Active|Retired -> Revoked, and never backwards"
+)
+
+
+def test_an_unauthorized_trust_edit_is_refused_by_rbac_not_by_cel() -> None:
+    row("a non-admin is refused the write, allowed the read, and the admin may write",
+        all(d3.rbac_refused_the_update("no", "yes", RBAC_REFUSAL, "yes").values()))
+    row("MUTANT: THE WRONG BOUNDARY — CEL's refusal accepted as an RBAC result",
+        not all(d3.rbac_refused_the_update("no", "yes", CEL_REFUSAL, "yes").values()))
+    row("MUTANT: the subject could patch after all",
+        not all(d3.rbac_refused_the_update("yes", "yes", RBAC_REFUSAL, "yes").values()))
+    row("MUTANT: a subject with no access at all — the refusal says nothing about trust",
+        not all(d3.rbac_refused_the_update("no", "no", RBAC_REFUSAL, "yes").values()))
+    row("MUTANT: a cluster where nobody may write a TrustPolicy",
+        not all(d3.rbac_refused_the_update("no", "yes", RBAC_REFUSAL, "no").values()))
+    row("MUTANT: an empty refusal proves nothing",
+        not all(d3.rbac_refused_the_update("no", "yes", "", "yes").values()))
+    row("MUTANT: a refusal about another resource",
+        not all(d3.rbac_refused_the_update(
+            "no", "yes",
+            'backups.logweir.dev is forbidden: User "x" cannot patch resource "backups"',
+            "yes").values()))
+
+
 def main() -> int:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

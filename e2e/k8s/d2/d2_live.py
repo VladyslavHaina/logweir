@@ -3599,7 +3599,8 @@ def negative_control() -> None:
 
 # --------------------------------------------------------------------------
 # A prefix-less destination, so the restore-preflight archive checks can be
-# judged on their own rather than through the prefix defect E4 isolates.
+# judged on their own — the control beside E4's prefixed destination, not a way
+# around a defect: D2-PREFLIGHT-PREFIX is closed and E4 asserts the join.
 # --------------------------------------------------------------------------
 
 
@@ -3640,8 +3641,8 @@ def s16prep() -> None:
 
 
 def e4() -> None:
-    with Scenario("E4", "a restore preflight reads the manifest without the destination's "
-                        "storage.prefix") as sc:
+    with Scenario("E4", "the plan names a relative manifest key and the product joins the "
+                        "destination's prefix at the read") as sc:
         prefixed = backup_facts("bk-a2", "a", "lw-a")
         flat = backup_facts_flat("bk-c", "a", "lw-c")
         sc.detail["prefixedBackup"] = prefixed
@@ -3678,14 +3679,43 @@ def e4() -> None:
                         "restorePreflight"].get("manifestKey")
                     sc.detail["prefixedLocationPrefix"] = plan_doc["request"][
                         "restorePreflight"]["sourceDestination"]["location"]["prefix"]
+        # THIS ROW WAS INVERTED AND ITS ASSERTIONS WERE NOT (review F-3). Its
+        # title said the preflight *"reads the manifest WITHOUT the
+        # destination's storage.prefix"*, which reads like D2-PREFLIGHT-PREFIX
+        # reproducing; what it actually asserted — a RELATIVE `manifestKey` in
+        # the plan — is the post-fix contract, because
+        # `crates/logweir/src/check/kinds/restore.rs` does
+        # `access.qualify(&req.manifest_key)` under "THE PREFIX IS JOINED HERE,
+        # ONCE". The proof that the join works was in the row's own `detail` and
+        # asserted nowhere. It is asserted now.
         entry = flat_checks.get("archive.backupSet")
         check(entry is not None, f"archive.backupSet did not run: {sorted(flat_checks)}")
         check(entry["state"] == "ready" and entry["code"] == "ManifestReadable",
-              "even with an EMPTY storage.prefix the restore preflight cannot read the "
+              "with an EMPTY storage.prefix the restore preflight cannot read the "
               f"manifest: {entry['state']}/{entry['code']} — {entry.get('message')}")
         check(sc.detail.get("prefixedManifestKey", "").count("/") == 1,
-              "the prefixed destination's check plan names a manifestKey that already "
-              f"carries a prefix: {sc.detail.get('prefixedManifestKey')!r}")
+              "the check plan must name a RELATIVE manifestKey — the archive's own "
+              "convention — because the product joins the destination's prefix once, at "
+              f"the read: {sc.detail.get('prefixedManifestKey')!r}")
+        prefixed_checks = sc.detail.get("prefixedChecks") or {}
+        check(bool(prefixed_checks),
+              "the prefixed destination's preflight (pf-plan1) was not available, so this "
+              "row cannot show the join working")
+        manifest = prefixed_checks.get("archive.backupSet") or {}
+        segments = prefixed_checks.get("archive.segments") or {}
+        sc.detail["prefixJoinedAtTheRead"] = {
+            "storagePrefix": sc.detail.get("prefixedLocationPrefix"),
+            "planManifestKey": sc.detail.get("prefixedManifestKey"),
+            "archive.backupSet": manifest, "archive.segments": segments,
+        }
+        check(manifest.get("state") == "ready" and manifest.get("code") == "ManifestReadable",
+              f"on the PREFIXED destination (storage.prefix "
+              f"{sc.detail.get('prefixedLocationPrefix')!r}) the manifest is "
+              f"{manifest.get('state')}/{manifest.get('code')} — D2-PREFLIGHT-PREFIX is "
+              f"reproducing, not closed")
+        check(segments.get("state") == "ready" and segments.get("code") == "SegmentsPresent",
+              f"on the PREFIXED destination the segments are "
+              f"{segments.get('state')}/{segments.get('code')}")
 
 
 
