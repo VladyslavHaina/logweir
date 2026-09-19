@@ -2624,6 +2624,28 @@ def legal_hold() -> None:
                        "recordKey": record_key, "gone": sorted(gone), "exitCode": code}
     save()
     patch_policy("keep-b", {"holds": []})
+    # AND THE FIXTURE RESTORE GOES. It is permanently nonterminal by design —
+    # that is what makes it an in-flight restore — and
+    # `retention_policy.rs::start_decision` refuses on the WHOLE destination
+    # while one exists: "a nonterminal Restore reads this destination; no
+    # retention Job is created". Leaving it alive wedged every later phase's
+    # enforcement silently, and cost the bounded-retry row a 1800 s window that
+    # recorded zero Jobs (review H-1). The row cleans up what it planted.
+    run(KN + ["delete", "restore", restore_name, "--wait=true"], check=False)
+    remaining_restores = [r["metadata"]["name"] for r in lst("restores")]
+    evidence.append(artifact("enforce/guard-restore-cleanup.json",
+                             {"deleted": restore_name, "restoresLeft": remaining_restores}))
+    check(
+        "retention-active-restore-fixture-is-cleaned-up",
+        "PLAT-16.2",
+        not remaining_restores,
+        f"the in-flight Restore this row planted is deleted before the phase returns "
+        f"({restore_name}); restores left in the namespace: {remaining_restores}. A "
+        f"permanently nonterminal Restore blocks every later enforcement run at this "
+        f"destination, so leaving one behind makes the next phase measure the leak instead "
+        f"of the product",
+        evidence,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -2949,7 +2971,7 @@ def partial_failure_is_attributable(points: list[dict[str, str]], exit_code: int
     }
 
 
-def bounded_retry_degrades(policy: dict[str, Any], failures: int,
+def bounded_retry_degrades(policy: dict[str, Any], failed_runs: int, counted: int,
                            jobs_while_degraded: int) -> dict[str, bool]:
     """D3 §6.5: after the retry budget, say so and stop until the spec changes.
 
@@ -2957,10 +2979,21 @@ def bounded_retry_degrades(policy: dict[str, Any], failures: int,
     (`BudgetExhausted`) deliberately does NOT count, so three ordinary bounded
     runs on a large archive cannot degrade a healthy policy. What must degrade
     it is three consecutive runs that genuinely failed.
+
+    `failed_runs` IS COUNTED FROM THE POLICY'S OWN JOBS, not from
+    `status.consecutiveRunFailures`, and the two are separate clauses on
+    purpose. The first landing took both numbers from the status, so a build
+    that fails to RECORD a failure looked to it like a build that had not run —
+    and it reported NOT-RUN over a window in which five enforcement Jobs had
+    failed (review **H-1**). A harness that reads the same broken field twice
+    cannot see the break. The Jobs are the ground truth; the counter is a claim
+    about them, and "the policy counted them" is the clause that fails when the
+    claim is wrong.
     """
     degraded = condition(policy, "EnforcementDegraded")
     return {
-        "three consecutive failures were counted": failures >= 3,
+        "the budget was actually spent — three runs genuinely failed": failed_runs >= 3,
+        "the policy COUNTED the failures its own Jobs recorded": counted >= 3,
         "EnforcementDegraded is True with a reason": (
             degraded.get("status") == "True" and bool(degraded.get("reason"))
         ),
@@ -3199,70 +3232,81 @@ def bounded_retry() -> None:
                    for o in (j["metadata"].get("ownerReferences") or []))
         }
 
+    # THE JOBS ARE THE GROUND TRUTH. `status.lastEnforcement.runId` is the field
+    # the defect below freezes, so a loop that counted runs from it would
+    # under-report by construction — which is exactly how a window containing
+    # five failed enforcement Jobs was reported as "no run at all" (review
+    # **H-1**). Runs are counted from the policy's OWN Jobs, by ownerReference,
+    # and the status counter is read beside them as a separate claim.
     deadline = time.time() + window
     policy: dict[str, Any] = {}
     failures = 0
-    seen: list[dict[str, Any]] = []
+    runs: dict[str, str] = {}
     while time.time() < deadline:
         policy = get("retentionpolicy", f"{OWNER}-degrade")
         status = policy.get("status") or {}
         failures = status.get("consecutiveRunFailures") or 0
-        last = status.get("lastEnforcement") or {}
-        if last.get("runId") and last["runId"] not in {r.get("runId") for r in seen}:
-            seen.append({k: last.get(k) for k in
-                         ("runId", "exitCode", "startedAt", "finishedAt", "objectsDeleted")})
+        for job in lst("jobs"):
+            if not any(o.get("uid") == policy_uid
+                       for o in (job["metadata"].get("ownerReferences") or [])):
+                continue
+            js = job.get("status") or {}
+            if js.get("failed"):
+                runs[job["metadata"]["name"]] = "failed"
+            elif js.get("succeeded"):
+                runs[job["metadata"]["name"]] = "succeeded"
+            else:
+                runs.setdefault(job["metadata"]["name"], "running")
         if condition(policy, "EnforcementDegraded").get("status") == "True":
             break
+        # ENOUGH FAILED RUNS AND A COUNTER THAT DID NOT MOVE is the defect, and
+        # waiting out the rest of the window only delays reporting it.
+        if sum(1 for v in runs.values() if v == "failed") >= 3 and failures < 3:
+            time.sleep(60)
+            policy = get("retentionpolicy", f"{OWNER}-degrade")
+            failures = (policy.get("status") or {}).get("consecutiveRunFailures") or 0
+            if failures < 3:
+                break
         time.sleep(15)
+    failed_runs = sum(1 for v in runs.values() if v == "failed")
     degraded_at = now()
     jobs_at_degrade = owned_jobs()
     time.sleep(180)
     new_jobs = sorted(owned_jobs() - jobs_at_degrade)
     evidence.append(artifact("enforce/bounded-retry-policy.json", policy))
     evidence.append(artifact("enforce/bounded-retry-runs.json",
-                             {"windowSeconds": window, "degradedAt": degraded_at,
-                              "consecutiveRunFailures": failures, "runsObserved": seen,
-                              "ownedJobsAtDegrade": sorted(jobs_at_degrade),
+                             {"windowSeconds": window, "observedAt": degraded_at,
+                              "consecutiveRunFailures": failures,
+                              "ownJobsAndOutcomes": runs, "failedRuns": failed_runs,
+                              "lastEnforcement": (policy.get("status") or {})
+                              .get("lastEnforcement"),
+                              "ownedJobsAtObservation": sorted(jobs_at_degrade),
                               "ownedJobsAfter": new_jobs}))
-    # A ROW THAT SAW NO RUN HAS MEASURED NOTHING. The retry BUDGET is the
-    # subject, and it cannot be judged by a window in which the controller
-    # never drove the enforcer once: that is a statement about the cadence, the
-    # lease or the destination's points, not about D3 §6.5. Recorded as NOT-RUN
-    # with what was observed, never as a product failure.
-    if not seen:
-        record(
-            "retention-bounded-retry", "PLAT-16.2", "NOT-RUN",
-            f"no enforcement run happened at all in {window}s, so the retry budget was never "
-            f"exercised. Evaluated="
-            f"{condition(policy, 'Evaluated').get('status')}/"
-            f"{condition(policy, 'Evaluated').get('reason')}, Ready="
-            f"{condition(policy, 'Ready').get('status')}/"
-            f"{condition(policy, 'Ready').get('reason')}, Enforced="
-            f"{condition(policy, 'Enforced').get('status')}/"
-            f"{condition(policy, 'Enforced').get('reason')}, "
-            f"consecutiveRunFailures={failures}. The fixture needs an Enforce policy that is "
-            f"the ONLY policy on a destination whose points are still present, and three "
-            f"genuinely failed runs at the observed inter-run gap — about eight minutes for "
-            f"the first — so roughly half an hour of window.",
-            evidence,
-        )
-        run(KN + ["delete", "retentionpolicy", f"{OWNER}-degrade", "--wait=true"], check=False)
-        return
-    retry = bounded_retry_degrades(policy, failures, len(new_jobs))
+    retry = bounded_retry_degrades(policy, failed_runs, failures, len(new_jobs))
+    uncounted = failed_runs >= 3 and failures < 3
     check(
         "retention-bounded-retry",
         "PLAT-16.2",
         all(retry.values()),
         f"an Enforce policy on a `* * * * *` cadence with a credential that cannot delete "
-        f"counted {failures} consecutive failed run(s) over {window}s "
-        f"({len(seen)} distinct run(s) observed: "
-        f"{[{k: r.get(k) for k in ('runId', 'exitCode')} for r in seen]}) and set "
-        f"EnforcementDegraded="
+        f"ran {len(runs)} enforcement Job(s) of its own in {window}s, {failed_runs} of them "
+        f"FAILED ({runs}), and the policy's own counter reads "
+        f"consecutiveRunFailures={failures} with EnforcementDegraded="
         f"{condition(policy, 'EnforcementDegraded').get('status')}/"
-        f"{condition(policy, 'EnforcementDegraded').get('reason')} "
-        f"({(condition(policy, 'EnforcementDegraded').get('message') or '')[:140]}); over the "
-        f"180 s after that the policy created {len(new_jobs)} further enforcement Job(s) "
-        f"{new_jobs} of its own — retention stops until the spec changes. "
+        f"{condition(policy, 'EnforcementDegraded').get('reason')}; it created "
+        f"{len(new_jobs)} further Job(s) {new_jobs} afterwards. "
+        + (
+            "DEFECT RET-DEGRADED-UNREACHABLE: the runs failed and the policy did not count "
+            "them. `retention_policy.rs` logs \"RetentionPolicy carries no "
+            "metadata.resourceVersion, which a /status compare-and-set needs (D-SEAMS S7); "
+            "no patch is sent\", so the status patch never lands, the failure is never "
+            "recorded, consecutiveRunFailures cannot reach DEGRADED_AFTER_FAILURES = 3 and "
+            "`EnforcementDegraded` can NEVER fire — D3 §6.5's bounded retry is unreachable "
+            "on this build, while Ready/Evaluated/Enforced all read True and a console sees "
+            "a healthy policy. This row FAILS on the product and must not be recorded as "
+            "unrun: the failure is the finding. "
+            if uncounted else ""
+        )
         + "; ".join(f"{k}={v}" for k, v in retry.items()),
         evidence,
     )

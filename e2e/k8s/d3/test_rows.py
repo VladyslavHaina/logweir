@@ -459,18 +459,26 @@ DEGRADED = _pol([{"type": "EnforcementDegraded", "status": "True", "reason": "Ru
 
 
 def test_bounded_retry_degrades_and_stops() -> None:
-    row("three failures, a degraded condition with words, and no further Job",
-        all(d3.bounded_retry_degrades(DEGRADED, 3, 0).values()))
+    row("three failed Jobs, counted, a degraded condition with words, no further Job",
+        all(d3.bounded_retry_degrades(DEGRADED, 3, 3, 0).values()))
     row("MUTANT: degraded before the budget is spent",
-        not all(d3.bounded_retry_degrades(DEGRADED, 2, 0).values()))
+        not all(d3.bounded_retry_degrades(DEGRADED, 2, 2, 0).values()))
     row("MUTANT: three failures and no degraded condition",
-        not all(d3.bounded_retry_degrades(_pol([]), 3, 0).values()))
+        not all(d3.bounded_retry_degrades(_pol([]), 3, 3, 0).values()))
     row("MUTANT: degraded, and still creating Jobs",
-        not all(d3.bounded_retry_degrades(DEGRADED, 3, 2).values()))
+        not all(d3.bounded_retry_degrades(DEGRADED, 3, 3, 2).values()))
     row("MUTANT: a degraded condition with no message",
         not all(d3.bounded_retry_degrades(
             _pol([{"type": "EnforcementDegraded", "status": "True", "reason": "RunFailures",
-                   "message": "  "}]), 3, 0).values()))
+                   "message": "  "}]), 3, 3, 0).values()))
+    # RET-DEGRADED-UNREACHABLE, as the live row meets it: five Jobs failed and
+    # the policy's counter stayed at 1, so the status patch never landed. A
+    # harness that read the counter for BOTH numbers could not see this at all —
+    # it would look like a policy that had not run.
+    row("MUTANT: THE DEFECT — runs failed and the policy did not count them",
+        not all(d3.bounded_retry_degrades(_pol([]), 5, 1, 5).values()))
+    row("MUTANT: a counter that moved with no failed run behind it",
+        not all(d3.bounded_retry_degrades(DEGRADED, 0, 3, 0).values()))
 
 
 def main() -> int:
