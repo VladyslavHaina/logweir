@@ -312,6 +312,43 @@ def test_the_non_image_allowlist_is_what_lets_a_harness_branch_run() -> None:
         "scripts/live/d1/test_rows.py".startswith(fenced.NON_IMAGE_PATHS))
 
 
+# --- the negative control's own certification (review harness-rows-4 D-L1) ---
+DELIBERATE = {
+    "status": "fail",
+    "failure": ("DELIBERATELY FALSE ASSERTION: a named allowlist created no discovery Job, "
+                "which is the landed behaviour L-09-6 asserts."),
+}
+# A `wait_for` timeout raises the SAME `Failure` type, so it lands as `fail`
+# with a message about waiting. This is the shape that must not certify.
+TIMEOUT_SHAPED = {
+    "status": "fail",
+    "failure": "timeout waiting for backup/neg-control to finish: dump /tmp/…/failure.json",
+}
+
+
+def test_only_the_deliberate_failure_certifies_the_negative_control() -> None:
+    verdict = d1.negative_control_verdict(DELIBERATE)
+    row("NEG-1 failing on its own false assertion certifies the harness",
+        verdict["harnessCanFail"] and verdict["failedOnItsOwnAssertion"], str(verdict))
+    row("and the recorded failure travels with the verdict",
+        "DELIBERATELY FALSE ASSERTION" in verdict["recordedFailure"])
+    timed_out = d1.negative_control_verdict(TIMEOUT_SHAPED)
+    row("MUTANT: A TIMEOUT-SHAPED FAILURE DOES NOT COUNT — the false assertion "
+        "was never reached",
+        not timed_out["harnessCanFail"] and timed_out["observed"] == "fail",
+        str(timed_out))
+    row("MUTANT: a run in which NEG-1 never ran at all",
+        not d1.negative_control_verdict(None)["harnessCanFail"])
+    row("MUTANT: NEG-1 recorded as not-run",
+        not d1.negative_control_verdict({"status": "not-run"})["harnessCanFail"])
+    row("MUTANT: NEG-1 PASSED — the false assertion held, so the harness is not "
+        "reading the cluster",
+        not d1.negative_control_verdict(
+            dict(DELIBERATE, status="pass"))["harnessCanFail"])
+    row("MUTANT: a failure with no message at all",
+        not d1.negative_control_verdict({"status": "fail", "failure": ""})["harnessCanFail"])
+
+
 def main() -> int:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

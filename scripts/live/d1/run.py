@@ -2878,6 +2878,41 @@ def register_not_run() -> None:
         not_run(sid, reason, task=task, title=title)
 
 
+# The sentence NEG-1 raises when its deliberately false assertion holds long
+# enough to be refused. Matched literally, because the point is to tell THIS
+# failure from every other one.
+DELIBERATE_FAILURE_MARK = "DELIBERATELY FALSE ASSERTION"
+
+
+def negative_control_verdict(control: dict[str, Any] | None) -> dict[str, Any]:
+    """Whether this run demonstrated that the harness can produce a FAIL.
+
+    WHICH FAILURE, NOT JUST A FAILURE (review harness-rows-4 **D-L1**). Every
+    scenario in this file fails by raising `Failure`, and a `wait_for` timeout
+    raises exactly the same type — so `status == "fail"` alone would certify the
+    negative control on a run in which the cluster never answered and NEG-1's
+    false assertion was never reached. That is the one failure mode a negative
+    control must not accept: it would stamp "this harness can fail" on a run
+    that only proved the cluster can be slow.
+
+    The recorded failure must therefore be the deliberate one, by its own
+    sentence. The sentence is carried in the row and matched literally here;
+    `recordedFailure` goes into the record either way, so a reader can see what
+    the run actually failed on.
+    """
+    control = control or {}
+    failure = control.get("failure") or ""
+    deliberate = DELIBERATE_FAILURE_MARK in failure
+    return {
+        "id": "NEG-1",
+        "expected": "fail",
+        "observed": control.get("status", "missing"),
+        "failedOnItsOwnAssertion": deliberate,
+        "recordedFailure": failure[:200],
+        "harnessCanFail": control.get("status") == "fail" and deliberate,
+    }
+
+
 def report() -> None:
     register_not_run()
     summary: dict[str, Any] = {}
@@ -2901,13 +2936,15 @@ def report() -> None:
             for sid in ids
         ]
     STATE["acceptanceEvidence"] = evidence
-    control = STATE["scenarios"].get("NEG-1")
-    STATE["negativeControl"] = {
-        "id": "NEG-1",
-        "expected": "fail",
-        "observed": (control or {}).get("status", "missing"),
-        "harnessCanFail": (control or {}).get("status") == "fail",
-    }
+    # WHICH FAILURE, NOT JUST A FAILURE (review harness-rows-4 **D-L1**). Every
+    # scenario here fails by raising `Failure`, and a `wait_for` timeout raises
+    # exactly the same thing — so `status == "fail"` would certify the negative
+    # control on a run in which the cluster never answered and NEG-1's false
+    # assertion was never reached. That is the one failure mode a negative
+    # control must not accept: it would stamp "this harness can fail" on a run
+    # that only proved the cluster can be slow. The recorded failure must be the
+    # deliberate one, by its own sentence.
+    STATE["negativeControl"] = negative_control_verdict(STATE["scenarios"].get("NEG-1"))
     STATE["summary"] = summary
     STATE["reportedAt"] = now()
     save()
