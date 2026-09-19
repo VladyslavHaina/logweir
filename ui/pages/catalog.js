@@ -114,8 +114,21 @@ export const CONNECT_SENTENCE =
   "deletes nothing. Points it finds signed by a key this installation does not list come back " +
   "as untrusted, and no step of this form changes that.";
 
-/** The draft this form keeps, and the intent that makes its submit durable. */
-export const CONNECT_FIELDS = Object.freeze(["name", "destination", "syncMode", "intent"]);
+/** The draft this form keeps: the three inputs, the intent that makes its
+ *  submit durable, and THE BODY THAT INTENT WAS SPENT ON.
+ *
+ *  `spentOn` is the last one and the least obvious. An idempotency key binds a
+ *  REQUEST, not a form: PLAT-17.1's rule answers `409 idempotency_conflict`
+ *  when a key arrives with a different request than the one it was first seen
+ *  with. So an operator who submits, gets a refusal, CORRECTS the destination
+ *  and submits again would spend the same key on a different body -- and every
+ *  further retry would answer 409 until the page was reloaded. Recording what
+ *  the key was spent on is what lets [`connectIntent`] mint a new one when the
+ *  body moves, which is the same escape `ui/pages/schedules.js` gives a manual
+ *  run through "Back up again". */
+export const CONNECT_FIELDS = Object.freeze([
+  "name", "destination", "syncMode", "intent", "spentOn",
+]);
 
 /** The form's key, per namespace. */
 export function connectKey(ns) {
@@ -142,15 +155,38 @@ export function mintConnectIntent() {
   return "logweir-ui.catalog." + hex;
 }
 
-/** The intent this draft holds, minted on first use and kept for its life. */
-export function connectIntent(key) {
+/** The body one intent is spent on, as the string the draft keeps. */
+export function spentOn(body) {
+  return JSON.stringify([
+    String((body || {}).name || ""),
+    String(((body || {}).destinationRef || {}).name || ""),
+    String((body || {}).syncMode || ""),
+  ]);
+}
+
+/** THE INTENT THIS DRAFT HOLDS, for the body it is about.
+ *
+ *  Minted on first use and kept for the life of the draft, so a double click,
+ *  a lost response and a retry after a 503 are ONE request. **Re-minted when
+ *  the body moves**, because an idempotency key binds a request: spending a
+ *  key on a corrected body is a `409 idempotency_conflict` that no further
+ *  retry can clear (see [`CONNECT_FIELDS`]). `body` absent means "just tell me
+ *  what this draft holds", and re-mints nothing. */
+export function connectIntent(key, body) {
   const draft = readDraft(key);
   const held = draft === null ? undefined : draft.intent;
-  if (typeof held === "string" && held.length >= 8) {
+  const was = draft === null ? undefined : draft.spentOn;
+  const now = body === undefined ? undefined : spentOn(body);
+  const moved = now !== undefined && typeof was === "string" && was !== now;
+  if (typeof held === "string" && held.length >= 8 && !moved) {
     return held;
   }
   const minted = mintConnectIntent();
-  keepDraft(key, Object.assign({}, draft || {}, { intent: minted }), CONNECT_FIELDS);
+  const kept = Object.assign({}, draft || {}, { intent: minted });
+  if (now !== undefined) {
+    kept.spentOn = now;
+  }
+  keepDraft(key, kept, CONNECT_FIELDS);
   return minted;
 }
 
@@ -345,10 +381,29 @@ export function renderPoints(page, ns, catalog) {
       entries.map((entry) => pointRow(entry, ns, catalog)),
       NO_POINT_SENTENCE,
     ) +
+    // ONE HTTP PAGE, SAID AS ONE. `CATALOG_WINDOW_SENTENCE` above is about the
+    // Kubernetes VIEW's own `viewLimit`; this is the separate truncation of
+    // this REQUEST, and reading the two as one would make a 200-row table look
+    // like the whole window (review F9). This build follows no cursor here.
+    (cursorOf(page) === null
+      ? ""
+      : "<p class=\"note\" data-more-points=\"true\">" + esc(MORE_POINTS_SENTENCE) + "</p>") +
     "<p class=\"note\">" + esc(POINT_BINDING_SENTENCE) + "</p>" +
     "</section>"
   );
 }
+
+/** The next cursor this page did NOT follow, or `null`. */
+export function cursorOf(page) {
+  const next = ((page || {}).page || {}).nextCursor;
+  return typeof next === "string" && next.length > 0 ? next : null;
+}
+
+/** What a table that stopped at one page says about itself. */
+export const MORE_POINTS_SENTENCE =
+  "This table is ONE page of this catalog's view and the view holds more. That is a different " +
+  "truncation from the window above: this one is the size of this request, and this build does " +
+  "not follow the cursor here. Use `logweir catalog list` against the archive for the rest.";
 
 /** THE UNTRUSTED-SIGNER PANEL.
  *
@@ -431,6 +486,23 @@ export function renderTrustSnippet(signers) {
   );
 }
 
+/** What a spent key answers, and what clears it.
+ *
+ *  It is rendered rather than pre-empted because the escape is already in the
+ *  form: correcting any field moves the body, and a moved body mints a new
+ *  intent on the next submit. The sentence says so, so an operator who sees a
+ *  409 knows the answer is "submit again", not "reload the page". */
+export const INTENT_USED_SENTENCE =
+  "The idempotency intent this form was holding was already spent on a DIFFERENT request, so " +
+  "the API refused rather than guessing which of the two you meant. The submission below mints " +
+  "a new intent because its body has changed; submit it again.";
+
+/** Whether a refusal is the product API's spent-key answer. */
+export function isIntentConflict(error) {
+  const code = (error || {}).reason;
+  return code === "idempotency_conflict" || code === "idempotency_key_invalid";
+}
+
 /** THE CONNECT-ARCHIVE FORM. One durable submission, one intent. */
 export function renderConnectForm(view) {
   const v = view || {};
@@ -473,6 +545,10 @@ export function renderConnectForm(view) {
     "<div class=\"form-status\" data-connect-status=\"true\" tabindex=\"-1\">" +
     mutationStatus(state, { kind: "RecoveryCatalog", name: values.name || "", idempotencyKey: true },
       unmatched) +
+    (isIntentConflict(state.error)
+      ? "<p class=\"complaint\" data-intent-used=\"true\">" +
+        badge("unverified", "intent already used") + " " + esc(INTENT_USED_SENTENCE) + "</p>"
+      : "") +
     "</div>" +
     "</form>" +
     (v.result ? renderConnectResult(v.ns, v.result) : "") +
@@ -632,14 +708,22 @@ function wire(node, ns, key, mutation, view, paint, deps, lifecycle) {
       syncMode: String((form.elements.syncMode || {}).value || SYNC_MODES[0]),
     };
     view.values = values;
+    const body = connectBody(values);
     // THE INTENT IS READ BEFORE THE DRAFT IS REWRITTEN, AND IT IS WRITTEN BACK
     // WITH IT. `keepDraft` is a REPLACE over the declared fields, not a merge:
     // keeping `values` alone would drop the intent this draft holds, and the
     // next submission would mint a new one -- so a resend of the SAME draft
     // would stop being the same request, which is the whole property an
     // idempotency key exists to provide.
-    const intent = connectIntent(key);
-    keepDraft(key, Object.assign({}, values, { intent: intent }), CONNECT_FIELDS);
+    //
+    // AND IT IS MINTED FOR THIS BODY. A corrected destination is a DIFFERENT
+    // request, and spending the old key on it is a 409 no retry can clear.
+    const intent = connectIntent(key, body);
+    keepDraft(
+      key,
+      Object.assign({}, values, { intent: intent, spentOn: spentOn(body) }),
+      CONNECT_FIELDS,
+    );
     const problems = validateConnect(values);
     if (Object.keys(problems).length > 0) {
       view.errors = { fields: problems, unmatched: [] };
@@ -652,12 +736,29 @@ function wire(node, ns, key, mutation, view, paint, deps, lifecycle) {
     }
     mutation.run(async () => {
       try {
-        const made = await connectArchive(ns, connectBody(values), intent, deps);
+        const made = await connectArchive(ns, body, intent, deps);
         view.result = made;
         view.errors = { fields: {}, unmatched: [] };
-        // THE DRAFT ENDS WITH THE INTENT IT HELD. A second connect is a second
-        // archive and mints its own key.
+        // A DURABLE RESULT ENDS THE DRAFT AND EMPTIES THE FORM (PLAT-13.2, and
+        // d1w7's review F1 in a new form). The catalog EXISTS now: leaving the
+        // name and the destination in the inputs invites a second click that
+        // creates a SECOND RecoveryCatalog for one destination -- which D3
+        // section 5.5 refuses with `Ready=False/DuplicateCatalog`, leaving a
+        // dead object in a namespace this console holds no delete for. The
+        // outcome line above says what was made and links to it; the form
+        // below it is empty and ready for a different archive.
         dropDraft(key);
+        view.values = { syncMode: SYNC_MODES[0] };
+        // AND THE LIST IS RE-READ, so the catalog that now exists is on screen
+        // rather than a table built before it did.
+        try {
+          view.collection = await listD3("catalog", ns, readOptions(lifecycle), deps);
+          view.loaded = true;
+        } catch (stale) {
+          // A refused re-list does not un-make the catalog. The outcome line
+          // is the durable fact; the table catches up on the next visit.
+          view.listError = stale;
+        }
         return made;
       } catch (error) {
         view.errors = fieldErrors(error, CATALOG_FIELD_PATHS);

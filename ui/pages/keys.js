@@ -127,8 +127,11 @@ export function evaluationFreshness(object, now, windowMs) {
   }
   if (typeof now !== "number" || !isFinite(now)) {
     // NO SERVER INSTANT IS NOT A FRESH ONE. Freshness has not been
-    // established, and `unknown` is what "not established" reads as.
-    return { fresh: false, reason: "Stale" };
+    // established, and `unknown` is what "not established" reads as -- under
+    // its OWN reason, because "this evaluation is old" and "this page has no
+    // clock the cluster saw" are two different things and explaining one with
+    // the other's sentence is a page saying something that did not happen.
+    return { fresh: false, reason: "NoServerClock" };
   }
   const budget = typeof windowMs === "number" && windowMs > 0 ? windowMs : EVALUATION_FRESHNESS_MS;
   return now - evaluatedAt > budget

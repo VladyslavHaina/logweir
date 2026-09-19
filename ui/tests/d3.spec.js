@@ -36,6 +36,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
+import { SERVER_TIME_MAX_AGE_MS } from "../api.js";
+
 import {
   D3_ENUMS,
   D3_SHAPES,
@@ -63,6 +65,7 @@ import {
   EVALUATION_UNKNOWN,
   GREEN_BASES,
   HISTORICAL_SUFFIX,
+  TRUST_BASIS_NOT_OBSERVED,
   IRREVERSIBLE_SENTENCE,
   NO_ONE_CLICK_TRUST_SENTENCE,
   RETENTION_SENTENCE,
@@ -71,6 +74,7 @@ import {
   TWO_HEALTHS_SENTENCE,
   TWO_INSTANTS_SENTENCE,
   UNKNOWN_IS_NOT_VALID_SENTENCE,
+  basisAllowsGreen,
   healthBadge,
   stateBadge,
   unverifiedCaption,
@@ -116,6 +120,9 @@ import {
   renderConnectForm,
   renderPoints,
   renderSigners,
+  MORE_POINTS_SENTENCE,
+  cursorOf,
+  isIntentConflict,
   mountCatalog,
   restorePointRoute,
   validateConnect,
@@ -756,7 +763,10 @@ test("an_evaluation_older_than_the_window_reads_unknown_measured_by_the_server_c
   // AND NO SERVER INSTANT IS NOT A FRESH ONE. This is the fail-closed side and
   // it is the one this page takes: with no `Date` header seen, freshness has
   // not been ESTABLISHED, and `unknown` is what "not established" reads as.
-  assert.deepEqual(evaluationFreshness(object, null), { fresh: false, reason: "Stale" });
+  assert.deepEqual(evaluationFreshness(object, null),
+    { fresh: false, reason: "NoServerClock" },
+    "and it says WHICH unknown it is: `no server clock` and `this evaluation is old` are two " +
+      "different things (review F7)");
 
   // THE MUTANT THIS PAIR IS FOR: a freshness check that fell back to
   // `Date.now()` when it had no server instant. An evaluation the BROWSER
@@ -768,7 +778,7 @@ test("an_evaluation_older_than_the_window_reads_unknown_measured_by_the_server_c
   justNow.status.evaluatedAt = new Date().toISOString();
   assert.deepEqual(
     evaluationFreshness(justNow, null),
-    { fresh: false, reason: "Stale" },
+    { fresh: false, reason: "NoServerClock" },
     "with no SERVER instant, an evaluation the browser's own clock calls one second old is " +
       "still unknown",
   );
@@ -910,6 +920,69 @@ test("a_recorded_before_revocation_basis_is_never_green", () => {
     exitCode: 0,
     evidence: { verification: object.status.evidence.verification },
   }), /badge-unverified/, "and the Backup rule agrees");
+});
+
+test("an_explicit_basis_None_is_an_ABSENCE_and_reads_by_the_pre_existing_rule", () => {
+  // REVIEW F1. D3 section 12 spells this exact case: "`trust` absent ->
+  // `basis: None` and the badge uses the pre-existing rule". The STRING
+  // `"None"` and an absent block are one fact said two ways -- one by a custom
+  // resource an older controller wrote, one by a DTO that fills the block in
+  // for it -- and reading the string as a downgrade put
+  // `unverified: no verification was recorded` on every archive an upgraded
+  // cluster carries, with `result: Valid`, `verifiedAt` and `matchedKeyId`
+  // sitting beside it saying otherwise.
+  //
+  // THE FIXTURE IS A REAL PRE-D3 OBJECT. `backup-pre-d3-basis-none.json` is
+  // the lab's own 2026-09-14 Backup, captured whole; its `trust` block is
+  // `{basis: "None", keyState: "Active", policy: {name: "legacy-roster-v1"}}`,
+  // written by the intermediate controller build that introduced the block
+  // without the basis vocabulary (see claude/lab-refresh-3.result.md section 9).
+  const real = d3("backup-pre-d3-basis-none.json");
+  const verification = real.status.evidence.verification;
+  assert.equal(verification.trust.basis, "None");
+  assert.equal(verification.trust.policy.name, "legacy-roster-v1");
+  assert.equal(TRUST_BASIS_NOT_OBSERVED, "None");
+  assert.equal(basisAllowsGreen("None"), true, "an explicit None is an absence");
+  assert.equal(basisAllowsGreen(undefined), true, "and so is no basis at all");
+  assert.equal(basisAllowsGreen("Current"), true);
+  assert.equal(basisAllowsGreen("Historical"), true);
+  assert.equal(basisAllowsGreen("RecordedBeforeRevocation"), false);
+  assert.equal(basisAllowsGreen("SomethingThisBuildDoesNotKnow"), false,
+    "a basis this build cannot read is still not a pass");
+
+  // THIS object is `Untrusted`, so it is not green -- for the reason the
+  // controller recorded, and NOT for the basis.
+  assert.equal(verification.result, "Untrusted");
+  const untrusted = decode(backupBadge(real.status));
+  assert.ok(untrusted.indexOf("badge-unverified") !== -1);
+  assert.match(untrusted, /untrusted signer -- the bytes are authentic/);
+  assert.equal(untrusted.indexOf("no verification was recorded"), -1,
+    "the caption is the case the controller recorded, not a claim that nothing did");
+
+  // AND THE SAME OBJECT WITH THE CONTROLLER'S OWN `Valid` IS GREEN.
+  const valid = d3("backup-valid-basis-none.json");
+  assert.equal(valid.status.evidence.verification.result, "Valid");
+  assert.equal(valid.status.evidence.verification.trust.basis, "None");
+  assert.equal(valid.status.exitCode, 0);
+  const ok = validVerification(valid.status);
+  assert.notEqual(ok, null, "an explicit None does not withdraw a recorded verdict");
+  assert.equal(ok[2], "None", "and the basis travels as what it is");
+  const badge = decode(backupBadge(valid.status));
+  assert.ok(badge.indexOf("badge-green") !== -1,
+    "every archive an upgraded cluster carries stays green: " + badge);
+  assert.match(badge, /verified by weirkeeper at 2026-09-14T23:51:21Z against key/);
+  assert.equal(badge.indexOf("signed before that key was retired"), -1,
+    "and it carries no qualifier, because no basis was established to qualify it");
+
+  // THE OPERATION VIEW'S EVIDENCE BLOCK READS THE SAME FUNCTION, so the two
+  // halves of the rule cannot come to disagree.
+  const facts = operationFacts({
+    kind: "backup", name: "b", uid: "u", terminal: true, verifiedSuccess: true,
+    evidenceVerification: valid.status.evidence.verification,
+    result: { status: "pass" }, evidence: {}, conditions: [],
+  }, true);
+  assert.ok(decode(renderEvidence(facts)).indexOf("badge-green") !== -1,
+    "the operation view agrees with the badge");
 });
 
 test("an_object_with_no_trust_block_at_all_stays_green", () => {
@@ -1066,10 +1139,80 @@ test("the_policy_covering_a_schedule_comes_from_the_controllers_own_supersededBy
 // the contract's own self-pinning arm
 // ===========================================================================
 
+/** THE ROUTES THIS CLIENT ASSUMES, exactly as `d3w12.result.md` section 4.1
+ *  lists them. Every one must be a key of the published document's `paths`
+ *  once the D3 family lands. */
+const ASSUMED_D3_ROUTES = Object.freeze([
+  "/api/v1/namespaces/{ns}/operations/{kind}/{name}/events",
+  "/api/v1/namespaces/{ns}/protection-policies",
+  "/api/v1/namespaces/{ns}/protection-policies/{name}",
+  "/api/v1/namespaces/{ns}/catalogs",
+  "/api/v1/namespaces/{ns}/catalogs/{name}",
+  "/api/v1/namespaces/{ns}/catalogs/{name}/points",
+  "/api/v1/namespaces/{ns}/catalogs/{name}/signers",
+  "/api/v1/namespaces/{ns}/retention-policies",
+  "/api/v1/trust-policies",
+]);
+
+/** The ONE route of the four families this document already publishes, and the
+ *  sentinel for "the D3 API half has not landed yet". */
+const PUBLISHED_OPERATION_ROUTE = "/api/v1/namespaces/{ns}/operations/{kind}/{name}";
+
+/** THE SHAPE NAMES THIS CLIENT DECLARES THAT THE DOCUMENT DOES NOT PUBLISH YET
+ *  -- checked in, sorted, and compared for EQUALITY below.
+ *
+ *  REVIEW F2. The first version of this arm let an unpublished name fall into
+ *  an `assumed` bucket whose only assertion was a tautology, so a DTO the
+ *  document published under a DIFFERENT name stayed in that bucket and the arm
+ *  went green having pinned nothing -- which is the empty cell the typed
+ *  contract exists to prevent, one level up. An equality against this list
+ *  makes a name joining it, leaving it or changing its spelling a diff a
+ *  reviewer reads, and makes the day `d3w11` lands a RED suite rather than a
+ *  quiet one. */
+const ASSUMED_D3_SHAPES = Object.freeze([
+  "AlertDeliveryView",
+  "AlertView",
+  "CatalogPointList",
+  "CatalogPointResponse",
+  "CatalogPointView",
+  "CatalogSignerView",
+  "CatalogSignersResponse",
+  "CompletionView",
+  "CreateCatalogRequest",
+  "D3Operation",
+  "D3OperationResponse",
+  "DiagnosticView",
+  "EvidenceVerificationView",
+  "KeyVerdictView",
+  "ProgressView",
+  "ProtectionPolicy",
+  "ProtectionPolicyList",
+  "ProtectionPolicyResponse",
+  "ProtectionPolicyStatusView",
+  "RecoveryCatalog",
+  "RecoveryCatalogList",
+  "RecoveryCatalogResponse",
+  "RecoveryCatalogStatusView",
+  "RetentionPolicy",
+  "RetentionPolicyList",
+  "RetentionPolicyResponse",
+  "RetentionPolicyStatusView",
+  "TeardownView",
+  "TrustKeyView",
+  "TrustPolicy",
+  "TrustPolicyList",
+  "TrustPolicyResponse",
+  "TrustPolicyStatusView",
+  "VerificationScopeView",
+  "VerificationTrustView",
+]);
+
 test("every_d3_shape_and_enum_is_declared_and_pins_itself_once_the_api_publishes_it", () => {
   const schema = JSON.parse(readFileSync(
     new URL("../../schemas/logweir-api-v1.openapi.json", import.meta.url), "utf8"));
   const definitions = schema.components.schemas;
+  const paths = schema.paths || {};
+
   const assumed = [];
   let pinned = 0;
   for (const name of Object.keys(D3_SHAPES)) {
@@ -1079,6 +1222,7 @@ test("every_d3_shape_and_enum_is_declared_and_pins_itself_once_the_api_publishes
       continue;
     }
     if (published.oneOf !== undefined) {
+      pinned += 1;
       continue;
     }
     const shape = D3_SHAPES[name];
@@ -1089,21 +1233,68 @@ test("every_d3_shape_and_enum_is_declared_and_pins_itself_once_the_api_publishes
         "requires. A field that became required on the server and stayed optional here is " +
         "the silent field loss the typed contract exists to stop.",
     );
+    const declared = Object.keys(published.properties || {});
+    for (const field of Object.keys(shape.required).concat(Object.keys(shape.optional))) {
+      assert.ok(
+        declared.indexOf(field) !== -1,
+        name + "." + field + " is decoded here and is not a field of the published schema",
+      );
+    }
     pinned += 1;
   }
-  // THE ASSUMPTION IS RECORDED, NOT HIDDEN. Until the API half lands, these
-  // names are this client's declaration of what it consumes; the arm above
-  // engages by itself, per name, the moment the document publishes one.
-  assert.ok(assumed.length + pinned === Object.keys(D3_SHAPES).length);
-  assert.ok(Object.keys(D3_SHAPES).length >= 30,
+
+  // (1) THE ASSUMED SET IS AN EQUALITY AND NOT A BUCKET. A name renamed on
+  // either side lands here, whichever side moved it.
+  assert.deepEqual(
+    assumed.slice().sort(),
+    ASSUMED_D3_SHAPES.slice().sort(),
+    "the set of D3 shapes this client declares that the published document does NOT name has " +
+      "changed. If `d3w11` landed, empty ASSUMED_D3_SHAPES in the same change and let the " +
+      "per-shape pin above do its work; if a shape was renamed HERE, rename it there too. A " +
+      "name silently sitting in this bucket is a decoder pinned against nothing.",
+  );
+
+  // (2) ONCE THE D3 FAMILY IS PUBLISHED, NOTHING MAY STILL BE ASSUMED. The
+  // sentinel is any of the routes section 4.1 names beyond the one the document
+  // already carried, so this arm arms itself the moment the API half lands
+  // rather than waiting for somebody to remember it.
+  const landed = ASSUMED_D3_ROUTES.filter((route) => paths[route] !== undefined);
+  assert.ok(paths[PUBLISHED_OPERATION_ROUTE] !== undefined,
+    "the operation read this client has always used is still published");
+  if (landed.length > 0) {
+    assert.deepEqual(
+      ASSUMED_D3_ROUTES.filter((route) => paths[route] === undefined),
+      [],
+      "the D3 route family is published and these routes this client addresses are not in it",
+    );
+    assert.deepEqual(assumed, [],
+      "the D3 routes are published, so every D3 shape must be pinned against the document; " +
+        "these are still assumed: " + assumed.join(", "));
+    assert.ok(pinned >= 30, "and every declared shape is pinned; pinned=" + String(pinned));
+  }
+
+  assert.equal(assumed.length + pinned, Object.keys(D3_SHAPES).length);
+  assert.ok(Object.keys(D3_SHAPES).length >= 35,
     "every D3 response DTO, list envelope and request body this client builds is declared");
+
+  // (3) THE VOCABULARIES, ON THE SAME TERMS.
+  const enumsAssumed = [];
   for (const name of Object.keys(D3_ENUMS)) {
     assert.ok(Array.isArray(D3_ENUMS[name]) && D3_ENUMS[name].length > 0,
       name + " is a closed, non-empty vocabulary");
     const published = definitions[name];
-    if (published !== undefined && Array.isArray(published.enum)) {
+    if (published === undefined) {
+      enumsAssumed.push(name);
+      continue;
+    }
+    if (Array.isArray(published.enum)) {
       assert.deepEqual(D3_ENUMS[name].slice().sort(), published.enum.slice().sort(), name);
     }
+  }
+  if (landed.length > 0) {
+    assert.deepEqual(enumsAssumed, [],
+      "the D3 routes are published, so every D3 vocabulary must be pinned; these are not: " +
+        enumsAssumed.join(", "));
   }
   assert.equal(D3_ENUMS.VerificationScopeLevel.indexOf("complete"), -1,
     "`complete` does not exist as a level in v1 and is absent from the vocabulary on purpose");
@@ -1154,6 +1345,12 @@ function fakeNode(form) {
     },
     get html() {
       return this.adopted.map((a) => a.html).join("");
+    },
+    /** The MOST RECENT paint. `replace` clears a real node before it appends;
+     *  this stand-in keeps every fragment, so a row asserting on what is on
+     *  screen NOW has to read the last one rather than the concatenation. */
+    get last() {
+      return this.adopted.length === 0 ? "" : this.adopted[this.adopted.length - 1].html;
     },
   };
 }
@@ -1382,3 +1579,241 @@ test("the_keys_mount_prefers_the_policy_and_names_the_refusal_when_it_cannot_rea
     assert.ok(refused.html.indexOf("kind: TrustPolicy") !== -1,
       "with the document a cluster admin applies, rendered and not submitted");
   });
+
+// ===========================================================================
+// review fix round 1: the close, the cleared form and the spent intent
+// ===========================================================================
+
+test("the_stream_is_CLOSED_on_a_settled_document_and_on_disposal", async () => {
+  // REVIEW F3. The behaviour was right and the GUARD was missing: the
+  // reviewer's mutant dropped `stream.close()` and kept `stream = null`, and
+  // the whole suite stayed green. A stream that survives a terminal document
+  // and a route change is one live connection per visit to `#/operations`,
+  // leaked across navigations, and the one-call-site gate counts the network
+  // call by name and knows nothing about a stream.
+  function fakeStream() {
+    const state = { closed: 0, handlers: {} };
+    return {
+      state: state,
+      readyState: 1,
+      addEventListener(type, handler) {
+        state.handlers[type] = handler;
+      },
+      close() {
+        state.closed += 1;
+        this.readyState = 2;
+      },
+    };
+  }
+
+  // (a) A TERMINAL, SETTLED DOCUMENT CLOSES IT.
+  let made = null;
+  class SettlingSource {
+    constructor() {
+      made = fakeStream();
+      Object.assign(this, made);
+      this.addEventListener = made.addEventListener.bind(made);
+      this.close = made.close.bind(this);
+      queueMicrotask(() => {
+        made.state.handlers.operation({ data: JSON.stringify(d3("operation-restore-completed.json")) });
+      });
+    }
+  }
+  const settled = watchOperation("team-a", "backup", "b1", () => {}, null, {
+    modeOf: () => "console",
+    EventSourceClass: SettlingSource,
+    setTimer: () => 0,
+    clearTimer: () => {},
+    read: async () => ({ terminal: false, verification: { state: "pending" } }),
+  });
+  await new Promise((resolve) => setTimeout(resolve, 1));
+  assert.equal(made.state.closed, 1,
+    "a settled document closes the connection; the run is untouched either way");
+  settled.stop();
+  assert.equal(made.state.closed, 1, "and stop() after it does not close twice");
+
+  // (b) LEAVING THE ROUTE CLOSES IT, with nothing settled at all.
+  let open = null;
+  class QuietSource {
+    constructor() {
+      open = fakeStream();
+      this.addEventListener = open.addEventListener.bind(open);
+      this.close = open.close.bind(open);
+      this.readyState = 1;
+    }
+  }
+  const controller = new AbortController();
+  watchOperation("team-a", "backup", "b2", () => {}, {
+    signal: controller.signal,
+    isCurrent: () => !controller.signal.aborted,
+  }, {
+    modeOf: () => "console",
+    EventSourceClass: QuietSource,
+    setTimer: () => 0,
+    clearTimer: () => {},
+    read: async () => ({ terminal: false, verification: { state: "pending" } }),
+  });
+  assert.equal(open.state.closed, 0, "nothing has settled");
+  controller.abort();
+  assert.equal(open.state.closed, 1,
+    "the route's own signal closes the connection -- and closing a READ never cancels the run");
+});
+
+test("a_durable_result_empties_the_form_and_re_reads_the_list", async () => {
+  // REVIEW F4, which is d1w7's post-save staleness in a new form. The catalog
+  // EXISTS after a success; leaving its name and destination in the inputs
+  // invites a second click that creates a SECOND RecoveryCatalog for one
+  // destination -- refused by the controller with `DuplicateCatalog`, leaving a
+  // dead object this console holds no delete for.
+  let lists = 0;
+  const created = [];
+  const deps = {
+    modeOf: () => "console",
+    consoleList: async () => {
+      lists += 1;
+      return {
+        items: created.slice(),
+        page: { limit: 200, nextCursor: null, snapshot: "1" },
+        requestId: "r" + String(lists),
+      };
+    },
+    consoleCreate: async (ns, plural, body) => {
+      const item = {
+        name: body.name, namespace: ns, uid: "u" + String(created.length + 1),
+        resourceVersion: "1", spec: { destinationRef: body.destinationRef },
+      };
+      created.push(item);
+      return { item: item, requestId: "c1" };
+    },
+  };
+  const form = fakeForm({ name: "primary", destination: "dest-a", syncMode: "Full" });
+  const node = fakeNode(form);
+  await mountCatalog(node, "d3-fix-a", fakeParse, null, deps);
+  assert.equal(lists, 1);
+
+  form.submit();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(created.length, 1, "one catalog");
+  assert.equal(lists, 2, "and the list was re-read, so the object that now exists is on screen");
+
+  const html = node.last;
+  assert.ok(html.indexOf("connect-result") !== -1, "the outcome names what was made");
+  assert.ok(html.indexOf("id=\"catalog-name\" name=\"name\" value=\"\"") !== -1,
+    "and the form is EMPTY: " + html.slice(Math.max(0, html.indexOf("catalog-name") - 40),
+      html.indexOf("catalog-name") + 120));
+  assert.equal(html.indexOf("value=\"primary\""), -1,
+    "the submitted name is not still sitting in the input inviting a second click");
+});
+
+test("a_corrected_body_mints_a_new_intent_rather_than_spending_the_old_one", async () => {
+  // REVIEW F5. An idempotency key binds a REQUEST. An operator who submits,
+  // is refused, corrects the destination and submits again would otherwise
+  // spend the same key on a different body -- `409 idempotency_conflict`, and
+  // every further retry the same, with only a page reload to recover.
+  const sent = [];
+  let failWith = null;
+  const deps = {
+    modeOf: () => "console",
+    consoleList: async () => ({ items: [], page: { limit: 200 }, requestId: "r1" }),
+    consoleCreate: async (ns, plural, body, options) => {
+      sent.push({ key: options.idempotencyKey, destination: body.destinationRef.name });
+      if (failWith !== null) {
+        throw failWith;
+      }
+      return {
+        item: {
+          name: body.name, namespace: ns, uid: "u1", resourceVersion: "1",
+          spec: { destinationRef: body.destinationRef },
+        },
+        requestId: "c1",
+      };
+    },
+  };
+  const refusal = new Error("the destination dest-typo does not exist");
+  refusal.status = 422;
+  refusal.reason = "validation_failed";
+  failWith = refusal;
+
+  const form = fakeForm({ name: "primary", destination: "dest-typo", syncMode: "Full" });
+  const node = fakeNode(form);
+  await mountCatalog(node, "d3-fix-b", fakeParse, null, deps);
+
+  form.submit();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(sent.length, 1);
+
+  // THE SAME BODY AGAIN IS THE SAME REQUEST.
+  form.submit();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(sent.length, 2);
+  assert.equal(sent[1].key, sent[0].key, "a retry of the same body keeps its intent");
+
+  // A CORRECTED BODY IS A DIFFERENT REQUEST AND GETS A DIFFERENT KEY.
+  form.elements.destination.value = "dest-a";
+  failWith = null;
+  form.submit();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(sent.length, 3);
+  assert.equal(sent[2].destination, "dest-a");
+  assert.notEqual(sent[2].key, sent[0].key,
+    "the corrected body carries a NEW intent, so the API is not asked to resolve one key to " +
+      "two different requests");
+});
+
+test("a_spent_intent_is_explained_and_not_left_as_a_bare_refusal", () => {
+  const conflict = new Error("this key was first seen with a different request");
+  conflict.status = 409;
+  conflict.reason = "idempotency_conflict";
+  assert.equal(isIntentConflict(conflict), true);
+  assert.equal(isIntentConflict({ reason: "validation_failed" }), false);
+  const html = decode(renderConnectForm({
+    ns: "team-a", values: { name: "primary" }, errors: { fields: {}, unmatched: [] },
+    state: { phase: "failed", error: conflict },
+  }));
+  assert.match(html, /data-intent-used="true"/);
+  assert.match(html, /already spent on a DIFFERENT request/);
+  assert.match(html, /submit it again/,
+    "and it says what clears it, because the escape is already in the form");
+});
+
+test("the_point_table_says_when_it_is_one_page_of_a_larger_view", () => {
+  const one = decodeCatalogPoints(d3("catalog-points.json")).value;
+  assert.equal(cursorOf(one), null);
+  assert.equal(renderPoints(one, "team-a", "primary").indexOf("data-more-points"), -1);
+
+  const more = d3("catalog-points.json");
+  more.page.nextCursor = "opaque-cursor";
+  const page = decodeCatalogPoints(more).value;
+  assert.equal(cursorOf(page), "opaque-cursor");
+  const html = decode(renderPoints(page, "team-a", "primary"));
+  assert.match(html, /data-more-points="true"/);
+  assert.match(html, /That is a different truncation from the window above/,
+    "the HTTP page and the Kubernetes view limit are two truncations and read as two");
+  assert.ok(MORE_POINTS_SENTENCE.indexOf("logweir catalog list") !== -1);
+});
+
+test("a_server_instant_too_old_to_be_now_is_reported_as_none", () => {
+  // REVIEW F6. A recorded instant that never expired is a stopped clock, and a
+  // clock in the past SHRINKS the measured age -- the direction that reads
+  // fresh. The instant is carried forward by an ELAPSED duration and dropped
+  // past the bound; the duration is a difference of two monotonic readings and
+  // never an absolute one.
+  assert.equal(SERVER_TIME_MAX_AGE_MS, 300000);
+  const dated = Date.parse("2026-09-18T04:42:25Z");
+  const carried = (elapsed) => {
+    if (elapsed < 0 || elapsed > SERVER_TIME_MAX_AGE_MS) {
+      return null;
+    }
+    return dated + elapsed;
+  };
+  assert.equal(carried(0), dated, "just recorded, it IS the instant");
+  assert.equal(carried(30000), dated + 30000, "and it moves with the time that has passed");
+  assert.equal(carried(SERVER_TIME_MAX_AGE_MS + 1), null,
+    "past the bound there is no server instant, and no server instant reads `unknown`");
+  assert.equal(carried(-1), null, "a clock that went backwards is not one to judge freshness by");
+
+  // And the page's own answer to `null` is `unknown`, under its own reason.
+  const object = d3("trustpolicy-active.json");
+  assert.deepEqual(evaluationFreshness(object, null),
+    { fresh: false, reason: "NoServerClock" });
+});

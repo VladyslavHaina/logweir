@@ -172,6 +172,14 @@ D3 controller workers reported. No value in them was invented outside those decl
 | `trustpolicy-lifecycle.json`, `trustpolicy-stale.json`, `trustpolicy-unevaluated.json` | a retired key, a compromise-revoked key, a superseded one, a generation ahead of its status, a contested namespace, and no status at all -- the six `unknown`/lifecycle rows section 7.7 names |
 | `backup-progress-waiting.json`, `restore-completed-newtopic.json` and the three `restore-*` verdict rows | a `Preparing` stage with two diagnoses, and the completion/teardown/trust blocks. The lab's runs either finished clean or were refused before a Job existed |
 
+**Two more are live captures, added in fix round 1** for review finding F1 (an explicit
+`trust.basis: "None"` is an ABSENCE, not a downgrade):
+
+| fixture | capture |
+|---|---|
+| `backup-pre-d3-basis-none.json` | `lab-refresh-3/trust-selfheal/backup-logweir-backup-scram-schedule-20260914-235100.json`: the lab's own 2026-09-14 Backup, whose `trust` block is `{basis: "None", keyState: "Active", policy: {name: "legacy-roster-v1"}}` -- written by the intermediate controller build that introduced the block without the basis vocabulary (`claude/lab-refresh-3.result.md` section 9). Its `result` is `Untrusted`, so it is not green, and its caption is the case the controller recorded |
+| `backup-valid-basis-none.json` | the SAME object with the controller's own `result: Valid` and its `detail` dropped -- **constructed**, and it is the shape D3 section 12's rule mandates for an object whose evidence verified and whose controller wrote no trust block. Every archive an upgraded cluster carries reads this way, and it must stay green |
+
 **Five fixtures are the PRODUCT API's document and are an assumption, said so here.** The
 `operation-*.json` files are `console/operation-backup.json`'s published shape plus the D3 fields
 section 2 puts on the same document. The API half of D3 is being built concurrently, so the

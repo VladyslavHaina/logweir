@@ -333,10 +333,11 @@ function render(lifecycle, context) {
       replace(main, el("p", { class: "pending", role: "status" }, "Reading " + current.title + "..."));
       current.mount(main, parseFragment, undefined, lifecycle);
     } else if (current.route === true && typeof current.mount === "function") {
-      // TWO ROUTES CARRY AN IDENTITY IN THE HASH, and each names its own
+      // THREE ROUTES CARRY AN IDENTITY IN THE HASH, and each names its own
       // extractor. The approvals page reads `subject`, `hash` and `name`; the
       // restore wizard reads `backup` and `uid`, the recovery point it is
-      // bound to. In both cases they are route parameters and never values
+      // bound to; the operation view reads `kind`, `name` and `uid`, the run a
+      // link was about. In all three they are route parameters and never values
       // parsed out of a document, and in both cases the page checks them
       // against the object it reads before it offers anything.
       //

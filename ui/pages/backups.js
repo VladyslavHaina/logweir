@@ -35,9 +35,9 @@
 import { apiClient } from "../client.js";
 import { active, cancelled, readOptions } from "../lifecycle.js";
 import {
-  GREEN_BASES,
   HISTORICAL_SUFFIX,
   badge,
+  basisAllowsGreen,
   bucketOf,
   cell,
   detailLink,
@@ -104,7 +104,7 @@ export function validVerification(status) {
     return null;
   }
   const basis = (verification.trust || {}).basis;
-  if (typeof basis === "string" && GREEN_BASES.indexOf(basis) === -1) {
+  if (!basisAllowsGreen(basis)) {
     return null;
   }
   return [at, key, typeof basis === "string" ? basis : null];

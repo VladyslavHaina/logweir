@@ -1302,9 +1302,30 @@ export const VERIFICATION_CASES = Object.freeze({
   RecordedBeforeRevocation:
     "recorded before revocation -- a compromised key signed it, and a controller had seen it " +
     "before the revocation took effect",
-  None: "no verification was recorded for this run",
+  NotRecorded: "no verification was recorded for this run",
   RunNotSucceeded: "the document verified and the run itself did not succeed",
 });
+
+/** THE BASIS THAT MEANS "NO TRUST EVALUATION WAS RECORDED", AND WHY IT IS NOT
+ *  A DOWNGRADE.
+ *
+ *  D3 section 12 spells the absent-field rule for this exact block: "`trust`
+ *  absent -> `basis: None` and the badge uses the pre-existing rule". So the
+ *  STRING `"None"` and an ABSENT `trust` block are the same fact said two
+ *  ways -- one by a custom resource an older controller wrote, one by a DTO
+ *  that fills the block in for it -- and both mean the trust layer has nothing
+ *  to say about this verdict, NOT that the verdict is worse.
+ *
+ *  Reading it as a downgrade puts `unverified: no verification was recorded` on
+ *  every archive an upgraded cluster carries, while `result: Valid`,
+ *  `verifiedAt` and `matchedKeyId` all sit beside it saying otherwise. That is
+ *  a caption this page would be inventing, about a controller that recorded a
+ *  verdict, and it is the review's own finding F1.
+ *
+ *  It is a CONSTANT and not a literal in three files because the name `None`
+ *  collides with the "no verdict at all" case one line above, and that
+ *  collision is how the defect got written in the first place. */
+export const TRUST_BASIS_NOT_OBSERVED = "None";
 
 /** The `trust.basis` values a green badge is allowed to carry. An object
  *  written by an older controller carries no `trust` block at all, and its
@@ -1324,13 +1345,28 @@ export function verificationCase(verification, runSucceeded) {
     if (trust.basis === "RecordedBeforeRevocation") {
       return VERIFICATION_CASES.RecordedBeforeRevocation;
     }
-    if (typeof trust.basis === "string" && GREEN_BASES.indexOf(trust.basis) === -1) {
-      return VERIFICATION_CASES.None;
+    if (!basisAllowsGreen(trust.basis)) {
+      return VERIFICATION_CASES.NotRecorded;
     }
     return runSucceeded === true ? "" : VERIFICATION_CASES.RunNotSucceeded;
   }
   const named = VERIFICATION_CASES[v.result];
-  return typeof named === "string" ? named : VERIFICATION_CASES.None;
+  return typeof named === "string" ? named : VERIFICATION_CASES.NotRecorded;
+}
+
+/** Whether a recorded `trust.basis` leaves a `Valid` verdict green.
+ *
+ *  THREE ANSWERS COLLAPSE TO YES, and they are three different facts: the
+ *  trust layer said `Current`, it said `Historical`, or it said nothing at all
+ *  -- as an absent block, or as [`TRUST_BASIS_NOT_OBSERVED`], which is the same
+ *  absence spelled by a document that has to spell something. What is left is
+ *  a basis this build does not know, and that one is not green, because a word
+ *  this page cannot read is not a word it may treat as a pass. */
+export function basisAllowsGreen(basis) {
+  if (typeof basis !== "string" || basis === TRUST_BASIS_NOT_OBSERVED) {
+    return true;
+  }
+  return GREEN_BASES.indexOf(basis) !== -1;
 }
 
 /** The caption a badge that is not green carries: the one word every older
@@ -1420,6 +1456,9 @@ export const EVALUATION_UNKNOWN_REASONS = Object.freeze({
   Stale:
     "status.evaluatedAt is older than the freshness window, measured against the server's own " +
     "clock and never the browser's",
+  NoServerClock:
+    "no answer this page has received carried a server instant to measure freshness against, " +
+    "and the browser's own clock is not one the cluster ever saw",
   NoVerdict: "this key has no verdict in status.keys[]",
 });
 

@@ -43,6 +43,7 @@ import {
   STATE_UNKNOWN_SENTENCE,
   WATCH_SENTENCE,
   badge,
+  basisAllowsGreen,
   cell,
   detailLink,
   diagnosticsTable,
@@ -290,8 +291,12 @@ export function renderEvidence(v) {
   const ver = v.evidenceVerification || {};
   const trust = ver.trust || {};
   const policy = trust.policy || {};
-  const green = ver.result === "Valid" &&
-    (typeof trust.basis !== "string" || trust.basis === "Current" || trust.basis === "Historical");
+  // THE SAME CLAUSE AS THE BADGE RULE, AND IT READS THE SAME FUNCTION. An
+  // explicit `basis: "None"` is what D3 section 12 says a DTO carries for an
+  // object whose controller wrote no trust block; it is an absence, not a
+  // downgrade, and a second spelling of the rule here is how the two halves
+  // would come to disagree.
+  const green = ver.result === "Valid" && basisAllowsGreen(trust.basis);
   const mark = green
     ? badge(
       "green",

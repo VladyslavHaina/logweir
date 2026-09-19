@@ -1,0 +1,96 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "Backup",
+  "metadata": {
+    "creationTimestamp": "2026-09-14T23:51:13Z",
+    "generation": 1,
+    "labels": {
+      "logweir.dev/schedule": "scram-schedule",
+      "logweir.dev/schedule-uid": "5f6fb620-ffad-4e82-8b2b-6b7273067177",
+      "logweir.dev/slot": "20260914-235100"
+    },
+    "name": "logweir-backup-scram-schedule-20260914-235100",
+    "namespace": "logweir-scram-local",
+    "resourceVersion": "2575820",
+    "uid": "93a4758f-05f0-4838-b7e9-8a2403bd2640"
+  },
+  "spec": {
+    "archive": {
+      "secretRef": {
+        "name": "logweir-s3"
+      },
+      "url": "s3://kafka-backups/scram-local"
+    },
+    "deadlineSeconds": 3600,
+    "scheduleRef": {
+      "name": "scram-schedule"
+    },
+    "slot": "20260914-235100",
+    "sourceRef": {
+      "name": "source"
+    },
+    "topics": [
+      "orders",
+      "payments"
+    ],
+    "triggeredBy": "schedule"
+  },
+  "status": {
+    "backupId": "5f6fb620-ffad-4e82-8b2b-6b7273067177-20260914-235100",
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-14T23:51:21.377057835Z",
+        "message": "the runner exited 0 (ok); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+        "observedGeneration": 1,
+        "reason": "Ok",
+        "status": "True",
+        "type": "Complete"
+      },
+      {
+        "lastTransitionTime": "2026-09-14T23:51:21.377057835Z",
+        "message": "both `receipt-key=` and `sidecar-key=` were read off the pod log and are on status.evidence",
+        "observedGeneration": 1,
+        "reason": "EvidenceKeysRecorded",
+        "status": "True",
+        "type": "EvidenceRecorded"
+      },
+      {
+        "lastTransitionTime": "2026-09-18T02:44:04.435837637Z",
+        "message": "unverified",
+        "observedGeneration": 1,
+        "reason": "VerificationUntrusted",
+        "status": "False",
+        "type": "Verified"
+      }
+    ],
+    "evidence": {
+      "receiptKey": "logweir/backups/5f6fb620-ffad-4e82-8b2b-6b7273067177-20260914-235100/01M2H59ZWAFN6Y2CV5YCCNG7RD.receipt.json",
+      "receiptSha256": "sha256:3b535d23ba9386033b1cca183488339c76b0addea7cd84c25c64206cc64a516e",
+      "sidecarKey": "logweir/backups/5f6fb620-ffad-4e82-8b2b-6b7273067177-20260914-235100/01M2H59ZWAFN6Y2CV5YCCNG7RD.receipt.sig",
+      "verification": {
+        "detail": "the signature over this document verified under key 2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe, and the trust policy legacy-roster-v1 does not accept it (SignedOutsideValidity): the document carries no signing-time field for its payload type, so the key's validity window could not be checked",
+        "matchedKeyId": "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe",
+        "payloadType": "application/vnd.logweir.backup-receipt+json;version=1.0.0",
+        "result": "Untrusted",
+        "trust": {
+          "basis": "None",
+          "keyState": "Active",
+          "policy": {
+            "name": "legacy-roster-v1"
+          }
+        },
+        "verifiedAt": "2026-09-14T23:51:21Z"
+      }
+    },
+    "exitCode": 0,
+    "exitReason": "ok",
+    "jobRef": {
+      "name": "logweir-backup-scram-schedule-20260914-235100"
+    },
+    "phase": "Succeeded",
+    "windowCovered": {
+      "fromMs": 1789429625076,
+      "toMs": 1789429628506
+    }
+  }
+}

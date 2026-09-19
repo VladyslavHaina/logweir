@@ -582,19 +582,65 @@ export async function consoleSchedulePolicy(ns, name, body, options) {
  *
  *  `null` UNTIL AN ANSWER HAS ARRIVED, and `null` if a proxy strips the
  *  header. A caller with no server instant has not established freshness, and
- *  D3 section 7.7's answer to "not established" is `unknown` -- never `valid`. */
+ *  D3 section 7.7's answer to "not established" is `unknown` -- never `valid`.
+ *
+ *  AND `null` ONCE IT IS TOO OLD TO BE "NOW". A recorded instant that never
+ *  expired would be a clock that stops: a route whose answers carry no `Date`
+ *  would leave the keys view comparing an evaluation against an instant from
+ *  minutes ago, and an instant in the past SHRINKS the measured age -- which
+ *  is the direction that reads FRESH. Section 7.7's rule is fail-closed, so
+ *  the instant is carried forward by the elapsed time since it was recorded
+ *  and dropped altogether past [`SERVER_TIME_MAX_AGE_MS`].
+ *
+ *  THE ELAPSED TIME IS A DURATION AND NEVER AN ABSOLUTE READING. It comes from
+ *  the monotonic clock where there is one (`performance.now()`), and from
+ *  `Date.now()` only as a difference of two of its readings. A browser five
+ *  minutes fast measures a ten-second gap as ten seconds; that is the whole
+ *  reason this is allowed to exist beside "a page renders no verdict from a
+ *  clock the cluster never saw". */
 export function serverTime() {
-  return lastServerTime;
+  if (lastServerTime === null) {
+    return null;
+  }
+  const mark = elapsedMark();
+  if (mark === null || lastServerMark === null) {
+    return lastServerTime;
+  }
+  const elapsed = mark - lastServerMark;
+  if (elapsed < 0 || elapsed > SERVER_TIME_MAX_AGE_MS) {
+    return null;
+  }
+  return lastServerTime + elapsed;
 }
 
-// The value [`serverTime`] returns. It is a number in memory for the life of
-// the loaded page and nothing else: not a cookie, not browser storage, not a
-// header this module sends anywhere.
+/** How long a recorded server instant may be carried forward before a caller
+ *  is told there is none. Five minutes: long enough that an idle tab keeps
+ *  answering, short enough that no verdict rests on an instant from a
+ *  different session of work. */
+export const SERVER_TIME_MAX_AGE_MS = 300000;
+
+// The value [`serverTime`] is built from, and the monotonic mark it was
+// recorded at. Both are numbers in memory for the life of the loaded page and
+// nothing else: not a cookie, not browser storage, not a header this module
+// sends anywhere.
 let lastServerTime = null;
+let lastServerMark = null;
+
+// A monotonic reading, for DURATIONS only. `performance.now()` where there is
+// one; `Date.now()` otherwise, and only ever as the difference of two of its
+// readings.
+function elapsedMark() {
+  const clock = globalThis.performance;
+  if (clock !== undefined && clock !== null && typeof clock.now === "function") {
+    return clock.now();
+  }
+  return Date.now();
+}
 
 // Records the `Date` of one answer. A header that is absent or unparseable
 // leaves the previous value alone rather than clearing it: one proxy that
-// strips the header on one route must not make every other verdict unknown.
+// strips the header on one route must not make every other verdict unknown --
+// the age bound above is what stops that leniency becoming a stopped clock.
 function noteServerTime(response) {
   const headers = response === null || response === undefined ? null : response.headers;
   if (headers === null || headers === undefined || typeof headers.get !== "function") {
@@ -607,6 +653,7 @@ function noteServerTime(response) {
   const at = Date.parse(dated);
   if (!isNaN(at)) {
     lastServerTime = at;
+    lastServerMark = elapsedMark();
   }
 }
 

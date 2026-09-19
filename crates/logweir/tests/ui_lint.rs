@@ -74,7 +74,7 @@ const VIEWER_AUTHORITY: &str = "viewer's entire cluster authority";
 /// has nothing to do with the `kafka-backup` subcommand GC3 denies. The escape
 /// sits on the element's own line because that gate matches per physical line
 /// -- which is also why this paragraph spells the name without its quotes.
-const API_EXPORTS: [&str; 26] = [
+const API_EXPORTS: [&str; 27] = [
     "GROUP",
     "VERSION",
     "WRITABLE_PLURALS",
@@ -128,6 +128,10 @@ const API_EXPORTS: [&str; 26] = [
     // module (`the_suspend_toggle_is_the_only_update`), which reads it through
     // `ui/operation-watch.js`'s `serverClock`.
     "serverTime",
+    // The bound that keeps that instant from becoming a STOPPED clock: an
+    // instant carried forward past it is reported as none, and none reads
+    // `unknown` (review F6). It is a constant, not a reader.
+    "SERVER_TIME_MAX_AGE_MS",
     "problemError",
 ];
 
@@ -860,6 +864,70 @@ fn every_api_path_is_relative() {
              result -- and does."
         );
     }
+}
+
+// -------------------------------- 9b. the SECOND request site, held the same way
+
+/// **ONE STREAM CONSTRUCTION, IN `api.js`, OVER A `path(...)` IDENTIFIER.**
+///
+/// `every_api_path_is_relative` counts `fetch(` and nothing else, so when D3
+/// W12 added `EventSource` the module grew a second way to reach the network
+/// that no gate covered: `ui/README.md` and `api.js`'s own paragraph both
+/// assert the identifier is built by `path(...)`, and a page constructing its
+/// own stream -- or the argument here becoming a binding -- would have left
+/// every gate green (review F8).
+///
+/// Three arms, the same three the `fetch` site has:
+///
+///   (i)   exactly one construction of the stream class in all of `ui/`;
+///   (ii)  it is in `api.js`;
+///   (iii) the whole line is pinned, so its first argument IS a `path(...)`
+///         call rather than something built elsewhere and passed in.
+///
+/// A capability PROBE is not a construction and is deliberately allowed:
+/// `ui/operation-watch.js` reads `globalThis.EventSource` to decide whether to
+/// stream at all, which reaches no network and creates nothing.
+#[test]
+fn the_event_stream_is_constructed_once_over_a_built_identifier() {
+    const CONSTRUCTIONS: [&str; 2] = ["new EventSource(", "new Source("];
+    let mut sites: Vec<(PathBuf, usize, String)> = Vec::new();
+    for file in every_ui_file() {
+        if is_markdown(&file) || is_under_tests(&file) {
+            continue;
+        }
+        let contents = read(&file);
+        for (index, line) in contents.lines().enumerate() {
+            if CONSTRUCTIONS.iter().any(|token| line.contains(token)) {
+                sites.push((file.clone(), index + 1, line.to_string()));
+            }
+        }
+    }
+    assert_eq!(
+        sites.len(),
+        1,
+        "there is exactly one server-sent-event stream constructed under ui/, and it lives in \
+         api.js beside the one fetch. Found: {:?}",
+        sites
+            .iter()
+            .map(|(f, l, _)| format!("{}:{l}", shown(f)))
+            .collect::<Vec<_>>()
+    );
+    let (site_file, site_line, site_text) = &sites[0];
+    assert_eq!(
+        site_file,
+        &ui_root().join("api.js"),
+        "the one stream construction must be in api.js, not {}:{site_line}",
+        shown(site_file)
+    );
+    assert_eq!(
+        site_text.as_str(),
+        "  return new Source(path(\"api\", \"v1\", \"namespaces\", ns, \"operations\", kind, name, \"events\"));",
+        "the stream's identifier is built by the one validator that refuses a scheme \
+         separator, a leading slash and a parent-directory hop, ON THE LINE OF THE \
+         CONSTRUCTION -- an argument built anywhere else is outside that guarantee, and the \
+         property stops being checkable by reading. At {}:{site_line}",
+        shown(site_file)
+    );
 }
 
 /// True when the `request(` at `start` is a call and not the tail of a longer

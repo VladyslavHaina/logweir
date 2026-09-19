@@ -1163,12 +1163,21 @@ run whose evidence is `NotAttempted` is never rendered as a verified success.
 
 The green rule gained one clause and the not-green caption gained a word.
 
-**Green** is `evidence.verification.result == "Valid"` **and** a trust basis of
-`Current` or `Historical` **and** the kind's own success field (`exitCode == 0`
-for a Backup, `outcome == "pass"` for a Restore). An object with no `trust`
-block at all -- everything an older controller wrote -- **stays green**: the
-block is additive, and treating its absence as a downgrade would turn every
-archive in an upgraded cluster red.
+**Green** is `evidence.verification.result == "Valid"` **and** a trust basis
+that leaves the verdict standing **and** the kind's own success field
+(`exitCode == 0` for a Backup, `outcome == "pass"` for a Restore).
+
+**Three bases leave it standing, and they are three different facts:**
+`Current`, `Historical`, and *no basis at all* -- which arrives two ways. An
+object an older controller wrote carries no `trust` block; a DTO that has to
+spell something spells it `basis: "None"`, which is what D3 section 12 says it
+carries for exactly that object. Both are ABSENCES: the trust layer has nothing
+to say about the verdict, not that the verdict is worse. Reading either as a
+downgrade would put `unverified: no verification was recorded` on every archive
+an upgraded cluster holds, with `result: Valid`, `verifiedAt` and
+`matchedKeyId` sitting beside it saying otherwise. A basis this build cannot
+read is not green, because a word the page cannot understand is not one it may
+treat as a pass.
 
 A **`Historical`** basis carries `(signed before that key was retired)` and is a
 **pass, not a warning**: the supported key rotation is meant to produce exactly
@@ -1209,15 +1218,25 @@ this version has -- no function in `render.js` can spell it.
   `selectable` field, read and never recomputed here. Nothing is hidden --
   every state is listed with its remedy -- and the view is named as a bounded
   WINDOW over object storage, so an expired one reads as a missing VIEW and not
-  as a missing archive. **There is no one-click trust**: an unknown signer gets
-  its key id, the out-of-band fingerprint command and a document this page
-  renders and does not apply.
+  as a missing archive. The point table says when it is ONE HTTP page of a
+  larger view, which is a different truncation from the window and reads as
+  one. **There is no one-click trust**: an unknown signer gets its key id, the
+  out-of-band fingerprint command and a document this page renders and does not
+  apply. Its one submission clears itself: a durable result empties the form
+  and re-reads the list, so a second click cannot make a duplicate catalog, and
+  a corrected body mints a new idempotency intent rather than spending the one
+  the refused request used.
 * **`#/keys`.** `unknown` is not `valid`. A key's evaluation reads `unknown`
   whenever the object carries no status, its `observedGeneration` is behind, or
   its `evaluatedAt` is outside the freshness window -- measured against the
   **server's** clock (the `Date` header of the answer that carried the object),
   never the browser's, and `unknown` again when there is no server instant at
-  all. Retirement and revocation are explained apart.
+  all, under its own reason. That instant is carried forward by the time
+  elapsed since it was recorded and **dropped after five minutes**: a recorded
+  instant that never expired is a stopped clock, and a clock in the past
+  shrinks the measured age, which is the direction that reads fresh. The
+  elapsed time is a difference of two monotonic readings and never an absolute
+  one. Retirement and revocation are explained apart.
 * **`#/schedules`' retention panel.** It reads `status.enforcement`, which is
   what is HAPPENING, and not `spec.mode`, which is what was asked for.
   `RETENTION_SENTENCE` is kept verbatim for a schedule report and for
