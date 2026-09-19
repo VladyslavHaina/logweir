@@ -1342,6 +1342,9 @@ impl Pass<'_> {
                     )
                     .await?;
                 }
+                StartOutcome::AlreadyHarvested => {
+                    outcome.enforced_reason = REASON_NOTHING_TO_DO;
+                }
                 StartOutcome::LeaseNotHeld => {
                     outcome.enforced_reason = REASON_LEASE_NOT_HELD;
                 }
@@ -1612,6 +1615,48 @@ impl Pass<'_> {
         // `AlreadyExists` from the API server — rather than of the clock.
         let run_id = plan::run_id(&self.uid, plan_sha256, slot.timestamp());
 
+        // A RUN THIS POLICY HAS ALREADY HARVESTED IS NOT STARTED AGAIN —
+        // defect RET-COUNT-EARLY.
+        //
+        // The run id is a pure function of the policy, the plan digest and the
+        // slot, so every pass inside one slot that computes the same plan
+        // recomputes the SAME id. `jobs.create` below then answers 409
+        // `AlreadyExists` — deliberately, that is what makes a duplicate
+        // reconcile idempotent — and the pass falls through to record
+        // `lastEnforcement` as if a new run had begun, clearing `finishedAt`
+        // with the explicit nulls a genuinely new run needs. The object then
+        // claims the finished run is in flight, `tracked_run` harvests the SAME
+        // Job a second time, and `consecutiveRunFailures` gains a failure no
+        // Job produced. Every further reconcile in the slot adds another: live
+        // on `af64073`, TWO enforcement Jobs and a count of 3, with
+        // `EnforcementDegraded` firing a full run early.
+        //
+        // WHY HERE AND NOT IN `enforcement_decision`. The "one run per slot"
+        // check there guards the approved-plan branch only; the unattended
+        // branch (`requireApprovedPlan: false`) returns `start: true` before the
+        // slot is computed at all, which is the configuration the live defect
+        // ran under. This is the one place both branches pass through, and the
+        // first place the id exists.
+        //
+        // FINISHED IS THE CONDITION, NOT MERELY RECORDED. A record with no
+        // `finishedAt` is a run still in flight, and `tracked_run` — not this
+        // arm — is what looks after it.
+        let recorded = self
+            .policy
+            .status
+            .as_ref()
+            .and_then(|s| s.last_enforcement.as_ref());
+        if recorded.and_then(|r| r.run_id.as_deref()) == Some(run_id.as_str())
+            && recorded.is_some_and(|r| r.finished_at.is_some())
+        {
+            debug!(
+                policy = %self.name, namespace = %self.namespace, run = %run_id,
+                "this plan has already run and been harvested in this slot; no Job is created \
+                 and the record is left alone"
+            );
+            return Ok(StartOutcome::AlreadyHarvested);
+        }
+
         // (a) THE LEASE, with a resourceVersion-preconditioned patch, AND IT
         //     MUST LAND (review `d3w9` C3). The first landing swallowed the
         //     409 this patch got every enforcing pass — the evaluation patch
@@ -1701,59 +1746,37 @@ impl Pass<'_> {
             }
             Err(e) => return Err(ReconcileError::Api(e)),
         }
+        // THE RUN RECORD. `runId`, `startedAt` and `planSha256` are this run's
+        // own; the seven terminal fields below describe a run that has FINISHED
+        // and are deleted, by explicit RFC 7386 `null`, so the previous run's
+        // outcome cannot be read as this one's (defect
+        // RET-DEGRADED-UNREACHABLE). `previously_refused()` reads `failed[]` to
+        // exclude a point from the next plan, so a stale one is not cosmetic.
+        //
+        // **THE RUN REACHING HERE IS ALWAYS A DIFFERENT ONE**, and that is why
+        // the clearing is unconditional. `start_run` is reached only after
+        // `tracked_run` returned "nothing in flight", which it does only when
+        // no run is recorded or the recorded one carries `finishedAt`. So a
+        // recorded run seen here has finished — and the guard at the top of
+        // this function has already returned for it. A second, write-side
+        // "clear only a different run" test was written and removed: it is
+        // provably dead behind that gate, and a branch no row can reach is not
+        // a guard (defect RET-COUNT-EARLY, and the argument is recorded so the
+        // next reader does not re-add it).
+        let record = json!({
+            "runId": run_id,
+            "startedAt": self.ctx.now,
+            "planSha256": plan_sha256,
+            "finishedAt": Value::Null,
+            "exitCode": Value::Null,
+            "deleted": Value::Null,
+            "failed": Value::Null,
+            "objectsDeleted": Value::Null,
+            "recordKey": Value::Null,
+            "recordSha256": Value::Null,
+        });
         self.patch_status(json!({
-            "lastEnforcement": {
-                "runId": run_id,
-                "startedAt": self.ctx.now,
-                "planSha256": plan_sha256,
-                // THE PREVIOUS RUN'S TERMINAL FIELDS ARE DELETED HERE, BY
-                // EXPLICIT `null`, AND THE OMISSION WAS DEFECT
-                // RET-DEGRADED-UNREACHABLE.
-                //
-                // A /status merge PATCH (RFC 7386) MERGES sub-objects: writing
-                // `lastEnforcement: {runId, startedAt, planSha256}` replaces
-                // those three keys and LEAVES EVERY OTHER KEY OF THE PREVIOUS
-                // RUN in place. `finishedAt` is the one that matters, because
-                // `tracked_run` reads exactly it to decide whether the run
-                // named by `runId` still needs harvesting. So from the second
-                // run onward the object said "this run finished at <the
-                // PREVIOUS run's instant>", every pass concluded there was
-                // nothing to track, no run after the first was ever harvested,
-                // its exit code was never read, and `consecutiveRunFailures`
-                // stopped at 1 — for good.
-                //
-                // What that cost: D3 §6.5's bounded retry
-                // (`DEGRADED_AFTER_FAILURES` consecutive failures stop
-                // scheduling until the spec changes) became UNREACHABLE, so a
-                // policy whose runs all fail kept creating deletion Jobs
-                // forever while `Enforced=True` and `EnforcementDegraded=False`
-                // showed an operator a healthy policy. Observed live on
-                // docker-desktop at `7b4fae9`: five enforcement Jobs in 140 s,
-                // all failed, `status.consecutiveRunFailures = 1`.
-                //
-                // ALL SEVEN, NOT ONLY `finishedAt`. The others are just as
-                // wrong once they outlive their run — `exitCode`, `deleted`,
-                // `failed`, `objectsDeleted` and the two record fields would
-                // attribute the previous run's outcome to this one, and
-                // `previously_refused()` reads `failed[]` to exclude a point
-                // from the next plan. A field that describes a finished run has
-                // no meaning on a run that has just started, and the way to say
-                // that in a merge patch is `null`.
-                //
-                // `harvest` is the model: it writes every one of these
-                // and deletes the lease with `"lease": Value::Null`.
-                "finishedAt": Value::Null,
-                "exitCode": Value::Null,
-                "deleted": Value::Null,
-                "failed": Value::Null,
-                "objectsDeleted": Value::Null,
-                "recordKey": Value::Null,
-                "recordSha256": Value::Null,
-            },
-            // THE PLAN'S NAME, PUBLISHED (review `d3w9` M9). The contract says
-            // "read the names from status; never compute one", and the first
-            // landing never wrote this one — leaving W11's `/preview` told to
-            // read a field that was always absent.
+            "lastEnforcement": record,
             "lastEvaluation": { "planRef": { "name": plan_name } },
         }))
         .await?;
@@ -2916,6 +2939,9 @@ pub fn parse_run_lines(log: &str, exit_code: Option<i32>) -> RunReport {
 pub enum StartOutcome {
     /// The Job was created (or already existed at its deterministic name).
     Started(String),
+    /// The run this plan and slot name has already been harvested; there is
+    /// nothing to start and nothing to record.
+    AlreadyHarvested,
     /// The lease PATCH did not land, so nothing is holding these points.
     LeaseNotHeld,
     /// A nonterminal `Restore` reads this destination.

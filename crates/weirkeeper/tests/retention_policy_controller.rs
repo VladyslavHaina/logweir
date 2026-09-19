@@ -4090,3 +4090,234 @@ async fn a_status_write_with_no_precondition_is_refused_and_the_pod_is_kept() {
         f.seen()
     );
 }
+
+// ---------------------------------------------------------------------------
+// RET-COUNT-EARLY — the failure count is a claim about the Jobs
+// ---------------------------------------------------------------------------
+
+/// The plan digest a pass would compute from `status`, learned rather than
+/// written down.
+///
+/// It MOVES between runs: a harvest records the run's per-point refusals and
+/// `previously_refused()` excludes those points from the next plan. The live
+/// run showed that as two enforcement Jobs with two different ids.
+async fn digest_for(status: &Value, at: DateTime<Utc>) -> String {
+    let learn = fixture(happy_routes(&six_points()));
+    run_at(&learn, &policy(enforcing(None), status.clone()), at).await;
+    learn.status()["lastEvaluation"]["planSha256"]
+        .as_str()
+        .expect("a digest")
+        .to_string()
+}
+
+/// The log of a run that failed with a per-point refusal — the shape the live
+/// runs produced, and the one that moves the next plan's digest.
+const REFUSED_RUN_LOG: &str = "retention-point=p6 state=Kept objects=0 code=AccessDenied\n\
+                               retention-result=deleted=0 failed=1 objects=0\n";
+
+/// A run that failed WITHOUT naming a point, so `previously_refused()` excludes
+/// nothing and the next pass computes the SAME plan — and therefore the same
+/// run id in the same slot. That repetition is what the guard is about, and a
+/// log that moved the digest would quietly make these rows assert nothing.
+const PLAIN_FAIL_LOG: &str = "retention-result=deleted=0 failed=0 objects=0\n";
+
+/// One full enforcement cycle: start a run, harvest it at `exit`, and return
+/// the status it leaves plus the Job name the pass created.
+async fn failed_cycle(
+    spec: &Value,
+    status: &Value,
+    at: DateTime<Utc>,
+    exit: i32,
+    log: &str,
+) -> (Value, String) {
+    let digest = digest_for(status, at).await;
+    let (started, run_id) = start_pass(spec, status, at, &digest).await;
+    let job_name = format!("{}-{run_id}", stem());
+    let leaked: &'static str = Box::leak(format!("/jobs/{job_name}").into_boxed_str());
+    let mut routes = happy_routes(&six_points());
+    routes.push(route("GET", leaked, job_body(&job_name, true)));
+    routes.push(route("GET", "/pods", pod_list(exit)));
+    routes.push(route("GET", "/log", log.to_string()));
+    routes.push(route("PATCH", leaked, "{}".to_string()));
+    routes.push(plan_config_map_route(&digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let f = fixture(routes);
+    let outcome = run_at(
+        &f,
+        &policy(spec.clone(), started.clone()),
+        at + chrono::Duration::minutes(1),
+    )
+    .await;
+    assert_eq!(
+        outcome.phase,
+        ctrl::RetentionPhase::Harvested,
+        "the cycle at {at} did not harvest run {run_id}"
+    );
+    (after(&started, &f), job_name)
+}
+
+/// A pass in a slot whose run has already been harvested.
+async fn same_slot_pass(spec: &Value, status: &Value, at: DateTime<Utc>, digest: &str) -> Fixture {
+    let mut routes = happy_routes(&six_points());
+    routes.push(plan_config_map_route(digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    // THE 409 THE DETERMINISTIC NAME PRODUCES. If the guard fails, the pass
+    // reaches this and the mock answers exactly as the API server would.
+    routes.push(Route {
+        method: "POST",
+        path_suffix: "/jobs",
+        status: 409,
+        body: json!({
+            "kind": "Status", "apiVersion": "v1", "status": "Failure",
+            "reason": "AlreadyExists", "code": 409, "message": "jobs already exists"
+        })
+        .to_string(),
+    });
+    let f = fixture(routes);
+    run_at(&f, &policy(spec.clone(), status.clone()), at).await;
+    f
+}
+
+/// **RET-COUNT-EARLY, reproduced.** Two failed enforcement Jobs leave the
+/// counter at 2 — including when extra passes look at the policy in between,
+/// which is what a real cluster does.
+///
+/// The live run on `af64073` reached `consecutiveRunFailures: 3` and fired
+/// `EnforcementDegraded` after the controller logged "created the retention
+/// Job" exactly TWICE, with both Jobs still present at the census (600 s TTL
+/// untouched) and the controller pod never restarted. The budget was declared
+/// spent a full run early.
+#[tokio::test]
+async fn two_failed_jobs_are_two_failures_however_many_passes_look_at_them() {
+    let spec = unattended_enforcing();
+
+    let (after_first, first_job) = failed_cycle(&spec, &json!({}), now(), 1, PLAIN_FAIL_LOG).await;
+    assert_eq!(after_first["consecutiveRunFailures"], json!(1));
+
+    // AN EXTRA PASS IN THE SAME SLOT, which is the whole defect. The run id is
+    // a pure function of the policy, the plan digest and the slot, so a pass
+    // that recomputes the same plan inside the same slot recomputes the same
+    // id; `jobs.create` answers 409 and the pass used to re-record
+    // `lastEnforcement` as if a new run had begun — clearing `finishedAt` and
+    // handing the finished Job back to `tracked_run` to harvest a second time.
+    let at = now() + chrono::Duration::minutes(2);
+    let same_slot = digest_for(&after_first, at).await;
+    let f = same_slot_pass(&spec, &after_first, at, &same_slot).await;
+    let after_extra = after(&after_first, &f);
+    assert_eq!(
+        after_extra["consecutiveRunFailures"],
+        json!(1),
+        "a pass that creates no Job creates no failure. Status: {after_extra}"
+    );
+
+    let (after_second, second_job) = failed_cycle(
+        &spec,
+        &after_extra,
+        now() + chrono::Duration::days(1),
+        1,
+        PLAIN_FAIL_LOG,
+    )
+    .await;
+    assert_ne!(first_job, second_job, "two distinct Jobs");
+    assert_eq!(
+        after_second["consecutiveRunFailures"],
+        json!(2),
+        "two failed Jobs are two failures — the count is a claim about the Jobs, and on the \
+         build this row was written for it claimed three. Status: {after_second}"
+    );
+    let degraded = condition_of(&after_second, ctrl::CONDITION_DEGRADED).expect("a condition");
+    assert_eq!(
+        degraded["status"], "False",
+        "and the budget is not spent yet: {degraded}"
+    );
+}
+
+/// And THREE failed Jobs — three distinct names, every one derived from this
+/// policy's UID — are what make the count 3 and the budget spent.
+#[tokio::test]
+async fn three_failed_jobs_by_owner_uid_are_what_make_the_count_three() {
+    let spec = unattended_enforcing();
+    let mut status = json!({});
+    let mut jobs: Vec<String> = Vec::new();
+    for day in 0..3 {
+        let (next, job) = failed_cycle(
+            &spec,
+            &status,
+            now() + chrono::Duration::days(day),
+            1,
+            REFUSED_RUN_LOG,
+        )
+        .await;
+        status = next;
+        jobs.push(job);
+        assert_eq!(
+            status["consecutiveRunFailures"],
+            json!(day + 1),
+            "one Job, one failure; day {day}"
+        );
+    }
+
+    jobs.sort();
+    jobs.dedup();
+    assert_eq!(
+        jobs.len(),
+        3,
+        "three DISTINCT Jobs, not one looked at three times"
+    );
+    // Every one is this policy's: the name is derived from the policy UID, and
+    // `job_body` owner-references the same UID — which is the census the live
+    // harness performs.
+    for job in &jobs {
+        assert!(
+            job.starts_with(&stem()),
+            "{job} is named from the policy UID {UID}"
+        );
+    }
+
+    let degraded = condition_of(&status, ctrl::CONDITION_DEGRADED).expect("a condition");
+    assert_eq!(degraded["status"], "True");
+    assert_eq!(degraded["reason"], ctrl::REASON_CONSECUTIVE_FAILURES);
+}
+
+/// The guard itself: a run this policy has already harvested is not started
+/// again, so no Job is asked for and the record is left exactly as the harvest
+/// wrote it.
+#[tokio::test]
+async fn a_run_already_harvested_in_this_slot_is_not_started_again() {
+    let spec = unattended_enforcing();
+    let (harvested, job_name) = failed_cycle(&spec, &json!({}), now(), 1, PLAIN_FAIL_LOG).await;
+    let run_id = harvested["lastEnforcement"]["runId"]
+        .as_str()
+        .expect("a run id")
+        .to_string();
+    assert_eq!(job_name, format!("{}-{run_id}", stem()));
+    let finished = harvested["lastEnforcement"]["finishedAt"].clone();
+    assert!(finished.is_string(), "the harvest recorded a finish");
+
+    // The SAME slot and the SAME plan, so the same run id.
+    let at = now() + chrono::Duration::minutes(2);
+    let digest = digest_for(&harvested, at).await;
+    let f = same_slot_pass(&spec, &harvested, at, &digest).await;
+
+    assert!(
+        f.seen()
+            .iter()
+            .all(|(method, uri)| !(method == "POST" && uri.contains("/jobs"))),
+        "no Job is even asked for: the 409 is avoided, not absorbed. Requests: {:?}",
+        f.seen()
+    );
+    let after_pass = after(&harvested, &f);
+    assert_eq!(
+        after_pass["lastEnforcement"]["runId"],
+        json!(run_id),
+        "the record still names the run that ran"
+    );
+    assert_eq!(
+        after_pass["lastEnforcement"]["finishedAt"], finished,
+        "and it is still finished — clearing this is what handed the same Job back to be \
+         harvested a second time. Record: {}",
+        after_pass["lastEnforcement"]
+    );
+    assert_eq!(after_pass["consecutiveRunFailures"], json!(1));
+}
