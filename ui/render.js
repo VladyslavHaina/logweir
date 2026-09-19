@@ -1238,3 +1238,389 @@ export function revisionLine(ref) {
   }
   return "<code>" + esc(parts.join(" \u00b7 ")) + "</code>";
 }
+
+// ===========================================================================
+// D3 (PLAT-12, PLAT-14, PLAT-15, PLAT-16, PLAT-19): the words for a durable
+// operation, protection health, a recovery catalog, retention enforcement and
+// key trust
+// ===========================================================================
+//
+// THE SAME RULE AS EVERY SECTION ABOVE IT, AND IT IS THE ONLY RULE HERE: a
+// fixed sentence of OURS is written down once, in this file, and rendered
+// verbatim. NO VERDICT IS COMPUTED HERE. Every function below is a lookup from
+// a value the cluster wrote to a sentence about that value; none of them reads
+// a clock, compares two instants, or decides whether something is fresh, valid
+// or safe. The one place that looks like an exception -- `evaluationWord` --
+// is handed the decision as an argument and only picks the word for it.
+//
+// FOUR CLAIMS THIS SECTION EXISTS TO STOP THE PAGE MAKING.
+//
+//   1. "unknown is valid". `ui/pages/keys.js` used to print `valid` for any
+//      key not in `status.expiredKeyIds`, INCLUDING when the object carried no
+//      status at all. D3 section 7.7: an unevaluated or stale evaluation reads
+//      `unknown`, and `valid`/`expired` are only ever rendered for a fresh one.
+//   2. "verified", for evidence signed by a key this installation does not
+//      accept. D3 section 7.4 adds `Untrusted` beside `Invalid` and
+//      `NotAttempted`, and the three are three different claims -- about the
+//      SIGNER, about the DOCUMENT and about the CONTROLLER. A single word for
+//      all three destroys the distinction that says what to go and fix.
+//   3. "exhaustive". A restore's record check is a SAMPLE. `verificationScope`
+//      carries the sampled counts and [`verificationScopeSentence`] renders
+//      them with the words "this is a sampled check, not an exhaustive
+//      comparison" -- never "complete", which is a level that does not exist
+//      in v1 (D3 section 2.5).
+//   4. "protected", for a policy Logweir could not evaluate. `health: Unknown`
+//      is rendered as unknown, and the `Protected` condition's `Unknown` is
+//      never rounded to `False`: "Logweir checked and you are not protected"
+//      is a claim nothing made.
+
+/** The suffix a green badge carries when the evidence verified under a key
+ *  that has since been retired (`trust.basis: Historical`).
+ *
+ *  IT IS A PASS AND NOT A WARNING. D3 section 7.6's rotation procedure is
+ *  supposed to produce exactly this state: the key was valid when it signed,
+ *  the archive still verifies, and the public material can never be edited out
+ *  of the policy. The qualifier says which key and when, so a reader is not
+ *  left wondering why a retired id appears on a green row. */
+export const HISTORICAL_SUFFIX = " (signed before that key was retired)";
+
+/** The evidence cases that are NOT green, each named by what it is a claim
+ *  about. The key is `status.evidence.verification.result` (plus the two
+ *  synthetic rows below); the value is appended to [`UNVERIFIED`] so the badge
+ *  still carries the one word every older surface reads, and still says which
+ *  of the cases this is.
+ *
+ *  `RecordedBeforeRevocation` IS NOT GREEN AND IS NOT SILENT. It is the case
+ *  where a compromise-revoked key signed evidence a controller had already
+ *  observed before the revocation took effect: the observation is real, and it
+ *  is not a substitute for a signature this installation still trusts. */
+export const VERIFICATION_CASES = Object.freeze({
+  Untrusted:
+    "untrusted signer -- the bytes are authentic and this installation does not accept the key",
+  Invalid: "invalid -- the signature did not verify, or a digest did not match",
+  NotAttempted: "not attempted -- the controller could not check this document",
+  RecordedBeforeRevocation:
+    "recorded before revocation -- a compromised key signed it, and a controller had seen it " +
+    "before the revocation took effect",
+  None: "no verification was recorded for this run",
+  RunNotSucceeded: "the document verified and the run itself did not succeed",
+});
+
+/** The `trust.basis` values a green badge is allowed to carry. An object
+ *  written by an older controller carries no `trust` block at all, and its
+ *  absence is NOT a downgrade: the block is additive (D3 section 12). */
+export const GREEN_BASES = Object.freeze(["Current", "Historical"]);
+
+/** Which non-green case a recorded verification is, as a word.
+ *
+ *  A LOOKUP AND NOT A JUDGEMENT. It reads `result` and, for the one value that
+ *  splits, `trust.basis`; every string outside [`VERIFICATION_CASES`] falls to
+ *  `None`, which says "no verification was recorded" rather than inventing a
+ *  name for a value this build does not know. */
+export function verificationCase(verification, runSucceeded) {
+  const v = verification || {};
+  const trust = v.trust || {};
+  if (v.result === "Valid") {
+    if (trust.basis === "RecordedBeforeRevocation") {
+      return VERIFICATION_CASES.RecordedBeforeRevocation;
+    }
+    if (typeof trust.basis === "string" && GREEN_BASES.indexOf(trust.basis) === -1) {
+      return VERIFICATION_CASES.None;
+    }
+    return runSucceeded === true ? "" : VERIFICATION_CASES.RunNotSucceeded;
+  }
+  const named = VERIFICATION_CASES[v.result];
+  return typeof named === "string" ? named : VERIFICATION_CASES.None;
+}
+
+/** The caption a badge that is not green carries: the one word every older
+ *  reader looks for, and the case it actually is. */
+export function unverifiedCaption(verification, runSucceeded) {
+  const said = verificationCase(verification, runSucceeded);
+  return said.length === 0 ? UNVERIFIED : UNVERIFIED + ": " + said;
+}
+
+/** The sentence beside every restore result, from `verificationScope`
+ *  (D3 section 2.5 and section 3.5).
+ *
+ *  THE COUNTS ARE LABELLED EXACTLY, and the last clause is not optional: a
+ *  sampled comparison presented without it reads as a full one. `complete`
+ *  does not exist as a level in v1 and this function cannot render it. */
+export function verificationScopeSentence(scope) {
+  const s = scope || null;
+  if (s === null || typeof s !== "object") {
+    return "No verification scope was recorded for this run, so how much of it was compared is " +
+      "not known here. An absent scope is not a complete one.";
+  }
+  if (s.level === "none") {
+    return "No record check ran for this restore: the run's own evidence attests what was " +
+      "written and by whom, and no records were compared.";
+  }
+  if (typeof s.recordsSampled !== "number" && typeof s.recordsSampledMatching !== "number") {
+    return "This restore's record check ran at level " + String(s.level) +
+      " and recorded no sampled counts, so how many records were compared is not known here. " +
+      "Whatever it compared, it was a sample: no level in this version performs an exhaustive " +
+      "comparison.";
+  }
+  const sampled = typeof s.recordsSampled === "number" ? String(s.recordsSampled) : ABSENT;
+  const matching = typeof s.recordsSampledMatching === "number"
+    ? String(s.recordsSampledMatching)
+    : ABSENT;
+  const expected = typeof s.recordsExpected === "number" ? String(s.recordsExpected) : ABSENT;
+  const degraded = s.level === "degraded"
+    ? " The comparison was degraded: the records were consumed and counted, not compared " +
+      "byte for byte."
+    : "";
+  return matching + " of " + sampled + " sampled records matched byte-for-byte; " + expected +
+    " records were expected in the sampled window; this is a sampled check, not an exhaustive " +
+    "comparison." + degraded;
+}
+
+/** D3 section 2.5's TABLE from the custom resource's own integrity vocabulary to the
+ *  scope level the API publishes. A LOOKUP AND NOT A JUDGEMENT: the three
+ *  values on the left are `Restore.status.integrity.level`'s whole vocabulary
+ *  and the three on the right are `verificationScope.level`'s.
+ *
+ *  It exists because legacy mode has no `logweir-api` to do the mapping and a
+ *  page that showed no scope at all there would be showing a result with
+ *  nothing beside it saying how much of it was checked -- which is the reading
+ *  the sentence exists to prevent. There is no fourth row, and `complete` is
+ *  not a value on either side. */
+export const SCOPE_LEVEL_OF_INTEGRITY = Object.freeze({
+  "byte-fingerprint": "sampled",
+  "consume-only": "degraded",
+  "not-attempted": "none",
+});
+
+/** The completion guidance for a terminal Restore, keyed by
+ *  `spec.target.mode`. D3 section 3.5: fixed sentences owned by this file,
+ *  never server-authored prose. */
+export const COMPLETION_GUIDANCE = Object.freeze({
+  newTopic:
+    "Consumers are not moved. Logweir wrote nothing to the original topics. Consumer group " +
+    "offsets were not restored; the engine's offset report is informational only. Point " +
+    "applications at the new names and validate reads before retiring anything.",
+  scratch:
+    "These topics are a rehearsal and are deleted by teardown; never point an application at " +
+    "them.",
+});
+
+/** The three evaluation words a keys view may print, and the ONE that is
+ *  printed whenever the freshness question has no answer. */
+export const EVALUATION_UNKNOWN = "unknown";
+
+/** Why an evaluation reads `unknown`, by the reason the caller established.
+ *  D3 section 7.7's three causes, each said in its own words. */
+export const EVALUATION_UNKNOWN_REASONS = Object.freeze({
+  NoStatus:
+    "this object carries no status at all, so nothing has evaluated these keys yet",
+  GenerationBehind:
+    "status.observedGeneration is behind metadata.generation, so these verdicts were computed " +
+    "from an earlier spec",
+  Stale:
+    "status.evaluatedAt is older than the freshness window, measured against the server's own " +
+    "clock and never the browser's",
+  NoVerdict: "this key has no verdict in status.keys[]",
+});
+
+/** The word an evaluation column prints. `decision` is what the caller
+ *  established from the object's own fields; `state` is the verdict.
+ *
+ *  THE BROWSER'S CLOCK IS NEVER AN INPUT HERE. Freshness is decided by the
+ *  caller from a SERVER instant, and this function only picks the word for the
+ *  decision it was handed -- which is what keeps "a page renders no verdict
+ *  from a clock the cluster never saw" true of this column. */
+export function evaluationWord(fresh, state) {
+  if (fresh !== true) {
+    return EVALUATION_UNKNOWN;
+  }
+  return typeof state === "string" && state.length > 0 ? state : EVALUATION_UNKNOWN;
+}
+
+/** The sentence a keys view carries above the table when the evaluation is
+ *  not fresh. */
+export const UNKNOWN_IS_NOT_VALID_SENTENCE =
+  "An evaluation this page could not confirm is fresh reads `unknown`, never `valid`. " +
+  "`valid` and `expired` are rendered only for a verdict the controller computed from the " +
+  "generation on this object, recently enough to still be about it.";
+
+/** The fingerprint command an operator runs OUT OF BAND against a public key,
+ *  and the whole of what this product offers for establishing trust in one.
+ *  There is NO one-click trust anywhere in this tree (D3 section 5.5 step 3). */
+export const NO_ONE_CLICK_TRUST_SENTENCE =
+  "This page offers no control that adds a key to a TrustPolicy. A key found beside an archive " +
+  "is a claim, never trusted by proximity: compare the fingerprint below with its holder out of " +
+  "band, then have an administrator add it with kubectl.";
+
+/** The four retention enforcement modes, as the sentence each one earns.
+ *
+ *  KEYED BY `status.enforcement` -- WHAT IS ACTUALLY HAPPENING -- and not by
+ *  `spec.mode`, which is what was ASKED FOR. A policy in `mode: Enforce` whose
+ *  destination will not resolve reports `RecommendationOnly`, and the panel
+ *  must say what is happening rather than what was requested. */
+export const ENFORCEMENT_SENTENCES = Object.freeze({
+  RecommendationOnly:
+    "Logweir reports what would be removed under this policy and removes nothing.",
+  LogweirWorker:
+    "An isolated Logweir retention worker deletes archive objects under this policy, with its " +
+    "own delete-capable credential that this controller never reads.",
+  ExternalLifecycleDeclared:
+    "Deletion at this destination is performed by your bucket lifecycle rule; Logweir reports " +
+    "and cannot protect individual points here.",
+});
+
+/** The sentence an `Enforce` policy carries, verbatim, beside its plan.
+ *  Deleting an archive object is not reversible and the panel says so before
+ *  an administrator approves a digest, not after. */
+export const IRREVERSIBLE_SENTENCE =
+  "Approving a plan authorises deletion of the archive objects it names. Deletion is not " +
+  "reversible: the points it removes cannot be restored from afterwards, and the only record " +
+  "that survives is the tombstone and the retention record under logweir/.";
+
+/** `status.guarantees`'s three values as words. `ProviderEnforcedUnverified`
+ *  is the one that must never read as enforcement BY LOGWEIR: it means the
+ *  operator declared a provider mechanism and Logweir cannot read it back. */
+export const GUARANTEE_WORDS = Object.freeze({
+  LogweirEnforced: "enforced by Logweir",
+  ProviderEnforcedUnverified: "declared by your provider; Logweir cannot verify it",
+  NotEnforced: "not enforced",
+});
+
+/** The sentence an `EnforcementDegraded=True` policy carries. */
+export const ENFORCEMENT_DEGRADED_SENTENCE =
+  "EnforcementDegraded: three consecutive enforcement runs failed, so this policy has stopped " +
+  "scheduling them until its spec changes. Nothing was deleted by the failed runs beyond what " +
+  "their own records name.";
+
+/** The sentence the legacy schedule retention report carries once a
+ *  RetentionPolicy covers the same destination. */
+export const SUPERSEDED_SENTENCE =
+  "A RetentionPolicy now covers this schedule's destination, and it is the evaluation that " +
+  "counts. This report is the legacy per-schedule one and is kept for continuity.";
+
+/** Health as a badge kind, by `ProtectionPolicy.status.health`. STRUCTURAL:
+ *  the caption is the recorded word and the kind is a class suffix. */
+export const HEALTH_KINDS = Object.freeze({
+  Healthy: "green",
+  AtRisk: "warn",
+  Stale: "unverified",
+  Unprotected: "unverified",
+  Unknown: "flat",
+});
+
+/** `ProtectionPolicy.status.health` as a badge. An absent health is [`ABSENT`]
+ *  and never a badge with no word. */
+export function healthBadge(health) {
+  if (typeof health !== "string" || health.length === 0) {
+    return ABSENT;
+  }
+  const kind = HEALTH_KINDS[health];
+  return badge(typeof kind === "string" ? kind : "flat", health);
+}
+
+/** The sentence beside protection health that keeps the two health questions
+ *  apart. D3 section 3.2 is explicit that they are never collapsed. */
+export const TWO_HEALTHS_SENTENCE =
+  "Schedule health and protection health are two different questions and this page never " +
+  "collapses them: an enabled, healthy schedule can still have no recent recoverable backup.";
+
+/** What `recoveryPointAt` and `newestRecordAt` each are. They are different
+ *  instants and D3 section 3.2 requires them labelled separately. */
+export const TWO_INSTANTS_SENTENCE =
+  "The recovery point instant is when the capture STARTED, which is what the objective is " +
+  "measured against. The newest archived record is the last record instant the archive covers. " +
+  "They are different numbers and an idle topic makes the second one look old for a reason " +
+  "that is not a gap in protection.";
+
+/** A notification is not evidence, and a delivery failure is not a run
+ *  failure. Both halves are rendered beside the alert ledger. */
+export const NOTIFICATION_NOT_EVIDENCE_SENTENCE =
+  "An alert is a notification and never evidence: the event document is unsigned, and a sink " +
+  "that refused it changes nothing about a backup's own recorded result.";
+
+/** The two axes a catalog entry carries, said before the table that shows
+ *  them, because "available" and "verified" are routinely read as one word. */
+export const TWO_AXES_SENTENCE =
+  "Availability and verification are separate axes. Availability is whether the archive can " +
+  "still serve this point; verification is whether its receipt verifies under a key this " +
+  "installation accepts. A point is selectable for a restore only when it is Available AND " +
+  "Verified or VerifiedHistorical, and that judgement is the catalog's own `selectable` field, " +
+  "not one this page recomputes.";
+
+/** The sentence a truncated catalog view carries. The window is bounded and
+ *  the durable truth is in object storage; nothing is silently hidden. */
+export const CATALOG_WINDOW_SENTENCE =
+  "This view is a bounded WINDOW over the durable catalog in object storage. Points beyond it " +
+  "are counted and histogrammed here and listed by `logweir catalog list` against the archive " +
+  "itself; none of them is hidden and none of them is deleted.";
+
+/** The sentence an expired or never-synced catalog view carries. */
+export const VIEW_EXPIRED_SENTENCE =
+  "The Kubernetes view of this catalog has expired or has never been synced. That is a missing " +
+  "VIEW and not a missing archive: the points are still in object storage. Sync the catalog to " +
+  "get the window back.";
+
+/** A normalized operation state as a badge. STRUCTURAL, like [`phaseBadge`]:
+ *  the caption is the API's own word and nothing here decides what it means.
+ *
+ *  TEN WORDS, FOUR OF WHICH ARE PHASES. `pending`, `running`, `succeeded` and
+ *  `failed` are the resource's own; `queued`, `preparing`, `verifying`,
+ *  `refused`, `cancelled` and `unknown` are distinctions `logweir-api` draws
+ *  that the resource does not record, and the page shows the API's word rather
+ *  than rounding it to a phase the controller never wrote. */
+export function stateBadge(state) {
+  if (typeof state !== "string" || state.length === 0) {
+    return ABSENT;
+  }
+  return badge("state-" + state.toLowerCase().replace(/[^a-z0-9]+/g, "-"), state);
+}
+
+/** The sentence an `unknown` operation state carries: what the API could not
+ *  establish, and that it is not a verdict about the run. */
+export const STATE_UNKNOWN_SENTENCE =
+  "`unknown` is what this operation's status could not establish -- an active stage whose last " +
+  "observation is old, a phase this build does not know, or no status at all yet. It is not a " +
+  "statement that the run failed.";
+
+/** The sentence an operation view carries about what aborting a watch does.
+ *  D3 section 2.6: a watch is a read, and leaving a page never cancels work
+ *  the cluster has already accepted. */
+export const WATCH_SENTENCE =
+  "This view follows the operation while it is open and stops when it reaches a terminal state " +
+  "or when you navigate away. Closing it cancels the READ and never the run.";
+
+/** The sentence the legacy mode's operation view carries: which facts it is
+ *  showing and which one it deliberately does not invent. */
+export const LEGACY_OPERATION_SENTENCE =
+  "This mode reads the custom resource directly, so it shows the controller's own " +
+  "`status.progress` -- stage, reason, last transition and the diagnoses it recorded. The " +
+  "normalized operation state is computed by `logweir-api` and is not available here; this page " +
+  "does not compute one of its own.";
+
+/** One diagnostic as a table row's worth of already-rendered cells. The code
+ *  is the REPAIR (which Secret, which image) and the severity is the
+ *  controller's; neither is reworded here. */
+export function diagnosticRow(entry) {
+  const d = entry || {};
+  const object = d.object || {};
+  return [
+    "<code>" + cell(d.code) + "</code>",
+    cell(d.severity),
+    cell(d.message),
+    cell(object.kind) + " " + cell(object.name),
+    cell(d.count),
+    cell(d.lastSeen),
+  ];
+}
+
+/** The diagnoses table. Empty is a STATE and says so: "nothing was recorded"
+ *  is not "everything is fine". */
+export function diagnosticsTable(entries) {
+  const list = Array.isArray(entries) ? entries : [];
+  return table(
+    ["CODE", "SEVERITY", "MESSAGE", "OBJECT", "COUNT", "LAST SEEN"],
+    list.map(diagnosticRow),
+    "The controller recorded no diagnosis for this run. That is not the same as a run with " +
+      "nothing wrong: a diagnosis is written when there is a cause to write down.",
+  );
+}

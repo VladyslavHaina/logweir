@@ -1826,6 +1826,18 @@ const LEGACY_SPECS = Object.freeze({
     approvalBytes: opaque, sidecarBytes: opaque,
   }),
   trustrosters: shapeOf("TrustRoster.spec", {}),
+  // D3 (PLAT-14.2, PLAT-15.1, PLAT-16.2, PLAT-19.1). Four kinds this page
+  // READS and never writes. Each required field below is the one the CRD
+  // itself requires and the one the page's renderer cannot do without:
+  // a ProtectionPolicy with no `protects` names nothing to protect, a
+  // RecoveryCatalog with no destination names no archive, a RetentionPolicy
+  // with no `scope` has no prefix its plan could be bounded by, and a
+  // TrustPolicy with no `keys` array is not a trust policy. `status` is never
+  // required, here as everywhere: an object one second old has none.
+  protectionpolicies: shapeOf("ProtectionPolicy.spec", { protects: opaque, objectives: opaque }),
+  recoverycatalogs: shapeOf("RecoveryCatalog.spec", {}),
+  retentionpolicies: shapeOf("RetentionPolicy.spec", { scope: opaque }),
+  trustpolicies: shapeOf("TrustPolicy.spec", { keys: listOf(opaque) }),
 });
 
 /** The `kind` a legacy object of each plural declares. Checked, because a
@@ -1843,6 +1855,10 @@ const LEGACY_KINDS = Object.freeze({
   restores: "Restore",
   approvals: "Approval",
   trustrosters: "TrustRoster",
+  protectionpolicies: "ProtectionPolicy",
+  recoverycatalogs: "RecoveryCatalog",
+  retentionpolicies: "RetentionPolicy",
+  trustpolicies: "TrustPolicy",
 });
 
 /** Validates one custom resource of `plural` and RETURNS IT UNCHANGED.
@@ -1922,4 +1938,787 @@ function everyOtherKey(spec, required) {
     }
   }
   return optional;
+}
+
+// ===========================================================================
+// D3 -- the shapes the console's D3 surfaces consume
+// ===========================================================================
+//
+// WHY THESE ARE A SEPARATE MAP FROM `CONSOLE_SHAPES`, AND WHAT THAT COSTS.
+//
+// `ui/tests/contract.spec.js` pins every member of `CONSOLE_SHAPES` against
+// `schemas/logweir-api-v1.openapi.json`: the fields this client requires must
+// be exactly the fields the published document requires. That pin is the whole
+// value of the typed contract, and it can only hold for a DTO the document
+// already publishes. The D3 route families are being built concurrently (D3
+// section 10; worker `d3w11`), so their schemas are not in the document yet --
+// and adding them to `CONSOLE_SHAPES` today would fail that arm for every
+// shape at once, which is a red suite that says nothing about drift.
+//
+// So they live here, in `D3_SHAPES`, and `the_d3_shapes_pin_themselves_once_
+// the_api_publishes_them` compares each one against the document IF the
+// document names it and records it as ASSUMED if it does not. The day the API
+// side lands, the pin engages by itself: nothing has to remember to move a
+// name from one map to the other, and a disagreement is a red test rather than
+// an empty cell in front of an operator.
+//
+// THE SHAPE OF THE ASSUMPTION IS WRITTEN DOWN, NOT GUESSED PER FIELD. Every
+// D3 read is assumed to answer the console's existing envelope -- `{item}` for
+// one object, `{items, page, requestId}` for a list -- carrying the object's
+// identity and the CUSTOM RESOURCE's own `spec` and `status` blocks, field for
+// field, under those two names. That is the one assumption; the field names
+// below are not assumptions at all but D3's published status contracts
+// (section 3.1, section 5.3, section 6.2, section 7.1), which the controllers
+// already write and which this page reads identically in legacy mode.
+
+/** `ProtectionPolicy.status.health` -- D3 section 3.2's five values. */
+export const HEALTH_STATES = Object.freeze([
+  "Healthy", "AtRisk", "Stale", "Unprotected", "Unknown",
+]);
+
+/** How availability was established. `CatalogStale` is NOT a health: it is why
+ *  a health could not be computed. */
+export const AVAILABILITY_BASES = Object.freeze([
+  "KubernetesStatus", "Catalog", "CatalogStale",
+]);
+
+/** The evidence word `lastAvailablePoint` carries. */
+export const POINT_EVIDENCE = Object.freeze([
+  "Valid", "ValidHistorical", "Untrusted", "NotAttempted",
+]);
+
+/** The five alert kinds (D3 section 3.3). */
+export const ALERT_KINDS = Object.freeze([
+  "BackupFailure", "Staleness", "ArchiveUnavailable", "RehearsalFailure", "RecoveryCompleted",
+]);
+
+/** An alert ledger entry's own state. */
+export const ALERT_STATES = Object.freeze(["Open", "Resolved"]);
+
+/** What happened to the delivery of one transition. `Suppressed` means no
+ *  sink was configured for the kind, which is a configuration choice and not a
+ *  failure (D3 section 3.4). */
+export const DELIVERY_STATES = Object.freeze([
+  "Pending", "Delivered", "Failed", "Suppressed",
+]);
+
+/** A catalog entry's availability axis (D3 section 5.4). */
+export const AVAILABILITY_STATES = Object.freeze([
+  "Available", "Missing", "Unreadable", "Deleted", "Conflict", "UnsupportedFormat", "Partial",
+]);
+
+/** A catalog entry's verification axis. SEPARATE from availability, and the
+ *  two are never collapsed into one column. */
+export const CATALOG_VERIFICATIONS = Object.freeze([
+  "Verified", "VerifiedHistorical", "UntrustedSigner", "Revoked", "Invalid",
+  "NoEvidence", "NotAttempted",
+]);
+
+/** What is actually happening under a RetentionPolicy (D3 section 6.2's
+ *  `status.enforcement`), as opposed to what `spec.mode` asked for. */
+export const ENFORCEMENT_STATES = Object.freeze([
+  "RecommendationOnly", "LogweirWorker", "ExternalLifecycleDeclared",
+]);
+
+/** Each guarantee's level. `ProviderEnforcedUnverified` is never enforcement
+ *  BY LOGWEIR and the page's words say so. */
+export const GUARANTEE_LEVELS = Object.freeze([
+  "LogweirEnforced", "ProviderEnforcedUnverified", "NotEnforced",
+]);
+
+/** `spec.mode` -- what was asked for. */
+export const RETENTION_MODES = Object.freeze(["Report", "Enforce", "ExternalLifecycle"]);
+
+/** A key's resolved state (D3 section 7.1's `status.keys[].effectiveState`). */
+export const EFFECTIVE_KEY_STATES = Object.freeze([
+  "Active", "NotYetValid", "Expired", "Retired", "Revoked", "Unparseable",
+]);
+
+/** Whether evidence this key signed still verifies, and on what basis. */
+export const VERIFICATION_USES = Object.freeze(["Full", "Historical", "None"]);
+
+/** A key's declared state in the spec. MONOTONIC: `Active` moves to `Retired`
+ *  and either moves to `Revoked`, and nowhere else. */
+export const KEY_STATES = Object.freeze(["Active", "Retired", "Revoked"]);
+
+/** The three usages a key may carry (D3 section 7.3). */
+export const KEY_USAGES = Object.freeze([
+  "EvidenceSigning", "GovernedApproval", "ConsoleConfirmation",
+]);
+
+/** Why a key was revoked. `KeyCompromise` is the one that refuses a claimed
+ *  signing time and needs an independent observation. */
+export const REVOCATION_REASONS = Object.freeze([
+  "KeyCompromise", "Superseded", "Unspecified",
+]);
+
+/** The basis on which stored evidence still verifies (D3 section 7.4). */
+export const TRUST_BASES = Object.freeze([
+  "Current", "Historical", "RecordedBeforeRevocation", "None",
+]);
+
+/** The key state a verdict was computed against. */
+export const TRUST_KEY_STATES = Object.freeze([
+  "Active", "Retired", "Expired", "Revoked", "Unknown",
+]);
+
+/** `status.evidence.verification.result` on a custom resource -- the CRD's own
+ *  PascalCase vocabulary, which gained `Untrusted` with D3 section 7.4. It is
+ *  NOT the console's lowercase `verificationState`; the two are different
+ *  fields of different documents and this file keeps them apart. */
+export const EVIDENCE_RESULTS = Object.freeze([
+  "Valid", "Invalid", "NotAttempted", "Untrusted",
+]);
+
+/** How much of a restore was actually compared (D3 section 2.5). `complete`
+ *  does not exist in v1 and is absent from this list on purpose. */
+export const SCOPE_LEVELS = Object.freeze(["sampled", "degraded", "none"]);
+
+/** The stages the controller writes on `status.progress`. */
+export const PROGRESS_STAGES = Object.freeze([
+  "Admission", "Queued", "Preparing", "Running", "Verifying", "Finished",
+]);
+
+/** The closed diagnosis vocabulary (D3 section 2.3; D2's `waiting.rs` table
+ *  plus `WaitingForPod`, with `DisruptedMidCheck` rendered `DisruptedMidRun`
+ *  on a run). Thirteen codes and no fourteenth. */
+export const DIAGNOSIS_CODES = Object.freeze([
+  "CredentialSecretNotFound", "CredentialSecretKeyMissing", "TrustBundleNotFound",
+  "RunnerImagePullFailed", "RunnerImageNotPresent", "RunnerImageInvalid",
+  "PodUnschedulable", "SigningKeyMissing", "VolumeMountFailed",
+  "RunnerServiceAccountMissing", "PodCreateRejected", "DisruptedMidRun", "WaitingForPod",
+]);
+
+/** A diagnosis' severity. */
+export const DIAGNOSIS_SEVERITIES = Object.freeze(["Warning", "Error"]);
+
+// --------------------------------------------------------- the D3 sub-shapes
+
+const D3_OBJECT_REF = shapeOf("D3ObjectRef", { kind: str, name: str });
+
+const D3_DIAGNOSTIC = shapeOf(
+  "DiagnosticView",
+  { code: oneOf(DIAGNOSIS_CODES), severity: oneOf(DIAGNOSIS_SEVERITIES), message: str },
+  { object: objectOf(D3_OBJECT_REF), firstSeen: str, lastSeen: str, count: int },
+);
+
+const D3_RUNNER = shapeOf(
+  "ProgressRunnerView",
+  {},
+  {
+    jobName: str, podName: str, podPhase: str, scheduled: bool,
+    containerState: str, waitingReason: str, startedAt: str,
+  },
+);
+
+const D3_RUNNER_PHASE = shapeOf("RunnerPhaseView", {}, { number: int, name: str });
+
+const D3_PROGRESS = shapeOf(
+  "ProgressView",
+  { stage: oneOf(PROGRESS_STAGES), reason: str },
+  {
+    message: str, lastTransitionTime: str, lastObservedTime: str,
+    runner: objectOf(D3_RUNNER), runnerPhase: objectOf(D3_RUNNER_PHASE),
+    diagnostics: listOf(objectOf(D3_DIAGNOSTIC)),
+  },
+);
+
+const D3_VERIFICATION_SCOPE = shapeOf(
+  "VerificationScopeView",
+  { level: oneOf(SCOPE_LEVELS) },
+  {
+    recordsSampled: int, recordsSampledMatching: int, recordsExpected: int, statement: str,
+  },
+);
+
+const D3_NEW_TOPIC = shapeOf("NewTopicView", { name: str }, { partitions: int });
+
+const D3_COMPLETION = shapeOf(
+  "CompletionView",
+  {},
+  {
+    newTopics: listOf(objectOf(D3_NEW_TOPIC)),
+    recordsExpected: int, recordsRestored: int,
+    recordsSampled: int, recordsSampledMatching: int,
+    integrityLevel: str, sampleWindow: opaque,
+  },
+);
+
+const D3_TEARDOWN_FAILURE = shapeOf("TeardownFailureView", { topic: str }, { error: str });
+
+const D3_TEARDOWN = shapeOf(
+  "TeardownView",
+  {},
+  {
+    attestationKey: str, deleted: listOf(str),
+    failed: listOf(objectOf(D3_TEARDOWN_FAILURE)),
+  },
+);
+
+const D3_TRUST_POLICY_REF = shapeOf(
+  "TrustPolicyRefView",
+  { name: str },
+  { uid: str, generation: int },
+);
+
+const D3_TRUST = shapeOf(
+  "VerificationTrustView",
+  { basis: oneOf(TRUST_BASES) },
+  { keyState: oneOf(TRUST_KEY_STATES), policy: objectOf(D3_TRUST_POLICY_REF) },
+);
+
+/** `status.evidence.verification` as D3 section 7.4 leaves it: the four
+ *  results, the claimed signing instant and the trust block. Every field but
+ *  `result` is optional, because an older controller wrote none of them and
+ *  D3 section 12's rule is that absent means NOT OBSERVED. */
+const D3_EVIDENCE_VERIFICATION = shapeOf(
+  "EvidenceVerificationView",
+  { result: oneOf(EVIDENCE_RESULTS) },
+  {
+    matchedKeyId: str, payloadType: str, verifiedAt: str, detail: str,
+    signedAt: str, trust: objectOf(D3_TRUST),
+  },
+);
+
+const D3_READINESS = shapeOf("ReadinessView", { state: str }, { basis: str });
+
+/** The operation DTO, EXTENDED. It starts from the published `Operation`'s own
+ *  required and optional fields -- so a field that moved there moves here --
+ *  and adds what D3 section 2 puts on the same document. */
+const D3_OPERATION = shapeOf(
+  "D3Operation",
+  OPERATION.required,
+  Object.assign({}, OPERATION.optional, {
+    lastUpdate: str,
+    awaitingApproval: bool,
+    progress: objectOf(D3_PROGRESS),
+    diagnostics: listOf(objectOf(D3_DIAGNOSTIC)),
+    verificationScope: objectOf(D3_VERIFICATION_SCOPE),
+    completion: objectOf(D3_COMPLETION),
+    teardown: objectOf(D3_TEARDOWN),
+    capture: opaque,
+    readiness: objectOf(D3_READINESS),
+    targetMode: str,
+    evidenceVerification: objectOf(D3_EVIDENCE_VERIFICATION),
+  }),
+);
+
+const D3_OPERATION_RESPONSE = readOnlyItem("D3OperationResponse", D3_OPERATION);
+
+// ------------------------------------------------------- protection policies
+
+const D3_LAST_POINT = shapeOf(
+  "LastAvailablePointView",
+  {},
+  {
+    pointId: str, backupRef: objectOf(NAME_REF), recoveryPointAt: str,
+    newestRecordAt: str, ageSeconds: int, evidence: oneOf(POINT_EVIDENCE),
+    topics: listOf(str), topicsTruncated: bool,
+  },
+);
+
+const D3_LAST_ATTEMPT = shapeOf(
+  "LastAttemptView",
+  {},
+  { backupRef: objectOf(NAME_REF), phase: str, reason: str, at: str },
+);
+
+const D3_MISSED = shapeOf("MissedView", {}, { lastMissedSlot: str, sinceLastFire: int });
+
+const D3_SCHEDULE_HEALTH = shapeOf(
+  "ScheduleHealthView",
+  { name: str },
+  { suspended: bool, ready: str, nextFireTime: str, lastMissedSlot: str },
+);
+
+const D3_REHEARSAL = shapeOf(
+  "RehearsalView",
+  {},
+  {
+    lastSucceededAt: str, lastRestoreRef: objectOf(NAME_REF),
+    lastFailedAt: str, lastReason: str,
+  },
+);
+
+const D3_DELIVERY = shapeOf(
+  "AlertDeliveryView",
+  { state: oneOf(DELIVERY_STATES) },
+  { attempts: int, lastAttemptAt: str, jobRef: objectOf(NAME_REF), lastError: str },
+);
+
+const D3_ALERT = shapeOf(
+  "AlertView",
+  { key: str, kind: oneOf(ALERT_KINDS), state: oneOf(ALERT_STATES) },
+  {
+    openedAt: str, resolvedAt: str, transition: int, notifiedTransition: int,
+    delivery: objectOf(D3_DELIVERY),
+  },
+);
+
+const D3_PROTECTION_STATUS = shapeOf(
+  "ProtectionPolicyStatusView",
+  {},
+  {
+    observedGeneration: int, evaluatedAt: str,
+    health: oneOf(HEALTH_STATES), availabilityBasis: oneOf(AVAILABILITY_BASES),
+    lastAvailablePoint: objectOf(D3_LAST_POINT),
+    lastAttempt: objectOf(D3_LAST_ATTEMPT),
+    consecutiveFailedRuns: int,
+    missed: objectOf(D3_MISSED),
+    schedules: listOf(objectOf(D3_SCHEDULE_HEALTH)),
+    rehearsal: objectOf(D3_REHEARSAL),
+    staleSince: str,
+    alerts: listOf(objectOf(D3_ALERT)),
+    conditions: listOf(objectOf(CONDITION)),
+  },
+);
+
+const D3_OBJECTIVES = shapeOf(
+  "ProtectionObjectivesView",
+  { maxRecoveryPointAgeSeconds: int },
+  {
+    maxConsecutiveFailedRuns: int, requireVerifiedEvidence: bool,
+    requireCatalogAvailability: bool, maxRehearsalAgeSeconds: int,
+  },
+);
+
+const D3_PROTECTS = shapeOf(
+  "ProtectsView",
+  { sourceRef: objectOf(NAME_REF) },
+  {
+    topics: listOf(str), scheduleRefs: listOf(objectOf(NAME_REF)),
+    destinationRef: objectOf(NAME_REF), catalogRef: objectOf(NAME_REF),
+    legacyArchive: opaque,
+  },
+);
+
+const D3_PROTECTION_SPEC = shapeOf(
+  "ProtectionPolicySpecView",
+  { protects: objectOf(D3_PROTECTS), objectives: objectOf(D3_OBJECTIVES) },
+  { notifications: opaque, evaluationIntervalSeconds: int },
+);
+
+const D3_PROTECTION = shapeOf(
+  "ProtectionPolicy",
+  { name: str, namespace: str, uid: str, resourceVersion: str, spec: objectOf(D3_PROTECTION_SPEC) },
+  { createdAt: str, generation: int, status: objectOf(D3_PROTECTION_STATUS) },
+);
+
+const D3_PROTECTION_RESPONSE = readOnlyItem("ProtectionPolicyResponse", D3_PROTECTION);
+const D3_PROTECTION_LIST = envelope("ProtectionPolicyList");
+
+// ---------------------------------------------------------------- catalogs
+
+const D3_CATALOG_COUNTS = shapeOf(
+  "CatalogCountsView",
+  {},
+  {
+    total: int, available: int, missing: int, unreadable: int, unverified: int,
+    untrustedSigner: int, invalid: int, conflict: int, deleted: int, unsupportedFormat: int,
+  },
+);
+
+const D3_SIGNER = shapeOf(
+  "CatalogSignerView",
+  { keyId: str },
+  { principalHint: str, points: int, trusted: bool },
+);
+
+const D3_CATALOG_CURSOR = shapeOf(
+  "CatalogCursorView",
+  {},
+  { indexShard: str, rescanStartAfter: str, complete: bool },
+);
+
+const D3_LAST_SYNC_JOB = shapeOf(
+  "LastSyncJobView",
+  {},
+  { name: str, startedAt: str, finishedAt: str, exitCode: int, refusalReason: str },
+);
+
+const D3_HISTOGRAM_DAY = shapeOf("CatalogHistogramView", { day: str, points: int });
+
+const D3_CATALOG_STATUS = shapeOf(
+  "RecoveryCatalogStatusView",
+  {},
+  {
+    observedGeneration: int, observedSyncRequest: str, generation: int,
+    syncedAt: str, viewExpiresAt: str,
+    cursor: objectOf(D3_CATALOG_CURSOR),
+    counts: objectOf(D3_CATALOG_COUNTS),
+    truncated: bool,
+    histogram: listOf(objectOf(D3_HISTOGRAM_DAY)),
+    signers: listOf(objectOf(D3_SIGNER)),
+    pages: opaque, indexConfigMap: str,
+    lastSyncJob: objectOf(D3_LAST_SYNC_JOB),
+    conditions: listOf(objectOf(CONDITION)),
+  },
+);
+
+const D3_CATALOG_SYNC = shapeOf(
+  "CatalogSyncSpecView",
+  {},
+  {
+    intervalSeconds: int, mode: str, maxObjectsPerRun: int,
+    deepCheck: str, viewLimit: int,
+  },
+);
+
+const D3_CATALOG_SPEC = shapeOf(
+  "RecoveryCatalogSpecView",
+  {},
+  {
+    destinationRef: objectOf(NAME_REF), legacyArchive: opaque,
+    sync: objectOf(D3_CATALOG_SYNC), syncRequest: str,
+  },
+);
+
+const D3_CATALOG = shapeOf(
+  "RecoveryCatalog",
+  { name: str, namespace: str, uid: str, resourceVersion: str, spec: objectOf(D3_CATALOG_SPEC) },
+  { createdAt: str, generation: int, status: objectOf(D3_CATALOG_STATUS) },
+);
+
+const D3_CATALOG_RESPONSE = readOnlyItem("RecoveryCatalogResponse", D3_CATALOG);
+const D3_CATALOG_LIST = envelope("RecoveryCatalogList");
+
+const D3_LOCATION = shapeOf(
+  "CatalogLocationView",
+  { locationId: str },
+  { availability: oneOf(AVAILABILITY_STATES), remedy: str },
+);
+
+/** ONE POINT, AS THE CATALOG MATERIALISED IT.
+ *
+ *  `selectable` IS READ AND NEVER RE-DERIVED. D3 section 5.4's rule --
+ *  `Available` AND (`Verified` or `VerifiedHistorical`) -- is materialised by
+ *  the catalog on purpose, and a page that recomputed it from two parsed enums
+ *  would be a second implementation of the most consequential rule in the
+ *  document. It is required here for that reason: a point with no `selectable`
+ *  is a contract failure and never a row this page decides about itself. */
+const D3_POINT = shapeOf(
+  "CatalogPointView",
+  {
+    pointId: str,
+    availability: oneOf(AVAILABILITY_STATES),
+    verification: oneOf(CATALOG_VERIFICATIONS),
+    selectable: bool,
+  },
+  {
+    backupId: str, runId: str, recoveryPointAtMs: int,
+    coveredFromMs: int, coveredToMs: int,
+    locations: listOf(objectOf(D3_LOCATION)),
+    receiptKey: str, receiptSha256: str, manifestKey: str, manifestSha256: str,
+    recordedAt: str, formatVersion: str, signerKeyId: str, remedy: str,
+    locationDigest: str, destinationRef: objectOf(NAME_REF),
+  },
+);
+
+const D3_POINT_LIST = envelope("CatalogPointList");
+const D3_POINT_RESPONSE = readOnlyItem("CatalogPointResponse", D3_POINT);
+
+const D3_SIGNERS_RESPONSE = shapeOf(
+  "CatalogSignersResponse",
+  { signers: listOf(objectOf(D3_SIGNER)), requestId: str },
+  { fingerprintCommand: str },
+);
+
+/** The connect-existing-archive submission (D3 section 5.5 step 1). */
+const CREATE_CATALOG_REQUEST = shapeOf(
+  "CreateCatalogRequest",
+  { name: str, syncMode: str },
+  { destinationRef: objectOf(NAME_REF), legacyArchive: objectOf(ARCHIVE_REQUEST) },
+);
+
+// -------------------------------------------------------- retention policies
+
+const D3_GUARANTEES = shapeOf(
+  "RetentionGuaranteesView",
+  {},
+  {
+    ageExpiry: oneOf(GUARANTEE_LEVELS),
+    minUsablePoints: oneOf(GUARANTEE_LEVELS),
+    activeRestoreProtection: oneOf(GUARANTEE_LEVELS),
+    sharedSegments: oneOf(GUARANTEE_LEVELS),
+    legalHold: oneOf(GUARANTEE_LEVELS),
+  },
+);
+
+const D3_CANDIDATE = shapeOf(
+  "RetentionCandidateView",
+  { pointId: str, reason: str },
+  { recoveryPointAt: str, objects: int, bytes: int },
+);
+
+const D3_REASONED_POINT = shapeOf("RetentionReasonedPointView", { pointId: str, reason: str });
+
+const D3_LAST_EVALUATION = shapeOf(
+  "RetentionEvaluationView",
+  {},
+  {
+    at: str, pointsEvaluated: int, candidateCount: int,
+    kept: listOf(str),
+    candidates: listOf(objectOf(D3_CANDIDATE)),
+    protected: listOf(objectOf(D3_REASONED_POINT)),
+    skipped: listOf(objectOf(D3_REASONED_POINT)),
+    planRef: objectOf(NAME_REF), planSha256: str, planExpiresAt: str,
+  },
+);
+
+const D3_LAST_ENFORCEMENT = shapeOf(
+  "RetentionEnforcementView",
+  {},
+  {
+    runId: str, startedAt: str, finishedAt: str, planSha256: str,
+    deleted: listOf(str), objectsDeleted: int,
+    recordKey: str, recordSha256: str, exitCode: int,
+  },
+);
+
+const D3_LEASE = shapeOf(
+  "RetentionLeaseView",
+  {},
+  { runId: str, pointIds: listOf(str), acquiredAt: str, expiresAt: str },
+);
+
+const D3_RETENTION_STATUS = shapeOf(
+  "RetentionPolicyStatusView",
+  {},
+  {
+    observedGeneration: int,
+    enforcement: oneOf(ENFORCEMENT_STATES),
+    guarantees: objectOf(D3_GUARANTEES),
+    lastEvaluation: objectOf(D3_LAST_EVALUATION),
+    lastEnforcement: objectOf(D3_LAST_ENFORCEMENT),
+    lease: objectOf(D3_LEASE),
+    consecutiveRunFailures: int,
+    conditions: listOf(objectOf(CONDITION)),
+  },
+);
+
+const D3_RETENTION_RULES = shapeOf(
+  "RetentionRulesView",
+  {},
+  { keepLast: int, keepDays: int, minUsablePoints: int },
+);
+
+const D3_EXTERNAL_LIFECYCLE = shapeOf(
+  "ExternalLifecycleView",
+  { provider: str, ruleId: str },
+  { expirationDays: int, prefix: str, acknowledgedUnenforceable: bool },
+);
+
+const D3_ENFORCEMENT_SPEC = shapeOf(
+  "RetentionEnforcementSpecView",
+  {},
+  {
+    credentialSecretRef: objectOf(NAME_REF), schedule: str,
+    requireApprovedPlan: bool, approvedPlanSha256: str, planMaxAgeSeconds: int,
+    maxDeletionsPerRun: int, maxObjectsPerRun: int, deadlineSeconds: int,
+  },
+);
+
+const D3_RETENTION_SPEC = shapeOf(
+  "RetentionPolicySpecView",
+  { scope: opaque },
+  {
+    destinationRef: objectOf(NAME_REF), catalogRef: objectOf(NAME_REF),
+    rules: objectOf(D3_RETENTION_RULES), holds: opaque,
+    mode: oneOf(RETENTION_MODES),
+    externalLifecycle: objectOf(D3_EXTERNAL_LIFECYCLE),
+    enforcement: objectOf(D3_ENFORCEMENT_SPEC),
+  },
+);
+
+const D3_RETENTION = shapeOf(
+  "RetentionPolicy",
+  { name: str, namespace: str, uid: str, resourceVersion: str, spec: objectOf(D3_RETENTION_SPEC) },
+  { createdAt: str, generation: int, status: objectOf(D3_RETENTION_STATUS) },
+);
+
+const D3_RETENTION_RESPONSE = readOnlyItem("RetentionPolicyResponse", D3_RETENTION);
+const D3_RETENTION_LIST = envelope("RetentionPolicyList");
+
+// ------------------------------------------------------------ trust policies
+
+const D3_KEY_VERDICT = shapeOf(
+  "KeyVerdictView",
+  { keyId: str, effectiveState: oneOf(EFFECTIVE_KEY_STATES) },
+  { usableForNewSignatures: bool, usableForVerification: oneOf(VERIFICATION_USES) },
+);
+
+const D3_NAMESPACE_CONFLICT = shapeOf(
+  "NamespaceConflictView",
+  { namespace: str, policies: listOf(str) },
+);
+
+const D3_TRUST_STATUS = shapeOf(
+  "TrustPolicyStatusView",
+  {},
+  {
+    observedGeneration: int, evaluatedAt: str, loaded: bool, keyCount: int,
+    keys: listOf(objectOf(D3_KEY_VERDICT)),
+    boundNamespaces: listOf(str),
+    conflicts: listOf(objectOf(D3_NAMESPACE_CONFLICT)),
+    conditions: listOf(objectOf(CONDITION)),
+  },
+);
+
+const D3_PRINCIPAL = shapeOf("KeyPrincipalView", { id: str }, { display: str });
+
+/** ONE KEY AS THE SPEC DECLARES IT. `spkiPem` is declared and deliberately
+ *  NOT rendered by any page: it is public material, it is long, and a key id
+ *  is what an operator compares out of band. */
+const D3_TRUST_KEY = shapeOf(
+  "TrustKeyView",
+  {
+    keyId: str, algorithm: str, usages: listOf(oneOf(KEY_USAGES)),
+    principal: objectOf(D3_PRINCIPAL), state: oneOf(KEY_STATES),
+  },
+  {
+    spkiPem: str, notBefore: str, notAfter: str,
+    retiredAt: str, revokedAt: str,
+    revocationReason: oneOf(REVOCATION_REASONS), revocationEffectiveFrom: str,
+  },
+);
+
+const D3_TRUST_SPEC = shapeOf(
+  "TrustPolicySpecView",
+  { keys: listOf(objectOf(D3_TRUST_KEY)) },
+  { default: bool, namespaces: listOf(str), allowedTargetClusterIds: listOf(str) },
+);
+
+const D3_TRUST_POLICY = shapeOf(
+  "TrustPolicy",
+  { name: str, uid: str, resourceVersion: str, spec: objectOf(D3_TRUST_SPEC) },
+  { createdAt: str, generation: int, status: objectOf(D3_TRUST_STATUS) },
+);
+
+const D3_TRUST_RESPONSE = readOnlyItem("TrustPolicyResponse", D3_TRUST_POLICY);
+const D3_TRUST_LIST = envelope("TrustPolicyList");
+
+/** Every D3 shape this client declares, by the name the OpenAPI document is
+ *  expected to publish it under. See this section's header for what the
+ *  separation from [`CONSOLE_SHAPES`] buys and what it costs. */
+export const D3_SHAPES = Object.freeze({
+  D3Operation: D3_OPERATION,
+  D3OperationResponse: D3_OPERATION_RESPONSE,
+  ProgressView: D3_PROGRESS,
+  DiagnosticView: D3_DIAGNOSTIC,
+  VerificationScopeView: D3_VERIFICATION_SCOPE,
+  CompletionView: D3_COMPLETION,
+  TeardownView: D3_TEARDOWN,
+  EvidenceVerificationView: D3_EVIDENCE_VERIFICATION,
+  VerificationTrustView: D3_TRUST,
+  ProtectionPolicy: D3_PROTECTION,
+  ProtectionPolicyResponse: D3_PROTECTION_RESPONSE,
+  ProtectionPolicyList: D3_PROTECTION_LIST,
+  ProtectionPolicyStatusView: D3_PROTECTION_STATUS,
+  AlertView: D3_ALERT,
+  AlertDeliveryView: D3_DELIVERY,
+  RecoveryCatalog: D3_CATALOG,
+  RecoveryCatalogResponse: D3_CATALOG_RESPONSE,
+  RecoveryCatalogList: D3_CATALOG_LIST,
+  RecoveryCatalogStatusView: D3_CATALOG_STATUS,
+  CatalogPointView: D3_POINT,
+  CatalogPointList: D3_POINT_LIST,
+  CatalogPointResponse: D3_POINT_RESPONSE,
+  CatalogSignerView: D3_SIGNER,
+  CatalogSignersResponse: D3_SIGNERS_RESPONSE,
+  CreateCatalogRequest: CREATE_CATALOG_REQUEST,
+  RetentionPolicy: D3_RETENTION,
+  RetentionPolicyResponse: D3_RETENTION_RESPONSE,
+  RetentionPolicyList: D3_RETENTION_LIST,
+  RetentionPolicyStatusView: D3_RETENTION_STATUS,
+  TrustPolicy: D3_TRUST_POLICY,
+  TrustPolicyResponse: D3_TRUST_RESPONSE,
+  TrustPolicyList: D3_TRUST_LIST,
+  TrustPolicyStatusView: D3_TRUST_STATUS,
+  TrustKeyView: D3_TRUST_KEY,
+  KeyVerdictView: D3_KEY_VERDICT,
+});
+
+/** Every closed vocabulary D3 adds, by the name the schema publishes. The
+ *  same self-pinning arm compares each with the document's `enum` once the
+ *  document names it. */
+export const D3_ENUMS = Object.freeze({
+  HealthState: HEALTH_STATES,
+  AvailabilityBasis: AVAILABILITY_BASES,
+  PointEvidence: POINT_EVIDENCE,
+  AlertKind: ALERT_KINDS,
+  AlertState: ALERT_STATES,
+  DeliveryState: DELIVERY_STATES,
+  PointAvailability: AVAILABILITY_STATES,
+  PointVerification: CATALOG_VERIFICATIONS,
+  RetentionEnforcement: ENFORCEMENT_STATES,
+  GuaranteeLevel: GUARANTEE_LEVELS,
+  RetentionMode: RETENTION_MODES,
+  EffectiveKeyState: EFFECTIVE_KEY_STATES,
+  VerificationUse: VERIFICATION_USES,
+  KeyState: KEY_STATES,
+  KeyUsage: KEY_USAGES,
+  RevocationReason: REVOCATION_REASONS,
+  TrustBasis: TRUST_BASES,
+  TrustKeyState: TRUST_KEY_STATES,
+  EvidenceResult: EVIDENCE_RESULTS,
+  VerificationScopeLevel: SCOPE_LEVELS,
+  ProgressStage: PROGRESS_STAGES,
+  DiagnosisCode: DIAGNOSIS_CODES,
+  DiagnosisSeverity: DIAGNOSIS_SEVERITIES,
+});
+
+/** The D3 item responses, by the plural their route hangs off. */
+const D3_ITEM_SHAPES = Object.freeze({
+  "protection-policies": D3_PROTECTION_RESPONSE,
+  catalogs: D3_CATALOG_RESPONSE,
+  "retention-policies": D3_RETENTION_RESPONSE,
+  "trust-policies": D3_TRUST_RESPONSE,
+});
+
+/** The D3 list envelopes and the item each carries, by the same plural. */
+const D3_LIST_SHAPES = Object.freeze({
+  "protection-policies": [D3_PROTECTION_LIST, D3_PROTECTION],
+  catalogs: [D3_CATALOG_LIST, D3_CATALOG],
+  "retention-policies": [D3_RETENTION_LIST, D3_RETENTION],
+  "trust-policies": [D3_TRUST_LIST, D3_TRUST_POLICY],
+});
+
+/** Decodes one D3 object response. */
+export function decodeD3Item(plural, value) {
+  const shape = D3_ITEM_SHAPES[plural];
+  if (shape === undefined) {
+    throw contractFailure("D3Response", plural, "no D3 item shape is declared for this route");
+  }
+  return decodeWith(shape, value);
+}
+
+/** Decodes one D3 list response. */
+export function decodeD3List(plural, value) {
+  const pair = D3_LIST_SHAPES[plural];
+  if (pair === undefined) {
+    throw contractFailure("D3List", plural, "no D3 list shape is declared for this route");
+  }
+  return decodeListWith(pair[0], pair[1], value);
+}
+
+/** Decodes the EXTENDED operation document -- the one the D3 operation view
+ *  and its SSE stream carry. */
+export function decodeD3Operation(value) {
+  return decodeWith(D3_OPERATION_RESPONSE, value);
+}
+
+/** Decodes one page of a catalog's points. */
+export function decodeCatalogPoints(value) {
+  return decodeListWith(D3_POINT_LIST, D3_POINT, value);
+}
+
+/** Decodes a catalog's signer panel. */
+export function decodeCatalogSigners(value) {
+  return decodeWith(D3_SIGNERS_RESPONSE, value);
+}
+
+/** Checks the connect-archive body against the request shape before it is
+ *  sent, exactly as every other console mutation input is checked. */
+export function decodeCatalogRequest(value) {
+  return decodeWith(CREATE_CATALOG_REQUEST, value);
 }

@@ -253,6 +253,19 @@ export const CONSOLE_WRITABLE_PLURALS = Object.freeze([
   // with a required `Idempotency-Key`, which is the whole of what makes a
   // double click, a lost response and a reload one run.
   "backups",
+  // D3 W12 (PLAT-15.2). `POST .../catalogs` is "connect an existing archive":
+  // the operator names a destination they already hold a read-only credential
+  // for, and the controller discovers what is in it. It is a DURABLE CREATE
+  // with a required `Idempotency-Key` (D3 section 5.5 step 1: "repeating it returns
+  // the same object"), which is exactly why it is here and not an action: a
+  // lost response, a double click and a reload must all resolve to the one
+  // RecoveryCatalog the first request made, and two catalogs for one
+  // destination are refused by the server as a duplicate.
+  //
+  // THE LEGACY WRITABLE SET IS UNCHANGED. `WRITABLE_PLURALS` above still names
+  // five kinds and `recoverycatalogs` is not one of them: this page creates no
+  // custom resource against kube-apiserver for any D3 kind, in either mode.
+  "catalogs",
 ]);
 
 /** The product API's session document: the actor, the namespace grants and the
@@ -342,6 +355,77 @@ export async function consoleOperation(ns, kind, name, options) {
     readInit(options),
   );
   return problemBody(response);
+}
+
+/** Lists one CLUSTER-SCOPED product kind. The product API serves exactly one
+ *  (`GET /api/v1/trust-policies`, D3 section 10, installation-admin read), and the
+ *  frozen list below is what bounds that: a page that reached for a second
+ *  cluster-scoped plural is refused here, before the network.
+ *
+ *  A CLUSTER-SCOPED READ AND NOTHING MORE. D3 section 10 keeps trust WRITES off the
+ *  API in v1 (`capabilities.trustAdministration: false`); the supported path
+ *  is `kubectl apply` plus the `logweir trust` helpers. There is no cluster
+ *  plural in [`CONSOLE_WRITABLE_PLURALS`] and this module offers no writer
+ *  that takes one. */
+export async function consoleClusterList(plural, options) {
+  assertClusterReadable("consoleClusterList", plural);
+  const response = await request(
+    path("api", "v1", plural) + listQuery(options || {}),
+    readInit(options),
+  );
+  return problemBody(response);
+}
+
+/** Reads one cluster-scoped product object by name. */
+export async function consoleClusterGet(plural, name, options) {
+  assertClusterReadable("consoleClusterGet", plural);
+  const response = await request(
+    path("api", "v1", plural, name) + listQuery(options || {}),
+    readInit(options),
+  );
+  return problemBody(response);
+}
+
+/** THE ONE STREAM THIS PAGE OPENS, AND THE SECOND REQUEST SITE IN ALL OF `ui/`
+ *  (D3 section 2.6).
+ *
+ *  `EventSource` IS A REQUEST, SO IT LIVES HERE. Every rule the one `fetch`
+ *  obeys, this obeys: the identifier is built by `path(...)` on the line of
+ *  the construction, so it is relative to the origin that served the page; no
+ *  header is set, because `EventSource` cannot set one and this page has no
+ *  credential to put in it either way; and nothing is stored. The browser
+ *  attaches the session cookie itself in console mode, exactly as it does to
+ *  the `fetch`.
+ *
+ *  `withCredentials` IS DELIBERATELY NOT SET. It only means anything for a
+ *  CROSS-ORIGIN stream, and a cross-origin stream is the thing this whole
+ *  module is built to make impossible: the identifier below cannot carry a
+ *  scheme, a leading slash or a parent-directory hop, so the stream is always
+ *  same-origin and same-origin requests carry the cookie by default.
+ *
+ *  NO TOKEN IN THE URL. A stream identifier lands in proxy logs, in browser
+ *  history and in a `Referer`; the product API authenticates this stream the
+ *  same way it authenticates every other read, from the cookie the browser
+ *  attaches. There is no query parameter here at all.
+ *
+ *  It returns the stream object. Closing it is the caller's -- `watchOperation`
+ *  in `ui/operation-watch.js` closes it on `lifecycle.signal` and on a
+ *  terminal operation, and aborting a watch never cancels the run. */
+export function openOperationStream(ns, kind, name, EventSourceClass) {
+  if (CONSOLE_OPERATION_KINDS.indexOf(kind) === -1) {
+    throw new RangeError(
+      "openOperationStream(): kind is one of " + CONSOLE_OPERATION_KINDS.join(", ") +
+        "; got " + String(kind),
+    );
+  }
+  const Source = EventSourceClass || globalThis.EventSource;
+  if (typeof Source !== "function") {
+    throw new TypeError(
+      "openOperationStream(): this browser has no EventSource, so this page cannot follow an " +
+        "operation as a stream; the caller falls back to polling.",
+    );
+  }
+  return new Source(path("api", "v1", "namespaces", ns, "operations", kind, name, "events"));
 }
 
 /** THE SIX NAMED ACTION ROUTES, AND NOTHING ELSE. The product API spells an
@@ -479,6 +563,51 @@ export async function consoleSchedulePolicy(ns, name, body, options) {
     init,
   );
   return problemBody(response);
+}
+
+/** THE ONE CLOCK THIS PAGE IS ALLOWED TO JUDGE FRESHNESS BY (D3 section 7.7).
+ *
+ *  The instant of the most recent answer, as the SERVER dated it -- the
+ *  `logweir-api` process in console mode, the Kubernetes API server (through
+ *  `kubectl proxy`) in legacy mode. Both are HTTP's own `Date` header, which
+ *  every one of them sets, and both are a clock the cluster actually saw.
+ *
+ *  WHY NOT `Date.now()`. A keys view that compared `status.evaluatedAt` with
+ *  the browser's clock would call a healthy evaluation stale on a laptop five
+ *  minutes fast, and call a stale one fresh on one five minutes slow -- and it
+ *  would disagree with the controller's own refusal by exactly that skew. The
+ *  existing rule in this tree is "a page renders no verdict from a clock the
+ *  cluster never saw", and this is what keeps it true for the one column that
+ *  needs an elapsed time at all.
+ *
+ *  `null` UNTIL AN ANSWER HAS ARRIVED, and `null` if a proxy strips the
+ *  header. A caller with no server instant has not established freshness, and
+ *  D3 section 7.7's answer to "not established" is `unknown` -- never `valid`. */
+export function serverTime() {
+  return lastServerTime;
+}
+
+// The value [`serverTime`] returns. It is a number in memory for the life of
+// the loaded page and nothing else: not a cookie, not browser storage, not a
+// header this module sends anywhere.
+let lastServerTime = null;
+
+// Records the `Date` of one answer. A header that is absent or unparseable
+// leaves the previous value alone rather than clearing it: one proxy that
+// strips the header on one route must not make every other verdict unknown.
+function noteServerTime(response) {
+  const headers = response === null || response === undefined ? null : response.headers;
+  if (headers === null || headers === undefined || typeof headers.get !== "function") {
+    return;
+  }
+  const dated = headers.get("Date");
+  if (typeof dated !== "string" || dated.length === 0) {
+    return;
+  }
+  const at = Date.parse(dated);
+  if (!isNaN(at)) {
+    lastServerTime = at;
+  }
 }
 
 /** Turns a non-2xx product-API response into an Error carrying the problem
@@ -643,6 +772,11 @@ const SUB_FILTERS = Object.freeze([
   "check",
   // GET .../connections/{name}/topic-discoveries
   "latest",
+  // GET .../catalogs/{name}/points (D3 section 10). The two AXES a point carries and
+  // the materialised judgement over them. `selectable` is a filter and never a
+  // computation: the catalog decides it, the route filters on it, and no page
+  // in this tree recomputes `Available AND (Verified|VerifiedHistorical)`.
+  "availability", "verification", "selectable",
 ]);
 
 // The header name that carries the product API's synchroniser token on an
@@ -714,6 +848,7 @@ function writeInit(body, options) {
 // what it promised is said so by name. This file already builds that failure
 // for a non-2xx; it builds the same one here.
 async function problemBody(response) {
+  noteServerTime(response);
   const text = await response.text();
   if (!response.ok) {
     throw problemError(response, text);
@@ -741,6 +876,23 @@ function parsed(response, text) {
   }
 }
 
+// The cluster-scoped product plurals this page may READ. One entry, and the
+// list exists so that a second one is a line a reviewer reads rather than a
+// call that quietly appeared: a cluster-scoped read in a shared console is a
+// read of something no namespace grant bounds.
+const CONSOLE_CLUSTER_PLURALS = Object.freeze(["trust-policies"]);
+
+// Refuses a cluster-scoped plural outside that list, by name, before anything
+// is sent.
+function assertClusterReadable(caller, plural) {
+  if (CONSOLE_CLUSTER_PLURALS.indexOf(plural) === -1) {
+    throw new RangeError(
+      caller + "(): " + String(plural) + " is not a cluster-scoped kind this page may read; " +
+        "the set is " + CONSOLE_CLUSTER_PLURALS.join(", ") + ".",
+    );
+  }
+}
+
 // Refuses a product kind this page may not create, by name, before anything is
 // sent. The legacy half's `assertWritable` bounds the kinds a Kubernetes write
 // may name; this bounds the kinds a product write may name, and the two lists
@@ -756,6 +908,7 @@ function assertConsoleWritable(caller, plural) {
 
 // Reads a response, raising the API server's own error on a non-2xx.
 async function body(response) {
+  noteServerTime(response);
   const text = await response.text();
   if (!response.ok) {
     throw apiError(response, text);
