@@ -435,7 +435,12 @@ export function renderTrustSnippet(signers) {
 export function renderConnectForm(view) {
   const v = view || {};
   const values = v.values || {};
-  const errors = v.errors || {};
+  // ONE ERROR SHAPE, THE ONE EVERY OTHER FORM IN THIS TREE USES:
+  // `{fields, unmatched}` -- `fields` keyed by this form's own input names, and
+  // `unmatched` for a server cause no input on screen is about, which is shown
+  // beside the outcome rather than dropped.
+  const errors = ((v.errors || {}).fields) || {};
+  const unmatched = (v.errors || {}).unmatched;
   const state = v.state || { phase: "idle" };
   const pending = state.phase === "pending";
   return (
@@ -467,7 +472,7 @@ export function renderConnectForm(view) {
     ">Connect archive</button></div>" +
     "<div class=\"form-status\" data-connect-status=\"true\" tabindex=\"-1\">" +
     mutationStatus(state, { kind: "RecoveryCatalog", name: values.name || "", idempotencyKey: true },
-      ((errors || {}).unmatched)) +
+      unmatched) +
     "</div>" +
     "</form>" +
     (v.result ? renderConnectResult(v.ns, v.result) : "") +
@@ -524,13 +529,35 @@ export function renderCatalogDetail(view) {
   );
 }
 
+/** The sentence the page carries while its list has not answered yet. An
+ *  empty table before the read would say "there is no catalog in this
+ *  namespace", which is a different fact from "this has not been read". */
+export const READING_SENTENCE = "Reading the recovery catalogs in this namespace...";
+
 /** The whole list page, with the connect form under it. */
 export function renderCatalogPage(view) {
   const v = view || {};
+  if (v.loaded !== true && (v.collection === null || v.collection === undefined)) {
+    return "<h2>Recovery catalog</h2>" +
+      "<p class=\"pending\" role=\"status\">" + esc(READING_SENTENCE) + "</p>" +
+      renderConnectForm(v);
+  }
   return renderCatalogList(v.collection, v.ns) + renderConnectForm(v);
 }
 
 // --------------------------------------------------------------- mount half
+
+/** The product API's own field paths mapped onto this form's input names, so a
+ *  422 lands beside the control it is about. A LIST OF PAIRS, which is what
+ *  `lifecycle.js`'s `fieldForPath` walks; a field name nothing here matches
+ *  travels in `unmatched` and is shown beside the outcome. */
+export const CATALOG_FIELD_PATHS = Object.freeze([
+  ["name", "name"],
+  ["destinationRef", "destination"],
+  ["destinationRef.name", "destination"],
+  ["legacyArchive", "destination"],
+  ["syncMode", "syncMode"],
+]);
 
 /** What this page checks before it sends, so a refusal lands beside its
  *  field rather than arriving as a 422 the form cannot place. */
@@ -560,8 +587,9 @@ export async function mountCatalog(node, ns, parse, lifecycle, deps) {
   const key = connectKey(ns);
   const mutation = mutationFor(key);
   const view = {
-    ns: ns, collection: null, values: readDraft(key) || { syncMode: SYNC_MODES[0] },
-    errors: {}, state: mutation.state, result: null,
+    ns: ns, collection: null, loaded: false,
+    values: readDraft(key) || { syncMode: SYNC_MODES[0] },
+    errors: { fields: {}, unmatched: [] }, state: mutation.state, result: null,
   };
   const paint = () => {
     if (!active(lifecycle)) {
@@ -576,6 +604,7 @@ export async function mountCatalog(node, ns, parse, lifecycle, deps) {
   }, lifecycle);
   try {
     view.collection = await listD3("catalog", ns, readOptions(lifecycle), deps);
+    view.loaded = true;
     paint();
   } catch (error) {
     if (!cancelled(error, lifecycle) && active(lifecycle)) {
@@ -603,26 +632,35 @@ function wire(node, ns, key, mutation, view, paint, deps, lifecycle) {
       syncMode: String((form.elements.syncMode || {}).value || SYNC_MODES[0]),
     };
     view.values = values;
-    keepDraft(key, values, CONNECT_FIELDS);
-    view.errors = validateConnect(values);
-    if (Object.keys(view.errors).length > 0) {
+    // THE INTENT IS READ BEFORE THE DRAFT IS REWRITTEN, AND IT IS WRITTEN BACK
+    // WITH IT. `keepDraft` is a REPLACE over the declared fields, not a merge:
+    // keeping `values` alone would drop the intent this draft holds, and the
+    // next submission would mint a new one -- so a resend of the SAME draft
+    // would stop being the same request, which is the whole property an
+    // idempotency key exists to provide.
+    const intent = connectIntent(key);
+    keepDraft(key, Object.assign({}, values, { intent: intent }), CONNECT_FIELDS);
+    const problems = validateConnect(values);
+    if (Object.keys(problems).length > 0) {
+      view.errors = { fields: problems, unmatched: [] };
       paint();
       return;
     }
+    view.errors = { fields: {}, unmatched: [] };
     if (mutation.pending()) {
       return;
     }
     mutation.run(async () => {
       try {
-        const made = await connectArchive(ns, connectBody(values), connectIntent(key), deps);
+        const made = await connectArchive(ns, connectBody(values), intent, deps);
         view.result = made;
-        view.errors = {};
+        view.errors = { fields: {}, unmatched: [] };
         // THE DRAFT ENDS WITH THE INTENT IT HELD. A second connect is a second
         // archive and mints its own key.
         dropDraft(key);
-        return { outcome: "succeeded", object: made };
+        return made;
       } catch (error) {
-        view.errors = fieldErrors(error, ["name", "destinationRef.name", "syncMode"]);
+        view.errors = fieldErrors(error, CATALOG_FIELD_PATHS);
         throw error;
       }
     });

@@ -79,6 +79,7 @@ import {
 } from "../render.js";
 import {
   DIFFERENT_RUN_SENTENCE,
+  mountOperation,
   operationFacts,
   operationRoute,
   operationRouteParams,
@@ -92,6 +93,8 @@ import {
 import {
   NOT_EVALUATED_SENTENCE,
   NO_POLICY_SENTENCE,
+  mountProtection,
+  mountProtectionDetail,
   objectiveLine,
   openAlerts,
   protectedBadge,
@@ -113,6 +116,7 @@ import {
   renderConnectForm,
   renderPoints,
   renderSigners,
+  mountCatalog,
   restorePointRoute,
   validateConnect,
   viewIsUsable,
@@ -121,6 +125,7 @@ import {
   EVALUATION_FRESHNESS_MS,
   FINGERPRINT_COMMAND,
   evaluationFreshness,
+  mountKeys,
   renderKeysPage,
   renderPolicyFacts,
   renderPolicyKeys,
@@ -1120,3 +1125,260 @@ test("the_four_d3_custom_resources_decode_in_legacy_mode_and_refuse_a_missing_re
       plural + " with no spec is a contract failure and not an empty page");
   }
 });
+
+// ===========================================================================
+// the mount halves, driven over a fake node and an in-memory API
+// ===========================================================================
+//
+// THE RENDERERS ABOVE ARE PURE AND THE MOUNTS ARE NOT, and the defects the
+// last two console waves' reviews caught all lived in the impure half: a form
+// that kept rendering the values it had already saved, two clicks sharing one
+// intent, and a control that only re-read. These rows drive the real mount
+// functions over the smallest node `render.js`'s `replace` touches.
+
+function fakeNode(form) {
+  return {
+    firstChild: null,
+    adopted: [],
+    appendChild(child) {
+      this.adopted.push(child);
+    },
+    removeChild() {},
+    querySelector(selector) {
+      return form !== undefined && String(selector).indexOf("data-connect-archive") !== -1
+        ? form
+        : null;
+    },
+    querySelectorAll() {
+      return [];
+    },
+    get html() {
+      return this.adopted.map((a) => a.html).join("");
+    },
+  };
+}
+
+const fakeParse = (html) => [{ html: html }];
+
+function fakeForm(values) {
+  const listeners = [];
+  return {
+    elements: {
+      name: { value: values.name },
+      destination: { value: values.destination },
+      syncMode: { value: values.syncMode },
+    },
+    addEventListener(type, handler) {
+      if (type === "submit") {
+        listeners.push(handler);
+      }
+    },
+    submit() {
+      for (const handler of listeners.slice(-1)) {
+        handler({ preventDefault() {} });
+      }
+    },
+  };
+}
+
+test("the_connect_form_sends_one_request_per_intent_and_a_second_click_while_pending_sends_none",
+  async () => {
+    const sent = [];
+    let resolveCreate = null;
+    const deps = {
+      modeOf: () => "console",
+      consoleList: async () => ({ items: [], page: { limit: 200 }, requestId: "r1" }),
+      consoleCreate: async (ns, plural, body, options) => {
+        sent.push({ ns: ns, plural: plural, body: body, key: options.idempotencyKey });
+        return new Promise((resolve) => {
+          resolveCreate = () => resolve({
+            item: {
+              name: body.name, namespace: ns, uid: "u1", resourceVersion: "1",
+              spec: { destinationRef: body.destinationRef },
+            },
+            requestId: "r2",
+          });
+        });
+      },
+    };
+    const form = fakeForm({ name: "primary", destination: "dest-a", syncMode: "Full" });
+    const node = fakeNode(form);
+    await mountCatalog(node, "d3-mount-a", fakeParse, null, deps);
+    assert.ok(node.html.indexOf("Connect an existing archive") !== -1, "the form is on screen");
+
+    form.submit();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(sent.length, 1, "one request");
+    assert.equal(sent[0].plural, "catalogs");
+    assert.deepEqual(sent[0].body,
+      { name: "primary", destinationRef: { name: "dest-a" }, syncMode: "Full" });
+    assert.ok(sent[0].key.indexOf("logweir-ui.catalog.") === 0,
+      "under an idempotency intent this draft holds");
+
+    // A SECOND CLICK WHILE THE FIRST IS IN FLIGHT SENDS NOTHING. The mutation
+    // machine has no `start` out of `pending`, and that absence is the guard.
+    form.submit();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(sent.length, 1, "the second click sent nothing");
+
+    resolveCreate();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.ok(node.html.indexOf("connect-result") !== -1, "and the outcome names the catalog");
+
+    // AND A LATER CLICK IS A SECOND ARCHIVE WITH A NEW INTENT, because the
+    // draft that held the first one ended with it.
+    form.submit();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(sent.length, 2, "a deliberate second connect is a second request");
+    assert.notEqual(sent[1].key, sent[0].key,
+      "and it carries a NEW intent: resending the first one would return the first catalog");
+  });
+
+test("one_draft_holds_one_intent_across_every_resend_of_it", async () => {
+  // THE DEFECT THIS ARM IS FOR, WHICH THE MUTANT BATTERY FOUND. `keepDraft` is
+  // a REPLACE over the declared fields and not a merge, so a submit handler
+  // that kept only the form's values dropped the intent the draft held -- and
+  // the next submission minted a new one. A resend would then be a DIFFERENT
+  // request under a different key, which is the exact opposite of what an
+  // idempotency key is for: a lost response and a retry would create two
+  // catalogs rather than resolving to the one the first request made.
+  const sent = [];
+  const deps = {
+    modeOf: () => "console",
+    consoleList: async () => ({ items: [], page: { limit: 200 }, requestId: "r1" }),
+    consoleCreate: async (ns, plural, body, options) => {
+      sent.push(options.idempotencyKey);
+      const failure = new Error("no answer from the API server");
+      failure.status = 503;
+      failure.reason = "ServiceUnavailable";
+      throw failure;
+    },
+  };
+  const form = fakeForm({ name: "primary", destination: "dest-a", syncMode: "Full" });
+  const node = fakeNode(form);
+  await mountCatalog(node, "d3-mount-c", fakeParse, null, deps);
+  for (let i = 0; i < 3; i += 1) {
+    form.submit();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.equal(sent.length, 3, "three retries of one draft");
+  assert.equal(sent[1], sent[0], "under ONE intent");
+  assert.equal(sent[2], sent[0], "and it does not move while the draft lives");
+});
+
+test("the_connect_form_refuses_an_empty_field_before_anything_is_sent", async () => {
+  const sent = [];
+  const deps = {
+    modeOf: () => "console",
+    consoleList: async () => ({ items: [], page: { limit: 200 }, requestId: "r1" }),
+    consoleCreate: async () => {
+      sent.push(1);
+      return {};
+    },
+  };
+  const form = fakeForm({ name: "", destination: "", syncMode: "Full" });
+  const node = fakeNode(form);
+  await mountCatalog(node, "d3-mount-b", fakeParse, null, deps);
+  form.submit();
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(sent.length, 0, "nothing was sent");
+  assert.ok(node.html.indexOf("a catalog needs a name") !== -1,
+    "and the refusal is beside the field it is about");
+});
+
+test("the_operation_mount_applies_the_uid_guard_to_the_object_it_actually_read", async () => {
+  const node = fakeNode();
+  const read = [];
+  await mountOperation(node, "team-a", { kind: "backup", name: "b1", uid: "the-one-i-asked-for" },
+    fakeParse, {
+      modeOf: () => "legacy",
+      api: {
+        get: async (ns, plural, name) => {
+          read.push(plural + "/" + name);
+          return {
+            kind: "Backup",
+            metadata: { name: "b1", namespace: ns, uid: "a-different-run" },
+            spec: {}, status: { phase: "Succeeded" },
+          };
+        },
+      },
+      setTimer: () => 0,
+      clearTimer: () => {},
+    }, null);
+  assert.deepEqual(read, ["backups/b1"], "it read the object the route names");
+  assert.ok(node.html.indexOf("data-uid-mismatch=\"true\"") !== -1,
+    "and refused it, because the object answers to another uid");
+  assert.equal(node.html.indexOf("Succeeded"), -1,
+    "nothing about the run it found is rendered");
+});
+
+test("the_operation_mount_refuses_a_kind_this_route_does_not_serve", async () => {
+  const node = fakeNode();
+  let reads = 0;
+  const watch = await mountOperation(node, "team-a", { kind: "rehearsal", name: "x", uid: "" },
+    fakeParse, { modeOf: () => "legacy", api: { get: async () => { reads += 1; return {}; } } },
+    null);
+  assert.equal(watch, null);
+  assert.equal(reads, 0, "nothing was read for a kind this route does not serve");
+  assert.ok(node.html.indexOf("This route serves backup and restore operations") !== -1);
+});
+
+test("the_protection_mount_renders_the_list_and_one_policy", async () => {
+  const list = fakeNode();
+  await mountProtection(list, "team-a", fakeParse, null, {
+    modeOf: () => "legacy",
+    api: { list: async () => ({ items: [d3("protection-unprotected.json")] }) },
+  });
+  assert.ok(list.html.indexOf("Unprotected") !== -1);
+  assert.ok(list.html.indexOf("PROTECTION") !== -1 && list.html.indexOf("SCHEDULES") !== -1);
+
+  const detail = fakeNode();
+  await mountProtectionDetail(detail, "team-a", "protect-healthy", fakeParse, null, {
+    modeOf: () => "legacy",
+    api: { get: async () => d3("protection-healthy.json") },
+  });
+  assert.ok(detail.html.indexOf("Newest available recovery point") !== -1);
+  assert.ok(detail.html.indexOf("newest archived record") !== -1);
+});
+
+test("the_keys_mount_prefers_the_policy_and_names_the_refusal_when_it_cannot_read_one",
+  async () => {
+    // WITH A POLICY: the roster read still happens (it is what a rollback would
+    // read) and the policy is what the page is about.
+    const withPolicy = fakeNode();
+    await mountKeys(withPolicy, fakeParse, {
+      modeOf: () => "legacy",
+      serverClock: () => Date.parse("2026-09-18T04:43:00Z"),
+      api: {
+        listCluster: async (plural) => plural === "trustpolicies"
+          ? { items: [d3("trustpolicy-active.json")] }
+          : { items: [] },
+      },
+    }, null);
+    assert.ok(withPolicy.html.indexOf("EVALUATION") !== -1);
+    assert.ok(withPolicy.html.indexOf("badge-green\">Active<") !== -1,
+      "a fresh verdict IS rendered as one");
+
+    // WITHOUT ONE: the API server's own refusal is on screen, by name, and not
+    // an empty table.
+    const refused = fakeNode();
+    const forbidden = new Error("trustpolicies.logweir.dev is forbidden");
+    forbidden.status = 403;
+    forbidden.reason = "Forbidden";
+    await mountKeys(refused, fakeParse, {
+      modeOf: () => "legacy",
+      serverClock: () => null,
+      api: {
+        listCluster: async (plural) => {
+          if (plural === "trustpolicies") {
+            throw forbidden;
+          }
+          return { items: [] };
+        },
+      },
+    }, null);
+    assert.ok(refused.html.indexOf("403") !== -1, "the status is on screen");
+    assert.ok(refused.html.indexOf("Forbidden") !== -1, "and the reason");
+    assert.ok(refused.html.indexOf("kind: TrustPolicy") !== -1,
+      "with the document a cluster admin applies, rendered and not submitted");
+  });
