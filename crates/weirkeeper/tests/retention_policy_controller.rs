@@ -3682,6 +3682,70 @@ async fn the_third_failure_publishes_enforcement_degraded_and_the_next_pass_keep
     }
 }
 
+/// **The upgrade path, and the reason the EVALUATION publishes the condition
+/// rather than leaving it to the harvest.**
+///
+/// A policy that reached the ceiling on a build that never published
+/// `EnforcementDegraded` — `d387f87` in the lab, `consecutiveRunFailures 3`,
+/// scheduling stopped, the condition absent — creates no further Job, so it
+/// never harvests again, so a harvest-only writer would never publish the
+/// condition at all. The object would stay unexplained for as long as the
+/// policy stayed stopped, which is forever until someone edits the spec.
+///
+/// The evaluation is the pass that READS the budget and STOPS the scheduling,
+/// so it is the pass that has to say so, and it says it out of
+/// `status.lastEnforcement` — the exit code and the closed per-point codes the
+/// last run left behind — so that a pass which harvested nothing still says why
+/// in words.
+#[tokio::test]
+async fn a_policy_already_at_the_ceiling_publishes_the_condition_on_its_next_pass() {
+    let digest = learned_digest().await;
+    let status = json!({
+        "observedGeneration": 4,
+        "consecutiveRunFailures": 3,
+        "lastEnforcement": {
+            "runId": "r00000000deadbeea",
+            "startedAt": "2026-09-17T04:00:00Z",
+            "finishedAt": "2026-09-17T04:05:00Z",
+            "exitCode": 1,
+            "failed": [
+                {"pointId": "p-not-in-this-view", "code": "AccessDenied"},
+                {"pointId": "p-also-not-here", "code": "AccessDenied"}
+            ]
+        }
+        // NO `conditions` AT ALL — the shape the defect left behind.
+    });
+    let f = quiet_pass(
+        &policy(unattended_enforcing(), status.clone()),
+        now(),
+        &digest,
+    )
+    .await;
+
+    assert!(
+        f.posted("/jobs").is_empty(),
+        "the budget is spent; nothing is scheduled"
+    );
+    let after_pass = after(&status, &f);
+    let degraded =
+        condition_of(&after_pass, ctrl::CONDITION_DEGRADED).expect("EnforcementDegraded");
+    assert_eq!(degraded["status"], "True");
+    assert_eq!(degraded["reason"], ctrl::REASON_CONSECUTIVE_FAILURES);
+    let message = degraded["message"].as_str().expect("a message");
+    assert!(message.contains('3'), "the count: {message}");
+    assert!(message.contains("exited 1"), "the exit code: {message}");
+    assert!(
+        message.contains("AccessDenied on 2 point(s)"),
+        "the closed per-point codes, counted rather than listed: {message}"
+    );
+    assert!(
+        message.contains("recordKey"),
+        "and where the durable evidence is, because the Job is TTL-collected: {message}"
+    );
+    // The count is history and this pass must not touch it: the spec has not changed.
+    assert_eq!(after_pass["consecutiveRunFailures"], json!(3));
+}
+
 /// The general rule behind the row above: **no status write drops a condition
 /// it did not name.** Proved on the narrowest writer in the file —
 /// `publish_enforcement_refusal` names `Enforced` alone, mid-pass, right after
