@@ -3526,6 +3526,94 @@ def trust() -> None:
         evidence,
     )
 
+    # --- the tracker's `overlap`, under its own name ----------------------
+    # A DECLARED ALIAS OF THE TWO VERDICTS ABOVE, not a new fixture: `v` is the
+    # same terminal Backup judged under the SYNTHESISED `legacy-roster-v1` and
+    # `va` is the same object judged under the explicit policy that now governs
+    # this namespace. The tracker's test is that both are accepted while they
+    # overlap, and that is what these two verdicts are — the row exists because
+    # the review found no row under the tracker's NAME, and a test nobody can
+    # find is a test nobody counts.
+    overlap = {
+        "the synthesised policy accepted it": (
+            v.get("result") == "Valid"
+            and v.get("trust", {}).get("policy", {}).get("name") == "legacy-roster-v1"
+        ),
+        "the explicit policy accepts the same object": (
+            va.get("result") == "Valid"
+            and va.get("trust", {}).get("policy", {}).get("name") == TRUST_POLICY
+        ),
+        "against the same key, so it is one object judged twice": (
+            va.get("matchedKeyId") == v.get("matchedKeyId")
+        ),
+        "and the basis did not weaken across the handover": (
+            va.get("trust", {}).get("basis") == v.get("trust", {}).get("basis") == "Current"
+        ),
+    }
+    evidence.append(artifact("trust/overlap.json", {
+        "underSynthesised": v, "underExplicit": va, "clauses": overlap}))
+    check(
+        "trust-overlap",
+        "PLAT-19.1",
+        all(overlap.values()),
+        f"the same terminal Backup is accepted by BOTH policies while they overlap: "
+        f"{v.get('result')} under `legacy-roster-v1` (the synthesised policy an installation "
+        f"starts with) and {va.get('result')} under the explicit `{TRUST_POLICY}` that now "
+        f"names this namespace, same key {str(v.get('matchedKeyId'))[:16]}…, basis "
+        f"{va.get('trust', {}).get('basis')} either way. Declared alias: the verdicts are "
+        f"`trust-fresh-object-records-signedAt`'s and "
+        f"`trust-explicit-policy-keeps-evidence-valid`'s; this row is the tracker's test "
+        f"under the tracker's name. "
+        + "; ".join(f"{k}={x}" for k, x in overlap.items()),
+        evidence,
+    )
+    # --- and `upgrade from the default roster`, likewise -------------------
+    upgrade = {
+        "an installation with no explicit policy still judges": bool(v.get("result")),
+        "under the SYNTHESISED legacy-roster-v1":
+            v.get("trust", {}).get("policy", {}).get("name") == "legacy-roster-v1",
+        "and the verdict survives the upgrade to an explicit policy":
+            va.get("result") == v.get("result") == "Valid",
+        "which is a different policy by name":
+            va.get("trust", {}).get("policy", {}).get("name") != "legacy-roster-v1",
+    }
+    evidence.append(artifact("trust/upgrade-from-default-roster.json",
+                             {"before": v, "after": va, "clauses": upgrade}))
+    check(
+        "trust-upgrade-from-default-roster",
+        "PLAT-19.1",
+        all(upgrade.values()),
+        f"an installation that has never written a TrustPolicy judges under the synthesised "
+        f"`legacy-roster-v1` ({v.get('result')}), and applying an explicit policy is an "
+        f"UPGRADE rather than a reset: the same object reads {va.get('result')} under "
+        f"`{TRUST_POLICY}`. Declared alias of the same two verdicts as `trust-overlap`, "
+        f"named for the tracker's test. The pre-`signedAt` half — the five 2026-09-14 "
+        f"objects healing — is `trust-signedat-upgrade-heals` and lab-refresh-6 §6. "
+        + "; ".join(f"{k}={x}" for k, x in upgrade.items()),
+        evidence,
+    )
+    record(
+        "trust-unknown-stale-expiry",
+        "PLAT-19.1",
+        "NOT-RUN",
+        "NOT CONSTRUCTIBLE FROM THE API ON THIS BUILD, and the half that is testable here "
+        "is already covered under another name. The tracker's test is that a key whose "
+        "expiry cannot be evaluated, or whose evaluation is stale, reads `unknown` and never "
+        "`valid`. Every `TrustPolicy.spec.keys[]` entry REQUIRES `notBefore` and `notAfter` "
+        "(the CRD's own required list), so a key with an unevaluable window cannot be "
+        "created through the API at all; and a stale evaluation is a rendering question — "
+        "the acceptance sentence says \"the keys view labels unevaluated or stale "
+        "expiry/trust information as unknown, not valid\", which is D3 W12's console half "
+        "and no console journey touches a keys view. What IS provable from the API is the "
+        "neighbouring rule — a key outside its window, or absent from the resolved policy, "
+        "never reads Valid — and that is `trust-two-namespaces-resolve-their-own-policies` "
+        "(Invalid where the key is not listed) and "
+        "`trust-old-archive-survives-its-signer-retiring` (Untrusted for a signature after "
+        "retirement). Recorded here rather than aliased, because neither is the `unknown` "
+        "rendering the test names.",
+        evidence,
+    )
+
     apply(trust_policy("Retired", retiredAt=now()))
     retired = await_trust(
         "trust-subject",
