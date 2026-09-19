@@ -500,12 +500,12 @@ fn only_a_bounded_decimal_is_an_event_id() {
 async fn a_terminal_run_with_an_unsettled_verdict_keeps_the_connection() {
     brisk();
     let mut object = fixture("backup-succeeded-verified.json");
-    // Evidence keys and a digest are recorded; the controller has not written
-    // a verification block yet, which is the `verifying` shape.
-    object["status"]["evidence"]
-        .as_object_mut()
-        .unwrap()
-        .remove("verification");
+    // The run is `Succeeded` — TERMINAL — and the verification block exists
+    // with no `result` in it: the controller reached the evidence and has not
+    // reached a verdict. `terminal` alone would close here.
+    object["status"]["evidence"]["verification"] = json!({
+        "payloadType": "application/vnd.logweir.backup-receipt+json;version=1.0.0"
+    });
     let app = app_in(object, "b10", "lw-s10");
 
     let (status, _, body) = stream(
@@ -516,9 +516,12 @@ async fn a_terminal_run_with_an_unsettled_verdict_keeps_the_connection() {
     .await;
     assert_eq!(status, 200);
     let frames = data(&body);
-    // The snapshot itself says so: the run is `verifying`, not `succeeded`.
-    assert_eq!(frames[0]["state"], "verifying");
+    // The RESULT is recorded and the VERDICT is not: two columns, and only one
+    // of them has arrived.
+    assert_eq!(frames[0]["state"], "succeeded");
+    assert_eq!(frames[0]["terminal"], true);
     assert_eq!(frames[0]["trust"]["state"], "pending");
+    assert_eq!(frames[0]["verifiedSuccess"], false);
     assert_eq!(
         frames.last().unwrap()["reason"],
         "maxDuration",
