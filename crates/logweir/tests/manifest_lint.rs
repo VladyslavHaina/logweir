@@ -202,7 +202,7 @@ fn rules_of(rel: &str, role_name: &str) -> Vec<(Vec<String>, Vec<String>, Vec<St
             assert!(
                 r.get("resourceNames").is_none(),
                 "{rel}: {role_name} has a rule with `resourceNames`; the four-role table in \
-                 `the_five_cluster_roles_are_exactly_as_specified` does not model it"
+                 `the_six_cluster_roles_are_exactly_as_specified` does not model it"
             );
             (take("apiGroups"), take("resources"), take("verbs"))
         })
@@ -235,6 +235,18 @@ const EIGHT_NEW_KINDS: [&str; 8] = [
 
 /// The three kinds D2 §7.2 gives `logweir-operator` `create` and `patch` on.
 const THREE_CHECK_KINDS: [&str; 3] = ["backupdestinations", "preflights", "topicdiscoveries"];
+
+/// The three kinds D3 §9 gives `logweir-operator` `create` on.
+///
+/// THREE AND NOT FOUR. Amendment G added five kinds; `trustpolicies` is
+/// cluster-scoped and write-fenced to `logweir-trust-admin`, and
+/// `retentionpolicies` is write-fenced to `logweir-retention-admin`, so what an
+/// operator may bring into existence is protection, a catalog and a rehearsal.
+const THREE_D3_OPERATOR_KINDS: [&str; 3] = [
+    "protectionpolicies",
+    "recoverycatalogs",
+    "rehearsalschedules",
+];
 
 fn v(items: &[&str]) -> Vec<String> {
     let mut out: Vec<String> = items.iter().map(|s| s.to_string()).collect();
@@ -1158,21 +1170,28 @@ fn every_call_site_has_a_grant() {
     );
 }
 
-/// The five ClusterRoles, verb for verb.
+/// The six ClusterRoles, verb for verb.
 ///
 /// A table test and not five assertions, because the property is the WHOLE rule
 /// set of each role: an extra rule is as much a defect as a wrong verb, and a
 /// per-rule assertion cannot see one.
 ///
-/// FIVE SINCE D2 W11, AND THE NAME SAYS SO. `logweir-trust-admin` (D3 §9) is
-/// the cluster-scoped `TrustPolicy` writer, and it is a role of its own
-/// precisely so it is not held by whoever holds `logweir-operator`: an operator
-/// who could edit a trust policy could add their own key and then approve their
-/// own restore. The function was renamed in fix round 1 (review finding F3):
-/// it had been left as `…four…` while asserting five, which is exactly the kind
-/// of stale claim the rest of this file exists to refuse.
+/// SIX SINCE D3 W13, AND THE NAME SAYS SO. Two of them are administrator roles
+/// that exist to NOT be held by whoever holds `logweir-operator`:
+///
+/// * `logweir-trust-admin` (D2 W11) writes `TrustPolicy`, which decides whose
+///   keys may sign an approval. An operator who held it could add their own key
+///   and then approve their own restore.
+/// * `logweir-retention-admin` (D3 W13) writes `RetentionPolicy`, whose
+///   `spec.mode` is what moves an installation from reporting to DELETING. D3
+///   §12 calls `Enforce` "a separate, later, administrator decision with its own
+///   credential", and RBAC is the only layer that can say whose decision.
+///
+/// The function has been renamed twice for the same reason — it was left at
+/// `…four…` while asserting five (fix round 1, review finding F3) — and the
+/// count is in the name because the count is an assertion.
 #[test]
-fn the_five_cluster_roles_are_exactly_as_specified() {
+fn the_six_cluster_roles_are_exactly_as_specified() {
     // --- `weirkeeper` (interface I28) -------------------------------------
     //
     // Three places where this differs from the letter of the task brief, each
@@ -1472,12 +1491,55 @@ fn the_five_cluster_roles_are_exactly_as_specified() {
         // `the_schedule_edit_restriction_is_cel_not_rbac` records for
         // `backupschedules`.
         (v(&["logweir.dev"]), v(&THREE_CHECK_KINDS), v(&["patch"])),
+        // D3 §9 — declare protection, connect an existing archive, schedule a
+        // rehearsal. THREE of D3's four namespaced kinds;
+        // `retentionpolicies` is the fourth and is asserted ABSENT below.
+        (
+            v(&["logweir.dev"]),
+            v(&THREE_D3_OPERATOR_KINDS),
+            v(&["create"]),
+        ),
+        // A `ProtectionPolicy`'s `.spec` carries NO immutability seal —
+        // `config/crd/protectionpolicies.yaml`'s only object-level rule is
+        // "exactly one of destinationRef or legacyArchive" — so an objective is
+        // policy an operator tunes, and both verbs are needed for the reason
+        // `backupschedules` needs both: `kubectl edit` and `kubectl apply` send
+        // a PATCH.
+        (
+            v(&["logweir.dev"]),
+            v(&["protectionpolicies"]),
+            v(&["update", "patch"]),
+        ),
+        // The other two seal everything but one field each — `spec.suspend`
+        // ("the standing authorization binds a digest of this spec") and
+        // `spec.syncRequest` ("a catalog of a different location is a
+        // different catalog"). A merge patch reaches exactly that field, so
+        // `patch` WITHOUT `update`: a PUT is the shape most likely to carry a
+        // second, unnoticed field, which the API server would then refuse for
+        // that field alone.
+        (
+            v(&["logweir.dev"]),
+            v(&["recoverycatalogs", "rehearsalschedules"]),
+            v(&["patch"]),
+        ),
     ];
+    let operator_rules = rules_of("config/rbac/operator_role.yaml", "logweir-operator");
     assert_eq!(
-        rules_of("config/rbac/operator_role.yaml", "logweir-operator"),
-        operator,
+        operator_rules, operator,
         "`logweir-operator`'s rules are not the expected set"
     );
+    // AND THE OPERATOR NEVER WRITES A `RetentionPolicy`, asserted on its own so
+    // that adding the kind to any rule above is a failure that names the
+    // decision rather than a table entry a reviewer has to spot. Read comes
+    // from `logweir-viewer`; the writes are `logweir-retention-admin`'s,
+    // because `spec.mode` is what moves an installation from reporting to
+    // deleting and D3 §16 calls deletion "the irreversible boundary".
+    for (_, resources, verbs) in &operator_rules {
+        assert!(
+            !resources.iter().any(|r| r == "retentionpolicies"),
+            "`logweir-operator` names `retentionpolicies` with {verbs:?}. It may not: an              operator who could write one could set `mode: Enforce` on a policy they also              authored, and the whole of D3 §12's \"separate, later, administrator decision\"              would be one person's from end to end"
+        );
+    }
 
     // --- `logweir-approver` -----------------------------------------------
     // EXACTLY ONE RULE: `create` on `approvals`, and nothing else. No `get`, no
@@ -1549,7 +1611,48 @@ fn the_five_cluster_roles_are_exactly_as_specified() {
         );
     }
 
-    // --- AND THE OPERATOR IS NOT THE TRUST ADMIN --------------------------
+    // --- `logweir-retention-admin` (D3 §9) --------------------------------
+    // ONE RULE, and the same shape `logweir-trust-admin` has, for the same kind
+    // of reason: it is the only holder of a write verb on the one kind whose
+    // object can end in a deletion.
+    //
+    // `get`/`list`/`watch` BESIDE THE WRITES, unlike the operator's D3 rules.
+    // This role is bindable on its own — a storage owner who administers
+    // retention in one namespace should not need `logweir-viewer` beside it to
+    // read the evaluation they are about to change. The read is the same read
+    // `logweir-viewer` already publishes, so it widens nothing.
+    //
+    // **NO `delete`**, and it is asserted rather than merely absent, with a
+    // reason of its own: turning enforcement off is `mode: Report`, and
+    // deleting the object while an enforcement Job holds its lease takes the
+    // `status.lease` record the restore-side hold reads.
+    //
+    // **NAMESPACED**, unlike `logweir-trust-admin`: `RetentionPolicy` is a
+    // namespaced kind, so this is bound per namespace and an installation can
+    // have a different retention administrator for each one.
+    let retention_admin = rules_of(
+        "config/rbac/retention_admin_role.yaml",
+        "logweir-retention-admin",
+    );
+    assert_eq!(
+        retention_admin,
+        vec![(
+            v(&["logweir.dev"]),
+            v(&["retentionpolicies"]),
+            v(&["get", "list", "watch", "create", "update", "patch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+        )],
+        "`logweir-retention-admin` reads and writes `retentionpolicies`, and names no other \
+         resource"
+    );
+    for (_, resources, verbs) in &retention_admin {
+        assert!(
+            !verbs.iter().any(|x| x == "delete"),
+            "`logweir-retention-admin` carries `delete` on {resources:?}; D3 §9 says it does \
+             not, and deleting a policy mid-run takes the lease the restore-side hold reads"
+        );
+    }
+
+    // --- AND THE OPERATOR IS NOT THE TRUST ADMIN, NOR THE RETENTION ADMIN --
     // The separation is the whole reason the fifth role exists, so it is
     // asserted here rather than left to the reader of two files.
     for (file, role) in [
@@ -1558,13 +1661,49 @@ fn the_five_cluster_roles_are_exactly_as_specified() {
         ("config/rbac/viewer_role.yaml", "logweir-viewer"),
     ] {
         for (_, resources, verbs) in rules_of(file, role) {
-            if resources.iter().any(|r| r == "trustpolicies") {
+            for (kind, admin, why) in [
+                (
+                    "trustpolicies",
+                    "logweir-trust-admin",
+                    "the kind that decides whose keys may sign an approval",
+                ),
+                (
+                    "retentionpolicies",
+                    "logweir-retention-admin",
+                    "the kind whose `spec.mode` moves an installation from reporting to deleting",
+                ),
+            ] {
+                if resources.iter().any(|r| r == kind) {
+                    assert_eq!(
+                        verbs,
+                        v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
+                        "`{role}` may READ `{kind}` and never write one: only `{admin}` holds a \
+                         write verb on {why}"
+                    );
+                }
+            }
+        }
+    }
+    // AND NEITHER ADMIN ROLE HOLDS THE OTHER'S KIND. Two roles that had grown
+    // into one another would satisfy every assertion above and none of the
+    // separation either of them exists for.
+    for (file, role, own) in [
+        (
+            "config/rbac/trust_admin_role.yaml",
+            "logweir-trust-admin",
+            "trustpolicies",
+        ),
+        (
+            "config/rbac/retention_admin_role.yaml",
+            "logweir-retention-admin",
+            "retentionpolicies",
+        ),
+    ] {
+        for (_, resources, verbs) in rules_of(file, role) {
+            for r in &resources {
                 assert_eq!(
-                    verbs,
-                    v(&["get", "list", "watch"]), // engine-token-ok: the Kubernetes RBAC verb `list`, never the denied kafka-backup subcommand — this file parses ClusterRoles and invokes no engine
-                    "`{role}` may READ `trustpolicies` and never write one: only \
-                     `logweir-trust-admin` holds a write verb on the kind that decides whose \
-                     keys may sign an approval"
+                    r, own,
+                    "`{role}` names `{r}` with {verbs:?}; it may name `{own}` and nothing else"
                 );
             }
         }
@@ -2052,13 +2191,13 @@ fn manifest_lint_selects_by_parsed_api_version_and_kind() {
     );
 
     // And the install file's exact shape: 1 Namespace + 14 CRDs + 1
-    // ServiceAccount + 5 ClusterRoles + 1 ClusterRoleBinding + 1 Deployment +
+    // ServiceAccount + 6 ClusterRoles + 1 ClusterRoleBinding + 1 Deployment +
     // 1 NetworkPolicy. The CRD count is ADR 0008's kind list — Amendment A's
     // six, Amendment F's three and Amendment G's five — and a kind that
     // reaches `config/crd/` without reaching
     // `config/crd/kustomization.yaml` shows up here as a count that did not
-    // move. FIVE ClusterRoles since D2 W11: `weirkeeper`, the three human
-    // roles, and `logweir-trust-admin`.
+    // move. SIX ClusterRoles since D3 W13: `weirkeeper`, the three human
+    // roles, `logweir-trust-admin` and `logweir-retention-admin`.
     let docs = install_file();
     let mut by_kind: BTreeMap<String, usize> = BTreeMap::new();
     for m in &docs {
@@ -2070,7 +2209,7 @@ fn manifest_lint_selects_by_parsed_api_version_and_kind() {
             ("Namespace".to_string(), 1),
             ("CustomResourceDefinition".to_string(), 14),
             ("ServiceAccount".to_string(), 1),
-            ("ClusterRole".to_string(), 5),
+            ("ClusterRole".to_string(), 6),
             ("ClusterRoleBinding".to_string(), 1),
             ("Deployment".to_string(), 1),
             ("NetworkPolicy".to_string(), 1),
@@ -2079,8 +2218,8 @@ fn manifest_lint_selects_by_parsed_api_version_and_kind() {
     );
     assert_eq!(
         docs.len(),
-        24,
-        "logweir.yaml must hold exactly 24 documents"
+        25,
+        "logweir.yaml must hold exactly 25 documents"
     );
 }
 

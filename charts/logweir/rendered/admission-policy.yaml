@@ -6995,6 +6995,26 @@ rules:
       - preflights
       - topicdiscoveries
     verbs: ["patch"]
+  # D3 §9 — declare protection, connect an archive, schedule a rehearsal…
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - protectionpolicies
+      - recoverycatalogs
+      - rehearsalschedules
+    verbs: ["create"]
+  # …tune an objective (no seal on that spec)…
+  - apiGroups: ["logweir.dev"]
+    resources: ["protectionpolicies"]
+    verbs: ["update", "patch"]
+  # …and flip the ONE field each of the other two leaves mutable:
+  # `spec.suspend` and `spec.syncRequest`. `patch` without `update`. See
+  # `config/rbac/operator_role.yaml`. `retentionpolicies` is NOT here — its
+  # writes are `logweir-retention-admin`'s.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - recoverycatalogs
+      - rehearsalschedules
+    verbs: ["patch"]
 ---
 # Source: logweir/templates/human-roles.yaml
 apiVersion: rbac.authorization.k8s.io/v1
@@ -7030,6 +7050,22 @@ metadata:
 rules:
   - apiGroups: ["logweir.dev"]
     resources: ["trustpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+# Source: logweir/templates/human-roles.yaml
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: logweir-retention-admin
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: human-role
+rules:
+  - apiGroups: ["logweir.dev"]
+    resources: ["retentionpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]
 ---
 # Source: logweir/templates/clusterrolebinding.yaml

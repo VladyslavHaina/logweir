@@ -54,10 +54,36 @@
 # who could delete a `BackupDestination` could remove the object a running
 # Backup froze its location from.
 #
-# NOTHING FROM D3 HERE. `protectionpolicies`, `rehearsalschedules`,
-# `recoverycatalogs` and `retentionpolicies` get their operator verbs from
-# D3 §9's own RBAC pass; this file gives the operator READ on them through
-# `logweir-viewer` and no write at all.
+# THE THREE D3 KINDS (§9): `create`, PLUS THE EDIT EACH ONE ACTUALLY ALLOWS.
+# D3 §9 gives the operator `create` on `protectionpolicies`,
+# `rehearsalschedules` and `recoverycatalogs`, and — exactly as with
+# `backupschedules` above — what may then CHANGE is the CRD's own CEL rule and
+# not a verb here:
+#
+# * `protectionpolicies` carries NO immutability seal on `.spec`. An objective
+#   is policy an operator is expected to tune, so it gets `update` AND `patch`,
+#   for the same reason `backupschedules` has both: `kubectl edit` and
+#   `kubectl apply` send a PATCH, so `update` alone is a grant nobody can use.
+# * `rehearsalschedules` seals every field but `spec.suspend` — "the standing
+#   authorization binds a digest of this spec, so an edit would authorize work
+#   nobody approved". Suspending is a merge patch, so `patch` WITHOUT `update`:
+#   a PUT of the whole object is the shape most likely to carry a second,
+#   unnoticed field, and the API server would refuse it for that field alone.
+# * `recoverycatalogs` seals everything but `spec.syncRequest` ("a catalog of a
+#   different location is a different catalog"). Same shape, same verb.
+#
+# THE FOURTH D3 KIND IS NOT HERE, AND THAT IS THE DECISION. `retentionpolicies`
+# is the only kind in this product whose object can end in a deletion, so its
+# write verbs live in `logweir-retention-admin` — a sixth role, bound
+# separately, exactly as `logweir-trust-admin` holds the `TrustPolicy` writes.
+# An operator who could write a `RetentionPolicy` could move an installation
+# from `Report` to `Enforce`, which D3 §12 makes "a separate, later,
+# administrator decision with its own credential".
+#
+# NO `delete` ON ANY OF THE THREE, for the reason the D2 block gives: a
+# `RecoveryCatalog` deleted mid-sync loses the view a `RetentionPolicy`
+# evaluates against, and a deleted `ProtectionPolicy` silently stops being the
+# thing that says whether you can recover.
 #
 # NO `approvals` HERE. Creating a restore and approving one are different
 # people on purpose (`logweir-approver`); an operator who could do both makes
@@ -99,4 +125,24 @@ rules:
       - backupdestinations
       - preflights
       - topicdiscoveries
+    verbs: ["patch"]
+  # D3 §9 — declare protection, connect an archive, schedule a rehearsal.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - protectionpolicies
+      - recoverycatalogs
+      - rehearsalschedules
+    verbs: ["create"]
+  # A `ProtectionPolicy`'s spec is not sealed: objectives are policy, and both
+  # verbs are needed for the same reason `backupschedules` needs both.
+  - apiGroups: ["logweir.dev"]
+    resources: ["protectionpolicies"]
+    verbs: ["update", "patch"]
+  # …and the ONE mutable field each of the other two has — `spec.suspend` and
+  # `spec.syncRequest` — both merge patches, both bounded by the CRD's own CEL.
+  # `patch` WITHOUT `update`. See this file's header.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - recoverycatalogs
+      - rehearsalschedules
     verbs: ["patch"]

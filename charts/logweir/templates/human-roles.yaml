@@ -1,7 +1,9 @@
 {{- /*
-The four human roles — `config/rbac/{viewer,operator,approver,trust_admin}_role.yaml`,
+The five human roles —
+`config/rbac/{viewer,operator,approver,trust_admin,retention_admin}_role.yaml`,
 rule for rule, SHIPPED UNBOUND exactly as `logweir.yaml` ships them. Who may
-view, operate, approve or administer trust in which namespace is your decision:
+view, operate, approve, administer trust or administer retention in which
+namespace is your decision:
 
     kubectl create rolebinding logweir-approver \
       --clusterrole=logweir-approver --user=<someone-else> -n <namespace>
@@ -27,6 +29,21 @@ keys may sign an approval; bind it to somebody who does NOT hold
 `logweir-operator`, or `self_attested: false` buys nothing. It carries no
 `delete`: deleting a policy sends every namespace it bound back to the legacy
 roster, which is a widening dressed as a cleanup.
+
+D3 W13 added the operator's three D3 kinds (`create` on `protectionpolicies`,
+`recoverycatalogs` and `rehearsalschedules`; `update`/`patch` on the first,
+whose spec is not sealed, and `patch` on the other two, whose CRDs leave
+exactly one field mutable each) and a FIFTH role.
+
+`logweir-retention-admin` IS NAMESPACED and needs a RoleBinding per namespace.
+It is the only holder of a write verb on `RetentionPolicy` — the one kind whose
+object can end in a deletion — and `spec.mode` is the field that moves an
+installation from reporting to deleting. Bind it to somebody who does NOT hold
+`logweir-operator`. It carries no `delete` either, for a reason of its own:
+turning enforcement off is `mode: Report`, and deleting the object while an
+enforcement Job holds its lease takes the lease record the restore-side hold
+reads. Holding the role deletes nothing on its own — see
+`config/rbac/retention_admin_role.yaml` for the other three gates.
 */ -}}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -92,6 +109,26 @@ rules:
       - preflights
       - topicdiscoveries
     verbs: ["patch"]
+  # D3 §9 — declare protection, connect an archive, schedule a rehearsal…
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - protectionpolicies
+      - recoverycatalogs
+      - rehearsalschedules
+    verbs: ["create"]
+  # …tune an objective (no seal on that spec)…
+  - apiGroups: ["logweir.dev"]
+    resources: ["protectionpolicies"]
+    verbs: ["update", "patch"]
+  # …and flip the ONE field each of the other two leaves mutable:
+  # `spec.suspend` and `spec.syncRequest`. `patch` without `update`. See
+  # `config/rbac/operator_role.yaml`. `retentionpolicies` is NOT here — its
+  # writes are `logweir-retention-admin`'s.
+  - apiGroups: ["logweir.dev"]
+    resources:
+      - recoverycatalogs
+      - rehearsalschedules
+    verbs: ["patch"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
@@ -119,4 +156,16 @@ metadata:
 rules:
   - apiGroups: ["logweir.dev"]
     resources: ["trustpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: logweir-retention-admin
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: human-role
+rules:
+  - apiGroups: ["logweir.dev"]
+    resources: ["retentionpolicies"]
     verbs: ["get", "list", "watch", "create", "update", "patch"]

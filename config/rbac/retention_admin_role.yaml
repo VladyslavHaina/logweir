@@ -1,0 +1,74 @@
+# `logweir-retention-admin` — the ONLY holder of a write verb on
+# `RetentionPolicy`, the one kind whose object can end in a deletion.
+#
+# ---------------------------------------------------------------------------
+# WHY A SIXTH ROLE AND NOT A RULE ON `logweir-operator`
+# ---------------------------------------------------------------------------
+# D3 §9, and D3 §12's upgrade order says the same thing in the other direction:
+# a `RetentionPolicy` is created "in `Report`", and "`Enforce` is a separate,
+# later, administrator decision with its own credential". `spec.mode` is the
+# field that carries that decision, and it is an ordinary mutable field — the
+# CRD seals `destinationRef`, `catalogRef` and `scope` and nothing else,
+# because an approved plan names point ids and a re-pointable policy would
+# apply that plan somewhere else. So "who may move this installation from
+# reporting to deleting" is a question RBAC has to answer, and the only way it
+# can answer it is by holding the write verb in a role of its own.
+#
+# The separation is the same one `logweir-trust-admin` exists for. An operator
+# who could write a `RetentionPolicy` could set `mode: Enforce` on a policy they
+# also authored, and D3 §16's "deletion is the irreversible boundary" would be
+# one person's decision from end to end.
+#
+# ---------------------------------------------------------------------------
+# WHAT IT IS NOT: A DELETE CAPABILITY
+# ---------------------------------------------------------------------------
+# **Holding this role deletes nothing by itself.** An `Enforce` policy still
+# needs three further things that are not in this file and cannot be granted by
+# it: the `logweir-retention` ServiceAccount to exist in the namespace
+# (`charts/logweir/templates/retention.yaml`, `retention.enabled`), an object-
+# store credential whose scope is the policy's own prefix and never `logweir/`,
+# and — per run — an administrator's `approve-plan` carrying the current
+# `planSha256`. This role is the FIRST of those gates, not the whole of them,
+# and `charts/logweir/README.md` says so where an adopter reads it.
+#
+# NAMESPACED, unlike `logweir-trust-admin`. A `RetentionPolicy` is a namespaced
+# kind, so this is bound per namespace and an installation can have a different
+# retention administrator for each one:
+#
+#     kubectl --context docker-desktop create rolebinding logweir-retention-admin \
+#       --clusterrole=logweir-retention-admin --user=<storage-owner> -n <namespace>
+#
+# ---------------------------------------------------------------------------
+# THE VERBS, AND THE ONE THAT IS DELIBERATELY ABSENT
+# ---------------------------------------------------------------------------
+# `get`/`list`/`watch` so the holder can read the evaluation and the enforcement
+# state they are about to change — this role is bindable on its own and must not
+# need `logweir-viewer` beside it to be usable. `create` and `update` are D3
+# §9's pair; `patch` is beside `update` for the reason `logweir-operator`'s
+# header records — `kubectl edit` and `kubectl apply` both send a PATCH, and an
+# `update`-only grant leaves the administrator unable to perform the edit the
+# role exists for, which here means unable to put a runaway policy back into
+# `mode: Report`.
+#
+# **NO `delete`.** Deleting a `RetentionPolicy` is not a safe undo: a policy
+# removed while an enforcement Job holds its lease takes the lease record with
+# it, and `status.lease` is what the restore-side hold reads. Turning
+# enforcement off is an EDIT — `mode: Report` — and that is the operation this
+# role is shaped around. Removing the object outright is a cluster-administrator
+# act with its own audit line, exactly as it is for a `TrustPolicy`.
+#
+# **NO VERB ON `backupschedules`**, whose legacy `status.retentionReport` is a
+# different mechanism with a different owner (D3 §6.3): it reports and never
+# deletes, and it is `logweir-operator`'s object.
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: logweir-retention-admin
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/component: human-role
+rules:
+  - apiGroups: ["logweir.dev"]
+    resources: ["retentionpolicies"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
