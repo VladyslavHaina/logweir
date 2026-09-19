@@ -289,6 +289,20 @@ pub mod env {
     pub const LOCATION: &str = "LOGWEIR_RETENTION_LOCATION";
 }
 
+/// What the write guard says when a status PATCH cannot be preconditioned.
+///
+/// **Named, not inlined, because it is a contract two places depend on**: the
+/// operator reading the controller log, and
+/// `tests/retention_policy_controller.rs`, which pins it so that a write
+/// silently losing its precondition cannot stop being reported. A /status
+/// compare-and-set needs `metadata.resourceVersion` (D-SEAMS S7); the cursor
+/// is `None` only before the first patch of a pass on an object that carries
+/// none, or after a 409 cleared it, and in both cases a blind write would
+/// overwrite a status this pass never read.
+pub const NO_RESOURCE_VERSION: &str =
+    "RetentionPolicy carries no metadata.resourceVersion, which a /status compare-and-set \
+     needs (D-SEAMS S7); no patch is sent";
+
 /// The annotation an administrator's `kubectl patch` records itself in, so the
 /// enforcement record can name who approved (D3 §6.5).
 pub const APPROVER_ANNOTATION: &str = "logweir.dev/retention-plan-approver";
@@ -983,41 +997,64 @@ impl Pass<'_> {
                 },
             ),
         ]);
-        self.patch_status(json!({
-            "observedGeneration": self.generation(),
-            "enforcement": ENFORCEMENT_LOGWEIR_WORKER,
-            // THE FIVE FIELDS THE CRD DECLARES AND THE FIRST LANDING NEVER
-            // WROTE (review `d3w9` H2). `failed[]` is the input
-            // `previously_refused()` reads, so without it D3 §6.5's "a provider
-            // refusal is recorded, kept and excluded from the next plan" could
-            // not fire at all.
-            "lastEnforcement": {
-                "runId": run_id,
-                "finishedAt": self.ctx.now,
-                "exitCode": exit_code,
-                "deleted": report.deleted,
-                "failed": report
-                    .failed
-                    .iter()
-                    .map(|(point_id, code)| json!({"pointId": point_id, "code": code}))
-                    .collect::<Vec<Value>>(),
-                "objectsDeleted": report.objects_deleted,
-                "recordKey": report.record_key,
-                "recordSha256": report.record_sha256,
-            },
-            // RFC 7386: `null` DELETES the key. The lease exists only while a
-            // run holds it, and a lease left behind would hold restore
-            // admission for nothing.
-            "lease": Value::Null,
-            "consecutiveRunFailures": failures,
-            "conditions": conditions,
-        }))
-        .await?;
+        let outcome = self
+            .patch_status(json!({
+                "observedGeneration": self.generation(),
+                "enforcement": ENFORCEMENT_LOGWEIR_WORKER,
+                // THE FIVE FIELDS THE CRD DECLARES AND THE FIRST LANDING NEVER
+                // WROTE (review `d3w9` H2). `failed[]` is the input
+                // `previously_refused()` reads, so without it D3 §6.5's "a provider
+                // refusal is recorded, kept and excluded from the next plan" could
+                // not fire at all.
+                "lastEnforcement": {
+                    "runId": run_id,
+                    "finishedAt": self.ctx.now,
+                    "exitCode": exit_code,
+                    "deleted": report.deleted,
+                    "failed": report
+                        .failed
+                        .iter()
+                        .map(|(point_id, code)| json!({"pointId": point_id, "code": code}))
+                        .collect::<Vec<Value>>(),
+                    "objectsDeleted": report.objects_deleted,
+                    "recordKey": report.record_key,
+                    "recordSha256": report.record_sha256,
+                },
+                // RFC 7386: `null` DELETES the key. The lease exists only while a
+                // run holds it, and a lease left behind would hold restore
+                // admission for nothing.
+                "lease": Value::Null,
+                "consecutiveRunFailures": failures,
+                "conditions": conditions,
+            }))
+            .await?;
 
         // THE TTL AFTER THE STATUS, and only then (S7). The Job's pod carries
         // the exit code this pass just published.
-        if let Some(job) = job {
-            self.patch_job_ttl(job).await?;
+        //
+        // AND ONLY IF THE STATUS ACTUALLY LANDED. `patch_status` answers
+        // `Conflict` both for a 409 and for a pass whose precondition cursor is
+        // gone ([`NO_RESOURCE_VERSION`]) — in either case this run's exit code
+        // was NOT published. Setting the Job's TTL then is the one irreversible
+        // half of the pair: the Job and its pod are collected, the exit code
+        // becomes unreadable, and the next pass harvests a run it can only
+        // record as "produced no exit code". S7's ordering rule exists to stop
+        // garbage collection racing the exit-code read; a write that did not
+        // land has not won that race, it has lost it. So the TTL waits, the run
+        // stays untracked, and the next pass reads it again.
+        match outcome {
+            PatchOutcome::Applied | PatchOutcome::Unchanged => {
+                if let Some(job) = job {
+                    self.patch_job_ttl(job).await?;
+                }
+            }
+            PatchOutcome::Conflict => {
+                warn!(
+                    policy = %self.name, namespace = %self.namespace, run = %run_id,
+                    "the harvest status did not land; this run stays untracked and its Job keeps \
+                     its pod so the next pass can read the exit code again"
+                );
+            }
         }
         Ok(Outcome {
             phase: RetentionPhase::Harvested,
@@ -1593,6 +1630,49 @@ impl Pass<'_> {
                 "runId": run_id,
                 "startedAt": self.ctx.now,
                 "planSha256": plan_sha256,
+                // THE PREVIOUS RUN'S TERMINAL FIELDS ARE DELETED HERE, BY
+                // EXPLICIT `null`, AND THE OMISSION WAS DEFECT
+                // RET-DEGRADED-UNREACHABLE.
+                //
+                // A /status merge PATCH (RFC 7386) MERGES sub-objects: writing
+                // `lastEnforcement: {runId, startedAt, planSha256}` replaces
+                // those three keys and LEAVES EVERY OTHER KEY OF THE PREVIOUS
+                // RUN in place. `finishedAt` is the one that matters, because
+                // `tracked_run` reads exactly it to decide whether the run
+                // named by `runId` still needs harvesting. So from the second
+                // run onward the object said "this run finished at <the
+                // PREVIOUS run's instant>", every pass concluded there was
+                // nothing to track, no run after the first was ever harvested,
+                // its exit code was never read, and `consecutiveRunFailures`
+                // stopped at 1 — for good.
+                //
+                // What that cost: D3 §6.5's bounded retry
+                // (`DEGRADED_AFTER_FAILURES` consecutive failures stop
+                // scheduling until the spec changes) became UNREACHABLE, so a
+                // policy whose runs all fail kept creating deletion Jobs
+                // forever while `Enforced=True` and `EnforcementDegraded=False`
+                // showed an operator a healthy policy. Observed live on
+                // docker-desktop at `7b4fae9`: five enforcement Jobs in 140 s,
+                // all failed, `status.consecutiveRunFailures = 1`.
+                //
+                // ALL SEVEN, NOT ONLY `finishedAt`. The others are just as
+                // wrong once they outlive their run — `exitCode`, `deleted`,
+                // `failed`, `objectsDeleted` and the two record fields would
+                // attribute the previous run's outcome to this one, and
+                // `previously_refused()` reads `failed[]` to exclude a point
+                // from the next plan. A field that describes a finished run has
+                // no meaning on a run that has just started, and the way to say
+                // that in a merge patch is `null`.
+                //
+                // `harvest` is the model: it writes every one of these
+                // and deletes the lease with `"lease": Value::Null`.
+                "finishedAt": Value::Null,
+                "exitCode": Value::Null,
+                "deleted": Value::Null,
+                "failed": Value::Null,
+                "objectsDeleted": Value::Null,
+                "recordKey": Value::Null,
+                "recordSha256": Value::Null,
             },
             // THE PLAN'S NAME, PUBLISHED (review `d3w9` M9). The contract says
             // "read the names from status; never compute one", and the first
@@ -2407,8 +2487,7 @@ impl Pass<'_> {
         let Some(resource_version) = self.version() else {
             warn!(
                 policy = %self.name, namespace = %self.namespace,
-                "RetentionPolicy carries no metadata.resourceVersion, which a /status \
-                 compare-and-set needs (D-SEAMS S7); no patch is sent"
+                "{NO_RESOURCE_VERSION}"
             );
             return Ok(PatchOutcome::Conflict);
         };

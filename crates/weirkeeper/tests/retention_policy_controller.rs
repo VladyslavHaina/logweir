@@ -3360,3 +3360,388 @@ fn the_run_line_parser_reads_by_name_and_skips_what_it_cannot_read() {
     assert!(bounded.bounded_only());
     assert!(!report.bounded_only(), "an AccessDenied is not a bound");
 }
+
+// ---------------------------------------------------------------------------
+// RET-DEGRADED-UNREACHABLE — the bounded retry, driven as a SEQUENCE
+// ---------------------------------------------------------------------------
+
+/// The object's status after a pass, which is the previous status with this
+/// pass's patches merged onto it — what the API server would hold and what the
+/// next pass reads. Every row below threads this rather than hand-writing the
+/// intermediate status, because the defect this file now pins lives ONLY in
+/// what one pass leaves behind for the next.
+fn after(previous: &Value, f: &Fixture) -> Value {
+    // EACH RAW PATCH, IN ORDER, ONTO THE PREVIOUS STATUS — never `Fixture::status()`.
+    // That helper folds the pass's patches into an EMPTY object, so an RFC 7386
+    // `null` (which deletes) has no key to delete and disappears; folding its
+    // result onto the previous status could then never remove anything, and a
+    // row about explicit nulls would assert the opposite of what it means to.
+    // The API server applies each patch to the object as it then stands, and so
+    // does this.
+    let mut merged = previous.clone();
+    for patch in f.status_patches() {
+        if let Some(status) = patch.get("status") {
+            weirkeeper::conditions::apply_merge_patch(&mut merged, status);
+        }
+    }
+    merged
+}
+
+/// A pass that should start a run. Returns the status it leaves and the run id.
+async fn start_pass(
+    spec: &Value,
+    status: &Value,
+    at: DateTime<Utc>,
+    digest: &str,
+) -> (Value, String) {
+    let mut routes = happy_routes(&six_points());
+    routes.push(plan_config_map_route(digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let f = fixture(routes);
+    let outcome = run_at(&f, &policy(spec.clone(), status.clone()), at).await;
+    assert_eq!(
+        outcome.phase,
+        ctrl::RetentionPhase::Started,
+        "the pass at {at} did not start a run"
+    );
+    let next = after(status, &f);
+    let run_id = next["lastEnforcement"]["runId"]
+        .as_str()
+        .expect("a run id")
+        .to_string();
+    (next, run_id)
+}
+
+/// A pass that should harvest the named run at `exit`.
+async fn harvest_pass(
+    spec: &Value,
+    status: &Value,
+    at: DateTime<Utc>,
+    run_id: &str,
+    exit: i32,
+    digest: &str,
+) -> Value {
+    let job_name = format!("{}-{run_id}", stem());
+    let leaked: &'static str = Box::leak(format!("/jobs/{job_name}").into_boxed_str());
+    // THE EVALUATION ROUTES ARE HERE TOO, DELIBERATELY. A pass that fails to
+    // recognise its own in-flight run falls through to `evaluate()` and starts
+    // ANOTHER one; with only the harvest routes the mock would panic on the
+    // first unrouted request and the failure would read as a gap in the table.
+    // With them present the pass completes and the phase assertion below is
+    // what fails, naming the defect.
+    let mut routes = happy_routes(&six_points());
+    routes.push(route("GET", leaked, job_body(&job_name, true)));
+    routes.push(route("GET", "/pods", pod_list(exit)));
+    routes.push(route(
+        "GET",
+        "/log",
+        "retention-result=deleted=0 failed=0 objects=0\n".to_string(),
+    ));
+    routes.push(route("PATCH", leaked, "{}".to_string()));
+    routes.push(plan_config_map_route(digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let f = fixture(routes);
+    let outcome = run_at(&f, &policy(spec.clone(), status.clone()), at).await;
+    assert_eq!(
+        outcome.phase,
+        ctrl::RetentionPhase::Harvested,
+        "the pass at {at} did not harvest run {run_id}"
+    );
+    after(status, &f)
+}
+
+/// A pass that is expected NOT to start a run. Returns the Fixture so the
+/// caller can assert on what was and was not sent.
+async fn quiet_pass(policy: &RetentionPolicy, at: DateTime<Utc>, digest: &str) -> Fixture {
+    let mut routes = happy_routes(&six_points());
+    routes.push(plan_config_map_route(digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let f = fixture(routes);
+    run_at(&f, policy, at).await;
+    f
+}
+
+/// The plan digest `six_points()` evaluates to — learned from a pass, never
+/// written down, so it cannot drift from the evaluator.
+async fn learned_digest() -> String {
+    let learn = fixture(happy_routes(&six_points()));
+    run(&learn, &policy(enforcing(None), json!({}))).await;
+    learn.status()["lastEvaluation"]["planSha256"]
+        .as_str()
+        .expect("a digest")
+        .to_string()
+}
+
+/// `spec.enforcement.requireApprovedPlan: false`, so each cycle below starts a
+/// run without an administrator re-approving a digest between them. The
+/// property under test is the COUNTING, not the approval.
+fn unattended_enforcing() -> Value {
+    let mut spec = enforcing(None);
+    spec["enforcement"]["requireApprovedPlan"] = json!(false);
+    spec
+}
+
+/// **RET-DEGRADED-UNREACHABLE.** Three consecutive failed runs degrade the
+/// policy, and a fourth is not scheduled until the spec changes.
+///
+/// DRIVEN AS A SEQUENCE OF REAL PASSES, each starting from the status the
+/// previous one wrote, and that is the whole point of the row. Every other test
+/// in this file hands the reconciler a hand-written status, so the defect —
+/// which lives ONLY in what one pass leaves behind for the next — was invisible
+/// to all of them: `three_consecutive_failures_degrade_and_stop_scheduling`
+/// passed while the product could not reach two.
+///
+/// What was wrong: `start_run`'s `lastEnforcement` patch is an RFC 7386 merge,
+/// and it wrote `{runId, startedAt, planSha256}` without clearing the previous
+/// run's `finishedAt`. `tracked_run` reads exactly that field to decide whether
+/// the run named by `runId` still needs harvesting, so from the SECOND run
+/// onward every pass concluded there was nothing to track, no run was ever
+/// harvested, no exit code was ever read, and `consecutiveRunFailures` stopped
+/// at 1. D3 §6.5's bounded retry was unreachable and the policy kept creating
+/// deletion Jobs while showing `Enforced=True` and `EnforcementDegraded=False`.
+/// Live at `7b4fae9`: five enforcement Jobs in 140 s, all failed, count 1.
+#[tokio::test]
+async fn three_failed_runs_degrade_and_a_fourth_is_not_scheduled_until_the_spec_changes() {
+    let digest = learned_digest().await;
+    let spec = unattended_enforcing();
+
+    let mut status = json!({});
+    for day in 0..3 {
+        let at = now() + chrono::Duration::days(day);
+        let (started, run_id) = start_pass(&spec, &status, at, &digest).await;
+        assert!(
+            started["lastEnforcement"].get("finishedAt").is_none(),
+            "a run that has just started has not finished; day {day} status: {started}"
+        );
+        status = harvest_pass(
+            &spec,
+            &started,
+            at + chrono::Duration::minutes(1),
+            &run_id,
+            1,
+            &digest,
+        )
+        .await;
+        assert_eq!(
+            status["consecutiveRunFailures"],
+            json!(day + 1),
+            "one failed run per cycle, counted; day {day}"
+        );
+    }
+
+    let degraded = status["conditions"]
+        .as_array()
+        .expect("conditions")
+        .iter()
+        .find(|c| c["type"] == ctrl::CONDITION_DEGRADED)
+        .cloned()
+        .expect("a Degraded condition");
+    assert_eq!(degraded["status"], "True");
+    assert_eq!(degraded["reason"], ctrl::REASON_CONSECUTIVE_FAILURES);
+
+    // THE FOURTH RUN IS NOT SCHEDULED. Three failures with the spec unchanged
+    // stop scheduling; `observedGeneration == metadata.generation` is the only
+    // thing on the object that says the spec has not changed.
+    let fourth = now() + chrono::Duration::days(3);
+    let f = quiet_pass(&policy(spec.clone(), status.clone()), fourth, &digest).await;
+    assert!(
+        f.posted("/jobs").is_empty(),
+        "a degraded policy schedules no further run. Requests: {:?}",
+        f.seen()
+    );
+
+    // AND THE SPEC CHANGING RELEASES IT. Nothing else does: not time, not a
+    // restart, not the count being high enough for long enough.
+    let mut bumped = policy_value(spec, status);
+    bumped["metadata"]["generation"] = json!(5);
+    let bumped: RetentionPolicy = serde_json::from_value(bumped).expect("a policy");
+    let g = quiet_pass(&bumped, fourth, &digest).await;
+    assert_eq!(
+        g.posted("/jobs").len(),
+        1,
+        "a spec change is what releases a degraded policy"
+    );
+}
+
+/// One successful run clears the count, so "three consecutive" means
+/// consecutive and a policy that recovers is not degraded by history.
+#[tokio::test]
+async fn a_successful_run_clears_the_consecutive_failure_count() {
+    let digest = learned_digest().await;
+    let spec = unattended_enforcing();
+
+    let mut status = json!({});
+    for day in 0..2 {
+        let at = now() + chrono::Duration::days(day);
+        let (started, run_id) = start_pass(&spec, &status, at, &digest).await;
+        status = harvest_pass(
+            &spec,
+            &started,
+            at + chrono::Duration::minutes(1),
+            &run_id,
+            1,
+            &digest,
+        )
+        .await;
+    }
+    assert_eq!(status["consecutiveRunFailures"], json!(2));
+
+    let at = now() + chrono::Duration::days(2);
+    let (started, run_id) = start_pass(&spec, &status, at, &digest).await;
+    status = harvest_pass(
+        &spec,
+        &started,
+        at + chrono::Duration::minutes(1),
+        &run_id,
+        0,
+        &digest,
+    )
+    .await;
+
+    assert_eq!(status["consecutiveRunFailures"], json!(0));
+    let degraded = status["conditions"]
+        .as_array()
+        .expect("conditions")
+        .iter()
+        .find(|c| c["type"] == ctrl::CONDITION_DEGRADED)
+        .cloned()
+        .expect("a Degraded condition");
+    assert_eq!(degraded["status"], "False");
+    assert_eq!(degraded["reason"], ctrl::REASON_HEALTHY);
+}
+
+/// The shape, asserted directly: a started run DELETES the previous run's
+/// terminal fields with explicit `null`s, all seven of them.
+///
+/// The row above proves the consequence; this one proves the mechanism, so a
+/// future change that clears `finishedAt` some other way and leaves `exitCode`
+/// or `failed[]` behind is still caught. `failed[]` matters beyond cosmetics:
+/// `previously_refused()` reads it to exclude a point from the next plan.
+#[tokio::test]
+async fn a_started_run_deletes_the_previous_runs_terminal_fields() {
+    let digest = learned_digest().await;
+    let status = json!({
+        "lastEnforcement": {
+            "runId": "r00000000deadbee9",
+            "startedAt": "2026-09-16T04:17:00Z",
+            "finishedAt": "2026-09-16T04:19:00Z",
+            "exitCode": 1,
+            "deleted": ["p1"],
+            // A point id the view does not carry, DELIBERATELY: `previously_refused()`
+            // reads `failed[]` and excludes those points from the next plan, so
+            // seeding a real one would change the plan digest this pass computes
+            // and the row would be about the evaluator instead of about the patch.
+            // That sensitivity is itself why this field must not outlive its run.
+            "failed": [{"pointId": "p-not-in-this-view", "code": "AccessDenied"}],
+            "objectsDeleted": 3,
+            "recordKey": "logweir/retention/uid/r00000000deadbee9.json",
+            "recordSha256": "sha256:aa"
+        },
+        "consecutiveRunFailures": 1
+    });
+    let (after_start, _) = start_pass(&unattended_enforcing(), &status, now(), &digest).await;
+
+    let record = &after_start["lastEnforcement"];
+    for field in [
+        "finishedAt",
+        "exitCode",
+        "deleted",
+        "failed",
+        "objectsDeleted",
+        "recordKey",
+        "recordSha256",
+    ] {
+        assert!(
+            record.get(field).is_none(),
+            "`{field}` describes a run that has finished and must not survive onto the run that \
+             has just started; a merge PATCH deletes it only with an explicit null. Record: \
+             {record}"
+        );
+    }
+    assert_eq!(record["startedAt"], json!(now()));
+    assert_ne!(record["runId"], json!("r00000000deadbee9"));
+    // The count is HISTORY and is deliberately untouched by a start: it is what
+    // the third consecutive failure will be added to.
+    assert_eq!(after_start["consecutiveRunFailures"], json!(1));
+}
+
+/// The write guard, pinned: a status PATCH with no `metadata.resourceVersion`
+/// to precondition on is REFUSED, and the harvest that could not publish its
+/// exit code does not then let the Job's pod be collected.
+///
+/// THE MESSAGE IS PART OF THE CONTRACT. It is the line an operator greps for
+/// when a status stops moving — it was 2013 lines in a three-minute window on
+/// the lab at `7b4fae9` — so it is named once in the controller and asserted
+/// here, rather than spelled twice.
+///
+/// THE SECOND HALF IS THE ONE THAT COSTS DATA. `harvest` writes the status and
+/// then patches the Job's `ttlSecondsAfterFinished`, in that order, because
+/// garbage collection must not race the exit-code read (D-SEAMS S7). A write
+/// that did not land has lost that race, not won it: setting the TTL then
+/// collects the pod whose exit code was never published, and every later pass
+/// can only record "produced no exit code". So the TTL waits.
+#[tokio::test]
+async fn a_status_write_with_no_precondition_is_refused_and_the_pod_is_kept() {
+    assert!(
+        ctrl::NO_RESOURCE_VERSION.contains("carries no metadata.resourceVersion")
+            && ctrl::NO_RESOURCE_VERSION.contains("no patch is sent"),
+        "the guard names the missing field and says it sent nothing: {}",
+        ctrl::NO_RESOURCE_VERSION
+    );
+
+    let run_id = "r00000000deadbee7";
+    let job_name = format!("{}-{run_id}", stem());
+    let leaked: &'static str = Box::leak(format!("/jobs/{job_name}").into_boxed_str());
+    let routes = vec![
+        route("GET", "/retentionpolicies", policy_list(vec![])),
+        route("GET", leaked, job_body(&job_name, true)),
+        route("GET", "/pods", pod_list(1)),
+        route(
+            "GET",
+            "/log",
+            "retention-result=deleted=0 failed=0 objects=0\n".to_string(),
+        ),
+        route(
+            "PATCH",
+            "/retentionpolicies/primary/status",
+            policy_value(json!({}), json!({})).to_string(),
+        ),
+        route("PATCH", leaked, "{}".to_string()),
+    ];
+    let f = fixture(routes);
+
+    let mut value = policy_value(
+        enforcing(None),
+        json!({
+            "lastEnforcement": {"runId": run_id, "startedAt": "2026-09-17T04:00:00Z"},
+            "consecutiveRunFailures": 2
+        }),
+    );
+    // THE ONE DIFFERENCE FROM EVERY OTHER ROW: no resourceVersion to
+    // precondition on.
+    value["metadata"]
+        .as_object_mut()
+        .expect("metadata")
+        .remove("resourceVersion");
+    let policy: RetentionPolicy = serde_json::from_value(value).expect("a policy");
+
+    run(&f, &policy).await;
+
+    assert!(
+        f.status_patches().is_empty(),
+        "a /status compare-and-set with nothing to precondition on is not sent as a blind write. \
+         Patches: {:?}",
+        f.status_patches()
+    );
+    assert!(
+        f.seen()
+            .iter()
+            .all(|(method, uri)| !(method == "PATCH" && uri.contains("/jobs/"))),
+        "and the Job keeps its pod, so the next pass can still read the exit code this one could \
+         not publish. Requests: {:?}",
+        f.seen()
+    );
+}

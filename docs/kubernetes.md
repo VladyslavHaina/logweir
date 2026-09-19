@@ -1431,6 +1431,40 @@ deployment property. **An operator who grants `DeleteObject` on the archive
 prefix to the ordinary backup credential loses this margin**, and should either
 not do that or run enforcement from a separately built image.
 
+**The bounded retry, and how to read it.** Three consecutive failed runs set
+`EnforcementDegraded=True/ConsecutiveFailures` and stop scheduling until the
+spec changes — "the spec changed" being `metadata.generation !=
+status.observedGeneration`, which is the only thing on the object that says so.
+One successful run clears `status.consecutiveRunFailures` to 0, so *consecutive*
+means consecutive and a policy that recovers is not degraded by history. Neither
+time nor a controller restart releases a degraded policy; editing the spec does.
+
+```bash
+kubectl --context docker-desktop -n <namespace> get retentionpolicy primary \
+  -o jsonpath='{.status.consecutiveRunFailures}{"\n"}{.status.lastEnforcement.finishedAt}{"\n"}'
+```
+
+**On a build before 2026-09-19 that counter is stuck and the bounded retry does
+not exist** (defect RET-DEGRADED-UNREACHABLE). `status.lastEnforcement` is
+written by a merge PATCH, and the patch that recorded a *starting* run left the
+*previous* run's `finishedAt` in place; the controller reads exactly that field
+to decide whether the run it just started still needs harvesting, so from the
+second run onward it decided there was nothing to track. No run after the first
+was ever harvested, no exit code was ever read, and `consecutiveRunFailures`
+stopped at 1 while the policy kept creating deletion Jobs and reporting
+`Enforced=True`, `EnforcementDegraded=False` — a healthy-looking policy whose
+every run was failing. Observed on docker-desktop: five enforcement Jobs in
+140 seconds, all failed, the counter at 1. **The tell is a `lastEnforcement`
+whose `runId` is current but whose `finishedAt` is older than its `startedAt`.**
+A started run now deletes all seven of the previous run's terminal fields with
+explicit `null`s.
+
+A second guard sits beside it: a `/status` write that has no
+`metadata.resourceVersion` to precondition on is refused rather than sent as a
+blind write, and the harvest that could not publish its exit code no longer sets
+the Job's `ttlSecondsAfterFinished`. The pod therefore survives for the next
+pass to read, instead of being collected with the exit code still unpublished.
+
 **This controller does not function live until the retention ServiceAccount
 exists.** Every Job it builds requests `logweir-retention`, and the chart does
 not create it yet (`retention.enabled` and the SA are the wave-4 RBAC worker's).
