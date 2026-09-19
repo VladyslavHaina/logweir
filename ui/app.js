@@ -24,8 +24,13 @@ import { mountHistory, mountRestoreDetail } from "./pages/history.js";
 import { mountRestoreWizard, restoreRouteParams } from "./pages/restore-wizard.js";
 import { approvalRouteParams, mountApprovals } from "./pages/approvals.js";
 import { mountKeys } from "./pages/keys.js";
+// D3 (PLAT-12.1, PLAT-14.1, PLAT-14.2, PLAT-15.1): the durable operation view
+// and the two D3 surfaces that have a list and a detail of their own.
+import { mountOperation, operationRouteParams } from "./pages/operation.js";
+import { mountProtection, mountProtectionDetail } from "./pages/protection.js";
+import { mountCatalog, mountCatalogDetail } from "./pages/catalog.js";
 
-// The eight routes, in navigation order. The hash is the whole route.
+// The eleven routes, in navigation order. The hash is the whole route.
 //
 // `#/destinations` IS CONSOLE-ONLY, AND IT IS STILL IN THIS LIST. The product
 // API serves saved destinations and `kubectl proxy` does not; the legacy UI
@@ -41,6 +46,13 @@ const ROUTES = [
   { hash: "#/schedules", title: "Schedules", blurb: "BackupSchedule objects, their next slot and their suspend state.", mount: mountSchedules },
   { hash: "#/backups", title: "Backups", blurb: "Backup runs, each with the evidence weirkeeper recorded for it.", mount: mountBackups, detail: mountBackupDetail },
   { hash: "#/history", title: "History", blurb: "Completed runs over time, newest first.", mount: mountHistory, detail: mountRestoreDetail },
+  // `#/operations` CARRIES AN IDENTITY IN THE HASH and has no list: an
+  // operation is always reached FROM a run -- a row, or the outcome of a
+  // submission -- and a list of operations would be the backups and history
+  // tables a second time.
+  { hash: "#/operations", title: "Operations", blurb: "One durable run: where it is, why, what it produced and whether the evidence verified.", mount: mountOperation, route: true, params: operationRouteParams },
+  { hash: "#/protection", title: "Protection", blurb: "Whether a recoverable backup exists, how old it is, and what was alerted about it.", mount: mountProtection, detail: mountProtectionDetail },
+  { hash: "#/catalog", title: "Catalog", blurb: "The durable recovery catalog: what is in the archive, whether it is available and whether it verifies.", mount: mountCatalog, detail: mountCatalogDetail },
   { hash: "#/restore", title: "Restore", blurb: "The restore wizard: a chosen recovery point, archive, point in time, target, preflight, plan.", mount: mountRestoreWizard, route: true, params: restoreRouteParams },
   { hash: "#/approvals", title: "Approvals", blurb: "Approval objects, and which key signed each one.", mount: mountApprovals, route: true, params: approvalRouteParams },
   { hash: "#/keys", title: "Keys", blurb: "The TrustRoster, read-only: it is cluster-scoped and admin-only.", mount: mountKeys, cluster: true },
