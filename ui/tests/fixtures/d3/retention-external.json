@@ -1,0 +1,90 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "RetentionPolicy",
+  "metadata": {
+    "creationTimestamp": "2026-09-19T01:49:15Z",
+    "generation": 1,
+    "labels": {
+      "logweir.dev/test-owner": "d3w14"
+    },
+    "name": "declared-c",
+    "namespace": "d3w14-lr520260919t0109z",
+    "resourceVersion": "4542389",
+    "uid": "b3f721e5-4957-4d96-857c-0c553e9aa27c"
+  },
+  "spec": {
+    "catalogRef": {
+      "name": "secondary"
+    },
+    "destinationRef": {
+      "name": "dest-b"
+    },
+    "externalLifecycle": {
+      "expirationDays": 7,
+      "prefix": "archive",
+      "provider": "s3",
+      "ruleId": "d3w14-rule"
+    },
+    "mode": "ExternalLifecycle",
+    "rules": {
+      "keepDays": 30,
+      "minUsablePoints": 1
+    },
+    "scope": {
+      "prefix": "archive"
+    }
+  },
+  "status": {
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-19T01:49:16.212026595Z",
+        "message": "deletion at this destination is performed by the bucket lifecycle rule `d3w14-rule`; Logweir reports and cannot protect individual points here",
+        "observedGeneration": 1,
+        "reason": "PolicyReady",
+        "status": "True",
+        "type": "Ready"
+      },
+      {
+        "lastTransitionTime": "2026-09-19T01:49:16.212026595Z",
+        "message": "an ExternalLifecycle policy produces no Logweir evaluation: nothing here reads the provider's rule, so there is nothing to report about what it would remove",
+        "observedGeneration": 1,
+        "reason": "NeverEvaluated",
+        "status": "Unknown",
+        "type": "Evaluated"
+      },
+      {
+        "lastTransitionTime": "2026-09-19T01:49:15.925897970Z",
+        "message": "Logweir deletes nothing under this policy",
+        "observedGeneration": 1,
+        "reason": "RecommendationOnly",
+        "status": "False",
+        "type": "Enforced"
+      },
+      {
+        "lastTransitionTime": "2026-09-19T01:49:16.212026595Z",
+        "message": "the declared lifecycle rule expires objects after 7 days and this policy's rules keep points for 30 days; the bucket wins, and Logweir cannot protect an individual point here",
+        "observedGeneration": 1,
+        "reason": "DeclaredExpiryConflicts",
+        "status": "True",
+        "type": "ExternalLifecycleConflict"
+      },
+      {
+        "lastTransitionTime": "2026-09-19T01:49:16.212026595Z",
+        "message": "no enforcement run has been attempted",
+        "observedGeneration": 1,
+        "reason": "Healthy",
+        "status": "False",
+        "type": "EnforcementDegraded"
+      }
+    ],
+    "enforcement": "ExternalLifecycleDeclared",
+    "guarantees": {
+      "activeRestoreProtection": "NotEnforced",
+      "ageExpiry": "ProviderEnforcedUnverified",
+      "legalHold": "ProviderEnforcedUnverified",
+      "minUsablePoints": "NotEnforced",
+      "sharedSegments": "NotEnforced"
+    },
+    "observedGeneration": 1
+  }
+}

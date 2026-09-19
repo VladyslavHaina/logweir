@@ -1,0 +1,139 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "Restore",
+  "metadata": {
+    "creationTimestamp": "2026-09-19T01:12:01Z",
+    "generation": 1,
+    "labels": {
+      "logweir.dev/test-owner": "d3w14"
+    },
+    "name": "d3w12-untrusted-restore",
+    "namespace": "d3w14-lr520260919t0109z",
+    "resourceVersion": "4263529",
+    "uid": "485722aa-f575-4648-b85b-a2abfd1a91f5"
+  },
+  "spec": {
+    "approvalRef": {
+      "name": "d3w14-hold-drill-approval-never-minted"
+    },
+    "backupSetRef": "c873ee2b-2628-4c4f-bc13-7bc5b3f4ab72",
+    "deadlineSeconds": 600,
+    "evidenceDestinationRef": {
+      "name": "dest-b"
+    },
+    "planBytes": "{\"backupSetRef\": \"c873ee2b-2628-4c4f-bc13-7bc5b3f4ab72\", \"note\": \"a plan nobody approved; this Restore never runs\"}",
+    "pointInTime": "2026-09-19T01:12:01Z",
+    "sourceArchive": {
+      "url": "logweir-destination://dest-b"
+    },
+    "sourceDestinationRef": {
+      "name": "dest-b"
+    },
+    "target": {
+      "clusterRef": {
+        "name": "source"
+      },
+      "mode": "newTopic",
+      "topicNaming": {
+        "prefix": "d3w14-hold-drill-"
+      }
+    }
+  },
+  "status": {
+    "completion": {
+      "integrityLevel": "byte-fingerprint",
+      "newTopics": [
+        {
+          "name": "d3w12-restore-orders",
+          "partitions": 3
+        },
+        {
+          "name": "d3w12-restore-payments",
+          "partitions": 3
+        }
+      ],
+      "recordsExpected": 200,
+      "recordsRestored": 200,
+      "recordsSampled": 64,
+      "recordsSampledMatching": 64,
+      "sampleWindow": {
+        "end": "2026-09-19T01:09:17.277Z",
+        "start": "2026-09-19T01:09:08.259Z"
+      }
+    },
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-19T01:12:20Z",
+        "message": "the approval verified",
+        "observedGeneration": 1,
+        "reason": "ApprovalVerified",
+        "status": "True",
+        "type": "Admitted"
+      },
+      {
+        "lastTransitionTime": "2026-09-19T01:14:02Z",
+        "message": "the runner exited 0 (ok)",
+        "observedGeneration": 1,
+        "reason": "Ok",
+        "status": "True",
+        "type": "Complete"
+      }
+    ],
+    "evidence": {
+      "scorecardKey": "logweir/drills/01M2VKDDD95HA4NQTHGFRJ2WCJ.scorecard.json",
+      "sidecarKey": "logweir/drills/01M2VKDDD95HA4NQTHGFRJ2WCJ.scorecard.sig",
+      "verification": {
+        "detail": "key b51c9f0e... is not listed in TrustPolicy org-default: UntrustedSigner",
+        "matchedKeyId": "b51c9f0e2a3d47f6890ab1c2d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f60",
+        "payloadType": "application/vnd.logweir.drill-scorecard+json;version=1.0.0",
+        "result": "Untrusted",
+        "signedAt": "2026-09-19T01:14:01Z",
+        "trust": {
+          "basis": "None",
+          "keyState": "Unknown",
+          "policy": {
+            "generation": 4,
+            "name": "org-default"
+          }
+        },
+        "verifiedAt": "2026-09-19T01:14:05Z"
+      }
+    },
+    "exitCode": 0,
+    "exitReason": "ok",
+    "integrity": {
+      "level": "byte-fingerprint",
+      "result": "pass"
+    },
+    "lastPhaseCompleted": 9,
+    "outcome": "pass",
+    "phase": "Succeeded",
+    "progress": {
+      "lastTransitionTime": "2026-09-19T01:14:02Z",
+      "message": "the runner exited 0 (ok)",
+      "reason": "Ok",
+      "runner": {
+        "containerState": "Terminated",
+        "jobName": "d3w12-newtopic-restore",
+        "podName": "d3w12-newtopic-restore-4kq2c",
+        "podPhase": "Succeeded",
+        "scheduled": true,
+        "startedAt": "2026-09-19T01:12:31Z"
+      },
+      "runnerPhase": {
+        "name": "teardown",
+        "number": 9
+      },
+      "stage": "Finished"
+    },
+    "reason": "Ok",
+    "teardown": {
+      "attestationKey": "logweir/drills/01M2VKDDD95HA4NQTHGFRJ2WCJ.teardown.json",
+      "deleted": [
+        "d3w12-restore-orders",
+        "d3w12-restore-payments"
+      ],
+      "failed": []
+    }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "requestId": "req-d3w12-signers",
+  "signers": [
+    {
+      "keyId": "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe",
+      "points": 4,
+      "principalHint": "signing@scram-local.invalid",
+      "trusted": true
+    },
+    {
+      "keyId": "b51c9f0e2a3d47f6890ab1c2d3e4f5061728394a5b6c7d8e9f0a1b2c3d4e5f60",
+      "points": 2,
+      "principalHint": "install:another",
+      "trusted": false
+    }
+  ]
+}

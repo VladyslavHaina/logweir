@@ -137,6 +137,53 @@ produces one, and W8's dynamic runs ended at their discovery deadline instead. I
 place in the D1 W7 fixtures where a VALUE was not observed; the shape is the CRD's and
 `config/crd/backups.yaml` is where each field of it is declared.
 
+## The D3 fixtures (`d3/`)
+
+D3 W12's suite (`ui/tests/d3.spec.js`) reads `d3/` and nothing else reads it. **Where a live
+object exists, the fixture IS that object**, copied whole from the D3 acceptance runs under
+`/tmp/logweir-roadmap-run/claude/artifacts/d3-live/` with only `metadata.annotations`
+(`kubectl.kubernetes.io/last-applied-configuration`, a second copy of the spec) and
+`metadata.managedFields` dropped:
+
+| fixture | capture |
+|---|---|
+| `protection-unprotected.json` | `lr520260919t0109z/notify/protection-policy.json`: `health: Unprotected`, `availabilityBasis: Catalog`, one open `Staleness` alert with `delivery.state: Delivered`, a suspended schedule and `Protected=False/NoAvailablePoint` |
+| `catalog-truncated.json` | `lr5.../catalog/missing-manifest-status.json`: `counts {total 5, available 3, missing 2, unverified 1}`, `truncated: true`, one page, one trusted signer, `Ready=True/ViewReady`. Its four conditions were a map in the capture and are written here as the `conditions[]` list the API server returns |
+| `catalog-points.json` | `lr5.../catalog/missing-manifest-entries.json`: four view entries, one of them `Missing`, in the list envelope the route answers |
+| `retention-report.json` | `lr5.../retention/keep-a.json`: `mode: Report`, `enforcement: RecommendationOnly`, three candidates, one `Unreadable` skip, a `planSha256` |
+| `retention-external.json` | `lr5.../retention/external-lifecycle.json`: `mode: ExternalLifecycle`, `ExternalLifecycleConflict=True/DeclaredExpiryConflicts`, the declared 7-day rule against 30-day rules |
+| `trustpolicy-active.json` | `20260918t0316z/final/trustpolicies.json`: one `Active` `EvidenceSigning` key, `Loaded=True`, `usableForVerification: Full`. Its `spkiPem` body was already redacted in the capture and stays redacted here |
+| `backup-progress-finished.json` | `lr5.../lifecycle/unrelated-backup.json`: `status.progress {stage: Finished, runner{...}}` and a `NotAttempted` verification with the controller's own detail |
+| `restore-pending-approval.json` | `lr5.../enforce/active-restore-object.json`: `phase: Pending`, `Admitted=False/ApprovalNotVerified` |
+
+**Seven fixtures are CONSTRUCTED, and this is the disclosure.** Each one is a real object above
+with fields the live runs did not reach filled in **from the field set D3 declares** -- section 3.1
+for protection, section 5.4 for a catalog entry, section 6.2 for retention, section 7.1/7.4 for
+trust, section 2.2 for progress and section 3.5 for completion -- and from the landed status the
+D3 controller workers reported. No value in them was invented outside those declared shapes.
+
+| fixture | what was filled in, and why no capture has it |
+|---|---|
+| `protection-healthy.json` | `health: Healthy` with a `lastAvailablePoint`. The live policy's schedule was suspended on purpose, so the lab never reached `Healthy`; the point id and the instants are the live catalog's own newest entry |
+| `protection-unknown.json` | `health: Unknown`, `availabilityBasis: CatalogStale`, `Protected=Unknown` and a `delivery.state: Failed` alert -- the three-status condition and the delivery-failure rows |
+| `catalog-points-states.json` | one entry per availability/verification state, plus one point in two buckets with a degraded location, plus the `locationDigest` a restore link carries. The lab's archive was written by one installation, so every live point is `Verified` |
+| `catalog-signers.json` | the live trusted signer, and an UNTRUSTED one -- PLAT-15.2 step 3's whole case, which a single-installation lab cannot produce |
+| `retention-enforce.json` | `mode: Enforce` with an approved digest, a failed `lastEnforcement` and `EnforcementDegraded=True`. The live runs enforced under an operator-driven plan; three consecutive failures is the row the panel's degraded sentence is about |
+| `trustpolicy-lifecycle.json`, `trustpolicy-stale.json`, `trustpolicy-unevaluated.json` | a retired key, a compromise-revoked key, a superseded one, a generation ahead of its status, a contested namespace, and no status at all -- the six `unknown`/lifecycle rows section 7.7 names |
+| `backup-progress-waiting.json`, `restore-completed-newtopic.json` and the three `restore-*` verdict rows | a `Preparing` stage with two diagnoses, and the completion/teardown/trust blocks. The lab's runs either finished clean or were refused before a Job existed |
+
+**Five fixtures are the PRODUCT API's document and are an assumption, said so here.** The
+`operation-*.json` files are `console/operation-backup.json`'s published shape plus the D3 fields
+section 2 puts on the same document. The API half of D3 is being built concurrently, so the
+OpenAPI document does not name them yet;
+`d3.spec.js::every_d3_shape_and_enum_is_declared_and_pins_itself_once_the_api_publishes_it`
+compares each declared shape with the document the moment it does, so the assumption becomes a
+pin without anyone remembering to move it.
+
+**No private key material is in `d3/`.** The one `spkiPem` any of them carries is a PUBLIC half
+whose body was redacted in the capture, and no fixture here carries a credential, a bearer token or
+a secret value of any shape.
+
 ## The preview fixtures
 
 `preview/` is what `ui/tests/preview-server.js` answers the page's API reads from, and nothing in

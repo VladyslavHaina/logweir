@@ -1,0 +1,135 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "ProtectionPolicy",
+  "metadata": {
+    "creationTimestamp": "2026-09-19T01:45:20Z",
+    "generation": 1,
+    "labels": {
+      "logweir.dev/test-owner": "d3w14"
+    },
+    "name": "protect-unknown",
+    "namespace": "d3w14-lr520260919t0109z",
+    "resourceVersion": "4537262",
+    "uid": "c8a19161-2797-407f-a9f6-c26cdede6886"
+  },
+  "spec": {
+    "evaluationIntervalSeconds": 60,
+    "notifications": {
+      "kinds": [
+        "Staleness",
+        "BackupFailure",
+        "ArchiveUnavailable"
+      ],
+      "renotifyAfterSeconds": 86400,
+      "routes": [
+        {
+          "name": "local-sink",
+          "webhook": {
+            "urlSecretRef": {
+              "key": "url",
+              "name": "d3w14-sink-url"
+            }
+          }
+        }
+      ],
+      "sendResolved": true
+    },
+    "objectives": {
+      "maxConsecutiveFailedRuns": 1,
+      "maxRecoveryPointAgeSeconds": 300,
+      "requireCatalogAvailability": true,
+      "requireVerifiedEvidence": true
+    },
+    "protects": {
+      "catalogRef": {
+        "name": "primary"
+      },
+      "destinationRef": {
+        "name": "dest-a"
+      },
+      "scheduleRefs": [
+        {
+          "name": "keeps-running"
+        }
+      ],
+      "sourceRef": {
+        "name": "source"
+      },
+      "topics": [
+        "orders",
+        "payments"
+      ]
+    }
+  },
+  "status": {
+    "alerts": [
+      {
+        "delivery": {
+          "attempts": 3,
+          "jobRef": {
+            "name": "protect-unknown-n-3f71f27f-3"
+          },
+          "lastAttemptAt": "2026-09-19T01:52:00.000000000Z",
+          "lastError": "the webhook sink answered 503",
+          "state": "Failed"
+        },
+        "key": "logweir-protection-c8a19161-2797-407f-a9f6-c26cdede6886-Staleness",
+        "kind": "Staleness",
+        "notifiedTransition": 4,
+        "openedAt": "2026-09-19T01:45:20.787859014Z",
+        "state": "Open",
+        "transition": 4
+      }
+    ],
+    "availabilityBasis": "CatalogStale",
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-19T01:45:20.787859014Z",
+        "message": "there is no available recovery point for this policy at all",
+        "observedGeneration": 1,
+        "reason": "Evaluated",
+        "status": "True",
+        "type": "Ready"
+      },
+      {
+        "lastTransitionTime": "2026-09-19T01:45:20.787859014Z",
+        "message": "the catalog view expired, so availability could not be established",
+        "observedGeneration": 1,
+        "reason": "CatalogStale",
+        "status": "Unknown",
+        "type": "Protected"
+      },
+      {
+        "lastTransitionTime": "2026-09-19T01:45:25.387353835Z",
+        "message": "three delivery attempts failed",
+        "observedGeneration": 1,
+        "reason": "DeliveryFailed",
+        "status": "False",
+        "type": "NotificationsDelivered"
+      }
+    ],
+    "consecutiveFailedRuns": 0,
+    "evaluatedAt": "2026-09-19T01:48:25.623545543Z",
+    "health": "Unknown",
+    "lastAttempt": {
+      "at": "2026-09-19T01:11:38Z",
+      "backupRef": {
+        "name": "logweir-backup-keeps-running-20260919-011100"
+      },
+      "phase": "Succeeded",
+      "reason": "ok"
+    },
+    "missed": {
+      "sinceLastFire": 2245
+    },
+    "observedGeneration": 1,
+    "schedules": [
+      {
+        "name": "keeps-running",
+        "ready": "False",
+        "suspended": true
+      }
+    ],
+    "staleSince": "2026-09-19T01:45:20.787859014Z"
+  }
+}

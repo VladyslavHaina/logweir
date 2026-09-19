@@ -1,0 +1,119 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "Backup",
+  "metadata": {
+    "creationTimestamp": "2026-09-19T01:11:45Z",
+    "generation": 1,
+    "labels": {
+      "logweir.dev/test-owner": "d3w14"
+    },
+    "name": "d3w14-lifecycle-survivor",
+    "namespace": "d3w14-lr520260919t0109z",
+    "resourceVersion": "4262335",
+    "uid": "067d425c-46c1-45ae-84fa-d4ae251e561b"
+  },
+  "spec": {
+    "archive": {
+      "url": "logweir-destination://dest-b"
+    },
+    "deadlineSeconds": 600,
+    "destinationRef": {
+      "name": "dest-b"
+    },
+    "sourceRef": {
+      "name": "source"
+    },
+    "topics": [
+      "orders",
+      "payments"
+    ],
+    "triggeredBy": "manual"
+  },
+  "status": {
+    "backupId": "067d425c-46c1-45ae-84fa-d4ae251e561b",
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-19T01:11:50.430329889Z",
+        "message": "the runner exited 0 (ok); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+        "observedGeneration": 1,
+        "reason": "Ok",
+        "status": "True",
+        "type": "Complete"
+      },
+      {
+        "lastTransitionTime": "2026-09-19T01:11:50.430329889Z",
+        "message": "both `receipt-key=` and `sidecar-key=` were read off the pod log and are on status.evidence",
+        "observedGeneration": 1,
+        "reason": "EvidenceKeysRecorded",
+        "status": "True",
+        "type": "EvidenceRecorded"
+      },
+      {
+        "lastTransitionTime": "2026-09-19T01:11:48.385003346Z",
+        "message": "the `runner` container has been seen running or terminated",
+        "observedGeneration": 1,
+        "reason": "RunnerStarted",
+        "status": "True",
+        "type": "RunnerReady"
+      },
+      {
+        "lastTransitionTime": "2026-09-19T01:11:50.430329889Z",
+        "message": "unverified",
+        "observedGeneration": 1,
+        "reason": "VerificationNotAttempted",
+        "status": "False",
+        "type": "Verified"
+      }
+    ],
+    "destination": {
+      "generation": 1,
+      "locationDigest": "sha256:a81c1aa15c13335c7174df25e4b390ef73bb5a09ca3b5ce4a845ceafc0d47954",
+      "name": "dest-b",
+      "uid": "97c5dede-1ac5-4045-a4e5-97c0ae8ffb10"
+    },
+    "evidence": {
+      "receiptKey": "logweir/backups/067d425c-46c1-45ae-84fa-d4ae251e561b/01M2VKGAMJECZ06GVANHANNT3S.receipt.json",
+      "sidecarKey": "logweir/backups/067d425c-46c1-45ae-84fa-d4ae251e561b/01M2VKGAMJECZ06GVANHANNT3S.receipt.sig",
+      "verification": {
+        "detail": "BackupDestination d3w14-lr520260919t0109z/dest-b reads evidence with a grant only a pod may hold (D2 \u00a73.9's evidence-fetch Job), and this build does not create that Job. The controller holds no verb on secrets and does not read this credential itself; run the printed logweir drill verify command, or set spec.access.evidenceRead.mode: ControllerIdentity for an allowlisted location",
+        "payloadType": "application/vnd.logweir.backup-receipt+json;version=1.0.0",
+        "result": "NotAttempted",
+        "verifiedAt": "2026-09-19T01:11:50Z"
+      }
+    },
+    "execution": {
+      "id": "067d425c-46c1-45ae-84fa-d4ae251e561b",
+      "inputsRef": {
+        "name": "d3w14-lifecycle-survivor-plan"
+      },
+      "inputsSha256": "sha256:a47073f95e0ae71d7b70f902ae7ecdaa6c846804a0adf654044cf9e1a4f517b0"
+    },
+    "exitCode": 0,
+    "exitReason": "ok",
+    "jobRef": {
+      "name": "d3w14-lifecycle-survivor"
+    },
+    "phase": "Succeeded",
+    "progress": {
+      "lastTransitionTime": "2026-09-19T01:11:50.430329889Z",
+      "message": "the runner exited 0 (ok); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+      "reason": "Ok",
+      "runner": {
+        "containerState": "Terminated",
+        "jobName": "d3w14-lifecycle-survivor",
+        "podName": "d3w14-lifecycle-survivor-z52b5",
+        "podPhase": "Succeeded",
+        "scheduled": true,
+        "startedAt": "2026-09-19T01:11:46Z",
+        "waitingReason": "ContainerCreating"
+      },
+      "stage": "Finished"
+    },
+    "selection": {
+      "coverage": "NamedTopics",
+      "mode": "SelectedTopics",
+      "resolvedTopicBytes": 14,
+      "resolvedTopicCount": 2
+    }
+  }
+}

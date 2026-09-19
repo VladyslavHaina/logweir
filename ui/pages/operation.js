@@ -46,7 +46,7 @@ import {
   cell,
   detailLink,
   diagnosticsTable,
-  errorBox,
+  errorBlock,
   esc,
   facts,
   phaseBadge,
@@ -398,7 +398,7 @@ export function renderOperation(view) {
   }
   if (v.document === null || v.document === undefined) {
     return heading + "<p class=\"pending\" role=\"status\">" + esc(READING_SENTENCE) + "</p>" +
-      (v.error ? errorBox(v.error) : "");
+      (v.error ? errorBlock(v.error) : "");
   }
   const f = operationFacts(v.document, v.console === true);
   const meta = v.meta || {};
@@ -424,7 +424,7 @@ export function renderOperation(view) {
       ? " " + String(meta.attempt) + " connection attempt(s) have failed."
       : "") +
     "</p>" +
-    (meta.error ? errorBox(meta.error) : "") +
+    (meta.error ? errorBlock(meta.error, false) : "") +
     renderProgress(f) +
     renderDiagnostics(f) +
     renderResult(f) +

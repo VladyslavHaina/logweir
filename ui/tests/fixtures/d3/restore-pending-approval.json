@@ -1,0 +1,56 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "Restore",
+  "metadata": {
+    "creationTimestamp": "2026-09-19T01:12:01Z",
+    "generation": 1,
+    "labels": {
+      "logweir.dev/test-owner": "d3w14"
+    },
+    "name": "d3w14-hold-drill",
+    "namespace": "d3w14-lr520260919t0109z",
+    "resourceVersion": "4263529",
+    "uid": "485722aa-f575-4648-b85b-a2abfd1a91f5"
+  },
+  "spec": {
+    "approvalRef": {
+      "name": "d3w14-hold-drill-approval-never-minted"
+    },
+    "backupSetRef": "c873ee2b-2628-4c4f-bc13-7bc5b3f4ab72",
+    "deadlineSeconds": 600,
+    "evidenceDestinationRef": {
+      "name": "dest-b"
+    },
+    "planBytes": "{\"backupSetRef\": \"c873ee2b-2628-4c4f-bc13-7bc5b3f4ab72\", \"note\": \"a plan nobody approved; this Restore never runs\"}",
+    "pointInTime": "2026-09-19T01:12:01Z",
+    "sourceArchive": {
+      "url": "logweir-destination://dest-b"
+    },
+    "sourceDestinationRef": {
+      "name": "dest-b"
+    },
+    "target": {
+      "clusterRef": {
+        "name": "source"
+      },
+      "mode": "scratch",
+      "topicNaming": {
+        "prefix": "d3w14-hold-drill-"
+      }
+    }
+  },
+  "status": {
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-19T01:12:01.249610171Z",
+        "message": "spec.approvalRef names the Approval `d3w14-hold-drill-approval-never-minted`, which does not exist yet or is not Verified=True; no Job is created until it is, and this object is looked at again in 30s (interface I19)",
+        "observedGeneration": 1,
+        "reason": "ApprovalNotVerified",
+        "status": "False",
+        "type": "Admitted"
+      }
+    ],
+    "phase": "Pending",
+    "reason": "ApprovalNotVerified"
+  }
+}

@@ -56,6 +56,7 @@ import {
   cell,
   copyBlock,
   detailLink,
+  errorBlock,
   errorBox,
   esc,
   facts,
@@ -508,13 +509,17 @@ export function renderCatalogDetail(view) {
       ["view limit", cell(sync.viewLimit)],
     ]) +
     renderCatalogStatus(object) +
+    // A REFUSED SUB-READ IS RENDERED IN THE SECTION IT BELONGS TO, as a
+    // string, because these renderers are pure functions from JSON to HTML.
+    // It is never absorbed into an empty table: an empty table is what an
+    // empty catalog looks like, and the two could not be more different.
     (v.pointsError
-      ? "<section class=\"points\"><h3>Recovery points</h3>" + errorBox(v.pointsError) +
-        "</section>"
+      ? "<section class=\"points\"><h3>Recovery points</h3>" +
+        errorBlock(v.pointsError, false) + "</section>"
       : renderPoints(v.points, v.ns, meta.name)) +
     (v.signersError
-      ? "<section class=\"signers\"><h3>Who signed these points</h3>" + errorBox(v.signersError) +
-        "</section>"
+      ? "<section class=\"signers\"><h3>Who signed these points</h3>" +
+        errorBlock(v.signersError, false) + "</section>"
       : renderSigners(v.signers))
   );
 }
@@ -574,7 +579,7 @@ export async function mountCatalog(node, ns, parse, lifecycle, deps) {
     paint();
   } catch (error) {
     if (!cancelled(error, lifecycle) && active(lifecycle)) {
-      replace(node, parse(errorBox(error) + renderConnectForm(view)));
+      replace(node, parse(errorBlock(error) + renderConnectForm(view)));
       wire(node, ns, key, mutation, view, paint, deps, lifecycle);
     }
   }

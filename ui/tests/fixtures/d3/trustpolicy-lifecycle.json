@@ -1,0 +1,152 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "TrustPolicy",
+  "metadata": {
+    "creationTimestamp": "2026-09-18T04:32:25Z",
+    "generation": 1,
+    "labels": {
+      "logweir.dev/test-owner": "d3w14"
+    },
+    "name": "org-default",
+    "resourceVersion": "2677816",
+    "uid": "5ddde3f8-9e79-4321-b1a1-02b29e1c9cbd"
+  },
+  "spec": {
+    "default": false,
+    "keys": [
+      {
+        "algorithm": "p256",
+        "keyId": "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe",
+        "notAfter": "2027-07-01T00:00:00Z",
+        "notBefore": "2026-01-01T00:00:00Z",
+        "principal": {
+          "display": "the lab signing key",
+          "id": "signing@scram-local.invalid"
+        },
+        "spkiPem": "-----BEGIN PUBLIC KEY-----[REDACTED PUBLIC KEY BODY]-----END PUBLIC KEY-----\n",
+        "state": "Active",
+        "usages": [
+          "EvidenceSigning"
+        ]
+      },
+      {
+        "algorithm": "p256",
+        "keyId": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
+        "notAfter": "2027-01-01T00:00:00Z",
+        "notBefore": "2026-01-01T00:00:00Z",
+        "principal": {
+          "display": "the signer this one replaced",
+          "id": "install:previous"
+        },
+        "retiredAt": "2026-06-01T00:00:00Z",
+        "spkiPem": "-----BEGIN PUBLIC KEY-----[REDACTED PUBLIC KEY BODY]-----END PUBLIC KEY-----\n",
+        "state": "Retired",
+        "usages": [
+          "EvidenceSigning"
+        ]
+      },
+      {
+        "algorithm": "p256",
+        "keyId": "3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b",
+        "notAfter": "2027-07-01T00:00:00Z",
+        "notBefore": "2026-01-01T00:00:00Z",
+        "principal": {
+          "display": "a key withdrawn after an incident",
+          "id": "install:compromised"
+        },
+        "retiredAt": "2026-08-01T00:00:00Z",
+        "revocationEffectiveFrom": "2026-07-25T00:00:00Z",
+        "revocationReason": "KeyCompromise",
+        "revokedAt": "2026-08-02T00:00:00Z",
+        "spkiPem": "-----BEGIN PUBLIC KEY-----[REDACTED PUBLIC KEY BODY]-----END PUBLIC KEY-----\n",
+        "state": "Revoked",
+        "usages": [
+          "EvidenceSigning"
+        ]
+      },
+      {
+        "algorithm": "p256",
+        "keyId": "5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+        "notAfter": "2027-07-01T00:00:00Z",
+        "notBefore": "2026-01-01T00:00:00Z",
+        "principal": {
+          "display": "rotated out, not compromised",
+          "id": "install:superseded"
+        },
+        "revocationEffectiveFrom": "2026-09-01T00:00:00Z",
+        "revocationReason": "Superseded",
+        "revokedAt": "2026-09-01T00:00:00Z",
+        "spkiPem": "-----BEGIN PUBLIC KEY-----[REDACTED PUBLIC KEY BODY]-----END PUBLIC KEY-----\n",
+        "state": "Revoked",
+        "usages": [
+          "GovernedApproval"
+        ]
+      }
+    ],
+    "namespaces": [
+      "d3w14-20260918t0316z"
+    ]
+  },
+  "status": {
+    "boundNamespaces": [
+      "d3w14-20260918t0316z"
+    ],
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-18T04:32:25.450297674Z",
+        "message": "every spkiPem on this policy parsed, hashes to its own keyId and matches its declared algorithm: 1 keys",
+        "observedGeneration": 1,
+        "reason": "Loaded",
+        "status": "True",
+        "type": "Loaded"
+      },
+      {
+        "lastTransitionTime": "2026-09-18T04:32:25.450297674Z",
+        "message": "this policy governs 1 namespace(s)",
+        "observedGeneration": 1,
+        "reason": "Bound",
+        "status": "True",
+        "type": "Bound"
+      },
+      {
+        "lastTransitionTime": "2026-09-18T04:32:25.450297674Z",
+        "message": "no Active key reaches its notAfter within 30 days",
+        "observedGeneration": 1,
+        "reason": "NotExpiring",
+        "status": "False",
+        "type": "ExpiringSoon"
+      }
+    ],
+    "conflicts": [],
+    "evaluatedAt": "2026-09-18T04:42:25.498722799Z",
+    "keyCount": 4,
+    "keys": [
+      {
+        "effectiveState": "Active",
+        "keyId": "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe",
+        "usableForNewSignatures": true,
+        "usableForVerification": "Full"
+      },
+      {
+        "effectiveState": "Retired",
+        "keyId": "1a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f809",
+        "usableForNewSignatures": false,
+        "usableForVerification": "Historical"
+      },
+      {
+        "effectiveState": "Revoked",
+        "keyId": "3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b",
+        "usableForNewSignatures": false,
+        "usableForVerification": "None"
+      },
+      {
+        "effectiveState": "Revoked",
+        "keyId": "5e6f708192a3b4c5d6e7f8091a2b3c4d5e6f708192a3b4c5d6e7f8091a2b3c4d",
+        "usableForNewSignatures": false,
+        "usableForVerification": "Historical"
+      }
+    ],
+    "loaded": true,
+    "observedGeneration": 1
+  }
+}

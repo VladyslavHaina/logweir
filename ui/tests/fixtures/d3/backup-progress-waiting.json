@@ -1,0 +1,109 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "Backup",
+  "metadata": {
+    "creationTimestamp": "2026-09-19T01:11:45Z",
+    "generation": 1,
+    "labels": {
+      "logweir.dev/test-owner": "d3w14"
+    },
+    "name": "d3w12-waiting",
+    "namespace": "d3w14-lr520260919t0109z",
+    "resourceVersion": "4262335",
+    "uid": "7f0e5e92-6a41-4ff2-9c4b-1d6a0e8f5c33"
+  },
+  "spec": {
+    "archive": {
+      "url": "logweir-destination://dest-b"
+    },
+    "deadlineSeconds": 600,
+    "destinationRef": {
+      "name": "dest-b"
+    },
+    "sourceRef": {
+      "name": "source"
+    },
+    "topics": [
+      "orders",
+      "payments"
+    ],
+    "triggeredBy": "manual"
+  },
+  "status": {
+    "backupId": "067d425c-46c1-45ae-84fa-d4ae251e561b",
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-19T01:11:50.000000000Z",
+        "message": "the runner container cannot start",
+        "observedGeneration": 1,
+        "reason": "CredentialReferenceMissing",
+        "status": "False",
+        "type": "RunnerReady"
+      }
+    ],
+    "destination": {
+      "generation": 1,
+      "locationDigest": "sha256:a81c1aa15c13335c7174df25e4b390ef73bb5a09ca3b5ce4a845ceafc0d47954",
+      "name": "dest-b",
+      "uid": "97c5dede-1ac5-4045-a4e5-97c0ae8ffb10"
+    },
+    "execution": {
+      "id": "067d425c-46c1-45ae-84fa-d4ae251e561b",
+      "inputsRef": {
+        "name": "d3w14-lifecycle-survivor-plan"
+      },
+      "inputsSha256": "sha256:a47073f95e0ae71d7b70f902ae7ecdaa6c846804a0adf654044cf9e1a4f517b0"
+    },
+    "jobRef": {
+      "name": "d3w14-lifecycle-survivor"
+    },
+    "phase": "Running",
+    "progress": {
+      "diagnostics": [
+        {
+          "code": "CredentialSecretNotFound",
+          "count": 6,
+          "firstSeen": "2026-09-19T01:11:50Z",
+          "lastSeen": "2026-09-19T01:12:44Z",
+          "message": "secret \"archive-credentials\" not found",
+          "object": {
+            "kind": "Pod",
+            "name": "d3w12-waiting-hk29p"
+          },
+          "severity": "Error"
+        },
+        {
+          "code": "WaitingForPod",
+          "count": 1,
+          "firstSeen": "2026-09-19T01:11:46Z",
+          "lastSeen": "2026-09-19T01:11:49Z",
+          "message": "no pod and no event for this Job yet",
+          "object": {
+            "kind": "Job",
+            "name": "d3w12-waiting"
+          },
+          "severity": "Warning"
+        }
+      ],
+      "lastObservedTime": "2026-09-19T01:12:46.000000000Z",
+      "lastTransitionTime": "2026-09-19T01:11:46.000000000Z",
+      "message": "the runner container cannot start: the Secret named by the archive credential does not exist",
+      "reason": "CredentialReferenceMissing",
+      "runner": {
+        "containerState": "Waiting",
+        "jobName": "d3w12-waiting",
+        "podName": "d3w12-waiting-hk29p",
+        "podPhase": "Pending",
+        "scheduled": true,
+        "waitingReason": "CreateContainerConfigError"
+      },
+      "stage": "Preparing"
+    },
+    "selection": {
+      "coverage": "NamedTopics",
+      "mode": "SelectedTopics",
+      "resolvedTopicBytes": 14,
+      "resolvedTopicCount": 2
+    }
+  }
+}
