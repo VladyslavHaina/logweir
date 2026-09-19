@@ -76,7 +76,7 @@ use logweir_core::destination::DestinationRole;
 
 use crate::catalog_view::{self as view, ViewEntry};
 use crate::check;
-use crate::conditions::{current_condition, merge_condition, status_unchanged};
+use crate::conditions::{merge_condition, status_unchanged};
 use crate::crds::recovery_catalog::RecoveryCatalog;
 use crate::crds::restore::Restore;
 use crate::crds::retention_policy::{RetentionMode, RetentionPolicy};
@@ -818,13 +818,13 @@ impl Pass<'_> {
                 "no enforcement run has been attempted".to_string(),
             ),
         ]);
-        self.patch_status(json!({
-            "observedGeneration": self.generation(),
+        let mut status = json!({
             "enforcement": ENFORCEMENT_EXTERNAL,
             "guarantees": guarantees,
             "conditions": conditions,
-        }))
-        .await?;
+        });
+        self.adopt_generation(&mut status);
+        self.patch_status(status).await?;
         Ok(Outcome {
             phase: RetentionPhase::Declared,
             ready: "True",
@@ -948,12 +948,12 @@ impl Pass<'_> {
                 format!("retention run {run_id} is executing as Job {job_name}"),
             ),
         ]);
-        self.patch_status(json!({
-            "observedGeneration": self.generation(),
+        let mut status = json!({
             "enforcement": ENFORCEMENT_LOGWEIR_WORKER,
             "conditions": conditions,
-        }))
-        .await?;
+        });
+        self.adopt_generation(&mut status);
+        self.patch_status(status).await?;
         Ok(Outcome {
             phase: RetentionPhase::Running,
             ready: "True",
@@ -1071,9 +1071,7 @@ impl Pass<'_> {
                 },
             ),
         ]);
-        let outcome = self
-            .patch_status(json!({
-                "observedGeneration": self.generation(),
+        let mut harvest_status = json!({
                 "enforcement": ENFORCEMENT_LOGWEIR_WORKER,
                 // THE FIVE FIELDS THE CRD DECLARES AND THE FIRST LANDING NEVER
                 // WROTE (review `d3w9` H2). `failed[]` is the input
@@ -1100,8 +1098,12 @@ impl Pass<'_> {
                 "lease": Value::Null,
                 "consecutiveRunFailures": failures,
                 "conditions": conditions,
-            }))
-            .await?;
+        });
+        // Through the helper like every other writer. It adopts the generation
+        // and adds nothing here: this patch already carries the count (already
+        // released by `budget_before()`) and its own `EnforcementDegraded`.
+        self.adopt_generation(&mut harvest_status);
+        let outcome = self.patch_status(harvest_status).await?;
 
         // THE TTL AFTER THE STATUS, and only then (S7). The Job's pod carries
         // the exit code this pass just published.
@@ -2400,7 +2402,6 @@ impl Pass<'_> {
             ),
         ]);
         let mut status = json!({
-            "observedGeneration": self.generation(),
             "enforcement": decision.enforcement,
             "guarantees": guarantees,
             "lastEvaluation": {
@@ -2416,21 +2417,7 @@ impl Pass<'_> {
             },
             "conditions": conditions,
         });
-        // THE COUNTER IS RESET BY THE SPEC CHANGE THAT RELEASES THE STOP, in
-        // the same patch that adopts the new generation — and ONLY then.
-        //
-        // The key is INSERTED, not written as a `null` on other passes: in an
-        // RFC 7386 merge a `null` DELETES, so an evaluation that always carried
-        // the key would wipe a count the harvests are keeping. And it is an
-        // explicit `0` rather than a deletion when it does fire, because "no
-        // consecutive failures" is an answer and a console showing an empty
-        // field would be showing an absence where there is one.
-        if self.spec_changed() {
-            status
-                .as_object_mut()
-                .expect("a status patch is always a JSON object")
-                .insert("consecutiveRunFailures".to_string(), json!(0));
-        }
+        self.adopt_generation(&mut status);
         self.patch_status(status).await
     }
 
@@ -2472,12 +2459,12 @@ impl Pass<'_> {
                 "nothing is removed while the view is unreadable".to_string(),
             ),
         ]);
-        self.patch_status(json!({
-            "observedGeneration": self.generation(),
+        let mut status = json!({
             "enforcement": ENFORCEMENT_RECOMMENDATION_ONLY,
             "conditions": conditions,
-        }))
-        .await?;
+        });
+        self.adopt_generation(&mut status);
+        self.patch_status(status).await?;
         Ok(Outcome {
             ready: "False",
             ready_reason: REASON_CATALOG_UNUSABLE,
@@ -2507,12 +2494,12 @@ impl Pass<'_> {
                 "no plan was written, so nothing can be approved".to_string(),
             ),
         ]);
-        self.patch_status(json!({
-            "observedGeneration": self.generation(),
+        let mut status = json!({
             "enforcement": ENFORCEMENT_RECOMMENDATION_ONLY,
             "conditions": conditions,
-        }))
-        .await?;
+        });
+        self.adopt_generation(&mut status);
+        self.patch_status(status).await?;
         Ok(refused(REASON_UNSUPPORTED_COMBINATION))
     }
 
@@ -2530,12 +2517,12 @@ impl Pass<'_> {
                 "nothing is removed while this policy is not ready".to_string(),
             ),
         ]);
-        self.patch_status(json!({
-            "observedGeneration": self.generation(),
+        let mut status = json!({
             "enforcement": ENFORCEMENT_RECOMMENDATION_ONLY,
             "conditions": conditions,
-        }))
-        .await?;
+        });
+        self.adopt_generation(&mut status);
+        self.patch_status(status).await?;
         Ok(refused(reason))
     }
 
@@ -2568,28 +2555,10 @@ impl Pass<'_> {
     /// are appended — so a diff of two status writes shows what changed rather
     /// than a reshuffle.
     fn conditions(&self, rows: &[(&str, &str, &str, String)]) -> Vec<Value> {
-        let existing: Vec<Condition> = self
-            .observed()
-            .and_then(|status| status.get("conditions").cloned())
-            .and_then(|c| serde_json::from_value::<Vec<Condition>>(c).ok())
-            .or_else(|| {
-                self.policy
-                    .status
-                    .as_ref()
-                    .and_then(|s| s.conditions.clone())
-            })
-            .unwrap_or_default();
+        let existing = self.existing_conditions();
         let mut out = existing.clone();
         for (r#type, status, reason, message) in rows {
-            let next = Condition {
-                r#type: (*r#type).to_string(),
-                status: (*status).to_string(),
-                observed_generation: Some(self.generation()),
-                last_transition_time: Some(self.ctx.now),
-                reason: Some((*reason).to_string()),
-                message: Some(message.clone()),
-            };
-            let merged = merge_condition(current_condition(Some(&existing), r#type), next);
+            let merged = self.one_condition(&existing, r#type, status, reason, message.clone());
             match out.iter().position(|c| &c.r#type == r#type) {
                 Some(at) => out[at] = merged,
                 None => out.push(merged),
@@ -2598,6 +2567,151 @@ impl Pass<'_> {
         out.into_iter()
             .map(|c| serde_json::to_value(c).unwrap_or(Value::Null))
             .collect()
+    }
+
+    /// The conditions as this pass believes they now stand.
+    fn existing_conditions(&self) -> Vec<Condition> {
+        self.observed()
+            .and_then(|status| status.get("conditions").cloned())
+            .and_then(|c| serde_json::from_value::<Vec<Condition>>(c).ok())
+            .or_else(|| {
+                self.policy
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.conditions.clone())
+            })
+            .unwrap_or_default()
+    }
+
+    /// One condition, carrying the `lastTransitionTime` the `metav1.Condition`
+    /// contract says it should — `merge_condition` keeps the existing one when
+    /// neither `status` nor `reason` moved, so a condition that has not
+    /// transitioned does not look like it has on every pass.
+    fn one_condition(
+        &self,
+        existing: &[Condition],
+        r#type: &str,
+        status: &str,
+        reason: &str,
+        message: String,
+    ) -> Condition {
+        let next = Condition {
+            r#type: r#type.to_string(),
+            status: status.to_string(),
+            observed_generation: Some(self.generation()),
+            last_transition_time: Some(self.ctx.now),
+            reason: Some(reason.to_string()),
+            message: Some(message),
+        };
+        merge_condition(existing.iter().find(|c| c.r#type == r#type), next)
+    }
+
+    /// Adopt `metadata.generation` onto the status — **and, when it advances,
+    /// release the consecutive-failure budget in the SAME patch.**
+    ///
+    /// EVERY WRITER THAT SETS `observedGeneration` GOES THROUGH HERE, and the
+    /// reason is a hole this branch's first landing left (review finding G1).
+    /// Seven writers adopt the generation; only the evaluation released the
+    /// budget. `evaluate()` returns through the refusal writers **before** the
+    /// evaluation is ever reached — an unreadable catalog view, a refused plan,
+    /// an unusable destination, a declared external lifecycle — so a policy
+    /// degraded at the ceiling, whose operator edits the spec, and whose view
+    /// is still unreadable, had its edit CONSUMED: `observedGeneration` moved,
+    /// `consecutiveRunFailures` stayed at 3, `spec_changed()` went false, and
+    /// the budget was spent again. The runs were failing for a reason, so a
+    /// refusal co-occurring with the edit is the likely case, not an exotic
+    /// one. Every further edit would be eaten the same way.
+    ///
+    /// ONE RULE, STATED ONCE — the argument `budget_before()` already makes,
+    /// applied to the write side. Adopting the generation and releasing the
+    /// budget are the same event and are therefore the same patch: splitting
+    /// them would let a 409 between the two leave the generation new and the
+    /// count at its ceiling, which is the defect with an extra step.
+    ///
+    /// The `EnforcementDegraded` condition is cleared here too, upserted into
+    /// whatever conditions the caller has already built, so an operator never
+    /// sees `EnforcementDegraded=True` beside `consecutiveRunFailures: 0`.
+    fn adopt_generation(&self, status: &mut Value) {
+        let object = status
+            .as_object_mut()
+            .expect("a status patch is always a JSON object");
+        object.insert("observedGeneration".to_string(), json!(self.generation()));
+        if !self.spec_changed() {
+            return;
+        }
+        // THE HELPER FILLS IN WHAT THE CALLER DID NOT SAY, and never overrides
+        // it. `harvest` writes the count this run produced — and `budget_before()`
+        // has already zeroed the history for it, so a run that failed under the
+        // NEW spec is one failure and not none; overwriting that with the
+        // release's `0` would lose the run. Same for the condition: a writer
+        // that has published its own `EnforcementDegraded` has more to say
+        // about it than "released" does.
+        //
+        // AN EXPLICIT `0`, NEVER A DELETION: "no consecutive failures" is an
+        // answer, and a console showing an empty field would be showing an
+        // absence where there is one. And inserted only on the pass that adopts
+        // a NEW generation — in an RFC 7386 merge a key carried on every pass
+        // would overwrite a count the harvests are keeping.
+        object
+            .entry("consecutiveRunFailures".to_string())
+            .or_insert_with(|| json!(0));
+        // "THE CALLER SAID IT" MEANS THIS PASS, NOT THE OBJECT'S HISTORY.
+        // `conditions()` preserves every condition the object already carries,
+        // so the array always holds an `EnforcementDegraded` once one has ever
+        // been published — checking for its mere presence would make this arm
+        // dead. A row a caller WROTE this pass carries this pass's
+        // `observedGeneration`; a row merely carried forward still carries the
+        // old one. That is the difference, and it is the difference that makes
+        // `harvest`'s freshly computed verdict win while a stale `True` from
+        // before the edit is replaced.
+        let written_this_pass = object
+            .get("conditions")
+            .and_then(Value::as_array)
+            .is_some_and(|conditions| {
+                conditions.iter().any(|c| {
+                    c["type"] == CONDITION_DEGRADED
+                        && c["observedGeneration"] == json!(self.generation())
+                })
+            });
+        if written_this_pass {
+            return;
+        }
+        let released = serde_json::to_value(
+            self.one_condition(
+                &self.existing_conditions(),
+                CONDITION_DEGRADED,
+                "False",
+                REASON_HEALTHY,
+                "the spec changed; the consecutive-failure budget is released and \
+             status.consecutiveRunFailures is reset to 0"
+                    .to_string(),
+            ),
+        )
+        .unwrap_or(Value::Null);
+        match object.get_mut("conditions").and_then(Value::as_array_mut) {
+            Some(conditions) => match conditions
+                .iter()
+                .position(|c| c["type"] == CONDITION_DEGRADED)
+            {
+                Some(at) => conditions[at] = released,
+                None => conditions.push(released),
+            },
+            // A writer that carries no conditions at all still gets the release
+            // one, built over the full existing array so nothing is dropped.
+            None => {
+                object.insert(
+                    "conditions".to_string(),
+                    json!(self.conditions(&[(
+                        CONDITION_DEGRADED,
+                        "False",
+                        REASON_HEALTHY,
+                        "the spec changed; the consecutive-failure budget is released and \
+                         status.consecutiveRunFailures is reset to 0"
+                            .to_string(),
+                    )])),
+                );
+            }
+        }
     }
 
     /// Every status write is a resourceVersion-preconditioned merge PATCH —

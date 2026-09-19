@@ -1482,6 +1482,19 @@ generation bump that releases the stop did not clear
 failure re-degraded it; the count is now reset in the same patch that adopts the
 new generation.
 
+**Every writer that adopts the generation releases the budget with it.** The
+controller writes `status.observedGeneration` from seven places, and
+`evaluate()` returns through the refusal writers — an unreadable catalog view, a
+refused plan, an unusable destination, a declared external lifecycle — before it
+ever reaches the evaluation. Until 2026-09-20 only the evaluation performed the
+reset, so a degraded policy whose view was *also* unreadable **consumed the
+operator's spec edit without releasing anything**: `observedGeneration` moved,
+`consecutiveRunFailures` stayed at 3, and every further edit was eaten the same
+way. Since the runs were failing for a reason, that co-occurrence is the likely
+case rather than an exotic one. The adoption and the release are now one
+function and one preconditioned patch, so a conflict between them cannot leave
+the generation new and the count at its ceiling.
+
 **What the enforcement Job is NOT: the evidence.** A harvested retention Job gets
 `ttlSecondsAfterFinished = 600`, so ten minutes later Kubernetes deletes it and
 its pod. A census by `ownerReference` therefore undercounts — after three failed

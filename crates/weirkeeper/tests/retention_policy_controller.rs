@@ -3592,6 +3592,27 @@ async fn three_failed_runs_degrade_and_a_fourth_is_not_scheduled_until_the_spec_
     // next failure re-degraded the policy, which is not a retry budget — and it
     // is what `d387f87` did: `consecutiveRunFailures` stayed at 3 across the
     // generation bump that correctly resumed scheduling.
+    // ONE PATCH CARRIES BOTH. Adopting the generation and releasing the budget
+    // are the same event: split across two patches, a 409 between them leaves
+    // `observedGeneration` new and the count at its ceiling, which is the
+    // defect with an extra step. Asserting only the merged result would not
+    // notice (review finding G2).
+    let together = g
+        .status_patches()
+        .into_iter()
+        .filter(|p| {
+            p["status"].get("observedGeneration").is_some()
+                && p["status"].get("consecutiveRunFailures").is_some()
+        })
+        .count();
+    assert_eq!(
+        together,
+        1,
+        "exactly one status patch carries both the adopted generation and the reset count. \
+         Patches: {:?}",
+        g.status_patches()
+    );
+
     let released = after(&status, &g);
     assert_eq!(
         released["consecutiveRunFailures"],
@@ -3669,6 +3690,16 @@ async fn the_third_failure_publishes_enforcement_degraded_and_the_next_pass_keep
         .expect("EnforcementDegraded survives a pass that does not name it");
     assert_eq!(still["status"], "True");
     assert_eq!(still["reason"], ctrl::REASON_CONSECUTIVE_FAILURES);
+    // AND IT DID NOT "TRANSITION" AGAIN. `metav1.Condition` says
+    // `lastTransitionTime` is the instant the condition last CHANGED, so a
+    // condition republished unchanged must keep its own. Without this the
+    // whole suite passed with `merge_condition` removed (review finding G3),
+    // and an operator reading "degraded 4 seconds ago" on a policy that has
+    // been degraded for a day has been told something false.
+    assert_eq!(
+        still["lastTransitionTime"], degraded["lastTransitionTime"],
+        "a condition that did not change keeps its lastTransitionTime"
+    );
     for kept in [
         ctrl::CONDITION_READY,
         ctrl::CONDITION_EVALUATED,
@@ -3744,6 +3775,89 @@ async fn a_policy_already_at_the_ceiling_publishes_the_condition_on_its_next_pas
     );
     // The count is history and this pass must not touch it: the spec has not changed.
     assert_eq!(after_pass["consecutiveRunFailures"], json!(3));
+}
+
+/// **Review finding G1: a refusal path must not eat the operator's spec edit.**
+///
+/// Seven writers adopt `metadata.generation` onto the status. Only the
+/// evaluation used to release the consecutive-failure budget with it — and
+/// `evaluate()` returns through the REFUSAL writers before the evaluation is
+/// ever reached. So a policy degraded at the ceiling, whose operator edits the
+/// spec, and whose catalog view is still unreadable, had its edit consumed:
+/// `observedGeneration` moved, `consecutiveRunFailures` stayed at 3,
+/// `spec_changed()` went false, and the budget was spent again. The runs were
+/// failing for a reason, so a refusal co-occurring with the edit is the likely
+/// case; every further edit would be eaten the same way.
+///
+/// `adopt_generation()` is the one place the two happen together, and this row
+/// drives the path that proved it was needed.
+#[tokio::test]
+async fn a_spec_edit_releases_the_budget_even_when_the_view_is_unreadable() {
+    let mut routes = happy_routes(&six_points());
+    routes.retain(|r| r.path_suffix != "/recoverycatalogs/primary");
+    routes.push(route(
+        "GET",
+        "/recoverycatalogs/primary",
+        catalog_body(Some(DEST), Value::Null),
+    ));
+    let f = fixture(routes);
+
+    let status = json!({
+        "observedGeneration": 4,
+        "consecutiveRunFailures": 3,
+        "conditions": [{
+            "type": ctrl::CONDITION_DEGRADED, "status": "True",
+            "reason": ctrl::REASON_CONSECUTIVE_FAILURES,
+            "message": "3 consecutive retention runs have failed",
+            "lastTransitionTime": "2026-09-17T04:00:00Z", "observedGeneration": 4
+        }]
+    });
+    // THE OPERATOR'S EDIT: generation 5 against observedGeneration 4.
+    let mut value = policy_value(unattended_enforcing(), status.clone());
+    value["metadata"]["generation"] = json!(5);
+    let policy: RetentionPolicy = serde_json::from_value(value).expect("a policy");
+
+    let outcome = run(&f, &policy).await;
+    assert_eq!(outcome.ready_reason, ctrl::REASON_CATALOG_UNUSABLE);
+
+    let patches = f.status_patches();
+    assert_eq!(
+        patches.len(),
+        1,
+        "the refusal is one patch. Patches: {patches:?}"
+    );
+    let written = &patches[0]["status"];
+    assert_eq!(
+        written["observedGeneration"],
+        json!(5),
+        "the edit is adopted"
+    );
+    assert_eq!(
+        written["consecutiveRunFailures"],
+        json!(0),
+        "AND the budget is released in the SAME patch, or the edit is consumed for nothing. \
+         Written: {written}"
+    );
+
+    let after_pass = after(&status, &f);
+    let degraded =
+        condition_of(&after_pass, ctrl::CONDITION_DEGRADED).expect("EnforcementDegraded");
+    assert_eq!(degraded["status"], "False");
+    assert_eq!(degraded["reason"], ctrl::REASON_HEALTHY);
+    assert!(
+        degraded["message"]
+            .as_str()
+            .expect("a message")
+            .contains("the spec changed"),
+        "and it says why: {degraded}"
+    );
+    // The refusal's own conditions are all there too.
+    for kept in [ctrl::CONDITION_READY, ctrl::CONDITION_EVALUATED] {
+        assert!(
+            condition_of(&after_pass, kept).is_some(),
+            "{kept} is written"
+        );
+    }
 }
 
 /// The general rule behind the row above: **no status write drops a condition
