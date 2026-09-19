@@ -636,12 +636,49 @@ def test_the_declared_phase_order_satisfies_its_preconditions() -> None:
         str(d3.phase_order_violations(broken)))
     row("and it names every phase that would then fail, not only the first",
         len(d3.phase_order_violations(broken)) == 5)
+    # review G-M2: `legal_hold` plants a nonterminal Restore that blocks every
+    # enforcement run at dest-b, so `bounded_retry` must follow it.
+    after_bounded = [p for p in d3.PHASES if p != "legal_hold"]
+    after_bounded.append("legal_hold")
+    row("MUTANT: legal_hold after bounded_retry — its leftover Restore would block "
+        "every enforcement run",
+        "bounded_retry runs before legal_hold" in d3.phase_order_violations(after_bounded))
     swapped = [p for p in d3.PHASES if p != "catalog"]
     swapped.append("catalog")
     row("MUTANT: catalog after the phases that read its view",
         bool(d3.phase_order_violations(swapped)))
     row("a phase list missing a phase entirely is not a violation, just a shorter run",
         not d3.phase_order_violations(["setup", "catalog", "retention"]))
+
+
+# --- the old archive still RESTORES (review G-M1) ----------------------------
+HIST = {"result": "Valid", "matchedKeyId": "6607952c", "trust": {"basis": "Historical"}}
+AFTER_RETIREMENT_SIG = {"result": "Untrusted", "matchedKeyId": "6607952c"}
+
+
+def _restores(**over):
+    args = dict(verdict=HIST, admitted={}, job="d3w14-historical-restore", phase="Running",
+                fresh=AFTER_RETIREMENT_SIG)
+    args.update(over)
+    return all(d3.historical_archive_still_restores(**args).values())
+
+
+def test_a_retired_keys_archive_is_still_readable() -> None:
+    row("Valid/Historical, nothing holding admission, a Job running, no new signature",
+        _restores())
+    row("a Succeeded restore counts too", _restores(phase="Succeeded"))
+    row("MUTANT: a HOLD at admission — Admitted=False",
+        not _restores(admitted={"status": "False", "reason": "ApprovalNotVerified"}))
+    row("MUTANT: no runner Job, so nothing proceeded",
+        not _restores(job=None))
+    row("MUTANT: still Pending — admitted by nobody",
+        not _restores(phase="Pending"))
+    row("MUTANT: the archive is not on the historical basis",
+        not _restores(verdict={"result": "Valid", "trust": {"basis": "Current"}}))
+    row("MUTANT: the archive does not verify at all",
+        not _restores(verdict={"result": "Untrusted", "trust": {"basis": "None"}}))
+    row("MUTANT: `retired` MEANS NOTHING — a signature made after it is Valid too",
+        not _restores(fresh={"result": "Valid", "matchedKeyId": "6607952c"}))
 
 
 def main() -> int:

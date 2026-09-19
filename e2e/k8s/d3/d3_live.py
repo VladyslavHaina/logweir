@@ -3596,21 +3596,21 @@ def trust() -> None:
         "trust-unknown-stale-expiry",
         "PLAT-19.1",
         "NOT-RUN",
-        "NOT CONSTRUCTIBLE FROM THE API ON THIS BUILD, and the half that is testable here "
-        "is already covered under another name. The tracker's test is that a key whose "
-        "expiry cannot be evaluated, or whose evaluation is stale, reads `unknown` and never "
-        "`valid`. Every `TrustPolicy.spec.keys[]` entry REQUIRES `notBefore` and `notAfter` "
-        "(the CRD's own required list), so a key with an unevaluable window cannot be "
-        "created through the API at all; and a stale evaluation is a rendering question — "
-        "the acceptance sentence says \"the keys view labels unevaluated or stale "
-        "expiry/trust information as unknown, not valid\", which is D3 W12's console half "
-        "and no console journey touches a keys view. What IS provable from the API is the "
-        "neighbouring rule — a key outside its window, or absent from the resolved policy, "
-        "never reads Valid — and that is `trust-two-namespaces-resolve-their-own-policies` "
-        "(Invalid where the key is not listed) and "
-        "`trust-old-archive-survives-its-signer-retiring` (Untrusted for a signature after "
-        "retirement). Recorded here rather than aliased, because neither is the `unknown` "
-        "rendering the test names.",
+        "IT IS A KEYS-VIEW RENDERING, and D3 §7.7 says so in as many words. The EVALUATION "
+        "column reads `unknown` when `status` is absent, when "
+        "`status.observedGeneration != metadata.generation`, or when `evaluatedAt` is older "
+        "than 15 minutes measured against a SERVER clock — and \"`valid` and `expired` are "
+        "only rendered for a fresh evaluation\". None of those three is a verdict this "
+        "harness can read off an object: they are statements about how a page renders a "
+        "roster whose evaluation is missing or stale, and the replacement they describe is "
+        "`ui/pages/keys.js`, which is D3 W12's work. No console journey touches a keys view, "
+        "so this test has no row anywhere. What is provable from the API is the neighbouring "
+        "rule — a key absent from the resolved policy, or signing after its retirement, "
+        "never reads Valid — and that is "
+        "`trust-two-namespaces-resolve-their-own-policies` (Invalid where the key is not "
+        "listed) and `trust-old-archive-survives-its-signer-retiring` (Untrusted for a "
+        "signature after retirement). Named here rather than aliased, because neither is the "
+        "`unknown` rendering §7.7 defines.",
         evidence,
     )
 
@@ -3929,6 +3929,100 @@ def mint_signing_key(tag: str) -> dict[str, Any]:
             "keyId": hashlib.sha256(der).hexdigest()}
 
 
+def roster_approver_key() -> dict[str, Any]:
+    return get("trustroster", "default", namespace="default")["spec"]["approverKeys"][0]
+
+
+def approver_material() -> dict[str, pathlib.Path]:
+    """The lab roster's approver keypair, written when the lab was built.
+
+    The PRIVATE half stays where `scripts/test-k8s-scram.py` put it and is
+    passed to the CLI by path; nothing here reads or records its bytes.
+    """
+    base = pathlib.Path(os.environ.get("LOGWEIR_SCRAM_OUT", "/tmp/logweir-scram-e2e"))
+    needed = {"approver": base / "approver.pem", "approverPub": base / "approver.pub.pem"}
+    missing = [str(v) for v in needed.values() if not v.is_file()]
+    if missing:
+        raise RuntimeError("lab approver material is absent: " + ", ".join(missing))
+    return needed
+
+
+def logweir_cli() -> str:
+    override = os.environ.get("LOGWEIR_BIN")
+    if override and pathlib.Path(override).is_file():
+        return override
+    for candidate in (ROOT / "target/debug/logweir", ROOT / "target/release/logweir"):
+        if candidate.is_file():
+            return str(candidate)
+    raise RuntimeError("no `logweir` binary: set LOGWEIR_BIN or build one")
+
+
+def legacy_restore_plan(backup_id: str, point_in_time: str, prefix: str) -> dict[str, Any]:
+    """A restore plan over the LEGACY inline archive this namespace writes to."""
+    return {
+        "source": {
+            "storage": {"backend": "s3", "bucket": "kafka-backups",
+                        "prefix": f"{OWNER}-{STAMP}", "region": "us-east-1",
+                        "endpoint": MINIO_ENDPOINT, "path_style": True, "allow_http": True},
+            "backup": backup_id,
+            "topics": TOPICS[:1],
+        },
+        "target": {
+            "bootstrap_servers": [f"kafka-source.{FIXTURE_NS}.svc.cluster.local:9096"],
+            "auth": {"mode": "scramSha512", "username": "scram-user", "tls": False},
+            "mode": "scratch",
+            "topic_naming": {"prefix": prefix},
+            "topic_mapping_prefix": "logweir-scratch-",
+            "marker_topic": "logweir.scratch",
+            "default_replication_factor": 1,
+            "teardown": "delete",
+        },
+        "restore": {"point_in_time": point_in_time},
+        "objectives": {"rto_seconds": 3600, "rpo_seconds": 86400, "pass_rate": 1.0},
+        "evidence": {"backend": "s3", "bucket": "kafka-backups",
+                     "prefix": "logweir/", "region": "us-east-1",
+                     "endpoint": MINIO_ENDPOINT, "path_style": True, "allow_http": True},
+        "notifications": {"webhooks": []},
+    }
+
+
+def historical_archive_still_restores(verdict: dict[str, Any], admitted: dict[str, Any],
+                                      job: str | None, phase: str | None,
+                                      fresh: dict[str, Any]) -> dict[str, bool]:
+    """A retired key's archive is still READABLE, and still unsignable.
+
+    D3 §7.4's green rule is `Valid ∧ (basis Current|Historical)`, and the point
+    of `Historical` is that a retirement must not strand the archives the key
+    signed: an operator has to be able to RESTORE from them. So the read side
+    has to proceed — the Restore admitted and its Job created — while the write
+    side does not: a run signed after the retirement is refused.
+
+    The last clause is what stops this being a row about a restore that happened
+    to work: if a NEW signature were also accepted, "retired" would mean nothing
+    and the read half would be proving no rule at all.
+    """
+    # ADMISSION IS EVIDENCED BY WHAT FOLLOWS IT, not by a condition. The
+    # controller writes `Admitted=False` for a HOLD — "phase: Pending and
+    # EXACTLY ONE condition, Admitted=False … no exitCode and no exitReason,
+    # because no run was attempted" — and on `Ok` it creates the Job instead of
+    # stamping `Admitted=True`. A first draft of this row asked for
+    # `Admitted=True` and failed on a restore that was already Running with its
+    # Job created, which is the shape of a row asserting something the product
+    # never writes.
+    return {
+        "the archive verifies on the historical basis": (
+            verdict.get("result") == "Valid"
+            and (verdict.get("trust") or {}).get("basis") == "Historical"
+        ),
+        "nothing is holding the Restore at admission": admitted.get("status") != "False",
+        "its runner Job exists and it is running — the read PROCEEDED": (
+            bool(job) and phase in {"Running", "Succeeded"}
+        ),
+        "while a run signed after the retirement is refused":
+            fresh.get("result") != "Valid",
+    }
+
+
 def old_archive() -> None:
     """A Backup signed by a SECOND key, then that key retired.
 
@@ -3968,13 +4062,23 @@ def old_archive() -> None:
         run(KN + ["delete", "secret", "logweir-signing-key", "--wait=true"], check=False)
         run(KN + ["create", "secret", "generic", "logweir-signing-key",
                   f"--from-file=signing.pem={key['private']}"], timeout=120)
+        # THE APPROVER KEY GOES IN TOO. An explicit policy REPLACES the roster
+        # for this namespace, so a policy listing only signing keys leaves the
+        # restore's Approval with no approver key to verify against — and the
+        # restore half below would fail for a reason that has nothing to do
+        # with the retirement it is about.
+        approver = roster_approver_key()
         apply(trust_policy(
             "Active",
             keys=[policy_key(lab["keyId"], lab["spkiPem"], "Active",
                              display="the lab signing key"),
                   policy_key(key["keyId"], key["spkiPem"], "Active",
                              display=f"{OWNER}'s second signer",
-                             subject=f"{OWNER}-signer2@logweir.invalid")],
+                             subject=f"{OWNER}-signer2@logweir.invalid"),
+                  policy_key(approver["keyId"], approver["spkiPem"], "Active",
+                             display="the lab approver key",
+                             subject="approver@scram-local.invalid",
+                             usages=["GovernedApproval"])],
         ))
         old = legacy_backup(f"{OWNER}-old-archive")
         before = old["status"]["evidence"]["verification"]
@@ -4002,7 +4106,11 @@ def old_archive() -> None:
                   policy_key(key["keyId"], key["spkiPem"], "Retired",
                              display=f"{OWNER}'s second signer",
                              subject=f"{OWNER}-signer2@logweir.invalid",
-                             retiredAt=retired_at)],
+                             retiredAt=retired_at),
+                  policy_key(approver["keyId"], approver["spkiPem"], "Active",
+                             display="the lab approver key",
+                             subject="approver@scram-local.invalid",
+                             usages=["GovernedApproval"])],
         ))
         after = await_trust(
             f"{OWNER}-old-archive",
@@ -4032,8 +4140,93 @@ def old_archive() -> None:
             + "; ".join(f"{k}={v}" for k, v in clauses.items()),
             evidence,
         )
+        # --- and the READ still proceeds -------------------------------
+        # THE POINT OF `Historical`. A retirement must not strand the archives
+        # the key signed, so an operator has to be able to RESTORE from them —
+        # which is the half harness-rows-6 §5 and harness-rows-7 §5 owed, and
+        # which only works over a LEGACY inline archive: a destination-backed
+        # run's evidence verdict is `NotAttempted` on this build (D2's own
+        # `S1.statusVerification` asserts it), so it has no `Valid` to become
+        # `Historical` in the first place. This archive is the one
+        # `legacy_backup` wrote and the controller verified itself.
+        restore_name = f"{OWNER}-historical-restore"
+        approval_name = f"{OWNER}-historical-approval"
+        for kind, name in (("restore", restore_name), ("approval", approval_name)):
+            run(KN + ["delete", kind, name, "--ignore-not-found=true", "--wait=true"],
+                check=False, timeout=120)
+        subject = get("backup", f"{OWNER}-old-archive")
+        plan = legacy_restore_plan(subject["status"]["backupId"],
+                                   subject["status"].get("capture", {}).get("finishedAt")
+                                   or now(), f"{OWNER}-hist-")
+        plan_bytes = json.dumps(plan, indent=2) + "\n"
+        work = pathlib.Path(tempfile.mkdtemp(prefix=f"{OWNER}-hist-", dir="/tmp"))
+        work.chmod(0o700)
+        try:
+            (work / "plan.json").write_text(plan_bytes)
+            run([logweir_cli(), "drill", "approve", "--spec", str(work / "plan.json"),
+                 "--key", str(approver_material()["approver"]), "--approver", OWNER,
+                 "--ticket", "HR7", "--subject-kind", "Restore",
+                 "--out", str(work / "approval.json")], timeout=120)
+            apply({
+                "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
+                "metadata": owned(restore_name),
+                "spec": {
+                    "sourceArchive": {"url": LEGACY_ARCHIVE,
+                                      "secretRef": {"name": "logweir-s3"}},
+                    "backupSetRef": subject["status"]["backupId"],
+                    "pointInTime": plan["restore"]["point_in_time"],
+                    "planBytes": plan_bytes,
+                    "approvalRef": {"name": approval_name},
+                    "deadlineSeconds": 900,
+                    "target": {"clusterRef": {"name": "source"}, "mode": "scratch",
+                               "topicNaming": {"prefix": f"{OWNER}-hist-"}},
+                },
+            })
+            apply({
+                "apiVersion": "logweir.dev/v1alpha1", "kind": "Approval",
+                "metadata": owned(approval_name),
+                "spec": {
+                    "approvalBytes": (work / "approval.json").read_text(),
+                    "sidecarBytes": (work / "approval.sig").read_text(),
+                    "planHash": "sha256:" + hashlib.sha256(plan_bytes.encode()).hexdigest(),
+                    "subjectRef": {"kind": "Restore", "name": restore_name},
+                },
+            })
+        finally:
+            shutil.rmtree(work, ignore_errors=True)
+        restored = wait_for(
+            "restore", restore_name,
+            lambda o: (condition(o, "Admitted").get("status") == "True"
+                       or (o.get("status") or {}).get("jobRef")
+                       or (o.get("status") or {}).get("phase") in
+                       {"Running", "Succeeded", "Failed", "Refused"}),
+            seconds=420, what="the restore from the retired key's archive to be admitted",
+        )
+        job = ((restored.get("status") or {}).get("jobRef") or {}).get("name")
+        admitted = condition(restored, "Admitted")
+        evidence.append(artifact("trust/historical-restore.json", restored))
+        phase = (restored.get("status") or {}).get("phase")
+        clauses = historical_archive_still_restores(after, admitted, job, phase, fresh)
+        evidence.append(artifact("trust/historical-restore-clauses.json", clauses))
+        check(
+            "trust-old-archive-still-restores",
+            "PLAT-19.1",
+            all(clauses.values()),
+            f"the archive signed by the key retired at {retired_at} verifies "
+            f"{after.get('result')} on basis {(after.get('trust') or {}).get('basis')}, and a "
+            f"Restore from it PROCEEDS: nothing holds it at admission "
+            f"(Admitted={admitted.get('status')}/{admitted.get('reason')}), phase "
+            f"{phase!r}, runner Job {job!r}. Meanwhile a "
+            f"Backup signed by that same key AFTER the retirement verifies "
+            f"{fresh.get('result')} — the archive stays readable and the key stays unusable, "
+            f"which is what `Historical` is for. "
+            + "; ".join(f"{k}={v}" for k, v in clauses.items()),
+            evidence,
+        )
         STATE["oldArchive"] = {"mintedKeyId": key["keyId"], "retiredAt": retired_at,
-                               "before": before, "after": after, "fresh": fresh}
+                               "before": before, "after": after, "fresh": fresh,
+                               "restore": {"name": restore_name, "job": job,
+                                           "admitted": admitted}}
         save()
     finally:
         # THE PRIVATE HALF GOES, whatever happened above.
@@ -4825,9 +5018,18 @@ PHASE_PRECONDITIONS: dict[str, tuple[str, ...]] = {
     "wrong_prefix": ("preview",),
     "denied_deletion": ("preview",),
     "no_evidence_credential": ("preview",),
-    # LAST OF THE dest-b PHASES, because it deletes the policy they read.
+    # LAST OF THE dest-b PHASES, because it deletes the policy they read — and
+    # after `legal_hold`, which plants a permanently nonterminal Restore at
+    # dest-b. `start_decision` refuses on the WHOLE destination while one
+    # exists ("a nonterminal Restore reads this destination; no retention Job
+    # is created"), so a `bounded_retry` that ran first would count zero
+    # enforcement runs and report the retry budget unexercised — which is
+    # exactly what it did before harness-rows-2 made `legal_hold` clean up
+    # after itself. The cleanup landed; the ORDER it depends on was never
+    # declared, and an undeclared dependency is one edit from being a bug
+    # again.
     "bounded_retry": ("preview", "enforce", "wrong_prefix", "denied_deletion",
-                      "no_evidence_credential"),
+                      "no_evidence_credential", "legal_hold"),
     "signed_at_probe": ("trust",),
 }
 
