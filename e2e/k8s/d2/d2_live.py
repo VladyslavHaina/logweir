@@ -1364,6 +1364,39 @@ def report() -> None:
 # never heard of is refused rather than silently tolerated.
 NON_IMAGE_PATHS = ("scripts/live/", "scripts/fixtures/", "e2e/", "docs/")
 
+# What the image build actually CONSUMES, derived from the two Dockerfiles —
+# the same set and the same rule `scripts/live/d1/fence/fenced.py` applies, and
+# for the same reason. Both Dockerfiles end their builder stage with `COPY . .`,
+# so an untracked `crates/**/x.rs` really is compiled in and an untracked
+# `Cargo.lock` really does decide what the image was built from.
+IMAGE_BUILD_INPUTS = (
+    "crates/", "Cargo.toml", "Cargo.lock", "rust-toolchain.toml", ".cargo/",
+    "third_party/", "LICENSE", "NOTICE", "THIRD_PARTY_NOTICES.md",
+    "ui/", "charts/", "config/", "logweir.yaml",
+)
+
+
+def untracked_is_ignorable(path: str) -> bool:
+    """Whether an UNTRACKED file can be ignored when comparing lab and checkout.
+
+    Three questions, and the last is what makes this fail closed: inside the
+    build inputs is refused; inside a tree no image contains is ignored;
+    otherwise it is ignorable only if it is a bare file at the repository root
+    — the orchestrator's `prompt` and its like, which land in the build CONTEXT,
+    invalidate a cargo layer and change no output byte because no crate names a
+    file at the root. Anything in a directory this function has never heard of
+    is REFUSED.
+
+    Without this the guard refused on `prompt` and `d2_live.py revision` could
+    not run at all (lab-refresh-5 §7.3, lab-refresh-6 §15) — while the D1 fence,
+    which had the same defect, has applied this rule since harness-rows-2.
+    """
+    if path.startswith(IMAGE_BUILD_INPUTS):
+        return False
+    if path.startswith(NON_IMAGE_PATHS):
+        return True
+    return "/" not in path
+
 
 def revision_guard() -> None:
     """Abort unless the product code in this checkout IS the build the lab runs.
@@ -1411,10 +1444,16 @@ def revision_guard() -> None:
     changed = [ln.strip() for ln in
                run(["git", "diff", "--name-only", revision, "HEAD"], timeout=120)
                .stdout.splitlines() if ln.strip()]
-    dirty = [ln[3:].strip() for ln in
-             run(["git", "status", "--porcelain"], timeout=120).stdout.splitlines()
-             if ln.strip()]
-    product = sorted({p for p in changed + dirty if not p.startswith(NON_IMAGE_PATHS)})
+    porcelain = run(["git", "status", "--porcelain", "--untracked-files=all"],
+                    timeout=120).stdout.splitlines()
+    dirty = [ln[3:].strip() for ln in porcelain if ln.strip() and not ln.startswith("?? ")]
+    untracked = [ln[3:].strip() for ln in porcelain if ln.startswith("?? ")]
+    untracked_ignored = [u for u in untracked if untracked_is_ignorable(u)]
+    untracked_refused = [u for u in untracked if not untracked_is_ignorable(u)]
+    product = sorted(
+        {p for p in changed + dirty if not p.startswith(NON_IMAGE_PATHS)}
+        | set(untracked_refused)
+    )
     if product:
         raise RuntimeError(
             f"the lab runs {revision[:12]} and this checkout has moved product files since: "
@@ -1436,7 +1475,9 @@ def revision_guard() -> None:
         state["images"] | {"labRevision": revision, "checkoutHead": head,
                            "originMain": run(["git", "rev-parse", "origin/main"],
                                              check=False, timeout=60).stdout.strip(),
-                           "changedSinceImage": changed, "uncommitted": dirty},
+                           "changedSinceImage": changed, "uncommitted": dirty,
+                           "untrackedIgnored": untracked_ignored,
+                           "untrackedRefused": untracked_refused},
     )
     log(f"revision guard: lab images are {revision}; HEAD {head} differs only outside the image")
 

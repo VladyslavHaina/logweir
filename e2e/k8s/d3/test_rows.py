@@ -625,6 +625,25 @@ def test_two_namespaces_resolve_their_own_policies() -> None:
         not _multi(governed=dict(GOVERNED, trust={"basis": "Historical"})))
 
 
+# --- the phase order, as the phases' own preconditions --------------------
+def test_the_declared_phase_order_satisfies_its_preconditions() -> None:
+    row("the shipped order violates nothing", not d3.phase_order_violations(d3.PHASES))
+    broken = [p for p in d3.PHASES if p != "bounded_retry"]
+    broken.insert(broken.index("packaging"), "bounded_retry")
+    row("MUTANT: THE TRAP — bounded_retry before preview, which deletes what "
+        "preview reads",
+        "bounded_retry runs before preview" in d3.phase_order_violations(broken),
+        str(d3.phase_order_violations(broken)))
+    row("and it names every phase that would then fail, not only the first",
+        len(d3.phase_order_violations(broken)) == 5)
+    swapped = [p for p in d3.PHASES if p != "catalog"]
+    swapped.append("catalog")
+    row("MUTANT: catalog after the phases that read its view",
+        bool(d3.phase_order_violations(swapped)))
+    row("a phase list missing a phase entirely is not a violation, just a shorter run",
+        not d3.phase_order_violations(["setup", "catalog", "retention"]))
+
+
 def main() -> int:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

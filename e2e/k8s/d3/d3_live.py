@@ -4590,6 +4590,19 @@ def sweep_selftest() -> dict[str, Any]:
 
 
 def report() -> None:
+    violations = phase_order_violations(PHASES)
+    check(
+        "d3-phase-order-satisfies-its-own-preconditions",
+        "harness",
+        not violations,
+        f"the declared PHASES order satisfies every precondition the phases have of each "
+        f"other ({len(PHASE_PRECONDITIONS)} declared): {violations or 'none violated'}. "
+        f"`preview` writes the plan document `enforce`, `wrong-prefix`, `denied-deletion` "
+        f"and `no-evidence-credential` all read, and `bounded_retry` deletes the `keep-b` "
+        f"policy `preview` builds from — which is why it now runs last of the dest-b phases. "
+        f"A declared order nobody checks is a comment",
+        [],
+    )
     STATE["controllerAtReport"] = controller_facts()
     STATE["revision"] = run(["git", "rev-parse", "HEAD"]).stdout.strip()
     STATE["originMain"] = run(["git", "rev-parse", "origin/main"], check=False).stdout.strip()
@@ -4710,10 +4723,64 @@ def cleanup() -> None:
     print(json.dumps(proof, indent=2))
 
 
+# What each phase needs to have run before it, declared rather than implied.
+# `preview` writes `enforce/plan-document.json` and `STATE["plan"]`; `keep-b` is
+# `retention`'s policy and `bounded_retry` deletes it.
+PHASE_PRECONDITIONS: dict[str, tuple[str, ...]] = {
+    "catalog_cases": ("catalog",),
+    "retention": ("catalog",),
+    "legal_hold": ("retention",),
+    "lifecycle": ("retention",),
+    "enforce_guards": ("retention",),
+    "preview": ("retention",),
+    "enforce": ("preview",),
+    "wrong_prefix": ("preview",),
+    "denied_deletion": ("preview",),
+    "no_evidence_credential": ("preview",),
+    # LAST OF THE dest-b PHASES, because it deletes the policy they read.
+    "bounded_retry": ("preview", "enforce", "wrong_prefix", "denied_deletion",
+                      "no_evidence_credential"),
+    "signed_at_probe": ("trust",),
+}
+
+
+def phase_order_violations(phases: list[str]) -> list[str]:
+    """Every phase that runs before something it needs.
+
+    A DECLARED ORDER, CHECKED. The list used to put `bounded_retry` before
+    `preview`, and since `bounded_retry` DELETES `keep-b` to put its own Enforce
+    policy on dest-b, `preview` then died on `retentionpolicy "keep-b" not
+    found` and took `enforce`, `wrong-prefix` and `denied-deletion` down with it
+    — four phases failing for a reason that is the list's and looks like the
+    product's (lab-refresh-5 §8.4, again in lab-refresh-6 §16). A declared order
+    nobody checks is a comment.
+    """
+    position = {name: index for index, name in enumerate(phases)}
+    out: list[str] = []
+    for phase, needs in PHASE_PRECONDITIONS.items():
+        if phase not in position:
+            continue
+        for need in needs:
+            if need in position and position[need] > position[phase]:
+                out.append(f"{phase} runs before {need}")
+    return sorted(out)
+
+
+# THE ORDER IS THE PHASES' OWN PRECONDITIONS, not a preference.
+#
+# `preview` is what writes `enforce/plan-document.json` and `STATE["plan"]`, and
+# `enforce`, `wrong_prefix`, `denied_deletion` and `no_evidence_credential` all
+# read them — so `preview` comes before every one of them. `bounded_retry`
+# DELETES `keep-b` to put its own Enforce policy on dest-b, and `preview` builds
+# its plan from `keep-b`'s evaluation, so running `bounded_retry` first left
+# `preview` dying on `retentionpolicy "keep-b" not found` and took the other
+# four down with it (lab-refresh-5 §8.4, confirmed again in lab-refresh-6 §16).
+# `bounded_retry` therefore runs after the phases that need `keep-b`.
 PHASES = [
     "setup", "catalog", "catalog_cases", "retention", "legal_hold", "lifecycle",
-    "enforce_guards", "bounded_retry", "packaging", "preview",
-    "enforce", "wrong_prefix", "denied_deletion", "no_evidence_credential", "trust",
+    "enforce_guards", "packaging", "preview",
+    "enforce", "wrong_prefix", "denied_deletion", "no_evidence_credential",
+    "bounded_retry", "trust",
     "signed_at_probe", "trust_rbac", "old_archive", "multiple_namespaces", "notify", "control", "report", "cleanup",
 ]
 

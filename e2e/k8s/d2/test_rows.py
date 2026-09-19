@@ -222,6 +222,32 @@ def test_an_expired_approver_key_stops_a_previously_green_restore() -> None:
         not _s18(admitted={"type": "Admitted", "status": "True", "reason": "Admitted"}))
 
 
+# --- the revision guard's untracked boundary (lab-refresh-6 §15) -------------
+def test_the_revision_guard_ignores_only_untracked_non_inputs() -> None:
+    row("the orchestrator's own scratch file at the root is ignorable",
+        d2.untracked_is_ignorable("prompt") and d2.untracked_is_ignorable("notes.txt"))
+    row("the harness trees, their fixtures and prose are ignorable",
+        all(d2.untracked_is_ignorable(p) for p in
+            ("scripts/live/d1/x.py", "scripts/fixtures/y.py", "e2e/k8s/d2/z.json",
+             "docs/note.md")))
+    row("MUTANT: an untracked Rust source is compiled into the image",
+        not d2.untracked_is_ignorable("crates/weirkeeper/src/zz.rs"))
+    row("MUTANT: an untracked Cargo.lock decides what the image was built from",
+        not d2.untracked_is_ignorable("Cargo.lock")
+        and not d2.untracked_is_ignorable("rust-toolchain.toml")
+        and not d2.untracked_is_ignorable(".cargo/config.toml"))
+    row("MUTANT: shipped artifacts a lab is equally built from",
+        not d2.untracked_is_ignorable("charts/logweir/values.yaml")
+        and not d2.untracked_is_ignorable("config/crd/backups.yaml")
+        and not d2.untracked_is_ignorable("ui/src/app.ts"))
+    row("MUTANT: FAIL CLOSED — a directory the rule has never heard of",
+        not d2.untracked_is_ignorable("scripts/check-image.sh")
+        and not d2.untracked_is_ignorable("newdir/x.rs"))
+    row("the rule is the same one the D1 fence applies",
+        d2.IMAGE_BUILD_INPUTS[:5] == ("crates/", "Cargo.toml", "Cargo.lock",
+                                      "rust-toolchain.toml", ".cargo/"))
+
+
 def main() -> int:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
