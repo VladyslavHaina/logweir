@@ -1741,8 +1741,42 @@ impl Pass<'_> {
             // A DETERMINISTIC NAME MAKES A DUPLICATE RECONCILE A 409, not a
             // second deletion run. That is the whole reason the run id is a
             // pure function of the policy, the plan digest and the minute.
+            //
+            // AND IT RETURNS HERE RATHER THAN FALLING THROUGH TO THE RECORD —
+            // defect RET-COUNT-EARLY's second and decisive arm. This arm used
+            // to log and continue, so the patch below wrote `runId`/`startedAt`
+            // and nulled all seven terminal fields for a Job that ALREADY
+            // EXISTS. When that Job's run had already been harvested, the nulls
+            // resurrected it: `tracked_run` read `finishedAt: None`, found the
+            // Job present and finished, re-read its pod and counted the same
+            // failure again. Nothing bounded the repetition.
+            //
+            // It is reachable even when the guard at the top of this function
+            // is not, because that guard compares against the run the object
+            // LAST recorded and the digest can return to an EARLIER run's.
+            // `previously_refused()` reads the last run's `failed[]`, so the
+            // exclusion set oscillates — run 1's plan, minus run 1's refusals
+            // gives run 2's, minus run 2's gives run 1's again — and inside one
+            // `* * * * *` slot that is the same run id. Live on `af64073`:
+            // `status.lastEnforcement` named the FIRST Job with a `startedAt`
+            // 17.5 s after that Job was created and a `finishedAt` 100 ms
+            // later, carrying its real `exitCode 1` and its own `recordKey`.
+            //
+            // WHAT IS GIVEN UP, STATED. The fall-through also recovered a run
+            // whose Job was created by a pass that died before recording it.
+            // That recovery is now not performed: the Job runs, its own
+            // create-only record under `logweir/retention/` is written by the
+            // worker and is the durable evidence, and the controller
+            // under-reports that run. Under-reporting a run is fail-safe —
+            // retention stops sooner, never later — and re-recording it is the
+            // defect above. The lease this pass wrote still holds the points.
             Err(kube::Error::Api(e)) if e.code == 409 => {
-                debug!(job = %job_name, "the retention Job already exists; this pass creates none");
+                debug!(
+                    job = %job_name, run = %run_id,
+                    "a Job already stands at this run's deterministic name; this pass creates \
+                     none and leaves the run record alone"
+                );
+                return Ok(StartOutcome::AlreadyHarvested);
             }
             Err(e) => return Err(ReconcileError::Api(e)),
         }
@@ -2939,8 +2973,9 @@ pub fn parse_run_lines(log: &str, exit_code: Option<i32>) -> RunReport {
 pub enum StartOutcome {
     /// The Job was created (or already existed at its deterministic name).
     Started(String),
-    /// The run this plan and slot name has already been harvested; there is
-    /// nothing to start and nothing to record.
+    /// The run this plan and slot name has already been harvested, or a Job
+    /// already stands at its deterministic name; there is nothing to start and
+    /// nothing to record.
     AlreadyHarvested,
     /// The lease PATCH did not land, so nothing is holding these points.
     LeaseNotHeld,

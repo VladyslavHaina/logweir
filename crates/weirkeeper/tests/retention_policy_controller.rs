@@ -4321,3 +4321,90 @@ async fn a_run_already_harvested_in_this_slot_is_not_started_again() {
     );
     assert_eq!(after_pass["consecutiveRunFailures"], json!(1));
 }
+
+/// **The oscillation path, end to end — review finding F1.** A policy whose
+/// plan digest returns to an EARLIER run's digest inside one slot does not
+/// re-count that run's failure.
+///
+/// This is the arm the guard at the top of `start_run` does not reach.
+/// `previously_refused()` reads the LAST run's `failed[]`, so the exclusion set
+/// oscillates: run 1's plan, minus run 1's refusals, is run 2's; minus run 2's
+/// refusals it is run 1's again. Inside one slot that is the same run id, and
+/// the object's last record names run 2 — so "the recorded run is this run and
+/// it finished" is false and the pass proceeds to `jobs.create`, which answers
+/// 409 for run 1's Job. The old fall-through then wrote `runId: run1` with all
+/// seven terminal fields nulled, `tracked_run` found run 1's Job present and
+/// finished, and `harvest` counted it a second time.
+///
+/// Live on `af64073` the artifact caught it exactly: `lastEnforcement` naming
+/// the FIRST Job with `startedAt` 17.5 s after that Job was created,
+/// `finishedAt` 100 ms later, its real `exitCode 1` and its own `recordKey`.
+#[tokio::test]
+async fn a_digest_that_returns_to_an_earlier_runs_id_does_not_re_count_it() {
+    let spec = unattended_enforcing();
+
+    // Run 1, which refuses a point — so the next plan excludes it.
+    let (after_first, first_job) = failed_cycle(&spec, &json!({}), now(), 1, REFUSED_RUN_LOG).await;
+    let first_run = after_first["lastEnforcement"]["runId"]
+        .as_str()
+        .expect("a run id")
+        .to_string();
+    assert_eq!(after_first["consecutiveRunFailures"], json!(1));
+
+    // Run 2 in the SAME slot, refusing nothing — so the exclusion set empties
+    // and the plan, and therefore the run id, returns to run 1's.
+    let (after_second, second_job) = failed_cycle(
+        &spec,
+        &after_first,
+        now() + chrono::Duration::minutes(2),
+        1,
+        PLAIN_FAIL_LOG,
+    )
+    .await;
+    assert_ne!(first_job, second_job, "run 2 is a different Job");
+    assert_eq!(after_second["consecutiveRunFailures"], json!(2));
+
+    let back = digest_for(&after_second, now() + chrono::Duration::minutes(4)).await;
+    let first_digest = after_first["lastEnforcement"]["planSha256"]
+        .as_str()
+        .expect("run 1's digest");
+    assert_eq!(
+        back, first_digest,
+        "the fixture must actually oscillate, or this row asserts nothing"
+    );
+    assert_ne!(
+        after_second["lastEnforcement"]["runId"],
+        json!(first_run),
+        "and the object's last record names run 2, which is why the run-id guard cannot fire"
+    );
+
+    // The third pass: same slot, run 1's digest, so run 1's id — and run 1's
+    // Job is still there.
+    let f = same_slot_pass(
+        &spec,
+        &after_second,
+        now() + chrono::Duration::minutes(4),
+        &back,
+    )
+    .await;
+    let after_third = after(&after_second, &f);
+    assert_eq!(
+        after_third["consecutiveRunFailures"],
+        json!(2),
+        "two Jobs ran, so two failures — the third pass created nothing. Status: {after_third}"
+    );
+    assert_eq!(
+        after_third["lastEnforcement"]["runId"], after_second["lastEnforcement"]["runId"],
+        "and the record still describes run 2, not a resurrected run 1: {}",
+        after_third["lastEnforcement"]
+    );
+    assert!(
+        after_third["lastEnforcement"]["finishedAt"].is_string(),
+        "which is still finished, so nothing hands its Job back to be harvested again"
+    );
+    let degraded = condition_of(&after_third, ctrl::CONDITION_DEGRADED).expect("a condition");
+    assert_eq!(
+        degraded["status"], "False",
+        "the budget is not spent: {degraded}"
+    );
+}
