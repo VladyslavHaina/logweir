@@ -1094,23 +1094,27 @@ test("the_keys_page_shows_expiry_from_the_roster_status", () => {
     const end = out.indexOf("</tr>", at);
     return out.slice(at, end);
   };
-  assert.ok(rowOf(spec.approverKeys[0].keyId).includes("<td>expired</td>"), "marked expired");
-  assert.ok(rowOf(spec.signingKeys[0].keyId).includes("<td>valid</td>"), "marked valid");
+  assert.ok(rowOf(spec.approverKeys[0].keyId).includes(">expired<"), "marked expired");
+  assert.ok(rowOf(spec.signingKeys[0].keyId).includes(">valid<"), "marked valid");
   assert.ok(
-    rowOf(spec.approverKeys[1].keyId).includes("<td>valid</td>"),
+    rowOf(spec.approverKeys[1].keyId).includes(">valid<"),
     "and a second, unexpired approver key is valid -- so the column reads the status list " +
       "and not the position",
   );
 
-  // The fingerprint command and the roster snippet, neither of them submitted.
+  // The fingerprint command and the trust snippet, neither of them submitted.
+  // D3 §7 REPLACED THE ROSTER WITH A `TrustPolicy`, so the document this page
+  // offers a cluster admin is a policy and the migration command beside it --
+  // a roster is not edited by hand into one.
   const text = decode(out);
   assert.ok(
     text.includes("openssl pkey -pubin -outform DER -in <key>.pub.pem | openssl dgst -sha256"),
     "the out-of-band fingerprint command, which is the only step that catches an " +
       "undisclosed key rotation",
   );
-  assert.ok(text.includes("kubectl --context docker-desktop apply -f roster.yml"));
-  assert.ok(text.includes("kind: TrustRoster"));
+  assert.ok(text.includes("kubectl --context <ctx> apply -f trustpolicy.yml"));
+  assert.ok(text.includes("kind: TrustPolicy"));
+  assert.ok(text.includes("logweir trust migrate-roster"), "and the reviewable migration path");
   // A Secret's value never reaches this page; the roster carries PUBLIC halves.
   assert.equal(text.indexOf("PRIVATE KEY"), -1, "no private key material anywhere on this page");
 });

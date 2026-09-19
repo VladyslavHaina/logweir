@@ -36,7 +36,6 @@ import { apiClient } from "../client.js";
 import { active, cancelled, readOptions } from "../lifecycle.js";
 import {
   ENGINE_SUBREPORT_LINE,
-  UNVERIFIED,
   badge,
   bucketOf,
   cell,
@@ -49,11 +48,15 @@ import {
   listFooter,
   phaseBadge,
   replace,
+  SCOPE_LEVEL_OF_INTEGRITY,
   table,
+  unverifiedCaption,
+  verificationScopeSentence,
 } from "../render.js";
 import { planHash } from "../plan.js";
 import { itemsOf } from "./clusters.js";
-import { backupBadge, greenLabel, validVerification } from "./backups.js";
+import { backupBadge, greenLabel, operationCell, validVerification } from "./backups.js";
+import { operationRoute } from "./operation.js";
 import { isRecoveryPoint, restorePointRoute } from "./restore-wizard.js";
 import {
   approvalState,
@@ -75,16 +78,70 @@ export const NO_HISTORY_SENTENCE =
   "as they exist.";
 
 /** **The Restore badge rule.** Green if and only if the recorded verification
- *  is `Valid` AND the run's own outcome is `pass`. */
+ *  is `Valid`, its trust basis is one a green badge may carry, AND the run's
+ *  own outcome is `pass`.
+ *
+ *  THE NOT-GREEN CAPTION NAMES ITS CASE, exactly as the Backup rule's does.
+ *  `Untrusted` means the bytes are authentic and this installation does not
+ *  accept the key; `NotAttempted` means the controller could not check at all;
+ *  `Invalid` means the document itself did not verify. Three different repairs
+ *  behind one word was the defect D3 section 7.4 names, and the word is kept while
+ *  the case is added beside it. */
 export function restoreBadge(status) {
-  const verified = validVerification(status);
-  if (verified === null) {
-    return badge("unverified", UNVERIFIED);
+  const s = status || {};
+  const verification = ((s.evidence || {}).verification) || {};
+  const verified = validVerification(s);
+  if (verified === null || s.outcome !== "pass") {
+    return badge("unverified", unverifiedCaption(verification, s.outcome === "pass"));
   }
-  if ((status || {}).outcome !== "pass") {
-    return badge("unverified", UNVERIFIED);
+  return badge("green", greenLabel(verified[0], verified[1], verified[2]));
+}
+
+/** HOW MUCH OF ONE RESTORE WAS COMPARED, from whichever document this page
+ *  is looking at.
+ *
+ *  `status.verificationScope` is the product API's own block and is used
+ *  verbatim when it is there. A custom resource carries the same facts under
+ *  two other names -- `status.integrity.level` and `status.completion`'s
+ *  counts -- and they are read through D3 section 2.5's own table
+ *  ([`SCOPE_LEVEL_OF_INTEGRITY`]), which is a vocabulary map and not a verdict:
+ *  the level is whatever the runner recorded, translated, never inferred from
+ *  a count or from a pass.
+ *
+ *  A LEVEL THIS TABLE DOES NOT KNOW PRODUCES NO SCOPE AT ALL, and the sentence
+ *  for an absent scope says how much was compared is not known here -- which is
+ *  true, and is not "complete". */
+export function scopeOf(object) {
+  const status = (object && object.status) || {};
+  if (status.verificationScope !== null && status.verificationScope !== undefined) {
+    return status.verificationScope;
   }
-  return badge("green", greenLabel(verified[0], verified[1]));
+  const level = SCOPE_LEVEL_OF_INTEGRITY[String((status.integrity || {}).level)];
+  if (level === undefined) {
+    return null;
+  }
+  const completion = status.completion || {};
+  return {
+    level: level,
+    recordsSampled: completion.recordsSampled,
+    recordsSampledMatching: completion.recordsSampledMatching,
+    recordsExpected: completion.recordsExpected,
+  };
+}
+
+/** THE LINK A ROW OF EITHER KIND CARRIES TO THE DURABLE OPERATION VIEW.
+ *
+ *  Two kinds, two operation kinds, one route. The uid travels with the name so
+ *  a link about a run that was deleted and recreated lands on a refusal rather
+ *  than on a different run's evidence. */
+export function rowOperationCell(object, ns) {
+  const meta = (object && object.metadata) || {};
+  if (typeof meta.name !== "string" || meta.name.length === 0) {
+    return cell(null);
+  }
+  const kind = kindOf(object) === "Backup" ? "backup" : "restore";
+  const target = operationRoute(ns || meta.namespace || "", kind, meta.name, meta.uid || "");
+  return "<a href=\"" + esc(target) + "\">Follow this run</a>";
 }
 
 function nameOf(object) {
@@ -182,6 +239,7 @@ export function renderHistoryList(input, second, ns) {
     phaseBadge((object.status || {}).phase),
     resultCell(object),
     rowBadge(object),
+    rowOperationCell(object, ns),
     restorePointCell(object, ns),
   ]);
 
@@ -192,7 +250,7 @@ export function renderHistoryList(input, second, ns) {
     "rule, because they do not share a field. A completed Backup carries a link that opens " +
     "the restore wizard on THAT recovery point, by uid.</p>" +
     table(
-      ["NAME", "KIND", "CREATED", "PHASE", "RESULT", "SIGNED", "RESTORE"],
+      ["NAME", "KIND", "CREATED", "PHASE", "RESULT", "SIGNED", "OPERATION", "RESTORE"],
       rows,
       NO_HISTORY_SENTENCE,
     ) +
@@ -255,6 +313,7 @@ export function renderRestoreDetail(object, operation) {
       ["last phase completed", cell(status.lastPhaseCompleted)],
       ["outcome", cell(status.outcome)],
       ["target mode", cell((spec.target || {}).mode)],
+      ["operation", rowOperationCell(object, (object.metadata || {}).namespace)],
       ["point in time", cell(spec.pointInTime)],
       ["backup set", cell(spec.backupSetRef)],
     ]) +
@@ -264,6 +323,11 @@ export function renderRestoreDetail(object, operation) {
       ["result", cell(integrity.result)],
       ["partial reason", cell(integrity.partialReason)],
     ]) +
+    // HOW MUCH OF THIS RESTORE WAS ACTUALLY COMPARED, BESIDE THE RESULT AND
+    // NEVER AWAY FROM IT (D3 section 2.5, section 3.5). A pass is a pass over a SAMPLE, and
+    // a result printed without its scope reads as an exhaustive comparison --
+    // which no level in v1 performs and none is called `complete`.
+    "<p class=\"scope\">" + esc(verificationScopeSentence(scopeOf(object))) + "</p>" +
     "<h3>Objectives asked for, and what the run achieved</h3>" +
     facts([
       ["objectives.rtoSeconds", cell(objectives.rtoSeconds)],

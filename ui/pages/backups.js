@@ -35,7 +35,8 @@
 import { apiClient } from "../client.js";
 import { active, cancelled, readOptions } from "../lifecycle.js";
 import {
-  UNVERIFIED,
+  GREEN_BASES,
+  HISTORICAL_SUFFIX,
   badge,
   bucketOf,
   cell,
@@ -52,9 +53,11 @@ import {
   revisionLine,
   table,
   triggerBadge,
+  unverifiedCaption,
 } from "../render.js";
 import { itemsOf } from "./clusters.js";
 import { renderCoverageLine } from "./schedules.js";
+import { operationRoute } from "./operation.js";
 
 const PLURAL = "backups";
 
@@ -69,12 +72,23 @@ export const NO_BACKUP_SENTENCE =
 
 /** The verification half of BOTH rules, and nothing else.
  *
- *  `Ok` is `[verifiedAt, matchedKeyId]`; anything else is `null`. A `Valid`
- *  carrying no `matchedKeyId` or no `verifiedAt` is NOT a verdict the
+ *  `Ok` is `[verifiedAt, matchedKeyId, basis]`; anything else is `null`. A
+ *  `Valid` carrying no `matchedKeyId` or no `verifiedAt` is NOT a verdict the
  *  controller ever writes -- it sets both on every `Valid`
  *  (`crates/weirkeeper/src/verification.rs`) -- so a block shaped like that is
  *  treated here as no verdict at all rather than as a green badge whose label
- *  cannot be written. */
+ *  cannot be written.
+ *
+ *  THE TRUST BASIS IS PART OF THE RULE NOW (D3 section 7.4). Green requires `Valid`
+ *  AND a basis of `Current` or `Historical`. The two bases that are NOT green
+ *  are `RecordedBeforeRevocation` -- a compromised key signed it and a
+ *  controller happened to have seen it first, which is an observation and not
+ *  a signature this installation still accepts -- and `None`.
+ *
+ *  AN OBJECT WITH NO `trust` BLOCK AT ALL STAYS GREEN. The block is additive
+ *  and every object written before D3 carries none; D3 section 12's rule is that an
+ *  absent field is NOT OBSERVED, and treating "an older controller wrote this"
+ *  as a downgrade would turn every archive in an upgraded cluster red. */
 export function validVerification(status) {
   const evidence = (status && status.evidence) || {};
   const verification = evidence.verification || {};
@@ -89,26 +103,44 @@ export function validVerification(status) {
   if (typeof key !== "string" || key.length === 0) {
     return null;
   }
-  return [at, key];
+  const basis = (verification.trust || {}).basis;
+  if (typeof basis === "string" && GREEN_BASES.indexOf(basis) === -1) {
+    return null;
+  }
+  return [at, key, typeof basis === "string" ? basis : null];
 }
 
-/** The label a green badge carries, verbatim. */
-export function greenLabel(verifiedAt, matchedKeyId) {
-  return "verified by weirkeeper at " + verifiedAt + " against key " + matchedKeyId;
+/** The label a green badge carries, verbatim.
+ *
+ *  A `Historical` BADGE IS A PASS AND NOT A WARNING. D3 section 7.6's supported key
+ *  rotation is meant to produce exactly this: the key was valid when it
+ *  signed, the old archives keep verifying, and the public material can never
+ *  be edited out of the policy. The qualifier says so on the badge so a reader
+ *  is not left wondering why a retired key id appears on a green row. */
+export function greenLabel(verifiedAt, matchedKeyId, basis) {
+  return "verified by weirkeeper at " + verifiedAt + " against key " + matchedKeyId +
+    (basis === "Historical" ? HISTORICAL_SUFFIX : "");
 }
 
 /** **The Backup badge rule.** Green if and only if the recorded verification
- *  is `Valid` AND the run's own exit code is `0`. Reads no `outcome`, because
- *  a `Backup` has none. */
+ *  is `Valid`, its trust basis is one a green badge may carry, AND the run's
+ *  own exit code is `0`. Reads no `outcome`, because a `Backup` has none.
+ *
+ *  WHEN IT IS NOT GREEN THE CAPTION STILL CARRIES THE WORD `unverified`, and
+ *  now says WHICH of the cases it is. The word is what every older surface
+ *  looks for and what the existing badge rule promises; the case is what says
+ *  where to go and look. `Invalid` is a claim about the DOCUMENT,
+ *  `NotAttempted` about the CONTROLLER and `Untrusted` about the SIGNER
+ *  (D3 section 7.4), and a console that printed one word for all three would have
+ *  destroyed the only distinction that says what to fix. */
 export function backupBadge(status) {
-  const verified = validVerification(status);
-  if (verified === null) {
-    return badge("unverified", UNVERIFIED);
+  const s = status || {};
+  const verification = ((s.evidence || {}).verification) || {};
+  const verified = validVerification(s);
+  if (verified === null || s.exitCode !== 0) {
+    return badge("unverified", unverifiedCaption(verification, s.exitCode === 0));
   }
-  if ((status || {}).exitCode !== 0) {
-    return badge("unverified", UNVERIFIED);
-  }
-  return badge("green", greenLabel(verified[0], verified[1]));
+  return badge("green", greenLabel(verified[0], verified[1], verified[2]));
 }
 
 function nameOf(object) {
@@ -144,7 +176,25 @@ export const TRIGGER_COLUMN_SENTENCE =
   "and Manual for a run a person asked for. A run frozen before PLAT-05.1 carries none and " +
   "says so; it is never read from triggeredBy, which cannot tell those four apart.";
 
-/** The backups table. NAME, TRIGGER, PHASE, EXIT, RECORDS, SIGNED, AGE. */
+/** THE LINK EVERY ROW CARRIES TO THE DURABLE OPERATION VIEW (PLAT-12.1).
+ *
+ *  BOTH HALVES OF THE IDENTITY TRAVEL, for the same reason the restore link
+ *  carries a uid: a name is reused, and a run deleted and recreated under one
+ *  is a different run with different evidence. The operation view refuses a
+ *  uid that does not answer rather than switching under a reader. */
+export function operationCell(object, ns) {
+  const meta = (object && object.metadata) || {};
+  if (typeof meta.name !== "string" || meta.name.length === 0) {
+    return cell(null);
+  }
+  const target = operationRoute(
+    ns || meta.namespace || "", "backup", meta.name, meta.uid || "",
+  );
+  return "<a href=\"" + esc(target) + "\">Follow this run</a>";
+}
+
+/** The backups table. NAME, TRIGGER, PHASE, EXIT, RECORDS, SIGNED, AGE,
+ *  OPERATION. */
 export function renderBackupList(input, ns) {
   const rows = itemsOf(input).map((object) => {
     const status = object.status || {};
@@ -158,6 +208,7 @@ export function renderBackupList(input, ns) {
       cell(status.records),
       backupBadge(status),
       cell(meta.creationTimestamp),
+      operationCell(object, ns),
     ];
   });
   return (
@@ -167,7 +218,7 @@ export function renderBackupList(input, ns) {
     "reading a clock.</p>" +
     "<p class=\"note\">" + esc(TRIGGER_COLUMN_SENTENCE) + "</p>" +
     table(
-      ["NAME", "TRIGGER", "PHASE", "EXIT", "RECORDS", "SIGNED", "AGE"],
+      ["NAME", "TRIGGER", "PHASE", "EXIT", "RECORDS", "SIGNED", "AGE", "OPERATION"],
       rows,
       NO_BACKUP_SENTENCE,
     ) +
@@ -201,6 +252,7 @@ export function renderBackupDetail(object) {
       ["schedule revision", revisionLine(spec.scheduleRef)],
       ["archive", cell(archive.url)],
       ["identity presented", cell(auth.mode) + " " + cell(auth.username)],
+      ["operation", operationCell(object, (object.metadata || {}).namespace)],
     ]) +
     // WHAT THIS RUN COVERED, from its own `status.selection` and from nowhere
     // else. `renderCoverageLine` is shared with the schedules page so a

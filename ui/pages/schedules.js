@@ -59,7 +59,12 @@ import {
 import { INCOMPLETE_DISCOVERY_POLICIES } from "../contract.js";
 import {
   ABSENT,
+  ENFORCEMENT_DEGRADED_SENTENCE,
+  ENFORCEMENT_SENTENCES,
+  GUARANTEE_WORDS,
+  IRREVERSIBLE_SENTENCE,
   RETENTION_SENTENCE,
+  SUPERSEDED_SENTENCE,
   badge,
   cell,
   copyBlock,
@@ -91,6 +96,8 @@ import {
 import { focusFirstProblem, isObjectName, itemsOf, readFormValues } from "./clusters.js";
 import { renderPreflight } from "./destinations.js";
 import { isRecoveryPoint, recoveryPoints, restorePointRoute } from "./restore-wizard.js";
+import { listD3 } from "../operation-watch.js";
+import { operationRoute } from "./operation.js";
 
 const PLURAL = "backupschedules";
 const BACKUPS = "backups";
@@ -296,14 +303,16 @@ function removableLine(set) {
  *  removal commands the status carries -- `awsCli` in that archive's own
  *  scheme and `mcCli` in `mc`'s spelling -- printed verbatim in a block a
  *  viewer copies, above the sentence that says who would be running them. */
-export function renderRetentionPanel(object) {
+export function renderRetentionPanel(object, policy) {
   const status = (object && object.status) || {};
   const report = status.retentionReport;
+  const enforcement = renderEnforcement(report, policy);
   if (!report) {
     return (
       "<section class=\"retention\"><h3>Retention</h3>" +
       "<p class=\"note\">No retention evaluation has been recorded for this schedule.</p>" +
-      "<p class=\"never-deletes\">" + RETENTION_SENTENCE + "</p></section>"
+      enforcement +
+      retentionSentenceFor(report, policy) + "</section>"
     );
   }
   const kept = Array.isArray(report.setsKept) ? report.setsKept : [];
@@ -332,6 +341,7 @@ export function renderRetentionPanel(object) {
 
   return (
     "<section class=\"retention\"><h3>Retention</h3>" +
+    enforcement +
     facts([
       ["evaluated at", cell(report.evaluatedAt)],
       ["keepLast applied", cell(report.keepLast)],
@@ -343,8 +353,161 @@ export function renderRetentionPanel(object) {
     skippedList +
     "<h4>The commands</h4>" +
     copyBlock(awsCli.concat(mcCli)) +
-    "<p class=\"never-deletes\">" + RETENTION_SENTENCE + "</p>" +
+    retentionSentenceFor(report, policy) +
     "</section>"
+  );
+}
+
+// ===========================================================================
+// D3 (PLAT-16.1, PLAT-16.2): WHICH SENTENCE THIS PANEL IS ALLOWED TO PRINT
+// ===========================================================================
+//
+// THE OLD SENTENCE IS STILL TRUE, AND ONLY WHERE IT IS. "Logweir never deletes
+// from your archive" was a statement about the whole product, and PLAT-16.2
+// made it a statement about a MODE: a RetentionPolicy in `Enforce` runs an
+// isolated worker that does delete, with its own delete-capable credential.
+// Printing the old line beside a policy that is deleting nightly would be the
+// most consequential false sentence this console could render.
+//
+// SO THE PANEL READS `status.enforcement` -- WHAT IS HAPPENING -- AND NOT
+// `spec.mode`, WHICH IS WHAT WAS ASKED FOR. A policy in `mode: Enforce` whose
+// destination will not resolve reports `RecommendationOnly`, and this panel
+// says the thing that is true of it.
+//
+// AND THE LEGACY REPORT SAYS WHAT IT IS. A schedule's own
+// `status.retentionReport` is a per-schedule RECOMMENDATION and nothing else;
+// once a RetentionPolicy covers the same destination the report carries
+// `supersededBy` and this panel says which evaluation counts.
+
+/** The one sentence this panel prints about deletion, chosen by what is
+ *  actually happening. `RETENTION_SENTENCE` verbatim for a schedule-level
+ *  report and for `RecommendationOnly`; the mode's own sentence otherwise. */
+export function retentionSentenceFor(report, policy) {
+  const state = enforcementOf(policy);
+  if (state === null || state === "RecommendationOnly") {
+    return "<p class=\"never-deletes\">" + RETENTION_SENTENCE + "</p>";
+  }
+  return "<p class=\"never-deletes\" data-enforcement=\"" + esc(state) + "\">" +
+    esc(ENFORCEMENT_SENTENCES[state] || "") + "</p>";
+}
+
+/** WHICH RetentionPolicy COVERS THIS SCHEDULE, FROM THE CONTROLLER'S OWN
+ *  ANSWER AND NOT FROM A GUESS.
+ *
+ *  `status.retentionReport.supersededBy` is written by the schedule controller
+ *  when a RetentionPolicy covers the same destination (D3 section 6.3). Matching on
+ *  anything else -- a destination name, a bucket prefix -- would be this page
+ *  deciding which policy governs a schedule, which is a decision with two
+ *  possible answers (two policies for one destination are a `Conflict` and
+ *  NEITHER evaluates) and one authority, and the authority is not a browser. */
+export function policyForSchedule(object, policies) {
+  const superseded = (((object || {}).status || {}).retentionReport || {}).supersededBy;
+  const name = (superseded || {}).name;
+  if (typeof name !== "string" || name.length === 0) {
+    return null;
+  }
+  for (const policy of Array.isArray(policies) ? policies : []) {
+    if (((policy || {}).metadata || {}).name === name) {
+      return policy;
+    }
+  }
+  return null;
+}
+
+/** `status.enforcement` off the RetentionPolicy covering this destination, or
+ *  `null` when there is no policy to read one from. */
+export function enforcementOf(policy) {
+  const state = ((policy || {}).status || {}).enforcement;
+  return typeof state === "string" && state.length > 0 ? state : null;
+}
+
+/** One condition out of a policy's list, by type. */
+export function policyCondition(policy, type) {
+  const conditions = ((policy || {}).status || {}).conditions;
+  for (const condition of Array.isArray(conditions) ? conditions : []) {
+    if ((condition || {}).type === type) {
+      return condition;
+    }
+  }
+  return null;
+}
+
+/** THE ENFORCEMENT BLOCK: which evaluation counts, what it guarantees, and --
+ *  in `Enforce` -- the approved-plan state and the irreversibility sentence.
+ *
+ *  THE APPROVED-PLAN STATE IS THREE FACTS AND NOT A TICK. The digest an
+ *  administrator approved, the digest the newest evaluation produced, and when
+ *  that plan expires. A run happens only when the first two are equal and the
+ *  plan is still young; printing "approved" alone would hide a plan that was
+ *  approved and then superseded by a later evaluation, which is the case the
+ *  two-step approval exists for. */
+export function renderEnforcement(report, policy) {
+  const superseded = (report || {}).supersededBy || null;
+  const state = enforcementOf(policy);
+  if (policy === null || policy === undefined) {
+    return (
+      "<p class=\"note\" data-enforcement=\"none\">" +
+      esc(report && report.enforcement
+        ? "This schedule's own report is " + String(report.enforcement) + ": a recommendation " +
+          "about this schedule's sets and nothing more."
+        : "No RetentionPolicy was read for this schedule's destination, so what is below is " +
+          "this schedule's own recommendation and nothing else.") +
+      (superseded === null
+        ? ""
+        : " " + esc(SUPERSEDED_SENTENCE) + " The policy is " + cell(superseded.name) + ".") +
+      "</p>"
+    );
+  }
+  const status = policy.status || {};
+  const guarantees = status.guarantees || {};
+  const spec = policy.spec || {};
+  const enforcement = spec.enforcement || {};
+  const evaluation = status.lastEvaluation || {};
+  const degraded = policyCondition(policy, "EnforcementDegraded");
+  const enforced = policyCondition(policy, "Enforced");
+  const external = spec.externalLifecycle || {};
+  return (
+    "<div class=\"enforcement\" data-enforcement=\"" + esc(String(state)) + "\">" +
+    "<h4>Enforcement</h4>" +
+    (superseded === null ? "" : "<p class=\"note\">" + esc(SUPERSEDED_SENTENCE) + "</p>") +
+    facts([
+      ["policy", cell(((policy.metadata || {}).name))],
+      ["mode asked for", cell(spec.mode)],
+      ["what is happening", cell(state)],
+      ["age expiry", esc(GUARANTEE_WORDS[guarantees.ageExpiry] || "")],
+      ["minimum usable points", esc(GUARANTEE_WORDS[guarantees.minUsablePoints] || "")],
+      ["active restore protection",
+        esc(GUARANTEE_WORDS[guarantees.activeRestoreProtection] || "")],
+      ["shared segments", esc(GUARANTEE_WORDS[guarantees.sharedSegments] || "")],
+      ["legal hold", esc(GUARANTEE_WORDS[guarantees.legalHold] || "")],
+    ]) +
+    (state === "ExternalLifecycleDeclared"
+      ? "<p class=\"note\">The declared rule is <code>" + cell(external.ruleId) +
+        "</code> on " + cell(external.provider) + ", expiring objects after " +
+        cell(external.expirationDays) + " day(s). Logweir cannot read a bucket lifecycle " +
+        "configuration back, so every guarantee above that says so is a DECLARATION.</p>"
+      : "") +
+    (state === "LogweirWorker"
+      ? "<h5>The approved plan</h5>" +
+        facts([
+          ["approval required", cell(enforcement.requireApprovedPlan)],
+          ["digest an administrator approved", cell(enforcement.approvedPlanSha256)],
+          ["digest of the newest evaluation", cell(evaluation.planSha256)],
+          ["that plan expires at", cell(evaluation.planExpiresAt)],
+          ["points it would remove", cell(evaluation.candidateCount)],
+        ]) +
+        (enforced === null
+          ? ""
+          : "<p class=\"note\">Enforced=" + esc(String(enforced.status)) + " " +
+            esc(String(enforced.reason || "")) + ": " + esc(String(enforced.message || "")) +
+            "</p>") +
+        "<p class=\"irreversible\">" + esc(IRREVERSIBLE_SENTENCE) + "</p>"
+      : "") +
+    (degraded !== null && String(degraded.status) === "True"
+      ? "<p class=\"complaint\" data-enforcement-degraded=\"true\">" +
+        esc(ENFORCEMENT_DEGRADED_SENTENCE) + " " + esc(String(degraded.message || "")) + "</p>"
+      : "") +
+    "</div>"
   );
 }
 
@@ -1214,7 +1377,7 @@ export function renderScheduleCard(ns, object, backups, extra) {
     "<div class=\"policy-slot\" data-policy-slot=\"" + esc(name) + "\">" +
     renderPolicyForm(policyFormView(ns, object, own, e.destinations, e.mayOperate)) + "</div>" +
     renderRecoveryPoints(ns, object, backups) +
-    renderRetentionPanel(object) +
+    renderRetentionPanel(object, policyForSchedule(object, e.retentionPolicies)) +
     "</section>"
   );
 }
@@ -1327,6 +1490,18 @@ async function readReadiness(api, ns, lifecycle, clusters) {
       unavailable: true,
       unavailableReason: error.message,
     });
+  }
+}
+
+/** Every RetentionPolicy in `ns`, or an empty list when the read is refused. */
+async function readRetentionPolicies(ns, lifecycle) {
+  try {
+    return itemsOf(await listD3("retention", ns, readOptions(lifecycle)));
+  } catch (error) {
+    if (cancelled(error, lifecycle)) {
+      throw error;
+    }
+    return [];
   }
 }
 
@@ -1494,11 +1669,20 @@ export async function mountSchedules(node, ns, parse, lifecycle, deps) {
     for (const object of objects) {
       cards[((object.metadata || {}).name) || ""] = {};
     }
+    // THE RETENTION POLICIES ARE A FIFTH READ AND ITS FAILURE IS NOT THE
+    // PAGE'S EITHER. A build whose API has no retention route yet, or an
+    // identity with no grant on the kind, must not take the schedules page
+    // down with it: the panel then shows this schedule's own recommendation
+    // and says that is what it is.
     const extra = {
       cards: cards,
       destinations: readiness.destinations,
       mayOperate: mayOperate(ns),
+      retentionPolicies: await readRetentionPolicies(ns, lifecycle),
     };
+    if (!active(lifecycle)) {
+      return;
+    }
     const panels = objects
       .map((object) => renderScheduleCard(ns, object, backups, extra)).join("");
     replace(
@@ -2767,6 +2951,14 @@ export function renderRunNowResult(ns, result) {
         "the first time rather than starting a second one. "
       : badge("green", "started") + " ") +
     detailLink("backups", String(ns || meta.namespace || ""), String(meta.name || "")) + " " +
+    // WHERE ONE CLICK'S DURABLE PROGRESS IS (PLAT-12.1). The run exists; this
+    // is the view that follows it to a terminal state without a reload, and
+    // the link carries the uid so a name reused later lands on a refusal
+    // rather than on a different run.
+    "<a href=\"" +
+    esc(operationRoute(String(ns || meta.namespace || ""), "backup", String(meta.name || ""),
+      String(meta.uid || ""))) +
+    "\">Follow this run</a> " +
     triggerBadge(spec.trigger) + " " + revisionLine(spec.scheduleRef) +
     (context === null
       ? ""
