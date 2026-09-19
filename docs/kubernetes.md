@@ -5177,6 +5177,90 @@ every run. `ScheduleStatusView` likewise carries `policy`, `nextRuns` and
 `activeRuns` and not `lastSlot`, `missedSlots`, `pendingRun` or `history`, and
 the card names those four rather than leaving empty rows.
 
+### The three D3 tabs, and what each of them refuses to say
+
+D3 added `#/operations`, `#/protection` and `#/catalog`, extended `#/keys` and
+changed one column on `#/backups`, `#/history` and `#/schedules`. The routes are:
+
+| tab | what it reads |
+|---|---|
+| `#/operations?ns=&kind=&name=&uid=` | `GET .../operations/{kind}/{name}` and its SSE stream `.../events` in console mode; the `Backup`/`Restore` custom resource itself in legacy mode |
+| `#/protection` | `GET .../protection-policies[/{name}]`, or the `ProtectionPolicy` custom resource |
+| `#/catalog` | `GET .../catalogs[/{name}]`, `/points`, `/signers` and the one create, `POST .../catalogs`; the `RecoveryCatalog` custom resource carries the status half in legacy mode and the point list is console-only |
+| `#/keys` | `GET /api/v1/trust-policies`, or the cluster-scoped `TrustPolicy`, with `TrustRoster/default` as the named fallback |
+
+**The operation view follows a run and cancels nothing.** The stream is one
+`EventSource` on the same origin, opened in `ui/api.js` beside the one `fetch`,
+carrying no header and no token in its identifier; it reconnects with backoff
+and falls back to polling after three failed connects, because a proxy that will
+not carry `text/event-stream` never starts. Closing the view closes a
+connection. There is no cancel route in v1 and the page offers no control that
+pretends there is. In legacy mode there is no normalized state at all -- the ten
+words are `logweir-api`'s, computed from a table this page does not implement a
+second time -- so the view renders the controller's own `status.progress` and
+says which fact it is showing.
+
+**Protection health and schedule health are two questions.** An enabled,
+healthy, never-failing schedule can have no recoverable backup: its evidence may
+not verify, the archive may have lost the object, or its runs may cover topics
+the objective is not about. `#/protection` renders both healths in their own
+columns and never collapses them, labels the capture-start instant and the
+newest archived record as the two different instants they are, and keeps the
+`Protected` condition at three statuses -- `Unknown` for an evaluation that
+could not happen is never rounded to `False`, because "Logweir checked and you
+are not protected" is a claim nothing made.
+
+**The catalog keeps availability and verification apart.** Whether the archive
+can still serve a point and whether its receipt verifies under a key this
+installation accepts are different facts with different repairs. Whether a point
+may be restored from is the catalog's own materialised `selectable` field, read
+and never recomputed. Nothing is hidden: a `Missing`, a `Conflict` and an
+`UntrustedSigner` row are each listed with their state and their remedy
+sentence. **There is no one-click trust anywhere.** A point signed by a key this
+installation does not list shows the key id -- the SHA-256 of the DER SPKI, the
+number `openssl` prints -- the out-of-band fingerprint command and a `TrustPolicy`
+document the page renders and does not apply. A key arriving beside an archive is
+never trusted by proximity.
+
+**`unknown` is not `valid`.** The keys view reads `unknown` whenever the object
+carries no status, its `observedGeneration` is behind its `generation`, or its
+`evaluatedAt` is outside the freshness window -- and that window is measured
+against the **server's** clock, the `Date` header of the answer that carried the
+object, never the browser's. With no server instant at all the column reads
+`unknown`, which is the fail-closed side. `valid` and `expired` are rendered only
+for a fresh verdict. Retirement and revocation are explained apart: a retired key
+verifies everything it signed before it was retired and authorises nothing new,
+while a key revoked for compromise does not get that courtesy, because its own
+claimed signing time is attacker-controlled.
+
+**The retention panel says what is HAPPENING.** It reads
+`RetentionPolicy.status.enforcement` and not `spec.mode`: a policy asking for
+`Enforce` whose destination will not resolve reports `RecommendationOnly`, and
+the panel says the thing that is true of it. "Logweir never deletes from your
+archive" is kept verbatim for a schedule report and for `RecommendationOnly`, and
+is replaced by the mode's own sentence otherwise -- printing it beside a policy
+that deletes nightly would be the most consequential false sentence this console
+could render. In `Enforce` the approved digest, the newest evaluation's digest
+and the plan's expiry are three separate facts, because a plan approved and then
+superseded is exactly what the two-step approval exists to catch, and the
+irreversibility sentence is on the page before an administrator approves a
+digest rather than after.
+
+**`legalHold` is never enforced by Logweir, in any mode.** The panel renders
+`ProviderEnforcedUnverified` as "declared by your provider; Logweir cannot verify
+it", because `object_store` exposes no WORM readback and the guarantee is exactly
+"a provider refusal is authoritative, recorded, not retried and excluded from the
+next plan".
+
+**The legacy in-cluster UI ServiceAccount reads none of the four D3 kinds.**
+`charts/logweir/templates/ui/ui.yaml`'s ClusterRole is unchanged by this change,
+so under the Helm UI the three D3 tabs are console flows and the keys view falls
+back to the roster, by name, with the API server's own refusal rendered. Adding
+`protectionpolicies`, `recoverycatalogs`, `retentionpolicies` and
+`trustpolicies` to that role would let the legacy path read them too; it is a
+chart change with its own review and its own exact-rule table in
+`crates/logweir/tests/chart_lint.rs`.
+
 ### The gates that keep it that way
 
 `just lint` runs `scripts/check-ui-offline.sh`, which reads every shipped byte

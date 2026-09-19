@@ -165,7 +165,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | file | what it is |
 |---|---|
 | `index.html` | the shell. Loads `./app.js` as a module; every reference relative. |
-| `app.js` | the hash router and the frame. Eight routes: `#/clusters`, `#/destinations`, `#/schedules`, `#/backups`, `#/history`, `#/restore`, `#/approvals`, `#/keys`. Two of them carry an identity in the hash -- see *The restore route, and the point it names*. |
+| `app.js` | the hash router and the frame. Eleven routes: `#/clusters`, `#/destinations`, `#/schedules`, `#/backups`, `#/history`, `#/operations`, `#/protection`, `#/catalog`, `#/restore`, `#/approvals`, `#/keys`. Three of them carry an identity in the hash -- see *The restore route, and the point it names* and *The operation route, and the run it names*. |
 | `api.js` | the **only** module that issues a network request, in either mode. One `fetch`, on one line, and every identifier built by `path(...)`. |
 | `client.js` | **which API is in front of this page**, decided once at boot, and the one object every page reads through. See *Two modes, one page*. |
 | `contract.js` | the typed contract: JSDoc types and strict decoders for every DTO the page consumes, in both modes. A required field that is absent is a **contract failure the page renders**, never an empty cell. |
@@ -180,7 +180,11 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `pages/schedules.js` | the BackupSchedule list, the suspend toggle, the retention panel, and each schedule's recovery points with their own "Restore this point" links. |
 | `pages/approvals.js` | the Approval list, the Restores waiting for one, and the create form for ONE chosen Restore. Refuses a private key by name and by the words that open its PEM, and never parses the two documents. |
 | `pages/destinations.js` | **saved destinations** (PLAT-08): the list, the create form, the access rotation, the access test, `/usage`, and adopting a legacy inline archive. Console mode only -- see *Destinations, discovery and readiness*. |
-| `pages/keys.js` | the cluster-scoped `TrustRoster`, read-only, with the out-of-band fingerprint command. |
+| `pages/keys.js` | the cluster-scoped `TrustPolicy` (with `TrustRoster` as the named fallback), read-only, with the out-of-band fingerprint command and the evaluation column that reads `unknown` rather than `valid`. |
+| `operation-watch.js` | the reconnecting watch over ONE operation -- backoff, terminal stop, disposal with the route -- and the bounded D3 reads the four D3 surfaces make, with every route they can address in one frozen table. |
+| `pages/operation.js` | the durable operation view: state, reason, last update, the diagnoses, the result and the evidence rendered separately, and the completion panel. |
+| `pages/protection.js` | protection health beside schedule health, the newest available recovery point with its two instants labelled apart, and the alert ledger with its delivery state. |
+| `pages/catalog.js` | the recovery catalog: the connect-archive submission, the point list with availability and verification as two columns, and the untrusted-signer panel with no one-click trust. |
 | `style.css` | the design system, in one file: tokens, light and dark, every component. System fonts; no font is fetched from anywhere. |
 | `pages/index.html` | zero bytes, on purpose -- see below. |
 | `tests/api.spec.js` | the behaviour arm of the two mechanical claims, under `node --test`. |
@@ -192,6 +196,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `tests/workflow.spec.js` | the named transitions, the transition errors and the wizard's six steps as a machine. |
 | `tests/selector.spec.js` | the saved-cluster selector: identity, rename, delete-and-recreate, freshness, the two contract v1 references, and the same rules in both client modes. |
 | `tests/d2.spec.js` | **destinations, topic discovery and operation readiness**: every state the product API can put in front of those three surfaces, and the five sentences this product refuses to render. |
+| `tests/d3.spec.js` | **the operation view, protection, the catalog, the keys view, the badge cases and the retention panel**: every state D3 declares, over the objects the D3 live runs recorded, and the five claims this product refuses to make. |
 | `tests/preview-server.js` | a development tool, never a test: serves this directory over the fixtures under `tests/fixtures/preview/`. See *Previewing with fixtures*. |
 
 **The design system** lives in `style.css` and nowhere else. It is written from
@@ -229,7 +234,7 @@ published over HTTP.
 
 ## Two modes, one page
 
-The same twenty-two files are served two ways, and **they decide which one they are
+The same twenty-six files are served two ways, and **they decide which one they are
 looking at exactly once**.
 
 **Legacy mode** is what ships today and what every section above describes:
@@ -1112,6 +1117,120 @@ tightening it would be one cross-side commit; `ui/tests/contract.spec.js`
 compares this client's required set with the schema's, so moving it here alone
 turns that arm red. The tightening needs `crates/logweir-api/src/contract.rs` in
 the same commit.
+
+## The operation route, and the run it names
+
+`#/operations?ns=&kind=&name=&uid=` is where one durable run lives. It is
+reached FROM a run -- a row in `#/backups` or `#/history`, or the outcome line
+one "Back up now" click produced -- and it has no list of its own, because a
+list of operations would be those two tables a second time.
+
+**The route carries the whole identity, and that is what makes it durable.** A
+refresh, a new tab and a link pasted into an incident channel all open the same
+run, because the custom resource is the source of truth and nothing about this
+view is state. The `uid` beside the name is a guard and not decoration: a name
+is reused, a Backup deleted and recreated under one is a different run with
+different evidence, and an object answering to a different uid gets **this name
+now refers to a different run** rather than a silent switch under a reader who
+came from a link about the old one. The guard is applied to every document that
+arrives, not only the first.
+
+**The watch is a read that repeats, and aborting it cancels nothing.** In
+console mode it opens `GET .../operations/{kind}/{name}/events` with
+`EventSource` -- the second request site in this tree, beside the one `fetch`,
+built by the same `path(...)` validator, carrying no header and no token in its
+identifier, because the browser attaches the session cookie itself on a
+same-origin stream. A connection that fails is retried at 1s, 2s, 5s and 30s
+with jitter, and after **three** failed connects the page polls instead: the
+interesting cause of a failed stream is not a flaky network but a proxy that
+buffers or refuses `text/event-stream`, and that one never resolves on its own.
+Legacy mode polls the object every 5s, and every 30s after five consecutive
+errors. Leaving the route closes the connection; the Job keeps running, and
+there is no cancel route in v1.
+
+**It computes no state.** In console mode the normalized `state` is one of ten
+words `logweir-api` derives; this page prints the API's word. In legacy mode
+there IS no normalized state, and the page says which API computes it and shows
+the controller's own `status.progress` rather than implementing that mapping a
+second time in a browser. `Date.now()` is used for one thing in this whole
+flow -- reconnect jitter -- and for no verdict at all.
+
+**The result and the evidence are two sections.** "The run exited 0" and "the
+document it signed verifies" are facts about two different things. A succeeded
+run whose evidence is `NotAttempted` is never rendered as a verified success.
+
+## What a badge claims after D3
+
+The green rule gained one clause and the not-green caption gained a word.
+
+**Green** is `evidence.verification.result == "Valid"` **and** a trust basis of
+`Current` or `Historical` **and** the kind's own success field (`exitCode == 0`
+for a Backup, `outcome == "pass"` for a Restore). An object with no `trust`
+block at all -- everything an older controller wrote -- **stays green**: the
+block is additive, and treating its absence as a downgrade would turn every
+archive in an upgraded cluster red.
+
+A **`Historical`** basis carries `(signed before that key was retired)` and is a
+**pass, not a warning**: the supported key rotation is meant to produce exactly
+that state, and the public material can never be edited out of the policy.
+
+**Not green still carries the word `unverified`**, which is what every older
+surface looks for and what makes a new verdict fail closed on one. What is new
+is the case beside it, because the three are three different claims with three
+different repairs:
+
+| case | a claim about | what to go and look at |
+|---|---|---|
+| `Invalid` | the DOCUMENT | the signature or a digest did not match |
+| `NotAttempted` | the CONTROLLER | it had no credential, could not read the object, or had no trust material |
+| `Untrusted` | the SIGNER | the bytes are authentic and this installation does not accept the key |
+
+A fourth row is not a `result` but a basis: `RecordedBeforeRevocation` is a
+compromise-revoked key whose evidence a controller had already observed. It is
+**never green**, and it is not silent either: the observation is real and it is
+not a substitute for a signature this installation still accepts.
+
+**Every restore result carries its scope sentence.** A record check is a
+SAMPLE: the counts are labelled exactly, the last clause says "this is a sampled
+check, not an exhaustive comparison", and the word `complete` is not a level
+this version has -- no function in `render.js` can spell it.
+
+## What the four D3 surfaces refuse to say
+
+* **`#/protection`.** Schedule health and protection health are two columns and
+  are never collapsed: an enabled, healthy, never-failing schedule can have no
+  recoverable backup. The capture-start instant and the newest archived record
+  are labelled apart, because an idle topic makes the second look old for a
+  reason that is not a gap in protection. `Protected` has three statuses, and
+  `Unknown` is never rounded to `False`. A delivery failure changes nothing
+  about a backup's own recorded result, and the page says so beside the ledger.
+* **`#/catalog`.** Availability and verification are two axes with two repairs.
+  Whether a point may be restored from is the catalog's own materialised
+  `selectable` field, read and never recomputed here. Nothing is hidden --
+  every state is listed with its remedy -- and the view is named as a bounded
+  WINDOW over object storage, so an expired one reads as a missing VIEW and not
+  as a missing archive. **There is no one-click trust**: an unknown signer gets
+  its key id, the out-of-band fingerprint command and a document this page
+  renders and does not apply.
+* **`#/keys`.** `unknown` is not `valid`. A key's evaluation reads `unknown`
+  whenever the object carries no status, its `observedGeneration` is behind, or
+  its `evaluatedAt` is outside the freshness window -- measured against the
+  **server's** clock (the `Date` header of the answer that carried the object),
+  never the browser's, and `unknown` again when there is no server instant at
+  all. Retirement and revocation are explained apart.
+* **`#/schedules`' retention panel.** It reads `status.enforcement`, which is
+  what is HAPPENING, and not `spec.mode`, which is what was asked for.
+  `RETENTION_SENTENCE` is kept verbatim for a schedule report and for
+  `RecommendationOnly` and is replaced by the mode's own sentence otherwise;
+  printing "Logweir never deletes from your archive" beside a policy that
+  deletes nightly would be the most consequential false sentence this console
+  could render.
+
+**The four D3 kinds are not in the legacy in-cluster UI's ClusterRole.** The
+chart's role is unchanged by this change, so under the Helm UI the three D3 tabs
+are console flows and the keys view falls back to the roster by name, with the
+API server's own refusal rendered rather than an empty table. A local `kubectl
+proxy` run from a kubeconfig that may read them shows them in legacy mode too.
 
 ## The three rules, each with a gate
 

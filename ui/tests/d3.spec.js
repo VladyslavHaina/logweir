@@ -752,6 +752,26 @@ test("an_evaluation_older_than_the_window_reads_unknown_measured_by_the_server_c
   // it is the one this page takes: with no `Date` header seen, freshness has
   // not been ESTABLISHED, and `unknown` is what "not established" reads as.
   assert.deepEqual(evaluationFreshness(object, null), { fresh: false, reason: "Stale" });
+
+  // THE MUTANT THIS PAIR IS FOR: a freshness check that fell back to
+  // `Date.now()` when it had no server instant. An evaluation the BROWSER
+  // thinks is one second old is still `unknown` here, because the browser's
+  // clock is not one the cluster ever saw -- and a page that used it would
+  // disagree with the controller's own refusal by exactly the skew between
+  // them, silently, in the direction that reads green.
+  const justNow = JSON.parse(JSON.stringify(object));
+  justNow.status.evaluatedAt = new Date().toISOString();
+  assert.deepEqual(
+    evaluationFreshness(justNow, null),
+    { fresh: false, reason: "Stale" },
+    "with no SERVER instant, an evaluation the browser's own clock calls one second old is " +
+      "still unknown",
+  );
+  assert.deepEqual(
+    evaluationFreshness(justNow, Date.parse(justNow.status.evaluatedAt) + 1000),
+    { fresh: true, reason: null },
+    "and the same object IS fresh once a server instant establishes it",
+  );
   const html = decode(renderPolicyKeys(object, null));
   // The STATE column is `spec.keys[].state` -- what the spec DECLARES -- and
   // it is still printed. What must not appear is the controller's VERDICT
