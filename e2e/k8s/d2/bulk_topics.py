@@ -158,6 +158,51 @@ def _recv_exactly(sock: socket.socket, count: int) -> bytes:
     return b"".join(chunks)
 
 
+def converged_topics(conn: "Conn", *, stable_for: float = 20.0, timeout: float = 300.0,
+                     interval: float = 5.0) -> tuple[list[tuple[str, bool, int]], dict]:
+    """The broker's topic list, once it has stopped moving.
+
+    KAFKA TOPIC CREATION IS ASYNCHRONOUS, and `CreateTopics` returning 0 for
+    five thousand names does not mean five thousand topics are in metadata.
+    The previous `--list` took one snapshot in the same port-forward as the
+    creation and recorded **503** of 5,000; a minute later the controller's own
+    discovery listed 3,004. `fixtures/broker-topics-user.txt` is written from
+    this output and S7 asserts `returned == len(that file)`, so a snapshot of a
+    broker mid-convergence is not a slightly-wrong baseline — it is a baseline
+    that guarantees the row fails (lab-refresh-5 §7.2).
+
+    So the count has to hold still before anything is printed. `stable_for` is
+    the quiet period, and a run that never reaches one exits **2** with the
+    counts it saw rather than printing a listing somebody will save.
+    """
+    deadline = time.monotonic() + timeout
+    started = time.monotonic()
+    counts: list[int] = []
+    rows = sorted(conn.topics())
+    last_change = time.monotonic()
+    polls = 1
+    counts.append(len(rows))
+    while time.monotonic() < deadline:
+        if time.monotonic() - last_change >= stable_for:
+            break
+        time.sleep(interval)
+        current = sorted(conn.topics())
+        polls += 1
+        if len(current) != len(rows):
+            last_change = time.monotonic()
+        rows = current
+        if not counts or counts[-1] != len(rows):
+            counts.append(len(rows))
+    stable = time.monotonic() - last_change
+    return rows, {
+        "converged": stable >= stable_for,
+        "stableSeconds": stable,
+        "polls": polls,
+        "elapsedSeconds": time.monotonic() - started,
+        "countsSeen": counts,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--host", default="127.0.0.1")
@@ -167,6 +212,11 @@ def main() -> int:
     parser.add_argument("--batch", type=int, default=500)
     parser.add_argument("--partitions", type=int, default=1)
     parser.add_argument("--list", action="store_true")
+    parser.add_argument("--stable-for", type=float, default=20.0,
+                        help="seconds the topic count must hold still before --list prints")
+    parser.add_argument("--converge-timeout", type=float, default=300.0,
+                        help="how long to wait for that; exit 2 if it never settles")
+    parser.add_argument("--poll-interval", type=float, default=5.0)
     args = parser.parse_args()
 
     conn = Conn(args.host, args.port)
@@ -178,10 +228,26 @@ def main() -> int:
                 f"this broker supports CreateTopics v{low}..v{high}; this helper speaks v0 only"
             )
         if args.list:
-            rows = sorted(conn.topics())
+            rows, settle = converged_topics(
+                conn, stable_for=args.stable_for, timeout=args.converge_timeout,
+                interval=args.poll_interval,
+            )
             for name, internal, partitions in rows:
                 print(f"{name}\t{'internal' if internal else 'user'}\t{partitions}")
-            print(f"# {len(rows)} topics", file=sys.stderr)
+            print(
+                f"# {len(rows)} topics; metadata stable at that count for "
+                f"{settle['stableSeconds']:.0f}s after {settle['polls']} poll(s) over "
+                f"{settle['elapsedSeconds']:.0f}s; counts seen {settle['countsSeen']}",
+                file=sys.stderr,
+            )
+            if not settle["converged"]:
+                print(
+                    f"# WARNING: the count was still moving when the "
+                    f"{args.converge_timeout}s budget ran out; this listing is a snapshot of "
+                    f"a broker that had not converged and must not be used as a baseline",
+                    file=sys.stderr,
+                )
+                return 2
             return 0
         created = 0
         existed = 0

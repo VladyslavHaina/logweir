@@ -2605,9 +2605,27 @@ def bulk() -> None:
             timeout=1800,
         )
         artifact("fixtures/bulk-topics.log", proc.stdout + proc.stderr)
+        # THE BASELINE IS ONLY A BASELINE ONCE THE BROKER HAS STOPPED MOVING.
+        # `CreateTopics` returning 0 for five thousand names does not mean five
+        # thousand topics are in metadata: the previous snapshot, taken in this
+        # same port-forward, recorded 503 of 5,000 and a minute later the
+        # controller's own discovery listed 3,004. S7 asserts
+        # `returned == len(this file)`, so a mid-convergence snapshot is not a
+        # slightly-wrong baseline — it is one that guarantees the row fails
+        # (lab-refresh-5 §7.2). `--list` now holds until the count is still, and
+        # exits 2 rather than printing a listing somebody would save.
         listing = run(
-            [sys.executable, str(helper), "--port", str(forward.local), "--list"],
-            timeout=300,
+            [sys.executable, str(helper), "--port", str(forward.local), "--list",
+             "--stable-for", "25", "--converge-timeout", "900"],
+            timeout=1200,
+            check=False,
+        )
+    settle = [ln for ln in listing.stderr.splitlines() if ln.startswith("#")]
+    artifact("fixtures/broker-topics-convergence.txt", "\n".join(settle))
+    if listing.returncode != 0:
+        raise RuntimeError(
+            "the broker's topic count never settled, so no baseline was recorded: "
+            + " ".join(settle)
         )
     rows = [line.split("\t") for line in listing.stdout.splitlines() if line.strip()]
     names = sorted(row[0] for row in rows)
@@ -2616,8 +2634,21 @@ def bulk() -> None:
     artifact("fixtures/broker-topics-user.txt", "\n".join(user_topics))
     state["brokerTopics"] = {"all": len(names), "user": len(user_topics)}
     state["userTopicsSha256"] = digest("\n".join(user_topics))
+    state["brokerConvergence"] = settle
     save()
-    log(f"bulk: {len(user_topics)} user topics, {len(names) - len(user_topics)} internal")
+    record(
+        "S7.baseline",
+        "the broker's topic list is recorded only after it stops moving",
+        "pass" if len(user_topics) >= BULK_COUNT else "fail",
+        detail={"userTopics": len(user_topics), "allTopics": len(names),
+                "requested": BULK_COUNT, "convergence": settle},
+        reason="" if len(user_topics) >= BULK_COUNT else
+        f"the converged broker holds {len(user_topics)} user topics and this run asked for "
+        f"{BULK_COUNT}: the baseline is settled but short, so S7 would compare the "
+        f"discovery against a smaller catalog than the one it was asked to build",
+    )
+    log(f"bulk: {len(user_topics)} user topics, {len(names) - len(user_topics)} internal; "
+        f"{' '.join(settle)}")
 
 
 def broker_user_topics() -> list[str]:

@@ -14,6 +14,7 @@ run of 2026-09-18.
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import os
 import pathlib
@@ -131,6 +132,55 @@ def test_not_attempted_is_written_and_says_why() -> None:
     valid = {"result": "Valid", "matchedKeyId": "2c76e22f", "verifiedAt": "2026-09-18T18:47:10Z"}
     row("MUTANT: a green Valid where nobody could read the evidence",
         not all(d2.not_attempted_is_honest(valid, []).values()))
+
+
+# --- S7's baseline: a broker that has stopped moving -------------------------
+_BULK = pathlib.Path(__file__).resolve().parent / "bulk_topics.py"
+_spec = importlib.util.spec_from_file_location("bulk_topics", _BULK)
+bulk_topics = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(bulk_topics)
+
+
+class _Broker:
+    """A broker whose metadata catches up over several polls, like a real one."""
+
+    def __init__(self, counts: list[int]) -> None:
+        self.counts = counts
+        self.polls = 0
+
+    def topics(self):
+        n = self.counts[min(self.polls, len(self.counts) - 1)]
+        self.polls += 1
+        return [(f"bulk-{i:05d}", False, 1) for i in range(n)]
+
+
+def _converge(counts: list[int], **over):
+    args = dict(stable_for=0.05, timeout=5.0, interval=0.0)
+    args.update(over)
+    return bulk_topics.converged_topics(_Broker(counts), **args)
+
+
+def test_the_baseline_waits_for_the_broker_to_converge() -> None:
+    rows, settle = _converge([503, 1500, 3004, 5000, 5000, 5000, 5000, 5000])
+    row("the listing is the settled count, not the first snapshot",
+        len(rows) == 5000 and settle["converged"], f"{len(rows)} {settle}")
+    row("and the counts it walked through are recorded",
+        settle["countsSeen"][0] == 503 and settle["countsSeen"][-1] == 5000,
+        str(settle["countsSeen"]))
+    rows, settle = _converge([5000] * 6)
+    row("a broker that was already still converges immediately",
+        len(rows) == 5000 and settle["converged"])
+    # THE DEFECT THIS EXISTS FOR: one snapshot of a broker mid-creation.
+    rows, settle = _converge([503])
+    row("MUTANT: a single snapshot is only a baseline once it has held still",
+        settle["converged"] and len(rows) == 503,
+        "a constant count is legitimately converged; the guard is the timeout below")
+    growing = list(range(500, 20000, 100))
+    rows, settle = _converge(growing, timeout=0.3)
+    row("MUTANT: a count still moving when the budget runs out does NOT converge",
+        not settle["converged"], str(settle))
+    row("and the caller can tell, because `converged` is False and the counts moved",
+        len(settle["countsSeen"]) > 1)
 
 
 def main() -> int:

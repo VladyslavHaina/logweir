@@ -481,6 +481,47 @@ def test_bounded_retry_degrades_and_stops() -> None:
         not all(d3.bounded_retry_degrades(DEGRADED, 0, 3, 0).values()))
 
 
+# --- PLAT-19.1's re-pointed trust rows ---------------------------------------
+# The recorded shapes are lab-refresh-5 §8.2 and this branch's own run.
+FRESH_V = {"result": "Valid", "signedAt": "2026-09-19T01:50:17Z",
+           "matchedKeyId": "2c76e22ff899", "verifiedAt": "2026-09-19T01:50:20Z"}
+HEALED_V = dict(FRESH_V, verifiedAt="2026-09-19T01:52:02Z")
+# What the defect did: the same receipt, stripped of `signedAt`, re-derived to
+# `Untrusted` with "carries no signing-time field".
+DEFECT_V = {"result": "Untrusted", "matchedKeyId": "2c76e22ff899",
+            "reason": "SignedOutsideValidity"}
+
+
+def test_a_stripped_signing_time_is_re_derived_rather_than_distrusted() -> None:
+    row("the fix: Valid comes back, with its signing time and the same key",
+        all(d3.signedat_heals(FRESH_V, HEALED_V).values()))
+    row("MUTANT: THE DEFECT — the stripped object re-derives Untrusted",
+        not all(d3.signedat_heals(FRESH_V, DEFECT_V).values()))
+    row("MUTANT: Valid again but the signing time never came back",
+        not all(d3.signedat_heals(
+            FRESH_V, {k: v for k, v in HEALED_V.items() if k != "signedAt"}).values()))
+    row("MUTANT: a repair that matched a DIFFERENT signing key is a new verdict, "
+        "not a repair",
+        not all(d3.signedat_heals(FRESH_V, dict(HEALED_V, matchedKeyId="0000")).values()))
+    row("MUTANT: the fresh run never recorded a signing time, so there is nothing "
+        "to strip",
+        not all(d3.signedat_heals(
+            {k: v for k, v in FRESH_V.items() if k != "signedAt"}, HEALED_V).values()))
+    row("MUTANT: an empty re-derivation is not a healing",
+        not all(d3.signedat_heals(FRESH_V, {}).values()))
+
+
+def test_clearing_the_block_reads_no_archive() -> None:
+    row("nothing comes back when the stored claim is gone",
+        all(d3.cleared_block_is_not_re_read({}).values()))
+    row("MUTANT: a verdict appeared, so something DID read the archive",
+        not all(d3.cleared_block_is_not_re_read(
+            {"result": "Valid", "signedAt": "2026-09-19T01:55:00Z"}).values()))
+    row("MUTANT: a signing time with no verdict is still a read",
+        not all(d3.cleared_block_is_not_re_read(
+            {"signedAt": "2026-09-19T01:55:00Z"}).values()))
+
+
 def main() -> int:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

@@ -1318,15 +1318,57 @@ def schedule_object(name: str, dest: str) -> dict[str, Any]:
 def retention() -> None:
     evidence: list[str] = []
     names = ["b-1", "b-2", "b-3", "b-4", "b-5", "b-6"]
+    # IDEMPOTENT BY THE DESTINATION'S POINTS, NOT BY THE BACKUP NAMES.
+    #
+    # The re-seed used to skip whenever all six `b-*` Backups still existed and
+    # had Succeeded — which says nothing about what is AT the destination. Every
+    # other phase writes there: `lifecycle` runs a Backup to dest-b to show an
+    # unreadable-lifecycle policy blocks nothing, and the enforcement rows
+    # delete points out of it. So a second `retention` skipped its seeding and
+    # measured a destination holding seven points with the arithmetic row still
+    # asserting six: PASS clean, FAIL on the re-run, for a reason that is the
+    # harness's and looks like the product's (lab-refresh-5 §8.3/§8.4).
+    #
+    # What the keep-rule arithmetic needs is a destination holding EXACTLY these
+    # six points, so that is what is reconciled and then asserted. The manifest
+    # count is the destination's own answer — the catalog view is built from the
+    # archive, so wiping the prefix retires every stray point whatever CR wrote
+    # it — and re-seeding is driven by that count rather than by the CR names.
+    def points_at_destination() -> list[str]:
+        # The whole bucket and then a filter: `objects()` re-roots a prefixed
+        # listing by concatenation, and this is the spelling every other
+        # enforcement row already uses.
+        return sorted(o["key"] for o in objects(BUCKET_B)
+                      if o["key"].startswith(f"{DEST_PREFIX}/")
+                      and o["key"].endswith("/manifest.json"))
+
     have = [n for n in names
             if (get_opt("backup", n) or {}).get("status", {}).get("phase") == "Succeeded"]
-    if len(have) != len(names) or os.environ.get("LOGWEIR_D3_FRESH_B"):
+    before_seed = points_at_destination()
+    stale = len(before_seed) != len(names)
+    if len(have) != len(names) or stale or os.environ.get("LOGWEIR_D3_FRESH_B"):
         mc("rm", "--recursive", "--force", f"local/{BUCKET_B}/", check_rc=False)
         for name in names:
             if get_opt("backup", name) is not None:
                 run(KN + ["delete", "backup", name, "--wait=true"])
             run_backup(name, "dest-b")
             time.sleep(1)
+    after_seed = points_at_destination()
+    evidence.append(artifact("retention/seed.json",
+                             {"names": names, "succeededBackups": have,
+                              "pointsBeforeSeed": before_seed, "pointsAfterSeed": after_seed,
+                              "reseeded": len(have) != len(names) or stale}))
+    check(
+        "retention-seed-is-idempotent",
+        "PLAT-16.1",
+        len(after_seed) == len(names),
+        f"this phase leaves dest-b holding exactly the {len(names)} points the keep-rule "
+        f"arithmetic is written against: {len(before_seed)} before and {len(after_seed)} "
+        f"after (re-seeded: {len(have) != len(names) or stale}). A phase whose second run "
+        f"measures a different destination from its first cannot tell a harness leak from a "
+        f"product change",
+        evidence,
+    )
     secondary = fresh_catalog("secondary", "dest-b")
     b_entries = view_entries(secondary)
     evidence.append(artifact("retention/dest-b-view.json", b_entries))
@@ -3580,6 +3622,12 @@ def signed_at_probe() -> None:
     evidence.append(artifact("trust/signedat-2-stripped.json", stripped))
     run(K + ["delete", "trustpolicy", TRUST_POLICY, "--wait=true"])
     apply(trust_policy("Active", notAfter="2027-06-01T00:00:00Z"))
+    # WAITING FOR THE HEALED SHAPE, not for the defect. The old loop broke as
+    # soon as the verdict stopped being `Valid` OR `signedAt` came back — which
+    # is "wait until something happens", and it was written when the something
+    # was the re-derivation to `Untrusted`. The fix restores the field, so the
+    # loop waits for the restoration and stops early on the verdict that would
+    # mean the defect is back.
     deadline = time.time() + 240
     v2: dict[str, Any] = stripped
     while time.time() < deadline:
@@ -3587,7 +3635,9 @@ def signed_at_probe() -> None:
             get("backup", "signedat-subject").get("status", {}).get("evidence", {})
             .get("verification", {}) or {}
         )
-        if v2.get("result") != "Valid" or v2.get("signedAt"):
+        if v2.get("result") == "Valid" and v2.get("signedAt"):
+            break
+        if v2.get("result") not in {"Valid", None}:
             break
         time.sleep(5)
     evidence.append(artifact("trust/signedat-3-rederived.json", v2))
@@ -3613,25 +3663,85 @@ def signed_at_probe() -> None:
         time.sleep(5)
     evidence.append(artifact("trust/signedat-4-after-clearing-the-block.json", restored))
     recovered = restored.get("result") == "Valid" and bool(restored.get("signedAt"))
-    record(
-        "trust-signedat-upgrade-defect",
+    heals = signedat_heals(v0, v2)
+    evidence.append(artifact("trust/signedat-heal-clauses.json", heals))
+    check(
+        "trust-signedat-upgrade-heals",
         "PLAT-19.1",
-        "PASS" if fresh_ok and v2.get("result") == "Untrusted" else "FAIL",
-        f"fresh run: result={v0.get('result')} signedAt={v0.get('signedAt')}. The SAME "
-        f"receipt with `signedAt` absent from its stored status re-derives to result="
-        f"{v2.get('result')} "
-        f"({(v2.get('reason') or v2.get('detail') or '')[:130]}). Clearing "
-        f"`status.evidence.verification` entirely does NOT trigger a re-verify that reads "
-        f"the archive: after 150 s the block is {restored or '<still absent>'} "
-        f"(restored={recovered}). No documented path re-reads the archive for a TERMINAL "
-        f"object — the re-trust pass re-derives from the stored matchedKeyId/signedAt/"
-        f"verifiedAt and performs no fetch — so a pre-`signedAt` object cannot be repaired "
-        f"in place by any operator action this build offers",
+        all(heals.values()),
+        f"a fresh run records result={v0.get('result')} signedAt={v0.get('signedAt')}; the "
+        f"SAME receipt with `signedAt` removed from its stored status — the shape of every "
+        f"pre-`signedAt` object — re-derives to result={v2.get('result')} signedAt="
+        f"{v2.get('signedAt')} after one read, with matchedKeyId "
+        f"{'unchanged' if v2.get('matchedKeyId') == v0.get('matchedKeyId') else 'MOVED'}. "
+        f"This row used to assert the opposite: it was "
+        f"`trust-signedat-upgrade-defect`, and it passed only when the re-derivation came "
+        f"back `Untrusted` — an inverted guard that outlived TRUST-UPGRADE-SIGNEDAT's fix "
+        f"and failed on the build that fixed it (lab-refresh-5 §8.2). "
+        + "; ".join(f"{k}={v}" for k, v in heals.items()),
+        evidence,
+    )
+    cleared = cleared_block_is_not_re_read(restored)
+    evidence.append(artifact("trust/cleared-block-clauses.json", cleared))
+    check(
+        "trust-cleared-verification-is-not-re-read",
+        "PLAT-19.1",
+        all(cleared.values()),
+        f"clearing `status.evidence.verification` entirely triggers NO archive re-read: "
+        f"after 150 s and a policy event the block is {restored or '<still absent>'}. This "
+        f"is the still-true half of the old defect row and it is a product statement, not a "
+        f"regression — the re-trust pass re-derives from the STORED matchedKeyId, signedAt "
+        f"and verifiedAt and performs no fetch, so an operator who clears the block gets "
+        f"nothing back. It is kept because it bounds what the fix above does: `signedAt` is "
+        f"restored by re-derivation from what is still stored, never by going to the "
+        f"archive. "
+        + "; ".join(f"{k}={v}" for k, v in cleared.items()),
         evidence,
         freshVerification=v0,
         rederivedVerification=v2,
         afterClearing=restored,
     )
+
+
+def signedat_heals(fresh: dict[str, Any], rederived: dict[str, Any]) -> dict[str, bool]:
+    """TRUST-UPGRADE-SIGNEDAT's fix, asserted as the fix rather than the defect.
+
+    A pre-`signedAt` object is a stored verification block with a verdict and a
+    matched key and no signing time. The defect re-derived that to `Untrusted`
+    (`SignedOutsideValidity`, "carries no signing-time field"); the fix reads
+    the document's own latest pre-signature timestamp and restores the field,
+    so the SAME receipt comes back `Valid` WITH `signedAt` after one read.
+
+    The last clause is what keeps this from being a row about nothing: a pass
+    that restored `signedAt` by changing which key it matched would not be a
+    repair, it would be a different verdict wearing the same word.
+    """
+    return {
+        "the fresh run recorded a verdict and a signing time": (
+            fresh.get("result") == "Valid" and bool(fresh.get("signedAt"))
+        ),
+        "the stripped object re-derives Valid, not Untrusted":
+            rederived.get("result") == "Valid",
+        "and its signing time is back": bool(rederived.get("signedAt")),
+        "against the same signing key": (
+            rederived.get("matchedKeyId") == fresh.get("matchedKeyId")
+        ),
+    }
+
+
+def cleared_block_is_not_re_read(after: dict[str, Any]) -> dict[str, bool]:
+    """The half of the old defect row that is still true, and still a bound.
+
+    Clearing `status.evidence.verification` outright is the only move an
+    operator has left, and it produces nothing: the re-trust pass re-derives
+    from what is STORED and performs no archive fetch, so with nothing stored
+    there is nothing to re-derive. Keeping it beside the healing row is what
+    stops that row being read as "the controller re-reads the archive".
+    """
+    return {
+        "no verdict came back from an archive read": not after.get("result"),
+        "and no signing time with it": not after.get("signedAt"),
+    }
 
 
 # ---------------------------------------------------------------------------
