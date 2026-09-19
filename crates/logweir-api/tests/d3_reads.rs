@@ -482,6 +482,20 @@ async fn the_point_view_keeps_availability_and_verification_apart_and_pages() {
     assert_eq!(first["selectable"], true);
     assert_eq!(first["signerKeyId"].as_str().unwrap().len(), 64);
     assert_eq!(first["locations"][0]["availability"], "Available");
+    // THE PLAN BINDING D3 §5.5 STEP 4 NEEDS. A console offering "restore this
+    // point" builds `source.point {point_id, receipt_key, receipt_sha256,
+    // manifest_sha256}`; without these four it cannot, and keys and digests
+    // are all that is published — never content.
+    assert!(first["receiptKey"].as_str().is_some_and(|k| !k.is_empty()));
+    assert!(first["receiptSha256"]
+        .as_str()
+        .is_some_and(|d| d.starts_with("sha256:")));
+    assert!(first["manifestKey"]
+        .as_str()
+        .is_some_and(|k| k.contains('/')));
+    assert!(first["manifestSha256"]
+        .as_str()
+        .is_some_and(|d| d.starts_with("sha256:")));
     // The ms instants are rendered as instants, not as numbers a console has
     // to divide.
     assert!(first["recoveryPointAt"].as_str().unwrap().ends_with('Z'));
