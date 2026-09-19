@@ -5097,7 +5097,6 @@
         "description": "The newest point this policy can actually recover from.",
         "type": "object",
         "required": [
-          "topics",
           "topicsTruncated"
         ],
         "properties": {
@@ -5992,16 +5991,13 @@
         "description": "A `RecoveryCatalog`, projected.",
         "type": "object",
         "required": [
-          "conditions",
           "counts",
           "deepCheck",
-          "histogram",
           "intervalSeconds",
           "mode",
           "name",
           "namespace",
           "resourceVersion",
-          "signers",
           "truncated",
           "uid",
           "viewExpired",
@@ -6493,7 +6489,6 @@
         "description": "Topics a previous teardown could not remove. While this is non-empty the next slot is SKIPPED rather than allowed to adopt topics it did not create.",
         "type": "object",
         "required": [
-          "pendingTopics",
           "pendingTopicsTruncated"
         ],
         "properties": {
@@ -6519,10 +6514,6 @@
       "CompletionView": {
         "description": "D3 §3.5's incident-facing completion panel — a Restore's, copied from the signed scorecard and never recomputed.",
         "type": "object",
-        "required": [
-          "newTopics",
-          "targetMode"
-        ],
         "properties": {
           "integrityLevel": {
             "description": "`byte-fingerprint`, `consume-only` or `not-attempted`, verbatim.",
@@ -6564,10 +6555,6 @@
             "description": "The window the sample covered.",
             "$ref": "#/components/schemas/SampleWindowView",
             "nullable": true
-          },
-          "targetMode": {
-            "description": "`scratch` or `newTopic` — which fixed guidance the console renders.",
-            "type": "string"
           }
         }
       },
@@ -7866,14 +7853,19 @@
         "description": "What the last enforcement run actually did.",
         "type": "object",
         "required": [
-          "deleted",
-          "failed"
+          "deletedTruncated"
         ],
         "properties": {
           "deleted": {
-            "description": "How many points it deleted.",
-            "type": "integer",
-            "format": "int64"
+            "description": "The points it deleted, by id.\n\nA LIST AND NOT A COUNT, for `TeardownView::deleted`'s reason and D3 §6.5's: the attributable record names \"every deleted point id\", and a count cannot be reconciled against the plan an administrator approved.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "deletedTruncated": {
+            "description": "Whether `deleted` was cut short by this projection's row bound.",
+            "type": "boolean"
           },
           "exitCode": {
             "description": "The worker's exit code.",
@@ -8579,7 +8571,6 @@
         "type": "object",
         "required": [
           "renotifyAfterSeconds",
-          "routes",
           "sendResolved"
         ],
         "properties": {
@@ -9021,7 +9012,7 @@
         ],
         "properties": {
           "basis": {
-            "description": "`current`, `historical`, `recordedBeforeRevocation`, `unverified` or `none`. `none` is what an absent `trust` block projects to.",
+            "description": "`Current`, `Historical`, `RecordedBeforeRevocation`, `Unverified` or `None`, **in the CRD's own spelling**. `None` is what an absent `trust` block projects to, which is D3 §12's sentence word for word: \"`trust` absent → `basis: None`\". The first round lowercased these and invented a vocabulary no other surface prints.",
             "type": "string"
           },
           "keyState": {
@@ -9091,7 +9082,6 @@
         "required": [
           "awaitingApproval",
           "conditions",
-          "diagnostics",
           "evidence",
           "kind",
           "name",
@@ -9202,6 +9192,11 @@
           },
           "stateReason": {
             "description": "The CamelCase reason for the state.",
+            "type": "string",
+            "nullable": true
+          },
+          "targetMode": {
+            "description": "`scratch` or `newTopic` — a Restore's target mode, absent on a Backup.\n\nAT THE TOP LEVEL, NOT ON THE COMPLETION PANEL. D3 §3.5 keys its two fixed guidance blocks on `spec.target.mode`, and that is a fact about the run from the moment it is created — a rehearsal is a rehearsal before its scorecard exists. The first round hid it inside `completion`, so a Restore that had not finished could not be labelled.",
             "type": "string",
             "nullable": true
           },
@@ -9345,7 +9340,6 @@
         "required": [
           "minAgeSeconds",
           "requireVerifiedEvidence",
-          "scheduleRefs",
           "selection"
         ],
         "properties": {
@@ -9390,8 +9384,9 @@
         "required": [
           "availability",
           "backupId",
-          "locations",
           "pointId",
+          "receiptKey",
+          "receiptSha256",
           "runId",
           "selectable",
           "verification"
@@ -9429,8 +9424,26 @@
               "$ref": "#/components/schemas/PointLocationView"
             }
           },
+          "manifestKey": {
+            "description": "The manifest's object key.",
+            "type": "string",
+            "nullable": true
+          },
+          "manifestSha256": {
+            "description": "The manifest's recorded SHA-256.",
+            "type": "string",
+            "nullable": true
+          },
           "pointId": {
             "description": "The content-derived point identity.",
+            "type": "string"
+          },
+          "receiptKey": {
+            "description": "The signed receipt's object key.\n\nKEYS AND DIGESTS ONLY, NEVER CONTENT — the rule `OperationEvidence` already follows. These four are what D3 §5.5 step 4 puts in a restore plan's `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}` binding, so a console that offers \"restore this point\" cannot build the plan without them.",
+            "type": "string"
+          },
+          "receiptSha256": {
+            "description": "Its recorded SHA-256.",
             "type": "string"
           },
           "recoveryPointAt": {
@@ -10095,14 +10108,14 @@
             "type": "string",
             "nullable": true
           },
-          "phase": {
-            "description": "The runner's own phase.",
-            "$ref": "#/components/schemas/RunnerPhaseView",
-            "nullable": true
-          },
           "reason": {
             "description": "The CamelCase reason.",
             "type": "string",
+            "nullable": true
+          },
+          "runnerPhase": {
+            "description": "The runner's own phase, from its `progress-phase=` lines.\n\nNAMED AS THE CRD NAMES IT. D3 §2.2 is \"verbatim from the CRD\" and the stored field is `status.progress.runnerPhase`; this view published it as `phase` in the first round and the console had already written `runnerPhase` against the decision. One spelling, and it is the one the object carries.",
+            "$ref": "#/components/schemas/RunnerPhaseView",
             "nullable": true
           },
           "stage": {
@@ -10134,7 +10147,6 @@
         "description": "What the policy protects, as references.",
         "type": "object",
         "required": [
-          "scheduleRefs",
           "sourceRef"
         ],
         "properties": {
@@ -10146,6 +10158,11 @@
           "destinationRef": {
             "description": "The saved destination, when there is one.",
             "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "legacyArchive": {
+            "description": "An inline archive, for an installation with no saved destinations. The URL has any userinfo redacted and the credential is a Secret NAME — `ArchiveView`'s rule since PLAT-08.",
+            "$ref": "#/components/schemas/ArchiveView",
             "nullable": true
           },
           "scheduleRefs": {
@@ -10217,15 +10234,12 @@
         "description": "A `ProtectionPolicy`, projected.",
         "type": "object",
         "required": [
-          "alerts",
-          "conditions",
           "evaluationIntervalSeconds",
           "name",
           "namespace",
           "objectives",
           "protects",
           "resourceVersion",
-          "schedules",
           "uid"
         ],
         "properties": {
@@ -10333,6 +10347,11 @@
           "rehearsalLastReason": {
             "description": "The reason the last rehearsal failed or was skipped.",
             "type": "string",
+            "nullable": true
+          },
+          "rehearsalLastRestoreRef": {
+            "description": "The `Restore` that rehearsal ran as, so the console can link it.",
+            "$ref": "#/components/schemas/NameRef",
             "nullable": true
           },
           "rehearsalLastSucceededAt": {
@@ -10632,7 +10651,6 @@
         "type": "object",
         "required": [
           "bounds",
-          "conditions",
           "name",
           "namespace",
           "point",
@@ -11181,10 +11199,6 @@
         "description": "What the last evaluation found. **Nothing here was deleted.**\n\nTHE NAME CARRIES ITS DOMAIN BECAUSE THE SCHEMA NAME IS GLOBAL. `schemars` keys `components/schemas` by the type's SHORT name, so two `EvaluationView` types in two route modules silently become one schema and one of the two `$ref`s points at the wrong shape — with no error anywhere. `trust.rs` has its own evaluation view, and `no_two_published_types_share_a_schema_name` in `tests/contract.rs` is what keeps the pair honest.",
         "type": "object",
         "required": [
-          "candidates",
-          "kept",
-          "protected",
-          "skipped",
           "truncated"
         ],
         "properties": {
@@ -11306,7 +11320,6 @@
         "required": [
           "approvedPlanState",
           "catalogRef",
-          "conditions",
           "destinationRef",
           "enforcementDegraded",
           "holds",
@@ -12496,8 +12509,7 @@
         "description": "What phase 9 removed, from the SIGNED teardown attestation.",
         "type": "object",
         "required": [
-          "deleted",
-          "failed"
+          "deletedTruncated"
         ],
         "properties": {
           "attestationKey": {
@@ -12506,12 +12518,18 @@
             "nullable": true
           },
           "deleted": {
-            "description": "How many topics were deleted.",
-            "type": "integer",
-            "format": "int64"
+            "description": "The topics phase 9 removed, by name.\n\nA LIST AND NOT A COUNT. D3 §2.2 declares `deleted: [string]`, and the incident question is \"which topics went\", not \"how many\": a count cannot be reconciled against the names the run created. The first round published the length.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "deletedTruncated": {
+            "description": "Whether `deleted` was cut short by this projection's row bound.",
+            "type": "boolean"
           },
           "failed": {
-            "description": "The ones that could not be.",
+            "description": "The ones that could not be removed. A non-empty list is what makes the next rehearsal slot SKIP rather than adopt topics it did not create.",
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/TeardownFailureView"
@@ -13145,16 +13163,12 @@
         "type": "object",
         "required": [
           "allowedTargetClusterIds",
-          "boundNamespaces",
-          "conditions",
-          "conflicts",
           "default",
           "evaluation",
           "keyCount",
-          "keys",
           "keysTruncated",
           "name",
-          "namespaces",
+          "namespacesFiltered",
           "namespacesTruncated",
           "resourceVersion",
           "uid"
@@ -13166,7 +13180,7 @@
             "format": "int64"
           },
           "boundNamespaces": {
-            "description": "The namespaces the controller resolved to this policy.",
+            "description": "The namespaces the controller resolved to this policy, filtered the same way as [`TrustPolicyView::namespaces`].",
             "type": "array",
             "items": {
               "type": "string"
@@ -13180,7 +13194,7 @@
             }
           },
           "conflicts": {
-            "description": "Namespaces two policies claim.",
+            "description": "Namespaces two policies claim, filtered the same way. A conflict is actionable only by somebody who administers the namespace it is about.",
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/NamespaceConflictView"
@@ -13232,14 +13246,18 @@
             "type": "string"
           },
           "namespaces": {
-            "description": "The namespaces it governs by name.",
+            "description": "The namespaces it governs by name, **filtered to the ones the reader administers**.",
             "type": "array",
             "items": {
               "type": "string"
             }
           },
+          "namespacesFiltered": {
+            "description": "Whether the namespace lists on this object are a FILTERED view.\n\nA `TrustPolicy` names the namespaces it governs, so publishing the list whole would let an administrator of one namespace enumerate every other namespace in the installation — the enumeration the shared-mode 404 rule exists to prevent, on the one object with no 404 to hide behind. The reader is told the list is partial rather than shown a short list that looks complete.",
+            "type": "boolean"
+          },
           "namespacesTruncated": {
-            "description": "Whether the namespace list was cut short.",
+            "description": "Whether the namespace list was cut short by the row bound.",
             "type": "boolean"
           },
           "observedGeneration": {

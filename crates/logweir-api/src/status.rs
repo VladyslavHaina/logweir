@@ -542,9 +542,15 @@ pub struct ProgressView {
     /// When the run was last observed, in active stages only.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_observed_time: Option<DateTime<Utc>>,
-    /// The runner's own phase.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub phase: Option<RunnerPhaseView>,
+    /// The runner's own phase, from its `progress-phase=` lines.
+    ///
+    /// NAMED AS THE CRD NAMES IT. D3 §2.2 is "verbatim from the CRD" and the
+    /// stored field is `status.progress.runnerPhase`; this view published it
+    /// as `phase` in the first round and the console had already written
+    /// `runnerPhase` against the decision. One spelling, and it is the one the
+    /// object carries.
+    #[serde(rename = "runnerPhase", skip_serializing_if = "Option::is_none")]
+    pub runner_phase: Option<RunnerPhaseView>,
 }
 
 /// D3 §2.5's evidence verdict, which is the RESULT and the TRUST BASIS
@@ -597,8 +603,11 @@ pub struct PolicyRefView {
 pub struct OperationTrust {
     /// The combined verdict.
     pub state: TrustState,
-    /// `current`, `historical`, `recordedBeforeRevocation`, `unverified` or
-    /// `none`. `none` is what an absent `trust` block projects to.
+    /// `Current`, `Historical`, `RecordedBeforeRevocation`, `Unverified` or
+    /// `None`, **in the CRD's own spelling**. `None` is what an absent `trust`
+    /// block projects to, which is D3 §12's sentence word for word: "`trust`
+    /// absent → `basis: None`". The first round lowercased these and invented
+    /// a vocabulary no other surface prints.
     pub basis: String,
     /// The signing key's state when the verdict was reached.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -676,7 +685,8 @@ pub struct SampleWindowView {
 #[serde(rename_all = "camelCase")]
 pub struct CompletionView {
     /// The topics the run created, with their partition counts.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub new_topics: Vec<CreatedTopicView>,
     /// The canary size.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -696,8 +706,6 @@ pub struct CompletionView {
     /// The window the sample covered.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub sample_window: Option<SampleWindowView>,
-    /// `scratch` or `newTopic` — which fixed guidance the console renders.
-    pub target_mode: String,
 }
 
 /// One topic teardown could not remove.
@@ -717,10 +725,21 @@ pub struct TeardownView {
     /// Where the attestation is.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub attestation_key: Option<String>,
-    /// How many topics were deleted.
-    pub deleted: i64,
-    /// The ones that could not be.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    /// The topics phase 9 removed, by name.
+    ///
+    /// A LIST AND NOT A COUNT. D3 §2.2 declares `deleted: [string]`, and the
+    /// incident question is "which topics went", not "how many": a count
+    /// cannot be reconciled against the names the run created. The first round
+    /// published the length.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
+    pub deleted: Vec<String>,
+    /// Whether `deleted` was cut short by this projection's row bound.
+    pub deleted_truncated: bool,
+    /// The ones that could not be removed. A non-empty list is what makes the
+    /// next rehearsal slot SKIP rather than adopt topics it did not create.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub failed: Vec<TeardownFailureView>,
 }
 
@@ -781,7 +800,8 @@ pub struct OperationView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<ProgressView>,
     /// The closed diagnosis list, newest `lastSeen` first, at most eight.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub diagnostics: Vec<DiagnosticView>,
     /// The evidence verdict in trust terms, beside — never instead of — the
     /// signature result in `verification`.
@@ -803,6 +823,15 @@ pub struct OperationView {
     /// A Restore's teardown outcome.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub teardown: Option<TeardownView>,
+    /// `scratch` or `newTopic` — a Restore's target mode, absent on a Backup.
+    ///
+    /// AT THE TOP LEVEL, NOT ON THE COMPLETION PANEL. D3 §3.5 keys its two
+    /// fixed guidance blocks on `spec.target.mode`, and that is a fact about
+    /// the run from the moment it is created — a rehearsal is a rehearsal
+    /// before its scorecard exists. The first round hid it inside
+    /// `completion`, so a Restore that had not finished could not be labelled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target_mode: Option<String>,
 }
 
 /// How long an active stage may go unobserved before the status is stale.
@@ -811,6 +840,9 @@ pub const STALE_OBSERVATION_SECONDS: i64 = 300;
 pub const STALE_NO_STATUS_SECONDS: i64 = 120;
 /// The most diagnostics a response carries.
 pub const MAX_DIAGNOSTICS: usize = 8;
+/// The most teardown rows of each kind a response carries. The CRD's own
+/// `maxItems`.
+pub const MAX_TEARDOWN_ROWS: usize = 256;
 
 fn progress_view(progress: Option<&RunProgress>) -> Option<ProgressView> {
     let p = progress?;
@@ -820,7 +852,7 @@ fn progress_view(progress: Option<&RunProgress>) -> Option<ProgressView> {
         message: p.message.as_deref().map(|m| bounded(m, 1024)),
         last_transition_time: p.last_transition_time,
         last_observed_time: p.last_observed_time,
-        phase: p.runner_phase.as_ref().map(|r| RunnerPhaseView {
+        runner_phase: p.runner_phase.as_ref().map(|r| RunnerPhaseView {
             number: r.number,
             name: r.name.as_deref().map(|n| bounded(n, 32)),
         }),
@@ -853,18 +885,17 @@ fn diagnostic_views(progress: Option<&RunProgress>) -> Vec<DiagnosticView> {
 /// An absent `trust` is `basis: none`; a `basis` this build does not recognise
 /// is passed through verbatim rather than rounded to the nearest word it does.
 fn trust_basis(trust: Option<&TrustBasis>) -> String {
-    let Some(basis) = trust.and_then(|t| t.basis.as_deref()) else {
-        return "none".to_string();
-    };
-    match basis {
-        "Current" => "current".to_string(),
-        "Historical" => "historical".to_string(),
-        "RecordedBeforeRevocation" => "recordedBeforeRevocation".to_string(),
-        "Unverified" => "unverified".to_string(),
-        "None" => "none".to_string(),
-        other => bounded(other, 64),
-    }
+    // PASSED THROUGH, NOT TRANSLATED. Every value here is a word the CRD
+    // stores and `docs/kubernetes.md` §15.2c names; a projection that rounded
+    // an unrecognised one to the nearest word it knew would report a basis
+    // nobody wrote.
+    trust
+        .and_then(|t| t.basis.as_deref())
+        .map_or_else(|| BASIS_NONE.to_string(), |basis| bounded(basis, 64))
 }
+
+/// What an absent `trust` block projects to (D3 §12).
+pub const BASIS_NONE: &str = "None";
 
 fn trust_of(
     verification: &OperationVerification,
@@ -878,9 +909,9 @@ fn trust_of(
     // not `Valid` can never be read up to `verified` by anything written here.
     let state = match verification.state {
         VerificationState::Valid => match basis.as_str() {
-            "historical" => TrustState::VerifiedHistorical,
-            "recordedBeforeRevocation" => TrustState::Verified,
-            "unverified" => TrustState::NotAttempted,
+            "Historical" => TrustState::VerifiedHistorical,
+            "RecordedBeforeRevocation" => TrustState::Verified,
+            "Unverified" => TrustState::NotAttempted,
             _ => TrustState::Verified,
         },
         VerificationState::Invalid => TrustState::Invalid,
@@ -1056,6 +1087,7 @@ pub fn backup_view(backup: &Backup, now: DateTime<Utc>) -> OperationView {
             }),
         completion: None,
         teardown: None,
+        target_mode: None,
         operation,
     }
 }
@@ -1144,21 +1176,28 @@ pub fn restore_view(restore: &Restore, now: DateTime<Utc>) -> OperationView {
                 start: w.start,
                 end: w.end,
             }),
-            target_mode: match restore.spec.target.mode {
-                weirkeeper::crds::restore::TargetMode::Scratch => "scratch".to_string(),
-                weirkeeper::crds::restore::TargetMode::NewTopic => "newTopic".to_string(),
-            },
         }),
+        target_mode: Some(wire_name(&restore.spec.target.mode)),
         teardown: status
             .and_then(|s| s.teardown.as_ref())
             .map(|t| TeardownView {
                 attestation_key: t.attestation_key.clone(),
-                deleted: t.deleted.as_ref().map_or(0, Vec::len) as i64,
+                deleted: t
+                    .deleted
+                    .iter()
+                    .flatten()
+                    .take(MAX_TEARDOWN_ROWS)
+                    .map(|name| bounded(name, 249))
+                    .collect(),
+                deleted_truncated: t
+                    .deleted
+                    .as_ref()
+                    .is_some_and(|d| d.len() > MAX_TEARDOWN_ROWS),
                 failed: t
                     .failed
                     .iter()
                     .flatten()
-                    .take(256)
+                    .take(MAX_TEARDOWN_ROWS)
                     .map(|f| TeardownFailureView {
                         topic: bounded(&f.topic, 253),
                         error: bounded(&f.error, 256),
@@ -1187,7 +1226,16 @@ pub fn restore_view(restore: &Restore, now: DateTime<Utc>) -> OperationView {
 // credential survives in a proxy log and a browser history), the connection is
 // closed at [`StreamBounds::max_connection`], the heartbeat is fixed, and the
 // number of concurrent streams one principal may hold in one namespace is
-// capped. Authorization is decided ONCE at subscribe, before the first read,
+// capped.
+//
+// AND THE CEILING IS WALL CLOCK FROM SUBSCRIBE, NOT PRODUCER TIME. The first
+// shape of this loop checked the deadline only BETWEEN sends, so a client that
+// opened the stream and never read filled the eight-frame channel, left the
+// producer parked in `tx.send(...).await`, and held its task and its slot for
+// as long as it kept the socket open and silent — measured at 1.212 s against
+// a 120 ms ceiling (review finding F3). Every send is now bounded by the
+// REMAINING budget and the tick never overshoots it, so a silent socket costs
+// one slot for `max_connection` and not for ever. Authorization is decided ONCE at subscribe, before the first read,
 // and the stream carries no ambient authority afterwards: it re-reads the same
 // object in the same namespace and can reach nothing else.
 
@@ -1417,6 +1465,7 @@ pub async fn open_stream(
         // ends the task at the next tick and releases it.
         let _slot = slot;
         let started = std::time::Instant::now();
+        let deadline = started + bounds.max_connection;
         let mut last_emit = started;
         let mut version = first.operation.resource_version.clone();
 
@@ -1437,30 +1486,40 @@ pub async fn open_stream(
             Some("operation")
         };
         if let Some(event) = opening {
-            if !send_view(&tx, event, &first).await {
+            if !send_view(&tx, event, &first, deadline).await {
                 return;
             }
             last_emit = std::time::Instant::now();
         }
         if is_settled(&first) {
-            let _ = send_end(&tx, StreamEnd::Settled).await;
+            let _ = send_end(&tx, StreamEnd::Settled, deadline).await;
             return;
         }
 
         loop {
+            // THE TICK NEVER OVERSHOOTS THE DEADLINE. Sleeping a whole poll
+            // interval past it would make the ceiling "300 s plus up to one
+            // poll", which is not what `docs/api.md` says.
+            let Some(left) = remaining(deadline) else {
+                let _ = send_end(&tx, StreamEnd::MaxDuration, deadline).await;
+                return;
+            };
             // A closed receiver is a client that went away. `timeout` resolves
             // either way, so this is the tick AND the disconnect check.
-            if tokio::time::timeout(bounds.poll, tx.closed()).await.is_ok() {
+            if tokio::time::timeout(bounds.poll.min(left), tx.closed())
+                .await
+                .is_ok()
+            {
                 return;
             }
-            if started.elapsed() >= bounds.max_connection {
-                let _ = send_end(&tx, StreamEnd::MaxDuration).await;
+            if remaining(deadline).is_none() {
+                let _ = send_end(&tx, StreamEnd::MaxDuration, deadline).await;
                 return;
             }
             let view = match kind.read(&state, &namespace, &name, state.now()).await {
                 Ok(view) => view,
                 Err(crate::kube::KubeFailure::NotFound) => {
-                    let _ = send_end(&tx, StreamEnd::Vanished).await;
+                    let _ = send_end(&tx, StreamEnd::Vanished, deadline).await;
                     return;
                 }
                 // A TRANSIENT FAILURE IS NOT AN EVENT. The client is already
@@ -1473,16 +1532,16 @@ pub async fn open_stream(
             };
             if view.operation.resource_version != version {
                 version = view.operation.resource_version.clone();
-                if !send_view(&tx, "operation", &view).await {
+                if !send_view(&tx, "operation", &view, deadline).await {
                     return;
                 }
                 last_emit = std::time::Instant::now();
                 if is_settled(&view) {
-                    let _ = send_end(&tx, StreamEnd::Settled).await;
+                    let _ = send_end(&tx, StreamEnd::Settled, deadline).await;
                     return;
                 }
             } else if last_emit.elapsed() >= bounds.heartbeat {
-                if !send_heartbeat(&tx, state.now()).await {
+                if !send_heartbeat(&tx, state.now(), deadline).await {
                     return;
                 }
                 last_emit = std::time::Instant::now();
@@ -1510,31 +1569,76 @@ pub async fn open_stream(
     Ok(response)
 }
 
-async fn send(tx: &tokio::sync::mpsc::Sender<bytes::Bytes>, text: String) -> bool {
-    tx.send(bytes::Bytes::from(text)).await.is_ok()
+/// How much of the connection budget is left, or `None` past it.
+fn remaining(deadline: std::time::Instant) -> Option<Duration> {
+    deadline.checked_duration_since(std::time::Instant::now())
+}
+
+/// Send one frame, or give up when the connection budget runs out.
+///
+/// THE TIMEOUT IS THE WHOLE POINT. A bounded channel is the memory bound and a
+/// blocking `send` is the backpressure, but a `send` that can block for ever
+/// is also a task and a stream slot that live for ever. Past the deadline this
+/// returns `false` and the caller drops the stream, which closes the body — a
+/// client that has not read for five minutes is not waiting for an `end`
+/// frame.
+async fn send(
+    tx: &tokio::sync::mpsc::Sender<bytes::Bytes>,
+    text: String,
+    deadline: std::time::Instant,
+) -> bool {
+    let Some(left) = remaining(deadline) else {
+        return false;
+    };
+    matches!(
+        tokio::time::timeout(left, tx.send(bytes::Bytes::from(text))).await,
+        Ok(Ok(()))
+    )
 }
 
 async fn send_view(
     tx: &tokio::sync::mpsc::Sender<bytes::Bytes>,
     event: &str,
     view: &OperationView,
+    deadline: std::time::Instant,
 ) -> bool {
     let Ok(data) = serde_json::to_string(view) else {
         return false;
     };
     let id = view.operation.resource_version.clone();
     let id = if valid_event_id(&id) { Some(id) } else { None };
-    send(tx, frame(event, id.as_deref(), &data)).await
+    send(tx, frame(event, id.as_deref(), &data), deadline).await
 }
 
-async fn send_heartbeat(tx: &tokio::sync::mpsc::Sender<bytes::Bytes>, now: DateTime<Utc>) -> bool {
+async fn send_heartbeat(
+    tx: &tokio::sync::mpsc::Sender<bytes::Bytes>,
+    now: DateTime<Utc>,
+    deadline: std::time::Instant,
+) -> bool {
     let data = serde_json::json!({ "at": now }).to_string();
-    send(tx, frame("heartbeat", None, &data)).await
+    send(tx, frame("heartbeat", None, &data), deadline).await
 }
 
-async fn send_end(tx: &tokio::sync::mpsc::Sender<bytes::Bytes>, end: StreamEnd) -> bool {
+/// The last frame, which must not be lost to its own deadline.
+///
+/// `end` IS SENT WITH WHAT IS LEFT, AND OTHERWISE WITHOUT WAITING. A client
+/// that is reading has room in the channel and receives the reason its stream
+/// closed; a client that is not reading has a full channel and gets nothing,
+/// which is correct — it has not read a frame for the length of the whole
+/// connection and is not waiting for one more. Using the bounded `send` alone
+/// would have dropped the `end` frame for EVERY stream that hit the ceiling,
+/// because the budget is exhausted at exactly the moment the frame is written.
+async fn send_end(
+    tx: &tokio::sync::mpsc::Sender<bytes::Bytes>,
+    end: StreamEnd,
+    deadline: std::time::Instant,
+) -> bool {
     let data = serde_json::json!({ "reason": end.as_str() }).to_string();
-    send(tx, frame("end", None, &data)).await
+    let text = frame("end", None, &data);
+    if remaining(deadline).is_some() {
+        return send(tx, text, deadline).await;
+    }
+    tx.try_send(bytes::Bytes::from(text)).is_ok()
 }
 
 /// A CRD enum's WIRE spelling, not its Rust one.

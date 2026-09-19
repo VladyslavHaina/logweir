@@ -181,11 +181,14 @@ object.** The rules, exactly:
 - A stage **never overrides a terminal phase.** `phase`, `exitCode` and
   `outcome` own the outcome; the progress channel answers "what is happening
   and why is it taking so long".
-- `trust.basis` is `none` when the status carries no `trust` block: nothing has
-  been compared with anything. A basis refines an already-safe result and never
-  rescues an unsafe one — no basis string turns a result that is not `Valid`
-  into a verified state, and `Valid` beside `basis: unverified` is
-  `notAttempted`.
+- `trust.basis` is `None` when the status carries no `trust` block: nothing has
+  been compared with anything. The spelling is the CRD's own
+  (`Current`, `Historical`, `RecordedBeforeRevocation`, `Unverified`, `None`),
+  which is D3 §12's sentence word for word, and an unrecognised value is passed
+  through rather than rounded to the nearest word this build knows. A basis
+  refines an already-safe result and never rescues an unsafe one — no basis
+  string turns a result that is not `Valid` into a verified state, and `Valid`
+  beside `basis: Unverified` is `notAttempted`.
 - `verificationScope.level` is `sampled` (`byte-fingerprint`), `degraded`
   (`consume-only`) or `none`. **`complete` does not exist in v1.** A Backup is
   always `none` with the three counts **absent** rather than zero: a receipt
@@ -197,6 +200,20 @@ object.** The rules, exactly:
   observe it again.
 - `readiness` is `{state: "unknown", basis: "notImplemented"}` until PLAT-03.1
   lands. It is a separate object and never overwrites `state`.
+- `targetMode` (`scratch` or `newTopic`) is on the operation and not on the
+  completion panel: D3 §3.5 keys its two fixed guidance blocks on
+  `spec.target.mode`, which is a fact about the run from the moment it is
+  created. It is absent on a Backup.
+- `progress.runnerPhase` is the CRD's own name for the runner's
+  `progress-phase=` lines. `teardown.deleted` and
+  `lastEnforcement.deleted` are **lists of names**, not counts: the incident
+  question is which topics or points went, and a count cannot be reconciled
+  against the plan or against the names the run created.
+- **A property the projection can omit is never `required` in the schema.** A
+  list that is absent when empty must not be declared required, or a client
+  validating against the document refuses a body the server considers correct;
+  `a_required_property_is_never_omitted_by_its_own_projection` round-trips each
+  view through its own schema to keep the two honest.
 
 The Job name, the pod name and the container state are **not** published.
 D0's "remains visible in bounded form" list is reason, message, exit code, last
@@ -255,7 +272,17 @@ a webhook URL is a bearer token with a hostname on the front and the name of
 the Secret holding one is what a reader needs to decide what to read next. A
 `RetentionPolicy`'s enforcement block names the one delete-capable credential in
 the installation; the projection publishes `credentialConfigured: true` and not
-the Secret's name. A `TrustPolicy`'s keys carry `spkiPem`; the projection
+the Secret's name.
+
+**Two rules, and which applies where.** An *archive's* credential Secret is
+published by NAME — `legacyArchive.credentialRef` on a catalog and on a
+protection policy, exactly as `destinations` has published `credentialRef` since
+PLAT-08 — because the name is part of the adoption contract: an operator types
+it into the connect form and the console echoes back the reference it stored. An
+*alert sink's* and a *deletion credential's* names are not published at all,
+because nothing echoes them back and naming them only tells a reader which
+Secret to try next. Every archive URL is published with its userinfo redacted,
+wherever it appears. A `TrustPolicy`'s keys carry `spkiPem`; the projection
 publishes the **key id** — the SHA-256 of the DER SPKI, the number `openssl`
 prints — so an operator compares fingerprints out of band, which is the
 supported path.
@@ -298,10 +325,26 @@ status, that status was computed from the current `metadata.generation`, and
 usability verdict. Freshness is measured against **this server's** clock, and
 the response publishes `evaluation.serverTime` beside `evaluatedAt` so a reader
 can check the arithmetic instead of redoing it against a clock the cluster never
-saw. `GET /api/v1/trust-policies` is cluster-scoped, so it has no namespace and
-requires the administrator role in at least one bound namespace: a `TrustPolicy`
-lists the namespaces it governs, and serving it to an actor bound in one would
-publish the shape of every other. Trust **writes** stay off the API in v1
+saw. **The cluster-scoped read is narrowed, and the narrowing is a deviation that is
+written down.** D0's matrix row for installation trust is "installation-admin
+only, cluster scope", and this authorization model has no installation-scoped
+role: every binding is `(role, namespace)`. So `GET /api/v1/trust-policies`
+requires the administrator role in at least one bound namespace **and** serves
+only policies that govern a namespace the reader administers or are the
+installation `default` — anything else is `404`, the same answer a policy that
+does not exist gives, because "it exists and you may not see it" is the
+enumeration being closed. Inside a policy that is served, `namespaces`,
+`boundNamespaces` and `conflicts[]` are filtered to the namespaces the reader
+administers, and `namespacesFiltered` says when a list is partial. Without that
+filter an administrator of one namespace reads the name of every other
+namespace in the installation off the one object that has no `404` to hide
+behind. The keys view §7.7 needs is unaffected.
+
+`capabilities.trustPoliciesRead` is computed per namespace like every other
+flag, but the route it names is cluster-scoped: **a console must read it from
+the union of the grants, not from the namespace it happens to be showing.** An
+actor who administers `team-b` and only views `team-a` would otherwise be shown
+`false` for a page the server serves. Trust **writes** stay off the API in v1
 (`capabilities.trustAdministration` is `false` for everybody, including the
 local administrator); the supported path is `kubectl apply` plus the
 `logweir trust` helpers. `capabilities.catalogWindowQuery` is `false` for the

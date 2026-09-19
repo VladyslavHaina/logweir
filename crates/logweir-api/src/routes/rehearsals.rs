@@ -45,7 +45,8 @@ pub const MAX_PENDING_TOPICS: usize = 64;
 #[serde(rename_all = "camelCase")]
 pub struct PointSelectorView {
     /// Candidate schedules.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub schedule_refs: Vec<NameRef>,
     /// The catalog candidates come from.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -149,7 +150,8 @@ pub struct SkippedSlotView {
 #[serde(rename_all = "camelCase")]
 pub struct CleanupStateView {
     /// The topics still there.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub pending_topics: Vec<String>,
     /// Whether the list was cut short.
     pub pending_topics_truncated: bool,
@@ -227,7 +229,8 @@ pub struct RehearsalScheduleView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub cleanup: Option<CleanupStateView>,
     /// `Ready`, `Authorized` and `RehearsalHealthy`.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub conditions: Vec<ConditionView>,
 }
 

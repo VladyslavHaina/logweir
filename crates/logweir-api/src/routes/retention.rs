@@ -139,16 +139,20 @@ pub struct RetentionEvaluationView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub candidate_count: Option<i64>,
     /// The points the rules keep.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub kept: Vec<String>,
     /// The points the rules would remove.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub candidates: Vec<CandidateView>,
     /// The points something else protected.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub protected: Vec<ProtectedPointView>,
     /// The points the evaluation could not classify.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub skipped: Vec<SkippedEntryView>,
     /// Whether any of the four lists above was cut short by this route's own
     /// row bound.
@@ -191,10 +195,19 @@ pub struct EnforcementRunView {
     /// The plan digest it executed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub plan_sha256: Option<String>,
-    /// How many points it deleted.
-    pub deleted: i64,
+    /// The points it deleted, by id.
+    ///
+    /// A LIST AND NOT A COUNT, for `TeardownView::deleted`'s reason and D3
+    /// §6.5's: the attributable record names "every deleted point id", and a
+    /// count cannot be reconciled against the plan an administrator approved.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
+    pub deleted: Vec<String>,
+    /// Whether `deleted` was cut short by this projection's row bound.
+    pub deleted_truncated: bool,
     /// The ones it could not.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub failed: Vec<FailedDeletionView>,
     /// How many objects went.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -342,7 +355,8 @@ pub struct RetentionPolicyView {
     pub enforcement_degraded: bool,
     /// `Ready`, `Evaluated`, `Enforced`, `ExternalLifecycleConflict` and
     /// `EnforcementDegraded`.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub conditions: Vec<ConditionView>,
 }
 
@@ -516,7 +530,14 @@ pub fn view(policy: &RetentionPolicy, now: DateTime<Utc>) -> RetentionPolicyView
                 started_at: r.started_at,
                 finished_at: r.finished_at,
                 plan_sha256: r.plan_sha256.clone(),
-                deleted: r.deleted.as_ref().map_or(0, Vec::len) as i64,
+                deleted: r
+                    .deleted
+                    .iter()
+                    .flatten()
+                    .take(MAX_ROWS)
+                    .map(|p| bounded(p, 128))
+                    .collect(),
+                deleted_truncated: r.deleted.as_ref().is_some_and(|d| d.len() > MAX_ROWS),
                 failed: r
                     .failed
                     .iter()

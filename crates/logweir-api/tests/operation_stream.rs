@@ -122,7 +122,7 @@ async fn a_settled_operation_emits_one_snapshot_and_ends() {
 
     let frames = data(&body);
     assert_eq!(frames[0]["state"], "succeeded");
-    assert_eq!(frames[0]["trust"]["basis"], "current");
+    assert_eq!(frames[0]["trust"]["basis"], "Current");
     assert_eq!(frames[0]["verifiedSuccess"], true);
     assert_eq!(frames[1]["reason"], "settled");
 

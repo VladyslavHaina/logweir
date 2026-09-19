@@ -206,17 +206,29 @@ pub struct TrustPolicyView {
     pub created_at: Option<DateTime<Utc>>,
     /// Whether this is the installation default.
     pub default: bool,
-    /// The namespaces it governs by name.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    /// The namespaces it governs by name, **filtered to the ones the reader
+    /// administers**.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub namespaces: Vec<String>,
-    /// Whether the namespace list was cut short.
+    /// Whether the namespace list was cut short by the row bound.
     pub namespaces_truncated: bool,
+    /// Whether the namespace lists on this object are a FILTERED view.
+    ///
+    /// A `TrustPolicy` names the namespaces it governs, so publishing the list
+    /// whole would let an administrator of one namespace enumerate every other
+    /// namespace in the installation — the enumeration the shared-mode 404
+    /// rule exists to prevent, on the one object with no 404 to hide behind.
+    /// The reader is told the list is partial rather than shown a short list
+    /// that looks complete.
+    pub namespaces_filtered: bool,
     /// How many target cluster ids a rehearsal or restore may write to.
     pub allowed_target_cluster_ids: i64,
     /// How many keys the policy carries in total.
     pub key_count: i64,
     /// The keys, at most [`MAX_ROWS`].
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub keys: Vec<TrustKeyView>,
     /// Whether the key list was cut short.
     pub keys_truncated: bool,
@@ -228,14 +240,19 @@ pub struct TrustPolicyView {
     /// Whether the controller could load the policy at all.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub loaded: Option<bool>,
-    /// The namespaces the controller resolved to this policy.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    /// The namespaces the controller resolved to this policy, filtered the
+    /// same way as [`TrustPolicyView::namespaces`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub bound_namespaces: Vec<String>,
-    /// Namespaces two policies claim.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    /// Namespaces two policies claim, filtered the same way. A conflict is
+    /// actionable only by somebody who administers the namespace it is about.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub conflicts: Vec<NamespaceConflictView>,
     /// `Loaded`, `Bound` and `ExpiringSoon`.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub conditions: Vec<crate::contract::ConditionView>,
 }
 
@@ -273,9 +290,38 @@ pub fn evaluation(policy: &TrustPolicy, now: DateTime<Utc>) -> TrustEvaluationVi
     }
 }
 
-/// Project one trust policy at `now`.
+/// Whether a policy is in the reader's scope.
+///
+/// D0's matrix row is "Installation trust … installation-admin only, cluster
+/// scope", and THIS AUTHORIZATION MODEL HAS NO INSTALLATION-SCOPED ROLE: every
+/// binding is `(role, namespace)`. So the route cannot implement D0's rule
+/// literally, and the deviation is made as narrow as the model allows rather
+/// than left as "any administrator sees everything":
+///
+/// * a policy is in scope when it governs a namespace the reader ADMINISTERS,
+///   or when it is the installation `default`, which is the policy that
+///   governs the reader's own namespaces when no explicit binding does; and
+/// * inside an in-scope policy, every namespace-bearing list is filtered to
+///   the namespaces the reader administers, with `namespacesFiltered` saying
+///   so.
+///
+/// Anything else is `not_found` — the same answer a policy that does not exist
+/// gives, because "this exists and you may not see it" is the enumeration this
+/// is closing.
 #[must_use]
-pub fn view(policy: &TrustPolicy, now: DateTime<Utc>) -> TrustPolicyView {
+pub fn in_scope(policy: &TrustPolicy, administered: &[String]) -> bool {
+    policy.spec.default
+        || policy
+            .spec
+            .namespaces
+            .iter()
+            .flatten()
+            .any(|n| administered.iter().any(|a| a == n))
+}
+
+/// Project one trust policy at `now`, showing only `administered` namespaces.
+#[must_use]
+pub fn view(policy: &TrustPolicy, now: DateTime<Utc>, administered: &[String]) -> TrustPolicyView {
     let spec = &policy.spec;
     let status = policy.status.as_ref();
     let evaluation = evaluation(policy, now);
@@ -314,7 +360,33 @@ pub fn view(policy: &TrustPolicy, now: DateTime<Utc>) -> TrustPolicyView {
             }
         })
         .collect();
-    let namespaces = spec.namespaces.as_ref();
+    let visible = |name: &String| administered.iter().any(|a| a == name);
+    let declared: Vec<&String> = spec.namespaces.iter().flatten().collect();
+    let kept: Vec<&String> = declared.iter().copied().filter(|n| visible(n)).collect();
+    let declared_bound: Vec<&String> = status
+        .and_then(|s| s.bound_namespaces.as_ref())
+        .into_iter()
+        .flatten()
+        .collect();
+    let kept_bound: Vec<&String> = declared_bound
+        .iter()
+        .copied()
+        .filter(|n| visible(n))
+        .collect();
+    let declared_conflicts: Vec<&weirkeeper::crds::trust_policy::NamespaceConflict> = status
+        .and_then(|s| s.conflicts.as_ref())
+        .into_iter()
+        .flatten()
+        .collect();
+    let kept_conflicts: Vec<&weirkeeper::crds::trust_policy::NamespaceConflict> =
+        declared_conflicts
+            .iter()
+            .copied()
+            .filter(|c| visible(&c.namespace))
+            .collect();
+    let filtered = kept.len() != declared.len()
+        || kept_bound.len() != declared_bound.len()
+        || kept_conflicts.len() != declared_conflicts.len();
     TrustPolicyView {
         name: policy.name_any(),
         uid: policy.uid().unwrap_or_default(),
@@ -322,13 +394,9 @@ pub fn view(policy: &TrustPolicy, now: DateTime<Utc>) -> TrustPolicyView {
         generation: policy.metadata.generation,
         created_at: policy.metadata.creation_timestamp.as_ref().map(|t| t.0),
         default: spec.default,
-        namespaces: namespaces
-            .into_iter()
-            .flatten()
-            .take(MAX_ROWS)
-            .map(|n| bounded(n, 63))
-            .collect(),
-        namespaces_truncated: namespaces.is_some_and(|n| n.len() > MAX_ROWS),
+        namespaces: kept.iter().take(MAX_ROWS).map(|n| bounded(n, 63)).collect(),
+        namespaces_truncated: kept.len() > MAX_ROWS,
+        namespaces_filtered: filtered,
         allowed_target_cluster_ids: spec.allowed_target_cluster_ids.as_ref().map_or(0, Vec::len)
             as i64,
         key_count: spec.keys.len() as i64,
@@ -337,17 +405,13 @@ pub fn view(policy: &TrustPolicy, now: DateTime<Utc>) -> TrustPolicyView {
         evaluation,
         observed_generation: status.and_then(|s| s.observed_generation),
         loaded: status.and_then(|s| s.loaded),
-        bound_namespaces: status
-            .and_then(|s| s.bound_namespaces.as_ref())
-            .into_iter()
-            .flatten()
+        bound_namespaces: kept_bound
+            .iter()
             .take(MAX_ROWS)
             .map(|n| bounded(n, 63))
             .collect(),
-        conflicts: status
-            .and_then(|s| s.conflicts.as_ref())
-            .into_iter()
-            .flatten()
+        conflicts: kept_conflicts
+            .iter()
             .take(MAX_ROWS)
             .map(|c| NamespaceConflictView {
                 namespace: bounded(&c.namespace, 63),
@@ -396,32 +460,39 @@ pub struct TrustPolicyResponse {
 /// namespace name is a DNS-1123 label, and `*` is not one.
 pub const CLUSTER_SCOPE: &str = "*";
 
-/// Authorize a cluster-scoped read.
+/// Authorize a cluster-scoped read, and return the namespaces it may show.
 ///
-/// "INSTALLATION ADMINISTRATOR" IS A ROLE THIS MODEL EXPRESSES AS "ADMINISTERS
-/// SOMETHING". D0's bindings are per namespace and there is no cluster-wide
-/// grant to check, so the nearest honest rule is: the actor must hold
-/// `trustPolicy.read` — which only [`Role::Administrator`] holds — in at least
-/// one namespace bound to them. An actor with no administrator binding
-/// anywhere is `forbidden`, and the audit line records the decision under
-/// [`CLUSTER_SCOPE`] with the namespace that carried it.
+/// **D0 REQUIRES INSTALLATION-ADMIN ONLY, AND THIS MODEL CANNOT SAY THAT.**
+/// D0's matrix row for installation trust is "none | none | none |
+/// installation-admin only, cluster scope", and every binding this authorizer
+/// knows is `(role, namespace)`: there is no installation-scoped role to check
+/// and no way to mint one here. So the deviation is made as narrow as the
+/// model allows, and it is written down rather than implied:
 ///
-/// IT IS DELIBERATELY NOT "ANY VIEWER". A `TrustPolicy` lists the namespaces
-/// it governs, so serving it to an actor bound in one namespace would publish
-/// the shape of every other one; that is the enumeration the shared-mode 404
-/// rule exists to prevent, on a cluster-scoped object where there is no 404 to
-/// hide behind.
+/// 1. the actor must hold `trustPolicy.read` — which only
+///    [`Role::Administrator`] holds — in at least one bound namespace;
+/// 2. the returned list is the namespaces it administers, and
+///    [`in_scope`] serves only policies that govern one of them or are the
+///    installation `default`; and
+/// 3. [`view`] filters every namespace-bearing list to that set.
+///
+/// Without (2) and (3) a namespace administrator reads `spec.namespaces`,
+/// `status.boundNamespaces` and `conflicts[].namespace` for the WHOLE
+/// installation — exactly the namespace enumeration the shared-mode 404 rule
+/// exists to prevent, on the one object with no 404 to hide behind.
 ///
 /// # Errors
 ///
 /// `forbidden`.
-pub fn authorize_cluster(state: &AppState, actor: &Actor) -> Result<(), ApiError> {
+pub fn authorize_cluster(state: &AppState, actor: &Actor) -> Result<Vec<String>, ApiError> {
     let authorizer = state.authorizer();
-    let granted = authorizer.namespaces(actor);
-    let carrier = granted
-        .iter()
-        .find(|ns| authorizer.allows(actor, ns, Action::ReadTrustPolicies));
-    let roles: Vec<String> = carrier
+    let administered: Vec<String> = authorizer
+        .namespaces(actor)
+        .into_iter()
+        .filter(|ns| authorizer.allows(actor, ns, Action::ReadTrustPolicies))
+        .collect();
+    let roles: Vec<String> = administered
+        .first()
         .map(|ns| authorizer.roles(actor, ns))
         .unwrap_or_default()
         .iter()
@@ -432,26 +503,24 @@ pub fn authorize_cluster(state: &AppState, actor: &Actor) -> Result<(), ApiError
         Action::ReadTrustPolicies.name(),
         &roles,
         &authorizer.binding_revision(),
-        if carrier.is_some() {
-            crate::audit::Decision::Allow
-        } else {
+        if administered.is_empty() {
             crate::audit::Decision::Deny
+        } else {
+            crate::audit::Decision::Allow
         },
     );
-    match carrier {
-        Some(namespace) => {
-            actor.audit.note("clusterScopeCarrier", namespace);
-            Ok(())
-        }
-        None => {
-            actor.audit.set_failure("forbidden");
-            Err(ApiError::new(
-                ProblemCode::Forbidden,
-                "Reading the installation's trust policies requires the administrator role in at \
-                 least one bound namespace.",
-            ))
-        }
+    if administered.is_empty() {
+        actor.audit.set_failure("forbidden");
+        return Err(ApiError::new(
+            ProblemCode::Forbidden,
+            "Reading the installation's trust policies requires the administrator role in at \
+             least one bound namespace.",
+        ));
     }
+    actor
+        .audit
+        .note("clusterScopeCarrier", &administered.join(","));
+    Ok(administered)
 }
 
 /// Whether any role in this build may read a trust policy. A compile-time
@@ -472,7 +541,7 @@ pub async fn list(
     actor: Actor,
     uri: Uri,
 ) -> Result<Response, ApiError> {
-    authorize_cluster(&state, &actor)?;
+    let administered = authorize_cluster(&state, &actor)?;
     let query = list_query(uri.query())?;
     let scope = CursorScope {
         actor_id: actor.id(),
@@ -523,7 +592,12 @@ pub async fn list(
         StatusCode::OK,
         &TrustPolicyList {
             request_id,
-            items: list.items.iter().map(|p| view(p, now)).collect(),
+            items: list
+                .items
+                .iter()
+                .filter(|p| in_scope(p, &administered))
+                .map(|p| view(p, now, &administered))
+                .collect(),
             page: Page {
                 limit: query.limit,
                 next_cursor,
@@ -542,13 +616,19 @@ pub async fn get_one(
     uri: Uri,
 ) -> Result<Response, ApiError> {
     crate::http::parse_query(uri.query(), &[])?;
-    authorize_cluster(&state, &actor)?;
+    let administered = authorize_cluster(&state, &actor)?;
     check_name(&name)?;
     let policy = state
         .kube()
         .get_cluster::<TrustPolicy>(&name)
         .await
         .map_err(KubeFailure::into_api_error)?;
+    // A POLICY OUT OF SCOPE IS `not_found`, NOT `forbidden`. "It exists and you
+    // may not see it" is the enumeration this route is closing; the answer is
+    // the one a policy that does not exist gives.
+    if !in_scope(&policy, &administered) {
+        return Err(ApiError::not_found());
+    }
     actor.audit.set_object(
         "TrustPolicy",
         &policy.name_any(),
@@ -559,7 +639,7 @@ pub async fn get_one(
         StatusCode::OK,
         &TrustPolicyResponse {
             request_id,
-            item: view(&policy, state.now()),
+            item: view(&policy, state.now(), &administered),
         },
     ))
 }

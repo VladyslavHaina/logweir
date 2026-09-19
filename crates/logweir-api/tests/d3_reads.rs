@@ -227,7 +227,11 @@ async fn retention_publishes_what_is_actually_enforcing_and_never_the_credential
         .expect("the Enforce policy");
     assert_eq!(enforce["mode"], "Enforce");
     assert_eq!(enforce["enforcementSettings"]["credentialConfigured"], true);
-    assert_eq!(enforce["lastEnforcement"]["deleted"], 0);
+    // THE POINT IDS, NOT A COUNT (D3 §6.5). The live run deleted nothing, so
+    // the list is absent rather than `0` — which is the same absent-field rule
+    // the counts follow.
+    assert!(enforce["lastEnforcement"].get("deleted").is_none());
+    assert_eq!(enforce["lastEnforcement"]["deletedTruncated"], false);
     assert_eq!(
         enforce["lastEnforcement"]["failed"][0]["code"],
         "AccessDenied"
@@ -1094,5 +1098,223 @@ async fn a_rehearsal_publishes_its_skip_its_leftovers_and_a_named_authorization(
         .await
         .json();
     assert_eq!(list["items"].as_array().unwrap().len(), 1);
+    app.fake.assert_strict();
+}
+
+// ======================================================================
+// Fix round 1 — the review's F2 and F4
+// ======================================================================
+
+/// A cluster-scoped policy governing four namespaces, of which the reader
+/// administers one.
+fn wide_policy(name: &str, namespaces: &[&str], default: bool) -> Value {
+    let mut policy = fixture("trust-policy-fresh.json");
+    policy["metadata"]["name"] = json!(name);
+    policy["spec"]["default"] = json!(default);
+    policy["spec"]["namespaces"] = json!(namespaces);
+    policy["status"]["boundNamespaces"] = json!(namespaces);
+    // One conflict per governed namespace, so a policy whose whole list the
+    // reader can see has nothing filtered out of it.
+    policy["status"]["conflicts"] = Value::Array(
+        namespaces
+            .iter()
+            .map(|n| json!({"namespace": n, "policies": ["org-default", name]}))
+            .collect(),
+    );
+    for key in policy["spec"]["keys"].as_array_mut().expect("keys") {
+        key["spkiPem"] = json!(spki_pem());
+    }
+    policy
+}
+
+/// **F2: a namespace administrator cannot enumerate the installation.**
+///
+/// REGRESSION REASON, MEASURED. The first round admitted any actor holding
+/// `trustPolicy.read` in any one bound namespace and then served EVERY
+/// `TrustPolicy` whole: an administrator bound only in `team-a` read
+/// `spec.namespaces`, `status.boundNamespaces` and `conflicts[].namespace` for
+/// the entire installation. D0's matrix row is "installation-admin only,
+/// cluster scope"; this model has no installation-scoped role, so the
+/// deviation is narrowed instead — a policy is served only when it governs a
+/// namespace the reader administers or is the installation `default`, and
+/// every namespace-bearing list is filtered to the administered set with
+/// `namespacesFiltered` saying so.
+#[tokio::test]
+async fn a_namespace_administrator_never_enumerates_another_namespace() {
+    let fake = seeded();
+    fake.seed_cluster(
+        "trustpolicies",
+        wide_policy(
+            "org-wide",
+            &["team-a", "team-b", "finance-prod", "hr-secrets"],
+            false,
+        ),
+    );
+    let shared = SharedApp::new(
+        fake,
+        support::idp::MockIdp::new(support::ISSUER, &[]),
+        SharedOptions {
+            bindings: support::RoleBindings {
+                revision: "rev-1".into(),
+                bindings: vec![support::binding(
+                    logweir_api::authz::Role::Administrator,
+                    NS_A,
+                    &["lw-a-admins"],
+                )],
+            },
+            ..SharedOptions::default()
+        },
+    );
+    let admin = shared.session_cookie("u-adm", &["lw-a-admins"]);
+
+    let response = shared.get("/api/v1/trust-policies/org-wide", &admin).await;
+    assert_eq!(response.status.as_u16(), 200);
+    let text = response.text();
+    for hidden in ["team-b", "finance-prod", "hr-secrets"] {
+        assert!(
+            !text.contains(hidden),
+            "{hidden} was enumerated to an administrator who does not administer it:\n{text}"
+        );
+    }
+    let item = &response.json()["item"];
+    assert_eq!(item["namespaces"], json!(["team-a"]));
+    assert_eq!(item["boundNamespaces"], json!(["team-a"]));
+    assert_eq!(
+        item["namespacesFiltered"], true,
+        "a filtered list that did not say so would look complete"
+    );
+    // The conflict about a namespace the reader administers survives; the one
+    // about `hr-secrets` does not.
+    assert_eq!(item["conflicts"].as_array().unwrap().len(), 1);
+    assert_eq!(item["conflicts"][0]["namespace"], "team-a");
+    // The keys view §7.7 needs is untouched by the filter.
+    assert_eq!(item["keys"][0]["state"], "Active");
+    assert_eq!(item["keyCount"], 1);
+
+    // A policy that governs nothing the reader administers is NOT FOUND — the
+    // same answer a policy that does not exist gives, because "it exists and
+    // you may not see it" is the enumeration this closes.
+    shared.app.fake.seed_cluster(
+        "trustpolicies",
+        wide_policy("hr-only", &["hr-secrets"], false),
+    );
+    let refused = shared.get("/api/v1/trust-policies/hr-only", &admin).await;
+    refused.assert_problem(404, "not_found");
+
+    let listed = shared.get("/api/v1/trust-policies", &admin).await.json();
+    let names: Vec<&str> = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
+    assert!(!names.contains(&"hr-only"), "{names:?}");
+    assert!(names.contains(&"org-wide"), "{names:?}");
+}
+
+/// **The installation `default` policy is in scope for every administrator.**
+///
+/// It is the policy that governs a namespace when no explicit binding does, so
+/// hiding it would hide the very object the keys page is about — and it names
+/// no namespaces, so there is nothing to enumerate from it.
+#[tokio::test]
+async fn the_default_policy_is_in_scope_and_an_unfiltered_one_says_so() {
+    let fake = FakeKube::new();
+    fake.seed_cluster("trustpolicies", wide_policy("org-default", &[], true));
+    fake.seed_cluster(
+        "trustpolicies",
+        wide_policy("just-team-a", &["team-a"], false),
+    );
+    let shared = SharedApp::new(
+        fake,
+        support::idp::MockIdp::new(support::ISSUER, &[]),
+        SharedOptions {
+            bindings: support::RoleBindings {
+                revision: "rev-1".into(),
+                bindings: vec![support::binding(
+                    logweir_api::authz::Role::Administrator,
+                    NS_A,
+                    &["lw-a-admins"],
+                )],
+            },
+            ..SharedOptions::default()
+        },
+    );
+    let admin = shared.session_cookie("u-adm", &["lw-a-admins"]);
+
+    let listed = shared.get("/api/v1/trust-policies", &admin).await.json();
+    let names: Vec<&str> = listed["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|i| i["name"].as_str().unwrap())
+        .collect();
+    assert_eq!(names, vec!["just-team-a", "org-default"]);
+
+    // A policy whose whole namespace list is visible is NOT reported filtered:
+    // the flag is a fact, not a constant.
+    let unfiltered = shared
+        .get("/api/v1/trust-policies/just-team-a", &admin)
+        .await
+        .json();
+    assert_eq!(unfiltered["item"]["namespacesFiltered"], false);
+    assert_eq!(unfiltered["item"]["namespaces"], json!(["team-a"]));
+}
+
+/// **F4: a legacy archive URL comes back with its userinfo redacted.**
+///
+/// REGRESSION REASON. The line that does it had no test at all: the reviewer
+/// planted `url: a.url.clone()` and the whole 358-test suite passed. The row
+/// that looked like the guard sent a URL with no userinfo in it. `POST`
+/// refuses a userinfo URL by field, so one can only arrive by `kubectl apply`
+/// — which is exactly the legacy-archive adoption path this family exists for.
+#[tokio::test]
+async fn an_archive_url_that_carries_userinfo_comes_back_redacted() {
+    let secret = concat!("arch1ve-", "p455w0rd-in-a-url");
+    let fake = seeded();
+    let mut catalog = fixture("recovery-catalog.json");
+    catalog["metadata"]["name"] = json!("adopted");
+    catalog["spec"]
+        .as_object_mut()
+        .unwrap()
+        .remove("destinationRef");
+    catalog["spec"]["legacyArchive"] = json!({
+        "url": format!("s3://archive-user:{secret}@old-bucket/kafka"),
+        "secretRef": {"name": "read-only"}
+    });
+    fake.seed("recoverycatalogs", NS_A, catalog);
+
+    let mut policy = fixture("protection-policy-unprotected.json");
+    policy["metadata"]["name"] = json!("adopted-protection");
+    policy["spec"]["protects"]
+        .as_object_mut()
+        .unwrap()
+        .remove("destinationRef");
+    policy["spec"]["protects"]["legacyArchive"] = json!({
+        "url": format!("s3://archive-user:{secret}@old-bucket/kafka"),
+        "secretRef": {"name": "read-only"}
+    });
+    fake.seed("protectionpolicies", NS_A, policy);
+
+    let app = TestApp::with(fake, Options::default());
+    for path in [
+        "/api/v1/namespaces/team-a/catalogs/adopted",
+        "/api/v1/namespaces/team-a/catalogs",
+        "/api/v1/namespaces/team-a/protection-policies/adopted-protection",
+    ] {
+        let text = app.get(path).await.text();
+        assert!(
+            !text.contains(secret),
+            "{path} published the credential in an archive URL:\n{text}"
+        );
+        assert!(
+            !text.contains("archive-user"),
+            "{path} published the userinfo of an archive URL:\n{text}"
+        );
+        assert!(
+            text.contains("old-bucket"),
+            "{path} redacted the whole URL instead of its userinfo:\n{text}"
+        );
+    }
     app.fake.assert_strict();
 }

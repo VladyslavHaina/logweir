@@ -239,16 +239,19 @@ pub struct CatalogView {
     /// How many points the materialised view actually holds.
     pub view_points: i64,
     /// Points per day.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub histogram: Vec<HistogramBucketView>,
     /// Who signed them.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub signers: Vec<SignerView>,
     /// The last sync Job.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_sync: Option<LastSyncView>,
     /// `Ready`, `Synced`, `Stale` and `TrustAvailable`.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub conditions: Vec<ConditionView>,
 }
 
@@ -406,8 +409,25 @@ pub struct PointView {
     /// The key that signed it, when one was identified.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signer_key_id: Option<String>,
+    /// The signed receipt's object key.
+    ///
+    /// KEYS AND DIGESTS ONLY, NEVER CONTENT — the rule `OperationEvidence`
+    /// already follows. These four are what D3 §5.5 step 4 puts in a restore
+    /// plan's `source.point {point_id, receipt_key, receipt_sha256,
+    /// manifest_sha256}` binding, so a console that offers "restore this
+    /// point" cannot build the plan without them.
+    pub receipt_key: String,
+    /// Its recorded SHA-256.
+    pub receipt_sha256: String,
+    /// The manifest's object key.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_key: Option<String>,
+    /// The manifest's recorded SHA-256.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub manifest_sha256: Option<String>,
     /// Every location it was seen at, each with its own availability.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub locations: Vec<PointLocationView>,
     /// What to do about a degraded verdict, from the catalog's own vocabulary.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -433,6 +453,10 @@ fn point_view(entry: &ViewEntry) -> PointView {
         verification: entry.verification.as_str().to_string(),
         selectable: entry.selectable,
         signer_key_id: entry.signer_key_id.as_deref().map(|k| bounded(k, 64)),
+        receipt_key: bounded(&entry.receipt_key, 1024),
+        receipt_sha256: bounded(&entry.receipt_sha256, 80),
+        manifest_key: entry.manifest_key.as_deref().map(|k| bounded(k, 1024)),
+        manifest_sha256: entry.manifest_sha256.as_deref().map(|d| bounded(d, 80)),
         locations: entry
             .locations
             .iter()

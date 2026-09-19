@@ -59,11 +59,17 @@ pub struct ProtectedSubjectView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub topics: Option<Vec<String>>,
     /// The schedules whose runs count.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub schedule_refs: Vec<NameRef>,
     /// The saved destination, when there is one.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub destination_ref: Option<NameRef>,
+    /// An inline archive, for an installation with no saved destinations. The
+    /// URL has any userinfo redacted and the credential is a Secret NAME —
+    /// `ArchiveView`'s rule since PLAT-08.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub legacy_archive: Option<crate::contract::ArchiveView>,
     /// The catalog that answers "is the point still there?".
     #[serde(skip_serializing_if = "Option::is_none")]
     pub catalog_ref: Option<NameRef>,
@@ -109,7 +115,8 @@ pub struct NotificationRouteView {
 #[serde(rename_all = "camelCase")]
 pub struct NotificationsView {
     /// The routes, at most four.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub routes: Vec<NotificationRouteView>,
     /// Which alert kinds are sent. Absent means all of them.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -144,7 +151,8 @@ pub struct AvailablePointView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub evidence: Option<String>,
     /// The topics it covers, bounded.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub topics: Vec<String>,
     /// Whether `topics` was cut short.
     pub topics_truncated: bool,
@@ -300,11 +308,15 @@ pub struct ProtectionPolicyView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub stale_since: Option<DateTime<Utc>>,
     /// The schedules, with their own readiness.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub schedules: Vec<ScheduleHealthView>,
     /// When a rehearsal last passed.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rehearsal_last_succeeded_at: Option<DateTime<Utc>>,
+    /// The `Restore` that rehearsal ran as, so the console can link it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rehearsal_last_restore_ref: Option<NameRef>,
     /// When one last failed, and why.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rehearsal_last_failed_at: Option<DateTime<Utc>>,
@@ -312,10 +324,12 @@ pub struct ProtectionPolicyView {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub rehearsal_last_reason: Option<String>,
     /// The deduplication ledger.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub alerts: Vec<AlertView>,
     /// `Ready`, `Protected` and `NotificationsDelivered`.
-    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(default)]
     pub conditions: Vec<ConditionView>,
 }
 
@@ -413,6 +427,12 @@ pub fn view(policy: &ProtectionPolicy) -> ProtectionPolicyView {
                 .map(name_ref)
                 .collect(),
             destination_ref: spec.protects.destination_ref.as_ref().map(name_ref),
+            legacy_archive: spec.protects.legacy_archive.as_ref().map(|a| {
+                crate::contract::ArchiveView {
+                    url: crate::validate::redact_url_userinfo(&a.url),
+                    credential_ref: a.secret_ref.as_ref().map(name_ref),
+                }
+            }),
             catalog_ref: spec.protects.catalog_ref.as_ref().map(name_ref),
         },
         objectives: ObjectivesView {
@@ -471,6 +491,10 @@ pub fn view(policy: &ProtectionPolicy) -> ProtectionPolicyView {
         rehearsal_last_succeeded_at: status
             .and_then(|s| s.rehearsal.as_ref())
             .and_then(|r| r.last_succeeded_at),
+        rehearsal_last_restore_ref: status
+            .and_then(|s| s.rehearsal.as_ref())
+            .and_then(|r| r.last_restore_ref.as_ref())
+            .map(name_ref),
         rehearsal_last_failed_at: status
             .and_then(|s| s.rehearsal.as_ref())
             .and_then(|r| r.last_failed_at),

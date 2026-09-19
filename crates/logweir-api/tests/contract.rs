@@ -521,3 +521,195 @@ fn no_two_published_types_share_a_schema_name() {
     assert!(schemas["RetentionEvaluationView"]["properties"]["planSha256"].is_object());
     assert!(schemas["TrustEvaluationView"]["properties"]["serverTime"].is_object());
 }
+
+/// **Every `required` property is one the projection always writes.**
+///
+/// REGRESSION REASON, FROM THE `d3w12` RECONCILIATION. `schemars` marks a
+/// field required unless it is an `Option` or carries a default, and
+/// `#[serde(skip_serializing_if = "Vec::is_empty")]` is neither: `CompletionView`
+/// published `newTopics` and `TeardownView` published `failed` as REQUIRED
+/// while omitting them from every body that had none. A console that validates
+/// against the document would then refuse a response the server considers
+/// correct — which is exactly what the sibling console branch's own pin does.
+///
+/// The check is a round trip rather than a reading of the attributes: build
+/// each view from an object with the emptiest status the CRD allows, serialize
+/// it, and require every `required` name to be there.
+#[test]
+fn a_required_property_is_never_omitted_by_its_own_projection() {
+    use serde_json::json;
+
+    let document = document();
+    let schemas = document["components"]["schemas"]
+        .as_object()
+        .expect("the document has schemas");
+    let now: chrono::DateTime<chrono::Utc> = "2026-09-19T01:30:00Z".parse().expect("an instant");
+
+    // The emptiest object each kind admits: identity and nothing else.
+    let meta = json!({"name": "x", "namespace": "team-a", "uid": "u", "resourceVersion": "1"});
+    let backup = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "Backup", "metadata": meta,
+        "spec": {"sourceRef": {"name": "s"}, "topics": ["t"],
+                 "archive": {"url": "s3://b/p"}, "triggeredBy": "manual", "deadlineSeconds": 60}
+    });
+    let restore = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore", "metadata": meta,
+        "spec": {"planBytes": "{}", "approvalRef": {"name": "a"},
+                 "sourceArchive": {"url": "s3://b/p"}, "backupSetRef": "b",
+                 "pointInTime": "2026-09-19T00:00:00Z",
+                 "target": {"clusterRef": {"name": "c"}, "mode": "scratch",
+                            "topicNaming": {"prefix": "p-"}},
+                 "deadlineSeconds": 60}
+    });
+    let catalog = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "RecoveryCatalog", "metadata": meta,
+        "spec": {"destinationRef": {"name": "d"},
+                 "sync": {"intervalSeconds": 3600, "mode": "Index", "maxObjectsPerRun": 1000,
+                          "deepCheck": "ManifestDigest", "viewLimit": 100}}
+    });
+    let protection = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "ProtectionPolicy", "metadata": meta,
+        "spec": {"protects": {"sourceRef": {"name": "s"}},
+                 "objectives": {"maxRecoveryPointAgeSeconds": 300},
+                 "evaluationIntervalSeconds": 300}
+    });
+    let retention = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "RetentionPolicy", "metadata": meta,
+        "spec": {"destinationRef": {"name": "d"}, "catalogRef": {"name": "c"},
+                 "scope": {"prefix": "p"}, "rules": {"minUsablePoints": 1}, "mode": "Report"}
+    });
+    let trust = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "TrustPolicy",
+        "metadata": {"name": "x", "uid": "u", "resourceVersion": "1"},
+        "spec": {"default": true, "keys": []}
+    });
+
+    // THE PANELS WITH EMPTY LISTS, WHICH IS THE SHAPE THAT CAUGHT THIS. A
+    // completion whose scorecard created no topic, and a teardown that removed
+    // nothing and failed at nothing, are the bodies where a `Vec` with
+    // `skip_serializing_if` is omitted while the schema calls it required. A
+    // minimal object alone never reaches those two views at all.
+    let mut bare_panels = restore.clone();
+    bare_panels["status"] = json!({
+        "phase": "Succeeded", "exitCode": 0, "outcome": "pass",
+        "completion": {"recordsRestored": 0},
+        "teardown": {"attestationKey": "logweir/drills/x.teardown.json"}
+    });
+
+    let bodies: Vec<(&str, Value)> = vec![
+        (
+            "OperationView",
+            serde_json::to_value(logweir_api::status::backup_view(
+                &serde_json::from_value(backup).expect("a Backup"),
+                now,
+            ))
+            .expect("serialises"),
+        ),
+        (
+            "OperationView",
+            serde_json::to_value(logweir_api::status::restore_view(
+                &serde_json::from_value(bare_panels).expect("a Restore"),
+                now,
+            ))
+            .expect("serialises"),
+        ),
+        (
+            "OperationView",
+            serde_json::to_value(logweir_api::status::restore_view(
+                &serde_json::from_value(restore).expect("a Restore"),
+                now,
+            ))
+            .expect("serialises"),
+        ),
+        (
+            "CatalogView",
+            serde_json::to_value(logweir_api::routes::catalogs::view(
+                &serde_json::from_value(catalog).expect("a RecoveryCatalog"),
+                now,
+            ))
+            .expect("serialises"),
+        ),
+        (
+            "ProtectionPolicyView",
+            serde_json::to_value(logweir_api::routes::protection::view(
+                &serde_json::from_value(protection).expect("a ProtectionPolicy"),
+            ))
+            .expect("serialises"),
+        ),
+        (
+            "RetentionPolicyView",
+            serde_json::to_value(logweir_api::routes::retention::view(
+                &serde_json::from_value(retention).expect("a RetentionPolicy"),
+                now,
+            ))
+            .expect("serialises"),
+        ),
+        (
+            "TrustPolicyView",
+            serde_json::to_value(logweir_api::routes::trust::view(
+                &serde_json::from_value(trust).expect("a TrustPolicy"),
+                now,
+                &[],
+            ))
+            .expect("serialises"),
+        ),
+    ];
+
+    /// Every `(schema, object)` pair the body reaches, following `$ref`.
+    fn check(
+        name: &str,
+        body: &Value,
+        schemas: &serde_json::Map<String, Value>,
+        problems: &mut Vec<String>,
+    ) {
+        let Some(schema) = schemas.get(name) else {
+            problems.push(format!("{name} is not published"));
+            return;
+        };
+        let object = body.as_object().expect("a view is an object");
+        for required in schema["required"].as_array().into_iter().flatten() {
+            let field = required.as_str().unwrap_or_default();
+            if !object.contains_key(field) {
+                problems.push(format!("{name}.{field} is required and was omitted"));
+            }
+        }
+        // Recurse into the properties the body actually carries.
+        let properties = schema["properties"].as_object();
+        for (key, value) in object {
+            let Some(property) = properties.and_then(|p| p.get(key)) else {
+                continue;
+            };
+            let referenced = property
+                .get("$ref")
+                .or_else(|| property.get("items").and_then(|i| i.get("$ref")))
+                .and_then(Value::as_str)
+                .map(|r| r.rsplit('/').next().unwrap_or_default().to_string());
+            let Some(child) = referenced else { continue };
+            match value {
+                Value::Object(_) => check(&child, value, schemas, problems),
+                Value::Array(items) => {
+                    for item in items {
+                        if item.is_object() {
+                            check(&child, item, schemas, problems);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    let mut problems = Vec::new();
+    for (name, body) in &bodies {
+        check(name, body, schemas, &mut problems);
+    }
+    assert!(
+        problems.is_empty(),
+        "the document requires properties the projection omits:\n{problems:#?}"
+    );
+    // The scan is only meaningful if it reached the nested views.
+    assert!(
+        schemas.contains_key("ReadinessView") && schemas.contains_key("OperationTrust"),
+        "the nested views are published"
+    );
+}

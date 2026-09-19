@@ -281,7 +281,7 @@ fn a_stale_observation_and_a_never_reconciled_object_are_both_unknown() {
 fn the_trust_basis_of_an_unrecorded_block_is_none_and_never_current() {
     let base = fixture("backup-succeeded-verified.json");
     let view = view_of(&base);
-    assert_eq!(view.trust.basis, "current");
+    assert_eq!(view.trust.basis, "Current");
     assert_eq!(view.trust.state, TrustState::Verified);
     assert!(view.operation.verified_success);
 
@@ -289,8 +289,9 @@ fn the_trust_basis_of_an_unrecorded_block_is_none_and_never_current() {
     remove(&mut without, "/status/evidence/verification/trust");
     let view = view_of(&without);
     assert_eq!(
-        view.trust.basis, "none",
-        "an absent trust block is `none`: nothing has been compared with anything"
+        view.trust.basis, "None",
+        "an absent trust block is `None` — D3 §12's sentence word for word, in the \
+         CRD's own spelling"
     );
     // The SIGNATURE still verified, so the result column is unchanged — the
     // two are different questions and the projection keeps them apart.
@@ -332,7 +333,7 @@ fn the_trust_basis_of_an_unrecorded_block_is_none_and_never_current() {
         "/status/evidence/verification/trust/keyState",
     );
     let view = view_of(&unverified);
-    assert_eq!(view.trust.basis, "unverified");
+    assert_eq!(view.trust.basis, "Unverified");
     assert_eq!(view.trust.state, TrustState::NotAttempted);
     assert!(!view.operation.verified_success);
 
@@ -348,7 +349,7 @@ fn the_trust_basis_of_an_unrecorded_block_is_none_and_never_current() {
         json!("Unverified"),
     );
     let view = view_of(&inconsistent);
-    assert_eq!(view.trust.basis, "unverified");
+    assert_eq!(view.trust.basis, "Unverified");
     assert_eq!(
         view.trust.state,
         TrustState::NotAttempted,
@@ -503,14 +504,17 @@ fn the_completion_panel_carries_the_counts_the_scorecard_recorded() {
         }),
     );
     let view = restore_view(&restore_from(&object), now());
-    let completion = view.completion.expect("the panel is published");
+    let completion = view.completion.clone().expect("the panel is published");
     assert_eq!(completion.records_sampled_matching, Some(4));
     assert_eq!(completion.records_restored, Some(10));
     assert_eq!(completion.new_topics.len(), 1);
     assert_eq!(completion.new_topics[0].partitions, Some(3));
-    // The MODE, because §3.5's two guidance blocks are keyed on it and the
-    // console must not have to infer "is this a rehearsal" from a prefix.
-    assert_eq!(completion.target_mode, "newTopic");
+    // THE MODE IS ON THE OPERATION, NOT ON THE PANEL. §3.5's two guidance
+    // blocks are keyed on `spec.target.mode`, which is a fact about the run
+    // from the moment it is created — a rehearsal is a rehearsal before its
+    // scorecard exists — so a Restore that has not finished can still be
+    // labelled.
+    assert_eq!(view.target_mode.as_deref(), Some("newTopic"));
     assert_eq!(
         view.verification_scope.level,
         VerificationScopeLevel::Sampled
@@ -518,7 +522,10 @@ fn the_completion_panel_carries_the_counts_the_scorecard_recorded() {
     assert_eq!(view.verification_scope.records_sampled, Some(4));
 
     let teardown = view.teardown.expect("the teardown outcome is published");
-    assert_eq!(teardown.deleted, 1);
+    // THE NAMES, NOT A COUNT. "Which topics went" is the incident question and
+    // a count cannot be reconciled against the names the run created.
+    assert_eq!(teardown.deleted, vec!["scram-restored-orders".to_string()]);
+    assert!(!teardown.deleted_truncated);
     assert_eq!(teardown.failed.len(), 1);
     assert_eq!(teardown.failed[0].topic, "scram-restored-payments");
 }

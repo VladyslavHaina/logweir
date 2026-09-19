@@ -964,6 +964,7 @@ fn no_infrastructure_detail_is_frozen_into_the_operation_contract() {
             "readiness",
             "stage",
             "stale",
+            "targetMode",
             "teardown",
             "trust",
             "verificationScope",
