@@ -4016,21 +4016,39 @@ def trust_namespace(namespace: str) -> None:
     be a second fixture to keep in step with the first, for nothing this row
     reads.
     """
-    if get_opt("namespace", namespace, namespace=None) is None:
+    def apply_there(obj: dict[str, Any]) -> dict[str, Any]:
+        """`apply()` is bound to this run's own namespace; the second one needs
+        its own target or kubectl refuses the mismatch."""
+        return json.loads(run(K + ["-n", namespace, "apply", "-f", "-", "-o", "json"],
+                              data=json.dumps(obj)).stdout)
+
+    existing = run(K + ["get", "namespace", namespace, "-o", "name"], check=False, timeout=60)
+    if existing.returncode != 0:
         run(K + ["create", "namespace", namespace])
         run(K + ["label", "namespace", namespace, f"logweir.dev/test-owner={OWNER}"])
+    # THE RUNNER'S ServiceAccounts, which `setup` creates and a probe Job needs:
+    # without `logweir-runner` the reachability probe's pod never starts, the
+    # Job finishes with no terminated container, and `reachable` is left unset —
+    # "rather than invented", as the controller says.
+    for sa in ("logweir-runner", "logweir-retention"):
+        apply_there({"apiVersion": "v1", "kind": "ServiceAccount",
+                     "metadata": {"name": sa, "namespace": namespace,
+                                  "labels": dict(LABEL)}})
     for name in ("source-scram", "logweir-s3", "logweir-signing-key"):
         source = get("secret", name, namespace=FIXTURE_NS)
-        apply({"apiVersion": "v1", "kind": "Secret",
-               "metadata": {"name": name, "namespace": namespace, "labels": dict(LABEL)},
-               "type": source.get("type", "Opaque"), "data": source["data"]})
-    apply({
+        apply_there({"apiVersion": "v1", "kind": "Secret",
+                     "metadata": {"name": name, "namespace": namespace,
+                                  "labels": dict(LABEL)},
+                     "type": source.get("type", "Opaque"), "data": source["data"]})
+    apply_there({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "KafkaCluster",
         "metadata": {"name": "source", "namespace": namespace, "labels": dict(LABEL)},
         "spec": {
             "bootstrapServers": [f"kafka-source.{FIXTURE_NS}.svc.cluster.local:9096"],
-            "security": {"protocol": "SASL_PLAINTEXT", "mechanism": "SCRAM-SHA-512",
-                         "secretRef": {"name": "source-scram"}},
+            # THE SAME SHAPE `setup` USES. The CRD decodes strictly, so an
+            # invented `spec.security` is a BadRequest rather than a default.
+            "auth": {"mode": "scramSha512", "username": "scram-user",
+                     "secretRef": {"name": "source-scram"}, "tls": False},
             "role": "source",
         },
     })
@@ -4100,8 +4118,9 @@ def multiple_namespaces() -> None:
             if t["metadata"]["name"].startswith(f"{OWNER}-{STAMP}-ns-")]
         evidence.append(artifact("trust/multi-ns-cleanup.json",
                                  {"policiesLeft": left,
-                                  "secondNamespace": get_opt("namespace", second,
-                                                             namespace=None) is not None,
+                                  "secondNamespaceGone": run(
+                                      K + ["get", "namespace", second, "-o", "name"],
+                                      check=False, timeout=60).returncode != 0,
                                   "privateKeyGone": not other["private"].exists()}))
         check(
             "trust-multi-namespace-fixture-is-cleaned-up",

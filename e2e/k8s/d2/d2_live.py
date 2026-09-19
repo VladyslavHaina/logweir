@@ -3622,6 +3622,24 @@ def roster_approver_key() -> dict[str, Any]:
     return roster["spec"]["approverKeys"][0]
 
 
+def approval_facts(approval: dict[str, Any]) -> dict[str, Any]:
+    """The Approval's verdict, and the reason from where it actually lives.
+
+    `status.verified` is a bool and the REASON is on the `Verified` condition,
+    not beside it — reading `status.reason` returns `None` however expired the
+    key is, which is how the first live run of this row lost its second clause.
+    """
+    status = approval.get("status") or {}
+    condition = next((c for c in status.get("conditions", [])
+                      if c.get("type") == "Verified"), {})
+    return {
+        "verified": status.get("verified"),
+        "reason": condition.get("reason"),
+        "message": (condition.get("message") or "")[:200],
+        "matchedKeyId": status.get("matchedKeyId"),
+    }
+
+
 def approval_expiry_is_relayed(green: dict[str, Any], expired: dict[str, Any],
                                approval_after: dict[str, Any],
                                restore_jobs: list[str],
@@ -3695,6 +3713,14 @@ def s18() -> None:
         restore_name = "rs-expired"
         approval_name = "ap-expired"
         try:
+            # RE-RUNNABLE. A `Restore`'s spec is immutable, so a leftover from an
+            # earlier attempt cannot be applied over; and an Approval bound to a
+            # deleted subject is a different refusal from the one under test.
+            for kind, name in (("restore", restore_name), ("approval", approval_name),
+                               ("preflight", "pf-expired-green"),
+                               ("preflight", "pf-expired")):
+                run(K + ["delete", kind, name, "--ignore-not-found=true", "--wait=true"],
+                    check=False, timeout=120)
             # 1. the key is valid for the next ten minutes, HERE only
             valid_until = (dt.datetime.now(dt.timezone.utc)
                            + dt.timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -3726,13 +3752,23 @@ def s18() -> None:
                 "approval", approval_name,
                 lambda o: (o.get("status") or {}).get("verified") is True,
                 timeout=300, what="the Approval to verify while the key is valid")
-            sc.detail["approvalWhileValid"] = {
-                k: (verified.get("status") or {}).get(k)
-                for k in ("verified", "reason", "matchedKeyId")}
+            sc.detail["approvalWhileValid"] = approval_facts(verified)
             artifact("objects/s18/approval-verified.json", verified)
 
             # 3. the green preview
-            apply(preflight("pf-expired-green", restore_preflight_request(minted["planBytes"]),
+            # `restoreRef` ALONE. The CRD's own rule is "set exactly one of
+            # planBytes (a draft) or restoreRef (an existing Restore)", and a
+            # DRAFT preflight answers `approval.state`
+            # `skipped/SubjectNotCreated` — "about a draft plan, which no
+            # approver has been asked to sign yet" — which is a true statement
+            # about a draft and no statement at all about an expired approval.
+            # The Restore carries its own plan, target and destinations.
+            apply(preflight("pf-expired-green",
+                            {"operation": "Restore",
+                             "restore": {"restoreRef": {"name": restore_name},
+                                         "sourceDestinationRef": {"name": "dest-a"},
+                                         "evidenceDestinationRef": {"name": "dest-b"},
+                                         "targetRef": {"name": "target"}}},
                             timeout_seconds=180))
             green_pf = wait_preflight("pf-expired-green", timeout=600)
             artifact("objects/s18/preflight-green.json", green_pf)
@@ -3750,13 +3786,17 @@ def s18() -> None:
                 "approval", approval_name,
                 lambda o: (o.get("status") or {}).get("verified") is False,
                 timeout=300, what="the Approval to lose its verdict when the key expires")
-            approval_after = {k: (after.get("status") or {}).get(k)
-                              for k in ("verified", "reason", "matchedKeyId")}
+            approval_after = approval_facts(after)
             sc.detail["approvalAfterExpiry"] = approval_after
             artifact("objects/s18/approval-expired.json", after)
 
             # 5. the preview a previously green plan gets now
-            apply(preflight("pf-expired", restore_preflight_request(minted["planBytes"]),
+            apply(preflight("pf-expired",
+                            {"operation": "Restore",
+                             "restore": {"restoreRef": {"name": restore_name},
+                                         "sourceDestinationRef": {"name": "dest-a"},
+                                         "evidenceDestinationRef": {"name": "dest-b"},
+                                         "targetRef": {"name": "target"}}},
                             timeout_seconds=180))
             expired_pf = wait_preflight("pf-expired", timeout=600)
             artifact("objects/s18/preflight-expired.json", expired_pf)
