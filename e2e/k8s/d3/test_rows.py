@@ -594,6 +594,37 @@ def test_a_retired_key_keeps_what_it_signed_and_signs_nothing_new() -> None:
         not _old_archive(after={"result": "Valid", "matchedKeyId": "7d1fb29eae5fd0ea"}))
 
 
+# --- PLAT-19.1's `multiple namespaces` ---------------------------------------
+LAB_KEY = "2c76e22ff89969dc"
+GOVERNED = {"result": "Valid", "matchedKeyId": LAB_KEY,
+            "trust": {"basis": "Current", "keyState": "Active"}}
+UNGOVERNED = {"result": "Untrusted", "matchedKeyId": LAB_KEY,
+              "trust": {"basis": "None"}}
+
+
+def _multi(**over):
+    args = dict(governed=GOVERNED, ungoverned=UNGOVERNED, key_id=LAB_KEY)
+    args.update(over)
+    return all(d3.verdicts_differ_by_namespace(**args).values())
+
+
+def test_two_namespaces_resolve_their_own_policies() -> None:
+    row("trusted here, not there, and both about the same key", _multi())
+    row("MUTANT: the other namespace trusts it too — no resolution happened",
+        not _multi(ungoverned={"result": "Valid", "matchedKeyId": LAB_KEY,
+                               "trust": {"basis": "Current"}}))
+    row("MUTANT: the governed namespace does not trust it either",
+        not _multi(governed={"result": "Untrusted", "matchedKeyId": LAB_KEY,
+                             "trust": {"basis": "None"}}))
+    row("MUTANT: the other namespace is SILENT rather than deciding",
+        not _multi(ungoverned={"matchedKeyId": LAB_KEY}))
+    row("MUTANT: different keys, so the differing verdicts say nothing about "
+        "which policy governed which namespace",
+        not _multi(governed=dict(GOVERNED, matchedKeyId="0000")))
+    row("MUTANT: trusted here but on a historical basis, which is a different claim",
+        not _multi(governed=dict(GOVERNED, trust={"basis": "Historical"})))
+
+
 def main() -> int:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

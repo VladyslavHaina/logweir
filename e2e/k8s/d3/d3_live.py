@@ -3390,7 +3390,8 @@ LEGACY_ARCHIVE = f"s3://kafka-backups/{OWNER}-{STAMP}"
 TRUST_POLICY = f"{OWNER}-{STAMP}"
 
 
-def legacy_backup(name: str, topics: list[str] | None = None) -> dict[str, Any]:
+def legacy_backup(name: str, topics: list[str] | None = None,
+                  namespace: str | None = None) -> dict[str, Any]:
     """An inline-`archive` Backup against the fixture's own bucket.
 
     THIS IS NOT A PREFERENCE. A destination-backed run's evidence verdict is
@@ -3402,10 +3403,14 @@ def legacy_backup(name: str, topics: list[str] | None = None) -> dict[str, Any]:
     rooted at the fixture's archive, so a Backup-level verdict is only
     reachable there. Retention enforcement never touches this bucket.
     """
+    # THE NAMESPACE IS A PARAMETER because `multiple_namespaces` needs the SAME
+    # run in two of them: one archive, one signing key, two policies, and the
+    # verdicts have to differ for the resolution and for nothing else.
+    ns = namespace or NS
     body = {
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "Backup",
-        "metadata": owned(name),
+        "metadata": {"name": name, "namespace": ns, "labels": dict(LABEL)},
         "spec": {
             "sourceRef": {"name": "source"},
             "topics": topics or ["orders"],
@@ -3414,12 +3419,12 @@ def legacy_backup(name: str, topics: list[str] | None = None) -> dict[str, Any]:
             "deadlineSeconds": 600,
         },
     }
-    if get_opt("backup", name) is not None:
-        run(KN + ["delete", "backup", name, "--wait=true"])
-    create(body)
-    wait_for("backup", name, terminal, seconds=600, what="a terminal phase")
+    if get_opt("backup", name, namespace=ns) is not None:
+        run(K + ["-n", ns, "delete", "backup", name, "--wait=true"])
+    apply(body)
+    wait_for("backup", name, terminal, seconds=600, namespace=ns, what="a terminal phase")
     return wait_for(
-        "backup", name, lambda o: verdict_of(o) in VERDICTS, seconds=240,
+        "backup", name, lambda o: verdict_of(o) in VERDICTS, seconds=240, namespace=ns,
         what="an evidence verdict",
     )
 
@@ -3963,6 +3968,149 @@ def old_archive() -> None:
             f"(file {key['private'].exists()}, dir {key['dir'].exists()}) and never entered "
             f"an artifact: what is recorded is the public SPKI and the key id. The "
             f"namespace's `logweir-signing-key` is restored to the lab's own copy",
+            evidence,
+        )
+
+
+# ---------------------------------------------------------------------------
+# PLAT-19.1's `multiple namespaces` — two policies, two namespaces, real objects
+# ---------------------------------------------------------------------------
+
+
+def verdicts_differ_by_namespace(governed: dict[str, Any], ungoverned: dict[str, Any],
+                                 key_id: str) -> dict[str, bool]:
+    """Two namespaces, two explicit policies, one key trusted in one of them.
+
+    D3's `multiple namespaces` is about RESOLUTION: `spec.namespaces` is an
+    exact list — "never a pattern: a pattern is how a new namespace silently
+    inherits a trust decision" — so two policies over two namespaces must
+    resolve independently, and the SAME signing key must be trusted in one and
+    not in the other.
+
+    The clause that makes this a resolution test rather than two unrelated
+    observations is the last one: both verdicts name the same key. If the
+    receipts had been signed by different keys, the differing verdicts would
+    say nothing about which policy governed which namespace.
+    """
+    return {
+        "the governed namespace trusts the key": governed.get("result") == "Valid",
+        "on the current basis": (governed.get("trust") or {}).get("basis") == "Current",
+        "the other namespace does NOT": ungoverned.get("result") != "Valid",
+        "and says so with a verdict rather than silence": bool(ungoverned.get("result")),
+        "both are about the SAME signing key": (
+            governed.get("matchedKeyId") == key_id
+            and ungoverned.get("matchedKeyId") in (key_id, None)
+        ),
+    }
+
+
+def trust_namespace(namespace: str) -> None:
+    """The smallest namespace a trust verdict can be measured in.
+
+    NOT `setup()` PARAMETERISED, AND THE DIFFERENCE IS DELIBERATE. `setup`
+    builds buckets, an `mc` pod, destinations and a catalog, none of which a
+    `legacy_backup` needs: it writes to the SHARED fixture's archive through an
+    inline `archive.url` and is verified by the controller's own read-only
+    handle. What a second namespace needs is its own name, the three Secrets
+    that Backup projects, and a `KafkaCluster` to read. Building the rest would
+    be a second fixture to keep in step with the first, for nothing this row
+    reads.
+    """
+    if get_opt("namespace", namespace, namespace=None) is None:
+        run(K + ["create", "namespace", namespace])
+        run(K + ["label", "namespace", namespace, f"logweir.dev/test-owner={OWNER}"])
+    for name in ("source-scram", "logweir-s3", "logweir-signing-key"):
+        source = get("secret", name, namespace=FIXTURE_NS)
+        apply({"apiVersion": "v1", "kind": "Secret",
+               "metadata": {"name": name, "namespace": namespace, "labels": dict(LABEL)},
+               "type": source.get("type", "Opaque"), "data": source["data"]})
+    apply({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "KafkaCluster",
+        "metadata": {"name": "source", "namespace": namespace, "labels": dict(LABEL)},
+        "spec": {
+            "bootstrapServers": [f"kafka-source.{FIXTURE_NS}.svc.cluster.local:9096"],
+            "security": {"protocol": "SASL_PLAINTEXT", "mechanism": "SCRAM-SHA-512",
+                         "secretRef": {"name": "source-scram"}},
+            "role": "source",
+        },
+    })
+    wait_for("kafkacluster", "source", lambda o: (o.get("status") or {}).get("reachable")
+             is True, seconds=240, namespace=namespace, what="the second namespace's source")
+
+
+def multiple_namespaces() -> None:
+    """Two explicit TrustPolicies, two namespaces, one key trusted in one."""
+    evidence: list[str] = []
+    second = f"{NS}-b"
+    first_policy = f"{OWNER}-{STAMP}-ns-a"
+    second_policy = f"{OWNER}-{STAMP}-ns-b"
+    lab = roster_signing_key()
+    # A key the SECOND namespace trusts INSTEAD of the lab's: a policy with no
+    # usable key at all would be a policy that failed to load, and this row
+    # needs a policy that loaded and decided.
+    other = mint_signing_key(f"{OWNER}-otherkey")
+    try:
+        trust_namespace(second)
+        for name in (first_policy, second_policy):
+            if get_opt("trustpolicy", name, namespace="default") is not None:
+                run(K + ["delete", "trustpolicy", name, "--wait=true"], check=False)
+        apply(trust_policy("Active", name=first_policy, namespaces=[NS],
+                           keys=[policy_key(lab["keyId"], lab["spkiPem"], "Active",
+                                            display="the lab signing key")]))
+        apply(trust_policy("Active", name=second_policy, namespaces=[second],
+                           keys=[policy_key(other["keyId"], other["spkiPem"], "Active",
+                                            display=f"{OWNER}'s unrelated key",
+                                            subject=f"{OWNER}-other@logweir.invalid")]))
+        here = legacy_backup(f"{OWNER}-ns-a")["status"]["evidence"]["verification"]
+        there_obj = legacy_backup(f"{OWNER}-ns-b", namespace=second)
+        there = there_obj["status"]["evidence"]["verification"]
+        evidence.append(artifact("trust/multi-ns-governed.json", here))
+        evidence.append(artifact("trust/multi-ns-other.json", there))
+        clauses = verdicts_differ_by_namespace(here, there, lab["keyId"])
+        evidence.append(artifact("trust/multi-ns-clauses.json", {
+            "clauses": clauses, "governedNamespace": NS, "otherNamespace": second,
+            "policies": {first_policy: [lab["keyId"]], second_policy: [other["keyId"]]},
+        }))
+        check(
+            "trust-two-namespaces-resolve-their-own-policies",
+            "PLAT-19.1",
+            all(clauses.values()),
+            f"two explicit TrustPolicies — {first_policy} over {NS} carrying the lab signing "
+            f"key, {second_policy} over {second} carrying a different key — resolve "
+            f"independently: the SAME signing key's receipt verifies "
+            f"{here.get('result')}/{(here.get('trust') or {}).get('basis')} in the governed "
+            f"namespace and {there.get('result')} in the other, both naming "
+            f"{str(here.get('matchedKeyId'))[:16]}…. `spec.namespaces` is an exact list, "
+            f"never a pattern, which is how a new namespace is stopped from silently "
+            f"inheriting a trust decision. "
+            + "; ".join(f"{k}={v}" for k, v in clauses.items()),
+            evidence,
+        )
+    finally:
+        for path in (other["private"],):
+            path.unlink(missing_ok=True)
+        shutil.rmtree(other["dir"], ignore_errors=True)
+        for name in (first_policy, second_policy):
+            run(K + ["delete", "trustpolicy", name, "--ignore-not-found=true", "--wait=true"],
+                check=False)
+        run(K + ["delete", "namespace", second, "--ignore-not-found=true", "--wait=true"],
+            check=False, timeout=300)
+        left = [t["metadata"]["name"] for t in json.loads(
+            run(K + ["get", "trustpolicies", "-o", "json"]).stdout)["items"]
+            if t["metadata"]["name"].startswith(f"{OWNER}-{STAMP}-ns-")]
+        evidence.append(artifact("trust/multi-ns-cleanup.json",
+                                 {"policiesLeft": left,
+                                  "secondNamespace": get_opt("namespace", second,
+                                                             namespace=None) is not None,
+                                  "privateKeyGone": not other["private"].exists()}))
+        check(
+            "trust-multi-namespace-fixture-is-cleaned-up",
+            "PLAT-19.1",
+            not left and not other["private"].exists(),
+            f"the two cluster-scoped policies and the second namespace this row created are "
+            f"gone (policies left: {left}); the unrelated key's private half is deleted "
+            f"({not other['private'].exists()}). A policy naming a namespace by exact name "
+            f"would silently re-judge a later run's evidence",
             evidence,
         )
 
@@ -4547,7 +4695,7 @@ PHASES = [
     "setup", "catalog", "catalog_cases", "retention", "legal_hold", "lifecycle",
     "enforce_guards", "bounded_retry", "packaging", "preview",
     "enforce", "wrong_prefix", "denied_deletion", "no_evidence_credential", "trust",
-    "signed_at_probe", "trust_rbac", "old_archive", "notify", "control", "report", "cleanup",
+    "signed_at_probe", "trust_rbac", "old_archive", "multiple_namespaces", "notify", "control", "report", "cleanup",
 ]
 
 
