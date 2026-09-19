@@ -1637,7 +1637,11 @@ fn chart_lint_ui_renders_the_proxy_with_its_paths_and_a_narrow_role() {
 /// has no other method, and `logweir-api`'s
 /// `linkage.rs::the_adapter_calls_only_the_four_permitted_kubernetes_verbs`
 /// is what keeps that true crate-side.
-const CONSOLE_VERBS: [&str; 4] = ["create", "get", "list", "patch"];
+const CONSOLE_VERBS: [&str; 4] = ["create", "get", "list", "patch"]; // engine-token-ok: the four Kubernetes RBAC verbs the console adapter spends; this file parses ClusterRoles and invokes no engine
+
+/// The two of them a read costs. Named rather than spelled at each use site, so
+/// the two loops below need no escape comment of their own.
+const READ_VERBS: [&str; 2] = ["get", "list"]; // engine-token-ok: Kubernetes RBAC verbs, never the denied kafka-backup subcommand
 
 /// Rust type -> the RBAC plural an rule names it by, for every kind the console
 /// adapter's seals can carry.
@@ -1843,7 +1847,7 @@ fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends
         })
     };
     for plural in &namespaced {
-        for verb in ["get", "list"] {
+        for verb in READ_VERBS {
             assert!(
                 granted(role, plural, verb),
                 "`crates/logweir-api/src/kube.rs` seals `{plural}` into `ProductResource`, so \
@@ -1861,7 +1865,7 @@ fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends
         );
     }
     for plural in console_sealed("ClusterResource") {
-        for verb in ["get", "list"] {
+        for verb in READ_VERBS {
             assert!(
                 granted(cluster_role, &plural, verb),
                 "`{plural}` is sealed into `ClusterResource` and the cluster-scoped half of the \
@@ -2011,7 +2015,10 @@ fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends
     }
     for crb in docs.iter().filter(|d| d.kind == "ClusterRoleBinding") {
         let name = crb.value["roleRef"]["name"].as_str().unwrap_or_default();
-        assert_ne!("logweir-api", name, "the NAMESPACED role is never bound cluster-wide");
+        assert_ne!(
+            "logweir-api", name,
+            "the NAMESPACED role is never bound cluster-wide"
+        );
         assert_ne!("cluster-admin", name);
     }
 
@@ -2070,7 +2077,10 @@ fn chart_lint_retention_renders_an_identity_with_no_grant_and_no_token() {
     );
     for d in &docs {
         if matches!(d.kind.as_str(), "RoleBinding" | "ClusterRoleBinding") {
-            let subjects = d.value["subjects"].as_sequence().cloned().unwrap_or_default();
+            let subjects = d.value["subjects"]
+                .as_sequence()
+                .cloned()
+                .unwrap_or_default();
             for s in subjects {
                 assert_ne!(
                     Some("logweir-retention"),
