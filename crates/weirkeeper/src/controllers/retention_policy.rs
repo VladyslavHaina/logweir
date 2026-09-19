@@ -566,6 +566,70 @@ impl Pass<'_> {
         self.policy.metadata.generation.unwrap_or(0)
     }
 
+    /// The spec has changed since the controller last acted on it.
+    ///
+    /// `metadata.generation != status.observedGeneration` is the ONLY thing on
+    /// the object that says so, and D3 §6.5 makes it the one release for a
+    /// degraded policy: not time, not a restart, not the count ageing out. A
+    /// policy that has never been reconciled has no `observedGeneration`, and
+    /// "never acted on" counts as changed — it has no failure history either.
+    fn spec_changed(&self) -> bool {
+        self.policy
+            .status
+            .as_ref()
+            .and_then(|s| s.observed_generation)
+            .unwrap_or(-1)
+            != self.generation()
+    }
+
+    /// The consecutive-failure budget this pass starts from.
+    ///
+    /// **A SPEC CHANGE ZEROES IT, AND THAT IS WHY THIS IS A FUNCTION AND NOT A
+    /// FIELD READ.** D3 §6.5 says a spec change releases the stop; a release
+    /// that left the counter at its ceiling would give the operator exactly one
+    /// run before the next failure re-degraded the policy, which is not a
+    /// retry budget. Live at `d387f87` that is what happened:
+    /// `consecutiveRunFailures` stayed at 3 across the generation bump that
+    /// correctly resumed scheduling.
+    ///
+    /// Every reader of the count goes through here — the enforcement decision,
+    /// the harvest that adds to it, and the evaluation that publishes it — so
+    /// the release rule is stated once.
+    fn budget_before(&self) -> i64 {
+        if self.spec_changed() {
+            return 0;
+        }
+        self.policy
+            .status
+            .as_ref()
+            .and_then(|s| s.consecutive_run_failures)
+            .unwrap_or(0)
+    }
+
+    /// The retry budget is spent: scheduling stops until the spec changes.
+    fn budget_spent(&self) -> bool {
+        self.budget_before() >= DEGRADED_AFTER_FAILURES
+    }
+
+    /// The last run's outcome IN WORDS, for the `EnforcementDegraded` message.
+    ///
+    /// A condition that says only "3 consecutive runs have failed" tells an
+    /// operator that something is wrong and nothing about what; D3 §6.5's
+    /// clause is "it says why in words". The exit code and the closed per-point
+    /// codes are what the object already knows, so they are what it says.
+    fn last_failure_detail(&self) -> String {
+        let record = self
+            .policy
+            .status
+            .as_ref()
+            .and_then(|s| s.last_enforcement.as_ref());
+        let codes: Vec<String> = record
+            .and_then(|r| r.failed.as_ref())
+            .map(|f| f.iter().map(|d| d.code.clone()).collect())
+            .unwrap_or_default();
+        failure_detail(record.and_then(|r| r.exit_code), &codes)
+    }
+
     fn owner(&self) -> RunnerOwner {
         RunnerOwner {
             api_version: RetentionPolicy::api_version(&()).to_string(),
@@ -920,12 +984,11 @@ impl Pass<'_> {
     ) -> Result<Outcome, ReconcileError> {
         let exit_code = report.exit_code;
         let failed = exit_code != Some(0);
-        let previous = self
-            .policy
-            .status
-            .as_ref()
-            .and_then(|s| s.consecutive_run_failures)
-            .unwrap_or(0);
+        // THROUGH `budget_before`, so a spec change zeroes the count here too.
+        // A harvest also writes `observedGeneration`, i.e. it adopts the new
+        // generation; adopting it without releasing the budget would leave the
+        // release depending on which arm happened to run first.
+        let previous = self.budget_before();
         // A RUN THAT STOPPED ON ITS OWN CEILING IS NOT A FAILED RUN (review
         // `d3w9` M2). It exits 1 because work remains, and counting it would
         // make three ordinary bounded runs on a large archive set
@@ -966,6 +1029,14 @@ impl Pass<'_> {
                  durable answer."
             ),
         };
+        let detail = failure_detail(
+            exit_code,
+            &report
+                .failed
+                .iter()
+                .map(|(_, code)| code.clone())
+                .collect::<Vec<String>>(),
+        );
         let conditions = self.conditions(&[
             (
                 CONDITION_READY,
@@ -989,11 +1060,14 @@ impl Pass<'_> {
                 },
                 if degraded {
                     format!(
-                        "{failures} consecutive runs have failed; scheduling stops until \
-                         spec changes"
+                        "{failures} consecutive retention runs have failed and the retry budget \
+                         is spent: {detail}. No further run is scheduled until spec changes \
+                         (edit spec.enforcement, or spec.rules, and the count clears with it). \
+                         status.lastEnforcement.recordKey names the durable record of the last \
+                         run."
                     )
                 } else {
-                    format!("{failures} consecutive run failures")
+                    format!("{failures} consecutive run failures; {detail}")
                 },
             ),
         ]);
@@ -2010,22 +2084,14 @@ impl Pass<'_> {
                 message: "spec.mode is Enforce and spec.enforcement is absent".to_string(),
             };
         };
-        let failures = self
-            .policy
-            .status
-            .as_ref()
-            .and_then(|s| s.consecutive_run_failures)
-            .unwrap_or(0);
-        let observed = self
-            .policy
-            .status
-            .as_ref()
-            .and_then(|s| s.observed_generation)
-            .unwrap_or(-1);
         // THREE CONSECUTIVE FAILURES STOP SCHEDULING UNTIL THE SPEC CHANGES.
-        // "The spec changed" is `metadata.generation != observedGeneration`,
-        // which is the only thing on the object that says so.
-        if failures >= DEGRADED_AFTER_FAILURES && observed == self.generation() {
+        // Both halves live in `budget_before`: it returns 0 when
+        // `metadata.generation != status.observedGeneration`, which is the only
+        // thing on the object that says the spec changed. One rule, read here,
+        // in `harvest` and in `publish_evaluation`, so the condition a console
+        // reads and the decision this pass makes cannot disagree.
+        let failures = self.budget_before();
+        if self.budget_spent() {
             return EnforcementDecision {
                 start: false,
                 enforcement: ENFORCEMENT_LOGWEIR_WORKER,
@@ -2299,8 +2365,41 @@ impl Pass<'_> {
                 REASON_NO_CONFLICT,
                 "no bucket lifecycle rule is declared for this destination".to_string(),
             ),
+            // `EnforcementDegraded` IS PUBLISHED BY THE PASS THAT ACTS ON IT,
+            // not only by the harvest that last incremented the count. The
+            // evaluation is where the budget is read and where scheduling is
+            // stopped, so it is where the object has to say so — otherwise the
+            // one thing an operator can see (a policy that quietly creates no
+            // Jobs) has no explanation anywhere, which is what `d387f87`
+            // shipped. `budget_spent()` is the same function the decision above
+            // used, so the words and the behaviour are one thing.
+            (
+                CONDITION_DEGRADED,
+                if self.budget_spent() { "True" } else { "False" },
+                if self.budget_spent() {
+                    REASON_CONSECUTIVE_FAILURES
+                } else {
+                    REASON_HEALTHY
+                },
+                if self.budget_spent() {
+                    format!(
+                        "{} consecutive retention runs have failed and the retry budget is \
+                         spent: {}. No further run is scheduled until spec changes. \
+                         status.lastEnforcement.recordKey names the durable record of the last \
+                         run.",
+                        self.budget_before(),
+                        self.last_failure_detail()
+                    )
+                } else if self.spec_changed() {
+                    "the spec changed; the consecutive-failure budget is released and \
+                     status.consecutiveRunFailures is reset to 0"
+                        .to_string()
+                } else {
+                    format!("{} consecutive run failures", self.budget_before())
+                },
+            ),
         ]);
-        self.patch_status(json!({
+        let mut status = json!({
             "observedGeneration": self.generation(),
             "enforcement": decision.enforcement,
             "guarantees": guarantees,
@@ -2316,8 +2415,23 @@ impl Pass<'_> {
                 "planExpiresAt": window.expires_at,
             },
             "conditions": conditions,
-        }))
-        .await
+        });
+        // THE COUNTER IS RESET BY THE SPEC CHANGE THAT RELEASES THE STOP, in
+        // the same patch that adopts the new generation — and ONLY then.
+        //
+        // The key is INSERTED, not written as a `null` on other passes: in an
+        // RFC 7386 merge a `null` DELETES, so an evaluation that always carried
+        // the key would wipe a count the harvests are keeping. And it is an
+        // explicit `0` rather than a deletion when it does fire, because "no
+        // consecutive failures" is an answer and a console showing an empty
+        // field would be showing an absence where there is one.
+        if self.spec_changed() {
+            status
+                .as_object_mut()
+                .expect("a status patch is always a JSON object")
+                .insert("consecutiveRunFailures".to_string(), json!(0));
+        }
+        self.patch_status(status).await
     }
 
     /// Rewrite `Enforced` alone, after the evaluation has already been
@@ -2425,25 +2539,64 @@ impl Pass<'_> {
         Ok(refused(reason))
     }
 
+    /// The FULL condition array, with `rows` upserted into it — never `rows`
+    /// alone.
+    ///
+    /// **`conditions` IS AN ARRAY, AND A MERGE PATCH REPLACES AN ARRAY WHOLE**
+    /// (RFC 7386). Returning only the rows a call site happened to name
+    /// therefore DELETED every condition it did not name, and that is how
+    /// `EnforcementDegraded` came to be missing from a policy that had spent
+    /// its retry budget: `harvest` published it, the very next pass published
+    /// `publish_evaluation`'s four conditions, and the array replace took it
+    /// off the object. Live at `d387f87`: `consecutiveRunFailures 3`,
+    /// scheduling correctly stopped, and `EnforcementDegraded` **absent** — not
+    /// `False`, not present at all — so nothing a console could read said the
+    /// policy had stopped or why.
+    ///
+    /// It was never only that condition. A pass that evaluates and is then
+    /// refused calls `publish_enforcement_refusal`, which names ONE condition;
+    /// before this change that single-element array replaced `Ready`,
+    /// `Evaluated` and `ExternalLifecycleConflict` too, mid-pass.
+    ///
+    /// **The base is the status as THIS PASS believes it now stands**, not the
+    /// object the watcher delivered: a pass patches more than once, and the
+    /// second patch has to preserve what the first one wrote. `observed()` is
+    /// exactly that cursor, and the watcher's copy is only the fallback for the
+    /// first write of a pass.
+    ///
+    /// Order is stable — existing conditions keep their positions, new types
+    /// are appended — so a diff of two status writes shows what changed rather
+    /// than a reshuffle.
     fn conditions(&self, rows: &[(&str, &str, &str, String)]) -> Vec<Value> {
-        let existing = self
-            .policy
-            .status
-            .as_ref()
-            .and_then(|s| s.conditions.as_ref());
-        rows.iter()
-            .map(|(r#type, status, reason, message)| {
-                let next = Condition {
-                    r#type: (*r#type).to_string(),
-                    status: (*status).to_string(),
-                    observed_generation: Some(self.generation()),
-                    last_transition_time: Some(self.ctx.now),
-                    reason: Some((*reason).to_string()),
-                    message: Some(message.clone()),
-                };
-                let merged = merge_condition(current_condition(existing, r#type), next);
-                serde_json::to_value(merged).unwrap_or(Value::Null)
+        let existing: Vec<Condition> = self
+            .observed()
+            .and_then(|status| status.get("conditions").cloned())
+            .and_then(|c| serde_json::from_value::<Vec<Condition>>(c).ok())
+            .or_else(|| {
+                self.policy
+                    .status
+                    .as_ref()
+                    .and_then(|s| s.conditions.clone())
             })
+            .unwrap_or_default();
+        let mut out = existing.clone();
+        for (r#type, status, reason, message) in rows {
+            let next = Condition {
+                r#type: (*r#type).to_string(),
+                status: (*status).to_string(),
+                observed_generation: Some(self.generation()),
+                last_transition_time: Some(self.ctx.now),
+                reason: Some((*reason).to_string()),
+                message: Some(message.clone()),
+            };
+            let merged = merge_condition(current_condition(Some(&existing), r#type), next);
+            match out.iter().position(|c| &c.r#type == r#type) {
+                Some(at) => out[at] = merged,
+                None => out.push(merged),
+            }
+        }
+        out.into_iter()
+            .map(|c| serde_json::to_value(c).unwrap_or(Value::Null))
             .collect()
     }
 
@@ -2686,6 +2839,33 @@ pub struct EnforcementDecision {
 // ---------------------------------------------------------------------------
 // Small pure helpers
 // ---------------------------------------------------------------------------
+
+/// "the last run exited 1 with AccessDenied on 2 point(s)", and the honest
+/// shapes when there is less to say.
+///
+/// **The codes are the closed per-point vocabulary and never a raw provider
+/// error body** — the same rule the record follows. Duplicates are counted, not
+/// listed: three points denied for one reason is one reason.
+fn failure_detail(exit_code: Option<i32>, codes: &[String]) -> String {
+    let exit = match exit_code {
+        Some(code) => format!("the last run exited {code}"),
+        None => {
+            "the last run produced no exit code (its pod is gone or was never readable)".to_string()
+        }
+    };
+    let mut counted: BTreeMap<&str, usize> = BTreeMap::new();
+    for code in codes {
+        *counted.entry(code.as_str()).or_default() += 1;
+    }
+    if counted.is_empty() {
+        return format!("{exit} and named no per-point code");
+    }
+    let named: Vec<String> = counted
+        .into_iter()
+        .map(|(code, n)| format!("{code} on {n} point(s)"))
+        .collect();
+    format!("{exit} with {}", named.join(", "))
+}
 
 /// One view entry, as the evaluation sees it.
 ///

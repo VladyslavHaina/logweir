@@ -1465,6 +1465,39 @@ blind write, and the harvest that could not publish its exit code no longer sets
 the Job's `ttlSecondsAfterFinished`. The pod therefore survives for the next
 pass to read, instead of being collected with the exit code still unpublished.
 
+**On a build before 2026-09-20 the counter moves but the condition is never
+there.** `status.conditions` is an array, and an RFC 7386 merge PATCH replaces an
+array whole — so a pass that named only its own conditions deleted every other
+one. The harvest published `EnforcementDegraded` correctly and the very next
+evaluation pass, whose four conditions do not include it, took it back off the
+object. The symptom is exact: `consecutiveRunFailures 3`, scheduling correctly
+stopped, and `EnforcementDegraded` **absent** — not `False`, not present at all —
+so `Ready=True` and `Evaluated=True` were all a console could see and nothing
+said the policy had stopped or why. It was never only that condition: a pass that
+evaluated and was then refused published `Enforced` alone and removed `Ready`,
+`Evaluated` and `ExternalLifecycleConflict` with it. Every status write now
+upserts into the conditions it already carries. On the same builds the
+generation bump that releases the stop did not clear
+`consecutiveRunFailures`, so the policy got exactly one run before the next
+failure re-degraded it; the count is now reset in the same patch that adopts the
+new generation.
+
+**What the enforcement Job is NOT: the evidence.** A harvested retention Job gets
+`ttlSecondsAfterFinished = 600`, so ten minutes later Kubernetes deletes it and
+its pod. A census by `ownerReference` therefore undercounts — after three failed
+runs it may see two Jobs, or none — and that is the design, not a discrepancy:
+the pod is where the log lives, the log is read once at harvest, and keeping
+finished Jobs forever would keep their pods forever.
+
+The durable evidence is, in order: `status.consecutiveRunFailures` for how many
+runs failed, `status.lastEnforcement` for what the last one did (`exitCode`,
+`deleted[]`, `failed[]` with the closed per-point codes, `objectsDeleted`), and
+`status.lastEnforcement.recordKey` for the **create-only, unsigned record in
+object storage**, which outlives the Job, the pod, the controller and the policy.
+`EnforcementDegraded`'s message names the count and the last run's exit code and
+codes so that the common question is answered without following any of them.
+**Do not use a Job census to decide whether a run happened**; use the record.
+
 **This controller does not function live until the retention ServiceAccount
 exists.** Every Job it builds requests `logweir-retention`, and the chart does
 not create it yet (`retention.enabled` and the SA are the wave-4 RBAC worker's).

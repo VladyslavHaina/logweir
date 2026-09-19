@@ -2167,9 +2167,16 @@ async fn three_consecutive_failures_degrade_and_stop_scheduling() {
         route("PATCH", leaked, "{}".to_string()),
     ];
     let f = fixture(routes);
+    // `observedGeneration` MATTERS TO THIS ROW NOW: a spec change releases the
+    // consecutive-failure budget, so a status carrying a count and NO observed
+    // generation means "the spec changed since the count was taken" and the
+    // count is zero. The controller writes both fields in the same patch, so a
+    // count without a generation is not a state it can produce — this fixture
+    // now says which generation the count belongs to.
     let status = json!({
         "lastEnforcement": {"runId": run_id, "startedAt": "2026-09-17T04:00:00Z"},
-        "consecutiveRunFailures": 2
+        "consecutiveRunFailures": 2,
+        "observedGeneration": 4
     });
     let outcome = run(&f, &policy(enforcing(None), status)).await;
     assert_eq!(outcome.enforced_reason, ctrl::REASON_RUN_FAILED);
@@ -3076,9 +3083,16 @@ async fn a_budget_bounded_run_does_not_count_toward_degradation() {
         route("PATCH", leaked, "{}".to_string()),
     ];
     let f = fixture(routes);
+    // `observedGeneration` MATTERS TO THIS ROW NOW: a spec change releases the
+    // consecutive-failure budget, so a status carrying a count and NO observed
+    // generation means "the spec changed since the count was taken" and the
+    // count is zero. The controller writes both fields in the same patch, so a
+    // count without a generation is not a state it can produce — this fixture
+    // now says which generation the count belongs to.
     let status = json!({
         "lastEnforcement": {"runId": run_id, "startedAt": "2026-09-17T04:00:00Z"},
-        "consecutiveRunFailures": 2
+        "consecutiveRunFailures": 2,
+        "observedGeneration": 4
     });
     run(&f, &policy(enforcing(None), status)).await;
     assert_eq!(
@@ -3452,6 +3466,14 @@ async fn harvest_pass(
     after(status, &f)
 }
 
+/// One condition off a status object, by type.
+fn condition_of<'a>(status: &'a Value, r#type: &str) -> Option<&'a Value> {
+    status["conditions"]
+        .as_array()?
+        .iter()
+        .find(|c| c["type"] == r#type)
+}
+
 /// A pass that is expected NOT to start a run. Returns the Fixture so the
 /// caller can assert on what was and was not sent.
 async fn quiet_pass(policy: &RetentionPolicy, at: DateTime<Utc>, digest: &str) -> Fixture {
@@ -3555,7 +3577,7 @@ async fn three_failed_runs_degrade_and_a_fourth_is_not_scheduled_until_the_spec_
 
     // AND THE SPEC CHANGING RELEASES IT. Nothing else does: not time, not a
     // restart, not the count being high enough for long enough.
-    let mut bumped = policy_value(spec, status);
+    let mut bumped = policy_value(spec, status.clone());
     bumped["metadata"]["generation"] = json!(5);
     let bumped: RetentionPolicy = serde_json::from_value(bumped).expect("a policy");
     let g = quiet_pass(&bumped, fourth, &digest).await;
@@ -3564,6 +3586,143 @@ async fn three_failed_runs_degrade_and_a_fourth_is_not_scheduled_until_the_spec_
         1,
         "a spec change is what releases a degraded policy"
     );
+
+    // AND IT RELEASES THE BUDGET, not merely the stop. A release that left the
+    // counter at its ceiling would give the operator exactly ONE run before the
+    // next failure re-degraded the policy, which is not a retry budget — and it
+    // is what `d387f87` did: `consecutiveRunFailures` stayed at 3 across the
+    // generation bump that correctly resumed scheduling.
+    let released = after(&status, &g);
+    assert_eq!(
+        released["consecutiveRunFailures"],
+        json!(0),
+        "the spec change that releases the stop resets the count in the same patch that adopts \
+         the new generation. Status: {released}"
+    );
+    let degraded = condition_of(&released, ctrl::CONDITION_DEGRADED).expect("a Degraded condition");
+    assert_eq!(degraded["status"], "False");
+    assert_eq!(degraded["reason"], ctrl::REASON_HEALTHY);
+}
+
+/// **The condition D3 §6.5 asks for, and the array replace that used to eat
+/// it.** At the third consecutive failure the object carries
+/// `EnforcementDegraded=True` with a reason and a message that says WHY in
+/// words — the count, the last run's exit code, and its closed per-point codes.
+///
+/// THE SECOND HALF IS THE REGRESSION. `status.conditions` is an array and an
+/// RFC 7386 merge PATCH replaces an array whole, so a pass that named only its
+/// own conditions DELETED every other one. `harvest` published
+/// `EnforcementDegraded` correctly and the very next evaluation pass — four
+/// conditions, none of them that one — took it straight off the object. Live at
+/// `d387f87`: `consecutiveRunFailures 3`, scheduling correctly stopped, and
+/// `EnforcementDegraded` **absent**; not `False`, not present at all. A console
+/// saw `Ready=True` and `Evaluated=True` and nothing that said the policy had
+/// spent its budget. So this row runs the evaluation pass AFTER the harvest and
+/// asserts the condition is still there.
+#[tokio::test]
+async fn the_third_failure_publishes_enforcement_degraded_and_the_next_pass_keeps_it() {
+    let digest = learned_digest().await;
+    let spec = unattended_enforcing();
+
+    let mut status = json!({});
+    let mut at = now();
+    for _ in 0..3 {
+        let (started, run_id) = start_pass(&spec, &status, at, &digest).await;
+        status = harvest_pass(
+            &spec,
+            &started,
+            at + chrono::Duration::minutes(1),
+            &run_id,
+            1,
+            &digest,
+        )
+        .await;
+        at += chrono::Duration::days(1);
+    }
+
+    let degraded = condition_of(&status, ctrl::CONDITION_DEGRADED).expect("a Degraded condition");
+    assert_eq!(degraded["status"], "True");
+    assert_eq!(degraded["reason"], ctrl::REASON_CONSECUTIVE_FAILURES);
+    let message = degraded["message"].as_str().expect("a message");
+    assert!(
+        message.contains('3'),
+        "the message names the count: {message}"
+    );
+    assert!(
+        message.contains("exited 1"),
+        "and the last run's exit code: {message}"
+    );
+    assert!(
+        message.contains("no further run is scheduled until spec changes")
+            || message.contains("No further run is scheduled until spec changes"),
+        "and what it means for scheduling: {message}"
+    );
+
+    // THE NEXT PASS EVALUATES AND MUST NOT EAT IT.
+    let f = quiet_pass(&policy(spec, status.clone()), at, &digest).await;
+    assert!(
+        f.posted("/jobs").is_empty(),
+        "a degraded policy schedules nothing"
+    );
+    let next = after(&status, &f);
+    let still = condition_of(&next, ctrl::CONDITION_DEGRADED)
+        .expect("EnforcementDegraded survives a pass that does not name it");
+    assert_eq!(still["status"], "True");
+    assert_eq!(still["reason"], ctrl::REASON_CONSECUTIVE_FAILURES);
+    for kept in [
+        ctrl::CONDITION_READY,
+        ctrl::CONDITION_EVALUATED,
+        ctrl::CONDITION_ENFORCED,
+    ] {
+        assert!(
+            condition_of(&next, kept).is_some(),
+            "{kept} is still on the object too. Conditions: {}",
+            next["conditions"]
+        );
+    }
+}
+
+/// The general rule behind the row above: **no status write drops a condition
+/// it did not name.** Proved on the narrowest writer in the file —
+/// `publish_enforcement_refusal` names `Enforced` alone, mid-pass, right after
+/// `publish_evaluation` wrote four. Before this branch that single-element
+/// array replaced the other three on the object.
+#[tokio::test]
+async fn a_status_write_keeps_the_conditions_it_does_not_name() {
+    let digest = learned_digest().await;
+    let mut routes = happy_routes(&six_points());
+    routes.retain(|r| r.path_suffix != "/restores");
+    routes.push(route(
+        "GET",
+        "/restores",
+        restore_list(vec![destination_backed_restore(
+            DEST,
+            "s1",
+            Some("Restoring"),
+        )]),
+    ));
+    routes.push(plan_config_map_route(&digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let f = fixture(routes);
+    let outcome = run(&f, &policy(unattended_enforcing(), json!({}))).await;
+    assert_eq!(outcome.enforced_reason, ctrl::REASON_ACTIVE_RESTORE);
+
+    let status = after(&json!({}), &f);
+    let enforced = condition_of(&status, ctrl::CONDITION_ENFORCED).expect("Enforced");
+    assert_eq!(enforced["reason"], ctrl::REASON_ACTIVE_RESTORE);
+    for kept in [
+        ctrl::CONDITION_READY,
+        ctrl::CONDITION_EVALUATED,
+        ctrl::CONDITION_EXTERNAL_CONFLICT,
+        ctrl::CONDITION_DEGRADED,
+    ] {
+        assert!(
+            condition_of(&status, kept).is_some(),
+            "the refusal names only `Enforced`; {kept} must survive it. Conditions: {}",
+            status["conditions"]
+        );
+    }
 }
 
 /// One successful run clears the count, so "three consecutive" means
@@ -3611,6 +3770,13 @@ async fn a_successful_run_clears_the_consecutive_failure_count() {
         .expect("a Degraded condition");
     assert_eq!(degraded["status"], "False");
     assert_eq!(degraded["reason"], ctrl::REASON_HEALTHY);
+    assert!(
+        degraded["message"]
+            .as_str()
+            .expect("a message")
+            .contains('0'),
+        "and it says so in words: {degraded}"
+    );
 }
 
 /// The shape, asserted directly: a started run DELETES the previous run's
@@ -3640,7 +3806,8 @@ async fn a_started_run_deletes_the_previous_runs_terminal_fields() {
             "recordKey": "logweir/retention/uid/r00000000deadbee9.json",
             "recordSha256": "sha256:aa"
         },
-        "consecutiveRunFailures": 1
+        "consecutiveRunFailures": 1,
+        "observedGeneration": 4
     });
     let (after_start, _) = start_pass(&unattended_enforcing(), &status, now(), &digest).await;
 
