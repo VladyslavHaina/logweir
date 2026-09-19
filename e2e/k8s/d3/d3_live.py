@@ -3682,7 +3682,12 @@ def signed_at_probe() -> None:
         evidence,
     )
     cleared = cleared_block_is_not_re_read(restored)
-    evidence.append(artifact("trust/cleared-block-clauses.json", cleared))
+    # `check()` takes no extra keywords — `record()` did, and this row used to be
+    # one. The three observations travel in the artifact instead, which is where
+    # a reader looks for them anyway.
+    evidence.append(artifact("trust/cleared-block-clauses.json",
+                             {"clauses": cleared, "freshVerification": v0,
+                              "rederivedVerification": v2, "afterClearing": restored}))
     check(
         "trust-cleared-verification-is-not-re-read",
         "PLAT-19.1",
@@ -3697,9 +3702,6 @@ def signed_at_probe() -> None:
         f"archive. "
         + "; ".join(f"{k}={v}" for k, v in cleared.items()),
         evidence,
-        freshVerification=v0,
-        rederivedVerification=v2,
-        afterClearing=restored,
     )
 
 
