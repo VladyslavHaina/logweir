@@ -1256,7 +1256,7 @@ Operation `Restore` runs the target equivalents (`target.resolved`,
 | `target.timestampBound` | J | B | `TimestampWithinBound` | `TimestampBoundExceeded` (same arithmetic as `phase0_admit.rs:629-680`) | `BrokerConfigsNotReadable` | 15 m |
 | `target.logAppendTime` | — | E | — | — | `LogAppendTimeOverrideVerifiedOnlyAtExecution` (the execution probe creates a topic; preflight never does, G12) | — |
 | `approval.state` | C | B when `restoreRef` is set; `skipped` (`SubjectNotCreated`) for drafts | `ApprovalVerified` | `ApprovalNotVerified` (carries the Approval's reason), `ApprovalExpired` (`KeyIdExpired` or v2 `expiresAt` passed), `ApprovalPlanMismatch`, `ApprovalSubjectMismatch` | `ApprovalPending` | min(10 m, key `notAfter`) |
-| `approval.keyValidity` | C | A | `ApproverKeyValid` | `ApproverKeyExpiresBeforeDeadline` (`notAfter` < now + `deadlineSeconds`) | — | min(10 m, `notAfter`) |
+| `approval.keyValidity` | C | A | `ApproverKeyValid` | `ApproverKeyExpiresBeforeDeadline` (`notAfter` < now + `deadlineSeconds`) | — | min(10 m, `notAfter`) (Amended 2026-09-19 at PREFLIGHT-APPROVAL-ROSTER's fix: the approval rows relay the Approval's own verdict and no longer read the roster, so `ApproverKeyExpiresBeforeDeadline` and the `min(10 m, notAfter)` re-check cap are SUSPENDED until the Approval publishes its matched key's window — defect APPROVAL-KEY-WINDOW-UNPUBLISHED; `KeyIdExpired` on the Approval reads `ApprovalExpired` here.) |
 
 ### 6.4 Result model and aggregation
 
