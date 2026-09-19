@@ -434,10 +434,21 @@ fn a_backup_scope_is_none_with_no_counts_and_a_restore_maps_its_integrity_level(
     assert!(view.verification_scope.records_sampled_matching.is_none());
     assert!(view.verification_scope.records_expected.is_none());
     assert!(view.completion.is_none());
-    assert!(
-        view.capture.is_some(),
-        "the live object carries a capture window"
-    );
+    let capture = view
+        .capture
+        .expect("the live object carries a capture window");
+    assert!(capture.started_at.is_some() && capture.finished_at.is_some());
+    // The count the VERIFIED receipt attested, beside the window it covers.
+    assert_eq!(capture.records, Some(10));
+
+    // AND ITS ABSENCE IS A FACT ABOUT THE RUN. `status.records` was declared
+    // and written by nothing until D3 W2 (`STATUS-RECORDS`), so every older
+    // object has it absent — and a zero here would say the run captured
+    // nothing, which is a different claim from "no receipt has been verified".
+    let mut older = fixture("backup-succeeded-verified.json");
+    remove(&mut older, "/status/records");
+    let view = view_of(&older);
+    assert_eq!(view.capture.expect("still a capture window").records, None);
 
     let base = fixture("restore-legacy-no-progress.json");
     for (level, expected) in [

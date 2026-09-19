@@ -734,6 +734,15 @@ pub struct CaptureView {
     /// When it finished.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub finished_at: Option<DateTime<Utc>>,
+    /// How many records the VERIFIED receipt attested.
+    ///
+    /// Absent is a fact about the run, not a zero. `Backup.status.records` was
+    /// declared with a printer column and written by nothing until D3 W2
+    /// (defect `STATUS-RECORDS`), so every object older than that fix has it
+    /// absent — and "no receipt has been verified for this run" is a different
+    /// statement from "this run captured nothing".
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub records: Option<i64>,
 }
 
 /// Configuration readiness (PLAT-03.1), which NEVER overwrites `state`.
@@ -1043,6 +1052,7 @@ pub fn backup_view(backup: &Backup, now: DateTime<Utc>) -> OperationView {
             .map(|c| CaptureView {
                 started_at: c.started_at,
                 finished_at: c.finished_at,
+                records: status.and_then(|s| s.records),
             }),
         completion: None,
         teardown: None,

@@ -5859,6 +5859,12 @@
             "format": "date-time",
             "nullable": true
           },
+          "records": {
+            "description": "How many records the VERIFIED receipt attested.\n\nAbsent is a fact about the run, not a zero. `Backup.status.records` was declared with a printer column and written by nothing until D3 W2 (defect `STATUS-RECORDS`), so every object older than that fix has it absent — and \"no receipt has been verified for this run\" is a different statement from \"this run captured nothing\".",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
           "startedAt": {
             "description": "Capture START, which is what protection freshness is measured from.",
             "type": "string",
