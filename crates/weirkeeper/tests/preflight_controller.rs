@@ -3333,7 +3333,40 @@ async fn an_approval_expired_under_a_policy_refuses_the_restore_before_it_is_sub
         "sourceDestinationRef": {"name": "primary"},
         "evidenceDestinationRef": {"name": "evidence"}
     }, "timeoutSeconds": 120});
-    let (status, _) = reconcile_with(&preflight(request), routes).await;
+    let (status, recorder) = reconcile_with(&preflight(request), routes).await;
+
+    // REVIEW P1 / MUTANT X3. THE APPROVAL IS READ IN THE PREFLIGHT'S OWN
+    // NAMESPACE, AND THIS IS THE ONLY ROW THAT CAN SAY SO.
+    //
+    // `weirkeeper::testing::answer` matches a route by PATH SUFFIX, so
+    // `/approvals/ap-1` registered here answers a request for ANY namespace's
+    // `ap-1` just as well. The reviewer's mutant — `Api::namespaced(client,
+    // "default")` in the Approval read — therefore passed the whole file. The
+    // product code is right; nothing could tell.
+    //
+    // It matters here more than anywhere else in this file: this commit makes
+    // the `Approval` the SOLE authority for a blocking row, so a namespace
+    // substitution would let a restore be authorised by an approval in a
+    // namespace the requester does not own. The double records full request
+    // targets, so the namespace is recoverable from the log even though the
+    // matcher ignores it.
+    let seen = recorder.lock().expect("recorder");
+    let approval_reads: Vec<&String> = seen
+        .iter()
+        .filter(|r| r.method == "GET" && r.uri.contains("/approvals/ap-1"))
+        .map(|r| &r.uri)
+        .collect();
+    assert!(
+        !approval_reads.is_empty(),
+        "the reconcile read the Approval at all"
+    );
+    assert!(
+        approval_reads
+            .iter()
+            .all(|uri| uri.contains(&format!("/namespaces/{NS}/approvals/ap-1"))),
+        "the Approval is read in the Preflight's own namespace and no other: {approval_reads:?}"
+    );
+    drop(seen);
 
     assert_eq!(
         status["result"]["state"], "notReady",
