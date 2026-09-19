@@ -117,9 +117,17 @@ pub struct SkippedEntryView {
 }
 
 /// What the last evaluation found. **Nothing here was deleted.**
+///
+/// THE NAME CARRIES ITS DOMAIN BECAUSE THE SCHEMA NAME IS GLOBAL. `schemars`
+/// keys `components/schemas` by the type's SHORT name, so two `EvaluationView`
+/// types in two route modules silently become one schema and one of the two
+/// `$ref`s points at the wrong shape — with no error anywhere. `trust.rs` has
+/// its own evaluation view, and
+/// `no_two_published_types_share_a_schema_name` in `tests/contract.rs` is what
+/// keeps the pair honest.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct EvaluationView {
+pub struct RetentionEvaluationView {
     /// When.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub at: Option<DateTime<Utc>>,
@@ -319,7 +327,7 @@ pub struct RetentionPolicyView {
     pub approved_plan_state: ApprovedPlanState,
     /// The last evaluation.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub last_evaluation: Option<EvaluationView>,
+    pub last_evaluation: Option<RetentionEvaluationView>,
     /// The last enforcement run.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub last_enforcement: Option<EnforcementRunView>,
@@ -450,7 +458,7 @@ pub fn view(policy: &RetentionPolicy, now: DateTime<Utc>) -> RetentionPolicyView
                 legal_hold: g.legal_hold.clone(),
             }),
         approved_plan_state: approved_plan_state(policy, now),
-        last_evaluation: evaluation.map(|e| EvaluationView {
+        last_evaluation: evaluation.map(|e| RetentionEvaluationView {
             at: e.at,
             points_evaluated: e.points_evaluated,
             candidate_count: e.candidate_count,

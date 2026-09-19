@@ -426,3 +426,98 @@ fn every_problem_code_is_documented() {
         assert!(enum_values.contains(code.as_str()));
     }
 }
+
+/// **No two published types share a schema name.**
+///
+/// REGRESSION REASON, AND IT WAS REAL. `schemars` keys
+/// `components/schemas` by a type's SHORT name, so two types called
+/// `EvaluationView` in two route modules become ONE schema: the second
+/// registration overwrites the first, both `$ref`s point at whichever won, and
+/// nothing anywhere reports it. D3 W11 shipped exactly that pair — a
+/// retention evaluation and a trust evaluation — and the document published
+/// `planSha256` where the trust policy's `serverTime` should have been. A
+/// generated document is only a contract if the generator cannot quietly
+/// disagree with the types.
+///
+/// The scan is over declarations rather than over the document, because the
+/// document is a map and a map cannot show a duplicate key.
+#[test]
+fn no_two_published_types_share_a_schema_name() {
+    fn walk_dir(dir: &std::path::Path, out: &mut Vec<(std::path::PathBuf, String)>) {
+        for entry in std::fs::read_dir(dir).expect("src is readable") {
+            let path = entry.expect("a directory entry").path();
+            if path.is_dir() {
+                walk_dir(&path, out);
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                out.push((
+                    path.clone(),
+                    std::fs::read_to_string(&path).expect("a source file"),
+                ));
+            }
+        }
+    }
+    let mut sources = Vec::new();
+    walk_dir(
+        &std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src"),
+        &mut sources,
+    );
+
+    let published: BTreeSet<String> = document()["components"]["schemas"]
+        .as_object()
+        .expect("the document has schemas")
+        .keys()
+        .cloned()
+        .collect();
+    assert!(published.len() > 50, "the scan found no schemas at all");
+
+    // ONLY A TYPE THAT DERIVES `JsonSchema` CAN OCCUPY A SCHEMA NAME. Matching
+    // on the name alone would flag `lib.rs`'s startup `Preflight` — a plain
+    // struct that shares a word with a DTO and is published by nothing.
+    let mut declared: std::collections::BTreeMap<String, Vec<String>> =
+        std::collections::BTreeMap::new();
+    for (path, text) in &sources {
+        let lines: Vec<&str> = text.lines().collect();
+        for (index, line) in lines.iter().enumerate() {
+            let trimmed = line.trim_start();
+            for keyword in ["pub struct ", "pub enum "] {
+                let Some(rest) = trimmed.strip_prefix(keyword) else {
+                    continue;
+                };
+                let name: String = rest
+                    .chars()
+                    .take_while(|c| c.is_alphanumeric() || *c == '_')
+                    .collect();
+                if !published.contains(&name) {
+                    continue;
+                }
+                // The derive sits in the attribute block immediately above.
+                let from = index.saturating_sub(8);
+                let derives = lines[from..index].iter().any(|l| l.contains("JsonSchema"));
+                if derives {
+                    declared
+                        .entry(name)
+                        .or_default()
+                        .push(path.display().to_string());
+                }
+            }
+        }
+    }
+    assert!(
+        declared.len() > 30,
+        "the derive filter matched almost nothing, so the scan proves nothing: {}",
+        declared.len()
+    );
+    let collisions: Vec<(&String, &Vec<String>)> = declared
+        .iter()
+        .filter(|(_, wheres)| wheres.len() > 1)
+        .collect();
+    assert!(
+        collisions.is_empty(),
+        "these names are published as ONE schema and declared more than once, so one \
+         $ref points at the wrong shape:\n{collisions:#?}"
+    );
+    // The pair that caused this test, both published and both distinct.
+    let schemas = &document()["components"]["schemas"];
+    assert!(schemas["RetentionEvaluationView"]["properties"]["planSha256"].is_object());
+    assert!(schemas["TrustEvaluationView"]["properties"]["serverTime"].is_object());
+}

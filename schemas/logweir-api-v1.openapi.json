@@ -8039,127 +8039,6 @@
           }
         ]
       },
-      "EvaluationView": {
-        "description": "What the last evaluation found. **Nothing here was deleted.**",
-        "type": "object",
-        "required": [
-          "candidates",
-          "kept",
-          "protected",
-          "skipped",
-          "truncated"
-        ],
-        "properties": {
-          "at": {
-            "description": "When.",
-            "type": "string",
-            "format": "date-time",
-            "nullable": true
-          },
-          "candidateCount": {
-            "description": "How many candidates there are in total, which may exceed the rows below.",
-            "type": "integer",
-            "format": "int64",
-            "nullable": true
-          },
-          "candidates": {
-            "description": "The points the rules would remove.",
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/CandidateView"
-            }
-          },
-          "kept": {
-            "description": "The points the rules keep.",
-            "type": "array",
-            "items": {
-              "type": "string"
-            }
-          },
-          "planExpiresAt": {
-            "description": "When the plan ages out.",
-            "type": "string",
-            "format": "date-time",
-            "nullable": true
-          },
-          "planRef": {
-            "description": "The plan `ConfigMap`.",
-            "$ref": "#/components/schemas/NameRef",
-            "nullable": true
-          },
-          "planSha256": {
-            "description": "The digest an administrator approves. A digest, not a credential.",
-            "type": "string",
-            "nullable": true
-          },
-          "pointsEvaluated": {
-            "description": "How many points were considered.",
-            "type": "integer",
-            "format": "int64",
-            "nullable": true
-          },
-          "protected": {
-            "description": "The points something else protected.",
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ProtectedPointView"
-            }
-          },
-          "skipped": {
-            "description": "The points the evaluation could not classify.",
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/SkippedEntryView"
-            }
-          },
-          "truncated": {
-            "description": "Whether any of the four lists above was cut short by this route's own row bound.",
-            "type": "boolean"
-          }
-        }
-      },
-      "EvaluationView2": {
-        "description": "How fresh the controller's verdict is, and what it was computed from.",
-        "type": "object",
-        "required": [
-          "freshWithinSeconds",
-          "reason",
-          "serverTime",
-          "state"
-        ],
-        "properties": {
-          "ageSeconds": {
-            "description": "How old that is, by this server's clock.",
-            "type": "integer",
-            "format": "int64",
-            "nullable": true
-          },
-          "evaluatedAt": {
-            "description": "When the controller evaluated.",
-            "type": "string",
-            "format": "date-time",
-            "nullable": true
-          },
-          "freshWithinSeconds": {
-            "description": "The freshness window.",
-            "type": "integer",
-            "format": "int64"
-          },
-          "reason": {
-            "description": "Which of the four ways it is not fresh, or `evaluated`.",
-            "$ref": "#/components/schemas/EvaluationReason"
-          },
-          "serverTime": {
-            "description": "The clock the comparison used. Published so a reader can check the arithmetic rather than redo it against the browser's.",
-            "type": "string",
-            "format": "date-time"
-          },
-          "state": {
-            "description": "`fresh` or `unknown`.",
-            "$ref": "#/components/schemas/EvaluationState"
-          }
-        }
-      },
       "ExecutionOnlyView": {
         "description": "A check that cannot be answered before the run.",
         "type": "object",
@@ -11298,6 +11177,85 @@
           }
         ]
       },
+      "RetentionEvaluationView": {
+        "description": "What the last evaluation found. **Nothing here was deleted.**\n\nTHE NAME CARRIES ITS DOMAIN BECAUSE THE SCHEMA NAME IS GLOBAL. `schemars` keys `components/schemas` by the type's SHORT name, so two `EvaluationView` types in two route modules silently become one schema and one of the two `$ref`s points at the wrong shape — with no error anywhere. `trust.rs` has its own evaluation view, and `no_two_published_types_share_a_schema_name` in `tests/contract.rs` is what keeps the pair honest.",
+        "type": "object",
+        "required": [
+          "candidates",
+          "kept",
+          "protected",
+          "skipped",
+          "truncated"
+        ],
+        "properties": {
+          "at": {
+            "description": "When.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "candidateCount": {
+            "description": "How many candidates there are in total, which may exceed the rows below.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "candidates": {
+            "description": "The points the rules would remove.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CandidateView"
+            }
+          },
+          "kept": {
+            "description": "The points the rules keep.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "planExpiresAt": {
+            "description": "When the plan ages out.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "planRef": {
+            "description": "The plan `ConfigMap`.",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "planSha256": {
+            "description": "The digest an administrator approves. A digest, not a credential.",
+            "type": "string",
+            "nullable": true
+          },
+          "pointsEvaluated": {
+            "description": "How many points were considered.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "protected": {
+            "description": "The points something else protected.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProtectedPointView"
+            }
+          },
+          "skipped": {
+            "description": "The points the evaluation could not classify.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SkippedEntryView"
+            }
+          },
+          "truncated": {
+            "description": "Whether any of the four lists above was cut short by this route's own row bound.",
+            "type": "boolean"
+          }
+        }
+      },
       "RetentionPolicyList": {
         "description": "A page of retention policies.",
         "type": "object",
@@ -11447,7 +11405,7 @@
           },
           "lastEvaluation": {
             "description": "The last evaluation.",
-            "$ref": "#/components/schemas/EvaluationView",
+            "$ref": "#/components/schemas/RetentionEvaluationView",
             "nullable": true
           },
           "leasedPoints": {
@@ -13010,6 +12968,48 @@
           }
         }
       },
+      "TrustEvaluationView": {
+        "description": "How fresh the controller's verdict is, and what it was computed from.\n\nNAMED FOR ITS DOMAIN; see `retention.rs`'s `RetentionEvaluationView` for why a short type name is a global schema name.",
+        "type": "object",
+        "required": [
+          "freshWithinSeconds",
+          "reason",
+          "serverTime",
+          "state"
+        ],
+        "properties": {
+          "ageSeconds": {
+            "description": "How old that is, by this server's clock.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "evaluatedAt": {
+            "description": "When the controller evaluated.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "freshWithinSeconds": {
+            "description": "The freshness window.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "reason": {
+            "description": "Which of the four ways it is not fresh, or `evaluated`.",
+            "$ref": "#/components/schemas/EvaluationReason"
+          },
+          "serverTime": {
+            "description": "The clock the comparison used. Published so a reader can check the arithmetic rather than redo it against the browser's.",
+            "type": "string",
+            "format": "date-time"
+          },
+          "state": {
+            "description": "`fresh` or `unknown`.",
+            "$ref": "#/components/schemas/EvaluationState"
+          }
+        }
+      },
       "TrustKeyView": {
         "description": "One key, as the policy declares it and as the controller evaluated it.",
         "type": "object",
@@ -13198,7 +13198,7 @@
           },
           "evaluation": {
             "description": "How fresh the verdicts above are.",
-            "$ref": "#/components/schemas/EvaluationView2"
+            "$ref": "#/components/schemas/TrustEvaluationView"
           },
           "generation": {
             "description": "`metadata.generation`.",

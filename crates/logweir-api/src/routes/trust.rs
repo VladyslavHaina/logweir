@@ -94,9 +94,12 @@ pub enum EvaluationReason {
 }
 
 /// How fresh the controller's verdict is, and what it was computed from.
+///
+/// NAMED FOR ITS DOMAIN; see `retention.rs`'s `RetentionEvaluationView` for
+/// why a short type name is a global schema name.
 #[derive(Clone, Debug, Serialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
-pub struct EvaluationView {
+pub struct TrustEvaluationView {
     /// `fresh` or `unknown`.
     pub state: EvaluationState,
     /// Which of the four ways it is not fresh, or `evaluated`.
@@ -218,7 +221,7 @@ pub struct TrustPolicyView {
     /// Whether the key list was cut short.
     pub keys_truncated: bool,
     /// How fresh the verdicts above are.
-    pub evaluation: EvaluationView,
+    pub evaluation: TrustEvaluationView,
     /// The generation the status was computed from.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
@@ -238,7 +241,7 @@ pub struct TrustPolicyView {
 
 /// D3 §7.7's freshness rule, in one function so no surface writes its own.
 #[must_use]
-pub fn evaluation(policy: &TrustPolicy, now: DateTime<Utc>) -> EvaluationView {
+pub fn evaluation(policy: &TrustPolicy, now: DateTime<Utc>) -> TrustEvaluationView {
     let status = policy.status.as_ref();
     let evaluated_at = status.and_then(|s| s.evaluated_at);
     let age_seconds = evaluated_at.map(|at| (now - at).num_seconds());
@@ -256,7 +259,7 @@ pub fn evaluation(policy: &TrustPolicy, now: DateTime<Utc>) -> EvaluationView {
             Some(_) => EvaluationReason::Evaluated,
         }
     };
-    EvaluationView {
+    TrustEvaluationView {
         state: if reason == EvaluationReason::Evaluated {
             EvaluationState::Fresh
         } else {
