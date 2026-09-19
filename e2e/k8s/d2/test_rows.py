@@ -183,6 +183,45 @@ def test_the_baseline_waits_for_the_broker_to_converge() -> None:
         len(settle["countsSeen"]) > 1)
 
 
+# --- PLAT-03.2's `expired approval`, after the preflight fix ------------------
+GREEN = {"state": "ready", "code": "ApprovalVerified", "gating": "blocking",
+         "message": "the Approval is Verified against a rostered approver key"}
+EXPIRED = {"state": "notReady", "code": "ApprovalExpired", "gating": "blocking",
+           "message": "the approver key that verified this approval has expired"}
+APPROVAL_EXPIRED = {"verified": False, "reason": "KeyIdExpired",
+                    "matchedKeyId": "a16169914cf8"}
+NOT_ADMITTED = {"type": "Admitted", "status": "False", "reason": "ApprovalNotVerified"}
+
+
+def _s18(**over):
+    args = dict(green=GREEN, expired=EXPIRED, approval_after=APPROVAL_EXPIRED,
+                restore_jobs=[], admitted=NOT_ADMITTED)
+    args.update(over)
+    return all(d2.approval_expiry_is_relayed(**args).values())
+
+
+def test_an_expired_approver_key_stops_a_previously_green_restore() -> None:
+    row("green before, ApprovalExpired after, and no Job for the green plan", _s18())
+    row("MUTANT: the preview was never green — the row would be about nothing",
+        not _s18(green={"state": "notReady", "code": "ApprovalPending",
+                        "gating": "blocking"}))
+    row("MUTANT: the Approval kept its verdict, so nothing expired",
+        not _s18(approval_after={"verified": True, "reason": "ApprovalVerified"}))
+    row("MUTANT: Verified=False for another reason entirely",
+        not _s18(approval_after={"verified": False, "reason": "SignatureInvalid"}))
+    row("MUTANT: THE PRE-FIX ANSWER — the preflight recomputes and says NotVerified",
+        not _s18(expired={"state": "notReady", "code": "ApprovalNotVerified",
+                          "gating": "blocking", "message": "x"}))
+    row("MUTANT: expired but ADVISORY, so the aggregate could still be ready",
+        not _s18(expired=dict(EXPIRED, gating="advisory")))
+    row("MUTANT: expired with no sentence naming the key",
+        not _s18(expired=dict(EXPIRED, message="   ")))
+    row("MUTANT: THE RESTORE STARTED ANYWAY on the previously green preview",
+        not _s18(restore_jobs=["rs-expired-runner"]))
+    row("MUTANT: the Restore was admitted",
+        not _s18(admitted={"type": "Admitted", "status": "True", "reason": "Admitted"}))
+
+
 def main() -> int:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

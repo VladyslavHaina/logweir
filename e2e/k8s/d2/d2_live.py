@@ -3529,23 +3529,277 @@ def s17() -> None:
             check(value not in json.dumps(obj), f"the Preflight carries the {label} credential")
 
 
-def s18() -> None:
-    record(
-        "S18", "an expired approver key makes an approval expired", "notRun",
-        reason=(
-            "D2 §14.4 S18 asks for a roster approver key whose `notAfter` is two "
-            "minutes ahead. `TrustRoster` and `TrustPolicy` are CLUSTER-SCOPED "
-            "(verified: `kubectl get crd -o custom-columns=…SCOPE`), there is exactly "
-            "one `TrustRoster/default` in this cluster, and lab-refresh-2 §8 already "
-            "showed that changing the resolved trust policy re-derives the verdict of "
-            "every pre-existing object. Two other live waves were reconciling against "
-            "that roster throughout this run, so this harness signs with the key the "
-            "roster ALREADY carries and never edits it. `logweir drill approve` has no "
-            "expiry flag (`--help` lists spec/key/approver/ticket/out/subject-kind "
-            "only), so an approval that expires cannot be minted without the roster "
-            "edit either."
+# S18 CANNOT RUN AGAINST A CONTROLLER OLDER THAN THIS COMMIT.
+#
+# Before `fix(preflight): the approval row is the Approval's verdict, not the
+# roster's`, `approval.state` recomputed the expiry from the CLUSTER-SCOPED
+# `TrustRoster`, so a namespace-scoped `TrustPolicy` — the only fixture that
+# does not edit shared state — could not reach the row at all. Running this row
+# against an older image would record a FAIL that is about the build and not
+# about the product, which is the class of mistake four previous waves spent
+# their reports correcting.
+PREFLIGHT_FIX_COMMIT = "c694fcd"
+
+
+def controller_revision() -> str:
+    """The commit the RUNNING controller was built from, off its image label."""
+    pods = get_list("pods", namespace=LAB_NS,
+                    selector="app.kubernetes.io/component=control-plane")
+    if not pods:
+        return ""
+    image = ((pods[0].get("spec") or {}).get("containers") or [{}])[0].get("image", "")
+    if not image:
+        return ""
+    out = run(["docker", "image", "inspect", image, "--format",
+               '{{index .Config.Labels "org.opencontainers.image.revision"}}'],
+              check=False, timeout=120)
+    return out.stdout.strip()
+
+
+def controller_carries(commit: str) -> bool:
+    """Whether the running controller's build CONTAINS a commit.
+
+    An ancestry question, not a string compare: the lab is refreshed to
+    whatever main is at the time, and every build after the fix carries it.
+    """
+    revision = controller_revision()
+    if not revision or revision == "<no value>":
+        return False
+    return run(["git", "merge-base", "--is-ancestor", commit, revision],
+               check=False, timeout=60).returncode == 0
+
+
+# The approver key's usage, and the one the CRD's G8 rule keeps separate from
+# evidence signing: "a key that both attests and authorises is a key whose
+# holder can approve their own work".
+APPROVER_USAGE = "GovernedApproval"
+
+
+def policy_key(key_id: str, spki_pem: str, *, usages: list[str], state: str = "Active",
+               not_before: str = "2026-01-01T00:00:00Z",
+               not_after: str = "2027-01-01T00:00:00Z",
+               subject: str = "approver@scram-local.invalid",
+               display: str = "the lab approver key", **over: Any) -> dict[str, Any]:
+    """One `TrustPolicy.spec.keys[]` entry, with its own window and usage.
+
+    PER-KEY WINDOWS ARE THE POINT. This row needs a key that is valid when the
+    Approval is signed and expired when the Preflight reads it, and `notAfter`
+    is per key — G2 allows it to be brought FORWARD, which is exactly the move
+    an expiry is.
+    """
+    entry = {
+        "keyId": key_id,
+        "spkiPem": spki_pem,
+        "algorithm": "p256",
+        "principal": {"id": subject, "display": display},
+        "usages": usages,
+        "state": state,
+        "notBefore": not_before,
+        "notAfter": not_after,
+    }
+    entry.update(over)
+    return entry
+
+
+def trust_policy(name: str, namespaces: list[str], keys: list[dict[str, Any]]) -> dict[str, Any]:
+    """A cluster-scoped `TrustPolicy` governing named namespaces only.
+
+    CLUSTER-SCOPED, SO IT RUNS UNDER THE LOCK — but it touches nothing shared:
+    `spec.namespaces` is an exact list and this one names only this run's
+    namespace, so the shared release's objects keep resolving through
+    `TrustRoster/default` exactly as before.
+    """
+    return {
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "TrustPolicy",
+        "metadata": {"name": name, "labels": {OWNER_LABEL_KEY: OWNER}},
+        "spec": {"namespaces": namespaces, "keys": keys},
+    }
+
+
+def roster_approver_key() -> dict[str, Any]:
+    roster = json.loads(run(CTX + ["get", "trustroster", "default", "-o", "json"]).stdout)
+    return roster["spec"]["approverKeys"][0]
+
+
+def approval_expiry_is_relayed(green: dict[str, Any], expired: dict[str, Any],
+                               approval_after: dict[str, Any],
+                               restore_jobs: list[str],
+                               admitted: dict[str, Any]) -> dict[str, bool]:
+    """D2 §14.4 S18, as the fixed preflight answers it.
+
+    The chain is three objects long and each link has to hold: a
+    namespace-scoped `TrustPolicy` expires the approver key, the **Approval
+    controller** re-derives `Verified=False` with `KeyIdExpired`, and the
+    Preflight's `approval.state` RELAYS that as `notReady/ApprovalExpired`
+    rather than recomputing it from the roster — which is what
+    `fix-preflight-approval` changed and what makes this row possible at all.
+
+    The first clause is the one that makes the rest mean something: the same
+    preview was GREEN before the key expired. Without it, a row could pass on a
+    preflight that was never able to approve anything.
+    """
+    return {
+        "the preview was green before the key expired": (
+            green.get("state") == "ready" and green.get("code") == "ApprovalVerified"
         ),
-    )
+        "the Approval's own verdict went to Verified=False/KeyIdExpired": (
+            approval_after.get("verified") is False
+            and approval_after.get("reason") == "KeyIdExpired"
+        ),
+        "the preflight relays it as notReady/ApprovalExpired": (
+            expired.get("state") == "notReady" and expired.get("code") == "ApprovalExpired"
+        ),
+        "and says which key, in words": bool((expired.get("message") or "").strip()),
+        "the check is blocking, so the aggregate cannot be ready":
+            expired.get("gating") == "blocking",
+        "no restore Job was created for the previously green plan": not restore_jobs,
+        "and the Restore is not admitted": admitted.get("status") == "False",
+    }
+
+
+def s18() -> None:
+    """PLAT-03.2's `expired approval`, as the tracker means it.
+
+    THE FIXTURE IS A NAMESPACE-SCOPED `TrustPolicy`, NOT A ROSTER EDIT.
+    `TrustRoster/default` is cluster-scoped, shared, and its spec is immutable
+    (`spec is immutable; create a new object instead`), and its one approver key
+    has no `notAfter` at all — which is why this row was `notRun` for four
+    waves. A `TrustPolicy` naming ONLY this namespace expires the key here and
+    nowhere else, and since `fix-preflight-approval` the preflight's
+    `approval.state` consumes the Approval's own verdict, so the expiry reaches
+    the row.
+
+    The window is brought FORWARD rather than set in the past from the start:
+    the Approval has to be Verified while the key is valid, or the row would be
+    about an approval that never worked.
+    """
+    with Scenario("S18", "an expired approver key makes an approval expired") as sc:
+        controller = controller_revision()
+        sc.detail["controllerRevision"] = controller
+        sc.detail["carriesPreflightFix"] = controller_carries(PREFLIGHT_FIX_COMMIT)
+        if not sc.detail["carriesPreflightFix"]:
+            record("S18", "an expired approver key makes an approval expired", "notRun",
+                   reason=("the running controller does not carry the preflight fix "
+                           f"({controller}); before it, `approval.state` recomputed the "
+                           "expiry from the cluster-scoped roster and a namespace-scoped "
+                           "TrustPolicy could not reach this row"),
+                   detail=sc.detail)
+            return
+        approver = roster_approver_key()
+        policy_name = f"{OWNER}-{STAMP}-approver"
+        sc.detail["approverKeyId"] = approver["keyId"]
+        sc.detail["trustPolicy"] = policy_name
+        facts = backup_facts("bk-a2", "a", "lw-a")
+        plan = restore_plan(facts["backupId"], facts["pointInTime"], "d2w14-expired-")
+        restore_name = "rs-expired"
+        approval_name = "ap-expired"
+        try:
+            # 1. the key is valid for the next ten minutes, HERE only
+            valid_until = (dt.datetime.now(dt.timezone.utc)
+                           + dt.timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            apply(trust_policy(policy_name, [NS], [policy_key(
+                approver["keyId"], approver["spkiPem"], usages=[APPROVER_USAGE],
+                not_after=valid_until)]))
+            sc.detail["validUntil"] = valid_until
+
+            # 2. an Approval signed and Verified while it is valid
+            minted = mint_approval(approval_name, restore_name, plan)
+            apply({
+                "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
+                "metadata": owned(restore_name),
+                "spec": {
+                    "sourceDestinationRef": {"name": "dest-a"},
+                    "evidenceDestinationRef": {"name": "dest-b"},
+                    "sourceArchive": {"url": "logweir-destination://dest-a"},
+                    "backupSetRef": facts["backupId"],
+                    "pointInTime": facts["pointInTime"],
+                    "planBytes": minted["planBytes"],
+                    "approvalRef": {"name": approval_name},
+                    "deadlineSeconds": 900,
+                    "target": {"clusterRef": {"name": "target"}, "mode": "newTopic",
+                               "topicNaming": {"prefix": "d2w14-expired-"}},
+                },
+            })
+            record_approval(minted)
+            verified = wait_for(
+                "approval", approval_name,
+                lambda o: (o.get("status") or {}).get("verified") is True,
+                timeout=300, what="the Approval to verify while the key is valid")
+            sc.detail["approvalWhileValid"] = {
+                k: (verified.get("status") or {}).get(k)
+                for k in ("verified", "reason", "matchedKeyId")}
+            artifact("objects/s18/approval-verified.json", verified)
+
+            # 3. the green preview
+            apply(preflight("pf-expired-green", restore_preflight_request(minted["planBytes"]),
+                            timeout_seconds=180))
+            green_pf = wait_preflight("pf-expired-green", timeout=600)
+            artifact("objects/s18/preflight-green.json", green_pf)
+            green = checks_by_id(green_pf).get("approval.state") or {}
+            sc.detail["greenApprovalCheck"] = green
+
+            # 4. the key expires — BROUGHT FORWARD, which G2 allows
+            expired_at = (dt.datetime.now(dt.timezone.utc)
+                          - dt.timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+            apply(trust_policy(policy_name, [NS], [policy_key(
+                approver["keyId"], approver["spkiPem"], usages=[APPROVER_USAGE],
+                not_after=expired_at)]))
+            sc.detail["expiredAt"] = expired_at
+            after = wait_for(
+                "approval", approval_name,
+                lambda o: (o.get("status") or {}).get("verified") is False,
+                timeout=300, what="the Approval to lose its verdict when the key expires")
+            approval_after = {k: (after.get("status") or {}).get(k)
+                              for k in ("verified", "reason", "matchedKeyId")}
+            sc.detail["approvalAfterExpiry"] = approval_after
+            artifact("objects/s18/approval-expired.json", after)
+
+            # 5. the preview a previously green plan gets now
+            apply(preflight("pf-expired", restore_preflight_request(minted["planBytes"]),
+                            timeout_seconds=180))
+            expired_pf = wait_preflight("pf-expired", timeout=600)
+            artifact("objects/s18/preflight-expired.json", expired_pf)
+            expired = checks_by_id(expired_pf).get("approval.state") or {}
+            sc.detail["expiredApprovalCheck"] = expired
+            sc.detail["aggregate"] = (expired_pf["status"].get("result") or {}).get("state")
+
+            # 6. and the Restore cannot start
+            restore = get("restore", restore_name)
+            jobs = [j["metadata"]["name"] for j in get_list("jobs")
+                    if any(o.get("uid") == restore["metadata"]["uid"]
+                           for o in (j["metadata"].get("ownerReferences") or []))]
+            admitted = next((c for c in (restore.get("status") or {}).get("conditions", [])
+                             if c.get("type") == "Admitted"), {})
+            sc.detail["restore"] = {"phase": (restore.get("status") or {}).get("phase"),
+                                    "admitted": admitted, "jobs": jobs,
+                                    "jobRef": (restore.get("status") or {}).get("jobRef")}
+            artifact("objects/s18/restore.json", restore)
+
+            clauses = approval_expiry_is_relayed(green, expired, approval_after, jobs, admitted)
+            sc.detail["criteria"] = clauses
+            unmet = sorted(k for k, ok in clauses.items() if not ok)
+            check(not unmet,
+                  "D2 §14.4 S18 criteria not met: " + "; ".join(unmet)
+                  + f". The preview was {green.get('state')}/{green.get('code')} while the "
+                  f"key was valid to {valid_until}; after the key expired at {expired_at} "
+                  f"the Approval reads verified={approval_after.get('verified')}/"
+                  f"{approval_after.get('reason')} and the preflight's approval.state is "
+                  f"{expired.get('state')}/{expired.get('code')} "
+                  f"({(expired.get('message') or '')[:120]}), aggregate "
+                  f"{sc.detail['aggregate']}; the Restore is Admitted="
+                  f"{admitted.get('status')}/{admitted.get('reason')} with {len(jobs)} Job(s)")
+        finally:
+            run(CTX + ["delete", "trustpolicy", policy_name, "--ignore-not-found=true",
+                       "--wait=true"], check=False, timeout=120)
+            left = [t["metadata"]["name"] for t in json.loads(
+                run(CTX + ["get", "trustpolicies", "-o", "json"]).stdout)["items"]
+                if t["metadata"]["name"].startswith(f"{OWNER}-{STAMP}")]
+            sc.detail["trustPoliciesLeft"] = left
+            check(not left,
+                  f"the cluster-scoped TrustPolicy this row created is deleted before it "
+                  f"returns; remaining: {left}. It governs a namespace by exact name, so a "
+                  f"leftover would silently re-judge a later run's evidence")
 
 
 def s19() -> None:

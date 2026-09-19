@@ -2472,7 +2472,10 @@ def neg_1() -> dict[str, Any]:
     jobs = discovery_jobs(uid)
     require(
         jobs != [],
-        "DELIBERATELY FALSE ASSERTION: a named allowlist created no discovery Job, which is "
+        # INTERPOLATED, so the sentence the certification matches on and the
+        # sentence this row raises cannot drift apart. They are the same string
+        # or the negative control silently stops certifying.
+        f"{DELIBERATE_FAILURE_MARK}: a named allowlist created no discovery Job, which is "
         "the landed behaviour L-09-6 asserts. This scenario failing is the expected result.",
         obj={"backup": done, "discoveryJobs": jobs},
     )
