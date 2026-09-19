@@ -247,11 +247,26 @@ fn a_stale_observation_and_a_never_reconciled_object_are_both_unknown() {
 
     // A TERMINAL OBJECT IS NEVER STALE. Nothing is going to observe it again,
     // and reporting a finished run as `unknown` after five minutes would make
-    // every completed backup in the console unknown by morning.
-    let terminal = fixture("backup-succeeded-verified.json");
+    // every completed backup in the console unknown by morning. The fixture
+    // CARRIES a `lastObservedTime` for this row, so the terminal check is what
+    // is being tested and not the absence of the field the check precedes.
+    let mut terminal = fixture("backup-succeeded-verified.json");
+    set(
+        &mut terminal,
+        "/status/progress/lastObservedTime",
+        json!("2026-09-19T01:00:00Z"),
+    );
+    assert_eq!(
+        terminal.pointer("/status/phase").and_then(Value::as_str),
+        Some("Succeeded")
+    );
     let long_after: chrono::DateTime<chrono::Utc> =
         "2027-01-01T00:00:00Z".parse().expect("an instant");
     let view = backup_view(&backup_from(&terminal), long_after);
+    assert!(!view.stale);
+    assert_eq!(view.operation.state, OperationState::Succeeded);
+    // And at `now`, where the observation is already half an hour old.
+    let view = backup_view(&backup_from(&terminal), now());
     assert!(!view.stale);
     assert_eq!(view.operation.state, OperationState::Succeeded);
 }
@@ -320,6 +335,25 @@ fn the_trust_basis_of_an_unrecorded_block_is_none_and_never_current() {
     assert_eq!(view.trust.basis, "unverified");
     assert_eq!(view.trust.state, TrustState::NotAttempted);
     assert!(!view.operation.verified_success);
+
+    // AND THE OTHER HALF OF THE SAME RULE, which the basis alone could get
+    // wrong: a `Valid` result beside `basis: Unverified` is NOT verified.
+    // `TrustBasis`'s contract is that `Unverified` is only ever written beside
+    // `NotAttempted`, so this pairing is a controller defect — and the reading
+    // of it has to fail closed rather than trust the half that says yes.
+    let mut inconsistent = base.clone();
+    set(
+        &mut inconsistent,
+        "/status/evidence/verification/trust/basis",
+        json!("Unverified"),
+    );
+    let view = view_of(&inconsistent);
+    assert_eq!(view.trust.basis, "unverified");
+    assert_eq!(
+        view.trust.state,
+        TrustState::NotAttempted,
+        "a `Valid` result with an uncompared signing time is not a verified one"
+    );
 
     // A revoked key is `untrusted`, which is neither `invalid` (the bytes are
     // fine) nor `notAttempted` (a verdict WAS reached).

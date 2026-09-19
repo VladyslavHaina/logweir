@@ -976,3 +976,56 @@ async fn a_credential_entered_once_reaches_no_log_line() {
          above prove nothing"
     );
 }
+
+/// **Opening an event stream is attributed to the route's own action AND names
+/// the second action it required.**
+///
+/// REGRESSION REASON. Every role in this build holds `operation.stream`, so
+/// removing the `authorize_also` call changes no HTTP answer at all: a mutant
+/// that deleted it survives the whole role matrix. What it does change is the
+/// record — and "did this principal hold the streaming grant when the
+/// connection was opened" is the question an audit reader asks after a console
+/// has been left open on a shared screen. The primary action stays
+/// `operation.read`, because the LAST `authorize` wins and filing the stream
+/// under a different name would make "who read team-a's operations"
+/// unanswerable.
+#[tokio::test]
+async fn opening_an_event_stream_records_both_actions_under_the_route_s_own() {
+    logweir_api::status::set_stream_bounds_for_test(logweir_api::status::StreamBounds {
+        poll: std::time::Duration::from_millis(10),
+        heartbeat: std::time::Duration::from_millis(30),
+        max_connection: std::time::Duration::from_millis(80),
+    });
+    let (log, _guard) = capture();
+    let app = app_with(seeded());
+    let cookie = app.session_cookie("u-op", &["lw-a-operators"]);
+
+    let response = app
+        .get(
+            "/api/v1/namespaces/team-a/operations/backup/backup-1/events",
+            &cookie,
+        )
+        .await;
+    assert_eq!(response.status.as_u16(), 200);
+    assert_eq!(
+        response.header("content-type").as_deref(),
+        Some("text/event-stream")
+    );
+
+    let record = log.record(&request_id(&response));
+    assert_eq!(record["decision"], "allow");
+    assert_eq!(record["namespace"], "team-a");
+    assert_eq!(
+        record["action"], "operation.read",
+        "the stream is filed under the domain's own read action"
+    );
+    let text = log.text();
+    assert!(
+        text.contains("operation.stream"),
+        "the record did not name the streaming action it also required:\n{text}"
+    );
+    assert!(
+        text.contains("\\\"stream\\\":\\\"open\\\"") || text.contains("stream"),
+        "the record did not say a stream was opened:\n{text}"
+    );
+}

@@ -486,3 +486,43 @@ fn only_a_bounded_decimal_is_an_event_id() {
         assert!(!valid_event_id(bad), "{bad}");
     }
 }
+
+/// **A finished run whose verdict has not arrived is NOT settled.**
+///
+/// REGRESSION REASON. `terminal` alone is the tempting end condition and it is
+/// wrong: a run that exited 0 with its evidence keys recorded and no verdict
+/// yet is terminal, and the verdict is the thing a console is waiting for.
+/// Closing there would leave "succeeded, verification pending" on the screen
+/// for ever, which is the exact conflation PLAT-14.1 exists to remove. The
+/// stream therefore keeps the connection and ends on the ceiling, not on
+/// `settled`.
+#[tokio::test]
+async fn a_terminal_run_with_an_unsettled_verdict_keeps_the_connection() {
+    brisk();
+    let mut object = fixture("backup-succeeded-verified.json");
+    // Evidence keys and a digest are recorded; the controller has not written
+    // a verification block yet, which is the `verifying` shape.
+    object["status"]["evidence"]
+        .as_object_mut()
+        .unwrap()
+        .remove("verification");
+    let app = app_in(object, "b10", "lw-s10");
+
+    let (status, _, body) = stream(
+        &app,
+        "/api/v1/namespaces/lw-s10/operations/backup/b10/events",
+        None,
+    )
+    .await;
+    assert_eq!(status, 200);
+    let frames = data(&body);
+    // The snapshot itself says so: the run is `verifying`, not `succeeded`.
+    assert_eq!(frames[0]["state"], "verifying");
+    assert_eq!(frames[0]["trust"]["state"], "pending");
+    assert_eq!(
+        frames.last().unwrap()["reason"],
+        "maxDuration",
+        "the stream closed before the verdict arrived: {:?}",
+        events(&body)
+    );
+}
