@@ -278,8 +278,8 @@ pub fn view(catalog: &RecoveryCatalog, now: DateTime<Utc>) -> CatalogView {
                 }),
             }),
         interval_seconds: spec.sync.interval_seconds,
-        mode: format!("{:?}", spec.sync.mode),
-        deep_check: format!("{:?}", spec.sync.deep_check),
+        mode: crate::status::wire_name(&spec.sync.mode),
+        deep_check: crate::status::wire_name(&spec.sync.deep_check),
         view_limit: spec.sync.view_limit,
         observed_generation: status.and_then(|s| s.observed_generation),
         observed_sync_request: status

@@ -1,0 +1,145 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "Backup",
+  "metadata": {
+    "creationTimestamp": "2026-09-19T00:58:26Z",
+    "generation": 1,
+    "labels": {
+      "logweir.dev/test-owner": "plat06"
+    },
+    "name": "b-diagnosed",
+    "namespace": "team-a",
+    "resourceVersion": "4254987",
+    "uid": "0c9acc83-af6e-4b59-8071-ef88d3ca95eb"
+  },
+  "spec": {
+    "archive": {
+      "secretRef": {
+        "name": "logweir-s3"
+      },
+      "url": "s3://kafka-backups/scram-local"
+    },
+    "deadlineSeconds": 600,
+    "sourceRef": {
+      "name": "source"
+    },
+    "topics": [
+      "orders",
+      "payments"
+    ],
+    "triggeredBy": "manual"
+  },
+  "status": {
+    "backupId": "0c9acc83-af6e-4b59-8071-ef88d3ca95eb",
+    "capture": {
+      "finishedAt": "2026-09-19T00:59:30.287341962Z",
+      "startedAt": "2026-09-19T00:59:30.071280546Z"
+    },
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-19T00:59:33.417915255Z",
+        "message": "the runner exited 0 (ok); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+        "observedGeneration": 1,
+        "reason": "Ok",
+        "status": "True",
+        "type": "Complete"
+      },
+      {
+        "lastTransitionTime": "2026-09-19T00:59:33.417915255Z",
+        "message": "both `receipt-key=` and `sidecar-key=` were read off the pod log and are on status.evidence",
+        "observedGeneration": 1,
+        "reason": "EvidenceKeysRecorded",
+        "status": "True",
+        "type": "EvidenceRecorded"
+      },
+      {
+        "lastTransitionTime": "2026-09-19T00:59:31.400160213Z",
+        "message": "the `runner` container has been seen running or terminated",
+        "observedGeneration": 1,
+        "reason": "RunnerStarted",
+        "status": "True",
+        "type": "RunnerReady"
+      },
+      {
+        "lastTransitionTime": "2026-09-19T00:59:33.417915255Z",
+        "message": "verified by weirkeeper at 2026-09-19T00:59:33Z against key 2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe",
+        "observedGeneration": 1,
+        "reason": "Verified",
+        "status": "True",
+        "type": "Verified"
+      }
+    ],
+    "evidence": {
+      "receiptKey": "logweir/backups/0c9acc83-af6e-4b59-8071-ef88d3ca95eb/01M2VJSV90DSJBR5DKGZG6045Y.receipt.json",
+      "receiptSha256": "sha256:86840c6d23827f2d9645c0bcc39129f5d65329ffefb7de73a5385f2f0eb16b2b",
+      "sidecarKey": "logweir/backups/0c9acc83-af6e-4b59-8071-ef88d3ca95eb/01M2VJSV90DSJBR5DKGZG6045Y.receipt.sig",
+      "verification": {
+        "matchedKeyId": "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe",
+        "payloadType": "application/vnd.logweir.backup-receipt+json;version=1.0.0",
+        "result": "Valid",
+        "signedAt": "2026-09-19T00:59:30Z",
+        "trust": {
+          "basis": "Current",
+          "keyState": "Active",
+          "policy": {
+            "name": "legacy-roster-v1"
+          }
+        },
+        "verifiedAt": "2026-09-19T00:59:33Z"
+      }
+    },
+    "execution": {
+      "id": "0c9acc83-af6e-4b59-8071-ef88d3ca95eb",
+      "inputsRef": {
+        "name": "plat06-restart-plan"
+      },
+      "inputsSha256": "sha256:e2a1aed6421151066af66bd915f5aec5d9af34398a538f313824cddc13c91ca5"
+    },
+    "exitCode": 0,
+    "exitReason": "ok",
+    "jobRef": {
+      "name": "plat06-restart"
+    },
+    "phase": "Succeeded",
+    "progress": {
+      "diagnostics": [
+        {
+          "code": "PodCreateRejected",
+          "count": 2,
+          "firstSeen": "2026-09-19T00:58:26.289404669Z",
+          "lastSeen": "2026-09-19T00:59:27.139230669Z",
+          "message": "the Job controller could not create the check pod: Error creating: pods \"plat06-restart-rkw6x\" is forbidden: exceeded quota: plat06-restart-hold, requested: pods=1, used: pods=1, limited: pods=0",
+          "object": {
+            "kind": "Job",
+            "name": "plat06-restart"
+          },
+          "severity": "Error"
+        }
+      ],
+      "lastTransitionTime": "2026-09-19T00:59:33.417915255Z",
+      "message": "the runner exited 0 (ok); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+      "reason": "Ok",
+      "runner": {
+        "containerState": "Terminated",
+        "jobName": "plat06-restart",
+        "podName": "plat06-restart-xtsd8",
+        "podPhase": "Succeeded",
+        "scheduled": true,
+        "startedAt": "2026-09-19T00:59:29Z",
+        "waitingReason": "ContainerCreating"
+      },
+      "stage": "Finished"
+    },
+    "records": 200,
+    "selection": {
+      "coverage": "NamedTopics",
+      "mode": "SelectedTopics",
+      "resolvedTopicBytes": 14,
+      "resolvedTopicCount": 2
+    },
+    "windowCovered": {
+      "fromMs": 1789514948259,
+      "toMs": 1789514957277
+    }
+  }
+}

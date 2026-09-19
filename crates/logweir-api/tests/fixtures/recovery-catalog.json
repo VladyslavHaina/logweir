@@ -1,0 +1,91 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "RecoveryCatalog",
+  "metadata": {
+    "generation": 1,
+    "name": "primary",
+    "namespace": "team-a"
+  },
+  "spec": {
+    "destinationRef": {
+      "name": "dest-a"
+    },
+    "sync": {
+      "deepCheck": "ManifestDigest",
+      "intervalSeconds": 3600,
+      "maxObjectsPerRun": 100000,
+      "mode": "Index",
+      "viewLimit": 4
+    }
+  },
+  "status": {
+    "conditions": [
+      {
+        "message": "the bounded view is published and has not aged out",
+        "reason": "ViewReady",
+        "status": "True",
+        "type": "Ready"
+      },
+      {
+        "message": "the view is within two sync intervals of its last refresh",
+        "reason": "ViewFresh",
+        "status": "False",
+        "type": "Stale"
+      },
+      {
+        "message": "the walk completed; the newest 4 of 5 points are materialised across 1 page(s). The view is a WINDOW: points beyond it are counted and histogrammed here and listed by `logweir catalog list` against the archive",
+        "reason": "Succeeded",
+        "status": "True",
+        "type": "Synced"
+      },
+      {
+        "message": "1 signing key(s) from TrustRoster/default are available to verify with",
+        "reason": "TrustMaterialPresent",
+        "status": "True",
+        "type": "TrustAvailable"
+      }
+    ],
+    "counts": {
+      "available": 3,
+      "conflict": 0,
+      "deleted": 0,
+      "invalid": 0,
+      "missing": 2,
+      "total": 5,
+      "unreadable": 0,
+      "unsupportedFormat": 0,
+      "untrustedSigner": 0,
+      "unverified": 1
+    },
+    "cursor": {
+      "complete": true,
+      "indexShard": "2026-09-19"
+    },
+    "lastSyncJob": {
+      "exitCode": 0,
+      "finishedAt": "2026-09-19T01:10:29Z",
+      "name": "lwc-cs-ff4c6f10e8c200ec9500-re8bc163c",
+      "startedAt": "2026-09-19T01:10:23Z"
+    },
+    "observedSyncRequest": "s1",
+    "pages": [
+      {
+        "configMapName": "lwc-cs-ff4c6f10e8c200ec9500-re8bc163c-p0",
+        "count": 4,
+        "firstPointId": "lwp1-c9fd2dc9272a1d1a44fa2d982ca4aba9",
+        "index": 0,
+        "lastPointId": "lwp1-43b00a99286b5be768958bc5e3c65d1c",
+        "sha256": "sha256:16255bcacd49adac3e8f7d17344b260c20c04bc93df52e06e1c8130453b4a6f8"
+      }
+    ],
+    "signers": [
+      {
+        "keyId": "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe",
+        "points": 4,
+        "trusted": true
+      }
+    ],
+    "truncated": true,
+    "viewExpiresAt": "2026-09-19T02:10:29Z"
+  }
+}

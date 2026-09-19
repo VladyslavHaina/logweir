@@ -1526,3 +1526,20 @@ async fn send_end(tx: &tokio::sync::mpsc::Sender<bytes::Bytes>, end: StreamEnd) 
     let data = serde_json::json!({ "reason": end.as_str() }).to_string();
     send(tx, frame("end", None, &data)).await
 }
+
+/// A CRD enum's WIRE spelling, not its Rust one.
+///
+/// `format!("{:?}")` was the obvious way to project one of these and it is
+/// wrong for every enum that carries a `rename_all`: `KeyAlgorithm::P256`
+/// serialises as `p256` in the object the API server stores, and a projection
+/// that published `P256` would publish a value no other surface — the CRD
+/// schema, `kubectl get -o json`, the controller's own logs — ever prints. It
+/// returns the empty string only for a type that does not serialise to a
+/// string at all, which no unit-variant enum does.
+#[must_use]
+pub fn wire_name<T: serde::Serialize>(value: &T) -> String {
+    serde_json::to_value(value)
+        .ok()
+        .and_then(|v| v.as_str().map(str::to_string))
+        .unwrap_or_default()
+}

@@ -414,7 +414,7 @@ pub fn view(policy: &RetentionPolicy, now: DateTime<Utc>) -> RetentionPolicyView
             name: spec.catalog_ref.name.clone(),
         },
         scope_prefix: bounded(&spec.scope.prefix, 512),
-        mode: format!("{:?}", spec.mode),
+        mode: crate::status::wire_name(&spec.mode),
         keep_last: spec.rules.keep_last,
         keep_days: spec.rules.keep_days,
         min_usable_points: spec.rules.min_usable_points,
@@ -423,7 +423,7 @@ pub fn view(policy: &RetentionPolicy, now: DateTime<Utc>) -> RetentionPolicyView
             .external_lifecycle
             .as_ref()
             .map(|e| ExternalLifecycleView {
-                provider: format!("{:?}", e.provider),
+                provider: crate::status::wire_name(&e.provider),
                 rule_id: bounded(&e.rule_id, 256),
                 expiration_days: e.expiration_days,
                 prefix: bounded(&e.prefix, 512),

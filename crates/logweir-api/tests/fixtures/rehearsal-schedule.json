@@ -1,0 +1,85 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "RehearsalSchedule",
+  "metadata": {
+    "generation": 1,
+    "name": "weekly-orders",
+    "namespace": "team-a",
+    "uid": "3f2a91c7-6c2b-4a1e-9f2d-0b1a2c3d4e5f"
+  },
+  "spec": {
+    "authorization": {
+      "approvalPolicyRef": { "name": "governed-default" },
+      "standingApprovalRef": { "name": "weekly-orders-standing" }
+    },
+    "bounds": {
+      "concurrencyPolicy": "Forbid",
+      "deadlineSeconds": 3600,
+      "maxPartitions": 200,
+      "recordsPerPartition": 25,
+      "startingDeadlineSeconds": 3600
+    },
+    "objectives": { "passRate": 1.0, "rtoSeconds": 1800 },
+    "point": {
+      "catalogRef": { "name": "primary" },
+      "minAgeSeconds": 0,
+      "requireVerifiedEvidence": true,
+      "scheduleRefs": [{ "name": "nightly" }],
+      "selection": "NewestAvailable",
+      "topics": ["orders"]
+    },
+    "protectionPolicyRef": { "name": "protect-a" },
+    "schedule": "0 3 * * 0",
+    "suspend": false,
+    "target": {
+      "clusterRef": { "name": "kafka-target" },
+      "markerTopic": "logweir.scratch",
+      "replicationFactor": 1,
+      "topicPrefix": "rehearsal-"
+    }
+  },
+  "status": {
+    "cleanup": {
+      "pendingTopics": ["rehearsal-3f2a91c7-orders"],
+      "since": "2026-09-18T03:04:11Z"
+    },
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-18T03:04:11Z",
+        "message": "the standing authorization verifies against the schedule's own sealed spec digest",
+        "observedGeneration": 1,
+        "reason": "StandingApprovalVerified",
+        "status": "True",
+        "type": "Authorized"
+      },
+      {
+        "lastTransitionTime": "2026-09-18T03:04:11Z",
+        "message": "teardown left 1 topic(s) behind; the next slot is skipped rather than allowed to adopt them",
+        "observedGeneration": 1,
+        "reason": "LeftoverTopics",
+        "status": "False",
+        "type": "RehearsalHealthy"
+      }
+    ],
+    "lastFailed": {
+      "at": "2026-09-18T03:04:11Z",
+      "reason": "TeardownIncomplete",
+      "restoreRef": { "name": "weekly-orders-20260918t030000z" }
+    },
+    "lastScheduledSlot": "2026-09-18T03:00:00Z",
+    "lastSkipped": {
+      "reason": "LeftoverTopics",
+      "slot": "2026-09-18T03:00:00Z"
+    },
+    "lastSucceeded": {
+      "at": "2026-09-11T03:07:45Z",
+      "evidence": "Valid",
+      "pointId": "lwp1-43b00a99286b5be768958bc5e3c65d1c",
+      "restoreRef": { "name": "weekly-orders-20260911t030000z" },
+      "rtoSeconds": 465
+    },
+    "nextFireTime": "2026-09-25T03:00:00Z",
+    "observedGeneration": 1,
+    "templateDigest": "sha256:0f9a18aa5b40b56c5e4a3d2c1b0a99887766554433221100ffeeddccbbaa9988"
+  }
+}

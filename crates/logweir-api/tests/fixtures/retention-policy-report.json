@@ -1,0 +1,110 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "RetentionPolicy",
+  "metadata": {
+    "creationTimestamp": "2026-09-19T01:11:38Z",
+    "generation": 1,
+    "labels": {
+      "logweir.dev/test-owner": "d3w14"
+    },
+    "name": "keep-a",
+    "namespace": "team-a",
+    "resourceVersion": "4542357",
+    "uid": "7b022a02-cf4f-47ce-8896-fc8c58b71f91"
+  },
+  "spec": {
+    "catalogRef": {
+      "name": "primary"
+    },
+    "destinationRef": {
+      "name": "dest-a"
+    },
+    "mode": "Report",
+    "rules": {
+      "keepLast": 1,
+      "minUsablePoints": 1
+    },
+    "scope": {
+      "prefix": "archive"
+    }
+  },
+  "status": {
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-19T01:11:38.529476883Z",
+        "message": "the destination and the catalog resolve",
+        "observedGeneration": 1,
+        "reason": "PolicyReady",
+        "status": "True",
+        "type": "Ready"
+      },
+      {
+        "lastTransitionTime": "2026-09-19T01:11:38.529476883Z",
+        "message": "5 point(s) evaluated at this destination: 1 kept, 3 candidate(s), 0 protected, 1 skipped. This catalog view carries no segment keys, so shared-segment                          protection is NotEnforced and the plan names each set's key prefix                          rather than its objects: candidates[].objects is omitted rather than guessed, and `logweir-retention --dry-run` enumerates the real count. 3 point(s) would be removed.",
+        "observedGeneration": 1,
+        "reason": "EvaluationComplete",
+        "status": "True",
+        "type": "Evaluated"
+      },
+      {
+        "lastTransitionTime": "2026-09-19T01:11:38.529476883Z",
+        "message": "this policy reports what would be removed and removes nothing; set spec.mode: Enforce and approve a plan digest to change that",
+        "observedGeneration": 1,
+        "reason": "RecommendationOnly",
+        "status": "False",
+        "type": "Enforced"
+      },
+      {
+        "lastTransitionTime": "2026-09-19T01:11:38.529476883Z",
+        "message": "no bucket lifecycle rule is declared for this destination",
+        "observedGeneration": 1,
+        "reason": "NoConflict",
+        "status": "False",
+        "type": "ExternalLifecycleConflict"
+      }
+    ],
+    "enforcement": "RecommendationOnly",
+    "guarantees": {
+      "activeRestoreProtection": "LogweirEnforced",
+      "ageExpiry": "NotEnforced",
+      "legalHold": "ProviderEnforcedUnverified",
+      "minUsablePoints": "LogweirEnforced",
+      "sharedSegments": "NotEnforced"
+    },
+    "lastEvaluation": {
+      "at": "2026-09-19T01:49:15.729621386Z",
+      "candidateCount": 3,
+      "candidates": [
+        {
+          "pointId": "lwp1-c9fd2dc9272a1d1a44fa2d982ca4aba9",
+          "reason": "BeyondKeepLast",
+          "recoveryPointAt": "2026-09-19T01:10:11.287Z"
+        },
+        {
+          "pointId": "lwp1-6a6ca28b7421d0cbb7eb51f597cc8b42",
+          "reason": "BeyondKeepLast",
+          "recoveryPointAt": "2026-09-19T01:10:04.349Z"
+        },
+        {
+          "pointId": "lwp1-43b00a99286b5be768958bc5e3c65d1c",
+          "reason": "BeyondKeepLast",
+          "recoveryPointAt": "2026-09-19T01:09:38.842Z"
+        }
+      ],
+      "kept": [
+        "lwp1-6644d0fed75c151caf8da68a8062aa3a"
+      ],
+      "planExpiresAt": "2026-09-19T02:15:47.469707845Z",
+      "planSha256": "sha256:0d90834b30c02e3f21a382d82e63c4f611b409fde6ad2cfd0199d63865598a95",
+      "pointsEvaluated": 5,
+      "protected": [],
+      "skipped": [
+        {
+          "pointId": "lwp1-7f8a53278110d46fd4f14ecaccc45cc4",
+          "reason": "Unreadable"
+        }
+      ]
+    },
+    "observedGeneration": 1
+  }
+}

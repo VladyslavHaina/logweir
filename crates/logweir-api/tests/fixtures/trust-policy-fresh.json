@@ -1,0 +1,81 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "TrustPolicy",
+  "metadata": {
+    "creationTimestamp": "2026-09-18T04:32:25Z",
+    "generation": 1,
+    "labels": {
+      "logweir.dev/test-owner": "d3w14"
+    },
+    "name": "org-default",
+    "resourceVersion": "2677816",
+    "uid": "5ddde3f8-9e79-4321-b1a1-02b29e1c9cbd"
+  },
+  "spec": {
+    "default": false,
+    "keys": [
+      {
+        "algorithm": "p256",
+        "keyId": "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe",
+        "notAfter": "2027-07-01T00:00:00Z",
+        "notBefore": "2026-01-01T00:00:00Z",
+        "principal": {
+          "display": "the lab signing key",
+          "id": "signing@scram-local.invalid"
+        },
+        "spkiPem": "<<SPKI>>",
+        "state": "Active",
+        "usages": [
+          "EvidenceSigning"
+        ]
+      }
+    ],
+    "namespaces": [
+      "team-a"
+    ]
+  },
+  "status": {
+    "boundNamespaces": [
+      "team-a"
+    ],
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-18T04:32:25.450297674Z",
+        "message": "every spkiPem on this policy parsed, hashes to its own keyId and matches its declared algorithm: 1 keys",
+        "observedGeneration": 1,
+        "reason": "Loaded",
+        "status": "True",
+        "type": "Loaded"
+      },
+      {
+        "lastTransitionTime": "2026-09-18T04:32:25.450297674Z",
+        "message": "this policy governs 1 namespace(s)",
+        "observedGeneration": 1,
+        "reason": "Bound",
+        "status": "True",
+        "type": "Bound"
+      },
+      {
+        "lastTransitionTime": "2026-09-18T04:32:25.450297674Z",
+        "message": "no Active key reaches its notAfter within 30 days",
+        "observedGeneration": 1,
+        "reason": "NotExpiring",
+        "status": "False",
+        "type": "ExpiringSoon"
+      }
+    ],
+    "conflicts": [],
+    "evaluatedAt": "2026-09-18T04:42:25.498722799Z",
+    "keyCount": 1,
+    "keys": [
+      {
+        "effectiveState": "Active",
+        "keyId": "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe",
+        "usableForNewSignatures": true,
+        "usableForVerification": "Full"
+      }
+    ],
+    "loaded": true,
+    "observedGeneration": 1
+  }
+}

@@ -1,0 +1,112 @@
+{
+  "apiVersion": "logweir.dev/v1alpha1",
+  "kind": "Restore",
+  "metadata": {
+    "creationTimestamp": "2026-09-14T23:56:32Z",
+    "generation": 1,
+    "name": "r-legacy",
+    "namespace": "team-a",
+    "resourceVersion": "2112850",
+    "uid": "52bb3680-0f73-4a1d-880c-aecb1f7b77e8"
+  },
+  "spec": {
+    "approvalRef": {
+      "name": "scram-record-approval"
+    },
+    "backupSetRef": "6424f937-7554-4976-9c1f-b02410e3c22a",
+    "deadlineSeconds": 600,
+    "planBytes": "{\n  \"source\": {\n    \"storage\": {\n      \"backend\": \"s3\",\n      \"bucket\": \"kafka-backups\",\n      \"prefix\": \"scram-local\",\n      \"region\": \"us-east-1\",\n      \"endpoint\": \"http://minio.logweir-scram-local.svc.cluster.local:9000\",\n      \"path_style\": true,\n      \"allow_http\": true\n    },\n    \"backup\": \"6424f937-7554-4976-9c1f-b02410e3c22a\",\n    \"topics\": [\n      \"orders\",\n      \"payments\"\n    ]\n  },\n  \"target\": {\n    \"bootstrap_servers\": [\n      \"kafka-target.logweir-scram-local.svc.cluster.local:9096\"\n    ],\n    \"auth\": {\n      \"mode\": \"scramSha512\",\n      \"username\": \"scram-user\",\n      \"tls\": false\n    },\n    \"mode\": \"newTopic\",\n    \"topic_naming\": {\n      \"prefix\": \"scram-restored-\"\n    },\n    \"topic_mapping_prefix\": \"logweir-scratch-\",\n    \"marker_topic\": \"logweir.scratch\",\n    \"default_replication_factor\": 1,\n    \"teardown\": \"delete\"\n  },\n  \"restore\": {\n    \"point_in_time\": \"2026-09-14T23:56:34Z\"\n  },\n  \"sample\": {\n    \"window_start\": \"2026-09-13T23:56:32Z\",\n    \"window_end\": \"2026-09-14T23:56:34Z\",\n    \"records_per_partition\": 25,\n    \"anchor\": \"head\"\n  },\n  \"objectives\": {\n    \"rto_seconds\": 3600,\n    \"rpo_seconds\": 86400,\n    \"pass_rate\": 1.0\n  },\n  \"evidence\": {\n    \"backend\": \"s3\",\n    \"bucket\": \"kafka-backups\",\n    \"prefix\": \"logweir/\",\n    \"region\": \"us-east-1\",\n    \"endpoint\": \"http://minio.logweir-scram-local.svc.cluster.local:9000\",\n    \"path_style\": true,\n    \"allow_http\": true\n  },\n  \"notifications\": {\n    \"webhooks\": []\n  }\n}\n",
+    "pointInTime": "2026-09-14T23:56:34Z",
+    "sourceArchive": {
+      "secretRef": {
+        "name": "logweir-s3"
+      },
+      "url": "s3://kafka-backups/scram-local"
+    },
+    "target": {
+      "clusterRef": {
+        "name": "target"
+      },
+      "mode": "newTopic",
+      "topicNaming": {
+        "prefix": "scram-restored-"
+      }
+    }
+  },
+  "status": {
+    "conditions": [
+      {
+        "lastTransitionTime": "2026-09-14T23:57:10.103134510Z",
+        "message": "the runner exited 0 (ok); the code was read from status.containerStatuses[name=runner].state.terminated.exitCode",
+        "observedGeneration": 1,
+        "reason": "Ok",
+        "status": "True",
+        "type": "Complete"
+      },
+      {
+        "lastTransitionTime": "2026-09-14T23:57:10.103134510Z",
+        "message": "both `scorecard-key=` and `sidecar-key=` were read off the pod log by name and are on status.evidence; `offset-report-key=` is printed only when the engine wrote an offset report, so its absence is a fact about the run",
+        "observedGeneration": 1,
+        "reason": "EvidenceKeysRecorded",
+        "status": "True",
+        "type": "EvidenceRecorded"
+      },
+      {
+        "lastTransitionTime": "2026-09-14T23:57:10.103134510Z",
+        "message": "verified by weirkeeper at 2026-09-14T23:57:10Z against key 2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe",
+        "observedGeneration": 1,
+        "reason": "Verified",
+        "status": "True",
+        "type": "Verified"
+      }
+    ],
+    "evidence": {
+      "offsetReportKey": "logweir/drills/01M2H5MMSKY5JR6RW108EGN954.offsets.json",
+      "offsetReportSha256": "sha256:84c4ed1c4acd71b3babf10be7fc8fb4231bd6594e2106a79dd5a8ca0958984cd",
+      "scorecardKey": "logweir/drills/01M2H5MMSKY5JR6RW108EGN954.json",
+      "scorecardSha256": "sha256:f401b897c7601026fef67bba94f58e9eb6f0c0ad6e27ef15653419feeabf8edf",
+      "sidecarKey": "logweir/drills/01M2H5MMSKY5JR6RW108EGN954.sig",
+      "verification": {
+        "matchedKeyId": "2c76e22ff89969dc0337e64756c85f18edb3e51ae2950ea18d81021d7176d7fe",
+        "payloadType": "application/vnd.logweir.drill-scorecard+json;version=1.0.0",
+        "result": "Valid",
+        "verifiedAt": "2026-09-14T23:57:10Z"
+      }
+    },
+    "exitCode": 0,
+    "exitReason": "ok",
+    "integrity": {
+      "level": "byte-fingerprint",
+      "result": "pass"
+    },
+    "jobRef": {
+      "name": "scram-record-restore"
+    },
+    "lastPhaseCompleted": 7,
+    "measured": {
+      "rpoSeconds": 565,
+      "rtoSeconds": 1
+    },
+    "newTopics": [
+      "scram-restored-orders",
+      "scram-restored-payments"
+    ],
+    "objectives": {
+      "met": true,
+      "passRate": 1,
+      "rpoSeconds": 86400,
+      "rtoSeconds": 3600
+    },
+    "oldTopics": [
+      "orders",
+      "payments"
+    ],
+    "outcome": "pass",
+    "phase": "Succeeded",
+    "reason": "Ok",
+    "topicPreflight": {
+      "timestampBound": 9223372036854775807,
+      "timestampType": "CreateTime"
+    }
+  }
+}

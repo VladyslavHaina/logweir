@@ -370,7 +370,7 @@ fn schedule_view(summary: &ScheduleSummary) -> ScheduleHealthView {
 fn alert_view(alert: &AlertEntry) -> AlertView {
     AlertView {
         key: bounded(&alert.key, 253),
-        kind: format!("{:?}", alert.kind),
+        kind: crate::status::wire_name(&alert.kind),
         state: bounded(&alert.state, 32),
         opened_at: alert.opened_at,
         resolved_at: alert.resolved_at,
@@ -438,7 +438,7 @@ pub fn view(policy: &ProtectionPolicy) -> ProtectionPolicyView {
             kinds: n
                 .kinds
                 .as_ref()
-                .map(|k| k.iter().map(|kind| format!("{kind:?}")).collect()),
+                .map(|k| k.iter().map(crate::status::wire_name).collect()),
             send_resolved: n.send_resolved,
             renotify_after_seconds: n.renotify_after_seconds,
         }),

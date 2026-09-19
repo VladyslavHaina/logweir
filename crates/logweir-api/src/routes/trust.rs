@@ -290,18 +290,18 @@ pub fn view(policy: &TrustPolicy, now: DateTime<Utc>) -> TrustPolicyView {
                 .filter(|_| fresh);
             TrustKeyView {
                 key_id: bounded(&key.key_id, 64),
-                algorithm: format!("{:?}", key.algorithm),
-                usages: key.usages.iter().map(|u| format!("{u:?}")).collect(),
+                algorithm: crate::status::wire_name(&key.algorithm),
+                usages: key.usages.iter().map(crate::status::wire_name).collect(),
                 principal: KeyPrincipalView {
                     id: bounded(&key.principal.id, 253),
                     display: key.principal.display.as_deref().map(|d| bounded(d, 253)),
                 },
                 not_before: key.not_before,
                 not_after: key.not_after,
-                state: format!("{:?}", key.state),
+                state: crate::status::wire_name(&key.state),
                 retired_at: key.retired_at,
                 revoked_at: key.revoked_at,
-                revocation_reason: key.revocation_reason.map(|r| format!("{r:?}")),
+                revocation_reason: key.revocation_reason.as_ref().map(crate::status::wire_name),
                 revocation_effective_from: key.revocation_effective_from,
                 effective_state: verdict
                     .map_or_else(|| UNKNOWN.to_string(), |v| bounded(&v.effective_state, 32)),

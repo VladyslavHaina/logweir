@@ -262,7 +262,7 @@ pub fn view(schedule: &RehearsalSchedule) -> RehearsalScheduleView {
                 .map(name_ref)
                 .collect(),
             catalog_ref: spec.point.catalog_ref.as_ref().map(name_ref),
-            selection: format!("{:?}", spec.point.selection),
+            selection: crate::status::wire_name(&spec.point.selection),
             min_age_seconds: spec.point.min_age_seconds,
             topics: spec
                 .point
@@ -278,7 +278,7 @@ pub fn view(schedule: &RehearsalSchedule) -> RehearsalScheduleView {
             replication_factor: spec.target.replication_factor,
         },
         bounds: RehearsalBoundsView {
-            concurrency_policy: format!("{:?}", spec.bounds.concurrency_policy),
+            concurrency_policy: crate::status::wire_name(&spec.bounds.concurrency_policy),
             deadline_seconds: spec.bounds.deadline_seconds,
             starting_deadline_seconds: spec.bounds.starting_deadline_seconds,
             records_per_partition: spec.bounds.records_per_partition,

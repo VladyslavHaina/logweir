@@ -994,6 +994,13 @@ impl TestClock {
         let mut t = self.0.lock().unwrap();
         *t += chrono::Duration::seconds(seconds);
     }
+
+    /// Move to an exact instant. A freshness rule is about the distance
+    /// between two recorded times, so a test about one reads better as "the
+    /// server clock is here" than as an offset a reader has to add up.
+    pub fn set(&self, instant: DateTime<Utc>) {
+        *self.0.lock().unwrap() = instant;
+    }
 }
 
 impl Clock for TestClock {
