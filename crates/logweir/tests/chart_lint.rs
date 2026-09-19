@@ -1883,23 +1883,10 @@ fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends
     //
     // SELF-LIQUIDATING, asserted below: when the kind reaches the seal the
     // entry must go, or this test fails naming it.
-    const GRANTED_AHEAD_OF_ITS_CALLER: [(&str, &str, &str); 11] = [
-        ("protectionpolicies", "get", "D3 W11 `protection.read`"),
-        ("protectionpolicies", "list", "D3 W11 `protection.read`"), // engine-token-ok: an RBAC verb, never an engine subcommand
-        ("rehearsalschedules", "get", "D3 W11 `rehearsal.read`"),
-        ("rehearsalschedules", "list", "D3 W11 `rehearsal.read`"), // engine-token-ok: an RBAC verb, never an engine subcommand
-        ("recoverycatalogs", "get", "D3 W11 `catalog.read`"),
-        ("recoverycatalogs", "list", "D3 W11 `catalog.read`"), // engine-token-ok: an RBAC verb, never an engine subcommand
-        ("recoverycatalogs", "create", "D3 W11 `catalog.connect`"),
-        ("retentionpolicies", "get", "D3 W11 `retention.read`"),
-        ("retentionpolicies", "list", "D3 W11 `retention.read`"), // engine-token-ok: an RBAC verb, never an engine subcommand
-        // The cluster-scoped half. `ClusterResource` — the second seal, which
-        // holds exactly this kind and holds it READ ONLY — arrives with the
-        // same wave, so on this tree the whole cluster role is ahead of its
-        // caller and says so rather than looking derived.
-        ("trustpolicies", "get", "D3 W11 `trustPolicy.read`"),
-        ("trustpolicies", "list", "D3 W11 `trustPolicy.read`"), // engine-token-ok: an RBAC verb, never an engine subcommand
-    ];
+    // LIQUIDATED 2026-09-19: D3 W11 (0ca3386) landed every caller this list
+    // named — the mechanical rule above now covers all of them, so the list is
+    // empty and the guard that emptied it stays.
+    const GRANTED_AHEAD_OF_ITS_CALLER: [(&str, &str, &str); 0] = [];
     let sealed_now: BTreeSet<String> = namespaced
         .union(&console_sealed("ClusterResource"))
         .cloned()
