@@ -8776,6 +8776,99 @@
           }
         }
       },
+      "Operation": {
+        "description": "The normalized status of one Backup or Restore.",
+        "type": "object",
+        "required": [
+          "conditions",
+          "evidence",
+          "kind",
+          "name",
+          "namespace",
+          "resourceVersion",
+          "result",
+          "state",
+          "terminal",
+          "uid",
+          "verification",
+          "verifiedSuccess"
+        ],
+        "properties": {
+          "conditions": {
+            "description": "The status conditions, at most 16.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConditionView"
+            }
+          },
+          "createdAt": {
+            "description": "When the object was created.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "evidence": {
+            "description": "Evidence object references.",
+            "$ref": "#/components/schemas/OperationEvidence"
+          },
+          "kind": {
+            "description": "`backup` or `restore`.",
+            "$ref": "#/components/schemas/OperationKind"
+          },
+          "lastUpdatedAt": {
+            "description": "The most recent condition transition or verification instant.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "message": {
+            "description": "The message of the condition that carries the reason, bounded.",
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "description": "The object name.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "The namespace.",
+            "type": "string"
+          },
+          "resourceVersion": {
+            "description": "The resourceVersion this status was read at.",
+            "type": "string"
+          },
+          "result": {
+            "description": "The result, separate from verification.",
+            "$ref": "#/components/schemas/OperationResult"
+          },
+          "state": {
+            "description": "The lifecycle state.",
+            "$ref": "#/components/schemas/OperationState"
+          },
+          "stateReason": {
+            "description": "The CamelCase reason for the state.",
+            "type": "string",
+            "nullable": true
+          },
+          "terminal": {
+            "description": "Whether the state is final.",
+            "type": "boolean"
+          },
+          "uid": {
+            "description": "The Kubernetes UID.",
+            "type": "string"
+          },
+          "verification": {
+            "description": "Evidence verification, separate from the result.",
+            "$ref": "#/components/schemas/OperationVerification"
+          },
+          "verifiedSuccess": {
+            "description": "True only when the result passed AND the evidence verified `Valid` (the controller's green-badge rule). `NotAttempted` is never verified success.",
+            "type": "boolean"
+          }
+        }
+      },
       "OperationEvidence": {
         "description": "Evidence object references. Keys and digests only.",
         "type": "object",
@@ -8825,6 +8918,24 @@
             ]
           }
         ]
+      },
+      "OperationResponse": {
+        "description": "`GET .../operations/{kind}/{name}`.",
+        "type": "object",
+        "required": [
+          "item",
+          "requestId"
+        ],
+        "properties": {
+          "item": {
+            "description": "The normalized operation.",
+            "$ref": "#/components/schemas/Operation"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
       },
       "OperationResult": {
         "description": "The result half of an operation.",

@@ -12,6 +12,9 @@
     "approvalSubmit": false,
     "approvalsRead": true,
     "backupsRead": true,
+    "catalogConnect": true,
+    "catalogWindowQuery": false,
+    "catalogs": true,
     "connectionCreate": true,
     "connectionTest": false,
     "connectionsRead": true,
@@ -21,12 +24,17 @@
     "operationEvents": false,
     "operationsRead": true,
     "preflight": true,
+    "protection": true,
+    "rehearsals": true,
     "restoreCreate": true,
     "restoresRead": true,
+    "retention": true,
     "scheduleCreate": true,
     "scheduleSetSuspension": true,
     "schedulesRead": true,
-    "topicDiscovery": true
+    "topicDiscovery": true,
+    "trustAdministration": false,
+    "trustPoliciesRead": false
   },
   "namespaces": [
     {
@@ -35,6 +43,9 @@
         "approvalSubmit": false,
         "approvalsRead": true,
         "backupsRead": true,
+        "catalogConnect": true,
+        "catalogWindowQuery": false,
+        "catalogs": true,
         "connectionCreate": true,
         "connectionTest": false,
         "connectionsRead": true,
@@ -44,12 +55,17 @@
         "operationEvents": false,
         "operationsRead": true,
         "preflight": true,
+        "protection": true,
+        "rehearsals": true,
         "restoreCreate": true,
         "restoresRead": true,
+        "retention": true,
         "scheduleCreate": true,
         "scheduleSetSuspension": true,
         "schedulesRead": true,
-        "topicDiscovery": true
+        "topicDiscovery": true,
+        "trustAdministration": false,
+        "trustPoliciesRead": false
       },
       "name": "team-a",
       "roles": []

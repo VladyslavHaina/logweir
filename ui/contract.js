@@ -311,10 +311,12 @@ const NAME_REF = shapeOf("NameRef", { name: str });
 
 export const CAPABILITY_FLAGS = Object.freeze([
   "approvalPacketRead", "approvalSubmit", "approvalsRead", "backupsRead",
-  "connectionCreate", "connectionTest", "connectionsRead", "credentialWrite",
-  "destinations", "manualBackupCreate", "operationEvents", "operationsRead",
-  "preflight", "restoreCreate", "restoresRead", "scheduleCreate",
-  "scheduleSetSuspension", "schedulesRead", "topicDiscovery",
+  "catalogConnect", "catalogWindowQuery", "catalogs", "connectionCreate",
+  "connectionTest", "connectionsRead", "credentialWrite", "destinations",
+  "manualBackupCreate", "operationEvents", "operationsRead", "preflight",
+  "protection", "rehearsals", "restoreCreate", "restoresRead", "retention",
+  "scheduleCreate", "scheduleSetSuspension", "schedulesRead", "topicDiscovery",
+  "trustAdministration", "trustPoliciesRead",
 ]);
 
 const CAPABILITIES = shapeOf(
