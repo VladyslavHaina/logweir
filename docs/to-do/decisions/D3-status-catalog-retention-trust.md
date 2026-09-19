@@ -313,8 +313,12 @@ Objects without `status.progress` (older controller) map from phase/conditions a
 
 DTO fields that stay separate from `state`:
 
-- `result.value`: `none | succeeded | notPass | failed | refused` (`notPass` = Restore exit 2 or
-  outcome ≠ pass with a signed scorecard), plus verbatim `exitCode`, `exitReason`, `outcome`.
+- `result.status`: `pending | pass | notPass | refused | error | unknown` (`notPass` = Restore exit 2 or
+  outcome ≠ pass with a signed scorecard; `pending` = no result yet; `error` = a run that ended
+  without a classified result; `unknown` = not observed), plus verbatim `exitCode`, `exitReason`,
+  `outcome`. (Amended 2026-09-19 at D3 W11's review, F5: the API publishes `result.status` with this
+  vocabulary — `crates/logweir-api/src/contract.rs` `ResultStatus` — where this section had said
+  `result.value: none | succeeded | notPass | failed | refused`.)
 - `evidence.verification`: `pending | verified | verifiedHistorical | untrusted | invalid |
   notAttempted | notApplicable` (from §7.4 `result` + `trust.basis`; `notApplicable` for exits
   1, 3, 4 which write no artifact). A `succeeded` result with `notAttempted` is never rendered
