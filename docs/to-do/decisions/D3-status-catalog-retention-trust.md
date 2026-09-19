@@ -1397,6 +1397,8 @@ New chart values (all default off): `protection.enabled`, `rehearsals.enabled`,
 
 ## 10. API surface (P17 conventions: problem+json, Idempotency-Key, cursors, capability flags)
 
+*Amended 2026-09-19 (W11's review, F8): the cluster-scoped trust-policies read is narrowed per D0's role-matrix note — served only for policies governing a namespace the reader administers or `default`; see D0 §role matrix, last row.*
+
 ```
 GET  /api/v1/namespaces/{ns}/operations/{kind}/{name}            kind = backup|restore
 GET  /api/v1/namespaces/{ns}/operations/{kind}/{name}/events     SSE (§2.6)

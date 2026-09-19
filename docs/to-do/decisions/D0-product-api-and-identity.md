@@ -142,7 +142,7 @@ Actor identity is exactly `(OIDC issuer, sub)`. Group claims map by exact string
 | Ordinary confirmation | none | confirm own operation where bound policy is Ordinary | none | may operate, but is still the requester |
 | Governed approval submission | none | none | submit only in approver-bound namespaces | permitted only if separately bound; cannot approve own request when policy requires independence |
 | Namespace approval policy/trust binding | none | none | read effective policy | administer explicitly; installation floor still applies |
-| Installation trust, issuer/session config, role bindings | none | none | none | installation-admin only, cluster scope |
+| Installation trust, issuer/session config, role bindings | none | none | none | installation-admin only, cluster scope. *Amended 2026-09-19 (D3 W11's review, F8): the API's `(role, namespace)` model carries no installation scope, so the cluster-scoped `GET /api/v1/trust-policies` is narrowed instead — a policy is served only if it governs a namespace the reader administers or is `default`, everything else 404 with byte-identical bodies, `namespaces`/`boundNamespaces`/`conflicts` filtered and flagged `namespacesFiltered`; the page count still reflects the unfiltered list (a count leak, no names). An installation-admin scope is a queued follow-up.* |
 
 Viewer never mutates. Operator never submits a governed approval or changes trust/policy. Approver cannot create an execution. Admin is not a magic self-approval bypass. Namespace is checked before resource lookup so unauthorized and nonexistent resources both return the same 404/403 policy chosen for enumeration resistance; audit retains the real reason.
 
