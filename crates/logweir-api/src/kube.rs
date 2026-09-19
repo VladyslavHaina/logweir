@@ -3,9 +3,12 @@
 //! Every Kubernetes call this service makes is a method on [`KubeAdapter`],
 //! and every method is typed over the closed [`ProductResource`] set —
 //! `KafkaCluster`, `BackupSchedule`, `Backup`, `Restore`, `Approval`,
-//! `BackupDestination`, `TopicDiscovery` and `Preflight`. There is no method
-//! that takes a group, a version, a plural or a path, so no request can name a
-//! Pod, a log, an exec stream, a Job or a core Namespace; there is no delete.
+//! `BackupDestination`, `TopicDiscovery`, `Preflight`, `ProtectionPolicy`,
+//! `RehearsalSchedule`, `RecoveryCatalog` and `RetentionPolicy` — plus the one
+//! CLUSTER-SCOPED kind, `TrustPolicy`, behind its own read-only seal
+//! ([`ClusterResource`]). There is no method that takes a group, a version, a
+//! plural or a path, so no request can name a Pod, a log, an exec stream, a Job
+//! or a core Namespace; there is no delete.
 //!
 //! TWO CORE OBJECTS ARE REACHED, EACH THROUGH ONE VERB AND ONE HAND-WRITTEN
 //! TYPE. [`ResultDocument`] is a `configmaps` GET and nothing else: it is a
@@ -59,9 +62,14 @@ use weirkeeper::crds::backup_schedule::{
 };
 use weirkeeper::crds::kafka_cluster::KafkaCluster;
 use weirkeeper::crds::preflight::Preflight;
+use weirkeeper::crds::protection_policy::ProtectionPolicy;
+use weirkeeper::crds::recovery_catalog::RecoveryCatalog;
+use weirkeeper::crds::rehearsal_schedule::RehearsalSchedule;
 use weirkeeper::crds::restore::Restore;
+use weirkeeper::crds::retention_policy::RetentionPolicy;
 use weirkeeper::crds::selection::AllUserTopics;
 use weirkeeper::crds::topic_discovery::TopicDiscovery;
+use weirkeeper::crds::trust_policy::TrustPolicy;
 use weirkeeper::crds::{ArchiveRef, LocalRef};
 
 use crate::config::KubeSource;
@@ -83,6 +91,15 @@ mod sealed {
     impl Sealed for weirkeeper::crds::backup_destination::BackupDestination {}
     impl Sealed for weirkeeper::crds::topic_discovery::TopicDiscovery {}
     impl Sealed for weirkeeper::crds::preflight::Preflight {}
+    impl Sealed for weirkeeper::crds::protection_policy::ProtectionPolicy {}
+    impl Sealed for weirkeeper::crds::rehearsal_schedule::RehearsalSchedule {}
+    impl Sealed for weirkeeper::crds::recovery_catalog::RecoveryCatalog {}
+    impl Sealed for weirkeeper::crds::retention_policy::RetentionPolicy {}
+
+    /// The cluster-scoped half of the seal. `TrustPolicy` is the only kind in
+    /// it, and it is READ-ONLY here: see [`super::ClusterResource`].
+    pub trait ClusterSealed {}
+    impl ClusterSealed for weirkeeper::crds::trust_policy::TrustPolicy {}
 }
 
 /// The closed set of CUSTOM resources this service may touch. Sealed: no
@@ -108,6 +125,36 @@ impl ProductResource for Approval {}
 impl ProductResource for BackupDestination {}
 impl ProductResource for TopicDiscovery {}
 impl ProductResource for Preflight {}
+impl ProductResource for ProtectionPolicy {}
+impl ProductResource for RehearsalSchedule {}
+impl ProductResource for RecoveryCatalog {}
+impl ProductResource for RetentionPolicy {}
+
+/// The closed set of CLUSTER-SCOPED custom resources this service may READ.
+///
+/// A SECOND SEAL, AND DELIBERATELY SMALLER THAN THE FIRST. `TrustPolicy` is
+/// cluster-scoped for the reason `docs/kubernetes.md` §8 gives — "a roster
+/// whose name the subject supplies is a roster the subject can choose" — so it
+/// cannot travel through [`ProductResource`], whose bound is
+/// `Scope = NamespaceResourceScope` precisely so that no namespaced route can
+/// reach outside its namespace. This trait exists instead of relaxing that
+/// bound, and it carries NO create, patch or delete method: D3 §10 keeps trust
+/// WRITES off the API in v1, and the way to keep them off is for the adapter
+/// to have no method that could perform one.
+pub trait ClusterResource:
+    kube::Resource<DynamicType = (), Scope = k8s_openapi::ClusterResourceScope>
+    + Clone
+    + DeserializeOwned
+    + Serialize
+    + std::fmt::Debug
+    + Send
+    + Sync
+    + 'static
+    + sealed::ClusterSealed
+{
+}
+
+impl ClusterResource for TrustPolicy {}
 
 /// The two kinds whose `spec.cancelRequested` may be raised.
 ///
@@ -815,6 +862,38 @@ impl KubeAdapter {
             api.patch(name, &params, &Patch::Merge(&patch)),
         )
         .await
+    }
+
+    /// One page of a CLUSTER-SCOPED list. Reads only.
+    ///
+    /// # Errors
+    ///
+    /// [`KubeFailure`].
+    pub async fn list_cluster<K: ClusterResource>(
+        &self,
+        page: &PageRequest,
+    ) -> Result<ObjectList<K>, KubeFailure> {
+        let api: Api<K> = Api::all(self.client.clone());
+        let mut params = ListParams::default().limit(page.limit);
+        if let Some(token) = &page.continue_token {
+            params = params.continue_token(token);
+        }
+        if let Some(selector) = &page.label_selector {
+            params = params.labels(selector);
+        }
+        self.bounded("list_page", K::plural(&()).as_ref(), api.list(&params))
+            .await
+    }
+
+    /// One cluster-scoped object by name. Reads only.
+    ///
+    /// # Errors
+    ///
+    /// [`KubeFailure`], `NotFound` included.
+    pub async fn get_cluster<K: ClusterResource>(&self, name: &str) -> Result<K, KubeFailure> {
+        let api: Api<K> = Api::all(self.client.clone());
+        self.bounded("get", K::plural(&()).as_ref(), api.get(name))
+            .await
     }
 
     /// Read one stored check result document by name.

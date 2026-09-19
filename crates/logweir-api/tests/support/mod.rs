@@ -47,7 +47,7 @@ pub const CLIENT_ID: &str = "logweir-console";
 pub const REDIRECT_URI: &str = "https://console.test/auth/callback";
 pub const NS_A: &str = "team-a";
 pub const NS_B: &str = "team-b";
-pub const PLURALS: [&str; 8] = [
+pub const PLURALS: [&str; 12] = [
     "kafkaclusters",
     "backupschedules",
     "backups",
@@ -56,8 +56,22 @@ pub const PLURALS: [&str; 8] = [
     "backupdestinations",
     "topicdiscoveries",
     "preflights",
+    "protectionpolicies",
+    "rehearsalschedules",
+    "recoverycatalogs",
+    "retentionpolicies",
 ];
+
+/// The one CLUSTER-SCOPED plural. It lives under `PREFIX`'s parent path, with
+/// no `namespaces/<ns>/` segment, so a route that tried to read it as if it
+/// were namespaced would be `unexpected` rather than quietly answered.
+pub const CLUSTER_PLURALS: [&str; 1] = ["trustpolicies"];
+/// The namespace key cluster-scoped objects are stored under in the fake's own
+/// table. It is not a namespace and no request path contains it.
+pub const CLUSTER_KEY: &str = "\u{0}cluster";
 const PREFIX: &str = "/apis/logweir.dev/v1alpha1/namespaces/";
+/// The group root, for the cluster-scoped kind.
+const GROUP_PREFIX: &str = "/apis/logweir.dev/v1alpha1/";
 /// The core group's namespaced path. TWO OBJECTS ONLY, each with ONE verb:
 /// `configmaps` GET (a check's own stored result) and `secrets` POST (a
 /// write-only credential). Anything else under it is `unexpected`.
@@ -141,6 +155,11 @@ fn kind_of(plural: &str) -> &'static str {
         "backupdestinations" => "BackupDestination",
         "topicdiscoveries" => "TopicDiscovery",
         "preflights" => "Preflight",
+        "protectionpolicies" => "ProtectionPolicy",
+        "rehearsalschedules" => "RehearsalSchedule",
+        "recoverycatalogs" => "RecoveryCatalog",
+        "retentionpolicies" => "RetentionPolicy",
+        "trustpolicies" => "TrustPolicy",
         "configmaps" => "ConfigMap",
         "secrets" => "Secret",
         _ => "Unknown",
@@ -247,6 +266,33 @@ impl FakeKube {
         object["kind"] = json!(kind_of(plural));
         s.objects.insert(
             (plural.to_string(), namespace.to_string(), name),
+            object.clone(),
+        );
+        object
+    }
+
+    /// Store a CLUSTER-SCOPED object. It carries no `metadata.namespace`,
+    /// because a cluster-scoped object does not have one and a fake that
+    /// invented one would let a namespaced read path answer for it.
+    pub fn seed_cluster(&self, plural: &str, mut object: Value) -> Value {
+        let mut s = self.state.lock().unwrap();
+        s.next_rv += 1;
+        s.next_uid += 1;
+        let name = object["metadata"]["name"]
+            .as_str()
+            .expect("seeded objects have a name")
+            .to_string();
+        let meta = object["metadata"].as_object_mut().unwrap();
+        meta.entry("uid")
+            .or_insert(json!(format!("seed-uid-{}", s.next_uid)));
+        meta.insert("resourceVersion".into(), json!(s.next_rv.to_string()));
+        meta.entry("creationTimestamp")
+            .or_insert(json!("2026-09-15T10:00:00Z"));
+        meta.entry("generation").or_insert(json!(1));
+        object["apiVersion"] = json!("logweir.dev/v1alpha1");
+        object["kind"] = json!(kind_of(plural));
+        s.objects.insert(
+            (plural.to_string(), CLUSTER_KEY.to_string(), name),
             object.clone(),
         );
         object
@@ -445,6 +491,107 @@ fn core_answer(s: &mut State, recorded: &Recorded, rest: &str) -> (Option<Durati
     }
 }
 
+/// The cluster-scoped kind: `GET` list and `GET` by name, and nothing else.
+///
+/// ANY OTHER VERB IS `unexpected`. D3 §10 keeps trust WRITES off the API in v1,
+/// and the way a test proves that is for the fake to refuse a write rather than
+/// perform one — a route that learned to POST a `TrustPolicy` fails every test
+/// in this crate instead of passing quietly.
+fn cluster_answer(
+    s: &mut State,
+    recorded: &Recorded,
+    rest: &str,
+) -> (Option<Duration>, u16, String) {
+    let parts: Vec<&str> = rest.split('/').collect();
+    let (plural, name) = match parts.as_slice() {
+        [plural] => (plural.to_string(), None),
+        [plural, name] => (plural.to_string(), Some(name.to_string())),
+        _ => {
+            s.unexpected
+                .push(format!("{} {}", recorded.method, recorded.path));
+            return (
+                None,
+                500,
+                status_body(500, "InternalError", "not allowed by the fake"),
+            );
+        }
+    };
+    let query: BTreeMap<String, String> =
+        serde_urlencoded::from_str(&recorded.query).unwrap_or_default();
+    match (recorded.method.as_str(), name) {
+        ("GET", None) => {
+            if query.contains_key("continue") && s.expire_continue_tokens {
+                return (
+                    None,
+                    410,
+                    status_body(410, "Expired", "the continue token is too old"),
+                );
+            }
+            let limit: usize = query
+                .get("limit")
+                .and_then(|l| l.parse().ok())
+                .unwrap_or(usize::MAX);
+            let after = query
+                .get("continue")
+                .map(|c| c.strip_prefix("fake-continue:").unwrap_or("").to_string());
+            let selector = query.get("labelSelector").cloned().unwrap_or_default();
+            let mut items: Vec<Value> = s
+                .objects
+                .iter()
+                .filter(|((p, n, _), _)| p == &plural && n == CLUSTER_KEY)
+                .filter(|((_, _, name), _)| {
+                    after.as_ref().is_none_or(|a| name.as_str() > a.as_str())
+                })
+                .map(|(_, v)| v.clone())
+                .filter(|v| labels_match(v, &selector))
+                .collect();
+            let more = items.len() > limit;
+            items.truncate(limit);
+            let mut metadata = json!({"resourceVersion": s.next_rv.to_string()});
+            if more {
+                let last = items
+                    .last()
+                    .and_then(|v| v["metadata"]["name"].as_str())
+                    .unwrap_or("");
+                metadata["continue"] = json!(format!("fake-continue:{last}"));
+            }
+            (
+                None,
+                200,
+                json!({
+                    "apiVersion": "logweir.dev/v1alpha1",
+                    "kind": format!("{}List", kind_of(&plural)),
+                    "metadata": metadata,
+                    "items": items,
+                })
+                .to_string(),
+            )
+        }
+        ("GET", Some(name)) => {
+            match s
+                .objects
+                .get(&(plural.clone(), CLUSTER_KEY.to_string(), name.clone()))
+            {
+                Some(v) => (None, 200, v.to_string()),
+                None => (
+                    None,
+                    404,
+                    status_body(404, "NotFound", &format!("{plural} \"{name}\" not found")),
+                ),
+            }
+        }
+        _ => {
+            s.unexpected
+                .push(format!("{} {}", recorded.method, recorded.path));
+            (
+                None,
+                500,
+                status_body(500, "InternalError", "not allowed by the fake"),
+            )
+        }
+    }
+}
+
 fn answer(state: &Arc<Mutex<State>>, recorded: Recorded) -> (Option<Duration>, u16, String) {
     // Taken BEFORE the answer and applied AFTER it, so the work really happens
     // and only the response is late. The lock is released before `answer_inner`
@@ -491,6 +638,14 @@ fn answer_inner(state: &Arc<Mutex<State>>, recorded: Recorded) -> (Option<Durati
 
     if let Some(rest) = recorded.path.strip_prefix(CORE_PREFIX) {
         return core_answer(&mut s, &recorded, rest);
+    }
+    // The cluster-scoped kind, BEFORE the namespaced prefix check: its path
+    // has no `namespaces/<ns>/` segment at all, and the only verbs are GET.
+    if let Some(rest) = recorded.path.strip_prefix(GROUP_PREFIX) {
+        let first = rest.split('/').next().unwrap_or_default();
+        if CLUSTER_PLURALS.contains(&first) {
+            return cluster_answer(&mut s, &recorded, rest);
+        }
     }
     let Some(rest) = recorded.path.strip_prefix(PREFIX) else {
         s.unexpected

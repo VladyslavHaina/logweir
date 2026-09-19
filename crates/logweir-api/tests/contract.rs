@@ -80,6 +80,23 @@ fn the_document_names_every_route_and_every_route_answers() {
             "/api/v1/namespaces/{ns}/preflights/{id}:cancel",
             "/api/v1/namespaces/{ns}/preflights/{id}/details",
             "/api/v1/namespaces/{ns}/operations/{kind}/{name}",
+            // D3 W11: the stream, the five read families and the one write
+            // among them.
+            "/api/v1/namespaces/{ns}/operations/{kind}/{name}/events",
+            "/api/v1/namespaces/{ns}/protection-policies",
+            "/api/v1/namespaces/{ns}/protection-policies/{name}",
+            "/api/v1/namespaces/{ns}/rehearsal-schedules",
+            "/api/v1/namespaces/{ns}/rehearsal-schedules/{name}",
+            "/api/v1/namespaces/{ns}/catalogs",
+            "/api/v1/namespaces/{ns}/catalogs/{name}",
+            "/api/v1/namespaces/{ns}/catalogs/{name}/points",
+            "/api/v1/namespaces/{ns}/catalogs/{name}/signers",
+            "/api/v1/namespaces/{ns}/retention-policies",
+            "/api/v1/namespaces/{ns}/retention-policies/{name}",
+            // The one cluster-scoped family: no `{ns}`, because a TrustPolicy
+            // names the namespaces it governs rather than living in one.
+            "/api/v1/trust-policies",
+            "/api/v1/trust-policies/{name}",
         ]
     );
     let mut operation_ids = BTreeSet::new();
@@ -93,7 +110,7 @@ fn the_document_names_every_route_and_every_route_answers() {
             );
         }
     }
-    assert_eq!(operation_ids.len(), 42);
+    assert_eq!(operation_ids.len(), 56);
 }
 
 /// Three documented paths exist only in shared mode: the two `/auth` routes and
@@ -194,6 +211,18 @@ fn walk<'a>(
     }
     if let Some(items) = schema.get("items") {
         walk(items, schemas, seen, out);
+    }
+    // COMPOSITION KEYWORDS ARE FOLLOWED TOO. `schemars` renders a flattened
+    // struct inline today, but it renders an `Option<T>` of a named type as a
+    // `$ref` beside a `nullable`, and a future shape could put a payload under
+    // `allOf`/`oneOf`/`anyOf`. A walk that stopped at those would quietly stop
+    // reaching the schemas the credential scan below is the whole point of.
+    for keyword in ["allOf", "oneOf", "anyOf"] {
+        if let Some(branches) = schema.get(keyword).and_then(Value::as_array) {
+            for branch in branches {
+                walk(branch, schemas, seen, out);
+            }
+        }
     }
 }
 

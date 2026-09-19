@@ -45,7 +45,18 @@ async fn kubernetes_shaped_and_unlisted_paths_are_404_and_reach_nothing() {
         "/api/v1/namespaces/team-a/topic-discoveries",
         "/api/v1/namespaces/team-a/destinations/x/topics",
         "/api/v1/namespaces/team-a/backupdestinations",
-        "/api/v1/namespaces/team-a/operations/backup/x/events",
+        // D3 W11 ADDED `.../events`, so the path that used to be here has
+        // moved to `catalogs.rs`'s own suite; what stays a 404 is a stream
+        // for a kind that has none. A transient check finishes in seconds and
+        // already has a cancel route; a long-lived connection is a resource it
+        // does not need, and the route table is the boundary.
+        "/api/v1/namespaces/team-a/operations/discovery/x/events",
+        "/api/v1/namespaces/team-a/operations/preflight/x/events",
+        "/api/v1/namespaces/team-a/operations/secret/x/events",
+        // The cluster-scoped trust read is a READ. There is no write route in
+        // v1 and the shape of that is a 405, not a stub that answers 501.
+        "/api/v1/trustpolicies",
+        "/api/v1/trust-policies/{name}",
         "/api/v1/nodes",
         "/api/v1/session/",
         "/version",

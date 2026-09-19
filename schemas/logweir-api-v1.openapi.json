@@ -3322,7 +3322,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/OperationResponse"
+                  "$ref": "#/components/schemas/OperationViewResponse"
                 }
               }
             }
@@ -3347,6 +3347,1072 @@
           "method_not_allowed",
           "misdirected_request",
           "namespace_forbidden",
+          "not_found",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/operations/{kind}/{name}/events": {
+      "get": {
+        "operationId": "streamOperationEvents",
+        "summary": "A bounded text/event-stream of one backup's or restore's normalized status. Event types are operation, reset, heartbeat and end; the event id is the object's resourceVersion and Last-Event-ID resumes with a reset snapshot when it is not the version the stream opened at. Every bound is the server's: the connection is closed after 300 s, a heartbeat is sent every 15 s of silence, and concurrent streams per principal per namespace are capped. NO query parameter is accepted, so no token can be placed in the URL; the stream is authenticated by the same session cookie as every other route and authorized once, at subscribe, for operation.read and operation.stream.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "kind",
+            "in": "path",
+            "required": true,
+            "description": "backup or restore. A transient check has a read route and no stream.",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "backup",
+                "restore"
+              ]
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Last-Event-ID",
+            "in": "header",
+            "required": false,
+            "description": "The resourceVersion of the last event received. Decimal digits, at most 64 of them; anything else is malformed_request.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The event stream. text/event-stream, not application/json."
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/protection-policies": {
+      "get": {
+        "operationId": "listProtectionPolicies",
+        "summary": "Protection health: the newest point that can actually be recovered from, how availability was decided, the objective, the failed and missed runs, each schedule's OWN readiness beside protection health, and the alert ledger with its delivery state. No sink URL, no routing key and no Secret name: each route publishes its name and which channels it has as booleans.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size, 1 to 200. Default 50.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "labelSelector",
+            "in": "query",
+            "required": false,
+            "description": "Equality-only label selector, key=value terms separated by commas.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of protection policies.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtectionPolicyList"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "cursor_expired",
+          "cursor_invalid",
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/protection-policies/{name}": {
+      "get": {
+        "operationId": "getProtectionPolicy",
+        "summary": "One protection policy. `health` absent means nothing has been evaluated, which is not Healthy.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The policy.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ProtectionPolicyResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/rehearsal-schedules": {
+      "get": {
+        "operationId": "listRehearsalSchedules",
+        "summary": "Recurring recovery rehearsals: the last pass, the last failure and the last SKIP with its reason, plus the leftover topics that block the next slot. The signed standing authorization is named, never carried.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size, 1 to 200. Default 50.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "labelSelector",
+            "in": "query",
+            "required": false,
+            "description": "Equality-only label selector, key=value terms separated by commas.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of rehearsal schedules.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RehearsalScheduleList"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "cursor_expired",
+          "cursor_invalid",
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/rehearsal-schedules/{name}": {
+      "get": {
+        "operationId": "getRehearsalSchedule",
+        "summary": "One rehearsal schedule.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The schedule.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RehearsalScheduleResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/catalogs": {
+      "get": {
+        "operationId": "listCatalogs",
+        "summary": "Recovery catalogs: the ten verdict counts, the signer list, whether the Kubernetes view is a WINDOW over a larger archive, and when that window ages out with its sync Job.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size, 1 to 200. Default 50.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "labelSelector",
+            "in": "query",
+            "required": false,
+            "description": "Equality-only label selector, key=value terms separated by commas.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of catalogs.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogList"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "cursor_expired",
+          "cursor_invalid",
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      },
+      "post": {
+        "operationId": "connectArchive",
+        "summary": "Connect an existing archive (PLAT-15.2): create a RecoveryCatalog under the name in the body, because every protection, rehearsal and retention policy references it by that name. The controller owns the object; this route creates it and nothing else. Repeating the request with the same Idempotency-Key returns the same object.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "Idempotency-Key",
+            "in": "header",
+            "required": true,
+            "description": "8 to 128 visible ASCII characters. The object name is derived from (actor, namespace, route, key); a replay of the same request returns 200 with the same object, a different request with the same key is idempotency_conflict.",
+            "schema": {
+              "type": "string",
+              "minLength": 8,
+              "maxLength": 128
+            }
+          },
+          {
+            "name": "Origin",
+            "in": "header",
+            "required": true,
+            "description": "Must equal the configured public origin exactly.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/ConnectArchiveRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "Created.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Replayed an identical earlier request.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "idempotency_conflict",
+          "idempotency_key_invalid",
+          "idempotency_key_required",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "origin_mismatch",
+          "payload_too_large",
+          "rate_limited",
+          "session_expired",
+          "state_conflict",
+          "unauthenticated",
+          "unsupported_media_type",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/catalogs/{name}": {
+      "get": {
+        "operationId": "getCatalog",
+        "summary": "One catalog.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The catalog.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CatalogResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/catalogs/{name}/points": {
+      "get": {
+        "operationId": "listCatalogPoints",
+        "summary": "One page of the materialised point view, with availability and verification as SEPARATE columns and the controller's own `selectable` conjunction beside them. Pages are read by the names the catalog's status records, at most eight per request, and each one is refused unless it is immutable and its bytes match the digest the status recorded. The cursor is bound to the view generation: a view replaced under a paging client is cursor_invalid with 'restart the list', never a silently different page. An empty list with viewExpired true means the window aged out, not that the archive is empty.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size, 1 to 200. Default 50.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "The opaque nextCursor of the previous page.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "selectable",
+            "in": "query",
+            "required": false,
+            "description": "true returns only points an ordinary restore may select (Available and verified).",
+            "schema": {
+              "type": "string",
+              "enum": [
+                "true",
+                "false"
+              ]
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of recovery points.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/PointPageResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "cursor_expired",
+          "cursor_invalid",
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "rate_limited",
+          "result_integrity_failed",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/catalogs/{name}/signers": {
+      "get": {
+        "operationId": "listCatalogSigners",
+        "summary": "The untrusted-signer panel: each key id that signed points in this archive, how many, and whether the bound TrustPolicy accepts it — with the out-of-band fingerprint command and NO route that would trust a key. Absent `trusted` means the catalog could not tell, which is not false and is certainly not true.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The signers.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/SignerPageResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/retention-policies": {
+      "get": {
+        "operationId": "listRetentionPolicies",
+        "summary": "Retention: what the last evaluation would remove, what is ACTUALLY enforcing it (RecommendationOnly, LogweirWorker or ExternalLifecycleDeclared), which guarantees are Logweir-enforced, provider-declared-unverified or not enforced at all, where the approved-plan gate stands, and whether three consecutive failed runs have set EnforcementDegraded. The delete-capable credential is published as a boolean, never as a Secret name.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size, 1 to 200. Default 50.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "The opaque nextCursor of the previous page. Bound to actor, route, namespace and filters; expires after 15 minutes.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "labelSelector",
+            "in": "query",
+            "required": false,
+            "description": "Equality-only label selector, key=value terms separated by commas.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of retention policies.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetentionPolicyList"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "cursor_expired",
+          "cursor_invalid",
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/namespaces/{ns}/retention-policies/{name}": {
+      "get": {
+        "operationId": "getRetentionPolicy",
+        "summary": "One retention policy, with the plan preview its last evaluation produced. Nothing in `lastEvaluation` was deleted.",
+        "parameters": [
+          {
+            "name": "ns",
+            "in": "path",
+            "required": true,
+            "description": "An explicitly granted namespace. An ungranted namespace is namespace_forbidden whether or not it exists.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The policy.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RetentionPolicyResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "namespace_forbidden",
+          "not_found",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout"
+        ]
+      }
+    },
+    "/api/v1/trust-policies": {
+      "get": {
+        "operationId": "listTrustPolicies",
+        "summary": "The installation's trust policies: which keys are accepted, for what usage, and how fresh that verdict is. CLUSTER-SCOPED, so it has no namespace and requires the administrator role in at least one bound namespace. A key whose evaluation is not fresh — no status, a status from an older generation, or an evaluatedAt older than 15 minutes by THIS server's clock — is published with effectiveState 'unknown' and no usability verdict: unknown is not valid. No public key bytes and no write route.",
+        "parameters": [
+          {
+            "name": "limit",
+            "in": "query",
+            "required": false,
+            "description": "Page size, 1 to 200. Default 50.",
+            "schema": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 200,
+              "default": 50
+            }
+          },
+          {
+            "name": "cursor",
+            "in": "query",
+            "required": false,
+            "description": "The opaque nextCursor of the previous page.",
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "labelSelector",
+            "in": "query",
+            "required": false,
+            "description": "Equality-only label selector.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "One page of trust policies.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrustPolicyList"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "cursor_expired",
+          "cursor_invalid",
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
+          "rate_limited",
+          "session_expired",
+          "unauthenticated",
+          "upstream_timeout",
+          "validation_failed"
+        ]
+      }
+    },
+    "/api/v1/trust-policies/{name}": {
+      "get": {
+        "operationId": "getTrustPolicy",
+        "summary": "One trust policy.",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "required": true,
+            "description": "The object name.",
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "The policy.",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/TrustPolicyResponse"
+                }
+              }
+            }
+          },
+          "default": {
+            "description": "An application/problem+json error; the possible codes are listed in x-logweir-problem-codes.",
+            "content": {
+              "application/problem+json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Problem"
+                }
+              }
+            }
+          }
+        },
+        "x-logweir-problem-codes": [
+          "forbidden",
+          "header_not_allowed",
+          "internal_error",
+          "kubernetes_unavailable",
+          "malformed_request",
+          "method_not_allowed",
+          "misdirected_request",
           "not_found",
           "rate_limited",
           "session_expired",
@@ -3612,6 +4678,86 @@
           }
         ]
       },
+      "AlertDeliveryView": {
+        "description": "How a transition was delivered, or why it was not.",
+        "type": "object",
+        "properties": {
+          "attempts": {
+            "description": "How many attempts.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "lastAttemptAt": {
+            "description": "When the last one was.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "lastError": {
+            "description": "The last error, redacted by the controller and bounded again here. Never a routing key and never a URL.",
+            "type": "string",
+            "nullable": true
+          },
+          "state": {
+            "description": "`Pending`, `Delivered`, `Failed` or `Suppressed`.",
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "AlertView": {
+        "description": "One entry of the deduplication ledger.",
+        "type": "object",
+        "required": [
+          "key",
+          "kind",
+          "state"
+        ],
+        "properties": {
+          "delivery": {
+            "description": "How that delivery went.",
+            "$ref": "#/components/schemas/AlertDeliveryView",
+            "nullable": true
+          },
+          "key": {
+            "description": "The stable dedup key.",
+            "type": "string"
+          },
+          "kind": {
+            "description": "What it is about.",
+            "type": "string"
+          },
+          "notifiedTransition": {
+            "description": "The last transition a delivery was created for. `transition` ahead of this one is an alert whose latest state has not been delivered.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "openedAt": {
+            "description": "When it opened.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "resolvedAt": {
+            "description": "When it resolved.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "state": {
+            "description": "`Open` or `Resolved`.",
+            "type": "string"
+          },
+          "transition": {
+            "description": "The transition counter: it increments on open, on resolve and on each re-notify.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          }
+        }
+      },
       "AllUserTopics": {
         "description": "Dynamic selection: every user topic the run's principal can see, minus the exclusions.",
         "type": "object",
@@ -3836,6 +4982,60 @@
           }
         }
       },
+      "ApprovedPlanState": {
+        "description": "Where the approved-plan gate stands.",
+        "oneOf": [
+          {
+            "description": "The policy does not enforce, so there is nothing to approve.",
+            "type": "string",
+            "enum": [
+              "notApplicable"
+            ]
+          },
+          {
+            "description": "`requireApprovedPlan: false`. Deletion runs unattended, and the controller records `Enforced/UnattendedDeletionEnabled` so the choice is visible on the object rather than only in a values file.",
+            "type": "string",
+            "enum": [
+              "notRequired"
+            ]
+          },
+          {
+            "description": "Enforcement is configured and no evaluation has produced a plan yet.",
+            "type": "string",
+            "enum": [
+              "noPlan"
+            ]
+          },
+          {
+            "description": "A plan exists and no approved digest matches it.",
+            "type": "string",
+            "enum": [
+              "awaitingApproval"
+            ]
+          },
+          {
+            "description": "The approved digest matches the current plan and the plan is young enough.",
+            "type": "string",
+            "enum": [
+              "approved"
+            ]
+          },
+          {
+            "description": "The approved digest matches and the plan has aged out; the next evaluation replaces it and it must be approved again.",
+            "type": "string",
+            "enum": [
+              "expired"
+            ]
+          },
+          {
+            "description": "Something the rule needs is absent. **Never `Approved`.**",
+            "type": "string",
+            "enum": [
+              "unknown"
+            ]
+          }
+        ]
+      },
       "ArchiveRequest": {
         "description": "An archive location in a request.",
         "type": "object",
@@ -3892,6 +5092,60 @@
             ]
           }
         ]
+      },
+      "AvailablePointView": {
+        "description": "The newest point this policy can actually recover from.",
+        "type": "object",
+        "required": [
+          "topics",
+          "topicsTruncated"
+        ],
+        "properties": {
+          "ageSeconds": {
+            "description": "How old the point was when the objective was evaluated.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "backupRef": {
+            "description": "The `Backup` object, while one still exists.",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "evidence": {
+            "description": "`Valid`, `ValidHistorical`, `Untrusted` or `NotAttempted`.",
+            "type": "string",
+            "nullable": true
+          },
+          "newestRecordAt": {
+            "description": "The newest record the point contains. A DIFFERENT NUMBER, published beside the one above so nobody reads an idle topic as stale protection.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "pointId": {
+            "description": "The durable point identity, when the catalog supplied one.",
+            "type": "string",
+            "nullable": true
+          },
+          "recoveryPointAt": {
+            "description": "*Capture start** — what the objective is measured from.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "topics": {
+            "description": "The topics it covers, bounded.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "topicsTruncated": {
+            "description": "Whether `topics` was cut short.",
+            "type": "boolean"
+          }
+        }
       },
       "Backup": {
         "description": "A backup run.",
@@ -4416,6 +5670,42 @@
           }
         }
       },
+      "CandidateView": {
+        "description": "One point the evaluation would remove.",
+        "type": "object",
+        "required": [
+          "pointId"
+        ],
+        "properties": {
+          "bytes": {
+            "description": "How many bytes, when the view knows.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "objects": {
+            "description": "How many objects it holds, when the view knows.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "pointId": {
+            "description": "The point.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Which rule made it a candidate.",
+            "type": "string",
+            "nullable": true
+          },
+          "recoveryPointAt": {
+            "description": "Its capture start.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
+      },
       "Capabilities": {
         "description": "The capability flags of one namespace grant.\n\nEvery flag is `implemented && allowed`. The eight domains that have no route in this build are always `false`.",
         "type": "object",
@@ -4424,6 +5714,9 @@
           "approvalSubmit",
           "approvalsRead",
           "backupsRead",
+          "catalogConnect",
+          "catalogWindowQuery",
+          "catalogs",
           "connectionCreate",
           "connectionTest",
           "connectionsRead",
@@ -4433,12 +5726,17 @@
           "operationEvents",
           "operationsRead",
           "preflight",
+          "protection",
+          "rehearsals",
           "restoreCreate",
           "restoresRead",
+          "retention",
           "scheduleCreate",
           "scheduleSetSuspension",
           "schedulesRead",
-          "topicDiscovery"
+          "topicDiscovery",
+          "trustAdministration",
+          "trustPoliciesRead"
         ],
         "properties": {
           "approvalPacketRead": {
@@ -4455,6 +5753,18 @@
           },
           "backupsRead": {
             "description": "`GET .../backups[/{name}]`.",
+            "type": "boolean"
+          },
+          "catalogConnect": {
+            "description": "`POST .../catalogs` — connect an existing archive (PLAT-15.2).",
+            "type": "boolean"
+          },
+          "catalogWindowQuery": {
+            "description": "Windowed catalog point queries (filters beyond the published window) have no route in v1 and are advertised `false` for everybody, per D3 §5.3's \"an absent capability, never a fake stub\".",
+            "type": "boolean"
+          },
+          "catalogs": {
+            "description": "The recovery-catalog domain (PLAT-15.1) is served AND readable here.",
             "type": "boolean"
           },
           "connectionCreate": {
@@ -4482,7 +5792,7 @@
             "type": "boolean"
           },
           "operationEvents": {
-            "description": "Operation event streams: no route.",
+            "description": "`GET .../operations/{kind}/{name}/events` — the server-sent stream.",
             "type": "boolean"
           },
           "operationsRead": {
@@ -4493,12 +5803,24 @@
             "description": "The preflight domain (PLAT-03) is served AND readable here.",
             "type": "boolean"
           },
+          "protection": {
+            "description": "The protection domain (PLAT-14.2) is served AND readable here.",
+            "type": "boolean"
+          },
+          "rehearsals": {
+            "description": "The rehearsal domain (PLAT-14.3) is served AND readable here.",
+            "type": "boolean"
+          },
           "restoreCreate": {
             "description": "`POST .../restores`.",
             "type": "boolean"
           },
           "restoresRead": {
             "description": "`GET .../restores[/{name}]`.",
+            "type": "boolean"
+          },
+          "retention": {
+            "description": "The retention domain (PLAT-16.1/16.2) is served AND readable here.",
             "type": "boolean"
           },
           "scheduleCreate": {
@@ -4516,6 +5838,297 @@
           "topicDiscovery": {
             "description": "The topic-discovery domain (PLAT-09.1) is served AND readable here.\n\nONE FLAG PER DOMAIN, AND IT IS THE READ FLOOR. D2 §8 names exactly three flags — `destinations`, `topicDiscovery`, `preflight` — so a domain gets one bit, not a bit per verb, and the bit answers \"is this domain served and visible to me\". Whether the actor may also START or CANCEL is the role table above, which `/session` publishes per grant in `roles`; a console reads `roles.includes(\"operator\")` for the buttons and this flag for the page. Splitting these into read/start pairs is a contract change that must land together with `ui/contract.js`'s `CAPABILITY_FLAGS`.",
             "type": "boolean"
+          },
+          "trustAdministration": {
+            "description": "Trust ADMINISTRATION (adding, retiring or revoking a key) has no route in v1 and is advertised `false` for everybody: D3 §10 keeps cluster-scoped trust writes on `kubectl apply` and the `logweir trust` helpers. There is no `Action` behind this flag, on purpose — a flag with no action cannot be turned on by a role table edit.",
+            "type": "boolean"
+          },
+          "trustPoliciesRead": {
+            "description": "`GET /api/v1/trust-policies[/{name}]` — the cluster-scoped read.",
+            "type": "boolean"
+          }
+        }
+      },
+      "CaptureView": {
+        "description": "When the capture actually happened — a Backup's.",
+        "type": "object",
+        "properties": {
+          "finishedAt": {
+            "description": "When it finished.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "startedAt": {
+            "description": "Capture START, which is what protection freshness is measured from.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
+      },
+      "CatalogCountsView": {
+        "description": "What the last sync found, by verdict. **Ten counts, not two**: \"how many points are there\" and \"how many can I restore from\" are different numbers.",
+        "type": "object",
+        "properties": {
+          "available": {
+            "description": "Readable, digest-matching, selectable.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "conflict": {
+            "description": "Two records disagree about one point.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "deleted": {
+            "description": "Recorded as deleted by an attributable retention run.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "invalid": {
+            "description": "The signature did not verify.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "missing": {
+            "description": "A definite `NotFound`.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "total": {
+            "description": "Every point the walk saw.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "unreadable": {
+            "description": "Present but unreadable — NOT the same as absent.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "unsupportedFormat": {
+            "description": "Written by a format this build does not understand.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "untrustedSigner": {
+            "description": "Signed by a key the bound policy does not trust.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "unverified": {
+            "description": "No signature verdict was reached.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          }
+        }
+      },
+      "CatalogList": {
+        "description": "A page of catalogs.",
+        "type": "object",
+        "required": [
+          "items",
+          "page",
+          "requestId"
+        ],
+        "properties": {
+          "items": {
+            "description": "The items on this page.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CatalogView"
+            }
+          },
+          "page": {
+            "description": "Paging.",
+            "$ref": "#/components/schemas/Page"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "CatalogResponse": {
+        "description": "One catalog.",
+        "type": "object",
+        "required": [
+          "item",
+          "requestId"
+        ],
+        "properties": {
+          "item": {
+            "description": "The item.",
+            "$ref": "#/components/schemas/CatalogView"
+          },
+          "replayed": {
+            "description": "Whether this replays an earlier identical request (HTTP 200) rather than creating (HTTP 201).",
+            "type": "boolean",
+            "nullable": true
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "CatalogView": {
+        "description": "A `RecoveryCatalog`, projected.",
+        "type": "object",
+        "required": [
+          "conditions",
+          "counts",
+          "deepCheck",
+          "histogram",
+          "intervalSeconds",
+          "mode",
+          "name",
+          "namespace",
+          "resourceVersion",
+          "signers",
+          "truncated",
+          "uid",
+          "viewExpired",
+          "viewLimit",
+          "viewPoints"
+        ],
+        "properties": {
+          "conditions": {
+            "description": "`Ready`, `Synced`, `Stale` and `TrustAvailable`.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConditionView"
+            }
+          },
+          "counts": {
+            "description": "What it found.",
+            "$ref": "#/components/schemas/CatalogCountsView"
+          },
+          "createdAt": {
+            "description": "When the object was created.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "cursor": {
+            "description": "Where the walk got to.",
+            "$ref": "#/components/schemas/SyncCursorView",
+            "nullable": true
+          },
+          "deepCheck": {
+            "description": "`None`, `ManifestDigest` or `SegmentSample`.",
+            "type": "string"
+          },
+          "destinationRef": {
+            "description": "The saved destination it indexes.",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "generation": {
+            "description": "`metadata.generation`.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "histogram": {
+            "description": "Points per day.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/HistogramBucketView"
+            }
+          },
+          "intervalSeconds": {
+            "description": "How often it syncs; `0` is manual only.",
+            "type": "integer",
+            "format": "int32"
+          },
+          "lastSync": {
+            "description": "The last sync Job.",
+            "$ref": "#/components/schemas/LastSyncView",
+            "nullable": true
+          },
+          "legacyArchive": {
+            "description": "The inline archive, with any userinfo redacted and the credential as a Secret NAME.",
+            "$ref": "#/components/schemas/ArchiveView",
+            "nullable": true
+          },
+          "mode": {
+            "description": "`Index` or `Full`.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The object name.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "The namespace.",
+            "type": "string"
+          },
+          "observedGeneration": {
+            "description": "The generation the view was built from.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "observedSyncRequest": {
+            "description": "The `syncRequest` token the controller has acted on. A request whose token is not this one has not been served yet.",
+            "type": "string",
+            "nullable": true
+          },
+          "resourceVersion": {
+            "description": "The resourceVersion this projection was read at.",
+            "type": "string"
+          },
+          "signers": {
+            "description": "Who signed them.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SignerView"
+            }
+          },
+          "syncedAt": {
+            "description": "When the view was last refreshed.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "truncated": {
+            "description": "Whether the archive holds more points than the view carries.",
+            "type": "boolean"
+          },
+          "uid": {
+            "description": "The Kubernetes UID.",
+            "type": "string"
+          },
+          "viewExpired": {
+            "description": "Whether the view has already expired, by this server's clock.",
+            "type": "boolean"
+          },
+          "viewExpiresAt": {
+            "description": "When the pages age out with their Job. After it the view is gone and this object says so rather than reporting an empty archive.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "viewLimit": {
+            "description": "How many newest points are materialised into Kubernetes.",
+            "type": "integer",
+            "format": "int32"
+          },
+          "viewPoints": {
+            "description": "How many points the materialised view actually holds.",
+            "type": "integer",
+            "format": "int64"
           }
         }
       },
@@ -4870,6 +6483,88 @@
           }
         ]
       },
+      "CleanupStateView": {
+        "description": "Topics a previous teardown could not remove. While this is non-empty the next slot is SKIPPED rather than allowed to adopt topics it did not create.",
+        "type": "object",
+        "required": [
+          "pendingTopics",
+          "pendingTopicsTruncated"
+        ],
+        "properties": {
+          "pendingTopics": {
+            "description": "The topics still there.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "pendingTopicsTruncated": {
+            "description": "Whether the list was cut short.",
+            "type": "boolean"
+          },
+          "since": {
+            "description": "Since when.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
+      },
+      "CompletionView": {
+        "description": "D3 §3.5's incident-facing completion panel — a Restore's, copied from the signed scorecard and never recomputed.",
+        "type": "object",
+        "required": [
+          "newTopics",
+          "targetMode"
+        ],
+        "properties": {
+          "integrityLevel": {
+            "description": "`byte-fingerprint`, `consume-only` or `not-attempted`, verbatim.",
+            "type": "string",
+            "nullable": true
+          },
+          "newTopics": {
+            "description": "The topics the run created, with their partition counts.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CreatedTopicView"
+            }
+          },
+          "recordsExpected": {
+            "description": "The canary size.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "recordsRestored": {
+            "description": "How many records were restored in the sampled window.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "recordsSampled": {
+            "description": "How many records were sampled.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "recordsSampledMatching": {
+            "description": "How many of them matched.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "sampleWindow": {
+            "description": "The window the sample covered.",
+            "$ref": "#/components/schemas/SampleWindowView",
+            "nullable": true
+          },
+          "targetMode": {
+            "description": "`scratch` or `newTopic` — which fixed guidance the console renders.",
+            "type": "string"
+          }
+        }
+      },
       "ConcurrencyPolicy": {
         "description": "Whether a slot may start while an earlier run is unfinished.",
         "oneOf": [
@@ -4922,6 +6617,102 @@
             "type": "string"
           }
         }
+      },
+      "ConnectArchiveRequest": {
+        "description": "`POST .../catalogs` — connect an archive.\n\nTHE NAME IS THE CALLER'S, like a destination's and for the same reason: a `ProtectionPolicy`, a `RehearsalSchedule` and a `RetentionPolicy` all reference a catalog by name, and a hashed name would make every one of those references unreadable.",
+        "type": "object",
+        "required": [
+          "name",
+          "syncMode"
+        ],
+        "properties": {
+          "deepCheck": {
+            "description": "How hard to check each point. Absent takes the CRD's default.",
+            "default": null,
+            "$ref": "#/components/schemas/ConnectDeepCheck",
+            "nullable": true
+          },
+          "destinationRef": {
+            "description": "The saved destination to index.",
+            "default": null,
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "intervalSeconds": {
+            "description": "Seconds between syncs; `0` is manual only. Absent takes the CRD's default.",
+            "default": null,
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "legacyArchive": {
+            "description": "An archive that predates saved destinations. Exactly one of this and `destinationRef`.",
+            "default": null,
+            "$ref": "#/components/schemas/ArchiveRequest",
+            "nullable": true
+          },
+          "name": {
+            "description": "The catalog's name, a DNS-1123 subdomain.",
+            "type": "string"
+          },
+          "syncMode": {
+            "description": "`index` or `full`. Connecting an existing archive wants `full`: an index walk only reads shards a Logweir installation wrote.",
+            "$ref": "#/components/schemas/ConnectSyncMode"
+          },
+          "viewLimit": {
+            "description": "How many newest points are materialised. Absent takes the CRD's default.",
+            "default": null,
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          }
+        },
+        "additionalProperties": false
+      },
+      "ConnectDeepCheck": {
+        "description": "The request spelling of [`DeepCheck`].",
+        "oneOf": [
+          {
+            "description": "Existence only.",
+            "type": "string",
+            "enum": [
+              "none"
+            ]
+          },
+          {
+            "description": "The manifest digest equals the receipt's.",
+            "type": "string",
+            "enum": [
+              "manifestDigest"
+            ]
+          },
+          {
+            "description": "Additionally sample segment bytes.",
+            "type": "string",
+            "enum": [
+              "segmentSample"
+            ]
+          }
+        ]
+      },
+      "ConnectSyncMode": {
+        "description": "The request spelling of [`SyncMode`].",
+        "oneOf": [
+          {
+            "description": "Day shards at or after the recorded cursor.",
+            "type": "string",
+            "enum": [
+              "index"
+            ]
+          },
+          {
+            "description": "A full, resumable rescan of receipts and manifests.",
+            "type": "string",
+            "enum": [
+              "full"
+            ]
+          }
+        ]
       },
       "Connection": {
         "description": "A saved connection.",
@@ -5459,6 +7250,25 @@
         },
         "additionalProperties": false
       },
+      "CreatedTopicView": {
+        "description": "One topic the run created.",
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "description": "Its name.",
+            "type": "string"
+          },
+          "partitions": {
+            "description": "Its partition count.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          }
+        }
+      },
       "Destination": {
         "description": "A saved destination.",
         "type": "object",
@@ -5893,6 +7703,70 @@
           }
         }
       },
+      "DiagnosticObjectView": {
+        "description": "The object a diagnostic is about.",
+        "type": "object",
+        "required": [
+          "kind",
+          "name"
+        ],
+        "properties": {
+          "kind": {
+            "description": "`Pod` or `Job`.",
+            "type": "string"
+          },
+          "name": {
+            "description": "Its name.",
+            "type": "string"
+          }
+        }
+      },
+      "DiagnosticView": {
+        "description": "One entry of the closed diagnosis list (D3 §2.3).",
+        "type": "object",
+        "required": [
+          "code",
+          "severity"
+        ],
+        "properties": {
+          "code": {
+            "description": "The CamelCase code, from D2's one classification table.",
+            "type": "string"
+          },
+          "count": {
+            "description": "How many times, capped by the controller.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "firstSeen": {
+            "description": "When it was first seen.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "lastSeen": {
+            "description": "When it was last seen.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "message": {
+            "description": "The sanitized explanation, at most 512 bytes.",
+            "type": "string",
+            "nullable": true
+          },
+          "object": {
+            "description": "What it is about.",
+            "$ref": "#/components/schemas/DiagnosticObjectView",
+            "nullable": true
+          },
+          "severity": {
+            "description": "`Warning` or `Error`.",
+            "type": "string"
+          }
+        }
+      },
       "DiscoveryConnectionView": {
         "description": "The connection a discovery was bound to when it ran.",
         "type": "object",
@@ -5979,6 +7853,304 @@
           "requestId": {
             "description": "The request ID.",
             "type": "string"
+          }
+        }
+      },
+      "EnforcementRunView": {
+        "description": "What the last enforcement run actually did.",
+        "type": "object",
+        "required": [
+          "deleted",
+          "failed"
+        ],
+        "properties": {
+          "deleted": {
+            "description": "How many points it deleted.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "exitCode": {
+            "description": "The worker's exit code.",
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "failed": {
+            "description": "The ones it could not.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FailedDeletionView"
+            }
+          },
+          "finishedAt": {
+            "description": "When it finished. Absent while a run is in flight.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "objectsDeleted": {
+            "description": "How many objects went.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "planSha256": {
+            "description": "The plan digest it executed.",
+            "type": "string",
+            "nullable": true
+          },
+          "recordKey": {
+            "description": "Where the attributable record is. **Create-only and UNSIGNED**, verified by the digest beside it; no surface calls it signed.",
+            "type": "string",
+            "nullable": true
+          },
+          "recordSha256": {
+            "description": "That record's digest.",
+            "type": "string",
+            "nullable": true
+          },
+          "runId": {
+            "description": "The run id.",
+            "type": "string",
+            "nullable": true
+          },
+          "startedAt": {
+            "description": "When it started.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
+      },
+      "EnforcementSettingsView": {
+        "description": "The settings that make `Enforce` bounded and attributable — without the credential.",
+        "type": "object",
+        "required": [
+          "credentialConfigured",
+          "deadlineSeconds",
+          "maxDeletionsPerRun",
+          "maxObjectsPerRun",
+          "planMaxAgeSeconds",
+          "requireApprovedPlan",
+          "schedule"
+        ],
+        "properties": {
+          "approvedPlanSha256": {
+            "description": "The digest an administrator approved, when there is one.",
+            "type": "string",
+            "nullable": true
+          },
+          "credentialConfigured": {
+            "description": "Whether a delete-capable credential is configured. A boolean, never a name.",
+            "type": "boolean"
+          },
+          "deadlineSeconds": {
+            "description": "The run deadline.",
+            "type": "integer",
+            "format": "int32"
+          },
+          "maxDeletionsPerRun": {
+            "description": "The per-run point ceiling.",
+            "type": "integer",
+            "format": "int32"
+          },
+          "maxObjectsPerRun": {
+            "description": "The per-run object ceiling.",
+            "type": "integer",
+            "format": "int32"
+          },
+          "planMaxAgeSeconds": {
+            "description": "How long an approved plan stays fresh.",
+            "type": "integer",
+            "format": "int32"
+          },
+          "requireApprovedPlan": {
+            "description": "Whether a plan digest must be approved before any Job is created.",
+            "type": "boolean"
+          },
+          "schedule": {
+            "description": "The evaluation/enforcement cadence.",
+            "type": "string"
+          }
+        }
+      },
+      "EvaluationReason": {
+        "description": "Why the evaluation is not fresh, when it is not.",
+        "oneOf": [
+          {
+            "description": "The controller evaluated this generation recently.",
+            "type": "string",
+            "enum": [
+              "evaluated"
+            ]
+          },
+          {
+            "description": "The object carries no status at all.",
+            "type": "string",
+            "enum": [
+              "notEvaluated"
+            ]
+          },
+          {
+            "description": "The status was computed from an older `metadata.generation`.",
+            "type": "string",
+            "enum": [
+              "generationBehind"
+            ]
+          },
+          {
+            "description": "The status has no `evaluatedAt`.",
+            "type": "string",
+            "enum": [
+              "noEvaluationTime"
+            ]
+          },
+          {
+            "description": "`evaluatedAt` is older than the freshness window.",
+            "type": "string",
+            "enum": [
+              "stale"
+            ]
+          }
+        ]
+      },
+      "EvaluationState": {
+        "description": "Why an evaluation is or is not believed.",
+        "oneOf": [
+          {
+            "description": "The controller evaluated the current generation recently.",
+            "type": "string",
+            "enum": [
+              "fresh"
+            ]
+          },
+          {
+            "description": "Nothing fresh: no status, a status computed from an older generation, or an `evaluatedAt` older than [`FRESH_EVALUATION_SECONDS`]. **Not `valid`.**",
+            "type": "string",
+            "enum": [
+              "unknown"
+            ]
+          }
+        ]
+      },
+      "EvaluationView": {
+        "description": "What the last evaluation found. **Nothing here was deleted.**",
+        "type": "object",
+        "required": [
+          "candidates",
+          "kept",
+          "protected",
+          "skipped",
+          "truncated"
+        ],
+        "properties": {
+          "at": {
+            "description": "When.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "candidateCount": {
+            "description": "How many candidates there are in total, which may exceed the rows below.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "candidates": {
+            "description": "The points the rules would remove.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/CandidateView"
+            }
+          },
+          "kept": {
+            "description": "The points the rules keep.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "planExpiresAt": {
+            "description": "When the plan ages out.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "planRef": {
+            "description": "The plan `ConfigMap`.",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "planSha256": {
+            "description": "The digest an administrator approves. A digest, not a credential.",
+            "type": "string",
+            "nullable": true
+          },
+          "pointsEvaluated": {
+            "description": "How many points were considered.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "protected": {
+            "description": "The points something else protected.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProtectedPointView"
+            }
+          },
+          "skipped": {
+            "description": "The points the evaluation could not classify.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SkippedEntryView"
+            }
+          },
+          "truncated": {
+            "description": "Whether any of the four lists above was cut short by this route's own row bound.",
+            "type": "boolean"
+          }
+        }
+      },
+      "EvaluationView2": {
+        "description": "How fresh the controller's verdict is, and what it was computed from.",
+        "type": "object",
+        "required": [
+          "freshWithinSeconds",
+          "reason",
+          "serverTime",
+          "state"
+        ],
+        "properties": {
+          "ageSeconds": {
+            "description": "How old that is, by this server's clock.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "evaluatedAt": {
+            "description": "When the controller evaluated.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "freshWithinSeconds": {
+            "description": "The freshness window.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "reason": {
+            "description": "Which of the four ways it is not fresh, or `evaluated`.",
+            "$ref": "#/components/schemas/EvaluationReason"
+          },
+          "serverTime": {
+            "description": "The clock the comparison used. Published so a reader can check the arithmetic rather than redo it against the browser's.",
+            "type": "string",
+            "format": "date-time"
+          },
+          "state": {
+            "description": "`fresh` or `unknown`.",
+            "$ref": "#/components/schemas/EvaluationState"
           }
         }
       },
@@ -6070,6 +8242,53 @@
           }
         }
       },
+      "ExternalLifecycleView": {
+        "description": "The declared, unverified provider lifecycle rule.",
+        "type": "object",
+        "required": [
+          "expirationDays",
+          "prefix",
+          "provider",
+          "ruleId"
+        ],
+        "properties": {
+          "expirationDays": {
+            "description": "The declared expiry.",
+            "type": "integer",
+            "format": "int32"
+          },
+          "prefix": {
+            "description": "The declared prefix.",
+            "type": "string"
+          },
+          "provider": {
+            "description": "`s3`, `gcs` or `azure`.",
+            "type": "string"
+          },
+          "ruleId": {
+            "description": "The rule id, as the operator declared it. **Logweir has not read it.**",
+            "type": "string"
+          }
+        }
+      },
+      "FailedDeletionView": {
+        "description": "One point a run could not delete.",
+        "type": "object",
+        "required": [
+          "code",
+          "pointId"
+        ],
+        "properties": {
+          "code": {
+            "description": "The refusal code — `AccessDenied`, `Locked`, `PreconditionFailed` and the rest are NOT retried and keep the point.",
+            "type": "string"
+          },
+          "pointId": {
+            "description": "The point.",
+            "type": "string"
+          }
+        }
+      },
       "FieldError": {
         "description": "One field-level validation failure.",
         "type": "object",
@@ -6093,6 +8312,37 @@
           }
         }
       },
+      "GuaranteesView": {
+        "description": "Which guarantees are in force, and by whom.",
+        "type": "object",
+        "properties": {
+          "activeRestoreProtection": {
+            "description": "Protection of a point an active restore needs.",
+            "type": "string",
+            "nullable": true
+          },
+          "ageExpiry": {
+            "description": "Age-based expiry.",
+            "type": "string",
+            "nullable": true
+          },
+          "legalHold": {
+            "description": "Legal hold.",
+            "type": "string",
+            "nullable": true
+          },
+          "minUsablePoints": {
+            "description": "The floor on usable points.",
+            "type": "string",
+            "nullable": true
+          },
+          "sharedSegments": {
+            "description": "Protection of a segment two manifests share.",
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
       "HealthStatus": {
         "description": "Health and readiness bodies.",
         "type": "object",
@@ -6103,6 +8353,25 @@
           "status": {
             "description": "`ok` (liveness), `ready` or `notReady`.",
             "type": "string"
+          }
+        }
+      },
+      "HistogramBucketView": {
+        "description": "How many points a day holds.",
+        "type": "object",
+        "required": [
+          "day",
+          "points"
+        ],
+        "properties": {
+          "day": {
+            "description": "`YYYY-MM-DD`.",
+            "type": "string"
+          },
+          "points": {
+            "description": "How many points.",
+            "type": "integer",
+            "format": "int64"
           }
         }
       },
@@ -6124,6 +8393,80 @@
             ]
           }
         ]
+      },
+      "KeyPrincipalView": {
+        "description": "Who holds a key.",
+        "type": "object",
+        "required": [
+          "id"
+        ],
+        "properties": {
+          "display": {
+            "description": "A label. Never authority.",
+            "type": "string",
+            "nullable": true
+          },
+          "id": {
+            "description": "The stable identity.",
+            "type": "string"
+          }
+        }
+      },
+      "LastAttemptView": {
+        "description": "The most recent run, whatever became of it.",
+        "type": "object",
+        "properties": {
+          "at": {
+            "description": "When.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "backupRef": {
+            "description": "The `Backup`.",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "phase": {
+            "description": "Its phase.",
+            "type": "string",
+            "nullable": true
+          },
+          "reason": {
+            "description": "Its reason.",
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "LastSyncView": {
+        "description": "The sync Job that produced this view.",
+        "type": "object",
+        "properties": {
+          "exitCode": {
+            "description": "Its exit code.",
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "finishedAt": {
+            "description": "When it finished.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "refusalReason": {
+            "description": "Its refusal reason, for an exit 3.",
+            "type": "string",
+            "nullable": true
+          },
+          "startedAt": {
+            "description": "When it started.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
       },
       "LastTestView": {
         "description": "The most recent explicit access test.",
@@ -6200,6 +8543,27 @@
           }
         },
         "additionalProperties": false
+      },
+      "NamespaceConflictView": {
+        "description": "A namespace two policies both claim. It resolves to NOTHING, and every approval and verification in it is refused.",
+        "type": "object",
+        "required": [
+          "namespace",
+          "policies"
+        ],
+        "properties": {
+          "namespace": {
+            "description": "The namespace.",
+            "type": "string"
+          },
+          "policies": {
+            "description": "The policies claiming it.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
       },
       "NamespaceGrant": {
         "description": "One explicitly granted namespace.",
@@ -6297,6 +8661,105 @@
           }
         }
       },
+      "NotificationRouteView": {
+        "description": "One configured alert destination — its name and which channels it has.\n\nTHE CHANNELS ARE BOOLEANS ON PURPOSE. A PagerDuty routing key, a webhook URL and a Slack webhook URL are each a credential; so is the name of the Secret that holds one, to a reader deciding what to try to read next.",
+        "type": "object",
+        "required": [
+          "name",
+          "pagerDuty",
+          "slack",
+          "webhook"
+        ],
+        "properties": {
+          "name": {
+            "description": "What status and logs call it.",
+            "type": "string"
+          },
+          "pagerDuty": {
+            "description": "Whether a PagerDuty channel is configured.",
+            "type": "boolean"
+          },
+          "slack": {
+            "description": "Whether a Slack channel is configured.",
+            "type": "boolean"
+          },
+          "webhook": {
+            "description": "Whether a webhook channel is configured.",
+            "type": "boolean"
+          }
+        }
+      },
+      "NotificationsView": {
+        "description": "Where alerts go, and which ones.",
+        "type": "object",
+        "required": [
+          "renotifyAfterSeconds",
+          "routes",
+          "sendResolved"
+        ],
+        "properties": {
+          "kinds": {
+            "description": "Which alert kinds are sent. Absent means all of them.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          },
+          "renotifyAfterSeconds": {
+            "description": "How long before an open alert is re-sent; `0` disables re-notify.",
+            "type": "integer",
+            "format": "int32"
+          },
+          "routes": {
+            "description": "The routes, at most four.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NotificationRouteView"
+            }
+          },
+          "sendResolved": {
+            "description": "Whether a resolution is delivered too.",
+            "type": "boolean"
+          }
+        }
+      },
+      "ObjectivesView": {
+        "description": "What \"protected\" means here.",
+        "type": "object",
+        "required": [
+          "maxConsecutiveFailedRuns",
+          "maxRecoveryPointAgeSeconds",
+          "requireCatalogAvailability",
+          "requireVerifiedEvidence"
+        ],
+        "properties": {
+          "maxConsecutiveFailedRuns": {
+            "description": "How many consecutive failed runs are tolerated.",
+            "type": "integer",
+            "format": "int32"
+          },
+          "maxRecoveryPointAgeSeconds": {
+            "description": "How old the newest recovery point may be, measured from CAPTURE START.",
+            "type": "integer",
+            "format": "int32"
+          },
+          "maxRehearsalAgeSeconds": {
+            "description": "How old the newest successful rehearsal may be.",
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "requireCatalogAvailability": {
+            "description": "Whether the catalog must say the point is still in storage.",
+            "type": "boolean"
+          },
+          "requireVerifiedEvidence": {
+            "description": "Whether unverified evidence counts as protection.",
+            "type": "boolean"
+          }
+        }
+      },
       "ObservedAuthView": {
         "description": "The identity a run presented.",
         "type": "object",
@@ -6310,99 +8773,6 @@
             "description": "The SASL principal presented.",
             "type": "string",
             "nullable": true
-          }
-        }
-      },
-      "Operation": {
-        "description": "The normalized status of one Backup or Restore.",
-        "type": "object",
-        "required": [
-          "conditions",
-          "evidence",
-          "kind",
-          "name",
-          "namespace",
-          "resourceVersion",
-          "result",
-          "state",
-          "terminal",
-          "uid",
-          "verification",
-          "verifiedSuccess"
-        ],
-        "properties": {
-          "conditions": {
-            "description": "The status conditions, at most 16.",
-            "type": "array",
-            "items": {
-              "$ref": "#/components/schemas/ConditionView"
-            }
-          },
-          "createdAt": {
-            "description": "When the object was created.",
-            "type": "string",
-            "format": "date-time",
-            "nullable": true
-          },
-          "evidence": {
-            "description": "Evidence object references.",
-            "$ref": "#/components/schemas/OperationEvidence"
-          },
-          "kind": {
-            "description": "`backup` or `restore`.",
-            "$ref": "#/components/schemas/OperationKind"
-          },
-          "lastUpdatedAt": {
-            "description": "The most recent condition transition or verification instant.",
-            "type": "string",
-            "format": "date-time",
-            "nullable": true
-          },
-          "message": {
-            "description": "The message of the condition that carries the reason, bounded.",
-            "type": "string",
-            "nullable": true
-          },
-          "name": {
-            "description": "The object name.",
-            "type": "string"
-          },
-          "namespace": {
-            "description": "The namespace.",
-            "type": "string"
-          },
-          "resourceVersion": {
-            "description": "The resourceVersion this status was read at.",
-            "type": "string"
-          },
-          "result": {
-            "description": "The result, separate from verification.",
-            "$ref": "#/components/schemas/OperationResult"
-          },
-          "state": {
-            "description": "The lifecycle state.",
-            "$ref": "#/components/schemas/OperationState"
-          },
-          "stateReason": {
-            "description": "The CamelCase reason for the state.",
-            "type": "string",
-            "nullable": true
-          },
-          "terminal": {
-            "description": "Whether the state is final.",
-            "type": "boolean"
-          },
-          "uid": {
-            "description": "The Kubernetes UID.",
-            "type": "string"
-          },
-          "verification": {
-            "description": "Evidence verification, separate from the result.",
-            "$ref": "#/components/schemas/OperationVerification"
-          },
-          "verifiedSuccess": {
-            "description": "True only when the result passed AND the evidence verified `Valid` (the controller's green-badge rule). `NotAttempted` is never verified success.",
-            "type": "boolean"
           }
         }
       },
@@ -6456,24 +8826,6 @@
           }
         ]
       },
-      "OperationResponse": {
-        "description": "`GET .../operations/{kind}/{name}`.",
-        "type": "object",
-        "required": [
-          "item",
-          "requestId"
-        ],
-        "properties": {
-          "item": {
-            "description": "The normalized operation.",
-            "$ref": "#/components/schemas/Operation"
-          },
-          "requestId": {
-            "description": "The request ID.",
-            "type": "string"
-          }
-        }
-      },
       "OperationResult": {
         "description": "The result half of an operation.",
         "type": "object",
@@ -6508,6 +8860,53 @@
             "$ref": "#/components/schemas/ResultStatus"
           }
         }
+      },
+      "OperationStage": {
+        "description": "D3 §2.5's stage vocabulary, exactly six values.",
+        "oneOf": [
+          {
+            "description": "Accepted; nothing has been scheduled.",
+            "type": "string",
+            "enum": [
+              "admission"
+            ]
+          },
+          {
+            "description": "A Job exists and no pod is running yet.",
+            "type": "string",
+            "enum": [
+              "queued"
+            ]
+          },
+          {
+            "description": "The pod exists and the runner container has not started.",
+            "type": "string",
+            "enum": [
+              "preparing"
+            ]
+          },
+          {
+            "description": "The runner is doing the work.",
+            "type": "string",
+            "enum": [
+              "running"
+            ]
+          },
+          {
+            "description": "The runner is checking, or the controller is verifying the evidence.",
+            "type": "string",
+            "enum": [
+              "verifying"
+            ]
+          },
+          {
+            "description": "Nothing more will happen.",
+            "type": "string",
+            "enum": [
+              "finished"
+            ]
+          }
+        ]
       },
       "OperationState": {
         "description": "The product lifecycle state.",
@@ -6617,6 +9016,45 @@
           }
         }
       },
+      "OperationTrust": {
+        "description": "The trust half of the verdict, separate from the result and from the signature check.\n\n`basis` IS NEVER ABSENT HERE, AND THAT IS D3 §12. A status with no `trust` block has not had its signing time compared with anything, so the honest projection is `none` — \"not observed\" — and never a flattering default.",
+        "type": "object",
+        "required": [
+          "basis",
+          "state"
+        ],
+        "properties": {
+          "basis": {
+            "description": "`current`, `historical`, `recordedBeforeRevocation`, `unverified` or `none`. `none` is what an absent `trust` block projects to.",
+            "type": "string"
+          },
+          "keyState": {
+            "description": "The signing key's state when the verdict was reached.",
+            "type": "string",
+            "nullable": true
+          },
+          "policy": {
+            "description": "Which policy answered.",
+            "$ref": "#/components/schemas/PolicyRefView",
+            "nullable": true
+          },
+          "signedAt": {
+            "description": "The signing time the verdict was reached AGAINST. Attacker-controlled for a compromised key, which is why it is recorded and not trusted.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "signingTimeRead": {
+            "description": "`absent` once a bounded re-read established that the DOCUMENT carries no signing time. It is the answer, recorded in place of the question.",
+            "type": "string",
+            "nullable": true
+          },
+          "state": {
+            "description": "The combined verdict.",
+            "$ref": "#/components/schemas/TrustState"
+          }
+        }
+      },
       "OperationVerification": {
         "description": "The verification half of an operation.",
         "type": "object",
@@ -6651,6 +9089,175 @@
           }
         }
       },
+      "OperationView": {
+        "description": "The normalized operation, D3 §2.5's shape: PLAT-17.1's frozen projection plus everything D3 adds.",
+        "type": "object",
+        "required": [
+          "awaitingApproval",
+          "conditions",
+          "diagnostics",
+          "evidence",
+          "kind",
+          "name",
+          "namespace",
+          "readiness",
+          "resourceVersion",
+          "result",
+          "stale",
+          "state",
+          "terminal",
+          "trust",
+          "uid",
+          "verification",
+          "verificationScope",
+          "verifiedSuccess"
+        ],
+        "properties": {
+          "awaitingApproval": {
+            "description": "Whether the run is held for a human approval.",
+            "type": "boolean"
+          },
+          "capture": {
+            "description": "A Backup's capture window.",
+            "$ref": "#/components/schemas/CaptureView",
+            "nullable": true
+          },
+          "completion": {
+            "description": "A Restore's completion panel.",
+            "$ref": "#/components/schemas/CompletionView",
+            "nullable": true
+          },
+          "conditions": {
+            "description": "The status conditions, at most 16.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConditionView"
+            }
+          },
+          "createdAt": {
+            "description": "When the object was created.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "diagnostics": {
+            "description": "The closed diagnosis list, newest `lastSeen` first, at most eight.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/DiagnosticView"
+            }
+          },
+          "evidence": {
+            "description": "Evidence object references.",
+            "$ref": "#/components/schemas/OperationEvidence"
+          },
+          "kind": {
+            "description": "`backup` or `restore`.",
+            "$ref": "#/components/schemas/OperationKind"
+          },
+          "lastUpdatedAt": {
+            "description": "The most recent condition transition or verification instant.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "message": {
+            "description": "The message of the condition that carries the reason, bounded.",
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "description": "The object name.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "The namespace.",
+            "type": "string"
+          },
+          "progress": {
+            "description": "The progress channel. Absent on anything an older controller wrote, and its absence is why `queued` and `preparing` are never inferred.",
+            "$ref": "#/components/schemas/ProgressView",
+            "nullable": true
+          },
+          "readiness": {
+            "description": "Configuration readiness, which is a separate object.",
+            "$ref": "#/components/schemas/ReadinessView"
+          },
+          "resourceVersion": {
+            "description": "The resourceVersion this status was read at.",
+            "type": "string"
+          },
+          "result": {
+            "description": "The result, separate from verification.",
+            "$ref": "#/components/schemas/OperationResult"
+          },
+          "stage": {
+            "description": "The controller's stage. Absent means no stage was observed — an older controller, or a phase this build does not recognise.",
+            "$ref": "#/components/schemas/OperationStage",
+            "nullable": true
+          },
+          "stale": {
+            "description": "Whether the status itself is too old to believe (D3 §2.5's last row).",
+            "type": "boolean"
+          },
+          "state": {
+            "description": "The lifecycle state.",
+            "$ref": "#/components/schemas/OperationState"
+          },
+          "stateReason": {
+            "description": "The CamelCase reason for the state.",
+            "type": "string",
+            "nullable": true
+          },
+          "teardown": {
+            "description": "A Restore's teardown outcome.",
+            "$ref": "#/components/schemas/TeardownView",
+            "nullable": true
+          },
+          "terminal": {
+            "description": "Whether the state is final.",
+            "type": "boolean"
+          },
+          "trust": {
+            "description": "The evidence verdict in trust terms, beside — never instead of — the signature result in `verification`.",
+            "$ref": "#/components/schemas/OperationTrust"
+          },
+          "uid": {
+            "description": "The Kubernetes UID.",
+            "type": "string"
+          },
+          "verification": {
+            "description": "Evidence verification, separate from the result.",
+            "$ref": "#/components/schemas/OperationVerification"
+          },
+          "verificationScope": {
+            "description": "What the verification covered.",
+            "$ref": "#/components/schemas/VerificationScopeView"
+          },
+          "verifiedSuccess": {
+            "description": "True only when the result passed AND the evidence verified `Valid` (the controller's green-badge rule). `NotAttempted` is never verified success.",
+            "type": "boolean"
+          }
+        }
+      },
+      "OperationViewResponse": {
+        "description": "`GET .../operations/{kind}/{name}` for a backup or a restore.",
+        "type": "object",
+        "required": [
+          "item",
+          "requestId"
+        ],
+        "properties": {
+          "item": {
+            "description": "The normalized operation: PLAT-17.1's projection plus D3 §2.5's additions.",
+            "$ref": "#/components/schemas/OperationView"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
       "Page": {
         "description": "One page of a list.",
         "type": "object",
@@ -6676,6 +9283,190 @@
           }
         }
       },
+      "PointLocationView": {
+        "description": "One location a point was seen at.",
+        "type": "object",
+        "required": [
+          "availability",
+          "locationId"
+        ],
+        "properties": {
+          "availability": {
+            "description": "What was found THERE.",
+            "type": "string"
+          },
+          "locationId": {
+            "description": "`s3://<bucket>/<prefix>` — bucket and prefix only. No endpoint, no region, no credential.",
+            "type": "string"
+          }
+        }
+      },
+      "PointPageResponse": {
+        "description": "One page of the materialised point view.",
+        "type": "object",
+        "required": [
+          "items",
+          "page",
+          "requestId",
+          "truncated",
+          "viewExpired"
+        ],
+        "properties": {
+          "items": {
+            "description": "The points, newest first, in the order the view materialised them.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PointView"
+            }
+          },
+          "page": {
+            "description": "Paging. `snapshot` is the view generation this page came from.",
+            "$ref": "#/components/schemas/Page"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          },
+          "truncated": {
+            "description": "Whether the archive holds more points than the view carries.",
+            "type": "boolean"
+          },
+          "viewExpired": {
+            "description": "Whether the view has aged out. An empty `items` with this `true` means \"the window is gone\", never \"the archive is empty\".",
+            "type": "boolean"
+          },
+          "viewExpiresAt": {
+            "description": "When the view ages out.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
+      },
+      "PointSelectorView": {
+        "description": "Which point a rehearsal takes.",
+        "type": "object",
+        "required": [
+          "minAgeSeconds",
+          "requireVerifiedEvidence",
+          "scheduleRefs",
+          "selection"
+        ],
+        "properties": {
+          "catalogRef": {
+            "description": "The catalog candidates come from.",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "minAgeSeconds": {
+            "description": "How old a point must be before it qualifies.",
+            "type": "integer",
+            "format": "int32"
+          },
+          "requireVerifiedEvidence": {
+            "description": "Whether unverified evidence disqualifies a point. CEL pins it `true` in v1: a rehearsal over unverified evidence proves the archive is readable and nothing about whether it is trustworthy.",
+            "type": "boolean"
+          },
+          "scheduleRefs": {
+            "description": "Candidate schedules.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NameRef"
+            }
+          },
+          "selection": {
+            "description": "`NewestAvailable` — the only strategy in v1.",
+            "type": "string"
+          },
+          "topics": {
+            "description": "The topics the rehearsal restores.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          }
+        }
+      },
+      "PointView": {
+        "description": "One recovery point, with its two verdicts kept apart.",
+        "type": "object",
+        "required": [
+          "availability",
+          "backupId",
+          "locations",
+          "pointId",
+          "runId",
+          "selectable",
+          "verification"
+        ],
+        "properties": {
+          "availability": {
+            "description": "`Available`, `Missing`, `Unreadable`, `Deleted`, `Conflict`, `UnsupportedFormat` or `Partial` — the BEST of its locations.",
+            "type": "string"
+          },
+          "backupId": {
+            "description": "The backup set it belongs to.",
+            "type": "string"
+          },
+          "coveredFrom": {
+            "description": "The start of the window it covers.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "coveredTo": {
+            "description": "The end of the window it covers. The restore window's end is inclusive, so a plan restores to `coveredTo` minus one millisecond.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "formatVersion": {
+            "description": "The record's format version.",
+            "type": "string",
+            "nullable": true
+          },
+          "locations": {
+            "description": "Every location it was seen at, each with its own availability.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PointLocationView"
+            }
+          },
+          "pointId": {
+            "description": "The content-derived point identity.",
+            "type": "string"
+          },
+          "recoveryPointAt": {
+            "description": "Capture start, as an instant.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "remedy": {
+            "description": "What to do about a degraded verdict, from the catalog's own vocabulary.",
+            "type": "string",
+            "nullable": true
+          },
+          "runId": {
+            "description": "The run that produced it.",
+            "type": "string"
+          },
+          "selectable": {
+            "description": "The conjunction of the two, materialised by the controller so no surface writes D3 §5.4's selection rule a second time.",
+            "type": "boolean"
+          },
+          "signerKeyId": {
+            "description": "The key that signed it, when one was identified.",
+            "type": "string",
+            "nullable": true
+          },
+          "verification": {
+            "description": "`Verified`, `VerifiedHistorical`, `UntrustedSigner`, `Revoked`, `Invalid`, `NoEvidence` or `NotAttempted` — the WORST of its locations.",
+            "type": "string"
+          }
+        }
+      },
       "PolicyChangedDetail": {
         "description": "What a schedule's policy is NOW, on `policy_changed` (D1 §8.2).\n\nA PROBLEM EXTENSION, NOT A FIELD ERROR. `expectedGeneration` was not malformed — it named a revision that has been superseded — so the answer a console needs is the current revision, not a sentence about a field. RFC 9457 permits extension members; this is the only one this API defines.",
         "type": "object",
@@ -6690,6 +9481,28 @@
           },
           "currentRunPolicySha256": {
             "description": "Its current run-policy digest, when the controller has recorded one. ABSENT means the controller has not evaluated this revision yet, never that the policy is empty.",
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "PolicyRefView": {
+        "description": "Which trust policy answered, and the revision that answered.",
+        "type": "object",
+        "properties": {
+          "generation": {
+            "description": "Its `metadata.generation`.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "name": {
+            "description": "Its name.",
+            "type": "string",
+            "nullable": true
+          },
+          "uid": {
+            "description": "Its UID — a same-named replacement is a different policy.",
             "type": "string",
             "nullable": true
           }
@@ -7265,6 +10078,302 @@
           }
         ]
       },
+      "ProgressView": {
+        "description": "The progress channel, absent on anything an older controller reconciled.",
+        "type": "object",
+        "properties": {
+          "lastObservedTime": {
+            "description": "When the run was last observed, in active stages only.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "lastTransitionTime": {
+            "description": "When the stage or reason last CHANGED.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "message": {
+            "description": "The sanitized message, at most 1024 bytes.",
+            "type": "string",
+            "nullable": true
+          },
+          "phase": {
+            "description": "The runner's own phase.",
+            "$ref": "#/components/schemas/RunnerPhaseView",
+            "nullable": true
+          },
+          "reason": {
+            "description": "The CamelCase reason.",
+            "type": "string",
+            "nullable": true
+          },
+          "stage": {
+            "description": "The stage the controller wrote, when this build recognises it.",
+            "$ref": "#/components/schemas/OperationStage",
+            "nullable": true
+          }
+        }
+      },
+      "ProtectedPointView": {
+        "description": "One point the rules selected and something else protected.",
+        "type": "object",
+        "required": [
+          "pointId",
+          "reason"
+        ],
+        "properties": {
+          "pointId": {
+            "description": "The point.",
+            "type": "string"
+          },
+          "reason": {
+            "description": "`ActiveRestore`, `MinUsablePoints`, `LegalHold`, `SharedSegment`, `Hold` or `Unknown`.",
+            "type": "string"
+          }
+        }
+      },
+      "ProtectedSubjectView": {
+        "description": "What the policy protects, as references.",
+        "type": "object",
+        "required": [
+          "scheduleRefs",
+          "sourceRef"
+        ],
+        "properties": {
+          "catalogRef": {
+            "description": "The catalog that answers \"is the point still there?\".",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "destinationRef": {
+            "description": "The saved destination, when there is one.",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "scheduleRefs": {
+            "description": "The schedules whose runs count.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NameRef"
+            }
+          },
+          "sourceRef": {
+            "description": "The source connection.",
+            "$ref": "#/components/schemas/NameRef"
+          },
+          "topics": {
+            "description": "The topics the objective is about. Absent means \"the topics of the newest matching point\", which is the honest reading of a schedule that selects dynamically — never \"all of them\".",
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "nullable": true
+          }
+        }
+      },
+      "ProtectionPolicyList": {
+        "description": "A page of protection policies.",
+        "type": "object",
+        "required": [
+          "items",
+          "page",
+          "requestId"
+        ],
+        "properties": {
+          "items": {
+            "description": "The items on this page.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ProtectionPolicyView"
+            }
+          },
+          "page": {
+            "description": "Paging.",
+            "$ref": "#/components/schemas/Page"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "ProtectionPolicyResponse": {
+        "description": "One protection policy.",
+        "type": "object",
+        "required": [
+          "item",
+          "requestId"
+        ],
+        "properties": {
+          "item": {
+            "description": "The item.",
+            "$ref": "#/components/schemas/ProtectionPolicyView"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "ProtectionPolicyView": {
+        "description": "A `ProtectionPolicy`, projected.",
+        "type": "object",
+        "required": [
+          "alerts",
+          "conditions",
+          "evaluationIntervalSeconds",
+          "name",
+          "namespace",
+          "objectives",
+          "protects",
+          "resourceVersion",
+          "schedules",
+          "uid"
+        ],
+        "properties": {
+          "alerts": {
+            "description": "The deduplication ledger.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/AlertView"
+            }
+          },
+          "availabilityBasis": {
+            "description": "`KubernetesStatus`, `Catalog` or `CatalogStale` — how availability was decided. \"The point exists\" and \"a Backup object says it succeeded\" are different claims.",
+            "type": "string",
+            "nullable": true
+          },
+          "conditions": {
+            "description": "`Ready`, `Protected` and `NotificationsDelivered`.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConditionView"
+            }
+          },
+          "consecutiveFailedRuns": {
+            "description": "How many runs have failed in a row.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "createdAt": {
+            "description": "When the object was created.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "evaluatedAt": {
+            "description": "When the verdict was reached.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "evaluationIntervalSeconds": {
+            "description": "How often it is evaluated.",
+            "type": "integer",
+            "format": "int32"
+          },
+          "generation": {
+            "description": "`metadata.generation`.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "health": {
+            "description": "`Healthy`, `AtRisk`, `Stale`, `Unprotected` or `Unknown`. Absent means nothing has been evaluated yet, which is not `Healthy`.",
+            "type": "string",
+            "nullable": true
+          },
+          "lastAttempt": {
+            "description": "The most recent run.",
+            "$ref": "#/components/schemas/LastAttemptView",
+            "nullable": true
+          },
+          "lastAvailablePoint": {
+            "description": "The newest point that can actually be recovered from.",
+            "$ref": "#/components/schemas/AvailablePointView",
+            "nullable": true
+          },
+          "lastMissedSlot": {
+            "description": "The last slot that did not run.",
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "description": "The object name.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "The namespace.",
+            "type": "string"
+          },
+          "notifications": {
+            "description": "Where alerts go. Absent means the verdict is reported here and delivered nowhere — a real choice, not a broken configuration.",
+            "$ref": "#/components/schemas/NotificationsView",
+            "nullable": true
+          },
+          "objectives": {
+            "description": "What \"protected\" means.",
+            "$ref": "#/components/schemas/ObjectivesView"
+          },
+          "observedGeneration": {
+            "description": "The generation the verdict was computed from. Different from `generation` means the verdict predates the current objective.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "protects": {
+            "description": "What it protects.",
+            "$ref": "#/components/schemas/ProtectedSubjectView"
+          },
+          "rehearsalLastFailedAt": {
+            "description": "When one last failed, and why.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "rehearsalLastReason": {
+            "description": "The reason the last rehearsal failed or was skipped.",
+            "type": "string",
+            "nullable": true
+          },
+          "rehearsalLastSucceededAt": {
+            "description": "When a rehearsal last passed.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "resourceVersion": {
+            "description": "The resourceVersion this projection was read at.",
+            "type": "string"
+          },
+          "schedules": {
+            "description": "The schedules, with their own readiness.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ScheduleHealthView"
+            }
+          },
+          "sinceLastFire": {
+            "description": "Seconds since the last successful fire.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "staleSince": {
+            "description": "Since when the objective has been missed.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "uid": {
+            "description": "The Kubernetes UID.",
+            "type": "string"
+          }
+        }
+      },
       "ReachabilityState": {
         "description": "The controller's last reachability observation.",
         "oneOf": [
@@ -7352,6 +10461,24 @@
         },
         "additionalProperties": false
       },
+      "ReadinessView": {
+        "description": "Configuration readiness (PLAT-03.1), which NEVER overwrites `state`.",
+        "type": "object",
+        "required": [
+          "basis",
+          "state"
+        ],
+        "properties": {
+          "basis": {
+            "description": "Why: `notImplemented`.",
+            "type": "string"
+          },
+          "state": {
+            "description": "`unknown` until PLAT-03.1 lands.",
+            "type": "string"
+          }
+        }
+      },
       "RecoveryPointRequest": {
         "description": "The recovery point a restore preflight is about.",
         "type": "object",
@@ -7398,6 +10525,312 @@
             "description": "The UID at the time of the check.",
             "type": "string",
             "nullable": true
+          }
+        }
+      },
+      "RehearsalBoundsView": {
+        "description": "The bounds a rehearsal runs inside.",
+        "type": "object",
+        "required": [
+          "concurrencyPolicy",
+          "deadlineSeconds",
+          "maxPartitions",
+          "recordsPerPartition",
+          "startingDeadlineSeconds"
+        ],
+        "properties": {
+          "concurrencyPolicy": {
+            "description": "`Forbid` — the only policy in v1.",
+            "type": "string"
+          },
+          "deadlineSeconds": {
+            "description": "The run deadline.",
+            "type": "integer",
+            "format": "int32"
+          },
+          "maxPartitions": {
+            "description": "The partition ceiling, enforced when the catalog knows the count.",
+            "type": "integer",
+            "format": "int32"
+          },
+          "recordsPerPartition": {
+            "description": "How many records per partition the canary writes.",
+            "type": "integer",
+            "format": "int32"
+          },
+          "startingDeadlineSeconds": {
+            "description": "The missed-slot horizon.",
+            "type": "integer",
+            "format": "int32"
+          }
+        }
+      },
+      "RehearsalFailureView": {
+        "description": "The last rehearsal that failed.",
+        "type": "object",
+        "properties": {
+          "at": {
+            "description": "When.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "reason": {
+            "description": "Why.",
+            "type": "string",
+            "nullable": true
+          },
+          "restoreRef": {
+            "description": "The `Restore`.",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          }
+        }
+      },
+      "RehearsalScheduleList": {
+        "description": "A page of rehearsal schedules.",
+        "type": "object",
+        "required": [
+          "items",
+          "page",
+          "requestId"
+        ],
+        "properties": {
+          "items": {
+            "description": "The items on this page.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RehearsalScheduleView"
+            }
+          },
+          "page": {
+            "description": "Paging.",
+            "$ref": "#/components/schemas/Page"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "RehearsalScheduleResponse": {
+        "description": "One rehearsal schedule.",
+        "type": "object",
+        "required": [
+          "item",
+          "requestId"
+        ],
+        "properties": {
+          "item": {
+            "description": "The item.",
+            "$ref": "#/components/schemas/RehearsalScheduleView"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "RehearsalScheduleView": {
+        "description": "A `RehearsalSchedule`, projected.",
+        "type": "object",
+        "required": [
+          "bounds",
+          "conditions",
+          "name",
+          "namespace",
+          "point",
+          "resourceVersion",
+          "schedule",
+          "standingApprovalRef",
+          "suspend",
+          "target",
+          "uid"
+        ],
+        "properties": {
+          "activeRestoreRef": {
+            "description": "The rehearsal running now.",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "approvalPolicyRef": {
+            "description": "The approval policy, when one is named.",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "bounds": {
+            "description": "The bounds.",
+            "$ref": "#/components/schemas/RehearsalBoundsView"
+          },
+          "cleanup": {
+            "description": "Leftover topics, which block the next slot.",
+            "$ref": "#/components/schemas/CleanupStateView",
+            "nullable": true
+          },
+          "conditions": {
+            "description": "`Ready`, `Authorized` and `RehearsalHealthy`.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConditionView"
+            }
+          },
+          "createdAt": {
+            "description": "When the object was created.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "generation": {
+            "description": "`metadata.generation`.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "lastFailed": {
+            "description": "The last failure.",
+            "$ref": "#/components/schemas/RehearsalFailureView",
+            "nullable": true
+          },
+          "lastScheduledSlot": {
+            "description": "The last slot the controller scheduled.",
+            "type": "string",
+            "nullable": true
+          },
+          "lastSkipped": {
+            "description": "The last skip. **A skip is not a pass and is never rendered as one.**",
+            "$ref": "#/components/schemas/SkippedSlotView",
+            "nullable": true
+          },
+          "lastSucceeded": {
+            "description": "The last pass.",
+            "$ref": "#/components/schemas/RehearsalSuccessView",
+            "nullable": true
+          },
+          "name": {
+            "description": "The object name.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "The namespace.",
+            "type": "string"
+          },
+          "nextFireTime": {
+            "description": "When it fires next.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "observedGeneration": {
+            "description": "The generation the status was computed from.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "pendingRestoreRef": {
+            "description": "The reservation a slot took before it created its child.",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "point": {
+            "description": "Which point.",
+            "$ref": "#/components/schemas/PointSelectorView"
+          },
+          "protectionPolicyRef": {
+            "description": "The protection policy the results surface on.",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "resourceVersion": {
+            "description": "The resourceVersion this projection was read at.",
+            "type": "string"
+          },
+          "rtoSeconds": {
+            "description": "The requested recovery time objective.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "schedule": {
+            "description": "The five-field UTC cron expression.",
+            "type": "string"
+          },
+          "standingApprovalRef": {
+            "description": "The `Approval` carrying the signed standing authorization. A NAME: the document and its signatures are reachable only through the approval packet route.",
+            "$ref": "#/components/schemas/NameRef"
+          },
+          "suspend": {
+            "description": "Whether it is suspended — the only mutable field of a sealed spec.",
+            "type": "boolean"
+          },
+          "target": {
+            "description": "Where it writes.",
+            "$ref": "#/components/schemas/RehearsalTargetView"
+          },
+          "uid": {
+            "description": "The Kubernetes UID.",
+            "type": "string"
+          }
+        }
+      },
+      "RehearsalSuccessView": {
+        "description": "The last rehearsal that passed.",
+        "type": "object",
+        "properties": {
+          "at": {
+            "description": "When.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "evidence": {
+            "description": "The verification verdict the run recorded.",
+            "type": "string",
+            "nullable": true
+          },
+          "pointId": {
+            "description": "Which point.",
+            "type": "string",
+            "nullable": true
+          },
+          "restoreRef": {
+            "description": "The `Restore` it ran as.",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
+          "rtoSeconds": {
+            "description": "The measured recovery time.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          }
+        }
+      },
+      "RehearsalTargetView": {
+        "description": "Where a rehearsal writes.",
+        "type": "object",
+        "required": [
+          "clusterRef",
+          "markerTopic",
+          "replicationFactor",
+          "topicPrefix"
+        ],
+        "properties": {
+          "clusterRef": {
+            "description": "The target connection.",
+            "$ref": "#/components/schemas/NameRef"
+          },
+          "markerTopic": {
+            "description": "The marker topic phase 0 checks.",
+            "type": "string"
+          },
+          "replicationFactor": {
+            "description": "The replication factor for created topics.",
+            "type": "integer",
+            "format": "int32"
+          },
+          "topicPrefix": {
+            "description": "The prefix as WRITTEN in the spec. The controller renders `<prefix><uid-first-8>-` per schedule, which is what teardown's deletion guard matches.",
+            "type": "string"
           }
         }
       },
@@ -7748,6 +11181,200 @@
           }
         ]
       },
+      "RetentionPolicyList": {
+        "description": "A page of retention policies.",
+        "type": "object",
+        "required": [
+          "items",
+          "page",
+          "requestId"
+        ],
+        "properties": {
+          "items": {
+            "description": "The items on this page.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RetentionPolicyView"
+            }
+          },
+          "page": {
+            "description": "Paging.",
+            "$ref": "#/components/schemas/Page"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "RetentionPolicyResponse": {
+        "description": "One retention policy.",
+        "type": "object",
+        "required": [
+          "item",
+          "requestId"
+        ],
+        "properties": {
+          "item": {
+            "description": "The item.",
+            "$ref": "#/components/schemas/RetentionPolicyView"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "RetentionPolicyView": {
+        "description": "A `RetentionPolicy`, projected.",
+        "type": "object",
+        "required": [
+          "approvedPlanState",
+          "catalogRef",
+          "conditions",
+          "destinationRef",
+          "enforcementDegraded",
+          "holds",
+          "leasedPoints",
+          "minUsablePoints",
+          "mode",
+          "name",
+          "namespace",
+          "resourceVersion",
+          "scopePrefix",
+          "uid"
+        ],
+        "properties": {
+          "approvedPlanState": {
+            "description": "Where the approved-plan gate stands.",
+            "$ref": "#/components/schemas/ApprovedPlanState"
+          },
+          "catalogRef": {
+            "description": "The catalog it evaluates.",
+            "$ref": "#/components/schemas/NameRef"
+          },
+          "conditions": {
+            "description": "`Ready`, `Evaluated`, `Enforced`, `ExternalLifecycleConflict` and `EnforcementDegraded`.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConditionView"
+            }
+          },
+          "consecutiveRunFailures": {
+            "description": "How many runs have failed in a row.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "createdAt": {
+            "description": "When the object was created.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "destinationRef": {
+            "description": "The destination it governs.",
+            "$ref": "#/components/schemas/NameRef"
+          },
+          "enforcement": {
+            "description": "**What is actually enforcing**: `RecommendationOnly`, `LogweirWorker` or `ExternalLifecycleDeclared`.",
+            "type": "string",
+            "nullable": true
+          },
+          "enforcementDegraded": {
+            "description": "Whether `EnforcementDegraded` is `True`: three consecutive failed runs stop scheduling until the spec changes.",
+            "type": "boolean"
+          },
+          "enforcementSettings": {
+            "description": "The enforcement settings, when the mode has them.",
+            "$ref": "#/components/schemas/EnforcementSettingsView",
+            "nullable": true
+          },
+          "externalLifecycle": {
+            "description": "The declared bucket lifecycle rule, when the mode declares one.",
+            "$ref": "#/components/schemas/ExternalLifecycleView",
+            "nullable": true
+          },
+          "generation": {
+            "description": "`metadata.generation`.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "guarantees": {
+            "description": "Which guarantees are in force, and by whom.",
+            "$ref": "#/components/schemas/GuaranteesView",
+            "nullable": true
+          },
+          "holds": {
+            "description": "How many holds are in force.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "keepDays": {
+            "description": "How many days they keep by age.",
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "keepLast": {
+            "description": "How many points the rules keep by rank.",
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          },
+          "lastEnforcement": {
+            "description": "The last enforcement run.",
+            "$ref": "#/components/schemas/EnforcementRunView",
+            "nullable": true
+          },
+          "lastEvaluation": {
+            "description": "The last evaluation.",
+            "$ref": "#/components/schemas/EvaluationView",
+            "nullable": true
+          },
+          "leasedPoints": {
+            "description": "How many points a run has claimed right now. A non-zero lease is why a restore of one of them holds with `PointRetentionInProgress`.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "minUsablePoints": {
+            "description": "The floor, which the rules can never go under.",
+            "type": "integer",
+            "format": "int32"
+          },
+          "mode": {
+            "description": "`Report`, `Enforce` or `ExternalLifecycle`, as configured.",
+            "type": "string"
+          },
+          "name": {
+            "description": "The object name.",
+            "type": "string"
+          },
+          "namespace": {
+            "description": "The namespace.",
+            "type": "string"
+          },
+          "observedGeneration": {
+            "description": "The generation the status was computed from.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "resourceVersion": {
+            "description": "The resourceVersion this projection was read at.",
+            "type": "string"
+          },
+          "scopePrefix": {
+            "description": "The only prefix deletion may ever touch.",
+            "type": "string"
+          },
+          "uid": {
+            "description": "The Kubernetes UID.",
+            "type": "string"
+          }
+        }
+      },
       "RetentionReportView": {
         "description": "The controller's retention report, bounded to 100 entries per list.",
         "type": "object",
@@ -7916,6 +11543,41 @@
             ]
           }
         ]
+      },
+      "RunnerPhaseView": {
+        "description": "The runner's own phase, from its `progress-phase=` lines.",
+        "type": "object",
+        "properties": {
+          "name": {
+            "description": "The step or phase name, at most 32 bytes.",
+            "type": "string",
+            "nullable": true
+          },
+          "number": {
+            "description": "`-1`..`9`. A backup reports `-1` with a step name.",
+            "type": "integer",
+            "format": "int32",
+            "nullable": true
+          }
+        }
+      },
+      "SampleWindowView": {
+        "description": "The window an integrity sample covered.",
+        "type": "object",
+        "properties": {
+          "end": {
+            "description": "Its end.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "start": {
+            "description": "Its start.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          }
+        }
       },
       "ScanView": {
         "description": "How much of the stored result one page actually looked at.",
@@ -8101,6 +11763,40 @@
           "uid": {
             "description": "Its UID.",
             "type": "string"
+          }
+        }
+      },
+      "ScheduleHealthView": {
+        "description": "A schedule as this policy sees it — rendered BESIDE protection health and never folded into it.",
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "lastMissedSlot": {
+            "description": "The last slot it missed.",
+            "type": "string",
+            "nullable": true
+          },
+          "name": {
+            "description": "The schedule's name.",
+            "type": "string"
+          },
+          "nextFireTime": {
+            "description": "When it fires next.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "ready": {
+            "description": "Its own `Ready` status.",
+            "type": "string",
+            "nullable": true
+          },
+          "suspended": {
+            "description": "Whether it is suspended — the commonest cause of staleness.",
+            "type": "boolean",
+            "nullable": true
           }
         }
       },
@@ -8381,6 +12077,106 @@
         },
         "additionalProperties": false
       },
+      "SignerPageResponse": {
+        "description": "The signer panel.",
+        "type": "object",
+        "required": [
+          "fingerprintCommand",
+          "items",
+          "requestId"
+        ],
+        "properties": {
+          "fingerprintCommand": {
+            "description": "The out-of-band comparison an administrator runs before adding a key. A command, not an action this service offers.",
+            "type": "string"
+          },
+          "items": {
+            "description": "The signers.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SignerView"
+            }
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          },
+          "untrustedPoints": {
+            "description": "How many points carry a signature the bound policy does not accept.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          }
+        }
+      },
+      "SignerView": {
+        "description": "Who signed the points in this catalog — the untrusted-signer panel's data.",
+        "type": "object",
+        "required": [
+          "keyId"
+        ],
+        "properties": {
+          "keyId": {
+            "description": "The key id: the SHA-256 of the DER SPKI, lowercase hex. Compare it out of band; there is no one-click trust.",
+            "type": "string"
+          },
+          "points": {
+            "description": "How many points it signed.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "principalHint": {
+            "description": "A hint at the principal, taken from the record. **Never authority.**",
+            "type": "string",
+            "nullable": true
+          },
+          "trusted": {
+            "description": "Whether the bound `TrustPolicy` accepts it. Absent means the catalog could not tell, which is not `false` and is certainly not `true`.",
+            "type": "boolean",
+            "nullable": true
+          }
+        }
+      },
+      "SkippedEntryView": {
+        "description": "One point or key the evaluation could not classify. **Unknown is retained**: nothing here is ever a deletion candidate.",
+        "type": "object",
+        "required": [
+          "reason"
+        ],
+        "properties": {
+          "key": {
+            "description": "The object key, when the point was not.",
+            "type": "string",
+            "nullable": true
+          },
+          "pointId": {
+            "description": "The point, when one was identified.",
+            "type": "string",
+            "nullable": true
+          },
+          "reason": {
+            "description": "`Unreadable`, `UnsupportedFormat` or `Conflict`.",
+            "type": "string"
+          }
+        }
+      },
+      "SkippedSlotView": {
+        "description": "A slot that did not run, and why.",
+        "type": "object",
+        "properties": {
+          "reason": {
+            "description": "The reason, from the closed list.",
+            "type": "string",
+            "nullable": true
+          },
+          "slot": {
+            "description": "The slot.",
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
       "SourceConnectionPreflightRequest": {
         "description": "The source-connection half of a preflight request.",
         "type": "object",
@@ -8584,6 +12380,67 @@
           "name": {
             "description": "The subject name.",
             "type": "string"
+          }
+        }
+      },
+      "SyncCursorView": {
+        "description": "Where the last walk got to.",
+        "type": "object",
+        "properties": {
+          "complete": {
+            "description": "Whether the walk finished. `false` is a budgeted walk that will continue, not a failure.",
+            "type": "boolean",
+            "nullable": true
+          },
+          "indexShard": {
+            "description": "The day shard the next `Index` sync resumes from.",
+            "type": "string",
+            "nullable": true
+          }
+        }
+      },
+      "TeardownFailureView": {
+        "description": "One topic teardown could not remove.",
+        "type": "object",
+        "required": [
+          "error",
+          "topic"
+        ],
+        "properties": {
+          "error": {
+            "description": "The error, bounded.",
+            "type": "string"
+          },
+          "topic": {
+            "description": "The topic.",
+            "type": "string"
+          }
+        }
+      },
+      "TeardownView": {
+        "description": "What phase 9 removed, from the SIGNED teardown attestation.",
+        "type": "object",
+        "required": [
+          "deleted",
+          "failed"
+        ],
+        "properties": {
+          "attestationKey": {
+            "description": "Where the attestation is.",
+            "type": "string",
+            "nullable": true
+          },
+          "deleted": {
+            "description": "How many topics were deleted.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "failed": {
+            "description": "The ones that could not be.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TeardownFailureView"
+            }
           }
         }
       },
@@ -9036,6 +12893,308 @@
           }
         }
       },
+      "TrustKeyView": {
+        "description": "One key, as the policy declares it and as the controller evaluated it.",
+        "type": "object",
+        "required": [
+          "algorithm",
+          "effectiveState",
+          "keyId",
+          "notAfter",
+          "notBefore",
+          "principal",
+          "state",
+          "usages"
+        ],
+        "properties": {
+          "algorithm": {
+            "description": "`p256` or `ed25519`.",
+            "type": "string"
+          },
+          "effectiveState": {
+            "description": "The EVALUATED state — `Active`, `NotYetValid`, `Expired`, `Retired`, `Revoked`, `Unparseable` — or `unknown` when the evaluation is not fresh. **`valid` and `expired` are rendered only for a fresh evaluation.**",
+            "type": "string"
+          },
+          "keyId": {
+            "description": "The key ID: the SHA-256 of the DER SPKI, lowercase hex — the number `openssl` prints, and what an out-of-band comparison compares.",
+            "type": "string"
+          },
+          "notAfter": {
+            "description": "The end of it. It may only ever move earlier.",
+            "type": "string",
+            "format": "date-time"
+          },
+          "notBefore": {
+            "description": "The start of its validity window.",
+            "type": "string",
+            "format": "date-time"
+          },
+          "principal": {
+            "description": "Who holds it.",
+            "$ref": "#/components/schemas/KeyPrincipalView"
+          },
+          "retiredAt": {
+            "description": "When it was retired.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "revocationEffectiveFrom": {
+            "description": "From when the revocation bites.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "revocationReason": {
+            "description": "`KeyCompromise`, `Superseded` or `Unspecified`. The distinction decides what happens to evidence signed before the revocation.",
+            "type": "string",
+            "nullable": true
+          },
+          "revokedAt": {
+            "description": "When it was revoked.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "state": {
+            "description": "The DECLARED lifecycle state: `Active`, `Retired` or `Revoked`.",
+            "type": "string"
+          },
+          "usableForNewSignatures": {
+            "description": "Whether it may sign new material. Absent when the evaluation is not fresh: an unevaluated key is not a usable one, and it is not an unusable one either.",
+            "type": "boolean",
+            "nullable": true
+          },
+          "usableForVerification": {
+            "description": "`Full`, `Historical` or `None`. Absent when the evaluation is not fresh.",
+            "type": "string",
+            "nullable": true
+          },
+          "usages": {
+            "description": "Exactly one of `EvidenceSigning`, `GovernedApproval` or `ConsoleConfirmation`. One key, one usage.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "TrustPolicyList": {
+        "description": "A page of trust policies.",
+        "type": "object",
+        "required": [
+          "items",
+          "page",
+          "requestId"
+        ],
+        "properties": {
+          "items": {
+            "description": "The items on this page.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TrustPolicyView"
+            }
+          },
+          "page": {
+            "description": "Paging.",
+            "$ref": "#/components/schemas/Page"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "TrustPolicyResponse": {
+        "description": "One trust policy.",
+        "type": "object",
+        "required": [
+          "item",
+          "requestId"
+        ],
+        "properties": {
+          "item": {
+            "description": "The item.",
+            "$ref": "#/components/schemas/TrustPolicyView"
+          },
+          "requestId": {
+            "description": "The request ID.",
+            "type": "string"
+          }
+        }
+      },
+      "TrustPolicyView": {
+        "description": "A `TrustPolicy`, projected.",
+        "type": "object",
+        "required": [
+          "allowedTargetClusterIds",
+          "boundNamespaces",
+          "conditions",
+          "conflicts",
+          "default",
+          "evaluation",
+          "keyCount",
+          "keys",
+          "keysTruncated",
+          "name",
+          "namespaces",
+          "namespacesTruncated",
+          "resourceVersion",
+          "uid"
+        ],
+        "properties": {
+          "allowedTargetClusterIds": {
+            "description": "How many target cluster ids a rehearsal or restore may write to.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "boundNamespaces": {
+            "description": "The namespaces the controller resolved to this policy.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "conditions": {
+            "description": "`Loaded`, `Bound` and `ExpiringSoon`.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ConditionView"
+            }
+          },
+          "conflicts": {
+            "description": "Namespaces two policies claim.",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/NamespaceConflictView"
+            }
+          },
+          "createdAt": {
+            "description": "When the object was created.",
+            "type": "string",
+            "format": "date-time",
+            "nullable": true
+          },
+          "default": {
+            "description": "Whether this is the installation default.",
+            "type": "boolean"
+          },
+          "evaluation": {
+            "description": "How fresh the verdicts above are.",
+            "$ref": "#/components/schemas/EvaluationView2"
+          },
+          "generation": {
+            "description": "`metadata.generation`.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "keyCount": {
+            "description": "How many keys the policy carries in total.",
+            "type": "integer",
+            "format": "int64"
+          },
+          "keys": {
+            "description": "The keys, at most [`MAX_ROWS`].",
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TrustKeyView"
+            }
+          },
+          "keysTruncated": {
+            "description": "Whether the key list was cut short.",
+            "type": "boolean"
+          },
+          "loaded": {
+            "description": "Whether the controller could load the policy at all.",
+            "type": "boolean",
+            "nullable": true
+          },
+          "name": {
+            "description": "The object name. Cluster-scoped: there is no namespace.",
+            "type": "string"
+          },
+          "namespaces": {
+            "description": "The namespaces it governs by name.",
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "namespacesTruncated": {
+            "description": "Whether the namespace list was cut short.",
+            "type": "boolean"
+          },
+          "observedGeneration": {
+            "description": "The generation the status was computed from.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "resourceVersion": {
+            "description": "The resourceVersion this projection was read at.",
+            "type": "string"
+          },
+          "uid": {
+            "description": "The Kubernetes UID.",
+            "type": "string"
+          }
+        }
+      },
+      "TrustState": {
+        "description": "D3 §2.5's evidence verdict, which is the RESULT and the TRUST BASIS together.",
+        "oneOf": [
+          {
+            "description": "Not finished, or finished with evidence and no verdict yet.",
+            "type": "string",
+            "enum": [
+              "pending"
+            ]
+          },
+          {
+            "description": "Verified under a key the policy accepts now.",
+            "type": "string",
+            "enum": [
+              "verified"
+            ]
+          },
+          {
+            "description": "Verified under a key that was valid when it signed and has since been retired. **A pass, not a downgrade** — it is what rotation looks like.",
+            "type": "string",
+            "enum": [
+              "verifiedHistorical"
+            ]
+          },
+          {
+            "description": "The signature verifies and the key is one this installation will not accept: unknown, revoked, or holding the wrong usage.",
+            "type": "string",
+            "enum": [
+              "untrusted"
+            ]
+          },
+          {
+            "description": "The bytes do not match the signature.",
+            "type": "string",
+            "enum": [
+              "invalid"
+            ]
+          },
+          {
+            "description": "No verdict was reached. NOT a verified result.",
+            "type": "string",
+            "enum": [
+              "notAttempted"
+            ]
+          },
+          {
+            "description": "The run wrote no artifact to verify (exits 1, 3 and 4, refusals, crashes).",
+            "type": "string",
+            "enum": [
+              "notApplicable"
+            ]
+          }
+        ]
+      },
       "UpdateDestinationAccessRequest": {
         "description": "`POST .../destinations/{name}:update-access`.",
         "type": "object",
@@ -9166,6 +13325,63 @@
           }
         },
         "additionalProperties": false
+      },
+      "VerificationScopeLevel": {
+        "description": "How thorough the record check was. `complete` does not exist in v1.",
+        "oneOf": [
+          {
+            "description": "`byte-fingerprint`: a sample was compared byte for byte.",
+            "type": "string",
+            "enum": [
+              "sampled"
+            ]
+          },
+          {
+            "description": "`consume-only`: records were read back and not compared.",
+            "type": "string",
+            "enum": [
+              "degraded"
+            ]
+          },
+          {
+            "description": "No record check ran, or the artifact attests counts and a window rather than a restore.",
+            "type": "string",
+            "enum": [
+              "none"
+            ]
+          }
+        ]
+      },
+      "VerificationScopeView": {
+        "description": "What the verification actually covered, in numbers the console renders a fixed sentence around.",
+        "type": "object",
+        "required": [
+          "level"
+        ],
+        "properties": {
+          "level": {
+            "description": "The level.",
+            "$ref": "#/components/schemas/VerificationScopeLevel"
+          },
+          "recordsExpected": {
+            "description": "The canary size the plan asked for.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "recordsSampled": {
+            "description": "How many records were sampled.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          },
+          "recordsSampledMatching": {
+            "description": "How many of them matched byte for byte.",
+            "type": "integer",
+            "format": "int64",
+            "nullable": true
+          }
+        }
       },
       "VerificationState": {
         "description": "Whether the controller verified the signed evidence.",

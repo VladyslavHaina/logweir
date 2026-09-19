@@ -219,7 +219,18 @@ fn no_source_here_names_a_forbidden_kubernetes_api() {
         "Api<Job>",
         "Api<ConfigMap>",
         "Api<Namespace>",
-        "Api::all",
+        // `Api::all` IS NOT HERE ANY MORE, AND IS FENCED INSTEAD OF BANNED.
+        // D3 §7.1 makes `TrustPolicy` cluster-scoped for the reason
+        // `docs/kubernetes.md` §8 gives — a roster whose name the subject
+        // supplies is a roster the subject can choose — so there is exactly
+        // one kind this service reads without a namespace, and it cannot be
+        // read through a namespaced handle. `the_cluster_scoped_read_is_one_
+        // sealed_kind_and_two_read_verbs` below is the replacement: it pins
+        // the number of `Api::all` sites, the two functions that may hold one,
+        // the single sealed type, and the absence of any create, patch or
+        // delete generic over that seal. `Api::all_with` stays banned: a
+        // constructor that takes a caller-supplied `DynamicType` is a
+        // constructor that takes a group, a version and a plural.
         "Api::all_with",
         ".delete(",
         ".delete_collection(",
@@ -349,9 +360,12 @@ fn api_binding_names(text: &str) -> BTreeSet<String> {
 /// `entry`, `get_status`, `get_metadata`, `watch`, and whatever a future
 /// version adds — fails it without ever being named.
 ///
-/// It also pins the binding name and the constructor, because both are what
+/// It also pins the binding name and the constructor set, because both are what
 /// make the scan honest: rename `api` and the verb scan would find nothing;
-/// swap `Api::namespaced` for `Api::all` and the namespace bound disappears.
+/// widen the constructor set and a namespaced route could hold a cluster-wide
+/// handle. `Api::all` is in the set for exactly one kind, and
+/// [`the_cluster_scoped_read_is_one_sealed_kind_and_two_read_verbs`] is what
+/// keeps it to that one.
 #[test]
 fn the_adapter_calls_only_the_four_permitted_kubernetes_verbs() {
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -381,9 +395,10 @@ fn the_adapter_calls_only_the_four_permitted_kubernetes_verbs() {
 
     assert_eq!(
         methods_called_on(&text, "Api::"),
-        BTreeSet::from(["namespaced".to_string()]),
-        "the only `Api` constructor permitted here is `Api::namespaced`: a cluster-wide \
-         handle would drop the namespace bound every route authorizes against"
+        BTreeSet::from(["namespaced".to_string(), "all".to_string()]),
+        "the `Api` constructors permitted here are `Api::namespaced` and — for the one \
+         cluster-scoped kind, which has no namespace to be bound to — `Api::all`. Anything \
+         else drops the namespace bound every namespaced route authorizes against"
     );
 
     assert_eq!(
@@ -656,5 +671,80 @@ fn both_impersonation_refusals_are_present() {
     assert!(
         kube.contains("pub fn refuse_impersonation") && kube.contains("a.impersonate.is_some()"),
         "the kubeconfig impersonation refusal is gone from the adapter"
+    );
+}
+
+/// **The cluster-scoped read is one sealed kind, two functions and no write.**
+///
+/// `ProductResource` is bound `Scope = NamespaceResourceScope` so that no
+/// namespaced route can reach outside its namespace, and D3 §7.1 puts exactly
+/// one kind — `TrustPolicy` — outside that bound. The danger is not the
+/// existence of a cluster-wide handle; it is a cluster-wide handle that grows a
+/// second kind, or a verb. So this pins all four things that would have to
+/// change for either to happen: how many `Api::all` sites there are, which
+/// functions hold them, how many types satisfy the seal, and that no `create`,
+/// `patch`, `replace` or `delete` is generic over it.
+///
+/// REGRESSION REASON. `the_adapter_calls_only_the_four_permitted_kubernetes_verbs`
+/// pins the verb set over the whole file, so it cannot tell a `create` reached
+/// through `Api::namespaced` from one reached through `Api::all`: adding
+/// `pub async fn create_cluster<K: ClusterResource>` that called `api.create`
+/// would leave that set unchanged and D3 §10's "trust writes stay off the API
+/// in v1" would be false with every test green.
+#[test]
+fn the_cluster_scoped_read_is_one_sealed_kind_and_two_read_verbs() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/kube.rs");
+    let text = std::fs::read_to_string(&path).expect("src/kube.rs is readable");
+    let code: Vec<String> = code_lines(&text)
+        .map(|(_, line)| line.to_string())
+        .collect();
+
+    let all_sites = code.iter().filter(|l| l.contains("Api::all(")).count();
+    assert_eq!(
+        all_sites,
+        2,
+        "`Api::all` belongs to the two cluster-scoped READ methods and to nothing else; \
+         {all_sites} sites were found in {}",
+        path.display()
+    );
+
+    let cluster_fns: Vec<&String> = code
+        .iter()
+        .filter(|l| l.contains("ClusterResource>") && l.contains("fn "))
+        .collect();
+    let names: BTreeSet<String> = cluster_fns
+        .iter()
+        .filter_map(|l| {
+            let after = l.split("fn ").nth(1)?;
+            Some(after.split('<').next()?.trim().to_string())
+        })
+        .collect();
+    assert_eq!(
+        names,
+        BTreeSet::from(["list_cluster".to_string(), "get_cluster".to_string()]),
+        "exactly two functions may be generic over the cluster seal, and both are reads. \
+         A create, patch or delete over it would be the trust WRITE D3 §10 keeps off this \
+         API in v1."
+    );
+
+    let sealed: Vec<&String> = code
+        .iter()
+        .filter(|l| l.contains("impl ClusterSealed for"))
+        .collect();
+    assert_eq!(
+        sealed.len(),
+        1,
+        "the cluster seal admits exactly one kind; it admits {}: {sealed:?}",
+        sealed.len()
+    );
+    assert!(
+        sealed[0].contains("trust_policy::TrustPolicy"),
+        "the one cluster-scoped kind is TrustPolicy: {}",
+        sealed[0]
+    );
+    assert!(
+        code.iter()
+            .any(|l| l.contains("impl ClusterResource for TrustPolicy")),
+        "TrustPolicy is the one implementor of the cluster-scoped read trait"
     );
 }

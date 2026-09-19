@@ -522,18 +522,55 @@ async fn logout_clears_the_session_and_needs_the_synchronizer_token() {
 /// **There is no event stream, authenticated or not — and the limiter the
 /// stream will need already exists and holds.**
 ///
-/// D0 asks for "unauthenticated SSE" to be refused. The honest state of this
-/// build is that the route does not exist: `operationEvents` is advertised
-/// `false` and every spelling of the path answers 404 with and without a
-/// session, which is the strongest form of "refused". The seam the route will
-/// use — per-actor, per-namespace connection slots — is implemented and
-/// exercised here so that adding the route is adding a route.
+/// **D0's "unauthenticated SSE is refused", now that the stream exists.**
+///
+/// The route landed with D3 W11, so the property is no longer "there is no
+/// route": it is that an anonymous caller never receives a `text/event-stream`
+/// body, that the other spellings a client might guess are still 404, and that
+/// no query parameter — so no token in a URL — is accepted. The slot seam is
+/// exercised here too, because it is what bounds the route now that there is
+/// one.
 #[tokio::test]
-async fn there_is_no_event_stream_yet_and_its_limit_seam_holds() {
+async fn the_event_stream_refuses_an_anonymous_caller_and_every_guessed_spelling() {
     let app = app();
     let cookie = app.session_cookie("u-op", &["lw-a-operators"]);
+
+    // The real route: anonymous is refused before anything is opened.
+    let anonymous = Raw::get("/api/v1/namespaces/team-a/operations/backup/x/events")
+        .send(&app)
+        .await;
+    assert_eq!(anonymous.status.as_u16(), 401);
+    assert_ne!(
+        anonymous.header("content-type").as_deref(),
+        Some("text/event-stream"),
+        "a stream was opened to an unauthenticated caller"
+    );
+
+    // Authenticated, but the object does not exist: 404 problem+json, never an
+    // empty stream that a console renders as "connecting…".
+    let missing = Raw::get("/api/v1/namespaces/team-a/operations/backup/x/events")
+        .header("cookie", &cookie)
+        .send(&app)
+        .await;
+    assert_eq!(missing.status.as_u16(), 404);
+    assert_ne!(
+        missing.header("content-type").as_deref(),
+        Some("text/event-stream")
+    );
+
+    // A TOKEN IN A URL IS THE ONE THING `EventSource` TEMPTS A DESIGN INTO.
+    // No query parameter is accepted at all, so `?access_token=` is refused as
+    // an unknown parameter rather than ignored.
+    let token_in_url =
+        Raw::get("/api/v1/namespaces/team-a/operations/backup/x/events?access_token=abc")
+            .header("cookie", &cookie)
+            .send(&app)
+            .await;
+    assert_eq!(token_in_url.status.as_u16(), 400);
+
+    // Everything else a client might guess is still 404, with and without a
+    // session.
     for path in [
-        "/api/v1/namespaces/team-a/operations/backup/x/events",
         "/api/v1/namespaces/team-a/events",
         "/api/v1/namespaces/team-a/operations/backup/x?watch=true",
         "/api/v1/events",
@@ -560,9 +597,9 @@ async fn there_is_no_event_stream_yet_and_its_limit_seam_holds() {
         );
     }
 
-    // The capability is advertised false, so a client cannot be told to try.
+    // The capability now names a route that exists.
     let session = app.get("/api/v1/session", &cookie).await.json();
-    assert_eq!(session["capabilities"]["operationEvents"], false);
+    assert_eq!(session["capabilities"]["operationEvents"], true);
 
     // The seam.
     let slots = logweir_api::auth::ratelimit::StreamSlots::with_limit(2);

@@ -188,8 +188,9 @@ impl AppState {
 /// The complete router, middleware included.
 pub fn router(state: AppState) -> Router {
     use crate::routes::{
-        approvals, backups, cadence_previews, connections, destinations, health, namespaces,
-        operations, preflights, restores, schedules, session, topic_discoveries,
+        approvals, backups, cadence_previews, catalogs, connections, destinations, health,
+        namespaces, operations, preflights, protection, rehearsals, restores, retention, schedules,
+        session, topic_discoveries, trust,
     };
 
     let api = Router::new()
@@ -286,6 +287,66 @@ pub fn router(state: AppState) -> Router {
             "/api/v1/namespaces/{ns}/operations/{kind}/{name}",
             get(operations::get_one),
         )
+        // D3 §2.6's stream. It is a SEPARATE path rather than a content
+        // negotiation on the read route: a route table that is the boundary
+        // cannot have a route whose resource cost depends on an `Accept`
+        // header, and the capability flag a console reads
+        // (`operationEvents`) has to name something.
+        .route(
+            "/api/v1/namespaces/{ns}/operations/{kind}/{name}/events",
+            get(operations::events),
+        )
+        // ---------------------------------------------------------------
+        // D3 §10's read families. Every one is a bounded GET with the same
+        // cursor, and the only write among them is the catalog create that
+        // PLAT-15.2's "connect an existing archive" needs.
+        // ---------------------------------------------------------------
+        .route(
+            "/api/v1/namespaces/{ns}/protection-policies",
+            get(protection::list),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/protection-policies/{name}",
+            get(protection::get_one),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/rehearsal-schedules",
+            get(rehearsals::list),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/rehearsal-schedules/{name}",
+            get(rehearsals::get_one),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/catalogs",
+            get(catalogs::list).post(catalogs::create),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/catalogs/{name}",
+            get(catalogs::get_one),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/catalogs/{name}/points",
+            get(catalogs::points),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/catalogs/{name}/signers",
+            get(catalogs::signers),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/retention-policies",
+            get(retention::list),
+        )
+        .route(
+            "/api/v1/namespaces/{ns}/retention-policies/{name}",
+            get(retention::get_one),
+        )
+        // CLUSTER-SCOPED, AND THE ONLY ONE. A `TrustPolicy` names the
+        // namespaces it governs, so it has no `{ns}` and its own
+        // administrator-only rule; `routes::trust::authorize_cluster` is that
+        // rule and records the decision under the `*` pseudo-namespace.
+        .route("/api/v1/trust-policies", get(trust::list))
+        .route("/api/v1/trust-policies/{name}", get(trust::get_one))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::http::unsafe_request_guard,

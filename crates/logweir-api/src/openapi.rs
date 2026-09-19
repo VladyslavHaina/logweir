@@ -769,9 +769,206 @@ fn paths() -> Value {
                 ],
                 request: None,
                 success: vec![
-                    ("200", "The normalized durable run (backup, restore), or the normalized transient check (discovery, preflight) — two shapes, because a check has no archive result, no signed evidence and no verification verdict.", "OperationResponse"),
+                    ("200", "The normalized durable run (backup, restore), or the normalized transient check (discovery, preflight) — two shapes, because a check has no archive result, no signed evidence and no verification verdict.", "OperationViewResponse"),
                 ],
                 problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),
+            }],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/operations/{kind}/{name}/events",
+            vec![Op {
+                method: "get",
+                operation_id: "streamOperationEvents",
+                summary: "A bounded text/event-stream of one backup's or restore's normalized status. Event types are operation, reset, heartbeat and end; the event id is the object's resourceVersion and Last-Event-ID resumes with a reset snapshot when it is not the version the stream opened at. Every bound is the server's: the connection is closed after 300 s, a heartbeat is sent every 15 s of silence, and concurrent streams per principal per namespace are capped. NO query parameter is accepted, so no token can be placed in the URL; the stream is authenticated by the same session cookie as every other route and authorized once, at subscribe, for operation.read and operation.stream.",
+                parameters: vec![
+                    ns(),
+                    param(
+                        "kind",
+                        "path",
+                        "backup or restore. A transient check has a read route and no stream.",
+                        json!({ "type": "string", "enum": ["backup", "restore"] }),
+                        true,
+                    ),
+                    name(),
+                    param(
+                        "Last-Event-ID",
+                        "header",
+                        "The resourceVersion of the last event received. Decimal digits, at most 64 of them; anything else is malformed_request.",
+                        json!({ "type": "string" }),
+                        false,
+                    ),
+                ],
+                request: None,
+                success: vec![("200", "The event stream. text/event-stream, not application/json.", "")],
+                problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET, &[ProblemCode::RateLimited]]),
+            }],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/protection-policies",
+            vec![Op {
+                method: "get",
+                operation_id: "listProtectionPolicies",
+                summary: "Protection health: the newest point that can actually be recovered from, how availability was decided, the objective, the failed and missed runs, each schedule's OWN readiness beside protection health, and the alert ledger with its delivery state. No sink URL, no routing key and no Secret name: each route publishes its name and which channels it has as booleans.",
+                parameters: list_params(),
+                request: None,
+                success: vec![("200", "One page of protection policies.", "ProtectionPolicyList")],
+                problems: all_codes(&[COMMON, NAMESPACED, KUBE, LIST]),
+            }],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/protection-policies/{name}",
+            vec![Op {
+                method: "get",
+                operation_id: "getProtectionPolicy",
+                summary: "One protection policy. `health` absent means nothing has been evaluated, which is not Healthy.",
+                parameters: vec![ns(), name()],
+                request: None,
+                success: vec![("200", "The policy.", "ProtectionPolicyResponse")],
+                problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),
+            }],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/rehearsal-schedules",
+            vec![Op {
+                method: "get",
+                operation_id: "listRehearsalSchedules",
+                summary: "Recurring recovery rehearsals: the last pass, the last failure and the last SKIP with its reason, plus the leftover topics that block the next slot. The signed standing authorization is named, never carried.",
+                parameters: list_params(),
+                request: None,
+                success: vec![("200", "One page of rehearsal schedules.", "RehearsalScheduleList")],
+                problems: all_codes(&[COMMON, NAMESPACED, KUBE, LIST]),
+            }],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/rehearsal-schedules/{name}",
+            vec![Op {
+                method: "get",
+                operation_id: "getRehearsalSchedule",
+                summary: "One rehearsal schedule.",
+                parameters: vec![ns(), name()],
+                request: None,
+                success: vec![("200", "The schedule.", "RehearsalScheduleResponse")],
+                problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),
+            }],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/catalogs",
+            vec![
+                Op {
+                    method: "get",
+                    operation_id: "listCatalogs",
+                    summary: "Recovery catalogs: the ten verdict counts, the signer list, whether the Kubernetes view is a WINDOW over a larger archive, and when that window ages out with its sync Job.",
+                    parameters: list_params(),
+                    request: None,
+                    success: vec![("200", "One page of catalogs.", "CatalogList")],
+                    problems: all_codes(&[COMMON, NAMESPACED, KUBE, LIST]),
+                },
+                Op {
+                    method: "post",
+                    operation_id: "connectArchive",
+                    summary: "Connect an existing archive (PLAT-15.2): create a RecoveryCatalog under the name in the body, because every protection, rehearsal and retention policy references it by that name. The controller owns the object; this route creates it and nothing else. Repeating the request with the same Idempotency-Key returns the same object.",
+                    parameters: vec![ns(), idempotency_key(), origin()],
+                    request: Some("ConnectArchiveRequest"),
+                    success: vec![
+                        ("201", "Created.", "CatalogResponse"),
+                        ("200", "Replayed an identical earlier request.", "CatalogResponse"),
+                    ],
+                    problems: all_codes(&[COMMON, NAMESPACED, KUBE, UNSAFE, CREATE]),
+                },
+            ],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/catalogs/{name}",
+            vec![Op {
+                method: "get",
+                operation_id: "getCatalog",
+                summary: "One catalog.",
+                parameters: vec![ns(), name()],
+                request: None,
+                success: vec![("200", "The catalog.", "CatalogResponse")],
+                problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),
+            }],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/catalogs/{name}/points",
+            vec![Op {
+                method: "get",
+                operation_id: "listCatalogPoints",
+                summary: "One page of the materialised point view, with availability and verification as SEPARATE columns and the controller's own `selectable` conjunction beside them. Pages are read by the names the catalog's status records, at most eight per request, and each one is refused unless it is immutable and its bytes match the digest the status recorded. The cursor is bound to the view generation: a view replaced under a paging client is cursor_invalid with 'restart the list', never a silently different page. An empty list with viewExpired true means the window aged out, not that the archive is empty.",
+                parameters: vec![
+                    ns(),
+                    name(),
+                    param("limit", "query", "Page size, 1 to 200. Default 50.", json!({ "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }), false),
+                    param("cursor", "query", "The opaque nextCursor of the previous page.", json!({ "type": "string" }), false),
+                    param("selectable", "query", "true returns only points an ordinary restore may select (Available and verified).", json!({ "type": "string", "enum": ["true", "false"] }), false),
+                ],
+                request: None,
+                success: vec![("200", "One page of recovery points.", "PointPageResponse")],
+                problems: all_codes(&[COMMON, NAMESPACED, KUBE, LIST, RESULT_PAGE]),
+            }],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/catalogs/{name}/signers",
+            vec![Op {
+                method: "get",
+                operation_id: "listCatalogSigners",
+                summary: "The untrusted-signer panel: each key id that signed points in this archive, how many, and whether the bound TrustPolicy accepts it — with the out-of-band fingerprint command and NO route that would trust a key. Absent `trusted` means the catalog could not tell, which is not false and is certainly not true.",
+                parameters: vec![ns(), name()],
+                request: None,
+                success: vec![("200", "The signers.", "SignerPageResponse")],
+                problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),
+            }],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/retention-policies",
+            vec![Op {
+                method: "get",
+                operation_id: "listRetentionPolicies",
+                summary: "Retention: what the last evaluation would remove, what is ACTUALLY enforcing it (RecommendationOnly, LogweirWorker or ExternalLifecycleDeclared), which guarantees are Logweir-enforced, provider-declared-unverified or not enforced at all, where the approved-plan gate stands, and whether three consecutive failed runs have set EnforcementDegraded. The delete-capable credential is published as a boolean, never as a Secret name.",
+                parameters: list_params(),
+                request: None,
+                success: vec![("200", "One page of retention policies.", "RetentionPolicyList")],
+                problems: all_codes(&[COMMON, NAMESPACED, KUBE, LIST]),
+            }],
+        ),
+        (
+            "/api/v1/namespaces/{ns}/retention-policies/{name}",
+            vec![Op {
+                method: "get",
+                operation_id: "getRetentionPolicy",
+                summary: "One retention policy, with the plan preview its last evaluation produced. Nothing in `lastEvaluation` was deleted.",
+                parameters: vec![ns(), name()],
+                request: None,
+                success: vec![("200", "The policy.", "RetentionPolicyResponse")],
+                problems: all_codes(&[COMMON, NAMESPACED, KUBE, GET]),
+            }],
+        ),
+        (
+            "/api/v1/trust-policies",
+            vec![Op {
+                method: "get",
+                operation_id: "listTrustPolicies",
+                summary: "The installation's trust policies: which keys are accepted, for what usage, and how fresh that verdict is. CLUSTER-SCOPED, so it has no namespace and requires the administrator role in at least one bound namespace. A key whose evaluation is not fresh — no status, a status from an older generation, or an evaluatedAt older than 15 minutes by THIS server's clock — is published with effectiveState 'unknown' and no usability verdict: unknown is not valid. No public key bytes and no write route.",
+                parameters: vec![
+                    param("limit", "query", "Page size, 1 to 200. Default 50.", json!({ "type": "integer", "minimum": 1, "maximum": 200, "default": 50 }), false),
+                    param("cursor", "query", "The opaque nextCursor of the previous page.", json!({ "type": "string" }), false),
+                    param("labelSelector", "query", "Equality-only label selector.", json!({ "type": "string" }), false),
+                ],
+                request: None,
+                success: vec![("200", "One page of trust policies.", "TrustPolicyList")],
+                problems: all_codes(&[COMMON, KUBE, LIST, &[ProblemCode::Forbidden]]),
+            }],
+        ),
+        (
+            "/api/v1/trust-policies/{name}",
+            vec![Op {
+                method: "get",
+                operation_id: "getTrustPolicy",
+                summary: "One trust policy.",
+                parameters: vec![name()],
+                request: None,
+                success: vec![("200", "The policy.", "TrustPolicyResponse")],
+                problems: all_codes(&[COMMON, KUBE, GET, &[ProblemCode::Forbidden]]),
             }],
         ),
     ];
@@ -816,7 +1013,20 @@ pub fn openapi_document() -> String {
     let _ = generator.subschema_for::<c::ApprovalList>();
     let _ = generator.subschema_for::<c::ApprovalResponse>();
     let _ = generator.subschema_for::<c::ApprovalPacketResponse>();
-    let _ = generator.subschema_for::<c::OperationResponse>();
+    let _ = generator.subschema_for::<crate::routes::operations::OperationViewResponse>();
+    let _ = generator.subschema_for::<crate::routes::protection::ProtectionPolicyList>();
+    let _ = generator.subschema_for::<crate::routes::protection::ProtectionPolicyResponse>();
+    let _ = generator.subschema_for::<crate::routes::rehearsals::RehearsalScheduleList>();
+    let _ = generator.subschema_for::<crate::routes::rehearsals::RehearsalScheduleResponse>();
+    let _ = generator.subschema_for::<crate::routes::catalogs::ConnectArchiveRequest>();
+    let _ = generator.subschema_for::<crate::routes::catalogs::CatalogList>();
+    let _ = generator.subschema_for::<crate::routes::catalogs::CatalogResponse>();
+    let _ = generator.subschema_for::<crate::routes::catalogs::PointPageResponse>();
+    let _ = generator.subschema_for::<crate::routes::catalogs::SignerPageResponse>();
+    let _ = generator.subschema_for::<crate::routes::retention::RetentionPolicyList>();
+    let _ = generator.subschema_for::<crate::routes::retention::RetentionPolicyResponse>();
+    let _ = generator.subschema_for::<crate::routes::trust::TrustPolicyList>();
+    let _ = generator.subschema_for::<crate::routes::trust::TrustPolicyResponse>();
     let _ = generator.subschema_for::<c::CreateDestinationRequest>();
     let _ = generator.subschema_for::<c::UpdateDestinationAccessRequest>();
     let _ = generator.subschema_for::<c::DestinationFromLegacyRequest>();

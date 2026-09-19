@@ -4,16 +4,21 @@
 pub mod approvals;
 pub mod backups;
 pub mod cadence_previews;
+pub mod catalogs;
 pub mod connections;
 pub mod destinations;
 pub mod health;
 pub mod namespaces;
 pub mod operations;
 pub mod preflights;
+pub mod protection;
+pub mod rehearsals;
 pub mod restores;
+pub mod retention;
 pub mod schedules;
 pub mod session;
 pub mod topic_discoveries;
+pub mod trust;
 
 use std::collections::BTreeMap;
 

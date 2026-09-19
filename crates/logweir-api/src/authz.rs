@@ -104,8 +104,26 @@ pub enum Action {
     SubmitApproval,
     /// Read the normalized operation status.
     ReadOperations,
-    /// Stream operation events (server-sent events). Not implemented.
+    /// Stream operation events (server-sent events).
     StreamOperationEvents,
+    /// List/get `ProtectionPolicy` projections: health, the alert ledger and
+    /// the delivery state (PLAT-14.2).
+    ReadProtectionPolicies,
+    /// List/get `RehearsalSchedule` projections (PLAT-14.3).
+    ReadRehearsalSchedules,
+    /// List/get `RecoveryCatalog` projections, the point view and the signer
+    /// panel (PLAT-15.1).
+    ReadCatalogs,
+    /// Create a `RecoveryCatalog` over an existing archive (PLAT-15.2's
+    /// "connect existing archive").
+    ConnectCatalog,
+    /// List/get `RetentionPolicy` projections: evaluation, enforcement mode
+    /// and the approved-plan state (PLAT-16.1/16.2).
+    ReadRetentionPolicies,
+    /// Read the cluster-scoped `TrustPolicy` rendering (PLAT-19.1). D3 §10
+    /// keeps trust WRITES off the API in v1, so there is no write action here
+    /// and no route that could take one.
+    ReadTrustPolicies,
 }
 
 impl Action {
@@ -142,6 +160,12 @@ impl Action {
             Action::SubmitApproval => "approval.submit",
             Action::ReadOperations => "operation.read",
             Action::StreamOperationEvents => "operation.stream",
+            Action::ReadProtectionPolicies => "protection.read",
+            Action::ReadRehearsalSchedules => "rehearsal.read",
+            Action::ReadCatalogs => "catalog.read",
+            Action::ConnectCatalog => "catalog.connect",
+            Action::ReadRetentionPolicies => "retention.read",
+            Action::ReadTrustPolicies => "trustPolicy.read",
         }
     }
 
@@ -149,10 +173,7 @@ impl Action {
     /// here has NO route: no stub, no 501.
     #[must_use]
     pub const fn implemented(self) -> bool {
-        !matches!(
-            self,
-            Action::TestConnection | Action::SubmitApproval | Action::StreamOperationEvents
-        )
+        !matches!(self, Action::TestConnection | Action::SubmitApproval)
     }
 }
 
@@ -279,6 +300,10 @@ impl Role {
                     | Action::ReadApprovals
                     | Action::ReadOperations
                     | Action::StreamOperationEvents
+                    | Action::ReadProtectionPolicies
+                    | Action::ReadRehearsalSchedules
+                    | Action::ReadCatalogs
+                    | Action::ReadRetentionPolicies
             ),
             // An operator edits a SCHEDULE's policy (D1 §5.1) and never an
             // approval or trust policy; see the note above `allows`.
@@ -308,6 +333,11 @@ impl Role {
                     | Action::ReadApprovalPacket
                     | Action::ReadOperations
                     | Action::StreamOperationEvents
+                    | Action::ReadProtectionPolicies
+                    | Action::ReadRehearsalSchedules
+                    | Action::ReadCatalogs
+                    | Action::ConnectCatalog
+                    | Action::ReadRetentionPolicies
             ),
             // The approver sees the governed approval subject and its plan,
             // and nothing that would let it prepare one: no connections, no
@@ -359,6 +389,20 @@ impl Role {
                     | Action::ReadApprovalPacket
                     | Action::ReadOperations
                     | Action::StreamOperationEvents
+                    | Action::ReadProtectionPolicies
+                    | Action::ReadRehearsalSchedules
+                    | Action::ReadCatalogs
+                    | Action::ConnectCatalog
+                    | Action::ReadRetentionPolicies
+                    // THE ONE CLUSTER-SCOPED READ, AND ONLY HERE. D3 §10 calls
+                    // `GET /api/v1/trust-policies` an installation-admin read:
+                    // a `TrustPolicy` names the namespaces it governs, so
+                    // serving it to a viewer bound in one namespace would
+                    // publish the shape of every other. §7.1's "an operator or
+                    // approver has read only" is about the Kubernetes verb on
+                    // the object, which is a separate grant on a separate
+                    // surface; this route is narrower on purpose.
+                    | Action::ReadTrustPolicies
             ),
         }
     }
@@ -744,8 +788,30 @@ pub struct Capabilities {
     pub approval_submit: bool,
     /// `GET .../operations/{kind}/{name}`.
     pub operations_read: bool,
-    /// Operation event streams: no route.
+    /// `GET .../operations/{kind}/{name}/events` — the server-sent stream.
     pub operation_events: bool,
+    /// The protection domain (PLAT-14.2) is served AND readable here.
+    pub protection: bool,
+    /// The rehearsal domain (PLAT-14.3) is served AND readable here.
+    pub rehearsals: bool,
+    /// The recovery-catalog domain (PLAT-15.1) is served AND readable here.
+    pub catalogs: bool,
+    /// `POST .../catalogs` — connect an existing archive (PLAT-15.2).
+    pub catalog_connect: bool,
+    /// The retention domain (PLAT-16.1/16.2) is served AND readable here.
+    pub retention: bool,
+    /// `GET /api/v1/trust-policies[/{name}]` — the cluster-scoped read.
+    pub trust_policies_read: bool,
+    /// Trust ADMINISTRATION (adding, retiring or revoking a key) has no route
+    /// in v1 and is advertised `false` for everybody: D3 §10 keeps
+    /// cluster-scoped trust writes on `kubectl apply` and the `logweir trust`
+    /// helpers. There is no `Action` behind this flag, on purpose — a flag
+    /// with no action cannot be turned on by a role table edit.
+    pub trust_administration: bool,
+    /// Windowed catalog point queries (filters beyond the published window)
+    /// have no route in v1 and are advertised `false` for everybody, per D3
+    /// §5.3's "an absent capability, never a fake stub".
+    pub catalog_window_query: bool,
 }
 
 impl Capabilities {
@@ -774,6 +840,14 @@ impl Capabilities {
             approval_submit: can(Action::SubmitApproval),
             operations_read: can(Action::ReadOperations),
             operation_events: can(Action::StreamOperationEvents),
+            protection: can(Action::ReadProtectionPolicies),
+            rehearsals: can(Action::ReadRehearsalSchedules),
+            catalogs: can(Action::ReadCatalogs),
+            catalog_connect: can(Action::ConnectCatalog),
+            retention: can(Action::ReadRetentionPolicies),
+            trust_policies_read: can(Action::ReadTrustPolicies),
+            trust_administration: false,
+            catalog_window_query: false,
         }
     }
 
@@ -801,6 +875,12 @@ impl Capabilities {
             out.approval_submit |= c.approval_submit;
             out.operations_read |= c.operations_read;
             out.operation_events |= c.operation_events;
+            out.protection |= c.protection;
+            out.rehearsals |= c.rehearsals;
+            out.catalogs |= c.catalogs;
+            out.catalog_connect |= c.catalog_connect;
+            out.retention |= c.retention;
+            out.trust_policies_read |= c.trust_policies_read;
         }
         out
     }
@@ -828,6 +908,14 @@ impl Capabilities {
             approval_submit: false,
             operations_read: false,
             operation_events: false,
+            protection: false,
+            rehearsals: false,
+            catalogs: false,
+            catalog_connect: false,
+            retention: false,
+            trust_policies_read: false,
+            trust_administration: false,
+            catalog_window_query: false,
         }
     }
 }
@@ -860,7 +948,19 @@ mod tests {
         // D1 W6: `POST .../backups` has a route, so the flag is no longer a
         // permanent `false`.
         assert!(c.manual_backup_create);
-        assert!(!c.approval_submit && !c.operation_events && !c.connection_test);
+        // D3 W11: the five read families and the event stream have routes.
+        assert!(c.protection && c.rehearsals && c.catalogs && c.retention);
+        assert!(c.catalog_connect && c.operation_events);
+        // localAdmin holds every action, so the cluster-scoped read is on too.
+        assert!(c.trust_policies_read);
+        assert!(!c.approval_submit && !c.connection_test);
+        // TWO FLAGS WITH NO ACTION BEHIND THEM, AND THEY STAY `false` FOR
+        // EVERYONE — including the local administrator, who holds every action
+        // there is. `trustAdministration` and `catalogWindowQuery` name
+        // surfaces D3 §10 and §5.3 deliberately do not serve in v1, and a flag
+        // that no role table entry can turn on is the shape "an absent
+        // capability, never a fake stub" takes in the contract.
+        assert!(!c.trust_administration && !c.catalog_window_query);
         assert_eq!(
             Capabilities::for_namespace(&z, &actor(), "team-b"),
             Capabilities::none()

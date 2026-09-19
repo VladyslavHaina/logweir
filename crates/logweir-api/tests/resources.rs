@@ -479,10 +479,29 @@ async fn session_and_namespaces_come_from_configuration_only() {
         // `PUT .../schedules/{name}`: the same authority, one flag, and
         // `role_matrix` pins that the two actions have the same role row.
         "manualBackupCreate",
+        // D3 W11: the five read families, the catalog create and the event
+        // stream have routes; the local administrator holds every implemented
+        // action, so every one of them is on.
+        "protection",
+        "rehearsals",
+        "catalogs",
+        "catalogConnect",
+        "retention",
+        "trustPoliciesRead",
+        "operationEvents",
     ] {
         assert_eq!(caps[enabled], true, "{enabled}");
     }
-    for disabled in ["connectionTest", "approvalSubmit", "operationEvents"] {
+    for disabled in [
+        "connectionTest",
+        "approvalSubmit",
+        // D3 §10 and §5.3 name these two surfaces and deliberately do not
+        // serve them in v1. They are `false` for the LOCAL ADMINISTRATOR, who
+        // holds every action there is, which is what makes them absent
+        // capabilities rather than a role the console has not been given.
+        "trustAdministration",
+        "catalogWindowQuery",
+    ] {
         assert_eq!(caps[disabled], false, "{disabled}");
     }
     let namespaces = app.get("/api/v1/namespaces").await.json();

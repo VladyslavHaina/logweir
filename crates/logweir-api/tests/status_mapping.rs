@@ -920,15 +920,19 @@ fn no_infrastructure_detail_is_frozen_into_the_operation_contract() {
     // it was removed or merely unset, and only one of those is a contract change.
     let document: Value =
         serde_json::from_str(&logweir_api::openapi::openapi_document()).expect("JSON");
-    let declared: BTreeSet<&str> = document["components"]["schemas"]["Operation"]["properties"]
+    // D3 W11 flattened PLAT-17.1's `Operation` into `OperationView`, so the
+    // published field set is that schema's: the frozen sixteen plus D3 §2.5's
+    // additions, and the assertion still names every one of them.
+    let declared: BTreeSet<&str> = document["components"]["schemas"]["OperationView"]["properties"]
         .as_object()
-        .expect("Operation is an object schema")
+        .expect("OperationView is an object schema")
         .keys()
         .map(String::as_str)
         .collect();
     assert_eq!(
         declared,
         BTreeSet::from([
+            // PLAT-17.1's frozen projection.
             "conditions",
             "createdAt",
             "evidence",
@@ -945,6 +949,24 @@ fn no_infrastructure_detail_is_frozen_into_the_operation_contract() {
             "uid",
             "verification",
             "verifiedSuccess",
+            // D3 §2.5. `progress` and `diagnostics` are the answer to "what is
+            // happening and why is it taking so long"; `runner` is NOT among
+            // them, because a Job name, a pod name and a container state are
+            // the infrastructure identifiers this test exists to keep out. A
+            // DIAGNOSTIC's `object` is published — PLAT-14.1's acceptance asks
+            // for resource-scoped errors in as many words — and is checked by
+            // the byte scan below like everything else.
+            "awaitingApproval",
+            "capture",
+            "completion",
+            "diagnostics",
+            "progress",
+            "readiness",
+            "stage",
+            "stale",
+            "teardown",
+            "trust",
+            "verificationScope",
         ]),
         "the operation contract's field set changed. Adding one is a MINOR change to \
          schemas/logweir-api-v1.openapi.json and needs `just schema`; adding an \
