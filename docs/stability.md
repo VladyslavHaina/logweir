@@ -1081,6 +1081,69 @@ and by phase 6 the admission guard has passed, the plan has been rendered and th
 `validate-restore` has already executed. The ADR that would normally record this decision is gated
 on an open question and is deferred; this section is the record.
 
+### The Amendment G status additions are additive, and absent means *not observed*
+
+`Backup.status.{progress,capture}`, `Restore.status.{progress,completion,teardown}`
+and `*.status.evidence.verification.{signedAt,trust}` are all optional blocks on
+kinds that already existed. Nothing is converted, nothing is rewritten, and an
+object written before them is read exactly as the controller that created it
+read it.
+
+**The rule, everywhere: an absent field means *not observed*, never a default
+that flatters the object.** That is a compatibility promise and it is worth
+stating as one, because the flattering reading is always the convenient one:
+
+| Absent | What is reported |
+|---|---|
+| `status.progress` | the phase alone; the API never reports `queued` or `preparing` it did not see |
+| `status.capture` | freshness falls back to the terminal condition's time, and `availabilityBasis` says so |
+| `status.evidence.verification.trust` | `basis: None`, and the badge uses the pre-existing rule |
+| a catalog point's `partitions` | the size bound is not enforced, recorded as `sizeBasis: unknown` |
+| a record's `execution` | provenance unknown |
+
+The one shape that is **not** a conclusion is `trust.basis: Unverified`: it
+means nothing has been compared yet, as distinct from `basis: None`, which
+means this key's lifecycle does not support this document. Neither may render
+green. The next section is the whole of why that distinction exists.
+
+### `RetentionPolicy` in `Enforce` is where the deletion boundary moves, and it is an installation decision
+
+Stated rather than implied, because it is the one thing in this product that
+cannot be undone.
+
+In every other mode, and in every build before `Enforce` is set, Logweir writes
+only under its own `logweir/` prefix with create-only semantics and holds no
+object-store delete capability anywhere. Enabling `Enforce` does not give the
+controller a delete verb — the controller still holds none, on any Kubernetes
+resource but the two transient check kinds, and the deleting crate is not
+linked into its process. What it does is turn the controller's existing
+authority to CREATE A JOB into a deletion capability **in the namespace that
+holds the retention credential**. That is the same residual class as the
+signing oracle: a component that can create a pod in a namespace can do
+whatever a credential in that namespace can do.
+
+The hard boundary is therefore the credential's own scope — prefix-only, never
+`logweir/` — and not any Kubernetes permission. Four things must all be true
+before an object is removed, and they are deliberately held by different
+places:
+
+1. `logweir-retention-admin`, bound in that namespace, sets `mode: Enforce`.
+   It is a role of its own precisely so the operator who authored the policy is
+   not also the person who armed it.
+2. The `logweir-retention` ServiceAccount exists there (chart value
+   `retention.enabled`). It is granted no Kubernetes verb at all; it exists so
+   the deleting pod has a name an audit trail can use.
+3. An object-store credential scoped to the policy's own prefix is available to
+   that namespace. This is the boundary.
+4. An administrator approves the current plan by its `planSha256`. A stale
+   hash is refused with zero deletes.
+
+Evidence of what a run did is written where the delete-capable credential
+cannot reach it: a create-only record under `logweir/`, whose key refuses a
+second put, plus a per-point intent tombstone written **before** that point's
+first delete. The record is unsigned, and this document says so rather than
+letting a reader assume otherwise.
+
 ### Upgrading past `signedAt`: a run that finished on an older controller is re-read once, not re-judged
 
 `status.evidence.verification.signedAt` and `.trust` arrived with the trust

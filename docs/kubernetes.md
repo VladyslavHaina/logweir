@@ -4331,6 +4331,71 @@ merge `PATCH` whose body carries `metadata.resourceVersion` as the
 compare-and-set precondition (§10's three RBAC notes). Inspect
 [config/rbac](../config/rbac/) for the authoritative grants.
 
+### The five Amendment G kinds, grant by grant
+
+The controller's rules for `ProtectionPolicy`, `RehearsalSchedule`,
+`RecoveryCatalog`, `RetentionPolicy` and `TrustPolicy` are written the way every
+other rule in that file is: a verb appears only where a reconciler calls it, and
+`crates/logweir/tests/manifest_lint.rs` walks both directions over the source
+manifest, the install file and every rendered chart copy.
+
+| Kind | Controller's verbs | Why not more |
+|---|---|---|
+| `protectionpolicies` | `list`, `watch`; `patch` on `/status` | no `get`: the watcher hands the object over and the reconciler never re-reads one |
+| `rehearsalschedules` | `get`, `list`, `watch`; `patch` on `/status` | `get` has a caller here where the others have none — an `Approval` naming a standing authorization is checked against the referent's own sealed spec, so the referent is read |
+| `recoverycatalogs` | `get`, `list`, `watch`; `patch` on `/status` | `get` is the one catalog a `ProtectionPolicy` names, folded into the existing rule rather than given a second one on the same resource |
+| `retentionpolicies` | `list`, `watch`; `patch` on `/status` | `list` is the namespace-wide conflict check (two policies over one destination); no `get`, no `update` |
+| `trustpolicies` | `list`, `watch`; `patch` on `/status` | a namespace never names its own trust, so there is no name to `get`; the write half is `logweir-trust-admin`'s |
+
+Plus `create` on `restores` — one per due rehearsal slot, and nothing in the
+crate updates, replaces or deletes a `Restore` — and `list` on core `events`,
+which is how a check pod that never started can say why.
+
+**The controller holds no `delete` on any of the five, and none on anything
+except the two transient check kinds** (`TopicDiscovery`, `Preflight`), whose
+collector deletes with a UID precondition and a per-pass cap. That includes the
+kind whose Job can remove data: the `RetentionPolicy` reconciler creates the
+enforcement Job and does not link the code that deletes —
+`scripts/check-no-archive-write.sh` proves the deleting crate is not in this
+process's dependency graph, and the deletion capability lives in the Job's own
+prefix-scoped object-store credential.
+
+**Every status write is `patch` on the `/status` subresource**, never `update`
+and never a verb on the spec. Seam S7: each carries
+`metadata.resourceVersion` as a compare-and-set precondition.
+
+### Who may write the five, from outside
+
+| Kind | Create | Edit | Held by |
+|---|---|---|---|
+| `protectionpolicies` | operator | `update`/`patch` (spec not sealed) | `logweir-operator` |
+| `recoverycatalogs` | operator | `patch` (`spec.syncRequest` only, by CEL) | `logweir-operator` |
+| `rehearsalschedules` | operator | `patch` (`spec.suspend` only, by CEL) | `logweir-operator` |
+| `retentionpolicies` | **retention admin** | `create`/`update`/`patch` | `logweir-retention-admin` |
+| `trustpolicies` | **trust admin** | `create`/`update`/`patch` | `logweir-trust-admin` |
+
+Neither admin role carries `delete`, and neither names the other's kind. The
+two separations are the same idea applied to the two irreversible things in the
+product: who decides whose keys may sign an approval, and who decides whether
+an installation reports or deletes.
+
+### The CRD apply/upgrade procedure for the five
+
+Unchanged from the procedure this release already documents, and it applies to
+the D3 kinds without an exception: `kubectl apply --server-side -f
+charts/logweir/crds/`, `kubectl wait --for=condition=Established` on all
+fourteen, and only then the controller. [install.md, "Upgrade CRDs before
+upgrading the controller"](install.md#upgrade-crds-before-upgrading-the-controller)
+carries the exact loop. Helm installs `crds/` on first release only and neither
+upgrades nor rolls them back, which is why the procedure is by hand.
+
+Five new CRDs are pure addition: nothing existing changes shape, no object is
+converted, and a cluster that applies them and never creates one of the kinds
+behaves exactly as it did. The one carve-out is
+`Approval.spec.subjectRef.kind`, whose new `RehearsalSchedule` value is an enum
+widening an older controller cannot decode — see [The one widening that is NOT
+rollback-safe](#the-one-widening-that-is-not-rollback-safe-approvalspecsubjectrefkind).
+
 The `patch` on `backups` is PLAT-05.2's history detach, and it is narrow by
 construction: it authorises the main resource and **not** `backups/status`,
 which is a separate resource string with its own rule, and it cannot change a

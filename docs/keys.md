@@ -204,11 +204,46 @@ are write-once. Public material can never be edited out, because a receipt
 signed in March must still verify in December.
 
 The controller holds `list`, `watch` and `patch` on the status subresource and
-nothing else — it never edits a key's lifecycle. **Today no Logweir ClusterRole
-grants `update` on `trustpolicies` at all**, so editing one is a cluster-admin
-action. *Planned (PLAT-19.1, not shipped):* a `logweir-trust-admin` ClusterRole
-that is the only holder of that verb, with operator and approver read-only.
-Until it exists, scope the permission yourself.
+nothing else — it never edits a key's lifecycle.
+
+### Who administers a `TrustPolicy`, and through what
+
+**`logweir-trust-admin`**, a cluster-scoped ClusterRole `logweir.yaml` ships
+unbound, is the only holder of a write verb on `trustpolicies`. It carries
+`get`/`list`/`watch` so the holder can read what they are about to change, and
+`create`/`update`/`patch` so a policy can be written and rotated — `patch`
+beside `update` because `kubectl edit` and `kubectl apply` both send one. It
+carries **no `delete`**: deleting a policy does not retire a key, it removes the
+binding that governs a namespace and silently sends every namespace it bound
+back to `legacy-roster-v1`. Withdrawing trust is an edit.
+
+```bash
+kubectl --context docker-desktop create clusterrolebinding logweir-trust-admin \
+  --clusterrole=logweir-trust-admin --user=<security-owner>
+```
+
+Bind it to somebody who does **not** hold `logweir-operator`: an operator who
+could edit a trust policy could add their own key and then approve their own
+restore, which is the one separation `self_attested: false` exists to make
+possible. `logweir-viewer`, `logweir-operator` and `logweir-approver` are
+read-only on the kind, and a test asserts it rather than leaving it to a reader
+of four files.
+
+**Not through the product API.** `GET /api/v1/trust-policies[/{name}]` is a
+read — it is what the console's keys view renders — and there is no write route
+and no action that could take one: `capabilities.trustAdministration` is
+`false` in this release. The console ServiceAccount's own grants stop at
+`get`/`list` on `trustpolicies`, so even a defect in the service's authorization
+could not produce a write. The supported administration path is `kubectl apply`
+under `logweir-trust-admin`, plus the `logweir trust export|migrate-roster`
+helpers; a cluster-scoped write that decides whose keys may sign an approval is
+a separately reviewed admin path, not a console button.
+
+What the read surface publishes, and what it deliberately does not: key ids,
+states, windows, usages and the namespaces a policy binds, plus an evaluation
+column that renders **`unknown`** — never `valid` — for a policy whose
+`status.observedGeneration` lags its `metadata.generation`. An unevaluated
+policy is not a trusted one.
 
 ### The supported procedure
 
@@ -221,7 +256,12 @@ Until it exists, scope the permission yourself.
    signing Secret name is still compiled in — so today this step means
    replacing the contents of the established Secret, which
    `logweir identity bootstrap` deliberately refuses to do for you. There is no
-   supported in-place runner cutover in this release.
+   supported in-place runner cutover in this release. It is not a chart change
+   alone: the value has to back a new controller environment variable replacing
+   the compiled `SIGNING_KEY_SECRET` constant, and a `logweir identity rotate
+   --confirm-current <keyId>` that mints the new pair without touching the old
+   one. Step 1 and steps 3-4 below are shipped and work; only the cutover in
+   this step is not.
 3. **Wait for in-flight Jobs**, then set the old key `state: Retired` with
    `retiredAt: <now>`.
 4. **Old archives keep verifying.** A retired key's evidence verifies with

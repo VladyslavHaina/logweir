@@ -540,11 +540,11 @@ A pod whose PodSpec names no ServiceAccount silently gets `default` — the one
 account an operator is most likely to have granted something to. That is why
 the name is set explicitly and why this step is not optional.
 
-### 5. Binding the four human roles
+### 5. Binding the five human roles
 
-`logweir.yaml` ships `logweir-viewer`, `logweir-operator`, `logweir-approver`
-and `logweir-trust-admin` **unbound**. Who may approve a restore in which
-namespace is your decision, not the install file's.
+`logweir.yaml` ships `logweir-viewer`, `logweir-operator`, `logweir-approver`,
+`logweir-trust-admin` and `logweir-retention-admin` **unbound**. Who may approve
+a restore in which namespace is your decision, not the install file's.
 
 ```bash
 kubectl --context docker-desktop create rolebinding logweir-viewer \
@@ -577,6 +577,94 @@ It carries no `delete` — deleting a policy does not retire a key, it removes
 the binding that governs a namespace and sends every namespace it bound back to
 the legacy roster, which is a widening dressed as a cleanup. Withdrawing trust
 is an edit.
+
+**`logweir-retention-admin` is namespaced and needs a `RoleBinding` per
+namespace.** It is the only holder of a write verb on `retentionpolicies`:
+
+```bash
+kubectl --context docker-desktop create rolebinding logweir-retention-admin \
+  --clusterrole=logweir-retention-admin --user=<storage-owner> -n <namespace>
+```
+
+The reason it is not on `logweir-operator` is `spec.mode`. A `RetentionPolicy`
+is created in `Report`, and moving it to `Enforce` is what makes this
+installation delete data; that is "a separate, later, administrator decision
+with its own credential", and RBAC is the only layer that can say whose
+decision. Bind it to somebody who does not hold `logweir-operator`, or an
+operator can set `Enforce` on a policy they also authored.
+
+It carries no `delete` either, for a different reason than the trust admin's:
+turning enforcement off is `mode: Report`, and deleting the object while an
+enforcement Job holds its lease takes the `status.lease` record the
+restore-side hold reads with it.
+
+**Holding it deletes nothing by itself.** An enforcement run passes three more
+gates, and all three are somewhere else: the `logweir-retention` ServiceAccount
+must exist in the namespace (chart value `retention.enabled`, or the fragment
+applied by hand), the run needs an object-store credential whose scope is the
+policy's own prefix and never `logweir/`, and every run needs an
+administrator's `approve-plan` carrying the current `planSha256`.
+
+### 5d. The console/API principal
+
+The product API is a service, not a page: it authenticates every request,
+resolves the actor's roles from its own binding table and refuses an ungranted
+namespace before it makes any Kubernetes call. So its ServiceAccount's grants
+are the union of what every route may need, and the per-actor narrowing happens
+above them — which is why they are wider than the local proxy's
+(§"Serving the UI") and why the two are separate identities that must not be
+conflated.
+
+The chart renders the identity and its roles under `api.enabled` (`<release>-api`
+in the release namespace, bound in `api.namespaces`). `logweir.yaml` does not:
+a console is optional, and an install file with no conditionals cannot ship an
+identity only some installations want.
+
+What it holds, and the seal it comes from — `crates/logweir-api/src/kube.rs` is
+the one adapter every route goes through, it is sealed so no other module can
+add a kind, and it spends exactly four Kubernetes verbs:
+
+| Grant | Why |
+|---|---|
+| `get`/`list` on the eight product kinds | every projection the API serves |
+| `create` on seven of them | the collection routes with a POST; `approvals` has none — a governed approval is not submitted through the API in v1 |
+| `patch` on `backupschedules`, `backupdestinations`, `topicdiscoveries`, `preflights` | suspension and policy edits, access rotation, and the two checks whose `spec.cancelRequested` may be raised |
+| `get`/`list` on `protectionpolicies`, `recoverycatalogs`, `rehearsalschedules`, `retentionpolicies` | D3's read surfaces |
+| `create` on `recoverycatalogs` | "connect existing archive", D3's one write |
+| `get`/`list` on `trustpolicies` (cluster-scoped, its own `ClusterRoleBinding`) | the keys view |
+| `get` on `configmaps` | a check's stored result and a catalog view's pages, each verified by owner UID, immutability and digest before a byte is served |
+| `create` on `secrets` | the write-only credential entry |
+
+And what it does **not** hold, each for a reason:
+
+* **no `watch`**, anywhere. The adapter has no watch method; the operation
+  event stream is server-sent events over this service's own reads.
+* **no `delete`**, anywhere.
+* **no read verb on `secrets`** — that missing verb is what makes a
+  console-written credential write-only. `create` cannot name a
+  `resourceNames`, so the *shape* of that create is fenced by a
+  ValidatingAdmissionPolicy instead (§5b); set
+  `admissionPolicy.consoleServiceAccountName` to this account.
+* **no `list` on `configmaps`**: a console that could page every ConfigMap in a
+  namespace is an inventory of somebody else's configuration.
+* **no write verb on `trustpolicies`**. Trust administration is not an API
+  operation in v1; the supported path is `kubectl apply` under
+  `logweir-trust-admin` (see [keys.md](keys.md)).
+
+`./scripts/render-install.sh --check` answers the `kubectl auth can-i` question
+for every pair above, in both directions, against the checked-in render — so a
+route added without its grant, or a grant added without its route, is a red
+build rather than a 403 in production.
+
+**What an operator may write on the D3 kinds.** `logweir-operator` gains
+`create` on `protectionpolicies`, `recoverycatalogs` and `rehearsalschedules`,
+and then exactly the edit each CRD permits: `update`/`patch` on a
+`ProtectionPolicy` (its spec is not sealed — an objective is policy you tune),
+and `patch` alone on the other two, whose CRDs leave one mutable field each
+(`spec.suspend` on a rehearsal, `spec.syncRequest` on a catalog). What may
+change is the CRD's own CEL rule and not the verb, exactly as it is for
+`backupschedules`. `retentionpolicies` is not among them — see
+`logweir-retention-admin` above.
 
 **What the viewer can and cannot see.** `logweir-viewer` reads all fourteen
 kinds, including `backupdestinations`, `topicdiscoveries` and `preflights`. It
@@ -742,6 +830,12 @@ done
 helm upgrade logweir charts/logweir -n logweir-system --wait --timeout 10m
 ```
 
+The loop names all fourteen kinds, the five D3 ones included, and the order
+matters in one direction only: **CRDs first, controller second**. A controller
+that starts before its CRDs exist logs a reflector error per missing kind and
+reconciles nothing of that kind; CRDs applied ahead of a controller that does
+not know them are inert, which is the safe half.
+
 Stop before Helm if any apply/wait fails. **Every change in this release is
 additive**: eight new kinds — `BackupDestination`, `TopicDiscovery`,
 `Preflight`, `TrustPolicy`, `ProtectionPolicy`, `RehearsalSchedule`,
@@ -788,8 +882,9 @@ Use the selected installation path above. The namespace is **not** created by ha
 `logweir.yaml` is the checked-in `kubectl kustomize` output of `config/`,
 regenerated by `just install-yaml` and never edited by hand. It contains the
 Namespace, the fourteen CustomResourceDefinitions, the RBAC — one
-ServiceAccount, **five** ClusterRoles (`weirkeeper`, the three human roles and
-`logweir-trust-admin`) and one ClusterRoleBinding — the controller Deployment
+ServiceAccount, **six** ClusterRoles (`weirkeeper`, the three human roles,
+`logweir-trust-admin` and `logweir-retention-admin`) and one ClusterRoleBinding
+— the controller Deployment
 and the runner NetworkPolicy, and **no custom resource** — so the
 CRD-not-yet-established ordering failure cannot happen. It carries no
 `ValidatingAdmissionPolicy` either, and cannot: that kind is 1.30+ and this

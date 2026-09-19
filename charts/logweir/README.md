@@ -53,7 +53,7 @@ install document; this README is the chart's own.
 | `ServiceAccount`, `ClusterRole`, `ClusterRoleBinding` `weirkeeper` | always | the one API client in the design; every granted verb has a caller and every call has a grant, no verb on `secrets`, no `update` on anything, and `delete` on **exactly** `topicdiscoveries` and `preflights` — the transient check kinds, whose retention windows nothing else can enforce ([`docs/kubernetes.md`](../../docs/kubernetes.md) §22.3). Status writes are merge `PATCH`es carrying a `metadata.resourceVersion` precondition. Since PLAT-05.2 it also holds `patch` on `backups`, for the one caller that detaches a terminal run from its schedule so that deleting the schedule stops collecting its history: metadata only, never `backups/status` (a separate resource string), and never a CEL-sealed `spec` (see §9 and §13) |
 | `Deployment` `weirkeeper` | always | the control plane. Image `controllerImage`, pull policy `imagePullPolicy`, `LOGWEIR_RUNNER_IMAGE` from `runnerImage`, `LOGWEIR_RUNNER_PULL_POLICY` from `runnerImagePullPolicy`, the archive env from `archive.*`, and `LOGWEIR_POLICY_CONFIGMAP` / `LOGWEIR_INSTALLATION_NAMESPACE` for the policy below, plus `LOGWEIR_NOTIFY_ALLOW_INSECURE_SINKS` when `notify.allowInsecureSinks` is true |
 | `ConfigMap` `weirkeeper-policy` | always | the installation policy — check ceilings, retention windows, discovery bounds, completeness attestations, the evidence allowlist and the legacy addressing. Rendered from `checks.*`, `engine.*`, `evidence.*` and `archive.s3.*`; see *The installation policy* below |
-| `ClusterRole`s `logweir-viewer`, `logweir-operator`, `logweir-approver`, `logweir-trust-admin` | always, **unbound** | the four human roles; who may act where is your decision. `logweir-trust-admin` is cluster-scoped and needs a `ClusterRoleBinding` |
+| `ClusterRole`s `logweir-viewer`, `logweir-operator`, `logweir-approver`, `logweir-trust-admin`, `logweir-retention-admin` | always, **unbound** | the five human roles; who may act where is your decision. `logweir-trust-admin` is cluster-scoped and needs a `ClusterRoleBinding`; `logweir-retention-admin` is namespaced and is the only holder of a write verb on `retentionpolicies` — see *`retention.enabled`* below |
 | `ValidatingAdmissionPolicy` + binding `logweir-console-credentials-only` | `admissionPolicy.enabled` | fences the console API's `create secrets` to the two Logweir credential types. **Kubernetes 1.30+ only** — see below |
 | retained Secret `logweir-signing-key`, retained ConfigMap `logweir-signing-trust`, authority-free singleton `ClusterRole`, scoped Role/Binding, short-lived Job | `identity.enabled` | atomically provision/adopt one cluster installation signer without Helm ever carrying private bytes; validate on install, upgrade and supported rollback |
 | `NetworkPolicy` `logweir-runner-egress`, `ServiceAccount` `logweir-runner` | release namespace and every `identity.authorizedRunnerNamespaces` entry | runner prerequisites; additional namespaces receive the same retained signer through scoped short-lived distribution, never an independently minted key |
@@ -61,6 +61,8 @@ install document; this README is the chart's own.
 | `Deployment` + `Service` `<release>-minio`, a PVC, `Secret` `<release>-minio-root`, `Secret` `logweir-s3`, `Job` `<release>-minio-seed` | `minio.enabled` | an in-cluster archive with the buckets `kafka-backups` and `logweir-evidence` |
 | `StatefulSet` + two `Service`s `<release>-kafka-source` and `-target`, `Job` `<release>-kafka-seed` | `demoKafka.enabled` | two single-broker KRaft clusters; `orders` and `payments` seeded on the source, the marker topic `logweir.scratch` on the target |
 | `Deployment`, `Service`, `ServiceAccount`, `ClusterRole`s, `RoleBinding` `<release>-ui` | `ui.enabled` | `kubectl proxy` serving the twenty-two UI files and the API on one origin, with its own authority (below). The files come from the image `ui.image`, not from a ConfigMap |
+| `ServiceAccount` `logweir-retention` | `retention.enabled` | the identity every `mode: Enforce` Job names. **No Role and no RoleBinding**: the retention worker makes zero Kubernetes API calls |
+| `ServiceAccount`, two `ClusterRole`s, `ClusterRoleBinding`, `RoleBinding` `<release>-api` | `api.enabled` | the console/API principal's grants. **RBAC only** — no Deployment, no image, no Service |
 
 Nothing optional is on by default. The release gate renders the snapshots with
 the pinned bootstrap digest exactly as shipped; the rest of the default render
@@ -192,6 +194,113 @@ it does and does not prove, including the live check that has **not** been run.
   recommendation.
 * **`ui.enabled`** — *serve the page from the cluster.* Read *The UI's
   authority* before turning it on.
+
+Two more flags render RBAC and nothing else, so neither starts a pod and
+neither is in the list above:
+
+* **`retention.enabled`** — *let a retention enforcement Job be admitted.*
+* **`api.enabled`** — *give the console/API service a reviewed identity.*
+
+## `retention.enabled` — the identity a deletion needs, and the three gates it is not
+
+It renders exactly one object: the `ServiceAccount` `logweir-retention`, with
+`automountServiceAccountToken: false` and **no Role, no RoleBinding and no
+ClusterRole**. The controller compiles that name into every `mode: Enforce`
+Job, so without it the Job's pod is admitted by nobody — fail-closed, but by
+accident rather than by decision, which is why the account exists as an
+explicit switch.
+
+**Turning it on deletes nothing and authorises nobody to delete anything.** The
+account holds no Kubernetes verb. The deletion capability lives in an
+object-store credential scoped to the policy's own prefix, and the account
+exists so that the pod which mounts that credential has a name an audit trail,
+a NetworkPolicy selector and a `kubectl get pods` can use — separate from
+`logweir-runner`, which runs backups, restores, checks, catalog syncs and
+notification deliveries. "What has run as the deleter" should have an answer.
+
+A deletion needs all four of these, and they are deliberately in four places:
+
+1. `mode: Enforce` on a `RetentionPolicy`, which only `logweir-retention-admin`
+   may write;
+2. this ServiceAccount in that namespace;
+3. an object-store credential whose scope is the policy's prefix and never
+   `logweir/` — **this is the hard boundary**;
+4. an administrator's `approve-plan` carrying the current `planSha256`, per run.
+
+There is no `retentionImage`: the enforcement binary ships in `runnerImage`
+beside the `logweir` entrypoint, and the controller overrides only the
+container's command.
+
+[`docs/stability.md`](../../docs/stability.md), "`RetentionPolicy` in `Enforce`
+is where the deletion boundary moves", states the residual plainly: enabling
+enforcement does not give the controller a delete verb, it turns the
+controller's existing authority to create a Job into a deletion capability in
+the namespace that holds the credential.
+
+## `api.enabled` — the console/API principal, RBAC only
+
+| object | name |
+|---|---|
+| `ServiceAccount` | `<release>-api`, in the release namespace |
+| `ClusterRole` + one `RoleBinding` per `api.namespaces` entry | `<release>-api` |
+| `ClusterRole` + `ClusterRoleBinding` | `<release>-api-trustpolicies` |
+
+**No Deployment, no image, no Service and no Ingress.** The console's image and
+its deployment are a separate piece of work; this flag exists so that an
+installation running the product API has a reviewed identity to run it as
+instead of inventing one, and so that the admission policy below has a subject
+that really exists.
+
+**It is wider than `<release>-ui`, and the two are not comparable.** The proxy
+acts for *whoever reaches its Service*, so its role is measured from the page's
+own request sites and is as small as the page. This account acts for a
+*service* that authenticates every request and resolves the actor's roles
+itself, so its role is the union of what every route may need and the per-actor
+narrowing happens above it. Copying either argument onto the other is how a
+console ends up with a page's authority or a page ends up with a console's.
+
+What it holds: `get`/`list` on the eight product kinds; `create` on seven of
+them (`approvals` has none — a governed approval is not submitted through the
+API in this release); `patch` on `backupschedules`, `backupdestinations`,
+`topicdiscoveries` and `preflights`; `get`/`list` on `protectionpolicies`,
+`recoverycatalogs`, `rehearsalschedules` and `retentionpolicies`; `create` on
+`recoverycatalogs` for "connect existing archive"; `get`/`list` on the
+cluster-scoped `trustpolicies`; `get` on `configmaps`; `create` on `secrets`.
+
+What it does not, each for a reason: **no `watch`** (the service's adapter has
+no watch method, and the operation event stream is server-sent events over its
+own reads), **no `delete`**, **no read verb on `secrets`** — that missing verb
+is what makes a console-written credential write-only — **no `list` on
+`configmaps`**, and **no write verb on `trustpolicies`**.
+
+Set `admissionPolicy.consoleServiceAccountName` to this account: the fence's
+whole effect is its subject list. Under the default release name both are
+`logweir-api`, and a test holds them to each other.
+
+`./scripts/render-install.sh --check` answers the `kubectl auth can-i` question
+for every pair above, in both directions, against the checked-in render.
+
+## `controller.failFastSeconds` and `controller.jobTtlSeconds`
+
+| value | default | what it decides |
+|---|---|---|
+| `controller.failFastSeconds` | `""` (300 s) | how long a non-transient diagnostic may hold before the Job is cancelled |
+| `controller.jobTtlSeconds` | `""` (604800 s) | how long a finished Job is kept |
+
+Both ship as the **empty string**, which means *this controller build's own
+default* and renders no environment variable at all — so a default install is
+byte-identical to what it was before these existed.
+
+`failFastSeconds: 0` is not "no patience", it is **never fail fast**: every Job
+runs to its own `activeDeadlineSeconds`. It is the lever for a cluster where an
+external controller materialises a Secret a few minutes behind the Job, where a
+healthy run would otherwise be cancelled at 300 s.
+
+Values below the build's floors (60 s and 3600 s) are clamped **up** by the
+controller, which logs what it used; an unparseable value is the default. The
+chart does not refuse either, because a typo should not fail the upgrade of a
+whole release. A job TTL below an hour would mean an operator cannot fetch the
+pod log of a run that failed overnight, which is why that floor is where it is.
 
 ## `notify.allowInsecureSinks` — the one notification setting
 

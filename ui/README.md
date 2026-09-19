@@ -244,6 +244,57 @@ and a bounded product API at `/api/v1` on one origin. The page addresses
 durable create carries an `Idempotency-Key`, lists are cursor-paged, and the
 namespaces come from `GET /api/v1/session` rather than from `runtime.js`.
 
+### The two principals, and why the console's is wider
+
+The mode a viewer is in decides **which ServiceAccount their reads run as**, and
+the two accounts are shaped by opposite arguments. They are separate objects in
+the chart (`ui.enabled` and `api.enabled`) and neither one's reasoning may be
+copied onto the other.
+
+**`<release>-ui` acts for whoever reaches its Service.** `kubectl proxy`
+attaches the pod's own token to every request it forwards, so reachability of
+the Service *is* the authorisation boundary -- there is no Ingress, and the
+supported way in is `kubectl port-forward`. Its ClusterRole is therefore
+measured from this tree: `get`/`list` on the kinds the page renders, the four
+`create`s the page issues, the one `patch` it issues (`spec.suspend` on a
+schedule), and `list` on the cluster-scoped `TrustRoster` the keys view reads.
+It holds **no verb on `configmaps`** -- the chunk documents a `TopicDiscovery`
+owns are ConfigMaps, and paging them is the console's job with its own
+owner-UID, immutability and digest checks -- and **no verb on `secrets`** at
+all. A page that shows less than this role allows is a convenience, never a
+control.
+
+**`<release>-api` acts for a service.** `logweir-api` authenticates every
+request, resolves the actor's roles from its own binding table, and refuses an
+ungranted namespace *before* it makes any Kubernetes call. Its ClusterRole is
+therefore the union of what every route may ever need, and the per-actor
+narrowing happens above it in code that the page cannot reach and the viewer
+cannot influence. That is why it is wider, and why "the console can read X"
+never means "this viewer can read X".
+
+Its grants come from one sealed adapter, not from a list somebody maintains:
+`get`/`list` on the eight product kinds, `create` on seven of them, `patch` on
+four, `get`/`list` on the four D3 kinds (`protectionpolicies`,
+`recoverycatalogs`, `rehearsalschedules`, `retentionpolicies`) plus the
+cluster-scoped `trustpolicies`, `create` on `recoverycatalogs` for "connect
+existing archive", `get` on `configmaps`, and `create` on `secrets`.
+
+And four absences that the page depends on:
+
+* **no `watch`.** The operation event stream is server-sent events over the
+  service's own reads, not a Kubernetes watch held open per browser tab.
+* **no `delete`**, anywhere.
+* **no read verb on `secrets`.** A credential this page submits is created and
+  can never be read back -- by any route, by any role, or by anyone who
+  compromises the service. That missing verb is the whole of the write-only
+  property; the *shape* of the create is fenced separately by a
+  ValidatingAdmissionPolicy, because RBAC cannot express "this Secret shape".
+* **no write verb on `trustpolicies`.** `capabilities.trustAdministration` is
+  `false` in this release, the keys view submits nothing, and even a defect in
+  the service's own authorization could not produce a write, because the
+  credential it would use does not hold the verb. Administering trust is
+  `kubectl apply` under `logweir-trust-admin`.
+
 ### How the choice is made
 
 At boot, `client.js` asks `GET /api/v1/session` **once**. An answer that decodes
