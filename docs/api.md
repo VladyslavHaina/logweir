@@ -137,8 +137,18 @@ anything not listed is `404`.
 | `GET /api/v1/namespaces/{ns}/preflights/{id}/details` | One page of the check's detail document. |
 | `POST /api/v1/namespaces/{ns}/preflights/{id}:cancel` | Ask an unfinished preflight **of one's own** to stop. |
 | `GET /api/v1/namespaces/{ns}/operations/{kind}/{name}` | The normalized status; `kind` is the closed set `backup\|restore\|discovery\|preflight`. |
+| `GET /api/v1/namespaces/{ns}/operations/{kind}/{name}/events` | The same thing as a bounded `text/event-stream`; `kind` is `backup\|restore`. |
+| `GET /api/v1/namespaces/{ns}/protection-policies[/{name}]` | Protection health: the newest point that can actually be recovered from, how availability was decided, the objective, the failed and missed runs, each schedule's own readiness, and the alert ledger with its delivery state. |
+| `GET /api/v1/namespaces/{ns}/rehearsal-schedules[/{name}]` | Recurring recovery rehearsals: the last pass, the last failure, the last **skip** with its reason, and the leftover topics that block the next slot. |
+| `GET /api/v1/namespaces/{ns}/catalogs` | Recovery catalogs: ten verdict counts, the signer list, and whether the Kubernetes view is a window over a larger archive. |
+| `POST /api/v1/namespaces/{ns}/catalogs` | Connect an existing archive: create a `RecoveryCatalog` **under the name in the body**, because every protection, rehearsal and retention policy references it by that name. |
+| `GET /api/v1/namespaces/{ns}/catalogs/{name}` | One catalog. |
+| `GET /api/v1/namespaces/{ns}/catalogs/{name}/points` | One page of the materialised point view, with availability and verification as separate columns. |
+| `GET /api/v1/namespaces/{ns}/catalogs/{name}/signers` | The untrusted-signer panel: key ids, point counts, whether the bound policy accepts each one, and the out-of-band fingerprint command. |
+| `GET /api/v1/namespaces/{ns}/retention-policies[/{name}]` | Retention: what the last evaluation would remove, what is **actually** enforcing it, which guarantees are in force and by whom, where the approved-plan gate stands, and whether enforcement has degraded. |
+| `GET /api/v1/trust-policies[/{name}]` | The installation's trust policies. **Cluster-scoped** and administrator-only; `unknown` is not `valid`. |
 
-`backup` and `restore` answer an `OperationResponse` — a result, evidence
+`backup` and `restore` answer an `OperationViewResponse` — a result, evidence
 references and a verification verdict. `discovery` and `preflight` answer a
 `CheckOperationResponse`, which carries **none** of those fields: a transient
 check has no archive result and no signed evidence, and publishing an empty
@@ -149,6 +159,153 @@ arrive.
 rewrites it and `just schema-check` fails on drift, as does
 `crates/logweir-api/tests/contract.rs`, which compares the checked-in bytes with
 the generator in-process.
+
+### The normalized operation, and what is absent
+
+`OperationView` is PLAT-17.1's `Operation` plus D3 §2.5's additions, flattened
+into one object: the sixteen frozen fields keep their spellings and the new keys
+sit beside them, so a client written against either shape reads the one it
+knows.
+
+**An absent field means "not observed", never a default that flatters the
+object.** The rules, exactly:
+
+- `progress` is absent on anything an older controller reconciled, and that
+  absence is why `queued` and `preparing` are **never inferred**. They are
+  distinctions only the progress channel can draw — a Job with no pod, against
+  a pod whose container has not started — and guessing them from
+  `phase: Pending` would publish an observation nobody made.
+- `stage` is absent when no stage was written and the phase is one this build
+  does not recognise. A `Resolving` backup (D1's dynamic discovery) is
+  `preparing`; anything unrecognised is `unknown/UnrecognizedPhase`.
+- A stage **never overrides a terminal phase.** `phase`, `exitCode` and
+  `outcome` own the outcome; the progress channel answers "what is happening
+  and why is it taking so long".
+- `trust.basis` is `none` when the status carries no `trust` block: nothing has
+  been compared with anything. A basis refines an already-safe result and never
+  rescues an unsafe one — no basis string turns a result that is not `Valid`
+  into a verified state, and `Valid` beside `basis: unverified` is
+  `notAttempted`.
+- `verificationScope.level` is `sampled` (`byte-fingerprint`), `degraded`
+  (`consume-only`) or `none`. **`complete` does not exist in v1.** A Backup is
+  always `none` with the three counts **absent** rather than zero: a receipt
+  attests counts and a window, not a restore, and `0 of 0 sampled records
+  matched` reads as a failed comparison.
+- `stale` is `true`, and the state is `unknown/StatusStale`, when an active run
+  has not been observed for 300 s or an object has carried no status for 120 s
+  after creation. A **terminal** object never goes stale: nothing is going to
+  observe it again.
+- `readiness` is `{state: "unknown", basis: "notImplemented"}` until PLAT-03.1
+  lands. It is a separate object and never overwrites `state`.
+
+The Job name, the pod name and the container state are **not** published.
+D0's "remains visible in bounded form" list is reason, message, exit code, last
+phase, timestamps and evidence references, and a Job name is on none of them; a
+diagnostic's `object {kind, name}` **is** published, because PLAT-14.1 asks for
+pod mount and scheduling failures as resource-scoped errors. The server authors
+no prose: `verificationScope` carries the level and the counts, and the fixed
+sentences are the console's.
+
+### The event stream
+
+`GET .../operations/{kind}/{name}/events` is `text/event-stream` on the same
+origin. Event types are `operation` (the whole view), `reset` (the whole view,
+after a resume this service cannot replay), `heartbeat` and `end`.
+
+**Every bound is the server's.**
+
+- **No query parameter is accepted.** `EventSource` cannot set headers and the
+  standard workaround is `?access_token=`; a URL is the one place a credential
+  survives in a proxy log, a browser history and a `Referer`, so this route
+  answers `malformed_request` to any parameter at all. The stream is
+  authenticated by the same session cookie as every other route.
+- Authorization is decided **once, at subscribe**, before the first Kubernetes
+  call: the namespace grant, `operation.read` and `operation.stream`. The audit
+  record is written then, which is when the decision was made.
+- The first read is **synchronous**: a missing object is `404`, not a stream
+  that opens and says nothing.
+- The event id is the object's `resourceVersion` — the same number the read
+  route publishes. A `Last-Event-ID` that is not a bounded decimal is
+  `malformed_request`.
+- **Resuming is either silence or one `reset`.** This service keeps no history
+  of resourceVersions, so it cannot replay what happened between two of them. A
+  client already at the current version is sent nothing; any other value gets
+  one `reset` carrying the whole current state.
+- The connection closes after 300 s (`end`, `reason: maxDuration`); reconnect.
+  A silent stream sends a `heartbeat` every 15 s. A terminal operation **whose
+  verification has settled** ends immediately (`reason: settled`) — a run that
+  exited 0 with its verdict still pending keeps the connection, because the
+  verdict is what the console is waiting for. A deleted object ends the stream
+  with `reason: vanished`.
+- Concurrent streams are capped per principal per namespace; past the ceiling
+  the answer is `rate_limited` with `Retry-After`, and the advice is to fall
+  back to polling the read route. A slot is released when the connection drops.
+- The object is **polled**, not watched: this service has no `watch` verb and
+  its RBAC does not gain one.
+
+### Protection, rehearsals, catalogs, retention and trust
+
+Five bounded read families, the same cursor as every other list, and one write
+among them.
+
+**No response carries a credential, and that shapes the projections.** A
+`ProtectionPolicy`'s notification routes carry `secretKeyRef`s; the projection
+publishes each route's **name** and which channels it has as booleans, because
+a webhook URL is a bearer token with a hostname on the front and the name of
+the Secret holding one is what a reader needs to decide what to read next. A
+`RetentionPolicy`'s enforcement block names the one delete-capable credential in
+the installation; the projection publishes `credentialConfigured: true` and not
+the Secret's name. A `TrustPolicy`'s keys carry `spkiPem`; the projection
+publishes the **key id** — the SHA-256 of the DER SPKI, the number `openssl`
+prints — so an operator compares fingerprints out of band, which is the
+supported path.
+
+**Retention says what is actually enforcing.** `enforcement` is
+`RecommendationOnly`, `LogweirWorker` or `ExternalLifecycleDeclared`, and
+`guarantees` says per guarantee whether Logweir enforces it, a provider is
+*declared* to (unverified), or nothing does. `approvedPlanState` is the
+two-step gate in one value — `notApplicable`, `notRequired`, `noPlan`,
+`awaitingApproval`, `approved`, `expired` or `unknown` — and it is **`unknown`
+whenever an input is absent**, never `approved`. Nothing in `lastEvaluation`
+was deleted. The enforcement record is create-only and **unsigned**, verified by
+the digest beside it; no surface calls it signed.
+
+**A catalog's view is a window, and the response says so.** The durable truth is
+in object storage; Kubernetes holds the newest `sync.viewLimit` points in
+immutable `ConfigMap` pages owned by the sync Job, and when that Job's TTL
+collects it the pages go with it. So `/points` publishes `truncated`,
+`viewExpired` and `viewExpiresAt`, and an empty list with `viewExpired: true`
+means the window aged out and **not** that the archive is empty. Page
+`ConfigMap`s are read by the names the catalog's own status records — never from
+a caller — at most eight per request, and each one is refused with
+`result_integrity_failed` unless it is immutable and its bytes match the
+recorded digest. The point cursor binds the **view generation**: a re-sync under
+a paging client is `cursor_invalid` with "restart the list", never half of one
+view and half of another. `availability` and `verification` are separate
+columns — one is an outage and one is a stranger's signature — with the
+controller's own `selectable` conjunction beside them.
+
+**`/signers` offers no button.** It publishes the key id, the point count and
+whether the bound policy accepts it, with the fingerprint command. There is no
+"trust this key" route in v1: a key found beside an archive is never trusted by
+proximity, and one-click trust is proximity with a confirmation dialog on it.
+An administrator adds the key with `kubectl apply`.
+
+**Trust: `unknown` is not `valid`.** A key's `effectiveState` is the
+controller's verdict only when the evaluation is **fresh** — the object has a
+status, that status was computed from the current `metadata.generation`, and
+`evaluatedAt` is younger than fifteen minutes. Otherwise it is `unknown` with no
+usability verdict. Freshness is measured against **this server's** clock, and
+the response publishes `evaluation.serverTime` beside `evaluatedAt` so a reader
+can check the arithmetic instead of redoing it against a clock the cluster never
+saw. `GET /api/v1/trust-policies` is cluster-scoped, so it has no namespace and
+requires the administrator role in at least one bound namespace: a `TrustPolicy`
+lists the namespaces it governs, and serving it to an actor bound in one would
+publish the shape of every other. Trust **writes** stay off the API in v1
+(`capabilities.trustAdministration` is `false` for everybody, including the
+local administrator); the supported path is `kubectl apply` plus the
+`logweir trust` helpers. `capabilities.catalogWindowQuery` is `false` for the
+same reason: an absent capability, never a fake stub.
 
 There is no cancel and no delete for `Backup` or `Restore`: their external side
 effects and cleanup semantics are not defined yet. Aborting a read cancels only
