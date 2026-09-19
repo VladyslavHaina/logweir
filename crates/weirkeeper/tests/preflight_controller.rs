@@ -1229,6 +1229,13 @@ fn the_recovery_point_location_comparison_has_three_answers() {
     assert_eq!(neither.code, CheckCode::RecoveryPointSucceeded);
 }
 
+/// A roster, for the rows that legitimately read one.
+///
+/// SINCE PREFLIGHT-APPROVAL-ROSTER THAT IS `signer.rostered` AND NOTHING ELSE
+/// in this file: the signing key's roster membership IS a roster fact, and the
+/// approver key's lifecycle is not — it belongs to the trust policy the
+/// Approval controller resolves through. The `approver_keys` entry stays on
+/// the fixture because `RosterFacts` still carries it for the binding digest.
 fn approver_roster(not_after: Option<DateTime<Utc>>) -> RosterFacts {
     RosterFacts {
         found: true,
@@ -1240,29 +1247,51 @@ fn approver_roster(not_after: Option<DateTime<Utc>>) -> RosterFacts {
     }
 }
 
-fn found_approval(verified: Option<bool>, approved_hash: Option<&str>) -> ApprovalFacts {
+/// One `Approval` as the preflight reduces it.
+///
+/// `reason` is the `Verified` condition's REASON token — what the row routes
+/// on — and `message` is its prose, which is what an operator reads. They used
+/// to be one field holding whichever existed, and that conflation is half of
+/// PREFLIGHT-APPROVAL-ROSTER: nothing could branch on a sentence, so the row
+/// branched on the roster instead.
+fn found_approval_with(
+    verified: Option<bool>,
+    reason: Option<&str>,
+    message: Option<&str>,
+    approved_hash: Option<&str>,
+) -> ApprovalFacts {
     ApprovalFacts::Found {
         name: "ap-1".to_string(),
         uid: "ap-uid".to_string(),
         resource_version: "7".to_string(),
         verified,
-        reason: Some("the DSSE signature did not verify".to_string()),
+        reason: reason.map(str::to_string),
+        message: message.map(str::to_string),
         matched_key_id: Some("approver-1".to_string()),
         approved_plan_hash: approved_hash.map(str::to_string),
         subject_name: Some("r-1".to_string()),
     }
 }
 
+fn found_approval(verified: Option<bool>, approved_hash: Option<&str>) -> ApprovalFacts {
+    found_approval_with(
+        verified,
+        verified.and_then(|v| (!v).then_some("SignatureInvalid")),
+        verified.and_then(|v| (!v).then_some("the DSSE signature did not verify")),
+        approved_hash,
+    )
+}
+
+fn state_row(rows: &[CheckOutcome]) -> CheckOutcome {
+    rows.iter()
+        .find(|r| r.id == CheckId::ApprovalState)
+        .expect("every Found approval reports approval.state")
+        .clone()
+}
+
 #[test]
 fn a_draft_plan_is_skipped_and_a_skip_is_not_an_answer() {
-    let rows = pf::approval_rows(
-        &ApprovalFacts::Draft,
-        &approver_roster(None),
-        "sha256:aa",
-        None,
-        None,
-        now(),
-    );
+    let rows = pf::approval_rows(&ApprovalFacts::Draft, "sha256:aa", None, None, now());
     assert_eq!(rows.len(), 1);
     assert_eq!(
         (rows[0].state, rows[0].code),
@@ -1275,25 +1304,139 @@ fn a_draft_plan_is_skipped_and_a_skip_is_not_an_answer() {
     );
 }
 
+/// **PREFLIGHT-APPROVAL-ROSTER.** The expiry verdict is the Approval
+/// controller's, read off its `Verified` condition's reason.
+///
+/// The defect: this row resolved the approver key's `notAfter` from
+/// `TrustRoster/default` and decided expiry itself, while
+/// `controllers::approval` resolves the same key through the **trust policy**
+/// that governs the namespace (D3 W10). On `lab-refresh-4` an isolated
+/// `TrustPolicy` with an expiring approver key moved the Approval to
+/// `Verified=False, KeyIdExpired` while this row — reading the roster, which
+/// is immutable and still showed the key open — said `ready`. A preflight that
+/// authorises what the controller has already refused is the one direction
+/// this kind may never fail in.
 #[test]
-fn an_expired_approver_key_is_an_expired_approval() {
+fn an_approval_expired_under_a_trust_policy_is_an_expired_approval() {
+    // Exactly what the Approval controller publishes in that case: the key
+    // matched, the signature was fine, and the RESOLVED POLICY's entry for it
+    // had passed its notAfter. The roster is not consulted and cannot be.
     let rows = pf::approval_rows(
-        &found_approval(Some(true), Some("sha256:aa")),
-        &approver_roster(Some(now() - Duration::minutes(1))),
+        &found_approval_with(
+            Some(false),
+            Some("KeyIdExpired"),
+            Some(
+                "the approval verified under key id approver-1, whose notAfter \
+                 2026-09-18T00:00:00Z has passed; a key past notAfter does not authorise anything",
+            ),
+            Some("sha256:aa"),
+        ),
         "sha256:aa",
         Some("r-1"),
         None,
         now(),
     );
-    let state = rows
-        .iter()
-        .find(|r| r.id == CheckId::ApprovalState)
-        .unwrap();
+    let state = state_row(&rows);
     assert_eq!(state.code, CheckCode::ApprovalExpired);
+    assert_eq!(state.state, CheckState::NotReady);
+    // THE RESTORE IS REFUSED: `approval.state` is blocking, so the aggregate
+    // is notReady however green everything else is.
+    assert_eq!(state.gating, Gating::Blocking);
     assert_eq!(
-        state.expires_at,
-        Some(now() - Duration::minutes(1)),
-        "a verdict about a key never outlives the key"
+        logweir_core::check_contract::aggregate(&rows),
+        OverallState::NotReady
+    );
+    // THE CONTROLLER'S OWN SENTENCE, which names the key and the instant this
+    // row no longer resolves and must not invent.
+    assert!(
+        state.message.contains("notAfter") && state.message.contains("approver-1"),
+        "the row relays the controller's message: {}",
+        state.message
+    );
+    assert!(state.remedy.contains("re-approved"));
+}
+
+/// The reason token this row routes on is the one the Approval controller
+/// writes, read from its own table.
+#[test]
+fn the_expiry_reason_is_the_one_the_approval_controller_writes() {
+    let refusal = weirkeeper::controllers::approval::ApprovalRefusal::KeyIdExpired {
+        key_id: "approver-1".to_string(),
+        not_after: "2026-09-18T00:00:00Z".to_string(),
+    };
+    assert_eq!(
+        pf::APPROVAL_REASON_KEY_ID_EXPIRED,
+        refusal.reason(),
+        "a rename in `controllers::approval` must be red here, not a preflight that quietly \
+         stops recognising an expiry"
+    );
+}
+
+/// A retired or revoked key is NOT an expired key, and this row does not
+/// pretend otherwise.
+///
+/// `controllers::approval` is explicit: reporting a revocation as an expiry
+/// sends an operator to extend a window when the remedy is an investigation,
+/// and a retirement has no `notAfter` to extend at all. The closed check
+/// vocabulary has one code for "did not verify"; the controller's reason and
+/// message carry which.
+#[test]
+fn a_retired_or_revoked_key_is_not_reported_as_an_expiry() {
+    for (reason, message) in [
+        (
+            "KeyRetired",
+            "which the resolved trust policy records as Retired at 2026-09-01",
+        ),
+        ("KeyRevoked", "records as Revoked (KeyCompromise)"),
+        (
+            "KeyNotYetValid",
+            "whose notBefore 2027-01-01T00:00:00Z has not arrived",
+        ),
+        (
+            "KeyIdNotInRoster",
+            "no key on the TrustRoster 'default' approverKeys authorises this",
+        ),
+        ("TrustPolicyConflict", "two policies claim this namespace"),
+    ] {
+        let rows = pf::approval_rows(
+            &found_approval_with(Some(false), Some(reason), Some(message), Some("sha256:aa")),
+            "sha256:aa",
+            Some("r-1"),
+            None,
+            now(),
+        );
+        let state = state_row(&rows);
+        assert_eq!(
+            state.code,
+            CheckCode::ApprovalNotVerified,
+            "`{reason}` is a refusal and not an expiry"
+        );
+        assert_eq!(state.state, CheckState::NotReady);
+        assert_eq!(
+            state.message, message,
+            "the controller's own words reach the row verbatim"
+        );
+    }
+}
+
+#[test]
+fn a_verified_approval_is_ready_and_says_what_it_read() {
+    let rows = pf::approval_rows(
+        &found_approval(Some(true), Some("sha256:aa")),
+        "sha256:aa",
+        Some("r-1"),
+        None,
+        now(),
+    );
+    let state = state_row(&rows);
+    assert_eq!(
+        (state.state, state.code),
+        (CheckState::Ready, CheckCode::ApprovalVerified)
+    );
+    assert!(
+        state.message.contains("Verified condition"),
+        "it names the fact it read, not a roster it no longer looks at: {}",
+        state.message
     );
 }
 
@@ -1301,38 +1444,45 @@ fn an_expired_approver_key_is_an_expired_approval() {
 fn an_approval_for_another_plan_is_a_plan_mismatch_and_not_a_pending_approval() {
     let rows = pf::approval_rows(
         &found_approval(Some(false), Some("sha256:bb")),
-        &approver_roster(None),
         "sha256:aa",
         Some("r-1"),
         None,
         now(),
     );
-    let state = rows
-        .iter()
-        .find(|r| r.id == CheckId::ApprovalState)
-        .unwrap();
     assert_eq!(
-        state.code,
+        state_row(&rows).code,
         CheckCode::ApprovalPlanMismatch,
         "reporting a plan mismatch as `not verified yet` sends an operator to wait for something \
          that has already happened"
     );
+    // THE ORDER IS UNCHANGED: plan hash, then expiry, then verified. An
+    // approval that expired AND names another plan is a plan mismatch, because
+    // the mismatch is the stronger and more actionable finding.
+    let both = pf::approval_rows(
+        &found_approval_with(
+            Some(false),
+            Some("KeyIdExpired"),
+            Some("expired"),
+            Some("sha256:bb"),
+        ),
+        "sha256:aa",
+        Some("r-1"),
+        None,
+        now(),
+    );
+    assert_eq!(state_row(&both).code, CheckCode::ApprovalPlanMismatch);
 }
 
 #[test]
 fn an_approval_with_no_status_yet_is_pending_and_not_a_refusal() {
     let rows = pf::approval_rows(
         &found_approval(None, Some("sha256:aa")),
-        &approver_roster(None),
         "sha256:aa",
         Some("r-1"),
         None,
         now(),
     );
-    let state = rows
-        .iter()
-        .find(|r| r.id == CheckId::ApprovalState)
-        .unwrap();
+    let state = state_row(&rows);
     assert_eq!(
         (state.state, state.code),
         (CheckState::Unknown, CheckCode::ApprovalPending)
@@ -1340,47 +1490,151 @@ fn an_approval_with_no_status_yet_is_pending_and_not_a_refusal() {
 }
 
 #[test]
+fn an_approval_that_is_missing_or_unnamed_is_named_as_such() {
+    let missing = pf::approval_rows(
+        &ApprovalFacts::NotFound {
+            name: "ap-gone".to_string(),
+        },
+        "sha256:aa",
+        Some("r-1"),
+        None,
+        now(),
+    );
+    assert_eq!(
+        missing.len(),
+        1,
+        "a missing Approval has no key to report on"
+    );
+    assert_eq!(missing[0].code, CheckCode::ApprovalNotVerified);
+    assert_eq!(missing[0].state, CheckState::NotReady);
+    assert!(missing[0].message.contains("ap-gone"));
+
+    let unnamed = pf::approval_rows(
+        &ApprovalFacts::NotNamed,
+        "sha256:aa",
+        Some("r-1"),
+        None,
+        now(),
+    );
+    assert_eq!(unnamed[0].code, CheckCode::ApprovalNotVerified);
+    assert!(unnamed[0].message.contains("names no Approval"));
+}
+
+#[test]
 fn an_approval_that_names_another_subject_is_a_subject_mismatch() {
     let rows = pf::approval_rows(
         &found_approval(Some(true), Some("sha256:aa")),
-        &approver_roster(None),
         "sha256:aa",
         Some("r-2"),
         None,
         now(),
     );
-    let state = rows
-        .iter()
-        .find(|r| r.id == CheckId::ApprovalState)
-        .unwrap();
-    assert_eq!(state.code, CheckCode::ApprovalSubjectMismatch);
+    assert_eq!(state_row(&rows).code, CheckCode::ApprovalSubjectMismatch);
 }
 
+/// The advisory row no longer claims a window it cannot ground.
+///
+/// It compared the restore's deadline against the approver key's `notAfter`
+/// AS THE ROSTER CARRIED IT — the same wrong authority the blocking row
+/// stopped reading. The Approval publishes `matchedKeyId` and a condition; it
+/// does not publish the resolved key's window, so there is nothing here to
+/// compare a deadline against, and a green advisory row derived from the wrong
+/// window is no better than a green blocking one.
+///
+/// `ApproverKeyExpiresBeforeDeadline` is therefore UNREACHABLE until the
+/// Approval publishes that window. This row is where that is recorded.
 #[test]
-fn a_key_that_expires_mid_restore_is_a_warning_and_not_a_refusal() {
-    let rows = pf::approval_rows(
-        &found_approval(Some(true), Some("sha256:aa")),
-        &approver_roster(Some(now() + Duration::minutes(5))),
-        "sha256:aa",
-        Some("r-1"),
+fn the_key_validity_row_makes_no_claim_it_cannot_ground() {
+    for deadline in [
+        None,
         Some(now() + Duration::hours(1)),
-        now(),
+        Some(now() - Duration::hours(1)),
+    ] {
+        let rows = pf::approval_rows(
+            &found_approval(Some(true), Some("sha256:aa")),
+            "sha256:aa",
+            Some("r-1"),
+            deadline,
+            now(),
+        );
+        let validity = rows
+            .iter()
+            .find(|r| r.id == CheckId::ApprovalKeyValidity)
+            .expect("the advisory row is still reported");
+        assert_eq!(validity.gating, Gating::Advisory);
+        assert_eq!(validity.code, CheckCode::ApproverKeyValid);
+        assert!(
+            validity.message.contains("does not re-derive"),
+            "the row says what it does NOT establish: {}",
+            validity.message
+        );
+        assert!(
+            !validity.message.contains("valid for the whole"),
+            "the sentence it used to print claimed a window from the roster: {}",
+            validity.message
+        );
+        assert!(
+            validity.message.contains("approver-1"),
+            "and names the key it read"
+        );
+    }
+}
+
+/// **The roster is not reachable from this path at all**, and the signature is
+/// what makes that true rather than a comment.
+///
+/// `approval_rows` is not GIVEN a `RosterFacts`, so it cannot consult one
+/// however the body is later edited. This reads the source for the shape,
+/// because a type that is absent cannot be asserted against at run time.
+#[test]
+fn the_approval_rows_are_not_given_the_roster() {
+    let source = std::fs::read_to_string(
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("src")
+            .join("controllers")
+            .join("preflight.rs"),
+    )
+    .expect("the controller source reads");
+
+    for function in [
+        "pub fn approval_rows(",
+        "fn approval_verdict(",
+        "fn key_validity_row(",
+    ] {
+        let at = source.find(function).unwrap_or_else(|| {
+            panic!(
+                "`{function}` is gone; this guard cannot hold a shape that \
+                                       no longer exists"
+            )
+        });
+        let body = &source[at..];
+        let end = body.find(')').expect("the parameter list closes");
+        let params = &body[..end];
+        assert!(
+            !params.contains("RosterFacts"),
+            "`{function}` takes a RosterFacts again. Resolving the approver key here is \
+             PREFLIGHT-APPROVAL-ROSTER: the roster is not the authority the Approval controller \
+             resolves through, so a verdict derived from it can authorise what the controller \
+             has already refused."
+        );
+    }
+
+    // And nothing in the approval half reaches for the roster's approver keys
+    // by another route.
+    let from = source
+        .find("pub fn approval_rows(")
+        .expect("the row exists");
+    let to = source
+        .find("// ---------------------------------------------------------------------------\n// The pod-status rows")
+        .expect("the approval section ends where the pod-status section begins");
+    assert!(
+        to > from,
+        "the approval section precedes the pod-status one"
     );
-    let validity = rows
-        .iter()
-        .find(|r| r.id == CheckId::ApprovalKeyValidity)
-        .unwrap();
-    assert_eq!(validity.code, CheckCode::ApproverKeyExpiresBeforeDeadline);
-    assert_eq!(
-        validity.gating,
-        Gating::Advisory,
-        "a key that expires mid-run does not invalidate an approval that verified"
+    assert!(
+        !source[from..to].contains("approver_keys"),
+        "the approval rows read `RosterFacts::approver_keys` again"
     );
-    let state = rows
-        .iter()
-        .find(|r| r.id == CheckId::ApprovalState)
-        .unwrap();
-    assert_eq!(state.code, CheckCode::ApprovalVerified);
 }
 
 // ===========================================================================
@@ -2952,10 +3206,29 @@ async fn a_missing_segment_publishes_a_sample_and_writes_the_details_config_map(
     );
 }
 
-/// PLAT-03.2's "expired approval": the controller reads `Approval.status` and
-/// the `TrustRoster`, and nothing else can answer it.
+/// PLAT-03.2's "expired approval", end to end — and the shape that proves
+/// **PREFLIGHT-APPROVAL-ROSTER** is closed.
+///
+/// The old version of this test planted an expired approver key on the
+/// `TrustRoster` and an `Approval` whose status said `verified: true`, and
+/// asserted `ApprovalExpired`. That WAS the defect: the preflight was deciding
+/// expiry from the roster while `controllers::approval` decides it from the
+/// trust policy that governs the namespace, and the two can disagree — on
+/// `lab-refresh-4` they did.
+///
+/// It is inverted here. The roster's approver key is **wide open** (no
+/// `notAfter` at all), so the roster cannot produce this verdict; the
+/// `Approval` carries what the controller writes under a `TrustPolicy` that
+/// has expired the key — `Verified=False`, reason `KeyIdExpired`. The only way
+/// the row can read `ApprovalExpired` is by consuming the Approval's own
+/// verdict, and the only way the restore can be refused is if that row still
+/// gates.
+///
+/// It also removes the fixture problem the harness hit: the row no longer
+/// needs a roster carrying an expired approver key, so PLAT-03.2's live test
+/// no longer needs the shared, immutable `TrustRoster/default` recreated.
 #[tokio::test]
-async fn an_expired_approver_key_is_reported_before_the_restore_is_submitted() {
+async fn an_approval_expired_under_a_policy_refuses_the_restore_before_it_is_submitted() {
     let job = job_name(CheckPlanKind::RestorePreflight);
     let plan = plan_yaml("restore-", "s3-bucket");
     let plan_hash = logweir_core::ids::sha256_prefixed(plan.as_bytes());
@@ -2986,16 +3259,29 @@ async fn an_expired_approver_key_is_reported_before_the_restore_is_submitted() {
             "approvalBytes": json!({"plan_hash": plan_hash}).to_string(),
             "sidecarBytes": "{}"
         },
-        "status": {"verified": true, "matchedKeyId": "approver-1"}
+        // WHAT THE APPROVAL CONTROLLER WRITES when the RESOLVED TRUST POLICY
+        // has expired the key that verified this approval (D3 W10).
+        "status": {
+            "verified": false,
+            "matchedKeyId": "approver-1",
+            "conditions": [{
+                "type": "Verified", "status": "False", "reason": "KeyIdExpired",
+                "message": "the approval verified under key id approver-1, whose notAfter \
+                            2026-09-16T11:00:00Z has passed; a key past notAfter does not \
+                            authorise anything"
+            }]
+        }
     });
-    let expired_roster = json!({
+    // THE ROSTER'S APPROVER KEY IS WIDE OPEN. If this row were still deriving
+    // expiry from the roster it would read `ready`, and this test would fail —
+    // which is exactly what makes it a proof rather than a restatement.
+    let open_roster = json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "TrustRoster",
         "metadata": {"name": "default", "uid": ROSTER_UID, "generation": 4},
         "spec": {
             "approverKeys": [{
                 "keyId": "approver-1",
-                "spkiPem": "-----BEGIN PUBLIC KEY-----\nAA\n-----END PUBLIC KEY-----",
-                "notAfter": "2026-09-16T11:00:00Z"
+                "spkiPem": "-----BEGIN PUBLIC KEY-----\nAA\n-----END PUBLIC KEY-----"
             }],
             "signingKeys": [{"keyId": RUNNER_KEY_ID, "spkiPem": "-----BEGIN PUBLIC KEY-----\nBB\n-----END PUBLIC KEY-----"}],
             "allowedClusterIds": ["target-id"]
@@ -3003,7 +3289,7 @@ async fn an_expired_approver_key_is_reported_before_the_restore_is_submitted() {
     });
 
     let mut routes = vec![
-        route("GET", "/trustrosters/default", expired_roster.to_string()),
+        route("GET", "/trustrosters/default", open_roster.to_string()),
         route("GET", "/restores/r-1", restore_object.to_string()),
         route("GET", "/approvals/ap-1", approval.to_string()),
         route(
@@ -3049,11 +3335,25 @@ async fn an_expired_approver_key_is_reported_before_the_restore_is_submitted() {
     }, "timeoutSeconds": 120});
     let (status, _) = reconcile_with(&preflight(request), routes).await;
 
-    assert_eq!(status["result"]["state"], "notReady");
     assert_eq!(
-        check_entry(&status, "approval.state")["code"],
-        "ApprovalExpired"
+        status["result"]["state"], "notReady",
+        "a blocking approval row that says expired refuses the restore"
     );
+    let approval = check_entry(&status, "approval.state");
+    assert_eq!(approval["code"], "ApprovalExpired");
+    assert_eq!(approval["state"], "notReady");
+    assert_eq!(approval["gating"], "blocking");
+    assert!(
+        approval["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("notAfter"),
+        "the controller's own sentence reaches the row: {approval}"
+    );
+    // THE ADVISORY ROW MAKES NO CLAIM ABOUT A WINDOW IT CANNOT SEE.
+    let validity = check_entry(&status, "approval.keyValidity");
+    assert_eq!(validity["code"], "ApproverKeyValid");
+    assert_eq!(validity["gating"], "advisory");
     assert_eq!(
         check_entry(&status, "plan.parse")["code"],
         "PlanParsed",

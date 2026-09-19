@@ -1774,8 +1774,17 @@ pub enum ApprovalFacts {
         resource_version: String,
         /// `status.verified`.
         verified: Option<bool>,
-        /// The `Verified` condition's reason, when there is one.
+        /// The `Verified` condition's REASON — a `ApprovalRefusal::reason()`
+        /// token such as `KeyIdExpired`, and the thing this row ROUTES on.
+        ///
+        /// IT USED TO BE THE MESSAGE OR THE REASON, WHICHEVER EXISTED, and
+        /// that conflation is half of PREFLIGHT-APPROVAL-ROSTER: a router
+        /// cannot branch on a sentence, so this row had nothing to branch on
+        /// and re-derived the verdict from the roster instead.
         reason: Option<String>,
+        /// The `Verified` condition's MESSAGE, which is what an operator
+        /// reads. Never routed on.
+        message: Option<String>,
         /// The roster key id that verified it.
         matched_key_id: Option<String>,
         /// The `plan_hash` inside the approval's own signed bytes.
@@ -1785,7 +1794,37 @@ pub enum ApprovalFacts {
     },
 }
 
+/// The `Verified` condition reason that means the approver key had passed its
+/// `notAfter` when the Approval controller last looked.
+///
+/// ONE SPELLING, AND IT IS THE CONTROLLER'S.
+/// `the_expiry_reason_is_the_one_the_approval_controller_writes` pins it
+/// against `ApprovalRefusal::KeyIdExpired`'s own `reason()`, so a rename there
+/// is a red test here rather than a preflight that silently stops recognising
+/// an expiry.
+pub const APPROVAL_REASON_KEY_ID_EXPIRED: &str = "KeyIdExpired";
+
 /// `approval.state` and `approval.keyValidity` — D2 §6.3's two rows.
+///
+/// # This row reads the Approval's verdict and never re-derives it
+///
+/// Defect **PREFLIGHT-APPROVAL-ROSTER**. It used to resolve the approver key
+/// and its `notAfter` out of `TrustRoster/default` and decide expiry here,
+/// while `controllers::approval` resolves the same key through the **trust
+/// policy** that governs the namespace (D3 W10). Those are two different
+/// authorities and they disagree: on `lab-refresh-4` an isolated `TrustPolicy`
+/// carrying an expiring approver key moved the Approval to
+/// `Verified=False, KeyIdExpired` while this row, reading the roster, still
+/// said `ready`. A preflight that authorises what the controller has already
+/// refused is the one direction this kind may never fail in — and the roster
+/// being immutable is also why PLAT-03.2's `expired approval` test could not
+/// be built without recreating a shared trust anchor.
+///
+/// So the verdict comes from the Approval: its `Verified` condition, that
+/// condition's REASON, and `status.matchedKeyId`. **`approval_rows` is not
+/// given a [`RosterFacts`] at all**, which is what makes "does not read the
+/// roster" a property of the signature rather than of a comment;
+/// `the_approval_rows_are_not_given_the_roster` holds the shape.
 ///
 /// `deadline` is the instant the restore would still need the approver key to
 /// be valid at; `ApproverKeyExpiresBeforeDeadline` is advisory because a key
@@ -1793,7 +1832,6 @@ pub enum ApprovalFacts {
 #[must_use]
 pub fn approval_rows(
     facts: &ApprovalFacts,
-    roster: &RosterFacts,
     recomputed_plan_hash: &str,
     restore_name: Option<&str>,
     deadline: Option<DateTime<Utc>>,
@@ -1834,6 +1872,7 @@ pub fn approval_rows(
             uid,
             verified,
             reason,
+            message,
             matched_key_id,
             approved_plan_hash,
             subject_name,
@@ -1844,10 +1883,11 @@ pub fn approval_rows(
                 name: name.clone(),
                 uid: Some(uid.clone()),
             };
-            let key = matched_key_id
-                .as_deref()
-                .and_then(|k| roster.approver_keys.iter().find(|(id, _)| id == k))
-                .and_then(|(_, not_after)| *not_after);
+            // NO KEY WINDOW IS DERIVED HERE ANY MORE. It used to be the
+            // roster's `notAfter` for `matchedKeyId`, and the roster is not
+            // the authority (see the type-level note). The two rows below
+            // therefore cap their expiry at their own catalogue entry's and
+            // nothing else.
             let mut out = Vec::new();
             let state = if let Some(subject) = subject_name.as_deref() {
                 if restore_name.is_some_and(|r| r != subject) {
@@ -1863,9 +1903,9 @@ pub fn approval_rows(
                         &scope,
                         *verified,
                         reason.as_deref(),
+                        message.as_deref(),
                         approved_plan_hash.as_deref(),
                         recomputed_plan_hash,
-                        key,
                         now,
                     )
                 }
@@ -1874,29 +1914,31 @@ pub fn approval_rows(
                     &scope,
                     *verified,
                     reason.as_deref(),
+                    message.as_deref(),
                     approved_plan_hash.as_deref(),
                     recomputed_plan_hash,
-                    key,
                     now,
                 )
             };
-            out.push(cap_expiry(state, key));
-            out.push(cap_expiry(
-                key_validity_row(matched_key_id.as_deref(), key, deadline, now),
-                key,
-            ));
+            out.push(state);
+            out.push(key_validity_row(matched_key_id.as_deref(), deadline, now));
             out
         }
     }
 }
 
+/// One `approval.state` verdict, from the Approval's own status and nothing
+/// else.
+///
+/// THE ORDER IS PLAN HASH, THEN EXPIRY, THEN VERIFIED, and it is unchanged by
+/// PREFLIGHT-APPROVAL-ROSTER — only the SOURCE of the expiry answer moved.
 fn approval_verdict(
     scope: &CheckScope,
     verified: Option<bool>,
     reason: Option<&str>,
+    message: Option<&str>,
     approved_plan_hash: Option<&str>,
     recomputed: &str,
-    key_not_after: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
 ) -> CheckOutcome {
     let op = PreflightOperation::Restore;
@@ -1921,19 +1963,38 @@ fn approval_verdict(
                 );
         }
     }
-    if key_not_after.is_some_and(|t| t <= now) {
+    // THE EXPIRY IS THE CONTROLLER'S, VERBATIM. `KeyIdExpired` is the reason
+    // `controllers::approval` writes when the key that verified an approval is
+    // past the `notAfter` of the entry the RESOLVED TRUST POLICY carries for
+    // it. Deciding it here from `TrustRoster/default` was the defect: a policy
+    // can expire a key the roster still shows as open, and this row then
+    // authorised what the controller had already refused.
+    if reason.is_some_and(|r| r == APPROVAL_REASON_KEY_ID_EXPIRED) {
         return mk(CheckState::NotReady, CheckCode::ApprovalExpired)
             .with_scope(scope.clone())
-            .with_message("the approver key that verified this approval has expired")
+            // THE CONTROLLER'S OWN SENTENCE when it wrote one: it names the key
+            // id and the `notAfter` that passed, which this row no longer
+            // resolves and must not invent.
+            .with_message(
+                message.unwrap_or("the approver key that verified this approval has expired"),
+            )
             .with_remedy("Have the restore re-approved with a current approver key.");
     }
     match verified {
         Some(true) => mk(CheckState::Ready, CheckCode::ApprovalVerified)
             .with_scope(scope.clone())
-            .with_message("the Approval is Verified against a rostered approver key"),
+            .with_message("the Approval's Verified condition is True"),
+        // EVERY OTHER REFUSAL IS `ApprovalNotVerified` CARRYING THE
+        // CONTROLLER'S OWN WORDS — including `KeyRetired`, `KeyRevoked` and
+        // `KeyNotYetValid`, which are deliberately NOT folded into
+        // `ApprovalExpired`. `controllers::approval` is explicit that a
+        // revocation reported as an expiry sends an operator to extend a
+        // window when the remedy is an investigation, and a retirement has no
+        // `notAfter` to extend at all. The closed check vocabulary has one
+        // code for "did not verify"; the reason and the message carry which.
         Some(false) => mk(CheckState::NotReady, CheckCode::ApprovalNotVerified)
             .with_scope(scope.clone())
-            .with_message(reason.unwrap_or("the Approval did not verify"))
+            .with_message(message.or(reason).unwrap_or("the Approval did not verify"))
             .with_remedy("Read the Approval's own Verified condition for the exact refusal."),
         // NO STATUS YET IS NOT A REFUSAL. The approval controller has not
         // reconciled it, which is a wait and not a verdict — D2 §6.3's
@@ -1944,9 +2005,30 @@ fn approval_verdict(
     }
 }
 
+/// `approval.keyValidity` — advisory, and honest about what it can no longer
+/// establish.
+///
+/// # Why this stopped comparing a window
+///
+/// It compared the restore's deadline against the approver key's `notAfter`
+/// **as `TrustRoster/default` carried it**, and that is the same wrong
+/// authority `approval_verdict` above stopped reading: the key's lifecycle
+/// belongs to the resolved `TrustPolicy`, which may retire, revoke or narrow a
+/// key the roster still shows as open. A green advisory row derived from the
+/// wrong window is no better than a green blocking one.
+///
+/// The Approval publishes `matchedKeyId` and a `Verified` condition; it does
+/// **not** publish the resolved key's window, so there is nothing here to
+/// compare a deadline against. The row therefore reports what it does know —
+/// that the controller verified the approval under this key — and says in
+/// words that it makes no claim about the deadline.
+///
+/// **`ApproverKeyExpiresBeforeDeadline` is unreachable until the Approval
+/// publishes the resolved key's window**, and that is recorded rather than
+/// hidden: `the_key_validity_row_makes_no_claim_it_cannot_ground` is the guard,
+/// and closing it belongs to whoever owns `controllers::approval`'s status.
 fn key_validity_row(
     key_id: Option<&str>,
-    not_after: Option<DateTime<Utc>>,
     deadline: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
 ) -> CheckOutcome {
@@ -1954,23 +2036,13 @@ fn key_validity_row(
     let mk = |state: CheckState, code: CheckCode| {
         outcome(op, CheckId::ApprovalKeyValidity, state, code, now)
     };
-    match (not_after, deadline) {
-        (Some(not_after), Some(deadline)) if not_after < deadline => mk(
-            CheckState::NotReady,
-            CheckCode::ApproverKeyExpiresBeforeDeadline,
-        )
-        .with_message(&format!(
-            "approver key `{}` expires at {}, before this restore's deadline at {}",
-            key_id.unwrap_or("<unknown>"),
-            not_after.to_rfc3339(),
-            deadline.to_rfc3339()
-        ))
-        .with_remedy("Rotate the approver key, or start the restore sooner."),
-        _ => mk(CheckState::Ready, CheckCode::ApproverKeyValid).with_message(&format!(
-            "approver key `{}` is valid for the whole of this restore's window",
-            key_id.unwrap_or("<unknown>")
-        )),
-    }
+    let _ = deadline;
+    mk(CheckState::Ready, CheckCode::ApproverKeyValid).with_message(&format!(
+        "the Approval controller verified this approval under approver key `{}`; this check \
+         does not re-derive that key's validity window, because the roster it used to read is \
+         not the authority the resolved trust policy is, and no window is published here",
+        key_id.unwrap_or("<unknown>")
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -3019,7 +3091,6 @@ impl Inputs {
             }
             out.extend(approval_rows(
                 &self.approval,
-                &self.roster,
                 self.plan
                     .as_ref()
                     .map_or("", |p| p.recomputed_hash.as_str()),
@@ -3816,11 +3887,8 @@ pub async fn resolve(
                                     uid,
                                     resource_version,
                                     verified: a.status.as_ref().and_then(|s| s.verified),
-                                    reason: verified_condition
-                                        .and_then(|c| c.message.clone())
-                                        .or_else(|| {
-                                            verified_condition.and_then(|c| c.reason.clone())
-                                        }),
+                                    reason: verified_condition.and_then(|c| c.reason.clone()),
+                                    message: verified_condition.and_then(|c| c.message.clone()),
                                     matched_key_id: a
                                         .status
                                         .as_ref()

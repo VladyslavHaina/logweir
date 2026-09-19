@@ -5892,6 +5892,54 @@ check read `<backupId>/manifest.json` at the bucket root and answered
 that reported that against a prefixed destination, create a new one: `Preflight`
 specs are immutable and the stored verdict is not revised in place.
 
+### 21.6a The approval rows read the `Approval`, not the roster
+
+`approval.state` is the `Approval`'s own verdict, relayed. The check reads
+`status.verified`, the `Verified` condition's **reason** and its **message**,
+and `status.matchedKeyId` — and it derives nothing of its own about the
+approver key.
+
+| what the `Approval` says | `approval.state` |
+|---|---|
+| `Verified=True` | `ready` `ApprovalVerified` |
+| `Verified=False`, reason `KeyIdExpired` | **`notReady` `ApprovalExpired`** — blocking, so the restore is refused |
+| `Verified=False`, any other reason (`KeyRetired`, `KeyRevoked`, `KeyNotYetValid`, `KeyIdNotInRoster`, `TrustPolicyConflict`, `SignatureInvalid`, …) | `notReady` `ApprovalNotVerified`, carrying the controller's own message |
+| no `Verified` condition yet | `unknown` `ApprovalPending` — a wait, not a verdict |
+
+The order is unchanged and it matters: **the plan hash first**, then expiry,
+then verified. An approval that verified against a *different* plan is a
+stronger and more actionable finding than "not verified yet", and reporting the
+mismatch as a pending approval sends an operator to wait for something that has
+already happened.
+
+**Why it does not decide expiry itself (defect PREFLIGHT-APPROVAL-ROSTER).** It
+used to resolve the approver key and its `notAfter` out of the cluster-scoped
+`TrustRoster` named `default` and compare that with the clock. The `Approval`
+controller resolves the same key through the **`TrustPolicy` that governs the
+namespace** (§19), which may retire, revoke or narrow a key the roster still
+shows as open. The two authorities disagreed in the lab: a `TrustPolicy`
+carrying an expiring approver key moved the `Approval` to
+`Verified=False, KeyIdExpired` while the preflight, reading the roster, still
+reported `ready`. A preflight that authorises what the controller has already
+refused is the one direction this kind may never fail in.
+
+**A retirement and a revocation are not expiries**, and this table keeps them
+apart for the reason §19 gives: a revocation reported as an expiry sends an
+operator to extend a window when the remedy is an investigation, and a retired
+key has no window to extend. The closed check vocabulary has one code for "did
+not verify"; the reason and the message say which.
+
+**`approval.keyValidity` no longer compares a window.** It is advisory, and it
+used to compare the restore's deadline with the roster's `notAfter` — the same
+wrong authority. The `Approval` publishes `matchedKeyId` and its condition; it
+does **not** publish the resolved key's lifecycle window, so there is nothing
+to compare a deadline against, and a green advisory row built from the wrong
+window is no better than a green blocking one. The row now reports
+`ApproverKeyValid` with a message saying it makes no claim about the deadline.
+`ApproverKeyExpiresBeforeDeadline` is therefore **unreachable until the
+`Approval` publishes that window**; it is stated here rather than left as a
+silently dead code.
+
 ### 21.7 Skipping a check is not answering it
 
 `spec.request.skipChecks` leaves a row out of the run. The row is still
