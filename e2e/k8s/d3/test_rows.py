@@ -556,6 +556,44 @@ def test_an_unauthorized_trust_edit_is_refused_by_rbac_not_by_cel() -> None:
             "yes").values()))
 
 
+# --- PLAT-19.1's `old archive` — a second signer, then retired ---------------
+SIGNED_WHILE_ACTIVE = {"result": "Valid", "matchedKeyId": "7d1fb29eae5fd0ea",
+                       "signedAt": "2026-09-19T03:07:02Z",
+                       "trust": {"basis": "Current", "keyState": "Active"}}
+AFTER_RETIREMENT = {"result": "Valid", "matchedKeyId": "7d1fb29eae5fd0ea",
+                    "signedAt": "2026-09-19T03:07:02Z",
+                    "trust": {"basis": "Historical", "keyState": "Retired"}}
+SIGNED_AFTER_RETIREMENT = {"result": "Untrusted", "matchedKeyId": "7d1fb29eae5fd0ea"}
+
+
+def _old_archive(**over):
+    args = dict(before=SIGNED_WHILE_ACTIVE, after=AFTER_RETIREMENT,
+                fresh=SIGNED_AFTER_RETIREMENT)
+    args.update(over)
+    return all(d3.old_archive_survives_retirement(**args).values())
+
+
+def test_a_retired_key_keeps_what_it_signed_and_signs_nothing_new() -> None:
+    row("Valid/Current while active, Valid/Historical after, and no new Valid",
+        _old_archive())
+    row("MUTANT: THE RETIREMENT HIDDEN — still Valid, still `Current`",
+        not _old_archive(after=dict(AFTER_RETIREMENT,
+                                    trust={"basis": "Current", "keyState": "Active"})))
+    row("MUTANT: RETIREMENT AS REVOCATION — the old archive goes Untrusted",
+        not _old_archive(after={"result": "Untrusted",
+                                "matchedKeyId": "7d1fb29eae5fd0ea",
+                                "trust": {"basis": "Historical"}}))
+    row("MUTANT: `retired` means nothing — a run signed AFTER it is Valid too",
+        not _old_archive(fresh={"result": "Valid", "matchedKeyId": "7d1fb29eae5fd0ea"}))
+    row("MUTANT: the archive never verified while the key was active",
+        not _old_archive(before={"result": "Untrusted",
+                                 "trust": {"basis": "Current"}}))
+    row("MUTANT: a different key matched afterwards — not the same evidence re-judged",
+        not _old_archive(after=dict(AFTER_RETIREMENT, matchedKeyId="0000")))
+    row("MUTANT: no trust block at all after the retirement",
+        not _old_archive(after={"result": "Valid", "matchedKeyId": "7d1fb29eae5fd0ea"}))
+
+
 def main() -> int:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

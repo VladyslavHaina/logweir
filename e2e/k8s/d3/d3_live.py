@@ -47,8 +47,10 @@ import os
 import pathlib
 import re
 import secrets
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from typing import Any, Callable
 
@@ -3427,25 +3429,41 @@ def roster_signing_key() -> dict[str, Any]:
     return roster["spec"]["signingKeys"][0]
 
 
-def trust_policy(state: str, **over: Any) -> dict[str, Any]:
-    key = roster_signing_key()
+def policy_key(key_id: str, spki_pem: str, state: str, *, display: str,
+               subject: str = "signing@scram-local.invalid", **over: Any) -> dict[str, Any]:
+    """One `spec.keys[]` entry, with its own validity window.
+
+    PER-KEY WINDOWS ARE THE POINT of taking a list: `old archive` needs two
+    keys whose states differ, and a retirement is a change to ONE entry's
+    `state`/`retiredAt` while the other's window stays where it was.
+    """
     entry = {
-        "keyId": key["keyId"],
-        "spkiPem": key["spkiPem"],
+        "keyId": key_id,
+        "spkiPem": spki_pem,
         "algorithm": "p256",
-        "principal": {"id": key.get("subject", "signing@scram-local.invalid"),
-                      "display": "the lab signing key"},
+        "principal": {"id": subject, "display": display},
         "usages": ["EvidenceSigning"],
         "state": state,
         "notBefore": "2026-01-01T00:00:00Z",
         "notAfter": "2027-01-01T00:00:00Z",
     }
     entry.update(over)
+    return entry
+
+
+def trust_policy(state: str, *, keys: list[dict[str, Any]] | None = None,
+                 namespaces: list[str] | None = None, name: str | None = None,
+                 **over: Any) -> dict[str, Any]:
+    key = roster_signing_key()
+    entry = policy_key(key["keyId"], key["spkiPem"], state,
+                       display="the lab signing key",
+                       subject=key.get("subject", "signing@scram-local.invalid"))
+    entry.update(over)
     return {
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "TrustPolicy",
-        "metadata": owned(TRUST_POLICY, namespace=None),
-        "spec": {"namespaces": [NS], "keys": [entry]},
+        "metadata": owned(name or TRUST_POLICY, namespace=None),
+        "spec": {"namespaces": namespaces or [NS], "keys": keys or [entry]},
     }
 
 
@@ -3744,6 +3762,209 @@ def cleared_block_is_not_re_read(after: dict[str, Any]) -> dict[str, bool]:
         "no verdict came back from an archive read": not after.get("result"),
         "and no signing time with it": not after.get("signedAt"),
     }
+
+
+# ---------------------------------------------------------------------------
+# PLAT-19.1's `old archive` — a second signer, then retired
+# ---------------------------------------------------------------------------
+
+
+def old_archive_survives_retirement(before: dict[str, Any], after: dict[str, Any],
+                                    fresh: dict[str, Any]) -> dict[str, bool]:
+    """D3 §7.4: a retired key's OLD evidence stays valid; its NEW evidence does not.
+
+    Retirement is not revocation. `Retired` means "may no longer sign", and the
+    whole point of distinguishing it from `Revoked` is that everything the key
+    signed while it was `Active` keeps its verdict — with `basis: Historical`
+    rather than `Current`, so a console can say "verified against a retired
+    key" instead of pretending nothing happened. A build that answered `Valid`
+    with `basis: Current` after a retirement would be hiding the retirement;
+    one that answered `Untrusted` would be revocation wearing retirement's
+    name, and would invalidate every archive an operator still needs.
+
+    The third clause is what keeps the first two honest: if a run signed AFTER
+    the retirement also came back `Valid`, "retired" would mean nothing at all.
+    """
+    return {
+        "the archive verified Valid while the key was Active":
+            before.get("result") == "Valid",
+        "and on the CURRENT basis, since the key was live when it signed":
+            (before.get("trust") or {}).get("basis") == "Current",
+        "after the retirement the same archive is STILL Valid":
+            after.get("result") == "Valid",
+        "on the HISTORICAL basis, so the retirement is visible":
+            (after.get("trust") or {}).get("basis") == "Historical",
+        "against the same key, so this is the same evidence re-judged":
+            after.get("matchedKeyId") == before.get("matchedKeyId"),
+        "and a run signed AFTER the retirement is NOT Valid":
+            fresh.get("result") != "Valid",
+    }
+
+
+def mint_signing_key(tag: str) -> dict[str, Any]:
+    """A second P-256 signing keypair, private half on disk and nowhere else.
+
+    THE PRIVATE HALF NEVER ENTERS AN OBJECT OR AN ARTIFACT. It is written 0600
+    inside a 0700 directory, projected into ONE Secret this namespace owns, and
+    deleted in the caller's `finally`. What is recorded is the public SPKI and
+    the key id, which is what a roster carries and what every verdict names.
+
+    `keyId` is the sha256 of the DER SPKI, lowercase hex — the same recipe the
+    lab's own key satisfies, which the caller re-computes against the roster
+    entry before trusting this function at all.
+    """
+    work = pathlib.Path(tempfile.mkdtemp(prefix=f"{tag}-", dir="/tmp"))
+    work.chmod(0o700)
+    private = work / "signing.pem"
+    sec1 = work / "sec1.pem"
+    run(["openssl", "ecparam", "-name", "prime256v1", "-genkey", "-noout",
+         "-out", str(sec1)], timeout=60)
+    sec1.chmod(0o600)
+    # PKCS#8, NOT SEC1. `logweir_evidence::keys` parses with `from_pkcs8_pem`,
+    # and `openssl ecparam -genkey` writes `BEGIN EC PRIVATE KEY` (SEC1), which
+    # that parser refuses — the runner then exits 4 with no evidence at all,
+    # which is exactly how this row first failed.
+    run(["openssl", "pkcs8", "-topk8", "-nocrypt", "-in", str(sec1),
+         "-out", str(private)], timeout=60)
+    private.chmod(0o600)
+    sec1.unlink(missing_ok=True)
+    spki_pem = run(["openssl", "ec", "-in", str(private), "-pubout"],
+                   timeout=60).stdout
+    der = subprocess.run(["openssl", "pkey", "-pubin", "-outform", "DER"],
+                         input=spki_pem.encode(), capture_output=True, timeout=60).stdout
+    return {"dir": work, "private": private, "spkiPem": spki_pem,
+            "keyId": hashlib.sha256(der).hexdigest()}
+
+
+def old_archive() -> None:
+    """A Backup signed by a SECOND key, then that key retired.
+
+    The signing Secret is looked up by the fixed name `logweir-signing-key` in
+    the RUN'S OWN namespace (`controllers/backup.rs::SIGNING_KEY_SECRET`), so a
+    second signer needs no change to anything shared: this namespace's copy is
+    replaced with a keypair minted here, and the lab's own Secret is untouched.
+    """
+    evidence: list[str] = []
+    # A FRESH POLICY, BECAUSE `spec.keys` IS APPEND-ONLY. The CRD refuses to
+    # drop a keyId — "old archives still need the public material that signed
+    # them", which is the same rule this row exists to demonstrate — and every
+    # run of this phase mints a DIFFERENT second key, so applying over a
+    # previous run's policy is refused. The policy is this run's own, named with
+    # the stamp, and is removed rather than edited.
+    if get_opt("trustpolicy", TRUST_POLICY, namespace="default") is not None:
+        run(K + ["delete", "trustpolicy", TRUST_POLICY, "--wait=true"], check=False)
+    key = mint_signing_key(f"{OWNER}-signer2")
+    original = get("secret", "logweir-signing-key")
+    try:
+        # the recipe, checked against the lab's own key before it is relied on
+        lab = roster_signing_key()
+        lab_der = subprocess.run(["openssl", "pkey", "-pubin", "-outform", "DER"],
+                                 input=lab["spkiPem"].encode(), capture_output=True,
+                                 timeout=60).stdout
+        check(
+            "trust-key-id-recipe-matches-the-roster",
+            "PLAT-19.1",
+            hashlib.sha256(lab_der).hexdigest() == lab["keyId"],
+            f"the keyId this row computes for a minted key — sha256 of the DER SPKI, "
+            f"lowercase hex — reproduces the roster's own recorded keyId for the lab key "
+            f"({lab['keyId'][:16]}…). A second signer identified by a recipe nobody checked "
+            f"would be a key the policy never matches, and every verdict below would be "
+            f"about nothing",
+            evidence,
+        )
+        run(KN + ["delete", "secret", "logweir-signing-key", "--wait=true"], check=False)
+        run(KN + ["create", "secret", "generic", "logweir-signing-key",
+                  f"--from-file=signing.pem={key['private']}"], timeout=120)
+        apply(trust_policy(
+            "Active",
+            keys=[policy_key(lab["keyId"], lab["spkiPem"], "Active",
+                             display="the lab signing key"),
+                  policy_key(key["keyId"], key["spkiPem"], "Active",
+                             display=f"{OWNER}'s second signer",
+                             subject=f"{OWNER}-signer2@logweir.invalid")],
+        ))
+        old = legacy_backup(f"{OWNER}-old-archive")
+        before = old["status"]["evidence"]["verification"]
+        evidence.append(artifact("trust/old-archive-1-signed.json", before))
+        check(
+            "trust-second-signer-is-trusted-while-active",
+            "PLAT-19.1",
+            before.get("result") == "Valid" and before.get("matchedKeyId") == key["keyId"],
+            f"a Backup signed by a SECOND key this run minted verifies "
+            f"{before.get('result')} against {str(before.get('matchedKeyId'))[:16]}… "
+            f"(the minted key is {key['keyId'][:16]}…), basis "
+            f"{(before.get('trust') or {}).get('basis')}. The signing Secret is resolved by "
+            f"a fixed name in the run's own namespace, so nothing shared was touched",
+            evidence,
+        )
+        # --- and now it retires ------------------------------------------
+        retired_at = now()
+        # THE RETIREMENT IS AN EDIT TO ONE ENTRY, not a new policy: `state` and
+        # `retiredAt` move while both keyIds stay, which is what append-only
+        # allows and what a real retirement looks like.
+        apply(trust_policy(
+            "Active",
+            keys=[policy_key(lab["keyId"], lab["spkiPem"], "Active",
+                             display="the lab signing key"),
+                  policy_key(key["keyId"], key["spkiPem"], "Retired",
+                             display=f"{OWNER}'s second signer",
+                             subject=f"{OWNER}-signer2@logweir.invalid",
+                             retiredAt=retired_at)],
+        ))
+        after = await_trust(
+            f"{OWNER}-old-archive",
+            lambda v: (v.get("trust") or {}).get("basis") == "Historical"
+            or v.get("result") != "Valid",
+            seconds=300, what="the old archive to be re-judged against the retired key",
+        )["status"]["evidence"]["verification"]
+        evidence.append(artifact("trust/old-archive-2-after-retirement.json", after))
+        fresh = legacy_backup(f"{OWNER}-after-retirement")["status"]["evidence"][
+            "verification"]
+        evidence.append(artifact("trust/old-archive-3-new-run.json", fresh))
+        clauses = old_archive_survives_retirement(before, after, fresh)
+        evidence.append(artifact("trust/old-archive-clauses.json",
+                                 {"clauses": clauses, "retiredAt": retired_at,
+                                  "mintedKeyId": key["keyId"]}))
+        check(
+            "trust-old-archive-survives-its-signer-retiring",
+            "PLAT-19.1",
+            all(clauses.values()),
+            f"the archive signed at {before.get('signedAt')} by the key retired at "
+            f"{retired_at} still verifies {after.get('result')} on basis "
+            f"{(after.get('trust') or {}).get('basis')} against the same key; a run made "
+            f"AFTER the retirement verifies {fresh.get('result')} "
+            f"({(fresh.get('trust') or {}).get('basis')}). Retirement is not revocation: "
+            f"what the key signed while Active keeps its verdict, and the console can say "
+            f"'verified against a retired key' rather than pretending nothing happened. "
+            + "; ".join(f"{k}={v}" for k, v in clauses.items()),
+            evidence,
+        )
+        STATE["oldArchive"] = {"mintedKeyId": key["keyId"], "retiredAt": retired_at,
+                               "before": before, "after": after, "fresh": fresh}
+        save()
+    finally:
+        # THE PRIVATE HALF GOES, whatever happened above.
+        for path in (key["private"],):
+            path.unlink(missing_ok=True)
+        shutil.rmtree(key["dir"], ignore_errors=True)
+        run(KN + ["delete", "secret", "logweir-signing-key", "--wait=true"], check=False)
+        apply({"apiVersion": "v1", "kind": "Secret", "metadata": owned("logweir-signing-key"),
+               "data": original.get("data", {}), "type": original.get("type", "Opaque")})
+        evidence.append(artifact("trust/old-archive-key-cleanup.json", {
+            "privateKeyFileExists": key["private"].exists(),
+            "workDirExists": key["dir"].exists(),
+            "labSecretRestored": get_opt("secret", "logweir-signing-key") is not None,
+        }))
+        check(
+            "trust-minted-private-key-never-outlives-the-row",
+            "PLAT-19.1",
+            not key["private"].exists() and not key["dir"].exists(),
+            f"the private half minted for this row is gone from disk "
+            f"(file {key['private'].exists()}, dir {key['dir'].exists()}) and never entered "
+            f"an artifact: what is recorded is the public SPKI and the key id. The "
+            f"namespace's `logweir-signing-key` is restored to the lab's own copy",
+            evidence,
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -4326,7 +4547,7 @@ PHASES = [
     "setup", "catalog", "catalog_cases", "retention", "legal_hold", "lifecycle",
     "enforce_guards", "bounded_retry", "packaging", "preview",
     "enforce", "wrong_prefix", "denied_deletion", "no_evidence_credential", "trust",
-    "signed_at_probe", "trust_rbac", "notify", "control", "report", "cleanup",
+    "signed_at_probe", "trust_rbac", "old_archive", "notify", "control", "report", "cleanup",
 ]
 
 
