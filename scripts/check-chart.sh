@@ -492,6 +492,57 @@ else
   echo "   rc=$rc  (an empty admissionPolicy.consoleServiceAccountName refused, as it must be)"
 fi
 
+# ---- THE FENCE'S SUBJECT UNDER A NON-DEFAULT RELEASE NAME (review F3) ----
+#
+# Every other render in this gate uses $RELEASE, which is `logweir`, and that is
+# exactly the one release name under which the bug could not be seen: the
+# console ServiceAccount is `<release>-api` and
+# `admissionPolicy.consoleServiceAccountName` defaults to the fixed string
+# `logweir-api`, so they agree there and NOWHERE ELSE. Under any other name the
+# policy used to install, read as enabled, and fence nobody — leaving the
+# console's `create` on Secrets, which RBAC cannot narrow by shape and which
+# this policy is the only bound on, with no bound at all.
+#
+# Two arms, because a refusal that refuses everything is not a fence either:
+# the divergent pair is REFUSED, and the aligned pair RENDERS and carries the
+# release-derived principal in its one matchConditions expression.
+OTHER_RELEASE=notlogweir
+helm template "$OTHER_RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  --set api.enabled=true --set admissionPolicy.enabled=true \
+  > /dev/null 2> "$tmp/vap-release-diverged.err"
+rc=$?
+if [ "$rc" -eq 0 ]; then
+  echo "FAIL: release '$OTHER_RELEASE' rendered ServiceAccount $OTHER_RELEASE-api beside a policy fencing the DEFAULT name; the fence would match nobody" >&2
+  fail=1
+else
+  echo "   rc=$rc  (a console account and a fence subject that disagree refused, as they must be)"
+fi
+helm template "$OTHER_RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  --set api.enabled=true --set admissionPolicy.enabled=true \
+  --set "admissionPolicy.consoleServiceAccountName=$OTHER_RELEASE-api" \
+  > "$tmp/vap-release-aligned.yaml" 2> "$tmp/vap-release-aligned.err"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "FAIL: release '$OTHER_RELEASE' with a matching consoleServiceAccountName must RENDER; rc=$rc" >&2
+  sed 's/^/      /' "$tmp/vap-release-aligned.err" >&2
+  fail=1
+else
+  want="system:serviceaccount:$NAMESPACE:$OTHER_RELEASE-api"
+  grep -F -q "$want" "$tmp/vap-release-aligned.yaml"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "FAIL: the aligned render's policy does not name $want" >&2
+    fail=1
+  fi
+  grep -F -q "name: $OTHER_RELEASE-api" "$tmp/vap-release-aligned.yaml"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "FAIL: the aligned render carries no ServiceAccount $OTHER_RELEASE-api for the policy to fence" >&2
+    fail=1
+  fi
+  echo "   rc=0  (release '$OTHER_RELEASE': the account and the fence subject are both $OTHER_RELEASE-api)"
+fi
+
 echo
 if [ "$fail" -ne 0 ]; then
   echo "FAIL: the chart is not what the tree says it is; the lines above name what drifted." >&2

@@ -57,6 +57,38 @@ that matches no request is a silent no-op with a green install behind it.
 failing with a Go formatting artefact.
 */ -}}
 {{- $name := required "admissionPolicy.consoleServiceAccountName must be set (a non-empty ServiceAccount name in the release namespace) whenever admissionPolicy.enabled is true: the policy's only effect is its matchConditions subject list, and an empty or null name renders a principal that matches no request at all — the fence would install, look enabled, and protect nothing." .Values.admissionPolicy.consoleServiceAccountName -}}
+{{- /*
+AND IT MUST BE THE ACCOUNT THIS CHART RENDERS, WHEN THIS CHART RENDERS ONE —
+review finding **F3**.
+
+`required` above catches an absent, null or empty name. It cannot catch the
+failure that actually happens: a name that is perfectly well-formed and belongs
+to nobody. `api.enabled` renders
+`{{ include "logweir.api.serviceAccountName" . }}` — the release name plus
+`-api` — while this value defaults to the fixed string `logweir-api`. The two
+agree under the default release name and NOWHERE ELSE, so
+`helm install myrel charts/logweir --set api.enabled=true --set
+admissionPolicy.enabled=true` used to render a console ServiceAccount called
+`myrel-api` beside a policy whose only `matchConditions` expression names
+`system:serviceaccount:<ns>:logweir-api`. The fence installs, `helm install`
+exits 0, the policy reads as enabled in `kubectl get validatingadmissionpolicy`
+— and it matches no request, so the console's `create` on Secrets, which RBAC
+cannot narrow by SHAPE and which this policy is the only bound on, is
+completely unfenced.
+
+REFUSED, AND NOT SILENTLY CORRECTED. Rendering the helper's name in place of the
+configured one would be the chart overriding an explicit decision, and an
+installation may legitimately fence an account this chart did NOT create (a
+console deployed out of band, `api.enabled` false). So the refusal fires only
+when BOTH are true — this chart is rendering an account, and the value names a
+different one — and it names both strings so the fix is obvious. Everything
+else, including a console run elsewhere and every `extraPrincipals` entry, is
+untouched.
+*/ -}}
+{{- $rendered := include "logweir.api.serviceAccountName" . -}}
+{{- if and .Values.api.enabled (ne $name $rendered) -}}
+{{- fail (printf "admissionPolicy.consoleServiceAccountName is %q, but api.enabled renders the console ServiceAccount %q in namespace %q. The policy's ONLY effect is its matchConditions subject list, so a name that is not the account this chart creates fences NOBODY: the install succeeds, the policy reads as enabled, and the console's `create` on Secrets — which RBAC cannot narrow by shape — has no bound at all. Set admissionPolicy.consoleServiceAccountName to %q, or add it to admissionPolicy.extraPrincipals if you meant to fence a different console as well." $name $rendered .Release.Namespace $rendered) -}}
+{{- end -}}
 {{- $sa := printf "system:serviceaccount:%s:%s" .Release.Namespace $name -}}
 {{- $principals := prepend .Values.admissionPolicy.extraPrincipals $sa | uniq -}}
 apiVersion: admissionregistration.k8s.io/v1

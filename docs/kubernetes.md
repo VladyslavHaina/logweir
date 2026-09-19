@@ -1299,13 +1299,39 @@ message.** The delivery Job runs as `logweir-runner` and not as a new
 `logweir-notifier` ServiceAccount: `logweir-runner` is bound to no Role or
 ClusterRole, is granted no verb on anything, its token is not mounted (on the
 account and again on the PodSpec), and creating a second zero-verb account would
-touch four files this worker does not own. **The NetworkPolicy half is not
-covered and W13 owns it:** `logweir-runner-egress` selects
+touch four files this worker does not own. **The NetworkPolicy half is still not
+covered, and W13 did not take it either — the reason is below, and it is not a
+missing selector.** `logweir-runner-egress` selects
 `batch.kubernetes.io/job-name Exists`, so a delivery pod inherits egress to the
 broker ports as well as 443, where D3 §9 wants a notifier reaching DNS and 443
-only. The `logweir.dev/component=notification` label is already on the Job and
-its pod template, so the narrower policy is a selector away; until then, on an
-enforcing CNI a compromised runner image in a delivery pod can reach a broker.
+only; on an enforcing CNI a compromised runner image in a delivery pod can reach
+a broker.
+
+**Why a selector is not enough, corrected at W13's review.** The labels are
+there — `controllers/protection_policy.rs` puts
+`logweir.dev/component: notification` on the delivery Job *and* on its pod
+template, and `controllers/retention_policy.rs` does the same with
+`logweir.dev/component: retention` — so for those two classes a narrow policy
+really is one selector away. What is not one selector away is the OTHER half:
+**NetworkPolicies are additive**, so adding a narrow policy for a delivery pod
+does not take anything away from it. The broad `logweir-runner-egress` matches
+that same pod and keeps granting the broker ports, and a narrow policy beside it
+changes nothing at all. Narrowing therefore means editing the SHIPPED policy's
+`podSelector` to exclude those components
+(`matchExpressions: [{key: logweir.dev/component, operator: NotIn, values:
+[notification, retention]}]`), which changes the egress of every runner Job in
+every installation — and Docker Desktop, the only cluster this project has,
+enforces no NetworkPolicy, so the change could be made but its effect could not
+be observed. The third class, catalog sync, has no component label at all
+(`controllers/recovery_catalog.rs` sets none), so it would need a controller
+change first.
+
+**Who owns it now.** The two policies plus the `NotIn` on the broad selector,
+and the catalog-sync label, are a wave that can both edit
+`crates/weirkeeper/src/controllers/recovery_catalog.rs` and test on a CNI that
+enforces. It is **not** W13, which shipped the ServiceAccounts and the RBAC and
+owns no controller source; recording it against a finished wave is how a gap
+stops being looked for.
 A policy may declare up to four notification routes, but `logweir notify
 deliver` reads one environment variable per sink kind, so one Job addresses at
 most one PagerDuty, one webhook and one Slack — the **first** of each in route

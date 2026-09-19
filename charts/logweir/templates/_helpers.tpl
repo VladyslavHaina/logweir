@@ -131,6 +131,30 @@ and refuse the install.
 {{- end -}}
 
 {{- /*
+THE CONSOLE/API ServiceAccount'S NAME, IN ONE PLACE — review finding **F3**.
+
+Two templates need it and they used to spell it differently: `ui/api-rbac.yaml`
+rendered `{{ .Release.Name }}-api` while `admission-policy.yaml` took the fixed
+string `admissionPolicy.consoleServiceAccountName`, whose default is
+`logweir-api`. Those agree under the default release name and NOWHERE ELSE:
+`helm install myrel …` rendered `ServiceAccount myrel-api` beside a
+ValidatingAdmissionPolicy whose whole effect is
+`request.userInfo.username in ["system:serviceaccount:<ns>:logweir-api"]` — a
+fence that installs, reads as enabled, and matches nobody, while the principal
+it was meant to bound holds `create` on Secrets that RBAC cannot narrow by
+shape.
+
+So the name is defined once, here, and both files call it. The value is still
+the one an installation OVERRIDES with (a console run out of band has whatever
+account its operator gave it, and `extraPrincipals` exists for the rest), but a
+value that DISAGREES with an account this chart is itself rendering is refused
+at render time rather than installed — see `admission-policy.yaml`.
+*/ -}}
+{{- define "logweir.api.serviceAccountName" -}}
+{{- printf "%s-api" .Release.Name -}}
+{{- end -}}
+
+{{- /*
 The namespaces the console/API ServiceAccount is bound in — the same shape, and
 a SEPARATE key on purpose. The legacy proxy and the console are two principals
 with two arguments (`templates/ui/api-rbac.yaml`'s header), and an installation

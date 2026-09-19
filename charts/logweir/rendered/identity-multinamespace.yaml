@@ -6813,6 +6813,34 @@ metadata:
     app.kubernetes.io/component: identity-distribution
 automountServiceAccountToken: false
 ---
+# Source: logweir/templates/retention.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: logweir-retention
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: retention
+automountServiceAccountToken: false
+---
+# Source: logweir/templates/retention.yaml
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: logweir-retention
+  namespace: recoveries
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: retention
+automountServiceAccountToken: false
+---
 # Source: logweir/templates/runner-serviceaccount.yaml
 apiVersion: v1
 kind: ServiceAccount

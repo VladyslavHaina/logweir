@@ -61,7 +61,7 @@ install document; this README is the chart's own.
 | `Deployment` + `Service` `<release>-minio`, a PVC, `Secret` `<release>-minio-root`, `Secret` `logweir-s3`, `Job` `<release>-minio-seed` | `minio.enabled` | an in-cluster archive with the buckets `kafka-backups` and `logweir-evidence` |
 | `StatefulSet` + two `Service`s `<release>-kafka-source` and `-target`, `Job` `<release>-kafka-seed` | `demoKafka.enabled` | two single-broker KRaft clusters; `orders` and `payments` seeded on the source, the marker topic `logweir.scratch` on the target |
 | `Deployment`, `Service`, `ServiceAccount`, `ClusterRole`s, `RoleBinding` `<release>-ui` | `ui.enabled` | `kubectl proxy` serving the twenty-two UI files and the API on one origin, with its own authority (below). The files come from the image `ui.image`, not from a ConfigMap |
-| `ServiceAccount` `logweir-retention` | `retention.enabled` | the identity every `mode: Enforce` Job names. **No Role and no RoleBinding**: the retention worker makes zero Kubernetes API calls |
+| `ServiceAccount` `logweir-retention`, in the release namespace **and every `identity.authorizedRunnerNamespaces` entry** | `retention.enabled` | the identity every `mode: Enforce` Job names, in every namespace that runs one. **No Role and no RoleBinding**: the retention worker makes zero Kubernetes API calls |
 | `ServiceAccount`, two `ClusterRole`s, `ClusterRoleBinding`, `RoleBinding` `<release>-api` | `api.enabled` | the console/API principal's grants. **RBAC only** — no Deployment, no image, no Service |
 
 Nothing optional is on by default. The release gate renders the snapshots with
@@ -203,12 +203,22 @@ neither is in the list above:
 
 ## `retention.enabled` — the identity a deletion needs, and the three gates it is not
 
-It renders exactly one object: the `ServiceAccount` `logweir-retention`, with
-`automountServiceAccountToken: false` and **no Role, no RoleBinding and no
+It renders exactly one kind of object: the `ServiceAccount` `logweir-retention`,
+with `automountServiceAccountToken: false` and **no Role, no RoleBinding and no
 ClusterRole**. The controller compiles that name into every `mode: Enforce`
 Job, so without it the Job's pod is admitted by nobody — fail-closed, but by
 accident rather than by decision, which is why the account exists as an
 explicit switch.
+
+**In the release namespace and in every `identity.authorizedRunnerNamespaces`
+entry**, because that is where the Jobs are: the controller creates an
+enforcement Job in the namespace of the `RetentionPolicy` that produced it, and
+a `RetentionPolicy` lives with the workload it protects. It reads that list even
+when `identity.enabled` is off — the list is about where Jobs run, and only the
+signer distribution beside it is about identity. For the low-level
+`logweir.yaml` path there is a fragment,
+`config/rbac/retention-serviceaccount.yaml`, applied once per namespace exactly
+as the runner's is (`docs/install.md` step 4).
 
 **Turning it on deletes nothing and authorises nobody to delete anything.** The
 account holds no Kubernetes verb. The deletion capability lives in an
@@ -274,8 +284,15 @@ is what makes a console-written credential write-only — **no `list` on
 `configmaps`**, and **no write verb on `trustpolicies`**.
 
 Set `admissionPolicy.consoleServiceAccountName` to this account: the fence's
-whole effect is its subject list. Under the default release name both are
-`logweir-api`, and a test holds them to each other.
+whole effect is its subject list, and a subject that names nobody is a policy
+that installs, reads as enabled and fences nothing — leaving the console's
+`create` on Secrets, which RBAC cannot narrow by shape, with no bound at all.
+Both names now come from one template helper, and **the render REFUSES** when
+`api.enabled` is on and the two disagree, naming both strings. Under the default
+release name they are both `logweir-api`; under `helm install myrel …` they are
+both `myrel-api` once you set the value, and neither can be silently wrong.
+(An installation fencing a console deployed out of band leaves `api.enabled`
+off, and the refusal does not apply.)
 
 `./scripts/render-install.sh --check` answers the `kubectl auth can-i` question
 for every pair above, in both directions, against the checked-in render.

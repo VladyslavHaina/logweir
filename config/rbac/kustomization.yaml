@@ -9,7 +9,7 @@
 # deletes.
 #
 # ---------------------------------------------------------------------------
-# TWO FILES IN THIS DIRECTORY ARE DELIBERATELY NOT LISTED
+# THREE FILES IN THIS DIRECTORY ARE DELIBERATELY NOT LISTED
 # ---------------------------------------------------------------------------
 # * `backup-reconciler-rbac-request.yaml` — Task 17's REQUEST. It is a
 #   ClusterRole named `weirkeeper-backup-request` that nothing is bound to;
@@ -26,6 +26,12 @@
 #   namespace and never `logweir-system`. Rendering it into `logweir.yaml` would
 #   create it in exactly the one namespace no runner ever runs in. It is applied
 #   per namespace, at install step 1 — see `docs/kubernetes.md` §13.
+# * `retention-serviceaccount.yaml` — the `logweir-retention` ServiceAccount,
+#   for exactly the same reason and with the same shape. Enforcement Jobs run in
+#   the namespace of the `RetentionPolicy` that produced them, which is an
+#   adopter's namespace and never `logweir-system`; the Helm path renders it
+#   from `retention.enabled` and the low-level path applies this file per
+#   namespace (`docs/install.md` step 4).
 apiVersion: kustomize.config.k8s.io/v1beta1
 kind: Kustomization
 resources:

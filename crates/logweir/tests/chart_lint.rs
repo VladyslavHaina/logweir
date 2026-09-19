@@ -1992,7 +1992,104 @@ fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends
         }
     }
 
-    // --- the bindings ------------------------------------------------------
+    // --- the bindings, AND THE NAMESPACES THEY ARE IN ----------------------
+    //
+    // Review finding **F1**, and the reviewer's surviving mutant R3. This block
+    // used to assert only that SOME `RoleBinding logweir-api` existed, that its
+    // `roleRef.kind` was `ClusterRole`, and that no `ClusterRoleBinding` named
+    // the namespaced role. It said nothing about WHICH namespaces — so
+    // `logweir.api.namespaces` rewritten to append `kube-system` rendered a
+    // console binding in a namespace no value names, and `chart_lint`,
+    // `manifest_lint`, `render-install --check` and `just chart-check` all
+    // exited 0.
+    //
+    // That is the one property the RoleBinding-not-ClusterRoleBinding shape
+    // exists to buy. Binding the console in an unconfigured namespace is a
+    // console read in a namespace the installation never granted — the
+    // authorizer would refuse it, but the whole point of the binding shape is
+    // that a defect in the authorizer must not reach beyond the configured set.
+    //
+    // SO THE EXPECTATION IS DERIVED, NOT RESTATED. The set is computed from the
+    // example's own values the way `logweir.api.namespaces` computes it — the
+    // release namespace, plus `api.namespaces`, or `kubernetes.namespace` when
+    // that list is empty — so a mutant that widens the helper fails here, and a
+    // mutant that widens the EXAMPLE does not silently move the goalposts.
+    for (example, release_namespace) in [
+        (Some("demo"), "logweir-system"),
+        (Some("identity-multinamespace"), "logweir-system"),
+    ] {
+        let name = example.expect("an example name");
+        let values: Value = serde_yaml::from_str(&read(&format!(
+            "charts/logweir/examples/{name}.values.yaml"
+        )))
+        .expect("the example values parse");
+        if values["api"]["enabled"].as_bool() != Some(true) {
+            continue;
+        }
+        let mut want: BTreeSet<String> = BTreeSet::from([release_namespace.to_string()]);
+        let listed: Vec<String> = values["api"]["namespaces"]
+            .as_sequence()
+            .map(|s| {
+                s.iter()
+                    .map(|v| v.as_str().expect("a namespace name").to_string())
+                    .collect()
+            })
+            .unwrap_or_default();
+        if listed.is_empty() {
+            if let Some(fallback) = values["kubernetes"]["namespace"].as_str() {
+                if !fallback.is_empty() {
+                    want.insert(fallback.to_string());
+                }
+            }
+        } else {
+            want.extend(listed);
+        }
+
+        let rendered_docs = rendered(name);
+        let bindings: Vec<&Doc> = rendered_docs
+            .iter()
+            .filter(|d| {
+                d.kind == "RoleBinding"
+                    && d.value["roleRef"]["name"].as_str() == Some("logweir-api")
+            })
+            .collect();
+        let got: BTreeSet<String> = bindings
+            .iter()
+            .map(|d| {
+                d.value["metadata"]["namespace"]
+                    .as_str()
+                    .unwrap_or("<no namespace>")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            want, got,
+            "rendered/{name}.yaml binds the console's namespaced role in {got:?}, and \
+             `api.namespaces` (plus the release namespace) says {want:?}. A binding in a \
+             namespace no value names is a console grant the installation never asked for, and \
+             it is exactly what the per-namespace RoleBinding shape exists to make visible"
+        );
+        assert_eq!(
+            want.len(),
+            bindings.len(),
+            "rendered/{name}.yaml carries {} RoleBindings for {} namespaces — one of them is a \
+             duplicate, which Helm refuses at install time rather than at render time",
+            bindings.len(),
+            want.len()
+        );
+        for rb in bindings {
+            assert_eq!(Some("ClusterRole"), rb.value["roleRef"]["kind"].as_str());
+            assert_eq!(
+                Some("logweir-api"),
+                rb.value["subjects"][0]["name"].as_str()
+            );
+            assert_eq!(
+                Some("logweir-system"),
+                rb.value["subjects"][0]["namespace"].as_str(),
+                "every binding names the ONE ServiceAccount, in the release namespace"
+            );
+        }
+    }
     let bindings: Vec<&Doc> = docs
         .iter()
         .filter(|d| {
@@ -2006,13 +2103,6 @@ fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends
          would mean a defect in that check reaches every namespace instead of the configured \
          ones"
     );
-    for rb in bindings {
-        assert_eq!(Some("ClusterRole"), rb.value["roleRef"]["kind"].as_str());
-        assert_eq!(
-            Some("logweir-api"),
-            rb.value["subjects"][0]["name"].as_str()
-        );
-    }
     for crb in docs.iter().filter(|d| d.kind == "ClusterRoleBinding") {
         let name = crb.value["roleRef"]["name"].as_str().unwrap_or_default();
         assert_ne!(
@@ -2033,6 +2123,64 @@ fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends
         "`admissionPolicy.consoleServiceAccountName`'s default must be the account \
          `api.enabled` renders under the default release name. They are two values that have \
          to agree, and nothing else would notice if they stopped"
+    );
+
+    // AND THE FENCE'S SUBJECT CANNOT DIVERGE FROM THE ACCOUNT — review F3.
+    //
+    // The two names used to be spelled separately: this template rendered
+    // `{{ .Release.Name }}-api` and `admission-policy.yaml` took the fixed
+    // string `admissionPolicy.consoleServiceAccountName`, whose default is
+    // `logweir-api`. They agree under the default release name and NOWHERE
+    // ELSE, so `helm install myrel …` rendered `ServiceAccount myrel-api`
+    // beside a policy whose only `matchConditions` expression named
+    // `logweir-api` — a fence that installs, reads as enabled, and matches no
+    // request, leaving the console's `create` on Secrets with no bound at all
+    // (RBAC cannot narrow a Secret by SHAPE; that policy is the only thing
+    // that can).
+    //
+    // ASSERTED AS TEXT, and the reason is Global Constraint 22: a `#[test]`
+    // may not shell out, so a render under a non-default release name cannot
+    // happen here. `scripts/check-chart.sh` performs that render in both
+    // directions — divergent pair refused, aligned pair rendering with the
+    // release-derived principal — and `chart_lint_the_gate_script_carries_every_arm`
+    // holds the script to those arms. What this row holds is the property that
+    // makes the refusal possible: ONE definition, called by both files.
+    let helpers = read("charts/logweir/templates/_helpers.tpl");
+    assert!(
+        helpers.contains("define \"logweir.api.serviceAccountName\""),
+        "`_helpers.tpl` must define `logweir.api.serviceAccountName`: the console account's \
+         name is needed by two templates, and two spellings of it is exactly how the fence \
+         came to name a principal the chart does not create"
+    );
+    for (file, why) in [
+        (
+            "charts/logweir/templates/ui/api-rbac.yaml",
+            "renders the account",
+        ),
+        (
+            "charts/logweir/templates/admission-policy.yaml",
+            "fences it",
+        ),
+    ] {
+        let text = read(file);
+        assert!(
+            text.contains("include \"logweir.api.serviceAccountName\""),
+            "{file} {why}, so it must take the name from `logweir.api.serviceAccountName` and \
+             never spell `printf \"%s-api\" .Release.Name` again"
+        );
+        assert!(
+            !text.contains("printf \"%s-api\" .Release.Name"),
+            "{file} spells the console account's name itself. There is one helper for it, and \
+             a second spelling is a second thing to keep in step"
+        );
+    }
+    assert!(
+        read("charts/logweir/templates/admission-policy.yaml")
+            .contains("if and .Values.api.enabled (ne $name $rendered)"),
+        "`admission-policy.yaml` must REFUSE at render time when this chart creates a console \
+         account and the fence names a different one. It must not silently substitute the \
+         rendered name either: an installation may legitimately fence a console deployed out \
+         of band, and `api.enabled` false is how it says so"
     );
 
     // AND NOTHING OF IT RENDERS WITH THE FLAG OFF.
@@ -2109,6 +2257,90 @@ fn chart_lint_retention_renders_an_identity_with_no_grant_and_no_token() {
             );
         }
     }
+
+    // AND IT EXISTS IN EVERY NAMESPACE THAT RUNS A JOB — review finding **F2**.
+    //
+    // It used to render in the release namespace alone. `RetentionPolicy`s live
+    // with the workload they protect, and
+    // `controllers::retention_policy` creates the Job with
+    // `Api::<Job>::namespaced(client, &self.namespace)` — so an operator who
+    // armed enforcement in `team-a` got a Job whose pod was never admitted,
+    // with nothing in any status naming the account that was missing. The
+    // account now follows `identity.authorizedRunnerNamespaces`, which is the
+    // shape `templates/identity.yaml` already uses for `logweir-runner` and is
+    // the same list for the same reason: the namespaces this installation runs
+    // Logweir Jobs in.
+    //
+    // DERIVED FROM THE EXAMPLE'S OWN VALUES, like the console binding set
+    // above, so a mutant that narrows the range fails here and a mutant that
+    // edits the example cannot move the goalposts.
+    for name in ["demo", "identity-multinamespace"] {
+        let values: Value = serde_yaml::from_str(&read(&format!(
+            "charts/logweir/examples/{name}.values.yaml"
+        )))
+        .expect("the example values parse");
+        if values["retention"]["enabled"].as_bool() != Some(true) {
+            continue;
+        }
+        let mut want: BTreeSet<String> = BTreeSet::from(["logweir-system".to_string()]);
+        if let Some(extra) = values["identity"]["authorizedRunnerNamespaces"].as_sequence() {
+            want.extend(
+                extra
+                    .iter()
+                    .map(|v| v.as_str().expect("a namespace name").to_string()),
+            );
+        }
+        let got: BTreeSet<String> = rendered(name)
+            .iter()
+            .filter(|d| d.kind == "ServiceAccount" && d.name() == "logweir-retention")
+            .map(|d| {
+                d.value["metadata"]["namespace"]
+                    .as_str()
+                    .unwrap_or("<no namespace>")
+                    .to_string()
+            })
+            .collect();
+        assert_eq!(
+            want, got,
+            "rendered/{name}.yaml puts the enforcement account in {got:?}, and the namespaces \
+             this installation runs Jobs in are {want:?}. A namespace that runs a \
+             `RetentionPolicy` and has no `logweir-retention` is enforcement that fails closed \
+             with nothing in any status saying which gate was shut"
+        );
+    }
+
+    // AND THE LOW-LEVEL PATH HAS A FRAGMENT, so the two documents that point at
+    // one are not pointing at nothing. It carries no namespace, exactly as
+    // `backup-runner-serviceaccount.yaml` does not, because a hard-coded one
+    // would be wrong in every namespace an enforcement Job actually runs in.
+    let fragment = read("config/rbac/retention-serviceaccount.yaml");
+    for needle in [
+        "name: logweir-retention",
+        "automountServiceAccountToken: false",
+    ] {
+        assert!(
+            fragment.contains(needle),
+            "config/rbac/retention-serviceaccount.yaml must carry `{needle}`"
+        );
+    }
+    assert!(
+        !fragment.contains("\n  namespace:"),
+        "the fragment names no namespace: it is applied into the namespace the `RetentionPolicy` \
+         lives in, and a hard-coded one would be wrong everywhere"
+    );
+    assert!(
+        !read("config/rbac/kustomization.yaml").contains("retention-serviceaccount.yaml\n  -")
+            && !read("config/rbac/kustomization.yaml")
+                .lines()
+                .any(|l| l.trim() == "- retention-serviceaccount.yaml"),
+        "the fragment must NOT be listed in config/rbac/kustomization.yaml: rendering it into \
+         `logweir.yaml` would create the account in the one namespace no enforcement Job runs in"
+    );
+    assert!(
+        read("docs/install.md").contains("config/rbac/retention-serviceaccount.yaml"),
+        "docs/install.md step 4 must name the fragment; before fix round 1 both this template's \
+         header and install.md pointed at a step that covered `logweir-runner` only"
+    );
 }
 
 /// **`controller.failFastSeconds` and `controller.jobTtlSeconds` render the two
@@ -2986,6 +3218,12 @@ fn chart_lint_the_gate_script_carries_every_arm() {
         // document `weirkeeper::check::policy` refuses fails CLOSED and
         // SILENTLY, so the schema has to refuse the same values at install
         // time, where the operator is still looking.
+        // Fix round 1, review F3: the fence's subject under a NON-DEFAULT
+        // release name, in both directions. Every other render in that script
+        // uses `$RELEASE` = `logweir`, which is the one name under which the
+        // divergence could not be seen.
+        "OTHER_RELEASE=notlogweir",
+        "--set \"admissionPolicy.consoleServiceAccountName=$OTHER_RELEASE-api\"",
         "--set 'checks.discovery.keepPerConnection=0'",
         "--set-string 'checks.discovery.visibilityAttestations[0].id=att-partial'",
         // Fix round 1, review F1 and F4. The three bounds `Policy::validate`

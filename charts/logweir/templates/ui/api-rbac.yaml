@@ -55,8 +55,11 @@ console-written credential write-only: the value is created and no route can
 read it back. `create` cannot name a `resourceNames`, which is exactly why the
 SHAPE of that create is fenced by a ValidatingAdmissionPolicy instead
 (`admissionPolicy.enabled`, D2 §7.3) — RBAC cannot express "this Secret shape",
-and the policy's `matchConditions` names THIS ServiceAccount. Set
-`admissionPolicy.consoleServiceAccountName` to the account this file renders.
+and the policy's `matchConditions` names THIS ServiceAccount. Both names come
+from the ONE helper `logweir.api.serviceAccountName` (review finding F3), and an
+`admissionPolicy.consoleServiceAccountName` that disagrees with the account this
+file renders is refused at render time: a fence that names a principal the chart
+did not create is a fence that matches nobody.
 
 **`get` ON `configmaps`, AND NOTHING ELSE ON THEM.** A check's stored result
 and a catalog view's pages are ConfigMaps; the adapter's projection drops
@@ -80,6 +83,19 @@ role below carries `get` and `list` only. A console that could write a
 `TrustPolicy` would be a console that could decide whose keys may sign an
 approval.
 
+BUT THE TRUST READ IS INSTALLATION-WIDE BY CONSTRUCTION, AND THAT IS ONLY HALF
+SAFE TODAY. `TrustPolicy` is cluster-scoped, so this grant cannot be narrowed to
+a namespace by any RBAC rule — the service is expected to do that narrowing
+itself, per actor, and for `GET /api/v1/trust-policies` it does **not** yet:
+D3 W11's own review records (its finding F2, open) that an actor holding
+`trustPolicy.read` in one bound namespace is served every policy's
+`spec.namespaces[]`, against D0's "installation trust … installation-admin only"
+row. This file is the ENABLING half and is correct; the route is the defective
+half. **W11 F2 must land before a console is actually run against this
+account** — until then an installation that wants the rest of the console
+without that exposure should decline `api.enabled` rather than assume the grant
+is bounded above it.
+
 AND NO `/status` SUBRESOURCE IS NAMED, WHICH IS NOT AN OMISSION. `get` on
 `recoverycatalogs` returns the whole object, status included; the status
 subresource exists so a WRITER can be authorised separately, not so a reader
@@ -99,7 +115,7 @@ on therefore starts nothing: it creates an account with no pod, which costs one
 ServiceAccount and grants nobody anything until something runs as it.
 */}}
 {{- if .Values.api.enabled }}
-{{- $name := printf "%s-api" .Release.Name }}
+{{- $name := include "logweir.api.serviceAccountName" . }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:

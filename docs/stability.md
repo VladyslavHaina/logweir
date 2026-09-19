@@ -1101,10 +1101,14 @@ stating as one, because the flattering reading is always the convenient one:
 | a catalog point's `partitions` | the size bound is not enforced, recorded as `sizeBasis: unknown` |
 | a record's `execution` | provenance unknown |
 
-The one shape that is **not** a conclusion is `trust.basis: Unverified`: it
-means nothing has been compared yet, as distinct from `basis: None`, which
-means this key's lifecycle does not support this document. Neither may render
-green. The next section is the whole of why that distinction exists.
+**Neither `basis: None` nor `basis: Unverified` is a conclusion.** `None` means
+the document carried no signing time, so the comparison had nothing to compare;
+`Unverified` means the stored status predates the field the comparison needs and
+nothing has been compared yet. Both are re-read **once**, through the same
+bounded path, on the next policy event; neither may render green. The next
+section is the whole of that rule, and the allow-list form it takes — only
+`Current` and `Historical` mean a comparison happened — is what keeps it correct
+under a build nobody has written yet.
 
 ### `RetentionPolicy` in `Enforce` is where the deletion boundary moves, and it is an installation decision
 

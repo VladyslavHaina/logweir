@@ -1537,7 +1537,10 @@ fn the_six_cluster_roles_are_exactly_as_specified() {
     for (_, resources, verbs) in &operator_rules {
         assert!(
             !resources.iter().any(|r| r == "retentionpolicies"),
-            "`logweir-operator` names `retentionpolicies` with {verbs:?}. It may not: an              operator who could write one could set `mode: Enforce` on a policy they also              authored, and the whole of D3 §12's \"separate, later, administrator decision\"              would be one person's from end to end"
+            "`logweir-operator` names `retentionpolicies` with {verbs:?}. It may not: an \
+             operator who could write one could set `mode: Enforce` on a policy they also \
+             authored, and the whole of D3 §12's \"separate, later, administrator decision\" \
+             would be one person's from end to end"
         );
     }
 
@@ -2241,11 +2244,20 @@ fn install_yaml_has_no_drift() {
             if name == "kustomization.yaml" {
                 continue;
             }
-            // The two Task 17 REQUEST fragments are deliberately not listed by
-            // `config/rbac/kustomization.yaml` and must not appear in the
-            // rendered file. Asserted below rather than skipped silently.
+            // The three files `config/rbac/kustomization.yaml` deliberately
+            // does not list must not appear in the rendered file: Task 17's
+            // REQUEST fragment, and the two PER-NAMESPACE Job ServiceAccounts.
+            // Asserted below rather than skipped silently.
+            //
+            // `retention-serviceaccount.yaml` joined them at D3 W13's fix round
+            // 1 (review F2), for exactly the reason the runner's carries:
+            // enforcement Jobs run in the namespace of the `RetentionPolicy`
+            // that produced them, which is an adopter's namespace and never
+            // `logweir-system`, so rendering it here would create the account
+            // in the one namespace no enforcement Job ever runs in.
             if name == "backup-reconciler-rbac-request.yaml"
                 || name == "backup-runner-serviceaccount.yaml"
+                || name == "retention-serviceaccount.yaml"
             {
                 for m in manifests_in(&f) {
                     assert!(

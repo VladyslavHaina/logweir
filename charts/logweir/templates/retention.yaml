@@ -38,22 +38,48 @@ renders this account and nothing else; it creates no policy, approves no plan
 and deletes nothing. `charts/logweir/README.md` lists the other three gates a
 deletion still has to pass.
 
-NOT RENDERED PER NAMESPACE, and that is the same shape `logweir-runner` has:
-retention Jobs run in the namespace of the `RetentionPolicy` that produced
-them, so this copy serves the release namespace and every other namespace
-applies the account itself (`docs/install.md` step 4).
+RENDERED PER NAMESPACE, EXACTLY AS `logweir-runner` IS — review finding **F2**.
+
+`controllers/retention_policy.rs` creates the enforcement Job with
+`Api::<Job>::namespaced(client, &self.namespace)`, which is the namespace of the
+`RetentionPolicy`, and a `RetentionPolicy` lives with the workload it protects
+rather than in `logweir-system`. A release-namespace-only account was therefore
+the wrong shape for the common case and the failure was undiagnosable: an
+operator binds `logweir-retention-admin` in `team-a`, sets `mode: Enforce`,
+approves the plan — and the Job's pod is never admitted, because
+`serviceAccountName: logweir-retention` names an account that does not exist
+there. Fail-closed, silent, with nothing in any status saying why.
+
+So this ranges over `identity.authorizedRunnerNamespaces` beside the release
+namespace, which is the shape `templates/identity.yaml` already uses for
+`logweir-runner` and is the same list for the same reason: it is the set of
+namespaces this installation runs Logweir Jobs in. It is read here even when
+`identity.enabled` is false, because retention signs nothing — the list is about
+where Jobs run, and only the SIGNER distribution beside it is about identity.
+
+AND THE LOW-LEVEL PATH HAS A FRAGMENT, so the sentence pointing at it is true:
+`config/rbac/retention-serviceaccount.yaml`, applied per namespace exactly as
+`config/rbac/backup-runner-serviceaccount.yaml` is (`docs/install.md` step 4).
+Before this wave both this header and install.md pointed at a step and a file
+that did not cover it.
 */}}
 {{- if .Values.retention.enabled }}
+{{- $namespaces := prepend (.Values.identity.authorizedRunnerNamespaces | default list) .Release.Namespace | uniq }}
+{{- range $index, $namespace := $namespaces }}
+{{- if $index }}
+---
+{{- end }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: logweir-retention
-  namespace: {{ .Release.Namespace }}
+  namespace: {{ $namespace }}
   labels:
-    {{- include "logweir.labels" . | nindent 4 }}
+    {{- include "logweir.labels" $ | nindent 4 }}
     app.kubernetes.io/component: retention
 automountServiceAccountToken: false
-{{- with (include "logweir.imagePullSecrets" .) }}
+{{- with (include "logweir.imagePullSecrets" $) }}
 {{ . }}
+{{- end }}
 {{- end }}
 {{- end }}

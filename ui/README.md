@@ -264,6 +264,12 @@ owner-UID, immutability and digest checks -- and **no verb on `secrets`** at
 all. A page that shows less than this role allows is a convenience, never a
 control.
 
+**The chart starts nothing.** `api.enabled` renders this identity and its roles
+and nothing else -- no Deployment, no image, no Service. The console's
+deployment is PLAT-17.1's own stage, so turning the flag on does not put the
+page into console mode; it gives a console deployed some other way a reviewed
+account to run as.
+
 **`<release>-api` acts for a service.** `logweir-api` authenticates every
 request, resolves the actor's roles from its own binding table, and refuses an
 ungranted namespace *before* it makes any Kubernetes call. Its ClusterRole is
@@ -294,6 +300,14 @@ And four absences that the page depends on:
   the service's own authorization could not produce a write, because the
   credential it would use does not hold the verb. Administering trust is
   `kubectl apply` under `logweir-trust-admin`.
+
+The trust READ is the one grant whose narrowing RBAC cannot help with: the kind
+is cluster-scoped, so the account sees every policy and the service is expected
+to decide per actor what to serve. For `GET /api/v1/trust-policies` that
+narrowing is not in place yet, so the keys view currently shows an actor every
+policy's namespace list. That is a route defect, tracked against the console
+API's wave, and it is why this account should not be run against until it
+lands.
 
 ### How the choice is made
 

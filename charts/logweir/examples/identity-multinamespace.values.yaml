@@ -14,3 +14,9 @@ api:
   enabled: true
   namespaces:
     - recoveries
+# Retention takes its namespaces from `identity.authorizedRunnerNamespaces`
+# above rather than from a list of its own: an enforcement Job runs in the
+# namespace of the `RetentionPolicy` that produced it, which is a namespace that
+# runs Logweir Jobs, and that is the set this key already names.
+retention:
+  enabled: true

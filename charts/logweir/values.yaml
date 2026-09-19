@@ -8,7 +8,7 @@ environment: ""                 # a label on every object; switches nothing
 # Runner Jobs are the operator's: imagePullSecrets reach them through the
 # runner ServiceAccount, node placement does not (not implemented).
 kubernetes:
-  namespace: ""                 # only feeds ui.namespaces; `-n` decides the install
+  namespace: ""                 # feeds ui.namespaces and api.namespaces; `-n` decides the install
   nodeSelector: {}
   tolerations: []
   affinity: {}

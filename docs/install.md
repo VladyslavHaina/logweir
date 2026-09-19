@@ -540,6 +540,27 @@ A pod whose PodSpec names no ServiceAccount silently gets `default` — the one
 account an operator is most likely to have granted something to. That is why
 the name is set explicitly and why this step is not optional.
 
+**And, in every namespace that will run a retention enforcement Job, the second
+account:**
+
+```bash
+kubectl --context docker-desktop -n <namespace> \
+  apply -f config/rbac/retention-serviceaccount.yaml
+```
+
+Enforcement Jobs run in the namespace of the `RetentionPolicy` that produced
+them, and every one names `logweir-retention` — a separate account from
+`logweir-runner`, granted no verb either, because it is the one pod in the
+installation that mounts a delete-capable storage credential and "what has run
+as the deleter" should have an answer. **On the Helm path this is
+`retention.enabled`**, which renders the account in the release namespace and in
+every `identity.authorizedRunnerNamespaces` entry; do not apply this file over
+those Helm-owned objects.
+
+Without it, enforcement fails closed and undiagnosably: the Job is created, its
+pod is never admitted because the account does not exist, and nothing in the
+`RetentionPolicy`'s status says which of the four gates was shut.
+
 ### 5. Binding the five human roles
 
 `logweir.yaml` ships `logweir-viewer`, `logweir-operator`, `logweir-approver`,
@@ -600,8 +621,9 @@ restore-side hold reads with it.
 
 **Holding it deletes nothing by itself.** An enforcement run passes three more
 gates, and all three are somewhere else: the `logweir-retention` ServiceAccount
-must exist in the namespace (chart value `retention.enabled`, or the fragment
-applied by hand), the run needs an object-store credential whose scope is the
+must exist in the namespace (chart value `retention.enabled`, which renders it
+in the release namespace and every `identity.authorizedRunnerNamespaces` entry;
+or `config/rbac/retention-serviceaccount.yaml` applied by hand — step 4), the run needs an object-store credential whose scope is the
 policy's own prefix and never `logweir/`, and every run needs an
 administrator's `approve-plan` carrying the current `planSha256`.
 
@@ -650,6 +672,17 @@ And what it does **not** hold, each for a reason:
 * **no write verb on `trustpolicies`**. Trust administration is not an API
   operation in v1; the supported path is `kubectl apply` under
   `logweir-trust-admin` (see [keys.md](keys.md)).
+
+**One caveat before you run a console against this account.** `TrustPolicy` is
+cluster-scoped, so its read grant is installation-wide and no RBAC rule can
+narrow it to a namespace — the service is expected to narrow it per actor, and
+for `GET /api/v1/trust-policies` it does not yet: an actor holding
+`trustPolicy.read` in one bound namespace is currently served every policy's
+`spec.namespaces[]`, which is the list of every governed namespace. The grant is
+the enabling half and is correct; the route is the defective half, tracked
+against the console API's own wave. Until it lands, an installation that does
+not want that exposure should leave `api.enabled` off rather than assume the
+read is bounded above the grant.
 
 `./scripts/render-install.sh --check` answers the `kubectl auth can-i` question
 for every pair above, in both directions, against the checked-in render — so a
