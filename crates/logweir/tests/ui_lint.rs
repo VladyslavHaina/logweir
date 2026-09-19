@@ -74,7 +74,7 @@ const VIEWER_AUTHORITY: &str = "viewer's entire cluster authority";
 /// has nothing to do with the `kafka-backup` subcommand GC3 denies. The escape
 /// sits on the element's own line because that gate matches per physical line
 /// -- which is also why this paragraph spells the name without its quotes.
-const API_EXPORTS: [&str; 22] = [
+const API_EXPORTS: [&str; 26] = [
     "GROUP",
     "VERSION",
     "WRITABLE_PLURALS",
@@ -96,6 +96,16 @@ const API_EXPORTS: [&str; 22] = [
     "consoleGet",
     "consoleSub",
     "consoleOperation",
+    // D3 W12 (PLAT-14.1, PLAT-15.1, PLAT-19.1): the ONE cluster-scoped product
+    // read (`GET /api/v1/trust-policies`, bounded by its own frozen plural
+    // list in api.js) and the module's SECOND request site -- the operation
+    // event stream. `EventSource` is a request, so it lives in api.js like
+    // every other one: its identifier is built by `path(...)` on the line of
+    // the construction, it carries no header and no token, and closing it
+    // closes a connection and never an operation.
+    "consoleClusterList",
+    "consoleClusterGet",
+    "openOperationStream",
     // D2 W13: the SIX named action routes the product API spells as a verb
     // suffix (`destinations/primary:test`) or a sub-collection create
     // (`connections/source/topic-discoveries`) -- neither of which is a plural
@@ -111,6 +121,13 @@ const API_EXPORTS: [&str; 22] = [
     // on which the second one is allowed to exist at all.
     "cadencePreview",
     "consoleSchedulePolicy",
+    // D3 W12 (PLAT-19.1, D3 section 7.7): the instant the SERVER dated its most
+    // recent answer, for the one column that needs an elapsed time -- the keys
+    // view's `unknown`. It is a reader over a value this module recorded; it
+    // issues no request, and it is deliberately not reachable from a page
+    // module (`the_suspend_toggle_is_the_only_update`), which reads it through
+    // `ui/operation-watch.js`'s `serverClock`.
+    "serverTime",
     "problemError",
 ];
 

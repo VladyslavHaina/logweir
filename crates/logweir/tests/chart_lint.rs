@@ -16,7 +16,7 @@
 //! # The properties
 //!
 //! * The chart's `crds/` and `ui/` are byte-identical copies of `config/crd/`
-//!   and the twenty-two shipped UI files — asserted here with `std::fs` and in
+//!   and the twenty-six shipped UI files — asserted here with `std::fs` and in
 //!   the script with `cmp`, so the property holds whichever runs first.
 //! * The DEFAULT render and `logweir.yaml` agree on the substance of the
 //!   control plane: the Deployment's args, every other env name and value,
@@ -285,17 +285,24 @@ fn is_digest_reference(reference: &str) -> bool {
             .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase())
 }
 
-/// The twenty-two shipped UI files: everything under `ui/` except `*.md` and
+/// The twenty-six shipped UI files: everything under `ui/` except `*.md` and
 /// `tests/` — `scripts/check-ui-offline.sh`'s scope, by construction.
+///
+/// It was twenty-two until D3 W12 added `operation-watch.js` and the three
+/// pages `#/operations`, `#/protection` and `#/catalog` are rendered by. The
+/// NUMBER is asserted rather than taken from the tree for the reason
+/// `check-image-ui.sh` states beside its own copy: a count read from the same
+/// directory the image was built from stays green when files are deleted from
+/// both sides at once.
 fn shipped_ui_files() -> Vec<String> {
     let files: Vec<String> = files_under("ui")
         .into_iter()
         .filter(|p| !p.ends_with(".md") && !p.starts_with("ui/tests/"))
         .collect();
     assert_eq!(
-        22,
+        26,
         files.len(),
-        "the shipped UI is twenty-two files (ui/*.html, ui/*.js, ui/*.css, ui/pages/*); found \
+        "the shipped UI is twenty-six files (ui/*.html, ui/*.js, ui/*.css, ui/pages/*); found \
          {files:?}"
     );
     files
@@ -399,11 +406,11 @@ fn chart_lint_crds_are_byte_identical_copies() {
 /// hash gate meaningless; a narrowly mounted `/ui/runtime` context does not.
 #[test]
 fn chart_lint_the_chart_carries_no_ui_copy_and_mounts_only_runtime_namespace_context() {
-    // The twenty-two are in the tree, where the image gate hashes
+    // The twenty-six are in the tree, where the image gate hashes
     // them from. If this ever drifts, `scripts/check-image-ui.sh` check 1 is
     // comparing against the wrong set.
     let shipped = shipped_ui_files();
-    assert_eq!(22, shipped.len());
+    assert_eq!(26, shipped.len());
 
     let under_chart: Vec<String> = files_under("charts/logweir")
         .into_iter()
@@ -1434,7 +1441,7 @@ const ACCEPT_PATHS: &str = "--accept-paths=^/(ui/|apis/logweir\\.dev/v1alpha1/)"
 /// not "stay green unedited": they would panic looking for it. They moved, and
 /// each of them got stronger on the way:
 ///
-///   * the twenty-two files' BYTES -> `scripts/check-image-ui.sh` check 1, which
+///   * the twenty-six files' BYTES -> `scripts/check-image-ui.sh` check 1, which
 ///     hashes what the image serves against `ui/` rather than what a template
 ///     inlined;
 ///   * "and nothing else" -> the same check, which fails naming every extra
@@ -1460,7 +1467,7 @@ fn chart_lint_ui_renders_the_proxy_with_its_paths_and_a_narrow_role() {
     assert_eq!(
         Some(format!("{}:{LOGWEIR_TAG}", ui_repository())).as_deref(),
         c["image"].as_str(),
-        "Task 39: the proxy runs LOGWEIR'S OWN `logweir-ui` image — kubectl with the twenty-two \
+        "Task 39: the proxy runs LOGWEIR'S OWN `logweir-ui` image — kubectl with the twenty-six \
          shipped files copied in at /ui — under the namespace the runner pin names, at \
          `:{LOGWEIR_TAG}` like the other two Logweir images. A bare kubectl digest here is the \
          page back in a ConfigMap."
