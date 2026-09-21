@@ -709,6 +709,95 @@ so a namespace `RoleBinding` of `logweir-viewer` does not convey it; a viewer
 who should also read trust needs a `ClusterRoleBinding`, which is a separate
 and visible decision.
 
+### 5e. Running the console in the cluster (`api.console.enabled`)
+
+§5d renders the identity and starts nothing. This is the pod that runs as it,
+and the order is deliberate: install the principal, satisfy yourself with
+`kubectl auth can-i` that it can do what the console does and no more, then run
+the console.
+
+**The image.** `logweir-console`, built by `Dockerfile.console`: the
+`logweir-api` binary plus the same twenty-two static page files the
+`logweir-ui` image carries, copied from the same one `ui/` directory in the
+source tree. `scripts/check-image-api.sh` hashes what the image will serve
+against that directory, so the console and the legacy proxy cannot drift apart,
+and it refuses an image carrying any key-shaped path. It is published beside the
+other three; §"Bring your own registry" applies to it unchanged
+(`docker tag logweir-console:check …`, and `--set api.console.image=…`).
+
+**Two switches.** `api.console.enabled` requires `api.enabled` and the render
+refuses the pair rather than producing nothing.
+
+**The key Secret first — the chart does not generate one.** These are
+persistent keys: one that changes on every render would be unrecoverable on
+upgrade and would make the checked-in rendered files unstable.
+
+```console
+$ head -c 32 /dev/urandom > cursor.key                 # localAdmin: raw bytes
+$ kubectl --context docker-desktop -n logweir-system \
+    create secret generic logweir-console-keys --from-file=cursor.key
+$ rm cursor.key
+```
+
+In `shared` mode that Secret carries two files instead, each two lines, and
+`api.console.keyVersion` must equal the `version:` they declare:
+
+```console
+$ printf 'version: 1\nkey: "%s"\n' "$(openssl rand -base64 32)" > session.key
+$ printf 'version: 1\nkey: "%s"\n' "$(openssl rand -base64 32)" > cursor.key
+$ kubectl --context docker-desktop -n logweir-system \
+    create secret generic logweir-console-keys \
+    --from-file=session.key --from-file=cursor.key
+```
+
+**The default mode is loopback, and that is the point.** `api.console.mode`
+ships as `localAdmin`: one configured administrator, no identity provider, and a
+listener `logweir-api` refuses to bind anywhere but `127.0.0.1`. Nothing answers
+at the Pod IP, so the ClusterIP Service is dead by construction and reaching the
+console needs the Kubernetes permission to port-forward into its pod. Unlike the
+in-cluster proxy of §"Serving the UI", turning this on cannot make a console
+that anyone who reaches a Service can drive.
+
+```console
+$ helm upgrade logweir charts/logweir -n logweir-system --reuse-values \
+    --set api.enabled=true --set api.console.enabled=true \
+    --set api.console.keySecret=logweir-console-keys
+$ kubectl --context docker-desktop -n logweir-system \
+    port-forward svc/logweir-api 8484:8484
+$ open http://127.0.0.1:8484/ui/
+```
+
+The local port must be `8484`: the rendered `publicOrigin` carries the listen
+port and the service refuses a mismatch, because an origin that does not match
+the one the browser sends is a CSRF check that cannot pass.
+
+**This mode has no probes**, because a kubelet probe addresses the Pod IP and
+this listener will not answer there. A configuration the binary refuses is
+therefore a `CrashLoopBackOff` with exit code 2, not a NotReady endpoint; the
+container's last log line names the field. `shared` mode binds the Pod IP and
+gets `/healthz` and `/readyz`.
+
+**Shared mode is the SSO console and needs four more things:** an OIDC issuer
+and client, the client secret in its own Secret under the key `clientSecret`, an
+exact `https://` public base URL, and a TLS certificate for the Ingress.
+`charts/logweir/examples/console-shared.values.yaml` is the complete shape and
+`charts/logweir/README.md` lists every configuration the chart refuses at render
+time — a non-HTTPS base URL, an Ingress with no TLS Secret, an Ingress in front
+of `localAdmin` mode, a role binding for an unbound namespace, a wildcard in a
+binding. Each is refused with the field named, before anything installs.
+
+**No credential reaches the ConfigMap.** The rendered configuration carries
+paths into read-only Secret mounts under `/var/run/logweir/` and never a value;
+a lint row walks every rendered console ConfigMap to keep it that way.
+
+**Uninstalling the console leaves everything else.** Setting
+`api.console.enabled=false` removes the ConfigMap, the Deployment, the Service
+and, if enabled, the Ingress and NetworkPolicy; the principal, its grants and
+every Logweir custom resource are untouched. The console creates and reads
+objects and executes nothing, so removing it stops no backup, cancels no restore
+and loses no evidence. Existing installations that never set the flag see no
+change at all.
+
 ### 5a. The installation policy `ConfigMap` (optional, and what it unlocks)
 
 The controller reads one administrator-owned document, `weirkeeper-policy`, in

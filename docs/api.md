@@ -19,26 +19,42 @@ the more permissive one.
 
 * `mode: localAdmin` — a loopback-only listener, the configured administrator
   as the actor, and namespaces from configuration alone. Not SSO, not a shared
-  console.
+  console. In the cluster it is the chart's default, and the loopback rule is
+  what makes it one: nothing answers at the pod's own address, so the ClusterIP
+  Service cannot carry a request and `kubectl port-forward` is the only way in.
 * `mode: shared` — the SSO console: OpenID Connect identity, a short-lived
   encrypted session cookie, a synchronizer CSRF token on every unsafe method,
   exact role and namespace bindings, and one audit record per request. It
   refuses a non-HTTPS `publicBaseUrl` before it binds anything.
 
-`logweir-api` is **not packaged or deployed**. No image builds it, the Helm
-chart has no `console` template or value, and `publish = false` keeps it out of
-the release archives. It runs from a local build against a kubeconfig context.
-Nothing about an existing installation changes when this crate is present, so
-there is nothing to upgrade, migrate or roll back: removing the crate removes
-the feature. The chart, image, ingress and NetworkPolicy work is a later stage.
+`logweir-api` **is packaged and deployable** as of D0 stage 7, and the two
+sentences that used to stand here — "no image builds it", "the API runs with
+whatever Kubernetes identity its kubeconfig carries, which may be cluster-admin"
+— are no longer true. `Dockerfile.console` builds the `logweir-console` image
+(this binary plus the static page files); `charts/logweir` runs it under
+`api.console.enabled` as the `<release>-api` ServiceAccount that `api.enabled`
+renders, with per-namespace RoleBindings, an optional TLS Ingress and an
+optional NetworkPolicy. See *Deployment* below and `charts/logweir/README.md`.
+`publish = false` still keeps the binary out of the release **archives**: it
+ships as an image, not as a tarball.
 
-**Shared mode is therefore not a supported deployment yet.** It is implemented
-and tested, and it runs from a local build behind a TLS terminator, but the
-console image, the chart's `console.*` templates, the ingress, the
-NetworkPolicy, the API's own ServiceAccount and its per-namespace RoleBindings
-do not exist. Until they do, the API runs with whatever Kubernetes identity its
-kubeconfig carries, which may be cluster-admin: the closed adapter is a
-**source-level** bound on what it can reach, not an RBAC one.
+**Nothing about an existing installation changes when it is not enabled.**
+`api.console.enabled` defaults to false, `api.enabled` keeps meaning exactly
+what it meant (an account and its grants, no pod), and the chart's default and
+demo renders are unchanged. Turning the console off again removes a ConfigMap,
+a Deployment and a Service and leaves every custom resource, every grant and
+every piece of evidence untouched — this service creates and reads objects and
+executes nothing.
+
+**Shared mode is a supported deployment shape and is still not a completed
+release claim.** The image, the chart templates, the ingress, the NetworkPolicy,
+the ServiceAccount and its RoleBindings exist and refuse the configurations that
+would publish a console over plain HTTP. What is not finished is the rest of
+D0's release criteria — the browser journey against a real provider, the
+production-CNI evidence for the NetworkPolicy (Docker Desktop's acceptance of a
+policy proves nothing about deny behaviour), and the trust-read narrowing
+recorded in `charts/logweir/templates/ui/api-rbac.yaml`. Read those before
+calling an installation a shared console.
 
 A domain whose routes do not exist yet has **no route at all** — no stub and no
 `501`. `GET /api/v1/session` reports each one as `false` under `capabilities`,
@@ -1215,6 +1231,77 @@ control. The real ceiling on concurrent checks is the controller's
 There is no event stream yet: `capabilities.operationEvents` is `false` and no
 path serves one, authenticated or not. The per-actor, per-namespace connection
 slots it will need are implemented and tested.
+
+## Deployment
+
+The service ships as one image and one optional Helm component.
+
+**The image is `logweir-console`, built by `Dockerfile.console`.** It carries
+`/usr/local/bin/logweir-api` and, at `/ui`, the same twenty-two static files the
+`logweir-ui` image carries — the same two globs, from the same one `ui/`
+directory in the source tree, so there is one copy of the page in the repository
+and two images that copy from it. `scripts/check-image-api.sh` hashes every file
+the image will serve against that directory (as
+`scripts/check-image-ui.sh` does for the other), requires all three licence
+files, requires the CA bundle, and refuses an image carrying any key-shaped path
+anywhere outside the system trust store: this is the one image in the tree that
+*mounts* key material at runtime, and none of it is ever built into a layer.
+The image declares `USER 65532:65532`, no `CMD`, and
+`ENTRYPOINT ["/usr/local/bin/logweir-api"]` — every argument is the chart's, so
+the MODE cannot come from a layer no chart test can see.
+
+**The chart runs it under two switches.** `api.enabled` renders the principal —
+a ServiceAccount, two ClusterRoles and one RoleBinding per configured namespace
+— and starts nothing, which is a state you can interrogate with
+`kubectl auth can-i` before anything runs as it. `api.console.enabled` runs the
+workload as that principal and requires the first; the render refuses the pair
+by name rather than producing nothing.
+
+| object | rendered when |
+|---|---|
+| immutable, content-addressed `ConfigMap` holding `config.yaml` | `api.console.enabled` |
+| `Deployment` and ClusterIP `Service` `<release>-api` | `api.console.enabled` |
+| `PodDisruptionBudget` | `api.console.replicas` > 1 |
+| `Ingress` | `api.console.ingress.enabled` — shared mode only, TLS required |
+| `NetworkPolicy` | `api.console.networkPolicy.enabled` |
+
+**The configuration file is that ConfigMap and it holds no credential.** Every
+one of the three — the OIDC client secret, the session key, the cursor MAC key —
+appears as a *path* into a read-only Secret volume under `/var/run/logweir/`,
+never as a value. The Secrets are the operator's: the chart generates no key
+material, because a Helm-generated key changes on every render and is
+unrecoverable on upgrade. `kubernetes.source` is always `inCluster` and there is
+no chart value for the other source — a pod that read a kubeconfig would act
+with whatever identity that file carried, and the RBAC argument above would be
+about an account nothing runs as. The token is the projected, time-bound kind
+the kubelet mounts.
+
+**The pod is non-root (65532), read-only-root, drops every capability and
+mounts one writable path (`/tmp`) that holds no state** — the page is read into
+memory once at startup and every audit record goes to stdout.
+
+**Probes exist only in `shared` mode**, and their absence in `localAdmin` mode
+is a consequence of the loopback rule rather than an omission: a kubelet HTTP
+probe is made against the Pod IP from the node's network namespace, and a
+loopback listener refuses it, so a readiness probe would hold a working console
+NotReady forever and a liveness probe would restart it. In that mode a refused
+configuration surfaces as `CrashLoopBackOff` with exit code 2 and a log line
+naming the field, which is what to look for.
+
+**What the chart refuses at render time**, each with the field named, because a
+console that comes up on plain HTTP or with a key someone rewrote underneath it
+looks like it is working: a `publicBaseUrl` that is not `https://` or that
+carries a path, trailing slash or userinfo; an Ingress with no TLS Secret; an
+Ingress in front of `localAdmin` mode at all; a role binding naming a namespace
+the ServiceAccount is not bound in; `*` or `?` in a binding; a NetworkPolicy
+with no ingress-controller selector; a missing key Secret. `values.schema.json`
+types the HTTPS rule as well, so `--set` is refused before a template runs, and
+`config.rs` refuses the same things again at startup with exit 2.
+
+`charts/logweir/README.md` §`api.console.enabled` and
+[install.md](install.md) §5e carry the commands, including the key Secret you
+must create first and the `kubectl port-forward` the default mode is reached
+with.
 
 ## Local administrator mode is not a shared console
 

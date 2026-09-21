@@ -63,6 +63,9 @@ install document; this README is the chart's own.
 | `Deployment`, `Service`, `ServiceAccount`, `ClusterRole`s, `RoleBinding` `<release>-ui` | `ui.enabled` | `kubectl proxy` serving the twenty-two UI files and the API on one origin, with its own authority (below). The files come from the image `ui.image`, not from a ConfigMap |
 | `ServiceAccount` `logweir-retention`, in the release namespace **and every `identity.authorizedRunnerNamespaces` entry** | `retention.enabled` | the identity every `mode: Enforce` Job names, in every namespace that runs one. **No Role and no RoleBinding**: the retention worker makes zero Kubernetes API calls |
 | `ServiceAccount`, two `ClusterRole`s, `ClusterRoleBinding`, `RoleBinding` `<release>-api` | `api.enabled` | the console/API principal's grants. **RBAC only** — no Deployment, no image, no Service |
+| `ConfigMap` `<release>-api-config-<digest>`, `Deployment` + `Service` `<release>-api` | `api.console.enabled` | the console itself: `logweir-api` out of the `logweir-console` image, serving `/ui/` and `/api/v1` on one origin as the principal above. Its default mode binds **loopback** — see *`api.console.enabled`* below |
+| `Ingress` `<release>-api` | `api.console.ingress.enabled` | the shared console's public entry point. **Shared mode only, TLS required**; refused in front of the default mode |
+| `NetworkPolicy` `<release>-api` | `api.console.networkPolicy.enabled` | ingress from the configured ingress-controller pods only; egress to DNS, the Kubernetes API and the configured IdP CIDRs — **never** a broker or object-store port |
 
 Nothing optional is on by default. The release gate renders the snapshots with
 the pinned bootstrap digest exactly as shipped; the rest of the default render
@@ -201,6 +204,12 @@ neither is in the list above:
 * **`retention.enabled`** — *let a retention enforcement Job be admitted.*
 * **`api.enabled`** — *give the console/API service a reviewed identity.*
 
+And one more starts the console itself, and needs `api.enabled`:
+
+* **`api.console.enabled`** — *run the console in this cluster.* Read
+  *`api.console.enabled`* before turning it on, and read it before assuming the
+  word "console" means the same thing as "reachable".
+
 ## `retention.enabled` — the identity a deletion needs, and the three gates it is not
 
 It renders exactly one kind of object: the `ServiceAccount` `logweir-retention`,
@@ -296,6 +305,172 @@ off, and the refusal does not apply.)
 
 `./scripts/render-install.sh --check` answers the `kubectl auth can-i` question
 for every pair above, in both directions, against the checked-in render.
+
+## `api.console.enabled` — the console itself, and the two names it goes by
+
+**The name, first, because two are in use and both are correct.** The decision
+document that specified this service (`docs/to-do/decisions/D0-product-api-and-identity.md`)
+calls it the *console* and gives its deployment worker `Dockerfile.console` and
+`console.*` values. The crate, the binary, the image's entrypoint and the
+already-shipped RBAC values block call it the *API*: `crates/logweir-api`,
+`logweir-api`, `api.enabled`. Rather than rename a landed values key, a landed
+RBAC template and `admissionPolicy.consoleServiceAccountName` for a word, the
+chart nests one inside the other:
+
+| what | called |
+|---|---|
+| the values block, the ServiceAccount, the Service, the Deployment | `api.*`, `<release>-api` |
+| the image and its Dockerfile | `logweir-console`, `Dockerfile.console` |
+| the workload's own values | `api.console.*` — D0's word, under the chart's |
+
+So `api.console.image` names `logweir-console` and the pod runs as
+`<release>-api`, and that is the whole of the discrepancy.
+
+### Two switches, because D0's rollout has two steps
+
+`api.enabled` renders the principal and **starts nothing**: an account you can
+interrogate with `kubectl auth can-i` before anything runs as it. That state is
+deliberate and is D0's own first step ("deploy console disabled; configure …
+OIDC, exact role/namespace bindings, TLS ingress … enable read-only console").
+`api.console.enabled` runs the workload as that principal, and **requires**
+`api.enabled` — the render refuses the pair, naming both flags, rather than
+quietly producing nothing.
+
+### The default mode cannot be reached from inside the cluster
+
+`api.console.mode` has no default in the binary and none here that changes the
+answer: the chart ships `localAdmin`, and in that mode `logweir-api` **refuses
+any non-loopback listener**. The pod binds `127.0.0.1`, so:
+
+* nothing answers at its Pod IP, and the ClusterIP Service is dead by
+  construction;
+* there is no `Ingress` — the render refuses one in front of this mode by name;
+* reaching it needs the Kubernetes permission to port-forward into the pod.
+
+That is the difference between this component and the legacy proxy below.
+`ui.enabled` renders a `kubectl proxy` where **anyone who can reach that Service
+acts with that ServiceAccount's authority**. Turning `api.console.enabled` on
+cannot produce that, in either mode: the default answers nobody who reaches the
+Service, and `shared` mode authenticates and authorizes every request before it
+reaches a route.
+
+```console
+$ head -c 32 /dev/urandom > cursor.key
+$ kubectl --context docker-desktop -n logweir-system \
+    create secret generic logweir-console-keys --from-file=cursor.key
+$ rm cursor.key
+$ helm install logweir charts/logweir -n logweir-system \
+    -f charts/logweir/examples/console.values.yaml
+$ kubectl --context docker-desktop -n logweir-system \
+    port-forward svc/logweir-api 8484:8484
+$ open http://127.0.0.1:8484/ui/
+```
+
+The local port must be `8484` too: the configuration's `publicOrigin` carries
+the listen port and `logweir-api` refuses a mismatch, because an origin that
+does not match the one the browser sends is a CSRF check that cannot pass.
+
+**There are no probes in this mode, and that is a consequence rather than an
+omission.** A kubelet HTTP probe is made from the node's network namespace
+against the *Pod IP*; a loopback-only listener refuses it, so a readiness probe
+would hold a working console permanently NotReady and a liveness probe would
+restart it forever. (`httpGet.host: 127.0.0.1` is not the escape it looks like —
+that is the node's loopback, not the pod's.) What you lose is the signal: a
+configuration the binary refuses shows up as `CrashLoopBackOff` with an exit
+code of 2 and a one-line message naming the field, rather than as a NotReady
+endpoint. `kubectl logs` is where you read it. In `shared` mode the listener is
+on the Pod IP and both probes are rendered: `/healthz` for liveness (process
+liveness only, consults nothing) and `/readyz` for readiness.
+
+### The key Secret is yours to create, and the chart will not invent one
+
+`api.console.keySecret` is required and names a Secret in the release namespace:
+
+| key | mode | what it is |
+|---|---|---|
+| `cursor.key` | both | the pagination-cursor MAC key, at least 32 bytes. In `localAdmin` mode it is raw bytes; in `shared` mode it is two lines, `version:` and `key:` |
+| `session.key` | `shared` | the session-cookie key, same two-line form |
+
+`api.console.keyVersion` must equal the `version:` those files declare. Bumping
+both is a deliberate rotation that ends every live session; a file that changes
+while the number does not is a key someone rewrote underneath the service, and
+startup refuses it (exit 2, naming the field).
+
+**This chart generates neither.** A Helm-generated key changes on every render —
+which would make the checked-in rendered files unstable — and is unrecoverable
+on upgrade, and D0 requires these to be persistent Secrets created or adopted
+explicitly. The same applies to `api.console.oidc.clientSecret`, which is the
+**name** of a Secret holding the client secret under the key `clientSecret`, and
+to `api.console.ingress.tlsSecretName`.
+
+**No credential is ever in the ConfigMap.** The rendered configuration carries
+*paths* — `oidc.clientSecretFile`, `sessionKey.file`, `cursorKey.file` — into
+read-only Secret mounts under `/var/run/logweir/`, and
+`chart_lint_the_console_config_map_carries_no_credential` walks every rendered
+console ConfigMap refusing a value under any credential-shaped key. A ConfigMap
+is readable by anything with `get configmaps` in the namespace, it is in
+`helm get manifest`, and it is checked into `charts/logweir/rendered/`.
+
+### `shared` mode, and what it refuses before it installs
+
+`examples/console-shared.values.yaml` is the whole shape. What the chart will
+not let you install, each refused at render time with the field named:
+
+| refused | why |
+|---|---|
+| `publicBaseUrl` that is not `https://` | TLS at the shared entry point is required, not recommended. `values.schema.json` types this too, so `--set` is refused before a template runs |
+| `publicBaseUrl` with a path, trailing slash or userinfo | the OIDC redirect URI is this value plus `/auth/callback` |
+| `ingress.enabled` with no `tlsSecretName` | a `__Host-`/`Secure` session cookie is never sent over plain HTTP, so it would be a console that cannot log anyone in — after publishing it |
+| `ingress.enabled` in `localAdmin` mode | an Ingress in front of a mode that authenticates nobody is an unauthenticated shared console |
+| a `roles.bindings` namespace outside the console's bound set | a product role for a namespace the ServiceAccount cannot read is a role that grants a 403 |
+| `*` or `?` in a binding | bindings are EXACT strings; a wildcard is refused by name rather than silently matching nothing |
+| `networkPolicy.enabled` without both ingress-controller selectors | an ingress rule with no `from` admits nothing; one with an empty pod selector admits the whole namespace |
+| `api.console.enabled` without `api.enabled` | a pod with no grants, which 403s on every route |
+
+`replicas` above 1 also renders a `PodDisruptionBudget` with
+`maxUnavailable: 1`. At one replica it renders none, deliberately: a budget over
+a single pod makes `kubectl drain` block forever on the node carrying it.
+
+### What the NetworkPolicy does and does not prove
+
+It allows ingress **only** from the configured ingress-controller pods on the
+console port, and egress to DNS, the Kubernetes API (the `kubernetes.default`
+ClusterIP, its visible endpoints and `identity.kubernetesApiCIDRs`) and the
+`networkPolicy.oidcCIDRs` on 443. It lists **no** broker port and **no**
+object-store port, which is the structural half of D0's "does not dial Kafka or
+object storage" — the other half is that `logweir-api` links no Kafka client and
+no object-store client at all.
+
+NetworkPolicy has no FQDN concept, so an identity provider behind a rotating
+address cannot be expressed: `oidcCIDRs` must be its actual endpoints. Left
+empty under an enforcing CNI, this policy blocks OIDC discovery and the console
+starts NotReady — the honest failure, and not a reason to widen the rule.
+
+And Docker Desktop commonly has **no enforcing CNI**, so a local install proves
+these objects are well-formed and nothing whatever about deny behaviour. D0 says
+so by name. Production support needs the chosen CNI's own evidence.
+
+### Upgrade, rollback, and what an existing installation sees
+
+An installation that is not setting `api.console.enabled` sees **no change at
+all**: the flag defaults to false, `api.enabled` keeps meaning exactly what it
+meant before (an account and its grants, no pod), and the default and demo
+renders are unchanged. Nothing converts.
+
+Turning it on is additive — a ConfigMap, a Deployment and a Service — and
+turning it off removes those three and leaves the principal, its grants and
+every Logweir custom resource untouched. The console creates and reads objects;
+it executes nothing, so removing it stops no backup, cancels no restore and
+loses no evidence. Rolling back to a chart version without these templates is
+the same operation performed by Helm.
+
+The configuration ConfigMap is **immutable and content-addressed**: its name
+carries the digest of the document, so an upgrade that changes one role binding
+creates a new object and rolls the pod onto it, and nobody with `patch
+configmaps` can change the role table under a running console. Going the other
+way — from `shared` back to `localAdmin` — ends every live session, because the
+listener moves to loopback and the session cookie's origin no longer exists;
+plan it as a withdrawal of access rather than as a setting change.
 
 ## `controller.failFastSeconds` and `controller.jobTtlSeconds`
 
