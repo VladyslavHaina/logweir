@@ -1800,3 +1800,17 @@ Documentation is licensed [CC-BY-4.0](../../LICENSE-docs).
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.
+
+## Amendment at integration (2026-09-21, RET-EVIDENCE-GRANT-IS-ARCHIVEREAD)
+
+§6.5 names the property (the record credential cannot delete) and not the grant. The
+grant is now stated: the enforcement Job's record and tombstone writes
+(`LOGWEIR_EVIDENCE_AWS_*`) use the destination's `evidenceWrite` grant when it is set and
+fall back to `archiveWrite` when it is not — the same fallback the destination resolver
+applies everywhere (`destination.rs`) and `docs/kubernetes.md` §7f documents — so an
+unseparated installation keeps enforcing after the upgrade; the delete credential
+(`enforcement.credentialSecretRef` → `AWS_*`) is unchanged; the `archiveRead` grant reaches
+the enforcement pod on no variable. A destination where neither `evidenceWrite` nor
+`archiveWrite` is usable is refused by name (`EvidenceGrantUnusable`) with the policy's
+guarantees downgraded to recommendation-only, exactly as every other destination refusal
+is published.

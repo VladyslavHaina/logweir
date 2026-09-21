@@ -232,7 +232,7 @@ Wave 2 resumes every branch in place with the prompts under
 | PLAT-17.1 | Done | plat17-api-finish, plat17-api-review, d1w6, d2w12, d3w11, d3w13, lab-refresh-3, plat17-1-stage7 (+ review) | Completion record under PLAT-17.1; D0 stage 7 landed 2026-09-21 (console image, chart deployment under the API's own RBAC, live can-i matrix); residue named in the record. |
 | PLAT-19.1 | Done | d3w1, d3w10, d3w14, fix-trust-upgrade, fix-trust-expiry, harness-rows-4/5/6/7, lab-refresh-4/5/6, d3w11, d3w12 (+ reviews) | Completion record under PLAT-19.1; live on docker-desktop 2026-09-18..21 incl. the keys view's unknown rendering. |
 | PLAT-08.1 | Done | d2w1, d2w2, d2w7, d2w10, d2w11, d2w13, d2w14, d2-status-destination, lab-refresh-3/4, plat08-u6 (+ reviews) | Completion record under PLAT-08.1; live on docker-desktop 2026-09-18..21 incl. the measured per-role permission table. |
-| PLAT-06.2 | In progress (every D1 wave landed; PLAT-04.2, 05.1, 05.2 and 09.2 Done; 06.2 waits on the CLI demonstration beside the UI, the legacy-mode grant and the failed-preflight journey) | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. W1 (the pure cadence engine) landed in main as `6eedc0a..4b54a5c` after review; see the PLAT-04.2 partial record. W3a (the `Backup` run contract: `spec.trigger`, `spec.scheduleRef` with generation and `runPolicySha256`, the selection type with `allUserTopics` requiring `incompleteDiscovery`, `status.selection`, `src/identity.rs`, `src/policy.rs`, the §3.4 vocabulary) landed in `696c81a`/`b334a98` inside `crds-shapes`; a `Backup` naming both `topics` and `allUserTopics` is refused by CEL and, terminally, by admission. W3b (the reconciler consumes the contract; grammar `v2`) landed at `397e37d`; see the PLAT-04.2 partial record. W2 (editable policy, the §4.5 scheduler; `destinationRef` editable) landed at `98257f8`; see the PLAT-05.1/04.2 partial record. W5 (dynamic selection per run through the check runner) landed at `7072b9d`; see the PLAT-09.2 partial record. W6 (cadence previews, `PUT schedules`, `POST backups`) landed at `72751ab`; see the PLAT-06.2 partial record. W4 (retained history; runs detached from the schedule's ownerReference) landed at `6845ffb`; see the PLAT-05.2 partial record. W7, W8 remain. |
+| PLAT-06.2 | Done | d1w6, d1w7, d1w8, plat06-2-finish (+ reviews) | Completion record under PLAT-06.2; live on docker-desktop 2026-09-21 incl. the CLI path beside the UI and the failed-preflight journey. |
 | PLAT-08.2 | In progress (every D2 wave landed; PLAT-03.1, 03.2, 07.2, 08.1 and 09.1 Done; 08.2's "document required object permissions" clause is met by the measured table; it waits on its console rows — destination edit during a draft, a recovery point inheriting its saved settings, addressing and transport as independent controls) | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. W1 (pure check contract and destination model) and W2 (explicit store options) landed as `c13b0cc..56bd074` after review (ACCEPT after two high and three medium fixes: JSON-form redaction bypass, ambient credentials inheriting the environment). W3 (`logweir_kafka::inventory`: bounded targeted describe, broker count, validate-only `CreateTopics`, error classification where an observed authorization failure makes visibility `limited` and anything unknown is failure, with a real admin-client fault capture because rdkafka 0.36 never invokes `ClientContext::error` for a metadata-only workflow — D2 §4.2 `[VERIFY U5]` corrected) and W5 (`weirkeeper::check`: check Jobs mirroring the execution pod, pod selection by controller owner UID only, framed-stdout relay through the W1 decoder, the full waiting-code table, TTL, plan/chunk/limit modules, the installation policy loader failing closed) landed as `23cec50..b8e62d1` after review (ACCEPT after one high and three medium fixes; 19 mutants killed; the rebase over PLAT-07.1 then routed the inventory client through the reader's `client_config`, removing a drifted copy that could upgrade plaintext to TLS when a CA was present — re-checked ACCEPT; weirkeeper 435, kafka 57). RBAC still owed by W11: `events: list` plus its `manifest_lint` row, the three new kinds' verbs, and a decision on `gc.rs`'s deletes. The reviewers' SEC-PODLOG finding against `controllers::backup::select_job_pod` is closed by `secpodlog` (see the defects table). W6a and W6b (the three Amendment F kinds and the destination sentinel on existing kinds) landed in `46880a3`/`88232f5`/`b334a98` inside `crds-shapes`; W7 (destination resolver, controller, evidence store cache) landed as `27fb924..0b25e95` (see the PLAT-08.1 partial record); W4 (runner `logweir check run`) landed at `537657d` (see the PLAT-03 partial record); W8 (`TopicDiscovery` controller) and W12 (API routes) are in review or in progress. W9, W10, W11, W13, W14 remain. |
 | PLAT-14.x, 15.x, 16.2 | In progress (W0–W13 and the console wave W12 landed; PLAT-16.1 and 19.1 Done; 16.2 waits on the batch lab refresh for the degraded condition and the retention-count/status-sweep rows, 15.1 on CATALOG-RECEIPTKEY-REDACTED, 14.2 on PROTECTION-SECRETKEYS-UNPROTECTED, 14.3 on the standing-authorization runner path (14.3b), 14.1 on the refresh's operation-state rows) | [D3](decisions/D3-status-catalog-retention-trust.md) | Operation states, protection freshness, rehearsals, durable catalog, retention enforcement boundary, trust lifecycle; fifteen worker tasks. W4 (`d3-notify`: the shared notification module and `logweir notify deliver`) landed after review (ACCEPT after two high fixes); W3 (`d3-catalog-writer`: signed catalog point records, `list_page`, `logweir catalog sync|list`) landed after review (see the PLAT-15.1 partial record); W0 (the five Amendment G kinds, additive run status, `Restore.spec` additions, the `Approval` enum) landed in `496451a`/`88232f5`/`b334a98` inside `crds-shapes`; W1 (trust lifecycle core, `TrustPolicy` controller, `trust export|migrate-roster`, G8) landed as `64fcd38..5fc1a72` (see the PLAT-19.1 partial record); W8 (`RecoveryCatalog` controller) in progress. W2, W5, W6, W7, W9, W10, W11, W12, W13, W14 remain. |
 
@@ -1333,6 +1333,48 @@ Review `claude/d1w7.review.md` ACCEPT after a fix round. Unmet: legacy mode refu
 up now" by name (a derived name and a missing chart grant), the same manual CR path
 through the CLI is not demonstrated beside the UI, and the failed-preflight case is not
 journeyed.
+
+**Completion record — Done (2026-09-21), PLAT-06.2.** Source landed on main as D1 W6 (the
+API half, `72751ab`: `POST …/backups` creating the canonical manual `Backup` of D1 §8.1 —
+`spec.trigger.kind: Manual`, the deterministic `logweir-manual-<26 base32>` name from the
+request scope, `scheduleRef` and the policy snapshot copied from one read — with the
+idempotency contract: same key + same body ⇒ 200 and the existing uid, same key + different
+body ⇒ 409 `idempotency_conflict`, a suspended or busy schedule never blocking a manual run),
+D1 W7 (the console half, `a2ce381`..`700916e`: "Back up now" and "Run first backup now"
+through the API with one idempotency intent per draft, the resulting run showing its
+copied schedule revision), and `claude/plat06-2-finish` (`..cc05b34`, review
+`claude/plat06-2-finish.review.md` ACCEPT-WITH-FIXES then the six fixes applied): the legacy
+`kubectl proxy` page gains exactly `create` on `backups` in the chart's UI ClusterRole (the
+`chart_lint` row pins the verb set; a planted extra verb fails) and derives the same
+deterministic name the API derives — one rule, D1 §8.2, pinned by one fixture
+(`ui/tests/fixtures/manual-backup-names.json`) that both a node row and a Rust row in
+`crates/logweir-api` drive; the manual CR path is demonstrated through the CLI beside the UI
+(`L-06-2-cli`: `kubectl --context docker-desktop apply -f config/samples/backup-manual.yaml`
+and the API-created run for the same scope compared field by field — name equal,
+`specDifferences: []`, labels equal, both reconciled; the negative control changes one
+snapshot field and is refused `RunPolicyDigestMismatch`); and the failed-preflight case is
+journeyed. Every listed test PASSES live on docker-desktop against the lab at `af64073`
+(`scripts/plat06-2-ui-e2e.mjs`, 9/9, localAdmin console mode; evidence
+`claude/artifacts/plat06-2-ui/lw-p062-ui20260921t205953z/` and
+`claude/artifacts/d1-live/20260921t203643z/`; the reviewer re-ran `L-06-2-cli` in its own
+namespace with the same result): **double click** — two POSTs, one run (and the legacy
+node row, with the adopt-anything mutant killed); **lost HTTP response** — a real
+`route.abort` after a real `route.fetch`, the resend answered 201 with the same uid, one run;
+**refresh** — the run listed after a real reload, the next click a second run; **paused
+schedule** — a run created with `suspend` untouched and the generation unchanged (D1
+§8.3); **failed preflight** — a schedule whose source is unreachable: D1 §8.4's own rule
+on screen (the readiness label `unknown`, the button enabled, no client-side guess), the
+run created and `Failed`/`operational` with the preflight's reason on the run view, the
+healthy control `Succeeded`; **successful scheduled-policy copy** — the copied policy
+digest equals the published digest at generation 1, through the console and the CLI
+alike (`specDifferencesConsoleVsApi: []`). Acceptance: repeated clicks create one requested
+run and a deliberate later backup creates another — the double-click, lost-response and
+refresh journeys read together. Named residue, not this task's acceptance: D1 §8.4's
+`notReady` branch (a preflight that has already answered not-ready before the click) was
+not journeyed — the unreachable-source case exercises the `unknown` branch; legacy mode's
+"Back up now" is proved by the chart grant, the shared name fixture and node rows, not by
+a live journey through the `kubectl proxy` page. Migration: the chart grant is additive;
+`config/samples/backup-manual.yaml` is the CLI path; nothing mutates an existing run.
 
 ## PLAT-07 — Reuse saved cluster connections everywhere
 
