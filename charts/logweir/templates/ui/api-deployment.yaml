@@ -76,9 +76,16 @@ it: the twenty-two page files are read into memory once at startup
 (`assets.rs`), the configuration and the keys are read-only mounts, and every
 audit record goes to stdout.
 
-The key mount is `defaultMode: 0400` and read-only. It is a Secret volume, so
-the kubelet writes it to a tmpfs, and it is mounted at a path the ConfigMap
-names — one place decides, `api-config.yaml`'s `logweir.api.keyDir`.
+The key mount is read-only, `defaultMode: 0440`, and the pod sets
+`fsGroup: 65532`. Those two go together and a live run is what established it:
+the kubelet writes a Secret volume owned by root, so `0400` alone means
+"readable by root alone" and a container running as 65532 gets
+`Permission denied (os error 13)` on its own key — which this file had, and
+which no render test could see, because a file mode is only wrong relative to a
+UID. `fsGroup` makes the volume group-owned by 65532; `0440` is then the
+narrowest mode the process can actually read through. It is a Secret volume, so
+the kubelet keeps it on tmpfs, and it is mounted at a path the ConfigMap names —
+one place decides, `api-config.yaml`'s `logweir.api.keyDir`.
 */}}
 {{- if .Values.api.console.enabled }}
 {{- include "logweir.api.consoleChecks" . }}
@@ -146,6 +153,20 @@ spec:
         runAsNonRoot: true
         runAsUser: 65532
         runAsGroup: 65532
+        {{- /*
+        `fsGroup` IS NOT DECORATION HERE, AND A LIVE RUN PROVED IT. The kubelet
+        writes a Secret volume owned by ROOT; without an fsGroup the key files
+        are root:root, and `defaultMode: 0400` then means "readable by root
+        alone" — so this container, which runs as 65532, got `cannot read the
+        configuration file …/cursor.key: Permission denied (os error 13)` and
+        CrashLoopBackOff'd on its first live install. Every render and unit
+        assertion passed on that manifest, because a file mode is only wrong
+        relative to a UID and none of them read the two together;
+        `chart_lint.rs` now does. With this set the kubelet chgrps the volume to
+        65532, and 0440 below is the narrowest mode the process can read
+        through.
+        */}}
+        fsGroup: 65532
         seccompProfile:
           type: RuntimeDefault
       containers:
@@ -202,18 +223,23 @@ spec:
         THE KEYS. `optional` is deliberately absent: a Secret that is not there
         holds the pod in ContainerCreating with an event naming it, which is a
         better failure than a console that starts and mints cursors with a key
-        it invented. `defaultMode: 0400` because the process reads them and
-        nothing else in the container should.
+        it invented. See the pod's `fsGroup` above for why the mode is 0440
+        and not 0400.
         */}}
         - name: keys
           secret:
             secretName: {{ $c.keySecret }}
-            defaultMode: 0400
+            {{- /*
+            0440 AND NOT 0400: with the pod's `fsGroup: 65532` above, the
+            kubelet makes this volume root:65532, so the group bit is what the
+            process reads through and the world bit stays off.
+            */}}
+            defaultMode: 0440
         {{- if eq $c.mode "shared" }}
         - name: oidc
           secret:
             secretName: {{ $c.oidc.clientSecret }}
-            defaultMode: 0400
+            defaultMode: 0440
             items:
               - key: clientSecret
                 path: clientSecret

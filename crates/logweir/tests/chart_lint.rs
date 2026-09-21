@@ -2205,6 +2205,30 @@ fn chart_lint_the_console_principal_holds_exactly_what_the_sealed_adapter_spends
 // uses it — the half `templates/ui/api-rbac.yaml`'s own header recorded as
 // missing ("There is no Deployment, no Service, no image and no Ingress here").
 
+/// A `defaultMode` as KUBERNETES reads it, which is not how this test's YAML
+/// parser reads it.
+///
+/// `defaultMode: 0440` is the idiom every Kubernetes example uses and is what
+/// an operator expects to see in `helm template` output, so the template writes
+/// it. But the two parsers disagree about that token: the API server's
+/// (go-yaml, YAML 1.1) treats a leading zero as OCTAL and stores 288, while
+/// `serde_yaml` (YAML 1.2 core schema) does not accept a leading zero as an
+/// integer at all and hands back the string `"0440"`. Neither is wrong; they
+/// implement different versions of the specification.
+///
+/// So this helper reads it the way the cluster does — a plain integer stays as
+/// it is, and a leading-zero string is parsed base 8 — and the divergence is
+/// written down here rather than discovered again by whoever next asserts a
+/// file mode.
+fn file_mode(value: &Value) -> Option<u64> {
+    if let Some(n) = value.as_u64() {
+        return Some(n);
+    }
+    let text = value.as_str()?;
+    let digits = text.strip_prefix('0').unwrap_or(text);
+    u64::from_str_radix(digits, 8).ok()
+}
+
 /// The console config document of one rendered file, parsed.
 ///
 /// There is exactly one ConfigMap whose name begins `<release>-api-config-` in
@@ -2305,6 +2329,46 @@ fn chart_lint_the_console_pod_is_non_root_read_only_and_probes_only_where_it_can
             pod["securityContext"]["seccompProfile"]["type"].as_str(),
             "{render}.yaml: pod securityContext.seccompProfile"
         );
+
+        // THE KEY FILES MUST BE READABLE BY THE UID THAT READS THEM, and this
+        // pair is here because the first live install of this component
+        // CrashLoopBackOff'd on exactly it: the kubelet writes a Secret volume
+        // owned by ROOT, so `defaultMode: 0400` means "readable by root alone"
+        // and the container, running as 65532, got `cannot read the
+        // configuration file …/cursor.key: Permission denied (os error 13)`.
+        // A file mode is only wrong relative to a UID, so no render assertion
+        // that looked at the mode alone could have caught it — this one reads
+        // the two together.
+        assert_eq!(
+            Some(65532),
+            pod["securityContext"]["fsGroup"].as_u64(),
+            "{render}.yaml: the pod must set fsGroup: 65532, or the kubelet leaves its Secret \
+             volumes root-owned and the key files are unreadable by the process that needs them"
+        );
+        for volume in pod["volumes"].as_sequence().expect("volumes") {
+            let Some(secret) = volume.get("secret") else {
+                continue;
+            };
+            let name = volume["name"].as_str().unwrap_or("<unnamed>");
+            let mode = file_mode(&secret["defaultMode"]).unwrap_or_else(|| {
+                panic!("{render}.yaml: secret volume `{name}` names no defaultMode")
+            });
+            assert_eq!(
+                0o440, mode,
+                "{render}.yaml: secret volume `{name}` has mode {mode:o}. It must be 0440: the \
+                 group bit is what the process reads through under fsGroup: 65532 (0400 is a \
+                 CrashLoopBackOff), and the world bit must stay off."
+            );
+            assert_eq!(
+                Some(true),
+                volume["secret"]
+                    .get("optional")
+                    .map_or(Some(true), |o| Some(o.as_bool() != Some(true))),
+                "{render}.yaml: secret volume `{name}` must not be optional — a missing key \
+                 Secret should hold the pod in ContainerCreating with an event naming it, not \
+                 start a console that invented its own key"
+            );
+        }
 
         let c = container(deployment);
         let sc = &c["securityContext"];
