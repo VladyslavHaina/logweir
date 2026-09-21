@@ -2551,14 +2551,25 @@ def plan_from_evaluation(ev: dict[str, Any], policy_name: str, dest: str,
                          *, keep_last: int, min_usable: int) -> tuple[str, dict[str, Any]]:
     """A plan whose lines are exactly the CONTROLLER's own candidate list.
 
-    NOT the controller's own plan DOCUMENT, and the reason is worth recording:
-    in `mode: Report` the evaluation publishes `planSha256` but **no
-    `planRef`**. The plan `ConfigMap` is rendered only on the enforcement path
-    (`retention_policy.rs:1559`), behind a lease — and that path refuses
-    outright while a nonterminal `Restore` reads the destination
-    (`StartOutcome::ActiveRestore`, `:1555`), which is the very fixture this
-    phase installs. So the document is not retrievable here; `plan_document()`
-    in this file reads `planRef` and is unreachable for a Report-mode policy.
+    NOT the controller's own plan DOCUMENT, and the reason is worth recording.
+    It USED TO BE that `mode: Report` published `planSha256` and **no
+    `planRef`** at all: the plan `ConfigMap` was rendered only on the
+    enforcement path, behind a lease that refuses outright while a nonterminal
+    `Restore` reads the destination (`StartOutcome::ActiveRestore`), which is
+    the very fixture this phase installs.
+
+    THAT CHANGED ON `claude/status-sweep` (merged to main as `561a21f`): the
+    controller now writes `planRef` on EVERY evaluation, Report mode included,
+    so `status.lastEvaluation.planRef` becomes a name where this harness
+    recorded `null` and `plan_document()` becomes reachable for a Report-mode
+    policy. **No row's predicate reads `planRef`**, so nothing here passes or
+    fails differently; what changes is the recorded evidence
+    (`controllerPlanRef`) and the sentences that explained the absence. On a
+    lab image that predates that merge the field is still `null`, and this
+    phase's evidence will say so until the batch refresh.
+
+    Either way this builds the plan from the VERDICT and not from the
+    document, which is the point below.
 
     What IS retrievable is the verdict, and the verdict is what a guard test
     needs: the lines are the controller's candidates, one for one, and nothing
@@ -2768,8 +2779,10 @@ def legal_hold() -> None:
         f"a plan whose lines ARE the controller's candidate list ({sorted(candidate_ids)}; "
         f"digest {digest}) names neither protected point "
         f"({plan_omits(plan, protected_ids)}) — the controller published "
-        f"planSha256={ev.get('planSha256')} and no planRef, because a Report-mode policy "
-        f"renders no plan ConfigMap; one enforced pass exited {code}, "
+        f"planSha256={ev.get('planSha256')} and planRef={ev.get('planRef')!r} "
+        f"(`null` on an image predating `561a21f`, where Report mode rendered no plan "
+        f"ConfigMap; a name on one that carries it — no predicate here reads the field "
+        f"either way); one enforced pass exited {code}, "
         f"removed {len(gone)} object(s), and every object under the held and "
         f"actively-restored sets {sorted(protected_prefixes)} is still present "
         f"({survived_enforcement(before, after_objects, protected_prefixes)}); the "
