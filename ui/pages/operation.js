@@ -139,6 +139,15 @@ export function operationFacts(document, console_) {
       lastUpdate: o.lastUpdatedAt || null,
       createdAt: o.createdAt || null,
       awaitingApproval: o.awaitingApproval === true,
+      // SELECTED AND DELIBERATELY NOT PRINTED, which is a decision and not an
+      // oversight. `ReadinessView` is published as required on every
+      // OperationView and `ReadinessView::not_implemented()` is the only value
+      // `logweir-api` can produce for it today: `{state: "unknown", basis:
+      // "notImplemented"}`, until PLAT-03.1 lands. A row saying "readiness
+      // unknown, because it is not implemented" on every run is noise a reader
+      // learns to skip, and skipping is what makes the row useless on the day
+      // it starts carrying an answer. It is kept in the facts so the page that
+      // renders it then has it, and the field is asserted by `contract.js`.
       readiness: o.readiness || null,
       stage: o.stage || null,
       progress: o.progress || null,
