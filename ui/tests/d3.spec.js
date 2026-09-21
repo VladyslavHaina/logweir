@@ -61,6 +61,7 @@ import {
   backoffFor,
   endReason,
   isSettled,
+  LEGACY_TERMINAL_PHASES,
   watchOperation,
   STREAM_END_REASONS,
 } from "../operation-watch.js";
@@ -122,6 +123,7 @@ import {
 import {
   CATALOG_FIELD_PATHS,
   CONNECT_SENTENCE,
+  isRedacted,
   NO_CATALOG_SENTENCE,
   POINT_BINDING_SENTENCE,
   bestLocation,
@@ -166,6 +168,11 @@ import {
 
 const d3 = (name) =>
   JSON.parse(readFileSync(new URL("./fixtures/d3/" + name, import.meta.url), "utf8"));
+
+/** A custom resource from the shared fixture directory -- the documents legacy
+ *  mode is handed, as `kubectl proxy` serves them. */
+const fixture = (name) =>
+  JSON.parse(readFileSync(new URL("./fixtures/" + name, import.meta.url), "utf8"));
 
 /** The PRODUCT API's own documents. They live under `fixtures/console/` with
  *  every other one, and `contract.spec.js` holds each of them to the published
@@ -714,22 +721,34 @@ test("one_point_in_two_buckets_is_one_row_and_the_degraded_location_is_named", (
   assert.equal(best.locationId, "s3://d3w14-lr520260919t0109z-a/archive");
 });
 
-test("the_restore_link_carries_the_whole_plan_binding", () => {
-  // RECONCILED. The link used to carry an assumed `locationDigest`; the
-  // catalog's view entry has never held one -- the frozen destination digest is
-  // a fact about a BACKUP's own destination snapshot, not about a point read
-  // out of a bucket -- so the API publishes none and this page invents none.
-  // What it carries instead is what a plan is actually built from: D3
-  // section 5.5 step 4's `source.point {point_id, receipt_key, receipt_sha256,
-  // manifest_sha256}`, plus the catalog's own destination.
+test("the_restore_link_carries_what_the_point_route_PUBLISHED", () => {
+  // RECONCILED, then corrected by review L-2. The link used to carry an
+  // assumed `locationDigest`; the catalog's view entry has never held one --
+  // the frozen destination digest is a fact about a BACKUP's own destination
+  // snapshot, not about a point read out of a bucket -- so the API publishes
+  // none and this page invents none. What it carries instead is what the point
+  // route published, which is what D3 section 5.5 step 4's plan is built from:
+  // `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}`,
+  // plus the catalog's own destination.
+  //
+  // AND THIS FIXTURE IS ITS OWN WITNESS. It was recorded from a live run, and
+  // every `receiptKey` in it is `[redacted].receipt.json` -- the product's own
+  // `redact_path` rewrote the key on the way into the catalog view, because a
+  // 26-character ULID is longer than the redactor's free-component cap. So the
+  // first thing this row proves is that the page does NOT carry a redacted key
+  // into a plan.
   const page = decodeCatalogPoints(con("catalog-points-states.json")).value;
   const entry = page.items[0];
   assert.ok(entry.receiptKey.length > 0 && entry.receiptSha256.length > 0,
     "the two binding fields a point cannot be restored without are REQUIRED on the view");
+  assert.ok(isRedacted(entry.receiptKey),
+    "the live-recorded fixture carries the redactor's output, which is the product defect");
+
   const route = restorePointRoute("team-a", "primary", entry, "dest-a");
   assert.ok(route.indexOf("point=" + entry.pointId) !== -1);
   assert.ok(route.indexOf("catalog=primary") !== -1);
-  assert.ok(route.indexOf("receiptKey=" + encodeURIComponent(entry.receiptKey)) !== -1);
+  assert.equal(route.indexOf("receiptKey="), -1,
+    "a redacted key is not a key and is not passed on");
   assert.ok(route.indexOf("receiptSha256=" + encodeURIComponent(entry.receiptSha256)) !== -1);
   assert.ok(route.indexOf("manifestSha256=" + encodeURIComponent(entry.manifestSha256)) !== -1);
   assert.ok(route.indexOf("destination=dest-a") !== -1,
@@ -738,9 +757,16 @@ test("the_restore_link_carries_the_whole_plan_binding", () => {
     "no digest is invented for a field no document publishes");
   assert.ok(POINT_BINDING_SENTENCE.indexOf("receipt_sha256") !== -1);
 
+  // AND A KEY THE REDACTOR LEFT ALONE STILL TRAVELS, so this is not a page
+  // that stopped carrying the binding.
+  const whole = JSON.parse(JSON.stringify(entry));
+  whole.receiptKey = "archive/0f1c77e4/01M32255588Y31QRHBGA0AHN6V.receipt.json";
+  const full = restorePointRoute("team-a", "primary", whole, "dest-a");
+  assert.ok(full.indexOf("receiptKey=" + encodeURIComponent(whole.receiptKey)) !== -1);
+
   // A point whose view carries no manifest digest says nothing rather than
   // inventing one; the link is still well formed.
-  const noManifest = JSON.parse(JSON.stringify(entry));
+  const noManifest = JSON.parse(JSON.stringify(whole));
   delete noManifest.manifestSha256;
   const bare = restorePointRoute("team-a", "primary", noManifest, "dest-a");
   assert.equal(bare.indexOf("manifestSha256="), -1);
@@ -2098,6 +2124,115 @@ test("isSettled_is_the_servers_own_two_conditions_and_the_two_states_agree_by_co
       name + ": this page stops exactly where the server sends `end: settled`",
     );
   }
+});
+
+test("a_FINISHED_run_in_legacy_mode_stops_polling_after_one_read", async () => {
+  // REVIEW M-1, AND IT IS THE MODE THIS WHOLE FILE IS ABOUT. `isSettled` read
+  // `terminal` and `verification.state`, which only the product API's DTO
+  // publishes. Legacy mode -- `kubectl proxy`, where the legacy operation view
+  // and the KEYSVIEW-ABSENT-VALID roster half both live -- is handed the
+  // CUSTOM RESOURCE, which has neither. So a console left open on a FINISHED
+  // Backup polled the kube-apiserver every POLL_MS for ever, and the stated
+  // reason for `isSettled` had no effect in the mode without a normalizing API
+  // in front of it. The reviewer's probe read "polls of a FINISHED run: 6";
+  // this row holds it at one.
+  const finished = fixture("backup-valid-exit0.json");
+  assert.equal(finished.status.phase, "Succeeded");
+  assert.equal(finished.status.evidence.verification.result, "Valid");
+  assert.equal(finished.terminal, undefined,
+    "the custom resource carries no top-level `terminal`; that is the whole finding");
+
+  const run = async (document) => {
+    let reads = 0;
+    const delays = [];
+    const watch = watchOperation("team-a", "backup", "b1", () => {}, null, {
+      modeOf: () => "legacy",
+      setTimer: (fn, ms) => { delays.push(ms); return 0; },
+      clearTimer: () => {},
+      read: async () => { reads += 1; return document; },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 2));
+    watch.stop();
+    return { reads: reads, delays: delays };
+  };
+
+  const stopped = await run(finished);
+  assert.equal(stopped.reads, 1, "a finished run is read ONCE");
+  assert.deepEqual(stopped.delays, [],
+    "THE MUTANT: leave `isSettled` DTO-only and this is [5000] and never empties");
+
+  // ... AND A RUNNING ONE STILL POLLS, so this is not a watch that gave up.
+  const running = fixture("backup-visible-only.json");
+  const live = await run(Object.assign({}, running, {
+    status: Object.assign({}, running.status, { phase: "Running" }),
+  }));
+  assert.equal(live.reads, 1);
+  assert.deepEqual(live.delays, [POLL_MS], "an unfinished run is scheduled for another read");
+
+  // THE FOUR CASES, over the shapes the custom resource actually writes.
+  const cr = (phase, evidence) => ({
+    metadata: { name: "b1" },
+    status: evidence === undefined ? { phase: phase } : { phase: phase, evidence: evidence },
+  });
+  assert.equal(isSettled(cr("Succeeded", { receiptKey: "k", verification: { result: "Valid" } })),
+    true, "terminal with a recorded verdict");
+  assert.equal(isSettled(cr("Succeeded", { receiptKey: "k" })), false,
+    "terminal with evidence recorded and NO verdict: the verdict is still coming");
+  assert.equal(isSettled(cr("Failed")), true,
+    "terminal having written nothing: there is no verdict to wait for");
+  assert.equal(isSettled(cr("Refused", {})), true,
+    "a refusal names no evidence key, so nothing is pending");
+  assert.equal(isSettled(cr("Running", { receiptKey: "k", verification: { result: "Valid" } })),
+    false, "a phase that is not terminal is not settled whatever the verdict says");
+  assert.equal(isSettled(cr("Cancelled")), false,
+    "a phase no controller writes is not one this page claims to know");
+  assert.deepEqual(LEGACY_TERMINAL_PHASES.slice(), ["Succeeded", "Failed", "Refused"]);
+
+  // AND THE DTO RULE IS UNTOUCHED: a document with a boolean `terminal` never
+  // reaches the custom-resource arm.
+  assert.equal(isSettled({ terminal: false, status: { phase: "Succeeded" } }), false,
+    "a DTO that says it is not terminal is not read as a custom resource");
+});
+
+test("a_redacted_receipt_key_is_not_carried_into_a_plan", async () => {
+  // REVIEW L-2. `PointView.receiptKey` is a required plan-binding key, and on
+  // this product the catalog sync runs it through `redact_path` first -- a
+  // 26-character ULID is longer than the redactor's free-component cap, so a
+  // point this product wrote itself comes back as `[redacted].receipt.json`.
+  // Observed on every live run of this branch. The page used to promise "the
+  // whole plan binding" and carry the redactor's output into the link.
+  assert.ok(isRedacted("[redacted].receipt.json"));
+  assert.ok(!isRedacted("archive/0f1c/01M3.receipt.json"));
+  assert.ok(!isRedacted(undefined));
+
+  const good = { pointId: "p1", receiptKey: "archive/a/b.receipt.json",
+    receiptSha256: "sha256:aa", manifestSha256: "sha256:bb" };
+  assert.match(restorePointRoute("team-a", "c1", good, "dest"),
+    /receiptKey=archive%2Fa%2Fb\.receipt\.json/);
+
+  const redacted = Object.assign({}, good, { receiptKey: "[redacted].receipt.json" });
+  const link = restorePointRoute("team-a", "c1", redacted, "dest");
+  assert.equal(link.indexOf("receiptKey="), -1,
+    "THE MUTANT: carry it anyway and the wizard builds `source.point.receipt_key` out of the " +
+      "redactor's output, which the runner refuses with exit 3 PointBindingMismatch");
+  assert.equal(link.indexOf("redacted"), -1);
+  assert.match(link, /receiptSha256=sha256%3Aaa/, "the digest is unaffected and still travels");
+  assert.match(link, /point=p1/);
+
+  // THE PAGE SAYS SO, and says it as a complaint rather than a note.
+  const html = decode(renderPoints({ items: [redacted], page: {} }, "team-a", "c1", "dest"));
+  assert.match(html, /data-redacted-binding="true"/);
+  assert.match(html, /published its receipt key as `\[redacted\]`/);
+  assert.match(html, /nothing in your archive is missing or unreadable because of this/);
+
+  // AND THE SENTENCE NO LONGER PROMISES WHAT THE API DOES NOT DELIVER.
+  assert.equal(POINT_BINDING_SENTENCE.indexOf("the whole plan binding"), -1,
+    "the page says what the point route delivers, not what a plan needs");
+  assert.match(POINT_BINDING_SENTENCE, /what the point route published for this point/);
+
+  const clean = decode(renderPoints({ items: [good], page: {} }, "team-a", "c1", "dest"));
+  assert.equal(clean.indexOf("data-redacted-binding"), -1,
+    "and a catalog whose keys survived says nothing about redaction");
 });
 
 test("a_durable_result_empties_the_form_and_re_reads_the_list", async () => {

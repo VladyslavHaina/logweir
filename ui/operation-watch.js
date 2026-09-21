@@ -199,17 +199,79 @@ export function backoffFor(attempt, fraction) {
  *  evidence for ever with nothing on screen saying it stopped looking. D3's
  *  own `end` event has the same two conditions.
  *
- *  A DOCUMENT THIS FUNCTION DOES NOT UNDERSTAND IS NOT SETTLED. An absent
- *  `terminal` is "not observed" (D3 section 12) and keeps the watch open,
- *  which is the side that costs a connection rather than the side that shows a
- *  stale run as a finished one. */
+ *  A DOCUMENT THIS FUNCTION DOES NOT UNDERSTAND IS NOT SETTLED, and a
+ *  document it understands is one of TWO. Console mode is handed the product
+ *  API's DTO and reads `terminal` + `verification.state`. LEGACY MODE IS
+ *  HANDED THE CUSTOM RESOURCE, which publishes neither: it has no top-level
+ *  `terminal` and no normalized `verification.state`, so the DTO rule alone
+ *  answered `false` for every legacy document ever written and a console left
+ *  open on a FINISHED run polled the kube-apiserver every 5 s for ever. The
+ *  same two conditions are read off `status.phase` and
+ *  `status.evidence.verification.result` below. */
 export function isSettled(operation) {
   const o = operation || {};
-  if (o.terminal !== true) {
+  if (typeof o.terminal === "boolean") {
+    if (o.terminal !== true) {
+      return false;
+    }
+    const verification = o.verification || {};
+    return verification.state !== "pending";
+  }
+  // NO `terminal` AT ALL IS THE CUSTOM RESOURCE, NOT AN UNREADABLE DTO.
+  const status = o.status;
+  if (status !== null && typeof status === "object" && !Array.isArray(status)) {
+    return legacySettled(status);
+  }
+  return false;
+}
+
+/** The phases the custom resource writes that nothing follows.
+ *
+ *  `Cancelled` IS DELIBERATELY NOT HERE. `PHASE_OF` in `ui/client.js` can
+ *  spell it because the normalized vocabulary has the word, but no cancel
+ *  route exists in v1 and no controller writes the phase; listing it would be
+ *  this page claiming to know a state the product does not produce. A phase
+ *  this build does not recognise keeps the watch open, which is the side that
+ *  costs a poll rather than the side that shows a running run as finished. */
+export const LEGACY_TERMINAL_PHASES = Object.freeze(["Succeeded", "Failed", "Refused"]);
+
+/** The keys a status names when it recorded a document worth verifying. */
+const LEGACY_EVIDENCE_KEYS = Object.freeze([
+  "receiptKey", "payloadKey", "scorecardKey", "sidecarKey", "offsetReportKey",
+]);
+
+/** THE SAME TWO CONDITIONS, READ OFF THE DOCUMENT LEGACY MODE ACTUALLY GETS.
+ *
+ *  `status.phase` is the custom resource's own word and
+ *  `status.evidence.verification.result` is its own verdict; neither is
+ *  spelled the way the DTO spells them and neither is derived here. A
+ *  TERMINAL phase with a recorded verdict is settled, and so is a terminal
+ *  phase that named no evidence at all -- a run refused before it executed, or
+ *  one that failed without writing a document, has no verdict coming and
+ *  waiting for one is waiting for ever.
+ *
+ *  A RESIDUE THIS CANNOT CLOSE, SAID OUT LOUD. `logweir-api` PROJECTS an
+ *  absent verification beside recorded evidence keys to `notAttempted` with
+ *  the controller's reason; the custom resource has no such projection, so in
+ *  legacy mode a terminal run whose controller recorded keys and never wrote a
+ *  verdict keeps the watch open. That is the conservative side and the page
+ *  says the verification is not recorded, but it is a poll that does not stop
+ *  and the mode is the one without a normalizing API in front of it. */
+function legacySettled(status) {
+  if (LEGACY_TERMINAL_PHASES.indexOf(status.phase) === -1) {
     return false;
   }
-  const verification = o.verification || {};
-  return verification.state !== "pending";
+  const evidence = status.evidence;
+  if (evidence === null || evidence === undefined || typeof evidence !== "object") {
+    return true;
+  }
+  const result = (evidence.verification || {}).result;
+  if (typeof result === "string" && result.length > 0) {
+    return true;
+  }
+  return !LEGACY_EVIDENCE_KEYS.some(
+    (key) => typeof evidence[key] === "string" && evidence[key].length > 0,
+  );
 }
 
 /** FOLLOWS ONE OPERATION UNTIL IT SETTLES OR THE ROUTE LEAVES.

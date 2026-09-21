@@ -337,12 +337,30 @@ export function restorePointRoute(ns, catalog, entry, destination) {
     "#/restore?ns=" + encodeURIComponent(String(ns || "")) +
     "&catalog=" + encodeURIComponent(String(catalog || "")) +
     "&point=" + encodeURIComponent(String(e.pointId || "")) +
-    at("receiptKey", e.receiptKey) +
+    (isRedacted(e.receiptKey) ? "" : at("receiptKey", e.receiptKey)) +
     at("receiptSha256", e.receiptSha256) +
     at("manifestSha256", e.manifestSha256) +
     at("destination", typeof destination === "string" ? destination : "") +
     (location === null ? "" : at("location", String(location.locationId || "")))
   );
+}
+
+/** The marker the product's own archive-key redactor leaves behind.
+ *
+ *  A REDACTED KEY IS NOT A KEY, AND THIS PAGE WILL NOT PASS ONE ON. The
+ *  catalog sync runs every archive key it records through
+ *  `logweir::check::redact_path`, and that redactor refuses a component longer
+ *  than its free-component cap -- which a 26-character ULID is. So a point
+ *  this product wrote itself comes back with
+ *  `receiptKey: "[redacted].receipt.json"`, observed on every live run of this
+ *  branch. Carrying that into a plan would build `source.point.receipt_key`
+ *  out of the redactor's output and earn exit 3 `PointBindingMismatch` from
+ *  the runner, one step later and one layer further from the cause. */
+export const REDACTION_MARKER = "[redacted]";
+
+/** Whether a published archive key is the redactor's output rather than a key. */
+export function isRedacted(value) {
+  return typeof value === "string" && value.indexOf(REDACTION_MARKER) !== -1;
 }
 
 /** The location a restore would read from: the first one the catalog reports
@@ -361,13 +379,21 @@ export function bestLocation(entry) {
   return locations.length === 0 ? null : locations[0];
 }
 
-/** What the restore link can and cannot carry today. */
+/** What the restore link carries -- WHAT THE POINT ROUTE DELIVERS, and no more.
+ *
+ *  The first spelling of this sentence promised "the whole plan binding". It
+ *  is not this page's to promise: the link carries exactly the fields
+ *  `GET .../catalogs/{name}/points` published for that point, and whether
+ *  those are enough to build a plan is a fact about the API's answer and not
+ *  about the link. See [`POINT_BINDING_REDACTED_SENTENCE`] for the case where
+ *  they are not. */
 export const POINT_BINDING_SENTENCE =
-  "This link carries the whole plan binding: the point id, its receipt key and digest, the " +
-  "manifest digest where the catalog has one, and the destination the catalog reads. Building " +
-  "the plan around `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}` is " +
-  "the restore wizard's own step (PLAT-15.2), and the runner re-checks that binding before it " +
-  "constructs a client: a mismatch is a refusal, not a restore of something else.";
+  "This link carries what the point route published for this point: the point id, the receipt " +
+  "key and digest, the manifest digest where the catalog has one, and the destination the " +
+  "catalog reads. Building the plan around `source.point {point_id, receipt_key, " +
+  "receipt_sha256, manifest_sha256}` is the restore wizard's own step (PLAT-15.2), and the " +
+  "runner re-checks that binding before it constructs a client: a mismatch is a refusal, not a " +
+  "restore of something else.";
 
 /** ONE POINT AS A ROW: the two axes, the signer, and the remedy. */
 export function pointRow(entry, ns, catalog, destination) {
@@ -413,9 +439,27 @@ export function renderPoints(page, ns, catalog, destination) {
       ? ""
       : "<p class=\"note\" data-more-points=\"true\">" + esc(MORE_POINTS_SENTENCE) + "</p>") +
     "<p class=\"note\">" + esc(POINT_BINDING_SENTENCE) + "</p>" +
+    (entries.some((entry) => isRedacted((entry || {}).receiptKey))
+      ? "<p class=\"complaint\" data-redacted-binding=\"true\">" +
+        esc(POINT_BINDING_REDACTED_SENTENCE) + "</p>"
+      : "") +
     "</section>"
   );
 }
+
+/** What a row says when the key the plan needs came back redacted.
+ *
+ *  A COMPLAINT, NOT A NOTE, and it names the field and the repair. The
+ *  alternative was to carry the redactor's output into the link and let the
+ *  runner refuse the plan with exit 3 `PointBindingMismatch` -- a correct
+ *  refusal, one step later, about a value nothing on screen said was wrong. */
+export const POINT_BINDING_REDACTED_SENTENCE =
+  "At least one point above published its receipt key as `[redacted]`: the product's own " +
+  "archive-key redactor rewrote it on the way into the catalog view, so what the API serves is not the key " +
+  "in the bucket. The restore link for that point omits `receiptKey` rather than carrying the " +
+  "redactor's output, and the plan cannot be completed from this page until the catalog " +
+  "publishes the key itself. The point id, the receipt digest and the manifest digest are " +
+  "unaffected; nothing in your archive is missing or unreadable because of this."
 
 /** The next cursor this page did NOT follow, or `null`. */
 export function cursorOf(page) {
