@@ -524,9 +524,17 @@ pub struct RestoreRunArgs {
     pub store_contract_version: Option<String>,
     #[arg(long)]
     pub spec: PathBuf,
-    /// MANDATORY in v0.1: approval is unconditional (spec §9.3 phase 1).
+    /// The per-run `Approval` document. MANDATORY for every ordinary Restore
+    /// — approval is unconditional (spec §9.3 phase 1).
+    ///
+    /// **Omitted only for a standing-authorized rehearsal** (PLAT-14.3b): the
+    /// signed standing document given by `--standing-authorization` REPLACES
+    /// it, and the run's execution contract must say so
+    /// (`LOGWEIR_EXECUTION_AUTHORIZATION_KIND=standing`). Omitting it under
+    /// any other shape is exit 3 by name, and giving it under a standing
+    /// contract is exit 3 too: a rehearsal bundle has no approval slot.
     #[arg(long)]
-    pub approval: PathBuf,
+    pub approval: Option<PathBuf>,
     /// MANDATORY: the approver's public key, which SHOULD differ from the
     /// signing key. Equal keys are labelled self_attested, never refused.
     #[arg(long)]

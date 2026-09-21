@@ -157,6 +157,54 @@ pub const ALL_ENV_ANY: [&str; 20] = [
     CONFIRMATION_KEY_SHA256_ENV,
 ];
 
+/// The `--triggered-by` prefix a standing-authorized rehearsal run carries.
+///
+/// # Why `triggered_by` changes shape at all
+///
+/// `validate_execution_contract` binds `--triggered-by` to the authorization
+/// the immutable Job template names, and for an ordinary `Restore` that is
+/// `approval/<name>`. A rehearsal's reason is not an approval a human clicked
+/// for this run — it is a SLOT of a schedule — and the value is copied verbatim
+/// into the signed scorecard's `triggered_by`, which is what an auditor reads
+/// to find out why the run happened. `approval/<standing approval>` would be
+/// true and useless: every slot of every schedule under one standing document
+/// would read identically, and neither the schedule nor the slot would appear
+/// anywhere in the signed evidence.
+///
+/// # The shape, and who checks which half
+///
+/// `rehearsal/<schedule name>/<slot>`. The runner checks the SHAPE in
+/// `validate_execution_contract` (before anything is parsed) and binds the
+/// `<schedule name>` segment to the standing document's own
+/// `subjectRef.name` only after that document's signature verifies — so the
+/// schedule this run claims to be is pinned by SIGNED bytes, not by an
+/// environment variable the controller sets.
+pub const TRIGGERED_BY_REHEARSAL_PREFIX: &str = "rehearsal/";
+
+/// `--triggered-by` for one rehearsal slot, built in exactly one place so the
+/// controller that emits it and the runner that parses it cannot disagree.
+#[must_use]
+pub fn rehearsal_triggered_by(schedule: &str, slot: &str) -> String {
+    format!("{TRIGGERED_BY_REHEARSAL_PREFIX}{schedule}/{slot}")
+}
+
+/// The `(schedule, slot)` inside a rehearsal trigger, or `None` when the value
+/// is not one.
+///
+/// Both segments must be non-empty: `rehearsal//x` names no schedule and
+/// `rehearsal/x/` names no slot, and either would make the binding below
+/// vacuous. A slot never contains `/` ([`crate::ids`]-shaped
+/// `YYYYmmddThhmmss`), so the split is unambiguous.
+#[must_use]
+pub fn parse_rehearsal_triggered_by(value: &str) -> Option<(&str, &str)> {
+    let rest = value.strip_prefix(TRIGGERED_BY_REHEARSAL_PREFIX)?;
+    let (schedule, slot) = rest.split_once('/')?;
+    if schedule.is_empty() || slot.is_empty() || slot.contains('/') {
+        return None;
+    }
+    Some((schedule, slot))
+}
+
 pub const AUTHORIZATION_KIND_APPROVAL: &str = "approval";
 pub const AUTHORIZATION_KIND_STANDING: &str = "standing";
 

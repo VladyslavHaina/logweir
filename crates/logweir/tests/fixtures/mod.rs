@@ -1539,7 +1539,7 @@ pub fn orchestrator_fixture(shape: Drill) -> OrchestratorFixture {
             store_contract_version: None,
             execution_contract_version: None,
             spec: spec_path,
-            approval,
+            approval: Some(approval),
             approver_key: approver_pub,
             allowed_clusters: allowed_path,
             signing_key: signing_pem,

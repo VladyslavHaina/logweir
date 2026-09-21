@@ -232,6 +232,26 @@ fn check_point_shape(point: &PointBinding) -> Result<(), DrillError> {
     )))
 }
 
+/// What [`verify_standing_authorization`] PROVED, returned so the caller does
+/// not have to re-parse bytes whose signature has already been checked.
+///
+/// **The caller needs both halves, and re-deriving either would be a second
+/// source of truth.** `crates/logweir/src/drill/mod.rs` mints the run's
+/// `Approved` from this: the key id is the identity the signature actually
+/// verified under (never the keyring's first entry, never a caller-supplied
+/// flag), and the document carries the subject the human signed for — which is
+/// what binds `--triggered-by`'s schedule segment to SIGNED bytes rather than
+/// to an environment variable the controller sets.
+#[derive(Clone, Debug)]
+pub struct VerifiedStandingAuthorization {
+    /// The `key_id` of the trusted key the DSSE signature verified under, and
+    /// whose usage was then judged.
+    pub key_id: String,
+    /// The signed document, parsed only after the signature over these exact
+    /// bytes verified.
+    pub document: wire::StandingAuthorization,
+}
+
 /// **Verify the SIGNED standing rehearsal authorization, then prove the plan
 /// falls inside the scope it carries** — D3 §4.3(d) and (e), the runner's half
 /// of "checked twice".
@@ -289,7 +309,7 @@ pub fn verify_standing_authorization(
     keyring_bytes: &[u8],
     schedule_uid: Option<&str>,
     now: chrono::DateTime<chrono::Utc>,
-) -> Result<(), DrillError> {
+) -> Result<VerifiedStandingAuthorization, DrillError> {
     let keyring: wire::AuthorizationKeyring =
         serde_json::from_slice(keyring_bytes).map_err(|error| {
             // Structural corruption of a mounted member says nothing about
@@ -417,7 +437,10 @@ pub fn verify_standing_authorization(
             key.key_id, doc.subject_ref.name, doc.subject_ref.uid
         )));
     }
-    Ok(())
+    Ok(VerifiedStandingAuthorization {
+        key_id: key.key_id.clone(),
+        document: doc,
+    })
 }
 
 #[cfg(test)]
@@ -867,6 +890,13 @@ evidence: {backend: filesystem, path: /tmp/logweir-binding-fixture-evidence}
     }
 
     fn verify(signed: &Signed, uid: Option<&str>) -> Result<(), DrillError> {
+        verify_standing_authorization_full(signed, uid).map(|_| ())
+    }
+
+    fn verify_standing_authorization_full(
+        signed: &Signed,
+        uid: Option<&str>,
+    ) -> Result<VerifiedStandingAuthorization, DrillError> {
         verify_standing_authorization(
             &plan_with(None),
             &allowed(&["TARGET00000000000000000"]),

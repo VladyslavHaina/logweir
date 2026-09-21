@@ -233,7 +233,23 @@ pub struct RunArgs {
     /// a destination rollout to a plan-grammar rollout.
     pub store_contract_version: Option<String>,
     pub spec: PathBuf,
-    pub approval: PathBuf,
+    /// `--approval`. The per-run `Approval` document the human signed over
+    /// `sha256(plan bytes)`.
+    ///
+    /// # Optional, and ABSENT IS LEGAL ONLY FOR A REHEARSAL
+    ///
+    /// PLAT-14.3b: a standing-authorized rehearsal has no per-run approval and
+    /// no unattended controller can mint one (Global Constraint 27 links no
+    /// signer into `weirkeeper`). Under
+    /// [`logweir_core::execution_contract::AuthorizationKind::Standing`] the
+    /// standing document REPLACES it — it is not verified beside it — and the
+    /// bundle carries no `approval.json` slot at all.
+    ///
+    /// Absent under any other shape is a refusal by name, never a skipped
+    /// check: an ordinary `Restore` that lost its approval must fail closed,
+    /// and a standalone invocation has no contract that could make a standing
+    /// document trustworthy.
+    pub approval: Option<PathBuf>,
     pub approver_key: PathBuf,
     pub allowed_clusters: PathBuf,
     pub signing_key: PathBuf,
@@ -308,8 +324,18 @@ pub struct ExecutionContract {
     pub approval_name: String,
     pub approval_uid: String,
     pub plan_sha256: String,
-    pub approval_sha256: String,
-    pub approval_sidecar_sha256: String,
+    /// MANDATORY under [`AuthorizationKind::Approval`] and REFUSED under
+    /// `Standing` — PLAT-14.3b.
+    ///
+    /// A standing rehearsal's bundle has no per-run approval slot to pin, and
+    /// a digest here under `Standing` would be the controller committing to a
+    /// document the runner is not going to verify. Refused rather than
+    /// ignored, for the reason `validate_execution_contract`'s optional-member
+    /// table already gives: unpinned material is never acted on, and pinned
+    /// material that nothing checks is worse than either.
+    pub approval_sha256: Option<String>,
+    /// As [`ExecutionContract::approval_sha256`], for its DSSE sidecar.
+    pub approval_sidecar_sha256: Option<String>,
     pub approver_key_sha256: String,
     pub allowed_clusters_sha256: String,
     /// v2. Absent means [`AuthorizationKind::Approval`] — tag 1's shape.
@@ -501,20 +527,76 @@ pub fn execution_contract_from(
         .into());
     }
 
+    // **The eleven mandatory variables are read FIRST, in their original
+    // order**, so an incomplete contract still refuses by naming the first
+    // MANDATORY variable it is missing. Hoisted out of the struct literal by
+    // PLAT-14.3b only because the approval-slot decision below has to run
+    // between them and the value — moving the refusal order would have been a
+    // silent behaviour change to a guard that
+    // `contract_transport_is_all_or_nothing_while_standalone_is_compatible`
+    // pins.
+    let subject_api_version = required(wire::SUBJECT_API_VERSION_ENV)?;
+    let subject_kind = required(wire::SUBJECT_KIND_ENV)?;
+    let subject_name = required(wire::SUBJECT_NAME_ENV)?;
+    let subject_namespace = required(wire::SUBJECT_NAMESPACE_ENV)?;
+    let subject_uid = required(wire::SUBJECT_UID_ENV)?;
+    let approval_name = required(wire::APPROVAL_NAME_ENV)?;
+    let approval_uid = required(wire::APPROVAL_UID_ENV)?;
+    let plan_sha256 = required(wire::PLAN_SHA256_ENV)?;
+    let approver_key_sha256 = required(wire::APPROVER_KEY_SHA256_ENV)?;
+    let allowed_clusters_sha256 = required(wire::ALLOWED_CLUSTERS_SHA256_ENV)?;
+
+    // **The per-run approval slot, required under `approval` and refused
+    // under `standing`** — PLAT-14.3b. Read through `optional` and then
+    // decided here, rather than through `required`, because whether it is
+    // mandatory is a function of the authorization kind.
+    let approval_sha256 = optional(wire::APPROVAL_SHA256_ENV);
+    let approval_sidecar_sha256 = optional(wire::APPROVAL_SIDECAR_SHA256_ENV);
+    if authorization_kind == wire::AuthorizationKind::Standing {
+        for (value, name) in [
+            (&approval_sha256, wire::APPROVAL_SHA256_ENV),
+            (&approval_sidecar_sha256, wire::APPROVAL_SIDECAR_SHA256_ENV),
+        ] {
+            if value.is_some() {
+                return Err(GuardRefusal(format!(
+                    "the Restore execution contract pins {name} while {} is {:?}; a standing \
+                     rehearsal authorization REPLACES the per-run approval and its bundle \
+                     carries no approval slot to pin; no data operation was started",
+                    wire::AUTHORIZATION_KIND_ENV,
+                    wire::AUTHORIZATION_KIND_STANDING
+                ))
+                .into());
+            }
+        }
+    } else {
+        for (value, name) in [
+            (&approval_sha256, wire::APPROVAL_SHA256_ENV),
+            (&approval_sidecar_sha256, wire::APPROVAL_SIDECAR_SHA256_ENV),
+        ] {
+            if value.is_none() {
+                return Err(GuardRefusal(format!(
+                    "incomplete Restore execution contract: {name} is missing and this run is \
+                     authorized by a per-run Approval; no data operation was started"
+                ))
+                .into());
+            }
+        }
+    }
+
     Ok(Some(ExecutionContract {
         version,
-        subject_api_version: required(wire::SUBJECT_API_VERSION_ENV)?,
-        subject_kind: required(wire::SUBJECT_KIND_ENV)?,
-        subject_name: required(wire::SUBJECT_NAME_ENV)?,
-        subject_namespace: required(wire::SUBJECT_NAMESPACE_ENV)?,
-        subject_uid: required(wire::SUBJECT_UID_ENV)?,
-        approval_name: required(wire::APPROVAL_NAME_ENV)?,
-        approval_uid: required(wire::APPROVAL_UID_ENV)?,
-        plan_sha256: required(wire::PLAN_SHA256_ENV)?,
-        approval_sha256: required(wire::APPROVAL_SHA256_ENV)?,
-        approval_sidecar_sha256: required(wire::APPROVAL_SIDECAR_SHA256_ENV)?,
-        approver_key_sha256: required(wire::APPROVER_KEY_SHA256_ENV)?,
-        allowed_clusters_sha256: required(wire::ALLOWED_CLUSTERS_SHA256_ENV)?,
+        subject_api_version,
+        subject_kind,
+        subject_name,
+        subject_namespace,
+        subject_uid,
+        approval_name,
+        approval_uid,
+        plan_sha256,
+        approval_sha256,
+        approval_sidecar_sha256,
+        approver_key_sha256,
+        allowed_clusters_sha256,
         authorization_kind,
         authorization_sha256,
         authorization_sidecar_sha256,
@@ -605,8 +687,11 @@ pub fn execution_contract_for_invocation(
 #[derive(Clone, Debug, Default)]
 pub struct ApprovalBundleBytes {
     pub plan: Vec<u8>,
-    pub approval: Vec<u8>,
-    pub approval_sidecar: Vec<u8>,
+    /// The per-run approval document, absent for a standing-authorized
+    /// rehearsal — PLAT-14.3b. See [`RunArgs::approval`].
+    pub approval: Option<Vec<u8>>,
+    /// Its DSSE sidecar, absent under exactly the same condition.
+    pub approval_sidecar: Option<Vec<u8>>,
     pub approver_key: Vec<u8>,
     pub allowed_clusters: Vec<u8>,
     /// The signed standing rehearsal authorization envelope. The scope lives
@@ -636,27 +721,46 @@ pub fn validate_execution_contract(
         )
         .into());
     }
-    let expected_trigger = format!("approval/{}", contract.approval_name);
-    if triggered_by != Some(expected_trigger.as_str()) {
-        return Err(GuardRefusal(format!(
-            "the execution contract names Approval {} but --triggered-by is {:?}; no data \
-             operation was started",
-            contract.approval_name, triggered_by
-        ))
-        .into());
+    // **`--triggered-by` is bound to the authorization this template names,
+    // and the two kinds are bound differently** — PLAT-14.3b.
+    //
+    // Under `approval` it is `approval/<name>` and nothing else, unchanged.
+    // Under `standing` the run's reason is a SLOT of a schedule, so the value
+    // is `rehearsal/<schedule>/<slot>`; only its SHAPE can be checked here,
+    // because the name it must agree with lives inside a document whose
+    // signature has not been verified yet. `check_v2_bindings` closes that gap
+    // against the SIGNED `subjectRef.name` — deliberately a stronger binding
+    // than an equality against an environment variable the controller set,
+    // which would only prove the controller agreed with itself.
+    if contract.authorization_kind
+        == logweir_core::execution_contract::AuthorizationKind::Standing
+    {
+        if triggered_by
+            .and_then(logweir_core::execution_contract::parse_rehearsal_triggered_by)
+            .is_none()
+        {
+            return Err(GuardRefusal(format!(
+                "this run is authorized by a standing rehearsal authorization, so --triggered-by \
+                 must name the schedule and slot as `{}<schedule>/<slot>`; it is {:?}; no data \
+                 operation was started",
+                logweir_core::execution_contract::TRIGGERED_BY_REHEARSAL_PREFIX,
+                triggered_by
+            ))
+            .into());
+        }
+    } else {
+        let expected_trigger = format!("approval/{}", contract.approval_name);
+        if triggered_by != Some(expected_trigger.as_str()) {
+            return Err(GuardRefusal(format!(
+                "the execution contract names Approval {} but --triggered-by is {:?}; no data \
+                 operation was started",
+                contract.approval_name, triggered_by
+            ))
+            .into());
+        }
     }
     let checks = [
         ("plan", &contract.plan_sha256, bundle.plan.as_slice()),
-        (
-            "approval",
-            &contract.approval_sha256,
-            bundle.approval.as_slice(),
-        ),
-        (
-            "approval sidecar",
-            &contract.approval_sidecar_sha256,
-            bundle.approval_sidecar.as_slice(),
-        ),
         (
             "approver public key",
             &contract.approver_key_sha256,
@@ -689,7 +793,25 @@ pub fn validate_execution_contract(
     /// One optional bundle-v2 member: its label, the digest the contract pins
     /// for it, and the bytes that were mounted.
     type OptionalMember<'a> = (&'a str, Option<&'a String>, Option<&'a Vec<u8>>);
-    let optional_members: [OptionalMember; 5] = [
+    let optional_members: [OptionalMember; 7] = [
+        // **The per-run approval slot is now one of these** — PLAT-14.3b. It
+        // is present-and-pinned under `approval` and absent-and-unpinned under
+        // `standing`, and BOTH directions are already refused here: a pinned
+        // digest with nothing mounted is a bundle that lost its approval, and
+        // a mounted approval the contract never committed to is material this
+        // run would otherwise verify and act on. `execution_contract_from` has
+        // already refused the two kind/presence combinations that would make
+        // either case reachable, so these two rows are the second line.
+        (
+            "approval",
+            contract.approval_sha256.as_ref(),
+            bundle.approval.as_ref(),
+        ),
+        (
+            "approval sidecar",
+            contract.approval_sidecar_sha256.as_ref(),
+            bundle.approval_sidecar.as_ref(),
+        ),
         (
             "standing rehearsal authorization",
             contract.authorization_sha256.as_ref(),
@@ -1717,7 +1839,11 @@ pub fn naming_the_password_var(
 struct StartupInputs {
     spec_text: String,
     allowed_text: String,
-    approved: phase1_approval::Approved,
+    /// The VERIFIED per-run approval, or `None` for a standing-authorized
+    /// rehearsal whose authorization is proved in `check_v2_bindings` instead
+    /// — PLAT-14.3b. Exactly one of the two paths produces the run's
+    /// `Approved`, and `execute_for_reporting` refuses both and neither.
+    approved: Option<phase1_approval::Approved>,
     /// The three bytes-streams of D3 §4.3(e)'s standing authorization, when
     /// this run carries one. Already digest-checked against the execution
     /// contract by the time this exists — the SIGNATURE is checked later, in
@@ -1746,7 +1872,44 @@ fn load_startup_inputs(
     signing_key: &logweir_evidence::keys::VerifyingKey,
     contract: Option<&ExecutionContract>,
 ) -> Result<StartupInputs, DrillError> {
-    let sidecar_path = args.approval.with_extension("sig");
+    // **Is this run's authorization the per-run approval, or the standing
+    // document?** — PLAT-14.3b. The CONTRACT decides, never the presence of a
+    // flag: a run whose contract says `approval` must present an approval
+    // whatever else is mounted, and a run with no contract at all has nothing
+    // that could make a standing document trustworthy (the arm below already
+    // refuses unpinned v2 material for exactly that reason).
+    let standing = contract.is_some_and(|c| {
+        c.authorization_kind == logweir_core::execution_contract::AuthorizationKind::Standing
+    });
+    let approval_path = match (args.approval.as_ref(), standing) {
+        (Some(path), false) => Some(path.clone()),
+        (None, true) => None,
+        // A standing rehearsal has no per-run approval to verify. Accepting
+        // one anyway would be the "sits BESIDE" shape this task exists to
+        // remove, and the file would be material no digest in the immutable
+        // template covers.
+        (Some(path), true) => {
+            return Err(GuardRefusal(format!(
+                "--approval {} was given for a run authorized by a standing rehearsal \
+                 authorization; the standing document REPLACES the per-run approval and the \
+                 bundle carries no approval slot; no data operation was started",
+                path.display()
+            ))
+            .into())
+        }
+        // FAIL CLOSED, and by name. An ordinary Restore that lost its approval
+        // must never fall through to "nothing to verify".
+        (None, false) => {
+            return Err(GuardRefusal(
+                "--approval is required: this run is not authorized by a standing rehearsal \
+                 authorization, and a Restore is never unauthorized; no data operation was \
+                 started"
+                    .to_string(),
+            )
+            .into())
+        }
+    };
+    let sidecar_path = approval_path.as_ref().map(|p| p.with_extension("sig"));
     // The standing authorization's sidecar is DERIVED from the document's own
     // path, exactly as the approval's is from `--approval`. One flag fewer to
     // get wrong, and the two files cannot be mismatched by an operator who
@@ -1769,8 +1932,8 @@ fn load_startup_inputs(
         };
     let bundle = ApprovalBundleBytes {
         plan: read_startup_file(&args.spec, "restore plan")?,
-        approval: read_startup_file(&args.approval, "approval")?,
-        approval_sidecar: read_startup_file(&sidecar_path, "approval sidecar")?,
+        approval: optional_member(&approval_path, "approval")?,
+        approval_sidecar: optional_member(&sidecar_path, "approval sidecar")?,
         approver_key: read_startup_file(&args.approver_key, "approver public key")?,
         allowed_clusters: read_startup_file(&args.allowed_clusters, "allowed-clusters")?,
         authorization: optional_member(
@@ -1818,13 +1981,40 @@ fn load_startup_inputs(
     let allowed_text = String::from_utf8(bundle.allowed_clusters.clone()).map_err(|error| {
         DrillError::Operational(format!("allowed-clusters is not UTF-8: {error}"))
     })?;
-    let approved = phase1_approval::verify_bytes(
-        &spec_text,
-        &bundle.approval,
-        &bundle.approval_sidecar,
-        &bundle.approver_key,
-        signing_key,
-    )?;
+    // **The per-run approval is verified ONLY when this run has one** —
+    // PLAT-14.3b, and this is the line the 2026-09-17 record names as the
+    // reason a rehearsal could not execute. It used to run unconditionally, so
+    // a standing bundle had to carry a placeholder in the approval slot that
+    // `verify_bytes` then rejected under `PAYLOAD_TYPE_APPROVAL`.
+    //
+    // The standing path's equivalent is `binding::verify_standing_authorization`
+    // in `check_v2_bindings`, which is a STRICTLY LARGER check: the DSSE
+    // signature under a pinned trusted key, that key's usage, the document's
+    // kind, subject, UID binding and validity window, and `plan ∈ scope`.
+    // Neither path can be skipped — `execute_for_reporting` refuses a run that
+    // produced no `Approved` at all.
+    let approved = match (&bundle.approval, &bundle.approval_sidecar) {
+        (Some(approval), Some(approval_sidecar)) => Some(phase1_approval::verify_bytes(
+            &spec_text,
+            approval,
+            approval_sidecar,
+            &bundle.approver_key,
+            signing_key,
+        )?),
+        // Both absent: the standing path, already pinned above.
+        (None, None) => None,
+        // Unreachable — both come from one `Option<PathBuf>` — and named
+        // rather than unwrapped so a future edit that splits them cannot
+        // silently produce "no approval to verify".
+        _ => {
+            return Err(GuardRefusal(
+                "an incomplete per-run approval was mounted: the document and its DSSE sidecar \
+                 are only meaningful together; no data operation was started"
+                    .to_string(),
+            )
+            .into())
+        }
+    };
     // All three, or none. `validate_execution_contract` has already refused a
     // pinned digest with nothing mounted and a mounted member with no pinned
     // digest, so a partial set can only arrive on the contract-free path — and
@@ -1962,11 +2152,54 @@ fn execute_for_reporting(
     // measurement is in `execute_for_reporting`'s own comment above). That is
     // what makes "refused before any data-plane work" true at the socket
     // layer, which is the claim D3 §4.3 and §5.5 both make.
-    if let Err(error) = check_v2_bindings(&startup, &authenticated_spec, contract.as_ref()) {
-        return (Err(error), Some(authenticated_spec));
-    }
+    let standing_approved = match check_v2_bindings(
+        args,
+        &startup,
+        &authenticated_spec,
+        contract.as_ref(),
+        &signer.verifying_key(),
+    ) {
+        Ok(approved) => approved,
+        Err(error) => return (Err(error), Some(authenticated_spec)),
+    };
+    // **EXACTLY ONE authorization produced this run's `Approved`** —
+    // PLAT-14.3b. The per-run approval path fills `startup.approved` in
+    // `load_startup_inputs`; the standing path fills the value above, after the
+    // signed document verified and the plan was proved inside its scope.
+    //
+    // Both and neither are refused here rather than resolved by precedence.
+    // "Neither" is the mutant this guard exists for: every individual check
+    // could be removed and a run would still need SOMETHING to have minted an
+    // `Approved`, so a rehearsal that skipped its authorization entirely
+    // cannot reach phase 0 by falling through.
+    let approved = match (startup.approved, standing_approved) {
+        (Some(approved), None) | (None, Some(approved)) => approved,
+        (Some(_), Some(_)) => {
+            return (
+                Err(GuardRefusal(
+                    "this run presented both a verified per-run approval and a standing \
+                     rehearsal authorization; exactly one authorizes a Restore; no data \
+                     operation was started"
+                        .to_string(),
+                )
+                .into()),
+                Some(authenticated_spec),
+            )
+        }
+        (None, None) => {
+            return (
+                Err(GuardRefusal(
+                    "this run is authorized by nothing: no per-run approval was verified and no \
+                     standing rehearsal authorization was proved; no data operation was started"
+                        .to_string(),
+                )
+                .into()),
+                Some(authenticated_spec),
+            )
+        }
+    };
     let outcome = match context(startup.spec_text, startup.allowed_text, store_contract) {
-        Ok(c) => execute_with_prevalidated(args, run_id, &c, &signer, startup.approved),
+        Ok(c) => execute_with_prevalidated(args, run_id, &c, &signer, approved),
         Err(error) => Err(error),
     };
     (outcome, Some(authenticated_spec))
@@ -1981,29 +2214,40 @@ fn execute_for_reporting(
 /// plan the authorization does not cover, which is a small thing to get wrong
 /// and an easy one to get right.
 fn check_v2_bindings(
+    args: &RunArgs,
     startup: &StartupInputs,
     plan: &DrillSpec,
     contract: Option<&ExecutionContract>,
-) -> Result<(), DrillError> {
+    signing_key: &logweir_evidence::keys::VerifyingKey,
+) -> Result<Option<phase1_approval::Approved>, DrillError> {
     use logweir_core::execution_contract::AuthorizationKind;
 
+    let mut standing_approved = None;
     if let Some(authorization) = startup.authorization.as_ref() {
         let allowed: AllowedClusters =
             serde_json::from_str(&startup.allowed_text).map_err(|error| {
                 DrillError::Operational(format!("allowed-clusters does not parse: {error}"))
             })?;
-        binding::verify_standing_authorization(
+        // **Global Constraint 1: the clock is read HERE**, in
+        // `crates/logweir`, and passed down. `logweir-core` takes `now` as an
+        // argument everywhere for exactly this reason.
+        let now = chrono::Utc::now();
+        let verified = binding::verify_standing_authorization(
             plan,
             &allowed,
             &authorization.document,
             &authorization.sidecar,
             &authorization.keys,
             contract.and_then(|c| c.rehearsal_schedule_uid.as_deref()),
-            // **Global Constraint 1: the clock is read HERE**, in
-            // `crates/logweir`, and passed down. `logweir-core` takes `now` as
-            // an argument everywhere for exactly this reason.
-            chrono::Utc::now(),
+            now,
         )?;
+        standing_approved = Some(standing_approved_from(
+            args,
+            &verified,
+            &startup.spec_text,
+            signing_key,
+            now,
+        )?);
     } else if contract.is_some_and(|c| c.authorization_kind == AuthorizationKind::Standing) {
         // Unreachable through `execution_contract_from`, which refuses a
         // `Standing` contract with no pinned authorization digests, and
@@ -2048,7 +2292,88 @@ fn check_v2_bindings(
             tracing::info!(point_id = %point_id, "recovery point binding verified");
         }
     }
-    Ok(())
+    Ok(standing_approved)
+}
+
+/// The run's [`phase1_approval::Approved`], minted from the SIGNED standing
+/// authorization — PLAT-14.3b.
+///
+/// # Why a rehearsal produces one at all
+///
+/// `Approved` is what phase 1 records and what phase 8 copies into the signed
+/// scorecard, and `measured.rto_seconds` is taken from `validated_at`. A
+/// rehearsal that produced none would either have to skip phase 1 — leaving
+/// the signed evidence silent about what authorized the run — or carry a
+/// fabricated one. This mints it from bytes a human signed, and from nothing
+/// else.
+///
+/// # Every field, and where it comes from
+///
+/// * `approver` — `standing-authorization/<schedule>` from the document's own
+///   `subjectRef.name`. **Never a person's name**: v1 of this document carries
+///   none (PLAT-19.2 adds `requester`/`ticket`), and inventing one would tell a
+///   scorecard reader that a human approved THIS run when what a human approved
+///   was a schedule.
+/// * `ticket` — empty, for the same reason, rather than the slot: `triggered_by`
+///   is already the scorecard's field for why this run happened.
+/// * `plan_hash` — recomputed from the exact plan bytes. The standing document
+///   binds a SCOPE, not one plan's hash; `plan_within_scope` has already proved
+///   this plan falls inside it.
+/// * `approved_at` — the document's `issuedAt`: when the human signed.
+/// * `key_id` — the key the signature actually verified under, returned by
+///   `verify_standing_authorization` rather than re-derived here.
+/// * `self_attested` — computed, though `may_authorize` has already refused an
+///   `EvidenceSigning` key, so a true value is unreachable today and is
+///   labelled rather than assumed false.
+///
+/// # The trigger binding
+///
+/// `--triggered-by`'s `<schedule>` segment must equal the SIGNED
+/// `subjectRef.name`. `validate_execution_contract` checked only the shape,
+/// because at that point no signature had been verified; this is where the
+/// value the auditor reads is bound to the document the human signed.
+fn standing_approved_from(
+    args: &RunArgs,
+    verified: &binding::VerifiedStandingAuthorization,
+    spec_text: &str,
+    signing_key: &logweir_evidence::keys::VerifyingKey,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<phase1_approval::Approved, DrillError> {
+    let doc = &verified.document;
+    let Some((schedule, slot)) = args
+        .triggered_by
+        .as_deref()
+        .and_then(logweir_core::execution_contract::parse_rehearsal_triggered_by)
+    else {
+        return Err(GuardRefusal(format!(
+            "this run is authorized by a standing rehearsal authorization, so --triggered-by \
+             must name the schedule and slot as `{}<schedule>/<slot>`; it is {:?}; no data \
+             operation was started",
+            logweir_core::execution_contract::TRIGGERED_BY_REHEARSAL_PREFIX,
+            args.triggered_by
+        ))
+        .into());
+    };
+    if schedule != doc.subject_ref.name {
+        return Err(GuardRefusal(format!(
+            "--triggered-by names RehearsalSchedule `{schedule}` (slot {slot}) and the signed \
+             standing authorization was issued for `{}`; the run's recorded reason must be the \
+             schedule a human signed for; no data operation was started",
+            doc.subject_ref.name
+        ))
+        .into());
+    }
+    Ok(phase1_approval::Approved {
+        validated_at: now,
+        approval: logweir_core::scorecard::ApprovalInfo {
+            approver: format!("standing-authorization/{}", doc.subject_ref.name),
+            ticket: String::new(),
+            plan_hash: logweir_core::ids::sha256_prefixed(spec_text.as_bytes()),
+            approved_at: doc.issued_at,
+            key_id: verified.key_id.clone(),
+            self_attested: verified.key_id == signing_key.key_id(),
+        },
+    })
 }
 
 fn load_signer(path: &std::path::Path) -> Result<ValidatedSigner, DrillError> {
@@ -2172,12 +2497,25 @@ fn execute_with_validated_approval(
     let signing_pub = signer.verifying_key();
     let approved = record(&mut sc, 1, "approval", || match &prevalidated_approval {
         Some(approved) => Ok(approved.clone()),
-        None => phase1_approval::verify(
-            &c.spec_text,
-            &args.approval,
-            &args.approver_key,
-            &signing_pub,
-        ),
+        // The path-based legacy/standalone entry point. `--approval` is
+        // `Option` since PLAT-14.3b, and absent here means a caller reached
+        // phase 1 with nothing to verify — refused by name rather than
+        // unwrapped. Unreachable through `execute_for_reporting`, which mints
+        // an `Approved` from one of the two authorizations before phase 0.
+        None => match args.approval.as_ref() {
+            Some(approval) => phase1_approval::verify(
+                &c.spec_text,
+                approval,
+                &args.approver_key,
+                &signing_pub,
+            ),
+            None => Err(GuardRefusal(
+                "--approval is required for a run that carries no pre-validated authorization; \
+                 no data operation was started"
+                    .to_string(),
+            )
+            .into()),
+        },
     })?;
     sc.approval = approved.approval.clone();
     sc.approval_validated_at = Some(approved.validated_at);
@@ -3285,7 +3623,7 @@ mod tests {
             execution_contract_version: None,
             store_contract_version: None,
             spec: PathBuf::from("drill.yaml"),
-            approval: PathBuf::from("approval.json"),
+            approval: Some(PathBuf::from("approval.json")),
             approver_key: PathBuf::from("approver.pem"),
             allowed_clusters: PathBuf::from("allowed.json"),
             signing_key: PathBuf::from("signer.pem"),

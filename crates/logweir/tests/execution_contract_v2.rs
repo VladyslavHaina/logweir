@@ -90,8 +90,8 @@ fn fixture_with_plan(plan: Vec<u8>) -> Fixture {
     Fixture {
         bundle: ApprovalBundleBytes {
             plan,
-            approval,
-            approval_sidecar: serde_json::to_vec(&sidecar).unwrap(),
+            approval: Some(approval),
+            approval_sidecar: Some(serde_json::to_vec(&sidecar).unwrap()),
             approver_key: approver
                 .verifying_key()
                 .to_public_key_pem()
@@ -186,8 +186,8 @@ fn contract_for(bundle: &ApprovalBundleBytes, version: wire::ContractVersion) ->
         approval_name: "approval-a".to_string(),
         approval_uid: "approval-uid-a".to_string(),
         plan_sha256: sha256_prefixed(&bundle.plan),
-        approval_sha256: sha256_prefixed(&bundle.approval),
-        approval_sidecar_sha256: sha256_prefixed(&bundle.approval_sidecar),
+        approval_sha256: bundle.approval.as_deref().map(sha256_prefixed),
+        approval_sidecar_sha256: bundle.approval_sidecar.as_deref().map(sha256_prefixed),
         approver_key_sha256: sha256_prefixed(&bundle.approver_key),
         allowed_clusters_sha256: sha256_prefixed(&bundle.allowed_clusters),
         authorization_kind: wire::AuthorizationKind::Approval,
@@ -218,11 +218,6 @@ fn env_map(contract: &ExecutionContract) -> BTreeMap<String, String> {
         (wire::APPROVAL_NAME_ENV, contract.approval_name.clone()),
         (wire::APPROVAL_UID_ENV, contract.approval_uid.clone()),
         (wire::PLAN_SHA256_ENV, contract.plan_sha256.clone()),
-        (wire::APPROVAL_SHA256_ENV, contract.approval_sha256.clone()),
-        (
-            wire::APPROVAL_SIDECAR_SHA256_ENV,
-            contract.approval_sidecar_sha256.clone(),
-        ),
         (
             wire::APPROVER_KEY_SHA256_ENV,
             contract.approver_key_sha256.clone(),
@@ -242,6 +237,11 @@ fn env_map(contract: &ExecutionContract) -> BTreeMap<String, String> {
         );
     }
     for (name, value) in [
+        (wire::APPROVAL_SHA256_ENV, &contract.approval_sha256),
+        (
+            wire::APPROVAL_SIDECAR_SHA256_ENV,
+            &contract.approval_sidecar_sha256,
+        ),
         (
             wire::AUTHORIZATION_SHA256_ENV,
             &contract.authorization_sha256,
@@ -472,6 +472,9 @@ fn the_same_material_under_v2_is_accepted() {
     let fixture = fixture();
     let mut contract = contract_for(&fixture.bundle, wire::ContractVersion::V2);
     contract.authorization_kind = wire::AuthorizationKind::Standing;
+    // PLAT-14.3b: a standing contract pins no per-run approval slot.
+    contract.approval_sha256 = None;
+    contract.approval_sidecar_sha256 = None;
     contract.authorization_sha256 = Some(format!("sha256:{}", "a".repeat(64)));
     contract.authorization_sidecar_sha256 = Some(format!("sha256:{}", "d".repeat(64)));
     contract.authorization_keys_sha256 = Some(format!("sha256:{}", "e".repeat(64)));
@@ -617,13 +620,23 @@ fn every_optional_bundle_member_is_pinned_in_both_directions() {
             |c, d| c.confirmation_key_sha256 = d,
         ),
     ];
+    /// `validate_execution_contract` binds `--triggered-by` to the
+    /// authorization kind since PLAT-14.3b, so a row that flips the contract
+    /// to `Standing` must present the rehearsal trigger.
+    fn trigger_for(contract: &ExecutionContract) -> &'static str {
+        if contract.authorization_kind == wire::AuthorizationKind::Standing {
+            STANDING_TRIGGER
+        } else {
+            "approval/approval-a"
+        }
+    }
     for (label, put_member, pin_digest) in members {
         // (a) Both present and agreeing: accepted.
         let mut bundle = fixture.bundle.clone();
         put_member(&mut bundle, scope.clone());
         let mut contract = contract_for(&fixture.bundle, wire::ContractVersion::V2);
         pin_digest(&mut contract, Some(sha256_prefixed(&scope)));
-        validate_execution_contract(&contract, Some("approval/approval-a"), &bundle)
+        validate_execution_contract(&contract, Some(trigger_for(&contract)), &bundle)
             .unwrap_or_else(|e| panic!("{label}: an agreeing member must be accepted: {e}"));
 
         // (b) Bytes that differ.
@@ -631,14 +644,14 @@ fn every_optional_bundle_member_is_pinned_in_both_directions() {
         let mut altered = scope.clone();
         altered.push(b'!');
         put_member(&mut tampered, altered);
-        let error = validate_execution_contract(&contract, Some("approval/approval-a"), &tampered)
+        let error = validate_execution_contract(&contract, Some(trigger_for(&contract)), &tampered)
             .unwrap_err_or_panic(&format!("{label}: substituted bytes must be refused"));
         assert!(error.to_string().contains(label), "{label}: {error}");
 
         // (c) Pinned, nothing mounted.
         let error = validate_execution_contract(
             &contract,
-            Some("approval/approval-a"),
+            Some(trigger_for(&contract)),
             &fixture.bundle.clone(),
         )
         .unwrap_err_or_panic(&format!("{label}: a lost member must be refused"));
@@ -652,7 +665,7 @@ fn every_optional_bundle_member_is_pinned_in_both_directions() {
         // (d) Mounted, nothing pinned.
         let mut unpinned = contract_for(&fixture.bundle, wire::ContractVersion::V2);
         pin_digest(&mut unpinned, None);
-        let error = validate_execution_contract(&unpinned, Some("approval/approval-a"), &bundle)
+        let error = validate_execution_contract(&unpinned, Some(trigger_for(&unpinned)), &bundle)
             .unwrap_err_or_panic(&format!("{label}: unpinned material must be refused"));
         assert!(
             error.to_string().contains("pins no digest for it"),
@@ -671,8 +684,8 @@ fn the_five_mandatory_members_are_still_hash_bound() {
         let mut changed = fixture.bundle.clone();
         match member {
             0 => changed.plan.push(b'!'),
-            1 => changed.approval.push(b'!'),
-            2 => changed.approval_sidecar.push(b'!'),
+            1 => changed.approval.as_mut().unwrap().push(b'!'),
+            2 => changed.approval_sidecar.as_mut().unwrap().push(b'!'),
             3 => changed.approver_key.push(b'!'),
             4 => changed.allowed_clusters.push(b'!'),
             _ => unreachable!(),
@@ -715,10 +728,10 @@ fn mount(fixture: &Fixture, signed: &SignedAuthorization) -> Mounted {
         _dir: dir,
     };
     std::fs::write(&m.plan, &fixture.bundle.plan).unwrap();
-    std::fs::write(&m.approval, &fixture.bundle.approval).unwrap();
+    std::fs::write(&m.approval, fixture.bundle.approval.as_deref().unwrap()).unwrap();
     std::fs::write(
         m.approval.with_extension("sig"),
-        &fixture.bundle.approval_sidecar,
+        fixture.bundle.approval_sidecar.as_deref().unwrap(),
     )
     .unwrap();
     std::fs::write(&m.approver_key, &fixture.bundle.approver_key).unwrap();
@@ -729,6 +742,10 @@ fn mount(fixture: &Fixture, signed: &SignedAuthorization) -> Mounted {
     std::fs::write(&m.authorization_keys, &signed.keys).unwrap();
     m
 }
+
+/// `--triggered-by` for every standing case here: the schedule
+/// `signed_authorization` names, and one slot.
+const STANDING_TRIGGER: &str = "rehearsal/weekly-orders/20260921T000000";
 
 /// The argv a standing-authorized run carries, beyond the ordinary flags.
 fn standing_argv(m: &Mounted) -> Vec<String> {
@@ -750,6 +767,13 @@ fn standing_contract(
 ) -> ExecutionContract {
     let mut contract = contract_for(&fixture.bundle, wire::ContractVersion::V2);
     contract.authorization_kind = wire::AuthorizationKind::Standing;
+    // **PLAT-14.3b: a standing rehearsal's bundle has NO per-run approval
+    // slot**, so the contract pins no digest for one. Before 14.3b the
+    // controller wrote the standing envelope into `approval.json` as a
+    // placeholder and the runner verified it under `PAYLOAD_TYPE_APPROVAL`,
+    // which is exactly why no rehearsal could execute.
+    contract.approval_sha256 = None;
+    contract.approval_sidecar_sha256 = None;
     contract.authorization_sha256 = Some(sha256_prefixed(&signed.document));
     contract.authorization_sidecar_sha256 = Some(sha256_prefixed(&signed.sidecar));
     contract.authorization_keys_sha256 = Some(sha256_prefixed(&signed.keys));
@@ -763,12 +787,20 @@ fn invoke(
     env: &BTreeMap<String, String>,
     extra: &[&str],
 ) -> (i32, String) {
+    // **A standing-authorized run carries NO `--approval` and its trigger
+    // names the schedule and slot** — PLAT-14.3b. Decided by the CONTRACT the
+    // environment carries, exactly as `load_startup_inputs` decides it: a run
+    // with stray standing material and no contract is an ORDINARY invocation
+    // that must still present its approval, and it is refused for the
+    // unpinned material rather than for a missing flag.
+    let standing = env.get(wire::AUTHORIZATION_KIND_ENV).map(String::as_str)
+        == Some(wire::AUTHORIZATION_KIND_STANDING);
     let mut command = Command::new(env!("CARGO_BIN_EXE_logweir"));
+    command.args(["restore", "run", "--spec"]).arg(&m.plan);
+    if !standing {
+        command.arg("--approval").arg(&m.approval);
+    }
     command
-        .args(["restore", "run", "--spec"])
-        .arg(&m.plan)
-        .arg("--approval")
-        .arg(&m.approval)
         .arg("--approver-key")
         .arg(&m.approver_key)
         .arg("--approver-key-ids")
@@ -777,7 +809,14 @@ fn invoke(
         .arg(&m.allowed)
         .arg("--signing-key")
         .arg(&m.signing)
-        .args(["--triggered-by", "approval/approval-a"])
+        .args([
+            "--triggered-by",
+            if standing {
+                STANDING_TRIGGER
+            } else {
+                "approval/approval-a"
+            },
+        ])
         .args(extra);
     // The runner must see ONLY the variables this case names: the parent test
     // process inherits whatever the developer's shell has, and a stray
@@ -806,12 +845,20 @@ fn invoke_stdout(
     env: &BTreeMap<String, String>,
     extra: &[&str],
 ) -> (i32, String) {
+    // **A standing-authorized run carries NO `--approval` and its trigger
+    // names the schedule and slot** — PLAT-14.3b. Decided by the CONTRACT the
+    // environment carries, exactly as `load_startup_inputs` decides it: a run
+    // with stray standing material and no contract is an ORDINARY invocation
+    // that must still present its approval, and it is refused for the
+    // unpinned material rather than for a missing flag.
+    let standing = env.get(wire::AUTHORIZATION_KIND_ENV).map(String::as_str)
+        == Some(wire::AUTHORIZATION_KIND_STANDING);
     let mut command = Command::new(env!("CARGO_BIN_EXE_logweir"));
+    command.args(["restore", "run", "--spec"]).arg(&m.plan);
+    if !standing {
+        command.arg("--approval").arg(&m.approval);
+    }
     command
-        .args(["restore", "run", "--spec"])
-        .arg(&m.plan)
-        .arg("--approval")
-        .arg(&m.approval)
         .arg("--approver-key")
         .arg(&m.approver_key)
         .arg("--approver-key-ids")
@@ -820,7 +867,14 @@ fn invoke_stdout(
         .arg(&m.allowed)
         .arg("--signing-key")
         .arg(&m.signing)
-        .args(["--triggered-by", "approval/approval-a"])
+        .args([
+            "--triggered-by",
+            if standing {
+                STANDING_TRIGGER
+            } else {
+                "approval/approval-a"
+            },
+        ])
         .args(extra);
     for name in wire::ALL_ENV_ANY {
         command.env_remove(name);

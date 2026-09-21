@@ -81,8 +81,8 @@ fn fixture_with_plan(plan: Vec<u8>) -> Fixture {
     Fixture {
         bundle: ApprovalBundleBytes {
             plan,
-            approval,
-            approval_sidecar,
+            approval: Some(approval),
+            approval_sidecar: Some(approval_sidecar),
             approver_key,
             allowed_clusters: br#"{"allowed_cluster_ids":["cluster-a"]}"#.to_vec(),
             // Bundle contract v2's three optional members. `None` is the
@@ -105,8 +105,8 @@ fn contract(bundle: &ApprovalBundleBytes) -> ExecutionContract {
         approval_name: "approval-a".to_string(),
         approval_uid: "approval-uid-a".to_string(),
         plan_sha256: sha256_prefixed(&bundle.plan),
-        approval_sha256: sha256_prefixed(&bundle.approval),
-        approval_sidecar_sha256: sha256_prefixed(&bundle.approval_sidecar),
+        approval_sha256: bundle.approval.as_deref().map(sha256_prefixed),
+        approval_sidecar_sha256: bundle.approval_sidecar.as_deref().map(sha256_prefixed),
         approver_key_sha256: sha256_prefixed(&bundle.approver_key),
         allowed_clusters_sha256: sha256_prefixed(&bundle.allowed_clusters),
         // Execution contract v2: this build's version, and the ordinary
@@ -139,10 +139,13 @@ fn env_map(contract: &ExecutionContract) -> BTreeMap<String, String> {
         (wire::APPROVAL_NAME_ENV, contract.approval_name.clone()),
         (wire::APPROVAL_UID_ENV, contract.approval_uid.clone()),
         (wire::PLAN_SHA256_ENV, contract.plan_sha256.clone()),
-        (wire::APPROVAL_SHA256_ENV, contract.approval_sha256.clone()),
+        (
+            wire::APPROVAL_SHA256_ENV,
+            contract.approval_sha256.clone().unwrap_or_default(),
+        ),
         (
             wire::APPROVAL_SIDECAR_SHA256_ENV,
-            contract.approval_sidecar_sha256.clone(),
+            contract.approval_sidecar_sha256.clone().unwrap_or_default(),
         ),
         (
             wire::APPROVER_KEY_SHA256_ENV,
@@ -165,8 +168,8 @@ fn exact_contract_content_hashes_and_approval_verify_independently() {
     validate_execution_contract(&contract, Some("approval/approval-a"), &fixture.bundle).unwrap();
     let approved = phase1_approval::verify_bytes(
         std::str::from_utf8(&fixture.bundle.plan).unwrap(),
-        &fixture.bundle.approval,
-        &fixture.bundle.approval_sidecar,
+        fixture.bundle.approval.as_deref().unwrap(),
+        fixture.bundle.approval_sidecar.as_deref().unwrap(),
         &fixture.bundle.approver_key,
         &fixture.signing.verifying_key(),
     )
@@ -183,8 +186,8 @@ fn every_projected_member_is_hash_bound_including_the_allowlist() {
         let mut changed = fixture.bundle.clone();
         match member {
             0 => changed.plan.push(b'!'),
-            1 => changed.approval.push(b'!'),
-            2 => changed.approval_sidecar.push(b'!'),
+            1 => changed.approval.as_mut().unwrap().push(b'!'),
+            2 => changed.approval_sidecar.as_mut().unwrap().push(b'!'),
             3 => changed.approver_key.push(b'!'),
             4 => changed.allowed_clusters.push(b'!'),
             _ => unreachable!(),
@@ -330,10 +333,10 @@ fn substituted_allowlist_is_refused_before_a_bootstrap_socket_is_touched() {
     let allowed = dir.path().join("allowed-clusters.json");
     let signing = dir.path().join("signing.pem");
     std::fs::write(&plan, &fixture.bundle.plan).unwrap();
-    std::fs::write(&approval, &fixture.bundle.approval).unwrap();
+    std::fs::write(&approval, fixture.bundle.approval.as_deref().unwrap()).unwrap();
     std::fs::write(
         approval.with_extension("sig"),
-        &fixture.bundle.approval_sidecar,
+        fixture.bundle.approval_sidecar.as_deref().unwrap(),
     )
     .unwrap();
     std::fs::write(&approver_key, &fixture.bundle.approver_key).unwrap();
@@ -384,7 +387,7 @@ fn a_lost_bundle_member_fails_before_context_or_kafka_is_constructed() {
     let allowed = dir.path().join("allowed-clusters.json");
     let signing = dir.path().join("signing.pem");
     std::fs::write(&plan, &fixture.bundle.plan).unwrap();
-    std::fs::write(&approval, &fixture.bundle.approval).unwrap();
+    std::fs::write(&approval, fixture.bundle.approval.as_deref().unwrap()).unwrap();
     // Deliberately do not create approval.sig: this models a projection lost
     // after the Job was created but before process startup.
     std::fs::write(&approver_key, &fixture.bundle.approver_key).unwrap();
@@ -449,10 +452,10 @@ fn startup_plan_digest_tamper_cannot_trigger_its_notification_destination() {
     let allowed = dir.path().join("allowed-clusters.json");
     let signing = dir.path().join("signing.pem");
     std::fs::write(&plan, tampered_plan).unwrap();
-    std::fs::write(&approval, &fixture.bundle.approval).unwrap();
+    std::fs::write(&approval, fixture.bundle.approval.as_deref().unwrap()).unwrap();
     std::fs::write(
         approval.with_extension("sig"),
-        &fixture.bundle.approval_sidecar,
+        fixture.bundle.approval_sidecar.as_deref().unwrap(),
     )
     .unwrap();
     std::fs::write(&approver_key, &fixture.bundle.approver_key).unwrap();
@@ -539,7 +542,7 @@ fn late_projected_plan_replacement_cannot_redirect_the_authenticated_notificatio
     assert!(mkfifo.success(), "mkfifo failed: {mkfifo}");
     std::fs::write(
         approval.with_extension("sig"),
-        &fixture.bundle.approval_sidecar,
+        fixture.bundle.approval_sidecar.as_deref().unwrap(),
     )
     .unwrap();
     std::fs::write(&approver_key, &fixture.bundle.approver_key).unwrap();
@@ -576,7 +579,7 @@ fn late_projected_plan_replacement_cannot_redirect_the_authenticated_notificatio
         .open(&approval)
         .unwrap();
     std::fs::write(&plan, substituted_plan).unwrap();
-    approval_writer.write_all(&fixture.bundle.approval).unwrap();
+    approval_writer.write_all(fixture.bundle.approval.as_deref().unwrap()).unwrap();
     drop(approval_writer);
 
     let output = child.wait_with_output().unwrap();
