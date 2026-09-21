@@ -1148,6 +1148,36 @@ Legacy mode polls the object every 5s, and every 30s after five consecutive
 errors. Leaving the route closes the connection; the Job keeps running, and
 there is no cancel route in v1.
 
+**The read and the stream carry two different shapes.** `GET
+.../operations/{kind}/{name}` answers `OperationViewResponse` -- `{item,
+requestId}`, both required -- and the stream's `operation` and `reset` frames
+are `serde_json::to_string(&OperationView)`: the flat view, no wrapper, no
+request id. `contract.js` declares both (`decodeD3Operation` and
+`decodeD3OperationFrame`) and the watch uses the right one at each site. An
+envelope arriving on the stream is a contract failure naming its field, never
+a blank render.
+
+**`end` is a reason, not a document, and two of its three reasons are not an
+end.** Its payload is `{"reason": "settled" | "maxDuration" | "vanished"}`.
+`settled` stops the watch -- the run is terminal and its verdict is in, the
+same pair `is_settled` uses on both sides. `vanished` stops it too and says
+so: the last snapshot stays, because it is what was true, and an object
+created later under the same name is a different run. `maxDuration` is the
+CONNECTION's 300-second ceiling, which a run longer than five minutes hits
+while it is still running, so the watch reconnects rather than freezing the
+page on a mid-run snapshot; it falls back to polling after as many empty
+closes as failed connects, and one document in between resets that count. An
+`end` this build cannot read takes the `maxDuration` side, which costs a
+connection rather than showing a running operation as a finished one.
+
+**A rehearsal is labelled before its scorecard exists.** `targetMode` is on
+the published view from the moment a `Restore` is created, and the operation
+view prints it there -- `scratch` or `newTopic` -- for a run that is pending,
+running or refused. It is not the completion guidance: that stays beside the
+scorecard and says what the run produced, while this says what the run is, and
+"these topics are deleted by teardown" is worth reading in advance. A
+`Restore` that records no mode says so; no mode is guessed.
+
 **It computes no state.** In console mode the normalized `state` is one of ten
 words `logweir-api` derives; this page prints the API's word. In legacy mode
 there IS no normalized state, and the page says which API computes it and shows

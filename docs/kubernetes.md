@@ -5200,6 +5200,35 @@ words are `logweir-api`'s, computed from a table this page does not implement a
 second time -- so the view renders the controller's own `status.progress` and
 says which fact it is showing.
 
+**The read route and the stream send two different shapes, and that is the
+server's decision.** `GET .../operations/{kind}/{name}` answers the envelope
+`{item, requestId}`; the stream's `operation` and `reset` frames are the BARE
+view, with no wrapper and no request id -- a request id belongs to a request,
+and a stream that emitted one per frame would publish the same value twenty
+times. The page decodes the two with two shapes.
+
+**`end` carries a reason and no document, and only two of the three reasons
+end anything.** `settled` means the run is terminal AND its verification
+verdict is in, which is the same pair `logweir-api`'s own `is_settled` uses.
+`vanished` means the object is gone: the last snapshot stays on screen, the
+reason is printed beside it, and nothing is re-read, because an object created
+later under the same name is a different run. `maxDuration` is the
+**connection's** 300-second ceiling and not the end of anything -- a backup
+longer than five minutes hits it while it is still running -- so the page
+reconnects, and falls back to polling only after as many empty closes as
+failed connects. A reason this build does not recognise is treated the same
+way, which costs a connection rather than showing a running operation as a
+finished one.
+
+**A rehearsal is labelled a rehearsal before its scorecard exists.** A
+`Restore`'s `targetMode` is on the view from the moment the object is created,
+so `#/operations` says `scratch` or `newTopic` for a run that is pending,
+running or refused -- not only for one that finished. That label is not the
+completion guidance: the guidance says what a run PRODUCED and stays beside
+the scorecard, while the label says what the run IS, and "its topics are
+deleted by teardown" is worth reading before the teardown rather than after
+it. A `Restore` that records no mode says so and no mode is guessed.
+
 **Protection health and schedule health are two questions.** An enabled,
 healthy, never-failing schedule can have no recoverable backup: its evidence may
 not verify, the archive may have lost the object, or its runs may cover topics
