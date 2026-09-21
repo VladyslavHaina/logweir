@@ -406,13 +406,102 @@
     "api": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["enabled"],
-      "description": "D3 §9 / PLAT-17.1. Renders the console/API ServiceAccount and its two roles — the RBAC half only. There is no `image`, no `replicas` and no `service` key, because this chart deploys no console; set `admissionPolicy.consoleServiceAccountName` to the account this renders.",
+      "required": ["enabled", "console"],
+      "description": "D3 §9 / PLAT-17.1. `enabled` renders the console/API principal — the ServiceAccount, its two ClusterRoles and one RoleBinding per configured namespace — and starts nothing; `console.enabled` additionally runs the logweir-console image as that principal. Two switches, because D0's rollout has a real state in which the identity exists and is reviewable with `kubectl auth can-i` while no pod runs. `admissionPolicy.consoleServiceAccountName` must name the account `enabled` renders.",
       "properties": {
         "enabled": { "type": "boolean" },
         "namespaces": {
           "type": "array",
           "items": { "type": "string", "minLength": 1 }
+        },
+        "console": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["enabled", "mode"],
+          "description": "D0 stage 7 calls this block `console.*` and the chart's values call the principal `api.*`; `api.console.*` is both names where a reader needs both. What this file types and what it CANNOT: the schema refuses a non-HTTPS publicBaseUrl, a mode outside the two, a port outside 1-65535 and a session lifetime outside 60-900. It cannot express `shared mode requires oidc.issuer` or `an Ingress requires a TLS secret`, because a JSON Schema conditional there would report an anonymous failure; those are `fail` calls in templates/ui/api-config.yaml, which name the field and say why.",
+          "properties": {
+            "enabled": { "type": "boolean" },
+            "image": { "type": "string", "minLength": 1 },
+            "imagePullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] },
+            "mode": {
+              "type": "string",
+              "enum": ["localAdmin", "shared"],
+              "description": "`localAdmin` is a loopback listener reached with kubectl port-forward: one configured administrator, no identity provider, no Ingress. `shared` is the SSO console: OIDC, an encrypted session cookie, exact role bindings, and TLS in front. logweir-api itself has NO default mode — a configuration that forgets to name one is refused rather than read as the more permissive one — and neither does this chart."
+            },
+            "replicas": { "type": "integer", "minimum": 1 },
+            "port": { "type": "integer", "minimum": 1, "maximum": 65535 },
+            "localAdminSubject": { "type": "string" },
+            "keySecret": { "type": "string" },
+            "keyVersion": { "type": "integer", "minimum": 1 },
+            "publicBaseUrl": {
+              "type": "string",
+              "pattern": "^$|^https://[^/?#@]+$",
+              "description": "TLS AT THE SHARED ENTRY POINT IS TYPED HERE, not only checked at render time, so `--set api.console.publicBaseUrl=http://console.example.com` is refused by the schema before a template runs. The pattern also refuses a path, a query, a fragment, userinfo and a trailing slash: the OIDC redirect URI is this value plus /auth/callback, and a value that is wrong here is a login that cannot complete. The empty string is permitted for localAdmin mode, where the field is unused."
+            },
+            "sessionMaxAgeSeconds": { "type": "integer", "minimum": 60, "maximum": 900 },
+            "trustedProxyCidrs": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "oidc": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "issuer": { "type": "string" },
+                "clientId": { "type": "string" },
+                "clientSecret": {
+                  "type": "string",
+                  "description": "The NAME of a Secret in the release namespace holding the client secret under the key `clientSecret`. Never the secret itself: a literal here would travel into the rendered manifest, into `helm get manifest`, and into charts/logweir/rendered/."
+                }
+              }
+            },
+            "roles": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "revision": { "type": "string" },
+                "bindings": {
+                  "type": "array",
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": ["role", "namespace"],
+                    "properties": {
+                      "role": { "type": "string", "enum": ["viewer", "operator", "approver", "administrator"] },
+                      "namespace": { "type": "string", "minLength": 1 },
+                      "groups": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+                      "subjects": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+                    }
+                  }
+                }
+              }
+            },
+            "ingress": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "className": { "type": "string" },
+                "host": { "type": "string" },
+                "tlsSecretName": { "type": "string" },
+                "annotations": { "type": "object", "additionalProperties": { "type": "string" } }
+              }
+            },
+            "networkPolicy": {
+              "type": "object",
+              "additionalProperties": false,
+              "properties": {
+                "enabled": { "type": "boolean" },
+                "ingressNamespace": { "type": "string" },
+                "ingressPodLabels": { "type": "object", "additionalProperties": { "type": "string" } },
+                "oidcCIDRs": { "type": "array", "items": { "type": "string", "minLength": 1 } }
+              }
+            },
+            "resources": { "type": "object" },
+            "nodeSelector": { "$ref": "#/definitions/nodeSelector" },
+            "tolerations": { "$ref": "#/definitions/tolerations" },
+            "affinity": { "$ref": "#/definitions/affinity" }
+          }
         }
       }
     }

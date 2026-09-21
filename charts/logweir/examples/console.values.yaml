@@ -1,0 +1,38 @@
+# console.values.yaml — THE CONSOLE IN ITS DEFAULT MODE. D0 stage 7.
+#
+# `api.console.mode: localAdmin` is the chart's default and this file does not
+# set it: the point of the example is what an installation gets when it turns
+# the console on and configures nothing else about identity.
+#
+# WHAT THAT MODE IS, IN ONE PARAGRAPH. `logweir-api` refuses any non-loopback
+# listener in localAdmin mode (`crates/logweir-api/src/config.rs`), so the pod
+# binds `127.0.0.1` and NOTHING answers at its Pod IP or through its ClusterIP.
+# There is no identity provider and no session: every request is attributed to
+# the one configured administrator, and the authority actually exercised is the
+# `<release>-api` ServiceAccount's — which is `templates/ui/api-rbac.yaml`'s
+# narrow grant and never a kubeconfig. Reaching it therefore requires the
+# Kubernetes permission to port-forward into the pod:
+#
+#     kubectl --context docker-desktop -n logweir-system \
+#       port-forward svc/logweir-api 8484:8484
+#     open http://127.0.0.1:8484/ui/
+#
+# THIS IS NOT SHARED-CONSOLE MODE AND MUST NOT BE DESCRIBED AS ONE. See
+# `console-shared.values.yaml` for that: OIDC, an encrypted session cookie,
+# exact role bindings, a TLS Ingress and a NetworkPolicy. D0's rollout order is
+# to install the identity first (`api.enabled` alone), then this, then that.
+#
+# THE ONE THING YOU MUST CREATE FIRST is the key Secret. The chart deliberately
+# does not generate it — a Helm-generated key changes on every render and is
+# unrecoverable on upgrade, and D0 requires these to be persistent, versioned
+# Secrets created or adopted explicitly:
+#
+#     head -c 32 /dev/urandom > cursor.key
+#     kubectl --context docker-desktop -n logweir-system \
+#       create secret generic logweir-console-keys --from-file=cursor.key
+#     rm cursor.key
+api:
+  enabled: true
+  console:
+    enabled: true
+    keySecret: logweir-console-keys

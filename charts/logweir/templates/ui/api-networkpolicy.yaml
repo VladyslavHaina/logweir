@@ -1,0 +1,148 @@
+{{/*
+`api.console.networkPolicy.enabled` — WHAT MAY REACH THE CONSOLE, AND WHAT THE
+CONSOLE MAY REACH.
+
+THE SAME SHAPE AND THE SAME WARNING AS `templates/networkpolicy.yaml`, which
+this file deliberately mirrors rather than extends: that file's podSelector is
+runner Jobs and identity-bootstrap pods, whose egress must reach brokers and
+object storage; this one's is the console, whose egress must reach neither. Two
+policies, two arguments, one style.
+
+DOCKER DESKTOP COMMONLY HAS NO ENFORCING CNI. Kubernetes states that a
+NetworkPolicy has no effect without a network plugin that implements it, and
+that Service/source-IP rewriting is implementation-dependent. A local install
+that "works" proves the objects are well-formed and nothing about deny
+behaviour; D0 says so by name — "Docker Desktop without enforcing CNI is
+explicitly NOT acceptable proof of deny behavior". The `[UNVERIFIED — …]` mark
+below is the bracket-anchored form `scripts/check-unverified-labels.sh` reads.
+
+---------------------------------------------------------------------------
+INGRESS: THE CONFIGURED INGRESS CONTROLLER, AND NOTHING ELSE
+---------------------------------------------------------------------------
+Both selectors are required (`logweir.api.consoleChecks` refuses either one
+empty): an ingress rule with no `from` admits nothing, and one with an empty
+podSelector admits every pod in the controller's namespace, which is not what
+"only the configured ingress controller" means.
+
+`localAdmin` mode needs no ingress rule at all and gets the same one anyway.
+That is not a contradiction: in that mode nothing answers at the Pod IP, and
+`kubectl port-forward` reaches the pod through the kubelet rather than over the
+pod network, so it is unaffected by any NetworkPolicy. An installation running
+the default mode should simply leave this component off.
+
+---------------------------------------------------------------------------
+EGRESS: DNS, THE KUBERNETES API, AND THE IDENTITY PROVIDER. NOT KAFKA, NOT S3.
+---------------------------------------------------------------------------
+D0: the API "does not dial Kafka or object storage", and `logweir-api`'s
+dependency graph carries no Kafka client and no object-store client — so this
+policy is a second, structural statement of a property the binary already has.
+The ports it does NOT list are the point: 9092/9094/9095/9096/9097 (brokers) and
+9000 (MinIO) appear in `templates/networkpolicy.yaml`'s RUNNER rule and are
+absent here.
+
+The Kubernetes API destinations are discovered the same way that file discovers
+them — the `kubernetes.default` ClusterIP, the visible endpoint addresses, and
+`identity.kubernetesApiCIDRs` — because pre- and post-DNAT matching differs by
+CNI and neither form is portable on its own. `lookup` returns nothing under
+`helm template`, so the rendered fixtures carry only the operator-supplied
+CIDRs and stay byte-stable.
+
+THE IDENTITY PROVIDER IS CIDRs OR NOTHING. NetworkPolicy has no FQDN concept, so
+a provider behind a rotating address cannot be expressed here; D0 requires
+"documented CIDRs or an approved egress proxy and production-CNI validation".
+`api.console.networkPolicy.oidcCIDRs` is that documented list, on 443 only. Left
+empty in shared mode this policy will BLOCK OIDC discovery under an enforcing
+CNI, and the console will start NotReady — which is the honest failure, not a
+reason to widen the rule to 0.0.0.0/0.
+*/}}
+{{- if and .Values.api.enabled .Values.api.console.enabled .Values.api.console.networkPolicy.enabled }}
+{{- include "logweir.api.consoleChecks" . }}
+{{- $c := .Values.api.console }}
+{{- $name := include "logweir.api.consoleName" . }}
+{{- $apiCIDRs := list }}
+{{- range $cidr := .Values.identity.kubernetesApiCIDRs }}
+{{- $apiCIDRs = append $apiCIDRs $cidr }}
+{{- end }}
+{{- $apiService := lookup "v1" "Service" "default" "kubernetes" }}
+{{- if and $apiService $apiService.spec.clusterIP (ne $apiService.spec.clusterIP "None") }}
+{{- $mask := ternary "128" "32" (contains ":" $apiService.spec.clusterIP) }}
+{{- $apiCIDRs = append $apiCIDRs (printf "%s/%s" $apiService.spec.clusterIP $mask) }}
+{{- end }}
+{{- $apiEndpoints := lookup "v1" "Endpoints" "default" "kubernetes" }}
+{{- if $apiEndpoints }}
+{{- range $subset := $apiEndpoints.subsets }}
+{{- range $address := $subset.addresses }}
+{{- $mask := ternary "128" "32" (contains ":" $address.ip) }}
+{{- $apiCIDRs = append $apiCIDRs (printf "%s/%s" $address.ip $mask) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $apiCIDRs = uniq $apiCIDRs }}
+# [UNVERIFIED — enforcement: Docker Desktop may accept this object without a
+# NetworkPolicy-enforcing CNI. Validate deny/allow behavior on the production
+# CNI; Service ClusterIP versus post-DNAT endpoint matching is provider-specific.]
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: logweir
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: api
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ $c.networkPolicy.ingressNamespace }}
+          podSelector:
+            matchLabels:
+              {{- toYaml $c.networkPolicy.ingressPodLabels | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: {{ int $c.port }}
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              component: kube-apiserver
+        {{- range $cidr := $apiCIDRs }}
+        - ipBlock:
+            cidr: {{ $cidr }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+  {{- with $c.networkPolicy.oidcCIDRs }}
+    - to:
+        {{- range $cidr := . }}
+        - ipBlock:
+            cidr: {{ $cidr }}
+        {{- end }}
+      ports:
+        - protocol: TCP
+          port: 443
+  {{- end }}
+{{- end }}

@@ -165,10 +165,49 @@ retention:
   enabled: false
 
 # ------------------------- api.enabled — the console/API principal's RBAC (D3)
-# ServiceAccount + roles only: no Deployment, no image, no Service (PLAT-17.1).
+# ServiceAccount + roles only. api.console.enabled additionally runs the pod.
 api:
   enabled: false
   namespaces: []                # extra namespaces to bind in; defaults to kubernetes.namespace
+  # --------- api.console — D0's `console.*`: the logweir-console workload (D0 §7)
+  # localAdmin binds loopback and is reached with port-forward; shared is SSO.
+  console:
+    enabled: false              # needs api.enabled; D0 installs the identity first
+    image: docker.io/vladyslavhaina/logweir-console:latest  # logweir-api + the page
+    imagePullPolicy: Always     # use Never for locally loaded images
+    mode: localAdmin            # localAdmin | shared. No default in the binary
+    replicas: 1                 # above 1 also renders a PodDisruptionBudget
+    port: 8484                  # container port and ClusterIP Service port
+    localAdminSubject: admin    # localAdmin: the one actor every request is recorded as
+    keySecret: ""               # REQUIRED Secret: cursor.key, plus session.key when shared
+    keyVersion: 1               # the `version:` those key files must declare
+    publicBaseUrl: ""           # shared: EXACT https:// URL, no path, no trailing slash
+    sessionMaxAgeSeconds: 900   # shared: 60..900; a stateless session cannot be revoked
+    trustedProxyCidrs: []       # shared: transport LOGGING only, never an identity
+    oidc:
+      issuer: ""                # EXACT, as the discovery document states it
+      clientId: ""              # EXACT; also the expected audience
+      clientSecret: ""          # the NAME of a Secret with key `clientSecret`
+    roles:
+      revision: ""              # shared: recorded in every audit line
+      bindings: []              # [{role, namespace, groups, subjects}] — EXACT strings
+    ingress:
+      enabled: false            # shared only; refused in localAdmin mode
+      className: ""
+      host: ""                  # publicBaseUrl's own authority
+      tlsSecretName: ""         # REQUIRED when enabled: there is no plain-HTTP console
+      annotations: {}           # HSTS belongs here, with the controller's own key
+    networkPolicy:
+      enabled: false            # Docker Desktop may accept these without enforcing them
+      ingressNamespace: ""      # the ingress controller's namespace
+      ingressPodLabels: {}      # and its pod labels; both required when enabled
+      oidcCIDRs: []             # exact IdP /32 or /128 endpoints; TCP 443 only
+    resources:
+      requests: { cpu: 25m, memory: 64Mi }
+      limits: { memory: 256Mi }
+    nodeSelector: {}
+    tolerations: []
+    affinity: {}
 
 # ------------------------------------------- ui.enabled — the page, in-cluster
 # `kubectl proxy` with the ServiceAccount's own authority: anyone who reaches

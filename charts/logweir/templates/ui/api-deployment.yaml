@@ -1,0 +1,249 @@
+{{/*
+`api.console.enabled` — THE CONSOLE POD, ITS Service, AND ITS DISRUPTION BUDGET.
+
+`api-config.yaml`'s header carries the two switches, the naming, and why the
+configuration is an immutable ConfigMap with no credential in it. This file is
+the workload: one Deployment running `logweir-api --config` out of the
+`logweir-console` image (`Dockerfile.console`), one ClusterIP Service, and a
+PodDisruptionBudget only where one can do any good.
+
+---------------------------------------------------------------------------
+THE SERVICE EXISTS IN BOTH MODES AND ONLY ONE MODE ANSWERS ON IT
+---------------------------------------------------------------------------
+In `shared` mode the process binds `0.0.0.0` and the ClusterIP is the Ingress's
+backend, as usual.
+
+In `localAdmin` mode — THE DEFAULT — `config.rs` refuses any non-loopback
+listener, so nothing answers at the Pod IP and the ClusterIP is dead by
+construction. The Service is still rendered, and it is not decoration: it is the
+stable name `kubectl port-forward svc/<release>-api 8484:8484` resolves, and
+port-forward reaches the pod's own network namespace through the API server
+rather than through the ClusterIP. So the object an administrator names is the
+same in both modes, and the difference between "reachable by anything in the
+cluster" and "reachable by someone who already has `create pods/portforward`"
+is made by the LISTENER, where the binary enforces it, and not by whether a
+template rendered a Service.
+
+Stated the other way round, because it is the answer to PLAT-17.1's residue and
+to `ui.yaml`'s whole header: turning this component on CANNOT produce an
+unauthenticated shared console. The legacy proxy's model is "anyone who can
+reach the Service acts as the ServiceAccount". This pod's default mode answers
+nobody who reaches the Service, and its shared mode authenticates every request
+before it reaches a route.
+
+ClusterIP AND NOTHING ELSE, with no chart value to change it. D0: "A ClusterIP
+Service exposes only the console port. No NodePort/LoadBalancer by default." A
+NodePort would put the console on every node's address, ahead of the Ingress and
+its TLS; the supported public path is the Ingress and nothing else.
+
+---------------------------------------------------------------------------
+PROBES, AND WHY THERE ARE NONE IN localAdmin MODE
+---------------------------------------------------------------------------
+`shared` mode gets both: `/healthz` as the liveness probe (process liveness
+only, consults nothing) and `/readyz` as the readiness probe (additionally
+requires that Kubernetes answers for this service's identity; its body never
+says which endpoint or why). Both are exempt from the service's own `Host`
+allowlist precisely because a kubelet addresses the Pod by IP.
+
+`localAdmin` mode gets NEITHER, and that is a consequence of the loopback rule
+rather than an omission. The kubelet performs an HTTP probe from the node's
+network namespace against the POD IP; a loopback-only listener refuses that
+connection, so a readiness probe would hold the pod permanently NotReady and a
+liveness probe would kill and restart a console that is working perfectly. A
+probe that cannot succeed is not a weaker check than none — it is an outage.
+`httpGet.host: 127.0.0.1` is not the escape it looks like: that is the NODE's
+loopback, not the pod's.
+
+What is lost is real and is said out loud in `charts/logweir/README.md`: in
+localAdmin mode the Deployment reports Ready as soon as the container starts,
+so a configuration the binary refuses (exit 2) shows up as CrashLoopBackOff in
+`kubectl get pods` rather than as a NotReady endpoint. The container's exit code
+and its one-line refusal naming the field are the signal.
+
+---------------------------------------------------------------------------
+THE TOKEN, THE FILESYSTEM, AND THE THREE MOUNTS
+---------------------------------------------------------------------------
+`automountServiceAccountToken: true`. This is the one optional component beside
+the legacy proxy that needs its token, and for the opposite reason: the proxy
+attaches its token to requests a BROWSER composed, while this service composes
+every Kubernetes call itself through one sealed adapter after authenticating and
+authorizing the actor. The mounted token is the projected, time-bound kind
+(BoundServiceAccountTokenVolume, the default since Kubernetes 1.21), which is
+what D0 means by "projected token".
+
+`readOnlyRootFilesystem: true` with ONE writable volume, `/tmp`, and no state in
+it: the twenty-two page files are read into memory once at startup
+(`assets.rs`), the configuration and the keys are read-only mounts, and every
+audit record goes to stdout.
+
+The key mount is `defaultMode: 0400` and read-only. It is a Secret volume, so
+the kubelet writes it to a tmpfs, and it is mounted at a path the ConfigMap
+names — one place decides, `api-config.yaml`'s `logweir.api.keyDir`.
+*/}}
+{{- if and .Values.api.enabled .Values.api.console.enabled }}
+{{- include "logweir.api.consoleChecks" . }}
+{{- $c := .Values.api.console }}
+{{- $name := include "logweir.api.consoleName" . }}
+{{- $configHash := include "logweir.api.config" . | sha256sum }}
+{{- $configName := printf "%s-config-%s" $name (trunc 10 $configHash) }}
+{{- $keys := include "logweir.api.keyDir" . }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/component: api
+  ports:
+    - name: http
+      port: {{ int $c.port }}
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  replicas: {{ int $c.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: logweir
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: api
+  template:
+    metadata:
+      annotations:
+        {{- /*
+        The ConfigMap is immutable and content-addressed, so its NAME already
+        changes when the configuration does and the pod would roll anyway. This
+        annotation is here for the reader and for `kubectl rollout status`: it
+        is the digest of the exact document the pod is running, visible without
+        resolving the volume.
+        */}}
+        checksum/logweir-api-config: {{ $configHash }}
+      labels:
+        app.kubernetes.io/name: logweir
+        app.kubernetes.io/instance: {{ .Release.Name }}
+        app.kubernetes.io/component: api
+    spec:
+      serviceAccountName: {{ $name }}
+      {{- with (include "logweir.placement" (dict "root" $ "over" $c)) }}
+      {{- . | nindent 6 }}
+      {{- end }}
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 65532
+        runAsGroup: 65532
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: {{ $c.image }}
+          imagePullPolicy: {{ $c.imagePullPolicy }}
+          args:
+            - --config
+            - /etc/logweir/api/config.yaml
+          ports:
+            - name: http
+              containerPort: {{ int $c.port }}
+          {{- if eq $c.mode "shared" }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+            periodSeconds: 5
+          {{- end }}
+          resources:
+            {{- toYaml $c.resources | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: config
+              mountPath: /etc/logweir/api
+              readOnly: true
+            - name: keys
+              mountPath: {{ $keys }}
+              readOnly: true
+            {{- if eq $c.mode "shared" }}
+            - name: oidc
+              mountPath: {{ include "logweir.api.oidcDir" . }}
+              readOnly: true
+            {{- end }}
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: config
+          configMap:
+            name: {{ $configName }}
+            items:
+              - key: config.yaml
+                path: config.yaml
+        {{- /*
+        THE KEYS. `optional` is deliberately absent: a Secret that is not there
+        holds the pod in ContainerCreating with an event naming it, which is a
+        better failure than a console that starts and mints cursors with a key
+        it invented. `defaultMode: 0400` because the process reads them and
+        nothing else in the container should.
+        */}}
+        - name: keys
+          secret:
+            secretName: {{ $c.keySecret }}
+            defaultMode: 0400
+        {{- if eq $c.mode "shared" }}
+        - name: oidc
+          secret:
+            secretName: {{ $c.oidc.clientSecret }}
+            defaultMode: 0400
+            items:
+              - key: clientSecret
+                path: clientSecret
+        {{- end }}
+        - name: tmp
+          emptyDir: {}
+{{- if gt (int $c.replicas) 1 }}
+---
+{{- /*
+A PodDisruptionBudget ONLY ABOVE ONE REPLICA, and the condition is the whole
+argument. D0's Helm list names a PDB; a PDB over a single-replica Deployment
+with `minAvailable: 1` makes `kubectl drain` block forever on a node with the
+only console pod on it, which turns an availability object into an outage during
+a node upgrade. With two or more replicas `maxUnavailable: 1` is what it should
+have been all along: a rolling disruption, never a simultaneous one.
+*/}}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+spec:
+  maxUnavailable: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: logweir
+      app.kubernetes.io/instance: {{ .Release.Name }}
+      app.kubernetes.io/component: api
+{{- end }}
+{{- end }}

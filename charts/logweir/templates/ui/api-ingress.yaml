@@ -1,0 +1,70 @@
+{{/*
+`api.console.ingress.enabled` — THE SHARED CONSOLE'S ONLY PUBLIC ENTRY POINT.
+
+SHARED MODE ONLY, AND TLS IS NOT OPTIONAL. `api-config.yaml`'s
+`logweir.api.consoleChecks` refuses this object outright in `localAdmin` mode
+(D0: the local administrator path "must not bind 0.0.0.0, get an Ingress, or be
+described as shared-console mode" — it authenticates nobody, so an Ingress in
+front of it is an unauthenticated shared console), and it refuses an empty
+`tlsSecretName` in shared mode. The refusal is at RENDER time, so it is a chart
+that does not install rather than an installation that publishes a console over
+plain HTTP. The service refuses the matching half at startup: a `publicBaseUrl`
+that is not `https://` is exit 2 before any socket.
+
+WHAT AN Ingress DOES NOT DO, STATED HERE BECAUSE IT IS ROUTINELY ASSUMED.
+An Ingress object has no effect without a controller, and controller behaviour
+varies between implementations — Kubernetes documents both
+(https://kubernetes.io/docs/concepts/services-networking/ingress/). This chart
+renders the object and the TLS reference; it does not install a controller,
+cannot verify that the named Secret holds a certificate for the named host, and
+cannot make the controller honour the annotations an installation adds. HSTS in
+particular is the controller's to set: D0 puts it at the ingress, and there is
+no portable Ingress field for it, so it belongs in
+`api.console.ingress.annotations` with the controller's own key.
+
+The API sets its own CSP, `X-Content-Type-Options`, `Referrer-Policy` and
+Permissions-Policy on every response (`crates/logweir-api/src/http.rs`), so
+those are NOT annotations here: a header the application sets is a header that
+survives changing the ingress controller.
+
+ONE HOST, ONE PATH PREFIX, ONE BACKEND. There is no second rule and no
+per-path split: the console is one origin serving `/ui/`, `/api/v1`, `/auth/*`
+and the two health paths, and splitting it across backends would break the
+same-origin cookie and CSRF model it depends on.
+*/}}
+{{- if and .Values.api.enabled .Values.api.console.enabled .Values.api.console.ingress.enabled }}
+{{- include "logweir.api.consoleChecks" . }}
+{{- $c := .Values.api.console }}
+{{- $name := include "logweir.api.consoleName" . }}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ $name }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    {{- include "logweir.labels" . | nindent 4 }}
+    app.kubernetes.io/component: api
+  {{- with $c.ingress.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  {{- with $c.ingress.className }}
+  ingressClassName: {{ . | quote }}
+  {{- end }}
+  tls:
+    - hosts:
+        - {{ $c.ingress.host | quote }}
+      secretName: {{ $c.ingress.tlsSecretName | quote }}
+  rules:
+    - host: {{ $c.ingress.host | quote }}
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: {{ $name }}
+                port:
+                  name: http
+{{- end }}

@@ -126,6 +126,18 @@ values_bootstrap="$(sed -n 's/^[[:space:]]*bootstrapImage:[[:space:]]*"\{0,1\}\(
 # because `minio:` and `demoKafka:` carry an `image:` at the same indent and
 # `ui:` is the last block in the file.
 values_ui="$(sed -n 's/^[[:space:]]\{2\}image:[[:space:]]*\([^[:space:]]*\).*$/\1/p' "$CHART/values.yaml" | tail -1)"
+# `api.console.image` IS NESTED ONE LEVEL DEEPER (four spaces), which is what
+# keeps the `tail -1` above pointing at `ui.image`: `api:` comes before `ui:` in
+# values.yaml and its own `image:` is not at two spaces. It is read INSIDE its
+# block rather than by indentation alone, so moving either block cannot silently
+# repoint one expression at the other's value.
+values_console="$(awk '
+  /^api:/     { inapi = 1; next }
+  /^[a-zA-Z]/ { inapi = 0 }
+  inapi && /^    image:[[:space:]]/ {
+    sub(/^    image:[[:space:]]*/, ""); sub(/[[:space:]].*$/, ""); print; exit
+  }
+' "$CHART/values.yaml")"
 # THE TREE'S REFERENCES, WHOLE — each still a digest under Global Constraint 7.
 tree_controller="$(sed -n 's/^[[:space:]]*image:[[:space:]]*\([^[:space:]]*\)[[:space:]]*$/\1/p' config/manager/deployment.yaml)"
 tree_runner="$(grep -A1 '^pub const RUNNER_IMAGE: &str =' crates/weirkeeper/src/job.rs | sed -n 's/^[[:space:]]*"\(.*\)";$/\1/p')"
@@ -158,6 +170,13 @@ fi
 # move therefore carries all three, which is the property arm 7 exists for.
 UI_IMAGE_NAME="logweir-ui"
 ui_repo="${runner_repo%/*}/$UI_IMAGE_NAME"
+# THE FOURTH REPOSITORY, D0 stage 7, derived exactly as the third is and for the
+# same reason: a namespace move must carry all four without editing this gate.
+# The NAME is D0's word for the deliverable (`Dockerfile.console`); the chart's
+# values block and the binary keep the crate's (`api.*`, `logweir-api`), and
+# charts/logweir/README.md reconciles the two.
+CONSOLE_IMAGE_NAME="logweir-console"
+console_repo="${runner_repo%/*}/$CONSOLE_IMAGE_NAME"
 if [ "${runner_repo%/*}" = "$runner_repo" ]; then
   echo "FAIL: could not derive the UI repository's namespace from the runner pin '$tree_runner'" >&2
   echo "      crates/weirkeeper/src/job.rs's RUNNER_IMAGE must name <host>/<namespace>/<name>@sha256:<64 hex>" >&2
@@ -166,6 +185,7 @@ fi
 want_controller="$controller_repo:$LOGWEIR_TAG"
 want_runner="$runner_repo:$LOGWEIR_TAG"
 want_ui="$ui_repo:$LOGWEIR_TAG"
+want_console="$console_repo:$LOGWEIR_TAG"
 if [ "$values_controller" != "$want_controller" ]; then
   echo "FAIL: values.yaml controllerImage is '$values_controller'; it must be exactly '$want_controller'" >&2
   echo "      (arm 7: the repository is config/manager/deployment.yaml's, the tag is this chart's ruling of 2026-09-12)" >&2
@@ -176,6 +196,14 @@ if [ "$values_runner" != "$want_runner" ]; then
   echo "      (arm 7: the repository is crates/weirkeeper/src/job.rs's RUNNER_IMAGE, the tag is this chart's ruling of 2026-09-12)" >&2
   fail=1
 fi
+if [ "$values_console" != "$want_console" ]; then
+  echo "FAIL: values.yaml api.console.image is '$values_console'; it must be exactly '$want_console'" >&2
+  echo "      (arm 7, D0 stage 7: the namespace is the runner pin's, the name is logweir-console —" >&2
+  echo "      the image Dockerfile.console builds — and the tag is this chart's ruling of" >&2
+  echo "      2026-09-12. This is the image the console POD runs; ui.image is the legacy" >&2
+  echo "      kubectl-proxy image, and the two are different principals.)" >&2
+  fail=1
+fi
 if [ "$values_ui" != "$want_ui" ]; then
   echo "FAIL: values.yaml ui.image is '$values_ui'; it must be exactly '$want_ui'" >&2
   echo "      (arm 7, Task 39: the namespace is the runner pin's, the name is logweir-ui — the" >&2
@@ -184,8 +212,8 @@ if [ "$values_ui" != "$want_ui" ]; then
   fail=1
 fi
 [ "$values_controller" = "$want_controller" ] && [ "$values_runner" = "$want_runner" ] &&
-  [ "$values_ui" = "$want_ui" ] &&
-  echo "   ok: controllerImage, runnerImage and ui.image are the tree's repositories at $LOGWEIR_TAG"
+  [ "$values_ui" = "$want_ui" ] && [ "$values_console" = "$want_console" ] &&
+  echo "   ok: controllerImage, runnerImage, ui.image and api.console.image are the tree's repositories at $LOGWEIR_TAG"
 
 bootstrap_required_diagnostic="identity.bootstrapImage must name a reviewed runner digest"
 if [ -z "$values_bootstrap" ]; then
@@ -313,7 +341,7 @@ done
 # The two Logweir repositories come from arm 7 above, which is why that arm runs
 # first. They are the ONLY references allowed to be a tag here, and the only tag
 # allowed is $LOGWEIR_TAG — exactly.
-echo "== 5. every rendered image is a digest, except the three Logweir images at $LOGWEIR_TAG (and $DIGEST_EXEMPT, by name) =="
+echo "== 5. every rendered image is a digest, except the four Logweir images at $LOGWEIR_TAG (and $DIGEST_EXEMPT, by name) =="
 images=0
 logweir_tagged=0
 for f in "$RENDERED"/*.yaml; do
@@ -348,12 +376,13 @@ for f in "$RENDERED"/*.yaml; do
     # `-ui` there. Before Task 39 added the third arm, the UI reference fell
     # through to the digest arm below and was reported as an un-digested tag.
     case "$ref" in
-      "$controller_repo":*|"$runner_repo":*|"$ui_repo":*|"$controller_repo"@*|"$runner_repo"@*|"$ui_repo"@*)
+      "$controller_repo":*|"$runner_repo":*|"$ui_repo":*|"$console_repo":*|"$controller_repo"@*|"$runner_repo"@*|"$ui_repo"@*|"$console_repo"@*)
         logweir_tagged=$((logweir_tagged + 1))
         if [ "$ref" != "$controller_repo:$LOGWEIR_TAG" ] &&
            [ "$ref" != "$runner_repo:$LOGWEIR_TAG" ] &&
-           [ "$ref" != "$ui_repo:$LOGWEIR_TAG" ]; then
-          echo "FAIL: $base references a Logweir image as '$ref'; this chart names all three by '<repository>:$LOGWEIR_TAG' (arm 7)" >&2
+           [ "$ref" != "$ui_repo:$LOGWEIR_TAG" ] &&
+           [ "$ref" != "$console_repo:$LOGWEIR_TAG" ]; then
+          echo "FAIL: $base references a Logweir image as '$ref'; this chart names all four by '<repository>:$LOGWEIR_TAG' (arm 7)" >&2
           fail=1
         fi
         continue
@@ -368,7 +397,7 @@ for f in "$RENDERED"/*.yaml; do
         ;;
     esac
     case "$ref" in
-      *:latest*) echo "FAIL: $base references :latest ('$ref') — only the three Logweir images may carry a tag here" >&2; fail=1 ;;
+      *:latest*) echo "FAIL: $base references :latest ('$ref') — only the four Logweir images may carry a tag here" >&2; fail=1 ;;
     esac
   done < <(grep -E '^[[:space:]]+(- )?image:[[:space:]]' "$f")
 done
@@ -384,7 +413,7 @@ fi
 
 # ---------------------------------------------------------------- 6. the schema
 echo "== 6. values.schema.json refuses a non-boolean flag =="
-for flag in demoKafka.enabled minio.enabled ui.enabled identity.enabled admissionPolicy.enabled notify.allowInsecureSinks; do
+for flag in demoKafka.enabled minio.enabled ui.enabled identity.enabled admissionPolicy.enabled notify.allowInsecureSinks api.enabled api.console.enabled; do
   helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} --set "$flag=yes" > /dev/null 2> "$tmp/schema-$flag.err"
   rc=$?
   if [ "$rc" -eq 0 ]; then
@@ -549,7 +578,7 @@ if [ "$fail" -ne 0 ]; then
   exit 1
 fi
 echo "ok: charts/logweir — CRDs byte-identical, no copy of ui/ (the page is the logweir-ui image),"
-echo "    helm lint clean, rendered files current, every image a digest except the three Logweir"
+echo "    helm lint clean, rendered files current, every image a digest except the four Logweir"
 echo "    images at :$LOGWEIR_TAG (author-only exempt by name), the schema refuses a non-boolean"
 echo "    flag, and values.yaml names the tree's own repositories at :$LOGWEIR_TAG."
 exit 0
