@@ -681,6 +681,265 @@ def test_a_retired_keys_archive_is_still_readable() -> None:
         not _restores(fresh={"result": "Valid", "matchedKeyId": "6607952c"}))
 
 
+# --- PLAT-15.1: a catalog larger than the view it publishes ------------------
+#
+# The shapes are the ones `catalog_scale` reads off a `RecoveryCatalog` whose
+# archive holds more real signed points than the CRD's smallest `viewLimit`.
+SCALE_OK = dict(
+    records=104,
+    counts={"total": 104, "available": 104, "missing": 0},
+    truncated=True,
+    entries=100,
+    pages=1,
+    cursor={"indexShard": "2026-09-21", "complete": True},
+)
+
+
+NEWEST_HUNDRED = [f"lwp1-{i:032x}" for i in range(100)]
+
+
+def _truncates(**over):
+    args = dict(SCALE_OK)
+    args.update(over)
+    listed = args.pop("listed", NEWEST_HUNDRED)
+    newest = args.pop("newest", NEWEST_HUNDRED)
+    return d3.view_truncates_honestly(newest_in_archive=newest, listed_ids=listed, **args)
+
+
+def test_a_truncated_view_says_so_and_counts_the_whole_archive() -> None:
+    row("104 real points, a 100-entry view: the flag, the count and the cursor agree",
+        all(_truncates().values()), f"{_truncates()}")
+    row("MUTANT: the view reports its own page as the whole archive",
+        not all(_truncates(counts={"total": 100}).values()))
+    row("MUTANT: truncation is not flagged",
+        not all(_truncates(truncated=False).values()))
+    row("MUTANT: the status field is absent entirely",
+        not all(_truncates(truncated=None).values()))
+    row("MUTANT: no cursor is published",
+        not all(_truncates(cursor={}).values()))
+    row("MUTANT: the hundred listed are not the newest hundred",
+        not all(_truncates(listed=[f"lwp1-{i:032x}" for i in range(500, 600)]).values()))
+    row("MUTANT: a fixture that never exceeded the floor would pass everything else",
+        not all(_truncates(records=100, counts={"total": 100}, truncated=False).values()))
+    row("MUTANT: more page ConfigMaps than the CRD allows",
+        not all(_truncates(pages=9).values()))
+
+
+CLI_PAGE = """lwp1-aaaa  2026-09-21T12:00:00Z  covered [1, 2)  backup=b run=r logweir/catalog/v1/points/lwp1-aaaa/record.json
+lwp1-bbbb  2026-09-21T11:00:00Z  covered [1, 2)  backup=b run=r logweir/catalog/v1/points/lwp1-bbbb/record.json
+catalog-listed=2
+catalog-unsupported-format=0
+catalog-unreadable=0
+catalog-inconsistent=0
+catalog-searched-days=1
+catalog-oldest-day-searched=2026-09-21
+catalog-truncated=true
+note: these rows come from the UNSIGNED day-sharded index."""
+
+
+def test_the_cli_page_is_read_as_the_cli_prints_it() -> None:
+    page = d3.parse_list(CLI_PAGE)
+    row("rows, count, and the truncation line the CLI only prints when it means it",
+        page["rows"] == ["lwp1-aaaa", "lwp1-bbbb"] and page["listed"] == 2
+        and page["truncated"] is True and page["searchedDays"] == 1, f"{page}")
+    full = d3.parse_list(CLI_PAGE.replace("catalog-truncated=true\n", ""))
+    row("MUTANT: no truncation line means the page is the whole window",
+        full["truncated"] is False)
+    row("MUTANT: a page that dropped rows it could not read is not silent",
+        d3.parse_list(CLI_PAGE.replace("catalog-unreadable=0", "catalog-unreadable=3"))
+        ["unreadable"] == 3)
+
+
+# --- PLAT-15.1: 403 is "could not tell", never "it is gone" ------------------
+DENIED = ["lwp1-1", "lwp1-2"]
+READABLE = ["lwp1-3", "lwp1-4"]
+PARTIAL = {
+    "lwp1-1": {"availability": "Unreadable", "selectable": False},
+    "lwp1-2": {"availability": "Unreadable", "selectable": False},
+    "lwp1-3": {"availability": "Available", "selectable": True},
+    "lwp1-4": {"availability": "Available", "selectable": True},
+}
+PARTIAL_COUNTS = {"total": 4, "available": 2, "unreadable": 2, "missing": 0}
+
+
+def test_a_key_scoped_credential_yields_unreadable_and_never_missing() -> None:
+    row("two denied objects are Unreadable, the rest Available, nothing Missing",
+        all(d3.partial_access_ok(PARTIAL, PARTIAL_COUNTS, DENIED, READABLE).values()))
+    gone = dict(PARTIAL, **{"lwp1-1": {"availability": "Missing", "selectable": False}})
+    row("MUTANT: a 403 reported as Missing — the defect this row exists for",
+        not all(d3.partial_access_ok(gone, dict(PARTIAL_COUNTS, unreadable=1, missing=1),
+                                     DENIED, READABLE).values()))
+    blanket = {k: {"availability": "Unreadable", "selectable": False} for k in PARTIAL}
+    row("MUTANT: a credential denied the WHOLE bucket proves nothing about one prefix",
+        not all(d3.partial_access_ok(blanket, dict(PARTIAL_COUNTS, available=0, unreadable=4),
+                                     DENIED, READABLE).values()))
+    row("MUTANT: the unreadable count is not the number of denied objects",
+        not all(d3.partial_access_ok(PARTIAL, dict(PARTIAL_COUNTS, unreadable=1),
+                                     DENIED, READABLE).values()))
+    row("MUTANT: no denied point at all, so the row asserts over an empty set",
+        not all(d3.partial_access_ok(PARTIAL, PARTIAL_COUNTS, [], READABLE).values()))
+
+
+# --- PLAT-15.1: deleted, corrupted and readable are three answers ------------
+MISSING_ENTRY = {"availability": "Missing", "selectable": False}
+CONFLICT_ENTRY = {"availability": "Conflict", "selectable": False,
+                  "remedy": "the bytes in the bucket are not the ones the signed receipt names"}
+CORRUPT_COUNTS = {"total": 5, "available": 2, "missing": 1, "conflict": 1,
+                  "unsupportedFormat": 1}
+
+
+def _corrupt(**over):
+    args = dict(corrupt=CONFLICT_ENTRY, missing=MISSING_ENTRY, counts=CORRUPT_COUNTS)
+    args.update(over)
+    return d3.corrupt_is_not_missing(**args)
+
+
+def test_a_corrupt_manifest_is_never_reported_as_a_missing_one() -> None:
+    row("deleted is Missing, corrupted is Conflict, and the corrupt one carries a remedy",
+        all(_corrupt().values()), f"{_corrupt()}")
+    row("an unreadable manifest is the other honest answer",
+        all(_corrupt(corrupt=dict(CONFLICT_ENTRY, availability="Unreadable"),
+                     counts=dict(CORRUPT_COUNTS, conflict=0, unreadable=1)).values()))
+    row("MUTANT: the corrupt manifest reported as Missing",
+        not all(_corrupt(corrupt=dict(MISSING_ENTRY, remedy="gone"),
+                         counts=dict(CORRUPT_COUNTS, missing=2, conflict=0)).values()))
+    row("MUTANT: corrupt bytes still Available and still offered",
+        not all(_corrupt(corrupt={"availability": "Available", "selectable": True,
+                                  "remedy": None}).values()))
+    row("MUTANT: the deleted manifest is not Missing either, so the two never differed",
+        not all(_corrupt(missing=CONFLICT_ENTRY,
+                         counts=dict(CORRUPT_COUNTS, missing=0, conflict=2)).values()))
+    row("MUTANT: no remedy sentence on a state nobody can act on",
+        not all(_corrupt(corrupt={"availability": "Conflict", "selectable": False}).values()))
+
+
+# --- PLAT-15.1: a record from a future major --------------------------------
+PLANTED = "lwp1-" + "f" * 32
+LISTED_FOUR = {f"lwp1-{i}": {"availability": "Available"} for i in range(4)}
+
+
+def _future(**over):
+    args = dict(counts=CORRUPT_COUNTS, listed=LISTED_FOUR, planted=PLANTED, pages=1,
+                others=len(d3.ACCESS_POINTS))
+    args.update(over)
+    return d3.unsupported_format_ok(**args)
+
+
+def test_a_future_major_is_counted_never_offered_and_never_fatal() -> None:
+    row("counted once, absent from the view, the walk published, the rest still listed",
+        all(_future().values()), f"{_future()}")
+    row("MUTANT: not counted at all — what a camelCase `formatVersion` edit produces",
+        not all(_future(counts=dict(CORRUPT_COUNTS, unsupportedFormat=0)).values()))
+    row("MUTANT: listed, and therefore offered to a restore",
+        not all(_future(listed=dict(LISTED_FOUR, **{PLANTED: {"availability":
+                                                              "UnsupportedFormat"}})).values()))
+    row("MUTANT: the walk died on it — refusal per catalog instead of per entry",
+        not all(_future(pages=0).values()))
+    row("MUTANT: the other points vanished with it",
+        not all(_future(others=1).values()))
+
+
+# --- PLAT-14.2: a fresh point resolves the alert, and it is delivered once ---
+OPEN = {"kind": "Staleness", "state": "Open", "notifiedTransition": 1,
+        "delivery": {"state": "Delivered", "attempts": 1}}
+RESOLVED = {"kind": "Staleness", "state": "Resolved", "notifiedTransition": 2,
+            "delivery": {"state": "Delivered", "attempts": 1}}
+
+
+def _resolve(**over):
+    args = dict(before=OPEN, after=RESOLVED, posts=1, new_transitions=1,
+                point_before="lwp1-old", point_after="lwp1-new")
+    args.update(over)
+    return d3.resolve_delivered_once(**args)
+
+
+def test_the_recovery_notification_is_one_delivery_for_one_transition() -> None:
+    row("open -> resolved, one new transition, one POST, Delivered",
+        all(_resolve().values()), f"{_resolve()}")
+    row("MUTANT: the view's newest point never changed — nothing recovered",
+        not all(_resolve(point_after="lwp1-old").values()))
+    row("MUTANT: the alert never resolved",
+        not all(_resolve(after=dict(RESOLVED, state="Open")).values()))
+    row("MUTANT: resolved but nothing was sent",
+        not all(_resolve(posts=0, new_transitions=0).values()))
+    row("MUTANT: two POSTs for one transition",
+        not all(_resolve(posts=2).values()))
+    row("MUTANT: the resolve was not a new transition, so the row read an old delivery",
+        not all(_resolve(after=dict(RESOLVED, notifiedTransition=1)).values()))
+    row("MUTANT: three attempts and never delivered",
+        not all(_resolve(after=dict(RESOLVED, delivery={"state": "Failed",
+                                                        "attempts": 3})).values()))
+
+
+# --- PLAT-14.2: an archive that can no longer serve its newest point --------
+AVAILABLE_ENTRY = {"pointId": "lwp1-new", "availability": "Available", "selectable": True}
+GONE_ENTRY = {"pointId": "lwp1-new", "availability": "Missing", "selectable": False}
+UNAVAILABLE = {"kind": "ArchiveUnavailable", "state": "Open", "notifiedTransition": 1,
+               "delivery": {"state": "Delivered", "attempts": 1}}
+
+
+def _unavailable(**over):
+    args = dict(entry_before=AVAILABLE_ENTRY, entry_after=GONE_ENTRY, before=[RESOLVED],
+                after=[RESOLVED, UNAVAILABLE], posts=1, new_transitions=1)
+    args.update(over)
+    return d3.archive_unavailable_opened(**args)
+
+
+def test_an_unavailable_archive_opens_the_alert_named_for_it() -> None:
+    row("Available -> Missing in the view, one ArchiveUnavailable opened and delivered",
+        all(_unavailable().values()), f"{_unavailable()}")
+    row("Unreadable is the same trigger", all(_unavailable(
+        entry_after=dict(GONE_ENTRY, availability="Unreadable")).values()))
+    row("MUTANT: the catalog entry never flipped, so the archive was never broken",
+        not all(_unavailable(entry_after=AVAILABLE_ENTRY).values()))
+    row("MUTANT: the alert was already open before this window",
+        not all(_unavailable(before=[RESOLVED, UNAVAILABLE]).values()))
+    row("MUTANT: no alert of that kind at all",
+        not all(_unavailable(after=[RESOLVED]).values()))
+    row("MUTANT: the transitions this window opened were not delivered one for one",
+        not all(_unavailable(posts=0).values()))
+    row("MUTANT: the point was not the one the view was offering",
+        not all(_unavailable(entry_before=dict(AVAILABLE_ENTRY, selectable=False)).values()))
+
+
+# --- PLAT-14.2: the word that is never `complete` ---------------------------
+SAMPLED_EVENT = {"alert": {"kind": "Staleness", "action": "trigger"},
+                 "verification_scope": "sampled",
+                 "summary": "protect-recovery: newest available recovery point is 41m old",
+                 "last_available_point": {"point_id": "lwp1-old", "evidence": "Valid"}}
+
+
+def test_a_notification_never_claims_exhaustive_verification() -> None:
+    row("`sampled` on every document, and the vocabulary holds",
+        all(d3.scope_is_never_complete([SAMPLED_EVENT]).values()))
+    row("`none` is honest too",
+        all(d3.scope_is_never_complete([dict(SAMPLED_EVENT,
+                                             verification_scope="none")]).values()))
+    row("MUTANT: `complete`",
+        not all(d3.scope_is_never_complete([dict(SAMPLED_EVENT,
+                                                 verification_scope="complete")]).values()))
+    row("MUTANT: no scope at all — a reader would assume the best",
+        not all(d3.scope_is_never_complete([{k: v for k, v in SAMPLED_EVENT.items()
+                                             if k != "verification_scope"}]).values()))
+    row("MUTANT: the scope is honest and the summary claims an exhaustive comparison",
+        not all(d3.scope_is_never_complete(
+            [dict(SAMPLED_EVENT, summary="every record completely verified")]).values()))
+    row("MUTANT: no events at all is not evidence of a correct label",
+        not all(d3.scope_is_never_complete([]).values()))
+
+
+def test_zz_every_row_in_this_file_passed() -> None:
+    """The file's own gate, for `python3 -m pytest e2e/k8s/d3`.
+
+    `row()` records a failure instead of raising, so that one run prints every
+    row rather than stopping at the first — which under pytest meant a module
+    whose rows all failed still reported six passing TESTS. This is the last
+    row by name on purpose: `main()` sorts, and pytest runs in definition
+    order, so `zz` is last either way.
+    """
+    assert not FAILURES, f"{len(FAILURES)} failing row(s): {FAILURES}"
+
+
 def main() -> int:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

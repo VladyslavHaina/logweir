@@ -29,7 +29,8 @@ alone and which `cleanup` removes.
 
 Rules this file enforces rather than documents: every `kubectl` carries
 `--context docker-desktop`; every object it creates carries
-`logweir.dev/test-owner=d3w14`; `cleanup` refuses a namespace or a bucket that
+`logweir.dev/test-owner=<OWNER>` (`LOGWEIR_D3_OWNER`, default `d3w14`);
+`cleanup` refuses a namespace or a bucket that
 does not; no Secret value, token or private key is ever printed or written to
 an artifact, and the ONE credential this harness mints is generated per run and
 scrubbed from argv and output before either is recorded (`redact` over every
@@ -56,8 +57,18 @@ from typing import Any, Callable
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 STAMP = os.environ.get("LOGWEIR_D3_STAMP", "20260918t0000z")
-OWNER = "d3w14"
-NS = f"{OWNER}-{STAMP}"
+# THE OWNER IS THE RUN'S, NOT THE FILE'S. Every object this harness creates
+# carries `logweir.dev/test-owner=<OWNER>`, `cleanup` refuses a namespace or a
+# bucket that does not, and the shared MinIO's users and policies are named
+# from it — so two workers running this harness at once must not share it.
+# `d3w14` stays the default because it is what the recorded evidence of
+# 2026-09-18 was produced under; a later worker sets its own and gets its own
+# namespace, buckets and MinIO identities with no edit to this file.
+OWNER = os.environ.get("LOGWEIR_D3_OWNER", "d3w14")
+NS = os.environ.get("LOGWEIR_D3_NS", f"{OWNER}-{STAMP}")
+# MinIO user names are not DNS labels: a hyphen is legal but an owner like
+# `d3-rows` reads better as one token beside `mc admin user add`.
+OWNER_TAG = re.sub(r"[^a-z0-9]", "", OWNER)
 FIXTURE_NS = "logweir-scram-local"
 OUT = pathlib.Path(
     os.environ.get("LOGWEIR_D3_OUT", f"/tmp/logweir-roadmap-run/claude/artifacts/d3-live/{STAMP}")
@@ -69,6 +80,13 @@ BUCKET_A = f"{OWNER}-{STAMP}-a"
 BUCKET_B = f"{OWNER}-{STAMP}-b"
 DEST_PREFIX = "archive"
 MINIO_ENDPOINT = f"http://minio.{FIXTURE_NS}.svc.cluster.local:9000"
+# THE SHARED MinIO'S OWN NAMESPACE HAS NO NAMESPACES. A user and a policy
+# created here outlive this run's Kubernetes namespace and are visible to every
+# other worker, so both carry the owner and both are removed by the phase that
+# minted them.
+RO_USER = f"{OWNER_TAG}reader"
+RO_POLICY = f"{OWNER_TAG}-ro"
+RO_SECRET = f"{OWNER}-readonly-s3"
 TOPICS = ["orders", "payments"]
 LABEL = {"logweir.dev/test-owner": OWNER}
 
@@ -270,7 +288,7 @@ def check(scenario: str, task: str, ok: bool, detail: str, evidence: list[str] |
 # MinIO, through an `mc` pod this namespace owns
 # ---------------------------------------------------------------------------
 
-MC_POD = "d3w14-mc"
+MC_POD = f"{OWNER}-mc"
 
 
 def mc(*args: str, check_rc: bool = True, timeout: int = 180) -> str:
@@ -369,7 +387,7 @@ def destination(name: str, bucket: str, *, write_secret: str = "logweir-s3") -> 
         "kind": "BackupDestination",
         "metadata": owned(name),
         "spec": {
-            "description": f"d3w14 live acceptance, bucket {bucket}",
+            "description": f"{OWNER} live acceptance, bucket {bucket}",
             "storage": {
                 "provider": "S3",
                 "bucket": bucket,
@@ -2244,23 +2262,23 @@ def denied_deletion() -> None:
     reader_secret = mint()
     run(KN + ["exec", MC_POD, "--", "/bin/sh", "-c",
               f"printf '%s' '{policy}' > /tmp/ro.json && "
-              f"mc admin policy create adm d3w14-ro /tmp/ro.json >/dev/null 2>&1; "
-              f"mc admin user add adm d3w14reader {reader_secret} >/dev/null 2>&1; "
-              f"mc admin policy attach adm d3w14-ro --user d3w14reader >/dev/null 2>&1; echo done"],
+              f"mc admin policy create adm {RO_POLICY} /tmp/ro.json >/dev/null 2>&1; "
+              f"mc admin user add adm {RO_USER} {reader_secret} >/dev/null 2>&1; "
+              f"mc admin policy attach adm {RO_POLICY} --user {RO_USER} >/dev/null 2>&1; echo done"],
         check=False, timeout=120)
     apply(
         {
             "apiVersion": "v1",
             "kind": "Secret",
-            "metadata": owned("d3w14-readonly-s3"),
-            "stringData": {"access-key-id": "d3w14reader",
+            "metadata": owned(RO_SECRET),
+            "stringData": {"access-key-id": RO_USER,
                            "secret-access-key": reader_secret},
         }
     )
     before = objects(BUCKET_B)
     _job, logs, code = retention_job(
         "d3w14-denied", "d3w14-plan-readonly", dry_run=False, digest=digest, image=image,
-        delete_secret="d3w14-readonly-s3",
+        delete_secret=RO_SECRET,
     )
     after = objects(BUCKET_B)
     evidence.append(artifact("enforce/denied-deletion-log.txt", logs))
@@ -2288,8 +2306,8 @@ def denied_deletion() -> None:
         evidence,
     )
     run(KN + ["exec", MC_POD, "--", "/bin/sh", "-c",
-              "mc admin user remove adm d3w14reader >/dev/null 2>&1; "
-              "mc admin policy rm adm d3w14-ro >/dev/null 2>&1; echo done"],
+              f"mc admin user remove adm {RO_USER} >/dev/null 2>&1; "
+              f"mc admin policy rm adm {RO_POLICY} >/dev/null 2>&1; echo done"],
         check=False, timeout=120)
 
 
@@ -3230,7 +3248,7 @@ def bounded_retry() -> None:
     for leftover in ("keep-b", f"{OWNER}-degrade"):
         if get_opt("retentionpolicy", leftover) is not None:
             run(KN + ["delete", "retentionpolicy", leftover, "--wait=true"], check=False)
-    if get_opt("secret", "d3w14-readonly-s3") is None:
+    if get_opt("secret", RO_SECRET) is None:
         ro_policy = json.dumps({
             "Version": "2012-10-17",
             "Statement": [
@@ -3241,18 +3259,18 @@ def bounded_retry() -> None:
         ro_secret = mint()
         run(KN + ["exec", MC_POD, "--", "/bin/sh", "-c",
                   f"printf '%s' '{ro_policy}' > /tmp/ro.json && "
-                  f"mc admin policy create adm d3w14-ro /tmp/ro.json >/dev/null 2>&1; "
-                  f"mc admin user add adm d3w14reader {ro_secret} >/dev/null 2>&1; "
-                  f"mc admin policy attach adm d3w14-ro --user d3w14reader >/dev/null 2>&1; "
+                  f"mc admin policy create adm {RO_POLICY} /tmp/ro.json >/dev/null 2>&1; "
+                  f"mc admin user add adm {RO_USER} {ro_secret} >/dev/null 2>&1; "
+                  f"mc admin policy attach adm {RO_POLICY} --user {RO_USER} >/dev/null 2>&1; "
                   f"echo done"], check=False, timeout=120)
-        apply({"apiVersion": "v1", "kind": "Secret", "metadata": owned("d3w14-readonly-s3"),
-               "stringData": {"access-key-id": "d3w14reader",
+        apply({"apiVersion": "v1", "kind": "Secret", "metadata": owned(RO_SECRET),
+               "stringData": {"access-key-id": RO_USER,
                               "secret-access-key": ro_secret}})
     created = apply(retention_policy(
         f"{OWNER}-degrade", "dest-b", "secondary", mode="Enforce",
         rules={"keepLast": 1, "minUsablePoints": 1},
         enforcement={
-            "credentialSecretRef": {"name": "d3w14-readonly-s3"},
+            "credentialSecretRef": {"name": RO_SECRET},
             "schedule": "* * * * *",
             "requireApprovedPlan": False,
             "deadlineSeconds": 120,
@@ -4559,7 +4577,8 @@ def trust_rbac() -> None:
 # PLAT-14.2 — a stale point alerts once, and a failed delivery rewrites nothing
 # ---------------------------------------------------------------------------
 
-SINK_POD = "d3w14-sink"
+SINK_POD = f"{OWNER}-sink"
+SINK_URL_SECRET = f"{OWNER}-sink-url"
 SINK_PORT = 8080
 
 
@@ -4573,7 +4592,7 @@ def sink_pod() -> dict[str, Any]:
         "apiVersion": "v1",
         "kind": "Pod",
         "metadata": {"name": SINK_POD, "namespace": NS,
-                     "labels": dict(LABEL, **{"app": "d3w14-sink"})},
+                     "labels": dict(LABEL, **{"app": SINK_POD})},
         "spec": {
             "restartPolicy": "Never",
             "automountServiceAccountToken": False,
@@ -4625,7 +4644,7 @@ def protection_policy(name: str, *, max_age: int) -> dict[str, Any]:
                 "routes": [
                     {
                         "name": "local-sink",
-                        "webhook": {"urlSecretRef": {"name": "d3w14-sink-url", "key": "url"}},
+                        "webhook": {"urlSecretRef": {"name": SINK_URL_SECRET, "key": "url"}},
                     }
                 ],
             },
@@ -4643,7 +4662,7 @@ def notify() -> None:
         {
             "apiVersion": "v1",
             "kind": "Secret",
-            "metadata": owned("d3w14-sink-url"),
+            "metadata": owned(SINK_URL_SECRET),
             "stringData": {"url": f"http://{sink_ip}:{SINK_PORT}/alerts"},
         }
     )
@@ -4766,6 +4785,802 @@ def notify() -> None:
         f"so encoded the hatch being shut as if it were the contract." + nothing_to_deliver,
         evidence,
     )
+
+
+# ---------------------------------------------------------------------------
+# PLAT-15.1 — a catalog with more real points than the view may hold
+# ---------------------------------------------------------------------------
+
+BUCKET_C = f"{OWNER}-{STAMP}-c"
+
+# THE CRD'S OWN FLOOR, AND NOTHING HERE MOVES IT. `sync.viewLimit` is
+# `100..5000` (D3 §5.3) and `maxObjectsPerRun` bottoms out at 1000, so the only
+# honest way to see `status.truncated` is to put more than a hundred REAL
+# signed points in an archive. Editing the floor to meet a smaller fixture
+# would be a row about a CRD this build does not ship.
+VIEW_LIMIT_FLOOR = 100
+SCALE_POINTS = int(os.environ.get("LOGWEIR_D3_SCALE_POINTS", "104"))
+SCALE_BATCH = int(os.environ.get("LOGWEIR_D3_SCALE_BATCH", "10"))
+CLI_POD = f"{OWNER}-cli"
+
+
+def run_backups(names: list[str], dest: str, *, batch: int = SCALE_BATCH) -> dict[str, str]:
+    """N REAL Backups, `batch` of them in flight at a time.
+
+    D2's `bulk_topics.py` is the shape: a fixture that makes the product do the
+    expensive thing for real and then REPORTS WHAT IT ACTUALLY GOT, rather than
+    asserting the number it asked for. A point in this archive is a run of the
+    shipped runner against the lab's Kafka that wrote an archive, a DSSE-signed
+    receipt and the catalog record that receipt implies — this harness knows no
+    other way to make a signed point, and it does not invent one.
+    """
+    phases: dict[str, str] = {}
+    for start in range(0, len(names), batch):
+        group = names[start:start + batch]
+        for name in group:
+            if get_opt("backup", name) is None:
+                create(backup_object(name, dest), check=False)
+        for name in group:
+            try:
+                obj = wait_for("backup", name, terminal, seconds=900, what="a terminal phase")
+                phases[name] = obj.get("status", {}).get("phase", "Unknown")
+            except RuntimeError:
+                phases[name] = "Timeout"
+        log(f"bulk: {len(phases)}/{len(names)} terminal, "
+            f"{sum(1 for v in phases.values() if v == 'Succeeded')} Succeeded")
+    return phases
+
+
+def cli_run(name: str, args: list[str], *, seconds: int = 600) -> tuple[int | None, str]:
+    """`logweir` out of the SHIPPED runner image, run the way an operator runs
+    it: its own read credential from a Secret, no API token, no service account
+    token mounted, and the exit code and stdout recorded."""
+    image = (STATE.get("controller") or {}).get("runnerImage") or controller_facts()["runnerImage"]
+    if get_opt("pod", name) is not None:
+        run(KN + ["delete", "pod", name, "--wait=true"])
+    create(
+        {
+            "apiVersion": "v1",
+            "kind": "Pod",
+            "metadata": owned(name),
+            "spec": {
+                "restartPolicy": "Never",
+                "automountServiceAccountToken": False,
+                "containers": [
+                    {
+                        "name": "cli",
+                        "image": image,
+                        "imagePullPolicy": "Never",
+                        "command": ["logweir"],
+                        "args": args,
+                        "env": [
+                            secret_env("AWS_ACCESS_KEY_ID", "logweir-s3", "access-key-id"),
+                            secret_env("AWS_SECRET_ACCESS_KEY", "logweir-s3", "secret-access-key"),
+                            {"name": "AWS_REGION", "value": "us-east-1"},
+                        ],
+                    }
+                ],
+            },
+        }
+    )
+    pod = wait_for(
+        "pod", name,
+        lambda o: o.get("status", {}).get("phase") in {"Succeeded", "Failed"},
+        seconds=seconds, what="a terminal phase",
+    )
+    logs = redact(run(KN + ["logs", name], check=False).stdout)
+    state = ((pod["status"].get("containerStatuses") or [{}])[0].get("state") or {})
+    code = (state.get("terminated") or {}).get("exitCode")
+    return code, logs
+
+
+def parse_list(logs: str) -> dict[str, Any]:
+    """`logweir catalog list`'s printed page, as the CLI prints it.
+
+    The counts it always prints — `catalog-unsupported-format`,
+    `catalog-unreadable`, `catalog-inconsistent` — are read too, because a page
+    that dropped rows it could not read without saying so would let a short
+    listing read as "these are all the points" (`catalog/cli.rs`'s `print_list`).
+    """
+    rows = [line.split()[0] for line in logs.splitlines() if line.startswith("lwp1-")]
+    fields: dict[str, str] = {}
+    for line in logs.splitlines():
+        if line.startswith("catalog-") and "=" in line:
+            key, _, value = line.partition("=")
+            fields[key] = value
+    return {
+        "rows": rows,
+        "listed": int(fields.get("catalog-listed", -1)),
+        "truncated": fields.get("catalog-truncated") == "true",
+        "unsupportedFormat": int(fields.get("catalog-unsupported-format", -1)),
+        "unreadable": int(fields.get("catalog-unreadable", -1)),
+        "inconsistent": int(fields.get("catalog-inconsistent", -1)),
+        "searchedDays": int(fields.get("catalog-searched-days", -1)),
+    }
+
+
+def cli_list(bucket: str, *, name: str, max_rows: int, since: str | None = None) -> dict[str, Any]:
+    args = [
+        "catalog", "list", "--url", f"s3://{bucket}", "--endpoint", MINIO_ENDPOINT,
+        "--region", "us-east-1", "--path-style", "--allow-http", "--max", str(max_rows),
+    ]
+    if since:
+        args += ["--since", since]
+    code, logs = cli_run(name, args)
+    page = parse_list(logs)
+    page["exitCode"] = code
+    page["evidence"] = artifact(f"scale/{name}.txt", logs)
+    return page
+
+
+def view_truncates_honestly(records: int, counts: dict[str, Any], truncated: Any,
+                            entries: int, pages: int, cursor: dict[str, Any],
+                            newest_in_archive: list[str],
+                            listed_ids: list[str]) -> dict[str, bool]:
+    """D3 §5.3's three honest signals: the FLAG, the COUNT and the CURSOR.
+
+    Each clause can fail on its own, and the one that matters most is the
+    count: a view that silently listed `viewLimit` points and reported
+    `total: viewLimit` would look exactly like this one from Kubernetes and
+    would have lost a hundred recovery points.
+    """
+    return {
+        "the archive holds more real signed points than the view may list":
+            records > VIEW_LIMIT_FLOOR,
+        "the flag says so": truncated is True,
+        "the count is the archive's, not the page's": counts.get("total") == records,
+        "the view materialises exactly `viewLimit` entries": entries == VIEW_LIMIT_FLOOR,
+        "in at most the 8 page ConfigMaps the CRD allows": 1 <= pages <= 8,
+        "a cursor is published": bool(cursor),
+        "and the entries are the NEWEST points, not an arbitrary hundred":
+            sorted(listed_ids) == sorted(newest_in_archive),
+    }
+
+
+def catalog_scale() -> None:
+    """More REAL points than `viewLimit`, and what each surface then says."""
+    evidence: list[str] = []
+    if BUCKET_C not in (STATE.get("buckets") or []):
+        mc("mb", "--ignore-existing", f"local/{BUCKET_C}")
+        STATE.setdefault("buckets", []).append(BUCKET_C)
+        save()
+    if get_opt("backupdestination", "dest-c") is None:
+        apply(destination("dest-c", BUCKET_C))
+        wait_for("backupdestination", "dest-c",
+                 lambda o: condition(o, "Valid").get("status") == "True",
+                 seconds=180, what="Valid=True")
+    names = [f"bulk-{i:03d}" for i in range(SCALE_POINTS)]
+    phases = run_backups(names, "dest-c")
+    evidence.append(artifact("scale/backup-phases.json", phases))
+
+    # THE NUMBER THIS ROW USES IS THE ARCHIVE'S, NOT THE ONE IT ASKED FOR.
+    # `bulk_topics.py`'s lesson: a fixture that asserts its own request has
+    # measured nothing. Every record.json here is a signed point the runner
+    # wrote.
+    record_keys = [o["key"] for o in objects(BUCKET_C, f"{CATALOG_PREFIX}/points/")
+                   if o["key"].endswith("record.json")]
+    sig_keys = [o["key"] for o in objects(BUCKET_C, f"{CATALOG_PREFIX}/points/")
+                if o["key"].endswith("record.sig")]
+    index_keys = sorted(index_entries(BUCKET_C))
+    archive_ids = [k.rsplit("/", 1)[-1].removesuffix(".json").split("-", 1)[1] for k in index_keys]
+    newest = archive_ids[-VIEW_LIMIT_FLOOR:]
+    evidence.append(artifact("scale/archive-index.json",
+                             {"records": len(record_keys), "sidecars": len(sig_keys),
+                              "indexEntries": len(index_keys),
+                              "succeeded": sum(1 for v in phases.values() if v == "Succeeded")}))
+
+    view = fresh_catalog("scale", "dest-c", seconds=900,
+                         viewLimit=VIEW_LIMIT_FLOOR, maxObjectsPerRun=100000)
+    entries = view_entries(view)
+    status = view["status"]
+    counts = status.get("counts") or {}
+    evidence.append(artifact("scale/view-status.json", catalog_summary(view)))
+    evidence.append(artifact("scale/view-entries.json", entries))
+    clauses = view_truncates_honestly(
+        len(record_keys), counts, status.get("truncated"), len(entries),
+        len(status.get("pages") or []), status.get("cursor") or {},
+        newest, [e["pointId"] for e in entries],
+    )
+    check(
+        "catalog-large-view-truncates-honestly",
+        "PLAT-15.1",
+        all(clauses.values()),
+        f"{len(record_keys)} REAL signed point records (and {len(sig_keys)} sidecars) written "
+        f"by {sum(1 for v in phases.values() if v == 'Succeeded')} Succeeded Backups against "
+        f"the lab's Kafka, read by a catalog asking for the CRD's smallest view "
+        f"(viewLimit={VIEW_LIMIT_FLOOR}, untouched in the CRD): truncated="
+        f"{status.get('truncated')}, counts={counts}, entries={len(entries)}, pages="
+        f"{len(status.get('pages') or [])}, cursor={status.get('cursor')}. Clauses {clauses}",
+        evidence,
+    )
+    STATE["scaleRecords"] = len(record_keys)
+    STATE["scaleOmitted"] = sorted(set(archive_ids) - {e["pointId"] for e in entries})
+    save()
+
+    # --- and what the operator CLI can still reach --------------------------
+    full = cli_list(BUCKET_C, name=f"{OWNER}-cli-full", max_rows=SCALE_POINTS + 50)
+    page = cli_list(BUCKET_C, name=f"{OWNER}-cli-page", max_rows=50)
+    newest_key = index_keys[-1] if index_keys else ""
+    after = cli_list(BUCKET_C, name=f"{OWNER}-cli-after", max_rows=50, since=newest_key)
+    evidence += [full["evidence"], page["evidence"], after["evidence"]]
+    omitted = STATE["scaleOmitted"]
+    cli_clauses = {
+        "the CLI reaches every point in the archive, including the ones the view omits":
+            full["listed"] == len(record_keys) and set(omitted) <= set(full["rows"]),
+        "a bounded page returns exactly what was asked for": page["listed"] == 50,
+        "and says it is a page": page["truncated"] is True,
+        "the full listing does not claim to be truncated": full["truncated"] is False,
+        "the cursor means `what arrived after this`, and nothing has":
+            after["listed"] == 0 and after["exitCode"] == 0,
+        "no row was dropped unreported": full["unreadable"] == 0 and full["inconsistent"] == 0,
+    }
+    check(
+        "catalog-list-reaches-past-the-view",
+        "PLAT-15.1",
+        all(cli_clauses.values()),
+        f"`logweir catalog list` out of the shipped runner image lists {full['listed']} points "
+        f"where the Kubernetes view materialised {len(entries)}: the {len(omitted)} point(s) "
+        f"beyond `viewLimit` ({omitted}) are reachable there and nowhere in the view. "
+        f"--max 50 returns {page['listed']} rows with catalog-truncated={page['truncated']}; "
+        f"--since <newest index key> returns {after['listed']} rows (exit {after['exitCode']}), "
+        f"which is the advertised cursor — a windowed query over OLDER points is an absent "
+        f"capability (D3 §5.3) and this row does not pretend otherwise. Clauses {cli_clauses}",
+        evidence,
+    )
+
+
+# ---------------------------------------------------------------------------
+# PLAT-15.1 — partial access, a corrupt manifest, and a record from the future
+# ---------------------------------------------------------------------------
+
+BUCKET_D = f"{OWNER}-{STAMP}-d"
+ACCESS_POINTS = ["acc-1", "acc-2", "acc-3", "acc-4"]
+SCOPED_USER = f"{OWNER_TAG}scoped"
+SCOPED_POLICY = f"{OWNER_TAG}-scoped"
+SCOPED_SECRET = f"{OWNER}-scoped-s3"
+
+
+def scoped_policy_document(bucket: str, deny_keys: list[str]) -> str:
+    """A credential that may read this archive EXCEPT these objects.
+
+    Key-scoped, not bucket-scoped: the row it exists for is "one prefix and not
+    another", and a credential denied the whole bucket would make every entry
+    unreadable and prove only that a broken credential breaks everything.
+    """
+    return json.dumps(
+        {
+            "Version": "2012-10-17",
+            "Statement": [
+                {"Effect": "Allow", "Action": ["s3:GetObject", "s3:ListBucket"],
+                 "Resource": [f"arn:aws:s3:::{bucket}", f"arn:aws:s3:::{bucket}/*"]},
+                {"Effect": "Deny", "Action": ["s3:GetObject"],
+                 "Resource": [f"arn:aws:s3:::{bucket}/{key}" for key in deny_keys]},
+            ],
+        }
+    )
+
+
+def record_of(bucket: str, point_id: str) -> dict[str, Any]:
+    return json.loads(cat(bucket, f"{CATALOG_PREFIX}/points/{point_id}/record.json").decode())
+
+
+def partial_access_ok(entries: dict[str, dict[str, Any]], counts: dict[str, Any],
+                      denied: list[str], readable: list[str]) -> dict[str, bool]:
+    """403 is "could not tell", and it is NEVER "your backup is gone".
+
+    The clause that carries the row is the last one: `Missing` is a definite
+    `NotFound` (D3 §5.4), and a credential that cannot read an object has
+    established nothing about whether the object is there.
+    """
+    return {
+        "the points whose objects the credential may not read are Unreadable":
+            bool(denied) and all(entries.get(p, {}).get("availability") == "Unreadable"
+                                 for p in denied),
+        "and are not selectable":
+            all(entries.get(p, {}).get("selectable") is False for p in denied),
+        "the points it may read are Available":
+            bool(readable) and all(entries.get(p, {}).get("availability") == "Available"
+                                   for p in readable),
+        "the count of unreadable points is exact":
+            counts.get("unreadable") == len(denied),
+        "and nothing was called Missing": counts.get("missing", 0) == 0,
+    }
+
+
+def corrupt_is_not_missing(corrupt: dict[str, Any], missing: dict[str, Any],
+                           counts: dict[str, Any]) -> dict[str, bool]:
+    """Three different answers about one archive, in one view."""
+    return {
+        "the point whose manifest was DELETED is Missing":
+            missing.get("availability") == "Missing",
+        "the point whose manifest was CORRUPTED is not":
+            corrupt.get("availability") not in {"Missing", None},
+        "it is not Available either":
+            corrupt.get("availability") != "Available",
+        "and it is not offered": corrupt.get("selectable") is False,
+        "each state is counted once":
+            counts.get("missing") == 1
+            and counts.get("conflict", 0) + counts.get("unreadable", 0) == 1,
+        "and the corrupt point carries a remedy sentence": bool(corrupt.get("remedy")),
+    }
+
+
+def unsupported_format_ok(counts: dict[str, Any], listed: dict[str, dict[str, Any]],
+                          planted: str, pages: int, others: int) -> dict[str, bool]:
+    return {
+        "the record from a future major is counted": counts.get("unsupportedFormat") == 1,
+        "it is never offered — it is not in the view at all": planted not in listed,
+        "the walk still published a view": pages >= 1,
+        "and every other point is still listed": others == len(ACCESS_POINTS),
+    }
+
+
+def catalog_access() -> None:
+    evidence: list[str] = []
+    if BUCKET_D not in (STATE.get("buckets") or []):
+        mc("mb", "--ignore-existing", f"local/{BUCKET_D}")
+        STATE.setdefault("buckets", []).append(BUCKET_D)
+        save()
+    if get_opt("backupdestination", "dest-d") is None:
+        apply(destination("dest-d", BUCKET_D))
+        wait_for("backupdestination", "dest-d",
+                 lambda o: condition(o, "Valid").get("status") == "True",
+                 seconds=180, what="Valid=True")
+    phases = run_backups(ACCESS_POINTS, "dest-d", batch=4)
+    if sorted(n for n, p in phases.items() if p == "Succeeded") != sorted(ACCESS_POINTS):
+        raise RuntimeError(f"the access fixture needs four real points: {phases}")
+    base = fresh_catalog("case-access", "dest-d")
+    base_entries = sorted(view_entries(base), key=lambda e: e["recoveryPointAtMs"])
+    if len(base_entries) != len(ACCESS_POINTS):
+        raise RuntimeError(f"dest-b holds {len(base_entries)} points, not {len(ACCESS_POINTS)}")
+    evidence.append(artifact("access/baseline-entries.json", base_entries))
+    p1, p2, p3, p4 = (e["pointId"] for e in base_entries)
+
+    # --- a credential that may read one object and not another --------------
+    #
+    # The keys come from the RECORD in the bucket and not from the view, whose
+    # `receiptKey` is redacted by design (`check::redact_path`); a deny built
+    # from a redacted path would deny nothing and the row would pass on an
+    # unrestricted credential.
+    denied_receipt = record_of(BUCKET_D, p1)["receipt"]["key"]
+    denied_manifest = record_of(BUCKET_D, p2)["archive"]["manifest_key"]
+    document = scoped_policy_document(BUCKET_D, [denied_receipt, denied_manifest])
+    scoped_secret = mint()
+    run(KN + ["exec", MC_POD, "--", "/bin/sh", "-c",
+              f"printf '%s' '{document}' > /tmp/scoped.json && "
+              f"mc admin policy create adm {SCOPED_POLICY} /tmp/scoped.json >/dev/null 2>&1; "
+              f"mc admin user add adm {SCOPED_USER} {scoped_secret} >/dev/null 2>&1; "
+              f"mc admin policy attach adm {SCOPED_POLICY} --user {SCOPED_USER} "
+              ">/dev/null 2>&1; echo done"],
+        check=False, timeout=120)
+    apply(
+        {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": owned(SCOPED_SECRET),
+            "stringData": {"access-key-id": SCOPED_USER, "secret-access-key": scoped_secret},
+        }
+    )
+    apply(destination("dest-ro", BUCKET_D, write_secret=SCOPED_SECRET))
+    wait_for("backupdestination", "dest-ro",
+             lambda o: condition(o, "Valid").get("status") == "True",
+             seconds=180, what="Valid=True")
+    try:
+        partial = fresh_catalog("case-partial", "dest-ro")
+        partial_entries = {e["pointId"]: e for e in view_entries(partial)}
+        counts = partial["status"].get("counts") or {}
+        evidence.append(artifact("access/partial-status.json", catalog_summary(partial)))
+        evidence.append(artifact("access/partial-entries.json", list(partial_entries.values())))
+        clauses = partial_access_ok(partial_entries, counts, [p1, p2], [p3, p4])
+        check(
+            "catalog-partial-access-is-unreadable-not-missing",
+            "PLAT-15.1",
+            all(clauses.values()),
+            f"a SECOND destination over the same archive with a key-scoped MinIO credential — "
+            f"allowed to list and read the bucket, denied `s3:GetObject` on exactly one "
+            f"point's receipt and one point's manifest — syncs to "
+            f"{ {k: v['availability'] for k, v in partial_entries.items()} } with counts "
+            f"{counts} and Synced="
+            f"{condition(partial, 'Synced').get('status')}/"
+            f"{condition(partial, 'Synced').get('reason')}. The denied points' remedy reads "
+            f"{[partial_entries.get(p, {}).get('remedy') for p in (p1, p2)]}. A 403 is "
+            f"'could not tell'; `Missing` is a definite NotFound and NOTHING here claimed "
+            f"one. Clauses {clauses}",
+            evidence,
+        )
+    finally:
+        run(KN + ["exec", MC_POD, "--", "/bin/sh", "-c",
+                  f"mc admin user remove adm {SCOPED_USER} >/dev/null 2>&1; "
+                  f"mc admin policy rm adm {SCOPED_POLICY} >/dev/null 2>&1; echo done"],
+            check=False, timeout=120)
+
+    # --- a deleted manifest, a corrupted one, and a record from the future ---
+    deleted_manifest = base_entries[2]["manifestKey"]
+    corrupt_manifest = base_entries[3]["manifestKey"]
+    rm(BUCKET_D, deleted_manifest)
+    # NOT a digest edit: the bytes are replaced with something that is not a
+    # manifest at all, which is what a truncated or half-overwritten object in
+    # a bucket looks like.
+    put(BUCKET_D, corrupt_manifest, b'{"this is not a manifest": true, "truncat')
+    planted = "lwp1-" + hashlib.sha256(f"{OWNER}{STAMP}future".encode()).hexdigest()[:32]
+    future_record = dict(record_of(BUCKET_D, p1))
+    future_record["format_version"] = "2.0.0"
+    future_record["point_id"] = planted
+    put(BUCKET_D, f"{CATALOG_PREFIX}/points/{planted}/record.json",
+        json.dumps(future_record).encode())
+    sample = sorted(index_entries(BUCKET_D))[-1]
+    day = sample.rsplit("/", 1)[0]
+    entry = json.loads(cat(BUCKET_D, sample).decode())
+    entry["point_id"] = planted
+    entry["record_key"] = f"{CATALOG_PREFIX}/points/{planted}/record.json"
+    put(BUCKET_D, f"{day}/{int(time.time() * 1000):013d}-{planted}.json",
+        json.dumps(entry).encode())
+
+    after = fresh_catalog("case-corrupt", "dest-d")
+    listed = {e["pointId"]: e for e in view_entries(after)}
+    acounts = after["status"].get("counts") or {}
+    evidence.append(artifact("access/corrupt-status.json", catalog_summary(after)))
+    evidence.append(artifact("access/corrupt-entries.json", list(listed.values())))
+    corrupt_clauses = corrupt_is_not_missing(listed.get(p4, {}), listed.get(p3, {}), acounts)
+    check(
+        "catalog-corrupt-manifest-is-not-missing",
+        "PLAT-15.1",
+        all(corrupt_clauses.values()),
+        f"one view, three answers about three points of one archive: the manifest DELETED is "
+        f"{listed.get(p3, {}).get('availability')}, the manifest OVERWRITTEN with bytes that "
+        f"are not a manifest is {listed.get(p4, {}).get('availability')} "
+        f"(remedy {listed.get(p4, {}).get('remedy')!r}), and the untouched points are "
+        f"{sorted({listed.get(p, {}).get('availability') for p in (p1, p2)})}. counts "
+        f"{acounts}. `Missing` is reserved for a definite NotFound; bytes that contradict the "
+        f"signed receipt are a contradiction and not an absence "
+        f"(`check/kinds/catalog_sync.rs`'s manifest-digest arm). Clauses {corrupt_clauses}",
+        evidence,
+    )
+    format_clauses = unsupported_format_ok(
+        acounts, listed, planted, len(after["status"].get("pages") or []),
+        len([p for p in (p1, p2, p3, p4) if p in listed]),
+    )
+    check(
+        "catalog-unsupported-format-is-counted-and-never-offered",
+        "PLAT-15.1",
+        all(format_clauses.values()),
+        f"a record declaring `format_version: 2.0.0` under a well-formed point id, with a "
+        f"self-consistent major-1 index entry pointing at it, is counted "
+        f"(counts.unsupportedFormat={acounts.get('unsupportedFormat')}), is absent from the "
+        f"view entirely ({planted not in listed}) and does not stop the walk: "
+        f"{len(after['status'].get('pages') or [])} page(s) published and "
+        f"{len([p for p in (p1, p2, p3, p4) if p in listed])} of the four real points still "
+        f"listed. THE 2026-09-18 RECORD SAID THIS NEEDED THE INSTALLATION'S PRIVATE KEY. It "
+        f"does not, and the reason is in the code: `examine` classifies from the record's own "
+        f"bytes and returns BEFORE it fetches the receipt or the sidecar "
+        f"(`crates/logweir/src/check/kinds/catalog_sync.rs:1191`, "
+        f"`crates/logweir/src/catalog/reader.rs:54`), so no signature is consulted for a "
+        f"major this build does not implement. The earlier probe wrote `formatVersion` "
+        f"(camelCase) into a document whose field is `format_version`, which major 1 ignores "
+        f"as an unknown field — it measured an unsigned edit, not a future major. Clauses "
+        f"{format_clauses}",
+        evidence,
+    )
+
+
+# ---------------------------------------------------------------------------
+# PLAT-14.2 — the recovery notification, the unavailable archive, and the word
+# that is never `complete`
+# ---------------------------------------------------------------------------
+
+RECOVERY_POLICY = "protect-recovery"
+RECOVERY_MAX_AGE = 600
+
+
+def alert_of(alerts: list[dict[str, Any]], kind: str) -> dict[str, Any] | None:
+    for alert in alerts or []:
+        if alert.get("kind") == kind:
+            return alert
+    return None
+
+
+def notified_total(alerts: list[dict[str, Any]]) -> int:
+    return sum(a.get("notifiedTransition") or 0 for a in alerts or [])
+
+
+def policy_alerts(name: str) -> list[dict[str, Any]]:
+    return ((get_opt("protectionpolicy", name) or {}).get("status") or {}).get("alerts") or []
+
+
+def policy_events(name: str) -> list[dict[str, Any]]:
+    """Every event document the controller wrote for this policy.
+
+    The ConfigMaps are `<policy>-ev-<sha8>` and immutable, so this reads what
+    was actually delivered rather than re-deriving what should have been.
+    """
+    events = []
+    for cm in lst("configmaps"):
+        if not cm["metadata"]["name"].startswith(f"{name}-ev-"):
+            continue
+        body = (cm.get("data") or {}).get("event.json")
+        if body:
+            events.append(json.loads(body))
+    return events
+
+
+def resolve_delivered_once(before: dict[str, Any] | None, after: dict[str, Any] | None,
+                           posts: int, new_transitions: int,
+                           point_before: str | None, point_after: str | None) -> dict[str, bool]:
+    """A FRESH POINT closed the alert, and the close was delivered once.
+
+    The point clause is not decoration: an alert that resolved because the
+    objective was widened, or because an old point was re-read, would satisfy
+    every other clause here and would prove nothing about recovery.
+    """
+    return {
+        "the staleness alert was open before": (before or {}).get("state") == "Open",
+        "a NEW recovery point reached the catalog view":
+            bool(point_after) and point_after != point_before,
+        "the alert is Resolved after it": (after or {}).get("state") == "Resolved",
+        "which is exactly one new notified transition":
+            (after or {}).get("notifiedTransition", 0)
+            == (before or {}).get("notifiedTransition", 0) + 1,
+        "one POST per transition this window opened, and no more":
+            posts == new_transitions and new_transitions == 1,
+        "and the delivery says Delivered, not merely attempted":
+            ((after or {}).get("delivery") or {}).get("state") == "Delivered",
+    }
+
+
+def archive_unavailable_opened(entry_before: dict[str, Any], entry_after: dict[str, Any],
+                               before: list[dict[str, Any]], after: list[dict[str, Any]],
+                               posts: int, new_transitions: int) -> dict[str, bool]:
+    opened = alert_of(after, "ArchiveUnavailable")
+    return {
+        "the newest point was Available and selectable in the view":
+            entry_before.get("availability") == "Available"
+            and entry_before.get("selectable") is True,
+        "breaking its archive flipped that entry":
+            entry_after.get("availability") in {"Missing", "Unreadable", "Deleted", "Conflict"},
+        "no ArchiveUnavailable alert was open before":
+            alert_of(before, "ArchiveUnavailable") is None,
+        "exactly one is open after": (opened or {}).get("state") == "Open",
+        "one POST per transition this window opened":
+            posts == new_transitions and new_transitions >= 1,
+        "and the open transition was delivered":
+            ((opened or {}).get("delivery") or {}).get("state") == "Delivered",
+    }
+
+
+def scope_is_never_complete(events: list[dict[str, Any]]) -> dict[str, bool]:
+    scopes = {e.get("verification_scope") for e in events}
+    bodies = json.dumps(events)
+    return {
+        "every event labels its verification scope":
+            bool(events) and all(e.get("verification_scope") for e in events),
+        "with one of the three honest words": scopes <= {"sampled", "degraded", "none"},
+        "and never `complete`": "complete" not in scopes,
+        "and no body claims an exhaustive comparison":
+            not re.search(r"complete(ly)?\s+verif|exhaustive|byte-for-byte\s+complete",
+                          bodies, re.I),
+    }
+
+
+def refresh_view(name: str, token: str) -> dict[str, Any]:
+    """The view, as it is NOW.
+
+    `sync_now` is tried first because a `syncRequest` bump is what the product
+    documents; `fresh_catalog` is the fallback the 2026-09-18 run had to use for
+    every refresh (CATALOG-RESYNC-NOT-HARVESTED). Which one answered is
+    recorded, because that difference is a product fact and not a harness
+    detail.
+    """
+    try:
+        view = sync_now(name, token, seconds=420)
+        STATE.setdefault("viewRefresh", {})[token] = "syncRequest"
+    except RuntimeError:
+        view = fresh_catalog(name, "dest-a")
+        STATE.setdefault("viewRefresh", {})[token] = "recreated (syncRequest was not harvested)"
+    save()
+    return view
+
+
+def protection_cases() -> None:
+    evidence: list[str] = []
+    if get_opt("pod", SINK_POD) is None:
+        apply(sink_pod())
+        run(KN + ["wait", "--for=condition=Ready", f"pod/{SINK_POD}", "--timeout=120s"])
+    sink_ip = get("pod", SINK_POD)["status"]["podIP"]
+    apply({"apiVersion": "v1", "kind": "Secret", "metadata": owned(SINK_URL_SECRET),
+           "stringData": {"url": f"http://{sink_ip}:{SINK_PORT}/alerts"}})
+    if get_opt("backupschedule", "keeps-running") is None:
+        apply(schedule_object("keeps-running", "dest-a"))
+    run(KN + ["patch", "backupschedule", "keeps-running", "--type=merge",
+              "-p", json.dumps({"spec": {"suspend": True}})])
+
+    # --- a policy that is Stale because its archive's newest point is old ----
+    view = refresh_view("primary", "protect-1")
+    before_entries = {e["pointId"]: e for e in view_entries(view)}
+    newest_before = max(before_entries.values(), key=lambda e: e["recoveryPointAtMs"],
+                        default={})
+    apply(protection_policy(RECOVERY_POLICY, max_age=RECOVERY_MAX_AGE))
+    stale = wait_for(
+        "protectionpolicy", RECOVERY_POLICY,
+        lambda o: alert_of(((o.get("status") or {}).get("alerts") or []), "Staleness") is not None,
+        seconds=420, what="a Staleness alert",
+    )
+    # the open delivery has to land before the resolve window opens, or its
+    # POST is counted in the wrong window.
+    wait_for(
+        "protectionpolicy", RECOVERY_POLICY,
+        lambda o: (((alert_of(((o.get("status") or {}).get("alerts") or []), "Staleness") or {})
+                    .get("delivery") or {}).get("state") in {"Delivered", "Failed",
+                                                             "Suppressed"}),
+        seconds=300, what="the open transition to finish delivering",
+    )
+    stale = get("protectionpolicy", RECOVERY_POLICY)
+    alerts_before = (stale.get("status") or {}).get("alerts") or []
+    evidence.append(artifact("protect/policy-stale.json", stale))
+
+    # --- (a) a fresh recovery point, and ONE delivery -----------------------
+    posts_mark = sink_posts()
+    notified_mark = notified_total(alerts_before)
+    fresh = run_backup("recovery-point", "dest-a")
+    fresh_view = refresh_view("primary", "protect-2")
+    after_entries = {e["pointId"]: e for e in view_entries(fresh_view)}
+    new_ids = sorted(set(after_entries) - set(before_entries))
+    newest_after = max(after_entries.values(), key=lambda e: e["recoveryPointAtMs"], default={})
+    resolved = wait_for(
+        "protectionpolicy", RECOVERY_POLICY,
+        lambda o: (alert_of(((o.get("status") or {}).get("alerts") or []), "Staleness") or {})
+        .get("state") == "Resolved",
+        seconds=420, what="the Staleness alert to resolve",
+    )
+    wait_for(
+        "protectionpolicy", RECOVERY_POLICY,
+        lambda o: (((alert_of(((o.get("status") or {}).get("alerts") or []), "Staleness") or {})
+                    .get("delivery") or {}).get("state") in {"Delivered", "Failed"}),
+        seconds=300, what="the resolve transition to finish delivering",
+    )
+    resolved = get("protectionpolicy", RECOVERY_POLICY)
+    alerts_after = (resolved.get("status") or {}).get("alerts") or []
+    posts = sink_posts() - posts_mark
+    new_transitions = notified_total(alerts_after) - notified_mark
+    evidence.append(artifact("protect/policy-after-fresh-point.json", resolved))
+    evidence.append(artifact("protect/fresh-point.json",
+                             {"backup": backup_facts(fresh), "newPointIds": new_ids,
+                              "newestBefore": newest_before.get("pointId"),
+                              "newestAfter": newest_after.get("pointId"),
+                              "viewRefresh": STATE.get("viewRefresh")}))
+    clauses = resolve_delivered_once(
+        alert_of(alerts_before, "Staleness"), alert_of(alerts_after, "Staleness"),
+        posts, new_transitions, newest_before.get("pointId"), newest_after.get("pointId"),
+    )
+    check(
+        "protection-recovery-notification-delivers-exactly-once",
+        "PLAT-14.2",
+        all(clauses.values()),
+        f"a real Backup wrote point {newest_after.get('pointId')} (the view's newest was "
+        f"{newest_before.get('pointId')}), the catalog view was refreshed "
+        f"({STATE.get('viewRefresh')}), and the policy's Staleness alert went "
+        f"{(alert_of(alerts_before, 'Staleness') or {}).get('state')} -> "
+        f"{(alert_of(alerts_after, 'Staleness') or {}).get('state')} with health "
+        f"{(resolved.get('status') or {}).get('health')}: {new_transitions} new notified "
+        f"transition(s) and {posts} POST(s) at the in-cluster echo sink, delivery "
+        f"{((alert_of(alerts_after, 'Staleness') or {}).get('delivery') or {})}. Clauses "
+        f"{clauses}",
+        evidence,
+    )
+
+    # --- (c) what the delivered documents say about verification ------------
+    events = policy_events(RECOVERY_POLICY)
+    evidence.append(artifact("protect/event-documents.json", events))
+    scope_clauses = scope_is_never_complete(events)
+    refusal = mutate_event_and_deliver(events)
+    if refusal:
+        evidence.append(refusal["evidence"])
+    check(
+        "protection-verification-scope-is-sampled-never-complete",
+        "PLAT-14.2",
+        all(scope_clauses.values()) and (refusal is None or refusal["refused"]),
+        f"the {len(events)} event document(s) this policy delivered carry verification_scope "
+        f"{sorted({e.get('verification_scope') for e in events})} and the alert rows carry "
+        f"evidence {sorted({(e.get('last_available_point') or {}).get('evidence') for e in events})}"
+        f". The vocabulary has three words and `complete` is not one of them "
+        f"(`weirkeeper::protection::VerificationScope`). LIVE MUTANT: "
+        + (f"the same delivery command, run against a copy of a real event whose "
+           f"verification_scope reads \"complete\", exits {refusal['exitCode']} and delivers "
+           f"nothing — {refusal['reason']}" if refusal else
+           "NOT RUN — no delivery Job was left to clone") +
+        f". Clauses {scope_clauses}",
+        evidence,
+    )
+
+    # --- (b) an archive that can no longer serve its newest point -----------
+    posts_mark = sink_posts()
+    alerts_before_break = policy_alerts(RECOVERY_POLICY)
+    notified_mark = notified_total(alerts_before_break)
+    victim = newest_after
+    rm(BUCKET_A, victim["manifestKey"])
+    broken_view = refresh_view("primary", "protect-3")
+    broken_entries = {e["pointId"]: e for e in view_entries(broken_view)}
+    degraded = wait_for(
+        "protectionpolicy", RECOVERY_POLICY,
+        lambda o: alert_of(((o.get("status") or {}).get("alerts") or []),
+                           "ArchiveUnavailable") is not None,
+        seconds=420, what="an ArchiveUnavailable alert",
+    )
+    wait_for(
+        "protectionpolicy", RECOVERY_POLICY,
+        lambda o: all(((a.get("delivery") or {}).get("state") in {"Delivered", "Failed",
+                                                                  "Suppressed"})
+                      for a in ((o.get("status") or {}).get("alerts") or [])),
+        seconds=300, what="every transition to finish delivering",
+    )
+    degraded = get("protectionpolicy", RECOVERY_POLICY)
+    alerts_after_break = (degraded.get("status") or {}).get("alerts") or []
+    posts = sink_posts() - posts_mark
+    new_transitions = notified_total(alerts_after_break) - notified_mark
+    evidence.append(artifact("protect/policy-archive-unavailable.json", degraded))
+    evidence.append(artifact("protect/broken-entry.json",
+                             {"before": victim, "after": broken_entries.get(victim["pointId"])}))
+    break_clauses = archive_unavailable_opened(
+        victim, broken_entries.get(victim["pointId"], {}), alerts_before_break,
+        alerts_after_break, posts, new_transitions,
+    )
+    check(
+        "protection-unavailable-archive-raises-the-alert",
+        "PLAT-14.2",
+        all(break_clauses.values()),
+        f"the newest point {victim['pointId']} was catalogued Available and selectable; with "
+        f"its manifest removed from the bucket the refreshed view reads "
+        f"{broken_entries.get(victim['pointId'], {}).get('availability')} and the policy "
+        f"opened {[a.get('kind') for a in alerts_after_break if a.get('state') == 'Open']} "
+        f"(health {(degraded.get('status') or {}).get('health')}): {new_transitions} new "
+        f"notified transition(s), {posts} POST(s) at the sink. D3 §3.3's trigger is the "
+        f"newest otherwise-available point being Missing/Unreadable/Untrusted in the catalog "
+        f"— the Backup's own status still says Succeeded, and that is the point of the row. "
+        f"Clauses {break_clauses}",
+        evidence,
+    )
+
+
+def mutate_event_and_deliver(events: list[dict[str, Any]]) -> dict[str, Any] | None:
+    """The delivery Job's own command, against an event that says `complete`.
+
+    The enum makes the word unwritable by the controller; this is the other
+    half — that the runner REFUSES it rather than forwarding it — and it is run
+    with the same image, the same argv and the same mount as the real delivery
+    Job, so a refusal here is the refusal a real sink would get.
+    """
+    names = [j["metadata"]["name"] for j in lst("jobs")
+             if j["metadata"]["name"].startswith(f"{RECOVERY_POLICY}-n-")]
+    jobs = sorted(names) or sorted(j["metadata"]["name"] for j in lst("jobs")
+                                   if "-n-" in j["metadata"]["name"])
+    if not events or not jobs:
+        return None
+    job = get("job", jobs[-1])
+    spec = json.loads(json.dumps(job["spec"]["template"]["spec"]))
+    mutated = dict(events[0])
+    mutated["verification_scope"] = "complete"
+    name = f"{OWNER}-scope-mutant"
+    apply({"apiVersion": "v1", "kind": "ConfigMap", "metadata": owned(f"{name}-event"),
+           "data": {"event.json": json.dumps(mutated)}})
+    for volume in spec.get("volumes", []) or []:
+        if volume.get("configMap"):
+            volume["configMap"]["name"] = f"{name}-event"
+    spec["restartPolicy"] = "Never"
+    if get_opt("pod", name) is not None:
+        run(KN + ["delete", "pod", name, "--wait=true"])
+    create({"apiVersion": "v1", "kind": "Pod", "metadata": owned(name), "spec": spec})
+    pod = wait_for("pod", name,
+                   lambda o: o.get("status", {}).get("phase") in {"Succeeded", "Failed"},
+                   seconds=300, what="a terminal phase")
+    logs = redact(run(KN + ["logs", name], check=False).stdout)
+    state = ((pod["status"].get("containerStatuses") or [{}])[0].get("state") or {})
+    code = (state.get("terminated") or {}).get("exitCode")
+    return {
+        "exitCode": code,
+        "refused": code not in {0, None},
+        "reason": (logs.strip().splitlines() or ["<no output>"])[-1],
+        "evidence": artifact("protect/scope-mutant.txt",
+                             f"exit={code}\nevent.verification_scope=complete\n\n{logs}"),
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -4899,7 +5714,7 @@ def report() -> None:
     save()
     artifact("results.json", STATE)
     lines = [
-        "# d3w14 — live docker-desktop acceptance results",
+        f"# {OWNER} — live docker-desktop acceptance results",
         f"context: docker-desktop   namespace: {NS}   uid: {STATE.get('namespaceUid')}",
         f"revision: {STATE.get('revision')}   origin/main: {STATE.get('originMain')}",
         f"controller: {json.dumps(STATE.get('controllerAtReport'))}",
@@ -4922,7 +5737,7 @@ def report() -> None:
 
 def render_cleanup(proof: dict[str, Any]) -> str:
     lines = [
-        "# d3w14 cleanup proof",
+        f"# {OWNER} cleanup proof",
         "",
         f"- recorded (UTC): {proof['at']}",
         "- context: docker-desktop (every command; no other context was named)",
@@ -5009,6 +5824,19 @@ def cleanup() -> None:
 # `retention`'s policy and `bounded_retry` deletes it.
 PHASE_PRECONDITIONS: dict[str, tuple[str, ...]] = {
     "catalog_cases": ("catalog",),
+    # Both write their own bucket and their own destination, so they need only
+    # `setup` — declared rather than implied, because the reason `catalog_access`
+    # does NOT use dest-b is that `retention` asserts dest-b holds exactly its
+    # six points, and a corrupt manifest planted there would fail a phase that
+    # never asked for one.
+    "catalog_scale": ("setup",),
+    "catalog_access": ("setup",),
+    # `notify` opens this namespace's first Staleness alert and needs the view
+    # `catalog` publishes; `protection_cases` refreshes that view, adds a point
+    # to dest-a and then breaks it, so it runs after every phase that reads
+    # dest-a expecting it whole.
+    "notify": ("catalog",),
+    "protection_cases": ("catalog", "notify"),
     "retention": ("catalog",),
     "legal_hold": ("retention",),
     "lifecycle": ("retention",),
@@ -5067,11 +5895,12 @@ def phase_order_violations(phases: list[str]) -> list[str]:
 # four down with it (lab-refresh-5 §8.4, confirmed again in lab-refresh-6 §16).
 # `bounded_retry` therefore runs after the phases that need `keep-b`.
 PHASES = [
-    "setup", "catalog", "catalog_cases", "retention", "legal_hold", "lifecycle",
+    "setup", "catalog", "catalog_cases", "catalog_scale", "catalog_access", "retention", "legal_hold", "lifecycle",
     "enforce_guards", "packaging", "preview",
     "enforce", "wrong_prefix", "denied_deletion", "no_evidence_credential",
     "bounded_retry", "trust",
-    "signed_at_probe", "trust_rbac", "old_archive", "multiple_namespaces", "notify", "control", "report", "cleanup",
+    "signed_at_probe", "trust_rbac", "old_archive", "multiple_namespaces", "notify", "protection_cases",
+    "control", "report", "cleanup",
 ]
 
 
