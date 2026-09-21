@@ -754,6 +754,51 @@ def view_entries(catalog: dict[str, Any]) -> list[dict[str, Any]]:
     return entries
 
 
+RECEIPT_KEY_PREFIX = "logweir/backups"
+ULID_LEN = 26
+
+
+def reconstructed_view_ok(entries: list[dict[str, Any]],
+                          expected_backup_ids: set[str],
+                          want: int) -> dict[str, bool]:
+    """The view rebuilt from storage alone, and every field a restore binds to.
+
+    THE LAST THREE CLAUSES ARE CATALOG-RECEIPTKEY-REDACTED. This row used to
+    ask only for the count and the two axes, so it passed through a refresh in
+    which every point published `receiptKey: "[redacted].receipt.json"` — the
+    run id in the key is a 26-character ULID and `check::redact_path`'s
+    free-component budget was 24, so the redactor ate the key while
+    `receiptSha256` and the location beside it survived. D3 §5.5 step 4 builds
+    a restore plan's `source.point {point_id, receipt_key, receipt_sha256,
+    manifest_sha256}` from these entries, so the field the console needs as a
+    plan binding was the one field it could not use, and no live row could
+    fail. The key is derived in exactly one place
+    (`logweir::backup::phase_run::receipt_keys`), so the row can name it.
+    """
+    by_backup = {e.get("backupId"): e for e in entries}
+    keys = [(e.get("receiptKey") or "") for e in entries]
+    return {
+        "the view lists every point with zero Backup CRs":
+            len(entries) == want and expected_backup_ids <= set(by_backup),
+        "every point is Available": bool(entries) and all(
+            e.get("availability") == "Available" for e in entries),
+        "every point is Verified": bool(entries) and all(
+            e.get("verification") == "Verified" for e in entries),
+        "every point is selectable": bool(entries) and all(
+            e.get("selectable") is True for e in entries),
+        "no published receiptKey carries the redaction marker":
+            bool(keys) and all("[redacted]" not in k for k in keys),
+        "every receiptKey is the key the backup runner wrote":
+            bool(entries) and all(
+                e.get("receiptKey")
+                == f"{RECEIPT_KEY_PREFIX}/{e.get('backupId')}/{e.get('runId')}.receipt.json"
+                for e in entries),
+        "and its run id is a 26-character ULID, which is what made the key redactable":
+            bool(entries) and all(
+                len(e.get("runId") or "") == ULID_LEN for e in entries),
+    }
+
+
 def catalog_summary(catalog: dict[str, Any]) -> dict[str, Any]:
     status = catalog.get("status", {})
     return {
@@ -839,22 +884,17 @@ def catalog() -> None:
     evidence.append(artifact("catalog/catalog-after-cr-loss.json", cat_obj))
     by_backup = {e.get("backupId"): e for e in entries}
     expected = {p["backupId"] for p in points.values()}
-    ok = (
-        len(entries) == 3
-        and expected <= set(by_backup)
-        and all(e.get("availability") == "Available" for e in entries)
-        and all(e.get("verification") == "Verified" for e in entries)
-        and all(e.get("selectable") is True for e in entries)
-    )
+    clauses = reconstructed_view_ok(entries, expected, 3)
     check(
         "catalog-reconstruction-after-cr-loss",
         "PLAT-15.1",
-        ok,
+        all(clauses.values()),
         f"with zero Backup CRs the view lists {len(entries)} points "
         f"({sorted(set(by_backup))}) — availability "
         f"{sorted({e.get('availability') for e in entries})}, verification "
         f"{sorted({e.get('verification') for e in entries})}, selectable "
-        f"{sorted({e.get('selectable') for e in entries})}",
+        f"{sorted({e.get('selectable') for e in entries})}, receiptKey "
+        f"{sorted({e.get('receiptKey') for e in entries})}. Clauses {clauses}",
         evidence,
     )
     STATE["viewEntriesAfterCrLoss"] = entries
@@ -5278,10 +5318,14 @@ def catalog_access() -> None:
 
     # --- a credential that may read one object and not another --------------
     #
-    # The keys come from the RECORD in the bucket and not from the view, whose
-    # `receiptKey` is redacted by design (`check::redact_path`); a deny built
-    # from a redacted path would deny nothing and the row would pass on an
-    # unrestricted credential.
+    # The keys come from the RECORD in the bucket and not from the view. That
+    # WAS because the view's `receiptKey` came back `[redacted].receipt.json`
+    # and a deny built from a redacted path would deny nothing, so the row
+    # would pass on an unrestricted credential. It was never "by design": it
+    # was CATALOG-RECEIPTKEY-REDACTED, and the view now publishes the whole key
+    # (`catalog-reconstruction-after-cr-loss` asserts it). The record stays the
+    # source here anyway — it is the right source for a deny policy either way,
+    # and it does not depend on the view being reachable.
     denied_receipt = record_of(BUCKET_D, p1)["receipt"]["key"]
     denied_manifest = record_of(BUCKET_D, p2)["archive"]["manifest_key"]
     document = scoped_policy_document(BUCKET_D, [denied_receipt, denied_manifest])

@@ -1045,6 +1045,81 @@ def test_the_sink_counts_every_post_and_not_every_line() -> None:
         and ONE_POST_OTHER_ROUTE.count("POST /alerts") == 0)
 
 
+# --- the view after CR loss, and the key a restore binds to -----------------
+#
+# Recorded from `catalog/view-entries-after-cr-loss.json` of the 2026-09-19 run
+# (`lr520260919t0109z`), with `receiptKey` restored to what
+# `catalog/archive-objects-before.json` of the SAME capture shows the runner
+# actually wrote: the capture's view column held
+# `"[redacted].receipt.json"`, which is the defect
+# CATALOG-RECEIPTKEY-REDACTED itself.
+_RECONSTRUCTED = [
+    {"backupId": "e1c4ff19-62fb-4d76-9a3f-2177d6fd9d4a",
+     "runId": "01M2VKCST7EF12EW5T2Y7SJ86Q",
+     "receiptKey": "logweir/backups/e1c4ff19-62fb-4d76-9a3f-2177d6fd9d4a/"
+                   "01M2VKCST7EF12EW5T2Y7SJ86Q.receipt.json",
+     "availability": "Available", "verification": "Verified", "selectable": True},
+    {"backupId": "bca2d600-d37e-4149-8dc0-c15caf496e4a",
+     "runId": "01M2VKCKQSTCRDVMPD866R0WP9",
+     "receiptKey": "logweir/backups/bca2d600-d37e-4149-8dc0-c15caf496e4a/"
+                   "01M2VKCKQSTCRDVMPD866R0WP9.receipt.json",
+     "availability": "Available", "verification": "Verified", "selectable": True},
+    {"backupId": "a97f49e0-a48a-40b4-831d-12a1219cc0f2",
+     "runId": "01M2VKCDQBZJ34Q5J12KJBE05A",
+     "receiptKey": "logweir/backups/a97f49e0-a48a-40b4-831d-12a1219cc0f2/"
+                   "01M2VKCDQBZJ34Q5J12KJBE05A.receipt.json",
+     "availability": "Available", "verification": "Verified", "selectable": True},
+]
+_EXPECTED_BACKUPS = {e["backupId"] for e in _RECONSTRUCTED}
+
+
+def test_the_reconstructed_view_publishes_the_key_a_restore_binds_to() -> None:
+    """CATALOG-RECEIPTKEY-REDACTED — and the row that could not fail.
+
+    `catalog-reconstruction-after-cr-loss` asked only for the count and the two
+    axes, so it PASSED on the 2026-09-19 refresh while all three points
+    published `receiptKey: "[redacted].receipt.json"`. A live row that cannot
+    fail when the defect is present is not evidence, so the mutants below are
+    the point of this test: each one is the shape the capture really had, or a
+    plausible near miss, and each must be refused.
+    """
+    ok = d3.reconstructed_view_ok(_RECONSTRUCTED, _EXPECTED_BACKUPS, 3)
+    row("the reconstructed view: three points, both axes, and the whole receipt key",
+        all(ok.values()), f"{ok}")
+
+    redacted = json.loads(json.dumps(_RECONSTRUCTED))
+    for e in redacted:
+        e["receiptKey"] = "[redacted].receipt.json"
+    bad = d3.reconstructed_view_ok(redacted, _EXPECTED_BACKUPS, 3)
+    row("MUTANT: the capture's own shape — `[redacted].receipt.json` — is refused",
+        not all(bad.values())
+        and not bad["no published receiptKey carries the redaction marker"]
+        and not bad["every receiptKey is the key the backup runner wrote"],
+        f"{bad}")
+
+    planted = json.loads(json.dumps(_RECONSTRUCTED))
+    planted[1]["receiptKey"] = planted[1]["receiptKey"].replace(
+        planted[1]["runId"], "[redacted]")
+    row("MUTANT: ONE point with the marker planted mid-key is refused",
+        not all(d3.reconstructed_view_ok(planted, _EXPECTED_BACKUPS, 3).values()))
+
+    truncated = json.loads(json.dumps(_RECONSTRUCTED))
+    truncated[0]["receiptKey"] = "logweir/backups/x/y.receipt.json"
+    row("MUTANT: a key that is not derived from this point's own ids is refused",
+        not all(d3.reconstructed_view_ok(truncated, _EXPECTED_BACKUPS, 3).values()))
+
+    short = json.loads(json.dumps(_RECONSTRUCTED))
+    short[2]["runId"] = "run-a"
+    short[2]["receiptKey"] = (
+        f"logweir/backups/{short[2]['backupId']}/run-a.receipt.json")
+    row("MUTANT: a short fake run id passes the derivation but is not a ULID, "
+        "so it cannot stand in for the shape that made the key redactable",
+        not all(d3.reconstructed_view_ok(short, _EXPECTED_BACKUPS, 3).values()))
+
+    row("MUTANT: an empty view satisfies no clause vacuously",
+        not all(d3.reconstructed_view_ok([], set(), 0).values()))
+
+
 def test_zz_every_row_in_this_file_passed() -> None:
     """The file's own gate, for `python3 -m pytest e2e/k8s/d3`.
 

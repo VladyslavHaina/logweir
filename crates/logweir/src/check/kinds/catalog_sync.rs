@@ -62,17 +62,22 @@
 //!   every rule EXCEPT the long-run one, so a `s3://k:secret@b` shape or an
 //!   `AKIA…` is still removed from them;
 //! * object keys and the `s3://bucket/prefix` location pass
-//!   [`crate::check::redact_path`], whose long-run clause is applied per path
-//!   SEGMENT — applying it whole would redact an ordinary archive key. The
-//!   `receiptKey` is the load-bearing one: D3 §5.5 step 4 builds a restore
-//!   plan's `source.point {point_id, receipt_key, receipt_sha256,
-//!   manifest_sha256}` from this line, so a key that arrives redacted is a
-//!   plan binding the runner refuses with exit 3 `PointBindingMismatch`. It
-//!   survived the long-run clause and then died on the free-component budget
-//!   instead, because a run id is a 26-character ULID and the budget is 24
+//!   [`crate::check::redact_path`], whose long-run clause is applied per RUN,
+//!   exactly as [`redact`] applies it, with one extra way for a run to be
+//!   public — it may be object-key SHAPED without carrying an anchor.
+//!   (Splitting the value on `/` first and running the rule over each piece is
+//!   the spelling that let a `/`-bearing credential through whole; it is not
+//!   what this function does, review finding F1.) The `receiptKey` is the
+//!   load-bearing one: D3 §5.5 step 4 builds a restore plan's
+//!   `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}`
+//!   from this line, so a key that arrives redacted is a plan binding the
+//!   runner refuses with exit 3 `PointBindingMismatch`. It survived the
+//!   long-run clause and then died on the free-component budget instead,
+//!   because a run id is a 26-character ULID and the budget is 24
 //!   (CATALOG-RECEIPTKEY-REDACTED); `check_contract::is_ulid` now exempts that
-//!   shape from the LENGTH — not from the count, and not by raising the
-//!   budget, which would be 3.6x more permissive about a credential;
+//!   shape from the LENGTH — not from the count, not by raising the budget
+//!   (which fails an existing redaction row), and not where the run carries no
+//!   archive anchor;
 //! * **everything else copied out of the archive passes the whole
 //!   `check_contract::redact`**, long-run clause included: a `pointId` is 37
 //!   characters and a `backupId` or `runId` shorter still, so the clause costs
@@ -450,8 +455,9 @@ pub const LONG_RUN_RULE: &str = "long-base64-or-hex-run";
 /// record's `backup_id` by anyone who can write a new key under the archive
 /// prefix travelled verbatim into an immutable page `ConfigMap`. Those fields
 /// now take the WHOLE [`redact`]; the object keys and the location id take
-/// [`crate::check::redact_path`], whose long-run clause is per path SEGMENT so
-/// a key is not eaten whole; and only the three digests come here.
+/// [`crate::check::redact_path`], which weighs each RUN exactly as [`redact`]
+/// does but will also read a run as an object key on its SHAPE alone, so a key
+/// is not eaten whole; and only the three digests come here.
 ///
 /// # Panics
 /// Never in practice: only if [`LONG_RUN_RULE`] names no rule, which
@@ -1387,11 +1393,13 @@ fn build_entry(observation: &Observation) -> Option<CatalogEntry> {
     //                       clause costs nothing here and catches a credential
     //                       planted in one by anyone who can write a new key
     //                       under the archive prefix.
-    //   * `redact_path`   — the same rules, with the long-run clause applied
-    //                       per path SEGMENT, for object keys and the
-    //                       `s3://bucket/prefix` location. Applying it whole
-    //                       would redact an ordinary archive key, which is the
-    //                       defect `check::redact_path` itself exists for.
+    //   * `redact_path`   — the same rules, the long-run clause still weighed
+    //                       per RUN, but a run may also be public by being
+    //                       object-key SHAPED without an anchor. For object
+    //                       keys and the `s3://bucket/prefix` location. The
+    //                       strict rule would redact an ordinary archive key,
+    //                       which is the defect `check::redact_path` itself
+    //                       exists for.
     //                       `receiptKey` MUST survive it whole: it is half the
     //                       plan binding a restore is built from, and it did
     //                       not until `is_ulid` exempted the 26-character run

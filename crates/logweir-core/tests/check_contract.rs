@@ -1584,6 +1584,49 @@ fn a_receipt_keys_ulid_run_id_survives_and_nothing_its_length_rides_with_it() {
         );
     }
 
+    // --- the exemption needs the ANCHOR, not just the shape ----------------
+    // REVIEW MED-1. `is_object_key_shaped` is this clause with the anchor
+    // requirement DROPPED, so an exemption that rode on shape alone would make
+    // any `<adopter bucket name>/<26 Crockford characters>` a key. The alphabet
+    // that mints 26-character tokens is base32, not base64: an unpadded RFC
+    // 4648 encoding of a 128-bit seed is exactly 26 characters and is
+    // ULID-shaped 6.7e-3 of the time (measured 2578/400,000 without this gate,
+    // 0/400,000 with it). `2BSWY3DPEHPK3PXPJBSWY3DPEH` is such a secret: RFC
+    // 4648 base32 AND Crockford, leading `2`.
+    const BASE32_SECRET: &str = "2BSWY3DPEHPK3PXPJBSWY3DPEH";
+    assert_eq!(BASE32_SECRET.len(), 26);
+    for unanchored in [
+        format!("my-archive-bucket-name/{BASE32_SECRET}"),
+        format!("tenant-prod/exports/{BASE32_SECRET}"),
+    ] {
+        assert!(
+            unanchored.len() >= 40,
+            "the probe must reach the threshold: {unanchored}"
+        );
+        assert!(
+            !is_object_key_shaped(&unanchored),
+            "a ULID-shaped secret was read as a key with no archive anchor              anywhere in the run: {unanchored}"
+        );
+        let sentence = format!("the object {unanchored} failed");
+        assert!(
+            redact(&sentence).contains(REDACTED),
+            "and `redact`, which requires the anchor, must still refuse it: {}",
+            redact(&sentence)
+        );
+    }
+    // …while the SAME component in the run-id slot of a key this product wrote
+    // is kept, because that run carries the anchor. This is the pair that makes
+    // the gate a precondition rather than a second budget.
+    for anchored in [
+        format!("logweir/backups/{SET}/{BASE32_SECRET}"),
+        format!("logweir/drills/{RUN}"),
+    ] {
+        assert!(
+            is_object_key_shaped(&anchored),
+            "an anchored run lost its run id: {anchored}"
+        );
+    }
+
     // --- what did NOT change, so the rows say what they mean ---------------
     // A 26-character all-lower-case component (a hex stem, for instance) was
     // never over the budget: it is a public NAME, and it survived before this

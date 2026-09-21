@@ -502,7 +502,8 @@ async fn the_point_view_keeps_availability_and_verification_apart_and_pages() {
         );
         assert!(
             key.ends_with(&format!("/{run_id}.receipt.json")),
-            "`receiptKey` must be `<prefix>/<backup_id>/<run_id>.receipt.json`,              so a console can bind a restore to it: {key}"
+            "`receiptKey` must end in `/<run_id>.receipt.json` so a console \
+             can bind a restore to it: {key}"
         );
         assert_eq!(
             key,
@@ -512,6 +513,11 @@ async fn the_point_view_keeps_availability_and_verification_apart_and_pages() {
                     .as_str()
                     .expect("a point carries its backup id")
             ),
+            // `logweir-api` does not depend on `logweir`, so this spelling is
+            // copied rather than read out of `phase_run::receipt_keys` the way
+            // `check_cli`'s cross-crate guard reads the controller's constants.
+            // If that function ever moves, THIS is the row that will lie
+            // rather than fail loudly.
             "and it is the key `logweir backup run` wrote (`phase_run::receipt_keys`)"
         );
     }

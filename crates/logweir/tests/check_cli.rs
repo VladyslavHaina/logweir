@@ -4863,9 +4863,10 @@ fn a_ulid_run_id_is_an_object_key_and_a_component_its_length_is_not() {
         format!("logweir/drills/{RUN}.receipt.json"),
         format!("{LAB}.receipt.json"),
     ] {
+        assert!(keep.contains(RUN), "the fixture must carry the run id");
         assert!(
-            keep.contains(RUN) || keep.contains("01M2VKCST7EF12EW5T2Y7SJ86Q"),
-            "the fixture must carry a run id"
+            keep.len() >= 40,
+            "and must reach the long-run threshold, or it proves nothing: {keep}"
         );
         assert_eq!(
             logweir::check::redact_path(&keep),
@@ -4899,6 +4900,27 @@ fn a_ulid_run_id_is_an_object_key_and_a_component_its_length_is_not() {
             }
         }
     }
+    // REVIEW MED-1: and the exemption needs the ANCHOR. `redact_path` reads a
+    // run as a key on its SHAPE alone — no UUID, no digest, none of this
+    // product's own archive components required — and `locationId` is
+    // `s3://<adopter bucket>/<adopter prefix>`, so the position is reachable.
+    // The alphabet that mints 26-character tokens is base32: an unpadded RFC
+    // 4648 encoding of a 128-bit seed (a TOTP secret, a recovery seed) is
+    // exactly 26 characters and is ULID-shaped 6.7e-3 of the time — 1 in 155,
+    // where before the exemption it was 0 in 400,000.
+    const BASE32_SECRET: &str = "2BSWY3DPEHPK3PXPJBSWY3DPEH";
+    for value in [
+        format!("my-archive-bucket-name/{BASE32_SECRET}"),
+        format!("s3://my-archive-bucket-name/{BASE32_SECRET}"),
+        serde_json::json!({"missingSegment": format!("tenant-prod/exports/{BASE32_SECRET}")})
+            .to_string(),
+    ] {
+        let out = logweir::check::redact_path(&value);
+        if out.contains(BASE32_SECRET) {
+            survived.push(format!("un-anchored, on shape alone: {out}"));
+        }
+    }
+
     // And the count is never relaxed: a ULID is exempt from the budget, not a
     // licence to carry a second free component beside it.
     for beside in ["MyBackupSet01", "payments-EU"] {
@@ -4913,7 +4935,7 @@ fn a_ulid_run_id_is_an_object_key_and_a_component_its_length_is_not() {
         "`redact_path` widened its budget instead of exempting the ULID shape \
          ({} of {}):\n  {}",
         survived.len(),
-        refused.len() * 2 + 2,
+        refused.len() * 2 + 5,
         survived.join("\n  ")
     );
 }

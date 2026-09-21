@@ -2620,11 +2620,36 @@ fn is_public_name(c: &str) -> bool {
 /// instead exempted BY SHAPE ([`is_ulid`]): it is an identity this product
 /// minted, not text an adopter chose, and the same measurement with the
 /// exemption is 1.35e-5 — **not one extra accept in 4,000,000 random keys**.
-/// The exemption is narrow by construction: a random base64 component is
-/// ULID-shaped with probability `(8/64) * (32/64)^25 ≈ 4e-9`, and a ULID still
-/// spends the ONE free slot, so nothing may ride beside it. (The three figures
-/// are one 4,000,000-key run of the script in the worker report, which
-/// reproduces the 400,000-key figures above at the same caps.)
+/// The exemption is narrow, and a ULID still spends the ONE free slot, so
+/// nothing may ride beside it. (The three figures are one 4,000,000-key run of
+/// the script in the worker report, which reproduces the 400,000-key figures
+/// above at the same caps.)
+///
+/// # How narrow, honestly — the alphabet matters
+///
+/// A random BASE64 component is ULID-shaped with probability
+/// `(8/64) * (32/64)^25 ≈ 4e-9`, which is why the AWS-shaped measurement above
+/// does not move. But base64 is not the alphabet that mints 26-character
+/// tokens, so that figure alone would be a misleading rationale. **BASE32 is.**
+/// An unpadded RFC 4648 base32 encoding of a 128-bit seed — a TOTP secret, a
+/// recovery seed — is exactly 26 characters, and RFC 4648's alphabet overlaps
+/// Crockford's in 28 of 32 positions, so such a secret is ULID-shaped
+/// `(6/32) * (28/32)^25 = 6.7e-3` of the time. One in 155, not one in 250
+/// million.
+///
+/// That is accepted, and it is only acceptable because of the other
+/// precondition: to reach this budget at all the component must be the SOLE
+/// free component of an ANCHORED run — a run carrying a UUID, a digest or a
+/// component this product itself writes into an archive key
+/// ([`at_most_one_free_component`]'s `ulid_exempt`). So the shape has to sit in
+/// the run-id slot of a key this product mints, not merely somewhere in an
+/// adopter-supplied string. Without that gate the same probe survives
+/// 2578/400,000 where it was 0/400,000; with it, 0/400,000.
+///
+/// (For 26 upper-case HEX characters the figure would be `1/2`, but nothing
+/// mints a 104-bit hex token; and the lower-case form of both already survives
+/// as a public NAME — [`is_public_name`], which is a wider pre-existing opening
+/// than this one and not a matter for this constant.)
 const FREE_COMPONENT_MAX: usize = 24;
 
 /// A ULID as [`crate::ids::format_run_id`] mints one: exactly 26 characters of
@@ -2750,7 +2775,9 @@ fn is_fact_pair(c: &str) -> bool {
 ///   a token. **At most one** of its remaining components may then be something
 ///   other than a public form, and that one is capped at
 ///   [`FREE_COMPONENT_MAX`] unless it is a ULID ([`is_ulid`]), which is an
-///   identity this product minted rather than text an adopter chose. Kafka
+///   identity this product minted rather than text an adopter chose — an
+///   exemption this arm may rely on precisely because it has already required
+///   the anchor. Kafka
 ///   topic names may carry upper case, and the strict clause above would have
 ///   redacted the whole segment path for `payments-EU`; a segment key has
 ///   exactly ONE adopter-chosen component, which is that topic name or the
@@ -2790,26 +2817,55 @@ fn is_public_identifier(run: &str) -> bool {
         .iter()
         .any(|c| is_uuid(c) || is_hex_digest(c) || is_archive_component(c))
         && components.iter().all(|c| public(c) || is_key_component(c))
-        && at_most_one_free_component(&components)
+        // `true`: the anchor was just required on the line above, so this arm
+        // is always looking at a run this product's own archive structure
+        // vouches for — which is the precondition the ULID exemption is
+        // allowed to rely on.
+        && at_most_one_free_component(&components, true)
 }
 
 /// At most one component that is not a public form, and that one no longer than
-/// [`FREE_COMPONENT_MAX`] **or a ULID** — the clause both key-shaped tests
-/// share.
+/// [`FREE_COMPONENT_MAX`] — or, when `ulid_exempt`, a ULID. The clause both
+/// key-shaped tests share.
 ///
 /// "At most one" is never relaxed; only the LENGTH of that one is, and only for
 /// the one shape this product mints rather than an adopter chooses
 /// ([`is_ulid`]). So `<set id>/<run id>` is a key, `<set id>/<run id>/<anything
 /// else free>` is still two free components and still goes, and the budget
 /// still answers for everything that is not a ULID.
-fn at_most_one_free_component(components: &[&str]) -> bool {
+///
+/// # `ulid_exempt` is the ANCHOR, passed down
+///
+/// The two callers do not share a precondition. [`is_public_identifier`] has
+/// already required an anchor — a UUID, a digest, or a component this product
+/// writes into an archive key — before it reaches here, so its run is archive
+/// structure and the exemption is about the run-id SLOT of a key this product
+/// minted. [`is_object_key_shaped`] is that clause with the anchor requirement
+/// DROPPED, so without this parameter the exemption would ride on shape alone,
+/// and any `<adopter bucket name>/<26 Crockford characters>` would survive.
+///
+/// That is reachable and it is measurable. An unpadded RFC 4648 base32 encoding
+/// of a 128-bit seed — a TOTP secret, a recovery seed — is **exactly 26
+/// characters**, and base32's alphabet overlaps Crockford's in 28 of 32
+/// positions, so such a secret is ULID-shaped `(6/32)·(28/32)^25 = 6.7e-3` of
+/// the time: 1 in 155, measured at 2578/400,000, where before the exemption it
+/// was 0/400,000. Gating on the anchor takes that back to 0/400,000 while every
+/// key this product writes stays whole, because every one of them is anchored:
+/// `logweir/backups/<uuid>/<run id>` and `logweir/drills/<run id>` both carry
+/// `logweir` and `backups`/`blobs`-class components that
+/// [`is_archive_component`] names, and the adopter-prefixed spellings carry the
+/// backup set's UUID.
+fn at_most_one_free_component(components: &[&str], ulid_exempt: bool) -> bool {
     let public = |c: &str| {
         c.is_empty() || is_hex_digest(c) || is_uuid(c) || is_public_name(c) || is_fact_pair(c)
     };
     let mut free = components.iter().filter(|c| !public(c));
     match free.next() {
         None => true,
-        Some(one) => (one.len() <= FREE_COMPONENT_MAX || is_ulid(one)) && free.next().is_none(),
+        Some(one) => {
+            (one.len() <= FREE_COMPONENT_MAX || (ulid_exempt && is_ulid(one)))
+                && free.next().is_none()
+        }
     }
 }
 
@@ -2827,21 +2883,35 @@ fn at_most_one_free_component(components: &[&str]) -> bool {
 ///
 /// The ONE non-public component is the adopter-chosen one: a backup set id like
 /// `20260915T030000Z`, which carries upper case and is neither a UUID nor a
-/// digest, or a topic name like `payments-EU` — or the run id this product
-/// minted, a 26-character ULID, which is two characters over the budget and
-/// exempt from it by shape alone ([`is_ulid`]). A credential is refused by the
+/// digest, or a topic name like `payments-EU`. A credential is refused by the
 /// same two clauses that refuse it in [`is_public_identifier`]: unsliced it is
 /// 40 characters and fails the length cap, and its own `/` characters —
 /// base64's 64th — split it into two or three components that are all
 /// non-public.
+///
+/// # The ULID exemption is NOT dropped along with the anchor
+///
+/// The run id of a key this product minted is a 26-character ULID, two over
+/// [`FREE_COMPONENT_MAX`], and it is exempt — but only where the run is
+/// ANCHORED, which this function still measures even though it no longer
+/// REQUIRES it. Dropping the anchor and keeping the exemption would make any
+/// `<adopter bucket name>/<26 Crockford characters>` a key, and an unpadded
+/// 128-bit base32 secret is that shape 6.7e-3 of the time (see
+/// [`at_most_one_free_component`]). Every key this product writes is anchored,
+/// so nothing the exemption exists for is lost: the anchor is a precondition,
+/// not a second budget.
 #[must_use]
 pub fn is_object_key_shaped(value: &str) -> bool {
     let components: Vec<&str> = value.split('/').collect();
     let public = |c: &str| {
         c.is_empty() || is_hex_digest(c) || is_uuid(c) || is_public_name(c) || is_fact_pair(c)
     };
+    // MEASURED, not required — the difference from [`is_public_identifier`].
+    let anchored = components
+        .iter()
+        .any(|c| is_uuid(c) || is_hex_digest(c) || is_archive_component(c));
     components.iter().all(|c| public(c) || is_key_component(c))
-        && at_most_one_free_component(&components)
+        && at_most_one_free_component(&components, anchored)
 }
 
 // --------------------------------------------------------------- visibility
