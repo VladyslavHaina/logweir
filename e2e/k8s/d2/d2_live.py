@@ -4555,6 +4555,28 @@ def u6_mc_pod() -> dict[str, Any]:
     }
 
 
+def u6_signing_key() -> None:
+    """The signing key this run's receipts are signed with.
+
+    `approver_material()` reads `/tmp/logweir-scram-e2e`, which this host no
+    longer has (the lab was rebuilt since D2 W14). The key the cluster-scoped
+    `TrustRoster/default` already trusts lives in the shared release's own
+    Secret, so it is COPIED — through a pipe, never printed, never written to
+    an artifact — into this run's namespace. The shared release is not
+    modified: this is a read of one Secret. U6 needs no approver key, because
+    every restore preflight it runs is a draft.
+    """
+    if get_opt("secret", "logweir-signing-key") is not None:
+        return
+    lab = json.loads(run(CTX + ["-n", LAB_NS, "get", "secret", "logweir-signing-key",
+                                "-o", "json"], timeout=60).stdout)
+    apply({"apiVersion": "v1", "kind": "Secret",
+           "metadata": owned("logweir-signing-key"),
+           "type": lab.get("type", "Opaque"),
+           "data": {"signing.pem": lab["data"]["signing.pem"]}})
+    log("u6setup: the roster's signing key is present in this namespace")
+
+
 def u6setup() -> None:
     """The U6 fixture: ONE MinIO, TWO brokers, one bucket, one principal per
     role, and one destination per readiness shape. Deliberately smaller than
@@ -4572,10 +4594,7 @@ def u6setup() -> None:
                               "secret-access-key": SECRETS[user]})
     literal_secret("kafka-admin", {"password": SECRETS["kafka-admin"]})
     literal_secret("kafka-target-admin", {"password": SECRETS["kafka-target-admin"]})
-    keys = approver_material()
-    apply({"apiVersion": "v1", "kind": "Secret", "metadata": owned("logweir-signing-key"),
-           "type": "Opaque",
-           "data": {"signing.pem": base64.b64encode(keys["signing"].read_bytes()).decode()}})
+    u6_signing_key()
     apply({"apiVersion": "v1", "kind": "ServiceAccount",
            "metadata": owned("logweir-runner"), "automountServiceAccountToken": False})
 
@@ -4640,24 +4659,36 @@ def u6setup() -> None:
         evidence_write="u6-evwriter", evidence_read="u6-evreader",
         description="U6: one principal per role, so a policy change isolates one role",
         **common))
+    # `writeProbe: CreateOnlyMarker` is read from the OBJECT and only for a
+    # Backup/Restore readiness plan — `preflight.rs:3692` skips it for a
+    # `DestinationAccess` request, which names its own roles. So the one
+    # operation that probes an evidence-write grant is a Backup preflight on a
+    # destination that opted in, and this one carries no other separated grant
+    # so the probed row is about `evidenceWrite` alone.
     apply(destination(
-        "u6-dest-probe", archive_write="u6-writer", archive_read="u6-reader",
-        evidence_write="u6-evwriter", evidence_read="u6-evreader", write_probe=True,
+        "u6-dest-probe", archive_write="u6-writer", evidence_write="u6-evwriter",
+        write_probe=True,
         description="U6: the same location with the create-only readiness write probe on",
+        **common))
+    apply(destination(
+        "u6-dest-write", archive_write="u6-writer",
+        description="U6: `evidenceWrite` and `archiveRead` ABSENT, so both fall back to "
+                    "`archiveWrite` \u2014 the shape D2 §3.11's archiveWrite row is about "
+                    "(\"Backup Job (engine and receipt)\")",
         **common))
     apply(destination(
         "u6-dest-cat", archive_write="u6-writer", archive_read="u6-catreader",
         evidence_write="u6-evwriter", evidence_read="u6-evreader",
         description="U6: catalogSync reads through `archiveRead`; this one isolates it",
         **common))
-    for name in ("u6-dest", "u6-dest-probe", "u6-dest-cat"):
+    for name in ("u6-dest", "u6-dest-probe", "u6-dest-cat", "u6-dest-write"):
         obj = wait_for("backupdestination", name,
                        lambda o: o.get("status", {}).get("reason") is not None,
                        timeout=180, what="a Valid verdict")
         artifact(f"u6/objects/{name}.json", obj)
         check(obj["status"].get("reason") == "Valid",
               f"{name} is not Valid: {obj['status'].get('reason')}")
-    log("u6setup: three destinations Valid")
+    log("u6setup: four destinations Valid")
 
 
 def u6_backup_manifest_facts(backup_id: str) -> dict[str, Any]:
@@ -4755,6 +4786,26 @@ def u6_restore_preflight_op(rows: list[str]):
     return op
 
 
+def u6_backup_preflight_op(dest: str, rows: list[str]):
+    """A Backup readiness plan. The ONLY operation on this build that probes an
+    `evidenceWrite` grant, because `writeProbe` is read from the destination
+    object and only for a Backup or Restore plan."""
+    def op(tag: str) -> dict[str, Any]:
+        name = f"u6-bp-{u6_seq():03d}"
+        apply(preflight(name, {
+            "operation": "Backup",
+            "backup": {"sourceRef": {"name": "source"},
+                       "destinationRef": {"name": dest},
+                       "topics": ["orders"]},
+        }, timeout_seconds=180))
+        obj = wait_preflight(name, timeout=600)
+        artifact(f"u6/objects/{name}.json", obj)
+        out = u6_check_outcome(obj, name, rows)
+        out["variant"] = tag
+        return out
+    return op
+
+
 def u6_backup_op(dest: str = "u6-dest"):
     def op(tag: str) -> dict[str, Any]:
         name = f"u6-bk-{u6_seq():03d}"
@@ -4800,13 +4851,351 @@ def u6a() -> None:
         )
     with Scenario("U6.evidenceWrite",
                   "the minimal grant under which the create-only readiness marker writes") as sc:
+        u6_attach("u6-writer", U6_WIDE_WRITE, "evw-archive")
         u6_bisect(
             sc, role="evidence-write", user="u6-evwriter",
             starting=["s3:PutObject@evidence", "s3:GetObject@evidence",
                       "s3:ListBucket@bucket:evidence", "s3:GetBucketLocation@bucket"],
-            operation=u6_destination_access_op(
-                "u6-dest-probe", ["EvidenceWrite"], ["destination.evidenceWritable"]),
-            note="`writeProbe: CreateOnlyMarker` is what makes this row probed at all",
+            operation=u6_backup_preflight_op(
+                "u6-dest-probe", ["destination.evidenceWritable"]),
+            note="`writeProbe: CreateOnlyMarker` is what makes this row probed at all, and a "
+                 "Backup readiness plan is the only request that reads it",
+        )
+
+
+
+
+def u6_composite(*parts: Callable[[str], dict[str, Any]]):
+    """One role, two product operations, one verdict.
+
+    `archiveRead` is listed AND read on this build — the check framework's
+    bounded list and the restore preflight's manifest read — and a minimal set
+    measured against only one of them would be minimal for half the role.
+    """
+    def op(tag: str) -> dict[str, Any]:
+        outcomes = [part(tag) for part in parts]
+        ok = all(o["ok"] for o in outcomes)
+        failing = [o for o in outcomes if not o["ok"]]
+        return {
+            "ok": ok, "variant": tag,
+            "kind": "+".join(sorted({o["kind"] for o in outcomes})),
+            "object": "+".join(o["object"] for o in outcomes),
+            "classified": {o["object"]: o["classified"] for o in outcomes},
+            "unclassified": bool(failing) and any(o["unclassified"] for o in failing),
+        }
+    return op
+
+
+def u6b() -> None:
+    """`archiveRead`: the bounded listing AND the manifest/segment reads."""
+    with Scenario("U6.archiveRead",
+                  "the minimal grant under which a destination's archive is listable "
+                  "and its recovery point readable") as sc:
+        check("u6BackupFacts" in state,
+              "U6.archiveRead needs a recovery point to read; run `u6c` (or `u6point`) first")
+        u6_bisect(
+            sc, role="archive-read", user="u6-reader",
+            starting=["s3:ListBucket@bucket:archive", "s3:GetObject@archive",
+                      "s3:GetBucketLocation@bucket"],
+            operation=u6_composite(
+                u6_destination_access_op("u6-dest", ["ArchiveRead"],
+                                         ["destination.archiveListable"]),
+                u6_restore_preflight_op(["archive.backupSet", "archive.segments"]),
+            ),
+            note="D2 §3.11 recorded `s3:ListBucket` (prefix-conditioned) plus `s3:GetObject`",
+        )
+
+
+U6_WIDE_WRITE = ["s3:ListBucket@bucket:both", "s3:GetBucketLocation@bucket",
+                 "s3:GetObject@archive", "s3:PutObject@archive",
+                 "s3:AbortMultipartUpload@archive",
+                 "s3:GetObject@evidence", "s3:PutObject@evidence",
+                 "s3:AbortMultipartUpload@evidence"]
+
+
+def u6point() -> None:
+    """One recovery point, written with a grant wide enough that WRITING it is
+    not the thing under measurement. Every later phase reads this point."""
+    with Scenario(f"U6.point{len(state.get('u6Points') or []) + 1}",
+                  "a recovery point to measure the read roles against") as sc:
+        u6_attach("u6-writer", U6_WIDE_WRITE, "point")
+        out = u6_backup_op("u6-dest-write")("point")
+        check(out["ok"], f"the seed backup did not succeed: {json.dumps(out['classified'])[:600]}")
+        facts = u6_backup_manifest_facts(out["backupId"])
+        state["u6BackupFacts"] = facts
+        state.setdefault("u6Points", []).append(out["backupId"])
+        save()
+        sc.detail["backup"] = {"object": out["object"], "backupId": out["backupId"],
+                               "evidence": out["evidence"]}
+        sc.detail["facts"] = {k: v for k, v in facts.items() if k != "segmentKeys"}
+        sc.detail["segmentCount"] = len(facts["segmentKeys"])
+        artifact("u6/point.json", sc.detail)
+
+
+def u6c() -> None:
+    """`archiveWrite`: a real `Backup`, which is the only thing that writes an
+    archive. D2 §14.3's recorded policy is the starting set VERBATIM, including
+    the `s3:DeleteObject` it carried and §3.11's table did not — so the
+    discrepancy between the two is settled by measurement."""
+    with Scenario("U6.archiveWrite",
+                  "the minimal grant under which a destination-backed Backup succeeds") as sc:
+        u6_bisect(
+            sc, role="archive-write", user="u6-writer",
+            starting=["s3:ListBucket@bucket:both", "s3:GetBucketLocation@bucket",
+                      "s3:GetObject@archive", "s3:PutObject@archive",
+                      "s3:AbortMultipartUpload@archive", "s3:DeleteObject@archive",
+                      "s3:GetObject@evidence", "s3:PutObject@evidence",
+                      "s3:AbortMultipartUpload@evidence"],
+            operation=u6_backup_op("u6-dest-write"),
+            note="the run writes the archive through the engine AND its own signed "
+                 "receipt under `logweir/`, with ONE grant",
+        )
+
+
+def u6_catalog_op(dest: str = "u6-dest-cat"):
+    """One `RecoveryCatalog` sync per variant — a FRESH object every time,
+    because a `syncRequest` bump on this build starts a Job whose result is
+    never harvested (`catalog-resync-is-not-harvested`, D3 W14)."""
+    def op(tag: str) -> dict[str, Any]:
+        name = f"u6-cat-{u6_seq():03d}"
+        since = now()
+        apply({
+            "apiVersion": "logweir.dev/v1alpha1", "kind": "RecoveryCatalog",
+            "metadata": owned(name),
+            "spec": {"destinationRef": {"name": dest},
+                     "sync": {"intervalSeconds": 300, "mode": "Index",
+                              "deepCheck": "ManifestDigest"},
+                     "syncRequest": "u6"},
+        })
+
+        def settled(o: dict[str, Any]) -> bool:
+            status = o.get("status") or {}
+            if status.get("observedSyncRequest") != "u6":
+                return False
+            if status.get("pages") and (status.get("syncedAt") or "") >= since:
+                return True
+            return any(
+                c.get("status") == "False"
+                and c.get("reason") not in {"PodNotStarted", "SyncInProgress", ""}
+                and (c.get("lastTransitionTime") or "") >= since
+                for c in status.get("conditions", []) or []
+            )
+
+        try:
+            obj = wait_for("recoverycatalog", name, settled, timeout=540,
+                           what="a published view or a settled sync failure")
+            timed_out = False
+        except TimeoutError:
+            obj = get("recoverycatalog", name)
+            timed_out = True
+        artifact(f"u6/objects/{name}.json", obj)
+        status = obj.get("status") or {}
+        counts = status.get("counts") or {}
+        ok = bool(status.get("pages")) and (counts.get("available") or 0) >= 1
+        conditions = [{"type": c.get("type"), "status": c.get("status"),
+                       "reason": c.get("reason"), "message": (c.get("message") or "")[:300]}
+                      for c in status.get("conditions", []) or []]
+        classified = {"counts": counts, "pages": len(status.get("pages") or []),
+                      "conditions": conditions, "timedOut": timed_out}
+        return {"ok": ok, "object": name, "kind": "RecoveryCatalog", "variant": tag,
+                "classified": classified,
+                "unclassified": (not ok) and not u6_denied(classified)}
+    return op
+
+
+def u6d() -> None:
+    """The `catalogSync` reader. It uses the destination's `archiveRead` grant
+    (`check/kinds/catalog_sync.rs` opens `DestinationRole::ArchiveRead`) but it
+    reads the catalog log, the receipts and the sidecars under `logweir/` as
+    well as the manifests under the archive prefix — so its minimal set is a
+    claim about a DIFFERENT set of keys than `archiveRead`'s own."""
+    with Scenario("U6.catalogSync",
+                  "the minimal grant under which a RecoveryCatalog publishes a view") as sc:
+        u6_bisect(
+            sc, role="catalog-sync", user="u6-catreader",
+            starting=["s3:ListBucket@bucket:both", "s3:GetBucketLocation@bucket",
+                      "s3:GetObject@archive", "s3:GetObject@evidence"],
+            operation=u6_catalog_op(),
+            note="the reader walks `logweir/catalog/v1/log/`, then reads each point's "
+                 "receipt, sidecar and manifest",
+        )
+
+
+# --- the retention enforcer ------------------------------------------------
+#
+# The enforcer is the one role whose operation DESTROYS what it measures, so a
+# bisection has to put the objects back between variants. The archive prefix is
+# snapshotted to a sibling prefix before the first run and copied back before
+# each variant, and every variant re-runs the CONTROLLER'S OWN Job — the same
+# image, command, argv, plan `ConfigMap` and projected credentials the
+# controller rendered — under a fresh `LOGWEIR_RETENTION_RUN_ID`, because the
+# tombstones it writes are create-only.
+
+U6_SNAPSHOT_PREFIX = "u6-snapshot"
+
+
+def u6_snapshot_archive() -> None:
+    mc("rm", "--recursive", "--force", f"a/{U6_BUCKET}/{U6_SNAPSHOT_PREFIX}/", check=False)
+    mc("cp", "--recursive", f"a/{U6_BUCKET}/{U6_ARCHIVE_PREFIX}/",
+       f"a/{U6_BUCKET}/{U6_SNAPSHOT_PREFIX}/", timeout=300)
+
+
+def u6_restore_archive() -> None:
+    mc("cp", "--recursive", f"a/{U6_BUCKET}/{U6_SNAPSHOT_PREFIX}/{U6_ARCHIVE_PREFIX}/",
+       f"a/{U6_BUCKET}/{U6_ARCHIVE_PREFIX}/", timeout=300)
+
+
+def u6_retention_job_op():
+    """Re-run the controller's own enforcement Job, one variant at a time."""
+    def op(tag: str) -> dict[str, Any]:
+        template = json.loads(json.dumps(state["u6RetentionJob"]))
+        name = f"u6-ret-{u6_seq():03d}"
+        run_id = f"{name}-{secrets.token_hex(4)}"
+        u6_restore_archive()
+        spec = template["spec"]
+        spec.pop("selector", None)
+        spec["template"]["metadata"].pop("labels", None)
+        spec["template"]["metadata"].pop("creationTimestamp", None)
+        spec.pop("completionMode", None)
+        spec.pop("suspend", None)
+        for env in spec["template"]["spec"]["containers"][0].get("env", []):
+            if env.get("name") == "LOGWEIR_RETENTION_RUN_ID":
+                env["value"] = run_id
+        job = {"apiVersion": "batch/v1", "kind": "Job",
+               "metadata": owned(name), "spec": spec}
+        apply(job)
+        finished = wait_for(
+            "job", name,
+            lambda o: bool((o.get("status") or {}).get("succeeded"))
+            or bool((o.get("status") or {}).get("failed")),
+            timeout=420, what="a terminal Job")
+        logs = redact(pod_logs_for_job(name, tail=120))[-3000:]
+        artifact(f"u6/objects/{name}.json", finished)
+        artifact(f"u6/objects/{name}.log", logs)
+        status = finished.get("status") or {}
+        ok = bool(status.get("succeeded")) and "retention-point=" in logs
+        deleted = logs.count("state=Deleted")
+        classified = {"jobSucceeded": bool(status.get("succeeded")),
+                      "jobFailed": status.get("failed"),
+                      "pointsDeleted": deleted, "runnerLogTail": logs[-2000:]}
+        return {"ok": ok and deleted >= 1, "object": name, "kind": "Job", "variant": tag,
+                "classified": classified,
+                "unclassified": (not (ok and deleted >= 1)) and not u6_denied(classified)}
+    return op
+
+
+def u6_retention_policy(name: str, *, catalog: str, generation_note: str = "") -> dict[str, Any]:
+    return {
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "RetentionPolicy",
+        "metadata": owned(name),
+        "spec": {
+            "destinationRef": {"name": "u6-dest"},
+            "catalogRef": {"name": catalog},
+            "scope": {"prefix": U6_ARCHIVE_PREFIX},
+            "rules": {"keepLast": 1, "minUsablePoints": 1},
+            "mode": "Enforce",
+            "enforcement": {
+                "credentialSecretRef": {"name": "u6-deleter"},
+                "schedule": "* * * * *",
+                "requireApprovedPlan": False,
+                "deadlineSeconds": 240,
+                "maxDeletionsPerRun": 1,
+                "maxObjectsPerRun": 500,
+            },
+        },
+    }
+
+
+def u6e() -> None:
+    """The retention enforcer's delete grant.
+
+    The baseline is the CONTROLLER's own `Enforce` run, so the role's minimal
+    set is anchored to a `RetentionPolicy` that actually enforced. The per-unit
+    rows then re-run that same Job — the controller's image, command, argv,
+    plan `ConfigMap` and projected credentials, with only the MinIO policy and
+    the run id changed — because the operation destroys the objects it needs
+    and a fresh controller run per unit costs eight minutes each.
+    """
+    with Scenario("U6.retentionEnforcer",
+                  "the minimal delete grant under which an Enforce run removes a point") as sc:
+        starting = ["s3:ListBucket@bucket:archive", "s3:GetBucketLocation@bucket",
+                    "s3:GetObject@archive", "s3:DeleteObject@archive"]
+        # The record and the tombstones are written with the destination's OWN
+        # `evidenceWrite` grant, not with the delete credential (D3 §6.5's two
+        # credentials). It is pinned wide here so the only thing this bisection
+        # moves is the delete grant.
+        u6_attach("u6-evwriter", ["s3:PutObject@evidence", "s3:GetObject@evidence",
+                                  "s3:ListBucket@bucket:evidence",
+                                  "s3:GetBucketLocation@bucket"], "ret-evidence")
+        u6_attach("u6-deleter", starting, "ret-baseline")
+        points = state.get("u6Points") or []
+        check(len(points) >= 2,
+              f"the enforcer needs at least two points to have a candidate; have {len(points)}")
+        catalog = f"u6-retcat-{u6_seq():03d}"
+        since = now()
+        apply({"apiVersion": "logweir.dev/v1alpha1", "kind": "RecoveryCatalog",
+               "metadata": owned(catalog),
+               "spec": {"destinationRef": {"name": "u6-dest"},
+                        "sync": {"intervalSeconds": 300, "mode": "Index",
+                                 "deepCheck": "ManifestDigest"},
+                        "syncRequest": "u6"}})
+        view = wait_for("recoverycatalog", catalog,
+                        lambda o: bool((o.get("status") or {}).get("pages"))
+                        and ((o.get("status") or {}).get("syncedAt") or "") >= since,
+                        timeout=540, what="a published view for the enforcer")
+        sc.detail["catalog"] = {"name": catalog, "counts": view["status"].get("counts")}
+        u6_snapshot_archive()
+
+        policy_name = f"u6-ret-policy-{u6_seq():03d}"
+        created = apply(u6_retention_policy(policy_name, catalog=catalog))
+        policy_uid = created["metadata"]["uid"]
+        window = int(os.environ.get("U6_RETENTION_WINDOW", "1500"))
+        deadline = time.monotonic() + window
+        job_obj: dict[str, Any] | None = None
+        while time.monotonic() < deadline:
+            jobs = [j for j in get_list("jobs")
+                    if any(o.get("uid") == policy_uid
+                           for o in (j["metadata"].get("ownerReferences") or []))]
+            terminal = [j for j in jobs
+                        if (j.get("status") or {}).get("succeeded")
+                        or (j.get("status") or {}).get("failed")]
+            if terminal:
+                job_obj = terminal[0]
+                break
+            time.sleep(10)
+        policy = get("retentionpolicy", policy_name)
+        artifact(f"u6/objects/{policy_name}.json", policy)
+        check(job_obj is not None,
+              f"no enforcement Job for {policy_name} within {window}s; "
+              f"status: {redact(json.dumps(policy.get('status'), sort_keys=True))[:600]}")
+        assert job_obj is not None
+        job_name = job_obj["metadata"]["name"]
+        logs = redact(pod_logs_for_job(job_name, tail=120))[-3000:]
+        artifact(f"u6/objects/{job_name}.json", job_obj)
+        artifact(f"u6/objects/{job_name}.log", logs)
+        sc.detail["controllerBaseline"] = {
+            "policy": policy_name,
+            "job": job_name,
+            "jobSucceeded": bool((job_obj.get("status") or {}).get("succeeded")),
+            "pointsDeleted": logs.count("state=Deleted"),
+            "lastEnforcement": (policy.get("status") or {}).get("lastEnforcement"),
+            "conditions": [{"type": c.get("type"), "status": c.get("status"),
+                            "reason": c.get("reason")}
+                           for c in (policy.get("status") or {}).get("conditions", [])],
+        }
+        check(bool((job_obj.get("status") or {}).get("succeeded")) and "state=Deleted" in logs,
+              "the controller's own Enforce run did not delete a point with the recorded "
+              f"grant: {json.dumps(sc.detail['controllerBaseline'])[:600]}")
+        # The Job spec the controller rendered IS the fixture every unit row runs.
+        state["u6RetentionJob"] = {"spec": job_obj["spec"]}
+        save()
+        artifact("u6/retention-job-template.json",
+                 json.loads(redact(json.dumps(job_obj["spec"], sort_keys=True))))
+        u6_bisect(
+            sc, role="retention-enforcer", user="u6-deleter",
+            starting=starting, operation=u6_retention_job_op(),
+            note="D3 §6.5 and `docs/kubernetes.md` §7f record `s3:ListBucket` with a prefix "
+                 "condition plus `s3:GetObject`/`s3:DeleteObject` on `<prefix>/*`",
         )
 
 

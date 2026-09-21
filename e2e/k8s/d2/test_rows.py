@@ -20,6 +20,7 @@ import os
 import pathlib
 import sys
 import tempfile
+from typing import Any
 
 _TMP = tempfile.mkdtemp(prefix="d2-test-rows-")
 os.environ.setdefault("D2W14_OUT", str(pathlib.Path(_TMP) / "private"))
@@ -246,6 +247,123 @@ def test_the_revision_guard_ignores_only_untracked_non_inputs() -> None:
     row("the rule is the same one the D1 fence applies",
         d2.IMAGE_BUILD_INPUTS[:5] == ("crates/", "Cargo.toml", "Cargo.lock",
                                       "rust-toolchain.toml", ".cargo/"))
+
+
+# --- U6: a measured per-role row, and what makes it a measurement -----------
+#
+# `u6_row_is_proved` is the whole of the D2 §15 U6 claim: a role's minimal set
+# is what it is only if the starting set ran, every unit came out exactly once,
+# every required unit's removal failed WITH THE PRODUCT'S OWN denial, every
+# unit left out really did work without it, and the minimal set was itself
+# executed. Each clause below is made to say False.
+
+def _denial(code: str = "AccessDenied") -> dict[str, Any]:
+    return {"destination.archiveListable": {"state": "notReady", "code": code}}
+
+
+def _removal(unit: str, ok: bool, classified: Any = None, unclassified: bool = False):
+    return {"unit": unit, "ok": ok, "unclassified": unclassified,
+            "classified": ({} if ok else _denial()) if classified is None else classified}
+
+
+U6_STARTING = ["s3:ListBucket@bucket:archive", "s3:GetObject@archive",
+               "s3:GetBucketLocation@bucket"]
+U6_BASELINE = {"ok": True, "object": "u6-da-001", "classified": {}}
+U6_REMOVALS = [
+    _removal("s3:ListBucket@bucket:archive", False),
+    _removal("s3:GetObject@archive", False),
+    _removal("s3:GetBucketLocation@bucket", True),
+]
+U6_MINIMAL = ["s3:ListBucket@bucket:archive", "s3:GetObject@archive"]
+U6_CONFIRM = {"ok": True, "object": "u6-da-005", "classified": {}}
+
+
+def _proved(**over) -> bool:
+    args = dict(role="archive-read", baseline=U6_BASELINE, removals=U6_REMOVALS,
+                minimal=U6_MINIMAL, confirm=U6_CONFIRM)
+    args.update(over)
+    return all(d2.u6_row_is_proved(**args).values())
+
+
+def test_a_measured_minimal_set_is_proved_only_by_what_was_run() -> None:
+    row("a starting set that worked, one removal each, and a minimal set that ran",
+        _proved())
+    row("MUTANT: the RECORDED starting set never worked, so there was nothing to bisect",
+        not _proved(baseline={"ok": False, "classified": _denial()}))
+    row("MUTANT: a required unit whose removal produced no product verdict at all",
+        not _proved(removals=[
+            _removal("s3:ListBucket@bucket:archive", False,
+                     {"destination.archiveListable": {"state": None, "code": None}},
+                     unclassified=True),
+            U6_REMOVALS[1], U6_REMOVALS[2]]))
+    row("MUTANT: a required unit that failed for a reason that is not a denial",
+        not _proved(removals=[
+            _removal("s3:ListBucket@bucket:archive", False, _denial("BrokerUnreachable")),
+            U6_REMOVALS[1], U6_REMOVALS[2]]))
+    row("MUTANT: THE RECORDED-NOT-MEASURED SHAPE — a minimal set asserted with no removals",
+        not _proved(removals=[], minimal=U6_STARTING))
+    row("MUTANT: the minimal set keeps a unit whose removal SUCCEEDED",
+        not _proved(minimal=U6_STARTING))
+    row("MUTANT: the minimal set drops a unit whose removal FAILED",
+        not _proved(minimal=["s3:ListBucket@bucket:archive"]))
+    row("MUTANT: no unit is required — the role needs none of them, which is not a measurement",
+        not _proved(removals=[_removal(u, True) for u in U6_STARTING], minimal=[]))
+    row("MUTANT: one unit removed twice and another never removed",
+        not _proved(removals=[U6_REMOVALS[0], U6_REMOVALS[0], U6_REMOVALS[1]]))
+    row("MUTANT: the measured minimal set was never executed as a whole",
+        not _proved(confirm={"ok": False, "classified": _denial()}))
+    row("the minimal set needs no separate confirmation when nothing was dropped",
+        _proved(removals=[_removal(u, False) for u in U6_STARTING],
+                minimal=list(U6_STARTING), confirm=None))
+    row("MUTANT: nothing was dropped, yet the starting set is reported as not working",
+        not _proved(baseline={"ok": False, "classified": _denial()},
+                    removals=[_removal(u, False) for u in U6_STARTING],
+                    minimal=list(U6_STARTING), confirm=None))
+
+
+def test_a_grant_unit_names_an_action_and_a_resource_scope() -> None:
+    listing = d2.u6_statement("s3:ListBucket@bucket:archive")
+    row("`s3:ListBucket` is authorised on the BUCKET arn, under an `s3:prefix` condition",
+        listing["Resource"] == ["arn:aws:s3:::lw-u6"]
+        and listing["Condition"]["StringLike"]["s3:prefix"] == ["team/u6/*"],
+        json.dumps(listing))
+    getting = d2.u6_statement("s3:GetObject@archive")
+    row("`s3:GetObject` is authorised on the OBJECT arn, and carries no prefix condition",
+        getting["Resource"] == ["arn:aws:s3:::lw-u6/team/u6/*"] and "Condition" not in getting,
+        json.dumps(getting))
+    evidence = d2.u6_statement("s3:PutObject@evidence")
+    row("the evidence root is a different scope from the archive prefix",
+        evidence["Resource"] == ["arn:aws:s3:::lw-u6/logweir/*"])
+    location = d2.u6_statement("s3:GetBucketLocation@bucket")
+    row("MinIO refuses an `s3:prefix` condition on `s3:GetBucketLocation`, so it has none",
+        "Condition" not in location and location["Resource"] == ["arn:aws:s3:::lw-u6"])
+    both = d2.u6_statement("s3:ListBucket@bucket:both")
+    row("a writer lists under BOTH roots in one condition",
+        both["Condition"]["StringLike"]["s3:prefix"] == ["team/u6/*", "logweir/*"])
+    try:
+        d2.u6_statement("s3:GetObject@somewhere-else")
+        unknown_refused = False
+    except ValueError:
+        unknown_refused = True
+    row("MUTANT: FAIL CLOSED — a scope the units vocabulary has never heard of",
+        unknown_refused)
+
+
+def test_only_the_products_own_denial_counts_as_a_denial() -> None:
+    row("a check row classified `AccessDenied`",
+        d2.u6_denied({"destination.archiveListable": {"state": "notReady",
+                                                      "code": "AccessDenied"}}))
+    row("a runner that printed its own `Access Denied`",
+        d2.u6_denied({"exitCode": 1, "runnerLogTail": "... S3 error: Access Denied ..."}))
+    row("credentials the backend rejected outright",
+        d2.u6_denied({"code": "InvalidCredentials"}))
+    row("MUTANT: a check that never answered",
+        not d2.u6_denied({"destination.archiveListable": {"state": None, "code": None}}))
+    row("MUTANT: a broker timeout is not an object-store denial",
+        not d2.u6_denied({"phase": "Failed", "reason": "MetadataTimeout",
+                          "runnerLogTail": "connection timed out"}))
+    row("MUTANT: a catalog sync that simply ran out of time",
+        not d2.u6_denied({"counts": {}, "pages": 0, "timedOut": True, "conditions": []}))
 
 
 def main() -> int:
