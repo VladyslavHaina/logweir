@@ -38,6 +38,28 @@ def row(name: str, ok: bool, detail: str = "") -> None:
         FAILURES.append(name)
 
 
+# THE GATE HAD TO BE ABLE TO FAIL. `row()` records a failure and returns, which
+# is right for `main()` — every row runs and the count is the report. But under
+# `python3 -m pytest e2e/k8s/d2` nothing called `main()`, no `test_` function
+# asserted anything, and the suite passed with every row failing: a harness row
+# that passes when the product does nothing, which is the one failure mode this
+# file exists to prevent. The autouse fixture closes it, so the same rows are a
+# real gate under pytest and a full report under python.
+try:  # pytest is not needed for the `python3 test_rows.py` path
+    import pytest as _pytest
+except ImportError:  # pragma: no cover - exercised by the CLI path
+    _pytest = None
+
+if _pytest is not None:
+
+    @_pytest.fixture(autouse=True)
+    def _no_row_may_fail():
+        before = len(FAILURES)
+        yield
+        new_failures = FAILURES[before:]
+        assert not new_failures, "failing rows: " + "; ".join(new_failures)
+
+
 # --- S11, as the fixed product answers it -----------------------------------
 S11_STATUS = {
     "phase": "Failed",

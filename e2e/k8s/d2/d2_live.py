@@ -5261,9 +5261,6 @@ def u6e() -> None:
                                   "s3:ListBucket@bucket:evidence",
                                   "s3:GetBucketLocation@bucket"], "ret-evidence")
         u6_attach("u6-deleter", starting, "ret-baseline")
-        points = state.get("u6Points") or []
-        check(len(points) >= 2,
-              f"the enforcer needs at least two points to have a candidate; have {len(points)}")
         catalog = f"u6-retcat-{u6_seq():03d}"
         since = now()
         apply({"apiVersion": "logweir.dev/v1alpha1", "kind": "RecoveryCatalog",
@@ -5276,7 +5273,14 @@ def u6e() -> None:
                         lambda o: bool((o.get("status") or {}).get("pages"))
                         and ((o.get("status") or {}).get("syncedAt") or "") >= since,
                         timeout=540, what="a published view for the enforcer")
-        sc.detail["catalog"] = {"name": catalog, "counts": view["status"].get("counts")}
+        counts = view["status"].get("counts") or {}
+        sc.detail["catalog"] = {"name": catalog, "counts": counts}
+        # `keepLast: 1` needs at least two usable points for one to be a
+        # candidate, and the view is the only thing that knows how many there
+        # are: every successful Backup of every earlier U6 phase left one.
+        check((counts.get("available") or 0) >= 2,
+              f"the enforcer needs two usable points to have a candidate; the view has "
+              f"{counts.get('available')} of {counts.get('total')}")
         u6_snapshot_archive()
 
         policy_name = f"u6-ret-policy-{u6_seq():03d}"
