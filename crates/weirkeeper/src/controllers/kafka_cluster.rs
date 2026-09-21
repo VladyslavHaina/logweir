@@ -70,7 +70,7 @@ use super::backup;
 use super::Context;
 use crate::check;
 use crate::conditions::{
-    current_condition, merge_condition, status_unchanged, TERMINAL_STATE_NAME_TOO_LONG,
+    current_condition, merge_condition, StatusVersion, TERMINAL_STATE_NAME_TOO_LONG,
     TERMINAL_STATE_POD_OWNERSHIP_CONTESTED,
 };
 use crate::connection::{self, ConnectionUse, ResolvedConnection};
@@ -565,34 +565,40 @@ fn condition(
     ))
 }
 
-/// Patch `/status` — unless the patch would change nothing.
+/// Patch `/status` — under seam **S7**'s `metadata.resourceVersion`
+/// precondition, and not at all when the patch would change nothing.
 ///
-/// The decision is [`crate::conditions::status_unchanged`]'s; this exists so
-/// this reconciler's five patch sites read as one line each.
+/// Both decisions are [`crate::conditions::patch_status_preconditioned`]'s;
+/// this exists so this reconciler's six patch sites read as one line each.
+/// Defect STATUS-PATCH-NO-RV: every write here was unconditional, and a probe
+/// verdict computed from a stale watch-cache copy could overwrite the refusal
+/// a newer build of this same controller had just written — which is exactly
+/// the rolling-upgrade case review finding L2 is about, one field over.
+///
+/// NO CALLER OF THIS RECONCILER WRITES TWICE IN A PASS, so there is no
+/// `patch_status_at` here: every site above returns immediately after its
+/// write. A 409 is the precondition working and reaches `error_policy`, which
+/// requeues.
 async fn patch_status_if_changed(
     api: &Api<KafkaCluster>,
     cluster: &KafkaCluster,
     name: &str,
     patch: Value,
-) -> Result<(), KafkaClusterError> {
-    if status_unchanged(
+) -> Result<StatusVersion, KafkaClusterError> {
+    crate::conditions::patch_status_preconditioned(
+        api,
+        "KafkaCluster",
+        name,
+        &StatusVersion::observed(cluster.meta()),
         cluster
             .status
             .as_ref()
             .and_then(|s| serde_json::to_value(s).ok())
             .as_ref(),
-        &patch,
-    ) {
-        debug!(
-            cluster = %name,
-            "the computed status equals the one on the object; no patch is sent"
-        );
-        return Ok(());
-    }
-    api.patch_status(name, &PatchParams::default(), &Patch::Merge(patch))
-        .await
-        .map_err(KafkaClusterError::Api)?;
-    Ok(())
+        patch,
+    )
+    .await
+    .map_err(KafkaClusterError::Api)
 }
 
 /// The `/status` merge patch for the pass that CREATED a probe Job.

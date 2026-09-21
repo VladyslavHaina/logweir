@@ -66,6 +66,14 @@ use weirkeeper::verification::{
 // Paths, fixtures and a scratch evidence tree
 // ===========================================================================
 
+/// The `metadata.resourceVersion` every fixture object carries — the thing a
+/// watch always delivers and a hand-built fixture used not to.
+///
+/// D-SEAMS **S7**: every `/status` write is a merge PATCH preconditioned on
+/// this value, so a fixture without one is not an object this controller could
+/// ever have been handed. Defect STATUS-PATCH-NO-RV is what its absence hid.
+const FIXTURE_RESOURCE_VERSION: &str = "4071";
+
 fn repo_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .ancestors()
@@ -671,7 +679,8 @@ fn backup_json() -> String {
         r#"{{
   "apiVersion": "logweir.dev/v1alpha1", "kind": "Backup",
   "metadata": {{
-    "name": "{NAME}", "namespace": "{NS}", "uid": "{UID}", "generation": 3
+    "name": "{NAME}", "namespace": "{NS}", "uid": "{UID}", "generation": 3,
+    "resourceVersion": "{FIXTURE_RESOURCE_VERSION}"
   }},
   "spec": {{
     "sourceRef": {{ "name": "prod" }},

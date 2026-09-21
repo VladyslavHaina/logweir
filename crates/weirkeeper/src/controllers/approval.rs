@@ -53,7 +53,6 @@ use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
 use futures::StreamExt as _;
-use kube::api::{Patch, PatchParams};
 use kube::runtime::controller::Action;
 use kube::runtime::{watcher, Controller};
 use kube::{Api, Resource, ResourceExt};
@@ -62,10 +61,10 @@ use logweir_core::trust::{KeyUsage, SigningRefusal};
 use logweir_verify::{verify_detached, Sidecar, VerifyingKey};
 use serde::Deserialize;
 use serde_json::json;
-use tracing::{debug, info, warn};
+use tracing::{info, warn};
 
 use super::Context;
-use crate::conditions::{current_condition, merge_condition, status_unchanged};
+use crate::conditions::{current_condition, merge_condition, StatusVersion};
 use crate::crds::approval::{Approval, ApprovalStatus, SubjectKind, VerifiedSubjectRef};
 use crate::crds::backup::Backup;
 use crate::crds::restore::Restore;
@@ -1340,23 +1339,25 @@ pub async fn reconcile_approval(
     // `lastTransitionTime: Some(now)` in [`status_for`] made every pass a
     // change, its own status patch woke the watch, and one steady `Approval`
     // ran 7,114 reconciles in 90.4 s. The outcome is still logged below.
-    if status_unchanged(
+    //
+    // AND UNDER SEAM S7's PRECONDITION — defect STATUS-PATCH-NO-RV's sweep.
+    // This write was unconditional while the chart's README said every status
+    // write in this crate is preconditioned; a verdict computed from a stale
+    // watch-cache copy is exactly what `min(10 m, notAfter)` re-checks make
+    // likely here, because two passes over one `Approval` can overlap.
+    crate::conditions::patch_status_preconditioned(
+        &api,
+        "Approval",
+        &name,
+        &StatusVersion::observed(approval.meta()),
         approval
             .status
             .as_ref()
             .and_then(|s| serde_json::to_value(s).ok())
             .as_ref(),
-        &patch,
-    ) {
-        debug!(
-            approval = %name,
-            namespace = %namespace,
-            "the computed status equals the one on the object; no patch is sent"
-        );
-    } else {
-        api.patch_status(&name, &PatchParams::default(), &Patch::Merge(patch))
-            .await?;
-    }
+        patch,
+    )
+    .await?;
 
     if outcome.is_verified() {
         info!(

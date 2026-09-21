@@ -67,6 +67,15 @@ const POD: &str = "logweir-probe-orders-prod-abcde";
 const JOB_UID: &str = "bbbbbbbb-0000-4000-8000-0000000000b3";
 
 /// A pod's `ownerReferences` naming `job_uid` as its **controller**.
+
+/// The `metadata.resourceVersion` every fixture object carries — the thing a
+/// watch always delivers and a hand-built fixture used not to.
+///
+/// D-SEAMS **S7**: every `/status` write is a merge PATCH preconditioned on
+/// this value, so a fixture without one is not an object this controller could
+/// ever have been handed. Defect STATUS-PATCH-NO-RV is what its absence hid.
+const FIXTURE_RESOURCE_VERSION: &str = "4071";
+
 fn pod_owner_json(kind: &str, job_uid: &str, controller: bool) -> String {
     pod_owner_json_in("batch/v1", kind, job_uid, controller)
 }
@@ -103,7 +112,8 @@ fn cluster_json(name: &str, auth: &str, status: &str) -> String {
         r#"{{
   "apiVersion": "logweir.dev/v1alpha1",
   "kind": "KafkaCluster",
-  "metadata": {{ "name": "{name}", "namespace": "{NS}", "uid": "{UID}", "generation": 1 }},
+  "metadata": {{ "name": "{name}", "namespace": "{NS}", "uid": "{UID}", "generation": 1,
+                  "resourceVersion": "{FIXTURE_RESOURCE_VERSION}" }},
   "spec": {{
     "bootstrapServers": ["b0.orders:9092", "b1.orders:9092"],
     "auth": {auth},

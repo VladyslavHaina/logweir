@@ -117,7 +117,7 @@ use super::backup::{
 use super::Context;
 use crate::check;
 use crate::conditions::{
-    current_condition, merge_condition, reason_for_exit, status_unchanged, wire_reason_for_exit,
+    current_condition, merge_condition, reason_for_exit, wire_reason_for_exit, StatusVersion,
     CONDITION_ADMITTED, CONDITION_COMPLETE, CONDITION_EVIDENCE_RECORDED, CONDITION_FAILED,
     CONDITION_JOB_CREATED, CONDITION_RUNNER_READY, CONDITION_VERIFIED, PHASE_FAILED, PHASE_PENDING,
     PHASE_RUNNING, PHASE_SUCCEEDED, REASON_ADMITTED, REASON_APPROVAL_BUNDLE_MATERIALIZATION_FAILED,
@@ -2608,35 +2608,66 @@ fn condition(
     ))
 }
 
-/// Patch `/status` — unless the patch would change nothing.
+/// Patch `/status` — under seam **S7**'s `metadata.resourceVersion`
+/// precondition, and not at all when the patch would change nothing.
 ///
-/// The decision is [`crate::conditions::status_unchanged`]'s; this exists so
-/// this reconciler's six patch sites read as one line each and the skip cannot
-/// be applied at five of them and forgotten at the sixth.
+/// Both decisions are [`crate::conditions::patch_status_preconditioned`]'s;
+/// this exists so this reconciler's nine patch sites read as one line each and
+/// neither rule can be applied at eight of them and forgotten at the ninth.
+/// Defect STATUS-PATCH-NO-RV is what the forgotten one looks like: every write
+/// here was unconditional while the chart's own README said all of them were
+/// preconditioned.
+///
+/// THE PRECONDITION IS THE OBJECT THIS PASS OBSERVED. A `Restore` whose
+/// terminal patch is followed by the verification patch writes twice in one
+/// pass, and the second write is where the observed version is already stale —
+/// [`patch_status_at`] is that caller's opt-in, by name.
 async fn patch_status_if_changed(
     api: &Api<Restore>,
     restore: &Restore,
     name: &str,
     patch: Value,
-) -> Result<(), RestoreError> {
-    if status_unchanged(
+) -> Result<StatusVersion, RestoreError> {
+    patch_status_at(
+        api,
+        restore,
+        name,
+        &StatusVersion::observed(restore.meta()),
+        patch,
+    )
+    .await
+}
+
+/// [`patch_status_if_changed`] for a write that is NOT the first of its pass.
+///
+/// `at` is where the previous write of this pass left the object, so the
+/// compare-and-set is against what this controller itself stored a moment ago
+/// rather than against the version the watch delivered — which the first write
+/// has already superseded. Without it the second patch of every terminal pass
+/// would be refused with a `409` the reconciler cannot retry: the object is
+/// terminal by then, `AwaitChange` is its requeue, and STEP 2b reads and
+/// writes nothing, so the evidence verdict would be lost for good.
+async fn patch_status_at(
+    api: &Api<Restore>,
+    restore: &Restore,
+    name: &str,
+    at: &StatusVersion,
+    patch: Value,
+) -> Result<StatusVersion, RestoreError> {
+    crate::conditions::patch_status_preconditioned(
+        api,
+        "Restore",
+        name,
+        at,
         restore
             .status
             .as_ref()
             .and_then(|s| serde_json::to_value(s).ok())
             .as_ref(),
-        &patch,
-    ) {
-        debug!(
-            restore = %name,
-            "the computed status equals the one on the object; no patch is sent"
-        );
-        return Ok(());
-    }
-    api.patch_status(name, &PatchParams::default(), &Patch::Merge(patch))
-        .await
-        .map_err(RestoreError::Api)?;
-    Ok(())
+        patch,
+    )
+    .await
+    .map_err(RestoreError::Api)
 }
 
 /// The `/status` merge patch for an admission that is a HOLD rather than a
@@ -4285,7 +4316,11 @@ async fn reconcile_restore_inner(
         restore.status.as_ref().and_then(|s| s.progress.as_ref()),
         now,
     );
-    patch_status_if_changed(&restores, restore, &name, terminal.clone()).await?;
+    // WHERE THE OBJECT NOW STANDS. The verification patch below is the SECOND
+    // write of this pass, and seam S7's precondition makes that fact load-bearing:
+    // preconditioned on the version the watch delivered it would be refused, and a
+    // terminal `Restore` is never reconciled again.
+    let at = patch_status_if_changed(&restores, restore, &name, terminal.clone()).await?;
 
     // ONLY NOW. The `?` above is what makes this ordering a guarantee rather
     // than a comment: a status patch that did not return 200 leaves this
@@ -4418,10 +4453,11 @@ async fn reconcile_restore_inner(
             // verdict it was.
             "weirkeeper recorded this Restore's evidence verdict"
         );
-        patch_status_if_changed(
+        patch_status_at(
             &restores,
             restore,
             &name,
+            &at,
             // EXPLICIT NULLS FOR THE FIELDS THIS VERDICT DOES NOT HOLD — see
             // `verification::verification_patch_value`. One rule, one helper,
             // both reconcilers and the re-trust patch.

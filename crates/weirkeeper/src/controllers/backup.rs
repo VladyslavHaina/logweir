@@ -86,7 +86,7 @@ use crate::backup_execution::{
 };
 use crate::check;
 use crate::conditions::{
-    current_condition, merge_condition, reason_for_exit, status_unchanged, wire_reason_for_exit,
+    current_condition, merge_condition, reason_for_exit, wire_reason_for_exit, StatusVersion,
     CONDITION_COMPLETE, CONDITION_EVIDENCE_RECORDED, CONDITION_EXECUTION_INPUTS_UNVERIFIED,
     CONDITION_FAILED, CONDITION_JOB_CREATED, CONDITION_REASON_GUARD_REFUSED,
     CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED, CONDITION_RUNNER_READY, CONDITION_TOPICS_RESOLVED,
@@ -2088,37 +2088,84 @@ pub fn with_status_patch(backup: &Backup, patch: &Value) -> Backup {
     projected
 }
 
-/// Patch `/status` — unless the patch would change nothing.
+/// Patch `/status` — under seam **S7**'s `metadata.resourceVersion`
+/// precondition, and not at all when the patch would change nothing.
 ///
-/// THE THIRD RULE OF THE STATUS-WRITE CONTRACT, at this kind's five patch
-/// sites. The decision is [`crate::conditions::status_unchanged`]'s and is not
-/// re-implemented here; this exists so the five call sites read as one line
-/// each and so the skip is impossible to apply at four of them and forget at
-/// the fifth.
+/// THE THIRD AND FOURTH RULES OF THE STATUS-WRITE CONTRACT, at this kind's
+/// eight patch sites. Neither is re-implemented here — both are
+/// [`crate::conditions::patch_status_preconditioned`]'s — so neither can be
+/// applied at seven call sites and forgotten at the eighth, which is what
+/// defect STATUS-PATCH-NO-RV was: every write from this reconciler was
+/// unconditional. `Backup` has FOUR status writers (this one,
+/// `backup_selection`, `backup_schedule`'s reservation and `schedule_history`),
+/// so "a concurrent writer" here is the ordinary case and not a race to
+/// imagine.
+///
+/// THE PRECONDITION IS THE OBJECT THIS CALLER OBSERVED, which for the second
+/// and third write of one pass is not the object the watch delivered — see
+/// [`with_status_written`] and [`patch_status_at`].
 async fn patch_status_if_changed(
     api: &Api<Backup>,
     backup: &Backup,
     name: &str,
     patch: Value,
-) -> Result<(), BackupError> {
-    if status_unchanged(
+) -> Result<StatusVersion, BackupError> {
+    patch_status_at(
+        api,
+        backup,
+        name,
+        &StatusVersion::observed(backup.meta()),
+        patch,
+    )
+    .await
+}
+
+/// [`patch_status_if_changed`] for a write that is NOT the first of its pass.
+///
+/// `at` is where the previous write of this pass left the object. The freeze
+/// pass writes the execution record, then `TopicsResolved`, then the running
+/// patch; the terminal pass writes the outcome and then the evidence verdict.
+/// Preconditioned on the watch's version instead, every one of those later
+/// writes would be refused with a `409` — and on the terminal pass the verdict
+/// would be lost, because a terminal `Backup` is never read again.
+async fn patch_status_at(
+    api: &Api<Backup>,
+    backup: &Backup,
+    name: &str,
+    at: &StatusVersion,
+    patch: Value,
+) -> Result<StatusVersion, BackupError> {
+    crate::conditions::patch_status_preconditioned(
+        api,
+        "Backup",
+        name,
+        at,
         backup
             .status
             .as_ref()
             .and_then(|s| serde_json::to_value(s).ok())
             .as_ref(),
-        &patch,
-    ) {
-        debug!(
-            backup = %name,
-            "the computed status equals the one on the object; no patch is sent"
-        );
-        return Ok(());
+        patch,
+    )
+    .await
+    .map_err(BackupError::Api)
+}
+
+/// [`with_status_patch`], ALSO carrying the `resourceVersion` the write that
+/// stored `patch` left behind.
+///
+/// The projection exists so a later builder in the same pass sees what that
+/// write stored; seam **S7** adds the other half — a later WRITE in the same
+/// pass must also precondition on where that write left the object. Both
+/// halves travel on one value, so a call site cannot advance the status and
+/// forget the version.
+#[must_use]
+fn with_status_written(backup: &Backup, patch: &Value, at: &StatusVersion) -> Backup {
+    let mut next = with_status_patch(backup, patch);
+    if let Some(version) = at.get() {
+        next.metadata.resource_version = Some(version.to_string());
     }
-    api.patch_status(name, &PatchParams::default(), &Patch::Merge(patch))
-        .await
-        .map_err(BackupError::Api)?;
-    Ok(())
+    next
 }
 
 /// The `/status` merge patch for a Job that exists and has not finished.
@@ -3623,8 +3670,12 @@ async fn reconcile_backup_inner(
         // and before the Job resumes from the same record: the next pass reads
         // the ConfigMap first and verifies it against this digest.
         let recorded = execution_status_patch(&frozen);
-        patch_status_if_changed(&backups, backup, &name, recorded.clone()).await?;
-        let mut stored = with_status_patch(backup, &recorded);
+        // THE VERSION TRAVELS WITH THE PROJECTION. Two more `/status` writes
+        // follow in this same pass and seam S7 preconditions each of them on
+        // where the previous one left the object, not on the version the watch
+        // delivered — which this write has already superseded.
+        let at = patch_status_if_changed(&backups, backup, &name, recorded.clone()).await?;
+        let mut stored = with_status_written(backup, &recorded, &at);
         let mut view = with_status_patch(&view, &recorded);
 
         // D1 §7.2 R9's LAST TWO STEPS, IN THIS ORDER AND ONLY ON THE PASS THAT
@@ -3636,10 +3687,10 @@ async fn reconcile_backup_inner(
         // Both are `?`-propagated, so a failed write leaves the reconcile
         // before the next line.
         if let Some(discovery) = discovery_job.as_deref() {
-            let resolved_patch =
+            let (resolved_patch, resolved_at) =
                 backup_selection::record_resolved(&stored, client, &namespace, discovery, now)
                     .await?;
-            stored = with_status_patch(&stored, &resolved_patch);
+            stored = with_status_written(&stored, &resolved_patch, &resolved_at);
             view = with_status_patch(&view, &resolved_patch);
         }
 
@@ -3976,7 +4027,10 @@ async fn reconcile_backup_inner(
         backup.status.as_ref().and_then(|s| s.progress.as_ref()),
         now,
     );
-    patch_status_if_changed(&backups, backup, &name, terminal.clone()).await?;
+    // WHERE THE OBJECT NOW STANDS: the evidence verdict below is the SECOND
+    // write of this pass, and a terminal `Backup` is never reconciled again, so
+    // a `409` there would lose the verdict rather than defer it.
+    let at = patch_status_if_changed(&backups, backup, &name, terminal.clone()).await?;
 
     // ONLY NOW. The `?` above is what makes this ordering a guarantee rather
     // than a comment: a status patch that did not return 200 leaves this
@@ -4147,7 +4201,7 @@ async fn reconcile_backup_inner(
                 }
             }
         }
-        patch_status_if_changed(&backups, backup, &name, evidence_patch).await?;
+        patch_status_at(&backups, backup, &name, &at, evidence_patch).await?;
     }
 
     info!(

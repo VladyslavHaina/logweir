@@ -82,7 +82,7 @@ use crate::backup_execution::{
 };
 use crate::check::{self, job as cjob, plan, policy, relay};
 use crate::conditions::{
-    current_condition, merge_condition, status_unchanged, CONDITION_TOPICS_RESOLVED,
+    current_condition, merge_condition, status_unchanged, StatusVersion, CONDITION_TOPICS_RESOLVED,
     REASON_DISCOVERY_RUNNING, REASON_RESOLVED, TERMINAL_STATE_DISCOVERY_FAILED,
     TERMINAL_STATE_DISCOVERY_INCOMPLETE, TERMINAL_STATE_DISCOVERY_RESULT_UNREADABLE,
     TERMINAL_STATE_INVALID_TOPIC_SELECTION, TERMINAL_STATE_JOB_NAME_CONFLICT,
@@ -943,11 +943,17 @@ pub fn resolved_status_patch(backup: &Backup, now: DateTime<Utc>) -> Value {
 /// status between the read and the write, so this pass's conclusion is NOT on
 /// the server and the next pass reads the newer object. That is the value the
 /// TTL ordering depends on.
+///
+/// The second half is WHERE THE OBJECT NOW STANDS ([`StatusVersion`]): a pass
+/// that writes again after this one has to precondition on the version this
+/// write left behind and not on the one it was handed. It is
+/// [`StatusVersion::default`] — no version at all — after a 409, because after
+/// a 409 the version is genuinely unknowable from here.
 async fn write_status(
     api: &Api<Backup>,
     backup: &Backup,
     patch: Value,
-) -> Result<bool, BackupError> {
+) -> Result<(bool, StatusVersion), BackupError> {
     let name = backup.name_any();
     if status_unchanged(
         backup
@@ -961,7 +967,7 @@ async fn write_status(
             backup = %name,
             "the computed status equals the one on the object; no patch is sent"
         );
-        return Ok(true);
+        return Ok((true, StatusVersion::observed(&backup.metadata)));
     }
     let Some(resource_version) = backup
         .metadata
@@ -990,13 +996,13 @@ async fn write_status(
         .patch_status(&name, &PatchParams::default(), &Patch::Merge(body))
         .await
     {
-        Ok(_) => Ok(true),
+        Ok(applied) => Ok((true, StatusVersion::observed(applied.meta()))),
         Err(kube::Error::Api(e)) if e.code == 409 => {
             debug!(
                 backup = %name,
                 "the status changed under this reconcile (409); the next pass reads it"
             );
-            Ok(false)
+            Ok((false, StatusVersion::default()))
         }
         Err(e) => Err(BackupError::Api(e)),
     }
@@ -1073,7 +1079,7 @@ pub async fn resolve(
             )}});
             let view = crate::controllers::backup::with_status_patch(backup, &carried);
             let patch = refused_status_patch(&view, state, &message, now);
-            let committed = write_status(&api, backup, patch).await?;
+            let (committed, _) = write_status(&api, backup, patch).await?;
             // THE SAME ORDERING THE RESOLVED PATH USES, AND FOR THE SAME
             // REASON. A refused run has reached its conclusion, so the relay on
             // the discovery pod is no longer needed and the Job may be
@@ -1842,7 +1848,9 @@ pub async fn set_discovery_ttl(
 /// conditions that object holds.
 ///
 /// Returns the patch it sent, so the caller can apply it to its own views —
-/// `{}` when the status already said this, which is not an error.
+/// `{}` when the status already said this, which is not an error — and WHERE
+/// THE OBJECT NOW STANDS, which the caller's own next write of this pass
+/// preconditions on ([`StatusVersion`], seam **S7**).
 ///
 /// **The TTL is patched only when the status write landed** (D-SEAMS **S7**):
 /// the write is a `resourceVersion` compare-and-set, a 409 means the object
@@ -1858,11 +1866,12 @@ pub async fn record_resolved(
     namespace: &str,
     job_name: &str,
     now: DateTime<Utc>,
-) -> Result<Value, BackupError> {
+) -> Result<(Value, StatusVersion), BackupError> {
     let api: Api<Backup> = Api::namespaced(client.clone(), namespace);
     let patch = resolved_status_patch(backup, now);
-    if write_status(&api, backup, patch.clone()).await? {
+    let (committed, at) = write_status(&api, backup, patch.clone()).await?;
+    if committed {
         set_discovery_ttl(client, namespace, job_name).await?;
     }
-    Ok(patch)
+    Ok((patch, at))
 }

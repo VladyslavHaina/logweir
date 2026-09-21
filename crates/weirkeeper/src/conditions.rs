@@ -1070,3 +1070,135 @@ pub fn status_unchanged(current: Option<&serde_json::Value>, next: &serde_json::
     apply_merge_patch(&mut merged, status);
     merged == current
 }
+
+// ---------------------------------------------------------------------------
+// THE FOURTH RULE OF THE STATUS-WRITE CONTRACT — D-SEAMS **S7**
+// ---------------------------------------------------------------------------
+//
+// Every `/status` write carries `metadata.resourceVersion` as a PRECONDITION.
+// The API server applies a `resourceVersion` carried in a merge-patch BODY as
+// an update precondition and answers `409 Conflict` on a mismatch, which is
+// how a merge PATCH gets a compare-and-set without the `update` verb —
+// `charts/logweir/README.md:53` and the D3 W2 record both state the rule for
+// every status write in this crate, and six of the seven kinds that have it
+// spell it out for themselves.
+//
+// Defect STATUS-PATCH-NO-RV is the seventh: `controllers::{backup, restore,
+// kafka_cluster}::patch_status_if_changed` — twenty-three call sites between
+// them — sent an UNCONDITIONAL merge patch, so a pass computing from a stale
+// watch-cache copy overwrote whatever a concurrent writer had stored. The
+// `Backup` kind has four writers (this reconciler, `backup_selection`,
+// `backup_schedule`'s reservation and `schedule_history`), which is exactly
+// the shape the precondition exists for.
+//
+// [`patch_status_preconditioned`] is the one implementation, so the rule
+// cannot hold at twenty-two sites and not at the twenty-third.
+//
+// # A 409 is not swallowed here
+//
+// It is returned as the API error it is and reaches the reconciler, whose
+// `error_policy` requeues; the next pass reads the object the other writer
+// stored and recomputes. A re-read-and-retry INSIDE this helper would be a
+// second write of a status computed from inputs nobody re-observed, which is
+// the defect with an extra round trip. A caller that needs the write to land
+// within the pass opts in BY NAME through [`StatusVersion`]: it passes the
+// version the previous write of the same pass left behind, which is what
+// `Backup`'s freeze → resolve → running sequence and both terminal →
+// verification sequences do.
+
+/// The `metadata.resourceVersion` the NEXT `/status` write of this pass must
+/// precondition on.
+///
+/// A pass that writes once takes it from the object the watch delivered and
+/// discards the result. A pass that writes more than once CANNOT: after the
+/// first PATCH returns, the object it was handed is stale by exactly one
+/// version, and a second write preconditioned on the old one is refused
+/// forever. So every write returns where the object now stands, and the
+/// sequences that need it thread it forward.
+///
+/// Deliberately NOT `#[must_use]`: discarding it is correct and common (one
+/// write, then a `return`), and a lint on every such site would train the
+/// reader to ignore it at the two sites where it matters.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct StatusVersion(Option<String>);
+
+impl StatusVersion {
+    /// Where the object a pass was handed stands — the precondition for that
+    /// pass's FIRST write.
+    ///
+    /// An empty string is treated as absent: that is what a hand-built fixture
+    /// carries, and a precondition of `""` is not one.
+    #[must_use]
+    pub fn observed(meta: &kube::core::ObjectMeta) -> Self {
+        Self(meta.resource_version.clone().filter(|v| !v.is_empty()))
+    }
+
+    /// The version itself, or `None` for an object that carries none.
+    #[must_use]
+    pub fn get(&self) -> Option<&str> {
+        self.0.as_deref()
+    }
+}
+
+/// Write `/status` under seam **S7**'s precondition — unless the patch would
+/// change nothing.
+///
+/// `at` is where the object stands ([`StatusVersion`]); `current` is the
+/// status this pass believes is stored, for [`status_unchanged`]'s decision.
+/// The returned [`StatusVersion`] is where the object stands AFTER this call:
+/// the response's own version when a patch was sent, and `at` unchanged when
+/// none was — a skipped write moves nothing, so the caller's precondition
+/// still holds.
+///
+/// # Errors
+///
+/// * [`kube::Error::Discovery`], shaped as the API server's own "no
+///   resourceVersion" answer, for an object that carries none. Unreachable for
+///   anything that came from a watch or a `get`; named rather than written
+///   without its precondition, because writing it unconditionally is the
+///   defect this function exists to close.
+/// * The API error for anything else, `409 Conflict` INCLUDED — see this
+///   section's header for why it is not retried here.
+pub async fn patch_status_preconditioned<K>(
+    api: &kube::Api<K>,
+    kind: &str,
+    name: &str,
+    at: &StatusVersion,
+    current: Option<&serde_json::Value>,
+    patch: serde_json::Value,
+) -> Result<StatusVersion, kube::Error>
+where
+    K: kube::Resource + Clone + std::fmt::Debug + serde::de::DeserializeOwned,
+{
+    if status_unchanged(current, &patch) {
+        tracing::debug!(
+            kind,
+            object = name,
+            "the computed status equals the one on the object; no patch is sent"
+        );
+        return Ok(at.clone());
+    }
+    let Some(resource_version) = at.get() else {
+        return Err(kube::Error::Discovery(
+            kube::error::DiscoveryError::MissingResource(format!(
+                "{kind} {name} carries no metadata.resourceVersion, which a /status \
+                 compare-and-set needs (D-SEAMS S7)"
+            )),
+        ));
+    };
+    let mut body = patch;
+    body.as_object_mut()
+        .expect("a status patch is always a JSON object")
+        .insert(
+            "metadata".to_string(),
+            serde_json::json!({ "name": name, "resourceVersion": resource_version }),
+        );
+    let applied = api
+        .patch_status(
+            name,
+            &kube::api::PatchParams::default(),
+            &kube::api::Patch::Merge(body),
+        )
+        .await?;
+    Ok(StatusVersion::observed(applied.meta()))
+}
