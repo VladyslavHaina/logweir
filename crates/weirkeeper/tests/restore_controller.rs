@@ -6698,3 +6698,122 @@ async fn a_second_pass_over_an_unchanged_running_job_sends_no_patch() {
         status["conditions"]
     );
 }
+
+/// **`Admitted=True` SURVIVES THE TERMINAL TRANSITION TOO** — review finding
+/// MED-2, the other half of defect RESTORE-ADMITTED-DROPPED.
+///
+/// The running pass was fixed first; the terminal builders still replaced
+/// `status.conditions` from an allow-list, so `Admitted` and `JobCreated` went
+/// off the object at the exact moment the run finished — on the object an
+/// AUDITOR inspects, which is never reconciled again, so nothing ever put them
+/// back. The window had moved from "one reconcile after admission" to "the
+/// moment the run ends", which is worse, not better.
+///
+/// Three passes, run for real, with the server's merge applied between them:
+/// create, then running, then the finished Job.
+///
+/// KILLS: `carry_remaining` in `finished_status_patch` replaced by
+/// `verification::carry_conditions(.., &[Verified, RunnerReady])`; carrying
+/// `Admitted` with a fresh `lastTransitionTime`.
+#[tokio::test]
+async fn the_admission_condition_survives_the_terminal_transition() {
+    let settle = |status: &Value| -> Restore {
+        let mut object: Value = serde_json::from_str(&restore_json(PLAN_BYTES, APPROVAL, NAME))
+            .expect("the fixture parses");
+        object["status"] = status.clone();
+        serde_json::from_value(object).expect("a Restore")
+    };
+
+    // PASS 1 — admitted, the Job is created.
+    let (client, _rec, bodies) = mock_client_recording_bodies(admission_routes(
+        200,
+        approval_json(true, &plan_hash(), &plan_hash()),
+        200,
+        cluster_json(true, PLAINTEXT_AUTH),
+    ));
+    reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the creating pass completes");
+    let mut status = Value::Object(serde_json::Map::new());
+    for patch in patched_statuses(&bodies.lock().expect("readable").clone()) {
+        apply_merge_patch(&mut status, &patch);
+    }
+    let admitted_at = status["conditions"]
+        .as_array()
+        .expect("an array")
+        .iter()
+        .find(|c| c["type"] == serde_json::json!("Admitted"))
+        .expect("the creating pass asserts Admitted")["lastTransitionTime"]
+        .as_str()
+        .expect("a lastTransitionTime")
+        .to_string();
+
+    // PASS 2 — the Job is running.
+    let (client2, _rec2, bodies2) = mock_client_recording_bodies(running_routes());
+    reconcile_restore(
+        &settle(&status),
+        &client2,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        utc(2026, 9, 10, 12, 30),
+    )
+    .await
+    .expect("the running pass completes");
+    for patch in patched_statuses(&bodies2.lock().expect("readable").clone()) {
+        apply_merge_patch(&mut status, &patch);
+    }
+
+    // PASS 3 — the Job has finished, and this is the LAST pass that will ever
+    // write to this object.
+    let (client3, _rec3, bodies3) = mock_client_recording_bodies(finished_routes(
+        pod_list_terminated(0),
+        log_body(&i8_tail()),
+        "Complete",
+    ));
+    reconcile_restore(
+        &settle(&status),
+        &client3,
+        &passing_scorecard,
+        &valid_evidence_at(utc(2026, 9, 10, 12, 45)),
+        utc(2026, 9, 10, 12, 45),
+    )
+    .await
+    .expect("the terminal pass completes");
+    for patch in patched_statuses(&bodies3.lock().expect("readable").clone()) {
+        apply_merge_patch(&mut status, &patch);
+    }
+
+    let conditions = status["conditions"].as_array().expect("an array");
+    let find = |want: &str| {
+        conditions
+            .iter()
+            .find(|c| c["type"] == serde_json::json!(want))
+    };
+    assert_eq!(
+        find("Complete").map(|c| c["status"].clone()),
+        Some(serde_json::json!("True")),
+        "the run's own verdict is there; got {conditions:?}"
+    );
+    let carried = find("Admitted").unwrap_or_else(|| {
+        panic!(
+            "a FINISHED Restore still says it was approved — the terminal patch owns the array \
+             and owes every condition it is not about. Got {conditions:?}"
+        )
+    });
+    assert_eq!(carried["status"], serde_json::json!("True"));
+    assert_eq!(
+        carried["lastTransitionTime"].as_str(),
+        Some(admitted_at.as_str()),
+        "with the instant the admission actually happened; nothing transitioned"
+    );
+    assert!(
+        find("JobCreated").is_some(),
+        "and the Job the run ran in is still named; got {conditions:?}"
+    );
+}

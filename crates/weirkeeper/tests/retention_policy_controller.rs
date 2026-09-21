@@ -4719,3 +4719,96 @@ async fn a_refused_run_record_creates_no_job() {
          which is the sequence the defect lives in"
     );
 }
+
+/// **A JOB CREATE THAT FAILS LEAVES THE RETRY BUDGET ALONE** — review finding
+/// MED-1.
+///
+/// The record is written before the Job (defect RET-STARTRUN-PATCH-OUTCOME), so
+/// a create that answers anything but `201` or `409 AlreadyExists` leaves a
+/// record with no Job. The next pass would reach `tracked_run`'s absent-Job arm
+/// — `runId` present, `finishedAt` absent, Job absent — harvest it with no exit
+/// code, count one consecutive FAILURE and say "its pod is gone or was never
+/// readable" about a pod that never existed. Three transient `403`s from a
+/// quota or an admission webhook would then wedge retention at
+/// `EnforcementDegraded=True` until an operator edited the spec.
+///
+/// A run that was never created is not a failed run. The record is withdrawn
+/// with an explicit `null`, and the row asserts BOTH halves: the withdrawal is
+/// on the wire, and a pass over the status it leaves starts fresh with the
+/// count and the budget untouched.
+///
+/// KILLS: `Err(e) => return Err(ReconcileError::Api(e))` without the
+/// withdrawal.
+#[tokio::test]
+async fn a_job_create_failure_after_the_record_leaves_no_run_to_harvest() {
+    let digest = learned_digest().await;
+    let spec = unattended_enforcing();
+    let mut routes = happy_routes(&six_points());
+    routes.push(plan_config_map_route(&digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
+    // THE CREATE IS REFUSED BY SOMETHING THAT IS NOT A NAME COLLISION — a
+    // ResourceQuota, an admission webhook, a broken API server. Not a 409:
+    // that arm means the Job exists and the record correctly describes it.
+    routes.push(Route {
+        method: "POST",
+        path_suffix: "/jobs",
+        status: 403,
+        body: json!({
+            "kind": "Status", "apiVersion": "v1", "status": "Failure",
+            "reason": "Forbidden", "code": 403,
+            "message": "exceeded quota: jobs"
+        })
+        .to_string(),
+    });
+    let f = fixture(routes);
+    let before = json!({});
+    let outcome = ctrl::reconcile_policy(
+        &policy(spec.clone(), before.clone()),
+        &ctrl::PolicyContext {
+            client: &f.client,
+            policy: &check::policy::Policy::defaults(),
+            runner_image: &RunnerImage::default(),
+            now: now(),
+        },
+    )
+    .await;
+    assert!(
+        outcome.is_err(),
+        "a create this controller cannot complete is an error the reconciler requeues on"
+    );
+
+    // THE WITHDRAWAL IS ON THE WIRE, as an explicit RFC 7386 null and not an
+    // omission: an omitted key leaves the record exactly where it was.
+    let withdrawal = f
+        .status_patches()
+        .into_iter()
+        .filter(|p| p["status"].get("lastEnforcement").is_some())
+        .next_back()
+        .expect("the record was written and then withdrawn");
+    assert_eq!(
+        withdrawal["status"]["lastEnforcement"],
+        Value::Null,
+        "the last word about the record is that there is none; got {withdrawal}"
+    );
+
+    // AND THE STATUS THIS PASS LEAVES NAMES NO RUN, so the next pass has
+    // nothing to harvest and nothing to count.
+    let after_pass = after(&before, &f);
+    assert!(
+        after_pass.get("lastEnforcement").is_none_or(Value::is_null),
+        "no run is recorded, so `tracked_run` finds none. Status: {after_pass}"
+    );
+    assert!(
+        after_pass
+            .get("consecutiveRunFailures")
+            .is_none_or(|v| v == &json!(0)),
+        "and the retry budget is untouched — a run that never ran is not a failed run. \
+         Status: {after_pass}"
+    );
+    assert!(
+        condition_of(&after_pass, ctrl::CONDITION_DEGRADED)
+            .is_none_or(|c| c["status"] == json!("False")),
+        "nothing is degraded by a Job that was never created. Status: {after_pass}"
+    );
+}

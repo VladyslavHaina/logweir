@@ -119,15 +119,15 @@ use crate::check;
 use crate::conditions::{
     current_condition, merge_condition, reason_for_exit, wire_reason_for_exit, StatusVersion,
     CONDITION_ADMITTED, CONDITION_COMPLETE, CONDITION_EVIDENCE_RECORDED, CONDITION_FAILED,
-    CONDITION_JOB_CREATED, CONDITION_RUNNER_READY, CONDITION_VERIFIED, PHASE_FAILED, PHASE_PENDING,
-    PHASE_RUNNING, PHASE_SUCCEEDED, REASON_ADMITTED, REASON_APPROVAL_BUNDLE_MATERIALIZATION_FAILED,
-    REASON_APPROVAL_NOT_VERIFIED, REASON_EVIDENCE_KEYS_RECORDED, REASON_EVIDENCE_KEYS_UNREADABLE,
-    REASON_OPERATIONAL, TERMINAL_STATE_APPROVAL_BUNDLE_CONFLICT,
-    TERMINAL_STATE_APPROVAL_NOT_RECEIVED, TERMINAL_STATE_APPROVAL_SUBJECT_MISMATCH,
-    TERMINAL_STATE_CLUSTER_NOT_REACHABLE, TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON,
-    TERMINAL_STATE_JOB_NAME_CONFLICT, TERMINAL_STATE_NAME_TOO_LONG,
-    TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT, TERMINAL_STATE_PLAN_HASH_MISMATCH,
-    TERMINAL_STATE_POD_OWNERSHIP_CONTESTED, TERMINAL_STATE_WINDOW_NOT_COVERED,
+    CONDITION_JOB_CREATED, PHASE_FAILED, PHASE_PENDING, PHASE_RUNNING, PHASE_SUCCEEDED,
+    REASON_ADMITTED, REASON_APPROVAL_BUNDLE_MATERIALIZATION_FAILED, REASON_APPROVAL_NOT_VERIFIED,
+    REASON_EVIDENCE_KEYS_RECORDED, REASON_EVIDENCE_KEYS_UNREADABLE, REASON_OPERATIONAL,
+    TERMINAL_STATE_APPROVAL_BUNDLE_CONFLICT, TERMINAL_STATE_APPROVAL_NOT_RECEIVED,
+    TERMINAL_STATE_APPROVAL_SUBJECT_MISMATCH, TERMINAL_STATE_CLUSTER_NOT_REACHABLE,
+    TERMINAL_STATE_GUARD_REFUSED_UNKNOWN_REASON, TERMINAL_STATE_JOB_NAME_CONFLICT,
+    TERMINAL_STATE_NAME_TOO_LONG, TERMINAL_STATE_PLAN_CONFIG_MAP_CONFLICT,
+    TERMINAL_STATE_PLAN_HASH_MISMATCH, TERMINAL_STATE_POD_OWNERSHIP_CONTESTED,
+    TERMINAL_STATE_WINDOW_NOT_COVERED,
 };
 use crate::crds::approval::Approval;
 use crate::crds::kafka_cluster::KafkaCluster;
@@ -2780,7 +2780,7 @@ pub fn refused_status_patch(
     message: &str,
     now: DateTime<Utc>,
 ) -> Value {
-    let conditions = crate::verification::carry_conditions(
+    let conditions = crate::conditions::carry_remaining(
         restore.status.as_ref().and_then(|s| s.conditions.as_ref()),
         vec![condition(
             restore,
@@ -2790,7 +2790,6 @@ pub fn refused_status_patch(
             message,
             now,
         )],
-        &[CONDITION_VERIFIED, CONDITION_RUNNER_READY],
     );
     json!({
         "status": {
@@ -2854,6 +2853,17 @@ pub fn running_status_patch(
         &format!("the runner Job {job_name} exists and has not finished"),
         now,
     ));
+    // AND EVERY STORED CONDITION THIS PATCH IS NOT ABOUT, HERE TOO — review
+    // finding LOW-2. `diagnostics::apply` carries them for the RUNNING pass,
+    // but the CREATING pass does not go through it (`restore.rs`'s step 1
+    // writes this patch directly), and its `409 AlreadyExists`-adopt arm calls
+    // this builder with `admitted: false` — an array of `[JobCreated]` alone,
+    // which would delete a stored `Admitted`. Stored order, for
+    // `upsert_conditions`' own reason: a running object is reconciled again.
+    let conditions = crate::conditions::upsert_conditions(
+        restore.status.as_ref().and_then(|s| s.conditions.as_ref()),
+        conditions,
+    );
     json!({
         "status": {
             "phase": PHASE_RUNNING,
@@ -2999,10 +3009,9 @@ pub fn finished_status_patch(
     // one would delete the condition the SECOND patch adds, which would re-add
     // it, which would wake this reconciler again. Measured at 20 reconciles
     // per second on the Phase B run. See `verification::carry_verified`.
-    let conditions = crate::verification::carry_conditions(
+    let conditions = crate::conditions::carry_remaining(
         restore.status.as_ref().and_then(|s| s.conditions.as_ref()),
         conditions,
-        &[CONDITION_VERIFIED, CONDITION_RUNNER_READY],
     );
     status.insert("conditions".to_string(), json!(conditions));
 
@@ -3144,7 +3153,7 @@ pub fn crashed_status_patch(
     job_name: &str,
     now: DateTime<Utc>,
 ) -> Value {
-    let conditions = crate::verification::carry_conditions(
+    let conditions = crate::conditions::carry_remaining(
         restore.status.as_ref().and_then(|s| s.conditions.as_ref()),
         vec![condition(
             restore,
@@ -3155,7 +3164,6 @@ pub fn crashed_status_patch(
              the exit code is unrecoverable",
             now,
         )],
-        &[CONDITION_VERIFIED, CONDITION_RUNNER_READY],
     );
     json!({
         "status": {

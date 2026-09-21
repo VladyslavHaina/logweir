@@ -11769,3 +11769,94 @@ async fn the_running_pass_carries_every_stored_condition_it_does_not_own() {
         "and the builder's own two are there; got {conditions:?}"
     );
 }
+
+/// **`Admitted=True` SURVIVES THE TERMINAL TRANSITION** — review finding
+/// MED-2, the `Backup` half.
+///
+/// Three passes, run for real, with the server's merge applied between them:
+/// the Job running, then the Job finished. The terminal builder owns the array,
+/// and it owes every condition it is not about — a finished `Backup` is the
+/// object an auditor inspects and it is never reconciled again, so a condition
+/// this patch drops is dropped for good.
+///
+/// KILLS: `carry_conditions` delegating to
+/// `verification::carry_conditions(.., &[…])` again; carrying `Admitted` with a
+/// fresh `lastTransitionTime`.
+#[tokio::test]
+async fn the_admission_condition_survives_the_backup_terminal_transition() {
+    let settle = |b: &Backup, status: &Value| -> Backup {
+        let mut object = serde_json::to_value(b).expect("serialisable");
+        object["status"] = status.clone();
+        serde_json::from_value(object).expect("a Backup")
+    };
+
+    // PASS 1 — the Job is running; this is where `Admitted=True` is written.
+    let (client, _seen, bodies) = mock_client_recording_bodies(running_routes());
+    reconcile_backup(
+        &frozen_backup(),
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 18),
+    )
+    .await
+    .expect("the running pass completes");
+    let mut status = serde_json::to_value(frozen_backup().status.expect("a status"))
+        .expect("the frozen status serialises");
+    for patch in patched_statuses(&bodies.lock().expect("the body recorder is readable")) {
+        weirkeeper::conditions::apply_merge_patch(&mut status, &patch);
+    }
+    let admitted_at = status["conditions"]
+        .as_array()
+        .expect("an array")
+        .iter()
+        .find(|c| c["type"] == json!("Admitted"))
+        .expect("the running pass asserts Admitted")["lastTransitionTime"]
+        .as_str()
+        .expect("a lastTransitionTime")
+        .to_string();
+
+    // PASS 2 — the Job has finished. The LAST pass that writes this object.
+    let (client2, _seen2, bodies2) = mock_client_recording_bodies(finished_routes(
+        &pod_list_terminated(0),
+        log_body(&i7_tail()),
+        200,
+        "Complete",
+    ));
+    reconcile_backup(
+        &settle(&frozen_backup(), &status),
+        &client2,
+        &observed_archive,
+        &valid_evidence,
+        utc(2026, 11, 9, 3, 25),
+    )
+    .await
+    .expect("the terminal pass completes");
+    for patch in patched_statuses(&bodies2.lock().expect("the body recorder is readable")) {
+        weirkeeper::conditions::apply_merge_patch(&mut status, &patch);
+    }
+
+    let conditions = status["conditions"].as_array().expect("an array");
+    let find = |want: &str| conditions.iter().find(|c| c["type"] == json!(want));
+    assert_eq!(
+        find("Complete").map(|c| c["status"].clone()),
+        Some(json!("True")),
+        "the run's own verdict is there; got {conditions:?}"
+    );
+    let carried = find("Admitted").unwrap_or_else(|| {
+        panic!(
+            "a FINISHED Backup still says it was admitted — the terminal patch owns the array \
+             and owes every condition it is not about. Got {conditions:?}"
+        )
+    });
+    assert_eq!(carried["status"], json!("True"));
+    assert_eq!(
+        carried["lastTransitionTime"].as_str(),
+        Some(admitted_at.as_str()),
+        "with the instant the admission actually happened"
+    );
+    assert!(
+        find("JobCreated").is_some(),
+        "and the Job the run ran in is still named; got {conditions:?}"
+    );
+}

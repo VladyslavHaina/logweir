@@ -1072,6 +1072,42 @@ pub fn upsert_conditions(
     out
 }
 
+/// `owned` FIRST, then every condition the object carries whose type `owned`
+/// does not name — the terminal builders' form of [`upsert_conditions`].
+///
+/// # Why terminal patches keep the builder's order instead of the object's
+///
+/// [`upsert_conditions`] keeps STORED order because a running object is
+/// reconciled again and again and `status_unchanged` compares arrays element by
+/// element. A terminal object is reconciled once more and then never
+/// (`status_is_terminal` returns before any read), so order stability buys
+/// nothing there — and the terminal builders' own contract is that
+/// `conditions[0]` is the `Complete`/`Failed` one the scalar `status.reason`
+/// quotes. Reordering it would move that statement for no gain.
+///
+/// # The rule is still "carry everything you do not own"
+///
+/// [`crate::verification::carry_conditions`]' allow-list is what defect
+/// RESTORE-ADMITTED-DROPPED was: `Admitted` and `JobCreated` were on no list,
+/// so the terminal patch — the object an auditor actually inspects — replaced
+/// the array with the run's verdict alone and the statement that the run had
+/// been APPROVED went off the object at the moment it finished. A condition a
+/// builder owns may transition; it may not disappear.
+#[must_use]
+pub fn carry_remaining(
+    stored: Option<&Vec<crate::crds::Condition>>,
+    mut owned: Vec<serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    for condition in stored.map(Vec::as_slice).unwrap_or_default() {
+        let r#type = serde_json::json!(condition.r#type);
+        if owned.iter().any(|c| c.get("type") == Some(&r#type)) {
+            continue;
+        }
+        owned.push(serde_json::json!(condition));
+    }
+    owned
+}
+
 /// Apply an RFC 7386 JSON merge patch to `target`, exactly as the API server
 /// would.
 ///

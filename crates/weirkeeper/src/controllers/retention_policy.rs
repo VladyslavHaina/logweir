@@ -1855,7 +1855,45 @@ impl Pass<'_> {
                 );
                 return Ok(StartOutcome::Started(job_name));
             }
-            Err(e) => return Err(ReconcileError::Api(e)),
+            // THE RECORD IS WITHDRAWN, AND THE BUDGET IS NOT SPENT — review
+            // finding MED-1. A `403` from a quota or an admission webhook, a
+            // `422`, a `500`: the record has landed and no Job exists, so the
+            // NEXT pass reaches `tracked_run`'s absent-Job arm — `runId`
+            // present, `finishedAt` absent, Job absent — and harvests it with
+            // no exit code, which is one consecutive FAILURE and a message
+            // ("its pod is gone or was never readable") describing a pod that
+            // never existed. Three transient create failures would wedge
+            // retention at `EnforcementDegraded=True` until an operator edited
+            // the spec, for runs that never ran.
+            //
+            // A run that was never created is not a failed run. The record is
+            // therefore withdrawn with an explicit RFC 7386 `null` before the
+            // error is returned, which is the same instrument the record's own
+            // seven terminal fields use, and the reconciler requeues onto a
+            // status that says no run is in flight.
+            //
+            // WHAT THIS DOES NOT CLOSE, STATED: a controller that DIES between
+            // the record write and the create leaves the record behind, and the
+            // next pass counts that run as a failure. Closing that needs the
+            // record to carry which Job it is waiting for, which is a CRD field
+            // this branch may not add; it is recorded as
+            // RET-RECORD-WITHOUT-JOB-COUNTS rather than left for someone to
+            // rediscover. The window is one API call wide and fail-safe in the
+            // direction that matters — retention stops sooner, never later.
+            Err(e) => {
+                let withdrawn = self
+                    .patch_status(json!({ "lastEnforcement": Value::Null }))
+                    .await?;
+                warn!(
+                    policy = %self.name, namespace = %self.namespace,
+                    job = %job_name, run = %run_id, error = %e,
+                    withdrawn = ?withdrawn,
+                    "the retention Job was not created; the run record this pass wrote is \
+                     withdrawn so a run that never ran is not harvested as a failed one and \
+                     does not spend a retry-budget slot"
+                );
+                return Err(ReconcileError::Api(e));
+            }
         }
         Ok(StartOutcome::Started(job_name))
     }

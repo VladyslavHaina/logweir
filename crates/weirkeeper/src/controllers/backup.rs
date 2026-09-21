@@ -89,8 +89,7 @@ use crate::conditions::{
     current_condition, merge_condition, reason_for_exit, wire_reason_for_exit, StatusVersion,
     CONDITION_COMPLETE, CONDITION_EVIDENCE_RECORDED, CONDITION_EXECUTION_INPUTS_UNVERIFIED,
     CONDITION_FAILED, CONDITION_JOB_CREATED, CONDITION_REASON_GUARD_REFUSED,
-    CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED, CONDITION_RUNNER_READY, CONDITION_TOPICS_RESOLVED,
-    CONDITION_VERIFIED, PHASE_FAILED, PHASE_RUNNING, PHASE_SUCCEEDED,
+    CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED, PHASE_FAILED, PHASE_RUNNING, PHASE_SUCCEEDED,
     REASON_EVIDENCE_KEYS_RECORDED, REASON_EVIDENCE_KEYS_UNREADABLE, REASON_JOB_INPUTS_MISMATCH,
     REASON_LEGACY_EXECUTION, REASON_OPERATIONAL, REASON_RUNNER_ARGV_ANNOTATION_IGNORED,
     REASON_RUNNER_ARGV_ANNOTATION_MALFORMED, TERMINAL_STATE_DISRUPTED_MID_DRILL,
@@ -2198,7 +2197,13 @@ fn with_status_written(backup: &Backup, patch: &Value, at: &StatusVersion) -> Ba
 /// on a running `Backup` used to find nothing at all.
 #[must_use]
 pub fn running_status_patch(backup: &Backup, job_name: &str, now: DateTime<Utc>) -> Value {
-    let conditions = carry_conditions(
+    // STORED ORDER, AND NOT `carry_conditions`' BUILDER-FIRST ORDER — review
+    // finding LOW-2. The FREEZE pass writes this patch directly, without
+    // `diagnostics::apply`, and a running object is reconciled again and again:
+    // `status_unchanged` compares arrays element by element, so the freeze pass
+    // and the running passes that follow it must compute the same order or the
+    // first running pass writes a reshuffle nobody asked for.
+    let conditions = crate::conditions::upsert_conditions(
         backup.status.as_ref().and_then(|s| s.conditions.as_ref()),
         vec![
             condition(
@@ -2253,37 +2258,23 @@ pub fn running_status_patch(backup: &Backup, job_name: &str, now: DateTime<Utc>)
 /// Secret is missing showed `RunnerReady=False/CredentialReferenceMissing` for
 /// five minutes and then, at the fail-fast cancellation, showed nothing at
 /// all. D3 §15's L1 asserts that condition live, AFTER the terminal patch.
+///
+/// # THE LIST IS GONE, AND THAT IS THE FIX
+///
+/// This used to name five types — the two execution-contract observations,
+/// `TopicsResolved`, `Verified` and `RunnerReady` — and carry those and nothing
+/// else. An allow-list works until a type nobody put on it appears, which is
+/// defect RESTORE-ADMITTED-DROPPED: `Admitted` and `JobCreated` were on no
+/// list, so the TERMINAL patch replaced the array with the run's verdict alone
+/// and the statement that the run had been APPROVED went off the object at the
+/// exact moment it finished — on the object an auditor actually inspects, which
+/// is never reconciled again. A condition a builder owns may transition; it may
+/// not disappear. [`crate::conditions::carry_remaining`] carries whatever the
+/// object holds, so the next condition type somebody adds is carried by
+/// construction.
 #[must_use]
-pub fn carry_conditions(
-    existing: Option<&Vec<Condition>>,
-    mut conditions: Vec<Value>,
-) -> Vec<Value> {
-    for r#type in [
-        CONDITION_EXECUTION_INPUTS_UNVERIFIED,
-        CONDITION_RUNNER_ARGV_ANNOTATION_IGNORED,
-        // D1 §7.2 R9. `TopicsResolved` is written by
-        // `controllers::backup_selection` and by nothing else, and every other
-        // builder owes it the same debt it owes the two observations above: a
-        // merge patch replaces `status.conditions`, so the `Running` patch that
-        // follows a freeze would otherwise erase the answer to "where did this
-        // run's topic list come from" one line after writing it.
-        CONDITION_TOPICS_RESOLVED,
-    ] {
-        if conditions
-            .iter()
-            .any(|c| c.get("type") == Some(&json!(r#type)))
-        {
-            continue;
-        }
-        if let Some(c) = current_condition(existing, r#type) {
-            conditions.push(json!(c));
-        }
-    }
-    crate::verification::carry_conditions(
-        existing,
-        conditions,
-        &[CONDITION_VERIFIED, CONDITION_RUNNER_READY],
-    )
+pub fn carry_conditions(existing: Option<&Vec<Condition>>, conditions: Vec<Value>) -> Vec<Value> {
+    crate::conditions::carry_remaining(existing, conditions)
 }
 
 /// The `status.destination` projection of a frozen destination snapshot —

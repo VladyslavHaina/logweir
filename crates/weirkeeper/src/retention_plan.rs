@@ -948,6 +948,15 @@ pub fn plan_bytes(document: &PlanDocument) -> Result<(Vec<u8>, String), PlanErro
 /// `status.lastEvaluation.planRef`** (finding M9), so no reader ever recomputes
 /// it — but this is the function it would recompute it with, and it is short
 /// enough to be checkable.
+///
+/// **THE EVALUATION PUBLISHES THE REF, NOT THE RUN** (defect
+/// RET-STALE-PLANREF). `publish_evaluation` names the plan it just rendered, so
+/// the ref and the `planSha256` beside it always describe the same plan. The
+/// `ConfigMap` is materialized by the pass that STARTS a run, so in `Report`
+/// mode — and on any evaluation that does not start one — the ref names an
+/// object that does not exist yet. That is the documented absent-object
+/// behaviour and not a fault: the name is a pure function of the policy UID and
+/// the digest, so it is exactly as true as the digest it sits next to.
 #[must_use]
 pub fn plan_config_map_name(policy_uid: &str, plan_sha256: &str) -> String {
     let digest = plan_sha256.trim_start_matches("sha256:");
