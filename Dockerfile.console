@@ -1,0 +1,220 @@
+# The `logweir-console` image — D0 stage 7. THE PRODUCT API, WITH THE PAGE IT SERVES.
+#
+# IT IS THE FOURTH IMAGE IN THIS TREE AND IT IS NOT A VARIANT OF ANY OF THEM:
+#
+#   `Dockerfile`             the runner: two binaries, the extracted OSO engine,
+#                            an amd64-only ELF, librdkafka and its SASL/TLS libraries.
+#   `Dockerfile.weirkeeper`  the controller: one binary, `ca-certificates`, nothing else.
+#   `Dockerfile.ui`          the LEGACY LOCAL ADMIN PROXY's page: a `COPY` of twenty-two
+#                            static files over a kubectl the Kubernetes project publishes.
+#                            IT COMPILES NOTHING and this file does not replace it.
+#   this file                `logweir-api` — a Rust binary — PLUS the same twenty-two
+#                            files, served by that binary out of its own process.
+#
+# WHY THE PAGE IS IN THIS IMAGE TOO, AND WHY THAT IS NOT A SECOND COPY OF IT.
+# `crates/logweir-api/src/assets.rs` reads the configured `uiDirectory` ONCE at
+# startup into memory and serves an allowlist keyed by exact path — the same
+# selection `Dockerfile.ui` makes (`ui/*.html`, `ui/*.js`, `ui/*.css` and
+# `ui/pages/`), for the same reason, with `README.md`, `tests/` and its throwaway
+# keypair excluded on both sides. There is ONE copy in the repository, `ui/`, and
+# two images copy from it; `scripts/check-image-api.sh` check 1 and
+# `scripts/check-image-ui.sh` check 1 each hash what their image will serve
+# against that one tree directory, so the two can never drift apart silently.
+#
+# NAMING, STATED ONCE HERE BECAUSE TWO NAMES ARE IN USE.
+# `docs/to-do/decisions/D0-product-api-and-identity.md` calls the deliverable the
+# CONSOLE (stage 7 owns "`Dockerfile.console`, chart `console` templates"), and
+# the crate, the binary and the chart's values block are all called API
+# (`crates/logweir-api`, `logweir-api`, `api.enabled`). Both names are kept where
+# they already are: the IMAGE and this file carry D0's `console`, the BINARY and
+# the chart's values carry the crate's `api`, and `charts/logweir/README.md`
+# says so in one paragraph rather than leaving a reader to guess. Renaming either
+# half would have been a rename across a landed RBAC template
+# (`charts/logweir/templates/ui/api-rbac.yaml`), a landed admission policy
+# (`admissionPolicy.consoleServiceAccountName`) and a landed crate — for a word.
+#
+# BUILD IT WITH THE RECIPE, NOT BY HAND:
+#
+#     just image-console                           # this host's architecture, loaded
+#     LOGWEIR_IMAGE_PLATFORM=linux/amd64 just image-console
+#
+# and then assert it:
+#
+#     bash scripts/check-image-api.sh logweir-console:check; echo "rc=$?"
+#
+# ---------------------------------------------------------------------------
+# WHAT IS *NOT* HERE, AND EACH ABSENCE IS A DECISION
+# ---------------------------------------------------------------------------
+# NO CONFIGURATION, AND NO DEFAULT CONFIGURATION. `logweir-api` takes
+# `--config <file>` and refuses to start without one (exit 2, before any socket
+# or Kubernetes client). The file is the chart's ConfigMap
+# (`charts/logweir/templates/ui/api-config.yaml`), so the MODE — `localAdmin`
+# versus `shared` — the listen address, the granted namespaces and the role
+# bindings are all readable from `helm template` and from `kubectl get cm`. A
+# baked default config here would be a second place a shared console's identity
+# settings could come from, in a layer no chart test can see. Same argument
+# `Dockerfile.ui` makes about `kubectl proxy`'s `--accept-paths`.
+#
+# NO `CMD`, FOR THE SAME REASON: the argument vector is the chart's.
+#
+# NO KEY MATERIAL OF ANY KIND (Global Constraint 28). The session key, the
+# cursor MAC key and the OIDC client secret are mounted from Secrets at paths
+# the configuration names. `scripts/check-image-api.sh` check 1 asserts `/ui`
+# holds exactly the twenty-two shipped files — so `ui/tests/`, which carries a
+# throwaway keypair, is a red — and check 5 asserts the image carries no
+# `*.pem`, `*.key` or kubeconfig anywhere a `COPY` could have put one.
+#
+# NO `third_party/org-root.fingerprint`. The runner and the controller each
+# carry that anchor because each is handed to a cluster owner as an execution
+# component; this service verifies no archive, mints no evidence and reads no
+# bundle. `check-image-api.sh` check 3 asserts the absence, exactly as
+# `check-image-weirkeeper.sh` asserts the absence of the MIT notice it owes
+# nobody: a file that ships without a reader is a claim, not a precaution.
+#
+# NO `/usr/share/licenses/kafka-backup/`. No `kafka-backup` binary and no OSO
+# code is in this image.
+
+# ---------------------------------------------------------------------------
+# THE BUILDER STAGE
+# ---------------------------------------------------------------------------
+# The same shape as `Dockerfile.weirkeeper`'s, including its refusal, because it
+# is the same workspace: `aws-lc-sys`'s cmake/bindgen steps read the HOST
+# `/usr/include` and fail on a cross target, and emulating the compile under
+# QEMU is forbidden (STANDING RULE 10). An arm64 host builds a linux/arm64
+# console image; an amd64 host builds a linux/amd64 one; `.github/workflows/images.yml`
+# runs one native runner per architecture and this file refuses anything else.
+FROM --platform=$BUILDPLATFORM rust:1.89-bookworm AS builder
+WORKDIR /src
+
+# BuildKit predeclares both; a predeclared ARG is not in scope inside a stage
+# until the stage asks for it.
+ARG BUILDARCH
+ARG TARGETARCH
+
+# 1.89 AND NOT "latest": the workspace MSRV is `rust-version = "1.89"` and
+# `rust-toolchain.toml`'s channel is `1.89.0`. This tag moves with those two.
+RUN set -eux; \
+    test -n "$TARGETARCH"; \
+    test -n "$BUILDARCH"; \
+    test "$BUILDARCH" = "$(dpkg --print-architecture)"; \
+    if [ "$TARGETARCH" != "$BUILDARCH" ]; then \
+      echo "Dockerfile.console: REFUSING to cross-compile ($BUILDARCH -> $TARGETARCH)." >&2; \
+      echo "  This workspace's graph contains aws-lc-sys, whose cmake/bindgen steps read the" >&2; \
+      echo "  HOST /usr/include and fail on a cross target. Build this image on a machine of" >&2; \
+      echo "  the target architecture and set LOGWEIR_IMAGE_PLATFORM to it, e.g." >&2; \
+      echo "  LOGWEIR_IMAGE_PLATFORM=linux/$BUILDARCH just image-console." >&2; \
+      echo "  Emulating the compile under QEMU is forbidden (STANDING RULE 10)." >&2; \
+      exit 1; \
+    fi; \
+    case "$TARGETARCH" in \
+      amd64) triple=x86_64-unknown-linux-gnu  ;; \
+      arm64) triple=aarch64-unknown-linux-gnu ;; \
+      *) echo "Dockerfile.console: unsupported TARGETARCH=$TARGETARCH (amd64 and arm64 only)" >&2; exit 1 ;; \
+    esac; \
+    echo "$triple" > /triple
+
+# A SEPARATE LAYER: a different tool with a different failure mode, and merging
+# them would make one cache miss pay for both.
+RUN rustup target add "$(cat /triple)"
+
+# `COPY . .` IS THE LAST THING BEFORE THE COMPILE, so every layer above survives
+# an edit to any tracked file. `.dockerignore` keeps `target/`, `.engine/` and
+# every Dockerfile out of the context.
+COPY . .
+
+# `-p logweir-api` AND NOT THE WORKSPACE. This image carries one binary. A
+# workspace build would compile `logweir`, its rdkafka/librdkafka C dependencies
+# and the whole engine-facing half for nothing, and would need the SASL and
+# OpenSSL development libraries the runtime stage below deliberately does not
+# have. `logweir-api` links `weirkeeper` (the CRD types and the green-badge
+# rules) and, through it, `logweir-verify`; it links neither `logweir-evidence`
+# nor `logweir-engine-oso`, which `scripts/check-one-signer.sh` and
+# `crates/logweir-api/tests/linkage.rs` assert from `cargo metadata`.
+RUN set -eux; \
+    triple="$(cat /triple)"; \
+    cargo build --release --target "$triple" -p logweir-api; \
+    mkdir -p /out; \
+    cp "target/$triple/release/logweir-api" /out/logweir-api
+
+# ---------------------------------------------------------------------------
+# THE RUNTIME STAGE
+# ---------------------------------------------------------------------------
+# `debian:bookworm-slim`, Global Constraint 10 — the same base the runner and
+# the controller use. One glibc floor (>= 2.36) to document, one base to patch.
+#
+# NO `--platform` HERE, ON PURPOSE. This stage follows the platform of the
+# build, which `just image-console` states once as
+# `--platform "${LOGWEIR_IMAGE_PLATFORM:-linux/arm64}"`. Pinning it here would
+# let the recipe and the file disagree, silently.
+FROM debian:bookworm-slim AS runtime
+
+# `ca-certificates` AND NOTHING ELSE.
+#
+#   NOT `libsasl2-2`  — this service dials no broker. D0: "does not dial Kafka
+#                       or object storage", and `crates/logweir-api/Cargo.toml`
+#                       links no Kafka client.
+#   NOT `libssl3`     — TLS is rustls with the `ring` provider, for the two
+#                       peers this service has: the Kubernetes API server and
+#                       the OIDC provider. There is no OpenSSL in its graph.
+#
+# `ca-certificates` IS REQUIRED and it is required by the OIDC half in
+# particular: the in-cluster API server is verified with the projected
+# ServiceAccount CA, but `hyper-rustls`'s `native-tokio` root store is what
+# validates the identity provider's certificate at discovery, JWKS and token
+# exchange. An image with no CA bundle fails shared-mode startup at the first
+# HTTPS handshake, with an error that names nothing useful.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+LABEL org.opencontainers.image.base.name="debian:bookworm-slim"
+LABEL org.opencontainers.image.title="logweir-console"
+LABEL org.opencontainers.image.description="The Logweir product API (logweir-api) and the twenty-two static page files it serves at /ui/. Not a Kubernetes proxy."
+LABEL org.opencontainers.image.licenses="Apache-2.0"
+
+COPY --from=builder /out/logweir-api /usr/local/bin/logweir-api
+
+# ---------------------------------------------------------------------------
+# THE TWENTY-TWO FILES, AND NOTHING ELSE
+# ---------------------------------------------------------------------------
+# TWO INSTRUCTIONS, NOT ONE `COPY ui /ui`, and the globs are `Dockerfile.ui`'s
+# character for character. A whole-directory copy would take `ui/README.md` and
+# `ui/tests/` with it — the second of which carries a throwaway keypair — and
+# would keep taking whatever lands under `ui/` next.
+#
+# Docker's `*` does not cross a `/`, so `ui/*.js` is the eleven top-level
+# scripts and never `ui/tests/*.js`.
+#
+# `/ui` IS THE SAME PATH BOTH IMAGES USE, which is not decoration: it is what
+# lets `scripts/check-image-api.sh` reuse `check-image-ui.sh`'s comparison
+# verbatim, and what lets `docs/api.md` name one directory for both deployments.
+# The chart's ConfigMap names it as `uiDirectory: /ui`.
+COPY ui/*.html ui/*.js ui/*.css /ui/
+COPY ui/pages /ui/pages
+
+# ---------------------------------------------------------------------------
+# THE LICENCES — Global Constraint 15, spec §16 clause 5
+# ---------------------------------------------------------------------------
+# THREE FILES, the same three at the same path as the runner and the controller,
+# and the third is the one "this is only our own code" glosses over: this image
+# ships a statically linked Rust binary, and MIT, BSD-2-Clause, BSD-3-Clause and
+# Apache-2.0 each require those copyright notices to travel with it.
+# `THIRD_PARTY_NOTICES.md` is that inventory, generated from the resolved graph
+# by `scripts/gen-third-party-notices.sh`.
+#
+# `Dockerfile.ui` deliberately does NOT carry the third file, because it links
+# no Rust binary and redistributes no crate. This image does both, so it does.
+COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /usr/share/licenses/logweir/
+
+# THE SAME NON-ROOT UID AS ALL THREE OTHER IMAGES AND AS the chart's PodSpec
+# (`runAsUser: 65532`, `runAsNonRoot: true`). The kubelet enforces
+# `runAsNonRoot` by REFUSING to start a container whose image declares
+# `USER root`, so this line and that PodSpec have to agree or the console never
+# starts. The files copied above are mode 0644 owned by root and world-readable,
+# which is what a read-only root filesystem serving static files needs and all
+# it needs.
+USER 65532:65532
+
+# NO `CMD`: `--config <file>` is the chart's argument, and a default argument
+# vector here would be a second place the console's MODE could come from.
+ENTRYPOINT ["/usr/local/bin/logweir-api"]

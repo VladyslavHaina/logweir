@@ -27,3 +27,10 @@
 # nothing else — and stops an edit to ITS comments invalidating the cargo layer
 # of the OTHER image's build.
 /Dockerfile.weirkeeper
+
+# D0 stage 7, for exactly the reason above. `Dockerfile.console` is the fourth
+# Dockerfile in this tree and is taken through BuildKit's frontend, not through
+# the context tar, so excluding it here changes what `COPY . .` copies and
+# nothing else — and stops an edit to ITS comments invalidating the cargo layer
+# of the other two compiling builds.
+/Dockerfile.console

@@ -812,3 +812,21 @@ image-ui:
 # Build the UI image and compare its served files with ui/. Requires Docker.
 smoke-ui: image-ui
     bash scripts/check-image-ui.sh logweir-ui:check
+
+# THE CONSOLE IMAGE — D0 stage 7. `logweir-api` plus the twenty-two page files.
+#
+# `Dockerfile.console` COMPILES, which `Dockerfile.ui` does not, so this recipe
+# behaves like `image-weirkeeper` and not like `image-ui`: the platform is
+# stated once, here, and the Dockerfile REFUSES a cross-compile rather than
+# emulating one (STANDING RULE 10). On an arm64 host the default below builds a
+# linux/arm64 image, which is what a Docker Desktop node on that host can run.
+#
+# DELIBERATELY NOT PART OF `lint`, `test`, `default`, `e2e` OR `gate`, exactly
+# as the other three image recipes are not: an image build must never become a
+# precondition of the Docker-free test run.
+image-console:
+    docker build --platform "${LOGWEIR_IMAGE_PLATFORM:-linux/arm64}" --load -f Dockerfile.console -t logweir-console:check .
+
+# Build the console image and assert it. Requires Docker.
+smoke-console: image-console
+    bash scripts/check-image-api.sh logweir-console:check
