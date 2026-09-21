@@ -63,7 +63,16 @@
 //!   `AKIA…` is still removed from them;
 //! * object keys and the `s3://bucket/prefix` location pass
 //!   [`crate::check::redact_path`], whose long-run clause is applied per path
-//!   SEGMENT — applying it whole would redact an ordinary archive key;
+//!   SEGMENT — applying it whole would redact an ordinary archive key. The
+//!   `receiptKey` is the load-bearing one: D3 §5.5 step 4 builds a restore
+//!   plan's `source.point {point_id, receipt_key, receipt_sha256,
+//!   manifest_sha256}` from this line, so a key that arrives redacted is a
+//!   plan binding the runner refuses with exit 3 `PointBindingMismatch`. It
+//!   survived the long-run clause and then died on the free-component budget
+//!   instead, because a run id is a 26-character ULID and the budget is 24
+//!   (CATALOG-RECEIPTKEY-REDACTED); `check_contract::is_ulid` now exempts that
+//!   shape from the LENGTH — not from the count, and not by raising the
+//!   budget, which would be 3.6x more permissive about a credential;
 //! * **everything else copied out of the archive passes the whole
 //!   `check_contract::redact`**, long-run clause included: a `pointId` is 37
 //!   characters and a `backupId` or `runId` shorter still, so the clause costs
@@ -1383,6 +1392,14 @@ fn build_entry(observation: &Observation) -> Option<CatalogEntry> {
     //                       `s3://bucket/prefix` location. Applying it whole
     //                       would redact an ordinary archive key, which is the
     //                       defect `check::redact_path` itself exists for.
+    //                       `receiptKey` MUST survive it whole: it is half the
+    //                       plan binding a restore is built from, and it did
+    //                       not until `is_ulid` exempted the 26-character run
+    //                       id from the free-component budget
+    //                       (CATALOG-RECEIPTKEY-REDACTED). `redact_path` is
+    //                       the narrowest class it can be in — `redact` would
+    //                       eat the whole key and `redact_digest` would drop
+    //                       the long-run clause a planted credential needs.
     //   * `redact_digest` — the long-run clause dropped, for the THREE values
     //                       that are 40-plus hex by definition and that a later
     //                       restore re-checks.

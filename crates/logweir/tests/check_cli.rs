@@ -4805,6 +4805,10 @@ fn a_slash_bearing_credential_is_not_an_object_key() {
             "team/prod/{SET}/topics/payments-EU/partition=2/segment-00000000000000000000.bin.zst"
         ),
         format!("logweir/backups/{SET}/run-a.receipt.json"),
+        // The same key as `logweir backup run` really writes it: the run id is
+        // a 26-character ULID, two over the free-component budget
+        // (CATALOG-RECEIPTKEY-REDACTED).
+        format!("logweir/backups/{SET}/01M2VKCST7EF12EW5T2Y7SJ86Q.receipt.json"),
         format!("logweir/blobs/{DIGEST}/manifest.json"),
         format!("kafka-backups/{DIGEST}"),
         "kafka-backups/20260915T030000Z/topics/orders/partition=0/segment-1.bin".to_string(),
@@ -4825,6 +4829,92 @@ fn a_slash_bearing_credential_is_not_an_object_key() {
             serde_json::from_str(&out).expect("a details line stays JSON");
         assert_eq!(parsed["missingSegment"], keep);
     }
+}
+
+/// **CATALOG-RECEIPTKEY-REDACTED, at the function the catalog really calls.**
+/// A 26-character ULID run id is an identity; a component merely its length is
+/// not.
+///
+/// REGRESSION REASON. `.` is not a run character, so the run `redact_path`
+/// weighs in a receipt key is `<prefix>/<backup_id>/<run_id>` and the run id is
+/// its one free component. At 26 characters it was over the free-component
+/// budget of 24, so the run went and the catalog published
+/// `receiptKey: "[redacted].receipt.json"` — the half of a restore's plan
+/// binding that the console cannot reconstruct from anything else.
+///
+/// The DIE half is what pins the fix as a SHAPE exemption rather than a bigger
+/// budget: a 27-character component still goes, and so does a 26-character one
+/// that is not a ULID. A cap raised to 26 passes the KEEP half and fails all of
+/// these.
+#[test]
+fn a_ulid_run_id_is_an_object_key_and_a_component_its_length_is_not() {
+    const SET: &str = "3f0ada8f-1a2b-4c3d-9e8f-0123456789ab";
+    const RUN: &str = "01M2VKCST7EF12EW5T2Y7SJ86Q";
+    // The live lab's own prefix and set id, from the D3 W14 capture in
+    // `crates/logweir-api/tests/fixtures/catalog-page-entries.jsonl`, whose
+    // `receiptKey` column is the defect verbatim.
+    const LAB: &str = "archive/e1c4ff19-62fb-4d76-9a3f-2177d6fd9d4a/01M2VKCST7EF12EW5T2Y7SJ86Q";
+
+    // --- KEEP: the plan binding survives, bare and in the line it travels in -
+    for keep in [
+        format!("logweir/backups/{SET}/{RUN}.receipt.json"),
+        format!("logweir/backups/{SET}/{RUN}.receipt.sig"),
+        format!("logweir/drills/{RUN}.receipt.json"),
+        format!("{LAB}.receipt.json"),
+    ] {
+        assert!(
+            keep.contains(RUN) || keep.contains("01M2VKCST7EF12EW5T2Y7SJ86Q"),
+            "the fixture must carry a run id"
+        );
+        assert_eq!(
+            logweir::check::redact_path(&keep),
+            keep,
+            "a restore's plan binding was redacted"
+        );
+        let line = serde_json::json!({"receiptKey": keep}).to_string();
+        let out = logweir::check::redact_path(&line);
+        let parsed: serde_json::Value = serde_json::from_str(&out).expect("the line stays JSON");
+        assert_eq!(parsed["receiptKey"], keep, "inside an entry line: {out}");
+    }
+
+    // --- DIE: only the ULID shape is exempt, and only from the LENGTH -------
+    let refused: Vec<(&str, String)> = vec![
+        ("27 characters", format!("{RUN}X1")),
+        ("26, timestamp overflow", format!("Z{}", &RUN[1..])),
+        ("26, not the Crockford alphabet", RUN.replacen('T', "U", 1)),
+        ("26, mixed case", RUN.replacen('T', "t", 1)),
+        ("26 of base64", "wJalrXUtnFEMIK7MDENGbPxRfi".to_string()),
+    ];
+    let mut survived: Vec<String> = Vec::new();
+    for (name, one) in &refused {
+        for value in [
+            format!("logweir/backups/{SET}/{one}.receipt.json"),
+            serde_json::json!({"receiptKey": format!("logweir/backups/{SET}/{one}.receipt.json")})
+                .to_string(),
+        ] {
+            let out = logweir::check::redact_path(&value);
+            if out.contains(one.as_str()) {
+                survived.push(format!("{name}: {out}"));
+            }
+        }
+    }
+    // And the count is never relaxed: a ULID is exempt from the budget, not a
+    // licence to carry a second free component beside it.
+    for beside in ["MyBackupSet01", "payments-EU"] {
+        let value = format!("logweir/backups/{SET}/{beside}/{RUN}.receipt.json");
+        let out = logweir::check::redact_path(&value);
+        if out.contains(beside) {
+            survived.push(format!("a second free component ({beside}): {out}"));
+        }
+    }
+    assert!(
+        survived.is_empty(),
+        "`redact_path` widened its budget instead of exempting the ULID shape \
+         ({} of {}):\n  {}",
+        survived.len(),
+        refused.len() * 2 + 2,
+        survived.join("\n  ")
+    );
 }
 
 /// `redact_path` splits exactly ONE rule out of the set, by name, and the name
@@ -6937,6 +7027,105 @@ fn a_long_credential_in_a_non_digest_field_is_redacted() {
     assert_eq!(
         entries[0]["manifestKey"],
         long_key.point.archive.manifest_key
+    );
+}
+
+/// **CATALOG-RECEIPTKEY-REDACTED, end to end.** The `receiptKey` the sync
+/// publishes is the one `logweir backup run` wrote, character for character,
+/// for a run id as the product really mints it.
+///
+/// REGRESSION REASON. Every fixture above spells the run id `run-a` — a
+/// lower-case public NAME, which never reached the free-component budget — so
+/// the whole suite was green while every LIVE point published
+/// `receiptKey: "[redacted].receipt.json"`. A real run id is a 26-character
+/// ULID (`logweir_core::ids::format_run_id`), two over the budget of 24, and
+/// it is the ONE free component of the key. D3 §5.5 step 4 builds
+/// `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}`
+/// from this line, so the key that arrived redacted was a plan binding the
+/// runner refuses with exit 3 `PointBindingMismatch`.
+///
+/// The second half is the negative control the first half needs: a run id one
+/// character LONGER is not a ULID, is over the budget, and is still redacted.
+/// A fix that raised the budget instead of exempting the shape passes the
+/// first half and fails the second.
+#[test]
+fn the_receipt_key_a_restore_binds_to_survives_a_sync_for_a_real_run_id() {
+    const SET: &str = "3f0ada8f-1a2b-4c3d-9e8f-0123456789ab";
+    const RUN: &str = "01M2VKCST7EF12EW5T2Y7SJ86Q";
+    let sidecar = claimed_sidecar(CATALOG_CLAIMED_KEY_ID);
+
+    let entry_for = |run_id: &str| -> serde_json::Value {
+        let f = catalog_fixture(
+            &catalog_receipt(SET, run_id, "2026-09-16T03:00:00Z"),
+            "s3://lw-archive/kafka-backups",
+            &sidecar,
+            CATALOG_CLAIMED_KEY_ID,
+        );
+        assert_eq!(
+            f.point.receipt.key,
+            format!("logweir/backups/{SET}/{run_id}.receipt.json"),
+            "the fixture is not the key `backup run` writes"
+        );
+        let run = drive_sync(
+            sync_request(),
+            &FakeWiring::default().with_role(
+                DestinationRole::ArchiveRead,
+                place(FakeObjects::new(), &f),
+            ),
+        );
+        let mut entry = entries_of(&body_of(&run)).remove(0);
+        entry["__key"] = serde_json::json!(f.point.receipt.key);
+        entry
+    };
+
+    // --- the run id the minter really produces -----------------------------
+    assert_eq!(
+        logweir_core::ids::format_run_id(1_789_780_191_192, 0x0123_4567_89ab_cdef_0123).len(),
+        26,
+        "a run id is 26 characters, which is what makes this row the live one"
+    );
+    let entry = entry_for(RUN);
+    assert_eq!(
+        entry["receiptKey"], entry["__key"],
+        "the plan binding was not published whole"
+    );
+    assert!(
+        entry["receiptKey"]
+            .as_str()
+            .is_some_and(|k| k.contains(RUN) && k.ends_with(".receipt.json")),
+        "the published key must carry the run id: {}",
+        entry["receiptKey"]
+    );
+    assert!(
+        !entry["receiptKey"]
+            .as_str()
+            .unwrap()
+            .contains(logweir_core::check_contract::REDACTED),
+        "the live symptom is back: {}",
+        entry["receiptKey"]
+    );
+    assert_eq!(entry["runId"], RUN, "and the run id itself travels");
+    assert_eq!(
+        entry["manifestKey"],
+        format!("kafka-backups/{SET}/manifest.json")
+    );
+
+    // --- the negative control: one character more is not a ULID ------------
+    let over = format!("{RUN}X");
+    assert_eq!(over.len(), 27);
+    let entry = entry_for(&over);
+    assert!(
+        !entry["receiptKey"]
+            .as_str()
+            .unwrap_or_default()
+            .contains(over.as_str()),
+        "a 27-character free component rode out on the ULID exemption: {}",
+        entry["receiptKey"]
+    );
+    assert_eq!(
+        entry["receiptKey"],
+        format!("{}.receipt.json", logweir_core::check_contract::REDACTED),
+        "…and what it is replaced with is the symptom this defect was reported as"
     );
 }
 
