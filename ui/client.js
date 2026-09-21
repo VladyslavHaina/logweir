@@ -1223,7 +1223,14 @@ const legacyApi = Object.freeze({
     return decodeLegacyObject(plural, await get(ns, plural, name, options)).value;
   },
   async create(ns, plural, object) {
-    return checked(plural, object, () => create(ns, plural, object));
+    // PLAT-11.2: `topicMapping` is a field of the PRODUCT API's create
+    // REQUEST and not a field of the custom resource -- `Restore.spec` has no
+    // topic list, and the subset lives in the plan bytes. The API server would
+    // prune it silently; stripping it here means this mode sends exactly the
+    // object it has always sent, and a reviewer reading the legacy path sees
+    // one shape rather than one that depends on the server's pruning rules.
+    const sent = withoutTopicMapping(object);
+    return checked(plural, sent, () => create(ns, plural, sent));
   },
   async patchSuspend(ns, name, value) {
     return patchSuspend(ns, name, value);
@@ -2111,7 +2118,7 @@ function requestBody(plural, object) {
           "and submit the plan it shows.",
       );
     }
-    return {
+    const body = {
       planBytes: document.bytes,
       planHash: document.hash,
       approvalRef: { name: spec.approvalRef.name },
@@ -2125,8 +2132,33 @@ function requestBody(plural, object) {
       },
       deadlineSeconds: spec.deadlineSeconds,
     };
+    // THE DECLARED MAPPING RIDES ON THE REQUEST AND NOT ON THE OBJECT
+    // (PLAT-11.2). `Restore.spec` has no topic list, so this travels beside
+    // the create body the wizard built: the product API recomputes every row
+    // from `target.topicNaming.prefix` and answers 422 when the preview and
+    // the submission disagree. It is carried only when it is there, so a
+    // caller that predates it sends exactly what it always did.
+    const mapping = (object || {}).topicMapping;
+    if (Array.isArray(mapping) && mapping.length > 0) {
+      body.topicMapping = mapping.map((row) => ({
+        source: (row || {}).source,
+        target: (row || {}).target,
+      }));
+    }
+    return body;
   }
   throw noRoute("the product API has no create route for " + String(plural) + ".");
+}
+
+/** The create body without its product-API-only mapping declaration. Returns
+ *  the SAME object when there is none, so every other create is untouched. */
+function withoutTopicMapping(object) {
+  if (object === null || typeof object !== "object" || object.topicMapping === undefined) {
+    return object;
+  }
+  const copy = Object.assign({}, object);
+  delete copy.topicMapping;
+  return copy;
 }
 
 function requestArchive(ref) {

@@ -100,6 +100,7 @@ import {
   badge,
   bucketOf,
   cell,
+  COMPLETION_GUIDANCE,
   copyBlock,
   epochMs,
   errorBox,
@@ -112,7 +113,9 @@ import {
   preflightSentence,
   replace,
   rfc3339,
+  staleReasonLine,
   table,
+  TARGET_MODE_MEANING,
   windowMessage,
 } from "../render.js";
 import { defaultTopicPrefix, TARGET_MODES, preparePlanDocument } from "../plan.js";
@@ -144,6 +147,10 @@ export const WIZARD_FORM = "restore-wizard";
 export const WIZARD_DRAFT_FIELDS = Object.freeze([
   "backupSetRef", "pointInTime", "mode", "topicPrefix", "targetCluster", "targetClusterUid",
   "endpoint", "region", "pathStyle", "allowHttp", "evidenceBucket", "archiveSecret",
+  // PLAT-11.2: the chosen subset is an edit like any other, and a draft that
+  // dropped it would restore a plan over every topic the point froze -- which
+  // is precisely the choice the operator made and this page lost.
+  "topics",
 ]);
 
 /** The API server's field paths, mapped to the wizard's inputs. `archive` and
@@ -157,6 +164,10 @@ export const WIZARD_FIELD_PATHS = Object.freeze([
   ["spec.sourceArchive.secretRef", "archiveSecret"],
   ["spec.sourceArchive", "archive"],
   ["spec.backupSetRef", "backupSet"],
+  // The product API's five mapping refusals arrive on `topicMapping[i].source`
+  // or `topicMapping[i].target`; the longest-prefix match sends every one of
+  // them to the subset control they are about.
+  ["topicMapping", "topics"],
 ]);
 
 /** The fields of `WIZARD_FIELD_PATHS` with no input of their own. */
@@ -932,6 +943,316 @@ export const WINDOW_REFUSAL_SENTENCE =
   "manifest and guard G-WIN refuses a point it does not cover, which is a narrower window " +
   "than this one when the archive holds less than the run recorded.";
 
+// ------------------------ the topic subset, its mapping and the limits (PLAT-11.2)
+
+/** The longest name a Kafka broker accepts for a topic.
+ *
+ *  249 AND NOT 255, and it is not this page's number: it is
+ *  `logweir_core::guard::MAX_TOPIC_NAME_CHARS`, which the API's own
+ *  `validate::is_topic_name` and the CRD's `TOPIC_NAME_PATTERN` both hold to.
+ *  The two halves are pinned against each other by
+ *  `ui/tests/fixtures/restore-limits.json`, which this page's suite reads and
+ *  `crates/logweir-api/tests/resources.rs` compares with the Rust constants --
+ *  so a drift in either language fails a test in both. */
+export const MAX_TOPIC_NAME_CHARS = 249;
+
+/** Whether `name` is a name a Kafka broker would accept: the same four ASCII
+ *  classes `logweir_core::guard::topic_name_is_kafka_legal` admits, and the
+ *  same bound. A character predicate rather than a pattern for that function's
+ *  own reason -- a `.` that matches a newline cannot defeat it. */
+export function isKafkaTopicName(name) {
+  if (typeof name !== "string" || name.length === 0 || name.length > MAX_TOPIC_NAME_CHARS) {
+    return false;
+  }
+  for (const c of name) {
+    const ok =
+      (c >= "a" && c <= "z") || (c >= "A" && c <= "Z") || (c >= "0" && c <= "9") ||
+      c === "." || c === "_" || c === "-";
+    if (!ok) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/** THE MAPPING RULE, AND THERE IS NO OTHER ONE IN THIS VERSION.
+ *
+ *  `logweir_core::spec::target_topic_prefix` gives the whole grammar: mode
+ *  `newTopic` takes `target.topic_naming.prefix`, mode `scratch` takes
+ *  `target.topic_mapping_prefix`, and NEITHER admits a per-topic rename. So a
+ *  mapped name is a concatenation, this function is that concatenation, and
+ *  every row the preview shows, every row the submit declares and every name
+ *  phase 0 creates comes through here. A page with a second rule would be a
+ *  page whose preview and whose submission could disagree. */
+export function mappedTopicName(prefix, topic) {
+  return String(prefix === undefined || prefix === null ? "" : prefix) + String(topic);
+}
+
+/** THE POINT'S FROZEN TOPIC LIST, and never a list this page assembled.
+ *
+ *  `Backup.spec.topics` is what the run froze -- for a dynamic selection it is
+ *  what discovery resolved and the controller wrote back -- and a subset is
+ *  only meaningful against it. A topic that is not in it is refused here and
+ *  again by the readiness check's `plan.bindings` row
+ *  (`PlanTopicsNotInRecoveryPoint`, D2 section 6.3). */
+export function frozenTopicsOf(state) {
+  const spec = (((state || {}).point) || {}).spec || {};
+  return Array.isArray(spec.topics) ? spec.topics.slice() : [];
+}
+
+/** The subset this wizard will restore, in the frozen list's own order.
+ *
+ *  THE ORDER IS THE POINT'S AND NOT THE CLICK ORDER, because the plan bytes
+ *  carry this list and a list that reordered itself with each click would
+ *  change the plan hash -- and therefore the approval -- for no change of
+ *  meaning. */
+export function selectedTopics(state) {
+  const s = state || {};
+  const chosen = Array.isArray((s.fields || {}).topics) ? s.fields.topics : [];
+  const wanted = new Set(chosen.map(String));
+  const frozen = frozenTopicsOf(s);
+  const inOrder = frozen.filter((t) => wanted.has(String(t)));
+  // A SELECTION THE FROZEN LIST DOES NOT HOLD IS KEPT, NOT DROPPED. It is what
+  // `mappingProblems` refuses by name; silently discarding it would leave the
+  // page submitting a different subset from the one it was showing.
+  const extra = chosen.filter((t) => frozen.indexOf(t) === -1);
+  return inOrder.concat(extra);
+}
+
+/** The exact source-to-target mapping, row by row: what the preview shows and
+ *  what the submit declares, from ONE call. */
+export function topicMapping(state) {
+  const prefix = (((state || {}).fields || {}).target || {}).topicPrefix;
+  return selectedTopics(state).map((source) => ({
+    source: source,
+    target: mappedTopicName(prefix, source),
+  }));
+}
+
+/** The page's refusals over the subset and the mapping, by input -- every one
+ *  of them made BEFORE anything is sent, and every one naming the value an
+ *  operator has to go and fix.
+ *
+ *  FIVE REFUSALS, AND THE SAME FIVE THE PRODUCT API MAKES
+ *  (`crates/logweir-api/src/routes/restores.rs::validate_topic_mapping`):
+ *  an empty subset, a topic the point did not freeze, a duplicate mapping
+ *  naming BOTH rows, an illegal prefix, and a mapped name a broker would
+ *  refuse. The duplicate can only be a repeated source, because a prefix map
+ *  over distinct sources is injective -- there is no rename in the grammar. */
+export function mappingProblems(state) {
+  const s = state || {};
+  const prefix = ((s.fields || {}).target || {}).topicPrefix;
+  const problems = Object.create(null);
+  const frozen = frozenTopicsOf(s);
+  const chosen = selectedTopics(s);
+  if (chosen.length === 0) {
+    problems.topics =
+      "choose at least one topic: a restore of no topic is not a restore, and the plan's " +
+      "grammar has no empty list";
+    return problems;
+  }
+  const stranger = chosen.find((t) => frozen.indexOf(t) === -1);
+  if (stranger !== undefined) {
+    problems.topics =
+      "`" + String(stranger) + "` is not in this recovery point's frozen topic list, so this " +
+      "archive holds nothing for it; the readiness check refuses the same plan with " +
+      "PlanTopicsNotInRecoveryPoint";
+    return problems;
+  }
+  const seen = new Map();
+  for (const source of chosen) {
+    const target = mappedTopicName(prefix, source);
+    const first = seen.get(target);
+    if (first !== undefined) {
+      problems.topics =
+        "`" + String(first) + "` and `" + String(source) + "` both map to the target topic `" +
+        target + "`; one restore cannot write two source topics into one target";
+      return problems;
+    }
+    seen.set(target, source);
+  }
+  if (typeof prefix !== "string" || prefix.length === 0) {
+    problems.topicPrefix =
+      "the prefix every restored topic's name starts with. An empty prefix maps every topic " +
+      "onto itself, which is a restore writing over the topic it came from";
+    return problems;
+  }
+  if (!isKafkaTopicName(prefix)) {
+    problems.topicPrefix =
+      "`" + prefix + "` is not a name a broker accepts: letters, digits, '.', '_' and '-' " +
+      "only, and at most " + String(MAX_TOPIC_NAME_CHARS) + " characters";
+    return problems;
+  }
+  for (const source of chosen) {
+    const target = mappedTopicName(prefix, source);
+    if (!isKafkaTopicName(target)) {
+      problems.topicPrefix =
+        "the mapped name for `" + String(source) + "` is `" + target + "`, which is not a name " +
+        "a broker accepts (at most " + String(MAX_TOPIC_NAME_CHARS) + " characters); shorten " +
+        "the prefix";
+      return problems;
+    }
+    if (target === source) {
+      problems.topicPrefix =
+        "this prefix maps `" + String(source) + "` onto itself; a restore writes to a NEW " +
+        "topic and the target must differ from the source";
+      return problems;
+    }
+  }
+  return problems;
+}
+
+/** The subset control and the mapping preview: one checkbox per frozen topic,
+ *  and the exact name each selected topic becomes. */
+export function renderTopicSubset(state) {
+  const s = state || {};
+  const frozen = frozenTopicsOf(s);
+  const chosen = new Set(selectedTopics(s).map(String));
+  const errors = errorsOf(s);
+  const rows = topicMapping(s).map((row) => [esc(row.source), "<code>" + esc(row.target) + "</code>"]);
+  const boxes = frozen
+    .map(
+      (topic, i) =>
+        "<li><label><input type=\"checkbox\" class=\"topic-box\" " +
+        "id=\"topic-" + String(i) + "\" data-topic=\"" + esc(topic) + "\"" +
+        (chosen.has(String(topic)) ? " checked" : "") + "> " + esc(topic) + "</label></li>",
+    )
+    .join("");
+  return (
+    "<h4 id=\"topic-subset\">Topics to restore</h4>" +
+    "<p class=\"blurb\">" + esc(SUBSET_SENTENCE) + "</p>" +
+    (frozen.length === 0
+      ? "<p class=\"note\" id=\"no-frozen-topics\">" + esc(NO_FROZEN_TOPICS) + "</p>"
+      : "<ul class=\"topic-subset\">" + boxes + "</ul>") +
+    "<div class=\"actions\">" +
+    "<button type=\"button\" id=\"select-all-topics\">Select all</button>" +
+    "<button type=\"button\" id=\"select-no-topics\">Clear</button>" +
+    "</div>" +
+    fieldErrorLine("topic-subset", errors.topics) +
+    "<h4>The mapping, before you submit</h4>" +
+    "<p class=\"blurb\">" + esc(MAPPING_SENTENCE) + "</p>" +
+    table(["SOURCE TOPIC", "TARGET TOPIC"], rows, "No topic is selected, so nothing is mapped.") +
+    "<p class=\"note\" id=\"mapping-identity\">" + esc(MAPPING_RULE_SENTENCE) + "</p>"
+  );
+}
+
+/** What a subset IS, said where it is chosen. */
+export const SUBSET_SENTENCE =
+  "Every topic this recovery point froze. Untick the ones this restore must not write: the " +
+  "plan carries exactly the list ticked here, and the archive's other topics are not read.";
+
+/** Printed when the chosen point froze no topic list at all. */
+export const NO_FROZEN_TOPICS =
+  "this recovery point records no frozen topic list, so there is no subset to choose from and " +
+  "no mapping this page can show. Choose another point.";
+
+/** What the table beneath the boxes is. */
+export const MAPPING_SENTENCE =
+  "The exact name each selected topic becomes on the target. These rows are what the plan " +
+  "carries and what the create request declares: the product API recomputes every one of them " +
+  "from the prefix it stores and refuses the request if a row disagrees.";
+
+/** The rule itself, said once, with its owner named. */
+export const MAPPING_RULE_SENTENCE =
+  "The rule is the prefix and nothing else (logweir_core::spec::target_topic_prefix): there is " +
+  "no per-topic rename in this version. Two source topics therefore cannot map to one target " +
+  "name unless the same topic is listed twice, which is refused here and again by the API.";
+
+// ------------------------------------------------- what recovery changes (D3 3.5)
+
+/** Why a pre-run partition count is not shown, and who owes it.
+ *
+ *  A PROJECTION GAP, NAMED RATHER THAN GUESSED. Per-topic partition counts
+ *  exist in this product only AFTER a run -- `Restore.status.completion
+ *  .newTopics[].partitions`, built from `target_diff.would_create` -- and
+ *  neither `Backup.status` nor the product API's `Backup` projection carries
+ *  the archive manifest's counts. The runner reads the manifest; this page has
+ *  never seen one. So the count is absent and said to be absent, which is the
+ *  difference between this line and a number a page invented. */
+export const PARTITION_COUNT_NOT_PUBLISHED =
+  "Partition counts are not shown before the run: this build publishes a per-topic partition " +
+  "count only after one, on the Restore's own completion (status.completion.newTopics[].partitions, " +
+  "from the target diff). The archive manifest holds the source counts and the runner reads it; " +
+  "no field of a Backup or of its product-API projection carries them, so there is nothing here " +
+  "to read and this page will not guess.";
+
+/** The replication factor every created topic is asked for, from the PLAN's
+ *  own field. `target.default_replication_factor` in the runner's grammar,
+ *  defaulted by `logweir_core::spec::rf1`; the broker refuses a factor above
+ *  its broker count and the readiness check says so first
+ *  (`ReplicationFactorExceedsBrokers`, D2 section 6.3). */
+export function replicationFactorOf(state) {
+  const rf = (((state || {}).fields || {}).target || {}).replicationFactor;
+  return typeof rf === "number" ? rf : null;
+}
+
+/** The verification this restore will perform, from the PLAN's sample block --
+ *  and never the word "exhaustive".
+ *
+ *  D3 section 3.5's rule is that the counts are labelled exactly and that the
+ *  last clause is not optional: a sampled comparison presented without it
+ *  reads as a full one. Before the run there are no counts, so what is said is
+ *  what was ASKED FOR -- `sample.records_per_partition` and `sample.anchor`,
+ *  both plan fields -- with the same closing clause `verificationScopeSentence`
+ *  ends with after the run. No level in this version compares every record. */
+export function verificationPlanSentence(state) {
+  const sample = ((state || {}).fields || {}).sample || {};
+  const n = typeof sample.recordsPerPartition === "number" ? String(sample.recordsPerPartition) : "?";
+  const anchor = typeof sample.anchor === "string" ? sample.anchor : "?";
+  return (
+    "This restore will compare " + n + " records per partition, anchored at " + anchor +
+    ", inside the sample window above. That is a sampled check, not an exhaustive comparison: " +
+    "no level in this version compares every restored record, and the result will say so beside " +
+    "its counts."
+  );
+}
+
+/** Resume: not implemented, said before the run and not after it.
+ *
+ *  PLAT-11's own scope line puts "advanced in-place recovery and crash resume"
+ *  in product expansion, and the runner has no resume: a Restore that fails
+ *  part way is a failed Restore, and the way forward is a NEW one to a fresh
+ *  target (which is what this wizard's retry does). Saying so here is the
+ *  migration note PLAT-11.2 asks for -- "clearly identify unimplemented
+ *  resume" -- in the one place an operator decides to start a restore. */
+export const RESUME_NOT_IMPLEMENTED =
+  "Resume is not implemented. A restore that fails part way through cannot be continued from " +
+  "where it stopped: there is no checkpoint to resume from, the topics it had already created " +
+  "stay as they are, and the way forward is a new restore to a fresh target. Advanced in-place " +
+  "recovery and crash resume are product expansion, not this version.";
+
+/** The limits panel: what recovery changes, and what it does not. */
+export function renderRecoveryLimits(state) {
+  const s = state || {};
+  const mode = String(((s.fields || {}).target || {}).mode);
+  const cutover = COMPLETION_GUIDANCE[mode];
+  const meaning = TARGET_MODE_MEANING[mode];
+  return (
+    "<h4 id=\"recovery-limits\">What this recovery changes, and what it does not</h4>" +
+    facts([
+      ["target replication factor", cell(replicationFactorOf(s))],
+      ["target partition counts", cell(null)],
+      ["target mode", cell(mode)],
+    ]) +
+    "<p class=\"note\" id=\"partition-counts\">" + esc(PARTITION_COUNT_NOT_PUBLISHED) + "</p>" +
+    "<p class=\"scope\" id=\"verification-plan\">" + esc(verificationPlanSentence(s)) + "</p>" +
+    (typeof meaning === "string"
+      ? "<p class=\"note\" id=\"target-mode-meaning\">" + esc(meaning) + "</p>"
+      : "") +
+    (typeof cutover === "string"
+      ? "<p class=\"guidance\" id=\"cutover-limit\" data-target-mode=\"" + esc(mode) + "\">" +
+        esc(cutover) + "</p>"
+      : "<p class=\"note\" id=\"cutover-limit\">" + esc(NO_CUTOVER_GUIDANCE) + "</p>") +
+    "<p class=\"note\" id=\"resume-limit\">" + esc(RESUME_NOT_IMPLEMENTED) + "</p>"
+  );
+}
+
+/** Said when the mode is not one this version knows, so no fixed sentence
+ *  applies. The page names the gap rather than picking a sentence. */
+export const NO_CUTOVER_GUIDANCE =
+  "this plan names no target mode this version knows, so no cutover guidance is shown: the " +
+  "guidance depends on which mode it uses and this page will not guess one.";
+
 /** Step 4 -- target and naming. EVERY `KafkaCluster` in the namespace with its
  *  role beside it, the two modes `TargetMode` accepts and nothing else, and
  *  the prefix PREFILLED with `default_topic_prefix`'s own output for the
@@ -968,7 +1289,8 @@ export function renderTargetStep(state) {
       : "";
   const errors = errorsOf(s);
   return (
-    "<section class=\"step\" id=\"step-target\" tabindex=\"-1\"><h3>4. Target and naming</h3>" +
+    "<section class=\"step\" id=\"step-target\" tabindex=\"-1\">" +
+    "<h3>4. Target, topic subset and naming</h3>" +
     "<p class=\"blurb\">Where the restored records are written. Nothing that already " +
     "exists is written to: a Restore only ever creates topics that did not exist, and " +
     "refuses outright if a mapped target topic is already there.</p>" +
@@ -1001,6 +1323,8 @@ export function renderTargetStep(state) {
     "<p class=\"note\">The prefix defaults to what logweir_core::spec::default_topic_prefix " +
     "produces for this instant, so a topic name says both what it is and what point it was " +
     "recovered to. It is editable.</p></div>" +
+    renderTopicSubset(s) +
+    renderRecoveryLimits(s) +
     "</section>"
   );
 }
@@ -1124,6 +1448,122 @@ export function renderPreflightStep(state, prepared) {
   );
 }
 
+// --------------------------------- the readiness gate before a submit (PLAT-11.2)
+
+/** Why the submit is refused by the readiness check on screen, or `null`.
+ *
+ *  THIS IS THE CLAUSE "NO EXISTING TARGET TOPIC IS OVERWRITTEN BY THE ORDINARY
+ *  PATH", MADE INTO A REFUSAL THIS PAGE MAKES FIRST. The collision itself is
+ *  detected server-side and always was -- `target.mappedTopics` answers
+ *  `MappedTopicExists` (D2 section 6.3, 5 m expiry) and the runner's phase 0
+ *  refuses the run whatever a console does -- but until this function existed
+ *  the wizard rendered that `notReady` verdict and then let the operator spend
+ *  an approver's signature on the plan anyway. A refusal that is displayed and
+ *  not enforced is a refusal an incident walks straight past.
+ *
+ *  FIVE ARMS, IN THE ORDER AN OPERATOR MEETS THEM:
+ *
+ *   1. THE CHECK CANNOT RUN HERE. Legacy mode has no `logweir-api` and
+ *      therefore no `Preflight` route, so there is no verdict to gate on and
+ *      this returns `null` -- with step 5 saying, in its own words, that the
+ *      check could not run. Gating on a check a mode cannot perform would make
+ *      the wizard unusable behind `kubectl proxy` while proving nothing: the
+ *      runner is the authority in both modes.
+ *   2. NOTHING HAS RUN for this plan.
+ *   3. THE RESULT IS ABOUT ANOTHER PLAN -- the target changed, the prefix
+ *      changed, the point in time changed. Any edit that moves the plan bytes
+ *      moves the hash, and D2 section 6.3's invalidation rule says the verdict
+ *      stops describing what is about to be submitted.
+ *   4. THE SERVER SAYS IT IS STALE or does not apply: `applicable: false`,
+ *      `stale: true`, or an expired verdict (`target.mappedTopics` expires in
+ *      five minutes, which is the shortest budget in the catalogue and exactly
+ *      the check a slow review outlives).
+ *   5. THE VERDICT IS NOT `ready` -- which is where a collision lands, named
+ *      by its own check id and code.
+ *
+ *  Pure: no DOM, no network, no clock. The freshness judgement is the
+ *  SERVER's (`applicable`/`stale`, recomputed on every GET against the caller's
+ *  own plan hash), never a comparison this page makes against a browser clock. */
+export function readinessRefusal(state, prepared) {
+  const s = state || {};
+  const p = prepared || {};
+  const readiness = s.readiness || {};
+  if (readiness.unavailable === true) {
+    return null;
+  }
+  const result = readiness.preflight || null;
+  const hash = typeof p.hash === "string" ? p.hash : "";
+  if (result === null) {
+    // NOT A REFUSAL, AND DELIBERATELY NOT ONE. D2 section 6.3's rule is about
+    // a verdict that has stopped applying, not about the absence of one, and
+    // the readiness check is advisory by construction: the runner's phase 0 is
+    // the authority and refuses a collision whether or not a console asked
+    // first. Refusing here would also make every restore in this product
+    // conditional on a route legacy mode does not have. So an unchecked plan
+    // may be submitted, and step 6 says in words that nothing has looked for
+    // an existing target topic yet.
+    return null;
+  }
+  const boundHash = typeof readiness.boundHash === "string" ? readiness.boundHash : "";
+  const serverHash = ((result.binding || {}).planHash);
+  const elsewhere =
+    hash.length > 0 &&
+    ((boundHash.length > 0 && boundHash !== hash) ||
+      (typeof serverHash === "string" && serverHash.length > 0 && serverHash !== hash));
+  if (elsewhere) {
+    return (
+      "the readiness check on screen was produced for plan " +
+      (boundHash.length > 0 ? boundHash : String(serverHash || "")) +
+      " and this plan hashes to " + hash + ". Something that changes the document -- the " +
+      "target, the prefix, the subset, the point in time -- changed since it ran, so it is " +
+      "not a verdict about what you are about to submit. Run it again."
+    );
+  }
+  if (result.terminal === false) {
+    return "the readiness check for this plan has not finished; wait for its verdict.";
+  }
+  if (result.applicable !== true || result.stale === true) {
+    const reasons = (Array.isArray(result.staleReasons) ? result.staleReasons : [])
+      .map((r) => staleReasonLine(r))
+      .join("; ");
+    return (
+      "the readiness check for this plan no longer applies to the inputs it was run against" +
+      (reasons.length > 0 ? " (" + reasons + ")" : "") +
+      ". Run it again before submitting."
+    );
+  }
+  if (result.state !== "ready") {
+    const failing = (Array.isArray(result.checks) ? result.checks : [])
+      .filter((c) => (c || {}).gating === "blocking" && (c || {}).state !== "ready")
+      .map((c) => String(c.id) + " (" + String(c.code) + ")")
+      .join(", ");
+    return (
+      "the readiness check for this plan is " + String(result.state) + " and not ready" +
+      (failing.length > 0 ? ": " + failing : "") +
+      ". Nothing is sent while a blocking check refuses this plan."
+    );
+  }
+  return null;
+}
+
+/** Said when no readiness check has run for the plan on screen.
+ *
+ *  A WARNING AND NOT A REFUSAL -- see [`readinessRefusal`]'s absent-result arm
+ *  for why. It still says the one thing an operator needs to know before
+ *  clicking: nothing has looked for an existing target topic yet. */
+export const READINESS_NOT_RUN_WARNING =
+  "No readiness check has run for this plan, so nothing has looked for an existing target topic " +
+  "with a mapped name, for a reachable target, or for an approver key that outlives the " +
+  "deadline. The restore may still be created: the runner's phase 0 refuses a mapped topic that " +
+  "already exists and nothing is overwritten either way. Run the check in step 5 to find out " +
+  "before an approver signs rather than after.";
+
+/** Why the gate is not applied in a mode with no readiness route. */
+export const READINESS_UNGATED_SENTENCE =
+  "This mode has no readiness route, so there is no verdict to hold the submit against and the " +
+  "submit is not gated here. Nothing about the product changes: the runner's phase 0 refuses a " +
+  "restore whose mapped target topic already exists, in this mode exactly as in the other one.";
+
 /** Step 6 -- the rendered plan, its hash, the two minted names, and the one
  *  guided submit.
  *
@@ -1137,6 +1577,11 @@ export function renderPlanStep(prepared, state) {
   const s = state || {};
   const submission = s.submission || {};
   const pending = submission.phase === "pending";
+  // THE READINESS GATE, ON THE BUTTON AND IN WORDS BESIDE IT (PLAT-11.2). A
+  // disabled control with no sentence is a page that has stopped working for
+  // a reason it will not say, so the refusal is rendered whether or not the
+  // reader can see the button's state.
+  const blocked = readinessRefusal(s, p);
   const errors = errorsOf(s);
   const beside = (s.errorsUnmatched || []).concat(
     NOT_INPUTS.reduce((all, name) => all.concat(errors[name] || []), []),
@@ -1171,9 +1616,19 @@ export function renderPlanStep(prepared, state) {
     copyBlock([APPROVE_COMMAND]) +
     "<div class=\"actions actions-final\">" +
     "<button type=\"button\" id=\"create-restore\" class=\"primary\"" +
-    (pending || !renderable ? " disabled" : "") + (pending ? " aria-busy=\"true\"" : "") +
+    (pending || !renderable || blocked !== null ? " disabled" : "") +
+    (pending ? " aria-busy=\"true\"" : "") +
     ">Create the Restore</button>" +
     "</div>" +
+    (blocked === null
+      ? ((s.readiness || {}).unavailable === true
+        ? "<p class=\"note\" id=\"readiness-ungated\">" + esc(READINESS_UNGATED_SENTENCE) + "</p>"
+        : ((s.readiness || {}).preflight
+          ? ""
+          : "<p class=\"note\" id=\"readiness-not-run\">" +
+            esc(READINESS_NOT_RUN_WARNING) + "</p>"))
+      : "<p class=\"complaint\" id=\"readiness-blocked\" role=\"alert\">Nothing is sent: " +
+        esc(blocked) + "</p>") +
     "<p class=\"note\">" + GUIDED_SUBMIT_SENTENCE + "</p>" +
     "<div class=\"form-status\" id=\"restore-submit-status\" tabindex=\"-1\">" +
     submissionStatus(submission, p, beside, s.ns) +
@@ -1281,7 +1736,7 @@ export const STEPS = Object.freeze([
   { id: "step-archive", title: "Archive" },
   { id: "step-backup-set", title: "Recovery point" },
   { id: "step-point-in-time", title: "Point in time" },
-  { id: "step-target", title: "Target and naming" },
+  { id: "step-target", title: "Target, topic subset and naming" },
   { id: "step-preflight", title: "Operation readiness" },
   { id: "step-plan", title: "Plan, hash and names" },
 ]);
@@ -1324,6 +1779,11 @@ export function stepStates(state) {
     chosen !== null &&
     typeof ((chosen.status || {}).backupId) === "string" &&
     chosen.status.backupId.length > 0;
+  // PLAT-11.2: step 4 now carries the subset and the mapping too, so it is
+  // whole only when those hold. The stepper still decides nothing -- the
+  // create button is gated by `validateRestore` and by the readiness check,
+  // not by this -- but a step whose mapping is refused must not read "done".
+  const mapping = mappingProblems(s);
   const whole = [
     typeof s.archiveUrl === "string" && s.archiveUrl.length > 0,
     setChosen,
@@ -1331,7 +1791,8 @@ export function stepStates(state) {
     target !== null &&
       TARGET_MODES.indexOf(targetFields.mode) !== -1 &&
       typeof targetFields.topicPrefix === "string" &&
-      targetFields.topicPrefix.length > 0,
+      targetFields.topicPrefix.length > 0 &&
+      Object.keys(mapping).length === 0,
     target !== null && targetStatus.reachable === true,
   ];
   const attention = [
@@ -1343,9 +1804,10 @@ export function stepStates(state) {
     // through.
     false,
     !whole[2],
-    target !== null &&
+    (target !== null &&
       targetFields.mode === "scratch" &&
-      typeof targetSpec.markerTopic !== "string",
+      typeof targetSpec.markerTopic !== "string") ||
+      Object.keys(mapping).length > 0,
     target !== null && !whole[4],
   ];
   let firstOpen = 5;
@@ -1498,9 +1960,12 @@ export function validateRestore(state) {
   if (TARGET_MODES.indexOf(target.mode) === -1) {
     problems.mode = "one of " + TARGET_MODES.join(", ");
   }
-  if (typeof target.topicPrefix !== "string" || target.topicPrefix.length === 0) {
-    problems.topicPrefix = "the prefix every restored topic's name starts with";
-  }
+  // THE SUBSET AND THE MAPPING (PLAT-11.2), in one call so the page and the
+  // product API refuse the same five things in the same words. It REPLACES
+  // the bare non-empty prefix check that used to stand here: an empty prefix
+  // is one of its five, and it is the identity map rather than a missing
+  // value.
+  Object.assign(problems, mappingProblems(s));
   const resolvedTarget = resolveTarget(s);
   if (resolvedTarget.state === "recreated") {
     problems.targetCluster =
@@ -1561,6 +2026,7 @@ export function wizardDraftValues(state) {
     allowHttp: source.allowHttp === true,
     evidenceBucket: (f.evidence || {}).bucket,
     archiveSecret: s.archiveSecretName,
+    topics: selectedTopics(s),
   };
 }
 
@@ -1621,6 +2087,13 @@ export function applyWizardDraft(state, draft) {
   }
   if (typeof d.archiveSecret === "string") {
     state.archiveSecretName = d.archiveSecret;
+  }
+  // AN EMPTY KEPT SUBSET IS A REAL EDIT and is applied as one: it is the state
+  // `mappingProblems` refuses by name, and dropping it here would silently put
+  // every frozen topic back.
+  if (Array.isArray(d.topics)) {
+    state.fields.topics = d.topics.slice();
+    state.fields.topics = selectedTopics(state);
   }
   return true;
 }
@@ -1733,6 +2206,16 @@ export function restoreBody(state, prepared) {
       },
       deadlineSeconds: typeof s.deadlineSeconds === "number" ? s.deadlineSeconds : 3600,
     },
+    // THE MAPPING THE PREVIEW SHOWED, DECLARED BESIDE THE REQUEST (PLAT-11.2).
+    // `Restore.spec` has no topic list -- the subset lives in the plan bytes --
+    // so this rides on the create REQUEST and is dropped by the API server in
+    // legacy mode, where the CRD's structural schema prunes what it does not
+    // declare. That asymmetry is deliberate and it is not a hole: the product
+    // API recomputes every row from the prefix it stores and refuses a request
+    // whose preview and submission disagree, and in legacy mode the plan bytes
+    // -- which carry the same list, from the same `selectedTopics` call -- are
+    // what phase 0 reads. One function produces both.
+    topicMapping: topicMapping(s),
   };
 }
 
@@ -1792,6 +2275,14 @@ export async function submitRestore(state, deps, lifecycle, options) {
   // accepted server mutation can finish after navigation.
   if (!active(lifecycle)) {
     return null;
+  }
+  // THE READINESS GATE IS CHECKED HERE AND NOT ONLY ON THE BUTTON (PLAT-11.2),
+  // for `validateRestore`'s own reason: a disabled attribute is a rendering,
+  // and this is the arm that holds when `submitRestore` is called directly --
+  // by the harness, by a test, or by a click that raced a re-render.
+  const blocked = readinessRefusal(s, prepared);
+  if (blocked !== null) {
+    throw refusal(blocked, { planHash: prepared.hash });
   }
   const reviewed = (options || {}).reviewedHash;
   if (typeof reviewed === "string" && reviewed !== prepared.hash) {
@@ -2439,6 +2930,22 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     if (archiveSecret !== null) {
       state.archiveSecretName = valueOf(archiveSecret);
     }
+    // THE SUBSET, READ FROM THE BOXES THAT ARE ON SCREEN (PLAT-11.2) -- and
+    // only when there ARE boxes, so a refusal page or a point with no frozen
+    // list cannot empty the selection behind the operator's back. The list is
+    // canonicalised through `selectedTopics` so the plan bytes, and therefore
+    // the hash an approver signs, do not move with the order of the clicks.
+    const boxes = node.querySelectorAll(".topic-box");
+    if (boxes.length > 0) {
+      const ticked = [];
+      for (const box of boxes) {
+        if (box.checked === true) {
+          ticked.push(box.getAttribute("data-topic"));
+        }
+      }
+      state.fields.topics = ticked;
+      state.fields.topics = selectedTopics(state);
+    }
     if (!active(lifecycle)) {
       return;
     }
@@ -2478,6 +2985,31 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     if (field !== null) {
       listen(field, "change", refresh, lifecycle);
     }
+  }
+  for (const box of node.querySelectorAll(".topic-box")) {
+    listen(box, "change", refresh, lifecycle);
+  }
+  // THE TWO BULK CONTROLS SET THE BOXES AND THEN GO THROUGH `refresh`, so the
+  // selection is read back off the DOM exactly as a click on one box is. A
+  // shortcut that wrote `state.fields.topics` directly would be a second way
+  // of choosing a subset, and the two could disagree.
+  const selectAll = node.querySelector("#select-all-topics");
+  if (selectAll !== null) {
+    listen(selectAll, "click", () => {
+      for (const box of node.querySelectorAll(".topic-box")) {
+        box.checked = true;
+      }
+      refresh();
+    }, lifecycle);
+  }
+  const selectNone = node.querySelector("#select-no-topics");
+  if (selectNone !== null) {
+    listen(selectNone, "click", () => {
+      for (const box of node.querySelectorAll(".topic-box")) {
+        box.checked = false;
+      }
+      refresh();
+    }, lifecycle);
   }
 
   wireRestoreReadiness(node, state, parse, api, lifecycle, prepared);
