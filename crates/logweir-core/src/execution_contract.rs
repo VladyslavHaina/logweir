@@ -1456,6 +1456,40 @@ mod tests {
     }
 
     #[test]
+    /// **LOW-2: `STANDING_MANDATORY_ENV` is a hand-written list, and this is
+    /// what binds it to [`ALL_ENV`].**
+    ///
+    /// Without this row a fourteenth mandatory name added to `ALL_ENV` would
+    /// silently escape the standing contract's completeness assertion in
+    /// `weirkeeper`, because that row loops the standing list. The rule is the
+    /// one sentence the constant's doc comment states: `ALL_ENV` minus exactly
+    /// the two per-run approval digests, in `ALL_ENV`'s order.
+    #[test]
+    fn the_standing_mandatory_set_is_all_env_minus_the_two_approval_digests() {
+        let expected: Vec<&str> = ALL_ENV
+            .iter()
+            .copied()
+            .filter(|n| *n != APPROVAL_SHA256_ENV && *n != APPROVAL_SIDECAR_SHA256_ENV)
+            .collect();
+        assert_eq!(
+            STANDING_MANDATORY_ENV.to_vec(),
+            expected,
+            "STANDING_MANDATORY_ENV is ALL_ENV minus the per-run approval slot, in order"
+        );
+        assert_eq!(STANDING_MANDATORY_ENV.len(), ALL_ENV.len() - 2);
+        for name in [APPROVAL_SHA256_ENV, APPROVAL_SIDECAR_SHA256_ENV] {
+            assert!(
+                !STANDING_MANDATORY_ENV.contains(&name),
+                "{name} pins a bundle member a rehearsal does not have"
+            );
+        }
+        // And the two that STAY: they name the standing Approval object, which
+        // is a real object a human signed and the one an auditor looks up.
+        for name in [APPROVAL_NAME_ENV, APPROVAL_UID_ENV] {
+            assert!(STANDING_MANDATORY_ENV.contains(&name), "{name} must stay");
+        }
+    }
+
     fn an_authorization_kind_is_a_closed_set() {
         assert_eq!(
             AuthorizationKind::parse("approval"),

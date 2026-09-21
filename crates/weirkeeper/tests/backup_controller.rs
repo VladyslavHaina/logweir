@@ -2112,7 +2112,7 @@ fn every_exit_code_maps_to_its_wire_reason() {
     assert_eq!(
         TERMINAL_STATES.len(),
         41,
-        "the forty terminal states that are NOT an exit code — the original ten, plus \
+        "the forty-one terminal states that are NOT an exit code — the original ten, plus \
          `NameTooLong` (errata E5d) and `ReferentNotFound` / `PlanConfigMapConflict` / \
          `ApprovalBundleConflict` / `ApprovalSubjectMismatch` / `JobNameConflict` / \
          `ArchiveUrlUnreadable` (errata E5a), plus `PlanHashMismatch` / `ClusterNotReachable` \

@@ -684,10 +684,29 @@ pub fn child_restore(
     ]
     .into_iter()
     .collect();
-    let annotations: BTreeMap<String, String> = [(
-        rehearsal::SIZE_BASIS_ANNOTATION.to_string(),
-        order.selected.size_basis.to_string(),
-    )]
+    let annotations: BTreeMap<String, String> = [
+        (
+            rehearsal::SIZE_BASIS_ANNOTATION.to_string(),
+            order.selected.size_basis.to_string(),
+        ),
+        // **THE APPROVAL'S UID, PINNED ON THE CHILD — PLAT-14.3b fix round 1.**
+        //
+        // `spec.authorization.approvalRef` is a `LocalRef` and carries only a
+        // NAME (D3 W0's CRD), so the `Restore` reconciler resolves the standing
+        // `Approval` by name and would accept a DIFFERENT object that later
+        // took the same name. This annotation is the UID of the object THIS
+        // slot actually authorised against, written by the only component that
+        // knows it, and `restore::admit` requires the `Approval` it resolves to
+        // carry it. It closes the window between this write and the first
+        // bundle write, after which the bundle's own immutable
+        // `logweir.dev/approval-uid` already makes a substitution a terminal
+        // `ApprovalBundleConflict`. The same annotation KEY is used on purpose:
+        // one name for one fact.
+        (
+            super::restore::BUNDLE_APPROVAL_UID_ANNOTATION.to_string(),
+            order.authorization.uid.clone(),
+        ),
+    ]
     .into_iter()
     .collect();
     Ok(Restore {

@@ -30,6 +30,7 @@ const NS: &str = "logweir-plat14-3b";
 const SCHEDULE: &str = "weekly-orders";
 const SCHEDULE_UID: &str = "3f2a91c7-1111-4222-8333-444444444444";
 const APPROVAL: &str = "weekly-orders-standing";
+const APPROVAL_UID: &str = "beef-1111";
 const TARGET: &str = "kafka-target";
 const TARGET_CLUSTER_ID: &str = "TARGET00000000000000000";
 const SLOT: &str = "20260920T030000";
@@ -110,7 +111,7 @@ fn approval_over(envelope: &str) -> weirkeeper::crds::approval::Approval {
     serde_json::from_value(serde_json::json!({
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "Approval",
-        "metadata": {"name": APPROVAL, "namespace": NS, "uid": "beef-1111"},
+        "metadata": {"name": APPROVAL, "namespace": NS, "uid": APPROVAL_UID},
         "spec": {
             "subjectRef": {"kind": "RehearsalSchedule", "name": SCHEDULE},
             "planHash": "sha256:aa",
@@ -150,6 +151,10 @@ fn standing_restore() -> Restore {
                 "logweir.dev/rehearsal-schedule": SCHEDULE,
                 "logweir.dev/rehearsal-slot": SLOT,
             },
+            // The UID of the Approval this slot was authorised against — the
+            // `RehearsalSchedule` reconciler writes it, and `admit` requires
+            // the object it resolved BY NAME to carry it.
+            "annotations": {"logweir.dev/approval-uid": APPROVAL_UID},
         },
         "spec": {
             "planBytes": plan_bytes(),
@@ -508,6 +513,30 @@ fn each_standing_refusal_is_named_and_reaches_no_job() {
         now() - chrono::Duration::days(1),
         400,
     ));
+    // ---- a deadline outside the signed bound (D3 §4.3(d), controller-only)
+    //
+    // `plan_within_scope` cannot see this: `deadlineSeconds` is the Job's
+    // `activeDeadlineSeconds`, not a plan field. For a hand-written Restore
+    // `admit_standing` is the ONLY place in the product that enforces it.
+    let mut over_deadline: serde_json::Value =
+        serde_json::to_value(standing_restore()).expect("serialises");
+    over_deadline["spec"]["deadlineSeconds"] = serde_json::json!(86_400);
+    let over_deadline: Restore = serde_json::from_value(over_deadline).expect("a Restore");
+    // ---- a deadline of zero: not a smaller bound, no bound ---------------
+    let mut no_deadline: serde_json::Value =
+        serde_json::to_value(standing_restore()).expect("serialises");
+    no_deadline["spec"]["deadlineSeconds"] = serde_json::json!(0);
+    let no_deadline: Restore = serde_json::from_value(no_deadline).expect("a Restore");
+    // ---- an Approval deleted and recreated under the same name -----------
+    let mut recreated: serde_json::Value = serde_json::to_value(approval()).expect("serialises");
+    recreated["metadata"]["uid"] = serde_json::json!("a-different-object");
+    let recreated: weirkeeper::crds::approval::Approval =
+        serde_json::from_value(recreated).expect("an Approval");
+    // ---- a Restore that pins no Approval UID at all ----------------------
+    let mut unpinned: serde_json::Value =
+        serde_json::to_value(standing_restore()).expect("serialises");
+    unpinned["metadata"]["annotations"] = serde_json::json!({});
+    let unpinned: Restore = serde_json::from_value(unpinned).expect("a Restore");
     // ---- not yet valid: issued in the future -----------------------------
     let not_yet_valid = approval_over(&envelope_with(
         scope(),
@@ -558,6 +587,9 @@ fn each_standing_refusal_is_named_and_reaches_no_job() {
 
     struct Row {
         what: &'static str,
+        /// The `Restore` under test — `standing_restore()` unless the row is
+        /// about a field of the object itself.
+        restore: Restore,
         approval: weirkeeper::crds::approval::Approval,
         trust: weirkeeper::trust::ResolvedTrust,
         expect_subject_mismatch: bool,
@@ -566,13 +598,15 @@ fn each_standing_refusal_is_named_and_reaches_no_job() {
     let rows = vec![
         Row {
             what: "expired",
+            restore: standing_restore(),
             approval: expired,
             trust: active.clone(),
             expect_subject_mismatch: false,
-            detail_contains: "",
+            detail_contains: "expired at",
         },
         Row {
             what: "a life longer than 90 days",
+            restore: standing_restore(),
             approval: too_long,
             trust: active.clone(),
             expect_subject_mismatch: false,
@@ -582,6 +616,7 @@ fn each_standing_refusal_is_named_and_reaches_no_job() {
         // document minted for next month does not authorise this slot.
         Row {
             what: "not yet valid",
+            restore: standing_restore(),
             approval: not_yet_valid,
             trust: active.clone(),
             expect_subject_mismatch: false,
@@ -589,6 +624,7 @@ fn each_standing_refusal_is_named_and_reaches_no_job() {
         },
         Row {
             what: "out of scope",
+            restore: standing_restore(),
             approval: out_of_scope,
             trust: active.clone(),
             expect_subject_mismatch: false,
@@ -596,6 +632,7 @@ fn each_standing_refusal_is_named_and_reaches_no_job() {
         },
         Row {
             what: "a revoked key",
+            restore: standing_restore(),
             approval: approval(),
             trust: revoked,
             expect_subject_mismatch: false,
@@ -603,6 +640,7 @@ fn each_standing_refusal_is_named_and_reaches_no_job() {
         },
         Row {
             what: "a wrong-usage key",
+            restore: standing_restore(),
             approval: approval(),
             trust: evidence_only,
             expect_subject_mismatch: false,
@@ -610,6 +648,7 @@ fn each_standing_refusal_is_named_and_reaches_no_job() {
         },
         Row {
             what: "a key the trust does not carry",
+            restore: standing_restore(),
             approval: approval(),
             trust: unknown_key,
             expect_subject_mismatch: false,
@@ -620,6 +659,7 @@ fn each_standing_refusal_is_named_and_reaches_no_job() {
         // is reported as a standing refusal rather than a subject mismatch.
         Row {
             what: "another schedule's UID",
+            restore: standing_restore(),
             approval: wrong_subject,
             trust: active.clone(),
             expect_subject_mismatch: false,
@@ -627,6 +667,7 @@ fn each_standing_refusal_is_named_and_reaches_no_job() {
         },
         Row {
             what: "another schedule's name",
+            restore: standing_restore(),
             approval: wrong_name,
             trust: active.clone(),
             expect_subject_mismatch: true,
@@ -634,10 +675,51 @@ fn each_standing_refusal_is_named_and_reaches_no_job() {
         },
         Row {
             what: "a per-run Approval",
+            restore: standing_restore(),
             approval: per_run,
             trust: active.clone(),
             expect_subject_mismatch: true,
             detail_contains: "RehearsalSchedule",
+        },
+        // **D3 §4.3(d)'s controller-only bound.** `plan_within_scope` cannot
+        // see `deadlineSeconds`, and the schedule's `scope_agrees` only sees
+        // Restores the schedule rendered — so for a hand-written one this is
+        // the only enforcement anywhere in the product.
+        Row {
+            what: "a deadline above the signed bound",
+            restore: over_deadline,
+            approval: approval(),
+            trust: active.clone(),
+            expect_subject_mismatch: false,
+            detail_contains: "the signed scope permits at most 3600",
+        },
+        Row {
+            what: "no deadline at all",
+            restore: no_deadline,
+            approval: approval(),
+            trust: active.clone(),
+            expect_subject_mismatch: false,
+            detail_contains: "positive wall-clock bound",
+        },
+        // **The Approval is pinned by UID, not merely by name.**
+        // `spec.authorization.approvalRef` is a `LocalRef` and carries no UID,
+        // so an Approval deleted and recreated under the same name would
+        // otherwise be resolved and used.
+        Row {
+            what: "an Approval recreated under the same name",
+            restore: standing_restore(),
+            approval: recreated,
+            trust: active.clone(),
+            expect_subject_mismatch: false,
+            detail_contains: "is a different authorisation",
+        },
+        Row {
+            what: "a Restore pinning no Approval UID",
+            restore: unpinned,
+            approval: approval(),
+            trust: active.clone(),
+            expect_subject_mismatch: false,
+            detail_contains: "cannot be pinned to the object",
         },
     ];
 
@@ -647,7 +729,7 @@ fn each_standing_refusal_is_named_and_reaches_no_job() {
             now: now(),
         };
         let verdict = admit(
-            &standing_restore(),
+            &row.restore,
             Some(&row.approval),
             Some(&cluster(true)),
             Some(&inputs),

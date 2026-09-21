@@ -1338,8 +1338,15 @@ async fn the_rendered_bundle_is_what_the_runner_loads() {
     // EVERY PINNED DIGEST HAS A MOUNTED MEMBER AND EVERY MOUNTED MEMBER A
     // PINNED DIGEST — the both-directions rule `validate_execution_contract`
     // applies over the v2 optional members, mirrored here because `weirkeeper`
-    // cannot depend on the `logweir` crate (PLAT-14.3b step 7 closes that split
-    // with a byte fixture).
+    // cannot depend on the `logweir` crate. **No shared byte fixture binds the
+    // two sides**; an earlier revision of this comment promised one that has
+    // not been written, and it is recorded as an open gap in
+    // `claude/plat14-3b.result.md` §7 rather than left as a promise here. What
+    // DOES bind them today is `logweir-core`: both sides compute their digests
+    // with `logweir_core::ids::sha256_prefixed` and read the same
+    // `execution_contract` constants, and the runner's real-binary rows in
+    // `crates/logweir/tests/execution_contract_v2.rs` exercise the consuming
+    // half against bytes of the same shape.
     // **THE MUTANT IS NOW DISCRIMINATING.** While the per-run slot held a
     // duplicate of the standing envelope, pinning one digest where the other
     // belonged was an EQUIVALENT mutant and this file said so. PLAT-14.3b

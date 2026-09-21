@@ -98,7 +98,10 @@ Changing the mode alone does not change group ownership. ConfigMaps use 0644
 and are readable without this group; credentials must remain Secrets.
 
 The restore approval bundle mounts at `/approval`: `approval.json`,
-`approval.sig`, `approver.pub.pem`, and `allowed-clusters.json`. Keeping the
+`approval.sig`, `approver.pub.pem`, and `allowed-clusters.json` — or, for a
+standing-authorized **rehearsal**, `standing-authorization.json`,
+`standing-authorization.sig`, `authorization-keys.json`, `approver.pub.pem` and
+`allowed-clusters.json`, with no per-run approval slot at all (§7g). Keeping the
 allowlist in a Secret prevents a subject with only `patch configmaps` from
 widening a restore's target set. This does not constrain a cluster-admin.
 Use repeatable `--approver-key-ids` flags to restrict the accepted approver
@@ -4477,7 +4480,7 @@ TTL at creation time:
 
 | Volume | From | At | Why |
 |---|---|---|---|
-| `approval` | immutable ConfigMap `<restore>-approval-bundle` | `/approval` | `approval.json`, `approval.sig`, `approver.pub.pem`, `allowed-clusters.json` |
+| `approval` | immutable ConfigMap `<restore>-approval-bundle` | `/approval` | `approval.json`, `approval.sig`, `approver.pub.pem`, `allowed-clusters.json` — a standing-authorized rehearsal projects five DIFFERENT members and neither `approval.*`; see §7g |
 | `signing` | Secret `logweir-signing-key`, `0440` | `/signing` | the runner's own signing key, readable only because `fsGroup: 65532` is set |
 | `plan` | ConfigMap `<name>-plan` | `/plan` | `spec.planBytes`, verbatim |
 | `work` | `emptyDir` | `/work` | the scorecard, the offset report and the checkpoint state, on a pod whose root filesystem is read-only |
