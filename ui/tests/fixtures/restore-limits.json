@@ -1,0 +1,15 @@
+{
+  "README": "PLAT-11.2. The numbers the restore wizard's limits panel and its mapping rails are allowed to state, each owned by Rust and pinned from BOTH languages: ui/tests/restore-subset.spec.js asserts the page renders exactly these, and crates/logweir-api/tests/resources.rs asserts they equal the Rust constants they name. A page that invented a number, or a constant that moved in one language only, fails a test in the other.",
+  "maxTopicNameChars": {
+    "value": 249,
+    "owner": "logweir_core::guard::MAX_TOPIC_NAME_CHARS"
+  },
+  "defaultReplicationFactor": {
+    "value": 1,
+    "owner": "logweir_core::spec::rf1 (target.default_replication_factor's serde default)"
+  },
+  "defaultRecordsPerPartition": {
+    "value": 25,
+    "owner": "logweir_core::spec::n25 (sample.records_per_partition's serde default)"
+  }
+}

@@ -310,6 +310,79 @@ export function renderDiagnostics(v) {
   );
 }
 
+/** THE ONE ACTION A FAILED RESTORE OFFERS: retry to a FRESH TARGET
+ *  (PLAT-11.2, PLAT-12.2).
+ *
+ *  A LINK AND NOT A BUTTON, because nothing is retried from here: it opens the
+ *  wizard, carrying which run failed, and the operator chooses the point and
+ *  reviews a whole new plan. The retry is a NEW Restore with a new topic
+ *  prefix, new plan bytes, a new plan hash and -- because both names are
+ *  minted from those bytes -- a new Restore name and a new Approval name. The
+ *  failed run's Approval is not reused and cannot be reached from here; where
+ *  the namespace's policy is governed the new restore waits for an approval of
+ *  its own, exactly as a first restore does.
+ *
+ *  AND NOTHING IS OFFERED FOR A BACKUP OR FOR A RUN THAT HAS NOT FAILED. A
+ *  retry of a running restore would be a second execution against the same
+ *  target names; a retry of a successful one is a restore, and the ordinary
+ *  wizard is where that starts. */
+export function renderRetryAction(v, ns) {
+  if (v.kind !== "restore") {
+    return "";
+  }
+  // BOTH MODES, AND EACH READ IN ITS OWN VOCABULARY. The console DTO says
+  // `terminal` and a lower-case `state`; the custom resource says
+  // `status.phase` with a capital, and its projection leaves `terminal` false
+  // because nothing there computes one. A predicate that read only the first
+  // would silently offer nothing behind `kubectl proxy`, which is where an
+  // incident without the product API happens.
+  const failed = v.console === true
+    ? v.terminal === true && String(v.state || "").toLowerCase() === "failed"
+    : String(v.phase || "").toLowerCase() === "failed";
+  if (!failed) {
+    return "";
+  }
+  return (
+    "<section class=\"retry\" id=\"restore-retry\"><h3>Retry</h3>" +
+    "<p class=\"note\">" + esc(RETRY_FRESH_TARGET_SENTENCE) + "</p>" +
+    "<p class=\"actions\"><a id=\"retry-fresh-target\" href=\"" +
+    esc(retryRoute(String(ns || ""), String(v.name || ""))) +
+    "\">Retry to a fresh target</a></p></section>"
+  );
+}
+
+/** The wizard's selector, carrying which failed run is being retried.
+ *
+ *  SPELLED HERE AND NOT IMPORTED, ON PURPOSE. The wizard owns this route and
+ *  exports the same helper (`restore-wizard.js::restoreRetryFromOperationRoute`),
+ *  but importing that module here would pull `ui/plan.js` into the operation
+ *  page's module graph -- and `plan.js` THROWS AT LOAD outside a secure
+ *  context. A page that only reads a run would then stop rendering on an
+ *  origin where it renders today, to support a link. So the four-token route
+ *  is written out, and `pages.spec.js` asserts this function and the wizard's
+ *  helper produce the identical string, which is the property that could
+ *  otherwise drift.
+ *
+ *  It names NO recovery point: `Restore.spec` carries a backup SET id and no
+ *  reference to the `Backup` it came from, so the point is chosen on the
+ *  selector rather than guessed here. */
+export function retryRoute(ns, restoreName) {
+  const n = typeof ns === "string" ? ns.trim() : "";
+  return (
+    "#/restore" +
+    (n.length > 0 ? "?ns=" + encodeURIComponent(n) + "&" : "?") +
+    "retryOf=" + encodeURIComponent(typeof restoreName === "string" ? restoreName : "")
+  );
+}
+
+/** What the retry link does, said beside it. */
+export const RETRY_FRESH_TARGET_SENTENCE =
+  "This run failed. There is no resume: a restore cannot be continued from where it stopped, " +
+  "and any topics it had already created stay as they are. Retrying opens the wizard for a NEW " +
+  "restore with a fresh topic prefix, so no name this run used is written to -- a new plan, a " +
+  "new plan hash, and a new approval of its own where the policy asks for one. This run is not " +
+  "modified.";
+
 /** THE RESULT: what the RUN did. Never the evidence, which is the next block. */
 export function renderResult(v) {
   const r = v.result || {};
@@ -545,6 +618,7 @@ export function renderOperation(view) {
     renderProgress(f) +
     renderDiagnostics(f) +
     renderResult(f) +
+    renderRetryAction(f, String(v.ns || "")) +
     renderEvidence(f) +
     renderCompletion(f) +
     renderTeardown(f)

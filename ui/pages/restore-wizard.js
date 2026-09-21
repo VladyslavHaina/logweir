@@ -147,6 +147,9 @@ export const WIZARD_FORM = "restore-wizard";
 export const WIZARD_DRAFT_FIELDS = Object.freeze([
   "backupSetRef", "pointInTime", "mode", "topicPrefix", "targetCluster", "targetClusterUid",
   "endpoint", "region", "pathStyle", "allowHttp", "evidenceBucket", "archiveSecret",
+  // PLAT-11.2: which failed run this draft belongs to, so a retry never picks
+  // up an ordinary restore's kept prefix (`applyWizardDraft`).
+  "retryOf",
   // PLAT-11.2: the chosen subset is an edit like any other, and a draft that
   // dropped it would restore a plan over every topic the point froze -- which
   // is precisely the choice the operator made and this page lost.
@@ -211,7 +214,7 @@ const API = apiClient();
  *  suite green. */
 export function restoreRouteParams(hash) {
   const text = typeof hash === "string" ? hash : "";
-  const route = { ns: "", uid: "", backup: "" };
+  const route = { ns: "", uid: "", backup: "", retryOf: "" };
   const question = text.indexOf("?");
   if (question === -1) {
     return route;
@@ -229,6 +232,11 @@ export function restoreRouteParams(hash) {
       route.backup = value;
     } else if (key === "ns" && value.length > 0) {
       route.ns = value;
+    } else if (key === "retryOf") {
+      // PLAT-11.2: the failed Restore this one retries. It is carried for the
+      // PREFIX it derives and for the banner that names it, and for nothing
+      // else -- the wizard reads no field of that object and writes to none.
+      route.retryOf = value;
     }
   }
   return route;
@@ -256,6 +264,114 @@ export function restoreSelectorRoute(ns) {
   const n = typeof ns === "string" ? ns.trim() : "";
   return "#/restore" + (n.length > 0 ? "?ns=" + encodeURIComponent(n) : "");
 }
+
+// ----------------------------------- the fresh-target retry (PLAT-11.2, PLAT-12.2)
+
+/** How many characters of the failed Restore's name the retry prefix carries.
+ *
+ *  Eight, off the END. A minted restore name is `rst-` plus a content-derived
+ *  suffix (`logweir-api`'s `idempotency.rs`), so the tail is the part that
+ *  distinguishes two runs; taking it keeps the prefix short enough to leave a
+ *  long topic name inside the broker's 249. A collision between two tails is
+ *  not a correctness problem -- it would make two retries share a prefix, and
+ *  the readiness check's `target.mappedTopics` row refuses the second by
+ *  name -- which is why this is allowed to be a tail rather than a hash. */
+export const RETRY_TAIL_CHARS = 8;
+
+/** THE PREFIX A FRESH-TARGET RETRY USES, and why it cannot be the default one.
+ *
+ *  `defaultTopicPrefix` is a PURE FUNCTION OF THE RECOVERY POINT. That is
+ *  exactly right for a first restore and exactly wrong for a retry: retrying
+ *  the same point with the same prefix renders the same plan bytes, which mint
+ *  the same Restore name and the same Approval name -- so the retry would
+ *  collide with the failed run's own name and, worse, would be authorised by
+ *  the Approval bound to it. PLAT-12.2's clause is that "retrying failed work
+ *  creates a new execution with deliberate fresh-target/approval handling
+ *  rather than colliding with the old name", and this function is the
+ *  deliberate part.
+ *
+ *  DETERMINISTIC, so retrying twice is the same retry: the same failed run
+ *  gives the same prefix, the same bytes, the same minted name, and the second
+ *  submit is the idempotent replay every other create in this wizard is. It
+ *  reads no clock -- the instant comes from the point, as everywhere else. */
+export function freshTargetPrefix(pointInTime, retryOf) {
+  const base = defaultTopicPrefix(pointInTime);
+  const name = typeof retryOf === "string" ? retryOf : "";
+  let tail = "";
+  for (const c of name.slice(-RETRY_TAIL_CHARS).toLowerCase()) {
+    if ((c >= "a" && c <= "z") || (c >= "0" && c <= "9")) {
+      tail += c;
+    }
+  }
+  return base + "retry-" + tail + "-";
+}
+
+/** The link that opens the wizard as a FRESH-TARGET RETRY of one failed
+ *  Restore, on the same recovery point. */
+export function restoreRetryRoute(ns, backup, restoreName) {
+  const name = typeof restoreName === "string" ? restoreName : "";
+  return restorePointRoute(ns, backup) + "&retryOf=" + encodeURIComponent(name);
+}
+
+/** The link a FAILED Restore offers: the wizard's selector, carrying which run
+ *  is being retried but choosing no point.
+ *
+ *  IT CANNOT NAME THE POINT, AND THAT IS A PROPERTY OF THE OBJECT RATHER THAN
+ *  A SHORTCUT. `Restore.spec` carries `backupSetRef` -- a backup SET id inside
+ *  the archive -- and no reference to the `Backup` that produced it, so a page
+ *  looking at a Restore knows which archive set to read and not which recovery
+ *  point object it came from. Guessing one by searching the namespace for a
+ *  Backup with a matching set id would be this page inventing an identity the
+ *  product does not record. So the operator chooses the point, on the
+ *  selector, with the retry travelling beside the choice. */
+export function restoreRetryFromOperationRoute(ns, restoreName) {
+  const name = typeof restoreName === "string" ? restoreName : "";
+  return restoreSelectorRoute(ns) +
+    (restoreSelectorRoute(ns).indexOf("?") === -1 ? "?" : "&") +
+    "retryOf=" + encodeURIComponent(name);
+}
+
+/** The banner a retry opens with: what it is retrying, what is different, and
+ *  the three things it does NOT do.
+ *
+ *  THE OLD APPROVAL IS NEVER REUSED, AND THAT IS STRUCTURAL RATHER THAN
+ *  PROMISED. `restoreBody` takes `spec.approvalRef.name` from the prepared
+ *  document's minted names and from nowhere else, and the names are minted
+ *  from the plan bytes -- so a plan with a fresh prefix mints a different
+ *  Approval name, and no route through this module can send the failed run's
+ *  own Approval reference. The controller's `PlanHashMismatch` refusal is the
+ *  backstop if one ever were. */
+export function renderRetryBanner(state) {
+  const s = state || {};
+  const of = typeof s.retryOf === "string" ? s.retryOf : "";
+  if (of.length === 0) {
+    return "";
+  }
+  return (
+    "<div class=\"retry-note\" id=\"retry-banner\" role=\"status\">" +
+    "<h3>Retrying to a fresh target</h3>" +
+    "<p class=\"note\">This is a NEW restore of the same recovery point, retrying <code>" +
+    esc(of) + "</code>. " + esc(RETRY_IDENTITY_SENTENCE) + "</p>" +
+    "<p class=\"note\" id=\"retry-untouched\">" + esc(RETRY_OLD_RUN_SENTENCE) + "</p>" +
+    "</div>"
+  );
+}
+
+/** What a retry changes, said where it is offered. */
+export const RETRY_IDENTITY_SENTENCE =
+  "The topic prefix is a fresh one derived from the run being retried, so every target topic " +
+  "name is new and nothing the failed run created is written to. A different prefix is a " +
+  "different plan, a different plan hash, a different minted Restore name and a different " +
+  "minted Approval name: the approval that authorised the failed run is not reused and cannot " +
+  "be -- both names come from these bytes, and a forged reference to it is refused by the " +
+  "controller with PlanHashMismatch. Where the namespace's policy is governed, this restore " +
+  "waits for a new approval of its own.";
+
+/** What a retry leaves alone. */
+export const RETRY_OLD_RUN_SENTENCE =
+  "The failed restore is not touched: this wizard writes to nothing that exists. Its object, " +
+  "its evidence and the topics it had already created stay exactly as they are, and resume is " +
+  "not implemented -- this is a new run from the beginning, not a continuation of that one.";
 
 /** Whether a `Backup` is a recovery point a plan can be built from:
  *  `phase: Succeeded`, a non-empty `status.backupId`, AND a covered window of
@@ -799,7 +915,18 @@ export function renderPointSelector(state) {
       cell(status.records),
       cell(pointVerdict(point)),
       cell((spec.archive || {}).url) + " -- " + esc(archiveAvailability(point)),
-      "<a href=\"" + esc(restorePointRoute(s.ns, point)) + "\">Restore this point</a>",
+      // A RETRY ARRIVING HERE KEEPS ITS IDENTITY (PLAT-11.2). The operation
+      // view of a failed Restore knows which run failed and not which Backup
+      // it came from -- `Restore.spec` carries a backup SET id, not the
+      // point's name or uid -- so the retry link lands on this selector and
+      // the choice of point is made here, with `retryOf` travelling on.
+      "<a href=\"" +
+        esc(typeof s.retryOf === "string" && s.retryOf.length > 0
+          ? restoreRetryRoute(s.ns, point, s.retryOf)
+          : restorePointRoute(s.ns, point)) +
+        "\">" + (typeof s.retryOf === "string" && s.retryOf.length > 0
+          ? "Retry to a fresh target from this point"
+          : "Restore this point") + "</a>",
     ];
   });
   const attributes = points.map(
@@ -810,6 +937,7 @@ export function renderPointSelector(state) {
   return (
     "<h2>Restore wizard</h2>" +
     "<p class=\"blurb\">" + SELECTOR_SENTENCE + "</p>" +
+    renderRetryBanner(s) +
     "<section class=\"step\" id=\"step-select-point\" tabindex=\"-1\">" +
     "<h3>Choose a recovery point</h3>" +
     "<div class=\"field\"><label for=\"point-search\">search</label>" +
@@ -975,7 +1103,7 @@ export function isKafkaTopicName(name) {
   return true;
 }
 
-/** THE MAPPING RULE, AND THERE IS NO OTHER ONE IN THIS VERSION.
+/** THE MAPPING RULE, AND THIS BUILD HAS NO OTHER ONE.
  *
  *  `logweir_core::spec::target_topic_prefix` gives the whole grammar: mode
  *  `newTopic` takes `target.topic_naming.prefix`, mode `scratch` takes
@@ -1045,6 +1173,28 @@ export function mappingProblems(state) {
   const problems = Object.create(null);
   const frozen = frozenTopicsOf(s);
   const chosen = selectedTopics(s);
+  // THE DUPLICATE CHECK READS THE RAW LIST, NOT THE CANONICAL ONE, AND THAT
+  // IS THE WHOLE REASON IT IS REACHABLE. `selectedTopics` filters the frozen
+  // list, so it collapses a repeated entry to one -- and a page that silently
+  // deduplicated would submit a list that is not the list it was given, which
+  // is exactly the class of surprise this task exists to remove. So the raw
+  // array is what is checked, and a duplicate is REFUSED rather than quietly
+  // fixed. (A checkbox cannot produce one; a restored draft, an "edit this
+  // restore" prefill and a caller constructing a state can.)
+  const raw = Array.isArray((s.fields || {}).topics) ? s.fields.topics : [];
+  const rawSeen = new Set();
+  for (const source of raw) {
+    const key = String(source);
+    if (rawSeen.has(key)) {
+      problems.topics =
+        "`" + key + "` and `" + key + "` both map to the target topic `" +
+        mappedTopicName(prefix, key) + "`; one restore cannot write two source topics into " +
+        "one target, and the mapping rule is a prefix, so a duplicate target can only be a " +
+        "duplicate source";
+      return problems;
+    }
+    rawSeen.add(key);
+  }
   if (chosen.length === 0) {
     problems.topics =
       "choose at least one topic: a restore of no topic is not a restore, and the plan's " +
@@ -1282,7 +1432,7 @@ export function renderTargetStep(state) {
   const prefix =
     typeof target.topicPrefix === "string" && target.topicPrefix.length > 0
       ? target.topicPrefix
-      : prefixFor(fields.pointInTime);
+      : defaultPrefixFor(s);
   const markerWarning =
     target.mode === "scratch" && typeof ((chosen || {}).spec || {}).markerTopic !== "string"
       ? "<p class=\"complaint\">" + SCRATCH_MARKER_WARNING + "</p>"
@@ -1888,6 +2038,7 @@ export function renderPreparedWizard(state, prepared) {
     "point in time, the target, the preflight, and the plan whose bytes the Restore " +
     "carries. Every value was read from this namespace's own objects or is editable " +
     "below.</p>" +
+    renderRetryBanner(state) +
     (s.editing
       ? "<p class=\"immutable-note\">" + RESTORE_IMMUTABLE_SENTENCE + "</p>"
       : "") +
@@ -2014,6 +2165,13 @@ export function wizardDraftValues(state) {
   const target = f.target || {};
   const source = f.source || {};
   return {
+    // WHICH RUN THIS DRAFT WAS MADE FOR, beside the set it was made for. A
+    // retry shares the recovery point -- and therefore the backup set -- with
+    // the run it retries, so `backupSetRef` alone would let an ordinary
+    // restore's kept prefix apply to a retry and put the failed run's own
+    // target names back. That is the collision the fresh prefix exists to
+    // avoid, restored from a draft.
+    retryOf: typeof s.retryOf === "string" ? s.retryOf : "",
     backupSetRef: f.backupSetRef,
     pointInTime: f.pointInTime,
     mode: target.mode,
@@ -2037,6 +2195,13 @@ export function wizardDraftValues(state) {
 export function applyWizardDraft(state, draft) {
   const d = draft || {};
   if (typeof d.backupSetRef !== "string" || d.backupSetRef !== ((state || {}).fields || {}).backupSetRef) {
+    return false;
+  }
+  // AND FOR THE SAME RUN IDENTITY. A draft with no `retryOf` is an older one
+  // and reads as the ordinary restore it was, so the comparison is against ""
+  // on both sides and the legacy case is unchanged.
+  const retrying = typeof ((state || {}).retryOf) === "string" ? state.retryOf : "";
+  if ((typeof d.retryOf === "string" ? d.retryOf : "") !== retrying) {
     return false;
   }
   if (typeof d.pointInTime === "string") {
@@ -2468,6 +2633,18 @@ export function resolveTarget(state) {
   });
 }
 
+/** The prefix this state defaults to: a retry's fresh one when this wizard is
+ *  retrying a failed run, and the recovery point's own otherwise. The ONE
+ *  place that choice is made, so the field's placeholder, the field's
+ *  emptied-value fallback and the initial state cannot disagree about it. */
+export function defaultPrefixFor(state) {
+  const s = state || {};
+  const at = (s.fields || {}).pointInTime;
+  return typeof s.retryOf === "string" && s.retryOf.length > 0
+    ? freshTargetPrefix(at, s.retryOf)
+    : prefixFor(at);
+}
+
 /** The default prefix for an instant, or the empty string when there is no
  *  instant to derive one from. */
 function prefixFor(pointInTime) {
@@ -2611,6 +2788,12 @@ async function renderAndWire(node, state, parse, api, lifecycle) {
  *  because the runner reads them from these bytes and from nowhere else. */
 export function initialState(ns, clusters, backups, selection) {
   const resolved = resolvePoint(backups, selection);
+  // PLAT-11.2 / PLAT-12.2: a retry of a failed run, or "" for an ordinary
+  // restore. It changes exactly one value -- the default topic prefix -- and
+  // through that value it changes the plan bytes, the plan hash and both
+  // minted names, which is the whole of "a new execution rather than a
+  // collision with the old name".
+  const retryOf = typeof (selection || {}).retryOf === "string" ? selection.retryOf : "";
   const point = resolved.point;
   const spec = (point || {}).spec || {};
   const status = (point || {}).status || {};
@@ -2627,8 +2810,12 @@ export function initialState(ns, clusters, backups, selection) {
   // `allowHttp` STARTS FALSE AND IS NEVER DERIVED (D-SEAMS S5). It is set by
   // the one explicit checkbox in step 1 and by nothing else.
   const store = { region: "", endpoint: "", pathStyle: false, allowHttp: false };
+  const prefix = retryOf.length > 0
+    ? freshTargetPrefix(pointInTime, retryOf)
+    : prefixFor(pointInTime);
   return {
     ns: ns,
+    retryOf: retryOf,
     clusters: clusters,
     backups: backups,
     selection: { uid: resolved.uid, backup: resolved.name },
@@ -2662,12 +2849,13 @@ export function initialState(ns, clusters, backups, selection) {
         bootstrapServers: ((target || {}).spec || {}).bootstrapServers || [],
         auth: targetAuth(target),
         mode: TARGET_MODES[1],
-        topicPrefix: prefixFor(pointInTime),
+        topicPrefix: prefix,
         // UNREAD in `newTopic` mode and still required by the grammar (it has
         // no serde default, because an empty prefix maps every source topic
         // onto ITSELF). The same string, so switching the mode select is a
-        // one-value change and never a document that will not parse.
-        topicMappingPrefix: prefixFor(pointInTime),
+        // one-value change and never a document that will not parse -- and a
+        // retry's fresh prefix therefore applies in BOTH modes.
+        topicMappingPrefix: prefix,
         markerTopic: "logweir.scratch",
         replicationFactor: 1,
         teardown: "delete",
@@ -2888,7 +3076,7 @@ function wire(node, state, parse, api, lifecycle, prepared) {
     if (prefix !== null) {
       // An emptied prefix is the default prefix again: the field SHOWS the
       // default when the value is empty, and the plan must be what it shows.
-      state.fields.target.topicPrefix = valueOf(prefix) || prefixFor(state.fields.pointInTime);
+      state.fields.target.topicPrefix = valueOf(prefix) || defaultPrefixFor(state);
     }
     if (cluster !== null) {
       // THE UID THE OPTION CARRIES, AND THE NAME IT SHOWED. Reading the

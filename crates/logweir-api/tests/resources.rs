@@ -301,6 +301,62 @@ async fn a_declared_topic_mapping_is_checked_against_the_stored_prefix() {
     );
 }
 
+/// PLAT-11.2: the three numbers the restore wizard's limits panel is allowed
+/// to state are RUST's, and this is the Rust half of the pin.
+///
+/// The console cannot import a Rust constant and `ui/tests/*.spec.js` cannot
+/// call one, so a page that hard-codes 249 or a replication factor of 1 agrees
+/// with the product only by inspection -- which is exactly how a number drifts
+/// in one language and is discovered in an incident. The fixture
+/// `ui/tests/fixtures/restore-limits.json` is the shared statement: the node
+/// suite asserts the page renders these values, and this asserts they ARE the
+/// Rust ones. Moving either constant fails a test in both languages.
+///
+/// KILLS: raising or lowering `MAX_TOPIC_NAME_CHARS` without the console
+/// following; changing `target.default_replication_factor`'s or
+/// `sample.records_per_partition`'s serde default while the wizard keeps
+/// prefilling the old one.
+#[test]
+fn the_restore_limits_the_console_states_are_the_rust_ones() {
+    let limits = support::fixture("restore-limits.json");
+
+    assert_eq!(
+        limits["maxTopicNameChars"]["value"].as_u64().unwrap() as usize,
+        logweir_core::guard::MAX_TOPIC_NAME_CHARS,
+        "{}",
+        limits["maxTopicNameChars"]["owner"]
+    );
+
+    // THE DEFAULTS ARE READ BY DESERIALISING A DOCUMENT THAT OMITS THEM, which
+    // is what a serde default IS -- reading the private `fn rf1` would test a
+    // function rather than the behaviour every plan in this product gets.
+    let target: logweir_core::spec::TargetSpec = serde_yaml::from_str(
+        "bootstrap_servers: [\"broker:9092\"]\ntopic_mapping_prefix: \"restore-\"\n",
+    )
+    .expect("a target block with neither optional field");
+    assert_eq!(
+        i64::from(target.default_replication_factor),
+        limits["defaultReplicationFactor"]["value"]
+            .as_i64()
+            .unwrap(),
+        "{}",
+        limits["defaultReplicationFactor"]["owner"]
+    );
+
+    let sample: logweir_core::spec::SampleSpec = serde_yaml::from_str(
+        "window_start: 2026-09-07T14:00:00Z\nwindow_end: 2026-09-07T14:05:00Z\n",
+    )
+    .expect("a sample block with no records_per_partition");
+    assert_eq!(
+        sample.records_per_partition as u64,
+        limits["defaultRecordsPerPartition"]["value"]
+            .as_u64()
+            .unwrap(),
+        "{}",
+        limits["defaultRecordsPerPartition"]["owner"]
+    );
+}
+
 #[tokio::test]
 async fn connections_project_secret_names_only_and_create_typed_objects() {
     let app = TestApp::new();
