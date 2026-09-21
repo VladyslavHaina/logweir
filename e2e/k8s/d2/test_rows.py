@@ -445,6 +445,48 @@ def test_a_catalog_sync_has_answered_only_when_it_has_published_or_failed() -> N
                                        pages=[{"index": 0}]), SINCE, "u6"))
 
 
+# One real `catalogSync` frame set, from `lwc-cs-80d65db5d3363255802b` on
+# 2026-09-21: the sentence that names the refusal exists ONLY here, because the
+# controller publishes a verdict from these frames and not the rows.
+FRAME_1 = 'eyJjb250cmFjdCI6ICJsb2d3ZWlyLmRldi9jaGVjay1yZXN1bHQvdjEiLCAia2luZCI6ICJjYXRhbG9nU3luYyIsICJjaGVja3MiOiBbeyJpZCI6ICJydW5uZXIuY29udHJhY3QiLCAic3RhdGUiOiAicmVhZHkiLCAiY29kZSI6ICJDb250cmFjdFN1cHBvcnRlZCIsICJtZXNzYWdlIjogInRoaXMgcnVubmVyIGltcGxlbWVudHMgY2hlY2sgY29u'
+FRAME_2 = 'dHJhY3QgdmVyc2lvbiAxIn0sIHsiaWQiOiAiZGVzdGluYXRpb24uYXJjaGl2ZUxpc3RhYmxlIiwgInN0YXRlIjogIm5vdFJlYWR5IiwgImNvZGUiOiAiQWNjZXNzRGVuaWVkIiwgIm1lc3NhZ2UiOiAidGhlIGR1cmFibGUgcmVjb3ZlcnkgY2F0YWxvZyB1bmRlciBgbG9nd2Vpci9jYXRhbG9nL3YxL2AgY291bGQgbm90IGJlIGxpc3RlZCJ9XX0='
+RELAY = ("--- pod ---\n"
+         "logweir-check-part=result:1/2:" + FRAME_1 + "\n"
+         "logweir-check-part=result:2/2:" + FRAME_2 + "\n")
+
+
+def test_the_sentence_that_names_the_refusal_is_decoded_from_the_job() -> None:
+    rows = d2.u6_relayed_checks(RELAY)
+    denial = [r for r in rows if r["state"] == "notReady"]
+    row("the relayed rows decode, and one of them is the store's own AccessDenied",
+        len(rows) == 2 and len(denial) == 1
+        and denial[0]["id"] == "destination.archiveListable"
+        and denial[0]["code"] == "AccessDenied", json.dumps(rows))
+    row("MUTANT: a frame missing from the set is not a verdict",
+        d2.u6_relayed_checks("logweir-check-part=result:1/2:" + FRAME_1 + "\n") == [])
+    row("MUTANT: a stream that is not `result`",
+        d2.u6_relayed_checks(RELAY.replace("result:", "details:")) == [])
+    row("MUTANT: frames that do not decode",
+        d2.u6_relayed_checks("logweir-check-part=result:1/1:!!!not-base64!!!\n") == [])
+    row("MUTANT: a pod that printed no frame at all",
+        d2.u6_relayed_checks("--- pod ---\nno frames here\n") == [])
+
+
+def test_a_catalog_records_the_sentence_it_did_say() -> None:
+    row("a recorded refusal is the product's own denial",
+        d2.u6_denied({"deniedBy": "`Synced=False/PartialScan`, with 13 of 13 points unreadable",
+                      "counts": {"unreadable": 13, "total": 13}}))
+    row("so is a relayed AccessDenied",
+        d2.u6_denied({"deniedBy": "the sync Job relayed `destination.archiveListable` "
+                                  "AccessDenied"}))
+    row("MUTANT: a sync that simply did not finish records no refusal",
+        not d2.u6_denied({"deniedBy": "", "timedOut": True, "counts": {}, "conditions": []}))
+    row("MUTANT: an empty `deniedBy` is not a denial however much else is recorded",
+        not d2.u6_denied({"deniedBy": "", "counts": {"total": 13, "available": 13},
+                          "conditions": [{"type": "Stale", "status": "False",
+                                          "reason": "ViewFresh"}]}))
+
+
 def test_only_the_products_own_denial_counts_as_a_denial() -> None:
     row("a check row classified `AccessDenied`",
         d2.u6_denied({"destination.archiveListable": {"state": "notReady",

@@ -4405,9 +4405,24 @@ def u6_attach(user: str, units: list[str], tag: str) -> str:
     return name
 
 
+#: A `RecoveryCatalog` never publishes `AccessDenied`. A walk whose points
+#: would not open lands `Synced=False/PartialScan` — "a permission or transport
+#: failure, which is NOT the same as absent" — and one whose first listing was
+#: refused relays no body and lands `ResultUnreadable`. In a bisection the only
+#: variable is the MinIO policy, so these are that failure classified; the
+#: operation records WHICH of them it saw as `deniedBy`, and never infers a
+#: denial from a sync that merely did not finish.
+U6_CATALOG_REFUSAL_REASONS = ("PartialScan", "ResultUnreadable")
+
+
 def u6_denied(classified: Any) -> bool:
-    """Did the PRODUCT say `denied` — as a check code or in its own output?"""
+    """Did the PRODUCT say `denied` — as a check code, a recorded refusal, or
+    in its own output?"""
     if isinstance(classified, dict):
+        # An operation whose product vocabulary is not the check contract's
+        # records the sentence it did say, and records nothing when it did not.
+        if classified.get("deniedBy"):
+            return True
         for key in ("code", "reason", "exitReason"):
             if classified.get(key) in U6_DENIAL_CODES:
                 return True
@@ -5110,6 +5125,40 @@ def u6c() -> None:
         )
 
 
+def u6_relayed_checks(log_text: str) -> list[dict[str, Any]]:
+    """The check rows a check Job relayed, decoded from its own stdout.
+
+    A check Job frames its result as `logweir-check-part=result:<i>/<n>:<b64>`
+    lines, and the `RecoveryCatalog` controller publishes a VERDICT from them
+    without republishing the rows. So the sentence that names the refusal —
+    `destination.archiveListable notReady AccessDenied` — exists only in the
+    Job's output, and a permission measurement that never decodes it is
+    reading the controller's summary instead of the store's answer.
+
+    Returns `[]` for anything that is not a complete, decodable `result`
+    stream: a partial frame set is not a verdict.
+    """
+    parts: dict[int, str] = {}
+    total: int | None = None
+    for line in log_text.splitlines():
+        match = re.match(r"logweir-check-part=(\w+):(\d+)/(\d+):(.*)$", line.strip())
+        if not match or match.group(1) != "result":
+            continue
+        parts[int(match.group(2))] = match.group(4)
+        total = int(match.group(3))
+    if not parts or total is None or sorted(parts) != list(range(1, total + 1)):
+        return []
+    try:
+        body = json.loads(base64.b64decode("".join(parts[k] for k in sorted(parts))))
+    except Exception:
+        return []
+    return [
+        {"id": c.get("id"), "state": c.get("state"), "code": c.get("code"),
+         "message": (c.get("message") or "")[:300]}
+        for c in body.get("checks", []) or []
+    ]
+
+
 #: The two condition types whose `False` is a SYNC VERDICT. `Stale=False`
 #: (`ViewFresh`) and `TrustAvailable=False` are not: the first is good news and
 #: the second is about the roster. A predicate that read any `False` condition
@@ -5181,12 +5230,26 @@ def u6_catalog_op(dest: str = "u6-dest-cat"):
                 job_log = redact(pod_logs_for_job(job, tail=60))[-2000:]
             except Exception as exc:
                 job_log = f"[sync Job log unavailable: {type(exc).__name__}]"
+        relayed = u6_relayed_checks(job_log)
+        refused = [c for c in relayed
+                   if c["state"] == "notReady" and c["code"] in U6_DENIAL_CODES]
+        verdict = [c for c in conditions
+                   if c["type"] == "Synced" and c["status"] == "False"
+                   and c["reason"] in U6_CATALOG_REFUSAL_REASONS]
+        denied_by = ""
+        if refused:
+            denied_by = "the sync Job relayed `%s` %s" % (refused[0]["id"], refused[0]["code"])
+        elif verdict:
+            denied_by = "`Synced=False/%s`, with %s of %s points unreadable" % (
+                verdict[0]["reason"], counts.get("unreadable"), counts.get("total"))
         classified = {"counts": counts, "pages": len(status.get("pages") or []),
                       "conditions": conditions, "timedOut": timed_out,
-                      "syncJob": job, "syncJobLogTail": job_log}
+                      "syncJob": job, "relayedChecks": relayed,
+                      "deniedBy": denied_by if not ok else "",
+                      "syncJobLogTail": job_log[-600:]}
         return {"ok": ok, "object": name, "kind": "RecoveryCatalog", "variant": tag,
                 "classified": classified,
-                "unclassified": (not ok) and not u6_denied(classified)}
+                "unclassified": (not ok) and not denied_by}
     return op
 
 
