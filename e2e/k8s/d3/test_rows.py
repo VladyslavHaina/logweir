@@ -928,6 +928,36 @@ def test_a_notification_never_claims_exhaustive_verification() -> None:
         not all(d3.scope_is_never_complete([]).values()))
 
 
+# --- the planted future-major document, which is a harness row's own honesty -
+REAL_RECORD = {"format_version": "1.0.0", "point_id": "lwp1-" + "a" * 32,
+               "backup_id": "b", "run_id": "r",
+               "receipt": {"key": "logweir/backups/b/r.receipt.json"}}
+REAL_INDEX = {"format_version": "1.0.0", "point_id": "lwp1-" + "a" * 32,
+              "record_key": "logweir/catalog/v1/points/lwp1-" + "a" * 32 + "/record.json",
+              "recovery_point_at_ms": 1789994969454}
+PLANT = "lwp1-" + "b" * 32
+
+
+def test_the_planted_record_really_declares_a_future_major() -> None:
+    doc = d3.future_major_document(REAL_RECORD, PLANT)
+    row("the document this harness plants declares major 2 under the planted id",
+        doc["format_version"] == "2.0.0" and doc["point_id"] == PLANT, f"{doc}")
+    row("MUTANT: THE 2026-09-18 PROBE — `formatVersion` beside an untouched "
+        "`format_version` is a major-1 record with an unknown field",
+        dict(REAL_RECORD, formatVersion="2.0.0", pointId=PLANT)["format_version"] == "1.0.0")
+    row("a camelCase key that arrived in the template is not carried over",
+        "formatVersion" not in d3.future_major_document(
+            dict(REAL_RECORD, formatVersion="2.0.0"), PLANT))
+    entry = d3.future_major_index_entry(REAL_INDEX, PLANT)
+    row("the index row points at the record the planted id implies",
+        entry["point_id"] == PLANT
+        and entry["record_key"] == f"{d3.CATALOG_PREFIX}/points/{PLANT}/record.json",
+        f"{entry}")
+    row("MUTANT: a record_key the point_id does not imply — the reader drops the row as "
+        "Inconsistent and the format is never reached",
+        dict(REAL_INDEX, point_id=PLANT)["record_key"] != entry["record_key"])
+
+
 def test_zz_every_row_in_this_file_passed() -> None:
     """The file's own gate, for `python3 -m pytest e2e/k8s/d3`.
 

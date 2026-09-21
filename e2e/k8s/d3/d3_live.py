@@ -643,11 +643,13 @@ def settled(token: str, since: str = ""):
 
     Neither half is redundant. `observedSyncRequest` is written when a sync
     STARTS, so a predicate that stops there reads the previous view; and the
-    `Synced` condition is not usable as a completion signal at all on this
-    build — a published view is routinely followed by a write that puts the
-    condition back to `Unknown/PodNotStarted` (see
-    `catalog-resync-is-not-harvested`). `status.syncedAt` moving forward is the
-    one signal that means the pages in `status.pages` are this walk's.
+    `Synced` condition was not usable as a completion signal at all on the
+    2026-09-18 build — a published view was routinely followed by a write that
+    put the condition back to `Unknown/PodNotStarted`
+    (`catalog-resync-is-not-harvested`, CLOSED on `af64073`, where the same
+    read finds `True/Succeeded`). `status.syncedAt` moving forward is still the
+    one signal that means the pages in `status.pages` are this walk's, and
+    reading the fact rather than the condition costs nothing.
     """
 
     def predicate(o: dict[str, Any]) -> bool:
@@ -908,8 +910,62 @@ def clone_runner_job(source: str, clone: str, plan_copy: str | None = None) -> s
     return clone
 
 
+def record_of(bucket: str, point_id: str) -> dict[str, Any]:
+    """One point's signed record, as it is stored."""
+    return json.loads(cat(bucket, f"{CATALOG_PREFIX}/points/{point_id}/record.json").decode())
+
+
 def index_entries(bucket: str) -> list[str]:
     return [o["key"] for o in objects(bucket, f"{CATALOG_PREFIX}/log/")]
+
+
+def future_major_document(template: dict[str, Any], planted: str) -> dict[str, Any]:
+    """A record this build cannot interpret, from a real one.
+
+    SNAKE_CASE, AND THAT IS THE WHOLE POINT. `CatalogPoint` is serialised with
+    `format_version` and `point_id`; a probe that sets `formatVersion` adds an
+    UNKNOWN FIELD, which major 1 ignores by design (`catalog/reader.rs` rule 2),
+    leaving a major-1 record carrying the template's own identity. The first
+    version of the schema-version row did exactly that, read
+    `counts.unsupportedFormat == 0`, and concluded that the classification
+    needs the installation's private signing key. It needs no signature at all:
+    `examine` classifies from these bytes and returns before it fetches the
+    receipt (`check/kinds/catalog_sync.rs:1191`).
+    """
+    doc = dict(template)
+    doc["format_version"] = "2.0.0"
+    doc["point_id"] = planted
+    doc.pop("formatVersion", None)
+    doc.pop("pointId", None)
+    return doc
+
+
+def future_major_index_entry(template: dict[str, Any], planted: str) -> dict[str, Any]:
+    """The index row that makes the planted record reachable.
+
+    Its `record_key` must be the one `point_id` implies or the reader drops the
+    row as `Inconsistent` (review finding F6) — which would leave the record
+    unlisted for a reason that has nothing to do with its format.
+    """
+    entry = dict(template)
+    entry["point_id"] = planted
+    entry["record_key"] = f"{CATALOG_PREFIX}/points/{planted}/record.json"
+    entry.pop("pointId", None)
+    entry.pop("recordKey", None)
+    return entry
+
+
+def plant_future_major(bucket: str, template_point: str, planted: str) -> dict[str, Any]:
+    """The record, its index row, and the keys both went to."""
+    record = future_major_document(record_of(bucket, template_point), planted)
+    record_key = f"{CATALOG_PREFIX}/points/{planted}/record.json"
+    put(bucket, record_key, json.dumps(record).encode())
+    sample = sorted(index_entries(bucket))[-1]
+    entry = future_major_index_entry(json.loads(cat(bucket, sample).decode()), planted)
+    entry_key = f"{sample.rsplit('/', 1)[0]}/{int(time.time() * 1000):013d}-{planted}.json"
+    put(bucket, entry_key, json.dumps(entry).encode())
+    return {"pointId": planted, "recordKey": record_key, "indexKey": entry_key,
+            "formatVersion": record["format_version"]}
 
 
 def catalog_cases() -> None:
@@ -989,22 +1045,9 @@ def catalog_cases() -> None:
 
     # --- a record from a future major is per-entry, never fatal --------------
     template_point = [e for e in missing_entries if e["availability"] == "Available"][0]
-    record_key = f"{CATALOG_PREFIX}/points/{template_point['pointId']}/record.json"
-    template_record = json.loads(cat(BUCKET_A, record_key).decode())
-    future_point = "lwp1-" + "f" * 32
-    future = dict(template_record)
-    future["pointId"] = future_point
-    future["formatVersion"] = "2.0.0"
-    put(BUCKET_A, f"{CATALOG_PREFIX}/points/{future_point}/record.json",
-        json.dumps(future).encode())
-    put(BUCKET_A, f"{CATALOG_PREFIX}/points/{future_point}/record.sig",
-        cat(BUCKET_A, f"{CATALOG_PREFIX}/points/{template_point['pointId']}/record.sig"))
-    sample_index = index_entries(BUCKET_A)[0]
-    index_body = cat(BUCKET_A, sample_index)
-    day = sample_index.rsplit("/", 1)[0]
-    new_index = json.loads(index_body.decode())
-    new_index["pointId"] = future_point
-    put(BUCKET_A, f"{day}/9999999999999-{future_point}.json", json.dumps(new_index).encode())
+    future_point = "lwp1-" + hashlib.sha256(f"{OWNER}{STAMP}cases".encode()).hexdigest()[:32]
+    planted_here = plant_future_major(BUCKET_A, template_point["pointId"], future_point)
+    evidence.append(artifact("catalog/planted-future-record.json", planted_here))
     after_future = fresh_catalog("case-format", "dest-a")
     future_entries = view_entries(after_future)
     fcounts = after_future["status"]["counts"]
@@ -1017,17 +1060,21 @@ def catalog_cases() -> None:
         "PLAT-15.1",
         bool(after_future["status"].get("pages"))
         and fcounts["total"] > counts["total"]
-        and listed_future.get("selectable") is not True,
+        and fcounts.get("unsupportedFormat", 0) >= 1
+        and listed_future.get("selectable") is not True
+        and future_point not in {e["pointId"] for e in future_entries},
         f"a record carrying `formatVersion: 2.0.0` is counted "
         f"(counts.total {counts['total']} -> {fcounts['total']}), is NEVER offered "
         f"(entry {listed_future or '<counted, not listed>'}), and does not stop the walk: "
         f"the view is still published with {len(after_future['status']['pages'])} page(s). "
-        f"counts {fcounts}. LIMITATION, stated rather than smoothed over: "
-        f"`counts.unsupportedFormat` is {fcounts.get('unsupportedFormat')} because a record "
-        f"edited outside the runner no longer verifies under the signing key, and a record "
-        f"that is BOTH validly signed AND of a future major cannot be produced without the "
-        f"installation's private signing key — so this proves `never fatal` and `never "
-        f"offered`, not the `UnsupportedFormat` classification itself",
+        f"counts {fcounts}, of which unsupportedFormat="
+        f"{fcounts.get('unsupportedFormat')}. THE PREVIOUS VERSION OF THIS ROW PLANTED "
+        f"`formatVersion` (camelCase) into a document whose field is `format_version`, which "
+        f"major 1 ignores as an unknown field: it measured an unsigned edit to a major-1 "
+        f"record, read `counts.unsupportedFormat == 0`, and concluded the classification "
+        f"needed the installation's private signing key. It needs no signature at all — "
+        f"`examine` classifies from the record's own bytes and returns before it fetches the "
+        f"receipt or the sidecar (`crates/logweir/src/check/kinds/catalog_sync.rs:1191`)",
         evidence,
     )
     # --- and the measurement that forced `fresh_catalog` on this harness ----
@@ -4666,9 +4713,17 @@ def notify() -> None:
             "stringData": {"url": f"http://{sink_ip}:{SINK_PORT}/alerts"},
         }
     )
-    if get_opt("backupschedule", "keeps-running") is not None:
-        run(KN + ["patch", "backupschedule", "keeps-running", "--type=merge",
-                  "-p", json.dumps({"spec": {"suspend": True}})])
+    # THE SCHEDULE THIS POLICY NAMES HAS TO EXIST, and this phase used to
+    # inherit it from `retention` without declaring it. A `ProtectionPolicy`
+    # whose `scheduleRefs` names nothing resolvable evaluates to
+    # `health: Unknown` / `Protected=Unknown/ScheduleMissing` — no alert opens,
+    # no transition is owed, and every row here then measures an evaluation
+    # that never happened. Measured on 2026-09-21, running `notify` without
+    # `retention`.
+    if get_opt("backupschedule", "keeps-running") is None:
+        apply(schedule_object("keeps-running", "dest-a"))
+    run(KN + ["patch", "backupschedule", "keeps-running", "--type=merge",
+              "-p", json.dumps({"spec": {"suspend": True}})])
     posts_before = sink_posts()
     backups_before = {b["metadata"]["name"]: b["metadata"]["resourceVersion"]
                       for b in lst("backups")}
@@ -5060,10 +5115,6 @@ def scoped_policy_document(bucket: str, deny_keys: list[str]) -> str:
     )
 
 
-def record_of(bucket: str, point_id: str) -> dict[str, Any]:
-    return json.loads(cat(bucket, f"{CATALOG_PREFIX}/points/{point_id}/record.json").decode())
-
-
 def partial_access_ok(entries: dict[str, dict[str, Any]], counts: dict[str, Any],
                       denied: list[str], readable: list[str]) -> dict[str, bool]:
     """403 is "could not tell", and it is NEVER "your backup is gone".
@@ -5202,19 +5253,10 @@ def catalog_access() -> None:
     # manifest at all, which is what a truncated or half-overwritten object in
     # a bucket looks like.
     put(BUCKET_D, corrupt_manifest, b'{"this is not a manifest": true, "truncat')
-    planted = "lwp1-" + hashlib.sha256(f"{OWNER}{STAMP}future".encode()).hexdigest()[:32]
-    future_record = dict(record_of(BUCKET_D, p1))
-    future_record["format_version"] = "2.0.0"
-    future_record["point_id"] = planted
-    put(BUCKET_D, f"{CATALOG_PREFIX}/points/{planted}/record.json",
-        json.dumps(future_record).encode())
-    sample = sorted(index_entries(BUCKET_D))[-1]
-    day = sample.rsplit("/", 1)[0]
-    entry = json.loads(cat(BUCKET_D, sample).decode())
-    entry["point_id"] = planted
-    entry["record_key"] = f"{CATALOG_PREFIX}/points/{planted}/record.json"
-    put(BUCKET_D, f"{day}/{int(time.time() * 1000):013d}-{planted}.json",
-        json.dumps(entry).encode())
+    planted = plant_future_major(
+        BUCKET_D, p1, "lwp1-" + hashlib.sha256(f"{OWNER}{STAMP}future".encode()).hexdigest()[:32])
+    planted_id = planted["pointId"]
+    evidence.append(artifact("access/planted-future-record.json", planted))
 
     after = fresh_catalog("case-corrupt", "dest-d")
     listed = {e["pointId"]: e for e in view_entries(after)}
@@ -5237,7 +5279,7 @@ def catalog_access() -> None:
         evidence,
     )
     format_clauses = unsupported_format_ok(
-        acounts, listed, planted, len(after["status"].get("pages") or []),
+        acounts, listed, planted_id, len(after["status"].get("pages") or []),
         len([p for p in (p1, p2, p3, p4) if p in listed]),
     )
     check(
@@ -5245,9 +5287,9 @@ def catalog_access() -> None:
         "PLAT-15.1",
         all(format_clauses.values()),
         f"a record declaring `format_version: 2.0.0` under a well-formed point id, with a "
-        f"self-consistent major-1 index entry pointing at it, is counted "
+        f"self-consistent major-1 index entry pointing at it ({planted}), is counted "
         f"(counts.unsupportedFormat={acounts.get('unsupportedFormat')}), is absent from the "
-        f"view entirely ({planted not in listed}) and does not stop the walk: "
+        f"view entirely ({planted_id not in listed}) and does not stop the walk: "
         f"{len(after['status'].get('pages') or [])} page(s) published and "
         f"{len([p for p in (p1, p2, p3, p4) if p in listed])} of the four real points still "
         f"listed. THE 2026-09-18 RECORD SAID THIS NEEDED THE INSTALLATION'S PRIVATE KEY. It "
