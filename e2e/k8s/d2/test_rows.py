@@ -396,6 +396,55 @@ def test_a_row_the_check_never_reached_is_not_a_failed_measurement() -> None:
         d2.u6_unanswered(_rows(("archive.backupSet", "notReady", None)), ok=False))
 
 
+SINCE = "2026-09-21T17:58:41Z"
+AFTER = "2026-09-21T17:58:50Z"
+
+
+def _cat(*conditions, pages=None, synced_at=None, token="u6"):
+    status = {"observedSyncRequest": token,
+              "conditions": [{"type": t, "status": st, "reason": r,
+                              "lastTransitionTime": AFTER} for t, st, r in conditions]}
+    if pages is not None:
+        status["pages"] = pages
+    if synced_at is not None:
+        status["syncedAt"] = synced_at
+    return status
+
+
+def test_a_catalog_sync_has_answered_only_when_it_has_published_or_failed() -> None:
+    # THE RECORDED SHAPE, nine seconds after the Job was created: no view, no
+    # failure, and a `Stale=False/ViewFresh` that used to be read as an answer.
+    row("MUTANT: `Stale=False` means NOT stale, and is not a sync verdict",
+        not d2.u6_catalog_settled(_cat(
+            ("Ready", "Unknown", "NeverSynced"),
+            ("Synced", "Unknown", "SyncInProgress"),
+            ("Stale", "False", "ViewFresh"),
+            ("TrustAvailable", "True", "TrustMaterialPresent")), SINCE, "u6"))
+    row("a published view for this token, after this walk started, is an answer",
+        d2.u6_catalog_settled(_cat(("Synced", "True", "ViewPublished"),
+                                   pages=[{"index": 0}], synced_at=AFTER), SINCE, "u6"))
+    row("a `Synced=False` verdict for this walk is an answer",
+        d2.u6_catalog_settled(_cat(("Synced", "False", "AccessDenied")), SINCE, "u6"))
+    row("a `Ready=False` verdict is an answer too",
+        d2.u6_catalog_settled(_cat(("Ready", "False", "ViewUnreadable")), SINCE, "u6"))
+    row("MUTANT: the controller has not even observed this syncRequest yet",
+        not d2.u6_catalog_settled(_cat(("Synced", "False", "AccessDenied"),
+                                       token="previous"), SINCE, "u6"))
+    row("MUTANT: the PREVIOUS walk's view, republished before this one started",
+        not d2.u6_catalog_settled(_cat(("Synced", "True", "ViewPublished"),
+                                       pages=[{"index": 0}],
+                                       synced_at="2026-09-21T17:00:00Z"), SINCE, "u6"))
+    row("MUTANT: a verdict that transitioned before this walk started",
+        not d2.u6_catalog_settled(
+            {"observedSyncRequest": "u6",
+             "conditions": [{"type": "Synced", "status": "False", "reason": "AccessDenied",
+                             "lastTransitionTime": "2026-09-21T17:00:00Z"}]},
+            SINCE, "u6"))
+    row("MUTANT: pages with no `syncedAt` at all",
+        not d2.u6_catalog_settled(_cat(("Synced", "True", "ViewPublished"),
+                                       pages=[{"index": 0}]), SINCE, "u6"))
+
+
 def test_only_the_products_own_denial_counts_as_a_denial() -> None:
     row("a check row classified `AccessDenied`",
         d2.u6_denied({"destination.archiveListable": {"state": "notReady",

@@ -5110,6 +5110,28 @@ def u6c() -> None:
         )
 
 
+#: The two condition types whose `False` is a SYNC VERDICT. `Stale=False`
+#: (`ViewFresh`) and `TrustAvailable=False` are not: the first is good news and
+#: the second is about the roster. A predicate that read any `False` condition
+#: as "the sync has answered" returned nine seconds after the Job was created,
+#: with no view and no failure, and the row was about nothing.
+U6_CATALOG_VERDICT_TYPES = ("Synced", "Ready")
+
+
+def u6_catalog_settled(status: dict[str, Any], since: str, token: str) -> bool:
+    """Has THIS sync finished — with a view, or with a verdict that it failed?"""
+    if status.get("observedSyncRequest") != token:
+        return False
+    if status.get("pages") and (status.get("syncedAt") or "") >= since:
+        return True
+    return any(
+        c.get("type") in U6_CATALOG_VERDICT_TYPES
+        and c.get("status") == "False"
+        and (c.get("lastTransitionTime") or "") >= since
+        for c in status.get("conditions", []) or []
+    )
+
+
 def u6_catalog_op(dest: str = "u6-dest-cat"):
     """One `RecoveryCatalog` sync per variant — a FRESH object every time,
     because a `syncRequest` bump on this build starts a Job whose result is
@@ -5127,17 +5149,7 @@ def u6_catalog_op(dest: str = "u6-dest-cat"):
         })
 
         def settled(o: dict[str, Any]) -> bool:
-            status = o.get("status") or {}
-            if status.get("observedSyncRequest") != "u6":
-                return False
-            if status.get("pages") and (status.get("syncedAt") or "") >= since:
-                return True
-            return any(
-                c.get("status") == "False"
-                and c.get("reason") not in {"PodNotStarted", "SyncInProgress", ""}
-                and (c.get("lastTransitionTime") or "") >= since
-                for c in status.get("conditions", []) or []
-            )
+            return u6_catalog_settled(o.get("status") or {}, since, "u6")
 
         try:
             obj = wait_for("recoverycatalog", name, settled, timeout=540,
