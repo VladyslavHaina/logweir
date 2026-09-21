@@ -1434,6 +1434,48 @@ together — W8 or W13 should add one fixture line asserting a serialized
 `catalog_view::ViewEntry` deserializes into `protection::CatalogEntry` with both
 axes preserved.
 
+**A point whose receipt the controller could not read (`PointFactsUnread`).** On
+a destination whose `evidenceRead` grant is `SecretKeys` or `WorkloadIdentity`
+the controller holds no Secret verb by design, so it verifies nothing itself and
+records `evidence.verification.result: NotAttempted` with a sentence naming the
+grant. `Backup.status.capture` and `status.evidence.receiptSha256` are written
+only on a verdict, so on that posture a succeeded run carries neither — the
+point can be neither aged against the objective nor named. Until 2026-09-21 the
+policy read that as *no point at all*: `health: Unprotected`, which is D3 §3.2's
+"nothing to recover from", and which **pages**, about archives whose own catalog
+entry for the same point read `Available`/`Verified`. Three changes close it and
+an operator sees all three:
+
+- The catalog join answers on the **archive set id** (`Backup.status.execution.id`
+  / `status.backupId`, and `backupId` on the catalog row) when the point has no
+  receipt-derived identity. `pointId` still decides where the controller has one.
+- The **capture time and the identity are read off that row** —
+  `recoveryPointAtMs` IS the receipt's `started_at` carried through the view — so
+  `status.lastAvailablePoint` carries a real `recoveryPointAt` and `pointId`. The
+  verification verdict is NOT rewritten: it still reads `NotAttempted`, because
+  this controller still did not read that receipt. Facts are filled only from the
+  ONE row the view holds for the point; an ambiguous archive-set join fills
+  nothing.
+- `objectives.requireVerifiedEvidence` is satisfied by the **entry's own
+  verification axis** where the controller reached no verdict. Only
+  `NotAttempted` defers this way: an `Untrusted` verdict the controller DID reach
+  still refuses the point, so `TrustPolicy` is not decorative.
+
+Where nothing can place the point — no catalog, or no row for it — the policy
+reports `Protected=Unknown` with reason **`PointFactsUnread`** and a sentence
+saying a run succeeded and its point could not be placed in time. That is a new
+member of the `Protected` condition's `reason` set; the field is a free string in
+the CRD, so **no schema change and no conversion** is involved. **Upgrade:** a
+policy that read `Unprotected`/`NoAvailablePoint` on this posture moves to
+`Healthy`, `Stale` or `Unknown` on the first pass after the upgrade, its open
+`Staleness` incident RESOLVES through the normal transition, and an
+`ArchiveUnavailable` incident may open where the catalog calls the bytes
+degraded. **Rollback:** nothing is persisted that an older controller cannot
+read — `PointFactsUnread` only ever appears in a `reason`/`message` string — and
+the old build recomputes its own verdict on its next pass. Installations where
+the controller does read receipts (`ControllerIdentity`) see no change at all:
+`status.capture` is present, so none of the three paths is taken.
+
 **Bounds.** At most 16 ledger entries (8 of them recoveries), 16 schedules, 64
 topics on `lastAvailablePoint` (`topicsTruncated: true` beyond that), the newest
 50 runs considered per evaluation over at most 5 API pages of 200, and at most 4
