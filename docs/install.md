@@ -774,6 +774,9 @@ not gated on OIDC because there is none. Unlike the in-cluster proxy of
 §"Serving the UI", turning this on cannot make a console that anyone who reaches
 a Service can drive.
 
+It exists for isolated labs and break-glass administration; it does not expose
+Ordinary confirmation and it is **not** a shared console.
+
 **`shared` is the only mode that may be exposed through a Service or an
 Ingress.**
 

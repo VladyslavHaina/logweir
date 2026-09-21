@@ -364,6 +364,9 @@ the cluster could dial:
   `templates/ui/api-rbac.yaml`, and never a kubeconfig.
 * **readiness is not gated on OIDC**, because there is no OIDC.
 
+It exists for isolated labs and break-glass administration. It does not
+expose Ordinary confirmation and it is **not** a shared console.
+
 **`shared` is the only mode that may be exposed through a Service or an
 Ingress.**
 

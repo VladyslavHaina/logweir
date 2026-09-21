@@ -23,6 +23,8 @@ the more permissive one.
   chart renders no Service, no Ingress and no ingress NetworkPolicy rule beside
   it, the identity is the `<release>-api` ServiceAccount, readiness is not gated
   on OIDC, and `kubectl port-forward deploy/<release>-api` is the only way in.
+  It is for isolated labs and break-glass administration; it does not expose
+  Ordinary confirmation and it is not a shared console.
 * `mode: shared` — the SSO console: OpenID Connect identity, a short-lived
   encrypted session cookie, a synchronizer CSRF token on every unsafe method,
   exact role and namespace bindings, and one audit record per request. It
