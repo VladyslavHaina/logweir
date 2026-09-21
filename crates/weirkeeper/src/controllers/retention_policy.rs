@@ -1764,7 +1764,8 @@ impl Pass<'_> {
             debug!(
                 policy = %self.name, namespace = %self.namespace,
                 job = %job_name, run = %run_id,
-                "a Job already stands at this run's deterministic name; this pass creates none,                  records nothing and leaves the run record alone"
+                "a Job already stands at this run's deterministic name; this pass creates \
+                 none, records nothing and leaves the run record alone"
             );
             return Ok(StartOutcome::AlreadyHarvested);
         }
