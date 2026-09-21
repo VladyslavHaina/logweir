@@ -4563,13 +4563,16 @@ def u6_seq() -> int:
     return n
 
 
+#: The display name of each role, WITH its own markup: a title is wrapped in
+#: nothing by the renderer, because two of these carry backticks of their own
+#: and nesting them produces `` `retention enforcer (`logweir-retention`)` ``.
 U6_ROLES = {
-    "archive-write": "archiveWrite",
-    "archive-read": "archiveRead",
-    "evidence-write": "evidenceWrite",
-    "evidence-read": "evidenceRead",
+    "archive-write": "`archiveWrite`",
+    "archive-read": "`archiveRead`",
+    "evidence-write": "`evidenceWrite`",
+    "evidence-read": "`evidenceRead`",
     "retention-enforcer": "retention enforcer (`logweir-retention`)",
-    "catalog-sync": "catalogSync reader",
+    "catalog-sync": "`catalogSync` reader",
     "write-probe": "write probe (`readiness.writeProbe: CreateOnlyMarker`)",
 }
 
@@ -5569,7 +5572,7 @@ def u6table() -> None:
         minimal = "; ".join(u6_unit_prose(u) for u in row["minimalSet"]) or "(none)"
         proved_by = row.get("minimalConfirmed") or row["baseline"]
         lines.append(
-            f"| `{U6_ROLES.get(role, role)}` | {minimal} | {row['baseline']['kind']} "
+            f"| {U6_ROLES.get(role, role)} | {minimal} | {row['baseline']['kind']} "
             f"`{proved_by['object']}` | `U6/{role}` |"
         )
     lines += ["", "## Bisection rows — removing one unit at a time", "",
@@ -5581,18 +5584,18 @@ def u6table() -> None:
             answer = json.dumps(removal["classified"], sort_keys=True)
             answer = re.sub(r"\s+", " ", answer)[:260].replace("|", "\\|")
             lines.append(
-                f"| `{U6_ROLES.get(role, role)}` | {u6_unit_prose(removal['unit'])} | "
+                f"| {U6_ROLES.get(role, role)} | {u6_unit_prose(removal['unit'])} | "
                 f"{removal['kind']} `{removal['object']}` | {verdict} | `{answer}` |")
     lines += ["", "## Units the recorded starting sets carried and the product does not need",
               ""]
     for role, row in sorted(table.items()):
         if row["notRequired"]:
-            lines.append(f"- `{U6_ROLES.get(role, role)}`: "
+            lines.append(f"- {U6_ROLES.get(role, role)}: "
                          + ", ".join(u6_unit_prose(u) for u in row["notRequired"]))
     lines += ["", "## Proof clauses, per role", ""]
     for role, row in sorted(table.items()):
         failed = [k for k, v in row["proof"].items() if not v]
-        lines.append(f"- `{U6_ROLES.get(role, role)}`: "
+        lines.append(f"- {U6_ROLES.get(role, role)}: "
                      + ("every clause of `u6_row_is_proved` holds"
                         if not failed else "NOT PROVED: " + "; ".join(failed)))
     body = "\n".join(lines) + "\n"

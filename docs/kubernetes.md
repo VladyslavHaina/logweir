@@ -440,6 +440,7 @@ The `Harness row` column names the phase that measured the line; the
 | `evidenceRead` | `s3:GetObject` on `<bucket>/logweir/*` | Preflight `u6-da-027` | `U6/evidence-read` |
 | write probe | `s3:PutObject` on `<bucket>/logweir/*` | Preflight `u6-bp-019` | `U6/write-probe` |
 | `catalogSync` reader | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`, `logweir/*`); `s3:GetObject` on `<bucket>/<prefix>/*`; `s3:GetObject` on `<bucket>/logweir/*` | RecoveryCatalog `u6-cat-076` | `U6/catalog-sync` |
+| retention enforcer | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`); `s3:DeleteObject` on `<bucket>/<prefix>/*` | Job `u6-ret-088` | `U6/retention-enforcer` |
 
 | Role | Action removed | Verdict, and the product's own answer | Harness object |
 |---|---|---|---|
@@ -472,6 +473,10 @@ The `Harness row` column names the phase that measured the line; the
 | `catalogSync` reader | `s3:GetBucketLocation` on the BUCKET arn | the operation still succeeds — **not required** | `u6-cat-073` |
 | `catalogSync` reader | `s3:GetObject` on `<bucket>/<prefix>/*` | **the operation fails**: `PartialScan` | `u6-cat-074` |
 | `catalogSync` reader | `s3:GetObject` on `<bucket>/logweir/*` | **the operation fails**: `PartialScan` | `u6-cat-075` |
+| retention enforcer | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`) | **the operation fails**: `state=Kept`, `code=ListRefused:AccessDenied` and `retention-result=deleted=0 failed=1 objects=0` | `u6-ret-084` |
+| retention enforcer | `s3:GetBucketLocation` on the BUCKET arn | the operation still succeeds — **not required** | `u6-ret-085` |
+| retention enforcer | `s3:GetObject` on `<bucket>/<prefix>/*` | the operation still succeeds — **not required** | `u6-ret-086` |
+| retention enforcer | `s3:DeleteObject` on `<bucket>/<prefix>/*` | **the operation fails**: `state=Kept`, `code=AccessDenied` and `retention-result=deleted=0 failed=1 objects=0` | `u6-ret-087` |
 
 **A wider grant than this table is not required by anything in this build.**
 Every action outside a role's row was removed and the role's operation still
@@ -506,6 +511,24 @@ entries say `Unreadable` and never `Missing`" — and a walk whose first
 listing was refused relays no body and lands `ResultUnreadable`. **If you
 separate the two, give the destination a `archiveRead` grant wide enough for
 the catalog, or accept that `RecoveryCatalog` will not sync.**
+
+**The retention enforcer needs no `s3:GetObject`.** It lists a set's objects
+and deletes them by the explicit key list its approved plan carries; it never
+reads one. The starting set here was §7f's own two-credential row, and
+removing `s3:GetObject` on `<bucket>/<prefix>/*` changed nothing about the run.
+
+**One warning about that row, measured on the way past.** §7f says the
+tombstones and the record are written with the destination's own
+`evidenceWrite` grant, and that this is what makes a deletion attributable by
+a principal that cannot delete. On this build they are written with
+**`archiveRead`'s** grant: the retention reconciler resolves the destination
+under `ArchiveRead` — deliberately, for the location — and then projects that
+same grant as the run's `LOGWEIR_EVIDENCE_AWS_*`. So on a destination that
+separates the two, an `Enforce` run's first intent tombstone is refused `403`,
+the point is `Kept` with `code=TombstoneRefused`, and nothing is deleted;
+and on one whose `archiveRead` *can* write under `logweir/*`, the deletion is
+attributed with a credential the design says must not be able to write there.
+Until that is fixed, read §7f's `evidenceWrite` row as `archiveRead`.
 
 ### 7b. A destination-backed run carries a complete `AWS_*` set, and none of it is the controller's
 
