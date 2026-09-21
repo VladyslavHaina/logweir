@@ -58,8 +58,10 @@ import {
   POLL_MS,
   SLOW_POLL_MS,
   backoffFor,
+  endReason,
   isSettled,
   watchOperation,
+  STREAM_END_REASONS,
 } from "../operation-watch.js";
 import {
   COMPLETION_GUIDANCE,
@@ -144,6 +146,8 @@ import {
   renderKeysPage,
   renderPolicyFacts,
   renderPolicyKeys,
+  renderRosterHalf,
+  renderRosterKeys,
   verdictFor,
 } from "../pages/keys.js";
 import { backupBadge, greenLabel, validVerification } from "../pages/backups.js";
@@ -914,6 +918,76 @@ test("the_keys_page_falls_back_to_the_roster_by_name_and_submits_nothing", () =>
   assert.equal(rows.indexOf("REDACTED PUBLIC KEY BODY"), -1);
 });
 
+test("KEYSVIEW_ABSENT_VALID__an_absent_expiredKeyIds_reads_unknown_and_never_valid", () => {
+  // THE DEFECT THIS ROW IS FOR, BY NAME. The roster half's expiry column used
+  // to be "`valid` unless this key id is in `status.expiredKeyIds[]`", and
+  // `[]` is what an ABSENT list decodes to in that spelling. So a TrustRoster
+  // the controller had never evaluated -- no status at all, or a status with
+  // no `expiredKeyIds` because nothing has parsed the keys yet -- printed a
+  // green `valid` for EVERY key in it. That is the exact sentence D3 section
+  // 7.7 forbids: `unknown` is not `valid`, and the one direction that must
+  // never be guessed is the flattering one.
+  //
+  // The roster has no `observedGeneration` and no `evaluatedAt`, so there is
+  // nothing to establish freshness FROM; the honest column is `unknown` with
+  // the reason beside it.
+  const roster = JSON.parse(readFileSync(
+    new URL("./fixtures/trustroster-default.json", import.meta.url), "utf8",
+  )).items[0];
+  const spec = roster.spec;
+  const expiredId = roster.status.expiredKeyIds[0];
+  const liveId = spec.signingKeys[0].keyId;
+
+  const rowFor = (html, keyId) => {
+    const at = html.indexOf(keyId);
+    assert.ok(at !== -1, "the key id " + keyId + " is rendered");
+    return html.slice(at, html.indexOf("</tr>", at));
+  };
+
+  // (1) AN EVALUATED ROSTER STILL READS THE CONTROLLER'S OWN LIST, so this is
+  // not a test that simply deleted a column.
+  const evaluated = decode(renderRosterKeys("signingKeys", spec.signingKeys, roster.status));
+  assert.match(rowFor(evaluated, liveId), /badge-green">valid</,
+    "an unexpired key under an evaluated status reads `valid`");
+  const evaluatedApprovers = decode(
+    renderRosterKeys("approverKeys", spec.approverKeys, roster.status),
+  );
+  assert.match(rowFor(evaluatedApprovers, expiredId), /badge-warn">expired</);
+
+  // (2) THE TWO ABSENCES. A status object with no `expiredKeyIds`, and no
+  // status at all: both are "nothing has evaluated this", and both read
+  // `unknown`.
+  for (const [label, status] of [
+    ["a status with no expiredKeyIds", { loaded: true }],
+    ["an empty status", {}],
+    ["no status object at all", undefined],
+    ["a null status", null],
+    ["expiredKeyIds that is not a list", { loaded: true, expiredKeyIds: "none" }],
+  ]) {
+    const html = decode(renderRosterKeys("signingKeys", spec.signingKeys, status));
+    const row = rowFor(html, liveId);
+    assert.match(row, /badge-flat">unknown</, label + ": the column reads `unknown`");
+    assert.match(row, /nothing has evaluated these keys yet/,
+      label + ": and says WHY it is unknown");
+    assert.equal(row.indexOf(">valid<"), -1,
+      label + ": THE MUTANT -- `valid` must not appear in this row for any key");
+    assert.equal(html.indexOf("badge-green"), -1,
+      label + ": and nothing in this table is green");
+  }
+
+  // (3) THE WHOLE ROSTER HALF, not just one table: an unevaluated roster is
+  // `unknown` in every row of both key lists.
+  const half = decode(renderRosterHalf({
+    roster: { metadata: { name: "default" }, spec: spec, status: { loaded: true } },
+  }));
+  assert.equal(half.indexOf(">valid<"), -1,
+    "neither approverKeys nor signingKeys claims `valid` for an unevaluated roster");
+  assert.equal((half.match(/badge-flat">unknown</g) || []).length,
+    spec.approverKeys.length + spec.signingKeys.length,
+    "every key in both lists carries the unknown badge, and none is skipped");
+  assert.ok(UNKNOWN_IS_NOT_VALID_SENTENCE.indexOf("never `valid`") !== -1);
+});
+
 // ===========================================================================
 // PLAT-19.1 -- the badge cases
 // ===========================================================================
@@ -1639,7 +1713,13 @@ test("the_stream_is_CLOSED_on_a_settled_document_and_on_disposal", async () => {
       this.addEventListener = made.addEventListener.bind(made);
       this.close = made.close.bind(this);
       queueMicrotask(() => {
-        made.state.handlers.operation({ data: JSON.stringify(con("operation-restore-completed.json")) });
+        // THE BARE VIEW, which is what `send_view` puts on the wire. Feeding
+        // the READ route's `{item, requestId}` envelope here is what let the
+        // envelope bug live: the suite asserted a close, and a close happens
+        // for a document that decodes to `undefined` too.
+        made.state.handlers.operation({
+          data: JSON.stringify(con("operation-restore-completed.json").item),
+        });
       });
     }
   }
@@ -1681,6 +1761,226 @@ test("the_stream_is_CLOSED_on_a_settled_document_and_on_disposal", async () => {
   controller.abort();
   assert.equal(open.state.closed, 1,
     "the route's own signal closes the connection -- and closing a READ never cancels the run");
+});
+
+// ===========================================================================
+// pass 2 reconciliation -- the stream's own two shapes
+// ===========================================================================
+
+/** A fake `EventSource` whose handlers this test drives by hand. */
+function streamHarness() {
+  const state = { closed: 0, opened: 0, handlers: {} };
+  class Source {
+    constructor() {
+      state.opened += 1;
+      state.handlers = {};
+      this.readyState = 1;
+      this.addEventListener = (type, handler) => {
+        state.handlers[type] = handler;
+      };
+      this.close = () => {
+        state.closed += 1;
+        this.readyState = 2;
+      };
+    }
+  }
+  return { state: state, Source: Source };
+}
+
+test("a_stream_frame_is_the_BARE_view_and_the_envelope_is_the_read_routes_alone", async () => {
+  // THE RECONCILIATION ITEM THE RENAMES DID NOT REACH (review section 5 item 2,
+  // in the one place it survived). `GET .../operations/{kind}/{name}` answers
+  // `OperationViewResponse` -- `{item, requestId}`, both required. The stream
+  // does NOT: `send_view` in `crates/logweir-api/src/status.rs` is
+  // `serde_json::to_string(&OperationView)`, so `operation` and `reset` carry
+  // the flat view with no wrapper. Decoding a frame as the envelope yields
+  // `undefined` for every document the stream has ever sent, and a watch that
+  // renders `undefined` is a live view that shows only its first read.
+  const envelope = con("operation-restore-completed.json");
+  assert.deepEqual(Object.keys(envelope).sort(), ["item", "requestId"],
+    "the READ route's fixture is the envelope, and `contract.spec.js` holds it to " +
+      "OperationViewResponse");
+
+  const seen = [];
+  const h = streamHarness();
+  watchOperation("team-a", "restore", "r1", (document) => seen.push(document), null, {
+    modeOf: () => "console",
+    EventSourceClass: h.Source,
+    setTimer: () => 0,
+    clearTimer: () => {},
+    read: async () => ({ terminal: false, verification: { state: "pending" } }),
+  });
+  h.state.handlers.operation({ data: JSON.stringify(envelope.item) });
+  assert.equal(seen.length, 1);
+  assert.ok(seen[0] !== null && seen[0] !== undefined,
+    "THE MUTANT: decode the frame as `{item, requestId}` and this is `undefined`");
+  assert.equal(seen[0].name, envelope.item.name);
+  assert.equal(seen[0].kind, "restore");
+  assert.equal(seen[0].targetMode, envelope.item.targetMode,
+    "and `targetMode` arrives at the TOP LEVEL, which is where the document publishes it");
+
+  // AND THE ENVELOPE ITSELF IS NOT A FRAME. Sent as one it is a document this
+  // client refuses, delivered as an error -- never as a blank render.
+  const errors = [];
+  const g = streamHarness();
+  watchOperation("team-a", "restore", "r2", (document, meta) => {
+    errors.push({ document: document, error: (meta || {}).error });
+  }, null, {
+    modeOf: () => "console",
+    EventSourceClass: g.Source,
+    setTimer: () => 0,
+    clearTimer: () => {},
+    read: async () => ({ terminal: false, verification: { state: "pending" } }),
+  });
+  g.state.handlers.operation({ data: JSON.stringify(envelope) });
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0].document, null);
+  assert.ok(isContractFailure(errors[0].error),
+    "an envelope on the stream is a contract failure with a field name, not a silent blank");
+});
+
+test("the_end_frame_is_a_reason_and_only_two_of_the_three_end_anything", async () => {
+  // `end` CARRIES `{"reason": ...}` AND NO DOCUMENT (`StreamEnd` in
+  // `crates/logweir-api/src/status.rs`). The first round fed it to the
+  // document handler and stopped on every one, which is wrong twice over: a
+  // normal close raised a decode error on screen, and `maxDuration` -- the
+  // 300-second CONNECTION ceiling, which a long backup hits while it is still
+  // running -- stopped the watch on a run that had not finished.
+  assert.deepEqual(Object.keys(STREAM_END_REASONS).sort(),
+    ["maxDuration", "settled", "vanished"]);
+  assert.equal(endReason("{\"reason\":\"settled\"}"), "settled");
+  assert.equal(endReason("{\"reason\":\"maxDuration\"}"), "maxDuration");
+  assert.equal(endReason("{\"reason\":\"vanished\"}"), "vanished");
+  assert.equal(endReason("{\"reason\":\"somethingLater\"}"), null,
+    "a reason this build does not know is not rounded to one it does");
+  assert.equal(endReason("not json at all"), null);
+
+  // (a) `settled` STOPS, and delivers nothing: there is no document in it.
+  const settled = streamHarness();
+  const settledSeen = [];
+  watchOperation("team-a", "backup", "b1", (doc, meta) => {
+    settledSeen.push({ doc: doc, error: (meta || {}).error });
+  }, null, {
+    modeOf: () => "console", EventSourceClass: settled.Source,
+    setTimer: () => 0, clearTimer: () => {},
+    read: async () => ({ terminal: false, verification: { state: "pending" } }),
+  });
+  settled.state.handlers.end({ data: "{\"reason\":\"settled\"}" });
+  assert.equal(settled.state.closed, 1, "the connection is closed");
+  assert.equal(settledSeen.length, 0,
+    "THE MUTANT: feed `end` to the document handler and this is one delivery carrying a " +
+      "decode error the operator sees as a broken page at the exact moment the run finished");
+
+  // (b) `maxDuration` RECONNECTS. The operation is untouched by a connection
+  // ceiling, and a watch that stopped here would leave a running backup frozen
+  // on screen at whatever it looked like five minutes in.
+  const long = streamHarness();
+  const timers = [];
+  watchOperation("team-a", "backup", "b2", () => {}, null, {
+    modeOf: () => "console", EventSourceClass: long.Source,
+    setTimer: (fn, ms) => { timers.push(ms); fn(); return 0; },
+    clearTimer: () => {}, random: () => 0,
+    read: async () => ({ terminal: false, verification: { state: "pending" } }),
+  });
+  assert.equal(long.state.opened, 1);
+  long.state.handlers.end({ data: "{\"reason\":\"maxDuration\"}" });
+  assert.equal(long.state.opened, 2, "the stream is re-opened, not abandoned");
+  assert.deepEqual(timers, [BACKOFF_MS[0]], "after the first backoff step");
+
+  // ... and an unreadable `end` takes the same side, which is the side that
+  // costs a connection rather than the side that shows a running run as done.
+  long.state.handlers.end({ data: "{}" });
+  assert.equal(long.state.opened, 3);
+
+  // ... but not for ever: a server that closed every stream at once falls back
+  // to polling on the same threshold a failed connect does.
+  const empty = streamHarness();
+  let polls = 0;
+  watchOperation("team-a", "backup", "b3", () => {}, null, {
+    modeOf: () => "console", EventSourceClass: empty.Source,
+    setTimer: (fn) => { fn(); return 0; }, clearTimer: () => {}, random: () => 0,
+    read: async () => { polls += 1; return { terminal: true, verification: { state: "valid" } }; },
+  });
+  for (let i = 0; i < CONNECTS_BEFORE_POLLING; i += 1) {
+    empty.state.handlers.end({ data: "{\"reason\":\"maxDuration\"}" });
+  }
+  await new Promise((resolve) => setTimeout(resolve, 1));
+  assert.equal(polls, 1, "the transport falls back rather than reconnecting for ever");
+
+  // ... and ONE DOCUMENT IN BETWEEN RESETS THE COUNT, because a stream that
+  // delivered a snapshot and then hit its ceiling is a healthy stream.
+  const healthy = streamHarness();
+  let healthyPolls = 0;
+  watchOperation("team-a", "backup", "b4", () => {}, null, {
+    modeOf: () => "console", EventSourceClass: healthy.Source,
+    setTimer: (fn) => { fn(); return 0; }, clearTimer: () => {}, random: () => 0,
+    read: async () => {
+      healthyPolls += 1;
+      return { terminal: true, verification: { state: "valid" } };
+    },
+  });
+  const running = JSON.parse(JSON.stringify(con("operation-backup-preparing.json").item));
+  for (let i = 0; i < CONNECTS_BEFORE_POLLING + 2; i += 1) {
+    healthy.state.handlers.operation({ data: JSON.stringify(running) });
+    healthy.state.handlers.end({ data: "{\"reason\":\"maxDuration\"}" });
+  }
+  await new Promise((resolve) => setTimeout(resolve, 1));
+  assert.equal(healthyPolls, 0, "a stream that keeps delivering keeps its transport");
+
+  // (c) `vanished` STOPS AND SAYS SO. The last snapshot stays -- it is what
+  // was true -- and the reason is on screen rather than a page that goes quiet.
+  const gone = streamHarness();
+  const goneSeen = [];
+  watchOperation("team-a", "backup", "b5", (doc, meta) => {
+    goneSeen.push({ doc: doc, error: (meta || {}).error });
+  }, null, {
+    modeOf: () => "console", EventSourceClass: gone.Source,
+    setTimer: () => 0, clearTimer: () => {},
+    read: async () => ({ terminal: false, verification: { state: "pending" } }),
+  });
+  gone.state.handlers.end({ data: "{\"reason\":\"vanished\"}" });
+  assert.equal(gone.state.closed, 1);
+  assert.equal(goneSeen.length, 1);
+  assert.equal(goneSeen[0].doc, null, "no document is invented for an object that is gone");
+  assert.equal(goneSeen[0].error.reason, "OperationVanished");
+  assert.match(goneSeen[0].error.message, /deleted while this page was following it/);
+  assert.match(goneSeen[0].error.message, /Nothing here was cancelled by this page/);
+});
+
+test("isSettled_is_the_servers_own_two_conditions_and_the_two_states_agree_by_construction", () => {
+  // REVIEW SECTION 5 ITEM 4, CHECKED AGAINST THE HANDLER AND NOT THE FIXTURE.
+  // `is_settled` in `crates/logweir-api/src/status.rs` is
+  // `terminal && trust.state != Pending`; this page reads
+  // `terminal && verification.state !== "pending"`. They are the same
+  // predicate because `trust_of` maps `VerificationState::Pending` to
+  // `TrustState::Pending` and NOTHING ELSE to it -- so the two words are
+  // pending together or not at all, and the console cannot stop one frame
+  // before the server does.
+  assert.equal(isSettled({ terminal: true, verification: { state: "pending" } }), false);
+  assert.equal(isSettled({ terminal: true, verification: { state: "valid" } }), true);
+  assert.equal(isSettled({ terminal: false, verification: { state: "valid" } }), false);
+  assert.equal(isSettled({ verification: { state: "valid" } }), false,
+    "an absent `terminal` is not observed, and not observed is not settled");
+
+  // EVERY PUBLISHED PAIRING, from the fixtures the document validates.
+  for (const name of [
+    "operation-restore-completed.json",
+    "operation-restore-untrusted.json",
+    "operation-restore-no-record-check.json",
+    "operation-backup-preparing.json",
+  ]) {
+    const item = operationOf(name);
+    assert.equal(
+      item.verification.state === "pending",
+      item.trust.state === "pending",
+      name + ": `verification.state` and `trust.state` are pending together or not at all",
+    );
+    assert.equal(
+      isSettled(item),
+      item.terminal === true && item.trust.state !== "pending",
+      name + ": this page stops exactly where the server sends `end: settled`",
+    );
+  }
 });
 
 test("a_durable_result_empties_the_form_and_re_reads_the_list", async () => {

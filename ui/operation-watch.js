@@ -94,6 +94,7 @@ import {
   decodeD3Item,
   decodeD3List,
   decodeD3Operation,
+  decodeD3OperationFrame,
   contractFailure,
 } from "./contract.js";
 import { active, cancelled, readOptions } from "./lifecycle.js";
@@ -118,6 +119,49 @@ export function serverClock() {
 
 /** The reconnect delays, in order, and the last one repeats. */
 export const BACKOFF_MS = Object.freeze([1000, 2000, 5000, 30000]);
+
+/** The three reasons the server's `end` frame carries, and what each MEANS
+ *  (`StreamEnd` in `crates/logweir-api/src/status.rs`).
+ *
+ *  `end` IS NOT A DOCUMENT. Its payload is `{"reason": "..."}` and nothing
+ *  else -- no operation, no envelope. The first round decoded it as an
+ *  operation and stopped the watch on every one of them, which is wrong in
+ *  BOTH directions: a normal close raised a decode error on screen, and a
+ *  `maxDuration` close -- the 300-second connection ceiling, which a running
+ *  backup hits while it is still running -- stopped the watch and left the
+ *  page showing a mid-run snapshot with nothing saying it had stopped looking.
+ *
+ *  `maxDuration` IS THE SERVER SAYING "RECONNECT", and it is the only one of
+ *  the three that is not the end of anything. `settled` is the end of the
+ *  operation; `vanished` is the end of the object. */
+export const STREAM_END_REASONS = Object.freeze({
+  /** Terminal, and the verification verdict is in. Nothing more is coming. */
+  settled: "settled",
+  /** The CONNECTION's 300-second ceiling. The operation is untouched. */
+  maxDuration: "maxDuration",
+  /** The object is gone. A new object under the same name is a different run. */
+  vanished: "vanished",
+});
+
+/** The reason an `end` frame carries, or `null` for one this build cannot read.
+ *
+ *  An UNREADABLE `end` IS TREATED AS `maxDuration` BY THE CALLER, which is the
+ *  side that costs a connection rather than the side that shows a running
+ *  operation as a finished one. */
+export function endReason(data) {
+  let parsed;
+  try {
+    parsed = JSON.parse(data);
+  } catch (notJson) {
+    return null;
+  }
+  const reason = (parsed || {}).reason;
+  return typeof reason === "string" && Object.prototype.hasOwnProperty.call(
+    STREAM_END_REASONS, reason,
+  )
+    ? reason
+    : null;
+}
 
 /** How much jitter one delay may carry, as a fraction of itself. Two tabs
  *  watching the same operation must not reconnect in lockstep. */
@@ -194,6 +238,11 @@ export function watchOperation(ns, kind, name, onUpdate, lifecycle, deps) {
   let timer = null;
   let stream = null;
   let failedConnects = 0;
+  // Consecutive `end` frames that did NOT end the operation, with no document
+  // in between. A server that closed a stream immediately and for ever would
+  // otherwise be reconnected to for ever; this counter falls back to polling
+  // on the same threshold a failed connect does.
+  let emptyEnds = 0;
   let pollErrors = 0;
   let transport = modeOf() === CONSOLE && streamable(d.EventSourceClass)
     ? "stream"
@@ -251,17 +300,23 @@ export function watchOperation(ns, kind, name, onUpdate, lifecycle, deps) {
     }
     stream = source;
     source.onmessage = null;
-    // FOUR NAMED EVENT TYPES AND NO DEFAULT HANDLER (D3 section 2.6). `operation`
-    // carries the full DTO, `reset` carries a fresh snapshot after the server
-    // dropped the resume point, `end` says the operation is terminal and its
-    // verification has settled, and `heartbeat` says only that the connection
-    // is alive. An unnamed `message` is a document this contract does not
+    // FOUR NAMED EVENT TYPES AND NO DEFAULT HANDLER (D3 section 2.6).
+    // `operation` carries the bare view, `reset` carries the same shape as a
+    // fresh snapshot after the server dropped the resume point, `end` carries
+    // `{reason}` and says why this CONNECTION closed, and `heartbeat` says
+    // only that the connection is alive. TWO OF THE FOUR ARE DOCUMENTS AND
+    // TWO ARE NOT, which is why `end` has its own handler rather than sharing
+    // this one. An unnamed `message` is a document this contract does not
     // describe, and it is deliberately not handled: a stream that started
     // sending something else is a contract change, not a render.
     const document = (event) => {
       failedConnects = 0;
+      emptyEnds = 0;
       try {
-        deliver(decodeD3Operation(JSON.parse(event.data)).value.item);
+        // THE FRAME IS THE BARE VIEW, NOT THE READ ROUTE'S ENVELOPE. See
+        // `decodeD3OperationFrame`: `send_view` serializes an `OperationView`
+        // and the GET serializes an `OperationViewResponse` around one.
+        deliver(decodeD3OperationFrame(JSON.parse(event.data)).value);
       } catch (bad) {
         deliver(null, bad);
       }
@@ -269,8 +324,45 @@ export function watchOperation(ns, kind, name, onUpdate, lifecycle, deps) {
     source.addEventListener("operation", document);
     source.addEventListener("reset", document);
     source.addEventListener("end", (event) => {
-      document(event);
-      stop();
+      // `end` CARRIES A REASON AND NO DOCUMENT, and only two of the three
+      // reasons are an end. Feeding it to `document` was a decode error per
+      // stream; stopping on all three was a watch that gave up every 300 s on
+      // any operation that took longer than that.
+      const reason = endReason(event.data);
+      if (reason === STREAM_END_REASONS.settled) {
+        stop();
+        return;
+      }
+      closeStream();
+      if (reason === STREAM_END_REASONS.vanished) {
+        // THE OBJECT IS GONE AND THIS PAGE DOES NOT GO QUIET ABOUT IT. The
+        // last snapshot stays on screen -- it is what was true -- with the
+        // server's own reason beside it, and the watch stops rather than
+        // re-reading a name that now belongs to nobody.
+        const gone = new Error(
+          "The API server no longer has this operation: it was deleted while this page was " +
+            "following it. Nothing here was cancelled by this page, and an object created " +
+            "later under the same name is a different run — re-open it from the list to read " +
+            "that one.",
+        );
+        gone.reason = "OperationVanished";
+        deliver(null, gone);
+        stop();
+        return;
+      }
+      // `maxDuration`, or an `end` this build cannot read: the CONNECTION
+      // ended, not the operation. Reconnect, and give up on the stream only
+      // after as many empty closes as failed connects.
+      if (done()) {
+        return;
+      }
+      emptyEnds += 1;
+      if (emptyEnds >= CONNECTS_BEFORE_POLLING) {
+        transport = "poll";
+        poll();
+        return;
+      }
+      timer = setTimer(openStream, backoffFor(emptyEnds - 1, random()));
     });
     source.addEventListener("heartbeat", () => {
       failedConnects = 0;

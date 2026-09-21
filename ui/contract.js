@@ -2771,10 +2771,30 @@ export function decodeD3List(plural, value) {
   return decodeListWith(pair[0], pair[1], value);
 }
 
-/** Decodes the operation document -- the one the operation view and its SSE
- *  stream both carry. */
+/** Decodes `GET .../operations/{kind}/{name}` -- the ENVELOPE, `{item,
+ *  requestId}`. */
 export function decodeD3Operation(value) {
   return decodeWith(D3_OPERATION_RESPONSE, value);
+}
+
+/** Decodes ONE STREAM FRAME'S operation document -- the BARE view, no envelope.
+ *
+ *  THE READ AND THE STREAM SEND TWO DIFFERENT SHAPES AND THAT IS THE SERVER'S
+ *  DECISION, not a guess. `GET .../operations/{kind}/{name}` answers
+ *  `OperationViewResponse` (`{item, requestId}`, and both are required); the
+ *  stream's `operation` and `reset` frames are
+ *  `serde_json::to_string(&OperationView)` -- see `send_view` in
+ *  `crates/logweir-api/src/status.rs` -- so they carry the flat view and
+ *  neither an `item` wrapper nor a `requestId`. A request id belongs to a
+ *  REQUEST, and a stream that emitted one per frame would be publishing the
+ *  same id 20 times.
+ *
+ *  Reading a frame with the envelope shape is not a cosmetic mismatch: it
+ *  yields `undefined` for every document the stream has ever sent, so the
+ *  console's live operation view renders nothing that arrives over the wire
+ *  and falls silent behind its own first read. */
+export function decodeD3OperationFrame(value) {
+  return decodeWith(D3_OPERATION, value);
 }
 
 /** Decodes one page of a catalog's points. */
