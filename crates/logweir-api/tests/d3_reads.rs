@@ -486,7 +486,35 @@ async fn the_point_view_keeps_availability_and_verification_apart_and_pages() {
     // point" builds `source.point {point_id, receipt_key, receipt_sha256,
     // manifest_sha256}`; without these four it cannot, and keys and digests
     // are all that is published — never content.
-    assert!(first["receiptKey"].as_str().is_some_and(|k| !k.is_empty()));
+    // **CATALOG-RECEIPTKEY-REDACTED.** `!is_empty()` was not a test of this
+    // field: `[redacted].receipt.json` is not empty, and that is exactly what
+    // every live point published, because the run id in the key is a
+    // 26-character ULID and the redactor's free-component budget is 24. The
+    // binding has to be the KEY, so the row asks for the key.
+    for item in v["items"].as_array().unwrap() {
+        let key = item["receiptKey"]
+            .as_str()
+            .expect("a point carries its key");
+        let run_id = item["runId"].as_str().expect("a point carries its run id");
+        assert!(
+            !key.contains(logweir_core::check_contract::REDACTED),
+            "the published plan binding is redacted: {key}"
+        );
+        assert!(
+            key.ends_with(&format!("/{run_id}.receipt.json")),
+            "`receiptKey` must be `<prefix>/<backup_id>/<run_id>.receipt.json`,              so a console can bind a restore to it: {key}"
+        );
+        assert_eq!(
+            key,
+            format!(
+                "logweir/backups/{}/{run_id}.receipt.json",
+                item["backupId"]
+                    .as_str()
+                    .expect("a point carries its backup id")
+            ),
+            "and it is the key `logweir backup run` wrote (`phase_run::receipt_keys`)"
+        );
+    }
     assert!(first["receiptSha256"]
         .as_str()
         .is_some_and(|d| d.starts_with("sha256:")));

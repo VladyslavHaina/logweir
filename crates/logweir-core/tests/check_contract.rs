@@ -10,18 +10,17 @@
 
 use chrono::{DateTime, Utc};
 use logweir_core::check_contract::{
-    advisory_warnings, aggregate, aggregate_expires_at, apply_rules, frames, inputs_digest, redact,
-    is_object_key_shaped, redaction_rules, stale_reasons, topic_tsv, topic_tsv_sha256,
-    visibility, ApprovalRef,
-    Attestation, Authority, BindingInputs, CaBundleRef, CheckCode, CheckId, CheckOperation,
-    CheckOutcome, CheckPlan, CheckPlanError, CheckPlanKind, CheckRequest, CheckResult,
-    CheckResultError, CheckState, ConnectionPlan, CredentialMode, DestinationAccessRequest,
-    DestinationPlan, EndFrame, EvidenceFetchRequest, EvidenceObjectRequest, ExpectedSummary,
-    FrameExpectations, Gating, OverallState, Referent, RosterRef, SourceConnectionRequest,
-    StaleReason, Stream, TopicEntry, TopicInventoryRequest, TruncationReason, VisibilityBasis,
-    VisibilitySignals, VisibilityState, CHECK_CONTRACT_VERSION, CHECK_PLAN_CONTRACT,
-    CHECK_RESULT_CONTRACT, FRAME_MAX_BYTES, MAX_CHECK_ENTRIES, MESSAGE_MAX_CHARS,
-    PART_MAX_BASE64_CHARS, REDACTED,
+    advisory_warnings, aggregate, aggregate_expires_at, apply_rules, frames, inputs_digest,
+    is_object_key_shaped, redact, redaction_rules, stale_reasons, topic_tsv, topic_tsv_sha256,
+    visibility, ApprovalRef, Attestation, Authority, BindingInputs, CaBundleRef, CheckCode,
+    CheckId, CheckOperation, CheckOutcome, CheckPlan, CheckPlanError, CheckPlanKind, CheckRequest,
+    CheckResult, CheckResultError, CheckState, ConnectionPlan, CredentialMode,
+    DestinationAccessRequest, DestinationPlan, EndFrame, EvidenceFetchRequest,
+    EvidenceObjectRequest, ExpectedSummary, FrameExpectations, Gating, OverallState, Referent,
+    RosterRef, SourceConnectionRequest, StaleReason, Stream, TopicEntry, TopicInventoryRequest,
+    TruncationReason, VisibilityBasis, VisibilitySignals, VisibilityState, CHECK_CONTRACT_VERSION,
+    CHECK_PLAN_CONTRACT, CHECK_RESULT_CONTRACT, FRAME_MAX_BYTES, MAX_CHECK_ENTRIES,
+    MESSAGE_MAX_CHARS, PART_MAX_BASE64_CHARS, REDACTED,
 };
 use logweir_core::destination::{
     Addressing, DestinationLocation, DestinationRole, StorageProvider, TransportSecurity,
@@ -1527,13 +1526,19 @@ fn a_receipt_keys_ulid_run_id_survives_and_nothing_its_length_rides_with_it() {
     // key, so only the budget and the shape clause can answer for it.
     let refused: Vec<(&str, String)> = vec![
         // 27 characters: one over a ULID, and the row a raised budget fails.
-        ("27 Crockford characters", format!("{RUN}XY")[..27].to_string()),
+        (
+            "27 Crockford characters",
+            format!("{RUN}XY")[..27].to_string(),
+        ),
         // 26 characters, Crockford alphabet, but the leading character is over
         // `7`: 26 characters hold 130 bits and a ULID is 128, so nothing minted
         // this and it is not exempt.
         ("26, but the timestamp overflows", format!("Z{}", &RUN[1..])),
         // 26 characters, upper case, but `U` is not in Crockford base32.
-        ("26, but not the Crockford alphabet", RUN.replacen('T', "U", 1)),
+        (
+            "26, but not the Crockford alphabet",
+            RUN.replacen('T', "U", 1),
+        ),
         // 26 characters, mixed case — the shape a credential really takes.
         ("26, but mixed case", RUN.replacen('T', "t", 1)),
         // 26 characters of base64 that is not even alphanumeric-only.

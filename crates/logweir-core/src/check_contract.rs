@@ -2615,14 +2615,16 @@ fn is_public_name(c: &str) -> bool {
 /// `receiptSha256` and the location beside it survived.
 ///
 /// The budget is NOT raised to cover it. Raising it to 26 admits any
-/// 26-character mixed-case component, and the same measurement over 400,000
-/// random keys goes from 1.25e-5 to 4.5e-5 — 3.6x worse for a shape nothing
-/// needs. A ULID is instead exempted BY SHAPE ([`is_ulid`]): it is an identity
-/// this product minted, not text an adopter chose, and the same measurement
-/// with the exemption is 1.25e-5 — unchanged, not one extra accept in 400,000.
+/// 26-character mixed-case component, and the same measurement goes from
+/// 1.35e-5 to 3.75e-5 — nearly 3x worse for a shape nothing needs. A ULID is
+/// instead exempted BY SHAPE ([`is_ulid`]): it is an identity this product
+/// minted, not text an adopter chose, and the same measurement with the
+/// exemption is 1.35e-5 — **not one extra accept in 4,000,000 random keys**.
 /// The exemption is narrow by construction: a random base64 component is
 /// ULID-shaped with probability `(8/64) * (32/64)^25 ≈ 4e-9`, and a ULID still
-/// spends the ONE free slot, so nothing may ride beside it.
+/// spends the ONE free slot, so nothing may ride beside it. (The three figures
+/// are one 4,000,000-key run of the script in the worker report, which
+/// reproduces the 400,000-key figures above at the same caps.)
 const FREE_COMPONENT_MAX: usize = 24;
 
 /// A ULID as [`crate::ids::format_run_id`] mints one: exactly 26 characters of

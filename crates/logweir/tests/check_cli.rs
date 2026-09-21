@@ -4850,9 +4850,10 @@ fn a_slash_bearing_credential_is_not_an_object_key() {
 fn a_ulid_run_id_is_an_object_key_and_a_component_its_length_is_not() {
     const SET: &str = "3f0ada8f-1a2b-4c3d-9e8f-0123456789ab";
     const RUN: &str = "01M2VKCST7EF12EW5T2Y7SJ86Q";
-    // The live lab's own prefix and set id, from the D3 W14 capture in
-    // `crates/logweir-api/tests/fixtures/catalog-page-entries.jsonl`, whose
-    // `receiptKey` column is the defect verbatim.
+    // The live lab's own prefix, set id and run id, from the D3 W14 capture in
+    // `crates/logweir-api/tests/fixtures/catalog-page-entries.jsonl` — whose
+    // `receiptKey` column held the defect verbatim
+    // (`"[redacted].receipt.json"`) until this fix.
     const LAB: &str = "archive/e1c4ff19-62fb-4d76-9a3f-2177d6fd9d4a/01M2VKCST7EF12EW5T2Y7SJ86Q";
 
     // --- KEEP: the plan binding survives, bare and in the line it travels in -
@@ -7068,10 +7069,8 @@ fn the_receipt_key_a_restore_binds_to_survives_a_sync_for_a_real_run_id() {
         );
         let run = drive_sync(
             sync_request(),
-            &FakeWiring::default().with_role(
-                DestinationRole::ArchiveRead,
-                place(FakeObjects::new(), &f),
-            ),
+            &FakeWiring::default()
+                .with_role(DestinationRole::ArchiveRead, place(FakeObjects::new(), &f)),
         );
         let mut entry = entries_of(&body_of(&run)).remove(0);
         entry["__key"] = serde_json::json!(f.point.receipt.key);
