@@ -1775,3 +1775,90 @@ fn a_configured_zero_switches_fail_fast_off_rather_than_cancelling_on_sight() {
          disable a behaviour an operator believes is running"
     );
 }
+
+/// **`apply` ITSELF CARRIES WHAT THE BASE BUILDER DID NOT** — defect
+/// RESTORE-ADMITTED-DROPPED, at the function it lived in.
+///
+/// The two production callers now upsert inside their own builders, so a base
+/// reaching here already carries. That makes this the only row that can fail
+/// when `apply`'s carry is removed — and it must exist, because `apply` is the
+/// one place the guarantee is stated for every builder that will ever be
+/// written: a merge PATCH REPLACES `status.conditions`, so the array this
+/// function emits is the whole of it.
+///
+/// KILLS: `status.insert("conditions", Value::Array(owned))` in
+/// `diagnostics::apply` — writing the base's array plus `RunnerReady` and
+/// dropping everything the object already held.
+#[test]
+fn apply_carries_a_stored_condition_the_base_builder_did_not_name() {
+    let p = waiting_pod(
+        "Pending",
+        "False",
+        "ImagePullBackOff",
+        "back-off pulling image",
+    );
+    let d = derive(&facts(Some(&p), &[], at(2, 0)));
+    let stored = vec![
+        Condition {
+            r#type: "Admitted".to_string(),
+            status: "True".to_string(),
+            observed_generation: Some(3),
+            last_transition_time: Some(at(1, 0)),
+            reason: Some("Admitted".to_string()),
+            message: Some("the approval this run names is Verified=True".to_string()),
+        },
+        Condition {
+            r#type: "JobCreated".to_string(),
+            status: "True".to_string(),
+            observed_generation: Some(3),
+            last_transition_time: Some(at(1, 0)),
+            reason: Some("JobCreated".to_string()),
+            message: Some("the runner Job exists".to_string()),
+        },
+    ];
+    // A BASE THAT NAMES ONLY ITS OWN CONDITION — the shape every builder had
+    // before this branch, and the shape the next one will have until it knows
+    // better.
+    let base = json!({"status": {
+        "phase": "Running",
+        "conditions": [{"type": "JobCreated", "status": "True", "reason": "JobCreated"}],
+    }});
+    let progress = Progress::default();
+    let mut write = write_for(&d, &progress, None, at(2, 0), false);
+    write.conditions = Some(&stored);
+    let out = apply(base, &write);
+
+    let conditions = out["status"]["conditions"]
+        .as_array()
+        .expect("an array")
+        .clone();
+    let find = |want: &str| conditions.iter().find(|c| c["type"] == json!(want));
+    let carried = find("Admitted").unwrap_or_else(|| {
+        panic!(
+            "a condition the object holds and this patch is not about is CARRIED, not deleted: \
+             {conditions:?}"
+        )
+    });
+    assert_eq!(carried["status"], json!("True"));
+    assert_eq!(
+        carried["lastTransitionTime"].as_str(),
+        at(1, 0)
+            .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+            .as_str()
+            .into(),
+        "verbatim, with its original instant — nothing transitioned"
+    );
+    assert_eq!(
+        conditions
+            .iter()
+            .map(|c| c["type"].as_str().unwrap_or_default().to_string())
+            .collect::<Vec<_>>(),
+        vec![
+            "Admitted".to_string(),
+            "JobCreated".to_string(),
+            CONDITION_RUNNER_READY.to_string()
+        ],
+        "in the order the object already holds them, with this patch's own appended — \
+         `status_unchanged` compares arrays element by element: {conditions:?}"
+    );
+}
