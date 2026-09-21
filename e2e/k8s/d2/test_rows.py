@@ -487,6 +487,26 @@ def test_a_catalog_records_the_sentence_it_did_say() -> None:
                                           "reason": "ViewFresh"}]}))
 
 
+def test_a_job_that_never_got_a_pod_is_still_over() -> None:
+    row("a Job with a succeeded pod is terminal",
+        d2.u6_job_is_terminal({"status": {"succeeded": 1}}))
+    row("a Job with a failed pod is terminal",
+        d2.u6_job_is_terminal({"status": {"failed": 1}}))
+    # THE RECORDED SHAPE: the enforcement Job named a ServiceAccount the
+    # namespace did not have, so the kubelet never made a pod, both counters
+    # stayed at zero, and the policy degraded around a Job that never ran.
+    row("a Job the API server refused a pod for is terminal once it says Failed",
+        d2.u6_job_is_terminal({"status": {"conditions": [
+            {"type": "Failed", "status": "True", "reason": "BackoffLimitExceeded"}]}}))
+    row("MUTANT: a Job still trying to create its pod is NOT terminal",
+        not d2.u6_job_is_terminal({"status": {"active": 0, "conditions": []}}))
+    row("MUTANT: a `Failed` condition that is not True",
+        not d2.u6_job_is_terminal({"status": {"conditions": [
+            {"type": "Failed", "status": "False", "reason": "BackoffLimitExceeded"}]}}))
+    row("MUTANT: a Job with no status at all",
+        not d2.u6_job_is_terminal({}))
+
+
 def test_only_the_products_own_denial_counts_as_a_denial() -> None:
     row("a check row classified `AccessDenied`",
         d2.u6_denied({"destination.archiveListable": {"state": "notReady",

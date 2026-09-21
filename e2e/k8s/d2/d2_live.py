@@ -4659,6 +4659,13 @@ def u6setup() -> None:
     u6_signing_key()
     apply({"apiVersion": "v1", "kind": "ServiceAccount",
            "metadata": owned("logweir-runner"), "automountServiceAccountToken": False})
+    # `retention_policy.rs::SERVICE_ACCOUNT` — an enforcement Job names it and
+    # the kubelet refuses the pod without it. Absent, the Job exists, no pod is
+    # ever created, `status.failed` stays 0 so the Job never looks terminal,
+    # and three runs later the policy is `EnforcementDegraded` with "the last
+    # run produced no exit code (its pod is gone or was never readable)".
+    apply({"apiVersion": "v1", "kind": "ServiceAccount",
+           "metadata": owned("logweir-retention"), "automountServiceAccountToken": False})
 
     objects: list[dict[str, Any]] = []
     objects += kafka_objects("kafka-acl", "U6D2AclAAAAAAAAAAAAAAA",
@@ -5320,11 +5327,8 @@ def u6_retention_job_op():
         job = {"apiVersion": "batch/v1", "kind": "Job",
                "metadata": owned(name), "spec": spec}
         apply(job)
-        finished = wait_for(
-            "job", name,
-            lambda o: bool((o.get("status") or {}).get("succeeded"))
-            or bool((o.get("status") or {}).get("failed")),
-            timeout=420, what="a terminal Job")
+        finished = wait_for("job", name, u6_job_is_terminal,
+                            timeout=420, what="a terminal Job")
         logs = redact(pod_logs_for_job(name, tail=120))[-3000:]
         artifact(f"u6/objects/{name}.json", finished)
         artifact(f"u6/objects/{name}.log", logs)
@@ -5338,6 +5342,23 @@ def u6_retention_job_op():
                 "classified": classified,
                 "unclassified": (not (ok and deleted >= 1)) and not u6_denied(classified)}
     return op
+
+
+def u6_job_is_terminal(job: dict[str, Any]) -> bool:
+    """Has this Job finished, one way or the other?
+
+    `status.succeeded`/`status.failed` count PODS, so a Job the kubelet refuses
+    to give a pod at all — a missing ServiceAccount, for one — sits at zero of
+    both forever while the API server records `FailedCreate` every few minutes.
+    The `Complete` and `Failed` conditions are what say the Job is over.
+    """
+    status = job.get("status") or {}
+    if status.get("succeeded") or status.get("failed"):
+        return True
+    return any(
+        c.get("type") in ("Complete", "Failed") and c.get("status") == "True"
+        for c in status.get("conditions", []) or []
+    )
 
 
 def u6_retention_policy(name: str, *, catalog: str, generation_note: str = "") -> dict[str, Any]:
@@ -5425,15 +5446,18 @@ def u6e() -> None:
             jobs = [j for j in get_list("jobs")
                     if any(o.get("uid") == policy_uid
                            for o in (j["metadata"].get("ownerReferences") or []))]
-            terminal = [j for j in jobs
-                        if (j.get("status") or {}).get("succeeded")
-                        or (j.get("status") or {}).get("failed")]
+            terminal = [j for j in jobs if u6_job_is_terminal(j)]
             if terminal:
                 job_obj = terminal[0]
                 break
             time.sleep(10)
         policy = get("retentionpolicy", policy_name)
         artifact(f"u6/objects/{policy_name}.json", policy)
+        if job_obj is None:
+            events = run(K + ["get", "events", "--field-selector",
+                              "reason=FailedCreate", "--sort-by=.lastTimestamp"],
+                         check=False, timeout=60).stdout[-800:]
+            sc.detail["failedCreateEvents"] = redact(events)
         check(job_obj is not None,
               f"no enforcement Job for {policy_name} within {window}s; "
               f"status: {redact(json.dumps(policy.get('status'), sort_keys=True))[:600]}")
