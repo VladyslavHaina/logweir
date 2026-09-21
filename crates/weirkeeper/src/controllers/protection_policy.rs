@@ -922,6 +922,13 @@ fn with_catalog_facts(
     mut candidate: p::PointCandidate,
     catalog: &p::CatalogAnswer,
 ) -> p::PointCandidate {
+    // A fast path AND the first half of the fallback-not-authority rule: a
+    // policy whose points the controller DID read must not scan the view once
+    // per candidate (up to `MAX_BACKUPS_SCANNED` times a pass), and must not
+    // take the view's numbers over its own. The two `is_none()` conjuncts below
+    // are the second half; all three together are one rule and the mutant that
+    // removes them (`MED3-M1`) makes the catalog row authoritative, which the
+    // `ControllerIdentity` row catches.
     if candidate.recovery_point_at.is_some() && candidate.point_id.is_some() {
         return candidate;
     }

@@ -3149,10 +3149,16 @@ fn a_reached_and_refused_verdict_is_unprotected_even_with_no_capture_time() {
 /// digest the controller recorded, NOT taken from the catalog row, and the
 /// capture time is the object's own.
 ///
-/// MUTANT: make `with_catalog_facts` OVERWRITE rather than fill — drop the
-/// `recovery_point_at.is_some() && point_id.is_some()` early return. The row's
-/// capture time here is deliberately 40 h old against a 26 h objective, so the
-/// health assertion and the `recoveryPointAt` assertion both fail.
+/// MUTANT (`MED3-M1`): make the catalog row AUTHORITATIVE rather than a
+/// fallback — drop `with_catalog_facts`'s early return and both `is_none()`
+/// conjuncts, so the row's values are assigned unconditionally. The row here
+/// carries a capture time 40 h old against a 26 h objective, so the health
+/// assertion and the `recoveryPointAt` assertion both fail. Dropping any ONE of
+/// the three survives, and that is why the mutant removes all three: on every
+/// shape `controllers::backup` produces, `status.capture` and
+/// `status.evidence.receiptSha256` are written together (both only on a `Valid`
+/// verdict), so "fill" and "overwrite" differ only when the rule is removed
+/// whole.
 #[test]
 fn a_controller_identity_destination_with_a_verified_receipt_is_protected() {
     let spec = {
