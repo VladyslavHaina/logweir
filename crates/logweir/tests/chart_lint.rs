@@ -1699,8 +1699,7 @@ fn chart_lint_the_legacy_page_creates_a_backup_and_never_edits_one() {
         let role = find(&docs, "ClusterRole", "logweir-ui");
         let mut on_backups: BTreeSet<String> = BTreeSet::new();
         for (groups, resources, verbs) in rules_of(role) {
-            if groups.iter().any(|g| g == "logweir.dev")
-                && resources.iter().any(|r| r == "backups")
+            if groups.iter().any(|g| g == "logweir.dev") && resources.iter().any(|r| r == "backups")
             {
                 on_backups.extend(verbs);
             }
