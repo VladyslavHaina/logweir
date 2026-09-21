@@ -724,7 +724,23 @@ def mc_pod() -> dict[str, Any]:
 
 
 def mc(*args: str, check: bool = True, timeout: int = 120) -> subprocess.CompletedProcess:
-    return run(K + ["exec", "mc", "--", "mc", *args], check=check, timeout=timeout)
+    # `kubectl exec` occasionally dies with "error stream protocol error" on
+    # this host. That is a fact about the connection and never about the store,
+    # so it is retried rather than recorded as a measurement.
+    last = None
+    for attempt_no in range(3):
+        proc = run(K + ["exec", "mc", "--", "mc", *args], check=False, timeout=timeout)
+        if proc.returncode == 0:
+            return proc
+        last = proc
+        if "error stream protocol error" not in (proc.stderr + proc.stdout):
+            break
+        time.sleep(2 * (attempt_no + 1))
+    if check and last is not None and last.returncode != 0:
+        raise RuntimeError(
+            "mc failed (" + str(last.returncode) + "): mc " + " ".join(args)
+            + "\nstdout: " + redact(last.stdout) + "\nstderr: " + redact(last.stderr))
+    return last  # type: ignore[return-value]
 
 
 def broker_exec(pod_label: str, args: list[str], *, check: bool = True, timeout: int = 300):
@@ -4357,9 +4373,25 @@ def u6_attach(user: str, units: list[str], tag: str) -> str:
     seq = int(state.get("u6PolicySeq", 0)) + 1
     state["u6PolicySeq"] = seq
     name = f"u6-{tag}-{seq}"[:60]
+    if not units:
+        # MinIO refuses a policy document with no statement, and "no policy
+        # attached" is the honest spelling of an empty grant anyway.
+        previous = (state.get("u6Attached") or {}).get(user)
+        if previous:
+            mc("admin", "policy", "detach", "a", previous, "--user", user, check=False)
+        attached = dict(state.get("u6Attached") or {})
+        attached.pop(user, None)
+        state["u6Attached"] = attached
+        save()
+        artifact(f"u6/policies/{name}.json", {"note": "no policy attached", "units": []})
+        return "(no policy attached)"
     body = json.dumps(u6_policy(units))
-    run(K + ["exec", "-i", "mc", "--", "sh", "-c", f"cat > /tmp/{name}.json"],
-        data=body, timeout=60)
+    for attempt_no in range(3):
+        proc = run(K + ["exec", "-i", "mc", "--", "sh", "-c", f"cat > /tmp/{name}.json"],
+                   data=body, check=False, timeout=60)
+        if proc.returncode == 0:
+            break
+        time.sleep(2 * (attempt_no + 1))
     mc("admin", "policy", "create", "a", name, f"/tmp/{name}.json")
     mc("admin", "policy", "attach", "a", name, "--user", user)
     previous = (state.get("u6Attached") or {}).get(user)
@@ -4428,9 +4460,18 @@ def u6_bisect(
     starting: list[str],
     operation: Callable[[str], dict[str, Any]],
     note: str = "",
+    before: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
-    """Measure one role's minimal set. See the module comment for the method."""
+    """Measure one role's minimal set. See the module comment for the method.
+
+    `before` runs ahead of every variant. Two roles need it: the readiness
+    marker is create-only, so a second probe answers `MarkerAlreadyPresent`
+    about the FIRST probe's object, and the enforcer deletes the very objects
+    its next run would delete. A bisection without it measures leftovers.
+    """
     log(f"U6[{role}]: starting set of {len(starting)} units on principal {user}")
+    if before:
+        before()
     u6_attach(user, starting, f"{role}-full")
     baseline = operation(f"{role}-full")
     baseline["units"] = list(starting)
@@ -4442,6 +4483,8 @@ def u6_bisect(
     removals: list[dict[str, Any]] = []
     for index, unit in enumerate(starting):
         reduced = [u for u in starting if u != unit]
+        if before:
+            before()
         u6_attach(user, reduced, f"{role}-no{index}")
         outcome = operation(f"{role}-no{index}")
         outcome["unit"] = unit
@@ -4457,6 +4500,8 @@ def u6_bisect(
     minimal = [r["unit"] for r in removals if not r["ok"]]
     confirm: dict[str, Any] | None = None
     if sorted(minimal) != sorted(starting):
+        if before:
+            before()
         u6_attach(user, minimal, f"{role}-min")
         confirm = operation(f"{role}-min")
         confirm["units"] = list(minimal)
@@ -4510,6 +4555,7 @@ U6_ROLES = {
     "evidence-read": "evidenceRead",
     "retention-enforcer": "retention enforcer (`logweir-retention`)",
     "catalog-sync": "catalogSync reader",
+    "write-probe": "write probe (`readiness.writeProbe: CreateOnlyMarker`)",
 }
 
 U6_PRINCIPALS = {
@@ -4519,6 +4565,7 @@ U6_PRINCIPALS = {
     "evidence-read": "u6-evreader",
     "retention-enforcer": "u6-deleter",
     "catalog-sync": "u6-catreader",
+    "write-probe": "u6-writer",
 }
 
 
@@ -4836,6 +4883,88 @@ def u6_backup_op(dest: str = "u6-dest"):
     return op
 
 
+def u6_clear_markers() -> None:
+    """Remove the create-only readiness markers a previous probe wrote.
+
+    `put_marker` answers `MarkerAlreadyPresent` — a READY row — when the key is
+    already there, on D2 §4.2's `[VERIFY U7]` premise that a backend authorises
+    before it evaluates `If-None-Match`. `u6f` measures that premise. Whatever
+    the answer, a bisection has to make each variant attempt a real create.
+    """
+    mc("rm", "--recursive", "--force", f"a/{U6_BUCKET}/logweir/readiness/",
+       check=False, timeout=120)
+
+
+def u6f() -> None:
+    """The optional create-only write probe — D2 §3.11's fifth row — and the
+    two facts this build makes about it.
+
+    **The probe holds the ARCHIVE credential.** A check Job carries ONE
+    credential for its destination (`preflight.rs`'s own comment), projected as
+    the unprefixed `AWS_ACCESS_KEY_ID`, and `store::open_evidence_write` builds
+    its handle from those same options with only the URL changed. So on a
+    destination that SEPARATES `evidenceWrite`, `destination.evidenceWritable`
+    is a statement about the archive principal's authority under `logweir/*`
+    and not about the `evidenceWrite` grant at all.
+
+    **And `MarkerAlreadyPresent` may not be a grant.** `put_marker` reads
+    `AlreadyExists` as authorised, on D2 §4.2's `[VERIFY U7]` premise that a
+    backend authorises before it evaluates `If-None-Match`. Measured here.
+    """
+    with Scenario("U6.writeProbe",
+                  "the minimal grant under which the create-only readiness marker writes") as sc:
+        job_env_before = None
+        u6_bisect(
+            sc, role="write-probe", user="u6-writer",
+            starting=["s3:PutObject@evidence", "s3:GetObject@evidence",
+                      "s3:ListBucket@bucket:evidence", "s3:GetBucketLocation@bucket",
+                      "s3:ListBucket@bucket:archive", "s3:GetObject@archive"],
+            operation=u6_backup_preflight_op("u6-dest-probe",
+                                             ["destination.evidenceWritable"]),
+            before=u6_clear_markers,
+            note="`writeProbe: CreateOnlyMarker` is what makes this row probed at all, and a "
+                 "Backup readiness plan is the only request that reads it",
+        )
+        sc.detail["probeCredential"] = (
+            "the check Job projects ONE credential — the destination's archive grant — as "
+            "`AWS_ACCESS_KEY_ID`, with no `LOGWEIR_EVIDENCE_AWS_*`, so this row is about "
+            "that principal's authority under `logweir/*`")
+        sc.detail["jobEnvBefore"] = job_env_before
+
+    with Scenario("U6.markerPrecedence",
+                  "whether `MarkerAlreadyPresent` is evidence of a write grant") as sc:
+        probe = u6_backup_preflight_op("u6-dest-probe", ["destination.evidenceWritable"])
+        u6_clear_markers()
+        u6_attach("u6-writer", U6_WIDE_WRITE, "u7-write")
+        first = probe("u7-write")
+        sc.detail["withGrantOnAnEmptyRoot"] = first["classified"]
+        check(first["ok"], "the marker was not written by a principal that may write it")
+        # The marker now EXISTS. Take the write away and ask again.
+        without = [u for u in U6_WIDE_WRITE if u != "s3:PutObject@evidence"]
+        u6_attach("u6-writer", without, "u7-nowrite")
+        second = probe("u7-nowrite")
+        sc.detail["withoutGrantOnAPresentMarker"] = second["classified"]
+        # With the marker gone the SAME policy must be refused, which is what
+        # makes the answer above a statement about the KEY and not the policy.
+        u6_clear_markers()
+        third = probe("u7-nowrite-clean")
+        sc.detail["withoutGrantOnAnEmptyRoot"] = third["classified"]
+        check(not third["ok"],
+              "a principal with no `s3:PutObject` under `logweir/*` wrote the marker anyway, "
+              "so this scenario is measuring the wrong credential")
+        sc.detail["u7Holds"] = not second["ok"]
+        sc.detail["finding"] = (
+            "U7 HOLDS on MinIO: an unauthorised principal is refused before the "
+            "precondition, so `MarkerAlreadyPresent` really does prove the grant"
+            if not second["ok"] else
+            "U7 DOES NOT HOLD on MinIO: `If-None-Match` is evaluated BEFORE authorisation, "
+            "so `MarkerAlreadyPresent` is a fact about the KEY and not about the grant, and "
+            "`destination.evidenceWritable` answers `ready` on every check after the first "
+            "for a principal that cannot write there")
+        artifact("u6/marker-precedence.json", sc.detail)
+        log("U6[U7]: " + sc.detail["finding"])
+
+
 def u6a() -> None:
     """The two evidence-root roles, measured with the checks that probe them."""
     with Scenario("U6.evidenceRead",
@@ -4850,16 +4979,20 @@ def u6a() -> None:
                  "— measured here as optional indeed",
         )
     with Scenario("U6.evidenceWrite",
-                  "the minimal grant under which the create-only readiness marker writes") as sc:
+                  "the minimal grant under which a run writes its signed receipt") as sc:
+        # NOT the readiness probe: `u6f` measures that the marker probe holds
+        # the ARCHIVE credential, so it cannot say anything about a separated
+        # `evidenceWrite`. What exercises this grant is an EXECUTION — the
+        # receipt a Backup writes under `logweir/` with
+        # `LOGWEIR_EVIDENCE_AWS_*`. `u6-dest` separates all four principals.
         u6_attach("u6-writer", U6_WIDE_WRITE, "evw-archive")
         u6_bisect(
             sc, role="evidence-write", user="u6-evwriter",
             starting=["s3:PutObject@evidence", "s3:GetObject@evidence",
                       "s3:ListBucket@bucket:evidence", "s3:GetBucketLocation@bucket"],
-            operation=u6_backup_preflight_op(
-                "u6-dest-probe", ["destination.evidenceWritable"]),
-            note="`writeProbe: CreateOnlyMarker` is what makes this row probed at all, and a "
-                 "Backup readiness plan is the only request that reads it",
+            operation=u6_backup_op("u6-dest"),
+            note="a destination-backed Backup writes its archive with `archiveWrite` and its "
+                 "signed receipt with `evidenceWrite`; only the second is varied here",
         )
 
 
@@ -5197,6 +5330,82 @@ def u6e() -> None:
             note="D3 §6.5 and `docs/kubernetes.md` §7f record `s3:ListBucket` with a prefix "
                  "condition plus `s3:GetObject`/`s3:DeleteObject` on `<prefix>/*`",
         )
+
+
+
+
+U6_UNIT_PROSE = {
+    "s3:ListBucket@bucket": "`s3:ListBucket` on `arn:aws:s3:::<bucket>`, unconditioned",
+    "s3:ListBucket@bucket:archive":
+        "`s3:ListBucket` on `arn:aws:s3:::<bucket>` (`s3:prefix` in `<prefix>/*`)",
+    "s3:ListBucket@bucket:evidence":
+        "`s3:ListBucket` on `arn:aws:s3:::<bucket>` (`s3:prefix` in `logweir/*`)",
+    "s3:ListBucket@bucket:both":
+        "`s3:ListBucket` on `arn:aws:s3:::<bucket>` (`s3:prefix` in `<prefix>/*`, `logweir/*`)",
+    "s3:GetBucketLocation@bucket": "`s3:GetBucketLocation` on `arn:aws:s3:::<bucket>`",
+    "s3:GetObject@archive": "`s3:GetObject` on `<bucket>/<prefix>/*`",
+    "s3:PutObject@archive": "`s3:PutObject` on `<bucket>/<prefix>/*`",
+    "s3:AbortMultipartUpload@archive": "`s3:AbortMultipartUpload` on `<bucket>/<prefix>/*`",
+    "s3:DeleteObject@archive": "`s3:DeleteObject` on `<bucket>/<prefix>/*`",
+    "s3:GetObject@evidence": "`s3:GetObject` on `<bucket>/logweir/*`",
+    "s3:PutObject@evidence": "`s3:PutObject` on `<bucket>/logweir/*`",
+    "s3:AbortMultipartUpload@evidence": "`s3:AbortMultipartUpload` on `<bucket>/logweir/*`",
+}
+
+
+def u6_unit_prose(unit: str) -> str:
+    return U6_UNIT_PROSE.get(unit, f"`{unit}`")
+
+
+def u6table() -> None:
+    """Render what U6 measured: the per-role minimal set, and one bisection row
+    per unit of every starting set, naming the object that proves it."""
+    table = state.get("u6Table") or {}
+    if not table:
+        raise RuntimeError("nothing measured yet; run the u6 phases first")
+    lines = [
+        "# D2 §15 U6 — the measured per-role minimal object-storage permission set",
+        "",
+        f"Cluster `{CONTEXT}`, namespace `{NS}`, owner `{OWNER}`, run `{STAMP}`.",
+        "",
+        "## The table",
+        "",
+        "| Role | Minimal S3 actions, with resource scope | Measured on | Harness row |",
+        "|---|---|---|---|",
+    ]
+    for role, row in sorted(table.items()):
+        minimal = "; ".join(u6_unit_prose(u) for u in row["minimalSet"]) or "(none)"
+        proved_by = row.get("minimalConfirmed") or row["baseline"]
+        lines.append(
+            f"| `{U6_ROLES.get(role, role)}` | {minimal} | {row['baseline']['kind']} "
+            f"`{proved_by['object']}` | `U6/{role}` |"
+        )
+    lines += ["", "## Bisection rows — removing one unit at a time", "",
+              "| Role | Unit removed | Operation | Verdict | The product's own answer |",
+              "|---|---|---|---|---|"]
+    for role, row in sorted(table.items()):
+        for removal in row["removals"]:
+            verdict = "still succeeds — **not required**" if removal["ok"] else "**FAILS**"
+            answer = json.dumps(removal["classified"], sort_keys=True)
+            answer = re.sub(r"\s+", " ", answer)[:260].replace("|", "\\|")
+            lines.append(
+                f"| `{U6_ROLES.get(role, role)}` | {u6_unit_prose(removal['unit'])} | "
+                f"{removal['kind']} `{removal['object']}` | {verdict} | `{answer}` |")
+    lines += ["", "## Units the recorded starting sets carried and the product does not need",
+              ""]
+    for role, row in sorted(table.items()):
+        if row["notRequired"]:
+            lines.append(f"- `{U6_ROLES.get(role, role)}`: "
+                         + ", ".join(u6_unit_prose(u) for u in row["notRequired"]))
+    lines += ["", "## Proof clauses, per role", ""]
+    for role, row in sorted(table.items()):
+        failed = [k for k, v in row["proof"].items() if not v]
+        lines.append(f"- `{U6_ROLES.get(role, role)}`: "
+                     + ("every clause of `u6_row_is_proved` holds"
+                        if not failed else "NOT PROVED: " + "; ".join(failed)))
+    body = "\n".join(lines) + "\n"
+    artifact("u6/TABLE.md", body)
+    print(body)
 
 
 def phase_table() -> dict[str, Callable[[], None]]:
