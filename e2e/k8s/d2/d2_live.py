@@ -5165,8 +5165,25 @@ def u6_catalog_op(dest: str = "u6-dest-cat"):
         conditions = [{"type": c.get("type"), "status": c.get("status"),
                        "reason": c.get("reason"), "message": (c.get("message") or "")[:300]}
                       for c in status.get("conditions", []) or []]
+        # THE OBJECT DOES NOT SAY `AccessDenied` HERE, AND THAT IS DELIBERATE.
+        # A walk that could not read its points publishes `Synced=False` with
+        # `PartialScan` — "a permission or transport failure, which is NOT the
+        # same as absent" — and a walk whose first listing was refused relays
+        # no body at all and lands `ResultUnreadable`. Both are the product
+        # classifying the failure; neither names the refusal. The refusal is in
+        # the sync Job's own output, which is where the store answered, so the
+        # Job's log is read into the record and is what makes this a permission
+        # measurement rather than a report that something went wrong.
+        job = (status.get("lastSyncJob") or {}).get("name")
+        job_log = ""
+        if job and not ok:
+            try:
+                job_log = redact(pod_logs_for_job(job, tail=60))[-2000:]
+            except Exception as exc:
+                job_log = f"[sync Job log unavailable: {type(exc).__name__}]"
         classified = {"counts": counts, "pages": len(status.get("pages") or []),
-                      "conditions": conditions, "timedOut": timed_out}
+                      "conditions": conditions, "timedOut": timed_out,
+                      "syncJob": job, "syncJobLogTail": job_log}
         return {"ok": ok, "object": name, "kind": "RecoveryCatalog", "variant": tag,
                 "classified": classified,
                 "unclassified": (not ok) and not u6_denied(classified)}
@@ -5304,6 +5321,15 @@ def u6e() -> None:
                                   "s3:ListBucket@bucket:evidence",
                                   "s3:GetBucketLocation@bucket"], "ret-evidence")
         u6_attach("u6-deleter", starting, "ret-baseline")
+        # The enforcer reads its candidates from a catalog VIEW, and the view
+        # is walked with the destination's `archiveRead` grant — which `u6b`
+        # has just reduced to its own minimal set, and which `u6d` measured to
+        # be too narrow for a catalog walk (the walk reads the record log and
+        # the receipts under `logweir/` as well as the manifests). Pin it to
+        # the catalog reader's measured minimum, or the enforcer has no plan
+        # for reasons that have nothing to do with the delete grant.
+        u6_attach("u6-reader", ["s3:ListBucket@bucket:both", "s3:GetObject@archive",
+                                "s3:GetObject@evidence"], "ret-view")
         catalog = f"u6-retcat-{u6_seq():03d}"
         since = now()
         apply({"apiVersion": "logweir.dev/v1alpha1", "kind": "RecoveryCatalog",
