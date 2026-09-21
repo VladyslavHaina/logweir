@@ -20,7 +20,8 @@
 
 use chrono::{DateTime, TimeZone, Utc};
 use weirkeeper::controllers::restore::{
-    admit, runner_argv, triggered_by, RestoreAdmission, StandingAdmission, ALLOWED_CLUSTERS_FILE,
+    admit, runner_argv, runner_job_spec, triggered_by, RestoreAdmission, StandingAdmission,
+    ALLOWED_CLUSTERS_FILE,
     APPROVAL_DOC_FILE, APPROVAL_SIG_FILE, APPROVER_KEY_FILE, AUTHORIZATION_KEYS_FILE,
     STANDING_AUTHORIZATION_FILE, STANDING_AUTHORIZATION_SIG_FILE,
 };
@@ -305,6 +306,61 @@ fn a_standing_restore_is_admitted_and_its_job_carries_the_bundle() {
             .any(|w| w[0] == "--triggered-by" && w[1] == format!("rehearsal/{SCHEDULE}/{SLOT}")),
         "and the argv carries it: {argv:?}"
     );
+
+    // ---- the Job's bundle mount, per the file table ----------------------
+    //
+    // PURE, so the Job a test builds is byte-identical to the one the
+    // reconciler POSTs (see `runner_job_spec`'s own note).
+    let spec = runner_job_spec(
+        &restore,
+        &cluster(true),
+        &[KEY_ID.to_string()],
+        &approval(),
+        &trust,
+        now(),
+    )
+    .expect("the Job renders for an admitted rehearsal");
+    let mount = spec
+        .config_map_mounts
+        .iter()
+        .find(|m| m.mount_path.ends_with("approval"))
+        .expect("the bundle is mounted");
+    let projected: Vec<(String, String)> = mount.items.clone();
+    for (key, path) in [
+        (STANDING_AUTHORIZATION_FILE, STANDING_AUTHORIZATION_FILE),
+        (
+            STANDING_AUTHORIZATION_SIG_FILE,
+            STANDING_AUTHORIZATION_SIG_FILE,
+        ),
+        (AUTHORIZATION_KEYS_FILE, AUTHORIZATION_KEYS_FILE),
+        (APPROVER_KEY_FILE, APPROVER_KEY_FILE),
+        (ALLOWED_CLUSTERS_FILE, ALLOWED_CLUSTERS_FILE),
+    ] {
+        assert!(
+            projected
+                .iter()
+                .any(|(k, p)| k == key && p == path),
+            "the file table projects {key} at {path}: {projected:?}"
+        );
+    }
+    // **THE SIDECAR KEEPS ITS OWN NAME.** Projecting it at `approval.sig`
+    // makes the runner read it into `bundle.approval_sidecar` and verify it
+    // under `PAYLOAD_TYPE_APPROVAL`; `verify_detached` then returns
+    // `payload_type mismatch`, a variant whose own doc comment calls it
+    // EVIDENCE OF SUBSTITUTION. A correctly signed, correctly scoped rehearsal
+    // would be reported to the operator as a TAMPERED APPROVAL.
+    for forbidden in [APPROVAL_DOC_FILE, APPROVAL_SIG_FILE] {
+        assert!(
+            !projected.iter().any(|(k, p)| k == forbidden || p == forbidden),
+            "a rehearsal Job projects no per-run approval slot, and {forbidden} is in \
+             {projected:?}"
+        );
+    }
+    assert_eq!(
+        projected.len(),
+        5,
+        "exactly the five members of the file table: {projected:?}"
+    );
 }
 
 /// The ORDINARY argv and trigger are BYTE-UNCHANGED by this task.
@@ -440,6 +496,12 @@ fn each_standing_refusal_is_named_and_reaches_no_job() {
         now() - chrono::Duration::days(1),
         400,
     ));
+    // ---- not yet valid: issued in the future -----------------------------
+    let not_yet_valid = approval_over(&envelope_with(
+        scope(),
+        now() + chrono::Duration::days(30),
+        30,
+    ));
     // ---- out of scope: the plan's prefix is not the signed one -----------
     let mut other_scope = scope();
     other_scope["topicPrefix"] = serde_json::json!("rehearsal-somethingelse-");
@@ -491,6 +553,9 @@ fn each_standing_refusal_is_named_and_reaches_no_job() {
     let rows = vec![
         Row { what: "expired", approval: expired, trust: active.clone(), expect_subject_mismatch: false, detail_contains: "" },
         Row { what: "a life longer than 90 days", approval: too_long, trust: active.clone(), expect_subject_mismatch: false, detail_contains: "90" },
+        // The notBefore half of the window, so BOTH edges are guarded: a
+        // document minted for next month does not authorise this slot.
+        Row { what: "not yet valid", approval: not_yet_valid, trust: active.clone(), expect_subject_mismatch: false, detail_contains: "not valid until" },
         Row { what: "out of scope", approval: out_of_scope, trust: active.clone(), expect_subject_mismatch: false, detail_contains: "outside the signed scope" },
         Row { what: "a revoked key", approval: approval(), trust: revoked, expect_subject_mismatch: false, detail_contains: "may no longer authorise anything new" },
         Row { what: "a wrong-usage key", approval: approval(), trust: evidence_only, expect_subject_mismatch: false, detail_contains: "never by EvidenceSigning" },
