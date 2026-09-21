@@ -657,18 +657,26 @@ AFTER_RETIREMENT_SIG = {"result": "Untrusted", "matchedKeyId": "6607952c"}
 
 
 def _restores(**over):
-    args = dict(verdict=HIST, admitted={}, job="d3w14-historical-restore", phase="Running",
+    args = dict(verdict=HIST, admitted={"type": "Admitted", "status": "True"},
+                job="d3w14-historical-restore", phase="Running",
                 fresh=AFTER_RETIREMENT_SIG)
     args.update(over)
     return all(d3.historical_archive_still_restores(**args).values())
 
 
 def test_a_retired_keys_archive_is_still_readable() -> None:
-    row("Valid/Historical, nothing holding admission, a Job running, no new signature",
-        _restores())
+    row("Valid/Historical, Admitted=True, a Job running, no new signature", _restores())
     row("a Succeeded restore counts too", _restores(phase="Succeeded"))
     row("MUTANT: a HOLD at admission — Admitted=False",
         not _restores(admitted={"status": "False", "reason": "ApprovalNotVerified"}))
+    # RESTORE-ADMITTED-DROPPED's own shape: the controller wrote `Admitted=True`
+    # and the next reconcile of the same RUNNING object replaced the condition
+    # array without it. The row asked `!= "False"` and passed straight through
+    # it; it asks `== "True"` now and FAILS on a lab build that predates the fix
+    # on `claude/status-sweep` — the honest reading, because an auditor looking
+    # at the object cannot tell it was approved.
+    row("MUTANT: the condition is GONE — RESTORE-ADMITTED-DROPPED's own shape",
+        not _restores(admitted={}))
     row("MUTANT: no runner Job, so nothing proceeded",
         not _restores(job=None))
     row("MUTANT: still Pending — admitted by nobody",
@@ -966,8 +974,15 @@ SECRETKEYS_STATUS = {
     "phase": "Succeeded", "exitCode": 0, "backupId": "366d2922",
     "evidence": {"receiptKey": "logweir/backups/366d2922/01M32.receipt.json",
                  "sidecarKey": "logweir/backups/366d2922/01M32.receipt.sig",
-                 "verification": {"result": None, "detail": "…this build does not create "
-                                  "that Job…"}},
+                 # THE VERDICT IS WRITTEN. `NotAttempted` with a sentence
+                 # naming the grant is what D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN's
+                 # fix landed for. The first draft of this fixture said
+                 # `result: None`, which made the defect row claim the
+                 # controller says nothing — what it says is exact, and the
+                 # failure is in how protection READS it.
+                 "verification": {"result": "NotAttempted",
+                                  "verifiedAt": "2026-09-21T13:26:21Z",
+                                  "detail": "…this build does not create that Job…"}},
 }
 READ_RECEIPT_STATUS = {
     "phase": "Succeeded", "exitCode": 0,
@@ -977,24 +992,31 @@ READ_RECEIPT_STATUS = {
 }
 
 
+CAPTURE = "capture.startedAt — D3 §3.2's recoveryPointAt"
+DIGEST = "evidence.receiptSha256 — the point id is its first 128 bits"
+WRITTEN = "evidence.verification.result is written at all"
+SATISFIED = "…and it satisfies requireVerifiedEvidence (Valid/ValidHistorical)"
+
+
 def test_a_policy_cannot_place_a_point_it_has_no_facts_about() -> None:
     have = d3.point_facts_the_policy_needs(READ_RECEIPT_STATUS)
-    row("a Backup whose receipt WAS read carries all three facts", all(have.values()), f"{have}")
+    row("a Backup whose receipt WAS read carries all four facts", all(have.values()), f"{have}")
     blind = d3.point_facts_the_policy_needs(SECRETKEYS_STATUS)
-    row("MUTANT — AND THE LIVE SHAPE: a SecretKeys destination leaves all three absent",
-        not any(blind.values()), f"{blind}")
+    row("THE LIVE SHAPE: a SecretKeys destination loses the two receipt-derived facts and "
+        "keeps a written verdict that does not satisfy the objective",
+        not blind[CAPTURE] and not blind[DIGEST] and blind[WRITTEN] and not blind[SATISFIED],
+        f"{blind}")
+    row("MUTANT: reading `written at all` as the objective being met would report this "
+        "candidate as verified", blind[WRITTEN] is True and blind[SATISFIED] is False)
+    row("MUTANT: a verdict block that is genuinely absent is a different fact again",
+        not d3.point_facts_the_policy_needs({"evidence": {"receiptKey": "k"}})[WRITTEN])
     verdict_only = d3.point_facts_the_policy_needs(
         {"evidence": {"verification": {"result": "Valid"}}})
     row("a verdict alone is neither a point id nor a time",
-        verdict_only["evidence.verification.result — the requireVerifiedEvidence objective"]
-        and not verdict_only["capture.startedAt — D3 §3.2's recoveryPointAt"]
-        and not verdict_only["evidence.receiptSha256 — the point id is its first 128 bits"],
-        f"{verdict_only}")
-    partial = d3.point_facts_the_policy_needs(
-        dict(READ_RECEIPT_STATUS, capture={}))
-    row("the capture clause fails on its own", not partial[
-        "capture.startedAt — D3 §3.2's recoveryPointAt"] and partial[
-        "evidence.receiptSha256 — the point id is its first 128 bits"])
+        verdict_only[WRITTEN] and verdict_only[SATISFIED]
+        and not verdict_only[CAPTURE] and not verdict_only[DIGEST], f"{verdict_only}")
+    partial = d3.point_facts_the_policy_needs(dict(READ_RECEIPT_STATUS, capture={}))
+    row("the capture clause fails on its own", not partial[CAPTURE] and partial[DIGEST])
 
 
 # --- the echo sink's own counter --------------------------------------------
@@ -1003,6 +1025,10 @@ def test_a_policy_cannot_place_a_point_it_has_no_facts_about() -> None:
 # a request ends with its body and no newline, so the next request's `POST`
 # continues that same line.
 ONE_POST = "POST /alerts HTTP/1.1\r\nHost: 10.1.36.254:8080\r\n\r\n{\"alert\":1}"
+# The same request to a sink mounted on another route: the fact counted is the
+# METHOD, so a route change must not zero the counter the way the line-anchored
+# version did.
+ONE_POST_OTHER_ROUTE = ONE_POST.replace("/alerts", "/hook")
 
 
 def test_the_sink_counts_every_post_and_not_every_line() -> None:
@@ -1014,11 +1040,16 @@ def test_the_sink_counts_every_post_and_not_every_line() -> None:
         "for all three, which is what `grep -c '^POST'` did",
         len([ln for ln in concatenated.splitlines() if ln.startswith("POST")]) == 1)
     row("an empty log is zero, not an error", d3.sink_post_count("") == 0)
+    row("MUTANT: keying on the route would zero the counter the day the sink moves",
+        d3.sink_post_count(ONE_POST_OTHER_ROUTE) == 1
+        and ONE_POST_OTHER_ROUTE.count("POST /alerts") == 0)
 
 
 def test_zz_every_row_in_this_file_passed() -> None:
     """The file's own gate, for `python3 -m pytest e2e/k8s/d3`.
 
+    It is a whole-module gate reading a module-global, so a partial selection
+    (`-k`, `-x`, `pytest-xdist`) can pass it vacuously: run the file whole.
     `row()` records a failure instead of raising, so that one run prints every
     row rather than stopping at the first — which under pytest meant a module
     whose rows all failed still reported six passing TESTS. This is the last

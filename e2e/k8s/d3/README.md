@@ -37,6 +37,8 @@ RET=logweir:scram-local            # optional; the default is the controller's
 python3 e2e/k8s/d3/d3_live.py setup            # namespace, destinations, buckets
 python3 e2e/k8s/d3/d3_live.py catalog          # PLAT-15.1: reconstruction after CR loss
 python3 e2e/k8s/d3/d3_live.py catalog-cases    # duplicate identity, Missing, stale index, format
+python3 e2e/k8s/d3/d3_live.py catalog-scale    # PLAT-15.1: 104 REAL points past `viewLimit`
+python3 e2e/k8s/d3/d3_live.py catalog-access   # PLAT-15.1: partial access, corrupt, future major
 python3 e2e/k8s/d3/d3_live.py retention        # PLAT-16.1: two destinations, honest reports
 python3 e2e/k8s/d3/d3_live.py legal-hold       # PLAT-16.2: spec.holds[]
 python3 e2e/k8s/d3/d3_live.py packaging        # proves the shipped image DOES carry the enforcer
@@ -47,11 +49,26 @@ python3 e2e/k8s/d3/d3_live.py wrong-prefix            --retention-image $RET
 python3 e2e/k8s/d3/d3_live.py denied-deletion         --retention-image $RET
 python3 e2e/k8s/d3/d3_live.py trust            # CLUSTER LOCK (TrustPolicy is cluster-scoped)
 python3 e2e/k8s/d3/d3_live.py signed-at-probe  # CLUSTER LOCK
-python3 e2e/k8s/d3/d3_live.py notify           # PLAT-14.2
+python3 e2e/k8s/d3/d3_live.py notify           # PLAT-14.2: staleness, dedup, transport
+python3 e2e/k8s/d3/d3_live.py protection-cases # PLAT-14.2: recovery, unavailable archive, scope
 python3 e2e/k8s/d3/d3_live.py control          # the negative control — it MUST fail
 python3 e2e/k8s/d3/d3_live.py report
 python3 e2e/k8s/d3/d3_live.py cleanup          # CLUSTER LOCK (deletes the TrustPolicy)
 ```
+
+`catalog-scale` and `catalog-access` each create their OWN bucket and destination (`-c`, `-d`)
+rather than reusing dest-b: `retention` asserts dest-b holds exactly its six points, and a
+corrupt manifest planted there would fail a phase that never asked for one. `catalog-scale`
+runs 104 real Backups, which is the only honest way past `viewLimit`'s CRD floor of 100 —
+nothing here edits that floor. `protection-cases` needs `catalog` (for the view it refreshes)
+and `notify` (for the namespace's first alert), and both are declared in
+`PHASE_PRECONDITIONS`.
+
+Who this run is, and where: `LOGWEIR_D3_OWNER` (default `d3w14`) is the
+`logweir.dev/test-owner` label `cleanup` checks, the prefix of the buckets and of the shared
+MinIO's minted user and policy — the shared MinIO has no namespaces, so two workers running
+this harness at once must not share it. `LOGWEIR_D3_NS` names the namespace (default
+`<owner>-<stamp>`).
 
 `--retention-image <ref>` may also be given as `LOGWEIR_D3_RETENTION_IMAGE`.
 Each phase appends to `$LOGWEIR_D3_OUT/state.json`, so they run one after

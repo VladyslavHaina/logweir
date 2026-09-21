@@ -540,6 +540,19 @@ def setup() -> None:
     )
 
 
+def image_revision(image: str | None) -> str | None:
+    """`org.opencontainers.image.revision` off a local image, or `None`."""
+    if not image:
+        return None
+    probe = run(
+        ["docker", "image", "inspect", "--format",
+         '{{index .Config.Labels "org.opencontainers.image.revision"}}', image],
+        check=False, timeout=60,
+    )
+    revision = probe.stdout.strip()
+    return revision if probe.returncode == 0 and revision and revision != "<no value>" else None
+
+
 def controller_facts() -> dict[str, Any]:
     """The controller this run is judging, by pod, imageID and revision label.
     A live claim about a build is worth nothing without it."""
@@ -550,10 +563,18 @@ def controller_facts() -> dict[str, Any]:
         e["name"]: e.get("value", "<fieldRef/secretRef>")
         for e in deploy["spec"]["template"]["spec"]["containers"][0].get("env", [])
     }
+    image = (pod.get("spec", {}).get("containers") or [{}])[0].get("image")
     return {
         "pod": pod.get("metadata", {}).get("name"),
         "imageID": (pod.get("status", {}).get("containerStatuses") or [{}])[0].get("imageID"),
-        "image": (pod.get("spec", {}).get("containers") or [{}])[0].get("image"),
+        "image": image,
+        # WHICH COMMIT THE BUILD CAME FROM, recorded rather than taken on trust.
+        # An imageID is a content digest and says nothing about a revision; CI
+        # (and WORKER-RULES, for a hand-built image) sets
+        # `org.opencontainers.image.revision`, and a live claim about a build is
+        # worth less without it. Best-effort: the label is read off the local
+        # daemon and an absent docker, image or label records `None`.
+        "imageRevision": image_revision(image),
         "runnerImage": env.get("LOGWEIR_RUNNER_IMAGE"),
         "policyConfigMap": env.get("LOGWEIR_POLICY_CONFIGMAP"),
         # The documented escape hatch for a non-https webhook. It decides
@@ -626,8 +647,11 @@ def backup_facts(obj: dict[str, Any]) -> dict[str, Any]:
 
 def catalog_object(name: str, dest: str, token: str, **sync: Any) -> dict[str, Any]:
     # 300 s is the CRD's floor and it is load-bearing here: a manual-only
-    # catalog (`intervalSeconds: 0`) publishes its FIRST view and then never
-    # harvests another sync — see the `catalog-resync-harvest` finding.
+    # catalog (`intervalSeconds: 0`) publishes its FIRST view and then has no
+    # interval to publish another on. The SECOND-REQUEST half of that finding —
+    # CATALOG-RESYNC-NOT-HARVESTED, where a bump ran a Job to Complete that the
+    # controller never harvested — is CLOSED on this build; see
+    # `catalog-resync-harvest`.
     body = {"intervalSeconds": 300, "mode": "Index", "deepCheck": "ManifestDigest"}
     body.update(sync)
     return {
@@ -674,11 +698,17 @@ def await_sync(name: str, token: str, *, seconds: int = 600, since: str = "") ->
 def fresh_catalog(name: str, dest: str, *, seconds: int = 420, **sync: Any) -> dict[str, Any]:
     """A NEW `RecoveryCatalog` object, synced once.
 
-    Not a `syncRequest` bump, and the reason is a defect this harness measures
-    rather than works around silently: a catalog's FIRST sync publishes within
-    seconds, and a later `syncRequest` starts a Job that completes and is never
-    harvested (`catalog-resync-is-not-harvested`). A fresh object per archive
-    generation is the only way to read the archive as it is NOW.
+    Not a `syncRequest` bump — but NO LONGER because a bump is not harvested.
+    That was CATALOG-RESYNC-NOT-HARVESTED, and it is CLOSED on this build:
+    `catalog-resync-harvest` measures the harvest every run and read 10.5 s on
+    `af64073`, where 480 s was not enough on 2026-09-18, and `refresh_view`
+    bumps `syncRequest` because that is what the product documents.
+
+    A fresh object per archive generation stays for a smaller reason: these
+    phases assert exact counts over an archive they have just mutated, and a
+    new object's first view is unambiguously about the archive as it is now,
+    with no previous generation for a reader of the evidence to confuse it
+    with.
     """
     if get_opt("recoverycatalog", name) is not None:
         run(KN + ["delete", "recoverycatalog", name, "--wait=true"])
@@ -1104,16 +1134,31 @@ def catalog_cases() -> None:
          "syncJobs": jobs, "completedSyncJobs": completed},
     )
     record(
-        "catalog-resync-is-not-harvested",
+        "catalog-resync-harvest",
         "PLAT-15.1",
         "FAIL" if harvested is None else "PASS",
-        f"`spec.syncRequest` is documented as 'change it to ask for a sync now'. On the "
-        f"SECOND request this catalog's sync Job ran and completed "
-        f"({len(completed)} of {len(jobs)} sync Jobs are Complete) and the controller never "
-        f"harvested it: after 480 s the object still reads Synced="
-        f"{condition(obj, 'Synced').get('status')}/{condition(obj, 'Synced').get('reason')} "
-        f"with observedSyncRequest={obj['status'].get('observedSyncRequest')!r} and the "
-        f"PREVIOUS view still published. harvestedAfterSeconds={harvested}",
+        (
+            f"`spec.syncRequest` is documented as 'change it to ask for a sync now', and on "
+            f"the SECOND request this catalog published a view for that token after "
+            f"{harvested}s ({len(completed)} of {len(jobs)} sync Jobs Complete; Synced="
+            f"{condition(obj, 'Synced').get('status')}/"
+            f"{condition(obj, 'Synced').get('reason')}, observedSyncRequest="
+            f"{obj['status'].get('observedSyncRequest')!r}). CATALOG-RESYNC-NOT-HARVESTED — "
+            f"the 2026-09-18 blocker, where the Job ran to Complete and the controller never "
+            f"harvested it, 480s was not enough, and `Synced` flipped back to "
+            f"`Unknown/PodNotStarted` after a publish — IS CLOSED on this build. The row was "
+            f"named `catalog-resync-is-not-harvested` while that was true; it asserts the "
+            f"same measurement either way and is named for the measurement now."
+            if harvested is not None else
+            f"`spec.syncRequest` is documented as 'change it to ask for a sync now'. On the "
+            f"SECOND request this catalog's sync Job ran and completed "
+            f"({len(completed)} of {len(jobs)} sync Jobs are Complete) and the controller "
+            f"never harvested it: after 480 s the object still reads Synced="
+            f"{condition(obj, 'Synced').get('status')}/"
+            f"{condition(obj, 'Synced').get('reason')} with observedSyncRequest="
+            f"{obj['status'].get('observedSyncRequest')!r} and the PREVIOUS view still "
+            f"published — CATALOG-RESYNC-NOT-HARVESTED, open on this build."
+        ),
         [path],
     )
     STATE["catalogCasesDone"] = True
@@ -1377,7 +1422,11 @@ def schedule_object(name: str, dest: str) -> dict[str, Any]:
             "topics": TOPICS,
             "archive": {"url": f"logweir-destination://{dest}"},
             "concurrencyPolicy": "Forbid",
-            "suspend": False,
+            # SUSPENDED AT BIRTH. Every caller patches it suspended one call
+            # later, and `* * * * *` means the gap between the two is a whole
+            # slot: a stray scheduled point in dest-a shifts the "newest point"
+            # the protection rows measure against.
+            "suspend": True,
         },
     }
 
@@ -4066,20 +4115,31 @@ def historical_archive_still_restores(verdict: dict[str, Any], admitted: dict[st
     to work: if a NEW signature were also accepted, "retired" would mean nothing
     and the read half would be proving no rule at all.
     """
-    # ADMISSION IS EVIDENCED BY WHAT FOLLOWS IT, not by a condition. The
-    # controller writes `Admitted=False` for a HOLD — "phase: Pending and
-    # EXACTLY ONE condition, Admitted=False … no exitCode and no exitReason,
-    # because no run was attempted" — and on `Ok` it creates the Job instead of
-    # stamping `Admitted=True`. A first draft of this row asked for
-    # `Admitted=True` and failed on a restore that was already Running with its
-    # Job created, which is the shape of a row asserting something the product
-    # never writes.
+    # ADMISSION IS A CONDITION, AND THIS ROW ASKS FOR IT. The comment here used
+    # to say the opposite — that on `Ok` the controller "creates the Job instead
+    # of stamping `Admitted=True`", and that a first draft asking for
+    # `Admitted=True` had been "asserting something the product never writes",
+    # so the clause was weakened to `!= "False"`.
+    #
+    # That was a DEFECT OBSERVED LIVE AND MIS-DIAGNOSED. The controller does
+    # write `Admitted=True`; the next reconcile of the same running object then
+    # dropped it, because `diagnostics::apply` replaced the condition array
+    # instead of upserting into it. That is RESTORE-ADMITTED-DROPPED, already
+    # recorded and fixed on `claude/status-sweep` (review
+    # `claude/status-sweep.review.md`, LOW-1, which named this very comment as
+    # the defect's strongest live corroboration).
+    #
+    # The clause is therefore tightened back to `== "True"`. ON A LAB BUILD
+    # THAT PREDATES THAT FIX THIS ROW FAILS, and that is the honest reading: an
+    # auditor looking at the Restore cannot tell that it was approved. It is
+    # expected to pass at the first batch refresh that carries the fix.
     return {
         "the archive verifies on the historical basis": (
             verdict.get("result") == "Valid"
             and (verdict.get("trust") or {}).get("basis") == "Historical"
         ),
-        "nothing is holding the Restore at admission": admitted.get("status") != "False",
+        "the Restore says it was admitted (`Admitted=True`)":
+            admitted.get("status") == "True",
         "its runner Job exists and it is running — the read PROCEEDED": (
             bool(job) and phase in {"Running", "Succeeded"}
         ),
@@ -4670,7 +4730,10 @@ def sink_post_count(log: str) -> int:
     the true count really was zero. A counter that cannot go up is not a
     counter.
     """
-    return log.count("POST /alerts")
+    # THE FACT IS `POST `, NOT THE ROUTE. Keying on "POST /alerts" would zero
+    # this counter again the day the sink's path changes, in the same silent way
+    # the line-anchored version did.
+    return log.count("POST ")
 
 
 def sink_posts() -> int:
@@ -5196,7 +5259,7 @@ def catalog_access() -> None:
     base = fresh_catalog("case-access", "dest-d")
     base_entries = sorted(view_entries(base), key=lambda e: e["recoveryPointAtMs"])
     if len(base_entries) != len(ACCESS_POINTS):
-        raise RuntimeError(f"dest-b holds {len(base_entries)} points, not {len(ACCESS_POINTS)}")
+        raise RuntimeError(f"dest-d holds {len(base_entries)} points, not {len(ACCESS_POINTS)}")
     evidence.append(artifact("access/baseline-entries.json", base_entries))
     p1, p2, p3, p4 = (e["pointId"] for e in base_entries)
 
@@ -5286,9 +5349,14 @@ def catalog_access() -> None:
         f"are not a manifest is {listed.get(p4, {}).get('availability')} "
         f"(remedy {listed.get(p4, {}).get('remedy')!r}), and the untouched points are "
         f"{sorted({listed.get(p, {}).get('availability') for p in (p1, p2)})}. counts "
-        f"{acounts}. `Missing` is reserved for a definite NotFound; bytes that contradict the "
-        f"signed receipt are a contradiction and not an absence "
-        f"(`check/kinds/catalog_sync.rs`'s manifest-digest arm). Clauses {corrupt_clauses}",
+        f"{acounts}. TWO DISTINCT FINDINGS, NOT ONE: `Missing` is reserved for a definite "
+        f"NotFound, and bytes that do not hash to the digest the signed receipt names are a "
+        f"CONTRADICTION about the point, which D3 §5.4 calls `Conflict` and "
+        f"`check/kinds/catalog_sync.rs:1264-1270` argues for in its own comment. D3 §5.4's "
+        f"'could not tell' gloss belongs to `Unreadable` — a read that FAILED — and that is "
+        f"proven separately by `catalog-partial-access-is-unreadable-not-missing`, whose 403 "
+        f"carries the remedy sentence 'this is could not tell, not is not there'. Clauses "
+        f"{corrupt_clauses}",
         evidence,
     )
     format_clauses = unsupported_format_ok(
@@ -5312,7 +5380,12 @@ def catalog_access() -> None:
         f"`crates/logweir/src/catalog/reader.rs:54`), so no signature is consulted for a "
         f"major this build does not implement. The earlier probe wrote `formatVersion` "
         f"(camelCase) into a document whose field is `format_version`, which major 1 ignores "
-        f"as an unknown field — it measured an unsigned edit, not a future major. Clauses "
+        f"as an unknown field — it measured an unsigned edit, not a future major. SO THE "
+        f"TRACKER'S 'validly signed AND of a future major' IS UNREACHABLE BY CONSTRUCTION, "
+        f"not merely unbuilt: no signature is consulted for a future major on either side — "
+        f"this planting writes no `record.sig` at all and the walk would not read one. A "
+        f"future build that read the sidecar BEFORE classifying the format would silently "
+        f"change what this row means, which is the one thing to watch. Clauses "
         f"{format_clauses}",
         evidence,
     )
@@ -5464,13 +5537,20 @@ def point_facts_the_policy_needs(status: dict[str, Any]) -> dict[str, bool]:
     """
     evidence = status.get("evidence") or {}
     verification = evidence.get("verification") or {}
+    result = verification.get("result")
     return {
         "capture.startedAt — D3 §3.2's recoveryPointAt":
             bool((status.get("capture") or {}).get("startedAt")),
         "evidence.receiptSha256 — the point id is its first 128 bits":
             bool(evidence.get("receiptSha256")),
-        "evidence.verification.result — the requireVerifiedEvidence objective":
-            bool(verification.get("result")),
+        # WRITTEN, AND NOT THE SAME QUESTION AS SATISFIED. The verdict block IS
+        # published on this path — `NotAttempted` with a sentence naming the
+        # grant, which is what D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN's fix landed
+        # for (`controllers/backup.rs:4050`). Reading its mere presence as the
+        # objective being met is the error this pair of clauses exists to stop.
+        "evidence.verification.result is written at all": bool(result),
+        "…and it satisfies requireVerifiedEvidence (Valid/ValidHistorical)":
+            result in {"Valid", "ValidHistorical"},
     }
 
 
@@ -5562,29 +5642,38 @@ def protection_cases() -> None:
         posts, new_transitions, newest_before.get("pointId"), newest_after.get("pointId"),
     )
     blind = [name for name, present in missing_facts.items() if not present]
+    verdict_written = missing_facts["evidence.verification.result is written at all"]
+    entry_now = after_entries.get(newest_after.get("pointId", ""), {})
     diagnosis = (
         "" if not blind else
-        f" WHY, AND IT IS THE PRODUCT'S: the fresh Backup Succeeded (exit "
-        f"{fresh_status.get('exitCode')}) and the catalog's own view calls its point "
-        f"{after_entries.get(newest_after.get('pointId', ''), {}).get('availability')}/"
-        f"{after_entries.get(newest_after.get('pointId', ''), {}).get('verification')} with "
-        f"selectable="
-        f"{after_entries.get(newest_after.get('pointId', ''), {}).get('selectable')} — but "
-        f"`Backup.status` carries none of {blind}. The controller reads both out of the backup "
-        f"RECEIPT (`controllers/backup.rs:1513` `capture_from_receipt`, and the receipt digest "
-        f"beside it), and it reads the receipt only through an evidence source it may use "
-        f"itself: this destination's `evidenceRead` is a `SecretKeys` grant, whose read is D2 "
-        f"§3.9's evidence-fetch Job, and `controllers/backup.rs:1302` says in its own words "
-        f"THIS BUILD DOES NOT CREATE THAT JOB. So `controllers/protection_policy.rs:867` "
-        f"derives `point_id` from an absent `evidence.receiptSha256` and gets `None`, "
-        f"`recovery_point_at` from an absent `status.capture` and gets `None`, and "
-        f"`protection.rs:993` refuses a candidate with no point id the moment a `catalogRef` "
-        f"is consulted. The one grant that would let the controller read the receipt, "
-        f"`ControllerIdentity`, is refused on this installation because it renders no policy "
-        f"ConfigMap to allowlist a location in (`LOGWEIR_POLICY_CONFIGMAP` is empty on the "
-        f"lab's Deployment). NOTHING THE HARNESS CAN DO FROM ITS OWN NAMESPACE CHANGES THIS: "
-        f"it is PLAT-14.2's `PLAT-15.1 availability integration` dependency, unmet in the "
-        f"shipped path"
+        f" WHY, AND IT IS THE PRODUCT'S — defect PROTECTION-SECRETKEYS-UNPROTECTED: the fresh "
+        f"Backup Succeeded (exit {fresh_status.get('exitCode')}) and the catalog's own view "
+        f"calls its point {entry_now.get('availability')}/{entry_now.get('verification')} "
+        f"with selectable={entry_now.get('selectable')}. The controller could not READ the "
+        f"receipt — this destination's `evidenceRead` is a `SecretKeys` grant, whose read is "
+        f"D2 §3.9's evidence-fetch Job, and `controllers/backup.rs:1302` says in its own "
+        f"words THIS BUILD DOES NOT CREATE THAT JOB. That refusal is expected and is reported "
+        f"honestly: the verdict block IS written "
+        f"(`evidence.verification.result` present: {verdict_written}, value "
+        f"{((fresh_status.get('evidence') or {}).get('verification') or {}).get('result')!r}). "
+        f"What is NOT sanctioned anywhere in D3 is what the protection controller then does "
+        f"with it, and THREE separate clauses each refuse this candidate on their own: "
+        f"(1) `protection.rs:976` — `requireVerifiedEvidence` against a `NotAttempted` "
+        f"verdict, which no catalog join can rescue; (2) `protection.rs:992-993` — the "
+        f"catalog join is `None => false` because `point_id` is derived from an absent "
+        f"`evidence.receiptSha256` (`controllers/protection_policy.rs:867`, "
+        f"`protection.rs:641`); (3) `protection.rs:1071` — the available filter drops a "
+        f"candidate whose `recovery_point_at` is `None`, `status.capture` being written only "
+        f"on a `Valid` verdict (`controllers/backup.rs:4134-4148`). So `Backup.status` "
+        f"carries none of {blind}, and 'the controller could not read this point's receipt' "
+        f"becomes `health: Unprotected` — D3 §3.2 reserves that for 'no available point at "
+        f"all' and gives 'evaluation impossible' `Unknown` — and it PAGES. The one grant the "
+        f"controller may read itself, `ControllerIdentity`, is refused here because the "
+        f"installation renders no policy ConfigMap to allowlist a location in "
+        f"(`LOGWEIR_POLICY_CONFIGMAP` is empty on the lab's Deployment); reaching it needs "
+        f"the cluster lock and a change to the shared release, so these rows are NOT-RUN on "
+        f"that path rather than impossible. It is PLAT-14.2's own `PLAT-15.1 availability "
+        f"integration` dependency, unmet in the shipped path"
     )
     check(
         "protection-recovery-notification-delivers-exactly-once",
@@ -5612,16 +5701,21 @@ def protection_cases() -> None:
     if refusal:
         evidence.append(refusal["evidence"])
     check(
-        "protection-verification-scope-is-sampled-never-complete",
+        "protection-verification-scope-is-never-complete",
         "PLAT-14.2",
         all(scope_clauses.values()) and (refusal is None or refusal["refused"]),
         f"the {len(events)} event document(s) this policy delivered carry verification_scope "
         f"{sorted({e.get('verification_scope') for e in events})}, with health "
         f"{sorted({e.get('health') for e in events})} and last_available_point "
-        f"{[e.get('last_available_point') for e in events]}. The vocabulary has three words "
-        f"and `complete` is not one of them (`weirkeeper::protection::VerificationScope`, "
-        f"whose own doc comment calls a fourth variant 'the product's one unrecoverable "
-        f"lie'). LIVE MUTANT: "
+        f"{[e.get('last_available_point') for e in events]}. WHICH OF THE THREE WORDS IS NOT "
+        f"THIS ROW'S SUBJECT and the row does not claim `sampled`: the controller writes "
+        f"`sampled` only for a point whose evidence verdict is `Valid` "
+        f"(`controllers/protection_policy.rs:685-689`), which is unreachable on this "
+        f"evidence-read path (PROTECTION-SECRETKEYS-UNPROTECTED), so a `NotAttempted` point "
+        f"is labelled `none` — honest, and still not `complete`. The vocabulary has three "
+        f"words and `complete` is not one of them "
+        f"(`weirkeeper::protection::VerificationScope`, whose own doc comment calls a fourth "
+        f"variant 'the product's one unrecoverable lie'). LIVE MUTANT: "
         + (f"the delivery Job's own image, argv and mount, run against a copy of a real event "
            f"whose verification_scope reads \"complete\", exits {refusal['exitCode']} and "
            f"delivers nothing — {refusal['reason']}" if refusal else
