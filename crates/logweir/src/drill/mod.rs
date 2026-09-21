@@ -4660,3 +4660,158 @@ mod tests {
         assert_ne!(posts[0].0, "https://substituted.example/events");
     }
 }
+
+// =======================================================================
+// PLAT-14.3b — the run's `Approved` when a STANDING document authorized it
+// =======================================================================
+
+#[cfg(test)]
+mod standing_approved_tests {
+    use super::*;
+    use chrono::{DateTime, Utc};
+
+    fn document(schedule: &str, issued: DateTime<Utc>) -> binding::VerifiedStandingAuthorization {
+        binding::VerifiedStandingAuthorization {
+            key_id: "kkkk".to_string(),
+            document: serde_json::from_value(serde_json::json!({
+                "formatVersion": "1.0.0",
+                "kind": "StandingRehearsalAuthorization",
+                "subjectRef": {
+                    "apiVersion": "logweir.dev/v1alpha1",
+                    "kind": "RehearsalSchedule",
+                    "namespace": "team-a",
+                    "name": schedule,
+                    "uid": "uid-1",
+                },
+                "scope": {
+                    "templateDigest": "sha256:aa",
+                    "targetClusterId": "TARGET00000000000000000",
+                    "topicPrefix": "rehearsal-",
+                    "topics": ["orders"],
+                    "maxPartitions": 200,
+                    "recordsPerPartition": 25,
+                    "deadlineSeconds": 3600,
+                    "modes": ["scratch"],
+                },
+                "issuedAt": issued.to_rfc3339(),
+                "expiresAt": (issued + chrono::Duration::days(30)).to_rfc3339(),
+            }))
+            .expect("the fixture document parses"),
+        }
+    }
+
+    fn args_triggered(triggered_by: Option<&str>) -> RunArgs {
+        RunArgs {
+            execution_contract_version: None,
+            store_contract_version: None,
+            spec: PathBuf::from("restore.yaml"),
+            approval: None,
+            approver_key: PathBuf::from("approver.pem"),
+            approver_key_ids: Vec::new(),
+            allowed_clusters: PathBuf::from("allowed.json"),
+            signing_key: PathBuf::from("signing.pem"),
+            triggered_by: triggered_by.map(str::to_string),
+            out: None,
+            metrics_file: None,
+            offset_report_out: None,
+            standing_authorization: Some(PathBuf::from("standing-authorization.json")),
+            authorization_keys: Some(PathBuf::from("authorization-keys.json")),
+            policy_snapshot: None,
+            confirmation_key: None,
+        }
+    }
+
+    fn signing_key() -> logweir_evidence::keys::VerifyingKey {
+        logweir_evidence::keys::SigningKey::generate_ed25519().verifying_key()
+    }
+
+    /// **The run's `Approved` comes from the SIGNED document and from nothing
+    /// else**, and it never claims a person approved this run.
+    ///
+    /// MUTANT: reading `approver` from a caller-supplied string, or defaulting
+    /// it to the operator who created the schedule, makes the signed scorecard
+    /// say a human authorized THIS run. What a human authorized was a
+    /// schedule, and the value says so.
+    #[test]
+    fn the_standing_approved_is_minted_from_the_signed_document() {
+        let issued = Utc::now() - chrono::Duration::days(2);
+        let verified = document("weekly-orders", issued);
+        let args = args_triggered(Some("rehearsal/weekly-orders/20260920T030000"));
+        let key = signing_key();
+        let approved =
+            standing_approved_from(&args, &verified, "name: plan\n", &key, Utc::now()).unwrap();
+
+        assert_eq!(
+            approved.approval.approver, "standing-authorization/weekly-orders",
+            "the approver names the SCHEDULE a human signed for, never a person"
+        );
+        assert!(
+            approved.approval.ticket.is_empty(),
+            "v1 of the document carries no ticket, and one is never invented"
+        );
+        assert_eq!(
+            approved.approval.plan_hash,
+            logweir_core::ids::sha256_prefixed(b"name: plan\n"),
+            "the plan hash is recomputed from the exact plan bytes"
+        );
+        assert_eq!(
+            approved.approval.approved_at, issued,
+            "approved_at is when the human signed the standing document"
+        );
+        assert_eq!(
+            approved.approval.key_id, "kkkk",
+            "the key id is the one the signature VERIFIED under"
+        );
+        assert!(
+            !approved.approval.self_attested,
+            "an approver key that is not the signing key is not self-attested"
+        );
+    }
+
+    /// **The trigger's schedule segment is bound to the SIGNED subject name.**
+    ///
+    /// MUTANT: dropping this comparison lets a rehearsal record itself in the
+    /// signed scorecard as a run of a schedule the standing document says
+    /// nothing about — which is precisely the field an auditor reads to find
+    /// out why the run happened.
+    #[test]
+    fn a_trigger_naming_another_schedule_is_refused() {
+        let verified = document("weekly-orders", Utc::now() - chrono::Duration::days(1));
+        let args = args_triggered(Some("rehearsal/some-other-schedule/20260920T030000"));
+        let error = standing_approved_from(
+            &args,
+            &verified,
+            "name: plan\n",
+            &signing_key(),
+            Utc::now(),
+        )
+        .expect_err("a trigger naming another schedule is refused");
+        assert!(matches!(error, DrillError::Guard(_)), "{error}");
+        let text = error.to_string();
+        assert!(text.contains("some-other-schedule") && text.contains("weekly-orders"), "{text}");
+        assert!(text.contains("no data operation was started"), "{text}");
+    }
+
+    /// A trigger that is not a rehearsal trigger at all is refused by name,
+    /// and so is a malformed one: `rehearsal//x` names no schedule.
+    #[test]
+    fn a_missing_or_malformed_rehearsal_trigger_is_refused() {
+        let verified = document("weekly-orders", Utc::now() - chrono::Duration::days(1));
+        for trigger in [None, Some("approval/weekly-orders-standing"), Some("rehearsal//x"), Some("rehearsal/weekly-orders/")] {
+            let args = args_triggered(trigger);
+            let error = standing_approved_from(
+                &args,
+                &verified,
+                "name: plan\n",
+                &signing_key(),
+                Utc::now(),
+            )
+            .expect_err("a run authorized by a standing document must name its slot");
+            assert!(matches!(error, DrillError::Guard(_)), "{trigger:?}: {error}");
+            assert!(
+                error.to_string().contains("rehearsal/"),
+                "{trigger:?}: the refusal names the shape it wanted: {error}"
+            );
+        }
+    }
+}

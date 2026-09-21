@@ -1093,6 +1093,191 @@ fn a_plan_inside_the_signed_scope_passes_the_authorization_checks() {
 }
 
 // ===========================================================================
+// PLAT-14.3b — the standing path REPLACES the per-run approval
+// ===========================================================================
+
+/// **THE ROW THIS TASK EXISTS FOR.** A standing-authorized run carries NO
+/// `--approval` at all and still gets past the authorization checks.
+///
+/// Before PLAT-14.3b this was impossible: `load_startup_inputs` called
+/// `phase1_approval::verify_bytes` unconditionally, so the bundle had to carry
+/// a placeholder in the approval slot, and that placeholder is signed under
+/// `PAYLOAD_TYPE_STANDING_AUTHORIZATION` — a correctly signed rehearsal was
+/// reported to the operator as a TAMPERED APPROVAL.
+///
+/// MUTANT: restoring the unconditional `verify_bytes` call makes this exit 3
+/// with a `payload_type mismatch`.
+#[test]
+fn a_standing_run_needs_no_per_run_approval() {
+    let fixture = fixture_with_plan(REHEARSAL_PLAN.as_bytes().to_vec());
+    let signed = signed_authorization("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000");
+    let m = mount(&fixture, &signed);
+    let contract = standing_contract(&fixture, &signed, "uid-1");
+    let argv = standing_argv(&m);
+    let (code, transcript) = invoke(
+        &m,
+        &fixture,
+        &env_map(&contract),
+        &argv.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    for not_expected in [
+        "payload_type",
+        "approval signature does not verify",
+        "--approval is required",
+        "plan_hash mismatch",
+        "RehearsalScopeViolation",
+        "AuthorizationInvalid",
+        "AuthorizationExpired",
+    ] {
+        assert!(
+            !transcript.contains(not_expected),
+            "a standing run needs no per-run approval; it must not fail with {not_expected} \
+             (exit {code}):\n{transcript}"
+        );
+    }
+    assert_ne!(code, 0, "no broker is running, so it cannot succeed");
+}
+
+/// **And an ORDINARY Restore still needs its Approval.** The flag becoming
+/// optional must never mean "authorization is optional".
+///
+/// MUTANT: treating an absent `--approval` as "nothing to verify" instead of a
+/// refusal makes this exit for a later, unrelated reason.
+#[test]
+fn an_ordinary_run_without_its_approval_is_refused_by_name() {
+    let fixture = fixture();
+    let signed = signed_authorization("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000");
+    let m = mount(&fixture, &signed);
+    // An ORDINARY contract — `authorization_kind: Approval` — so `invoke`
+    // passes `--approval`; removing the file is not enough, because the point
+    // is the FLAG. The contract-driven helper omits the flag only for a
+    // standing contract, so this case names it explicitly by mounting a
+    // standing-shaped argv under an approval-shaped contract.
+    let contract = contract_for(&fixture.bundle, wire::ContractVersion::V2);
+    let mut env = env_map(&contract);
+    // Force the runner down the "no approval presented" path the way a
+    // mis-rendered Job template would: the contract says `approval`, and the
+    // argv carries none.
+    env.remove(wire::AUTHORIZATION_KIND_ENV);
+    let mut command = Command::new(env!("CARGO_BIN_EXE_logweir"));
+    command
+        .args(["restore", "run", wire::VERSION_ARG, wire::VERSION, "--spec"])
+        .arg(&m.plan)
+        .arg("--approver-key")
+        .arg(&m.approver_key)
+        .arg("--allowed-clusters")
+        .arg(&m.allowed)
+        .arg("--signing-key")
+        .arg(&m.signing)
+        .args(["--triggered-by", "approval/approval-a"]);
+    for name in wire::ALL_ENV_ANY {
+        command.env_remove(name);
+    }
+    for (name, value) in &env {
+        command.env(name, value);
+    }
+    let output = command.output().unwrap();
+    let transcript = format!(
+        "{}{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.status.code(), Some(3), "{transcript}");
+    assert!(
+        transcript.contains("--approval is required"),
+        "an ordinary Restore that lost its approval fails CLOSED and by name: {transcript}"
+    );
+    assert!(
+        transcript.contains("no data operation was started"),
+        "{transcript}"
+    );
+}
+
+/// A standing run that ALSO presents a per-run approval is refused: that is
+/// the pre-14.3b "sits beside" shape, and the file would be material no digest
+/// in the immutable template covers.
+#[test]
+fn a_standing_run_that_also_presents_an_approval_is_refused() {
+    let fixture = fixture_with_plan(REHEARSAL_PLAN.as_bytes().to_vec());
+    let signed = signed_authorization("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000");
+    let m = mount(&fixture, &signed);
+    let contract = standing_contract(&fixture, &signed, "uid-1");
+    let mut argv = standing_argv(&m);
+    argv.push("--approval".to_string());
+    argv.push(m.approval.to_str().unwrap().to_string());
+    let (code, transcript) = invoke(
+        &m,
+        &fixture,
+        &env_map(&contract),
+        &argv.iter().map(String::as_str).collect::<Vec<_>>(),
+    );
+    assert_eq!(code, 3, "{transcript}");
+    assert!(
+        transcript.contains("REPLACES the per-run approval"),
+        "the refusal says which shape it refused: {transcript}"
+    );
+}
+
+/// The two per-run approval digests are REFUSED under `standing` and REQUIRED
+/// under `approval` — both directions, at the contract reader.
+#[test]
+fn the_approval_slot_is_pinned_by_the_authorization_kind() {
+    let fixture = fixture();
+    let signed = signed_authorization("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000");
+
+    // (a) a standing contract that pins the per-run approval slot.
+    let mut standing = standing_contract(&fixture, &signed, "uid-1");
+    standing.approval_sha256 = Some(format!("sha256:{}", "a".repeat(64)));
+    let map = env_map(&standing);
+    let error = execution_contract_from(|n| map.get(n).cloned())
+        .unwrap_err_or_panic("a standing contract pins no approval digest");
+    assert!(
+        error.to_string().contains(wire::APPROVAL_SHA256_ENV)
+            && error.to_string().contains("no approval slot to pin"),
+        "{error}"
+    );
+
+    // (b) an approval contract that pins neither.
+    let mut ordinary = contract_for(&fixture.bundle, wire::ContractVersion::V2);
+    ordinary.approval_sidecar_sha256 = None;
+    let map = env_map(&ordinary);
+    let error = execution_contract_from(|n| map.get(n).cloned())
+        .unwrap_err_or_panic("an approval-authorized run must pin its approval sidecar");
+    assert!(
+        error
+            .to_string()
+            .contains(wire::APPROVAL_SIDECAR_SHA256_ENV),
+        "{error}"
+    );
+}
+
+/// `--triggered-by` is bound to the AUTHORIZATION KIND: `approval/<name>` for
+/// an ordinary Restore, `rehearsal/<schedule>/<slot>` for a rehearsal. A
+/// standing run whose trigger is the old approval shape is refused before
+/// anything is parsed.
+#[test]
+fn a_standing_contract_requires_a_rehearsal_trigger() {
+    let fixture = fixture();
+    let signed = signed_authorization("uid-1", "rehearsal-3f2a91c7-", "TARGET00000000000000000");
+    let contract = standing_contract(&fixture, &signed, "uid-1");
+    let mut bundle = fixture.bundle.clone();
+    bundle.approval = None;
+    bundle.approval_sidecar = None;
+    bundle.authorization = Some(signed.document.clone());
+    bundle.authorization_sidecar = Some(signed.sidecar.clone());
+    bundle.authorization_keys = Some(signed.keys.clone());
+
+    let error = validate_execution_contract(&contract, Some("approval/approval-a"), &bundle)
+        .unwrap_err_or_panic("a rehearsal's trigger names its schedule and slot");
+    assert!(
+        error.to_string().contains("rehearsal/"),
+        "the refusal names the shape it wanted: {error}"
+    );
+    validate_execution_contract(&contract, Some(STANDING_TRIGGER), &bundle)
+        .expect("the rehearsal trigger is accepted");
+}
+
+// ===========================================================================
 // A tiny helper so every row above reads the same way.
 // ===========================================================================
 
