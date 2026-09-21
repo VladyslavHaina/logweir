@@ -728,6 +728,151 @@ fn an_unreadable_newest_point_selects_the_older_one_and_opens_archive_unavailabl
 }
 
 // ===========================================================================
+// U — defect PROTECTION-SECRETKEYS-UNPROTECTED (tracker row: PLAT-14.2's
+// health table; measured live on 2026-09-21, `claude/d3-rows.result.md` §5)
+// ===========================================================================
+
+/// The shape the live run measured, as a candidate.
+///
+/// A destination whose `evidenceRead` grant is `SecretKeys` is read through D2
+/// §3.9's evidence-fetch Job, which this build does not create, so the
+/// controller reaches NO verification verdict — it says so, as `NotAttempted`
+/// with a sentence — and therefore writes no `status.capture` and no
+/// `status.evidence.receiptSha256`. The run itself succeeded and the archive
+/// is fine. Every field here is a fact the live artifact
+/// (`claude/artifacts/d3-live/20260921t1248z/protect/fresh-point.json`)
+/// records.
+fn unreadable_point(hours_ago: i64) -> p::PointCandidate {
+    p::PointCandidate {
+        point_id: None,
+        recovery_point_at: None,
+        newest_record_at: Some(now() - Duration::hours(hours_ago)),
+        evidence: p::Evidence::NotAttempted,
+        ..candidate(hours_ago)
+    }
+}
+
+/// A succeeded point the controller could not place in time is `Unknown`, and
+/// it does not page.
+///
+/// MUTANT: delete the `PointFactsUnread` arm from `evaluate`'s `unresolvable`
+/// chain (or gate it on something that is never true). The candidate falls out
+/// of the available set as before, `newest` is `None`, and the verdict is
+/// `Unprotected`/`NoAvailablePoint` with a `Staleness` alert open and the
+/// sentence "there is no available recovery point for this policy at all" on
+/// its way to an incident title — which is the measured defect, about an
+/// archive that holds the point. Four assertions fail, on the health, the
+/// reason, the alert set and the sentence.
+#[test]
+fn a_point_whose_facts_are_unreadable_is_unknown_and_never_unprotected() {
+    let spec = spec();
+    let schedules = [healthy_schedule()];
+    let rehearsal = p::RehearsalFacts::default();
+    let catalog = p::CatalogAnswer::NotConsulted;
+    let unreadable = [unreadable_point(2)];
+
+    let verdict = p::evaluate(&inputs(
+        &spec,
+        &unreadable,
+        &catalog,
+        &schedules,
+        &[],
+        &rehearsal,
+    ));
+
+    assert_eq!(
+        verdict.health,
+        p::Health::Unknown,
+        "D3 §3.2 gives `Unknown` to evaluation-impossible; `Unprotected` is reserved for no \
+         available point at all"
+    );
+    assert_eq!(verdict.freshness, p::Freshness::Unknown);
+    assert_eq!(verdict.reason, p::FreshnessReason::PointFactsUnread);
+    assert!(
+        !verdict.open_kinds.contains(&p::PolicyAlertKind::Staleness),
+        "`Staleness` covers `Unprotected` by design, so reading an unreadable receipt as \
+         `Unprotected` PAGES about an archive nobody has looked at"
+    );
+    assert!(
+        !verdict.summary.contains("no available recovery point"),
+        "that sentence reaches a PagerDuty incident title verbatim and is false here: {}",
+        verdict.summary
+    );
+    assert!(
+        verdict.summary.contains("could not be placed in time"),
+        "the sentence must say what is missing — a read — and not name an object that is \
+         present: {}",
+        verdict.summary
+    );
+
+    // NEGATIVE CONTROL, and the reason this test cannot be satisfied by making
+    // everything `Unknown`: a policy with NO candidate at all is still
+    // `Unprotected`, which is the state that should page.
+    let verdict = p::evaluate(&inputs(&spec, &[], &catalog, &schedules, &[], &rehearsal));
+    assert_eq!(verdict.health, p::Health::Unprotected);
+    assert_eq!(verdict.reason, p::FreshnessReason::NoAvailablePoint);
+    assert!(verdict.open_kinds.contains(&p::PolicyAlertKind::Staleness));
+}
+
+/// `PointFactsUnread` is the LAST resort and never masks a reason an operator
+/// can act on, nor a point that IS placeable.
+///
+/// MUTANT: move the arm above `CatalogStale`/`SourceMissing`, or drop the
+/// `newest.is_none()` gate. The first two assertions fail on the reason; the
+/// third fails on the health, because a policy with a perfectly good fresh
+/// point would report `Unknown` for an older sibling nobody can read.
+#[test]
+fn an_unplaceable_point_never_masks_a_more_specific_reason_or_a_placeable_one() {
+    let with_catalog = spec_with_catalog();
+    let schedules = [healthy_schedule()];
+    let rehearsal = p::RehearsalFacts::default();
+    let unreadable = [unreadable_point(2)];
+
+    let mut gone = inputs(
+        &with_catalog,
+        &unreadable,
+        &p::CatalogAnswer::NotConsulted,
+        &schedules,
+        &[],
+        &rehearsal,
+    );
+    gone.source_exists = false;
+    assert_eq!(
+        p::evaluate(&gone).reason,
+        p::FreshnessReason::SourceMissing,
+        "a missing source names an object the operator can go and look at; it wins"
+    );
+
+    let stale = p::CatalogAnswer::Stale(p::FreshnessReason::CatalogStale);
+    assert_eq!(
+        p::evaluate(&inputs(
+            &with_catalog,
+            &unreadable,
+            &stale,
+            &schedules,
+            &[],
+            &rehearsal
+        ))
+        .reason,
+        p::FreshnessReason::CatalogStale
+    );
+
+    // A placeable point decides, and the unreadable sibling changes nothing.
+    let plain = spec();
+    let both = [unreadable_point(40), candidate(2)];
+    let verdict = p::evaluate(&inputs(
+        &plain,
+        &both,
+        &p::CatalogAnswer::NotConsulted,
+        &schedules,
+        &[],
+        &rehearsal,
+    ));
+    assert_eq!(verdict.health, p::Health::Healthy);
+    assert_eq!(verdict.reason, p::FreshnessReason::WithinObjective);
+}
+
+// ===========================================================================
 // U — the ledger (tracker rows: REPEATED FAILURE DEDUPLICATION, RECOVERY
 // NOTIFICATION)
 // ===========================================================================

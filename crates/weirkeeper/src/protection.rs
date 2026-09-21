@@ -226,6 +226,27 @@ wire_enum! {
         DestinationMissing => "DestinationMissing",
         /// `spec.protects.scheduleRefs` names no `BackupSchedule` that exists.
         ScheduleMissing => "ScheduleMissing",
+        /// A run this policy covers SUCCEEDED, and the controller could not
+        /// read the facts that place its recovery point in time — defect
+        /// `PROTECTION-SECRETKEYS-UNPROTECTED`.
+        ///
+        /// # An unplaceable point is not an absent point
+        ///
+        /// `Backup.status.capture` is written only on a `Valid` verification
+        /// verdict (`controllers::backup`), and on a destination whose
+        /// `evidenceRead` grant is `SecretKeys` or `WorkloadIdentity` the
+        /// controller holds no Secret verb and reaches no verdict at all — it
+        /// says so, honestly, as `NotAttempted`. The point exists; what is
+        /// missing is the controller's ability to read its receipt.
+        ///
+        /// Reading that as [`FreshnessReason::NoAvailablePoint`] made every
+        /// such policy [`Health::Unprotected`] — D3 §3.2's "no available point
+        /// at all", the worst value the enum has, which PAGES — about an
+        /// archive whose own catalog entry for the same point reads
+        /// `Available`/`Verified`. D3 §3.2 gives "evaluation impossible" to
+        /// [`Health::Unknown`], and this is that: not a pass, not a failure,
+        /// and no incident with a false sentence in its title.
+        PointFactsUnread => "PointFactsUnread",
         /// The object carries no namespace or no UID, so nothing was read and
         /// no verdict was computed. Unreachable for an object that came from
         /// the API server; named rather than borrowed from another reason,
@@ -970,16 +991,10 @@ pub fn is_available(
     spec: &ProtectionPolicySpec,
     catalog: &CatalogAnswer,
 ) -> bool {
-    if !candidate.succeeded() {
+    if !matches_policy(candidate, spec) {
         return false;
     }
     if spec.objectives.require_verified_evidence && !candidate.evidence.is_verified() {
-        return false;
-    }
-    if !candidate.source_matches || !candidate.destination_matches {
-        return false;
-    }
-    if !candidate.covers_all_topics && !topics_covered(spec, &candidate.topics) {
         return false;
     }
     match catalog {
@@ -993,6 +1008,39 @@ pub fn is_available(
             None => false,
         },
     }
+}
+
+/// The RUN half of D3 §3.2's availability rule: everything a policy can decide
+/// from the `Backup` object alone, with the catalog conjunct and the evidence
+/// objective deliberately left out.
+///
+/// Named because two callers need exactly this set and one of them must NOT
+/// apply the other two conjuncts: [`is_available`] adds them, and the
+/// unplaceable-point rule ([`is_unplaceable`]) is about a point whose evidence
+/// the controller could not read, so judging it on that evidence is the defect.
+#[must_use]
+pub fn matches_policy(candidate: &PointCandidate, spec: &ProtectionPolicySpec) -> bool {
+    candidate.succeeded()
+        && candidate.source_matches
+        && candidate.destination_matches
+        && (candidate.covers_all_topics || topics_covered(spec, &candidate.topics))
+}
+
+/// Whether this candidate is a point the policy covers that the controller
+/// could not PLACE IN TIME — defect `PROTECTION-SECRETKEYS-UNPROTECTED`.
+///
+/// A recovery point with no capture start cannot be aged, so it cannot satisfy
+/// an objective measured in seconds. What it also cannot do is be counted as
+/// evidence that the policy has NOTHING — which is what dropping it silently
+/// out of the available set did. See [`FreshnessReason::PointFactsUnread`].
+///
+/// The evidence objective is not applied here ON PURPOSE: the whole claim is
+/// "the controller could not read this point's receipt", and refusing the
+/// point for the verdict it therefore does not have is the double-counting the
+/// defect is made of.
+#[must_use]
+pub fn is_unplaceable(candidate: &PointCandidate, spec: &ProtectionPolicySpec) -> bool {
+    candidate.recovery_point_at.is_none() && matches_policy(candidate, spec)
 }
 
 /// `topics ⊆ point topics` — D3 §3.2.
@@ -1131,6 +1179,19 @@ pub fn evaluate(input: &Inputs<'_>) -> Verdict {
         // Review F12: an entry whose axes this build cannot read is a view that
         // could not ANSWER, not a point that is gone.
         Some(FreshnessReason::CatalogUnreadable)
+    } else if newest.is_none() && input.candidates.iter().any(|c| is_unplaceable(c, spec)) {
+        // Defect `PROTECTION-SECRETKEYS-UNPROTECTED`, the safety net. A run
+        // this policy covers succeeded and the controller could not place its
+        // point in time. That is "evaluation impossible" — D3 §3.2's
+        // `Unknown` — and NOT "no available point at all", which is the value
+        // that pages.
+        //
+        // LAST in the chain: every reason above it is more specific and names
+        // an object the operator can go and look at, while this one says the
+        // controller could not read what it needed. `newest.is_none()` is the
+        // gate, because a policy that DID find a point has a verdict and an
+        // unreadable older one changes nothing about it.
+        Some(FreshnessReason::PointFactsUnread)
     } else {
         None
     };
@@ -1462,6 +1523,21 @@ pub fn summarize(
         Health::Unprotected => {
             "there is no available recovery point for this policy at all".to_string()
         }
+        // The one `Unknown` arm with a sentence of its own, because the generic
+        // one ("protection could not be evaluated (PointFactsUnread)") sends an
+        // operator looking for a missing object when every object is present.
+        // What is missing is a READ: the controller reached no verification
+        // verdict for the point — that is what the destination's `evidenceRead`
+        // grant decides — so it holds no capture time to age it by. The
+        // sentence says that and claims nothing about the archive, which this
+        // controller did not look at.
+        Health::Unknown if reason == FreshnessReason::PointFactsUnread => format!(
+            "a run for this policy succeeded, but its recovery point could not be placed in \
+             time: the controller read no verification verdict for it and so holds no capture \
+             time, and an age cannot be compared to the objective of {}. This is not a pass \
+             and not a failure",
+            humanize(objective)
+        ),
         Health::Unknown => format!(
             "protection could not be evaluated ({}); this is not a pass and not a failure",
             reason.as_str()
