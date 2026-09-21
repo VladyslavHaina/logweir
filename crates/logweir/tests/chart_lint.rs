@@ -2448,6 +2448,49 @@ fn chart_lint_the_console_pod_is_non_root_read_only_and_probes_only_where_it_can
         }
     }
 
+    // THE Service IS `shared` MODE'S ALONE, and this pair is the assertion the
+    // review turned into a requirement. A loopback listener with a Service in
+    // front of it has populated Endpoints — the pod is Ready the moment it
+    // starts, there being no readiness probe — and refuses every connection: a
+    // security property to a reader of the template, an outage to every monitor
+    // in the cluster, and an object any pod can dial. `kubectl port-forward`
+    // takes a Deployment directly, so the in-cluster administrator mode needs
+    // no Service and now renders none.
+    assert!(
+        !names_of(&rendered("console"), "Service").contains("logweir-api"),
+        "console.yaml: the in-cluster administrator mode must render NO Service. Its listener is \
+         127.0.0.1 (config.rs refuses anything else), so a Service there would refuse every \
+         connection while advertising a ready endpoint. The documented path is \
+         `kubectl port-forward deploy/<release>-api`."
+    );
+    assert!(
+        names_of(&rendered("console-shared"), "Service").contains("logweir-api"),
+        "console-shared.yaml: shared mode binds the Pod IP and its Ingress needs a backend, so \
+         this is the one mode that renders a Service"
+    );
+    // …and the NetworkPolicy tells the same story: an allow rule where there is
+    // something to reach, an explicit deny where there is not.
+    let local_docs = rendered("console");
+    let local_np = find(&local_docs, "NetworkPolicy", "logweir-api");
+    assert_eq!(
+        Some(0),
+        local_np.value["spec"]["ingress"]
+            .as_sequence()
+            .map(Vec::len),
+        "console.yaml: the in-cluster administrator mode's NetworkPolicy must carry an EMPTY \
+         ingress list — with `Ingress` in policyTypes that is deny, and it is the honest rule \
+         when there is no Service and the listener is loopback"
+    );
+    let shared_docs = rendered("console-shared");
+    let shared_np = find(&shared_docs, "NetworkPolicy", "logweir-api");
+    assert_eq!(
+        Some(1),
+        shared_np.value["spec"]["ingress"]
+            .as_sequence()
+            .map(Vec::len),
+        "console-shared.yaml: shared mode admits the configured ingress controller, and only it"
+    );
+
     // A PodDisruptionBudget only where one can do any good: the default render
     // is one replica and must NOT have one (it would block `kubectl drain`
     // forever on the node carrying the only console pod); the shared example
@@ -2724,6 +2767,93 @@ fn chart_lint_the_shared_console_cannot_be_published_without_tls() {
     assert!(
         !names_of(&rendered("console"), "Ingress").contains("logweir-api"),
         "the default (localAdmin) console render must carry no Ingress at all"
+    );
+}
+
+/// **`api.console.mode` has no default, and the two modes are two different
+/// shapes — one of which is not exposed in the cluster at all.**
+///
+/// THE MISSING DEFAULT IS THE POINT. `crates/logweir-api/src/config.rs` refuses
+/// a configuration file that forgets to name a mode rather than reading it as
+/// the more permissive one, and after review this chart does the same: enabling
+/// the console without naming a mode is a render-time `fail` naming the field,
+/// not a quiet fall-through to either shape.
+///
+/// The two shapes, as this row holds them:
+///
+/// * **the in-cluster administrator mode** (`localAdmin`) — a loopback
+///   listener, NO Service, no Ingress, no ingress NetworkPolicy rule, the
+///   narrowly bound `<release>-api` ServiceAccount, and readiness not gated on
+///   OIDC because there is no OIDC. Nothing in the cluster can dial it;
+///   `kubectl port-forward deploy/<release>-api` is the documented path, and
+///   `create pods/portforward` in that namespace is therefore equivalent to
+///   full console administrator authority.
+/// * **`shared`** — the only mode that may be exposed through a Service or an
+///   Ingress.
+///
+/// `scripts/check-chart.sh` arm 8 is the half that runs `helm` and reads its
+/// status; GC22 forbids shelling out from a `#[test]`, so this half reads the
+/// checked-in `fail` and the two renders.
+///
+/// MUTANT: give `api.console.mode` a default again in `values.yaml`, or delete
+/// the `fail` — this row fails naming what is gone.
+#[test]
+fn chart_lint_the_console_mode_has_no_default_and_only_shared_is_exposed() {
+    let values: Value =
+        serde_yaml::from_str(&read("charts/logweir/values.yaml")).expect("values.yaml parses");
+    let mode = values["api"]["console"]["mode"]
+        .as_str()
+        .expect("api.console.mode must be present in values.yaml, even though it has no default");
+    assert!(
+        mode.is_empty(),
+        "charts/logweir/values.yaml ships `api.console.mode: {mode}`. There must be NO default: \
+         the binary refuses a configuration that forgets to name a mode rather than reading it \
+         as the more permissive one, and a chart default would be exactly that fall-through, \
+         one layer up. Ship an empty string and let the template refuse it by name."
+    );
+
+    let template = read("charts/logweir/templates/ui/api-config.yaml");
+    assert!(
+        template.contains("api.console.mode is empty, and there is no default."),
+        "templates/ui/api-config.yaml must refuse an empty mode at render time, naming the field"
+    );
+    assert!(
+        template.contains("They must name the SAME authority"),
+        "templates/ui/api-config.yaml must refuse an ingress.host that is not publicBaseUrl's \
+         authority: a mismatched pair renders, lints and installs clean, and then the service \
+         answers 421 misdirected_request to every browser that arrives through the Ingress it \
+         just published"
+    );
+
+    // The schema types the two names AND lets the empty string through, so that
+    // a values file with the console OFF still validates; the template is what
+    // refuses the empty one when it is ON.
+    let schema: serde_json::Value =
+        serde_json::from_str(&read("charts/logweir/values.schema.json"))
+            .expect("the schema parses");
+    let modes = schema["properties"]["api"]["properties"]["console"]["properties"]["mode"]["enum"]
+        .as_array()
+        .expect("api.console.mode carries an enum");
+    let modes: Vec<&str> = modes.iter().filter_map(|m| m.as_str()).collect();
+    assert_eq!(
+        vec!["", "localAdmin", "shared"],
+        modes,
+        "the schema must accept exactly the empty string and the two mode names"
+    );
+
+    // And the Ingress the shared example renders names publicBaseUrl's own
+    // authority, which is the positive half of the refusal above.
+    let shared = rendered("console-shared");
+    let ingress = find(&shared, "Ingress", "logweir-api");
+    let host = ingress.value["spec"]["rules"][0]["host"]
+        .as_str()
+        .expect("the Ingress names a host");
+    let (_, config) = console_config("console-shared");
+    let base = config["publicBaseUrl"].as_str().expect("a publicBaseUrl");
+    assert_eq!(
+        format!("https://{host}"),
+        base,
+        "the Ingress host and publicBaseUrl must name the same authority"
     );
 }
 

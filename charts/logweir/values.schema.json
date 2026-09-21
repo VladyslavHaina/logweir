@@ -418,15 +418,15 @@
           "type": "object",
           "additionalProperties": false,
           "required": ["enabled", "mode"],
-          "description": "D0 stage 7 calls this block `console.*` and the chart's values call the principal `api.*`; `api.console.*` is both names where a reader needs both. What this file types and what it CANNOT: the schema refuses a non-HTTPS publicBaseUrl, a mode outside the two, a port outside 1-65535 and a session lifetime outside 60-900. It cannot express `shared mode requires oidc.issuer` or `an Ingress requires a TLS secret`, because a JSON Schema conditional there would report an anonymous failure; those are `fail` calls in templates/ui/api-config.yaml, which name the field and say why.",
+          "description": "D0 stage 7 calls this block `console.*` and the chart's values call the principal `api.*`; `api.console.*` is both names where a reader needs both. What this file types and what it CANNOT: the schema refuses a non-HTTPS publicBaseUrl, a mode outside the two named ones, a port outside 1-65535 and a session lifetime outside 60-900. It cannot express `shared mode requires oidc.issuer` or `an Ingress requires a TLS secret`, because a JSON Schema conditional there would report an anonymous failure; those are `fail` calls in templates/ui/api-config.yaml, which name the field and say why.",
           "properties": {
             "enabled": { "type": "boolean" },
             "image": { "type": "string", "minLength": 1 },
             "imagePullPolicy": { "type": "string", "enum": ["Always", "IfNotPresent", "Never"] },
             "mode": {
               "type": "string",
-              "enum": ["localAdmin", "shared"],
-              "description": "`localAdmin` is a loopback listener reached with kubectl port-forward: one configured administrator, no identity provider, no Ingress. `shared` is the SSO console: OIDC, an encrypted session cookie, exact role bindings, and TLS in front. logweir-api itself has NO default mode — a configuration that forgets to name one is refused rather than read as the more permissive one — and neither does this chart."
+              "enum": ["", "localAdmin", "shared"],
+              "description": "THE IN-CLUSTER ADMINISTRATOR MODE (`localAdmin`): a loopback listener with NO Service at all, reached only with `kubectl port-forward deploy/<release>-api` — one configured administrator, no identity provider, no Ingress, the narrowly bound `<release>-api` ServiceAccount, and readiness not gated on OIDC. `shared` is the SSO console and is the ONLY mode that may be exposed through a Service or an Ingress: OIDC, an encrypted session cookie, exact role bindings, and TLS in front. THERE IS NO DEFAULT, here or in the binary — `crates/logweir-api/src/config.rs` refuses a file that forgets to name a mode rather than reading it as the more permissive one, and this chart refuses the same way. The empty string is in this enum only so a values file with the console OFF still validates; `api.console.enabled` with an empty mode is a render-time `fail` naming the field."
             },
             "replicas": { "type": "integer", "minimum": 1 },
             "port": { "type": "integer", "minimum": 1, "maximum": 65535 },

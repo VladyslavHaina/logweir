@@ -19,9 +19,10 @@ the more permissive one.
 
 * `mode: localAdmin` — a loopback-only listener, the configured administrator
   as the actor, and namespaces from configuration alone. Not SSO, not a shared
-  console. In the cluster it is the chart's default, and the loopback rule is
-  what makes it one: nothing answers at the pod's own address, so the ClusterIP
-  Service cannot carry a request and `kubectl port-forward` is the only way in.
+  console. Run in the cluster it is the **in-cluster administrator mode**: the
+  chart renders no Service, no Ingress and no ingress NetworkPolicy rule beside
+  it, the identity is the `<release>-api` ServiceAccount, readiness is not gated
+  on OIDC, and `kubectl port-forward deploy/<release>-api` is the only way in.
 * `mode: shared` — the SSO console: OpenID Connect identity, a short-lived
   encrypted session cookie, a synchronizer CSRF token on every unsafe method,
   exact role and namespace bindings, and one audit record per request. It
@@ -1257,20 +1258,30 @@ a ServiceAccount, two ClusterRoles and one RoleBinding per configured namespace
 workload as that principal and requires the first; the render refuses the pair
 by name rather than producing nothing.
 
+**`api.console.mode` has no chart default either**, for the reason this file
+gives above: a mode read by fall-through is the more permissive one nobody
+chose. Enabling the console without naming a mode is a render-time refusal
+naming the field.
+
 | object | rendered when |
 |---|---|
 | immutable, content-addressed `ConfigMap` holding `config.yaml` | `api.console.enabled` |
-| `Deployment` and ClusterIP `Service` `<release>-api` | `api.console.enabled` |
+| `Deployment` `<release>-api` | `api.console.enabled` |
+| ClusterIP `Service` `<release>-api` | `api.console.mode: shared` — **only**. The in-cluster administrator mode binds loopback, so a Service there would advertise a ready endpoint and refuse every connection |
 | `PodDisruptionBudget` | `api.console.replicas` > 1 |
-| `Ingress` | `api.console.ingress.enabled` — shared mode only, TLS required |
-| `NetworkPolicy` | `api.console.networkPolicy.enabled` |
+| `Ingress` | `api.console.ingress.enabled` — shared mode only, TLS required, host must be `publicBaseUrl`'s authority |
+| `NetworkPolicy` | `api.console.networkPolicy.enabled` — an allow rule for the configured ingress controller in shared mode, `ingress: []` (deny) in the administrator mode |
 
 **The configuration file is that ConfigMap and it holds no credential.** Every
 one of the three — the OIDC client secret, the session key, the cursor MAC key —
 appears as a *path* into a read-only Secret volume under `/var/run/logweir/`,
 never as a value. The Secrets are the operator's: the chart generates no key
 material, because a Helm-generated key changes on every render and is
-unrecoverable on upgrade. `kubernetes.source` is always `inCluster` and there is
+unrecoverable on upgrade. **Those Secrets live in the release namespace, which
+is inside `weirkeeper`'s cluster-wide Job-create authority, so residual O1
+(`docs/kubernetes.md` §15.4) extends to the console's session and cursor keys
+until D0 stage 5 scopes the controller's namespaces — and until it does, an
+installation must not describe shared mode as secure.** `kubernetes.source` is always `inCluster` and there is
 no chart value for the other source — a pod that read a kubeconfig would act
 with whatever identity that file carried, and the RBAC argument above would be
 about an account nothing runs as. The token is the projected, time-bound kind
@@ -1300,17 +1311,29 @@ types the HTTPS rule as well, so `--set` is refused before a template runs, and
 
 `charts/logweir/README.md` §`api.console.enabled` and
 [install.md](install.md) §5e carry the commands, including the key Secret you
-must create first and the `kubectl port-forward` the default mode is reached
-with.
+must create first and the `kubectl port-forward deploy/<release>-api` the
+in-cluster administrator mode is reached with.
 
 ## Local administrator mode is not a shared console
 
-This mode uses the selected kubeconfig identity and may be cluster-admin. It is
-an explicit administrator mode, not SSO and not per-user authorization: the
-namespace grants come from the configuration file, and every actor of this
-process is the same actor. It must not bind a routable address, must not get an
-Ingress, and adding a login in front of it would not create per-user
-authorization. Shared operation uses `mode: shared`, which is a different
+**Where it runs decides whose authority it carries, and the two are not the
+same.** Run from a laptop, `mode: localAdmin` uses the selected kubeconfig
+identity and **may be cluster-admin** — that is the manual administrator path
+D0 describes, and the closed adapter is a source-level bound on what it reaches,
+not an RBAC one. Run in the cluster under `api.console.enabled` it is the
+**in-cluster administrator mode**: `kubernetes.source: inCluster`, with no chart
+value for a kubeconfig at all, so it carries the `<release>-api` ServiceAccount
+and nothing else — the narrow grant in
+`charts/logweir/templates/ui/api-rbac.yaml`, which `kubectl auth can-i` can be
+asked about before anything runs as it. In that shape the chart also renders no
+Service, no Ingress and no ingress NetworkPolicy rule, and `create
+pods/portforward` in the namespace is the whole authorization boundary.
+
+**What is the same in both.** It is an explicit administrator mode, not SSO and
+not per-user authorization: the namespace grants come from the configuration
+file, and every actor of this process is the same actor. It must not bind a
+routable address, must not get an Ingress, and adding a login in front of it
+would not create per-user authorization. Shared operation uses `mode: shared`, which is a different
 listener, a different authenticator and a different authorizer — never this one
 with a login bolted in front. Ordinary confirmation is unavailable through this
 mode; it keeps the legacy governed approval behaviour.

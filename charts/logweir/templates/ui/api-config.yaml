@@ -106,6 +106,9 @@ laptop with no cluster.
 {{- if lt (int $c.replicas) 1 -}}
 {{- fail "api.console.replicas must be at least 1." -}}
 {{- end -}}
+{{- if not $c.mode -}}
+{{- fail "api.console.mode is empty, and there is no default. The two modes are `localAdmin` — THE IN-CLUSTER ADMINISTRATOR MODE: a loopback listener with no Service at all, reached only with `kubectl port-forward deploy/<release>-api`, one configured administrator, no identity provider, the narrowly bound <release>-api ServiceAccount, and readiness not gated on OIDC — and `shared`, the SSO console, which is the ONLY mode that may be exposed through a Service or an Ingress. `crates/logweir-api/src/config.rs` refuses a configuration file that forgets to name a mode rather than reading it as the more permissive one; this chart refuses the same way and for the same reason. Name one." -}}
+{{- end -}}
 {{- if eq $c.mode "localAdmin" -}}
 {{- if not $c.localAdminSubject -}}
 {{- fail "api.console.localAdminSubject is empty. localAdmin mode has no identity provider: every request is attributed to this one configured administrator, so the name it is recorded under is not optional." -}}
@@ -151,13 +154,16 @@ laptop with no cluster.
 {{- if not $c.ingress.tlsSecretName -}}
 {{- fail "api.console.ingress.tlsSecretName is empty. An Ingress for the shared console without a TLS block is a console published over plain HTTP: the session cookie is `__Host-`/`Secure` and would never be sent, and the OIDC redirect URI is https. TLS at the shared entry point is required, not recommended (D0)." -}}
 {{- end -}}
+{{- if ne $c.ingress.host (trimPrefix "https://" $c.publicBaseUrl) -}}
+{{- fail (printf "api.console.ingress.host is %q but api.console.publicBaseUrl is %q. They must name the SAME authority. The OIDC redirect URI is publicBaseUrl plus /auth/callback, and the service answers 421 misdirected_request to any Host it does not serve — so a mismatched pair renders, lints and installs clean, and then refuses every browser that arrives through the Ingress it just published. Every other way to get this wrong is refused here by name; so is this one." $c.ingress.host $c.publicBaseUrl) -}}
+{{- end -}}
 {{- end -}}
 {{- else -}}
 {{- fail (printf "api.console.mode is %q. The two modes are `localAdmin` (a loopback listener reached with kubectl port-forward, one configured administrator, no identity provider) and `shared` (SSO: OIDC, an encrypted session cookie, exact role bindings and TLS). There is no default: a file that forgets to say which it wants is refused rather than read as the more permissive one." $c.mode) -}}
 {{- end -}}
-{{- if $c.networkPolicy.enabled -}}
+{{- if and $c.networkPolicy.enabled (eq $c.mode "shared") -}}
 {{- if or (not $c.networkPolicy.ingressNamespace) (not $c.networkPolicy.ingressPodLabels) -}}
-{{- fail "api.console.networkPolicy.enabled needs both networkPolicy.ingressNamespace and networkPolicy.ingressPodLabels. An ingress NetworkPolicy with no `from` selector admits nothing at all, which would be a console nobody can reach; one with an empty podSelector admits every pod in the namespace, which is not what `only the configured ingress controller` means." -}}
+{{- fail "api.console.networkPolicy.enabled in shared mode needs both networkPolicy.ingressNamespace and networkPolicy.ingressPodLabels. An ingress rule with no `from` selector admits nothing at all, which would be a console nobody can reach; one with an empty podSelector admits every pod in the controller's namespace, which is not what `only the configured ingress controller` means. (In the in-cluster administrator mode there is no ingress rule to write: nothing may dial this pod, so the policy denies ingress outright and neither selector is read.)" -}}
 {{- end -}}
 {{- end -}}
 {{- end -}}
@@ -168,18 +174,25 @@ formatting, and they are here rather than inside the document because a comment
 emitted into a rendered ConfigMap is a comment an operator has to scroll past on
 every `kubectl get cm -o yaml`.
 
-1. LOOPBACK IN localAdmin MODE, AND THE SERVICE CANNOT REACH IT — WHICH IS THE
-   POINT. `config.rs` refuses any non-loopback listener in that mode by name
+1. THE IN-CLUSTER ADMINISTRATOR MODE (`localAdmin`) BINDS LOOPBACK AND HAS NO
+   Service. `config.rs` refuses any non-loopback listener in that mode by name
    (`0.0.0.0`, `[::]` and any routable address), so `127.0.0.1` is not a choice
-   this template makes; it is the only one the binary accepts. The consequence
-   is the security property that makes this the DEFAULT mode: turning the
-   console on cannot put an unauthenticated shared console on a ClusterIP. The
-   legacy `kubectl proxy` (`ui.yaml`) is reachable by anything in the cluster
-   and acts with its own ServiceAccount for whoever reached it; this pod answers
-   nothing that arrives at its Pod IP. Reach it through the API server:
+   this template makes; it is the only one the binary accepts — and this chart
+   then renders no Service, no Ingress and no ingress NetworkPolicy rule to go
+   with it, so there is nothing in the cluster that a monitor or another pod
+   could dial. The legacy `kubectl proxy` (`ui.yaml`) is reachable by anything
+   in the cluster and acts with its own ServiceAccount for whoever reached it;
+   this pod is reachable only through the API server's portforward subresource.
+   Reach it that way:
 
-       kubectl --context docker-desktop -n <ns> port-forward svc/<release>-api 8484:8484
+       kubectl --context docker-desktop -n <ns> port-forward deploy/<release>-api 8484:8484
        open http://127.0.0.1:8484/ui/
+
+   A DEPLOYMENT TARGET AND NOT A Service, because in this mode there IS no
+   Service: `api-deployment.yaml` renders one only in `shared` mode. `kubectl
+   port-forward` takes a Deployment directly, so nothing is lost, and what is
+   gained is that this chart renders no object any monitor or any other pod
+   could dial.
 
    `publicOrigin` must carry the listen port (`config.rs` refuses a mismatch),
    so the local side of that port-forward is the same number.

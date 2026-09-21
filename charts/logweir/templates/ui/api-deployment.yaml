@@ -8,33 +8,44 @@ the workload: one Deployment running `logweir-api --config` out of the
 PodDisruptionBudget only where one can do any good.
 
 ---------------------------------------------------------------------------
-THE SERVICE EXISTS IN BOTH MODES AND ONLY ONE MODE ANSWERS ON IT
+THE Service IS RENDERED IN `shared` MODE ONLY
 ---------------------------------------------------------------------------
-In `shared` mode the process binds `0.0.0.0` and the ClusterIP is the Ingress's
-backend, as usual.
+In `shared` mode the process binds `0.0.0.0`, the ClusterIP is the Ingress's
+backend, and the Service is the ordinary thing it looks like.
 
-In `localAdmin` mode — THE DEFAULT — `config.rs` refuses any non-loopback
-listener, so nothing answers at the Pod IP and the ClusterIP is dead by
-construction. The Service is still rendered, and it is not decoration: it is the
-stable name `kubectl port-forward svc/<release>-api 8484:8484` resolves, and
-port-forward reaches the pod's own network namespace through the API server
-rather than through the ClusterIP. So the object an administrator names is the
-same in both modes, and the difference between "reachable by anything in the
-cluster" and "reachable by someone who already has `create pods/portforward`"
-is made by the LISTENER, where the binary enforces it, and not by whether a
-template rendered a Service.
+In the IN-CLUSTER ADMINISTRATOR MODE (`localAdmin`) there is NO Service at all,
+and that is a change made after review. `config.rs` refuses any non-loopback
+listener in that mode, so a Service rendered there would have populated
+Endpoints (the pod is Ready the moment it starts, there being no readiness
+probe — see below) and would refuse every connection: a security property to a
+reader of this file, and an outage to every monitor in the cluster. There is no
+need for it either, because `kubectl port-forward` takes a Deployment directly:
+
+    kubectl --context docker-desktop -n <ns> port-forward deploy/<release>-api 8484:8484
+
+So this chart renders, in that mode, nothing that anything in the cluster could
+dial: no Service, no Ingress (refused by name), and no ingress rule in the
+NetworkPolicy. `shared` is the only mode that may be exposed through either.
 
 Stated the other way round, because it is the answer to PLAT-17.1's residue and
 to `ui.yaml`'s whole header: turning this component on CANNOT produce an
 unauthenticated shared console. The legacy proxy's model is "anyone who can
-reach the Service acts as the ServiceAccount". This pod's default mode answers
-nobody who reaches the Service, and its shared mode authenticates every request
-before it reaches a route.
+reach the Service acts as the ServiceAccount". The in-cluster administrator mode
+has no Service to reach, and shared mode authenticates and authorizes every
+request before it reaches a route.
 
-ClusterIP AND NOTHING ELSE, with no chart value to change it. D0: "A ClusterIP
-Service exposes only the console port. No NodePort/LoadBalancer by default." A
-NodePort would put the console on every node's address, ahead of the Ingress and
-its TLS; the supported public path is the Ingress and nothing else.
+AND THE PRICE OF THE ADMINISTRATOR MODE, SAID OUT LOUD: `create
+pods/portforward` in this namespace is equivalent to full console administrator
+authority over every bound namespace. There is no identity provider and no
+product role check in that mode — every request is the one configured
+administrator — so that Kubernetes verb IS the authorization boundary, and it
+should be granted as such.
+
+WHERE IT IS RENDERED, ClusterIP AND NOTHING ELSE, with no chart value to change
+it. D0: "A ClusterIP Service exposes only the console port. No
+NodePort/LoadBalancer by default." A NodePort would put the console on every
+node's address, ahead of the Ingress and its TLS; the supported public path is
+the Ingress and nothing else.
 
 ---------------------------------------------------------------------------
 PROBES, AND WHY THERE ARE NONE IN localAdmin MODE
@@ -45,8 +56,9 @@ requires that Kubernetes answers for this service's identity; its body never
 says which endpoint or why). Both are exempt from the service's own `Host`
 allowlist precisely because a kubelet addresses the Pod by IP.
 
-`localAdmin` mode gets NEITHER, and that is a consequence of the loopback rule
-rather than an omission. The kubelet performs an HTTP probe from the node's
+The in-cluster administrator mode gets NEITHER, and that is a consequence of the
+loopback rule rather than an omission — readiness there is not gated on OIDC or
+on anything else, because nothing can probe a loopback listener. The kubelet performs an HTTP probe from the node's
 network namespace against the POD IP; a loopback-only listener refuses that
 connection, so a readiness probe would hold the pod permanently NotReady and a
 liveness probe would kill and restart a console that is working perfectly. A
@@ -94,6 +106,7 @@ one place decides, `api-config.yaml`'s `logweir.api.keyDir`.
 {{- $configHash := include "logweir.api.config" . | sha256sum }}
 {{- $configName := printf "%s-config-%s" $name (trunc 10 $configHash) }}
 {{- $keys := include "logweir.api.keyDir" . }}
+{{- if eq $c.mode "shared" }}
 apiVersion: v1
 kind: Service
 metadata:
@@ -113,6 +126,7 @@ spec:
       port: {{ int $c.port }}
       targetPort: http
 ---
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:

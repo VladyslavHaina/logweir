@@ -6679,6 +6679,56 @@ spec:
         - protocol: TCP
           port: 6443
 ---
+# Source: logweir/templates/ui/api-networkpolicy.yaml
+# [UNVERIFIED — enforcement: Docker Desktop may accept this object without a
+# NetworkPolicy-enforcing CNI. Validate deny/allow behavior on the production
+# CNI; Service ClusterIP versus post-DNAT endpoint matching is provider-specific.]
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: logweir-api
+  namespace: logweir-system
+  labels:
+    app.kubernetes.io/name: logweir
+    app.kubernetes.io/instance: logweir
+    app.kubernetes.io/managed-by: Helm
+    helm.sh/chart: logweir-0.1.0
+    app.kubernetes.io/component: api
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: logweir
+      app.kubernetes.io/instance: logweir
+      app.kubernetes.io/component: api
+  policyTypes:
+    - Ingress
+    - Egress
+  # The in-cluster administrator mode admits nothing: an empty list with
+  # `Ingress` in policyTypes is deny. There is no Service to reach either.
+  ingress: []
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              component: kube-apiserver
+      ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+---
 # Source: logweir/templates/identity.yaml
 apiVersion: v1
 kind: ServiceAccount
@@ -7290,29 +7340,6 @@ subjects:
   - kind: ServiceAccount
     name: logweir-api
     namespace: logweir-system
----
-# Source: logweir/templates/ui/api-deployment.yaml
-apiVersion: v1
-kind: Service
-metadata:
-  name: logweir-api
-  namespace: logweir-system
-  labels:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/managed-by: Helm
-    helm.sh/chart: logweir-0.1.0
-    app.kubernetes.io/component: api
-spec:
-  type: ClusterIP
-  selector:
-    app.kubernetes.io/name: logweir
-    app.kubernetes.io/instance: logweir
-    app.kubernetes.io/component: api
-  ports:
-    - name: http
-      port: 8484
-      targetPort: http
 ---
 # Source: logweir/templates/deployment.yaml
 apiVersion: apps/v1

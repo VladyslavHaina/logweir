@@ -1,21 +1,26 @@
-# console.values.yaml — THE CONSOLE IN ITS DEFAULT MODE. D0 stage 7.
+# console.values.yaml — THE IN-CLUSTER ADMINISTRATOR MODE. D0 stage 7.
 #
-# `api.console.mode: localAdmin` is the chart's default and this file does not
-# set it: the point of the example is what an installation gets when it turns
-# the console on and configures nothing else about identity.
+# `api.console.mode` HAS NO DEFAULT — in this chart or in the binary — so this
+# file names it, and a values file that forgets to is refused at render time
+# with the field named rather than read as the more permissive mode.
 #
-# WHAT THAT MODE IS, IN ONE PARAGRAPH. `logweir-api` refuses any non-loopback
-# listener in localAdmin mode (`crates/logweir-api/src/config.rs`), so the pod
-# binds `127.0.0.1` and NOTHING answers at its Pod IP or through its ClusterIP.
-# There is no identity provider and no session: every request is attributed to
-# the one configured administrator, and the authority actually exercised is the
-# `<release>-api` ServiceAccount's — which is `templates/ui/api-rbac.yaml`'s
-# narrow grant and never a kubeconfig. Reaching it therefore requires the
-# Kubernetes permission to port-forward into the pod:
+# WHAT THIS MODE IS, IN ONE PARAGRAPH. `logweir-api` refuses any non-loopback
+# listener in it (`crates/logweir-api/src/config.rs`), so the pod binds
+# `127.0.0.1`; and the chart then renders NO Service, no Ingress and no ingress
+# NetworkPolicy rule, so there is nothing in the cluster that a monitor or
+# another pod could dial. There is no identity provider and no session: every
+# request is attributed to the one configured administrator, and the authority
+# actually exercised is the `<release>-api` ServiceAccount's — which is
+# `templates/ui/api-rbac.yaml`'s narrow grant and never a kubeconfig. Readiness
+# is not gated on OIDC, because there is none. Reach it through the API server:
 #
 #     kubectl --context docker-desktop -n logweir-system \
-#       port-forward svc/logweir-api 8484:8484
+#       port-forward deploy/logweir-api 8484:8484
 #     open http://127.0.0.1:8484/ui/
+#
+# `create pods/portforward` IN THIS NAMESPACE IS THEREFORE EQUIVALENT TO FULL
+# CONSOLE ADMINISTRATOR AUTHORITY OVER EVERY BOUND NAMESPACE — grant it as you
+# would grant that.
 #
 # THIS IS NOT SHARED-CONSOLE MODE AND MUST NOT BE DESCRIBED AS ONE. See
 # `console-shared.values.yaml` for that: OIDC, an encrypted session cookie,
@@ -31,8 +36,18 @@
 #     kubectl --context docker-desktop -n logweir-system \
 #       create secret generic logweir-console-keys --from-file=cursor.key
 #     rm cursor.key
+#
+# `networkPolicy.enabled` IS ON HERE although this mode needs no ingress rule,
+# so that the checked-in render (`charts/logweir/rendered/console.yaml`) shows
+# what the policy looks like in this mode: `ingress: []`, which with `Ingress`
+# in `policyTypes` is DENY, beside the same egress rules shared mode gets. That
+# is the honest policy when there is no Service and the listener is loopback.
+# Docker Desktop will accept it and enforce neither half.
 api:
   enabled: true
   console:
     enabled: true
+    mode: localAdmin
     keySecret: logweir-console-keys
+    networkPolicy:
+      enabled: true

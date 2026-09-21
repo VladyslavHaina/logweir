@@ -739,6 +739,15 @@ $ kubectl --context docker-desktop -n logweir-system \
 $ rm cursor.key
 ```
 
+**This Secret is inside `weirkeeper`'s Job-create authority, and D0 requires
+that said.** It lives in the release namespace, which the chart binds
+`weirkeeper` over cluster-wide. Residual **O1** (`docs/kubernetes.md` §15.4, which
+states it for the installation signing key: Job CRUD in a namespace that holds
+that key is equivalent to holding it, because a Job the controller creates can
+mount it) therefore extends to the console's session and cursor keys as well —
+holding Job CRUD in this namespace is equivalent to holding them. D0 stage 5 scopes the controller's namespaces; **until it lands, an
+installation must not describe shared mode as secure.**
+
 In `shared` mode that Secret carries two files instead, each two lines, and
 `api.console.keyVersion` must equal the `version:` they declare:
 
@@ -750,26 +759,44 @@ $ kubectl --context docker-desktop -n logweir-system \
     --from-file=session.key --from-file=cursor.key
 ```
 
-**The default mode is loopback, and that is the point.** `api.console.mode`
-ships as `localAdmin`: one configured administrator, no identity provider, and a
-listener `logweir-api` refuses to bind anywhere but `127.0.0.1`. Nothing answers
-at the Pod IP, so the ClusterIP Service is dead by construction and reaching the
-console needs the Kubernetes permission to port-forward into its pod. Unlike the
-in-cluster proxy of §"Serving the UI", turning this on cannot make a console
-that anyone who reaches a Service can drive.
+**`api.console.mode` has no default and must be named.** The binary refuses a
+configuration file that forgets to say which mode it wants rather than reading
+it as the more permissive one, and the chart refuses the same way, naming the
+field. The two modes are two shapes:
+
+**`localAdmin` — the in-cluster administrator mode.** One configured
+administrator, no identity provider, and a listener `logweir-api` refuses to
+bind anywhere but `127.0.0.1`. The chart renders **no Service**, no Ingress and
+no ingress rule in the NetworkPolicy, so there is nothing in the cluster that a
+monitor or another pod could dial; the identity is the `<release>-api`
+ServiceAccount of §5d, narrowly bound and never a kubeconfig; and readiness is
+not gated on OIDC because there is none. Unlike the in-cluster proxy of
+§"Serving the UI", turning this on cannot make a console that anyone who reaches
+a Service can drive.
+
+**`shared` is the only mode that may be exposed through a Service or an
+Ingress.**
 
 ```console
 $ helm upgrade logweir charts/logweir -n logweir-system --reuse-values \
     --set api.enabled=true --set api.console.enabled=true \
+    --set api.console.mode=localAdmin \
     --set api.console.keySecret=logweir-console-keys
 $ kubectl --context docker-desktop -n logweir-system \
-    port-forward svc/logweir-api 8484:8484
+    port-forward deploy/logweir-api 8484:8484
 $ open http://127.0.0.1:8484/ui/
 ```
 
-The local port must be `8484`: the rendered `publicOrigin` carries the listen
-port and the service refuses a mismatch, because an origin that does not match
-the one the browser sends is a CSRF check that cannot pass.
+`kubectl port-forward` takes a Deployment directly, which is why this mode needs
+no Service. The local port must be `8484`: the rendered `publicOrigin` carries
+the listen port and the service refuses a mismatch, because an origin that does
+not match the one the browser sends is a CSRF check that cannot pass.
+
+**`create pods/portforward` in this namespace is equivalent to full console
+administrator authority over every bound namespace — grant it as you would grant
+that.** There is no identity provider and no product role check in this mode:
+every request is the one configured administrator, so that Kubernetes verb *is*
+the authorization boundary.
 
 **This mode has no probes**, because a kubelet probe addresses the Pod IP and
 this listener will not answer there. A configuration the binary refuses is
@@ -791,8 +818,8 @@ paths into read-only Secret mounts under `/var/run/logweir/` and never a value;
 a lint row walks every rendered console ConfigMap to keep it that way.
 
 **Uninstalling the console leaves everything else.** Setting
-`api.console.enabled=false` removes the ConfigMap, the Deployment, the Service
-and, if enabled, the Ingress and NetworkPolicy; the principal, its grants and
+`api.console.enabled=false` removes the ConfigMap and the Deployment, and with
+them the Service, Ingress and NetworkPolicy wherever those were rendered; the principal, its grants and
 every Logweir custom resource are untouched. The console creates and reads
 objects and executes nothing, so removing it stops no backup, cancels no restore
 and loses no evidence. Existing installations that never set the flag see no

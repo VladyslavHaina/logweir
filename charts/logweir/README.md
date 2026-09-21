@@ -63,9 +63,10 @@ install document; this README is the chart's own.
 | `Deployment`, `Service`, `ServiceAccount`, `ClusterRole`s, `RoleBinding` `<release>-ui` | `ui.enabled` | `kubectl proxy` serving the twenty-two UI files and the API on one origin, with its own authority (below). The files come from the image `ui.image`, not from a ConfigMap |
 | `ServiceAccount` `logweir-retention`, in the release namespace **and every `identity.authorizedRunnerNamespaces` entry** | `retention.enabled` | the identity every `mode: Enforce` Job names, in every namespace that runs one. **No Role and no RoleBinding**: the retention worker makes zero Kubernetes API calls |
 | `ServiceAccount`, two `ClusterRole`s, `ClusterRoleBinding`, `RoleBinding` `<release>-api` | `api.enabled` | the console/API principal's grants. **RBAC only** — no Deployment, no image, no Service |
-| `ConfigMap` `<release>-api-config-<digest>`, `Deployment` + `Service` `<release>-api` | `api.console.enabled` | the console itself: `logweir-api` out of the `logweir-console` image, serving `/ui/` and `/api/v1` on one origin as the principal above. Its default mode binds **loopback** — see *`api.console.enabled`* below |
-| `Ingress` `<release>-api` | `api.console.ingress.enabled` | the shared console's public entry point. **Shared mode only, TLS required**; refused in front of the default mode |
-| `NetworkPolicy` `<release>-api` | `api.console.networkPolicy.enabled` | ingress from the configured ingress-controller pods only; egress to DNS, the Kubernetes API and the configured IdP CIDRs — **never** a broker or object-store port |
+| `ConfigMap` `<release>-api-config-<digest>` + `Deployment` `<release>-api` | `api.console.enabled` | the console itself: `logweir-api` out of the `logweir-console` image, serving `/ui/` and `/api/v1` on one origin as the principal above. `api.console.mode` is **required** — see *`api.console.mode`* below |
+| `Service` `<release>-api` | `api.console.mode: shared` | the Ingress's backend. The in-cluster administrator mode binds loopback and renders **no Service at all** |
+| `Ingress` `<release>-api` | `api.console.ingress.enabled` | the shared console's public entry point. **Shared mode only, TLS required, host must be `publicBaseUrl`'s authority**; refused in front of the in-cluster administrator mode |
+| `NetworkPolicy` `<release>-api` | `api.console.networkPolicy.enabled` | in shared mode, ingress from the configured ingress-controller pods only; in the in-cluster administrator mode, `ingress: []` — deny. Egress in both: DNS, the Kubernetes API and the configured IdP CIDRs, and **never** a broker or object-store port |
 
 Nothing optional is on by default. The release gate renders the snapshots with
 the pinned bootstrap digest exactly as shipped; the rest of the default render
@@ -206,9 +207,10 @@ neither is in the list above:
 
 And one more starts the console itself, and needs `api.enabled`:
 
-* **`api.console.enabled`** — *run the console in this cluster.* Read
-  *`api.console.enabled`* before turning it on, and read it before assuming the
-  word "console" means the same thing as "reachable".
+* **`api.console.enabled`** — *run the console in this cluster.* It needs
+  `api.console.mode`, which has **no default**. Read *`api.console.enabled`*
+  before turning it on, and read it before assuming the word "console" means the
+  same thing as "reachable".
 
 ## `retention.enabled` — the identity a deletion needs, and the three gates it is not
 
@@ -336,22 +338,40 @@ OIDC, exact role/namespace bindings, TLS ingress … enable read-only console").
 `api.enabled` — the render refuses the pair, naming both flags, rather than
 quietly producing nothing.
 
-### The default mode cannot be reached from inside the cluster
+### `api.console.mode` has no default, and the two modes are two shapes
 
-`api.console.mode` has no default in the binary and none here that changes the
-answer: the chart ships `localAdmin`, and in that mode `logweir-api` **refuses
-any non-loopback listener**. The pod binds `127.0.0.1`, so:
+**There is no default, here or in the binary.** `crates/logweir-api/src/config.rs`
+refuses a configuration file that forgets to name a mode rather than reading it
+as the more permissive one, and this chart refuses the same way:
+`api.console.enabled: true` with no `api.console.mode` is a render-time failure
+naming the field. Name one.
 
-* nothing answers at its Pod IP, and the ClusterIP Service is dead by
-  construction;
-* there is no `Ingress` — the render refuses one in front of this mode by name;
-* reaching it needs the Kubernetes permission to port-forward into the pod.
+#### `localAdmin` — the **in-cluster administrator mode**
+
+`logweir-api` **refuses any non-loopback listener** in this mode, so the pod
+binds `127.0.0.1`. The chart then renders nothing to go with it that anything in
+the cluster could dial:
+
+* **no Service.** `kubectl port-forward` takes a Deployment directly, so one is
+  not needed — and a Service in front of a loopback listener would advertise a
+  ready endpoint (there is no readiness probe; see below) while refusing every
+  connection: a security property to a reader of the template, and an outage to
+  every monitor in the cluster.
+* **no Ingress** — the render refuses one in front of this mode by name.
+* **no ingress rule in the NetworkPolicy**: `ingress: []`, which with `Ingress`
+  in `policyTypes` is deny.
+* the identity is the `<release>-api` ServiceAccount, narrowly bound by
+  `templates/ui/api-rbac.yaml`, and never a kubeconfig.
+* **readiness is not gated on OIDC**, because there is no OIDC.
+
+**`shared` is the only mode that may be exposed through a Service or an
+Ingress.**
 
 That is the difference between this component and the legacy proxy below.
 `ui.enabled` renders a `kubectl proxy` where **anyone who can reach that Service
 acts with that ServiceAccount's authority**. Turning `api.console.enabled` on
-cannot produce that, in either mode: the default answers nobody who reaches the
-Service, and `shared` mode authenticates and authorizes every request before it
+cannot produce that in either mode: the administrator mode has no Service to
+reach, and `shared` mode authenticates and authorizes every request before it
 reaches a route.
 
 ```console
@@ -362,13 +382,19 @@ $ rm cursor.key
 $ helm install logweir charts/logweir -n logweir-system \
     -f charts/logweir/examples/console.values.yaml
 $ kubectl --context docker-desktop -n logweir-system \
-    port-forward svc/logweir-api 8484:8484
+    port-forward deploy/logweir-api 8484:8484
 $ open http://127.0.0.1:8484/ui/
 ```
 
 The local port must be `8484` too: the configuration's `publicOrigin` carries
 the listen port and `logweir-api` refuses a mismatch, because an origin that
 does not match the one the browser sends is a CSRF check that cannot pass.
+
+**`create pods/portforward` in this namespace is equivalent to full console
+administrator authority over every bound namespace — grant it as you would grant
+that.** This mode has no identity provider and no product role check: every
+request is attributed to the one configured `localAdminSubject`, so that
+Kubernetes verb *is* the authorization boundary, and it is the whole of it.
 
 **There are no probes in this mode, and that is a consequence rather than an
 omission.** A kubelet HTTP probe is made from the node's network namespace
@@ -403,6 +429,17 @@ explicitly. The same applies to `api.console.oidc.clientSecret`, which is the
 **name** of a Secret holding the client secret under the key `clientSecret`, and
 to `api.console.ingress.tlsSecretName`.
 
+**Residual O1 extends to this Secret, and D0 requires that to be said.** It
+lives in the release namespace, which `templates/clusterrolebinding.yaml` binds
+`weirkeeper` over cluster-wide. Residual **O1** (`docs/kubernetes.md` §15.4:
+*"Job CRUD in a namespace that holds `logweir-signing-key` is equivalent to
+holding that key, because a Job the controller creates can mount it"*) therefore
+covers the console's session and cursor keys as well: a Job the controller
+creates can mount them, so holding Job CRUD here is equivalent to holding them.
+D0 stage 5 scopes the controller's namespaces away from the cluster-wide
+binding; **until it lands, an installation must not describe shared mode as
+secure.** D0 says so in the same sentence that asks for the keys to be moved.
+
 **No credential is ever in the ConfigMap.** The rendered configuration carries
 *paths* — `oidc.clientSecretFile`, `sessionKey.file`, `cursorKey.file` — into
 read-only Secret mounts under `/var/run/logweir/`, and
@@ -426,6 +463,8 @@ not let you install, each refused at render time with the field named:
 | `*` or `?` in a binding | bindings are EXACT strings; a wildcard is refused by name rather than silently matching nothing |
 | `networkPolicy.enabled` without both ingress-controller selectors | an ingress rule with no `from` admits nothing; one with an empty pod selector admits the whole namespace |
 | `api.console.enabled` without `api.enabled` | a pod with no grants, which 403s on every route |
+| `api.console.enabled` with no `api.console.mode` | there is no default, here or in the binary; a mode read by fall-through is the more permissive one nobody chose |
+| `ingress.host` that is not `publicBaseUrl`'s authority | the redirect URI is `publicBaseUrl` + `/auth/callback` and the service answers `421 misdirected_request` to any other `Host`, so a mismatch publishes a console every browser is refused by |
 
 `replicas` above 1 also renders a `PodDisruptionBudget` with
 `maxUnavailable: 1`. At one replica it renders none, deliberately: a budget over

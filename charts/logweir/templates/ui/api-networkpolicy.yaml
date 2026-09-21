@@ -18,18 +18,22 @@ the bracket-anchored mark `scripts/check-unverified-labels.sh` reads, closed in
 place with its reason, exactly as `templates/networkpolicy.yaml` carries it.
 
 ---------------------------------------------------------------------------
-INGRESS: THE CONFIGURED INGRESS CONTROLLER, AND NOTHING ELSE
+INGRESS: IN `shared` MODE, THE CONFIGURED INGRESS CONTROLLER AND NOTHING ELSE.
+IN THE IN-CLUSTER ADMINISTRATOR MODE, NOTHING AT ALL.
 ---------------------------------------------------------------------------
-Both selectors are required (`logweir.api.consoleChecks` refuses either one
-empty): an ingress rule with no `from` admits nothing, and one with an empty
-podSelector admits every pod in the controller's namespace, which is not what
-"only the configured ingress controller" means.
+In `shared` mode both selectors are required (`logweir.api.consoleChecks`
+refuses either one empty): an ingress rule with no `from` admits nothing, and
+one with an empty podSelector admits every pod in the controller's namespace,
+which is not what "only the configured ingress controller" means.
 
-`localAdmin` mode needs no ingress rule at all and gets the same one anyway.
-That is not a contradiction: in that mode nothing answers at the Pod IP, and
-`kubectl port-forward` reaches the pod through the kubelet rather than over the
-pod network, so it is unaffected by any NetworkPolicy. An installation running
-the default mode should simply leave this component off.
+In the in-cluster administrator mode the `ingress:` list below is EMPTY, which
+with `Ingress` in `policyTypes` means deny — and it is the honest rule, because
+in that mode the chart renders no Service either and the listener is loopback,
+so nothing in the cluster is supposed to dial this pod at all. `kubectl
+port-forward` reaches it through the API server's portforward subresource and
+the kubelet, not over the pod network, so it is unaffected by this policy. (The
+enforcement warning above applies to the deny exactly as to the allow: Docker
+Desktop will accept either and enforce neither.)
 
 ---------------------------------------------------------------------------
 EGRESS: DNS, THE KUBERNETES API, AND THE IDENTITY PROVIDER. NOT KAFKA, NOT S3.
@@ -99,6 +103,7 @@ spec:
   policyTypes:
     - Ingress
     - Egress
+  {{- if eq $c.mode "shared" }}
   ingress:
     - from:
         - namespaceSelector:
@@ -110,6 +115,11 @@ spec:
       ports:
         - protocol: TCP
           port: {{ int $c.port }}
+  {{- else }}
+  # The in-cluster administrator mode admits nothing: an empty list with
+  # `Ingress` in policyTypes is deny. There is no Service to reach either.
+  ingress: []
+  {{- end }}
   egress:
     - to:
         - namespaceSelector:

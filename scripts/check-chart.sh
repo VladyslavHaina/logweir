@@ -581,12 +581,15 @@ fi
 # and the difference matters: a `fail` inside a `define` that no rendered path
 # reaches is a refusal that reads correctly and refuses nothing.
 #
-# Each row is a configuration that would install a console that looks like it is
-# working. D0: "A console that comes up on plain HTTP, or with a key someone
-# rewrote underneath it, is worse than one that does not come up at all."
+# EACH ROW NAMES THE DIAGNOSTIC IT EXPECTS, not merely a non-zero status. A
+# refusal that fires for the WRONG reason is not a guard: when the chart lost
+# its default `api.console.mode`, several rows below started refusing for the
+# missing mode instead of the thing they were written for, and a status-only
+# check would have stayed green through all of them.
 echo "== 8. the console's refusals, run =="
 CONSOLE_ON=(--set api.enabled=true --set api.console.enabled=true)
 CONSOLE_KEY=(--set api.console.keySecret=logweir-console-keys)
+CONSOLE_LOCAL=(--set api.console.mode=localAdmin)
 CONSOLE_SHARED=(
   --set api.console.mode=shared
   --set api.console.oidc.issuer=https://idp.example.com/realms/logweir
@@ -599,48 +602,109 @@ CONSOLE_SHARED=(
 )
 console_refuses() {
   what="$1"
-  shift
+  expect="$2"
+  shift 2
   helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
     "$@" > /dev/null 2> "$tmp/console-refusal.err"
   rc=$?
   if [ "$rc" -eq 0 ]; then
     echo "FAIL: $what was ACCEPTED; it must be refused before anything installs" >&2
     fail=1
-  else
-    echo "   rc=$rc  ($what refused, as it must be)"
+    return
   fi
+  grep -F -q "$expect" "$tmp/console-refusal.err"
+  grc=$?
+  if [ "$grc" -ne 0 ]; then
+    echo "FAIL: $what was refused for the WRONG reason. Expected the diagnostic to name" >&2
+    echo "      '$expect'; helm said:" >&2
+    sed 's/^/      /' "$tmp/console-refusal.err" >&2
+    fail=1
+    return
+  fi
+  echo "   rc=$rc  ($what refused, naming $expect)"
 }
-console_refuses "the console workload without its principal (api.enabled=false)" \
-  --set api.enabled=false --set api.console.enabled=true "${CONSOLE_KEY[@]}"
-console_refuses "the console with no key Secret" \
-  "${CONSOLE_ON[@]}"
-console_refuses "shared mode over plain HTTP" \
+console_refuses "the console with NO mode at all" "api.console.mode is empty" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}"
+console_refuses "the console workload without its principal (api.enabled=false)" "requires api.enabled" \
+  --set api.enabled=false --set api.console.enabled=true "${CONSOLE_LOCAL[@]}" "${CONSOLE_KEY[@]}"
+console_refuses "the console with no key Secret" "api.console.keySecret is empty" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_LOCAL[@]}"
+console_refuses "shared mode over plain HTTP" "publicBaseUrl" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=http://console.example.com
-console_refuses "shared mode with a publicBaseUrl carrying a trailing slash" \
+console_refuses "shared mode with a publicBaseUrl carrying a trailing slash" "publicBaseUrl" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com/
-console_refuses "a shared-console Ingress with no TLS Secret" \
+console_refuses "a shared-console Ingress with no TLS Secret" "api.console.ingress.tlsSecretName is empty" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
   --set api.console.ingress.enabled=true --set api.console.ingress.host=console.example.com
-console_refuses "an Ingress in front of localAdmin mode" \
-  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" \
+console_refuses "an Ingress host that is not publicBaseUrl's authority" "They must name the SAME authority" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
+  --set-string api.console.publicBaseUrl=https://console.example.com \
+  --set api.console.ingress.enabled=true --set api.console.ingress.host=console.internal.example \
+  --set api.console.ingress.tlsSecretName=logweir-console-tls
+console_refuses "an Ingress in front of the in-cluster administrator mode" "is refused" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_LOCAL[@]}" "${CONSOLE_KEY[@]}" \
   --set api.console.ingress.enabled=true --set api.console.ingress.host=console.example.com \
   --set api.console.ingress.tlsSecretName=logweir-console-tls
-console_refuses "a product role binding for a namespace the console is not bound in" \
+console_refuses "a product role binding for a namespace the console is not bound in" "which is not one the console is bound in" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
   --set "api.console.roles.bindings[0].namespace=some-other-namespace"
-console_refuses "a wildcard in a product role binding" \
+console_refuses "a wildcard in a product role binding" "contains \`*\` or \`?\`" \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
   --set-string "api.console.roles.bindings[0].groups[0]=logweir-*"
-console_refuses "a console NetworkPolicy with no ingress-controller selector" \
-  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" --set api.console.networkPolicy.enabled=true
+console_refuses "a shared-console NetworkPolicy with no ingress-controller selector" "needs both networkPolicy.ingressNamespace" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
+  --set-string api.console.publicBaseUrl=https://console.example.com \
+  --set api.console.networkPolicy.enabled=true
 
-# AND THE SUPPORTED SHAPE STILL RENDERS, because a gate whose every arm refuses
-# proves only that the template fails.
+# AND THE TWO SUPPORTED SHAPES STILL RENDER — a gate whose every arm refuses
+# proves only that the template fails. The Service is the interesting half: the
+# in-cluster administrator mode must render NONE, and shared mode must render
+# one, because that is what keeps a loopback listener from also publishing an
+# object every monitor reads as an outage and every pod can dial.
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  "${CONSOLE_ON[@]}" "${CONSOLE_LOCAL[@]}" "${CONSOLE_KEY[@]}" \
+  --set api.console.networkPolicy.enabled=true \
+  > "$tmp/console-local.yaml" 2> "$tmp/console-local.err"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "FAIL: the in-cluster administrator mode did NOT render; rc=$rc" >&2
+  sed 's/^/      /' "$tmp/console-local.err" >&2
+  fail=1
+else
+  grep -F -q "name: $RELEASE-api" "$tmp/console-local.yaml"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "FAIL: the in-cluster administrator render carries no $RELEASE-api object at all" >&2
+    fail=1
+  fi
+  awk '/^kind: Service$/ { inservice = 1; next }
+       /^kind: /         { inservice = 0 }
+       inservice && /^  name: / { print }' "$tmp/console-local.yaml" > "$tmp/console-local-services.txt"
+  grep -F -q "$RELEASE-api" "$tmp/console-local-services.txt"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "FAIL: the in-cluster administrator mode rendered a Service named $RELEASE-api." >&2
+    echo "      That listener is loopback-only, so the Service would have populated Endpoints" >&2
+    echo "      and refuse every connection: a security property to a reader and an outage to" >&2
+    echo "      every monitor. \`shared\` is the only mode that may be exposed through one." >&2
+    fail=1
+  else
+    echo "   rc=0  (the in-cluster administrator mode renders no Service)"
+  fi
+  grep -F -q "ingress: []" "$tmp/console-local.yaml"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "FAIL: the in-cluster administrator mode's NetworkPolicy does not deny ingress outright" >&2
+    fail=1
+  else
+    echo "   rc=0  (…and its NetworkPolicy admits nothing)"
+  fi
+fi
 helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
   "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
   --set-string api.console.publicBaseUrl=https://console.example.com \
@@ -658,8 +722,17 @@ else
   if [ "$rc" -ne 0 ]; then
     echo "FAIL: the supported shared-console render carries no TLS secretName" >&2
     fail=1
+  fi
+  awk '/^kind: Service$/ { inservice = 1; next }
+       /^kind: /         { inservice = 0 }
+       inservice && /^  name: / { print }' "$tmp/console-supported.yaml" > "$tmp/console-shared-services.txt"
+  grep -F -q "$RELEASE-api" "$tmp/console-shared-services.txt"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "FAIL: shared mode rendered no Service named $RELEASE-api for the Ingress to back" >&2
+    fail=1
   else
-    echo "   rc=0  (the supported shared console renders, with its TLS Secret)"
+    echo "   rc=0  (the supported shared console renders, with its TLS Secret and its Service)"
   fi
 fi
 

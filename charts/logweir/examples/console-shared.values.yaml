@@ -1,10 +1,12 @@
 # console-shared.values.yaml — THE SSO CONSOLE, WITH EVERYTHING D0 REQUIRES OF
 # IT. Substitute your own issuer, client, host, certificate and groups.
 #
-# READ `console.values.yaml` FIRST. That is the default mode and it is a
-# different thing: a loopback listener reached with `kubectl port-forward`, one
-# configured administrator, no identity provider and no Ingress. This file is
-# the shared console, and the difference between the two is every value below.
+# READ `console.values.yaml` FIRST. That is the IN-CLUSTER ADMINISTRATOR MODE
+# and it is a different thing: a loopback listener with no Service at all,
+# reached only with `kubectl port-forward deploy/<release>-api`, one configured
+# administrator, no identity provider and no Ingress. `shared` is the only mode
+# that may be exposed through a Service or an Ingress, and the difference
+# between the two is every value below.
 #
 # ---------------------------------------------------------------------------
 # WHAT AN INSTALLATION MUST CREATE BEFORE THIS INSTALLS

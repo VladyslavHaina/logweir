@@ -175,7 +175,7 @@ api:
     enabled: false              # needs api.enabled; D0 installs the identity first
     image: docker.io/vladyslavhaina/logweir-console:latest  # logweir-api + the page
     imagePullPolicy: Always     # use Never for locally loaded images
-    mode: localAdmin            # localAdmin | shared. No default in the binary
+    mode: ""                    # REQUIRED: localAdmin | shared. There is no default
     replicas: 1                 # above 1 also renders a PodDisruptionBudget
     port: 8484                  # container port and ClusterIP Service port
     localAdminSubject: admin    # localAdmin: the one actor every request is recorded as
