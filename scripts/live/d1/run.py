@@ -1096,7 +1096,16 @@ def ensure_acl_broker(*, allowed: tuple[str, ...] = acl_kafka.ALLOWED_TOPICS) ->
     )
     state["observedClusterId"] = (ready.get("status") or {}).get("clusterId")
     save()
-    return state
+    # A SNAPSHOT, NOT THE LIVE DICT. `state` is `STATE["environment"]["aclKafka"]`
+    # itself, and the caller puts what it gets back into its own `asserted`
+    # block. Returning the live object makes those two the SAME dict, so
+    # `NEG-09-5` — which calls this again with a wider ACL set — would rewrite
+    # L-09-5's already-recorded evidence the next time `save()` ran, inside one
+    # invocation. It survived here only because each phase ran as its own
+    # process and `load()` re-read the file; a single
+    # `run.py L-09-5 NEG-09-5` would have silently changed the record of a row
+    # that had already passed.
+    return json.loads(json.dumps(state))
 
 
 def acl_backup(name: str, policy: str, **over: Any) -> dict[str, Any]:
