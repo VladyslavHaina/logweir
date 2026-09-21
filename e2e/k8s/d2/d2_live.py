@@ -5436,6 +5436,16 @@ def u6e() -> None:
               f"{counts.get('available')} of {counts.get('total')}")
         u6_snapshot_archive()
 
+        # TWO POLICIES FOR ONE DESTINATION IS A REFUSAL, not a race: the second
+        # lands `Ready=False/Conflict` — "neither evaluates and neither
+        # enforces until one is removed" — so a re-run of this phase must take
+        # the previous attempt's policy with it or measure nothing.
+        for old_policy in get_list("retentionpolicies"):
+            name_ = old_policy["metadata"]["name"]
+            if name_.startswith("u6-ret-policy-"):
+                run(K + ["delete", "retentionpolicy", name_, "--wait=true"],
+                    check=False, timeout=120)
+                log(f"U6[retention]: removed the previous attempt's policy {name_}")
         policy_name = f"u6-ret-policy-{u6_seq():03d}"
         created = apply(u6_retention_policy(policy_name, catalog=catalog))
         policy_uid = created["metadata"]["uid"]
