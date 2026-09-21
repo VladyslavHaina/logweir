@@ -3713,6 +3713,10 @@ def approval_facts(approval: dict[str, Any]) -> dict[str, Any]:
         "reason": condition.get("reason"),
         "message": (condition.get("message") or "")[:200],
         "matchedKeyId": status.get("matchedKeyId"),
+        # APPROVAL-KEY-WINDOW-UNPUBLISHED. `None` for a controller image that
+        # predates the field and for an approval that matched no key; S22/S23
+        # are the rows that make the difference matter.
+        "approverKeyWindow": status.get("approverKeyWindow"),
     }
 
 
@@ -3916,6 +3920,292 @@ def s18() -> None:
                   f"the cluster-scoped TrustPolicy this row created is deleted before it "
                   f"returns; remaining: {left}. It governs a namespace by exact name, so a "
                   f"leftover would silently re-judge a later run's evidence")
+
+
+# --------------------------------------------------------------------------
+# S22 / S23 — APPROVAL-KEY-WINDOW-UNPUBLISHED
+# --------------------------------------------------------------------------
+
+# The re-check ceiling D2 §6.3 gives both `approval.*` rows, in seconds. The
+# published `expiresAt` is `min(this, the key's notAfter)`.
+APPROVAL_RECHECK_CEILING_SECONDS = 10 * 60
+
+
+def crd_publishes_status_field(plural: str, field: str) -> bool:
+    """Whether the INSTALLED CRD's `status` carries `field`.
+
+    THE BUILD QUESTION, ASKED OF THE CLUSTER. S18 gates itself on a commit
+    ancestry because its fix left no schema trace; this one does, and a schema
+    probe survives a rebase that renumbers the commit. It answers "could this
+    controller publish the window at all", which is a fact about the image —
+    and never "did it", which is what S22 asserts.
+    """
+    out = run(CTX + ["get", "crd", plural, "-o", "json"], check=False, timeout=120)
+    if out.returncode != 0:
+        return False
+    versions = (json.loads(out.stdout).get("spec") or {}).get("versions") or []
+    for version in versions:
+        properties = (((version.get("schema") or {}).get("openAPIV3Schema") or {})
+                      .get("properties") or {}).get("status") or {}
+        if field in (properties.get("properties") or {}):
+            return True
+    return False
+
+
+def rfc3339(value: str) -> dt.datetime:
+    """An RFC 3339 instant the API server wrote, as an aware datetime."""
+    return dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
+
+
+def approver_key_window_is_warned(approval: dict[str, Any], validity: dict[str, Any],
+                                  state: dict[str, Any], deadline_seconds: int,
+                                  aggregate: str) -> dict[str, bool]:
+    """D2 §6.3's `ApproverKeyExpiresBeforeDeadline`, as the fixed product answers it.
+
+    The chain: a namespace-scoped `TrustPolicy` narrows the approver key's
+    `notAfter` to inside the restore's own `deadlineSeconds`; the **Approval
+    controller** republishes `status.approverKeyWindow` for the key that
+    verified it; the Preflight's `approval.keyValidity` row reads that window
+    back and warns.
+
+    THE LAST TWO CLAUSES ARE WHAT MAKE IT A WARNING AND NOT A REFUSAL. D2 §6.3
+    gates this row `A` and §6.4 says "Advisory `notReady` appears as warnings".
+    An approval that is valid RIGHT NOW is not refused because its key closes
+    before a deadline the restore may never reach — so `approval.state` is
+    still `ready` and the aggregate is not `notReady`.
+    """
+    window = approval.get("approverKeyWindow") or {}
+    not_after = window.get("notAfter")
+    return {
+        "the Approval publishes a window for the key that verified it": (
+            bool(not_after)
+            and bool(approval.get("matchedKeyId"))
+            and window.get("keyId") == approval.get("matchedKeyId")
+        ),
+        "the window closes inside the restore's own deadline": bool(not_after) and (
+            rfc3339(not_after)
+            < dt.datetime.now(dt.timezone.utc) + dt.timedelta(seconds=deadline_seconds)
+        ),
+        "the preflight warns with ApproverKeyExpiresBeforeDeadline": (
+            validity.get("state") == "notReady"
+            and validity.get("code") == "ApproverKeyExpiresBeforeDeadline"
+        ),
+        "and names the key and both instants, in words": (
+            bool((validity.get("message") or "").strip())
+            and str(window.get("keyId") or "\x00") in (validity.get("message") or "")
+        ),
+        "the warning is ADVISORY, so it cannot refuse": validity.get("gating") == "advisory",
+        "the blocking approval row is still ready": (
+            state.get("state") == "ready" and state.get("code") == "ApprovalVerified"
+        ),
+        "so the verdict is not notReady": aggregate != "notReady",
+    }
+
+
+def approval_rows_recheck_is_capped(rows: dict[str, Any], not_after: str,
+                                    ceiling_seconds: int = APPROVAL_RECHECK_CEILING_SECONDS
+                                    ) -> dict[str, bool]:
+    """D2 §6.3's `min(10 m, notAfter)` on BOTH `approval.*` rows.
+
+    A verdict about a key must not outlive the key. The ceiling clause alone
+    would pass against a product that does nothing — every row is already
+    capped at ten minutes — so the row is run with a `notAfter` INSIDE the
+    ceiling and the last clause requires the cap to have actually bitten.
+    """
+    ids = ("approval.state", "approval.keyValidity")
+    present = [rows.get(i) or {} for i in ids]
+    expiries: list[dt.datetime] = []
+    observed: list[dt.datetime] = []
+    for row in present:
+        if row.get("expiresAt") and row.get("observedAt"):
+            expiries.append(rfc3339(row["expiresAt"]))
+            observed.append(rfc3339(row["observedAt"]))
+    closes = rfc3339(not_after) if not_after else None
+    return {
+        "both approval rows ran and both publish an expiresAt": len(expiries) == len(ids),
+        "neither is re-checked after the key's notAfter": bool(closes) and len(expiries) == len(ids)
+        and all(e <= closes for e in expiries),
+        "and neither outlives the ten-minute ceiling": len(expiries) == len(ids) and all(
+            e <= o + dt.timedelta(seconds=ceiling_seconds)
+            for e, o in zip(expiries, observed)
+        ),
+        "the cap BIT — the key closes sooner than the ceiling": bool(closes)
+        and len(expiries) == len(ids)
+        and all(
+            closes < o + dt.timedelta(seconds=ceiling_seconds) and e < o + dt.timedelta(
+                seconds=ceiling_seconds)
+            for e, o in zip(expiries, observed)
+        ),
+    }
+
+
+S22_ID = "S22"
+S22_TITLE = "an approver key closing before the restore's deadline is warned about ahead of time"
+S23_ID = "S23"
+S23_TITLE = "both approval rows re-check inside min(10 m, the approver key's notAfter)"
+
+
+def s22() -> None:
+    """Two rows for APPROVAL-KEY-WINDOW-UNPUBLISHED, off ONE fixture.
+
+    S18 proves the WITHDRAWN verdict reaches the blocking row. These two prove
+    the other half: the approver key's WINDOW reaches the advisory row and the
+    re-check cap, which between 2026-09-19 and 2026-09-21 nothing published
+    anywhere.
+
+    THE FIXTURE IS THE SAME NAMESPACE-SCOPED `TrustPolicy` S18 uses, for the
+    same reason: `TrustRoster/default` is cluster-scoped, shared and immutable,
+    and its one approver key has no `notAfter` at all. The policy names ONLY
+    this run's namespace, and it is deleted in a `finally` — it is
+    cluster-scoped, so a leftover would silently re-judge a later run.
+
+    THE WINDOW IS NARROWED AFTER THE APPROVAL VERIFIED, not before: the
+    Approval has to be `Verified=True` under a wide window first, or S22 would
+    be a row about an approval that never worked, and the narrowing is itself
+    the live proof that the published window is RE-DERIVED on a policy edit
+    rather than stamped once.
+    """
+    deadline_seconds = 3600
+    # NINE MINUTES, NOT TEN. The cap is `min(10 m, notAfter)`; a window exactly
+    # at the ceiling would leave both bounds equal and the row could not tell
+    # a capped `expiresAt` from an uncapped one. Nine leaves the whole window
+    # for the preflight to finish in, and the preflight's `observedAt` is later
+    # than this instant, so `notAfter - observedAt < 9 m` however fast it runs.
+    window_minutes = 9
+    controller = controller_revision()
+    publishes = crd_publishes_status_field("approvals.logweir.dev", "approverKeyWindow")
+    if not publishes:
+        for sid, title in ((S22_ID, S22_TITLE), (S23_ID, S23_TITLE)):
+            record(sid, title, "notRun",
+                   reason=("the installed Approval CRD has no status.approverKeyWindow "
+                           f"(controller {controller or 'unknown'}); before "
+                           "APPROVAL-KEY-WINDOW-UNPUBLISHED's fix no window was published "
+                           "anywhere, so neither row can reach the behaviour it is about"),
+                   detail={"controllerRevision": controller})
+        return
+
+    approver = roster_approver_key()
+    policy_name = f"{OWNER}-{STAMP}-window"
+    facts = backup_facts("bk-a2", "a", "lw-a")
+    plan = restore_plan(facts["backupId"], facts["pointInTime"], "d2w14-window-")
+    restore_name = "rs-window"
+    approval_name = "ap-window"
+    detail: dict[str, Any] = {"controllerRevision": controller, "trustPolicy": policy_name,
+                              "approverKeyId": approver["keyId"],
+                              "deadlineSeconds": deadline_seconds}
+    try:
+        for kind, name in (("restore", restore_name), ("approval", approval_name),
+                           ("preflight", "pf-window")):
+            run(K + ["delete", kind, name, "--ignore-not-found=true", "--wait=true"],
+                check=False, timeout=120)
+
+        # 1. a WIDE window, here only
+        wide = (dt.datetime.now(dt.timezone.utc)
+                + dt.timedelta(hours=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        apply(trust_policy(policy_name, [NS], [policy_key(
+            approver["keyId"], approver["spkiPem"], usages=[APPROVER_USAGE],
+            not_after=wide)]))
+        detail["wideNotAfter"] = wide
+
+        # 2. an Approval that verifies under it
+        minted = mint_approval(approval_name, restore_name, plan)
+        apply({
+            "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
+            "metadata": owned(restore_name),
+            "spec": {
+                "sourceDestinationRef": {"name": "dest-a"},
+                "evidenceDestinationRef": {"name": "dest-b"},
+                "sourceArchive": {"url": "logweir-destination://dest-a"},
+                "backupSetRef": facts["backupId"],
+                "pointInTime": facts["pointInTime"],
+                "planBytes": minted["planBytes"],
+                "approvalRef": {"name": approval_name},
+                "deadlineSeconds": deadline_seconds,
+                "target": {"clusterRef": {"name": "target"}, "mode": "newTopic",
+                           "topicNaming": {"prefix": "d2w14-window-"}},
+            },
+        })
+        record_approval(minted)
+        verified = wait_for(
+            "approval", approval_name,
+            lambda o: (o.get("status") or {}).get("verified") is True,
+            timeout=300, what="the Approval to verify under the wide window")
+        detail["approvalUnderWideWindow"] = approval_facts(verified)
+        artifact("objects/s22/approval-wide.json", verified)
+
+        # 3. the window is NARROWED, and the published window follows
+        closes = (dt.datetime.now(dt.timezone.utc)
+                  + dt.timedelta(minutes=window_minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        apply(trust_policy(policy_name, [NS], [policy_key(
+            approver["keyId"], approver["spkiPem"], usages=[APPROVER_USAGE],
+            not_after=closes)]))
+        detail["narrowedNotAfter"] = closes
+        narrowed = wait_for(
+            "approval", approval_name,
+            lambda o: (((o.get("status") or {}).get("approverKeyWindow") or {})
+                       .get("notAfter") or "").startswith(closes[:16]),
+            timeout=300,
+            what="the published approverKeyWindow to follow the TrustPolicy edit")
+        approval_now = approval_facts(narrowed)
+        detail["approvalAfterNarrowing"] = approval_now
+        artifact("objects/s22/approval-narrowed.json", narrowed)
+
+        # 4. one preflight over the existing Restore, read by both rows
+        apply(preflight("pf-window",
+                        {"operation": "Restore",
+                         "restore": {"restoreRef": {"name": restore_name},
+                                     "sourceDestinationRef": {"name": "dest-a"},
+                                     "evidenceDestinationRef": {"name": "dest-b"},
+                                     "targetRef": {"name": "target"}}},
+                        timeout_seconds=180))
+        obj = wait_preflight("pf-window", timeout=420)
+        artifact("objects/s22/preflight-window.json", obj)
+        rows = checks_by_id(obj)
+        aggregate = (obj["status"].get("result") or {}).get("state")
+        detail["aggregate"] = aggregate
+        detail["approvalRows"] = {k: rows.get(k) for k in
+                                  ("approval.state", "approval.keyValidity")}
+
+        published = ((narrowed.get("status") or {}).get("approverKeyWindow") or {})
+        with Scenario(S22_ID, S22_TITLE) as sc:
+            sc.detail.update(detail)
+            clauses = approver_key_window_is_warned(
+                approval_now, rows.get("approval.keyValidity") or {},
+                rows.get("approval.state") or {}, deadline_seconds, aggregate)
+            sc.detail["criteria"] = clauses
+            unmet = sorted(k for k, ok in clauses.items() if not ok)
+            check(not unmet,
+                  "D2 §6.3 approval.keyValidity criteria not met: " + "; ".join(unmet)
+                  + f". The key closes at {published.get('notAfter')} and the restore's "
+                  f"deadline is {deadline_seconds}s out; the row reads "
+                  f"{(rows.get('approval.keyValidity') or {}).get('state')}/"
+                  f"{(rows.get('approval.keyValidity') or {}).get('code')} "
+                  f"({((rows.get('approval.keyValidity') or {}).get('message') or '')[:160]}), "
+                  f"approval.state is {(rows.get('approval.state') or {}).get('state')}/"
+                  f"{(rows.get('approval.state') or {}).get('code')}, aggregate {aggregate}")
+
+        with Scenario(S23_ID, S23_TITLE) as sc:
+            sc.detail.update(detail)
+            clauses = approval_rows_recheck_is_capped(rows, published.get("notAfter") or "")
+            sc.detail["criteria"] = clauses
+            unmet = sorted(k for k, ok in clauses.items() if not ok)
+            check(not unmet,
+                  "D2 §6.3 min(10 m, notAfter) criteria not met: " + "; ".join(unmet)
+                  + f". The key closes at {published.get('notAfter')}; the rows publish "
+                  + json.dumps({k: {"observedAt": (rows.get(k) or {}).get("observedAt"),
+                                    "expiresAt": (rows.get(k) or {}).get("expiresAt")}
+                                for k in ("approval.state", "approval.keyValidity")},
+                               sort_keys=True))
+    finally:
+        run(CTX + ["delete", "trustpolicy", policy_name, "--ignore-not-found=true",
+                   "--wait=true"], check=False, timeout=120)
+        left = [t["metadata"]["name"] for t in json.loads(
+            run(CTX + ["get", "trustpolicies", "-o", "json"]).stdout)["items"]
+            if t["metadata"]["name"] == policy_name]
+        if left:
+            record(S23_ID, S23_TITLE, "fail",
+                   reason=f"the cluster-scoped TrustPolicy {policy_name} outlived this row; "
+                          "it governs a namespace by exact name and would re-judge a later run")
 
 
 def s19() -> None:

@@ -545,6 +545,122 @@ def test_only_the_products_own_denial_counts_as_a_denial() -> None:
         not d2.u6_denied({"counts": {}, "pages": 0, "timedOut": True, "conditions": []}))
 
 
+# --- S22 / S23: APPROVAL-KEY-WINDOW-UNPUBLISHED ------------------------------
+#
+# The shapes below are what the fixed product publishes. Each decision is
+# exercised against them AND against the shape it published BEFORE the fix —
+# `approverKeyWindow` absent, `ApproverKeyValid` on the advisory row, both rows
+# expiring a flat ten minutes out. Every one of those must be REFUSED, because
+# "the harness row passes when the product does nothing" is the failure mode
+# this file exists to prevent.
+import datetime as _dt  # noqa: E402
+
+_T0 = _dt.datetime(2026, 9, 21, 12, 0, 0, tzinfo=_dt.timezone.utc)
+
+
+def _iso(minutes: float) -> str:
+    return (_T0 + _dt.timedelta(minutes=minutes)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+W_KEY = "a16169914cf8"
+# The key closes nine minutes out; the restore's deadline is an hour out.
+W_WINDOW = {"keyId": W_KEY, "notBefore": _iso(-60 * 24), "notAfter": _iso(9)}
+W_APPROVAL = {"verified": True, "reason": "Verified", "matchedKeyId": W_KEY,
+              "approverKeyWindow": W_WINDOW}
+W_VALIDITY = {"id": "approval.keyValidity", "state": "notReady", "gating": "advisory",
+              "code": "ApproverKeyExpiresBeforeDeadline",
+              "message": f"approver key `{W_KEY}` expires at {_iso(9)}, before this "
+                         f"restore's deadline at {_iso(60)}",
+              "observedAt": _iso(0), "expiresAt": _iso(9)}
+W_STATE = {"id": "approval.state", "state": "ready", "gating": "blocking",
+           "code": "ApprovalVerified", "observedAt": _iso(0), "expiresAt": _iso(9)}
+W_ROWS = {"approval.state": W_STATE, "approval.keyValidity": W_VALIDITY}
+
+
+def _s22(**over):
+    args = dict(approval=W_APPROVAL, validity=W_VALIDITY, state=W_STATE,
+                deadline_seconds=3600, aggregate="ready")
+    args.update(over)
+    # The clock the decision compares the deadline against is the real one, so
+    # the fixture's window is re-based onto it rather than frozen.
+    shift = (_dt.datetime.now(_dt.timezone.utc) - _T0).total_seconds() / 60.0
+    approval = json.loads(json.dumps(args["approval"]))
+    window = approval.get("approverKeyWindow")
+    if window and window.get("notAfter"):
+        window["notAfter"] = _iso(9 + shift)
+    args["approval"] = approval
+    return all(d2.approver_key_window_is_warned(**args).values())
+
+
+def _s23(rows=None, not_after=None):
+    return all(d2.approval_rows_recheck_is_capped(
+        rows if rows is not None else W_ROWS,
+        not_after if not_after is not None else _iso(9)).values())
+
+
+def test_a_key_closing_before_the_deadline_is_warned_about_ahead_of_time() -> None:
+    row("the window is published, the row warns, and nothing is refused", _s22())
+    row("MUTANT: THE PRE-FIX ANSWER — no window is published at all",
+        not _s22(approval={"verified": True, "reason": "Verified", "matchedKeyId": W_KEY,
+                           "approverKeyWindow": None}))
+    row("MUTANT: THE PRE-FIX ROW — the advisory row says ApproverKeyValid",
+        not _s22(validity=dict(W_VALIDITY, state="ready", code="ApproverKeyValid")))
+    row("MUTANT: the row reads unknown, so the window never reached it",
+        not _s22(validity=dict(W_VALIDITY, state="unknown",
+                               code="ApproverKeyWindowUnknown")))
+    row("MUTANT: the window names a DIFFERENT key than the one that verified",
+        not _s22(approval=dict(W_APPROVAL,
+                               approverKeyWindow=dict(W_WINDOW, keyId="someone-else"))))
+    row("MUTANT: the warning is BLOCKING, so a valid approval would be refused",
+        not _s22(validity=dict(W_VALIDITY, gating="blocking")))
+    row("MUTANT: the blocking row went notReady, so this is S18 and not this row",
+        not _s22(state=dict(W_STATE, state="notReady", code="ApprovalExpired")))
+    row("MUTANT: the aggregate is notReady — an advisory row refused something",
+        not _s22(aggregate="notReady"))
+    row("MUTANT: the warning names no key, so an operator cannot act on it",
+        not _s22(validity=dict(W_VALIDITY, message="   ")))
+    row("MUTANT: the key outlasts the deadline, so there is nothing to warn about",
+        not all(d2.approver_key_window_is_warned(
+            approval=dict(W_APPROVAL, approverKeyWindow=dict(
+                W_WINDOW,
+                notAfter=(_dt.datetime.now(_dt.timezone.utc)
+                          + _dt.timedelta(days=30)).strftime("%Y-%m-%dT%H:%M:%SZ"))),
+            validity=W_VALIDITY, state=W_STATE, deadline_seconds=3600,
+            aggregate="ready").values()))
+
+
+def test_both_approval_rows_recheck_inside_the_published_window() -> None:
+    row("both rows are capped at the key's notAfter", _s23())
+    row("MUTANT: THE PRE-FIX ANSWER — both rows expire a flat ten minutes out",
+        not _s23(rows={"approval.state": dict(W_STATE, expiresAt=_iso(10)),
+                       "approval.keyValidity": dict(W_VALIDITY, expiresAt=_iso(10))}))
+    row("MUTANT: only the BLOCKING row is capped",
+        not _s23(rows={"approval.state": W_STATE,
+                       "approval.keyValidity": dict(W_VALIDITY, expiresAt=_iso(10))}))
+    row("MUTANT: only the ADVISORY row is capped",
+        not _s23(rows={"approval.state": dict(W_STATE, expiresAt=_iso(10)),
+                       "approval.keyValidity": W_VALIDITY}))
+    row("MUTANT: a row is re-checked AFTER the key has closed",
+        not _s23(rows={"approval.state": dict(W_STATE, expiresAt=_iso(9.5)),
+                       "approval.keyValidity": W_VALIDITY}))
+    row("MUTANT: the advisory row did not run at all",
+        not _s23(rows={"approval.state": W_STATE}))
+    row("MUTANT: a row publishes no expiresAt, so nothing was capped",
+        not _s23(rows={"approval.state": {k: v for k, v in W_STATE.items()
+                                          if k != "expiresAt"},
+                       "approval.keyValidity": W_VALIDITY}))
+    row("MUTANT: no window was published, so the cap cannot be measured",
+        not _s23(not_after=""))
+    # THE MEASUREMENT CLAUSE. Run with a key that closes AFTER the ceiling and
+    # the ten-minute bound is the binding one — every row passes the first
+    # three clauses while the product caps nothing, which is why the fourth
+    # clause exists and why this row must refuse the setup.
+    row("MUTANT: the fixture cannot measure the cap — the key outlasts the ceiling",
+        not _s23(rows={"approval.state": dict(W_STATE, expiresAt=_iso(10)),
+                       "approval.keyValidity": dict(W_VALIDITY, expiresAt=_iso(10))},
+                 not_after=_iso(45)))
+
+
 # Wrapped AFTER every test is defined, so pytest collects the wrappers.
 for _name, _fn in list(globals().items()):
     if _name.startswith("test_") and callable(_fn):
