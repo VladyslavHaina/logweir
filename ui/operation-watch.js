@@ -342,7 +342,7 @@ export function watchOperation(ns, kind, name, onUpdate, lifecycle, deps) {
         const gone = new Error(
           "The API server no longer has this operation: it was deleted while this page was " +
             "following it. Nothing here was cancelled by this page, and an object created " +
-            "later under the same name is a different run — re-open it from the list to read " +
+            "later under the same name is a different run -- re-open it from the list to read " +
             "that one.",
         );
         gone.reason = "OperationVanished";
