@@ -1321,9 +1321,16 @@ fn policy_list(items: Vec<Value>) -> String {
 /// The happy route table: one policy, one destination, one catalog with one
 /// page of six points, no restores.
 fn happy_routes(entries: &[Value]) -> Vec<Route> {
+    routes_for_destination(entries, destination_body())
+}
+
+/// [`happy_routes`] over a destination the caller wrote — the one seam the
+/// `evidenceWrite` rows need, because the grant they turn off is read from the
+/// object and from nowhere else.
+fn routes_for_destination(entries: &[Value], destination: String) -> Vec<Route> {
     vec![
         route("GET", "/retentionpolicies", policy_list(vec![])),
-        route("GET", "/backupdestinations/archive", destination_body()),
+        route("GET", "/backupdestinations/archive", destination),
         route(
             "GET",
             "/recoverycatalogs/primary",
@@ -1882,6 +1889,317 @@ async fn the_job_runs_the_separate_binary_and_never_carries_a_credential_value()
     assert_eq!(owner["kind"], "RetentionPolicy");
     assert_eq!(owner["uid"], UID);
     assert_eq!(owner["controller"], json!(true));
+}
+
+// ---------------------------------------------------------------------------
+// The two credentials, and which grant lands on which variable — defect
+// RET-EVIDENCE-GRANT-IS-ARCHIVEREAD
+// ---------------------------------------------------------------------------
+
+/// Render one enforcement Job against `destination` and hand the caller its
+/// `secretKeyRef` variables, as `name -> (Secret, key)`.
+///
+/// Two passes, because the digest an administrator approves is only knowable
+/// after the first one publishes it — the same shape every enforcing row here
+/// uses.
+async fn rendered_job_credentials(destination: String) -> BTreeMap<String, (String, String)> {
+    let learn = fixture(routes_for_destination(&six_points(), destination.clone()));
+    run(&learn, &policy(enforcing(None), json!({}))).await;
+    let digest = learn.status()["lastEvaluation"]["planSha256"]
+        .as_str()
+        .expect("a digest")
+        .to_string();
+
+    let mut routes = routes_for_destination(&six_points(), destination);
+    routes.push(plan_config_map_route(&digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let f = fixture(routes);
+    run(&f, &policy(enforcing(Some(&digest)), json!({}))).await;
+
+    let job = f.posted("/jobs").remove(0);
+    let mut out = BTreeMap::new();
+    for entry in job["spec"]["template"]["spec"]["containers"][0]["env"]
+        .as_array()
+        .expect("env")
+    {
+        if let Some(reference) = entry["valueFrom"].get("secretKeyRef") {
+            out.insert(
+                entry["name"].as_str().expect("a name").to_string(),
+                (
+                    reference["name"].as_str().expect("a Secret").to_string(),
+                    reference["key"].as_str().expect("a key").to_string(),
+                ),
+            );
+        }
+    }
+    out
+}
+
+/// `spec.access` with every principal separated — the destination
+/// `docs/kubernetes.md` §7a recommends, and the one the live U6 run used.
+fn four_principals() -> Value {
+    json!({
+        "archiveWrite": {"mode": "SecretKeys", "secret": {
+            "name": "lw-writer", "accessKeyIdKey": "id", "secretAccessKeyKey": "key"
+        }},
+        "archiveRead": {"mode": "SecretKeys", "secret": {
+            "name": "lw-reader", "accessKeyIdKey": "id", "secretAccessKeyKey": "key"
+        }},
+        "evidenceWrite": {"mode": "SecretKeys", "secret": {
+            "name": "lw-evidence", "accessKeyIdKey": "eid", "secretAccessKeyKey": "ekey"
+        }}
+    })
+}
+
+/// **THE ROW THE LIVE DEFECT OWES.** `LOGWEIR_EVIDENCE_AWS_*` names the
+/// destination's `evidenceWrite` Secret; `AWS_*` names the delete Secret; and
+/// the `archiveRead` grant — which `evaluate` still resolves, for the location —
+/// reaches the pod on NO variable at all.
+///
+/// Before the fix the evidence variables carried `resolved.grant`, the
+/// `ArchiveRead` one, so live on a destination separating the four principals
+/// the first intent tombstone came back `403 AccessDenied` (`state=Kept
+/// code=TombstoneRefused`, `deleted=0 failed=1`,
+/// `claude/artifacts/d2-live/u620260921t140000z`). The old fixture named one
+/// Secret for everything and could not have seen it.
+#[tokio::test]
+async fn the_record_credential_is_the_evidence_write_grant_and_not_the_archive_one() {
+    let env = rendered_job_credentials(destination_with_access(four_principals())).await;
+
+    assert_eq!(
+        env.get(weirkeeper::destination::EVIDENCE_ACCESS_KEY_ID_ENV),
+        Some(&("lw-evidence".to_string(), "eid".to_string())),
+        "D3 §7f: the record under `logweir/` is written with `spec.access.evidenceWrite`, \
+         whose OWN data keys it names. Rendered: {env:?}"
+    );
+    assert_eq!(
+        env.get(weirkeeper::destination::EVIDENCE_SECRET_ACCESS_KEY_ENV),
+        Some(&("lw-evidence".to_string(), "ekey".to_string()))
+    );
+    assert_eq!(
+        env.get("AWS_ACCESS_KEY_ID"),
+        Some(&("retention-delete".to_string(), "access-key-id".to_string())),
+        "and the deletes' own grant is `spec.enforcement.credentialSecretRef`, unchanged"
+    );
+    assert_eq!(
+        env.get("AWS_SECRET_ACCESS_KEY"),
+        Some(&("retention-delete".to_string(), "secret-access-key".to_string()))
+    );
+    let named: BTreeSet<&str> = env.values().map(|(secret, _)| secret.as_str()).collect();
+    assert_eq!(
+        named,
+        BTreeSet::from(["lw-evidence", "retention-delete"]),
+        "TWO credentials reach a retention pod and these are the two. The `archiveRead` grant \
+         is resolved for the LOCATION and its Secret is named on no variable — reading the \
+         archive is not something this Job does, and writing the record with the reader is the \
+         defect. Rendered: {env:?}"
+    );
+}
+
+/// The reader's session token is not a third part of the deleter's credential.
+///
+/// The filter that drops the destination's archive grant from the retention pod
+/// named two variables and `AWS_SESSION_TOKEN` was not one of them, so an
+/// `archiveRead` grant declaring `sessionTokenKey` put the READER's token beside
+/// the DELETER's id and secret — a triple from two principals, which every call
+/// would have rejected with a signature error naming neither. The evidence
+/// grant's own token still reaches the pod, on its own variable.
+#[tokio::test]
+async fn the_archive_grants_session_token_never_reaches_the_retention_pod() {
+    let mut access = four_principals();
+    access["archiveRead"]["secret"]["sessionTokenKey"] = json!("reader-token");
+    access["evidenceWrite"]["secret"]["sessionTokenKey"] = json!("etoken");
+    let env = rendered_job_credentials(destination_with_access(access)).await;
+
+    assert!(
+        !env.contains_key("AWS_SESSION_TOKEN"),
+        "`AWS_*` in a retention pod is the DELETE grant and all three of its variables; the \
+         destination's archive credential is dropped as ONE credential, not two thirds of \
+         one. Rendered: {env:?}"
+    );
+    assert_eq!(
+        env.get(weirkeeper::destination::EVIDENCE_SESSION_TOKEN_ENV),
+        Some(&("lw-evidence".to_string(), "etoken".to_string())),
+        "the evidence grant's own token is projected, on its own variable"
+    );
+}
+
+/// A destination that declares no `evidenceWrite`: the condition names the
+/// field, and NOTHING is spent — no Job, no plan `ConfigMap`, no lease and no
+/// run record.
+///
+/// The old shape defaulted the role to `archiveWrite` and created the Job
+/// anyway. A retention pod holds the DELETE grant on `AWS_*`, so that default
+/// hands a deleting pod a credential that can rewrite the objects under
+/// `<prefix>/*` it is removing — the aggregation the two-credential design
+/// exists to prevent.
+#[tokio::test]
+async fn a_destination_with_no_evidence_write_grant_creates_no_job() {
+    let mut access = four_principals();
+    access.as_object_mut().expect("access").remove("evidenceWrite");
+    let bare = destination_with_access(access);
+
+    let learn = fixture(routes_for_destination(&six_points(), bare.clone()));
+    run(&learn, &policy(enforcing(None), json!({}))).await;
+    let digest = learn.status()["lastEvaluation"]["planSha256"]
+        .as_str()
+        .expect("a digest")
+        .to_string();
+
+    let mut routes = routes_for_destination(&six_points(), bare);
+    routes.push(plan_config_map_route(&digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let f = fixture(routes);
+    let outcome = run(&f, &policy(enforcing(Some(&digest)), json!({}))).await;
+
+    assert_eq!(outcome.enforced_reason, ctrl::REASON_EVIDENCE_GRANT_UNUSABLE);
+    assert_eq!(outcome.phase, ctrl::RetentionPhase::Evaluated);
+    assert!(
+        f.seen().iter().all(|(m, _)| m != "POST"),
+        "an approved plan whose destination cannot attribute the deletion creates NOTHING — \
+         not a Job, and not the immutable plan ConfigMap either. Requests: {:?}",
+        f.seen()
+    );
+    let status = f.status();
+    assert!(
+        status.get("lease").is_none() && status.get("lastEnforcement").is_none(),
+        "and it is refused BEFORE the lease and the run record, so no retry-budget slot is \
+         spent on a configuration problem: {status}"
+    );
+    let message = f.condition(ctrl::CONDITION_ENFORCED)["message"]
+        .as_str()
+        .expect("a message")
+        .to_string();
+    assert!(
+        message.contains("spec.access.evidenceWrite"),
+        "the operator's whole remedy is one field, so the condition names it: {message}"
+    );
+    assert!(
+        !message.contains("lw-writer") && !message.contains("lw-reader"),
+        "and it names no Secret: a condition is a status field. {message}"
+    );
+}
+
+/// A `WorkloadIdentity` `evidenceWrite` grant is refused for the same reason
+/// and with the same field: `logweir-retention`'s `EvidenceSink::open` builds
+/// its sink with `StoreOptions::static_keys` and has no workload-identity path,
+/// so the Job could only ever refuse itself at exit 3 — after spending a lease,
+/// a `ConfigMap`, a record and one of three retry-budget slots.
+#[tokio::test]
+async fn a_workload_identity_evidence_grant_creates_no_job() {
+    let mut access = four_principals();
+    access["evidenceWrite"] = json!({
+        "mode": "WorkloadIdentity",
+        "workloadIdentity": {"serviceAccountName": "lw-evidence-writer"}
+    });
+    let object = destination_with_access(access);
+
+    let learn = fixture(routes_for_destination(&six_points(), object.clone()));
+    run(&learn, &policy(enforcing(None), json!({}))).await;
+    let digest = learn.status()["lastEvaluation"]["planSha256"]
+        .as_str()
+        .expect("a digest")
+        .to_string();
+
+    let mut routes = routes_for_destination(&six_points(), object);
+    routes.push(plan_config_map_route(&digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let f = fixture(routes);
+    let outcome = run(&f, &policy(enforcing(Some(&digest)), json!({}))).await;
+
+    assert_eq!(outcome.enforced_reason, ctrl::REASON_EVIDENCE_GRANT_UNUSABLE);
+    assert!(f.posted("/jobs").is_empty());
+    let message = f.condition(ctrl::CONDITION_ENFORCED)["message"]
+        .as_str()
+        .expect("a message")
+        .to_string();
+    assert!(
+        message.contains("spec.access.evidenceWrite") && message.contains("WorkloadIdentity"),
+        "the message names the field AND the mode the operator wrote: {message}"
+    );
+    assert!(
+        !message.contains("lw-evidence-writer"),
+        "and never the ServiceAccount name — `ResolvedGrant`'s `Debug` carries names a status \
+         field must not: {message}"
+    );
+}
+
+/// `Report` needs no record credential, and a destination without
+/// `evidenceWrite` therefore evaluates exactly as it always did.
+///
+/// The refusal lives in `start_run` and not in `evaluate` for this reason: a
+/// policy that deletes nothing has no deletion to attribute, and refusing its
+/// preview would tell an operator to fix a field their policy does not use.
+#[tokio::test]
+async fn a_report_mode_policy_needs_no_evidence_write_grant() {
+    let mut access = four_principals();
+    access.as_object_mut().expect("access").remove("evidenceWrite");
+    let f = fixture(routes_for_destination(
+        &six_points(),
+        destination_with_access(access),
+    ));
+    let outcome = run(&f, &policy(json!({}), json!({}))).await;
+
+    assert_eq!(outcome.phase, ctrl::RetentionPhase::Evaluated);
+    assert_eq!(outcome.ready_reason, ctrl::REASON_POLICY_READY);
+    assert_eq!(outcome.enforced_reason, ctrl::REASON_RECOMMENDATION_ONLY);
+    assert!(outcome.points_evaluated > 0);
+}
+
+/// `evidence_credential` itself, at the three answers a Job can get — the pure
+/// half of the four rows above.
+#[test]
+fn the_record_credential_is_decided_in_one_pure_place() {
+    let keys = |token: Option<&str>| weirkeeper::destination::ResolvedGrant::SecretKeys {
+        secret: "lw-evidence".to_string(),
+        access_key_id_key: "eid".to_string(),
+        secret_access_key_key: "ekey".to_string(),
+        session_token_key: token.map(str::to_string),
+    };
+    let projected = ctrl::evidence_credential(&resolved_for(keys(None)), true).expect("projected");
+    assert_eq!(projected.len(), 2, "two variables when no token is declared");
+    let with_token =
+        ctrl::evidence_credential(&resolved_for(keys(Some("t"))), true).expect("projected");
+    assert_eq!(with_token.len(), 3);
+
+    let undeclared = ctrl::evidence_credential(&resolved_for(keys(None)), false)
+        .expect_err("an undeclared evidenceWrite is refused");
+    assert!(
+        undeclared.contains("spec.access.evidenceWrite"),
+        "even though the ROLE resolved — `resolve` defaults it to `archiveWrite`, and that \
+         default is what this refuses: {undeclared}"
+    );
+    let workload = ctrl::evidence_credential(
+        &resolved_for(weirkeeper::destination::ResolvedGrant::WorkloadIdentity {
+            service_account_name: "sa".to_string(),
+        }),
+        true,
+    )
+    .expect_err("a grant with no static keys is refused");
+    assert!(workload.contains("WorkloadIdentity") && !workload.contains("\"sa\""));
+}
+
+/// A `ResolvedDestination` carrying `grant`, for the pure row above.
+fn resolved_for(
+    grant: weirkeeper::destination::ResolvedGrant,
+) -> weirkeeper::destination::ResolvedDestination {
+    let dest: weirkeeper::crds::backup_destination::BackupDestination =
+        serde_json::from_str(&destination_with_access(four_principals()))
+            .expect("the fixture is a destination");
+    let mut resolved = weirkeeper::destination::resolve(
+        &dest,
+        weirkeeper::destination::DestinationRole::EvidenceWrite,
+        &check::policy::Policy::defaults(),
+    )
+    .expect("the fixture resolves");
+    resolved.grant = grant;
+    resolved
 }
 
 /// The plan `ConfigMap` is immutable and owned by the policy, and it carries the
