@@ -1546,10 +1546,16 @@ fn chart_lint_ui_renders_the_proxy_with_its_paths_and_a_narrow_role() {
             ],
             vec!["get".into(), "list".into()], // engine-token-ok: an RBAC verb the page issues, never an engine subcommand
         ),
+        // D1 §8.5/§8.6 (PLAT-06.2): `backups` joined this rule so legacy mode
+        // can perform "Back up now" instead of refusing it by name. The verb
+        // is `create` and the resource set is otherwise byte-for-byte what it
+        // was; `chart_lint_the_legacy_page_creates_a_backup_and_never_edits_one`
+        // below is the row that pins what `backups` may and may not carry.
         (
             vec!["logweir.dev".into()],
             vec![
                 "approvals".into(),
+                "backups".into(),
                 "backupschedules".into(),
                 "kafkaclusters".into(),
                 "restores".into(),
@@ -1652,6 +1658,60 @@ fn chart_lint_ui_renders_the_proxy_with_its_paths_and_a_narrow_role() {
         !docs.iter().any(|d| d.kind == "Ingress"),
         "the chart renders no Ingress: reachability of the Service is the authorisation boundary"
     );
+}
+
+/// **The legacy page may CREATE a `Backup` and may never edit or delete one
+/// (D1 §8.5/§8.6, PLAT-06.2).**
+///
+/// THE VERB SET FOR ONE RESOURCE, COLLECTED ACROSS EVERY RULE, because that is
+/// the only way a grant actually reads: RBAC unions the rules, so a table that
+/// checked each rule on its own would miss a second rule that added `delete` to
+/// `backups` beside the first one's `create`. This gathers every verb any rule
+/// in this role grants on `backups` and compares the whole set.
+///
+/// WHY EXACTLY THESE THREE. `get` and `list` are what the runs page and the
+/// schedule card have always read. `create` is PLAT-06.2's one addition: a
+/// manual run is an ordinary object (D1 §8.1) and the page creates it directly
+/// in this mode, under the same deterministic name the product API derives.
+/// `patch`, `update` and `delete` are absent BY DESIGN — a run's inputs are
+/// frozen (PLAT-06.1), the task's migration rule is "do not mutate an existing
+/// execution to retry it", and a second run is a second object. A page that
+/// could patch a `Backup` could retarget a frozen plan; a page that could
+/// delete one could erase evidence.
+///
+/// THE MUTANT: add `"delete"` (or `"patch"`, or `"update"`) to the `backups`
+/// rule in `charts/logweir/templates/ui/ui.yaml` and this fails naming the verb,
+/// as does `chart_lint_ui_renders_the_proxy_with_its_paths_and_a_narrow_role`'s
+/// whole-table comparison. Removing `create` fails here too, which is what
+/// keeps the legacy button from going back to refusing itself.
+#[test]
+fn chart_lint_the_legacy_page_creates_a_backup_and_never_edits_one() {
+    let want: BTreeSet<String> = ["create", "get", "list"] // engine-token-ok: Kubernetes RBAC verbs the legacy page issues, never an engine subcommand
+        .into_iter()
+        .map(str::to_string)
+        .collect();
+    // BOTH RENDERS THAT HAVE A PAGE AT ALL, because `ui.enabled` is off by
+    // default and a grant proved in one values file says nothing about the
+    // other. `demo` is the local lab's shape and `msk` is the managed-cloud
+    // one; they are the two renders `logweir-ui` appears in.
+    for render in ["demo", "msk"] {
+        let docs = rendered(render);
+        let role = find(&docs, "ClusterRole", "logweir-ui");
+        let mut on_backups: BTreeSet<String> = BTreeSet::new();
+        for (groups, resources, verbs) in rules_of(role) {
+            if groups.iter().any(|g| g == "logweir.dev")
+                && resources.iter().any(|r| r == "backups")
+            {
+                on_backups.extend(verbs);
+            }
+        }
+        assert_eq!(
+            want, on_backups,
+            "in the {render} render, the legacy page's ClusterRole must grant exactly get, list \
+             and create on `backups` (D1 §8.5/§8.6): a manual run is an ordinary create, and a \
+             run is never edited or deleted from a browser. Found {on_backups:?}"
+        );
+    }
 }
 
 // ================================================= D3 W13: the console/API principal

@@ -7186,9 +7186,25 @@ rules:
       - preflights
       - topicdiscoveries
     verbs: ["get", "list"]
+  # D1 §8.5/§8.6 (PLAT-06.2) — `backups` JOINS THE CREATE SET, AND NOTHING
+  # ELSE DOES. "Back up now" is the one flow the legacy page could render and
+  # not perform: it held `get`/`list` on `backups` and no `create`, so the
+  # button either had to be hidden or had to send a request this identity was
+  # refused. A manual `Backup` is an ORDINARY object (D1 §8.1) — the same one
+  # `kubectl create -f config/samples/backup-manual.yaml` makes — so the grant
+  # is the ordinary `create` verb and the object the page builds is the object
+  # the product API builds, down to the deterministic name.
+  #
+  # STILL NO `patch` AND NO `delete` ON `backups`. A run is immutable once it
+  # exists (PLAT-06.1 freezes its inputs) and "do not mutate an existing
+  # execution to retry it" is the task's own migration rule; a second run is a
+  # second object. `chart_lint_the_legacy_page_creates_a_backup_and_never_edits_one`
+  # pins the verb set for `backups` to exactly {get, list, create} and fails on
+  # a planted extra verb.
   - apiGroups: ["logweir.dev"]
     resources:
       - approvals
+      - backups
       - backupschedules
       - kafkaclusters
       - restores
