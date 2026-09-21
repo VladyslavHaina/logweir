@@ -18,6 +18,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import functools
 import sys
 import tempfile
 from typing import Any
@@ -43,21 +44,24 @@ def row(name: str, ok: bool, detail: str = "") -> None:
 # `python3 -m pytest e2e/k8s/d2` nothing called `main()`, no `test_` function
 # asserted anything, and the suite passed with every row failing: a harness row
 # that passes when the product does nothing, which is the one failure mode this
-# file exists to prevent. The autouse fixture closes it, so the same rows are a
-# real gate under pytest and a full report under python.
-try:  # pytest is not needed for the `python3 test_rows.py` path
-    import pytest as _pytest
-except ImportError:  # pragma: no cover - exercised by the CLI path
-    _pytest = None
-
-if _pytest is not None:
-
-    @_pytest.fixture(autouse=True)
-    def _no_row_may_fail():
+# file exists to prevent.
+#
+# Each test is wrapped instead of fenced by an autouse fixture, because a
+# fixture asserts AFTER the `yield` and pytest attributes that to teardown: the
+# summary line then reads `13 passed, 1 error` and the test that recorded the
+# row still prints as passed (reviewer finding **F5**). Asserting inside the
+# call makes it `12 passed, 1 failed`, naming the test. `main()` keeps the full
+# report by catching the assertion — every row has already been printed by the
+# time it is raised.
+def _fails_on_a_recorded_row(fn):
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
         before = len(FAILURES)
-        yield
-        new_failures = FAILURES[before:]
-        assert not new_failures, "failing rows: " + "; ".join(new_failures)
+        fn(*args, **kwargs)
+        recorded = FAILURES[before:]
+        assert not recorded, "failing rows: " + "; ".join(recorded)
+
+    return wrapper
 
 
 # --- S11, as the fixed product answers it -----------------------------------
@@ -362,6 +366,23 @@ def test_a_grant_unit_names_an_action_and_a_resource_scope() -> None:
     both = d2.u6_statement("s3:ListBucket@bucket:both")
     row("a writer lists under BOTH roots in one condition",
         both["Condition"]["StringLike"]["s3:prefix"] == ["team/u6/*", "logweir/*"])
+    # …which is why no starting set uses it: withdrawing a compound unit shows
+    # only that ONE of its legs was needed (reviewer finding F1). The two legs
+    # are separate units, and their conditions are disjoint.
+    archive = d2.u6_statement("s3:ListBucket@bucket:archive")
+    evidence = d2.u6_statement("s3:ListBucket@bucket:evidence")
+    row("the two prefix legs are separate units with disjoint conditions",
+        archive["Condition"]["StringLike"]["s3:prefix"] == ["team/u6/*"]
+        and evidence["Condition"]["StringLike"]["s3:prefix"] == ["logweir/*"]
+        and archive["Resource"] == evidence["Resource"])
+    row("MUTANT: no starting set may carry the compound unit any more",
+        all("s3:ListBucket@bucket:both" not in src for src in d2.U6_STARTING_SETS.values()),
+        str({k: v for k, v in d2.U6_STARTING_SETS.items()
+             if "s3:ListBucket@bucket:both" in v}))
+    readiness = d2.u6_statement("s3:PutObject@readiness")
+    row("the readiness root is a NARROWER object scope than the evidence root",
+        readiness["Resource"] == ["arn:aws:s3:::lw-u6/logweir/readiness/*"],
+        json.dumps(readiness))
     try:
         d2.u6_statement("s3:GetObject@somewhere-else")
         unknown_refused = False
@@ -524,10 +545,21 @@ def test_only_the_products_own_denial_counts_as_a_denial() -> None:
         not d2.u6_denied({"counts": {}, "pages": 0, "timedOut": True, "conditions": []}))
 
 
+# Wrapped AFTER every test is defined, so pytest collects the wrappers.
+for _name, _fn in list(globals().items()):
+    if _name.startswith("test_") and callable(_fn):
+        globals()[_name] = _fails_on_a_recorded_row(_fn)
+
+
 def main() -> int:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
-            fn()
+            try:
+                fn()
+            except AssertionError:
+                # Every row this test recorded is already printed; the count
+                # below is the report, and the exit code is the verdict.
+                pass
     print(f"\n{len(FAILURES)} failing row(s)" if FAILURES else "\nall rows pass")
     return 1 if FAILURES else 0
 

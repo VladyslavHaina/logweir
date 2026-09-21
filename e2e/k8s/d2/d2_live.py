@@ -4317,8 +4317,14 @@ U6_EVIDENCE_PREFIX = "logweir"
 #: The resource scopes a unit can name. `bucket:*` are `s3:ListBucket`'s
 #: prefix-conditioned forms; MinIO refuses an `s3:prefix` condition on
 #: `s3:GetBucketLocation`, which is why `bucket` exists unconditioned.
+#: `bucket:both` is retained for the record — a policy document may legally
+#: carry both prefix legs in ONE condition — but no starting set uses it any
+#: more: a compound unit withdrawn whole shows only that ONE of its legs was
+#: needed, so a minimal set containing it is asserted at the other leg
+#: (reviewer finding **F1**). `readiness` is the narrower object scope D2 §3.11
+#: records for the write probe, `<bucket>/logweir/readiness/*`.
 U6_SCOPES = ("bucket", "bucket:archive", "bucket:evidence", "bucket:both",
-             "archive", "evidence")
+             "archive", "evidence", "readiness")
 
 #: The codes the product uses for "the backend evaluated this request and
 #: refused it". A removal that fails with anything else is NOT a permission
@@ -4350,7 +4356,11 @@ def u6_statement(unit: str) -> dict[str, Any]:
             "Resource": [bucket_arn],
             "Condition": {"StringLike": {"s3:prefix": prefixes[scope]}},
         }
-    root = U6_ARCHIVE_PREFIX if scope == "archive" else U6_EVIDENCE_PREFIX
+    root = {
+        "archive": U6_ARCHIVE_PREFIX,
+        "evidence": U6_EVIDENCE_PREFIX,
+        "readiness": f"{U6_EVIDENCE_PREFIX}/readiness",
+    }[scope]
     return {
         "Effect": "Allow",
         "Action": [action],
@@ -4566,6 +4576,47 @@ def u6_seq() -> int:
 #: The display name of each role, WITH its own markup: a title is wrapped in
 #: nothing by the renderer, because two of these carry backticks of their own
 #: and nesting them produces `` `retention enforcer (`logweir-retention`)` ``.
+#: Every role's RECORDED starting set, in one place, so `test_rows.py` can
+#: assert that none of them carries a compound unit (reviewer finding **F1**)
+#: and a reader can see what was withdrawn without reading seven phases.
+U6_STARTING_SETS: dict[str, list[str]] = {
+    "archive-write": [
+        "s3:ListBucket@bucket:archive", "s3:ListBucket@bucket:evidence",
+        "s3:GetBucketLocation@bucket",
+        "s3:GetObject@archive", "s3:PutObject@archive",
+        "s3:AbortMultipartUpload@archive", "s3:DeleteObject@archive",
+        "s3:GetObject@evidence", "s3:PutObject@evidence",
+        "s3:AbortMultipartUpload@evidence",
+    ],
+    "archive-read": [
+        "s3:ListBucket@bucket:archive", "s3:GetObject@archive",
+        "s3:GetBucketLocation@bucket",
+    ],
+    "evidence-write": [
+        "s3:PutObject@evidence", "s3:GetObject@evidence",
+        "s3:ListBucket@bucket:evidence", "s3:GetBucketLocation@bucket",
+    ],
+    "evidence-read": [
+        "s3:GetObject@evidence", "s3:ListBucket@bucket:evidence",
+        "s3:GetBucketLocation@bucket",
+    ],
+    "write-probe": [
+        "s3:PutObject@readiness", "s3:GetObject@evidence",
+        "s3:ListBucket@bucket:evidence", "s3:GetBucketLocation@bucket",
+        "s3:ListBucket@bucket:archive", "s3:GetObject@archive",
+    ],
+    "catalog-sync": [
+        "s3:ListBucket@bucket:archive", "s3:ListBucket@bucket:evidence",
+        "s3:GetBucketLocation@bucket",
+        "s3:GetObject@archive", "s3:GetObject@evidence",
+    ],
+    "retention-enforcer": [
+        "s3:ListBucket@bucket:archive", "s3:GetBucketLocation@bucket",
+        "s3:GetObject@archive", "s3:DeleteObject@archive",
+    ],
+}
+
+
 U6_ROLES = {
     "archive-write": "`archiveWrite`",
     "archive-read": "`archiveRead`",
@@ -4963,12 +5014,14 @@ def u6f() -> None:
     """
     with Scenario("U6.writeProbe",
                   "the minimal grant under which the create-only readiness marker writes") as sc:
-        job_env_before = None
-        u6_bisect(
+        row = u6_bisect(
             sc, role="write-probe", user="u6-writer",
-            starting=["s3:PutObject@evidence", "s3:GetObject@evidence",
-                      "s3:ListBucket@bucket:evidence", "s3:GetBucketLocation@bucket",
-                      "s3:ListBucket@bucket:archive", "s3:GetObject@archive"],
+            # `s3:PutObject` at `<bucket>/logweir/readiness/*`, not at
+            # `<bucket>/logweir/*`: D2 §3.11 and `docs/install.md` both record
+            # the narrower scope for this row and nothing had tested it, so the
+            # narrower one is what the starting set carries. A baseline that
+            # succeeds with it IS the proof that it suffices.
+            starting=U6_STARTING_SETS["write-probe"],
             operation=u6_backup_preflight_op("u6-dest-probe",
                                              ["destination.evidenceWritable"]),
             before=u6_clear_markers,
@@ -4978,8 +5031,28 @@ def u6f() -> None:
         sc.detail["probeCredential"] = (
             "the check Job projects ONE credential — the destination's archive grant — as "
             "`AWS_ACCESS_KEY_ID`, with no `LOGWEIR_EVIDENCE_AWS_*`, so this row is about "
-            "that principal's authority under `logweir/*`")
-        sc.detail["jobEnvBefore"] = job_env_before
+            "that principal's authority under the evidence root")
+        # THE SECOND PROOF, READ AND NOT ASSERTED (reviewer finding **F4**: the
+        # first landing declared a `job_env_before` nothing ever assigned, so
+        # the artifact carried `null` under a report that said "confirmed
+        # twice"). The check Job's own env is read back here, by name: which
+        # Secret `AWS_ACCESS_KEY_ID` comes from, and whether any
+        # `LOGWEIR_EVIDENCE_AWS_*` exists beside it. Values never appear — a
+        # `secretKeyRef` is a name and a key.
+        job = (get("preflight", row["baseline"]["object"])
+               .get("status", {}).get("jobRef", {}) or {}).get("name")
+        if job and get_opt("job", job) is not None:
+            env = job_env(job)
+            sc.detail["probeJobEnv"] = {
+                "AWS_ACCESS_KEY_ID": env.get("AWS_ACCESS_KEY_ID"),
+                "evidenceVariablesPresent": sorted(
+                    k for k in env if k.startswith("LOGWEIR_EVIDENCE_AWS_")),
+                "job": job,
+            }
+        else:
+            sc.detail["probeJobEnv"] = (
+                f"the check Job {job!r} is gone (its TTL expired), so this leg of the "
+                "proof is the bisection alone")
 
     with Scenario("U6.markerPrecedence",
                   "whether `MarkerAlreadyPresent` is evidence of a write grant") as sc:
@@ -5021,8 +5094,7 @@ def u6a() -> None:
                   "the minimal grant under which `destination.evidenceReadable` answers") as sc:
         u6_bisect(
             sc, role="evidence-read", user="u6-evreader",
-            starting=["s3:GetObject@evidence", "s3:ListBucket@bucket:evidence",
-                      "s3:GetBucketLocation@bucket"],
+            starting=U6_STARTING_SETS["evidence-read"],
             operation=u6_destination_access_op(
                 "u6-dest", ["EvidenceRead"], ["destination.evidenceReadable"]),
             note="D2 §3.11 recorded `s3:GetObject`, with `s3:ListBucket` optional "
@@ -5038,8 +5110,7 @@ def u6a() -> None:
         u6_attach("u6-writer", U6_WIDE_WRITE, "evw-archive")
         u6_bisect(
             sc, role="evidence-write", user="u6-evwriter",
-            starting=["s3:PutObject@evidence", "s3:GetObject@evidence",
-                      "s3:ListBucket@bucket:evidence", "s3:GetBucketLocation@bucket"],
+            starting=U6_STARTING_SETS["evidence-write"],
             operation=u6_backup_op("u6-dest"),
             note="a destination-backed Backup writes its archive with `archiveWrite` and its "
                  "signed receipt with `evidenceWrite`; only the second is varied here",
@@ -5078,8 +5149,7 @@ def u6b() -> None:
               "U6.archiveRead needs a recovery point to read; run `u6c` (or `u6point`) first")
         u6_bisect(
             sc, role="archive-read", user="u6-reader",
-            starting=["s3:ListBucket@bucket:archive", "s3:GetObject@archive",
-                      "s3:GetBucketLocation@bucket"],
+            starting=U6_STARTING_SETS["archive-read"],
             operation=u6_composite(
                 u6_destination_access_op("u6-dest", ["ArchiveRead"],
                                          ["destination.archiveListable"]),
@@ -5124,11 +5194,10 @@ def u6c() -> None:
                   "the minimal grant under which a destination-backed Backup succeeds") as sc:
         u6_bisect(
             sc, role="archive-write", user="u6-writer",
-            starting=["s3:ListBucket@bucket:both", "s3:GetBucketLocation@bucket",
-                      "s3:GetObject@archive", "s3:PutObject@archive",
-                      "s3:AbortMultipartUpload@archive", "s3:DeleteObject@archive",
-                      "s3:GetObject@evidence", "s3:PutObject@evidence",
-                      "s3:AbortMultipartUpload@evidence"],
+            # The two `s3:ListBucket` prefix legs are SEPARATE units. Withdrawn
+            # together they show only that one of them was needed, and the
+            # minimal set then asserts the other (reviewer finding **F1**).
+            starting=U6_STARTING_SETS["archive-write"],
             operation=u6_backup_op("u6-dest-write"),
             note="the run writes the archive through the engine AND its own signed "
                  "receipt under `logweir/`, with ONE grant",
@@ -5273,8 +5342,7 @@ def u6d() -> None:
                   "the minimal grant under which a RecoveryCatalog publishes a view") as sc:
         u6_bisect(
             sc, role="catalog-sync", user="u6-catreader",
-            starting=["s3:ListBucket@bucket:both", "s3:GetBucketLocation@bucket",
-                      "s3:GetObject@archive", "s3:GetObject@evidence"],
+            starting=U6_STARTING_SETS["catalog-sync"],
             operation=u6_catalog_op(),
             note="the reader walks `logweir/catalog/v1/log/`, then reads each point's "
                  "receipt, sidecar and manifest",
@@ -5398,8 +5466,7 @@ def u6e() -> None:
     """
     with Scenario("U6.retentionEnforcer",
                   "the minimal delete grant under which an Enforce run removes a point") as sc:
-        starting = ["s3:ListBucket@bucket:archive", "s3:GetBucketLocation@bucket",
-                    "s3:GetObject@archive", "s3:DeleteObject@archive"]
+        starting = U6_STARTING_SETS["retention-enforcer"]
         # D3 §6.5 and `docs/kubernetes.md` §7f both say the record and the
         # tombstones are written with the destination's OWN `evidenceWrite`
         # grant. THEY ARE NOT, on this build: `retention_policy.rs:1188`
