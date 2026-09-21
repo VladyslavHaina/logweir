@@ -875,9 +875,23 @@ fn candidate_from_backup(
     let newest_record_at = status
         .and_then(|s| s.window_covered.as_ref())
         .and_then(|w| chrono::DateTime::from_timestamp_millis(w.to_ms.saturating_sub(1)));
+    // The archive set this run wrote into, from the pre-Job patch — BEFORE any
+    // verification is attempted, which is why it is there on the credential
+    // posture where the receipt digest is not. `execution.id` is the value the
+    // runner is handed as its backup id override, and `backupId` is the same
+    // value on a run frozen before execution inputs existed.
+    let backup_id = status
+        .and_then(|s| {
+            s.execution
+                .as_ref()
+                .map(|e| e.id.clone())
+                .or_else(|| s.backup_id.clone())
+        })
+        .filter(|id| !id.is_empty());
     p::PointCandidate {
         backup_name: Some(backup.name_any()),
         point_id,
+        backup_id,
         recovery_point_at: status
             .and_then(|s| s.capture.as_ref())
             .and_then(|c| c.started_at),

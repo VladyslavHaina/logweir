@@ -595,6 +595,22 @@ pub struct PointCandidate {
     /// D3 §5.1's identity, when it is derivable — see
     /// [`point_id_from_receipt_digest`].
     pub point_id: Option<String>,
+    /// The archive set this run wrote into: `status.execution.id`, or
+    /// `status.backupId` for a run frozen before execution inputs existed.
+    ///
+    /// # The second join key, and why a second one is needed
+    ///
+    /// [`Self::point_id`] is derived from the receipt digest, which a
+    /// controller with no Secret verb never fetches — so on the credential
+    /// posture the documentation RECOMMENDS, the only identity the catalog
+    /// join had was absent and every such point failed the join. The archive
+    /// set id is on `Backup.status` from the pre-Job patch, before any
+    /// verification is attempted, and `CatalogEntry::backup_id` carries the
+    /// same value: the two sides agree by construction because the runner is
+    /// handed this id as its backup id override.
+    ///
+    /// `None` for a `Backup` frozen by a controller that wrote neither field.
+    pub backup_id: Option<String>,
     /// **Capture start.** `Backup.status.capture.startedAt`.
     pub recovery_point_at: Option<Time>,
     /// `windowCovered.toMs - 1 ms`, labelled separately and never used for the
@@ -1000,14 +1016,70 @@ pub fn is_available(
     match catalog {
         CatalogAnswer::NotConsulted => true,
         CatalogAnswer::Stale(_) => false,
-        CatalogAnswer::Fresh(entries) => match candidate.point_id.as_deref() {
-            // A point the catalog has never heard of is not available when the
-            // operator asked for catalog availability: the whole point of the
-            // objective is that the bytes were confirmed to be there.
-            Some(id) => entries.iter().any(|e| e.point_id == id && e.is_available()),
-            None => false,
-        },
+        // A point the catalog has never heard of is not available when the
+        // operator asked for catalog availability: the whole point of the
+        // objective is that the bytes were confirmed to be there.
+        CatalogAnswer::Fresh(entries) => {
+            entries_for(candidate, entries).any(CatalogEntry::is_available)
+        }
     }
+}
+
+/// The entries in a fresh view that are about this candidate — D3 §5.1's point
+/// identity where the controller has it, and the ARCHIVE SET id where it does
+/// not.
+///
+/// # Why the second key exists (`PROTECTION-SECRETKEYS-UNPROTECTED`)
+///
+/// `point_id` comes from `Backup.status.evidence.receiptSha256`, which is
+/// written only where the controller could fetch and verify the receipt. On a
+/// destination whose `evidenceRead` grant is `SecretKeys` — the posture the
+/// documentation recommends, since it gives the controller no Secret verb —
+/// that field is absent, the join answered `None => false` for every point,
+/// and the policy reported that the archive held nothing. The archive set id
+/// is on the object from the pre-Job patch and on the catalog row under
+/// `backupId`, so the fact the join needs was already on both sides.
+///
+/// `point_id` DECIDES where the candidate has one: it is the narrower key, and
+/// a candidate whose identity the view does not list is a candidate the view
+/// does not know, not one to go looking for under a coarser name.
+fn entries_for<'e>(
+    candidate: &PointCandidate,
+    entries: &'e [CatalogEntry],
+) -> impl Iterator<Item = &'e CatalogEntry> {
+    let point_id = candidate.point_id.clone();
+    // An EMPTY `backupId` is not a key. `#[serde(default)]` gives `""` to a
+    // view that does not write the field, and joining on it would make every
+    // such entry an answer for every candidate whose receipt went unread.
+    let backup_id = candidate
+        .backup_id
+        .clone()
+        .filter(|id| !id.is_empty() && point_id.is_none());
+    entries.iter().filter(move |e| match &point_id {
+        Some(id) => &e.point_id == id,
+        None => backup_id.as_ref().is_some_and(|id| &e.backup_id == id),
+    })
+}
+
+/// The one entry a fresh view holds for this candidate, newest first.
+///
+/// A `Backup` writes one recovery point, so the archive-set join is 1:1 in
+/// practice; the order is fixed anyway (newest `recoveryPointAtMs`, then
+/// `pointId`) so that two reconciles over one cluster state never disagree
+/// about which row they read a capture time off.
+#[must_use]
+pub fn catalog_entry_for<'e>(
+    candidate: &PointCandidate,
+    catalog: &'e CatalogAnswer,
+) -> Option<&'e CatalogEntry> {
+    let CatalogAnswer::Fresh(entries) = catalog else {
+        return None;
+    };
+    entries_for(candidate, entries).max_by(|a, b| {
+        a.recovery_point_at_ms
+            .cmp(&b.recovery_point_at_ms)
+            .then_with(|| a.point_id.cmp(&b.point_id))
+    })
 }
 
 /// The RUN half of D3 §3.2's availability rule: everything a policy can decide
@@ -1421,8 +1493,14 @@ fn open_alert_kinds(
     // the case the tracker's "unavailable archive" row is about — a signer
     // retired or revoked under a point the `Backup` CR still calls `Valid`.
     if let CatalogAnswer::Fresh(entries) = catalog {
-        let degraded_id = |id: Option<&str>| {
-            id.is_some_and(|id| entries.iter().any(|e| e.point_id == id && e.is_degraded()))
+        // THE SAME MATCHING RULE `is_available` USES (`entries_for`), and not a
+        // second one keyed on `point_id` alone. A point whose receipt the
+        // controller could not read has no `point_id`, so a point-id-only
+        // lookup answered "no degraded entry" for exactly the points the
+        // archive-set join was added to reach, and `ArchiveUnavailable` stayed
+        // shut over a broken archive.
+        let degraded = |candidate: &PointCandidate| {
+            entries_for(candidate, entries).any(CatalogEntry::is_degraded)
         };
         let mut otherwise: Vec<&PointCandidate> = input
             .candidates
@@ -1432,10 +1510,8 @@ fn open_alert_kinds(
             })
             .collect();
         otherwise.sort_by_key(|c| std::cmp::Reverse(c.recovery_point_at));
-        let top_degraded = otherwise
-            .first()
-            .is_some_and(|top| degraded_id(top.point_id.as_deref()));
-        let chosen_degraded = newest.is_some_and(|n| degraded_id(n.point_id.as_deref()));
+        let top_degraded = otherwise.first().is_some_and(|top| degraded(top));
+        let chosen_degraded = newest.is_some_and(degraded);
         if top_degraded || chosen_degraded {
             open.push(PolicyAlertKind::ArchiveUnavailable);
         }

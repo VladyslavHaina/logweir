@@ -448,6 +448,7 @@ fn candidate(hours_ago: i64) -> p::PointCandidate {
     p::PointCandidate {
         backup_name: Some("b-1".to_string()),
         point_id: Some(point_id("b-1")),
+        backup_id: Some("set-1".to_string()),
         recovery_point_at: Some(now() - Duration::hours(hours_ago)),
         newest_record_at: Some(now() - Duration::hours(hours_ago)),
         phase: Some("Succeeded".to_string()),
@@ -752,6 +753,33 @@ fn unreadable_point(hours_ago: i64) -> p::PointCandidate {
     }
 }
 
+/// The catalog-backed spec with the evidence objective OFF, so a test can
+/// exercise the catalog JOIN without clause 1 of the defect deciding first.
+fn spec_with_catalog_only() -> ProtectionPolicySpec {
+    let mut value = spec_value();
+    merge(
+        &mut value,
+        &json!({
+            "protects": {"catalogRef": {"name": CATALOG}},
+            "objectives": {"requireVerifiedEvidence": false}
+        }),
+    );
+    serde_json::from_value(value).expect("the catalog-only fixture spec parses")
+}
+
+/// [`entry`] with the archive set id said out loud.
+fn entry_in_set(
+    point_id: &str,
+    backup_id: &str,
+    availability: &str,
+    verification: &str,
+) -> p::CatalogEntry {
+    p::CatalogEntry {
+        backup_id: backup_id.to_string(),
+        ..entry(point_id, availability, verification)
+    }
+}
+
 /// A succeeded point the controller could not place in time is `Unknown`, and
 /// it does not page.
 ///
@@ -870,6 +898,112 @@ fn an_unplaceable_point_never_masks_a_more_specific_reason_or_a_placeable_one() 
     ));
     assert_eq!(verdict.health, p::Health::Healthy);
     assert_eq!(verdict.reason, p::FreshnessReason::WithinObjective);
+}
+
+/// A point with a capture time and NO receipt digest — the join's own case,
+/// isolated from the two clauses the other fixes close.
+fn no_receipt_point(hours_ago: i64) -> p::PointCandidate {
+    p::PointCandidate {
+        point_id: None,
+        evidence: p::Evidence::NotAttempted,
+        ..candidate(hours_ago)
+    }
+}
+
+/// The catalog join answers on the ARCHIVE SET id when the controller never
+/// read the receipt that would have given the point an identity.
+///
+/// MUTANT: restore `match candidate.point_id { Some(id) => …, None => false }`
+/// in `is_available`'s `Fresh` arm — the first assertion fails and the health
+/// reads `Unprotected` over a catalog that lists the point as
+/// `Available`/`Verified`. MUTANT 2: drop the `point_id.is_none()` guard in
+/// `entries_for` so the coarser key is tried for a candidate that HAS an
+/// identity the view does not list — the fourth assertion fails.
+#[test]
+fn the_catalog_join_falls_back_to_the_archive_set_id() {
+    let spec = spec_with_catalog_only();
+    let schedules = [healthy_schedule()];
+    let rehearsal = p::RehearsalFacts::default();
+    let points = [no_receipt_point(2)];
+
+    let present = p::CatalogAnswer::Fresh(vec![entry_in_set(
+        &point_id("b-1"),
+        "set-1",
+        "Available",
+        "Verified",
+    )]);
+    assert!(
+        p::is_available(&points[0], &spec, &present),
+        "`backupId` is on the Backup from the pre-Job patch and on the catalog row; the fact \
+         the join needs was already on both sides"
+    );
+    let verdict = p::evaluate(&inputs(
+        &spec,
+        &points,
+        &present,
+        &schedules,
+        &[],
+        &rehearsal,
+    ));
+    assert_eq!(verdict.health, p::Health::Healthy);
+    assert_eq!(verdict.basis, p::AvailabilityBasis::Catalog);
+
+    // NEGATIVE CONTROL 1 — a row of ANOTHER archive set does not answer for
+    // this point. Without this the join would be "any entry at all".
+    let elsewhere = p::CatalogAnswer::Fresh(vec![entry_in_set(
+        &point_id("b-1"),
+        "set-2",
+        "Available",
+        "Verified",
+    )]);
+    assert!(!p::is_available(&points[0], &spec, &elsewhere));
+
+    // NEGATIVE CONTROL 2 — an EMPTY `backupId` is not a key. `serde(default)`
+    // hands `""` to a view that does not write the field, and joining on it
+    // would make every such row an answer for every unread point.
+    let blank = p::PointCandidate {
+        backup_id: Some(String::new()),
+        ..no_receipt_point(2)
+    };
+    let blank_row = p::CatalogAnswer::Fresh(vec![entry_in_set(
+        &point_id("b-1"),
+        "",
+        "Available",
+        "Verified",
+    )]);
+    assert!(!p::is_available(&blank, &spec, &blank_row));
+
+    // NEGATIVE CONTROL 3 — `point_id` is the narrower key and DECIDES where
+    // the candidate has one: a point whose identity the view does not list is
+    // a point the view does not know, not one to find under a coarser name.
+    let listed_elsewhere = p::PointCandidate {
+        point_id: Some(point_id("b-9")),
+        ..no_receipt_point(2)
+    };
+    assert!(!p::is_available(&listed_elsewhere, &spec, &present));
+
+    // And the alert reaches it too: `ArchiveUnavailable` used a point-id-only
+    // lookup, so it stayed SHUT over exactly the points the join was added for.
+    let broken = p::CatalogAnswer::Fresh(vec![entry_in_set(
+        &point_id("b-1"),
+        "set-1",
+        "Missing",
+        "Verified",
+    )]);
+    let verdict = p::evaluate(&inputs(
+        &spec,
+        &points,
+        &broken,
+        &schedules,
+        &[],
+        &rehearsal,
+    ));
+    assert!(
+        verdict
+            .open_kinds
+            .contains(&p::PolicyAlertKind::ArchiveUnavailable),
+        "the bytes this policy would otherwise count are gone; that is D3 §3.3's alert"
+    );
 }
 
 // ===========================================================================
