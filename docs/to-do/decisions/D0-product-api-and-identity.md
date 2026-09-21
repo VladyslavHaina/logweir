@@ -284,3 +284,36 @@ Documentation is licensed [CC-BY-4.0](../../LICENSE-docs).
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.
+
+## Amendment at integration (2026-09-21, PLAT-17.1 stage 7)
+
+The chart's deployment stage landed under the existing `api.*` values block that D3 W13
+introduced for the console/API principal, not the `console.*` names this document uses;
+`charts/logweir/README.md` states the mapping and no second key is introduced. Two shapes
+exist in the cluster, and enabling the console forces the choice: `api.console.enabled`
+without an explicit `mode` is refused at render time with the field named, because the
+binary has no default mode either.
+
+- **Shared mode** is the shape this document defines above: OIDC, exact HTTPS
+  `publicBaseUrl`, TLS at the ingress, a ClusterIP Service on the console port, the ingress
+  NetworkPolicy, readiness gated on OIDC discovery and key material. It is the only mode for
+  which a Service or Ingress is rendered, and it is not declared secure until stage 5 scopes
+  the controller's Job-create authority away from the namespace that holds the console keys
+  (residual O1 in `docs/kubernetes.md` §15.4 extends to the session and cursor keys until
+  then; the shipped documents say so by name).
+- **In-cluster administrator mode** (`mode: localAdmin` in the chart) is the laptop
+  administrator mode moved into a pod: the listener is bound to loopback, nothing is rendered
+  that another pod or a monitor could dial, the documented access path is
+  `kubectl port-forward deploy/<release>-api`, the identity is the `<release>-api`
+  ServiceAccount under the narrow grant of `templates/ui/api-rbac.yaml` (never a kubeconfig,
+  never cluster-admin), and readiness is not gated on OIDC. Its authorization surface is the
+  Kubernetes permission to port-forward: `create pods/portforward` in the release namespace
+  is equivalent to full console administrator authority over every bound namespace and is
+  granted as such. It exists for isolated labs and break-glass administration; it does not
+  expose Ordinary and it is not a shared console.
+
+The acceptance row "Localhost administrator mode still works only at loopback with an
+explicit docker-desktop kubeconfig/context" keeps its meaning for the laptop mode; the
+in-cluster shape is covered by the render refusals (no mode, a Service in administrator
+mode, shared mode without TLS or with an ingress host that differs from `publicBaseUrl`)
+and by the live `auth can-i` matrix recorded under PLAT-17.1.
