@@ -170,6 +170,10 @@ pub const REASON_UNATTENDED: &str = "UnattendedDeletionEnabled";
 pub const REASON_NOTHING_TO_DO: &str = "NothingToDo";
 /// `Enforced=False`: a Job of this run's name exists and is not ours.
 pub const REASON_JOB_NAME_CONFLICT: &str = "JobNameConflict";
+/// `Enforced=False`: the destination has no `spec.access.evidenceWrite` grant
+/// an enforcement Job could write its record with, so no Job is created
+/// (defect RET-EVIDENCE-GRANT-IS-ARCHIVEREAD).
+pub const REASON_EVIDENCE_GRANT_UNUSABLE: &str = "EvidenceGrantUnusable";
 
 /// `ExternalLifecycleConflict=True`: the declared expiry would expire kept
 /// points.
@@ -208,6 +212,7 @@ pub const CONDITION_REASONS: &[&str] = &[
     REASON_UNATTENDED,
     REASON_NOTHING_TO_DO,
     REASON_JOB_NAME_CONFLICT,
+    REASON_EVIDENCE_GRANT_UNUSABLE,
     REASON_DECLARED_EXPIRY_CONFLICTS,
     REASON_NO_CONFLICT,
     REASON_CONSECUTIVE_FAILURES,
@@ -1183,13 +1188,29 @@ impl Pass<'_> {
 
     async fn evaluate(&self) -> Result<Outcome, ReconcileError> {
         // The destination, for its location id and (in `Enforce`) its Job
-        // environment. `ArchiveRead`: this controller reads nothing from the
-        // archive at all, and the role is what the LOCATION is resolved under.
-        let resolved = match destination::resolve_ref(
+        // environment — RESOLVED FOR TWO ROLES FROM ONE READ.
+        //
+        // `ArchiveRead` is what the LOCATION is resolved under: this controller
+        // reads nothing from the archive at all, and that role is the narrowest
+        // one the location is available from.
+        //
+        // `EvidenceWrite` is the RECORD credential, and it is a SEPARATE
+        // resolution because it is a separate principal — defect
+        // RET-EVIDENCE-GRANT-IS-ARCHIVEREAD. Until this existed the enforcement
+        // Job's `LOGWEIR_EVIDENCE_AWS_*` carried `resolved.grant`, which is the
+        // `archiveRead` one, so on a destination that separates the four
+        // principals the first intent tombstone was refused `403 AccessDenied`
+        // (`state=Kept code=TombstoneRefused`, `deleted=0 failed=1`, live in
+        // `claude/artifacts/d2-live/u620260921t140000z`) and retention could not
+        // run at all — while on a destination whose `archiveRead` happens to be
+        // writable it attributed deletions to the one credential D3 §7f says
+        // must not write under `logweir/`.
+        let roles = match destination::resolve_ref_roles(
             self.ctx.client,
             &self.namespace,
             &self.policy.spec.destination_ref.name,
             DestinationRole::ArchiveRead,
+            DestinationRole::EvidenceWrite,
             self.ctx.policy,
         )
         .await
@@ -1202,6 +1223,7 @@ impl Pass<'_> {
                     .await
             }
         };
+        let resolved = roles.primary;
 
         // THE SCOPE MUST BE THE DESTINATION'S OWN PREFIX (D3 §6.2). A policy
         // whose scope names a prefix the destination does not root would give a
@@ -1324,6 +1346,8 @@ impl Pass<'_> {
             match self
                 .start_run(
                     &resolved,
+                    &roles.secondary,
+                    roles.secondary_declared,
                     &plan_bytes,
                     &plan_sha256,
                     &evaluation.candidates,
@@ -1358,6 +1382,11 @@ impl Pass<'_> {
                 StartOutcome::PlanConfigMapConflict(message) => {
                     outcome.enforced_reason = REASON_PLAN_CONFIG_MAP_CONFLICT;
                     self.publish_enforcement_refusal(REASON_PLAN_CONFIG_MAP_CONFLICT, &message)
+                        .await?;
+                }
+                StartOutcome::EvidenceGrantUnusable(message) => {
+                    outcome.enforced_reason = REASON_EVIDENCE_GRANT_UNUSABLE;
+                    self.publish_enforcement_refusal(REASON_EVIDENCE_GRANT_UNUSABLE, &message)
                         .await?;
                 }
             }
@@ -1607,14 +1636,37 @@ impl Pass<'_> {
     // Enforcement
     // -----------------------------------------------------------------------
 
+    #[allow(clippy::too_many_arguments)]
     async fn start_run(
         &self,
         resolved: &ResolvedDestination,
+        evidence: &ResolvedDestination,
+        evidence_declared: bool,
         plan_bytes: &[u8],
         plan_sha256: &str,
         candidates: &[plan::Candidate],
         slot: DateTime<Utc>,
     ) -> Result<StartOutcome, ReconcileError> {
+        // THE RECORD CREDENTIAL IS SETTLED BEFORE ANYTHING IS SPENT — defect
+        // RET-EVIDENCE-GRANT-IS-ARCHIVEREAD.
+        //
+        // First, before the lease, before the plan `ConfigMap` and before the
+        // run record: a destination whose `evidenceWrite` grant no enforcement
+        // Job can use is a configuration problem, not a failed run, and it must
+        // cost neither a lease, nor an immutable `ConfigMap`, nor a slot of the
+        // three-failure retry budget. The old shape created the Job anyway and
+        // let the worker exit 3 at the store builder, which spent one.
+        let evidence_env = match evidence_credential(evidence, evidence_declared) {
+            Ok(env) => env,
+            Err(message) => {
+                warn!(
+                    policy = %self.name, namespace = %self.namespace,
+                    destination = %evidence.name,
+                    "no usable evidenceWrite grant; no retention Job is created"
+                );
+                return Ok(StartOutcome::EvidenceGrantUnusable(message));
+            }
+        };
         let leased: Vec<String> = candidates.iter().map(|c| c.point_id.clone()).collect();
         // THE SLOT IS THE CRON'S, NOT THE MINUTE'S (review `d3w9` M5/Q1). The
         // run id is a pure function of it, so "one run per slot" is a property
@@ -1735,7 +1787,14 @@ impl Pass<'_> {
         }
 
         let job_name = self.job_name(&run_id);
-        let job = self.build_job(&job_name, &run_id, &plan_name, plan_sha256, resolved);
+        let job = self.build_job(
+            &job_name,
+            &run_id,
+            &plan_name,
+            plan_sha256,
+            resolved,
+            &evidence_env,
+        );
         let jobs: Api<Job> = Api::namespaced(self.ctx.client.clone(), &self.namespace);
 
         // (c) A JOB ALREADY AT THIS NAME ENDS THE PASS, BEFORE THE RECORD.
@@ -2011,6 +2070,7 @@ impl Pass<'_> {
         plan_config_map: &str,
         plan_sha256: &str,
         resolved: &ResolvedDestination,
+        evidence_env: &[crate::job::EnvFromSecret],
     ) -> Job {
         let enforcement = self.policy.spec.enforcement.as_ref();
         let deadline = enforcement.map_or(1800, |e| i64::from(e.deadline_seconds));
@@ -2069,27 +2129,38 @@ impl Pass<'_> {
                 key: crate::crds::backup_destination::DEFAULT_SECRET_ACCESS_KEY_KEY.to_string(),
             });
         }
-        // The `evidenceWrite` grant, for the record under `logweir/`. The
-        // destination's own, resolved separately, and NEVER the delete
-        // credential reused.
         env_from_secret.extend(
             dest_env
                 .from_secret
                 .iter()
                 .filter(|e| {
                     // THE DESTINATION'S ARCHIVE CREDENTIAL IS DROPPED HERE ON
-                    // PURPOSE. `AWS_ACCESS_KEY_ID` in a retention pod is the
-                    // DELETE-capable grant and nothing else; letting the
-                    // destination's read grant land on the same variable would
-                    // silently decide which of the two the worker deletes with.
+                    // PURPOSE, AND ALL THREE VARIABLES OF IT. `AWS_ACCESS_KEY_ID`
+                    // in a retention pod is the DELETE-capable grant and nothing
+                    // else; letting the destination's read grant land on the
+                    // same variable would silently decide which of the two the
+                    // worker deletes with.
+                    //
+                    // `AWS_SESSION_TOKEN` USED TO SURVIVE THIS FILTER, which
+                    // was the same defect one variable along: an `archiveRead`
+                    // grant declaring `sessionTokenKey` put the READER's token
+                    // in the pod beside the DELETER's id and secret, and a
+                    // mismatched triple is not a credential — every call would
+                    // have failed `InvalidAccessKeyId`/`SignatureDoesNotMatch`
+                    // with nothing in the message about where the third part
+                    // came from. The three names are one credential and they
+                    // are dropped as one.
                     e.name != destination::AWS_ACCESS_KEY_ID_ENV
                         && e.name != destination::AWS_SECRET_ACCESS_KEY_ENV
+                        && e.name != destination::AWS_SESSION_TOKEN_ENV
                 })
                 .cloned(),
         );
-        if let Some(evidence) = self.evidence_env_from_secret(resolved) {
-            env_from_secret.extend(evidence);
-        }
+        // The `evidenceWrite` grant, for the record under `logweir/`: the
+        // destination's own, resolved under its own role, checked by
+        // `evidence_credential` before this pass spent anything, and NEVER
+        // either of the other two principals reused.
+        env_from_secret.extend(evidence_env.iter().cloned());
 
         let mut job = crate::job::build(&crate::job::RunnerJobSpec {
             name: job_name.to_string(),
@@ -2147,44 +2218,6 @@ impl Pass<'_> {
             spec.template.metadata = Some(meta);
         }
         job
-    }
-
-    /// The `evidenceWrite` grant's projected variables, when the destination
-    /// declares one distinct from the archive grant.
-    fn evidence_env_from_secret(
-        &self,
-        resolved: &ResolvedDestination,
-    ) -> Option<Vec<crate::job::EnvFromSecret>> {
-        match &resolved.grant {
-            destination::ResolvedGrant::SecretKeys {
-                secret,
-                access_key_id_key,
-                secret_access_key_key,
-                session_token_key,
-            } => {
-                let mut out = vec![
-                    crate::job::EnvFromSecret {
-                        name: destination::EVIDENCE_ACCESS_KEY_ID_ENV.to_string(),
-                        secret_name: secret.clone(),
-                        key: access_key_id_key.clone(),
-                    },
-                    crate::job::EnvFromSecret {
-                        name: destination::EVIDENCE_SECRET_ACCESS_KEY_ENV.to_string(),
-                        secret_name: secret.clone(),
-                        key: secret_access_key_key.clone(),
-                    },
-                ];
-                if let Some(token) = session_token_key {
-                    out.push(crate::job::EnvFromSecret {
-                        name: destination::EVIDENCE_SESSION_TOKEN_ENV.to_string(),
-                        secret_name: secret.clone(),
-                        key: token.clone(),
-                    });
-                }
-                Some(out)
-            }
-            _ => None,
-        }
     }
 
     /// Who approved the current plan, from the annotation an administrator's
@@ -3084,6 +3117,12 @@ pub enum StartOutcome {
     /// An object already holds the plan `ConfigMap`'s name and is not this
     /// plan.
     PlanConfigMapConflict(String),
+    /// The destination has no `spec.access.evidenceWrite` grant an enforcement
+    /// Job could write its record with — defect
+    /// RET-EVIDENCE-GRANT-IS-ARCHIVEREAD. Returned BEFORE the lease, so this
+    /// pass spends no lease, no `ConfigMap`, no run record and no retry-budget
+    /// slot on a configuration problem.
+    EvidenceGrantUnusable(String),
 }
 
 /// How long the current plan stays approvable — review `d3w9` H4.
@@ -3114,6 +3153,118 @@ pub struct EnforcementDecision {
 // ---------------------------------------------------------------------------
 // Small pure helpers
 // ---------------------------------------------------------------------------
+
+/// The three `LOGWEIR_EVIDENCE_AWS_*` references an enforcement Job writes its
+/// intent tombstone and its run record with, or the message that names the
+/// field the destination is missing.
+///
+/// # The credential is the destination's OWN `evidenceWrite`, and nothing else
+///
+/// `docs/kubernetes.md` §7f's table has exactly two rows and they are two
+/// principals: the delete grant from `spec.enforcement.credentialSecretRef`,
+/// which may remove a point and may not write under `logweir/`, and the
+/// `evidenceWrite` grant from the destination's own `spec.access.evidenceWrite`,
+/// which may create under `logweir/` and may not delete. *Neither alone is
+/// enough*, which is the property that makes a deletion attributable — and it
+/// is a property of WHICH grant lands on which variable, so this function is
+/// where it is decided, once, for the only Job that deletes anything.
+///
+/// # Why an absent `evidenceWrite` is refused here and defaulted elsewhere
+///
+/// [`destination::resolve`] defaults the `EvidenceWrite` role to `archiveWrite`
+/// (D2 §3.4), and on the **Backup** path that costs nothing: a backup pod is
+/// already holding the archive write grant, so inheriting it for the receipt
+/// widens no boundary. A **retention** pod holds the DELETE grant on `AWS_*`
+/// and no archive credential at all, so the same defaulting would hand a
+/// deleting pod the archive WRITE credential — a principal that can rewrite the
+/// very objects under `<prefix>/*` the run is removing. Delete plus archive
+/// write in one pod can remove a point and forge its replacement, which is
+/// exactly the aggregation the two-credential design exists to prevent. So the
+/// role is resolved, and then the fall-back is refused with the field named:
+/// one `spec.access.evidenceWrite` grant is the operator's whole remedy.
+///
+/// # And it must be static keys
+///
+/// `logweir-retention`'s `EvidenceSink::open` builds its sink with
+/// `StoreOptions::static_keys` from `LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID` and
+/// `…_SECRET_ACCESS_KEY` and has no workload-identity path, so a
+/// `WorkloadIdentity` `evidenceWrite` grant is a Job that can only exit 3. It
+/// is refused here instead, before a lease, a `ConfigMap`, a run record or a
+/// slot of the three-failure retry budget is spent on it.
+///
+/// # Errors
+///
+/// The operator-facing sentence, naming `spec.access.evidenceWrite`.
+pub fn evidence_credential(
+    evidence: &ResolvedDestination,
+    declared: bool,
+) -> Result<Vec<crate::job::EnvFromSecret>, String> {
+    let where_ = format!(
+        "BackupDestination {}/{}",
+        evidence.namespace, evidence.name
+    );
+    if !declared {
+        return Err(format!(
+            "{where_} declares no spec.access.evidenceWrite grant, and a retention run's record \
+             credential is never defaulted to another principal: this Job's AWS_ACCESS_KEY_ID is \
+             the DELETE grant, so falling back would hand a deleting pod the archive write \
+             credential, and falling back to spec.access.archiveRead would attribute the \
+             deletions to a grant the design says must not write under logweir/ (docs/kubernetes.md \
+             §7f). Declare spec.access.evidenceWrite — create-only puts under logweir/, no delete \
+             — and this policy enforces again. No Job was created and nothing was deleted."
+        ));
+    }
+    match &evidence.grant {
+        destination::ResolvedGrant::SecretKeys {
+            secret,
+            access_key_id_key,
+            secret_access_key_key,
+            session_token_key,
+        } => {
+            let mut out = vec![
+                crate::job::EnvFromSecret {
+                    name: destination::EVIDENCE_ACCESS_KEY_ID_ENV.to_string(),
+                    secret_name: secret.clone(),
+                    key: access_key_id_key.clone(),
+                },
+                crate::job::EnvFromSecret {
+                    name: destination::EVIDENCE_SECRET_ACCESS_KEY_ENV.to_string(),
+                    secret_name: secret.clone(),
+                    key: secret_access_key_key.clone(),
+                },
+            ];
+            if let Some(token) = session_token_key {
+                out.push(crate::job::EnvFromSecret {
+                    name: destination::EVIDENCE_SESSION_TOKEN_ENV.to_string(),
+                    secret_name: secret.clone(),
+                    key: token.clone(),
+                });
+            }
+            Ok(out)
+        }
+        other => Err(format!(
+            "{where_} resolves spec.access.evidenceWrite to a {} grant, and the retention worker \
+             builds its record store from the static keys LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID and \
+             LOGWEIR_EVIDENCE_AWS_SECRET_ACCESS_KEY only — it has no workload-identity path, so a \
+             Job carrying that grant could do nothing but refuse itself. Give \
+             spec.access.evidenceWrite a SecretKeys grant. No Job was created and nothing was \
+             deleted.",
+            grant_mode(other)
+        )),
+    }
+}
+
+/// A grant's `mode` as `spec.access.<role>.mode` spells it — for a message that
+/// names what the operator wrote, never the grant's `Debug` (which carries
+/// Secret and ServiceAccount NAMES into a status field).
+fn grant_mode(grant: &destination::ResolvedGrant) -> &'static str {
+    match grant {
+        destination::ResolvedGrant::SecretKeys { .. } => "SecretKeys",
+        destination::ResolvedGrant::WorkloadIdentity { .. } => "WorkloadIdentity",
+        destination::ResolvedGrant::ControllerIdentity => "ControllerIdentity",
+        destination::ResolvedGrant::NotConfigured => "absent",
+    }
+}
 
 /// "the last run exited 1 with AccessDenied on 2 point(s)", and the honest
 /// shapes when there is less to say.

@@ -1875,6 +1875,87 @@ pub async fn resolve_ref(
     Ok(resolved.with_ca(&observation)?)
 }
 
+/// One `BackupDestination` read ONCE and resolved for TWO roles — what
+/// [`resolve_ref_roles`] returns.
+#[derive(Debug)]
+pub struct ResolvedRoles {
+    /// The first role's resolution. The location, the digest and the canonical
+    /// URL are the same on both; only [`ResolvedDestination::grant`] and
+    /// [`ResolvedDestination::role`] differ.
+    pub primary: ResolvedDestination,
+    /// The second role's resolution, from the same object and the same read.
+    pub secondary: ResolvedDestination,
+    /// Whether the object DECLARES the second role's own grant, or
+    /// [`secondary`](Self::secondary) is the documented fall-back — see
+    /// [`declares`].
+    pub secondary_declared: bool,
+}
+
+/// Whether `dest` declares `role`'s OWN grant, rather than reaching one through
+/// the defaulting [`resolve`] documents.
+///
+/// A CALLER MAY NEED THE DIFFERENCE EVEN THOUGH [`resolve`] DOES NOT. Every
+/// role but `EvidenceRead` resolves to *something* — `archiveWrite` is required
+/// and the other two fall back to it — so a resolution alone cannot say whether
+/// an operator declared the principal or merely inherited the write grant. The
+/// retention controller needs exactly that distinction: its Job's `AWS_*` is
+/// the DELETE grant, so falling back would hand a deleting pod the archive
+/// WRITE credential, which `docs/kubernetes.md` §7f says it must never carry.
+#[must_use]
+pub fn declares(dest: &BackupDestination, role: DestinationRole) -> bool {
+    let access = &dest.spec.access;
+    match role {
+        // Required by the CRD; there is nothing for it to fall back to.
+        DestinationRole::ArchiveWrite => true,
+        DestinationRole::ArchiveRead => access.archive_read.is_some(),
+        DestinationRole::EvidenceWrite => access.evidence_write.is_some(),
+        DestinationRole::EvidenceRead => access.evidence_read.is_some(),
+    }
+}
+
+/// Read one `BackupDestination` by name and resolve it for TWO roles, from ONE
+/// read and ONE CA-bundle fetch.
+///
+/// TWO `resolve_ref` CALLS WOULD BE TWO READS OF A MOVING OBJECT: a destination
+/// edited between them would give a caller a location from one generation and a
+/// grant from another, and the pair is exactly what such a caller freezes into
+/// one Job. [`resolve`] is pure over the object this reads once, so the second
+/// role costs no API call — the shape `controllers::backup` already uses for
+/// its own two roles.
+///
+/// # Errors
+///
+/// Whatever [`resolve_ref`] refuses, for EITHER role.
+pub async fn resolve_ref_roles(
+    client: &kube::Client,
+    namespace: &str,
+    name: &str,
+    primary: DestinationRole,
+    secondary: DestinationRole,
+    policy: &Policy,
+) -> Result<ResolvedRoles, ResolveError> {
+    let api: Api<BackupDestination> = Api::namespaced(client.clone(), namespace);
+    let Some(dest) = api.get_opt(name).await? else {
+        return Err(DestinationRefusal::new(
+            CheckCode::DestinationNotFound,
+            "spec.destinationRef.name",
+            format!(
+                "namespace {namespace} has no BackupDestination named {name}; a destinationRef \
+                 is namespace-local and is never resolved in another namespace"
+            ),
+        )
+        .into());
+    };
+    let first = resolve(&dest, primary, policy)?;
+    let second = resolve(&dest, secondary, policy)?;
+    let observation = read_ca_bundle(client, &first).await?;
+    Ok(ResolvedRoles {
+        primary: first.with_ca(&observation)?,
+        secondary: second.with_ca(&observation)?,
+        secondary_declared: declares(&dest, secondary),
+    })
+}
+
 /// Read the CA bundle a resolved destination declares.
 ///
 /// # Errors

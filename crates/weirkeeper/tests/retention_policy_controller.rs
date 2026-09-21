@@ -951,7 +951,30 @@ fn the_mismatch_note_names_the_remedy() {
 // The controller
 // ===========================================================================
 
+/// THE FIXTURE DESTINATION SEPARATES ITS PRINCIPALS, because that is the
+/// destination `docs/kubernetes.md` §7a recommends and the one the live U6
+/// measurement ran on. A fixture that named one Secret four times could not
+/// tell `archiveRead` from `evidenceWrite` in a rendered Job, which is exactly
+/// the confusion defect RET-EVIDENCE-GRANT-IS-ARCHIVEREAD lived in: the
+/// enforcement Job's `LOGWEIR_EVIDENCE_AWS_*` carried the READER's Secret and
+/// every test passed.
 fn destination_body() -> String {
+    destination_with_access(json!({
+        "archiveWrite": {"mode": "SecretKeys", "secret": {
+            "name": "lw-writer", "accessKeyIdKey": "id", "secretAccessKeyKey": "key"
+        }},
+        "archiveRead": {"mode": "SecretKeys", "secret": {
+            "name": "lw-reader", "accessKeyIdKey": "id", "secretAccessKeyKey": "key"
+        }},
+        "evidenceWrite": {"mode": "SecretKeys", "secret": {
+            "name": "lw-evidence", "accessKeyIdKey": "eid", "secretAccessKeyKey": "ekey"
+        }}
+    }))
+}
+
+/// The same destination with `spec.access` written by the caller — for the rows
+/// that turn one grant off.
+fn destination_with_access(access: Value) -> String {
     json!({
         "apiVersion": "logweir.dev/v1alpha1", "kind": "BackupDestination",
         "metadata": {
@@ -965,14 +988,7 @@ fn destination_body() -> String {
                 "addressing": "PathStyle"
             },
             "transport": {"security": "InsecureHTTP"},
-            "access": {
-                "archiveWrite": {"mode": "SecretKeys", "secret": {
-                    "name": "lw-writer", "accessKeyIdKey": "id", "secretAccessKeyKey": "key"
-                }},
-                "archiveRead": {"mode": "SecretKeys", "secret": {
-                    "name": "lw-reader", "accessKeyIdKey": "id", "secretAccessKeyKey": "key"
-                }}
-            }
+            "access": access
         },
         "status": {
             "observedGeneration": 1, "reason": "Valid",
