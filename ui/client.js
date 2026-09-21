@@ -912,6 +912,296 @@ function mergeOperation(object, operation) {
 
 // ------------------------------------------------------------- the two APIs
 
+// =========================================================================
+// D1 SECTION 8.2's MANUAL-RUN NAME: ONE RULE, OBEYED BY BOTH MODES
+// =========================================================================
+//
+// WHY THIS IS HERE AT ALL. "Back up now" is the only create in this tree whose
+// object has NO NAME UNTIL THE SCOPE IS HASHED. Every other create names its
+// object after something the person typed, so `AlreadyExists` is the
+// idempotence. A manual run's name IS the idempotency record: D1 section 8.2
+// makes it `logweir-manual-` plus the first 26 characters of the lowercase,
+// unpadded RFC 4648 base32 of `sha256` over the length-prefixed tuple
+// `(issuer, subject, namespace, route, key)`. A double click, a lost response
+// and a retry all target the SAME name, and the API server's own
+// `AlreadyExists` is what makes a second object impossible.
+//
+// THE RULE IS SHARED, NOT RE-INVENTED. `crates/logweir-api/src/idempotency.rs`
+// (`identity`, `base32_lower`, `NAME_HASH_CHARS`) is the other implementation,
+// and this one is written to match it byte for byte:
+//
+//   * the scope opens with the literal format line below -- INSIDE the hashed
+//     bytes, so a format change is a name change rather than a silent change
+//     of question;
+//   * each field is prefixed with its BYTE length as a 64-bit big-endian
+//     integer, so no pair of fields can be re-cut into a different pair;
+//   * the digest is taken over the whole document and rendered in the base32
+//     alphabet below -- `a`-`z` then `2`-`7`, which is DNS-label safe;
+//   * exactly 26 characters of it are kept, which is 130 bits and a 41-
+//     character DNS-1123 name.
+//
+// AND IT IS PINNED BY A FIXTURE BOTH SIDES PASS, because the two
+// implementations are in two languages and a comment is not a test.
+// `ui/tests/fixtures/manual-backup-names.json` carries scope tuples and the
+// name each one produces; `ui/tests/d1.spec.js` drives THIS function over
+// every row, and `scripts/live/d1/run.py`'s `L-06-2-cli` drives the REAL
+// `logweir-api` over the same rows and fails if any name differs. A fixture
+// checked by one side only would pin this function to itself.
+//
+// WHAT LEGACY MODE PUTS IN THE FIRST TWO FIELDS, AND WHY IT IS HONEST.
+// Behind `kubectl proxy` the browser holds no authenticated identity of any
+// kind: the credential is attached by the proxy, out of the page's sight, and
+// there is no session document and no subject. So legacy mode names the two
+// fields it cannot know with the EMPTY string and says so, here and in
+// `ui/README.md`. The consequence is stated rather than hidden: in legacy mode
+// a manual run's name is decided by `(namespace, route, key)` alone, and the
+// key is 128 random bits minted per draft (`mintIntent`), so two people
+// driving two proxies cannot collide by accident -- and if they ever did, the
+// second create would be an `AlreadyExists` whose stored request hash decides
+// replay versus conflict, which is the same answer the product API gives.
+
+/** The route identifier inside a manual run's idempotency scope. It is the
+ *  PRODUCT API's route even in legacy mode: the scope is a scope, and two
+ *  requests that mean the same thing must hash to the same name whichever
+ *  door they came through. */
+export const MANUAL_BACKUP_ROUTE = "POST /api/v1/namespaces/{ns}/backups";
+
+/** `crates/logweir-api/src/routes/backups.rs`'s `NAME_PREFIX`. */
+export const MANUAL_BACKUP_PREFIX = "logweir-manual-";
+
+/** The first line of the hashed scope document, newline included. */
+export const MANUAL_SCOPE_FORMAT = "logweir-api/idempotency-scope/v1\n";
+
+/** How many base32 characters of the scope digest the name carries. */
+export const MANUAL_NAME_HASH_CHARS = 26;
+
+/** The annotation a legacy-mode manual run carries, D1 section 8.1's spelling.
+ *  The product API writes its own `api.logweir.dev/request-sha256` beside a
+ *  scope hash and a request id; this mode has neither an actor nor a request
+ *  id to record, so it writes the one value it can compute and compare. */
+export const LEGACY_REQUEST_ANNOTATION = "logweir.dev/request-sha256";
+
+/** What legacy mode puts in the scope's `issuer` and `subject`. See the block
+ *  above: the browser holds neither behind `kubectl proxy`, and an invented
+ *  value would be a claim about an identity this page cannot see. */
+export const LEGACY_SCOPE_ACTOR = Object.freeze({ issuer: "", subject: "" });
+
+/** RFC 4648 base32, lowercase, unpadded -- `idempotency.rs::base32_lower`. */
+function base32Lower(bytes) {
+  const alphabet = "abcdefghijklmnopqrstuvwxyz234567";
+  let out = "";
+  let buffer = 0;
+  let bits = 0;
+  for (const byte of bytes) {
+    // `* 256` rather than `<< 8`: a JavaScript bitwise operator coerces to a
+    // SIGNED 32-bit integer, and a 13-bit accumulator shifted left by 8 would
+    // be fine today and wrong the moment anyone widened it. Arithmetic keeps
+    // the accumulator an exact integer.
+    buffer = buffer * 256 + byte;
+    bits += 8;
+    while (bits >= 5) {
+      bits -= 5;
+      out += alphabet.charAt(Math.floor(buffer / Math.pow(2, bits)) % 32);
+    }
+    buffer = buffer % Math.pow(2, bits);
+  }
+  if (bits > 0) {
+    out += alphabet.charAt((buffer * Math.pow(2, 5 - bits)) % 32);
+  }
+  return out;
+}
+
+/** One length-prefixed field: eight bytes of big-endian length, then the
+ *  UTF-8 bytes. `idempotency.rs::push_field`. */
+function pushField(out, value) {
+  const bytes = new TextEncoder().encode(String(value));
+  const length = bytes.length;
+  for (let i = 7; i >= 0; i -= 1) {
+    // Byte i of a 64-bit big-endian length. A JavaScript string is bounded far
+    // below 2^32 bytes, so the top four bytes are always zero; they are
+    // written anyway because the Rust side writes eight and the digest is over
+    // the bytes, not over the intention.
+    out.push(Math.floor(length / Math.pow(2, 8 * i)) % 256);
+  }
+  for (const byte of bytes) {
+    out.push(byte);
+  }
+}
+
+/** The deterministic name of the manual run at `scope`
+ *  `{issuer, subject, namespace, route, key}`, D1 section 8.2.
+ *
+ *  `route` defaults to [`MANUAL_BACKUP_ROUTE`] because there is exactly one
+ *  route this rule is used for; it is a parameter so the fixture can pin the
+ *  field's PLACE in the scope rather than only its value. */
+export async function manualBackupName(scope) {
+  const s = scope || {};
+  const document = [];
+  for (const byte of new TextEncoder().encode(MANUAL_SCOPE_FORMAT)) {
+    document.push(byte);
+  }
+  pushField(document, s.issuer === undefined ? "" : s.issuer);
+  pushField(document, s.subject === undefined ? "" : s.subject);
+  pushField(document, s.namespace === undefined ? "" : s.namespace);
+  pushField(document, s.route === undefined ? MANUAL_BACKUP_ROUTE : s.route);
+  pushField(document, s.key === undefined ? "" : s.key);
+  const digest = await sha256Of(new Uint8Array(document));
+  return MANUAL_BACKUP_PREFIX + base32Lower(digest).slice(0, MANUAL_NAME_HASH_CHARS);
+}
+
+/** SHA-256 over exactly these bytes, as bytes.
+ *
+ *  `ui/plan.js` already refuses to load outside a secure context, and this
+ *  module imports it, so `crypto.subtle` is present wherever this file runs.
+ *  The refusal is repeated here anyway rather than assumed: this one decides a
+ *  NAME, and a name computed some other way is a second run. */
+async function sha256Of(bytes) {
+  const subtle = (globalThis.crypto || {}).subtle;
+  if (subtle === undefined || subtle === null) {
+    const error = new Error(
+      "this page will not create a manual backup here: deriving the run's name needs the " +
+        "platform's hash, and it is unavailable. A name computed any other way would be a " +
+        "different run from the one a second click is meant to find.",
+    );
+    error.kind = "refused";
+    error.status = 0;
+    error.reason = "NoHash";
+    throw error;
+  }
+  return new Uint8Array(await subtle.digest("SHA-256", bytes));
+}
+
+/** `sha256:<lowercase hex>` over the UTF-8 bytes of `text` --
+ *  `logweir_core::ids::sha256_prefixed`'s form, which is what
+ *  [`LEGACY_REQUEST_ANNOTATION`] carries. */
+async function requestHash(text) {
+  const digest = await sha256Of(new TextEncoder().encode(text));
+  let hex = "";
+  for (const byte of digest) {
+    hex += byte.toString(16).padStart(2, "0");
+  }
+  return "sha256:" + hex;
+}
+
+/** The run deadline a manual run inherits when the schedule names none --
+ *  `weirkeeper::controllers::backup_schedule::SCHEDULED_DEADLINE_SECONDS` and
+ *  `weirkeeper::cadence::DEFAULT_ACTIVE_DEADLINE_SECONDS`, which are the same
+ *  number for the same reason: D1 section 3.2 puts the deadline INSIDE the digested
+ *  document, so a schedule that says nothing and a schedule that says 3600 ask
+ *  for the same run and must digest the same. */
+export const DEFAULT_MANUAL_DEADLINE_SECONDS = 3600;
+
+/** The four labels a manual run carries -- selection hints, never authority.
+ *  Membership of a schedule is `spec.scheduleRef.uid`, which is in the sealed
+ *  spec. `crates/weirkeeper/src/identity.rs` holds the same four names. */
+const MANUAL_LABELS = Object.freeze({
+  trigger: "logweir.dev/trigger",
+  attempt: "logweir.dev/attempt",
+  schedule: "logweir.dev/schedule",
+  scheduleUid: "logweir.dev/schedule-uid",
+});
+
+function copyRef(reference) {
+  const r = reference || null;
+  return r === null || typeof r.name !== "string" ? null : { name: r.name };
+}
+
+/** The `Backup` a "Back up now" on `schedule` becomes: D1 section 8.1's canonical
+ *  object, with no name and no annotations yet.
+ *
+ *  THE POLICY HALF IS A STRUCTURAL COPY AND NOTHING CLEVERER, because that is
+ *  exactly what `weirkeeper::controllers::backup_schedule::run_policy_spec`
+ *  does -- the one builder the scheduler validates, digests and POSTs, and the
+ *  one `crates/logweir-api/src/routes/backups.rs::build` calls for body A.
+ *  Source, topic selection, archive or destination, and the deadline with its
+ *  absent default resolved. Nothing is canonicalised here: sorting the topics
+ *  or dropping a duplicate would change the object without changing the policy
+ *  it digests to, and `Backup.spec.topics` keeps the operator's order verbatim
+ *  by design.
+ *
+ *  THE IDENTITY HALF IS WRITTEN LAST AND IS ALWAYS THE SAME: `triggeredBy:
+ *  manual`, `trigger {kind: Manual, attempt: 0}`, no slot. */
+export function manualBackupObject(ns, schedule, digest) {
+  const meta = (schedule || {}).metadata || {};
+  const policy = (schedule || {}).spec || {};
+  const name = String(meta.name || "");
+  const uid = String(meta.uid || "");
+  const labels = {};
+  labels[MANUAL_LABELS.trigger] = "manual";
+  labels[MANUAL_LABELS.attempt] = "0";
+  labels[MANUAL_LABELS.schedule] = name;
+  if (uid.length > 0) {
+    labels[MANUAL_LABELS.scheduleUid] = uid;
+  }
+  const spec = {
+    sourceRef: copyRef(policy.sourceRef) || { name: "" },
+    topics: Array.isArray(policy.topics) ? policy.topics.slice() : [],
+    archive: {
+      url: String((policy.archive || {}).url || ""),
+    },
+    triggeredBy: "manual",
+    trigger: { kind: "Manual", attempt: 0 },
+    deadlineSeconds: typeof policy.activeDeadlineSeconds === "number"
+      ? policy.activeDeadlineSeconds
+      : DEFAULT_MANUAL_DEADLINE_SECONDS,
+    scheduleRef: {
+      name: name,
+      uid: uid,
+      generation: meta.generation,
+      runPolicySha256: digest,
+    },
+  };
+  const secret = copyRef((policy.archive || {}).secretRef);
+  if (secret !== null) {
+    spec.archive.secretRef = secret;
+  }
+  const destination = copyRef(policy.destinationRef);
+  if (destination !== null) {
+    spec.destinationRef = destination;
+  }
+  if (policy.allUserTopics !== undefined && policy.allUserTopics !== null) {
+    // A STRUCTURED CLONE, not a reference: the schedule object this page read
+    // is rendered elsewhere on the same card, and a create body that shared a
+    // sub-object with it could be mutated from either side.
+    spec.allUserTopics = JSON.parse(JSON.stringify(policy.allUserTopics));
+  }
+  return {
+    apiVersion: "logweir.dev/v1alpha1",
+    kind: "Backup",
+    metadata: { name: "", namespace: String(ns), labels: labels },
+    spec: spec,
+  };
+}
+
+/** The bytes the legacy request hash covers: the request as this page MEANT
+ *  it, field by field, in a fixed order.
+ *
+ *  NOT `JSON.stringify(body)`. Two bodies that mean the same thing can carry
+ *  their keys in different orders, and an absent optional and a `null` one are
+ *  different strings and the same request; a hash over the raw object would
+ *  make a replay depend on how the caller happened to build it. This names the
+ *  four values the route actually has and spells an absent one `null`, so the
+ *  same intent hashes the same way whoever assembled it -- which is what makes
+ *  the stored annotation a usable replay guard. */
+function canonicalRequest(ns, body) {
+  const b = body || {};
+  const reference = b.scheduleRef || {};
+  const ack = b.readinessAcknowledgement || null;
+  return JSON.stringify({
+    route: MANUAL_BACKUP_ROUTE,
+    namespace: String(ns),
+    scheduleRef: {
+      name: String(reference.name || ""),
+      expectedGeneration: typeof reference.expectedGeneration === "number"
+        ? reference.expectedGeneration
+        : null,
+    },
+    readinessAcknowledgement: ack === null
+      ? null
+      : { preflight: String(ack.preflight || ""), state: String(ack.state || "") },
+  });
+}
+
 const legacyApi = Object.freeze({
   async list(ns, plural, options) {
     return decodeLegacyList(plural, await list(ns, plural, options)).value;
@@ -951,26 +1241,138 @@ const legacyApi = Object.freeze({
   editSchedulePolicy() {
     return Promise.reject(consoleOnly("Editing a schedule's future policy"));
   },
-  runBackupNow() {
-    // AND SO IS THE THIRD, FOR TWO REASONS THAT ARE BOTH ABOUT THIS MODE AND
-    // NOT ABOUT THE FEATURE.
+  async runBackupNow(ns, body, key) {
+    // THE THIRD ONE IS NO LONGER CONSOLE-ONLY (PLAT-06.2, D1 section 8.5's legacy
+    // column). It was refused here for two reasons and both are now answered:
     //
-    // THE NAME IS DERIVED FROM FACTS THE BROWSER DOES NOT HOLD. D1 section 8.2 makes
-    // a manual run's name `logweir-manual-` plus base32 of a sha256 over
-    // `(issuer, sub, namespace, route, key)` -- the AUTHENTICATED subject, as
-    // the product API knows it. A browser has no issuer and no subject in
-    // either mode, so a name minted here would be a DIFFERENT name from the
-    // one the canonical path produces, and "kubectl, the API and the console
-    // create the same object" would stop being true of the one field every
-    // replay guard in this design rests on.
+    //   * THE NAME. D1 section 8.2's rule is a pure function of the request scope
+    //     and it now lives in ONE place this file can call
+    //     (`manualBackupName`), pinned against `logweir-api`'s own
+    //     `idempotency.rs` by `ui/tests/fixtures/manual-backup-names.json`.
+    //     The scope's issuer and subject are empty in this mode -- the browser
+    //     holds neither behind `kubectl proxy` -- and the block above says so.
+    //   * THE GRANT. `charts/logweir/templates/ui/ui.yaml` now grants `create`
+    //     on `backups` to the page's ServiceAccount, and nothing else on that
+    //     resource. Before that, sending this would have been a 403 the page
+    //     would then have had to narrate.
     //
-    // AND THE IN-CLUSTER UI SERVICEACCOUNT HAS NO `create backups`.
-    // `charts/logweir/templates/ui/ui.yaml` grants `create` on approvals,
-    // kafkaclusters, backupschedules and restores and stops there; D1 section 8.5
-    // adds this one, and that grant is a chart change with its own review.
-    // Sending the create anyway would be a 403 this page would then have to
-    // narrate, which is the thing refusing here by name exists to avoid.
-    return Promise.reject(consoleOnly("Back up now"));
+    // WHAT THIS DOES *NOT* DO: compute a run policy digest. `runPolicySha256`
+    // is `weirkeeper::policy::run_policy_sha256` over a canonical document, the
+    // controller RECOMPUTES it and refuses the run terminally on a mismatch, and
+    // a second implementation in a browser is precisely how a run comes to
+    // record a digest nobody can reproduce. So the digest is COPIED from
+    // `status.policy.runPolicySha256` -- and only when `status.policy.generation`
+    // equals the `metadata.generation` this page is about to copy, which is the
+    // controller's own statement that the two describe the same revision. When
+    // it does not, this refuses by name and says which number is behind.
+    const reference = (body || {}).scheduleRef || null;
+    if (reference === null) {
+      // D1 section 8.2's body B. An ad-hoc run needs a selection, an archive and a
+      // deadline the page would have to assemble itself, with no schedule to
+      // copy and no published digest to carry. That is the product API's job.
+      throw consoleOnly("Backing up an ad-hoc selection with no schedule");
+    }
+    const name = String(reference.name || "");
+    const schedule = decodeLegacyObject(
+      "backupschedules",
+      await get(ns, "backupschedules", name),
+    ).value;
+    const meta = schedule.metadata || {};
+    const spec = schedule.spec || {};
+    const status = schedule.status || {};
+    const generation = typeof meta.generation === "number" ? meta.generation : null;
+    const policy = status.policy || null;
+    const digest = policy === null ? null : policy.runPolicySha256;
+
+    // 409 policy_changed, WITH THE REVISION IN FORCE ATTACHED, exactly as the
+    // product API answers it: the page renders the same sentence and offers
+    // the same next click in both modes.
+    const expected = reference.expectedGeneration;
+    if (typeof expected === "number" && generation !== null && expected !== generation) {
+      const error = new Error(
+        "the schedule's policy is at revision g" + String(generation) + " and this panel was " +
+          "rendered at g" + String(expected) + ". Nothing was created: a manual run copies the " +
+          "revision it names.",
+      );
+      error.kind = "rejected";
+      error.status = 409;
+      error.reason = "policy_changed";
+      error.policy = {
+        currentGeneration: generation,
+        currentRunPolicySha256: typeof digest === "string" ? digest : null,
+      };
+      throw error;
+    }
+    if (generation === null || policy === null || policy.generation !== generation) {
+      const error = new Error(
+        "this page will not create a manual backup of " + name + " yet: the controller has not " +
+          "published a policy digest for revision g" + String(generation) + " (status.policy " +
+          (policy === null ? "is absent" : "is still at g" + String(policy.generation)) + "). A " +
+          "run records the digest of what it will actually do, this mode reads that number from " +
+          "the schedule rather than computing a second one, and a run carrying a digest nobody " +
+          "can reproduce is refused by the controller. Wait for the schedule to be evaluated, " +
+          "or create the run with kubectl from config/samples/backup-manual.yaml.",
+      );
+      error.kind = "refused";
+      error.status = 0;
+      error.reason = "PolicyDigestNotPublished";
+      throw error;
+    }
+
+    const object = manualBackupObject(ns, schedule, digest);
+    const hash = await requestHash(canonicalRequest(ns, body));
+    object.metadata.annotations = { [LEGACY_REQUEST_ANNOTATION]: hash };
+    object.metadata.name = await manualBackupName({
+      issuer: LEGACY_SCOPE_ACTOR.issuer,
+      subject: LEGACY_SCOPE_ACTOR.subject,
+      namespace: ns,
+      route: MANUAL_BACKUP_ROUTE,
+      key: String(key),
+    });
+
+    const context = {
+      name: name,
+      uid: String(meta.uid || ""),
+      generation: generation,
+      runPolicySha256: digest,
+      suspended: spec.suspend === true,
+      activeRuns: Array.isArray(status.activeRuns) ? status.activeRuns : [],
+    };
+    try {
+      const created = decodeLegacyObject(
+        "backups",
+        await checked("backups", object, () => create(ns, "backups", object)),
+      ).value;
+      return { run: created, schedule: context, replayed: false };
+    } catch (refused) {
+      // THE REPLAY, AND THE CONFLICT, DECIDED BY THE OBJECT AND NOT BY MEMORY
+      // (D1 section 8.5's legacy row). A double click, a retry after a timeout and a
+      // "Check status" all derive the SAME name, so the second create is the
+      // API server's own `AlreadyExists`. What that means is decided by
+      // reading the object: the request hash this page wrote is either the one
+      // it would write now -- the same intent, the same request, so the run it
+      // already made IS the answer -- or it is not, and refusing is the only
+      // honest reply. Nothing is patched, replaced or adopted either way.
+      if (refused.reason !== "AlreadyExists") {
+        throw refused;
+      }
+      const existing = decodeLegacyObject(
+        "backups",
+        await get(ns, "backups", object.metadata.name),
+      ).value;
+      const stored = ((existing.metadata || {}).annotations || {})[LEGACY_REQUEST_ANNOTATION];
+      if (stored === hash) {
+        return { run: existing, schedule: context, replayed: true };
+      }
+      const error = new Error(
+        "the idempotency intent this panel is holding already created a DIFFERENT request's " +
+          "run (" + object.metadata.name + "). Nothing was created.",
+      );
+      error.kind = "rejected";
+      error.status = 409;
+      error.reason = "idempotency_conflict";
+      throw error;
+    }
   },
 });
 

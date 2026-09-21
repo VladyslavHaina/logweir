@@ -1097,19 +1097,71 @@ A retry renders **"Retry, attempt 2"** in the Backups table and **"Retry 2 of
 `retry.maxRetries`, a run carries no copy of it, and the table does not read
 schedules -- so where the number is not at hand it is not printed.
 
-### What is not here, in either mode
+### What legacy mode can do, and what it cannot
 
-`Back up now` is **console-only**. In `kubectl proxy` mode it is refused by
-name, for two reasons that are both about the mode: a manual run's name is
-derived from the authenticated subject as the product API knows it (issuer,
-subject, namespace, route, key), which a browser does not hold, so a
-browser-minted name would not be the name the canonical path produces; and the
-in-cluster UI ServiceAccount has no `create` on `backups` (D1 section 8.5 adds
-that grant, and it is a chart change with its own review). The cadence preview
-and the policy replace are console-only too: there is no preview route in front
-of `kubectl proxy`, and the replace is built on the product API's
-`expectedGeneration` precondition, which a JSON-merge patch against
-kube-apiserver would not have.
+The cadence preview and the policy replace are **console-only**. There is no
+preview route in front of `kubectl proxy` -- it is a computation `logweir-api`
+performs with the controller's own time-zone database, and the browser will not
+evaluate cron to fill the gap, because a second implementation is a second
+opinion about when a backup runs. A saved schedule's `status.nextRuns` IS
+rendered in legacy mode: the controller computed it, and the page reads the
+object. The whole-policy replace is console-only for a different reason: it is
+built on the product API's `expectedGeneration` precondition and its pre-write
+refusals, and a JSON-merge patch against kube-apiserver would have neither.
+
+`Back up now` is **no longer console-only** (PLAT-06.2). It was, for two
+reasons that were both about the mode and are both answered now.
+
+**The name.** A manual run has no name until its idempotency scope is hashed:
+D1 section 8.2 makes it `logweir-manual-` plus the first 26 characters of the
+lowercase, unpadded RFC 4648 base32 of `sha256` over the length-prefixed tuple
+`(issuer, subject, namespace, route, key)`. That rule now lives in one place
+this page can call, `ui/client.js`'s `manualBackupName`, written to match
+`crates/logweir-api/src/idempotency.rs::identity` byte for byte and PINNED
+against it by `ui/tests/fixtures/manual-backup-names.json` -- which
+`ui/tests/d1.spec.js` drives this function over and which
+`scripts/live/d1/run.py`'s `L-06-2-cli` drives the real `logweir-api` over, so
+neither side pins itself. The scope's issuer and subject are the EMPTY string
+in legacy mode, because a browser behind `kubectl proxy` genuinely holds
+neither: the credential is attached by the proxy, out of the page's sight. The
+consequence is stated rather than hidden -- in legacy mode a run's name is
+decided by `(namespace, route, key)` alone, and the key is 128 random bits
+minted per draft, so two proxies cannot collide by accident; if they ever did,
+the second create would be an `AlreadyExists` whose stored request hash decides
+replay versus conflict, which is the same answer the product API gives.
+
+**The grant.** `charts/logweir/templates/ui/ui.yaml` now grants the page's
+ServiceAccount `create` on `backups`, and nothing else on that resource: no
+`patch`, no `update`, no `delete`. A run's inputs are frozen (PLAT-06.1), a
+second run is a second object, and
+`chart_lint_the_legacy_page_creates_a_backup_and_never_edits_one` pins the verb
+set.
+
+**What this mode does NOT do is compute a run policy digest.**
+`spec.scheduleRef.runPolicySha256` is `weirkeeper::policy::run_policy_sha256`
+over a canonical document; the controller recomputes it and refuses the run
+terminally on a mismatch, so a browser canonicalising the policy itself would
+be a second opinion about the one number whose job is to say that two parties
+agree. The page COPIES `status.policy.runPolicySha256` and only when
+`status.policy.generation` equals the `metadata.generation` it is about to
+copy -- the controller's own statement that the two describe one revision. When
+it does not, the page refuses by name, says which number is behind, and points
+at `kubectl create -f config/samples/backup-manual.yaml`. An ad-hoc run with no
+schedule (D1 section 8.2's body B) stays console-only for the same reason: there
+is no published digest to carry and no schedule to copy.
+
+**Idempotence in this mode is the object, not this page's memory.** The created
+`Backup` carries `logweir.dev/request-sha256` over the request as the page
+meant it -- route, namespace, schedule name, expected generation, readiness
+acknowledgement, in that order, with an absent optional spelled `null`. A
+second click derives the same name, gets kube-apiserver's own `AlreadyExists`,
+reads the stored annotation, and answers "already started" when it matches and
+a refusal when it does not. Nothing is patched, replaced or adopted either way.
+Console mode's equivalent annotations are `api.logweir.dev/request-sha256`
+beside a scope hash, a request id and an actor; the two are different
+annotations because they are hashes of different documents, and the field-by-
+field comparison that proves "one CR path" is over `spec` and the labels, which
+ARE identical.
 
 `Schedule.generation` is **optional in the published schema and always emitted
 by this build**. D1 W6 left it out of the schema's `required` set so that

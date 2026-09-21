@@ -3504,6 +3504,53 @@ kubectl --context docker-desktop -n <ns> get backup nightly-catchup \
   -o jsonpath='{.status.execution.id}{"\t"}{.status.phase}{"\n"}'
 ```
 
+**One CR path, three doors, and the name is the same through all of them.** The
+name above is not decoration: it is the idempotency record. D1 §8.2 derives it
+as `logweir-manual-` followed by the first 26 characters of the lowercase,
+unpadded RFC 4648 base32 (`a`–`z` then `2`–`7`) of `sha256` over a document that
+opens with the literal line `logweir-api/idempotency-scope/v1\n` and then
+carries five fields — **issuer, subject, namespace, route, key** — each prefixed
+with its UTF-8 byte length as a 64-bit big-endian integer. `route` is the string
+`POST /api/v1/namespaces/{ns}/backups`. The format line is inside the hashed
+bytes on purpose: a format change is then a name change rather than a silent
+change of question, and the length prefixes are what stop two fields being
+re-cut into a different pair that hashes the same.
+
+The rule is implemented twice — `crates/logweir-api/src/idempotency.rs`
+(`identity`, `base32_lower`) and `ui/client.js` (`manualBackupName`) — and
+pinned by `ui/tests/fixtures/manual-backup-names.json`, which `ui/tests/d1.spec.js`
+drives the page over and which `scripts/live/d1/run.py`'s `L-06-2-cli` drives
+the real `logweir-api` over, so neither implementation pins only itself. What
+this buys an operator is that the three doors produce **one object**:
+
+| Door | Who derives the name | What else differs |
+|---|---|---|
+| `kubectl create -f config/samples/backup-manual.yaml` | you do, or you pick any free DNS-1123 name | no idempotency annotations |
+| `POST /api/v1/namespaces/{ns}/backups` with `Idempotency-Key` | the API, from the authenticated `(issuer, subject)` | `api.logweir.dev/idempotency-scope-sha256`, `…/request-sha256`, `…/request-id`, `…/actor` |
+| the console's "Back up now" behind `kubectl proxy` | the page, from the same rule with an **empty** issuer and subject | `logweir.dev/request-sha256` over the request the page built |
+
+`spec` and the four labels are **identical** across all three; only the
+annotations differ, and they differ because they are hashes of different
+documents. The legacy page's issuer and subject are empty because a browser
+behind `kubectl proxy` holds neither — the credential is attached by the proxy,
+out of the page's sight — so in that mode the name is decided by
+`(namespace, route, key)` alone. The key is 128 random bits minted per draft,
+and a collision would be an `AlreadyExists` whose stored
+`logweir.dev/request-sha256` decides replay versus conflict, which is what the
+product API does with its own annotation.
+
+**The legacy page copies the policy digest and never computes one.**
+`spec.scheduleRef.runPolicySha256` is `weirkeeper::policy::run_policy_sha256`
+over a canonical document, the reconciler recomputes it, and a mismatch is a
+terminal refusal. So the browser reads `status.policy.runPolicySha256` off the
+schedule, and only when `status.policy.generation` equals the
+`metadata.generation` it is about to copy — the controller's own statement that
+the two describe one revision. When the controller is behind, the page refuses
+by name, says which number is behind, and points here. The same holds for the
+in-cluster UI ServiceAccount's authority: it holds `get`, `list` and `create` on
+`backups` and no `patch`, `update` or `delete`, because a run's inputs are
+frozen and a second run is a second object.
+
 ### The plan ConfigMap: frozen inputs, created before any Job exists
 
 The Job mounts a ConfigMap named `<backup name>-plan` at `/plan`, and the

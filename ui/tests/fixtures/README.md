@@ -192,6 +192,31 @@ pin without anyone remembering to move it.
 whose body was redacted in the capture, and no fixture here carries a credential, a bearer token or
 a secret value of any shape.
 
+## The manual-run name rule
+
+`manual-backup-names.json` is D1 §8.2's deterministic name, pinned. A manual `Backup` has no
+name until its idempotency scope is hashed, so that rule -- and not a name somebody typed -- is
+what makes a double click one run; it is implemented twice, in
+`crates/logweir-api/src/idempotency.rs` (`identity`, `base32_lower`) and in `ui/client.js`
+(`manualBackupName`), and two implementations of a hash agree until the day they do not.
+
+The file carries the `rule` block -- the format line that opens the hashed document, the name
+prefix, the route identifier, how many base32 characters are kept, the alphabet, the field order
+and the length-prefix width -- and six `rows`, each a scope tuple and the name it produces.
+
+**Both sides pass it, and that is the point.** `ui/tests/d1.spec.js` drives `manualBackupName` over
+every row. `scripts/live/d1/run.py`'s `L-06-2-cli` drives the REAL `logweir-api` in localAdmin mode
+against docker-desktop, asks it to create a manual run under a known key, and fails if the object
+the API server stored is not named what the page's own function says it should be. A fixture only
+one side checked would pin a function to itself.
+
+The rows are chosen for what they can catch: the localAdmin actor and an OIDC one; the LEGACY
+scope, whose issuer and subject are empty because a browser behind `kubectl proxy` holds neither;
+the shortest and longest keys the product API accepts; and a pair whose fields are the same
+characters cut in two places -- `(subject: "admin", namespace: "lw-p062-demo")` against
+`(subject: "", namespace: "adminlw-p062-demo")` -- which collide under a naive concatenation and
+must not collide here. All six names are distinct.
+
 ## The preview fixtures
 
 `preview/` is what `ui/tests/preview-server.js` answers the page's API reads from, and nothing in

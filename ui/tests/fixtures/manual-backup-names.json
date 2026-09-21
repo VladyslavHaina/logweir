@@ -1,0 +1,85 @@
+{
+  "rule": {
+    "formatLine": "logweir-api/idempotency-scope/v1\n",
+    "prefix": "logweir-manual-",
+    "route": "POST /api/v1/namespaces/{ns}/backups",
+    "hashChars": 26,
+    "alphabet": "abcdefghijklmnopqrstuvwxyz234567",
+    "fieldOrder": [
+      "issuer",
+      "subject",
+      "namespace",
+      "route",
+      "key"
+    ],
+    "lengthPrefix": "uint64 big-endian, over the UTF-8 byte length"
+  },
+  "rows": [
+    {
+      "note": "the product API in localAdmin mode: issuer urn:logweir:local-admin, the configured subject",
+      "scope": {
+        "issuer": "urn:logweir:local-admin",
+        "subject": "admin",
+        "namespace": "lw-p062-demo",
+        "route": "POST /api/v1/namespaces/{ns}/backups",
+        "key": "logweir-ui.manual.0123456789abcdef0123456789abcdef"
+      },
+      "name": "logweir-manual-tnyva6sto6e32ugspqikpk4oc4"
+    },
+    {
+      "note": "LEGACY MODE: the browser behind kubectl proxy holds no issuer and no subject, so both are empty. Same namespace, route and key as the row above, and therefore a DIFFERENT name: the scope is what the name is of.",
+      "scope": {
+        "issuer": "",
+        "subject": "",
+        "namespace": "lw-p062-demo",
+        "route": "POST /api/v1/namespaces/{ns}/backups",
+        "key": "logweir-ui.manual.0123456789abcdef0123456789abcdef"
+      },
+      "name": "logweir-manual-6jp2wavcalwx5oyvjnzfmjkmw6"
+    },
+    {
+      "note": "a shared-console OIDC actor",
+      "scope": {
+        "issuer": "https://idp.example",
+        "subject": "u-7",
+        "namespace": "prod",
+        "route": "POST /api/v1/namespaces/{ns}/backups",
+        "key": "kkkkkkkk"
+      },
+      "name": "logweir-manual-wg2gdubo5m6k3dsf3sj65rcjtr"
+    },
+    {
+      "note": "the minimum key the product API accepts (eight visible ASCII characters)",
+      "scope": {
+        "issuer": "urn:logweir:local-admin",
+        "subject": "admin",
+        "namespace": "lw-p062-demo",
+        "route": "POST /api/v1/namespaces/{ns}/backups",
+        "key": "12345678"
+      },
+      "name": "logweir-manual-qcwrpakh5j3hbke5vbovdzny72"
+    },
+    {
+      "note": "the length prefix is what stops two fields being re-cut into a different pair: an empty subject beside a namespace that starts with the subject of the row above must not collide",
+      "scope": {
+        "issuer": "urn:logweir:local-admin",
+        "subject": "",
+        "namespace": "adminlw-p062-demo",
+        "route": "POST /api/v1/namespaces/{ns}/backups",
+        "key": "12345678"
+      },
+      "name": "logweir-manual-3oqjj6mvnghglvgoqmn3kiholo"
+    },
+    {
+      "note": "a 128-character key, the product API maximum",
+      "scope": {
+        "issuer": "urn:logweir:local-admin",
+        "subject": "admin",
+        "namespace": "lw-p062-demo",
+        "route": "POST /api/v1/namespaces/{ns}/backups",
+        "key": "zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz"
+      },
+      "name": "logweir-manual-kiat5oqfyxkzuck6iyulkkfsat"
+    }
+  ]
+}

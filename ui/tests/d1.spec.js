@@ -89,7 +89,13 @@ import {
 } from "../pages/schedules.js";
 import { mountSchedules } from "../pages/schedules.js";
 import { renderBackupDetail, renderBackupList } from "../pages/backups.js";
-import { apiClient, resetMode, selectMode } from "../client.js";
+import {
+  MANUAL_BACKUP_ROUTE,
+  apiClient,
+  manualBackupName,
+  resetMode,
+  selectMode,
+} from "../client.js";
 import { dropDraft, formKey, mutationFor, readDraft } from "../lifecycle.js";
 import { decodeCadencePreview, decodeManualBackup, decodePolicyChanged } from "../contract.js";
 
@@ -1147,13 +1153,23 @@ test("an_invented_preview_parameter_is_dropped_before_the_network", async () => 
 });
 
 test("legacy_mode_refuses_the_preview_and_the_replace_by_name_and_sends_nothing", async () => {
+  // TWO OF THE THREE, AND THE THIRD IS NO LONGER ONE OF THEM (PLAT-06.2).
+  // "Back up now" WITH a schedule is a path this mode can walk now -- section 10
+  // below walks it against a fake kube-apiserver -- so what stays refused here
+  // is the draft cadence preview (a computation `logweir-api` performs, and a
+  // second cron implementation in a browser is a second opinion about when a
+  // backup runs), the whole-policy replace (built on the product API's
+  // `expectedGeneration` precondition, which a merge patch would not have),
+  // and the AD-HOC manual body, which has no schedule to copy and no published
+  // digest to carry.
   await legacyMode();
   const net = transport(() => ({ status: 500, body: null }));
   try {
     const api = apiClient();
     await assert.rejects(() => api.previewCadence({ schedule: "0 2 * * *" }), /Previewing a cadence/);
     await assert.rejects(() => api.editSchedulePolicy("ns", "tz", {}), /Editing a schedule/);
-    await assert.rejects(() => api.runBackupNow("ns", {}, "k".repeat(10)), /Back up now/);
+    await assert.rejects(() => api.runBackupNow("ns", {}, "k".repeat(10)),
+      /Backing up an ad-hoc selection/);
     assert.equal(net.seen.length, 0, "not one request was sent");
   } finally {
     net.restore();
@@ -1500,4 +1516,375 @@ test("an_unknown_outcome_on_a_manual_run_names_the_key_and_no_empty_name", () =>
   assert.equal(html.indexOf("it reuses the name"), -1,
     "the name sentence is false of this route and is not rendered for it");
   assert.equal(html.indexOf("Backup :"), -1, "and no sentence carries an empty name");
+});
+
+// ===========================================================================
+// 10. legacy mode: the same manual run, through kube-apiserver (PLAT-06.2)
+// ===========================================================================
+//
+// WHAT CHANGED AND WHY THESE ROWS EXIST. Until this branch `runBackupNow`
+// refused in legacy mode by name, for two reasons D1 W7's review checked and
+// accepted: the run's NAME is derived from an idempotency scope, and the
+// in-cluster page had no `create backups`. Both are answered now -- the rule
+// is shared (`manualBackupName`, pinned by `manual-backup-names.json`) and the
+// chart grants the verb -- so the legacy column of D1 section 8.5 is a path a person
+// can walk, and these rows walk it against a FAKE CLUSTER that behaves like
+// kube-apiserver: it stores objects by name and answers a second create under
+// a name it already holds with a `409 AlreadyExists` Status.
+//
+// THE NEGATIVE CONTROL FOR EACH BEHAVIOUR IS THE ROW BESIDE IT. One run from a
+// double click is only interesting beside a second intent that DOES create a
+// second object; a replay is only interesting beside a stored request hash
+// that differs and is refused instead of adopted.
+
+const NAME_RULE = fixture("manual-backup-names.json");
+
+/** A fake kube-apiserver for one namespace: objects by plural and name, the
+ *  `AlreadyExists` Status on a repeat create, and a record of every write. */
+function fakeCluster(seed) {
+  const store = new Map(Object.entries(seed || {}));
+  const writes = [];
+  const status = (code, reason, message) => ({
+    status: code,
+    body: {
+      kind: "Status", apiVersion: "v1", status: "Failure",
+      code: code, reason: reason, message: message,
+    },
+  });
+  const cluster = {
+    store: store,
+    writes: writes,
+    refuseCreate: null,
+    of(plural) {
+      return [...store.entries()]
+        .filter(([k]) => k.indexOf(plural + "/") === 0)
+        .map(([, v]) => v);
+    },
+    answer(url, init) {
+      const path = String(url).split("?")[0];
+      const parts = path.split("/");
+      const plural = parts[6];
+      const name = parts[7];
+      if ((init.method || "GET") === "GET") {
+        if (name === undefined) {
+          return { status: 200, body: { kind: "BackupList", apiVersion: "logweir.dev/v1alpha1", items: cluster.of(plural) } };
+        }
+        const held = store.get(plural + "/" + name);
+        return held === undefined
+          ? status(404, "NotFound", plural + ".logweir.dev \"" + name + "\" not found")
+          : { status: 200, body: held };
+      }
+      if (init.method === "POST") {
+        const sent = JSON.parse(init.body);
+        writes.push(sent);
+        if (cluster.refuseCreate !== null) {
+          return cluster.refuseCreate;
+        }
+        const key = plural + "/" + sent.metadata.name;
+        if (store.has(key)) {
+          return status(409, "AlreadyExists",
+            plural + ".logweir.dev \"" + sent.metadata.name + "\" already exists");
+        }
+        // The API server fills in what it owns. Nothing else is touched: a
+        // stored object is the object that was sent.
+        const stored = JSON.parse(JSON.stringify(sent));
+        stored.apiVersion = "logweir.dev/v1alpha1";
+        stored.kind = "Backup";
+        stored.metadata.uid = "uid-" + String(store.size);
+        stored.metadata.creationTimestamp = "2026-09-21T09:0" + String(store.size) + ":00Z";
+        stored.status = { phase: "Pending" };
+        store.set(key, stored);
+        return { status: 201, body: stored };
+      }
+      return status(405, "MethodNotAllowed", init.method);
+    },
+  };
+  return cluster;
+}
+
+/** The schedule the legacy rows copy: the live `schedule-policy.json` with a
+ *  uid and a `status.policy` at the SAME generation as `metadata.generation`,
+ *  which is the controller's own statement that the two describe one revision. */
+function legacySchedule(overrides) {
+  const object = JSON.parse(JSON.stringify(SCHEDULE));
+  object.metadata.uid = "8d6be0c6-0000-4000-8000-0000000000ff";
+  object.status.policy.generation = object.metadata.generation;
+  return Object.assign(object, overrides || {});
+}
+
+async function legacyRun(cluster, ns, key, body) {
+  const net = transport((u, init) => cluster.answer(u, init));
+  try {
+    return await apiClient().runBackupNow(
+      ns, body || { scheduleRef: { name: "tz", expectedGeneration: 1 } }, key,
+    );
+  } finally {
+    net.restore();
+  }
+}
+
+test("the_manual_run_name_rule_is_one_rule_and_the_fixture_pins_both_sides", async () => {
+  // THE FIXTURE IS THE CONTRACT BETWEEN TWO IMPLEMENTATIONS.
+  // `crates/logweir-api/src/idempotency.rs::identity` is the other one, and
+  // `scripts/live/d1/run.py`'s L-06-2-cli drives the REAL binary over the same
+  // rule and fails if the object kube-apiserver stored is not named what this
+  // function says. Here the page's half is held to every recorded row.
+  assert.equal(NAME_RULE.rule.prefix, "logweir-manual-");
+  assert.equal(NAME_RULE.rule.hashChars, 26);
+  assert.deepEqual(NAME_RULE.rule.fieldOrder, ["issuer", "subject", "namespace", "route", "key"]);
+  assert.ok(NAME_RULE.rows.length >= 6);
+  for (const row of NAME_RULE.rows) {
+    assert.equal(await manualBackupName(row.scope), row.name,
+      "the page derives a different name from the recorded scope: " + row.note);
+    assert.equal(row.name.length, 41, "prefix plus 26 characters is a 41-character DNS-1123 name");
+    assert.match(row.name, /^logweir-manual-[a-z2-7]{26}$/,
+      "lowercase RFC 4648 base32, which is DNS-label safe");
+  }
+  assert.equal(new Set(NAME_RULE.rows.map((r) => r.name)).size, NAME_RULE.rows.length,
+    "every recorded scope has its own name, including the pair whose fields are the same " +
+      "characters cut in two places -- that pair is what the 64-bit length prefix is for");
+
+  // THE DRIFT CONTROL: a guard that cannot fail is not a guard. One character
+  // changed in ANY field of the scope must change the name, or the field is
+  // not in the digest at all.
+  const base = NAME_RULE.rows[0].scope;
+  for (const field of NAME_RULE.rule.fieldOrder) {
+    const moved = Object.assign({}, base);
+    moved[field] = String(base[field]) + "x";
+    assert.notEqual(await manualBackupName(moved), NAME_RULE.rows[0].name,
+      field + " is not part of the derived name, so two different requests would collide");
+  }
+  // And the legacy scope is a DIFFERENT scope from the API actor's, so the two
+  // never collide by accident either.
+  const legacy = NAME_RULE.rows.find((r) => r.scope.issuer === "" && r.scope.subject === "");
+  assert.ok(legacy !== undefined, "the fixture records what legacy mode puts in the first two fields");
+});
+
+test("legacy_mode_creates_d1_section_8_1s_canonical_backup_and_a_double_click_is_one_run", async () => {
+  await legacyMode();
+  const ns = "lw-legacy";
+  const schedule = legacySchedule();
+  const cluster = fakeCluster({ "backupschedules/tz": schedule });
+  try {
+    const key = "logweir-ui.manual.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    const first = await legacyRun(cluster, ns, key);
+    const second = await legacyRun(cluster, ns, key);
+
+    // ONE OBJECT. Two clicks, two POSTs, one run: the name is a function of
+    // the scope, so the second create is kube-apiserver's own AlreadyExists.
+    assert.equal(cluster.writes.length, 2, "both clicks were really sent");
+    assert.equal(cluster.of("backups").length, 1, "and exactly one Backup exists");
+    assert.equal(first.replayed, false);
+    assert.equal(second.replayed, true);
+    assert.equal(first.run.metadata.uid, second.run.metadata.uid, "the same run, both times");
+
+    // THE SAME NAME THE PRODUCT API WOULD DERIVE FOR THIS SCOPE.
+    assert.equal(first.run.metadata.name, await manualBackupName({
+      issuer: "", subject: "", namespace: ns, route: MANUAL_BACKUP_ROUTE, key: key,
+    }));
+
+    // D1 section 8.1's OBJECT, field for field: the four labels and no others, the
+    // policy copied from the schedule, and the identity block.
+    const made = first.run;
+    assert.deepEqual(made.metadata.labels, {
+      "logweir.dev/trigger": "manual",
+      "logweir.dev/attempt": "0",
+      "logweir.dev/schedule": "tz",
+      "logweir.dev/schedule-uid": schedule.metadata.uid,
+    });
+    assert.equal(made.spec.triggeredBy, "manual");
+    assert.deepEqual(made.spec.trigger, { kind: "Manual", attempt: 0 });
+    assert.equal(made.spec.slot, undefined, "a manual run has no slot");
+    assert.deepEqual(made.spec.sourceRef, { name: schedule.spec.sourceRef.name });
+    assert.deepEqual(made.spec.topics, schedule.spec.topics,
+      "the operator's order, verbatim: the digest canonicalises and the object does not");
+    assert.equal(made.spec.archive.url, schedule.spec.archive.url);
+    assert.equal(made.spec.deadlineSeconds, schedule.spec.activeDeadlineSeconds);
+    assert.deepEqual(made.spec.scheduleRef, {
+      name: "tz",
+      uid: schedule.metadata.uid,
+      generation: schedule.metadata.generation,
+      runPolicySha256: schedule.status.policy.runPolicySha256,
+    });
+    // THE DIGEST IS COPIED, NEVER COMPUTED. This is the one number a browser
+    // must not produce: the controller recomputes it and refuses the run
+    // terminally on a mismatch.
+    assert.equal(made.spec.scheduleRef.runPolicySha256, schedule.status.policy.runPolicySha256);
+    // AND THE REPLAY GUARD IS ON THE OBJECT, not in this page's memory.
+    assert.match(made.metadata.annotations["logweir.dev/request-sha256"], /^sha256:[0-9a-f]{64}$/);
+    // The schedule's own state travels with the run, as notices.
+    assert.equal(first.schedule.generation, schedule.metadata.generation);
+    assert.equal(first.schedule.suspended, schedule.spec.suspend === true);
+  } finally {
+    resetMode();
+  }
+});
+
+test("a_deliberate_second_legacy_backup_is_a_second_object_and_a_reused_intent_is_not", async () => {
+  await legacyMode();
+  const ns = "lw-legacy";
+  const cluster = fakeCluster({ "backupschedules/tz": legacySchedule() });
+  const key = formKey(ns, RUN_NOW_FORM, "tz");
+  dropDraft(key);
+  try {
+    // The intents the PAGE would hold: one per draft, ended by "Back up again".
+    const first = await legacyRun(cluster, ns, intentFor(key));
+    const repeat = await legacyRun(cluster, ns, intentFor(key));
+    const deliberate = await legacyRun(cluster, ns, newIntent(key));
+
+    assert.equal(cluster.of("backups").length, 2,
+      "three clicks, two runs: the repeat replayed and the deliberate one did not");
+    assert.equal(repeat.replayed, true);
+    assert.equal(repeat.run.metadata.uid, first.run.metadata.uid);
+    assert.equal(deliberate.replayed, false);
+    assert.notEqual(deliberate.run.metadata.name, first.run.metadata.name,
+      "a new intent is a new scope and therefore a new name");
+    assert.notEqual(deliberate.run.metadata.uid, first.run.metadata.uid);
+  } finally {
+    dropDraft(key);
+    resetMode();
+  }
+});
+
+test("the_same_legacy_intent_on_a_different_request_is_refused_and_never_adopted", async () => {
+  // THE NEGATIVE CONTROL FOR THE REPLAY. "An object already exists under this
+  // name" is not "this run is mine": the stored request hash decides, and a
+  // different request under a spent intent is a refusal the page can render,
+  // not a run somebody else's click made.
+  await legacyMode();
+  const ns = "lw-legacy";
+  const cluster = fakeCluster({ "backupschedules/tz": legacySchedule() });
+  try {
+    const key = "logweir-ui.manual.bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+    await legacyRun(cluster, ns, key);
+    await assert.rejects(
+      () => legacyRun(cluster, ns, key, {
+        scheduleRef: { name: "tz", expectedGeneration: 1 },
+        readinessAcknowledgement: { preflight: "pf-1", state: "notReady" },
+      }),
+      (error) => {
+        assert.equal(error.reason, "idempotency_conflict");
+        assert.equal(error.status, 409);
+        return true;
+      },
+    );
+    assert.equal(cluster.of("backups").length, 1, "and nothing was created or adopted");
+  } finally {
+    resetMode();
+  }
+});
+
+test("a_stale_legacy_card_is_a_policy_changed_refusal_carrying_the_revision_in_force", async () => {
+  await legacyMode();
+  const ns = "lw-legacy";
+  const schedule = legacySchedule();
+  schedule.metadata.generation = 9;
+  schedule.status.policy.generation = 9;
+  const cluster = fakeCluster({ "backupschedules/tz": schedule });
+  try {
+    await assert.rejects(
+      () => legacyRun(cluster, ns, "logweir-ui.manual.cccccccccccccccccccccccccccccccc",
+        { scheduleRef: { name: "tz", expectedGeneration: 1 } }),
+      (error) => {
+        assert.equal(error.reason, "policy_changed");
+        assert.equal(error.policy.currentGeneration, 9);
+        assert.equal(error.policy.currentRunPolicySha256, schedule.status.policy.runPolicySha256);
+        return true;
+      },
+    );
+    assert.equal(cluster.writes.length, 0, "nothing was sent: the refusal is BEFORE the create");
+    // And the page renders it with the revision in force, in both modes, from
+    // the one renderer.
+    const line = renderRunNowConflict({
+      phase: "failed", kind: "conflict",
+      error: {
+        reason: "policy_changed",
+        policy: { currentGeneration: 9, currentRunPolicySha256: schedule.status.policy.runPolicySha256 },
+      },
+    });
+    assert.match(line, /revision g9/);
+  } finally {
+    resetMode();
+  }
+});
+
+test("legacy_mode_refuses_rather_than_computing_a_run_policy_digest_of_its_own", async () => {
+  // THE DEFECT CLASS THIS CLOSES. `runPolicySha256` is computed in exactly one
+  // place -- `weirkeeper::policy::run_policy_sha256` -- because the controller
+  // recomputes it and refuses the run TERMINALLY on a mismatch. A browser that
+  // canonicalised the policy itself would be a second opinion about a number
+  // whose whole job is to say that two parties agree. So when the controller
+  // has not yet published a digest for the revision this page is copying, the
+  // page says which number is behind and creates nothing.
+  await legacyMode();
+  const ns = "lw-legacy";
+  const behind = legacySchedule();
+  behind.metadata.generation = 4;
+  behind.status.policy.generation = 3;
+  const cluster = fakeCluster({ "backupschedules/tz": behind });
+  try {
+    await assert.rejects(
+      () => legacyRun(cluster, ns, "logweir-ui.manual.dddddddddddddddddddddddddddddddd",
+        { scheduleRef: { name: "tz" } }),
+      (error) => {
+        assert.equal(error.reason, "PolicyDigestNotPublished");
+        assert.equal(error.kind, "refused");
+        assert.match(error.message, /still at g3/);
+        return true;
+      },
+    );
+    assert.equal(cluster.writes.length, 0);
+    // The ad-hoc body has no schedule to copy at all, and is named rather than
+    // half-built.
+    await assert.rejects(
+      () => legacyRun(cluster, ns, "logweir-ui.manual.eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+        { sourceRef: { name: "source" } }),
+      /Backing up an ad-hoc selection/,
+    );
+  } finally {
+    resetMode();
+  }
+});
+
+test("a_refused_legacy_create_renders_the_api_servers_own_reason_verbatim", async () => {
+  // D1 section 8.5's Rejected row, and the reason the grant is a chart change rather
+  // than a sentence: when kube-apiserver refuses this identity, what the
+  // person reads is the API SERVER'S message, not a sentence this page
+  // composed about a decision it did not make.
+  await legacyMode();
+  const ns = "lw-legacy";
+  const cluster = fakeCluster({ "backupschedules/tz": legacySchedule() });
+  const message = "backups.logweir.dev is forbidden: User \"system:serviceaccount:logweir:" +
+    "logweir-ui\" cannot create resource \"backups\" in API group \"logweir.dev\" in the " +
+    "namespace \"lw-legacy\"";
+  cluster.refuseCreate = {
+    status: 403,
+    body: { kind: "Status", apiVersion: "v1", status: "Failure", code: 403,
+      reason: "Forbidden", message: message },
+  };
+  try {
+    let captured = null;
+    await assert.rejects(
+      () => legacyRun(cluster, ns, "logweir-ui.manual.ffffffffffffffffffffffffffffffff"),
+      (error) => {
+        captured = error;
+        return true;
+      },
+    );
+    assert.equal(captured.status, 403);
+    assert.equal(captured.reason, "Forbidden");
+    assert.equal(captured.message, message, "the API server's sentence, unedited");
+
+    const html = renderRunNowPanel({
+      ns: ns, name: "tz", object: legacySchedule(), mayOperate: true, runs: [],
+      state: { phase: "failed", kind: "rejected", error: captured },
+    });
+    assert.ok(html.indexOf("cannot create resource &quot;backups&quot;") !== -1,
+      "the server's own words are on screen: " + html.slice(0, 400));
+    assert.match(html, /403 Forbidden/);
+    assert.equal(offersAnotherRun({ state: { phase: "failed", error: captured } }), false,
+      "and a 403 is not answered by spending a fresh intent on the same refused request");
+  } finally {
+    resetMode();
+  }
 });
