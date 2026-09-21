@@ -2378,15 +2378,43 @@ approver's file and the verified bytes is the class of transformation
 ### What lands on the status, and what does not
 
 On success: `verified: true`, `matchedKeyId`, `approver`, `ticket`,
-`selfAttestedRisk`, and a `Verified` condition. On a refusal: `verified: false`
-and a `Verified` condition whose `reason` is the name from the table above and
-whose `message` says what was compared — and **no** `approver` and **no**
-`matchedKeyId`, because a name lifted out of bytes whose signature nobody
-authorised is an attacker-controlled string on a field a UI renders.
+`selfAttestedRisk`, `approverKeyWindow`, and a `Verified` condition. On a
+refusal: `verified: false` and a `Verified` condition whose `reason` is the name
+from the table above and whose `message` says what was compared — and **no**
+`approver`, **no** `matchedKeyId` and **no** `approverKeyWindow`, because a name
+lifted out of bytes whose signature nobody authorised is an attacker-controlled
+string on a field a UI renders. Those four are sent as an explicit `null` on a
+refusal, not merely left out: a JSON merge patch that omits a key leaves the old
+value, so an `Approval` verified at 09:00 and refused at 09:05 used to keep all
+of them (fixed 2026-09-21 with `approverKeyWindow`'s arrival, which made it
+load-bearing rather than untidy).
 
 `selfAttestedRisk` is `true` when the matched approver key id also appears in
 `spec.signingKeys[].keyId`. It is **labelled, never refused**: `false` means
 only "two different key ids", and one operator holding both keys satisfies it.
+
+**`approverKeyWindow` is the matched approver key's declared validity window** —
+`keyId`, `notBefore`, `notAfter`, as the `TrustPolicy` that governs the
+namespace declares them (§19), re-derived on exactly the events that re-derive
+the `Verified` condition, because it comes out of the same decision and is
+written in the same preconditioned patch:
+
+```bash
+kubectl --context docker-desktop get approval a1 \
+  -o jsonpath='{.status.approverKeyWindow.notAfter}'
+```
+
+It exists for a reader that cannot resolve the key itself. The restore
+preflight's `approval.keyValidity` row is that reader (§21.6a): it compares the
+restore's deadline against `notAfter` and caps both approval rows' re-check at
+`min(10 m, notAfter)`. **It is not a second verdict** — whether the key may
+authorise anything *now* is the `Verified` condition's answer, and a retired or
+revoked key has an open window and authorises nothing.
+
+**Absent means unknown, never valid.** No key matched, so there is no window;
+a reader that finds none must say so rather than assume the key is good. A
+controller image that predates this field publishes none either, which is the
+same answer for the length of an upgrade.
 
 **The controller patches `/status` and nothing else.** It never patches a
 `spec` — every `spec` in this group is sealed by the CEL rule of §7, and an
@@ -6512,16 +6540,40 @@ operator to extend a window when the remedy is an investigation, and a retired
 key has no window to extend. The closed check vocabulary has one code for "did
 not verify"; the reason and the message say which.
 
-**`approval.keyValidity` no longer compares a window.** It is advisory, and it
-used to compare the restore's deadline with the roster's `notAfter` — the same
-wrong authority. The `Approval` publishes `matchedKeyId` and its condition; it
-does **not** publish the resolved key's lifecycle window, so there is nothing
-to compare a deadline against, and a green advisory row built from the wrong
-window is no better than a green blocking one. The row now reports
-`ApproverKeyValid` with a message saying it makes no claim about the deadline.
-`ApproverKeyExpiresBeforeDeadline` is therefore **unreachable until the
-`Approval` publishes that window**; it is stated here rather than left as a
-silently dead code.
+**`approval.keyValidity` compares the window the `Approval` publishes.** It is
+advisory. It used to compare the restore's deadline with the *roster's*
+`notAfter` — the same wrong authority the blocking row stopped reading — and
+between 2026-09-19 and 2026-09-21 it compared nothing at all, because no window
+was published anywhere (defect APPROVAL-KEY-WINDOW-UNPUBLISHED, recorded rather
+than hidden). It now reads `status.approverKeyWindow`, which the `Approval`
+controller resolved through the governing `TrustPolicy`:
+
+| what the `Approval` publishes | `approval.keyValidity` |
+|---|---|
+| a window whose `notAfter` is **before** now + `spec.deadlineSeconds` | `notReady` `ApproverKeyExpiresBeforeDeadline` — **advisory, so it is a warning and not a refusal** |
+| a window the restore's deadline falls inside | `ready` `ApproverKeyValid` |
+| no window, or one naming a different key than `matchedKeyId` | `unknown` `ApproverKeyWindowUnknown` — never `ready` |
+
+The warning is a forecast, not a verdict: a key that closes mid-run does not
+invalidate an approval that verified while it was open, and the row that refuses
+a *withdrawn* verdict is the blocking `approval.state` row above. An advisory
+`notReady` appears as a warning beside the result and cannot by itself make the
+aggregate `notReady` (D2 §6.4).
+
+**Both approval rows re-check at `min(10 m, notAfter)`.** A verdict about a key
+must not outlive the key: a preflight that stayed fresh for the full ten minutes
+past a `notAfter` four minutes away would let a restore be admitted on a record
+that says `ready` about a window that has closed. With no window published there
+is nothing to cap at, and the ten-minute catalogue entry stands.
+
+**Upgrading and rolling back.** `status.approverKeyWindow` is additive and
+optional. A controller that predates it publishes none, and every reader treats
+its absence as `unknown` — so an upgrade in progress shows
+`ApproverKeyWindowUnknown` on an advisory row and refuses nothing, and a
+rollback returns to exactly that. Existing `Approval` objects need no
+conversion: the field appears on the next reconcile of each one, which the
+five-minute heartbeat guarantees. Nothing reads the window to decide
+authorisation, so a cluster that never publishes one keeps working.
 
 ### 21.7 Skipping a check is not answering it
 

@@ -153,6 +153,34 @@ spec:
                   entry.
                 nullable: true
                 type: string
+              approverKeyWindow:
+                description: |-
+                  The matched approver key's declared validity window — defect APPROVAL-KEY-WINDOW-UNPUBLISHED; see [`ApproverKeyWindow`].
+
+                  **ABSENT WHEN NO KEY MATCHED**, and absent means UNKNOWN to every reader, never valid. It is cleared by an explicit `null` on every refusal (`controllers::approval::CLEARABLE_STATUS_FIELDS`) rather than merely omitted, because a JSON merge patch that omits a key LEAVES IT — and a window left behind by a verdict that has since been withdrawn is the one shape a reader would read as "this key is good until then".
+                nullable: true
+                properties:
+                  keyId:
+                    description: |-
+                      The `keyId` this window belongs to — the key the signature actually verified under, the same value [`ApprovalStatus::matched_key_id`] carries.
+
+                      REPEATED HERE ON PURPOSE. A window beside a key id is two fields a merge patch can leave in disagreement; a window that NAMES its key is one fact, and a reader can refuse a window that is about some other key rather than compare a deadline against it.
+                    type: string
+                  notAfter:
+                    description: That key's declared `notAfter` — the instant this
+                      approval stops being true on its own, and the value the preflight
+                      caps its re-check at.
+                    format: date-time
+                    type: string
+                  notBefore:
+                    description: That key's declared `notBefore`.
+                    format: date-time
+                    type: string
+                required:
+                - keyId
+                - notAfter
+                - notBefore
+                type: object
               conditions:
                 description: '`Verified`, and whatever else the controller reports.'
                 items:
