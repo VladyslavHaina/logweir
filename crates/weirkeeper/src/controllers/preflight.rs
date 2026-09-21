@@ -92,7 +92,7 @@ use super::Context;
 use crate::check::{self, job as check_job, limits, plan as check_plan, policy as check_policy};
 use crate::conditions::{current_condition, merge_condition, status_unchanged};
 use crate::connection::{self, ConnectionUse, ResolvedConnection};
-use crate::crds::approval::Approval;
+use crate::crds::approval::{Approval, ApproverKeyWindow};
 use crate::crds::backup::Backup;
 use crate::crds::kafka_cluster::KafkaCluster;
 use crate::crds::preflight::{
@@ -1787,6 +1787,22 @@ pub enum ApprovalFacts {
         message: Option<String>,
         /// The roster key id that verified it.
         matched_key_id: Option<String>,
+        /// `status.approverKeyWindow` — the matched approver key's declared
+        /// validity window, as the **Approval controller** published it.
+        ///
+        /// THE ONLY WINDOW THIS FILE MAY READ. It is not resolved here and it
+        /// is not the roster's: `controllers::approval` resolved the key
+        /// through the `TrustPolicy` that governs the namespace and wrote what
+        /// it found, which is the same authority the verdict beside it came
+        /// from. `None` is the honest answer of an `Approval` that matched no
+        /// key, or of a controller that predates the field — and `None` is
+        /// UNKNOWN, never valid.
+        ///
+        /// BOXED because `Found` is already the large variant of this enum and
+        /// a fourth inline field tipped `clippy::large_enum_variant`: every
+        /// `ApprovalFacts` in a reduced-inputs struct would otherwise carry the
+        /// window's bytes whether or not there is one.
+        approver_key_window: Option<Box<ApproverKeyWindow>>,
         /// The `plan_hash` inside the approval's own signed bytes.
         approved_plan_hash: Option<String>,
         /// The `Restore` the approval names.
@@ -1826,9 +1842,24 @@ pub const APPROVAL_REASON_KEY_ID_EXPIRED: &str = "KeyIdExpired";
 /// roster" a property of the signature rather than of a comment;
 /// `the_approval_rows_are_not_given_the_roster` holds the shape.
 ///
+/// # The key's WINDOW comes from the Approval too — and only from there
+///
+/// Defect **APPROVAL-KEY-WINDOW-UNPUBLISHED**, the deliberate regression the
+/// fix above created and recorded. Two D2 §6.3 behaviours are about the KEY and
+/// not about the verdict — `ApproverKeyExpiresBeforeDeadline` and the
+/// `min(10 m, notAfter)` re-check cap on both rows — and both need a window
+/// this file may no longer resolve. `controllers::approval` now publishes it
+/// (`status.approverKeyWindow`: the matched key's `keyId`, `notBefore` and
+/// `notAfter`, as the RESOLVED TRUST POLICY declares them), so the two return
+/// reading the same authority the verdict does.
+///
 /// `deadline` is the instant the restore would still need the approver key to
-/// be valid at; `ApproverKeyExpiresBeforeDeadline` is advisory because a key
-/// that expires mid-run does not invalidate an approval that verified.
+/// be valid at. `ApproverKeyExpiresBeforeDeadline` is ADVISORY, which is D2
+/// §6.3's own `Gate` column for `approval.keyValidity` (`A`) and what §6.4
+/// spells out — *"Advisory `notReady` appears as warnings"* — so this is a
+/// warning ahead of time and not a refusal: a key that expires mid-run does not
+/// invalidate an approval that verified while it was valid, and the blocking
+/// `approval.state` row is where a withdrawn verdict refuses.
 #[must_use]
 pub fn approval_rows(
     facts: &ApprovalFacts,
@@ -1874,6 +1905,7 @@ pub fn approval_rows(
             reason,
             message,
             matched_key_id,
+            approver_key_window,
             approved_plan_hash,
             subject_name,
             ..
@@ -1883,11 +1915,20 @@ pub fn approval_rows(
                 name: name.clone(),
                 uid: Some(uid.clone()),
             };
-            // NO KEY WINDOW IS DERIVED HERE ANY MORE. It used to be the
-            // roster's `notAfter` for `matchedKeyId`, and the roster is not
-            // the authority (see the type-level note). The two rows below
-            // therefore cap their expiry at their own catalogue entry's and
-            // nothing else.
+            // NO KEY WINDOW IS DERIVED HERE. It is READ BACK from the
+            // `Approval`, which resolved it through the trust policy that
+            // governs the namespace — the roster this file used to walk is not
+            // that authority (see the type-level note).
+            //
+            // AND THE WINDOW MUST NAME THE KEY THE VERDICT NAMES. A window
+            // beside a key id is two fields, and two fields can disagree: a
+            // merge patch that lands half an update, or a controller that
+            // published one key's window beside another key's verdict, would
+            // otherwise have this row compare a deadline against a window that
+            // is about nothing it read. Disagreement is `None`, which is
+            // unknown — never valid.
+            let window = matched_window(matched_key_id.as_deref(), approver_key_window.as_deref());
+            let not_after = window.map(|w| w.not_after);
             let mut out = Vec::new();
             let state = if let Some(subject) = subject_name.as_deref() {
                 if restore_name.is_some_and(|r| r != subject) {
@@ -1920,8 +1961,17 @@ pub fn approval_rows(
                     now,
                 )
             };
-            out.push(state);
-            out.push(key_validity_row(matched_key_id.as_deref(), deadline, now));
+            // `min(10 m, notAfter)` ON BOTH ROWS — D2 §6.3's `Expiry` column
+            // for `approval.state` and for `approval.keyValidity` alike. A
+            // verdict about a key must not outlive the key: a preflight that
+            // stayed fresh for ten minutes past a `notAfter` four minutes away
+            // would let a restore be admitted on a window that closed while the
+            // record still said `ready`.
+            out.push(cap_expiry(state, not_after));
+            out.push(cap_expiry(
+                key_validity_row(matched_key_id.as_deref(), window, deadline, now),
+                not_after,
+            ));
             out
         }
     }
@@ -2005,30 +2055,57 @@ fn approval_verdict(
     }
 }
 
-/// `approval.keyValidity` — advisory, and honest about what it can no longer
-/// establish.
+/// The published window, but only when it is about the key the verdict names.
 ///
-/// # Why this stopped comparing a window
+/// `controllers::approval` writes the `keyId` INSIDE the window for this
+/// comparison. A window that names another key is not a window about this
+/// approval, and comparing a deadline against it would be worse than having
+/// none: it would be a green advisory row grounded in someone else's rotation
+/// schedule.
+fn matched_window<'a>(
+    matched_key_id: Option<&str>,
+    window: Option<&'a ApproverKeyWindow>,
+) -> Option<&'a ApproverKeyWindow> {
+    let window = window?;
+    match matched_key_id {
+        Some(id) if id == window.key_id => Some(window),
+        _ => None,
+    }
+}
+
+/// `approval.keyValidity` — D2 §6.3's advisory row, reading the window the
+/// `Approval` publishes.
 ///
-/// It compared the restore's deadline against the approver key's `notAfter`
-/// **as `TrustRoster/default` carried it**, and that is the same wrong
-/// authority `approval_verdict` above stopped reading: the key's lifecycle
-/// belongs to the resolved `TrustPolicy`, which may retire, revoke or narrow a
-/// key the roster still shows as open. A green advisory row derived from the
-/// wrong window is no better than a green blocking one.
+/// # Three answers, and the third is the one that matters
 ///
-/// The Approval publishes `matchedKeyId` and a `Verified` condition; it does
-/// **not** publish the resolved key's window, so there is nothing here to
-/// compare a deadline against. The row therefore reports what it does know —
-/// that the controller verified the approval under this key — and says in
-/// words that it makes no claim about the deadline.
+/// * the window is published and its `notAfter` falls **before** the restore's
+///   deadline — `notReady`/`ApproverKeyExpiresBeforeDeadline`, D2 §6.3's own
+///   condition (`notAfter` < now + `deadlineSeconds`). ADVISORY: §6.3 gates
+///   this row `A` and §6.4 says *"Advisory `notReady` appears as warnings"*, so
+///   it warns ahead of time and never refuses. The refusal, if the key does
+///   expire, is the blocking `approval.state` row relaying `KeyIdExpired` —
+///   which is a fact and not a forecast.
+/// * the window is published and the deadline falls inside it —
+///   `ready`/`ApproverKeyValid`.
+/// * **no window is published, or the one published is about another key —
+///   `unknown`/`ApproverKeyWindowUnknown`, NEVER `ready`.** PLAT-19.1's
+///   acceptance: unevaluated or stale expiry information is unknown, not valid.
+///   An `Approval` that matched no key has no window to publish and its verdict
+///   is already `notReady` on the blocking row; a controller image that
+///   predates `status.approverKeyWindow` publishes none either, and during that
+///   upgrade window this row says so rather than inventing a pass. `unknown` on
+///   an ADVISORY row does not make the aggregate `unknown` (D2 §6.4 aggregates
+///   over blocking checks), so honesty here costs a reader nothing but a green
+///   badge it was not entitled to.
 ///
-/// **`ApproverKeyExpiresBeforeDeadline` is unreachable until the Approval
-/// publishes the resolved key's window**, and that is recorded rather than
-/// hidden: `the_key_validity_row_makes_no_claim_it_cannot_ground` is the guard,
-/// and closing it belongs to whoever owns `controllers::approval`'s status.
+/// # Why this is not derived from `Verified=True` alone
+///
+/// A verified approval says the key was usable when the controller last looked.
+/// This row asks a different question — will it still be usable at the end of a
+/// restore that has not started — and "it verified" is not an answer to it.
 fn key_validity_row(
     key_id: Option<&str>,
+    window: Option<&ApproverKeyWindow>,
     deadline: Option<DateTime<Utc>>,
     now: DateTime<Utc>,
 ) -> CheckOutcome {
@@ -2036,13 +2113,39 @@ fn key_validity_row(
     let mk = |state: CheckState, code: CheckCode| {
         outcome(op, CheckId::ApprovalKeyValidity, state, code, now)
     };
-    let _ = deadline;
-    mk(CheckState::Ready, CheckCode::ApproverKeyValid).with_message(&format!(
-        "the Approval controller verified this approval under approver key `{}`; this check \
-         does not re-derive that key's validity window, because the roster it used to read is \
-         not the authority the resolved trust policy is, and no window is published here",
-        key_id.unwrap_or("<unknown>")
-    ))
+    let Some(window) = window else {
+        return mk(CheckState::Unknown, CheckCode::ApproverKeyWindowUnknown).with_message(
+            &format!(
+                "the Approval publishes no validity window for approver key `{}`, so this check \
+             cannot say whether that key outlasts this restore; an unpublished window is \
+             unknown and never valid",
+                key_id.unwrap_or("<unknown>")
+            ),
+        );
+    };
+    match deadline {
+        // THE COMPARISON IS `<`, AND THE DIRECTION IS D2 §6.3's: the key
+        // expires BEFORE the deadline. A key whose `notAfter` is exactly the
+        // deadline is not early, and a `>` here would warn about every key that
+        // outlasts the restore — the one row an operator would learn to ignore.
+        Some(deadline) if window.not_after < deadline => mk(
+            CheckState::NotReady,
+            CheckCode::ApproverKeyExpiresBeforeDeadline,
+        )
+        .with_message(&format!(
+            "approver key `{}` expires at {}, before this restore's deadline at {}",
+            window.key_id,
+            window.not_after.to_rfc3339(),
+            deadline.to_rfc3339()
+        ))
+        .with_remedy("Rotate the approver key, or start the restore sooner."),
+        _ => mk(CheckState::Ready, CheckCode::ApproverKeyValid).with_message(&format!(
+            "the Approval controller verified this approval under approver key `{}`, whose \
+             published validity window runs to {}; this restore's deadline falls inside it",
+            window.key_id,
+            window.not_after.to_rfc3339()
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -3893,6 +3996,11 @@ pub async fn resolve(
                                         .status
                                         .as_ref()
                                         .and_then(|s| s.matched_key_id.clone()),
+                                    approver_key_window: a
+                                        .status
+                                        .as_ref()
+                                        .and_then(|s| s.approver_key_window.clone())
+                                        .map(Box::new),
                                     approved_plan_hash: super::restore::approval_plan_hash(&a),
                                     subject_name: Some(a.spec.subject_ref.name.clone()),
                                 }

@@ -321,6 +321,15 @@ closed_vocabulary! {
         BrokerConfigsNotReadable => "BrokerConfigsNotReadable",
         LogAppendTimeOverrideVerifiedOnlyAtExecution => "LogAppendTimeOverrideVerifiedOnlyAtExecution",
         ApprovalPending => "ApprovalPending",
+        // D2 §6.3's `approval.keyValidity`, Unknown column — added 2026-09-21
+        // at APPROVAL-KEY-WINDOW-UNPUBLISHED's fix. The row compares a
+        // restore's deadline against the approver key's window as the
+        // `Approval` publishes it; when no window is published there is
+        // nothing to compare, and PLAT-19.1's acceptance is explicit that
+        // unevaluated or stale expiry information is UNKNOWN and not valid.
+        // A `ready/ApproverKeyValid` in that case would be the whole defect
+        // wearing a green badge.
+        ApproverKeyWindowUnknown => "ApproverKeyWindowUnknown",
         SubjectNotCreated => "SubjectNotCreated",
         RecoveryPointLocationUnknown => "RecoveryPointLocationUnknown",
         // -- framework / phase codes (D2 §4.2, §4.3, §5.1, §6.2) ---------

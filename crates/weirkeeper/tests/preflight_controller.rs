@@ -42,6 +42,7 @@ use weirkeeper::controllers::preflight::{
     RosterFacts, ScopeReferents,
 };
 use weirkeeper::controllers::Context;
+use weirkeeper::crds::approval::ApproverKeyWindow;
 use weirkeeper::crds::preflight::{Preflight, PreflightOperation};
 use weirkeeper::testing::{mock_client_recording_bodies, Route};
 
@@ -1268,9 +1269,58 @@ fn found_approval_with(
         reason: reason.map(str::to_string),
         message: message.map(str::to_string),
         matched_key_id: Some("approver-1".to_string()),
+        // NO WINDOW BY DEFAULT — which is what a controller image that
+        // predates `status.approverKeyWindow` publishes, and what an
+        // `Approval` that matched no key publishes. Every row that wants one
+        // says so through [`windowed`].
+        approver_key_window: None,
         approved_plan_hash: approved_hash.map(str::to_string),
         subject_name: Some("r-1".to_string()),
     }
+}
+
+/// The same facts, carrying the window `controllers::approval` publishes for
+/// `key_id` — `notBefore` an hour back, `notAfter` at `not_after`.
+fn windowed(facts: ApprovalFacts, key_id: &str, not_after: DateTime<Utc>) -> ApprovalFacts {
+    let ApprovalFacts::Found {
+        name,
+        uid,
+        resource_version,
+        verified,
+        reason,
+        message,
+        matched_key_id,
+        approved_plan_hash,
+        subject_name,
+        ..
+    } = facts
+    else {
+        panic!("only a Found approval carries a window");
+    };
+    ApprovalFacts::Found {
+        name,
+        uid,
+        resource_version,
+        verified,
+        reason,
+        message,
+        matched_key_id,
+        approver_key_window: Some(Box::new(ApproverKeyWindow {
+            key_id: key_id.to_string(),
+            not_before: now() - Duration::hours(1),
+            not_after,
+        })),
+        approved_plan_hash,
+        subject_name,
+    }
+}
+
+/// The `approval.keyValidity` row out of one `approval_rows` call.
+fn validity_row(rows: &[CheckOutcome]) -> CheckOutcome {
+    rows.iter()
+        .find(|r| r.id == CheckId::ApprovalKeyValidity)
+        .expect("every Found approval reports approval.keyValidity")
+        .clone()
 }
 
 fn found_approval(verified: Option<bool>, approved_hash: Option<&str>) -> ApprovalFacts {
@@ -1532,50 +1582,229 @@ fn an_approval_that_names_another_subject_is_a_subject_mismatch() {
     assert_eq!(state_row(&rows).code, CheckCode::ApprovalSubjectMismatch);
 }
 
-/// The advisory row no longer claims a window it cannot ground.
+/// **APPROVAL-KEY-WINDOW-UNPUBLISHED, deliverable 2.** The advisory row reads
+/// the window the `Approval` publishes and warns ahead of time.
 ///
-/// It compared the restore's deadline against the approver key's `notAfter`
-/// AS THE ROSTER CARRIED IT — the same wrong authority the blocking row
-/// stopped reading. The Approval publishes `matchedKeyId` and a condition; it
-/// does not publish the resolved key's window, so there is nothing here to
-/// compare a deadline against, and a green advisory row derived from the wrong
-/// window is no better than a green blocking one.
+/// D2 §6.3's condition verbatim: `ApproverKeyExpiresBeforeDeadline` when
+/// `notAfter` < now + `deadlineSeconds`. It is a WARNING — the row is gated `A`
+/// and §6.4 says "Advisory `notReady` appears as warnings" — so the aggregate
+/// over the same rows is not dragged to `notReady` by it. The refusal, when the
+/// key actually expires, is the blocking row relaying `KeyIdExpired`.
 ///
-/// `ApproverKeyExpiresBeforeDeadline` is therefore UNREACHABLE until the
-/// Approval publishes that window. This row is where that is recorded.
+/// KILLS: "compare the other way" (`notAfter > deadline`), which warns about
+/// every key that OUTLASTS the restore and is the one row an operator learns to
+/// ignore; "use `<=`", which warns about a key that is valid for exactly as
+/// long as it needs to be; "make the warning blocking", which would refuse a
+/// restore whose approval is valid now over a key that expires mid-run.
 #[test]
-fn the_key_validity_row_makes_no_claim_it_cannot_ground() {
-    for deadline in [
-        None,
-        Some(now() + Duration::hours(1)),
-        Some(now() - Duration::hours(1)),
-    ] {
-        let rows = pf::approval_rows(
-            &found_approval(Some(true), Some("sha256:aa")),
-            "sha256:aa",
-            Some("r-1"),
+fn a_key_that_expires_before_the_deadline_is_warned_about_and_not_refused() {
+    let facts = windowed(
+        found_approval(Some(true), Some("sha256:aa")),
+        "approver-1",
+        now() + Duration::minutes(20),
+    );
+    let deadline = now() + Duration::hours(1);
+    let rows = pf::approval_rows(&facts, "sha256:aa", Some("r-1"), Some(deadline), now());
+
+    let validity = validity_row(&rows);
+    assert_eq!(validity.gating, Gating::Advisory);
+    assert_eq!(validity.state, CheckState::NotReady);
+    assert_eq!(validity.code, CheckCode::ApproverKeyExpiresBeforeDeadline);
+    assert!(
+        validity.message.contains("approver-1") && validity.message.contains("before this"),
+        "the warning names the key and says what it is early for: {}",
+        validity.message
+    );
+    assert!(
+        !validity.remedy.is_empty(),
+        "a warning an operator can act on names the action"
+    );
+
+    // ADVISORY MEANS THE AGGREGATE IS NOT DRAGGED DOWN BY IT (D2 §6.4).
+    assert_eq!(state_row(&rows).state, CheckState::Ready);
+    assert_eq!(
+        logweir_core::check_contract::aggregate(&rows),
+        OverallState::Ready,
+        "an early-expiring key is a warning ahead of time, not a refusal: {rows:?}"
+    );
+    assert_eq!(
+        logweir_core::check_contract::advisory_warnings(&rows).len(),
+        1,
+        "…and it is REPORTED, as a warning"
+    );
+
+    // THE BOUNDARY. `notAfter` exactly at the deadline is not early.
+    let exact = pf::approval_rows(
+        &windowed(
+            found_approval(Some(true), Some("sha256:aa")),
+            "approver-1",
             deadline,
-            now(),
+        ),
+        "sha256:aa",
+        Some("r-1"),
+        Some(deadline),
+        now(),
+    );
+    assert_eq!(validity_row(&exact).code, CheckCode::ApproverKeyValid);
+
+    // AND THE ABSENCE OF THE WARNING WHEN THE DEADLINE IS EARLIER.
+    let outlasts = pf::approval_rows(
+        &windowed(
+            found_approval(Some(true), Some("sha256:aa")),
+            "approver-1",
+            now() + Duration::hours(6),
+        ),
+        "sha256:aa",
+        Some("r-1"),
+        Some(deadline),
+        now(),
+    );
+    let row = validity_row(&outlasts);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::Ready, CheckCode::ApproverKeyValid)
+    );
+    assert!(
+        row.message.contains("falls inside it"),
+        "the ready sentence says what it compared: {}",
+        row.message
+    );
+}
+
+/// **Deliverable 2, second half: `min(10 m, notAfter)` on BOTH rows.**
+///
+/// D2 §6.3 gives `approval.state` `min(10 m, key notAfter)` and
+/// `approval.keyValidity` `min(10 m, notAfter)`. A verdict about a key must not
+/// outlive the key: a preflight that stayed fresh for the full ten minutes past
+/// a `notAfter` four minutes away would let a restore be admitted on a record
+/// that says `ready` about a window that has closed.
+///
+/// KILLS: "cap only the blocking row" — the advisory row would then outlive the
+/// key it is entirely about; "cap only when the key expires before the
+/// deadline", which leaves the common case uncapped; "take the catalogue entry
+/// unconditionally", the shipped behaviour and the second half of the defect.
+#[test]
+fn both_approval_rows_re_check_inside_the_published_window() {
+    let inside = now() + Duration::minutes(4);
+    let rows = pf::approval_rows(
+        &windowed(
+            found_approval(Some(true), Some("sha256:aa")),
+            "approver-1",
+            inside,
+        ),
+        "sha256:aa",
+        Some("r-1"),
+        Some(now() + Duration::hours(1)),
+        now(),
+    );
+    assert_eq!(rows.len(), 2);
+    for row in &rows {
+        assert_eq!(
+            row.expires_at,
+            Some(inside),
+            "`{}` must be re-checked at the key's notAfter, not ten minutes later",
+            row.id
         );
-        let validity = rows
-            .iter()
-            .find(|r| r.id == CheckId::ApprovalKeyValidity)
-            .expect("the advisory row is still reported");
-        assert_eq!(validity.gating, Gating::Advisory);
-        assert_eq!(validity.code, CheckCode::ApproverKeyValid);
-        assert!(
-            validity.message.contains("does not re-derive"),
-            "the row says what it does NOT establish: {}",
-            validity.message
+    }
+
+    // …and the ten minutes is still the CEILING when the key outlasts it.
+    let far = pf::approval_rows(
+        &windowed(
+            found_approval(Some(true), Some("sha256:aa")),
+            "approver-1",
+            now() + Duration::days(30),
+        ),
+        "sha256:aa",
+        Some("r-1"),
+        None,
+        now(),
+    );
+    for row in &far {
+        assert_eq!(
+            row.expires_at,
+            Some(now() + Duration::minutes(10)),
+            "`{}` keeps its catalogue expiry when the window is further out",
+            row.id
         );
-        assert!(
-            !validity.message.contains("valid for the whole"),
-            "the sentence it used to print claimed a window from the roster: {}",
-            validity.message
-        );
-        assert!(
-            validity.message.contains("approver-1"),
-            "and names the key it read"
+    }
+}
+
+/// **Deliverable 2, third half: no window is UNKNOWN, and never valid.**
+///
+/// PLAT-19.1's acceptance is explicit — unevaluated or stale expiry information
+/// is unknown, not valid. Three shapes reach it: an `Approval` that matched no
+/// key (nothing to publish), a controller image that predates
+/// `status.approverKeyWindow` (an upgrade in progress), and a window that names
+/// SOME OTHER key than the verdict does. The third is why
+/// `controllers::approval` writes the key id inside the window.
+///
+/// The advisory row being `unknown` does not make the aggregate `unknown`: D2
+/// §6.4 aggregates over blocking checks, so honesty here costs a reader nothing
+/// but a green badge it was not entitled to.
+///
+/// KILLS: "treat an absent window as valid" — the row would read `ready` about
+/// a key it knows nothing about, which is the whole defect; "trust any window
+/// the status carries", which compares a deadline against another key's
+/// rotation schedule; "make the unknown row blocking", which would stall every
+/// restore through the upgrade that adds the field.
+#[test]
+fn an_unpublished_or_mismatched_window_is_unknown_and_never_valid() {
+    let deadline = Some(now() + Duration::hours(1));
+
+    // 1. nothing published at all.
+    let none = pf::approval_rows(
+        &found_approval(Some(true), Some("sha256:aa")),
+        "sha256:aa",
+        Some("r-1"),
+        deadline,
+        now(),
+    );
+    let row = validity_row(&none);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::Unknown, CheckCode::ApproverKeyWindowUnknown)
+    );
+    assert!(
+        row.message.contains("approver-1") && row.message.contains("never valid"),
+        "it names the key it could not ground and says what absence means: {}",
+        row.message
+    );
+    assert_eq!(row.gating, Gating::Advisory);
+    assert_eq!(
+        logweir_core::check_contract::aggregate(&none),
+        OverallState::Ready,
+        "an advisory unknown does not stall a restore whose blocking rows are ready"
+    );
+    assert_eq!(
+        none[0].expires_at,
+        Some(now() + Duration::minutes(10)),
+        "with no window there is nothing to cap at, so the catalogue entry stands"
+    );
+
+    // 2. a window about a DIFFERENT key than the one that verified.
+    let other = pf::approval_rows(
+        &windowed(
+            found_approval(Some(true), Some("sha256:aa")),
+            "approver-2",
+            now() + Duration::minutes(1),
+        ),
+        "sha256:aa",
+        Some("r-1"),
+        deadline,
+        now(),
+    );
+    let row = validity_row(&other);
+    assert_eq!(
+        (row.state, row.code),
+        (CheckState::Unknown, CheckCode::ApproverKeyWindowUnknown),
+        "a window naming approver-2 says nothing about approver-1, and a minute-long \
+         window would otherwise have produced a very confident warning"
+    );
+    for row in &other {
+        assert_eq!(
+            row.expires_at,
+            Some(now() + Duration::minutes(10)),
+            "and no row is capped at another key's notAfter"
         );
     }
 }
@@ -3383,9 +3612,13 @@ async fn an_approval_expired_under_a_policy_refuses_the_restore_before_it_is_sub
             .contains("notAfter"),
         "the controller's own sentence reaches the row: {approval}"
     );
-    // THE ADVISORY ROW MAKES NO CLAIM ABOUT A WINDOW IT CANNOT SEE.
+    // THE ADVISORY ROW MAKES NO CLAIM ABOUT A WINDOW THAT IS NOT PUBLISHED.
+    // The key expired, so the Approval matched none and published no
+    // `status.approverKeyWindow`; `unknown` is the answer and `ready` would be
+    // APPROVAL-KEY-WINDOW-UNPUBLISHED wearing a green badge.
     let validity = check_entry(&status, "approval.keyValidity");
-    assert_eq!(validity["code"], "ApproverKeyValid");
+    assert_eq!(validity["code"], "ApproverKeyWindowUnknown");
+    assert_eq!(validity["state"], "unknown");
     assert_eq!(validity["gating"], "advisory");
     assert_eq!(
         check_entry(&status, "plan.parse")["code"],
@@ -3395,6 +3628,183 @@ async fn an_approval_expired_under_a_policy_refuses_the_restore_before_it_is_sub
     assert!(
         status["binding"]["planHash"].as_str().is_some(),
         "the verdict is bound to the exact plan hash (D2 §6.6)"
+    );
+}
+
+/// **APPROVAL-KEY-WINDOW-UNPUBLISHED, end to end.** The window the `Approval`
+/// publishes reaches the published rows: the warning, and the cap on both.
+///
+/// The pure rows above prove the arithmetic; this one proves the WIRING — that
+/// `status.approverKeyWindow` is read off the object at all, and that the
+/// capped expiry survives into `status.checks[]` and the aggregate's own
+/// `expiresAt`. A reader of the pure tests alone could not tell a controller
+/// that never looked at the field from one that did.
+///
+/// THE ROSTER IS WIDE OPEN HERE TOO, for the same reason the expiry row above
+/// inverts it: nothing in this verdict can have come from `TrustRoster/default`.
+///
+/// KILLS: "never read `status.approverKeyWindow`" — the shipped behaviour;
+/// "cap the rows and publish the uncapped `expiresAt`"; "let the advisory
+/// warning drag the aggregate to `notReady`", which would refuse a restore over
+/// a key that is valid right now.
+#[tokio::test]
+async fn a_published_key_window_reaches_the_warning_and_the_cap_on_both_rows() {
+    let job = job_name(CheckPlanKind::RestorePreflight);
+    let plan = plan_yaml("restore-", "s3-bucket");
+    let plan_hash = logweir_core::ids::sha256_prefixed(plan.as_bytes());
+    // The restore's own deadline is an hour out; the key's window closes in
+    // twenty minutes. D2 §6.3: `notAfter` < now + `deadlineSeconds`.
+    let not_after = now() + Duration::minutes(20);
+    let restore_object = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "Restore",
+        "metadata": {"name": "r-1", "namespace": NS, "uid": "restore-uid", "generation": 1},
+        "spec": {
+            "planBytes": plan,
+            "approvalRef": {"name": "ap-1"},
+            "sourceArchive": {"url": "logweir-destination://primary"},
+            "sourceDestinationRef": {"name": "primary"},
+            "evidenceDestinationRef": {"name": "evidence"},
+            "backupSetRef": "bk-1",
+            "pointInTime": "2026-09-15T00:00:00Z",
+            "target": {
+                "clusterRef": {"name": "target"}, "mode": "scratch",
+                "topicNaming": {"prefix": "restore-"}
+            },
+            "deadlineSeconds": 3600
+        }
+    });
+    let approval = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "Approval",
+        "metadata": {"name": "ap-1", "namespace": NS, "uid": "ap-uid", "resourceVersion": "9"},
+        "spec": {
+            "subjectRef": {"kind": "Restore", "name": "r-1"},
+            "planHash": plan_hash,
+            "approvalBytes": json!({"plan_hash": plan_hash}).to_string(),
+            "sidecarBytes": "{}"
+        },
+        // WHAT THE APPROVAL CONTROLLER WRITES under a TrustPolicy whose
+        // approver key is valid now and closes inside this restore's deadline.
+        "status": {
+            "verified": true,
+            "matchedKeyId": "approver-1",
+            "approverKeyWindow": {
+                "keyId": "approver-1",
+                "notBefore": (now() - Duration::days(30)).to_rfc3339(),
+                "notAfter": not_after.to_rfc3339(),
+            },
+            "conditions": [{
+                "type": "Verified", "status": "True", "reason": "Verified",
+                "message": "the DSSE signature over spec.approvalBytes verified under \
+                            GovernedApproval key approver-1 (trustSource=org-default)"
+            }]
+        }
+    });
+    let open_roster = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "TrustRoster",
+        "metadata": {"name": "default", "uid": ROSTER_UID, "generation": 4},
+        "spec": {
+            "approverKeys": [{
+                "keyId": "approver-1",
+                "spkiPem": "-----BEGIN PUBLIC KEY-----\nAA\n-----END PUBLIC KEY-----"
+            }],
+            "signingKeys": [{"keyId": RUNNER_KEY_ID, "spkiPem": "-----BEGIN PUBLIC KEY-----\nBB\n-----END PUBLIC KEY-----"}],
+            "allowedClusterIds": ["target-id"]
+        }
+    });
+
+    let mut routes = vec![
+        route("GET", "/trustrosters/default", open_roster.to_string()),
+        route("GET", "/restores/r-1", restore_object.to_string()),
+        route("GET", "/approvals/ap-1", approval.to_string()),
+        route(
+            "GET",
+            "/kafkaclusters/target",
+            kafka_cluster("target", Some("target-id")).to_string(),
+        ),
+        route(
+            "GET",
+            "/backupdestinations/primary",
+            backup_destination("primary").to_string(),
+        ),
+        route(
+            "GET",
+            "/backupdestinations/evidence",
+            backup_destination("evidence").to_string(),
+        ),
+    ];
+    routes.push(route(
+        "GET",
+        leak(job.clone()),
+        finished_job(&job).to_string(),
+    ));
+    routes.push(route(
+        "GET",
+        "/pods",
+        list_of(vec![owned_pod(&job, terminated(0))]),
+    ));
+    routes.push(route("GET", "/events", list_of(vec![])));
+    routes.push(route(
+        "GET",
+        "-plan",
+        plan_config_map(&job, PLAN_DIGEST).to_string(),
+    ));
+    routes.push(route("GET", "/log", relay_log(PLAN_DIGEST, vec![], None)));
+    routes.push(route("PATCH", "/pf-1/status", echo("Preflight", "pf-1")));
+    routes.push(route("PATCH", leak(job.clone()), echo("Job", &job)));
+
+    let request = json!({"operation": "Restore", "restore": {
+        "restoreRef": {"name": "r-1"},
+        "sourceDestinationRef": {"name": "primary"},
+        "evidenceDestinationRef": {"name": "evidence"}
+    }, "timeoutSeconds": 120});
+    let (status, _recorder) = reconcile_with(&preflight(request), routes).await;
+
+    let state = check_entry(&status, "approval.state");
+    assert_eq!(state["code"], "ApprovalVerified");
+    assert_eq!(state["state"], "ready");
+
+    let validity = check_entry(&status, "approval.keyValidity");
+    assert_eq!(
+        validity["code"], "ApproverKeyExpiresBeforeDeadline",
+        "the key closes inside the restore's own deadline: {validity}"
+    );
+    assert_eq!(validity["state"], "notReady");
+    assert_eq!(
+        validity["gating"], "advisory",
+        "D2 §6.3 gates this row `A`, and §6.4: advisory notReady appears as warnings"
+    );
+    assert!(
+        validity["remedy"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("Rotate"),
+        "the warning names the action: {validity}"
+    );
+
+    // THE CAP, ON BOTH ROWS, IN THE PUBLISHED RECORD.
+    for id in ["approval.state", "approval.keyValidity"] {
+        let expires: DateTime<Utc> = check_entry(&status, id)["expiresAt"]
+            .as_str()
+            .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+            .map(|t| t.with_timezone(&Utc))
+            .unwrap_or_else(|| panic!("`{id}` publishes an expiresAt: {status}"));
+        assert!(
+            expires <= not_after,
+            "`{id}` must not be re-checked after the key's notAfter ({not_after}): {expires}"
+        );
+        assert!(
+            expires <= now() + Duration::minutes(10),
+            "`{id}` keeps the ten-minute ceiling too"
+        );
+    }
+
+    // AND THE WARNING IS A WARNING. An approval that is valid right now is not
+    // refused because its key closes before a deadline the restore may never
+    // reach.
+    assert_ne!(
+        status["result"]["state"], "notReady",
+        "an advisory row never refuses: {}",
+        status["result"]
     );
 }
 
