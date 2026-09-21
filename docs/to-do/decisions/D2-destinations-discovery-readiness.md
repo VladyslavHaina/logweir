@@ -2115,3 +2115,16 @@ Documentation is licensed [CC-BY-4.0](../../LICENSE-docs).
 
 Apache Kafka® and Kafka® are registered trademarks of the Apache Software
 Foundation. Logweir is not affiliated with or endorsed by the ASF.
+
+## Amendment at integration (2026-09-21, PLAT-08.1)
+
+§15 U6 and U7 are resolved by measurement, not by the recorded MinIO policies: the
+per-role minimal object-storage permission table lives in `docs/kubernetes.md` §7a, each
+row citing the `e2e/k8s/d2` bisection row that measured it on the worker's own MinIO
+(seven roles, thirty-five rows; the two `s3:ListBucket` prefix legs are separate units,
+and `archiveWrite` lists only under `<prefix>/*` while the catalogSync reader lists only
+under `logweir/*`). Where §3.11 or §14.3 name a grant a role carries, the measured table
+is authoritative — no role is granted `s3:DeleteObject` except the retention enforcer's
+delete principal. The retention enforcement Job's evidence credential is `evidenceWrite`
+(D3 §6.5); the controller projecting `archiveRead` there is the defect
+RET-EVIDENCE-GRANT-IS-ARCHIVEREAD, not a change to this contract.

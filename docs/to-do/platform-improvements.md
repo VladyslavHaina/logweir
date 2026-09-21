@@ -231,8 +231,9 @@ Wave 2 resumes every branch in place with the prompts under
 | PLAT-09.2 | Done | d1w5, d1w7, d1w8, fix-discovery-results, lab-refresh-3, plat09-2-rows (+ review) | Completion record under PLAT-09.2; live on docker-desktop 2026-09-21, all seven L-09 rows on one build. |
 | PLAT-17.1 | Done | plat17-api-finish, plat17-api-review, d1w6, d2w12, d3w11, d3w13, lab-refresh-3, plat17-1-stage7 (+ review) | Completion record under PLAT-17.1; D0 stage 7 landed 2026-09-21 (console image, chart deployment under the API's own RBAC, live can-i matrix); residue named in the record. |
 | PLAT-19.1 | Done | d3w1, d3w10, d3w14, fix-trust-upgrade, fix-trust-expiry, harness-rows-4/5/6/7, lab-refresh-4/5/6, d3w11, d3w12 (+ reviews) | Completion record under PLAT-19.1; live on docker-desktop 2026-09-18..21 incl. the keys view's unknown rendering. |
+| PLAT-08.1 | Done | d2w1, d2w2, d2w7, d2w10, d2w11, d2w13, d2w14, d2-status-destination, lab-refresh-3/4, plat08-u6 (+ reviews) | Completion record under PLAT-08.1; live on docker-desktop 2026-09-18..21 incl. the measured per-role permission table. |
 | PLAT-06.2 | In progress (every D1 wave landed; PLAT-04.2, 05.1, 05.2 and 09.2 Done; 06.2 waits on the CLI demonstration beside the UI, the legacy-mode grant and the failed-preflight journey) | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. W1 (the pure cadence engine) landed in main as `6eedc0a..4b54a5c` after review; see the PLAT-04.2 partial record. W3a (the `Backup` run contract: `spec.trigger`, `spec.scheduleRef` with generation and `runPolicySha256`, the selection type with `allUserTopics` requiring `incompleteDiscovery`, `status.selection`, `src/identity.rs`, `src/policy.rs`, the §3.4 vocabulary) landed in `696c81a`/`b334a98` inside `crds-shapes`; a `Backup` naming both `topics` and `allUserTopics` is refused by CEL and, terminally, by admission. W3b (the reconciler consumes the contract; grammar `v2`) landed at `397e37d`; see the PLAT-04.2 partial record. W2 (editable policy, the §4.5 scheduler; `destinationRef` editable) landed at `98257f8`; see the PLAT-05.1/04.2 partial record. W5 (dynamic selection per run through the check runner) landed at `7072b9d`; see the PLAT-09.2 partial record. W6 (cadence previews, `PUT schedules`, `POST backups`) landed at `72751ab`; see the PLAT-06.2 partial record. W4 (retained history; runs detached from the schedule's ownerReference) landed at `6845ffb`; see the PLAT-05.2 partial record. W7, W8 remain. |
-| PLAT-08.x | In progress (every D2 wave landed; PLAT-03.1, 03.2, 07.2 and 09.1 Done; 08.1 waits on U6's minimal-permission table, 08.2 on its inheritance/validation rows) | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. W1 (pure check contract and destination model) and W2 (explicit store options) landed as `c13b0cc..56bd074` after review (ACCEPT after two high and three medium fixes: JSON-form redaction bypass, ambient credentials inheriting the environment). W3 (`logweir_kafka::inventory`: bounded targeted describe, broker count, validate-only `CreateTopics`, error classification where an observed authorization failure makes visibility `limited` and anything unknown is failure, with a real admin-client fault capture because rdkafka 0.36 never invokes `ClientContext::error` for a metadata-only workflow — D2 §4.2 `[VERIFY U5]` corrected) and W5 (`weirkeeper::check`: check Jobs mirroring the execution pod, pod selection by controller owner UID only, framed-stdout relay through the W1 decoder, the full waiting-code table, TTL, plan/chunk/limit modules, the installation policy loader failing closed) landed as `23cec50..b8e62d1` after review (ACCEPT after one high and three medium fixes; 19 mutants killed; the rebase over PLAT-07.1 then routed the inventory client through the reader's `client_config`, removing a drifted copy that could upgrade plaintext to TLS when a CA was present — re-checked ACCEPT; weirkeeper 435, kafka 57). RBAC still owed by W11: `events: list` plus its `manifest_lint` row, the three new kinds' verbs, and a decision on `gc.rs`'s deletes. The reviewers' SEC-PODLOG finding against `controllers::backup::select_job_pod` is closed by `secpodlog` (see the defects table). W6a and W6b (the three Amendment F kinds and the destination sentinel on existing kinds) landed in `46880a3`/`88232f5`/`b334a98` inside `crds-shapes`; W7 (destination resolver, controller, evidence store cache) landed as `27fb924..0b25e95` (see the PLAT-08.1 partial record); W4 (runner `logweir check run`) landed at `537657d` (see the PLAT-03 partial record); W8 (`TopicDiscovery` controller) and W12 (API routes) are in review or in progress. W9, W10, W11, W13, W14 remain. |
+| PLAT-08.2 | In progress (every D2 wave landed; PLAT-03.1, 03.2, 07.2, 08.1 and 09.1 Done; 08.2's "document required object permissions" clause is met by the measured table; it waits on its console rows — destination edit during a draft, a recovery point inheriting its saved settings, addressing and transport as independent controls) | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. W1 (pure check contract and destination model) and W2 (explicit store options) landed as `c13b0cc..56bd074` after review (ACCEPT after two high and three medium fixes: JSON-form redaction bypass, ambient credentials inheriting the environment). W3 (`logweir_kafka::inventory`: bounded targeted describe, broker count, validate-only `CreateTopics`, error classification where an observed authorization failure makes visibility `limited` and anything unknown is failure, with a real admin-client fault capture because rdkafka 0.36 never invokes `ClientContext::error` for a metadata-only workflow — D2 §4.2 `[VERIFY U5]` corrected) and W5 (`weirkeeper::check`: check Jobs mirroring the execution pod, pod selection by controller owner UID only, framed-stdout relay through the W1 decoder, the full waiting-code table, TTL, plan/chunk/limit modules, the installation policy loader failing closed) landed as `23cec50..b8e62d1` after review (ACCEPT after one high and three medium fixes; 19 mutants killed; the rebase over PLAT-07.1 then routed the inventory client through the reader's `client_config`, removing a drifted copy that could upgrade plaintext to TLS when a CA was present — re-checked ACCEPT; weirkeeper 435, kafka 57). RBAC still owed by W11: `events: list` plus its `manifest_lint` row, the three new kinds' verbs, and a decision on `gc.rs`'s deletes. The reviewers' SEC-PODLOG finding against `controllers::backup::select_job_pod` is closed by `secpodlog` (see the defects table). W6a and W6b (the three Amendment F kinds and the destination sentinel on existing kinds) landed in `46880a3`/`88232f5`/`b334a98` inside `crds-shapes`; W7 (destination resolver, controller, evidence store cache) landed as `27fb924..0b25e95` (see the PLAT-08.1 partial record); W4 (runner `logweir check run`) landed at `537657d` (see the PLAT-03 partial record); W8 (`TopicDiscovery` controller) and W12 (API routes) are in review or in progress. W9, W10, W11, W13, W14 remain. |
 | PLAT-14.x, 15.x, 16.2 | In progress (W0–W13 and the console wave W12 landed; PLAT-16.1 and 19.1 Done; 16.2 waits on the batch lab refresh for the degraded condition and the retention-count/status-sweep rows, 15.1 on CATALOG-RECEIPTKEY-REDACTED, 14.2 on PROTECTION-SECRETKEYS-UNPROTECTED, 14.3 on the standing-authorization runner path (14.3b), 14.1 on the refresh's operation-state rows) | [D3](decisions/D3-status-catalog-retention-trust.md) | Operation states, protection freshness, rehearsals, durable catalog, retention enforcement boundary, trust lifecycle; fifteen worker tasks. W4 (`d3-notify`: the shared notification module and `logweir notify deliver`) landed after review (ACCEPT after two high fixes); W3 (`d3-catalog-writer`: signed catalog point records, `list_page`, `logweir catalog sync|list`) landed after review (see the PLAT-15.1 partial record); W0 (the five Amendment G kinds, additive run status, `Restore.spec` additions, the `Approval` enum) landed in `496451a`/`88232f5`/`b334a98` inside `crds-shapes`; W1 (trust lifecycle core, `TrustPolicy` controller, `trust export|migrate-roster`, G8) landed as `64fcd38..5fc1a72` (see the PLAT-19.1 partial record); W8 (`RecoveryCatalog` controller) in progress. W2, W5, W6, W7, W9, W10, W11, W12, W13, W14 remain. |
 
 ### Decision records
@@ -1635,6 +1636,55 @@ amended). Review `claude/d2-status-destination.review.md` ACCEPT; 9/9 + 3/3 muta
 tests; the review also found STATUS-PATCH-NO-RV (defect table, pre-existing). Remaining:
 live proof of the block and the mismatch row on the next refresh; D2 §15 U6 (the per-role
 minimal permission table) still unmeasured.
+
+**Completion record — Done (2026-09-21), PLAT-08.1.** Source landed on main as D2 W1/W2
+(the pure destination model and explicit store options, `c13b0cc`..`56bd074`), W6a/W6b (the
+`BackupDestination` kind and the destination sentinel on existing kinds, inside
+`crds-shapes`), W7 (`27fb924`..`0b25e95`: `weirkeeper::destination::resolve` returning, per
+operation role — `archiveWrite`, `archiveRead`, `evidenceWrite`, `evidenceRead` — a complete
+and explicit credential set never inherited from the controller's environment, the
+`BackupDestination` controller and the controller-identity evidence cache), W10
+(destination-backed Backup, Schedule and Restore execution, `e98eb8a`), W11 (RBAC, the
+policy ConfigMap and the admission policy), D2 W13's console destinations page, and the
+frozen `Backup.status.destination {name, uid, generation, locationDigest}` block with the
+restore preflight's `RecoveryPointLocationMismatch`/`RecoveryPointLocationUnknown`
+(`52c1f00`..`85adc2e`, D2 §6.3 amended). Every listed test is proven live on docker-desktop
+from `e2e/k8s/d2` (D2 W14 on `e7d0e79`, `claude/d2w14.result.md`/`.review.md` ACCEPT;
+re-proved on lab-refresh-3/4): **distinct endpoints/credentials** — S1, two MinIO
+destinations with disjoint buckets and three credentials each, the Job env, the frozen plan
+storage block and the bucket contents disjoint; **denied location** — S3, `Preflight
+DestinationAccess archiveListable/AccessDenied`, the Backup `Failed` with `exitCode 1`;
+**malformed URL** — S2, transport/scheme, malformed endpoints, the reserved `logweir/`
+prefix, `VirtualHosted` with a custom endpoint refused as `AddressingUnsupportedByEngine`,
+both immutability refusals; **namespace separation** — S4; **evidence/archive destination
+differences** — S5, a Restore reading `lw-a` with `a-reader` and writing its evidence to
+`lw-b` with `b-writer`, the scorecard verified from `lw-b`'s bytes and nothing under
+`lw-a/logweir/drills/`; no global-configuration leakage (S6); **secret values not returned**
+— S14 and two independent sweeps over every object, API body, browser page and sixty
+minutes of controller log. The three items the 2026-09-18 records left open are closed:
+the frozen destination block and the mismatch row proved on lab-refresh-4 (its report
+§605-608), D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN closed on lab-refresh-3, and D2 §15 U6 — the
+per-role minimal object-storage permission table — now MEASURED rather than recorded
+(`claude/plat08-u6` `..0452439`, review `claude/plat08-u6.review.md` ACCEPT-WITH-FIXES then
+the seven fixes applied): seven roles, thirty-five bisection rows on the worker's own
+MinIO, fourteen required units each proved by withdrawing it and reading the product's own
+classified refusal (the preflight row's `AccessDenied`, the Backup/Restore condition, the
+enforcer's `state=Kept code=…`), nineteen units proved NOT required by a successful object
+without them, the two `s3:ListBucket` prefix legs measured separately (both compound rows
+were a leg too wide — `archiveWrite` lists only under `<prefix>/*`, the catalogSync reader
+only under `logweir/*`), the table in `docs/kubernetes.md` §7a with every row citing its
+harness row and the sentence that a broader grant is not required, `docs/install.md`
+reconciled, and the reviewer's independent re-run of two roles matching exactly; D2 §15 U7
+measured and holding. Named residue, none of it this task's acceptance: the retention
+enforcement Job is handed the `archiveRead` grant as its evidence credential
+(RET-EVIDENCE-GRANT-IS-ARCHIVEREAD, defect table — the one place the product still violates
+"keep source archive access separate from evidence storage access"; the fix is in flight
+on `claude/fix-retention-grant` and the U6 retention row re-runs at the batch refresh);
+`destination.evidenceWritable` answered with the archive credential and a
+`DestinationAccess` check that never probes writes (PREFLIGHT-EVIDENCEWRITABLE-WRONG-PRINCIPAL,
+DESTINATIONACCESS-IGNORES-WRITEPROBE, defect table); D2 §3.11/§14.3/§15 wording reconciled
+by the amendment recorded at this integration. Migration: none — additive kinds; inline
+archive configuration converts through `:from-legacy` without changing in-flight plans.
 
 ### PLAT-08.2 — Inherit destination defaults and validate storage choices
 
