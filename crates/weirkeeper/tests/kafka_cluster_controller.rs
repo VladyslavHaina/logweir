@@ -1939,3 +1939,88 @@ async fn a_steady_kafka_cluster_issues_no_second_status_patch() {
          reconciles, and exactly as many resourceVersion bumps, in 90 s. Calls: {second:?}"
     );
 }
+
+// ===========================================================================
+// SEAM S7 — every `/status` write is a resourceVersion-preconditioned merge
+// PATCH (defect STATUS-PATCH-NO-RV)
+// ===========================================================================
+
+/// **EVERY STATUS WRITE CARRIES ITS PRECONDITION** — D-SEAMS **S7**.
+///
+/// This reconciler's six writes went out with no `metadata` at all, so a
+/// verdict computed from a stale watch-cache copy could overwrite the refusal a
+/// NEWER build of this same controller had just written — which is review
+/// finding L2's rolling-upgrade case, one field over.
+///
+/// Both of this kind's branches are asserted: the pass that creates a probe Job
+/// and the pass that reads a finished one.
+///
+/// KILLS: dropping the `metadata` insert in
+/// `conditions::patch_status_preconditioned`; naming a different object.
+#[tokio::test]
+async fn every_cluster_status_write_is_a_resource_version_preconditioned_merge_patch() {
+    let (client, _rec, bodies) = mock_client_recording_bodies(creating_routes());
+    reconcile_cluster(&cluster(), &client, now())
+        .await
+        .expect("the creating pass completes");
+    let created = bodies.lock().expect("the recorder is readable").clone();
+
+    let (client2, _rec2, bodies2) =
+        mock_client_recording_bodies(finished_routes(0, log_body(&i14_tail())));
+    reconcile_cluster(&cluster(), &client2, now())
+        .await
+        .expect("the finished pass completes");
+    let finished = bodies2.lock().expect("the recorder is readable").clone();
+
+    let writes: Vec<Value> = created
+        .iter()
+        .chain(finished.iter())
+        .filter(|b| b.method == "PATCH" && path(&b.uri).ends_with("/status"))
+        .map(|b| serde_json::from_str::<Value>(&b.body).expect("a status patch is JSON"))
+        .collect();
+    assert_eq!(
+        writes.len(),
+        2,
+        "one write per pass, and both are asserted; got {writes:?}"
+    );
+    for body in &writes {
+        assert_eq!(
+            body["metadata"]["resourceVersion"],
+            serde_json::json!(FIXTURE_RESOURCE_VERSION),
+            "every /status write preconditions on the object this pass observed; got {body}"
+        );
+        assert_eq!(
+            body["metadata"]["name"],
+            serde_json::json!(NAME),
+            "the precondition is tied to the object the path names; got {body}"
+        );
+    }
+}
+
+/// **A `409` IS SURFACED, NOT SWALLOWED** — no caller of this reconciler writes
+/// twice in a pass, so the conflict is simply the API error it is, and
+/// `error_policy` requeues.
+///
+/// KILLS: swallowing the 409 inside the helper and returning `Ok`.
+#[tokio::test]
+async fn a_conflicting_cluster_status_write_is_surfaced() {
+    let mut routes = creating_routes();
+    for route in &mut routes {
+        if route.method == "PATCH" && route.path_suffix.ends_with("/status") {
+            route.status = 409;
+            route.body = r#"{"kind":"Status","apiVersion":"v1","status":"Failure",
+                             "message":"the object has been modified","reason":"Conflict",
+                             "code":409}"#
+                .to_string();
+        }
+    }
+    let (client, _rec, _bodies) = mock_client_recording_bodies(routes);
+    let error = reconcile_cluster(&cluster(), &client, now())
+        .await
+        .expect_err("a refused precondition is an error the reconciler requeues on");
+    assert!(
+        format!("{error}").contains("409")
+            || matches!(&error, e if format!("{e:?}").contains("409")),
+        "the conflict reaches the reconciler verbatim; got {error}"
+    );
+}

@@ -2783,3 +2783,83 @@ fn the_approval_reconcile_requeues_at_its_keys_not_after() {
          that lab-refresh-4 sampled 22 times. Body:\n{body}"
     );
 }
+
+// ===========================================================================
+// SEAM S7 — the verdict write carries its resourceVersion precondition
+// (defect STATUS-PATCH-NO-RV)
+// ===========================================================================
+
+/// **THE VERDICT WRITE CARRIES ITS PRECONDITION** — D-SEAMS **S7**.
+///
+/// `charts/logweir/README.md:53` says every status write in this crate is a
+/// `resourceVersion`-preconditioned merge PATCH, and this one was not: it went
+/// out with no `metadata` at all. Two passes over one `Approval` can overlap —
+/// the `min(10 m, notAfter)` re-check is exactly what makes that likely — and
+/// the loser of that race used to win the write.
+///
+/// KILLS: dropping the `metadata` insert in
+/// `conditions::patch_status_preconditioned`; naming a different object in the
+/// body than the request path does.
+#[tokio::test]
+async fn the_approval_verdict_write_is_a_resource_version_preconditioned_merge_patch() {
+    let approval = approval_object(APPROVAL_DOC, &good_sidecar(), SubjectKind::Restore);
+    let (client, _calls, bodies) =
+        mock_client_recording_bodies(approval_routes((200, restore_body(PLAN_BYTES, PLAN_HASH))));
+    approval::reconcile_approval(&approval, &client)
+        .await
+        .expect("the reconcile completes");
+
+    let seen = bodies.lock().expect("readable").clone();
+    let writes: Vec<serde_json::Value> = seen
+        .iter()
+        .filter(|b| {
+            b.method == "PATCH"
+                && b.uri
+                    .split('?')
+                    .next()
+                    .unwrap_or(&b.uri)
+                    .ends_with("/status")
+        })
+        .map(|b| serde_json::from_str::<serde_json::Value>(&b.body).expect("JSON"))
+        .collect();
+    assert_eq!(writes.len(), 1, "one verdict, one write; got {writes:?}");
+    assert_eq!(
+        writes[0]["metadata"]["resourceVersion"],
+        serde_json::json!(FIXTURE_RESOURCE_VERSION),
+        "the write preconditions on the object this pass observed; got {}",
+        writes[0]
+    );
+    assert_eq!(
+        writes[0]["metadata"]["name"],
+        serde_json::json!("a1"),
+        "the precondition is tied to the object the path names; got {}",
+        writes[0]
+    );
+}
+
+/// **A `409` IS SURFACED, NOT SWALLOWED** — the precondition working. The next
+/// pass reads what the other writer stored; nothing this one computed lands.
+///
+/// KILLS: swallowing the 409 inside the helper and returning `Ok`.
+#[tokio::test]
+async fn a_conflicting_approval_verdict_write_is_surfaced() {
+    let approval = approval_object(APPROVAL_DOC, &good_sidecar(), SubjectKind::Restore);
+    let mut routes = approval_routes((200, restore_body(PLAN_BYTES, PLAN_HASH)));
+    for route in &mut routes {
+        if route.method == "PATCH" && route.path_suffix.ends_with("/status") {
+            route.status = 409;
+            route.body = r#"{"kind":"Status","apiVersion":"v1","status":"Failure",
+                             "message":"the object has been modified","reason":"Conflict",
+                             "code":409}"#
+                .to_string();
+        }
+    }
+    let (client, _calls, _bodies) = mock_client_recording_bodies(routes);
+    let error = approval::reconcile_approval(&approval, &client)
+        .await
+        .expect_err("a refused precondition is an error the reconciler requeues on");
+    assert!(
+        format!("{error:?}").contains("409"),
+        "the conflict reaches the reconciler verbatim; got {error}"
+    );
+}

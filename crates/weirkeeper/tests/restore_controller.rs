@@ -6245,3 +6245,247 @@ async fn a_restore_that_wrote_no_artifact_still_writes_no_verification_block() {
         statuses[0]
     );
 }
+
+// ===========================================================================
+// SEAM S7 — every `/status` write is a resourceVersion-preconditioned merge
+// PATCH (defect STATUS-PATCH-NO-RV)
+// ===========================================================================
+
+/// The `resourceVersion` the API server reports AFTER the first status write of
+/// a pass.
+///
+/// Deliberately not [`FIXTURE_RESOURCE_VERSION`]: a second write that
+/// preconditioned on the object this pass was HANDED rather than on what the
+/// first write returned would then be visibly wrong instead of accidentally
+/// right.
+const BUMPED_RESOURCE_VERSION: &str = "4099";
+
+/// [`finished_routes`] whose `/status` PATCH answers with the object standing
+/// one version later, as a real API server does.
+fn finished_routes_bumping_version(pods: String, log: String) -> Vec<Route> {
+    let mut routes = finished_routes(pods, log, "Complete");
+    let bumped = restore_json(PLAN_BYTES, APPROVAL, NAME).replace(
+        &format!("\"resourceVersion\": \"{FIXTURE_RESOURCE_VERSION}\""),
+        &format!("\"resourceVersion\": \"{BUMPED_RESOURCE_VERSION}\""),
+    );
+    assert!(
+        bumped.contains(BUMPED_RESOURCE_VERSION),
+        "the fixture carries a resourceVersion to bump"
+    );
+    for route in &mut routes {
+        if route.method == "PATCH" && route.path_suffix.ends_with("/status") {
+            route.body = bumped.clone();
+        }
+    }
+    routes
+}
+
+/// Every `PATCH …/status` body the double saw, whole — `metadata` included.
+fn patch_bodies(bodies: &[SeenBody], suffix: &str) -> Vec<Value> {
+    bodies
+        .iter()
+        .filter(|b| b.method == "PATCH" && path(&b.uri).ends_with(suffix))
+        .map(|b| serde_json::from_str::<Value>(&b.body).expect("a status patch is JSON"))
+        .collect()
+}
+
+/// **EVERY STATUS WRITE CARRIES ITS PRECONDITION** — D-SEAMS **S7**, and the
+/// row the D3 W2 record implies.
+///
+/// `charts/logweir/README.md:53` says every status write in this crate is a
+/// `resourceVersion`-preconditioned merge PATCH. Defect STATUS-PATCH-NO-RV is
+/// that this reconciler's nine writes were not: the merge patch went out with
+/// no `metadata` at all, so a pass computing from a stale watch-cache copy
+/// overwrote whatever a concurrent writer had stored.
+///
+/// Asserted over TWO passes that take different branches — the admission hold
+/// and the finished run, whose second write is the verification — because the
+/// defect was one helper serving every branch and a row over one branch would
+/// not have seen it.
+///
+/// KILLS: dropping the `metadata` insert in
+/// `conditions::patch_status_preconditioned`; writing an empty
+/// `resourceVersion`; naming a different object in the body.
+#[tokio::test]
+async fn every_restore_status_write_is_a_resource_version_preconditioned_merge_patch() {
+    // ---- the admission hold: one write ---------------------------------
+    let (client, _rec, bodies) = mock_client_recording_bodies(admission_routes(
+        200,
+        approval_json(false, &plan_hash(), &plan_hash()),
+        200,
+        cluster_json(true, PLAINTEXT_AUTH),
+    ));
+    reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
+    let held = patch_bodies(
+        &bodies
+            .lock()
+            .expect("the body recorder is readable")
+            .clone(),
+        "/status",
+    );
+    assert_eq!(held.len(), 1, "the hold writes once; got {held:?}");
+
+    // ---- the finished run: the terminal write and the verification -----
+    let (client2, _rec2, bodies2) = mock_client_recording_bodies(finished_routes(
+        pod_list_terminated(0),
+        log_body(&i8_tail()),
+        "Complete",
+    ));
+    reconcile_restore(
+        &restore(),
+        &client2,
+        &passing_scorecard,
+        &valid_evidence_at(utc(2026, 9, 10, 12, 0)),
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
+    let finished = patch_bodies(
+        &bodies2
+            .lock()
+            .expect("the body recorder is readable")
+            .clone(),
+        "/status",
+    );
+    assert_eq!(
+        finished.len(),
+        2,
+        "a finished, verified pass writes twice; got {finished:?}"
+    );
+
+    for body in held.iter().chain(finished.iter()) {
+        assert_eq!(
+            body["metadata"]["name"],
+            serde_json::json!(NAME),
+            "the precondition is tied to the object the request path names; got {body}"
+        );
+        let version = body["metadata"]["resourceVersion"].as_str();
+        assert!(
+            version.is_some_and(|v| !v.is_empty()),
+            "every /status write carries a non-empty resourceVersion precondition (S7); got \
+             {body}"
+        );
+    }
+}
+
+/// **THE SECOND WRITE OF A PASS PRECONDITIONS ON WHAT THE FIRST ONE ANSWERED.**
+///
+/// The terminal patch and the verification patch are two writes of ONE pass,
+/// and after the first returns the object this pass was handed is stale by
+/// exactly one version. Preconditioned on that stale version the verification
+/// write is refused with a `409` forever — and a terminal `Restore` requeues
+/// `AwaitChange` and never reads its Job again, so the evidence verdict would
+/// be lost rather than deferred.
+///
+/// KILLS: `patch_status_at(&restores, restore, &name, &at, …)` rewritten as
+/// `patch_status_if_changed(&restores, restore, &name, …)` — the whole suite
+/// passes with that mutation unless the double's answer moves the version,
+/// which is why this row bumps it.
+#[tokio::test]
+async fn the_verification_write_preconditions_on_the_terminal_writes_answer() {
+    let (client, _rec, bodies) = mock_client_recording_bodies(finished_routes_bumping_version(
+        pod_list_terminated(0),
+        log_body(&i8_tail()),
+    ));
+    reconcile_restore(
+        &restore(),
+        &client,
+        &passing_scorecard,
+        &valid_evidence_at(utc(2026, 9, 10, 12, 0)),
+        now(),
+    )
+    .await
+    .expect("the reconcile completes");
+    let seen = bodies
+        .lock()
+        .expect("the body recorder is readable")
+        .clone();
+    let writes = patch_bodies(&seen, "/status");
+    assert_eq!(writes.len(), 2, "two writes in one pass; got {writes:?}");
+    assert_eq!(
+        writes[0]["metadata"]["resourceVersion"],
+        serde_json::json!(FIXTURE_RESOURCE_VERSION),
+        "the FIRST write preconditions on the object the watch delivered"
+    );
+    assert_eq!(
+        writes[1]["metadata"]["resourceVersion"],
+        serde_json::json!(BUMPED_RESOURCE_VERSION),
+        "the SECOND write preconditions on where the first write left the object, not on the \
+         version this pass was handed"
+    );
+    assert_eq!(
+        writes[1].pointer("/status/evidence/verification/result"),
+        Some(&serde_json::json!("Valid")),
+        "the second write is the verification verdict; got {}",
+        writes[1]
+    );
+}
+
+/// **A `409` IS SURFACED, NOT SWALLOWED AND NOT RETRIED** — the row the D3 W2
+/// record implies.
+///
+/// The precondition working looks like this: the API server answers `409`, the
+/// helper returns it as the API error it is, the reconcile stops there, and
+/// `error_policy` requeues so the next pass reads what the OTHER writer
+/// stored. Nothing this pass computed is on the object, and — the half that
+/// makes it a safety property rather than a detail — the Job's TTL is not
+/// patched either, so the pod whose log the next pass has to read is still
+/// alive.
+///
+/// KILLS: swallowing the 409 inside the helper and returning `Ok`; re-reading
+/// the object and retrying the same computed status inside the helper (either
+/// one puts a status derived from inputs nobody re-observed on top of the
+/// concurrent writer's).
+#[tokio::test]
+async fn a_conflicting_status_write_stops_the_pass_and_arms_no_ttl() {
+    let mut routes = finished_routes(pod_list_terminated(0), log_body(&i8_tail()), "Complete");
+    for route in &mut routes {
+        if route.method == "PATCH" && route.path_suffix.ends_with("/status") {
+            route.status = 409;
+            route.body = r#"{"kind":"Status","apiVersion":"v1","status":"Failure",
+                             "message":"the object has been modified","reason":"Conflict",
+                             "code":409}"#
+                .to_string();
+        }
+    }
+    let (client, _rec, bodies) = mock_client_recording_bodies(routes);
+    let error = reconcile_restore(
+        &restore(),
+        &client,
+        &passing_scorecard,
+        &valid_evidence_at(utc(2026, 9, 10, 12, 0)),
+        now(),
+    )
+    .await
+    .expect_err("a refused precondition is an error the reconciler requeues on");
+    match error {
+        weirkeeper::controllers::restore::RestoreError::Api(kube::Error::Api(e)) => {
+            assert_eq!(e.code, 409, "the conflict reaches the reconciler verbatim");
+        }
+        other => panic!("a 409 surfaces as the API error it is; got {other}"),
+    }
+
+    let seen = bodies
+        .lock()
+        .expect("the body recorder is readable")
+        .clone();
+    assert_eq!(
+        patch_bodies(&seen, "/status").len(),
+        1,
+        "the pass stops at the refused write and does not try a second one: {seen:?}"
+    );
+    assert!(
+        !seen
+            .iter()
+            .any(|b| b.method == "PATCH" && path(&b.uri).contains("/jobs/")),
+        "no TTL is armed on a run whose outcome is not on the server: {seen:?}"
+    );
+}
