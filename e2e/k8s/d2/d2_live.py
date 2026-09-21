@@ -1327,7 +1327,7 @@ def sweep() -> dict[str, Any]:
 
 
 def cleanup() -> None:
-    proof: list[str] = ["# d2w14 cleanup proof", ""]
+    proof: list[str] = [f"# {OWNER} cleanup proof", ""]
     for name, key in ((NS, "namespaceUid"), (NS_B, "namespaceBUid")):
         assert_safe_namespace(name)
         live = json.loads(
