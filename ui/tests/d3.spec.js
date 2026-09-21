@@ -36,7 +36,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 
-import { SERVER_TIME_MAX_AGE_MS } from "../api.js";
+import { SERVER_TIME_MAX_AGE_MS, problemError } from "../api.js";
+import { fieldErrors } from "../lifecycle.js";
 
 import {
   D3_ENUMS,
@@ -119,6 +120,7 @@ import {
   renderScheduleHealth,
 } from "../pages/protection.js";
 import {
+  CATALOG_FIELD_PATHS,
   CONNECT_SENTENCE,
   NO_CATALOG_SENTENCE,
   POINT_BINDING_SENTENCE,
@@ -1536,6 +1538,64 @@ function fakeForm(values) {
     },
   };
 }
+
+test("a_422_from_the_connect_route_lands_beside_the_field_it_names", () => {
+  // THE LIVE RUN FOUND THIS, AND IT IS THE ONE THE FIXTURES COULD NOT.
+  // `POST .../catalogs` with a name that is not a DNS-1123 subdomain is a real
+  // 422 whose body carries `errors: [{field, code, message}]` -- this is the
+  // document `logweir-api` answered on 2026-09-21, copied verbatim. The
+  // console's `fieldErrors` reads `details.causes[]`, and nothing bridged the
+  // two for a D3 create: the form printed "fix the fields marked below" and
+  // marked nothing.
+  const body = JSON.stringify({
+    type: "https://logweir.dev/problems/validation-failed",
+    title: "Request validation failed",
+    status: 422,
+    code: "validation_failed",
+    detail: "One or more fields are invalid.",
+    requestId: "01M3239MB1EA2W0D4SR9BXA4VY",
+    retryable: false,
+    errors: [{ field: "name", code: "invalid_value",
+      message: "a catalog name is a DNS-1123 subdomain" }],
+  });
+  const error = problemError({ status: 422 }, body);
+  assert.equal(error.code, "validation_failed");
+  assert.equal(error.message, "One or more fields are invalid.",
+    "the top-level sentence is the server's `detail`, verbatim");
+
+  const placed = fieldErrors(error, CATALOG_FIELD_PATHS);
+  assert.deepEqual(placed.fields.name, ["a catalog name is a DNS-1123 subdomain"],
+    "THE MUTANT: drop the bridge and this is `undefined` -- the form marks no field at all");
+  assert.deepEqual(placed.unmatched, [],
+    "and `name` is a path this form declares, so nothing travels as unmatched");
+
+  const html = decode(renderConnectForm({
+    ns: "team-a", values: { name: "Not A DNS Name", destination: "primary", syncMode: "full" },
+    errors: placed,
+    state: { phase: "rejected", error: error },
+  }));
+  assert.match(html, /a catalog name is a DNS-1123 subdomain/,
+    "the server's own words are on screen, beside the input they are about");
+  assert.match(html, /aria-invalid="true"/, "and the field it names is marked");
+
+  // A PATH NO INPUT MATCHES IS STILL SHOWN, beside the outcome rather than
+  // dropped -- the same rule every other form in this tree follows.
+  const elsewhere = problemError({ status: 422 }, JSON.stringify({
+    code: "validation_failed", detail: "One or more fields are invalid.",
+    errors: [{ field: "viewLimit", code: "out_of_range", message: "viewLimit is at most 100000" }],
+  }));
+  const spare = fieldErrors(elsewhere, CATALOG_FIELD_PATHS);
+  assert.equal(Object.keys(spare.fields).length, 0);
+  assert.deepEqual(spare.unmatched, ["viewLimit: viewLimit is at most 100000"]);
+
+  // A PROBLEM WITH NO `errors` IS NOT GIVEN AN EMPTY ONE.
+  const plain = problemError({ status: 403 }, JSON.stringify({
+    code: "forbidden", detail: "This actor may not read that namespace.",
+  }));
+  assert.equal(plain.details, undefined,
+    "no `errors` array is no `details`, which is what an absent field means");
+  assert.equal(plain.message, "This actor may not read that namespace.");
+});
 
 test("the_connect_form_sends_one_request_per_intent_and_a_second_click_while_pending_sends_none",
   async () => {

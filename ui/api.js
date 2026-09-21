@@ -696,6 +696,35 @@ export function problemError(response, text) {
   error.reason = document.code;
   error.code = document.code;
   error.problem = document;
+  // THE PER-FIELD CAUSES A 422 CARRIES, IN THE SHAPE A FORM ALREADY READS.
+  //
+  // THE LIVE RUN FOUND THIS ONE. `Problem.errors[]` is `{field, code,
+  // message}` and `lifecycle.js::fieldErrors` reads `details.causes[]` as
+  // `{field, message, reason}`; only four call sites in `ui/client.js` bridged
+  // the two, and the D3 creates do not go through any of them. So a real 422
+  // from `POST .../catalogs` -- "a catalog name is a DNS-1123 subdomain",
+  // against the field `name` -- reached the connect form with NO field
+  // errors at all, and the form still printed "fix the fields marked below"
+  // with nothing marked. A page that names a repair it does not point at is
+  // worse than one that says only what went wrong.
+  //
+  // Bridged HERE, at the one place every product-API error is built, rather
+  // than at each caller: the per-caller `withCauses` still runs afterwards
+  // where it exists and still wins, because it canonicalises the path into the
+  // custom resource's vocabulary and this cannot -- it does not know the
+  // plural. The messages are the server's own either way, verbatim.
+  if (Array.isArray(document.errors) && document.errors.length > 0) {
+    error.details = {
+      causes: document.errors.map((cause) => {
+        const c = cause || {};
+        return {
+          field: typeof c.field === "string" ? c.field : "",
+          message: typeof c.message === "string" ? c.message : "",
+          reason: typeof c.code === "string" ? c.code : "invalid",
+        };
+      }),
+    };
+  }
   if (typeof document.requestId === "string") {
     error.requestId = document.requestId;
   }
