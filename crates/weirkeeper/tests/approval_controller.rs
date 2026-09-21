@@ -1188,6 +1188,7 @@ async fn a_recreated_subject_uid_does_not_rebind_an_existing_approval() {
         approver: Some("ops@example.com".to_string()),
         ticket: Some("CHG-4711".to_string()),
         self_attested_risk: Some(false),
+        approver_key_window: None,
         verified_subject_ref: Some(VerifiedSubjectRef {
             api_version: "logweir.dev/v1alpha1".to_string(),
             kind: SubjectKind::Restore,
@@ -2718,8 +2719,19 @@ fn only_a_verified_outcome_is_time_limited() {
     )
     .expect("inside the window");
     assert_eq!(
-        verified.valid_until, not_after,
+        verified.valid_until(),
+        not_after,
         "the MATCHED key's own window, which is what check 6 asked about"
+    );
+    let window = verified
+        .key_window
+        .clone()
+        .expect("the matched key's window travels with the verdict");
+    assert_eq!(
+        (window.key_id.as_str(), window.not_after),
+        (APPROVER_KEY_ID, not_after),
+        "…and the window NAMES the key it is about, so a reader cannot compare a deadline \
+         against some other key's notAfter"
     );
     assert_eq!(
         ApprovalOutcome::Verified(verified).valid_until(),
@@ -2861,4 +2873,246 @@ async fn a_conflicting_approval_verdict_write_is_surfaced() {
         format!("{error:?}").contains("409"),
         "the conflict reaches the reconciler verbatim; got {error}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// APPROVAL-KEY-WINDOW-UNPUBLISHED — the matched key's window reaches `/status`
+// ---------------------------------------------------------------------------
+
+/// The routes a policy-governed `Approval` reconcile takes, with `not_after`
+/// on the one approver key.
+fn policy_routes(not_after: DateTime<Utc>) -> Vec<Route> {
+    let mut approver = policy_key(vec![SpecUsage::GovernedApproval]);
+    approver.not_after = not_after;
+    let list = serde_json::json!({
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "TrustPolicyList",
+        "metadata": {"resourceVersion": "1"},
+        "items": [trust_policy("org-default", vec![approver])],
+    });
+    vec![
+        Route {
+            method: "GET",
+            path_suffix: "/trustpolicies",
+            status: 200,
+            body: list.to_string(),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/trustrosters/default",
+            status: 200,
+            body: roster_body("", ""),
+        },
+        Route {
+            method: "GET",
+            path_suffix: "/restores/r1",
+            status: 200,
+            body: restore_body(PLAN_BYTES, PLAN_HASH),
+        },
+        Route {
+            method: "PATCH",
+            path_suffix: "/approvals/a1/status",
+            status: 200,
+            body: patched_approval_body(),
+        },
+    ]
+}
+
+/// One reconcile against a policy whose approver key expires at `not_after`,
+/// returning the `status` object it patched.
+async fn reconcile_under_policy(
+    approval: &Approval,
+    not_after: DateTime<Utc>,
+) -> Vec<serde_json::Value> {
+    let (client, _calls, bodies) = mock_client_recording_bodies(policy_routes(not_after));
+    approval::reconcile_approval(approval, &client)
+        .await
+        .expect("the reconcile completes");
+    let seen = bodies.lock().expect("the recorder is readable").clone();
+    status_patches(&seen)
+}
+
+/// The `Approval` the API server would hold after `patch` is merged onto
+/// `previous`.
+fn approval_carrying(previous: Option<&serde_json::Value>, patch: &serde_json::Value) -> Approval {
+    let mut stored = previous.cloned().unwrap_or(serde_json::Value::Null);
+    apply_merge_patch(&mut stored, patch);
+    let mut approval = approval_object(APPROVAL_DOC, &good_sidecar(), SubjectKind::Restore);
+    approval.status = Some(
+        serde_json::from_value::<ApprovalStatus>(stored)
+            .expect("the patched status is an ApprovalStatus"),
+    );
+    approval
+}
+
+/// **Defect APPROVAL-KEY-WINDOW-UNPUBLISHED, deliverable 1.** The verdict and
+/// the window it rests on are written by the same pass, in the same body.
+///
+/// Since PREFLIGHT-APPROVAL-ROSTER the restore preflight relays this object's
+/// verdict and resolves nothing itself, so the matched key's window is knowable
+/// ONLY from what this controller publishes. Two D2 §6.3 behaviours —
+/// `ApproverKeyExpiresBeforeDeadline` and the `min(10 m, notAfter)` re-check
+/// cap — are unreachable while it is absent.
+///
+/// KILLS: "publish the verdict and not the window" — the shipped behaviour and
+/// the defect itself; "publish a window with no key id on it", which a reader
+/// cannot tell apart from a window about some other approver key; "publish the
+/// `notAfter` and leave `notBefore` off", which D3 §7.6 stages a successor key
+/// through.
+#[tokio::test]
+async fn the_status_publishes_the_matched_keys_window_next_to_the_verdict() {
+    // THE WALL CLOCK, NOT THE FIXTURE INSTANT: `decide` stamps `Utc::now()`
+    // into `evaluate`, so a key whose window is relative to the fixture's
+    // 2026-09-09 would already have expired by the time the suite runs.
+    let not_after = Utc::now() + Duration::hours(3);
+    let approval = approval_object(APPROVAL_DOC, &good_sidecar(), SubjectKind::Restore);
+    let patches = reconcile_under_policy(&approval, not_after).await;
+    assert_eq!(patches.len(), 1, "one verdict, one write");
+    let status = &patches[0];
+
+    assert_eq!(status["verified"], serde_json::json!(true));
+    let window = &status["approverKeyWindow"];
+    assert_eq!(
+        window["keyId"].as_str(),
+        Some(APPROVER_KEY_ID),
+        "the window NAMES the key it is about, and it is the key that verified: {status}"
+    );
+    assert_eq!(
+        window["keyId"], status["matchedKeyId"],
+        "…the same key `status.matchedKeyId` reports"
+    );
+    assert_eq!(
+        window["notAfter"],
+        serde_json::to_value(not_after).expect("an instant serialises"),
+        "the resolved policy's own notAfter, verbatim: {status}"
+    );
+    assert_eq!(
+        window["notBefore"],
+        serde_json::to_value(at("2026-01-01T00:00:00Z")).expect("an instant serialises"),
+        "and its notBefore, which is what a staged successor key is recognised by: {status}"
+    );
+
+    // The window an operator reads and the instant this controller wakes at are
+    // ONE value. A status saying the key is good until 16:00 while the timer
+    // sleeps to 18:00 would be the expiry lag this field was added beside.
+    let ApprovalOutcome::Verified(verified) = approval::decide(
+        &approval,
+        &mock_client_recording(policy_routes(not_after)).0,
+    )
+    .await
+    .expect("the decision completes") else {
+        panic!("the fixture verifies");
+    };
+    assert_eq!(verified.valid_until(), not_after);
+}
+
+/// **Deliverable 1, second half: it is RE-DERIVED, not stamped once.**
+///
+/// The window is a projection of the resolved `TrustPolicy`, and a policy is an
+/// object an operator edits. It must move on exactly the events that move the
+/// `Verified` condition — which it does by construction here, because both come
+/// out of the same [`approval::decide`] outcome and are written by the same
+/// patch. G2 allows a `notAfter` to be brought FORWARD, which is how
+/// `e2e/k8s/d2`'s S18 expires a key in one namespace and nowhere else.
+///
+/// KILLS: "write the window once and keep it" — the second pass would publish
+/// the first pass's `notAfter` and a preflight would authorise a restore
+/// against a window the policy has already withdrawn; "read the window back off
+/// the object's own status instead of off the resolved trust".
+#[tokio::test]
+async fn a_trust_policy_edit_that_moves_not_after_moves_the_published_window() {
+    let first_until = Utc::now() + Duration::hours(3);
+    let brought_forward = Utc::now() + Duration::minutes(4);
+
+    let approval = approval_object(APPROVAL_DOC, &good_sidecar(), SubjectKind::Restore);
+    let first = reconcile_under_policy(&approval, first_until).await;
+    let stored = approval_carrying(None, &first[0]);
+
+    // The SAME object, reconciled again against a policy an operator narrowed.
+    let second = reconcile_under_policy(&stored, brought_forward).await;
+    assert_eq!(
+        second.len(),
+        1,
+        "a moved window is a changed status, so the no-op skip does not swallow it"
+    );
+    assert_eq!(
+        second[0]["approverKeyWindow"]["notAfter"],
+        serde_json::to_value(brought_forward).expect("an instant serialises"),
+        "the published window followed the policy: {}",
+        second[0]
+    );
+    assert_ne!(
+        first[0]["approverKeyWindow"]["notAfter"],
+        second[0]["approverKeyWindow"]["notAfter"]
+    );
+
+    // And a policy that did not move writes nothing at all — the window is not
+    // a heartbeat.
+    let steady = approval_carrying(Some(&first[0]), &second[0]);
+    let third = reconcile_under_policy(&steady, brought_forward).await;
+    assert!(
+        third.is_empty(),
+        "an unchanged window is an unchanged status: {third:?}"
+    );
+}
+
+/// **Deliverable 1, third half: absent when no key matched — and CLEARED.**
+///
+/// `status_for` has always computed `None` for the approver, the key id and now
+/// the window when nothing verified. It said so into a JSON **merge** patch,
+/// which leaves a key it does not carry (RFC 7386), so an `Approval` verified
+/// at 09:00 and refused at 09:05 kept all of them. For the window that is not
+/// untidiness: the preflight compares a deadline against it, and a window
+/// stranded by a withdrawn verdict reads as an OPEN window for a key that
+/// authorises nothing — the "absent means valid" failure the field exists to
+/// prevent, arriving as "present and stale" instead.
+///
+/// KILLS: "omit the field and let the merge sort it out" — the shipped
+/// `json!({"status": status})` body; "clear the window but keep the approver
+/// and the key id", which leaves an attacker-supplied name beside
+/// `Verified=False`; "clear `verifiedSubjectRef` too", which would unlatch the
+/// replay fence a recreated referent is refused by.
+#[tokio::test]
+async fn a_refused_approval_publishes_no_window_and_clears_the_one_it_had() {
+    let verified_status = reconcile_under_policy(
+        &approval_object(APPROVAL_DOC, &good_sidecar(), SubjectKind::Restore),
+        Utc::now() + Duration::hours(3),
+    )
+    .await[0]
+        .clone();
+    assert!(!verified_status["approverKeyWindow"].is_null());
+
+    // The same object, after the key expired under the policy that governs it.
+    let stored = approval_carrying(None, &verified_status);
+    let refused = reconcile_under_policy(&stored, Utc::now() - Duration::minutes(1)).await;
+    assert_eq!(refused.len(), 1);
+    let status = &refused[0];
+    assert_eq!(status["verified"], serde_json::json!(false));
+
+    for field in approval::CLEARABLE_STATUS_FIELDS {
+        assert_eq!(
+            status[field],
+            serde_json::Value::Null,
+            "`{field}` is sent as an explicit null, or the merge patch leaves the value a \
+             withdrawn verdict wrote: {status}"
+        );
+    }
+    assert!(
+        !status["verifiedSubjectRef"].is_null(),
+        "the replay fence is NOT clearable: once established it must survive every later \
+         failure, including the referent's deletion: {status}"
+    );
+
+    // And the object the API server is left holding really has no window.
+    let after = approval_carrying(Some(&verified_status), status);
+    let after_status = after.status.expect("a status was patched");
+    assert!(
+        after_status.approver_key_window.is_none(),
+        "merging the patch as the API server would leaves no window behind"
+    );
+    assert!(
+        after_status.matched_key_id.is_none() && after_status.approver.is_none(),
+        "…nor a key id or an approver name lifted from bytes that did not verify"
+    );
+    assert!(after_status.verified_subject_ref.is_some());
 }

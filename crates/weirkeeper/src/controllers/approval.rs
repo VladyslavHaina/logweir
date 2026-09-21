@@ -65,7 +65,9 @@ use tracing::{info, warn};
 
 use super::Context;
 use crate::conditions::{current_condition, merge_condition, StatusVersion};
-use crate::crds::approval::{Approval, ApprovalStatus, SubjectKind, VerifiedSubjectRef};
+use crate::crds::approval::{
+    Approval, ApprovalStatus, ApproverKeyWindow, SubjectKind, VerifiedSubjectRef,
+};
 use crate::crds::backup::Backup;
 use crate::crds::restore::Restore;
 use crate::crds::trust_roster::TrustRoster;
@@ -339,21 +341,24 @@ pub struct Verified {
     /// signature — the value [`verify_detached`] RETURNED, never
     /// `sidecar.signatures[0].keyid`.
     pub matched_key_id: String,
-    /// **The instant this verdict stops being true on its own** — the matched
-    /// key's `notAfter`, and the whole of defect `TRUST-EXPIRY-LAG`.
+    /// **The matched key's declared validity window** — `None` only when the
+    /// resolved trust does not carry the matched id at all, which check 6 has
+    /// already made unreachable.
     ///
-    /// A verified approval is not a fact, it is a fact WITH A DEADLINE: check 6
-    /// asked whether the matched key may sign something new, and
-    /// `may_sign_new` refuses at `now >= notAfter`. Nothing writes to the
-    /// object when the clock crosses that instant, so on lab-refresh-4 an
-    /// approval read `Verified=True` across 22 samples over 2 m 35 s after its
-    /// approver key expired, at one unchanged `resourceVersion`.
+    /// TWO CONSUMERS, ONE FACT. [`Self::valid_until`] reads `notAfter` off it
+    /// to requeue AT the key's boundary instead of at the next heartbeat
+    /// (defect `TRUST-EXPIRY-LAG`: on lab-refresh-4 an approval read
+    /// `Verified=True` across 22 samples over 2 m 35 s after its approver key
+    /// expired, at one unchanged `resourceVersion`), and [`status_for`]
+    /// publishes the whole of it so the restore preflight can compare a
+    /// deadline against it (defect `APPROVAL-KEY-WINDOW-UNPUBLISHED`).
     ///
-    /// Carrying it here is what lets [`reconcile`] requeue AT the boundary
-    /// instead of at the next heartbeat. It is deliberately not written to the
-    /// status: the condition already says everything an operator reads, and a
-    /// new status field would be a CRD change for a lag a requeue closes.
-    pub valid_until: DateTime<Utc>,
+    /// **IT WAS A BARE `valid_until` UNTIL THE SECOND CONSUMER ARRIVED**, and
+    /// keeping one field rather than adding a second is the point: a published
+    /// window and a requeue deadline that could disagree is a status saying the
+    /// key is good until 12:00 while the controller sleeps until 13:00. They
+    /// are the same value read twice.
+    pub key_window: Option<ApproverKeyWindow>,
     /// The approver named inside the signed bytes.
     pub approver: String,
     /// The change ticket named inside the signed bytes.
@@ -376,6 +381,25 @@ pub struct Verified {
     /// Pure [`evaluate`] callers have no Kubernetes referent and leave it
     /// absent; only a reconcile outcome is written to status.
     pub verified_subject_ref: Option<VerifiedSubjectRef>,
+}
+
+impl Verified {
+    /// **The instant this verdict stops being true on its own** — the matched
+    /// key's `notAfter`.
+    ///
+    /// THE FALLBACK IS A DEADLINE THAT NEVER FIRES RATHER THAN A PANIC. A
+    /// `None` window means the resolved trust does not carry the id check 6
+    /// resolved through `may_sign_new_for`, which cannot happen; an admission
+    /// path may not abort on an invariant it merely believes, so the timer
+    /// falls back to the heartbeat and the STATUS publishes nothing at all —
+    /// unknown, never valid.
+    #[must_use]
+    pub const fn valid_until(&self) -> DateTime<Utc> {
+        match &self.key_window {
+            Some(window) => window.not_after,
+            None => DateTime::<Utc>::MAX_UTC,
+        }
+    }
 }
 
 /// The approval document, as this controller reads it.
@@ -639,15 +663,20 @@ pub fn evaluate(
         .key(&matched_key_id)
         .is_some_and(|k| k.trust.has_usage(KeyUsage::EvidenceSigning));
 
+    // THE MATCHED KEY'S OWN WINDOW, and it is present by construction: check 6
+    // above resolved this id through `may_sign_new_for`, which refuses
+    // `UntrustedSigner` when the resolved trust does not carry it. THE MATCHED
+    // key's, never the first key's — a policy may hold several approver keys
+    // and only one of them signed this, and publishing another one's window
+    // would be a deadline about a key that authorised nothing.
+    let key_window = trust.key(&matched_key_id).map(|k| ApproverKeyWindow {
+        key_id: matched_key_id.clone(),
+        not_before: k.trust.not_before,
+        not_after: k.trust.not_after,
+    });
+
     Ok(Verified {
-        // THE MATCHED KEY'S OWN WINDOW, and it is present by construction:
-        // check 6 above resolved this id through `may_sign_new_for`, which
-        // refuses `UntrustedSigner` when the policy does not carry it. The
-        // fallback is a deadline that never fires rather than a panic, because
-        // an admission path may not abort on an invariant it merely believes.
-        valid_until: trust
-            .key(&matched_key_id)
-            .map_or(chrono::DateTime::<Utc>::MAX_UTC, |k| k.trust.not_after),
+        key_window,
         matched_key_id,
         approver: doc.approver,
         ticket: doc.ticket,
@@ -921,7 +950,7 @@ impl ApprovalOutcome {
     #[must_use]
     pub const fn valid_until(&self) -> Option<DateTime<Utc>> {
         match self {
-            Self::Verified(v) => Some(v.valid_until),
+            Self::Verified(v) => Some(v.valid_until()),
             Self::Refused(_) | Self::Referent(_) => None,
         }
     }
@@ -1260,37 +1289,46 @@ pub fn status_for(
     now: DateTime<Utc>,
 ) -> ApprovalStatus {
     let verified = outcome.is_verified();
-    let (matched_key_id, approver, ticket, self_attested_risk, verified_subject_ref) = match outcome
-    {
-        ApprovalOutcome::Verified(v) => (
-            Some(v.matched_key_id.clone()),
-            Some(v.approver.clone()),
-            Some(v.ticket.clone()),
-            Some(v.self_attested_risk),
-            v.verified_subject_ref.clone(),
-        ),
-        // A refused approval reports NO approver and NO key id. An approver
-        // name lifted out of bytes whose signature did not verify is an
-        // attacker-controlled string on a status field a UI renders. Subject
-        // provenance is different: once established it is a replay fence and
-        // must survive every later failure, including referent deletion.
-        _ => (
-            None,
-            None,
-            None,
-            None,
-            approval
-                .status
-                .as_ref()
-                .and_then(|status| status.verified_subject_ref.clone()),
-        ),
-    };
+    let (matched_key_id, approver, ticket, self_attested_risk, key_window, verified_subject_ref) =
+        match outcome {
+            ApprovalOutcome::Verified(v) => (
+                Some(v.matched_key_id.clone()),
+                Some(v.approver.clone()),
+                Some(v.ticket.clone()),
+                Some(v.self_attested_risk),
+                v.key_window.clone(),
+                v.verified_subject_ref.clone(),
+            ),
+            // A refused approval reports NO approver, NO key id AND NO KEY
+            // WINDOW. An approver name lifted out of bytes whose signature did
+            // not verify is an attacker-controlled string on a status field a
+            // UI renders; a window left over from a verdict that has since been
+            // withdrawn is worse, because a reader compares a deadline against
+            // it and finds it open. No key matched, so there is no window —
+            // which the preflight reads as `unknown`, never as valid.
+            //
+            // Subject provenance is different: once established it is a replay
+            // fence and must survive every later failure, including referent
+            // deletion.
+            _ => (
+                None,
+                None,
+                None,
+                None,
+                None,
+                approval
+                    .status
+                    .as_ref()
+                    .and_then(|status| status.verified_subject_ref.clone()),
+            ),
+        };
     ApprovalStatus {
         verified: Some(verified),
         matched_key_id,
         approver,
         ticket,
         self_attested_risk,
+        approver_key_window: key_window,
         verified_subject_ref,
         conditions: Some(vec![merge_condition(
             current_condition(
@@ -1307,6 +1345,56 @@ pub fn status_for(
             },
         )]),
     }
+}
+
+/// The `status` keys this reconciler computes as `Option` and must be able to
+/// CLEAR — defect `STATUS-PATCH-NO-RV`'s neighbour, and the reason
+/// [`status_patch_body`] exists.
+///
+/// # A merge patch that omits a key leaves it
+///
+/// [`status_for`] already says a refused `Approval` reports no approver, no key
+/// id, no self-attestation label and no key window. It said so by setting each
+/// to `None`, and every one of them is `skip_serializing_if = "Option::is_none"`
+/// — so the patch body simply had no such key and RFC 7386 left the old value
+/// on the object. An `Approval` verified at 09:00 and refused at 09:05 kept
+/// `status.approver`, `status.matchedKeyId` and (from this task on) the
+/// approver key's window beside a `Verified=False` condition.
+///
+/// The window is what makes it urgent rather than untidy. The restore
+/// preflight compares a restore's deadline against it and caps its re-check at
+/// its `notAfter`; a window stranded by a withdrawn verdict is a reader finding
+/// an OPEN window for a key that authorises nothing, which is precisely the
+/// "treat absent as valid" failure the whole field exists to avoid. The other
+/// three are swept with it because they are the same bug in the same body.
+///
+/// `verifiedSubjectRef` is DELIBERATELY NOT HERE. It is a replay fence, not a
+/// verdict: once established it must survive every later failure, and
+/// [`status_for`] carries it forward for exactly that reason.
+pub const CLEARABLE_STATUS_FIELDS: [&str; 5] = [
+    "matchedKeyId",
+    "approver",
+    "ticket",
+    "selfAttestedRisk",
+    "approverKeyWindow",
+];
+
+/// The `{"status": …}` merge-patch body, with an explicit `null` for every
+/// [`CLEARABLE_STATUS_FIELDS`] key this pass computed as `None`.
+///
+/// [`crate::conditions::status_unchanged`] applies the body exactly as the API
+/// server would, so the no-write-when-nothing-changed guard keeps working: a
+/// `null` for a key the object does not have merges to nothing.
+#[must_use]
+pub fn status_patch_body(status: &ApprovalStatus) -> serde_json::Value {
+    let mut body = serde_json::to_value(status).unwrap_or(serde_json::Value::Null);
+    if let Some(map) = body.as_object_mut() {
+        for field in CLEARABLE_STATUS_FIELDS {
+            map.entry(field.to_string())
+                .or_insert(serde_json::Value::Null);
+        }
+    }
+    json!({ "status": body })
 }
 
 /// Decide one `Approval` and patch **only** its `/status`.
@@ -1331,7 +1419,7 @@ pub async fn reconcile_approval(
     let status = status_for(approval, &outcome, Utc::now());
 
     let api: Api<Approval> = Api::namespaced(client.clone(), &namespace);
-    let patch = json!({ "status": status });
+    let patch = status_patch_body(&status);
     // NO WRITE WHEN NOTHING CHANGED — plan erratum E11(d), review finding H-2.
     // An `Approval` is the most steady object this controller holds: its spec
     // is sealed by CEL and its verdict is a function of that spec, the roster

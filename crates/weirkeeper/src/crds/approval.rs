@@ -9,7 +9,7 @@
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
-use super::Condition;
+use super::{Condition, Time};
 
 /// What an `Approval` can be about.
 ///
@@ -150,6 +150,53 @@ pub struct ApprovalSpec {
     pub sidecar_bytes: String,
 }
 
+/// The matched approver key's declared validity window, published beside the
+/// `Verified` condition.
+///
+/// # Why a status field, when the condition already carries the verdict
+///
+/// Defect **APPROVAL-KEY-WINDOW-UNPUBLISHED**. Since PREFLIGHT-APPROVAL-ROSTER
+/// the restore preflight's two `approval.*` rows RELAY this object's verdict
+/// and no longer resolve the approver key themselves — the roster they used to
+/// read is not the authority the namespace's `TrustPolicy` is. That removed the
+/// only place the key's window was known, and took two D2 §6.3 behaviours with
+/// it: `ApproverKeyExpiresBeforeDeadline`, which warns ahead of time about a
+/// key that expires inside a restore's own deadline, and the
+/// `min(10 m, notAfter)` re-check cap on both rows. Neither is a verdict about
+/// this `Approval`; both are questions about the KEY, and only the controller
+/// that resolved the key can answer them.
+///
+/// So the window is published here, by the one process that resolved it,
+/// derived from the same [`crate::trust::ResolvedTrust`] the `Verified`
+/// condition is derived from and written in the same preconditioned patch. A
+/// reader that finds it can compare it; a reader that does not MUST read
+/// `unknown` and never `valid` (PLAT-19.1's acceptance: unevaluated or stale
+/// expiry information is unknown, not valid).
+///
+/// IT IS NOT A SECOND VERDICT. The window is what the resolved trust DECLARES
+/// for the key; whether the key may authorise anything now is the `Verified`
+/// condition's answer and nothing here overrides it. A retired or revoked key
+/// has an open window and authorises nothing, which is exactly why this type
+/// carries three facts and no state.
+#[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ApproverKeyWindow {
+    /// The `keyId` this window belongs to — the key the signature actually
+    /// verified under, the same value [`ApprovalStatus::matched_key_id`]
+    /// carries.
+    ///
+    /// REPEATED HERE ON PURPOSE. A window beside a key id is two fields a
+    /// merge patch can leave in disagreement; a window that NAMES its key is
+    /// one fact, and a reader can refuse a window that is about some other
+    /// key rather than compare a deadline against it.
+    pub key_id: String,
+    /// That key's declared `notBefore`.
+    pub not_before: Time,
+    /// That key's declared `notAfter` — the instant this approval stops being
+    /// true on its own, and the value the preflight caps its re-check at.
+    pub not_after: Time,
+}
+
 /// `Approval.status`.
 #[derive(Deserialize, Serialize, Clone, Debug, Default, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -171,6 +218,17 @@ pub struct ApprovalStatus {
     /// `false` means only that the two matched key ids differ.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub self_attested_risk: Option<bool>,
+    /// The matched approver key's declared validity window — defect
+    /// APPROVAL-KEY-WINDOW-UNPUBLISHED; see [`ApproverKeyWindow`].
+    ///
+    /// **ABSENT WHEN NO KEY MATCHED**, and absent means UNKNOWN to every
+    /// reader, never valid. It is cleared by an explicit `null` on every
+    /// refusal (`controllers::approval::CLEARABLE_STATUS_FIELDS`) rather than
+    /// merely omitted, because a JSON merge patch that omits a key LEAVES IT —
+    /// and a window left behind by a verdict that has since been withdrawn is
+    /// the one shape a reader would read as "this key is good until then".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approver_key_window: Option<ApproverKeyWindow>,
     /// The exact referent identity used for the first successful verification.
     /// Once present it is retained across later failures so a same-named,
     /// recreated object can never acquire this Approval on a later reconcile.
