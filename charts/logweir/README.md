@@ -602,6 +602,13 @@ namespaces must already exist and be listed in
 `identity.authorizedRunnerNamespaces`. Run `just check-secrets <namespace>`
 only after the Helm hooks succeed.
 
+**How small those archive credentials may be is measured, not guessed.**
+[`docs/kubernetes.md`](../../docs/kubernetes.md) §7a carries the per-role
+minimal S3 action set with its resource scope — one bisected row per action,
+each naming the live harness row that proved the role's own operation fails
+without it. A wider grant than that table is not required by anything this
+chart installs.
+
 The controller's read-only evidence credential is the `logweir-evidence-ro`
 Secret in the release namespace. It is `optional: true` on the Deployment: the
 controller starts without it and every verification reads `NotAttempted`,

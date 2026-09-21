@@ -4767,8 +4767,20 @@ def u6_restore_plan(backup_id: str, point_in_time: str, prefix: str) -> dict[str
             "teardown": "delete",
         },
         "restore": {"point_in_time": point_in_time},
-        "sample": {"window_start": "2026-09-01T00:00:00Z", "window_end": point_in_time,
-                   "per_partition": 5},
+        "sample": {
+            "window_start": "2026-09-01T00:00:00Z",
+            "window_end": point_in_time,
+            "records_per_partition": 25,
+            "anchor": "head",
+        },
+        "objectives": {"rto_seconds": 3600, "rpo_seconds": 86400, "pass_rate": 1.0},
+        "evidence": {
+            "backend": "s3", "bucket": U6_BUCKET, "prefix": "logweir/",
+            "region": "us-east-1",
+            "endpoint": f"http://minio-a.{NS}.svc:9000",
+            "path_style": True, "allow_http": True,
+        },
+        "notifications": {"webhooks": []},
     }
 
 
