@@ -4793,15 +4793,28 @@ def u6_rows(obj: dict[str, Any], rows: list[str]) -> dict[str, Any]:
             for r in rows}
 
 
+def u6_unanswered(picked: dict[str, Any], ok: bool) -> bool:
+    """Did this check FAIL without answering anything it was asked?
+
+    Not "did every row answer". A blocking row that failed puts the rows after
+    it at `unknown/BlockedByPrerequisite` — "a prerequisite of this check did
+    not pass, so it did not run" — which is the product being honest about a
+    row it did not reach, downstream of a verdict it did reach. What would make
+    a removal useless as a measurement is a result with NO `notReady` verdict
+    at all: every row `unknown/PodNotStarted`, a check that timed out, a pod
+    that never ran. That is a fact about the harness, not about the grant.
+    """
+    if ok:
+        return False
+    return not any(
+        row.get("state") == "notReady" and row.get("code") for row in picked.values()
+    )
+
+
 def u6_check_outcome(obj: dict[str, Any], name: str, rows: list[str]) -> dict[str, Any]:
     picked = u6_rows(obj, rows)
     ok = all(picked[r]["state"] == "ready" for r in rows)
-    # "Unclassified" = the operation did not produce a verdict at all for a row
-    # it was asked about. A permission measurement built on that would be a
-    # measurement of the harness.
-    unclassified = (not ok) and any(
-        picked[r]["state"] not in {"ready", "notReady"} or not picked[r]["code"]
-        for r in rows)
+    unclassified = u6_unanswered(picked, ok)
     return {
         "ok": ok, "object": name, "kind": "Preflight",
         "overall": obj.get("status", {}).get("result", {}).get("state"),

@@ -371,6 +371,31 @@ def test_a_grant_unit_names_an_action_and_a_resource_scope() -> None:
         unknown_refused)
 
 
+def _rows(*pairs) -> dict[str, Any]:
+    return {rid: {"state": state, "code": code} for rid, state, code in pairs}
+
+
+def test_a_row_the_check_never_reached_is_not_a_failed_measurement() -> None:
+    row("a denial, with the row after it honestly BlockedByPrerequisite, is answered",
+        not d2.u6_unanswered(_rows(
+            ("archive.backupSet", "notReady", "AccessDenied"),
+            ("archive.segments", "unknown", "BlockedByPrerequisite")), ok=False))
+    row("a plain denial is answered",
+        not d2.u6_unanswered(
+            _rows(("destination.archiveListable", "notReady", "AccessDenied")), ok=False))
+    row("a check that passed is never unanswered",
+        not d2.u6_unanswered(
+            _rows(("destination.archiveListable", "ready", "ArchiveListable")), ok=True))
+    row("MUTANT: the pod never started, so nothing was measured about the grant",
+        d2.u6_unanswered(_rows(
+            ("archive.backupSet", "unknown", "PodNotStarted"),
+            ("archive.segments", "unknown", "BlockedByPrerequisite")), ok=False))
+    row("MUTANT: the row was not in the result at all",
+        d2.u6_unanswered(_rows(("archive.backupSet", None, None)), ok=False))
+    row("MUTANT: a notReady row with no code is not a classification",
+        d2.u6_unanswered(_rows(("archive.backupSet", "notReady", None)), ok=False))
+
+
 def test_only_the_products_own_denial_counts_as_a_denial() -> None:
     row("a check row classified `AccessDenied`",
         d2.u6_denied({"destination.archiveListable": {"state": "notReady",
