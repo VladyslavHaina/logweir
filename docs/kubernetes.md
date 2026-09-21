@@ -1458,8 +1458,19 @@ an operator sees all three:
   nothing.
 - `objectives.requireVerifiedEvidence` is satisfied by the **entry's own
   verification axis** where the controller reached no verdict. Only
-  `NotAttempted` defers this way: an `Untrusted` verdict the controller DID reach
-  still refuses the point, so `TrustPolicy` is not decorative.
+  `NotAttempted` defers this way. A verdict a verifier REACHED still decides:
+  `Untrusted` is a signature this installation refuses and `Invalid` is a
+  document that is not what it claims to be, and neither is overruled by a
+  catalog row — otherwise `TrustPolicy` would be decorative and a tampered
+  archive would read `Healthy` behind a view harvested before the tampering.
+  Such a point is `Unprotected` and pages, with or without a capture time.
+  **The trust boundary this moves, and why it holds:** the answer now comes
+  from the content of a namespaced `ConfigMap`, but those page ConfigMaps are
+  created `immutable: true` and owned by the catalog sync Job, the writer never
+  adopts a foreign-owned object (a 409 is routed through the page-acceptance
+  check), and `RecoveryCatalog.status.pages` — which names them — is a status
+  subresource a tenant does not write. Deleting a page yields
+  `CatalogUnreadable` and therefore `Unknown`, never a forged pass.
 
 Where nothing can place the point — no catalog, or no row for it — the policy
 reports `Protected=Unknown` with reason **`PointFactsUnread`** and a sentence
@@ -1467,10 +1478,14 @@ saying a run succeeded and its point could not be placed in time. That is a new
 member of the `Protected` condition's `reason` set; the field is a free string in
 the CRD, so **no schema change and no conversion** is involved. **Upgrade:** a
 policy that read `Unprotected`/`NoAvailablePoint` on this posture moves to
-`Healthy`, `Stale` or `Unknown` on the first pass after the upgrade, its open
-`Staleness` incident RESOLVES through the normal transition, and an
+`Healthy`, `Stale` or `Unknown` on the first pass after the upgrade, and an
 `ArchiveUnavailable` incident may open where the catalog calls the bytes
-degraded. **Rollback:** nothing is persisted that an older controller cannot
+degraded. **An open `Staleness` incident resolves only where the new health is
+`Healthy` or `AtRisk`** — D3 §3.3's resolve column, verbatim: "`health` back to
+`Healthy`/`AtRisk`". A policy that lands on `Unknown`/`PointFactsUnread` keeps
+its incident open and un-renotified until someone gives it a `catalogRef` or a
+readable receipt: Logweir does not claim a condition cleared because it stopped
+being able to look. **Rollback:** nothing is persisted that an older controller cannot
 read — `PointFactsUnread` only ever appears in a `reason`/`message` string — and
 the old build recomputes its own verdict on its next pass. Installations where
 the controller does read receipts (`ControllerIdentity`) see no change at all:
