@@ -958,6 +958,45 @@ def test_the_planted_record_really_declares_a_future_major() -> None:
         dict(REAL_INDEX, point_id=PLANT)["record_key"] != entry["record_key"])
 
 
+# --- PLAT-14.2: what a policy needs off a Backup to see a point at all -------
+#
+# The recorded shape is `Backup/recovery-point` on 2026-09-21: a run that
+# Succeeded against a destination whose `evidenceRead` is a `SecretKeys` grant.
+SECRETKEYS_STATUS = {
+    "phase": "Succeeded", "exitCode": 0, "backupId": "366d2922",
+    "evidence": {"receiptKey": "logweir/backups/366d2922/01M32.receipt.json",
+                 "sidecarKey": "logweir/backups/366d2922/01M32.receipt.sig",
+                 "verification": {"result": None, "detail": "…this build does not create "
+                                  "that Job…"}},
+}
+READ_RECEIPT_STATUS = {
+    "phase": "Succeeded", "exitCode": 0,
+    "capture": {"startedAt": "2026-09-21T13:06:49Z", "finishedAt": "2026-09-21T13:06:58Z"},
+    "evidence": {"receiptSha256": "sha256:" + "a" * 64,
+                 "verification": {"result": "Valid"}},
+}
+
+
+def test_a_policy_cannot_place_a_point_it_has_no_facts_about() -> None:
+    have = d3.point_facts_the_policy_needs(READ_RECEIPT_STATUS)
+    row("a Backup whose receipt WAS read carries all three facts", all(have.values()), f"{have}")
+    blind = d3.point_facts_the_policy_needs(SECRETKEYS_STATUS)
+    row("MUTANT — AND THE LIVE SHAPE: a SecretKeys destination leaves all three absent",
+        not any(blind.values()), f"{blind}")
+    verdict_only = d3.point_facts_the_policy_needs(
+        {"evidence": {"verification": {"result": "Valid"}}})
+    row("a verdict alone is neither a point id nor a time",
+        verdict_only["evidence.verification.result — the requireVerifiedEvidence objective"]
+        and not verdict_only["capture.startedAt — D3 §3.2's recoveryPointAt"]
+        and not verdict_only["evidence.receiptSha256 — the point id is its first 128 bits"],
+        f"{verdict_only}")
+    partial = d3.point_facts_the_policy_needs(
+        dict(READ_RECEIPT_STATUS, capture={}))
+    row("the capture clause fails on its own", not partial[
+        "capture.startedAt — D3 §3.2's recoveryPointAt"] and partial[
+        "evidence.receiptSha256 — the point id is its first 128 bits"])
+
+
 def test_zz_every_row_in_this_file_passed() -> None:
     """The file's own gate, for `python3 -m pytest e2e/k8s/d3`.
 

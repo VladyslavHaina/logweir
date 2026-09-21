@@ -5422,6 +5422,45 @@ def refresh_view(name: str, token: str) -> dict[str, Any]:
     return view
 
 
+def settle(kind: str, name: str, predicate: Callable[[dict[str, Any]], bool], *,
+           seconds: int, what: str) -> dict[str, Any] | None:
+    """`wait_for`, for a condition the product may honestly never reach.
+
+    A row that ends in a timeout EXCEPTION records nothing, and "the harness
+    crashed" is not a verdict anybody can act on. Where the thing waited for is
+    the thing under test, the wait returns `None` and the row writes the FAIL
+    with the objects in it.
+    """
+    try:
+        return wait_for(kind, name, predicate, seconds=seconds, what=what)
+    except RuntimeError:
+        log(f"NOT REACHED in {seconds}s: {kind}/{name} {what}")
+        return None
+
+
+def point_facts_the_policy_needs(status: dict[str, Any]) -> dict[str, bool]:
+    """The three facts a `ProtectionPolicy` reads off a `Backup` to place its
+    point in TIME and in the CATALOG.
+
+    `controllers/protection_policy.rs:855-882` builds each `PointCandidate`
+    from `status.capture.startedAt` (D3 §3.2's `recoveryPointAt`) and from
+    `status.evidence.receiptSha256`, whose first 128 bits ARE the point id
+    (`protection.rs:641`). Both come from the backup receipt, which the
+    controller reads only when the destination's `evidenceRead` grant is one it
+    can use itself.
+    """
+    evidence = status.get("evidence") or {}
+    verification = evidence.get("verification") or {}
+    return {
+        "capture.startedAt — D3 §3.2's recoveryPointAt":
+            bool((status.get("capture") or {}).get("startedAt")),
+        "evidence.receiptSha256 — the point id is its first 128 bits":
+            bool(evidence.get("receiptSha256")),
+        "evidence.verification.result — the requireVerifiedEvidence objective":
+            bool(verification.get("result")),
+    }
+
+
 def protection_cases() -> None:
     evidence: list[str] = []
     if get_opt("pod", SINK_POD) is None:
@@ -5434,21 +5473,23 @@ def protection_cases() -> None:
         apply(schedule_object("keeps-running", "dest-a"))
     run(KN + ["patch", "backupschedule", "keeps-running", "--type=merge",
               "-p", json.dumps({"spec": {"suspend": True}})])
+    if get_opt("protectionpolicy", RECOVERY_POLICY) is not None:
+        run(KN + ["delete", "protectionpolicy", RECOVERY_POLICY, "--wait=true"])
 
-    # --- a policy that is Stale because its archive's newest point is old ----
-    view = refresh_view("primary", "protect-1")
+    # --- a policy over an archive whose newest point is old -----------------
+    view = refresh_view("primary", f"protect-1-{int(time.time())}")
     before_entries = {e["pointId"]: e for e in view_entries(view)}
     newest_before = max(before_entries.values(), key=lambda e: e["recoveryPointAtMs"],
                         default={})
     apply(protection_policy(RECOVERY_POLICY, max_age=RECOVERY_MAX_AGE))
-    stale = wait_for(
+    opened = settle(
         "protectionpolicy", RECOVERY_POLICY,
         lambda o: alert_of(((o.get("status") or {}).get("alerts") or []), "Staleness") is not None,
         seconds=420, what="a Staleness alert",
     )
-    # the open delivery has to land before the resolve window opens, or its
-    # POST is counted in the wrong window.
-    wait_for(
+    if opened is None:
+        raise RuntimeError("no Staleness alert opened at all; the rows below measure nothing")
+    settle(
         "protectionpolicy", RECOVERY_POLICY,
         lambda o: (((alert_of(((o.get("status") or {}).get("alerts") or []), "Staleness") or {})
                     .get("delivery") or {}).get("state") in {"Delivered", "Failed",
@@ -5463,49 +5504,85 @@ def protection_cases() -> None:
     posts_mark = sink_posts()
     notified_mark = notified_total(alerts_before)
     fresh = run_backup("recovery-point", "dest-a")
-    fresh_view = refresh_view("primary", "protect-2")
+    fresh_status = fresh.get("status") or {}
+    fresh_view = refresh_view("primary", f"protect-2-{int(time.time())}")
     after_entries = {e["pointId"]: e for e in view_entries(fresh_view)}
     new_ids = sorted(set(after_entries) - set(before_entries))
     newest_after = max(after_entries.values(), key=lambda e: e["recoveryPointAtMs"], default={})
-    resolved = wait_for(
+    resolved = settle(
         "protectionpolicy", RECOVERY_POLICY,
         lambda o: (alert_of(((o.get("status") or {}).get("alerts") or []), "Staleness") or {})
         .get("state") == "Resolved",
         seconds=420, what="the Staleness alert to resolve",
     )
-    wait_for(
-        "protectionpolicy", RECOVERY_POLICY,
-        lambda o: (((alert_of(((o.get("status") or {}).get("alerts") or []), "Staleness") or {})
-                    .get("delivery") or {}).get("state") in {"Delivered", "Failed"}),
-        seconds=300, what="the resolve transition to finish delivering",
-    )
-    resolved = get("protectionpolicy", RECOVERY_POLICY)
-    alerts_after = (resolved.get("status") or {}).get("alerts") or []
+    if resolved is not None:
+        settle(
+            "protectionpolicy", RECOVERY_POLICY,
+            lambda o: (((alert_of(((o.get("status") or {}).get("alerts") or []), "Staleness")
+                         or {}).get("delivery") or {}).get("state") in {"Delivered", "Failed"}),
+            seconds=300, what="the resolve transition to finish delivering",
+        )
+    policy_now = get("protectionpolicy", RECOVERY_POLICY)
+    alerts_after = (policy_now.get("status") or {}).get("alerts") or []
     posts = sink_posts() - posts_mark
     new_transitions = notified_total(alerts_after) - notified_mark
-    evidence.append(artifact("protect/policy-after-fresh-point.json", resolved))
-    evidence.append(artifact("protect/fresh-point.json",
-                             {"backup": backup_facts(fresh), "newPointIds": new_ids,
-                              "newestBefore": newest_before.get("pointId"),
-                              "newestAfter": newest_after.get("pointId"),
-                              "viewRefresh": STATE.get("viewRefresh")}))
+    # WHY THE POLICY CANNOT SEE THE POINT THE CATALOG CAN, if it cannot.
+    missing_facts = point_facts_the_policy_needs(fresh_status)
+    evidence.append(artifact("protect/policy-after-fresh-point.json", policy_now))
+    evidence.append(artifact(
+        "protect/fresh-point.json",
+        {"backupStatusKeys": sorted(fresh_status.keys()),
+         "pointFactsThePolicyNeeds": missing_facts,
+         "backup": backup_facts(fresh),
+         "newPointIdsInTheView": new_ids,
+         "theViewsVerdictOnTheFreshPoint": after_entries.get(newest_after.get("pointId", "")),
+         "newestBefore": newest_before.get("pointId"),
+         "newestAfter": newest_after.get("pointId"),
+         "viewRefresh": STATE.get("viewRefresh")}))
     clauses = resolve_delivered_once(
         alert_of(alerts_before, "Staleness"), alert_of(alerts_after, "Staleness"),
         posts, new_transitions, newest_before.get("pointId"), newest_after.get("pointId"),
+    )
+    blind = [name for name, present in missing_facts.items() if not present]
+    diagnosis = (
+        "" if not blind else
+        f" WHY, AND IT IS THE PRODUCT'S: the fresh Backup Succeeded (exit "
+        f"{fresh_status.get('exitCode')}) and the catalog's own view calls its point "
+        f"{after_entries.get(newest_after.get('pointId', ''), {}).get('availability')}/"
+        f"{after_entries.get(newest_after.get('pointId', ''), {}).get('verification')} with "
+        f"selectable="
+        f"{after_entries.get(newest_after.get('pointId', ''), {}).get('selectable')} — but "
+        f"`Backup.status` carries none of {blind}. The controller reads both out of the backup "
+        f"RECEIPT (`controllers/backup.rs:1513` `capture_from_receipt`, and the receipt digest "
+        f"beside it), and it reads the receipt only through an evidence source it may use "
+        f"itself: this destination's `evidenceRead` is a `SecretKeys` grant, whose read is D2 "
+        f"§3.9's evidence-fetch Job, and `controllers/backup.rs:1302` says in its own words "
+        f"THIS BUILD DOES NOT CREATE THAT JOB. So `controllers/protection_policy.rs:867` "
+        f"derives `point_id` from an absent `evidence.receiptSha256` and gets `None`, "
+        f"`recovery_point_at` from an absent `status.capture` and gets `None`, and "
+        f"`protection.rs:993` refuses a candidate with no point id the moment a `catalogRef` "
+        f"is consulted. The one grant that would let the controller read the receipt, "
+        f"`ControllerIdentity`, is refused on this installation because it renders no policy "
+        f"ConfigMap to allowlist a location in (`LOGWEIR_POLICY_CONFIGMAP` is empty on the "
+        f"lab's Deployment). NOTHING THE HARNESS CAN DO FROM ITS OWN NAMESPACE CHANGES THIS: "
+        f"it is PLAT-14.2's `PLAT-15.1 availability integration` dependency, unmet in the "
+        f"shipped path"
     )
     check(
         "protection-recovery-notification-delivers-exactly-once",
         "PLAT-14.2",
         all(clauses.values()),
-        f"a real Backup wrote point {newest_after.get('pointId')} (the view's newest was "
-        f"{newest_before.get('pointId')}), the catalog view was refreshed "
-        f"({STATE.get('viewRefresh')}), and the policy's Staleness alert went "
+        f"a real Backup wrote a new point and the refreshed view lists it "
+        f"({len(new_ids)} new point id(s) {new_ids}; the view's newest was "
+        f"{newest_before.get('pointId')} and is now {newest_after.get('pointId')}), the view "
+        f"was refreshed ({STATE.get('viewRefresh')}), and the policy's Staleness alert went "
         f"{(alert_of(alerts_before, 'Staleness') or {}).get('state')} -> "
         f"{(alert_of(alerts_after, 'Staleness') or {}).get('state')} with health "
-        f"{(resolved.get('status') or {}).get('health')}: {new_transitions} new notified "
-        f"transition(s) and {posts} POST(s) at the in-cluster echo sink, delivery "
+        f"{(policy_now.get('status') or {}).get('health')}/"
+        f"{(policy_now.get('status') or {}).get('availabilityBasis')}: {new_transitions} new "
+        f"notified transition(s) and {posts} POST(s) at the in-cluster echo sink, delivery "
         f"{((alert_of(alerts_after, 'Staleness') or {}).get('delivery') or {})}. Clauses "
-        f"{clauses}",
+        f"{clauses}.{diagnosis}",
         evidence,
     )
 
@@ -5521,13 +5598,15 @@ def protection_cases() -> None:
         "PLAT-14.2",
         all(scope_clauses.values()) and (refusal is None or refusal["refused"]),
         f"the {len(events)} event document(s) this policy delivered carry verification_scope "
-        f"{sorted({e.get('verification_scope') for e in events})} and the alert rows carry "
-        f"evidence {sorted({(e.get('last_available_point') or {}).get('evidence') for e in events})}"
-        f". The vocabulary has three words and `complete` is not one of them "
-        f"(`weirkeeper::protection::VerificationScope`). LIVE MUTANT: "
-        + (f"the same delivery command, run against a copy of a real event whose "
-           f"verification_scope reads \"complete\", exits {refusal['exitCode']} and delivers "
-           f"nothing — {refusal['reason']}" if refusal else
+        f"{sorted({e.get('verification_scope') for e in events})}, with health "
+        f"{sorted({e.get('health') for e in events})} and last_available_point "
+        f"{[e.get('last_available_point') for e in events]}. The vocabulary has three words "
+        f"and `complete` is not one of them (`weirkeeper::protection::VerificationScope`, "
+        f"whose own doc comment calls a fourth variant 'the product's one unrecoverable "
+        f"lie'). LIVE MUTANT: "
+        + (f"the delivery Job's own image, argv and mount, run against a copy of a real event "
+           f"whose verification_scope reads \"complete\", exits {refusal['exitCode']} and "
+           f"delivers nothing — {refusal['reason']}" if refusal else
            "NOT RUN — no delivery Job was left to clone") +
         f". Clauses {scope_clauses}",
         evidence,
@@ -5539,28 +5618,33 @@ def protection_cases() -> None:
     notified_mark = notified_total(alerts_before_break)
     victim = newest_after
     rm(BUCKET_A, victim["manifestKey"])
-    broken_view = refresh_view("primary", "protect-3")
+    broken_view = refresh_view("primary", f"protect-3-{int(time.time())}")
     broken_entries = {e["pointId"]: e for e in view_entries(broken_view)}
-    degraded = wait_for(
+    degraded = settle(
         "protectionpolicy", RECOVERY_POLICY,
         lambda o: alert_of(((o.get("status") or {}).get("alerts") or []),
                            "ArchiveUnavailable") is not None,
         seconds=420, what="an ArchiveUnavailable alert",
     )
-    wait_for(
-        "protectionpolicy", RECOVERY_POLICY,
-        lambda o: all(((a.get("delivery") or {}).get("state") in {"Delivered", "Failed",
-                                                                  "Suppressed"})
-                      for a in ((o.get("status") or {}).get("alerts") or [])),
-        seconds=300, what="every transition to finish delivering",
-    )
-    degraded = get("protectionpolicy", RECOVERY_POLICY)
-    alerts_after_break = (degraded.get("status") or {}).get("alerts") or []
+    if degraded is not None:
+        settle(
+            "protectionpolicy", RECOVERY_POLICY,
+            lambda o: all(((a.get("delivery") or {}).get("state")
+                           in {"Delivered", "Failed", "Suppressed"})
+                          for a in ((o.get("status") or {}).get("alerts") or [])),
+            seconds=300, what="every transition to finish delivering",
+        )
+    policy_broken = get("protectionpolicy", RECOVERY_POLICY)
+    alerts_after_break = (policy_broken.get("status") or {}).get("alerts") or []
     posts = sink_posts() - posts_mark
     new_transitions = notified_total(alerts_after_break) - notified_mark
-    evidence.append(artifact("protect/policy-archive-unavailable.json", degraded))
+    evidence.append(artifact("protect/policy-archive-unavailable.json", policy_broken))
     evidence.append(artifact("protect/broken-entry.json",
-                             {"before": victim, "after": broken_entries.get(victim["pointId"])}))
+                             {"before": victim, "after": broken_entries.get(victim["pointId"]),
+                              "manifestRemoved": victim.get("manifestKey"),
+                              "backupStatusStillSays": {
+                                  k: (fresh_status.get(k))
+                                  for k in ("phase", "exitCode", "backupId")}}))
     break_clauses = archive_unavailable_opened(
         victim, broken_entries.get(victim["pointId"], {}), alerts_before_break,
         alerts_after_break, posts, new_transitions,
@@ -5569,15 +5653,19 @@ def protection_cases() -> None:
         "protection-unavailable-archive-raises-the-alert",
         "PLAT-14.2",
         all(break_clauses.values()),
-        f"the newest point {victim['pointId']} was catalogued Available and selectable; with "
-        f"its manifest removed from the bucket the refreshed view reads "
-        f"{broken_entries.get(victim['pointId'], {}).get('availability')} and the policy "
-        f"opened {[a.get('kind') for a in alerts_after_break if a.get('state') == 'Open']} "
-        f"(health {(degraded.get('status') or {}).get('health')}): {new_transitions} new "
-        f"notified transition(s), {posts} POST(s) at the sink. D3 §3.3's trigger is the "
-        f"newest otherwise-available point being Missing/Unreadable/Untrusted in the catalog "
-        f"— the Backup's own status still says Succeeded, and that is the point of the row. "
-        f"Clauses {break_clauses}",
+        f"the newest point {victim.get('pointId')} was catalogued "
+        f"{victim.get('availability')}/selectable={victim.get('selectable')}; with its "
+        f"manifest removed from the bucket the refreshed view reads "
+        f"{broken_entries.get(victim.get('pointId', ''), {}).get('availability')} "
+        f"(remedy {broken_entries.get(victim.get('pointId', ''), {}).get('remedy')!r}) while "
+        f"the Backup's own status still says {fresh_status.get('phase')}/exit "
+        f"{fresh_status.get('exitCode')} — which is the whole point of the row — and the "
+        f"policy holds "
+        f"{[a.get('kind') for a in alerts_after_break if a.get('state') == 'Open']} open at "
+        f"health {(policy_broken.get('status') or {}).get('health')}: {new_transitions} new "
+        f"notified transition(s), {posts} POST(s) at the sink. Clauses {break_clauses}."
+        + diagnosis.replace("WHY, AND IT IS THE PRODUCT'S:",
+                            "AND WHY NO ALERT OF THAT KIND CAN OPEN HERE:", 1),
         evidence,
     )
 
