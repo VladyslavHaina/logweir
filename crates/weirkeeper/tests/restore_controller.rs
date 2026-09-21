@@ -6590,6 +6590,19 @@ async fn the_admission_condition_survives_the_second_pass_over_a_running_job() {
         types.iter().any(|t| t == "JobCreated") && types.iter().any(|t| t == "RunnerReady"),
         "and its own two conditions; got {types:?}"
     );
+    assert_eq!(
+        types,
+        vec![
+            "Admitted".to_string(),
+            "JobCreated".to_string(),
+            "RunnerReady".to_string()
+        ],
+        "IN THE ORDER THE OBJECT ALREADY HOLDS THEM. `status_unchanged` compares arrays element \
+         by element, so a carry that APPENDED what it carried — this patch's conditions, then \
+         the stored ones it did not name — would recompute a different array on every pass over \
+         an object nobody had touched, write it, and wake this reconciler with its own write. \
+         Got {types:?}"
+    );
 
     let carried = second[0]["conditions"]
         .as_array()
@@ -6606,5 +6619,82 @@ async fn the_admission_condition_survives_the_second_pass_over_a_running_job() {
         carried["lastTransitionTime"].as_str(),
         Some(admitted_at.as_str()),
         "with its ORIGINAL lastTransitionTime: nothing transitioned, so nothing moved"
+    );
+}
+
+/// **A SECOND IDENTICAL RUNNING PASS SENDS NOTHING** — plan erratum **E11(d)**,
+/// and the reason `upsert_conditions` keeps stored ORDER rather than appending.
+///
+/// A reconciler's own status patch is what wakes it. `status_unchanged`
+/// compares the condition array element by element, so a carry that appended
+/// what it carried — `[JobCreated, RunnerReady, Admitted]` onto a stored
+/// `[Admitted, JobCreated, RunnerReady]` — would compute a DIFFERENT array on
+/// every pass over an object nobody touched, write it, and wake itself with
+/// the write. That is the 20-reconciles-per-second shape this file already
+/// carries a row for on the terminal path; this is the running one.
+///
+/// KILLS: building the carry as "this patch's conditions, then the stored ones
+/// it did not name" instead of upserting into the stored list.
+#[tokio::test]
+async fn a_second_pass_over_an_unchanged_running_job_sends_no_patch() {
+    // PASS 1 creates the Job, PASS 2 observes it running — the object then
+    // stands where a steady in-flight `Restore` stands.
+    let (client, _rec, bodies) = mock_client_recording_bodies(admission_routes(
+        200,
+        approval_json(true, &plan_hash(), &plan_hash()),
+        200,
+        cluster_json(true, PLAINTEXT_AUTH),
+    ));
+    reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the creating pass completes");
+    let mut status = Value::Object(serde_json::Map::new());
+    for patch in patched_statuses(&bodies.lock().expect("readable").clone()) {
+        apply_merge_patch(&mut status, &patch);
+    }
+    let settle = |status: &Value| -> Restore {
+        let mut object: Value = serde_json::from_str(&restore_json(PLAN_BYTES, APPROVAL, NAME))
+            .expect("the fixture parses");
+        object["status"] = status.clone();
+        serde_json::from_value(object).expect("a Restore")
+    };
+
+    let (client2, _rec2, bodies2) = mock_client_recording_bodies(running_routes());
+    reconcile_restore(
+        &settle(&status),
+        &client2,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        utc(2026, 9, 10, 12, 30),
+    )
+    .await
+    .expect("the first running pass completes");
+    for patch in patched_statuses(&bodies2.lock().expect("readable").clone()) {
+        apply_merge_patch(&mut status, &patch);
+    }
+
+    // PASS 3: the same Job, the same pod, nothing moved but the clock.
+    let (client3, _rec3, bodies3) = mock_client_recording_bodies(running_routes());
+    reconcile_restore(
+        &settle(&status),
+        &client3,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        utc(2026, 9, 10, 12, 30) + chrono::Duration::seconds(15),
+    )
+    .await
+    .expect("the second running pass completes");
+    let third = patched_statuses(&bodies3.lock().expect("readable").clone());
+    assert!(
+        third.is_empty(),
+        "a pass over an object nothing touched writes NOTHING; it sent {third:?}. The stored \
+         conditions were {}",
+        status["conditions"]
     );
 }
