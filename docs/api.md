@@ -136,7 +136,7 @@ anything not listed is `404`.
 | `GET /api/v1/namespaces/{ns}/backups[/{name}]` | `Backup` projections, with the trigger and the schedule revision the run copied. |
 | `POST /api/v1/namespaces/{ns}/backups` | "Back up now" from a schedule, or "Run first backup now" from a cluster. |
 | `GET /api/v1/namespaces/{ns}/restores[/{name}]` | `Restore` projections. |
-| `POST /api/v1/namespaces/{ns}/restores` | Create a `Restore`, preserving the plan bytes exactly. |
+| `POST /api/v1/namespaces/{ns}/restores` | Create a `Restore`, preserving the plan bytes exactly. An optional `topicMapping` declares the mapping the caller previewed and is checked against the prefix this request stores — see below. |
 | `GET /api/v1/namespaces/{ns}/approvals[/{name}]` | Approval metadata and status. |
 | `GET /api/v1/namespaces/{ns}/approvals/{name}/packet` | The raw approval document, only through this explicit route. |
 | `GET /api/v1/namespaces/{ns}/destinations` | `BackupDestination` rows: the canonical URL, the endpoint, the transport, the addressing and the controller's `Valid` verdict. |
@@ -594,6 +594,48 @@ route's acceptance as a readiness verdict**: if it wants a "Run anyway"
 confirmation it implements one against `POST .../preflights`, whose result is a
 real check — and a `ready` verdict still does not mean the execution-only checks
 passed. There is no preflight this route consults and none it can fake.
+
+### The restore's declared topic mapping
+
+`POST .../restores` takes an optional `topicMapping`: the exact source/target
+rows the caller previewed.
+
+```json
+{"topicMapping": [{"source": "orders",   "target": "restore-20260907T140500Z-orders"},
+                  {"source": "payments", "target": "restore-20260907T140500Z-payments"}]}
+```
+
+**It is a declaration and it is never stored.** `Restore.spec` has no topic
+list — the subset lives in the opaque plan bytes
+(`logweir_core::spec::SourceSpec::topics`) — so nothing here is persisted and
+the created object is byte-for-byte what it was before the field existed.
+
+**What it buys is a rail this service can check without parsing the plan**, and
+the service still parses nothing. The mapping rule is prefix concatenation and
+nothing else in this version — `logweir_core::spec::target_topic_prefix` gives
+the whole grammar, and there is no per-topic rename in it — and
+`target.topicNaming.prefix` **is** a stored field. So `prefix + source` is a
+pure function of the object about to be created, and a request whose preview and
+whose submission disagree is refused here rather than discovered in phase 0,
+after an approver has signed.
+
+| `errors[].field` | `errors[].code` | when |
+|---|---|---|
+| `topicMapping` | `empty` | the field is present with no rows. Omit it to declare none. |
+| `topicMapping` | `too_many` | more than 1000 rows. |
+| `topicMapping[i].source` | `invalid_topic` | the source is not a name a broker accepts (`^[a-zA-Z0-9._-]{1,249}$`). |
+| `topicMapping[i].target` | `mapped_name_illegal` | the mapped name is not one a broker accepts. The message names the source. |
+| `topicMapping[i].target` | `mapping_identity` | the target equals its source — a restore writing over the topic it came from. |
+| `topicMapping[i].target` | `mapping_mismatch` | the target is not `prefix + source`. The message names the target that prefix produces. |
+| `topicMapping[i].target` | `duplicate_mapping` | two rows map to one target name. With an injective prefix map that is a repeated SOURCE, so the message names **both** rows and the target they share. |
+
+The mapping is checked only when `target.topicNaming.prefix` is itself legal:
+a mismatch computed from a refused prefix would name an expected target nobody
+could produce, and would send the operator to the wrong field.
+
+**Absent is exactly the behaviour this route had before the field existed**, and
+an absent declaration is left out of the idempotency request hash, so a client
+that predates it replays onto the same object it always did.
 
 ### Saved destinations
 

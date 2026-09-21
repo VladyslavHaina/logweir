@@ -175,7 +175,7 @@ authorisation story is "the API server evaluated the viewer's RBAC".
 | `select.js` | **the saved-cluster selector and the words a connection probe may be described with**. Identity (`{uid, name}`) resolution, the freshness judgement, the searchable control. Shared by the clusters page, the schedule form and both wizard sides -- see *Choosing a saved connection*. |
 | `plan.js` | the restore plan document, its sha256 and the two minted names. Refuses a non-secure context at module load. |
 | `lifecycle.js` | what lives and dies with one route (reads, listeners) and what deliberately does not: the in-memory drafts, the mutation records and the idempotent create. |
-| `pages/restore-wizard.js` | the recovery-point selector, the six wizard steps over the point somebody chose, the plan bytes, and the ONE guided submit that creates the Restore and opens what it needs next. |
+| `pages/restore-wizard.js` | the recovery-point selector, the six wizard steps over the point somebody chose (step 4 carries the topic subset, the exact mapping preview and the recovery limits), the plan bytes, the readiness gate, the fresh-target retry, and the ONE guided submit that creates the Restore and opens what it needs next. |
 | `pages/history.js` | Backups and Restores interleaved, the Restore detail view, and the "Restore this point" link a completed Backup row carries. |
 | `pages/schedules.js` | the BackupSchedule list, the suspend toggle, the retention panel, and each schedule's recovery points with their own "Restore this point" links. |
 | `pages/approvals.js` | the Approval list, the Restores waiting for one, and the create form for ONE chosen Restore. Refuses a private key by name and by the words that open its PEM, and never parses the two documents. |
@@ -582,6 +582,135 @@ point's backup set and its covered window, so choosing another point changes the
 bytes, the sha256 on screen and both minted names -- and the reviewed-plan check
 (PLAT-13.2) refuses a submit whose prepared hash is not the hash that was
 displayed. An approval covers the point it was signed over, and nothing else.
+
+## The topic subset, the mapping, and what a recovery does not do
+
+**Step 4 chooses which of the point's frozen topics to restore, and shows the
+exact name each one becomes** (PLAT-11.2). Before it, the wizard took the whole
+of `Backup.spec.topics` and showed no target name anywhere: an operator
+restoring one topic out of forty had to edit the plan by hand, and nobody saw a
+mapped name until the run created it.
+
+**The mapping rule is the prefix and nothing else.**
+`logweir_core::spec::target_topic_prefix` is the whole grammar -- `newTopic`
+takes `target.topicNaming.prefix`, `scratch` takes `topic_mapping_prefix`, and
+neither admits a per-topic rename -- so a mapped name is a concatenation.
+`mappedTopicName` is that concatenation and the only place the page performs it;
+`topicMapping(state)` builds the preview rows AND the rows the create request
+declares, from one call, so a page that previewed one mapping cannot submit
+another.
+
+**Five refusals, made before anything is sent, and made again by the product
+API in the same words** (`routes/restores.rs::validate_topic_mapping`):
+
+| refused | the page says | the API answers |
+|---|---|---|
+| no topic selected | a restore of no topic is not a restore | `topicMapping` / `empty` |
+| a topic the point did not freeze | names it, and names `PlanTopicsNotInRecoveryPoint` | `topicMapping[i].source` / `invalid_topic` |
+| the same source twice | names both rows and the target they share | `topicMapping[i].target` / `duplicate_mapping` |
+| a prefix that is not a Kafka name, or an empty one (the identity map) | names the value and the 249-character bound | `target.topicNaming.prefix` / `invalid_prefix`, or `topicMapping[i].target` / `mapping_identity` |
+| a mapped name longer than a broker accepts | names the topic and the bound | `topicMapping[i].target` / `mapped_name_illegal` |
+
+A duplicate target can only be a duplicate SOURCE, because a prefix map over
+distinct sources is injective. The subset is canonicalised into the point's own
+order before it reaches the plan, so the hash an approver signs does not move
+with the order of the clicks -- but the DUPLICATE check reads the raw list, so a
+repeated entry is refused rather than quietly deduplicated into a list that is
+not the one the page was given.
+
+**`topicMapping` rides on the product API's create REQUEST and is never stored.**
+`Restore.spec` has no topic list -- the subset lives in the opaque plan bytes --
+so the API recomputes every row from `target.topicNaming.prefix`, which it DOES
+store, and answers 422 when the preview and the submission disagree. In legacy
+mode the field is stripped before the object is sent (`client.js`), because the
+custom resource has nowhere to put it; there the plan bytes carry the same list,
+from the same call, and phase 0 reads them.
+
+**What a recovery changes, and what it does not**, beside the mapping, each from
+a contract constant or a plan field and never from prose this page invented:
+
+* the **target replication factor**, from the plan's own
+  `target.default_replication_factor`;
+* the **partition count**, which is *not shown and said not to be*: this build
+  publishes a per-topic count only after a run
+  (`Restore.status.completion.newTopics[].partitions`, from the target diff),
+  and no field of a `Backup` or of its projection carries the archive
+  manifest's. PLAT-15.1's catalog is where that would come from;
+* the **sampled verification scope**, from the plan's `sample` block, closing
+  with the clause D3 section 3.5 makes non-optional -- *a sampled check, not an
+  exhaustive comparison*. No level in this version compares every record;
+* the **consumer cutover limitation**, byte for byte from `render.js`'s
+  `COMPLETION_GUIDANCE` and `TARGET_MODE_MEANING` -- the same fixed sentences
+  the completion panel shows afterwards;
+* **resume is not implemented**, said in the wizard before the run rather than
+  discovered after one. A restore that fails part way cannot be continued from
+  where it stopped; the way forward is a new restore to a fresh target.
+
+`ui/tests/fixtures/restore-limits.json` pins the three numbers from both
+languages: the node suite asserts the page renders them, and
+`crates/logweir-api/tests/resources.rs` asserts they are `logweir_core`'s own.
+
+## The readiness check holds the submit
+
+**A readiness verdict that no longer describes the plan on screen refuses the
+create** (PLAT-11.2, D2 section 6.3's invalidation rule). `readinessRefusal` is
+checked on the button and again inside `submitRestore`, so a direct call cannot
+walk past it, and it refuses four states:
+
+* the result is about **another plan** -- the target, the prefix, the subset or
+  the point in time changed, so the hash moved. Both hashes are named;
+* the server says it is **stale or inapplicable**. The judgement is the
+  server's, recomputed on every GET against the caller's own plan hash, never a
+  comparison this page makes against a browser clock. `target.mappedTopics`
+  expires in five minutes, which is the shortest budget in D2 section 6.3's
+  catalogue and exactly the check a slow review outlives;
+* it has **not finished**;
+* it is **not ready** -- which is where a target-topic collision lands, as
+  `target.mappedTopics` / `MappedTopicExists`, named with its check id and code.
+
+**An ABSENT check is a warning, not a refusal.** D2 section 6.3's rule is about
+a verdict that has stopped applying; the runner's phase 0 refuses a mapped topic
+that already exists whether or not a console asked first, and legacy mode has no
+readiness route at all. So an unchecked plan may be submitted, and step 6 says
+in words what has not been looked for. In legacy mode the step says the check
+could not run here.
+
+## Retrying a failed restore to a fresh target
+
+**A failed `Restore` offers *Retry to a fresh target*** (PLAT-11.2,
+PLAT-12.2's retry identity). The route is
+
+```
+#/restore?ns=<namespace>&retryOf=<failed restore name>
+```
+
+and it names **no recovery point**, deliberately: `Restore.spec` carries a
+backup SET id and no reference to the `Backup` it came from, so the point is
+chosen on the selector -- which carries `retryOf` forward -- rather than guessed
+from a set id.
+
+**The retry is a new execution, and the prefix is what makes it one.**
+`defaultTopicPrefix` is a pure function of the recovery point, so retrying the
+same point with the same prefix would render the same plan bytes, mint the same
+`Restore` name and the same `Approval` name, and collide with the run being
+retried -- and be authorised by the approval bound to it. `freshTargetPrefix`
+derives the prefix from the failed run instead: deterministic (retrying twice is
+the same retry, and the second submit is an idempotent replay), reading no
+clock, and producing a target name the failed run never used.
+
+**The old approval is never reused, structurally.** Both names are minted from
+the plan bytes and `restoreBody` reads them from nowhere else, so a fresh prefix
+mints a different `Approval` name; the failed run is not named anywhere in what
+is sent. Where the namespace's policy is governed, the retry waits for an
+approval of its own, exactly as a first restore does, and the controller's
+`PlanHashMismatch` refusal is the backstop. **The failed run is not modified** --
+the wizard writes to nothing that exists -- and its evidence and any topics it
+had already created stay as they are.
+
+**A draft cannot put the old prefix back.** A retry shares its recovery point,
+and therefore its backup set, with the run it retries, so `applyWizardDraft`
+compares `retryOf` as well as `backupSetRef`: an ordinary restore's kept prefix
+does not apply to a retry, and a retry's does not apply to an ordinary restore.
 
 ## Choosing a saved connection
 
