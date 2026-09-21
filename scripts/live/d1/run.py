@@ -106,6 +106,18 @@ def redact(text: str) -> str:
         text,
         flags=re.S,
     )
+    # AND NEVER THE RAW `Idempotency-Key` (L-06-2-cli). It is not a credential,
+    # but `crates/logweir-api/src/idempotency.rs` is explicit that the raw key
+    # is never stored or logged in any form -- only hashes derived from it --
+    # because the published request hash is salted with its digest precisely so
+    # that the hash cannot be recomputed from the object. An artifact that
+    # printed the key would hand a reader the one input that makes it
+    # recomputable, which is the property that rule exists to keep.
+    text = re.sub(
+        r"(Idempotency-Key:\s*)[^\"\\\\]+",
+        r"\1[REDACTED]",
+        text,
+    )
     for key in SECRET_KEYS:
         text = re.sub(
             rf'("{re.escape(key)}"\s*:\s*)"[^"]*"', r'\1"[REDACTED]"', text
@@ -3192,7 +3204,537 @@ TASK_SCENARIOS = {
         "L-05.2-cap",
     ],
     "PLAT-09.2": ["L-09-1", "L-09-2", "L-09-3a", "L-09-3b", "L-09-4", "L-09-5", "L-09-6"],
+    # PLAT-06.2's done evidence, which D1 §13.2 does not give an L- number:
+    # "Demonstrate the same manual CR path through CLI/API and UI." The UI half
+    # is `scripts/plat06-2-ui-e2e.mjs`; this is the CLI/API half.
+    "PLAT-06.2": ["L-06-2-cli"],
 }
+
+# ---------------------------------------------------------------------------
+# PLAT-06.2 — the same manual CR path through the CLI, beside the API
+# ---------------------------------------------------------------------------
+
+MANUAL_ROUTE = "POST /api/v1/namespaces/{ns}/backups"
+API_SUBJECT = os.environ.get("LOGWEIR_D1_API_SUBJECT") or OWNER
+
+
+def api_binary() -> pathlib.Path:
+    """The `logweir-api` this harness drives, release first.
+
+    The Lean-loop rule is "CLI branches run the RELEASE binary against the
+    lab", and `L-04-preview` predates it and looks in `target/debug`. Both are
+    accepted here, newest first, and the one that was used is recorded in the
+    scenario's own `asserted` block so a reader never has to guess which.
+    """
+    for candidate in ("target/release/logweir-api", "target/debug/logweir-api"):
+        binary = ROOT / candidate
+        if binary.exists():
+            return binary
+    raise Failure(
+        "neither target/release/logweir-api nor target/debug/logweir-api exists; build one "
+        "with `cargo build --release -p logweir-api`"
+    )
+
+
+def page_derived_name(namespace: str, key: str, *, issuer: str, subject: str) -> str:
+    """D1 section 8.2's name, computed by THE PAGE'S OWN FUNCTION.
+
+    This deliberately shells into node and imports `ui/client.js` rather than
+    reimplementing the rule in Python. A third implementation would prove that
+    three things agree with each other and nothing about the two that ship;
+    what this row is for is that the CONSOLE's derivation and the PRODUCT API's
+    derivation are one rule, so the console's derivation has to be the thing
+    that runs here.
+    """
+    script = (
+        "import { manualBackupName, MANUAL_BACKUP_ROUTE } from "
+        f"{json.dumps(str(ROOT / 'ui' / 'client.js'))};\n"
+        "const name = await manualBackupName({\n"
+        f"  issuer: {json.dumps(issuer)}, subject: {json.dumps(subject)},\n"
+        f"  namespace: {json.dumps(namespace)}, route: MANUAL_BACKUP_ROUTE,\n"
+        f"  key: {json.dumps(key)},\n"
+        "});\n"
+        "process.stdout.write(name);\n"
+    )
+    return run(
+        ["node", "--input-type=module", "-e", script], timeout=60, record=False
+    ).stdout.strip()
+
+
+def run_policy_copy(schedule: dict[str, Any]) -> dict[str, Any]:
+    """The policy half of the `Backup` a manual run of `schedule` becomes.
+
+    An INDEPENDENT copy, written from `config/samples/backup-manual.yaml`'s own
+    instructions ("copy `spec.sourceRef`, `spec.topics` (or `spec.allUserTopics`
+    with `topics: []`), `spec.archive` and `spec.activeDeadlineSeconds` from the
+    same object"), in a third language, by a reader of the sample rather than by
+    the code under test. That is what makes the comparison below mean something:
+    it is not the API's output compared with itself.
+    """
+    spec = schedule["spec"]
+    copied: dict[str, Any] = {
+        "sourceRef": {"name": spec["sourceRef"]["name"]},
+        "topics": list(spec.get("topics") or []),
+        "archive": json.loads(json.dumps(spec["archive"])),
+        "deadlineSeconds": spec.get("activeDeadlineSeconds", 3600),
+        "triggeredBy": "manual",
+        "trigger": {"kind": "Manual", "attempt": 0},
+        "scheduleRef": {
+            "name": schedule["metadata"]["name"],
+            "uid": schedule["metadata"]["uid"],
+            "generation": schedule["metadata"]["generation"],
+            "runPolicySha256": schedule["status"]["policy"]["runPolicySha256"],
+        },
+    }
+    if spec.get("allUserTopics") is not None:
+        copied["allUserTopics"] = json.loads(json.dumps(spec["allUserTopics"]))
+    if spec.get("destinationRef") is not None:
+        copied["destinationRef"] = {"name": spec["destinationRef"]["name"]}
+    return copied
+
+
+def manual_labels(schedule: dict[str, Any]) -> dict[str, str]:
+    """The four labels D1 section 8.1 writes, and no others."""
+    return {
+        "logweir.dev/trigger": "manual",
+        "logweir.dev/attempt": "0",
+        "logweir.dev/schedule": schedule["metadata"]["name"],
+        "logweir.dev/schedule-uid": schedule["metadata"]["uid"],
+    }
+
+
+def scoped_sample(schedule: dict[str, Any], name: str, spec: dict[str, Any]) -> str:
+    """`config/samples/backup-manual.yaml`, scoped to this schedule.
+
+    The SHIPPED file is read and its five placeholder values are replaced --
+    the name, the two schedule labels, and the policy block the sample's own
+    prose tells an operator to copy. Everything else, prose and structure, is
+    the file as it ships, and the exact bytes applied are written next to the
+    result so a reader can diff them against `config/samples/backup-manual.yaml`.
+    """
+    text = (ROOT / "config/samples/backup-manual.yaml").read_text()
+    head, _, _ = text.partition("\n---\n")
+    body = {
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "Backup",
+        "metadata": {"name": name, "labels": manual_labels(schedule)},
+        "spec": spec,
+    }
+    return (
+        head
+        + "\n# ---------------------------------------------------------------------------\n"
+        + f"# SCOPED to schedule {schedule['metadata']['name']} (generation "
+        + f"{schedule['metadata']['generation']}) in namespace {NS} by\n"
+        + "# scripts/live/d1/run.py::L-06-2-cli. Structure and prose above are the shipped\n"
+        + "# file's; the values below are this schedule's, copied as the prose says.\n"
+        + "# ---------------------------------------------------------------------------\n---\n"
+        + json.dumps(body, indent=2, sort_keys=True)
+        + "\n"
+    )
+
+
+def await_manual_run(name: str, *, timeout: int = 420) -> dict[str, Any]:
+    """Wait until this `Backup` has actually become a run.
+
+    "Reconciled to a run" is not "the object exists": it is the controller
+    having frozen the inputs and dispatched a Job. The execution id is asserted
+    to be the object's own UID, which is D1 section 3.1 rule 2 for a manual run -- a
+    manual run's archive prefix can therefore never collide with a scheduled
+    run's `<scheduleUID>-<slot>`.
+    """
+    reconciled = wait_for(
+        "backup",
+        name,
+        lambda o: ((o.get("status") or {}).get("execution") or {}).get("id") is not None,
+        timeout=timeout,
+        what="to freeze its execution inputs",
+    )
+    jobs = wait_until(
+        lambda: runner_jobs(get("backup", name)),
+        timeout=timeout,
+        interval=1.0,
+        what=f"the runner Job of {name}",
+    )
+    return {
+        "name": name,
+        "uid": reconciled["metadata"]["uid"],
+        "executionId": reconciled["status"]["execution"]["id"],
+        "inputsRef": reconciled["status"]["execution"].get("inputsRef"),
+        "inputsSha256": reconciled["status"]["execution"].get("inputsSha256"),
+        "job": jobs[0]["metadata"]["name"],
+        "jobUid": jobs[0]["metadata"]["uid"],
+        "phase": (reconciled.get("status") or {}).get("phase"),
+    }
+
+
+def spec_differences(left: dict[str, Any], right: dict[str, Any], path: str = "") -> list[str]:
+    """Every leaf at which two specs differ, by path. `[]` is byte equality."""
+    out: list[str] = []
+    if isinstance(left, dict) and isinstance(right, dict):
+        for key in sorted(set(left) | set(right)):
+            here = f"{path}.{key}" if path else key
+            if key not in left:
+                out.append(f"{here}: absent vs {right[key]!r}")
+            elif key not in right:
+                out.append(f"{here}: {left[key]!r} vs absent")
+            else:
+                out.extend(spec_differences(left[key], right[key], here))
+        return out
+    if isinstance(left, list) and isinstance(right, list):
+        if len(left) != len(right):
+            return [f"{path}: {len(left)} entries vs {len(right)}"]
+        for i, (a, b) in enumerate(zip(left, right)):
+            out.extend(spec_differences(a, b, f"{path}[{i}]"))
+        return out
+    if left != right:
+        out.append(f"{path}: {left!r} vs {right!r}")
+    return out
+
+
+@scenario(
+    "L-06-2-cli",
+    "PLAT-06.2",
+    "one CR path: kubectl apply and the product API build the same manual Backup",
+)
+def l_06_2_cli() -> dict[str, Any]:
+    """PLAT-06.2's done evidence: "Demonstrate the same manual CR path through
+    CLI/API and UI."
+
+    The claim `config/samples/backup-manual.yaml` makes in its own header is
+    that `POST /api/v1/namespaces/<ns>/backups` and the console's "Back up now"
+    "produce exactly this shape", and that "the only fields they add are the
+    deterministic name and the console's own audit annotations". This measures
+    it, on the real cluster, both ways round:
+
+      1. The product API creates a manual run from a schedule under a known
+         idempotency key. Its NAME is compared with the name the CONSOLE'S OWN
+         `manualBackupName` derives for the same scope -- the two
+         implementations of D1 section 8.2, live, with no fixture in between.
+      2. That object is read back, reconciled to a run, and then DELETED, so
+         the same name is free.
+      3. `kubectl apply -f` the shipped sample, scoped to the same schedule
+         under the same name, with its policy block copied INDEPENDENTLY here
+         in Python from the sample's own prose. Its `spec` and its labels are
+         compared with the API's, leaf by leaf.
+      4. It reconciles to a run too.
+      5. A second POST under the same key, while the kubectl object holds the
+         name, is `409 state_conflict`: the API targeted exactly that name and
+         refused to adopt an object it did not create.
+      6. NEGATIVE CONTROL: one snapshot field of the copy is changed and the
+         comparison must FAIL, and the controller must refuse the run
+         terminally rather than executing a policy whose digest it cannot
+         reproduce.
+    """
+    name = "manual-cli"
+    kn("delete", "backupschedule", name, "--ignore-not-found=true", "--wait=true")
+    # SUSPENDED, so nothing this scenario measures can be a scheduled run that
+    # happened to fire. D1 section 8.3: a suspended schedule never blocks a manual run,
+    # and that is exactly the property being leaned on here.
+    schedule = create(schedule_object(name, schedule="0 3 * * *", suspend=True, topics=["t1", "t2"]))
+    observed = await_schedule_observed(name)
+    require(
+        ((observed.get("status") or {}).get("policy") or {}).get("generation")
+        == observed["metadata"]["generation"],
+        "the controller has not published a policy digest for the current generation, so "
+        "neither the console nor this harness may copy one",
+        obj=excerpt(observed, "metadata.generation", "status.policy", "status.observedGeneration"),
+    )
+    schedule = observed
+    generation = schedule["metadata"]["generation"]
+
+    binary = api_binary()
+    API_DIR.mkdir(mode=0o700, parents=True, exist_ok=True)
+    cursor = API_DIR / "cursor.key"
+    if not cursor.exists():
+        cursor.write_bytes(os.urandom(48))
+        cursor.chmod(0o600)
+    config = API_DIR / "config-p062.yaml"
+    config.write_text(
+        "mode: localAdmin\n"
+        f'listen: "127.0.0.1:{API_PORT}"\n'
+        f'publicOrigin: "http://127.0.0.1:{API_PORT}"\n'
+        f"uiDirectory: {ROOT / 'ui'}\n"
+        "localAdmin:\n"
+        f"  subject: {API_SUBJECT}\n"
+        "  displayName: PLAT-06.2 CLI/API comparison\n"
+        f"namespaces: [{NS}]\n"
+        "kubernetes:\n"
+        "  source: kubeconfig\n"
+        "  context: docker-desktop\n"
+        f"cursorKeyFile: {cursor}\n"
+    )
+    log_path = API_DIR / "api-p062.log"
+    handle = subprocess.Popen(  # noqa: S603 - a repository binary with a literal argv
+        [str(binary), "--config", str(config)],
+        stdout=log_path.open("wb"),
+        stderr=subprocess.STDOUT,
+    )
+    base = f"http://127.0.0.1:{API_PORT}"
+    key = "plat06-2-finish." + secrets.token_hex(16)
+
+    def post(idempotency_key: str, body: dict[str, Any]) -> tuple[int, Any]:
+        result = run(
+            [
+                "curl", "-sS", "-w", "\n%{http_code}",
+                "-X", "POST",
+                "-H", "Content-Type: application/json",
+                # An unsafe request must carry the configured public origin:
+                # `logweir-api` refuses one that does not with 403
+                # `origin_mismatch`, which is the same-origin rule the console
+                # relies on and which a curl has to satisfy like any browser.
+                "-H", f"Origin: {base}",
+                "-H", f"Idempotency-Key: {idempotency_key}",
+                "--data-binary", json.dumps(body),
+                f"{base}/api/v1/namespaces/{NS}/backups",
+            ],
+            timeout=60,
+        )
+        text, _, code = result.stdout.rpartition("\n")
+        try:
+            return int(code), json.loads(text)
+        except json.JSONDecodeError:
+            return int(code), text
+
+    try:
+        wait_until(
+            lambda: run(
+                ["curl", "-sS", "-o", "/dev/null", "-w", "%{http_code}", f"{base}/healthz"],
+                check=False, timeout=10, record=False,
+            ).stdout == "200",
+            timeout=60,
+            interval=1.0,
+            what="logweir-api to answer /healthz",
+        )
+
+        # --- 0. the fixture is the rule this row is about --------------------
+        # `ui/tests/fixtures/manual-backup-names.json` is the pin between the
+        # two implementations, and a fixture only one side checks pins a
+        # function to itself. The page's half is checked by `ui/tests/d1.spec.js`;
+        # this is where the rule meets the REAL binary, so the fixture's own
+        # rule block is asserted to be the rule used below, and every recorded
+        # row is re-derived by the page's function on this machine.
+        fixture_path = ROOT / "ui/tests/fixtures/manual-backup-names.json"
+        name_fixture = json.loads(fixture_path.read_text())
+        require(
+            name_fixture["rule"]["route"] == MANUAL_ROUTE
+            and name_fixture["rule"]["prefix"] == "logweir-manual-"
+            and name_fixture["rule"]["hashChars"] == 26
+            and name_fixture["rule"]["fieldOrder"]
+            == ["issuer", "subject", "namespace", "route", "key"],
+            "the name fixture describes a different rule from the one this row measures",
+            obj=name_fixture["rule"],
+        )
+        fixture_rows = []
+        for entry in name_fixture["rows"]:
+            scope = entry["scope"]
+            derived = page_derived_name(
+                scope["namespace"], scope["key"],
+                issuer=scope["issuer"], subject=scope["subject"],
+            )
+            require(
+                derived == entry["name"],
+                f"the page derives {derived!r} for a scope the fixture records as "
+                f"{entry['name']!r} ({entry['note']})",
+                obj=entry,
+            )
+            fixture_rows.append({"note": entry["note"], "name": entry["name"]})
+
+        # --- 1. the API's run, and the name the console would derive ---------
+        expected_name = page_derived_name(
+            NS, key, issuer="urn:logweir:local-admin", subject=API_SUBJECT
+        )
+        code, created = post(key, {"scheduleRef": {"name": name, "expectedGeneration": generation}})
+        require(code == 201, f"POST .../backups answered {code}", obj=created)
+        api_name = created["item"]["name"]
+        require(
+            api_name == expected_name,
+            "THE TWO IMPLEMENTATIONS OF D1 section 8.2 DISAGREE. The product API named the run "
+            f"{api_name!r}; the console's own manualBackupName derives {expected_name!r} for "
+            "the same scope (issuer urn:logweir:local-admin, subject "
+            f"{API_SUBJECT!r}, namespace {NS!r}, route {MANUAL_ROUTE!r}).",
+            obj=created,
+        )
+        api_object = get("backup", api_name)
+        api_run = await_manual_run(api_name)
+        api_spec = json.loads(json.dumps(api_object["spec"]))
+        api_labels = dict(api_object["metadata"].get("labels") or {})
+        api_annotations = sorted((api_object["metadata"].get("annotations") or {}).keys())
+
+        # --- 2. free the name --------------------------------------------------
+        kn("delete", "backup", api_name, "--wait=true", timeout=180)
+        wait_until(
+            lambda: get_opt("backup", api_name) is None,
+            timeout=120, interval=1.0, what=f"{api_name} to be gone",
+        )
+
+        # --- 3. the same object, through kubectl -------------------------------
+        copied = run_policy_copy(schedule)
+        sample_path = OUT / "objects/L-06-2-cli/backup-manual.scoped.yaml"
+        sample_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        sample_path.write_text(scoped_sample(schedule, api_name, copied))
+        kn("apply", "-f", str(sample_path))
+        cli_object = get("backup", api_name)
+        cli_spec = json.loads(json.dumps(cli_object["spec"]))
+        cli_labels = dict(cli_object["metadata"].get("labels") or {})
+
+        spec_diff = spec_differences(api_spec, cli_spec)
+        require(
+            not spec_diff,
+            "the kubectl object's spec differs from the API's for the same scope: "
+            + "; ".join(spec_diff),
+            obj={"api": api_spec, "kubectl": cli_spec},
+        )
+        require(
+            api_labels == cli_labels,
+            f"the labels differ: API {api_labels} vs kubectl {cli_labels}",
+            obj={"api": api_labels, "kubectl": cli_labels},
+        )
+        require(
+            cli_object["metadata"]["name"] == api_name,
+            "the two objects do not share the name",
+        )
+        require(
+            api_spec["trigger"] == {"kind": "Manual", "attempt": 0}
+            and api_spec["triggeredBy"] == "manual"
+            and api_spec["scheduleRef"]["generation"] == generation
+            and api_spec["scheduleRef"]["runPolicySha256"]
+            == schedule["status"]["policy"]["runPolicySha256"],
+            "the shared spec is not D1 section 8.1's manual shape",
+            obj=api_spec,
+        )
+        cli_run = await_manual_run(api_name)
+        require(
+            cli_run["uid"] != api_run["uid"] and cli_run["executionId"] == cli_run["uid"],
+            "a re-created name is a NEW run with its own execution id (D1 section 3.1 rule 2)",
+            obj={"api": api_run, "kubectl": cli_run},
+        )
+
+        # --- 5. the API targets that name and refuses to adopt it --------------
+        conflict_code, conflict = post(
+            key, {"scheduleRef": {"name": name, "expectedGeneration": generation}}
+        )
+        require(
+            conflict_code == 409 and conflict.get("code") == "state_conflict",
+            f"a repeat POST over the kubectl object answered {conflict_code} "
+            f"{conflict.get('code') if isinstance(conflict, dict) else conflict!r}; the API "
+            "derives the same name and must refuse an object it did not create rather than "
+            "adopt or replace it",
+            obj=conflict,
+        )
+
+        # --- 6. the negative control -------------------------------------------
+        # ONE SNAPSHOT FIELD CHANGED. The comparison must fail, and the
+        # controller must refuse the run: `runPolicySha256` is recomputed from
+        # the object's own fields, so a copied digest beside an edited field is
+        # a control-plane defect and terminal.
+        mutated = json.loads(json.dumps(copied))
+        mutated["deadlineSeconds"] = int(copied["deadlineSeconds"]) + 1
+        mutated_name = api_name[:-4] + "zzzz"
+        mutated_path = OUT / "objects/L-06-2-cli/backup-manual.mutated.yaml"
+        mutated_path.write_text(scoped_sample(schedule, mutated_name, mutated))
+        kn("apply", "-f", str(mutated_path))
+        mutated_object = get("backup", mutated_name)
+        mutated_diff = spec_differences(api_spec, json.loads(json.dumps(mutated_object["spec"])))
+        require(
+            any(d.startswith("deadlineSeconds") for d in mutated_diff),
+            "the comparison did not notice a changed snapshot field, so it could not have "
+            "noticed a real one either: " + repr(mutated_diff),
+            obj=mutated_object,
+        )
+        refused = wait_for(
+            "backup",
+            mutated_name,
+            terminal,
+            timeout=300,
+            what="the mutated copy to be judged",
+        )
+        refused_condition = condition(refused, "Failed") or {}
+        refusal_is_the_digest = refused_condition.get("reason") in {
+            "RunPolicyDigestMismatch",
+            "ScheduleRefInvalid",
+            "ExecutionSpecInvalid",
+        }
+        kn("delete", "backup", mutated_name, "--ignore-not-found=true", "--wait=false")
+
+        return {
+            "asserted": {
+                "route": MANUAL_ROUTE,
+                "apiBinary": str(binary.relative_to(ROOT)),
+                "mode": "localAdmin",
+                "subject": API_SUBJECT,
+                "schedule": {
+                    "name": name,
+                    "uid": schedule["metadata"]["uid"],
+                    "generation": generation,
+                    "suspended": True,
+                    "runPolicySha256": schedule["status"]["policy"]["runPolicySha256"],
+                },
+                "nameRule": {
+                    "fixture": str(fixture_path.relative_to(ROOT)),
+                    "fixtureRowsRederivedByThePage": fixture_rows,
+                    "consoleDerived": expected_name,
+                    "apiDerived": api_name,
+                    "equal": expected_name == api_name,
+                    "derivedBy": "ui/client.js::manualBackupName",
+                },
+                "api": {
+                    "status": code,
+                    "run": api_run,
+                    "annotations": api_annotations,
+                    "spec": api_spec,
+                    "labels": api_labels,
+                },
+                "kubectl": {
+                    "command": f"kubectl --context {CONTEXT} -n {NS} apply -f "
+                    "config/samples/backup-manual.yaml (scoped)",
+                    "file": artifact(
+                        "objects/L-06-2-cli/backup-manual.scoped.yaml",
+                        sample_path.read_text(),
+                    ),
+                    "run": cli_run,
+                    "spec": cli_spec,
+                    "labels": cli_labels,
+                    "annotations": sorted(
+                        (cli_object["metadata"].get("annotations") or {}).keys()
+                    ),
+                },
+                "specDifferences": spec_diff,
+                "labelsEqual": api_labels == cli_labels,
+                "repeatPostOverTheKubectlObject": {
+                    "status": conflict_code,
+                    "code": conflict.get("code") if isinstance(conflict, dict) else None,
+                },
+                "negativeControl": {
+                    "changedField": "deadlineSeconds",
+                    "from": copied["deadlineSeconds"],
+                    "to": mutated["deadlineSeconds"],
+                    "name": mutated_name,
+                    "comparisonFailedAt": mutated_diff,
+                    "controllerPhase": (refused.get("status") or {}).get("phase"),
+                    "controllerReason": refused_condition.get("reason"),
+                    "controllerMessage": refused_condition.get("message"),
+                    "refusedForTheDigest": refusal_is_the_digest,
+                },
+            },
+            "uids": {
+                "schedule": schedule["metadata"]["uid"],
+                "apiBackup": api_run["uid"],
+                "kubectlBackup": cli_run["uid"],
+                "mutatedBackup": mutated_object["metadata"]["uid"],
+            },
+            "dumps": dump_objects(
+                "L-06-2-cli",
+                {"schedule": ("backupschedule", name), "kubectlBackup": ("backup", api_name)},
+            ),
+        }
+    finally:
+        handle.terminate()
+        try:
+            handle.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            handle.kill()
+        artifact("logs/logweir-api-p062.log", log_path.read_text(errors="replace"))
+
 
 # Evidence the brief names for PLAT-04.2's acceptance ("users can predict the
 # next runs"; "policy never creates an unbounded backlog") that D1 §13.2 does

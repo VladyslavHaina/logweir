@@ -632,6 +632,124 @@ def test_a_row_never_matches_the_capture_its_previous_run_left() -> None:
         fenced.capture_identity(STALE) != fenced.capture_identity(FRESH))
 
 
+
+# --- L-06-2-cli: the CLI/API comparison's own decisions ---------------------
+#
+# The row compares two objects leaf by leaf and calls them the same. A
+# comparison that cannot say "different" is not a comparison, so every case
+# below is a recorded shape AND the mutation of it the row must refuse.
+
+P062_SCHEDULE = {
+    "metadata": {"name": "manual-cli", "uid": "3f1c-uid", "generation": 3},
+    "spec": {
+        "schedule": "0 3 * * *",
+        "suspend": True,
+        "sourceRef": {"name": "source"},
+        "topics": ["t1", "t2"],
+        "archive": {"url": "logweir-destination://dest"},
+        "destinationRef": {"name": "dest"},
+        "concurrencyPolicy": "Forbid",
+        "activeDeadlineSeconds": 600,
+        "retention": {"keepLast": 3},
+    },
+    "status": {
+        "observedGeneration": 3,
+        "policy": {"generation": 3, "runPolicySha256": "sha256:" + "ab" * 32},
+    },
+}
+
+
+def test_the_manual_copy_is_the_policy_half_and_the_identity_half() -> None:
+    copied = d1.run_policy_copy(P062_SCHEDULE)
+    row("L-06-2-cli: the copy carries the schedule's policy fields",
+        copied["sourceRef"] == {"name": "source"}
+        and copied["topics"] == ["t1", "t2"]
+        and copied["archive"] == {"url": "logweir-destination://dest"}
+        and copied["destinationRef"] == {"name": "dest"}
+        and copied["deadlineSeconds"] == 600)
+    row("L-06-2-cli: and the manual identity, with no slot",
+        copied["triggeredBy"] == "manual"
+        and copied["trigger"] == {"kind": "Manual", "attempt": 0}
+        and "slot" not in copied)
+    row("L-06-2-cli: scheduleRef records uid, generation and the PUBLISHED digest",
+        copied["scheduleRef"] == {
+            "name": "manual-cli", "uid": "3f1c-uid", "generation": 3,
+            "runPolicySha256": "sha256:" + "ab" * 32,
+        })
+    # WHAT IT MUST NOT CARRY. Cadence, concurrency and retention decide WHEN a
+    # run happens and are excluded from the run policy by D1 §3.2; a copy that
+    # dragged them onto the Backup would not match the API's object and would
+    # not be a run policy either.
+    row("MUTANT: the cadence half is not copied onto the run",
+        not ({"schedule", "suspend", "concurrencyPolicy", "retention",
+              "activeDeadlineSeconds"} & set(copied)))
+    absent = json.loads(json.dumps(P062_SCHEDULE))
+    del absent["spec"]["activeDeadlineSeconds"]
+    row("L-06-2-cli: an absent deadline resolves to 3600, as the digest requires",
+        d1.run_policy_copy(absent)["deadlineSeconds"] == 3600)
+    dynamic = json.loads(json.dumps(P062_SCHEDULE))
+    dynamic["spec"]["topics"] = []
+    dynamic["spec"]["allUserTopics"] = {"incompleteDiscovery": "Refuse"}
+    row("L-06-2-cli: a dynamic selection is copied whole, with topics []",
+        d1.run_policy_copy(dynamic)["allUserTopics"] == {"incompleteDiscovery": "Refuse"}
+        and d1.run_policy_copy(dynamic)["topics"] == [])
+    row("L-06-2-cli: the four labels, and no others",
+        d1.manual_labels(P062_SCHEDULE) == {
+            "logweir.dev/trigger": "manual",
+            "logweir.dev/attempt": "0",
+            "logweir.dev/schedule": "manual-cli",
+            "logweir.dev/schedule-uid": "3f1c-uid",
+        })
+
+
+def test_the_spec_comparison_can_say_different() -> None:
+    left = d1.run_policy_copy(P062_SCHEDULE)
+    row("L-06-2-cli: two copies of the same schedule are byte-equal",
+        d1.spec_differences(left, d1.run_policy_copy(P062_SCHEDULE)) == [])
+    for path, change in (
+        ("deadlineSeconds", lambda s: s.update(deadlineSeconds=601)),
+        ("sourceRef.name", lambda s: s["sourceRef"].update(name="other")),
+        ("topics[1]", lambda s: s["topics"].__setitem__(1, "t3")),
+        ("archive.url", lambda s: s["archive"].update(url="s3://elsewhere")),
+        ("scheduleRef.runPolicySha256",
+         lambda s: s["scheduleRef"].update(runPolicySha256="sha256:" + "cd" * 32)),
+        ("trigger.kind", lambda s: s["trigger"].update(kind="Scheduled")),
+    ):
+        mutated = json.loads(json.dumps(left))
+        change(mutated)
+        found = d1.spec_differences(left, mutated)
+        row(f"MUTANT: a changed {path} is reported at that path",
+            any(d.startswith(path) for d in found), repr(found))
+    # A field that is present on one side and absent on the other is a
+    # difference and not a match: the row's whole claim is "the only fields the
+    # API adds are the name and its own annotations".
+    dropped = json.loads(json.dumps(left))
+    del dropped["destinationRef"]
+    row("MUTANT: an absent field is a difference, not a tie",
+        any(d.startswith("destinationRef") for d in d1.spec_differences(left, dropped)))
+    # A list that is shorter is a difference even when every entry it has
+    # matches: a topic quietly dropped from a copy is exactly the defect this
+    # comparison exists to catch.
+    short = json.loads(json.dumps(left))
+    short["topics"] = ["t1"]
+    row("MUTANT: a dropped topic is a difference",
+        d1.spec_differences(left, short) != [])
+
+
+def test_the_raw_idempotency_key_never_reaches_an_artifact() -> None:
+    captured = json.dumps({
+        "argv": ["curl", "-H", "Idempotency-Key: plat06-2-finish.deadbeefcafe", "-X", "POST"],
+        "note": "after it",
+    })
+    cleaned = d1.redact(captured)
+    row("L-06-2-cli: the raw Idempotency-Key is redacted out of a recorded command",
+        "plat06-2-finish.deadbeefcafe" not in cleaned and "[REDACTED]" in cleaned, cleaned)
+    row("MUTANT: the redaction stops at the JSON string and eats nothing after it",
+        json.loads(cleaned)["note"] == "after it", cleaned)
+    row("MUTANT: a document with no key at all is returned unchanged",
+        d1.redact('{"a": "b"}') == '{"a": "b"}')
+
+
 def main() -> int:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):
