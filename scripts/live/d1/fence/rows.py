@@ -2032,6 +2032,7 @@ def frozen_list_survives_a_deleted_topic(
     status: dict[str, Any],
     receipt: dict[str, Any] | None,
     gone: str,
+    failure_text: str = "",
 ) -> dict[str, bool]:
     """D1 §7.5's "topic deleted after discovery, before the engine reads it".
 
@@ -2045,6 +2046,18 @@ def frozen_list_survives_a_deleted_topic(
     vanished under it, and D1 deliberately declines to promise that. What D1
     promises unconditionally is the first clause and the last three, and those
     are asserted whichever way the run went.
+
+    AND EACH BRANCH HAS TO BE ABOUT *THIS* TOPIC (review **M-1**). The earlier
+    version admitted any `Failed` run whose runner exited 1, which is the
+    dangerous direction rather than the safe one: this build is genuinely
+    non-deterministic here — the same choreography finished exit 1, exit 0 and
+    exit 1 in three consecutive runs of 2026-09-21 — so a broker blip or an
+    archive timeout would have satisfied every clause and turned the row green
+    having measured nothing about the deletion. The `Succeeded` branch is
+    already attributed, by `records[gone] == 0`; the `Failed` branch now has to
+    be attributed the same way, by the runner naming the topic in its own
+    failure text. `failure_text` is the terminal condition, the progress
+    message and the runner pod's log, concatenated by the row.
     """
     frozen = (after.get("inputs") or {}).get("topics") or []
     records = (receipt or {}).get("records") or {}
@@ -2054,9 +2067,13 @@ def frozen_list_survives_a_deleted_topic(
             after.get("sha256") == before.get("sha256")
             and after.get("resourceVersion") == before.get("resourceVersion"),
         "the frozen list still names the deleted topic": gone in frozen,
-        "the outcome is one of the two D1 §7.5 admits":
+        "the outcome is one of the two D1 §7.5 admits, and names the deleted topic":
             (phase == "Succeeded" and receipt is not None)
-            or (phase == "Failed" and status.get("exitCode") == 1),
+            or (
+                phase == "Failed"
+                and status.get("exitCode") == 1
+                and gone in (failure_text or "")
+            ),
         "no receipt claims records for a topic outside the frozen list":
             set(records) <= set(frozen),
         "nothing claims records for the topic that was deleted":
@@ -2190,7 +2207,13 @@ def _delete_between_freeze_and_execution(H: Any, name: str, *, delete: bool) -> 
     receipt = None
     if ((done.get("status") or {}).get("evidence") or {}).get("receiptKey"):
         receipt = H.receipt_of(done)
+    # READ NOW, WHILE THE POD IS STILL THERE. The discovery and runner Jobs are
+    # patched with `ttlSecondsAfterFinished` once the terminal status lands, so
+    # the runner's own account of what it found is on a clock from the moment
+    # this row's `wait_for` returns.
+    failure = runner_failure_text(H, done, name)
     return {
+        "failure": failure,
         "backup": done,
         "uid": uid,
         "gone": gone,
@@ -2205,6 +2228,81 @@ def _delete_between_freeze_and_execution(H: Any, name: str, *, delete: bool) -> 
         "heldResponse": response,
         "receipt": receipt,
         "runnerJobs": [j["metadata"]["name"] for j in H.runner_jobs(done)],
+    }
+
+
+#: What makes a runner log line a statement about a failure rather than an echo
+#: of the inputs. Deliberately broad — a missed marker costs a false red that a
+#: reader resolves from the excerpt beside it, while a marker that matched
+#: everything would put the row back where review M-1 found it.
+FAILURE_MARKERS = (
+    "error",
+    "fail",
+    "refus",
+    "panic",
+    "unknown_topic",
+    "not found",
+    "does not exist",
+    "no longer",
+    "missing",
+)
+
+
+def runner_failure_text(H: Any, backup: dict[str, Any], job: str) -> dict[str, Any]:
+    """Everything this run says about WHY it ended the way it did.
+
+    Three sources, concatenated, because the product spreads the answer across
+    them and a row that read only one would be asserting on where the words
+    live rather than on what they say: the terminal `Failed` condition (which on
+    this build carries only the exit code and where it was read from), the
+    `status.progress` message beside it, and the runner pod's own log — which is
+    the only place the engine's account of a missing topic appears at all.
+
+    The pod is read by the Job's own name labels (`backup.rs::pod_selectors`).
+    A pod already reaped by `ttlSecondsAfterFinished` yields an empty log and
+    `podAbsent: true`; the row then FAILS its attribution clause rather than
+    passing on the two status strings, because "the evidence expired" and "the
+    run failed for the reason claimed" are not the same statement.
+    """
+    condition = (H.condition(backup, "Failed") or {}).get("message") or ""
+    progress = ((backup.get("status") or {}).get("progress") or {}).get("message") or ""
+    pods = [
+        item
+        for item in H.lst("pods")
+        if (item["metadata"].get("labels") or {}).get("job-name") == job
+        or (item["metadata"].get("labels") or {}).get("batch.kubernetes.io/job-name") == job
+    ]
+    log = ""
+    pod_name = None
+    if pods:
+        pod_name = pods[0]["metadata"]["name"]
+        result = H.run(
+            H.KN + ["logs", pod_name, "-c", "runner", "--tail=400"],
+            check=False,
+            timeout=120,
+        )
+        log = result.stdout + result.stderr
+    # THE WHOLE LOG IS NOT THE ATTRIBUTION, AND THIS IS THE TRAP IN M-1's FIX.
+    # The runner echoes the frozen `backup.yaml` it was handed, so the deleted
+    # name appears in its log whatever happened — searching the full text would
+    # have matched the INPUT and called it the reason. Only lines that read as a
+    # failure are offered as attribution; the full log is kept beside them for
+    # whoever reads the excerpt.
+    failure_only = [
+        line
+        for line in log.splitlines()
+        if any(marker in line.lower() for marker in FAILURE_MARKERS)
+    ]
+    return {
+        "conditionMessage": condition,
+        "progressMessage": progress,
+        "podName": pod_name,
+        "podAbsent": pod_name is None,
+        "runnerLog": log,
+        "failureLines": failure_only,
+        # What the row is allowed to attribute the failure to.
+        "text": "\n".join([condition, progress, *failure_only]),
+        "fullText": "\n".join([condition, progress, log]),
     }
 
 
@@ -2263,12 +2361,38 @@ def l_09_3a(H: Any) -> dict[str, Any]:
         "nothing",
         obj=observed["topicsAfter"],
     )
+    failure = observed["failure"]
+    # THE EXCERPT GOES IN THE RECORD WHATEVER THE VERDICT IS (review M-1). A row
+    # that dumped the runner's words only when it failed would leave a green run
+    # unable to say why it was green.
+    excerpt_path = H.artifact(
+        "objects/L-09-3a/runner-failure.log",
+        "\n".join(
+            [
+                f"# pod {failure['podName']} (container `runner`), Job {observed['backup']['metadata']['name']}",
+                f"# deleted topic under test: {observed['gone']}",
+                "",
+                "## Failed condition message",
+                failure["conditionMessage"],
+                "",
+                "## status.progress message",
+                failure["progressMessage"],
+                "",
+                "## the lines this row is allowed to attribute the failure to",
+                "\n".join(failure["failureLines"]) or "(none)",
+                "",
+                "## runner container log (tail 400), in full",
+                failure["runnerLog"],
+            ]
+        ),
+    )
     clauses = frozen_list_survives_a_deleted_topic(
         observed["planAtHold"],
         observed["planAfter"],
         observed["backup"]["status"],
         observed["receipt"],
         observed["gone"],
+        failure["text"],
     )
     H.require(
         all(clauses.values()),
@@ -2278,10 +2402,15 @@ def l_09_3a(H: Any) -> dict[str, Any]:
         + f". phase={observed['backup']['status'].get('phase')!r}, "
         f"exitCode={observed['backup']['status'].get('exitCode')!r}, "
         f"frozen={observed['planAfter']['inputs'].get('topics')}, "
-        f"records={(observed['receipt'] or {}).get('records')}",
+        f"records={(observed['receipt'] or {}).get('records')}, "
+        f"does the failure text name {observed['gone']}? "
+        f"{observed['gone'] in failure['text']} "
+        f"(runner pod {failure['podName']!r}, podAbsent={failure['podAbsent']}); "
+        f"excerpt {excerpt_path}",
         obj=observed["backup"],
         dumps={"planAtHold": observed["planAtHold"], "planAfter": observed["planAfter"],
-               "receipt": observed["receipt"]},
+               "receipt": observed["receipt"],
+               "runnerFailure": {k: v for k, v in failure.items() if k != "text"}},
     )
     status = observed["backup"]["status"]
     retry: dict[str, Any] | None = None
@@ -2298,6 +2427,9 @@ def l_09_3a(H: Any) -> dict[str, Any]:
         "asserted": {
             "heldRequest": observed["held"],
             "rediscoveryAfterTheDeletion": retry,
+            "runnerFailureNamesTheDeletedTopic": observed["gone"] in failure["text"],
+            "runnerFailureExcerpt": excerpt_path,
+            "runnerPod": failure["podName"],
             "failedAttemptIsRetryable": status.get("phase") != "Failed"
             or (status.get("exitCode") == 1),
             "clauses": clauses,

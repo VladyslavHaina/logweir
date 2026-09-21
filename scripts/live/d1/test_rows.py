@@ -394,16 +394,25 @@ def test_an_acl_limited_discovery_never_claims_the_cluster() -> None:
         not all(d1.partial_discovery_never_claims_the_cluster(
             ACL_PLAN_SELECTION, ACL_STATUS_SELECTION,
             ["acl-a", "acl-b", "secret-t"], ACL_PRINCIPAL_SEES, "secret-t").values()))
-    # `limited` and the count are ONE fact published twice; either without the
-    # other is a controller inventing a verdict.
-    lying = json.loads(json.dumps(ACL_PLAN_SELECTION))
-    lying["discovery"]["visibility"] = "limited"
-    row("MUTANT: visibility `limited` with a zero limited count is refused",
-        not all(d1.partial_discovery_never_claims_the_cluster(
-            lying, ACL_STATUS_SELECTION, ["acl-a", "acl-b"],
+    # THE TWO NUMBERS ARE NOT ONE FACT, AND THE ROW NO LONGER PRETENDS THEY ARE
+    # (review L-1). `limitedTopicCount` counts ANY per-entry error
+    # (`backup_selection.rs:326`); `visibility: limited` is raised only by
+    # `TopicAuthorizationFailed`. Each of the two rows below is a LEGAL product
+    # state that the earlier biconditional would have painted red.
+    limited_without_a_count = json.loads(json.dumps(ACL_PLAN_SELECTION))
+    limited_without_a_count["discovery"]["visibility"] = "limited"
+    row("LEGAL: `limited` with a zero count — an INTERNAL topic the broker "
+        "refused, taken by the internal arm before the limited one — is accepted",
+        all(d1.partial_discovery_never_claims_the_cluster(
+            limited_without_a_count, ACL_STATUS_SELECTION, ["acl-a", "acl-b"],
             ACL_PRINCIPAL_SEES, "secret-t").values()))
-    # ... and the pairing is accepted when the broker DID report an errored
-    # entry, which is the other verdict D1 §7.2 R5 admits.
+    count_without_limited = json.loads(json.dumps(ACL_PLAN_SELECTION))
+    count_without_limited["discovery"]["limitedTopicCount"] = 1
+    row("LEGAL: a positive count beside `unknown` — a listing entry with a "
+        "NON-authorization error — is accepted",
+        all(d1.partial_discovery_never_claims_the_cluster(
+            count_without_limited, dict(ACL_STATUS_SELECTION, limitedTopicCount=1),
+            ["acl-a", "acl-b"], ACL_PRINCIPAL_SEES, "secret-t").values()))
     honest = json.loads(json.dumps(ACL_PLAN_SELECTION))
     honest["discovery"]["visibility"] = "limited"
     honest["discovery"]["limitedTopicCount"] = 1
@@ -415,6 +424,12 @@ def test_an_acl_limited_discovery_never_claims_the_cluster() -> None:
         not all(d1.partial_discovery_never_claims_the_cluster(
             honest, dict(ACL_STATUS_SELECTION, limitedTopicCount=0),
             ["acl-a", "acl-b"], ACL_PRINCIPAL_SEES, "secret-t").values()))
+    no_count = json.loads(json.dumps(ACL_PLAN_SELECTION))
+    del no_count["discovery"]["limitedTopicCount"]
+    row("MUTANT: a plan that publishes NO limited count at all is refused",
+        not all(d1.partial_discovery_never_claims_the_cluster(
+            no_count, ACL_STATUS_SELECTION, ["acl-a", "acl-b"],
+            ACL_PRINCIPAL_SEES, "secret-t").values()))
     row("MUTANT: a discovery block with no visibility at all is refused",
         not all(d1.partial_discovery_never_claims_the_cluster(
             {"coverage": "VisibleUserTopicsOnly"}, ACL_STATUS_SELECTION,
@@ -469,15 +484,45 @@ RECEIPT_ZERO = {"source": {"topics": ["rc-gone", "rc-keep"]},
                 "records": {"rc-gone": 0, "rc-keep": 5}}
 
 
+# What the runner said. The `Failed` branch is only evidence when the runner's
+# own words are about THIS topic (review M-1) — this build exits 1 for plenty of
+# other reasons, and did so twice in three runs on 2026-09-21.
+NAMES_THE_TOPIC = (
+    "the runner exited 1 (operational)\n"
+    "\nERROR reading topic rc-gone: UNKNOWN_TOPIC_OR_PARTITION\n"
+)
+UNRELATED_FAILURE = (
+    "the runner exited 1 (operational)\n"
+    "\nERROR archive upload to s3://kafka-backups timed out after 120s\n"
+)
+
+
 def test_a_topic_deleted_between_freeze_and_execution() -> None:
     ok = fence_rows.frozen_list_survives_a_deleted_topic(
         PLAN_AT_HOLD, PLAN_AT_HOLD, {"phase": "Succeeded"}, RECEIPT_ZERO, "rc-gone")
     row("L-09-3a: Succeeded with 0 records for the deleted topic is admitted",
         all(ok.values()), str(ok))
-    row("L-09-3a: Failed exit 1 with no receipt is the other outcome D1 admits",
+    row("L-09-3a: Failed exit 1 whose text names the deleted topic is the other "
+        "outcome D1 admits",
         all(fence_rows.frozen_list_survives_a_deleted_topic(
             PLAN_AT_HOLD, PLAN_AT_HOLD, {"phase": "Failed", "exitCode": 1},
-            None, "rc-gone").values()))
+            None, "rc-gone", NAMES_THE_TOPIC).values()))
+    # THE FINDING THIS ROW EXISTS FOR.
+    row("MUTANT: `Failed` exit 1 whose message does not name the deleted topic is "
+        "refused — an unrelated operational failure is not this measurement",
+        not all(fence_rows.frozen_list_survives_a_deleted_topic(
+            PLAN_AT_HOLD, PLAN_AT_HOLD, {"phase": "Failed", "exitCode": 1},
+            None, "rc-gone", UNRELATED_FAILURE).values()))
+    row("MUTANT: `Failed` exit 1 with NO failure text at all — a reaped pod — is "
+        "refused rather than passing on the status strings",
+        not all(fence_rows.frozen_list_survives_a_deleted_topic(
+            PLAN_AT_HOLD, PLAN_AT_HOLD, {"phase": "Failed", "exitCode": 1},
+            None, "rc-gone", "").values()))
+    row("the Succeeded branch needs no failure text — it is attributed by "
+        "records[gone] == 0",
+        all(fence_rows.frozen_list_survives_a_deleted_topic(
+            PLAN_AT_HOLD, PLAN_AT_HOLD, {"phase": "Succeeded"}, RECEIPT_ZERO,
+            "rc-gone", "").values()))
     moved = dict(PLAN_AT_HOLD, resourceVersion="4712")
     row("MUTANT: a frozen plan that MOVED is refused — the snapshot is immutable",
         not all(fence_rows.frozen_list_survives_a_deleted_topic(
@@ -499,10 +544,11 @@ def test_a_topic_deleted_between_freeze_and_execution() -> None:
             PLAN_AT_HOLD, PLAN_AT_HOLD, {"phase": "Succeeded"},
             {"source": {"topics": ["rc-gone", "rc-keep"]},
              "records": {"rc-gone": 0, "rc-keep": 5, "rc-other": 9}}, "rc-gone").values()))
-    row("MUTANT: Failed with exit 0 is neither outcome D1 admits",
+    row("MUTANT: Failed with exit 0 is neither outcome D1 admits, however well "
+        "its text names the topic",
         not all(fence_rows.frozen_list_survives_a_deleted_topic(
             PLAN_AT_HOLD, PLAN_AT_HOLD, {"phase": "Failed", "exitCode": 0},
-            None, "rc-gone").values()))
+            None, "rc-gone", NAMES_THE_TOPIC).values()))
 
 
 # --- L-09-3b: the source moved under the run --------------------------------

@@ -1613,12 +1613,25 @@ def partial_discovery_never_claims_the_cluster(
     fixture's own reading confirms it from the client side: the principal's
     `--list` shows the allowed topics and nothing else.
 
-    So for a run discovery `visibility == "limited"` if and only if the listing
-    carried an errored entry, and that is the invariant asserted here — a real
-    relation between two published numbers, which a controller that invented
-    either would break. What the acceptance sentence actually promises is the
-    LAST clause, and it holds under both verdicts: no observation upgrades
-    coverage to `AllUserTopicsAttested` without an administrator attestation.
+    AND IT DOES NOT DEMAND THE CONVERSE EITHER (review **L-1**). An earlier
+    version asserted `visibility == "limited"` **if and only if**
+    `limitedTopicCount > 0`, and both halves of that biconditional are wrong
+    against the contract, because the two numbers do not come from one
+    predicate. `limitedTopicCount` is `classification.limited.len()` and
+    `classify` buckets an entry on ANY per-entry error
+    (`backup_selection.rs:326`, whose own comment says so), so a
+    non-authorization error gives a positive count beside `visibility:
+    unknown`. In the other direction an INTERNAL topic carrying
+    `TopicAuthorizationFailed` is taken by the internal arm, which is tested
+    first (`backup_selection.rs:324`), so `limited` can be raised with a zero
+    count. Both are legal states and the row must not paint either red.
+
+    What is left is sound and is what is asserted: the verdict is one of the
+    two a run discovery can produce, the count is published and the status
+    agrees with the plan it was frozen from, the frozen list is what the
+    principal can see, and — the acceptance sentence's own clause — no
+    observation upgrades coverage to `AllUserTopicsAttested` without an
+    administrator attestation.
     """
     discovery = sel.get("discovery") or {}
     visibility = discovery.get("visibility") or sel.get("visibility")
@@ -1631,10 +1644,8 @@ def partial_discovery_never_claims_the_cluster(
             denied not in frozen_topics,
         "the discovery published a completeness verdict at all":
             visibility in {"unknown", "limited"},
-        "the verdict is `limited` exactly when the listing carried an errored entry":
-            isinstance(limited, int) and (visibility == "limited") == (limited > 0),
         "the status flattens the plan's own limited count":
-            status_sel.get("limitedTopicCount") == limited,
+            isinstance(limited, int) and status_sel.get("limitedTopicCount") == limited,
         "the run is labelled visible-only":
             status_sel.get("coverage") == "VisibleUserTopicsOnly"
             and sel.get("coverage") == "VisibleUserTopicsOnly",
