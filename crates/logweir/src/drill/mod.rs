@@ -732,8 +732,7 @@ pub fn validate_execution_contract(
     // against the SIGNED `subjectRef.name` — deliberately a stronger binding
     // than an equality against an environment variable the controller set,
     // which would only prove the controller agreed with itself.
-    if contract.authorization_kind
-        == logweir_core::execution_contract::AuthorizationKind::Standing
+    if contract.authorization_kind == logweir_core::execution_contract::AuthorizationKind::Standing
     {
         if triggered_by
             .and_then(logweir_core::execution_contract::parse_rehearsal_triggered_by)
@@ -1993,28 +1992,27 @@ fn load_startup_inputs(
     // kind, subject, UID binding and validity window, and `plan ∈ scope`.
     // Neither path can be skipped — `execute_for_reporting` refuses a run that
     // produced no `Approved` at all.
-    let approved = match (&bundle.approval, &bundle.approval_sidecar) {
-        (Some(approval), Some(approval_sidecar)) => Some(phase1_approval::verify_bytes(
-            &spec_text,
-            approval,
-            approval_sidecar,
-            &bundle.approver_key,
-            signing_key,
-        )?),
-        // Both absent: the standing path, already pinned above.
-        (None, None) => None,
-        // Unreachable — both come from one `Option<PathBuf>` — and named
-        // rather than unwrapped so a future edit that splits them cannot
-        // silently produce "no approval to verify".
-        _ => {
-            return Err(GuardRefusal(
+    let approved =
+        match (&bundle.approval, &bundle.approval_sidecar) {
+            (Some(approval), Some(approval_sidecar)) => Some(phase1_approval::verify_bytes(
+                &spec_text,
+                approval,
+                approval_sidecar,
+                &bundle.approver_key,
+                signing_key,
+            )?),
+            // Both absent: the standing path, already pinned above.
+            (None, None) => None,
+            // Unreachable — both come from one `Option<PathBuf>` — and named
+            // rather than unwrapped so a future edit that splits them cannot
+            // silently produce "no approval to verify".
+            _ => return Err(GuardRefusal(
                 "an incomplete per-run approval was mounted: the document and its DSSE sidecar \
                  are only meaningful together; no data operation was started"
                     .to_string(),
             )
-            .into())
-        }
-    };
+            .into()),
+        };
     // All three, or none. `validate_execution_contract` has already refused a
     // pinned digest with nothing mounted and a mounted member with no pinned
     // digest, so a partial set can only arrive on the contract-free path — and
@@ -2172,22 +2170,22 @@ fn execute_for_reporting(
     // could be removed and a run would still need SOMETHING to have minted an
     // `Approved`, so a rehearsal that skipped its authorization entirely
     // cannot reach phase 0 by falling through.
-    let approved = match (startup.approved, standing_approved) {
-        (Some(approved), None) | (None, Some(approved)) => approved,
-        (Some(_), Some(_)) => {
-            return (
-                Err(GuardRefusal(
-                    "this run presented both a verified per-run approval and a standing \
+    let approved =
+        match (startup.approved, standing_approved) {
+            (Some(approved), None) | (None, Some(approved)) => approved,
+            (Some(_), Some(_)) => {
+                return (
+                    Err(GuardRefusal(
+                        "this run presented both a verified per-run approval and a standing \
                      rehearsal authorization; exactly one authorizes a Restore; no data \
                      operation was started"
-                        .to_string(),
+                            .to_string(),
+                    )
+                    .into()),
+                    Some(authenticated_spec),
                 )
-                .into()),
-                Some(authenticated_spec),
-            )
-        }
-        (None, None) => {
-            return (
+            }
+            (None, None) => return (
                 Err(GuardRefusal(
                     "this run is authorized by nothing: no per-run approval was verified and no \
                      standing rehearsal authorization was proved; no data operation was started"
@@ -2195,9 +2193,8 @@ fn execute_for_reporting(
                 )
                 .into()),
                 Some(authenticated_spec),
-            )
-        }
-    };
+            ),
+        };
     let outcome = match context(startup.spec_text, startup.allowed_text, store_contract) {
         Ok(c) => execute_with_prevalidated(args, run_id, &c, &signer, approved),
         Err(error) => Err(error),
@@ -2503,12 +2500,9 @@ fn execute_with_validated_approval(
         // unwrapped. Unreachable through `execute_for_reporting`, which mints
         // an `Approved` from one of the two authorizations before phase 0.
         None => match args.approval.as_ref() {
-            Some(approval) => phase1_approval::verify(
-                &c.spec_text,
-                approval,
-                &args.approver_key,
-                &signing_pub,
-            ),
+            Some(approval) => {
+                phase1_approval::verify(&c.spec_text, approval, &args.approver_key, &signing_pub)
+            }
             None => Err(GuardRefusal(
                 "--approval is required for a run that carries no pre-validated authorization; \
                  no data operation was started"
@@ -4778,17 +4772,15 @@ mod standing_approved_tests {
     fn a_trigger_naming_another_schedule_is_refused() {
         let verified = document("weekly-orders", Utc::now() - chrono::Duration::days(1));
         let args = args_triggered(Some("rehearsal/some-other-schedule/20260920T030000"));
-        let error = standing_approved_from(
-            &args,
-            &verified,
-            "name: plan\n",
-            &signing_key(),
-            Utc::now(),
-        )
-        .expect_err("a trigger naming another schedule is refused");
+        let error =
+            standing_approved_from(&args, &verified, "name: plan\n", &signing_key(), Utc::now())
+                .expect_err("a trigger naming another schedule is refused");
         assert!(matches!(error, DrillError::Guard(_)), "{error}");
         let text = error.to_string();
-        assert!(text.contains("some-other-schedule") && text.contains("weekly-orders"), "{text}");
+        assert!(
+            text.contains("some-other-schedule") && text.contains("weekly-orders"),
+            "{text}"
+        );
         assert!(text.contains("no data operation was started"), "{text}");
     }
 
@@ -4797,7 +4789,12 @@ mod standing_approved_tests {
     #[test]
     fn a_missing_or_malformed_rehearsal_trigger_is_refused() {
         let verified = document("weekly-orders", Utc::now() - chrono::Duration::days(1));
-        for trigger in [None, Some("approval/weekly-orders-standing"), Some("rehearsal//x"), Some("rehearsal/weekly-orders/")] {
+        for trigger in [
+            None,
+            Some("approval/weekly-orders-standing"),
+            Some("rehearsal//x"),
+            Some("rehearsal/weekly-orders/"),
+        ] {
             let args = args_triggered(trigger);
             let error = standing_approved_from(
                 &args,
@@ -4807,7 +4804,10 @@ mod standing_approved_tests {
                 Utc::now(),
             )
             .expect_err("a run authorized by a standing document must name its slot");
-            assert!(matches!(error, DrillError::Guard(_)), "{trigger:?}: {error}");
+            assert!(
+                matches!(error, DrillError::Guard(_)),
+                "{trigger:?}: {error}"
+            );
             assert!(
                 error.to_string().contains("rehearsal/"),
                 "{trigger:?}: the refusal names the shape it wanted: {error}"

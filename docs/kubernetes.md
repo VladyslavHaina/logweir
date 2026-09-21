@@ -2006,17 +2006,19 @@ be frozen, before the reservation and before any `POST`: an out-of-scope plan
 reaches no `Restore`, no `ConfigMap` and no Job. **That half is live today.** The
 runner's half — proving the same thing again against the mounted bundle, through
 the same predicate from the same projection, before it constructs any client —
-is the intended end state and is not reachable yet; see "What is not wired yet"
-below.
+is live too since PLAT-14.3b, and the `Restore` reconciler makes the same chain
+a THIRD time at admission (see "How a rehearsal executes" below).
 
 **What the bundle contains.** One immutable `ConfigMap` owned by the `Restore`:
 the signed standing document at `standing-authorization.json` with its sidecar
 derived at `standing-authorization.sig` (the paths the runner mounts), the
 trusted public keys at `authorization-keys.json`, an allowlist holding **exactly**
-the signed target cluster id, the approver's public key, and the per-run
-`approval.json` / `approval.sig` slot described under "What is not wired yet".
-Every member is pinned by a sha256 in the Job's immutable environment, and no
-private key material is ever written to it.
+the signed target cluster id, and the approver's public key — **five members,
+and no per-run `approval.json` slot.** Every member is pinned by a sha256 in
+the Job's immutable environment, and no private key material is ever written to
+it. The sidecar keeps its own name: mounted at `approval.sig` the runner would
+verify it under `PAYLOAD_TYPE_APPROVAL` and report a correctly signed rehearsal
+as a substituted approval.
 
 **The rendered prefix is unique per schedule object.**
 `spec.target.topicPrefix` is rendered as `<prefix><schedule-uid-first-8>-`, for
@@ -2089,34 +2091,60 @@ Rolling the CRDs back deletes any `RehearsalSchedule` objects and, by owner
 cascade, their `Restore` CRs and approval bundles; no archive object and no
 signed evidence is affected.
 
-**What is not wired yet — a rehearsal cannot execute, and this is the whole
-list.** The schedule fires, selects a point, proves the plan is inside the signed
-scope, reserves, creates the `Restore` and writes its bundle. Nothing runs. Two
-independent reasons, tracked together as **PLAT-14.3b**:
+**How a rehearsal executes.** The schedule fires, selects a point, proves the
+plan is inside the signed scope, reserves, creates the `Restore` and writes its
+bundle; the `Restore` reconciler then admits it and creates the Job. The
+standing document REPLACES the per-run approval rather than sitting beside it
+(PLAT-14.3b) — a per-run approval binds `sha256(plan bytes)` and only a human
+with a signing key can produce one, while the controller links no signer at all
+(Global Constraint 27), so requiring both is requiring a rehearsal never to run.
 
-1. **The runner's standing check sits BESIDE the per-run approval, not in place
-   of it.** `logweir restore run`'s startup path verifies `--approval` under
-   `PAYLOAD_TYPE_APPROVAL` unconditionally, and that document must bind
-   `sha256(plan bytes)` — which only a human with a signing key can produce,
-   because the controller links no signer at all. The standing scope proof runs
-   *after* that, over an already authenticated plan. Whether `--approval` becomes
-   optional under `AUTHORIZATION_KIND=standing` is a contract decision, not a
-   patch, and it has not been made. Until it is, the bundle's `approval.json` /
-   `approval.sig` members are a placeholder.
-2. **Five functions in the `Restore` reconciler do not read
-   `spec.authorization`.** `admit` and `get_approval` resolve `spec.approvalRef`
-   only, so a standing `Restore` is refused terminally with
-   `ApprovalNotReceived`; `triggered_by` would emit `approval/` with an empty
-   name, which the runner's own trigger check refuses; `runner_argv` emits
-   neither `--standing-authorization` nor `--authorization-keys`; and
-   `runner_job_spec` projects neither new member and never calls the
-   standing environment renderer.
+*The runner.* `logweir restore run` takes `--standing-authorization` and
+`--authorization-keys` and no `--approval`. It verifies the DSSE signature over
+the envelope's exact bytes under a key the bundle pins, judges THAT key's usage
+(`GovernedApproval` or `ConsoleConfirmation`, never `EvidenceSigning` — D3
+§7.3), admits the document (kind, subject, the UID binding to this schedule,
+and a validity window capped at ninety days), and proves `plan ∈ scope` — all
+before any client is constructed. Each failure is refused by name with exit 3
+and `no data operation was started`. `--approval` is REQUIRED for every other
+shape and refused under `AUTHORIZATION_KIND=standing`; the contract's
+`LOGWEIR_EXECUTION_APPROVAL_SHA256` / `…_SIDECAR_SHA256` are likewise required
+under `approval` and refused under `standing`, so the approval slot's presence
+cannot disagree with the authorization kind in either direction.
 
-The schedule says so rather than sitting silent: a child refused this way sets
-`RehearsalHealthy=False` with reason **`StandingAuthorizationNotAdmitted`** and a
-message naming those five functions and PLAT-14.3b. A rehearsal that never ran is
-not a rehearsal that failed, and the archive, the broker and the approver's key
-are not the problem.
+*`--triggered-by`.* A rehearsal's reason is a slot, not an approval a human
+clicked for this run, so the value is `rehearsal/<schedule>/<slot>` and it is
+copied verbatim into the signed scorecard. The runner checks its SHAPE before
+anything is parsed and binds the `<schedule>` segment to the signed document's
+own `subjectRef.name` once the signature verifies — a stronger binding than an
+equality against an environment variable the controller set. The scorecard's
+`approval.approver` reads `standing-authorization/<schedule>` and never a
+person's name: what a human signed was a schedule.
+
+*The controller.* `admit` dispatches on the object's own `spec.authorization` —
+never on what `Approval` happens to exist — so a standing document cannot admit
+an ordinary `Restore`, and an ordinary `Restore` still needs its own verified
+`Approval`. For a rehearsal it re-makes the schedule's chain: the `Approval` is
+`Verified=True` and is a `RehearsalSchedule` approval bound to the schedule the
+spec names, the key it verified under is one this namespace's trust still lets
+authorise with an approver's usage, the signed bytes are admissible against the
+UID the `Approval` controller recorded, and `plan ∈ scope`. Running it again
+here is not redundancy: a key can be withdrawn between the slot firing and this
+reconcile, and a `Restore` carrying `spec.authorization` can be created by
+anything with RBAC on the kind. A refusal is terminal with reason
+**`StandingAuthorizationRefused`** — its own reason, because an operator told
+`ApprovalSubjectMismatch` goes looking at a subject binding that is correct —
+and creates no Job. An absent or unverified `Approval` stays a thirty-second
+hold. This is the one kind for which trust is resolved BEFORE admission; the
+ordinary path still resolves it only when a Job is going to exist.
+
+*On the schedule.* A rehearsal that fails — verification, preflight, or its
+authorization — is recorded as the failure it is on `RehearsalHealthy` and
+D3 §4's `rehearsalLast*`, with the `Restore`'s own terminal reason in the
+message. The `StandingAuthorizationNotAdmitted` hold PLAT-14.3 carried while
+this was unwired is gone. Owned-topic cleanup is unchanged: the controller
+deletes no topic, teardown is the runner's phase 9 inside the prefix guard, and
+an unrelated topic on the target is never touched.
 
 ## 8. The approval flow
 

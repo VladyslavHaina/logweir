@@ -579,7 +579,9 @@ fn late_projected_plan_replacement_cannot_redirect_the_authenticated_notificatio
         .open(&approval)
         .unwrap();
     std::fs::write(&plan, substituted_plan).unwrap();
-    approval_writer.write_all(fixture.bundle.approval.as_deref().unwrap()).unwrap();
+    approval_writer
+        .write_all(fixture.bundle.approval.as_deref().unwrap())
+        .unwrap();
     drop(approval_writer);
 
     let output = child.wait_with_output().unwrap();

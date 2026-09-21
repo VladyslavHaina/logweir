@@ -743,14 +743,15 @@ pub struct StandingAdmission<'a> {
 ///
 /// # The order
 ///
-/// 1. the ref names something; 2. the `Approval` exists and is `Verified=True`
-/// (a HOLD — it can become true without anyone touching this object);
-/// 3. it is a `RehearsalSchedule` approval bound to the schedule
-/// `spec.authorization.rehearsalScheduleRef` names; 4. the key it verified
-/// under is one the namespace's trust still lets authorise, with an approver's
-/// usage; 5. the SIGNED bytes are admissible (kind, subject, the UID binding,
-/// the validity window and D3 §4.3's 90-day cap); 6. `plan ∈ scope`. The
-/// target-reachable check is last, exactly as on the ordinary path.
+/// The ref names something. The `Approval` exists and is `Verified=True` — a
+/// HOLD, because it can become true without anyone touching this object. It is
+/// a `RehearsalSchedule` approval bound to the schedule
+/// `spec.authorization.rehearsalScheduleRef` names. The key it verified under
+/// is one the namespace's trust still lets authorise, carrying an approver's
+/// usage. The SIGNED bytes are admissible — kind, subject, the UID binding,
+/// the validity window and D3 §4.3's 90-day cap. And `plan ∈ scope`. The
+/// target-reachable check is last, exactly as on the ordinary path, so an
+/// authorization problem is never reported as a broker problem.
 fn admit_standing(
     restore: &Restore,
     approval: Option<&Approval>,
@@ -834,8 +835,7 @@ fn admit_standing(
                 .to_string(),
         };
     };
-    if bound.kind != crate::crds::approval::SubjectKind::RehearsalSchedule
-        || bound.name != schedule
+    if bound.kind != crate::crds::approval::SubjectKind::RehearsalSchedule || bound.name != schedule
     {
         return RestoreAdmission::ApprovalSubjectMismatch {
             approval: wanted,
@@ -894,16 +894,16 @@ fn admit_standing(
     }
 
     // ---- 5. the SIGNED bytes, parsed only now ----------------------------
-    let doc: wire::StandingAuthorization =
-        match serde_json::from_str(&approval.spec.approval_bytes) {
-            Ok(doc) => doc,
-            Err(error) => {
-                return refused(format!(
-                    "it verified, but its bytes are not a standing rehearsal authorization: \
+    let doc: wire::StandingAuthorization = match serde_json::from_str(&approval.spec.approval_bytes)
+    {
+        Ok(doc) => doc,
+        Err(error) => {
+            return refused(format!(
+                "it verified, but its bytes are not a standing rehearsal authorization: \
                      {error}"
-                ))
-            }
-        };
+            ))
+        }
+    };
     if let Err(refusal) =
         wire::admit_standing_authorization(&doc, Some(&bound.uid), standing_inputs.now)
     {
@@ -923,16 +923,15 @@ fn admit_standing(
     // obligation 1, and the same projection `rehearsal_schedule` uses, so the
     // two halves of "checked twice" cannot disagree by computing different
     // facts from the same plan.
-    let plan: logweir_core::spec::DrillSpec =
-        match serde_yaml::from_str(&restore.spec.plan_bytes) {
-            Ok(plan) => plan,
-            Err(error) => {
-                return refused(format!(
-                    "spec.planBytes does not parse as a restore plan, so it cannot be proved \
+    let plan: logweir_core::spec::DrillSpec = match serde_yaml::from_str(&restore.spec.plan_bytes) {
+        Ok(plan) => plan,
+        Err(error) => {
+            return refused(format!(
+                "spec.planBytes does not parse as a restore plan, so it cannot be proved \
                      inside the signed scope: {error}"
-                ))
-            }
-        };
+            ))
+        }
+    };
     let allowed = logweir_core::spec::AllowedClusters {
         allowed_cluster_ids: vec![doc.scope.target_cluster_id.clone()],
         source_cluster_id: None,
@@ -4376,10 +4375,9 @@ async fn reconcile_restore_inner(
         } else {
             None
         };
-        let standing_inputs = standing_trust.as_ref().map(|trust| StandingAdmission {
-            trust,
-            now,
-        });
+        let standing_inputs = standing_trust
+            .as_ref()
+            .map(|trust| StandingAdmission { trust, now });
         let admission = admit(
             restore,
             approval.as_ref(),

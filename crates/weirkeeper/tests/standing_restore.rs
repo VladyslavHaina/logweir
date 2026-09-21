@@ -21,9 +21,8 @@
 use chrono::{DateTime, TimeZone, Utc};
 use weirkeeper::controllers::restore::{
     admit, runner_argv, runner_job_spec, triggered_by, RestoreAdmission, StandingAdmission,
-    ALLOWED_CLUSTERS_FILE,
-    APPROVAL_DOC_FILE, APPROVAL_SIG_FILE, APPROVER_KEY_FILE, AUTHORIZATION_KEYS_FILE,
-    STANDING_AUTHORIZATION_FILE, STANDING_AUTHORIZATION_SIG_FILE,
+    ALLOWED_CLUSTERS_FILE, APPROVAL_DOC_FILE, APPROVAL_SIG_FILE, APPROVER_KEY_FILE,
+    AUTHORIZATION_KEYS_FILE, STANDING_AUTHORIZATION_FILE, STANDING_AUTHORIZATION_SIG_FILE,
 };
 use weirkeeper::crds::restore::Restore;
 
@@ -260,7 +259,12 @@ fn a_standing_restore_is_admitted_and_its_job_carries_the_bundle() {
     let restore = standing_restore();
 
     assert_eq!(
-        admit(&restore, Some(&approval()), Some(&cluster(true)), Some(&inputs)),
+        admit(
+            &restore,
+            Some(&approval()),
+            Some(&cluster(true)),
+            Some(&inputs)
+        ),
         RestoreAdmission::Ok,
         "a verified, in-window, in-scope standing authorization admits the slot"
     );
@@ -268,8 +272,9 @@ fn a_standing_restore_is_admitted_and_its_job_carries_the_bundle() {
     // ---- the argv ---------------------------------------------------------
     let argv = runner_argv(&restore, &[KEY_ID.to_string()]);
     assert!(
-        argv.windows(2).any(|w| w[0] == "--standing-authorization"
-            && w[1].ends_with(STANDING_AUTHORIZATION_FILE)),
+        argv.windows(2)
+            .any(|w| w[0] == "--standing-authorization"
+                && w[1].ends_with(STANDING_AUTHORIZATION_FILE)),
         "the argv points at the standing document: {argv:?}"
     );
     assert!(
@@ -285,7 +290,9 @@ fn a_standing_restore_is_admitted_and_its_job_carries_the_bundle() {
     // The sidecar is NOT a flag — the runner derives it by replacing the
     // extension, so there is one fewer path to get wrong.
     assert!(
-        !argv.iter().any(|a| a.ends_with(STANDING_AUTHORIZATION_SIG_FILE)),
+        !argv
+            .iter()
+            .any(|a| a.ends_with(STANDING_AUTHORIZATION_SIG_FILE)),
         "the sidecar path is DERIVED, never passed: {argv:?}"
     );
     assert!(
@@ -337,9 +344,7 @@ fn a_standing_restore_is_admitted_and_its_job_carries_the_bundle() {
         (ALLOWED_CLUSTERS_FILE, ALLOWED_CLUSTERS_FILE),
     ] {
         assert!(
-            projected
-                .iter()
-                .any(|(k, p)| k == key && p == path),
+            projected.iter().any(|(k, p)| k == key && p == path),
             "the file table projects {key} at {path}: {projected:?}"
         );
     }
@@ -351,7 +356,9 @@ fn a_standing_restore_is_admitted_and_its_job_carries_the_bundle() {
     // would be reported to the operator as a TAMPERED APPROVAL.
     for forbidden in [APPROVAL_DOC_FILE, APPROVAL_SIG_FILE] {
         assert!(
-            !projected.iter().any(|(k, p)| k == forbidden || p == forbidden),
+            !projected
+                .iter()
+                .any(|(k, p)| k == forbidden || p == forbidden),
             "a rehearsal Job projects no per-run approval slot, and {forbidden} is in \
              {projected:?}"
         );
@@ -438,7 +445,12 @@ fn a_rehearsal_naming_no_approval_is_terminal() {
         .expect("the fixture is standing")
         .approval_ref
         .name = "   ".to_string();
-    let verdict = admit(&restore, Some(&approval()), Some(&cluster(true)), Some(&inputs));
+    let verdict = admit(
+        &restore,
+        Some(&approval()),
+        Some(&cluster(true)),
+        Some(&inputs),
+    );
     assert!(
         matches!(verdict, RestoreAdmission::ApprovalNotReceived { .. }),
         "got {verdict:?}"
@@ -540,7 +552,8 @@ fn each_standing_refusal_is_named_and_reaches_no_job() {
     let evidence_only = trust_with(evidence_key);
     // ---- a key the namespace's trust does not carry at all ---------------
     let mut other_key = approver_key();
-    other_key.key_id = "0000000000000000000000000000000000000000000000000000000000000000".to_string();
+    other_key.key_id =
+        "0000000000000000000000000000000000000000000000000000000000000000".to_string();
     let unknown_key = trust_with(other_key);
 
     struct Row {
@@ -551,21 +564,81 @@ fn each_standing_refusal_is_named_and_reaches_no_job() {
         detail_contains: &'static str,
     }
     let rows = vec![
-        Row { what: "expired", approval: expired, trust: active.clone(), expect_subject_mismatch: false, detail_contains: "" },
-        Row { what: "a life longer than 90 days", approval: too_long, trust: active.clone(), expect_subject_mismatch: false, detail_contains: "90" },
+        Row {
+            what: "expired",
+            approval: expired,
+            trust: active.clone(),
+            expect_subject_mismatch: false,
+            detail_contains: "",
+        },
+        Row {
+            what: "a life longer than 90 days",
+            approval: too_long,
+            trust: active.clone(),
+            expect_subject_mismatch: false,
+            detail_contains: "90",
+        },
         // The notBefore half of the window, so BOTH edges are guarded: a
         // document minted for next month does not authorise this slot.
-        Row { what: "not yet valid", approval: not_yet_valid, trust: active.clone(), expect_subject_mismatch: false, detail_contains: "not valid until" },
-        Row { what: "out of scope", approval: out_of_scope, trust: active.clone(), expect_subject_mismatch: false, detail_contains: "outside the signed scope" },
-        Row { what: "a revoked key", approval: approval(), trust: revoked, expect_subject_mismatch: false, detail_contains: "may no longer authorise anything new" },
-        Row { what: "a wrong-usage key", approval: approval(), trust: evidence_only, expect_subject_mismatch: false, detail_contains: "never by EvidenceSigning" },
-        Row { what: "a key the trust does not carry", approval: approval(), trust: unknown_key, expect_subject_mismatch: false, detail_contains: "does not carry" },
+        Row {
+            what: "not yet valid",
+            approval: not_yet_valid,
+            trust: active.clone(),
+            expect_subject_mismatch: false,
+            detail_contains: "not valid until",
+        },
+        Row {
+            what: "out of scope",
+            approval: out_of_scope,
+            trust: active.clone(),
+            expect_subject_mismatch: false,
+            detail_contains: "outside the signed scope",
+        },
+        Row {
+            what: "a revoked key",
+            approval: approval(),
+            trust: revoked,
+            expect_subject_mismatch: false,
+            detail_contains: "may no longer authorise anything new",
+        },
+        Row {
+            what: "a wrong-usage key",
+            approval: approval(),
+            trust: evidence_only,
+            expect_subject_mismatch: false,
+            detail_contains: "never by EvidenceSigning",
+        },
+        Row {
+            what: "a key the trust does not carry",
+            approval: approval(),
+            trust: unknown_key,
+            expect_subject_mismatch: false,
+            detail_contains: "does not carry",
+        },
         // The UID binding is caught by `admit_standing_authorization` over the
         // SIGNED bytes — a stronger place than a status comparison, and so it
         // is reported as a standing refusal rather than a subject mismatch.
-        Row { what: "another schedule's UID", approval: wrong_subject, trust: active.clone(), expect_subject_mismatch: false, detail_contains: "but this run is RehearsalSchedule UID another-uid" },
-        Row { what: "another schedule's name", approval: wrong_name, trust: active.clone(), expect_subject_mismatch: true, detail_contains: "another-schedule" },
-        Row { what: "a per-run Approval", approval: per_run, trust: active.clone(), expect_subject_mismatch: true, detail_contains: "RehearsalSchedule" },
+        Row {
+            what: "another schedule's UID",
+            approval: wrong_subject,
+            trust: active.clone(),
+            expect_subject_mismatch: false,
+            detail_contains: "but this run is RehearsalSchedule UID another-uid",
+        },
+        Row {
+            what: "another schedule's name",
+            approval: wrong_name,
+            trust: active.clone(),
+            expect_subject_mismatch: true,
+            detail_contains: "another-schedule",
+        },
+        Row {
+            what: "a per-run Approval",
+            approval: per_run,
+            trust: active.clone(),
+            expect_subject_mismatch: true,
+            detail_contains: "RehearsalSchedule",
+        },
     ];
 
     for row in rows {
@@ -609,7 +682,11 @@ fn each_standing_refusal_is_named_and_reaches_no_job() {
             (other, expected) => panic!(
                 "{}: expected {} refusal, got {other:?}",
                 row.what,
-                if expected { "a subject-mismatch" } else { "a standing" }
+                if expected {
+                    "a subject-mismatch"
+                } else {
+                    "a standing"
+                }
             ),
         }
     }
@@ -642,7 +719,12 @@ fn an_unverified_standing_approval_is_held_and_not_refused() {
     assert!(!verdict.is_terminal(), "a hold, requeued — interface I19");
 
     // And a missing one is the same hold: the Approval may not exist yet.
-    let verdict = admit(&standing_restore(), None, Some(&cluster(true)), Some(&inputs));
+    let verdict = admit(
+        &standing_restore(),
+        None,
+        Some(&cluster(true)),
+        Some(&inputs),
+    );
     assert!(
         matches!(verdict, RestoreAdmission::ApprovalNotVerified { .. }),
         "got {verdict:?}"
@@ -662,7 +744,12 @@ fn the_cluster_check_is_last_on_the_standing_path() {
     };
     assert!(
         matches!(
-            admit(&standing_restore(), Some(&approval()), Some(&cluster(false)), Some(&inputs)),
+            admit(
+                &standing_restore(),
+                Some(&approval()),
+                Some(&cluster(false)),
+                Some(&inputs)
+            ),
             RestoreAdmission::ClusterNotReachable { .. }
         ),
         "a good authorization and an unreachable target is a cluster refusal"
@@ -674,7 +761,12 @@ fn the_cluster_check_is_last_on_the_standing_path() {
     ));
     assert!(
         matches!(
-            admit(&standing_restore(), Some(&expired), Some(&cluster(false)), Some(&inputs)),
+            admit(
+                &standing_restore(),
+                Some(&expired),
+                Some(&cluster(false)),
+                Some(&inputs)
+            ),
             RestoreAdmission::StandingAuthorizationRefused { .. }
         ),
         "and an expired authorization is reported as one even when the target is also down"
