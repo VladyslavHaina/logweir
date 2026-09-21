@@ -2346,7 +2346,10 @@ fn chart_lint_the_console_pod_is_non_root_read_only_and_probes_only_where_it_can
         );
 
         assert_eq!(
-            Some(&Value::from(vec!["--config", "/etc/logweir/api/config.yaml"])),
+            Some(&Value::from(vec![
+                "--config",
+                "/etc/logweir/api/config.yaml"
+            ])),
             c.get("args"),
             "{render}.yaml: the console takes its whole configuration from the mounted file; the \
              image declares no CMD so this argument vector is the only one"
@@ -2358,8 +2361,8 @@ fn chart_lint_the_console_pod_is_non_root_read_only_and_probes_only_where_it_can
              those are two different principals with two different arguments"
         );
 
-        let has_probe =
-            c.get("readinessProbe").is_some_and(|p| !p.is_null()) || c.get("livenessProbe").is_some_and(|p| !p.is_null());
+        let has_probe = c.get("readinessProbe").is_some_and(|p| !p.is_null())
+            || c.get("livenessProbe").is_some_and(|p| !p.is_null());
         if mode == "shared" {
             assert_eq!(
                 Some("/readyz"),
@@ -2397,7 +2400,8 @@ fn chart_lint_the_console_pod_is_non_root_read_only_and_probes_only_where_it_can
     );
     assert_eq!(
         Some(1),
-        find(&shared, "PodDisruptionBudget", "logweir-api").value["spec"]["maxUnavailable"].as_u64(),
+        find(&shared, "PodDisruptionBudget", "logweir-api").value["spec"]["maxUnavailable"]
+            .as_u64(),
         "above one replica the budget is a rolling disruption, never a simultaneous one"
     );
 }
@@ -2454,10 +2458,7 @@ fn chart_lint_the_console_config_map_carries_no_credential() {
                         } else {
                             format!("{path}.{name}")
                         };
-                        if CREDENTIAL_KEYS
-                            .iter()
-                            .any(|c| c.eq_ignore_ascii_case(name))
-                        {
+                        if CREDENTIAL_KEYS.iter().any(|c| c.eq_ignore_ascii_case(name)) {
                             panic!(
                                 "{render}.yaml: the console ConfigMap carries `{here}`. Every \
                                  credential this service reads is a PATH into a mounted Secret \
@@ -2599,21 +2600,34 @@ fn chart_lint_the_console_config_map_carries_no_credential() {
 #[test]
 fn chart_lint_the_shared_console_cannot_be_published_without_tls() {
     let schema: serde_json::Value =
-        serde_json::from_str(&read("charts/logweir/values.schema.json")).expect("the schema parses");
+        serde_json::from_str(&read("charts/logweir/values.schema.json"))
+            .expect("the schema parses");
     let url = &schema["properties"]["api"]["properties"]["console"]["properties"]["publicBaseUrl"];
-    let pattern = url["pattern"]
-        .as_str()
-        .expect("api.console.publicBaseUrl must carry a `pattern`: without it the schema accepts \
-                 `http://console.example.com` and TLS at the shared entry point is left to prose");
+    let pattern = url["pattern"].as_str().expect(
+        "api.console.publicBaseUrl must carry a `pattern`: without it the schema accepts \
+                 `http://console.example.com` and TLS at the shared entry point is left to prose",
+    );
     assert!(
         pattern.contains("https://"),
         "the publicBaseUrl pattern `{pattern}` does not require https://"
     );
     let re = regex_lite_matches(pattern);
-    assert!(re("https://console.example.com"), "pattern {pattern} rejects a valid HTTPS base URL");
-    assert!(!re("http://console.example.com"), "pattern {pattern} ACCEPTS plain HTTP");
-    assert!(!re("https://console.example.com/"), "pattern {pattern} accepts a trailing slash");
-    assert!(!re("https://user@console.example.com"), "pattern {pattern} accepts userinfo");
+    assert!(
+        re("https://console.example.com"),
+        "pattern {pattern} rejects a valid HTTPS base URL"
+    );
+    assert!(
+        !re("http://console.example.com"),
+        "pattern {pattern} ACCEPTS plain HTTP"
+    );
+    assert!(
+        !re("https://console.example.com/"),
+        "pattern {pattern} accepts a trailing slash"
+    );
+    assert!(
+        !re("https://user@console.example.com"),
+        "pattern {pattern} accepts userinfo"
+    );
 
     let template = read("charts/logweir/templates/ui/api-config.yaml");
     for needle in [
@@ -2677,7 +2691,6 @@ fn regex_lite_matches(pattern: &str) -> impl Fn(&str) -> bool + '_ {
         })
     }
 }
-
 
 /// **`retention.enabled` renders the enforcement Job's identity — an account
 /// with no token and no role — and nothing else.**

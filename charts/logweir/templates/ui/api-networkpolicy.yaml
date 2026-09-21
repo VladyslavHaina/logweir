@@ -13,8 +13,9 @@ NetworkPolicy has no effect without a network plugin that implements it, and
 that Service/source-IP rewriting is implementation-dependent. A local install
 that "works" proves the objects are well-formed and nothing about deny
 behaviour; D0 says so by name — "Docker Desktop without enforcing CNI is
-explicitly NOT acceptable proof of deny behavior". The `[UNVERIFIED — …]` mark
-below is the bracket-anchored form `scripts/check-unverified-labels.sh` reads.
+explicitly NOT acceptable proof of deny behavior". The rendered object carries
+the bracket-anchored mark `scripts/check-unverified-labels.sh` reads, closed in
+place with its reason, exactly as `templates/networkpolicy.yaml` carries it.
 
 ---------------------------------------------------------------------------
 INGRESS: THE CONFIGURED INGRESS CONTROLLER, AND NOTHING ELSE

@@ -3032,9 +3032,7 @@ fn the_console_dockerfile_copies_the_page_by_glob_and_compiles_natively() {
          and emulating the compile under QEMU is forbidden (STANDING RULE 10)"
     );
     assert!(
-        !text
-            .lines()
-            .any(|l| l.trim_start().starts_with("COPY ui ")),
+        !text.lines().any(|l| l.trim_start().starts_with("COPY ui ")),
         "Dockerfile.console must copy the page with the two globs, never `COPY ui /ui`: a \
          whole-directory copy takes ui/README.md and ui/tests/ with it, and ui/tests/ carries a \
          throwaway keypair"
@@ -3042,9 +3040,9 @@ fn the_console_dockerfile_copies_the_page_by_glob_and_compiles_natively() {
     // The header PROSE names the anchor to say why it is absent, so the
     // assertion is about the INSTRUCTION and not about the string.
     assert!(
-        !text
-            .lines()
-            .any(|l| l.trim_start().starts_with("COPY third_party/org-root.fingerprint")),
+        !text.lines().any(|l| l
+            .trim_start()
+            .starts_with("COPY third_party/org-root.fingerprint")),
         "Dockerfile.console must NOT bake the org-root anchor: this service verifies no archive \
          and mints no evidence, and scripts/check-image-api.sh check 3 asserts the absence"
     );

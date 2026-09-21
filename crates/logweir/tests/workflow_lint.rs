@@ -94,8 +94,14 @@ fn images_are_loaded_and_checked_before_credentials_or_push() {
     // the version STRING has to be inspected, because a COPY from the wrong
     // source exits 0 while printing another binary's name.
     for (name, marker) in [
-        ("retention", "--entrypoint logweir-retention logweir:check --version"),
-        ("console", "--entrypoint logweir-api logweir-console:check --version"),
+        (
+            "retention",
+            "--entrypoint logweir-retention logweir:check --version",
+        ),
+        (
+            "console",
+            "--entrypoint logweir-api logweir-console:check --version",
+        ),
     ] {
         let probe = steps
             .iter()
