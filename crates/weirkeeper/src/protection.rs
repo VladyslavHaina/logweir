@@ -1089,11 +1089,10 @@ fn entries_for<'e>(
     // An EMPTY `backupId` is not a key. `#[serde(default)]` gives `""` to a
     // view that does not write the field, and joining on it would make every
     // such entry an answer for every candidate whose receipt went unread.
-    let backup_id = candidate
-        .backup_id
-        .clone()
-        .filter(|id| !id.is_empty() && point_id.is_none());
+    let backup_id = candidate.backup_id.clone().filter(|id| !id.is_empty());
     entries.iter().filter(move |e| match &point_id {
+        // ONE key or the other and never both: an identity the view does not
+        // list is an answer, and the answer is "no".
         Some(id) => &e.point_id == id,
         None => backup_id.as_ref().is_some_and(|id| &e.backup_id == id),
     })
