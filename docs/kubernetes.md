@@ -434,28 +434,29 @@ The `Harness row` column names the phase that measured the line; the
 
 | Role | Minimal actions, each at the resource scope shown | Proved by | Harness row |
 |---|---|---|---|
-| `archiveWrite` | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`, `logweir/*`); `s3:GetObject` on `<bucket>/<prefix>/*`; `s3:PutObject` on `<bucket>/<prefix>/*`; `s3:PutObject` on `<bucket>/logweir/*` | Backup `u6-bk-044` | `U6/archive-write` |
-| `archiveRead` | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`); `s3:GetObject` on `<bucket>/<prefix>/*` | Preflight `u6-da-054+u6-rp-055` | `U6/archive-read` |
+| `archiveWrite` | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`); `s3:GetObject` on `<bucket>/<prefix>/*`; `s3:PutObject` on `<bucket>/<prefix>/*`; `s3:PutObject` on `<bucket>/logweir/*` | Backup `u6-bk-045` | `U6/archive-write` |
+| `archiveRead` | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`); `s3:GetObject` on `<bucket>/<prefix>/*` | Preflight `u6-da-010+u6-rp-011` | `U6/archive-read` |
 | `evidenceWrite` | `s3:PutObject` on `<bucket>/logweir/*` | Backup `u6-bk-033` | `U6/evidence-write` |
 | `evidenceRead` | `s3:GetObject` on `<bucket>/logweir/*` | Preflight `u6-da-027` | `U6/evidence-read` |
-| write probe | `s3:PutObject` on `<bucket>/logweir/*` | Preflight `u6-bp-019` | `U6/write-probe` |
-| `catalogSync` reader | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`, `logweir/*`); `s3:GetObject` on `<bucket>/<prefix>/*`; `s3:GetObject` on `<bucket>/logweir/*` | RecoveryCatalog `u6-cat-076` | `U6/catalog-sync` |
-| retention enforcer | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`); `s3:DeleteObject` on `<bucket>/<prefix>/*` | Job `u6-ret-088` | `U6/retention-enforcer` |
+| write probe | `s3:PutObject` on `<bucket>/logweir/readiness/*` | Preflight `u6-bp-019` | `U6/write-probe` |
+| `catalogSync` reader | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `logweir/*`); `s3:GetObject` on `<bucket>/<prefix>/*`; `s3:GetObject` on `<bucket>/logweir/*` | RecoveryCatalog `u6-cat-052` | `U6/catalog-sync` |
+| retention enforcer | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`); `s3:DeleteObject` on `<bucket>/<prefix>/*` | Job `u6-ret-060` | `U6/retention-enforcer` |
 
 | Role | Action removed | Verdict, and the product's own answer | Harness object |
 |---|---|---|---|
-| `archiveWrite` | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`, `logweir/*`) | **the operation fails**: `exitCode 1` / `operational`, the runner's own log naming the refusal | `u6-bk-035` |
-| `archiveWrite` | `s3:GetBucketLocation` on the BUCKET arn | the operation still succeeds — **not required** | `u6-bk-036` |
-| `archiveWrite` | `s3:GetObject` on `<bucket>/<prefix>/*` | **the operation fails**: `exitCode 1` / `operational`, the runner's own log naming the refusal | `u6-bk-037` |
-| `archiveWrite` | `s3:PutObject` on `<bucket>/<prefix>/*` | **the operation fails**: `exitCode 1` / `operational`, the runner's own log naming the refusal | `u6-bk-038` |
-| `archiveWrite` | `s3:AbortMultipartUpload` on `<bucket>/<prefix>/*` | the operation still succeeds — **not required** | `u6-bk-039` |
-| `archiveWrite` | `s3:DeleteObject` on `<bucket>/<prefix>/*` | the operation still succeeds — **not required** | `u6-bk-040` |
-| `archiveWrite` | `s3:GetObject` on `<bucket>/logweir/*` | the operation still succeeds — **not required** | `u6-bk-041` |
-| `archiveWrite` | `s3:PutObject` on `<bucket>/logweir/*` | **the operation fails**: `exitCode 4` / `signing-or-lock`, the runner's own log naming the refusal | `u6-bk-042` |
-| `archiveWrite` | `s3:AbortMultipartUpload` on `<bucket>/logweir/*` | the operation still succeeds — **not required** | `u6-bk-043` |
-| `archiveRead` | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`) | **the operation fails**: `archive.segments` → `AccessDenied`; `destination.archiveListable` → `AccessDenied` | `u6-da-048+u6-rp-049` |
-| `archiveRead` | `s3:GetObject` on `<bucket>/<prefix>/*` | **the operation fails**: `archive.backupSet` → `AccessDenied`; `archive.segments` → `BlockedByPrerequisite` | `u6-da-050+u6-rp-051` |
-| `archiveRead` | `s3:GetBucketLocation` on the BUCKET arn | the operation still succeeds — **not required** | `u6-da-052+u6-rp-053` |
+| `archiveWrite` | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`) | **the operation fails**: `exitCode 1` / `operational`, the runner's own log naming the refusal | `u6-bk-035` |
+| `archiveWrite` | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `logweir/*`) | the operation still succeeds — **not required** | `u6-bk-036` |
+| `archiveWrite` | `s3:GetBucketLocation` on the BUCKET arn | the operation still succeeds — **not required** | `u6-bk-037` |
+| `archiveWrite` | `s3:GetObject` on `<bucket>/<prefix>/*` | **the operation fails**: `exitCode 1` / `operational`, the runner's own log naming the refusal | `u6-bk-038` |
+| `archiveWrite` | `s3:PutObject` on `<bucket>/<prefix>/*` | **the operation fails**: `exitCode 1` / `operational`, the runner's own log naming the refusal | `u6-bk-039` |
+| `archiveWrite` | `s3:AbortMultipartUpload` on `<bucket>/<prefix>/*` | the operation still succeeds — **not required** | `u6-bk-040` |
+| `archiveWrite` | `s3:DeleteObject` on `<bucket>/<prefix>/*` | the operation still succeeds — **not required** | `u6-bk-041` |
+| `archiveWrite` | `s3:GetObject` on `<bucket>/logweir/*` | the operation still succeeds — **not required** | `u6-bk-042` |
+| `archiveWrite` | `s3:PutObject` on `<bucket>/logweir/*` | **the operation fails**: `exitCode 4` / `signing-or-lock`, the runner's own log naming the refusal | `u6-bk-043` |
+| `archiveWrite` | `s3:AbortMultipartUpload` on `<bucket>/logweir/*` | the operation still succeeds — **not required** | `u6-bk-044` |
+| `archiveRead` | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`) | **the operation fails**: `archive.segments` → `AccessDenied`; `destination.archiveListable` → `AccessDenied` | `u6-da-004+u6-rp-005` |
+| `archiveRead` | `s3:GetObject` on `<bucket>/<prefix>/*` | **the operation fails**: `archive.backupSet` → `AccessDenied`; `archive.segments` → `BlockedByPrerequisite` | `u6-da-006+u6-rp-007` |
+| `archiveRead` | `s3:GetBucketLocation` on the BUCKET arn | the operation still succeeds — **not required** | `u6-da-008+u6-rp-009` |
 | `evidenceWrite` | `s3:PutObject` on `<bucket>/logweir/*` | **the operation fails**: `exitCode 4` / `signing-or-lock`, the runner's own log naming the refusal | `u6-bk-029` |
 | `evidenceWrite` | `s3:GetObject` on `<bucket>/logweir/*` | the operation still succeeds — **not required** | `u6-bk-030` |
 | `evidenceWrite` | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `logweir/*`) | the operation still succeeds — **not required** | `u6-bk-031` |
@@ -463,28 +464,39 @@ The `Harness row` column names the phase that measured the line; the
 | `evidenceRead` | `s3:GetObject` on `<bucket>/logweir/*` | **the operation fails**: `destination.evidenceReadable` → `AccessDenied` | `u6-da-024` |
 | `evidenceRead` | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `logweir/*`) | the operation still succeeds — **not required** | `u6-da-025` |
 | `evidenceRead` | `s3:GetBucketLocation` on the BUCKET arn | the operation still succeeds — **not required** | `u6-da-026` |
-| write probe | `s3:PutObject` on `<bucket>/logweir/*` | **the operation fails**: `destination.evidenceWritable` → `AccessDenied` | `u6-bp-013` |
+| write probe | `s3:PutObject` on `<bucket>/logweir/readiness/*` | **the operation fails**: `destination.evidenceWritable` → `AccessDenied` | `u6-bp-013` |
 | write probe | `s3:GetObject` on `<bucket>/logweir/*` | the operation still succeeds — **not required** | `u6-bp-014` |
 | write probe | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `logweir/*`) | the operation still succeeds — **not required** | `u6-bp-015` |
 | write probe | `s3:GetBucketLocation` on the BUCKET arn | the operation still succeeds — **not required** | `u6-bp-016` |
 | write probe | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`) | the operation still succeeds — **not required** | `u6-bp-017` |
 | write probe | `s3:GetObject` on `<bucket>/<prefix>/*` | the operation still succeeds — **not required** | `u6-bp-018` |
-| `catalogSync` reader | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`, `logweir/*`) | **the operation fails**: `ResultUnreadable` | `u6-cat-072` |
-| `catalogSync` reader | `s3:GetBucketLocation` on the BUCKET arn | the operation still succeeds — **not required** | `u6-cat-073` |
-| `catalogSync` reader | `s3:GetObject` on `<bucket>/<prefix>/*` | **the operation fails**: `PartialScan` | `u6-cat-074` |
-| `catalogSync` reader | `s3:GetObject` on `<bucket>/logweir/*` | **the operation fails**: `PartialScan` | `u6-cat-075` |
-| retention enforcer | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`) | **the operation fails**: `state=Kept`, `code=ListRefused:AccessDenied` and `retention-result=deleted=0 failed=1 objects=0` | `u6-ret-084` |
-| retention enforcer | `s3:GetBucketLocation` on the BUCKET arn | the operation still succeeds — **not required** | `u6-ret-085` |
-| retention enforcer | `s3:GetObject` on `<bucket>/<prefix>/*` | the operation still succeeds — **not required** | `u6-ret-086` |
-| retention enforcer | `s3:DeleteObject` on `<bucket>/<prefix>/*` | **the operation fails**: `state=Kept`, `code=AccessDenied` and `retention-result=deleted=0 failed=1 objects=0` | `u6-ret-087` |
+| `catalogSync` reader | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`) | the operation still succeeds — **not required** | `u6-cat-047` |
+| `catalogSync` reader | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `logweir/*`) | **the operation fails**: `ResultUnreadable` | `u6-cat-048` |
+| `catalogSync` reader | `s3:GetBucketLocation` on the BUCKET arn | the operation still succeeds — **not required** | `u6-cat-049` |
+| `catalogSync` reader | `s3:GetObject` on `<bucket>/<prefix>/*` | **the operation fails**: `PartialScan` | `u6-cat-050` |
+| `catalogSync` reader | `s3:GetObject` on `<bucket>/logweir/*` | **the operation fails**: `PartialScan` | `u6-cat-051` |
+| retention enforcer | `s3:ListBucket` on the BUCKET arn (`s3:prefix` in `<prefix>/*`) | **the operation fails**: `state=Kept`, `code=ListRefused:AccessDenied` and `retention-result=deleted=0 failed=1 objects=0` | `u6-ret-056` |
+| retention enforcer | `s3:GetBucketLocation` on the BUCKET arn | the operation still succeeds — **not required** | `u6-ret-057` |
+| retention enforcer | `s3:GetObject` on `<bucket>/<prefix>/*` | the operation still succeeds — **not required** | `u6-ret-058` |
+| retention enforcer | `s3:DeleteObject` on `<bucket>/<prefix>/*` | **the operation fails**: `state=Kept`, `code=AccessDenied` and `retention-result=deleted=0 failed=1 objects=0` | `u6-ret-059` |
 
 **A wider grant than this table is not required by anything in this build.**
 Every action outside a role's row was removed and the role's operation still
-succeeded, on the same fixture, in the same run. Three of them are worth
+succeeded, on the same fixture, in the same run. `s3:ListBucket`'s two
+`s3:prefix` legs are withdrawn separately, so a row naming one root has been
+shown not to need the other: `archiveWrite` lists only under `<prefix>/*` even
+though it writes its receipt under `logweir/`, and the `catalogSync` reader
+lists only under `logweir/*` even though it reads manifests under the archive
+prefix. Where a scope narrower than the whole evidence root is documented it is
+the one measured: the readiness probe's `s3:PutObject` is granted at
+`<bucket>/logweir/readiness/*` and nothing wider was needed. Three of them are worth
 naming because the recorded policies carried them: **`s3:DeleteObject` is not
-needed by `archiveWrite`** (the starting set carried it from D2 §14.3's own
-`a-writer` document and the Backup succeeded without it, which is the
-deployment property §7f's margin rests on); **`s3:GetObject` under `logweir/*`
+needed by `archiveWrite`** — the harness added it as a deliberate over-grant,
+because D2 §3.11 states that no role is ever granted it, and the Backup
+succeeded without it, so the code agrees with the constraint rather than merely
+never being asked; that is the deployment property the margin in *A
+`RetentionPolicy` in `Enforce` is the one thing Logweir does that cannot be
+undone* rests on. **`s3:GetObject` under `logweir/*`
 is not needed by `evidenceWrite`**, whose puts are create-only; and
 **`s3:GetBucketLocation` is not needed by any role**, because the engine and
 the store are given an explicit region and never ask the bucket for one.
@@ -503,7 +515,11 @@ really used: a run writing its own signed receipt.
 grant.** A catalog walk opens the destination's `archiveRead` handle and then
 reads the record log, the receipts and the signature sidecars under
 `logweir/` as well as the manifests under the archive prefix — so a principal
-scoped to `archiveRead`'s own measured minimum publishes no view. It does not
+scoped to `archiveRead`'s own measured minimum publishes no view. The two are
+not even the same shape: the walk LISTS only under `logweir/*` (it enumerates
+`logweir/catalog/v1/log/` and then opens every other object by the key a
+record names) and READS under both roots, where `archiveRead` lists under the
+archive prefix and reads only there. Neither row is a superset of the other. It does not
 say `AccessDenied` when that happens, either: a walk whose points would not
 open lands `Synced=False` with `PartialScan`, whose message is exact — "a
 permission or transport failure, which is NOT the same as absent; those
@@ -517,7 +533,9 @@ and deletes them by the explicit key list its approved plan carries; it never
 reads one. The starting set here was §7f's own two-credential row, and
 removing `s3:GetObject` on `<bucket>/<prefix>/*` changed nothing about the run.
 
-**One warning about that row, measured on the way past.** §7f says the
+**One warning about that row, measured on the way past.** *A `RetentionPolicy`
+in `Enforce` is the one thing Logweir does that cannot be undone* — this file
+carries two `### 7f.` headings, and that is the one meant here — says the
 tombstones and the record are written with the destination's own
 `evidenceWrite` grant, and that this is what makes a deletion attributable by
 a principal that cannot delete. On this build they are written with
@@ -528,7 +546,8 @@ separates the two, an `Enforce` run's first intent tombstone is refused `403`,
 the point is `Kept` with `code=TombstoneRefused`, and nothing is deleted;
 and on one whose `archiveRead` *can* write under `logweir/*`, the deletion is
 attributed with a credential the design says must not be able to write there.
-Until that is fixed, read §7f's `evidenceWrite` row as `archiveRead`.
+Until that is fixed, read that section's `evidenceWrite` credential row as
+`archiveRead`; the paragraph under its own table says so too.
 
 ### 7b. A destination-backed run carries a complete `AWS_*` set, and none of it is the controller's
 
@@ -1539,6 +1558,17 @@ over every dependency kind, dev edges included. Adding the edge to `weirkeeper`,
 
 The first can remove a point and cannot write the document that attributes its
 removal. The second can write that document and cannot remove anything.
+
+**On this build the second row is not what the reconciler projects.** A
+retention Job's `LOGWEIR_EVIDENCE_AWS_*` carry `spec.access.archiveRead`'s
+grant and not `spec.access.evidenceWrite`'s — defect
+**RET-EVIDENCE-GRANT-IS-ARCHIVEREAD**, measured live and tabulated in §7a's
+*The object-storage permission each grant actually needs, measured*. Until it
+is fixed, the principal that must be able to create under `logweir/` is
+`spec.access.archiveRead`: a destination that separates the two gets
+`code=TombstoneRefused`, `retention-result=deleted=0 failed=1` and no deletion
+at all. The row above is the contract and stays; this paragraph goes when the
+reconciler matches it.
 
 **A run with no `evidenceWrite` credential exits 3 having deleted nothing**, and
 is refused before any handle is built. A credential that exists but cannot

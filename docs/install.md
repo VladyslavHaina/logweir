@@ -469,31 +469,50 @@ purpose: the principal that WRITES an archive should not be the principal that
 reads evidence back to verify it. It is written in S3 action names; the
 equivalent MinIO policy actions have the same spellings.
 
-**The table below is the INTENDED minimum and has not been measured.** It is
-derived from what the code and the pinned engine are expected to call, not from
-a run that was denied everything else and observed to succeed. The engine's
-write path in particular does multipart uploads and checkpoint reads whose exact
-action set is measured against a deny-by-default MinIO policy in the live
-acceptance, and this table is corrected from that measurement. Until then, treat
-it as a starting policy to tighten from — not as a set to lock down to — and
-expect an omission to surface as a mid-operation 403.
+**The table below WAS measured**, on 2026-09-21, against a deny-by-default
+MinIO: each role's own operation was run once with the intended set, once for
+every single action withdrawn from it, and once more with exactly the actions
+whose removal broke it. The method, one bisection row per action naming the
+object whose status carries the refusal, and the two rows that are about a
+different principal than their name suggests, are in
+[`docs/kubernetes.md`](kubernetes.md) §7a, *The object-storage permission each
+grant actually needs, measured*. This is a set to lock down to.
 
 | Role | Actions | Resources |
 |---|---|---|
-| `archiveWrite` | `s3:ListBucket` (condition `s3:prefix` in `<prefix>/*` and `logweir/*`), `s3:GetObject`, `s3:PutObject`, `s3:AbortMultipartUpload` | `arn:aws:s3:::<bucket>/<prefix>/*`, `arn:aws:s3:::<bucket>/logweir/*` |
-| `archiveRead` | `s3:ListBucket` (condition `s3:prefix` in `<prefix>/*`), `s3:GetObject` | `arn:aws:s3:::<bucket>/<prefix>/*` |
-| `evidenceWrite` | `s3:PutObject` (conditional create), `s3:GetObject` | `arn:aws:s3:::<bucket>/logweir/*` |
-| `evidenceRead` | `s3:GetObject`; optionally `s3:ListBucket` (condition `s3:prefix` in `logweir/*`) | `arn:aws:s3:::<bucket>/logweir/*` |
+| `archiveWrite` | `s3:ListBucket` (condition `s3:prefix` in `<prefix>/*`), `s3:GetObject`, `s3:PutObject` | the bucket for the listing; `arn:aws:s3:::<bucket>/<prefix>/*` for both object actions, plus `s3:PutObject` on `arn:aws:s3:::<bucket>/logweir/*` for the receipt and the catalog record |
+| `archiveRead` | `s3:ListBucket` (condition `s3:prefix` in `<prefix>/*`), `s3:GetObject` | the bucket; `arn:aws:s3:::<bucket>/<prefix>/*` |
+| `evidenceWrite` | `s3:PutObject` (conditional create) | `arn:aws:s3:::<bucket>/logweir/*` |
+| `evidenceRead` | `s3:GetObject` | `arn:aws:s3:::<bucket>/logweir/*` |
 | write probe (opt-in) | `s3:PutObject` | `arn:aws:s3:::<bucket>/logweir/readiness/*` |
+| `RecoveryCatalog` sync | `s3:ListBucket` (condition `s3:prefix` in `logweir/*`), `s3:GetObject` | the bucket; `arn:aws:s3:::<bucket>/<prefix>/*` AND `arn:aws:s3:::<bucket>/logweir/*` |
+
+**`s3:AbortMultipartUpload` and `s3:GetBucketLocation` are in no row**, because
+the measurement removed each of them and every operation still succeeded: the
+engine is given an explicit region and never asks the bucket for one, and no
+upload in the acceptance was large enough to abort. Grant them if your own
+sizes differ; nothing here needs them.
+
+**The `RecoveryCatalog` sync row is not `archiveRead`**, though the sync uses
+that grant: it lists only under `logweir/*` and reads under BOTH roots, where
+`archiveRead` lists under the archive prefix and reads only there. A
+destination whose catalog you sync needs its `archiveRead` grant widened to
+this row, or the catalog publishes no view.
 
 **No role is ever granted `s3:DeleteObject`.** Logweir prints the removal
-commands and an operator runs them; no component in this build holds a delete
-capability against object storage.
+commands and an operator runs them; the only component that deletes is
+`logweir-retention`, under its own separate `spec.enforcement.credentialSecretRef`
+(measured minimum: `s3:ListBucket` with `s3:prefix` in `<prefix>/*`, and
+`s3:DeleteObject` on `arn:aws:s3:::<bucket>/<prefix>/*` — it needs no
+`s3:GetObject`, because it deletes the explicit key list its approved plan
+carries and reads nothing).
 
 **Grant `evidenceRead` its `s3:ListBucket` if you want "absent" to mean absent.**
-Without it, S3 answers `AccessDenied` for a key that is not there, so a missing
-receipt is indistinguishable from a denied read and verification reports
-`Unknown` presence rather than `Absent`.
+It is not in the measured minimum — the `destination.evidenceReadable` probe
+reads an absent key and `ObjectNotFound` is its passing answer — but without it,
+S3 answers `AccessDenied` for a key that is not there, so a missing receipt is
+indistinguishable from a denied read and verification reports `Unknown`
+presence rather than `Absent`.
 
 **`archiveRead` is what an `evidenceRead: ArchiveReadGrant` reuses**, and the CRD
 refuses that mode unless an explicit `spec.access.archiveRead` exists: a write
