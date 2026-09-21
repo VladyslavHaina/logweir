@@ -1897,7 +1897,7 @@ pub struct ResolvedRoles {
     pub secondary: Result<ResolvedDestination, Box<DestinationRefusal>>,
     /// Whether the object DECLARES the second role's own grant, or
     /// [`secondary`](Self::secondary) is the documented fall-back — see
-    /// [`declares`].
+    /// [`declares`], which says what this is and is not for.
     pub secondary_declared: bool,
 }
 
@@ -1907,10 +1907,14 @@ pub struct ResolvedRoles {
 /// A CALLER MAY NEED THE DIFFERENCE EVEN THOUGH [`resolve`] DOES NOT. Every
 /// role but `EvidenceRead` resolves to *something* — `archiveWrite` is required
 /// and the other two fall back to it — so a resolution alone cannot say whether
-/// an operator declared the principal or merely inherited the write grant. The
-/// retention controller needs exactly that distinction: its Job's `AWS_*` is
-/// the DELETE grant, so falling back would hand a deleting pod the archive
-/// WRITE credential, which `docs/kubernetes.md` §7f says it must never carry.
+/// an operator declared the principal or merely inherited the write grant.
+///
+/// **This does not decide whether the default is ALLOWED**, and no caller uses
+/// it that way: the defaulting is the documented contract (§7's absent-field
+/// rule, `docs/install.md`'s *absent grants do not widen*) and it stands. It
+/// decides which field a REFUSAL names, which is the difference between
+/// telling an operator to fix the line they wrote and sending them looking for
+/// a line their object does not contain.
 #[must_use]
 pub fn declares(dest: &BackupDestination, role: DestinationRole) -> bool {
     let access = &dest.spec.access;

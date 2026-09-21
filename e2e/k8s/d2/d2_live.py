@@ -5468,21 +5468,16 @@ def u6e() -> None:
                   "the minimal delete grant under which an Enforce run removes a point") as sc:
         starting = U6_STARTING_SETS["retention-enforcer"]
         # D3 §6.5 and `docs/kubernetes.md` §7f both say the record and the
-        # tombstones are written with the destination's OWN `evidenceWrite`
-        # grant. THEY ARE NOT, on this build: `retention_policy.rs:1188`
-        # resolves the destination under `DestinationRole::ArchiveRead` — for
-        # the location, deliberately — and `:2073` then projects THAT
-        # `resolved.grant` as `LOGWEIR_EVIDENCE_AWS_*`, under a doc comment
-        # that says `evidenceWrite`. Measured: on a destination separating the
-        # four principals, the Job's `LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID` is
-        # the `archiveRead` Secret, and the first tombstone is refused
-        # `403 AccessDenied` / `TombstoneRefused`, so nothing is deleted
-        # (defect **RET-EVIDENCE-GRANT-IS-ARCHIVEREAD**).
-        #
-        # This phase measures the DELETE grant, which is the role D3 §6.5 and
-        # §7f describe, so the evidence half is pinned wide on whichever
-        # principal the build actually projects — `archiveRead`'s — and the
-        # defect is reported rather than worked around silently.
+        # tombstones are written with the destination's own `evidenceWrite`
+        # grant, and since the fix for **RET-EVIDENCE-GRANT-IS-ARCHIVEREAD**
+        # they are. This phase used to pin `s3:PutObject@evidence` onto
+        # `u6-reader` as well, because the build projected the `archiveRead`
+        # grant onto `LOGWEIR_EVIDENCE_AWS_*` and the run could not write its
+        # tombstone otherwise. THAT PIN IS GONE, and its removal is what gives
+        # this phase a failure mode: `u6-reader` can no longer write under
+        # `logweir/*`, so a build that went back to projecting `archiveRead`
+        # would have its first tombstone refused `403` and every row here would
+        # fail rather than quietly pass on a workaround.
         u6_attach("u6-evwriter", ["s3:PutObject@evidence", "s3:GetObject@evidence"],
                   "ret-evidence")
         u6_attach("u6-deleter", starting, "ret-baseline")
@@ -5493,11 +5488,10 @@ def u6e() -> None:
         # the receipts under `logweir/` as well as the manifests). Pin it to
         # the catalog reader's measured minimum, or the enforcer has no plan
         # for reasons that have nothing to do with the delete grant.
-        # …and `s3:PutObject` under `logweir/*` on top of the catalog reader's
-        # measured minimum, because of the defect above: this principal is the
-        # one the enforcement Job writes its tombstones and its record with.
+        # The catalog reader's measured minimum and NOTHING MORE. No
+        # `s3:PutObject@evidence`: the record is not this principal's to write.
         u6_attach("u6-reader", ["s3:ListBucket@bucket:both", "s3:GetObject@archive",
-                                "s3:GetObject@evidence", "s3:PutObject@evidence"],
+                                "s3:GetObject@evidence"],
                   "ret-view")
         catalog = f"u6-retcat-{u6_seq():03d}"
         since = now()
@@ -5561,13 +5555,29 @@ def u6e() -> None:
         logs = redact(pod_logs_for_job(job_name, tail=120))[-3000:]
         artifact(f"u6/objects/{job_name}.json", job_obj)
         artifact(f"u6/objects/{job_name}.log", logs)
-        sc.detail["evidenceCredentialDefect"] = {
+        # THE CONTRACT, ASSERTED — not the defect, recorded. `u6-reader` no
+        # longer holds `s3:PutObject` under `logweir/*`, so a build that
+        # projected `archiveRead` here would also fail the delete rows below;
+        # this row names the principal so the failure says WHY.
+        rendered = job_env(job_name)
+        evidence_ref = ((rendered.get("LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID") or {})
+                        .get("secretKeyRef") or {})
+        delete_ref = ((rendered.get("AWS_ACCESS_KEY_ID") or {})
+                      .get("secretKeyRef") or {})
+        sc.detail["evidenceCredential"] = {
             "id": "RET-EVIDENCE-GRANT-IS-ARCHIVEREAD",
             "expected": "spec.access.evidenceWrite (D3 §6.5, docs/kubernetes.md §7f)",
-            "observed": redact(json.dumps(job_env(job_name), sort_keys=True))[:900],
-            "sites": ["crates/weirkeeper/src/controllers/retention_policy.rs:1188",
-                      "crates/weirkeeper/src/controllers/retention_policy.rs:2073"],
+            "recordSecret": evidence_ref.get("name"),
+            "deleteSecret": delete_ref.get("name"),
+            "observed": redact(json.dumps(rendered, sort_keys=True))[:900],
         }
+        check(evidence_ref.get("name") == "u6-evwriter",
+              "the enforcement Job's LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID must name the "
+              "evidenceWrite Secret u6-evwriter and never the archiveRead Secret u6-reader "
+              f"(RET-EVIDENCE-GRANT-IS-ARCHIVEREAD): {json.dumps(sc.detail['evidenceCredential']['recordSecret'])}")
+        check(delete_ref.get("name") == "u6-deleter",
+              "and AWS_ACCESS_KEY_ID must name spec.enforcement.credentialSecretRef's "
+              f"Secret u6-deleter: {json.dumps(sc.detail['evidenceCredential']['deleteSecret'])}")
         sc.detail["controllerBaseline"] = {
             "policy": policy_name,
             "job": job_name,

@@ -1389,7 +1389,11 @@ impl Pass<'_> {
                 }
                 StartOutcome::EvidenceGrantUnusable(message) => {
                     outcome.enforced_reason = REASON_EVIDENCE_GRANT_UNUSABLE;
-                    self.publish_enforcement_refusal(REASON_EVIDENCE_GRANT_UNUSABLE, &message)
+                    // AND THE OBJECT STOPS CLAIMING DELETION. Nothing will run
+                    // here until a human edits the destination, so the two
+                    // fields the console reads say so too — review M1.
+                    outcome.enforcement = ENFORCEMENT_RECOMMENDATION_ONLY;
+                    self.publish_standing_refusal(REASON_EVIDENCE_GRANT_UNUSABLE, &message)
                         .await?;
                 }
             }
@@ -1659,7 +1663,13 @@ impl Pass<'_> {
         // cost neither a lease, nor an immutable `ConfigMap`, nor a slot of the
         // three-failure retry budget. The old shape created the Job anyway and
         // let the worker exit 3 at the store builder, which spent one.
-        let evidence_env = match evidence_credential(evidence, evidence_declared) {
+        let delete_secret = self
+            .policy
+            .spec
+            .enforcement
+            .as_ref()
+            .map(|e| e.credential_secret_ref.name.as_str());
+        let evidence_env = match evidence_credential(evidence, evidence_declared, delete_secret) {
             Ok(env) => env,
             Err(message) => {
                 warn!(
@@ -2623,6 +2633,54 @@ impl Pass<'_> {
         Ok(())
     }
 
+    /// [`Self::publish_enforcement_refusal`] for a refusal that is a STANDING
+    /// configuration state and not a per-pass race — review finding M1.
+    ///
+    /// # What the difference is, on the object
+    ///
+    /// `publish_evaluation` has already written `status.enforcement` as
+    /// `decision.enforcement` — `LogweirWorker` for an approved `Enforce`
+    /// policy — and `status.guarantees.ageExpiry` is keyed off exactly that
+    /// value, so it is `LogweirEnforced`. The console reads those two fields
+    /// and not the condition reason: `ui/render.js` renders `LogweirWorker` as
+    /// *"an isolated Logweir retention worker deletes archive objects under
+    /// this policy"* and `LogweirEnforced` as *"enforced by Logweir"*. On a
+    /// policy that will not create a Job until a human edits the
+    /// `BackupDestination`, both sentences are false.
+    ///
+    /// `ActiveRestore`, `LeaseNotHeld`, `RunNotRecorded` and
+    /// `PlanConfigMapConflict` are per-pass races that clear on the next
+    /// reconcile with no human action, so `LogweirWorker` stays true of those
+    /// policies and they keep using the plain helper above. The precedent for
+    /// THIS case is [`Self::publish_refusal`], which every other
+    /// destination-resolution failure goes through and which writes
+    /// `ENFORCEMENT_RECOMMENDATION_ONLY`; `ui/render.js` states the rule
+    /// outright — *"A policy in `mode: Enforce` whose destination will not
+    /// resolve reports `RecommendationOnly`, and the panel must say what is
+    /// happening rather than what was requested."*
+    ///
+    /// `guarantees` is patched OBJECT-WISE and names one key: RFC 7386 merges
+    /// an object member by member, so `minUsablePoints`,
+    /// `activeRestoreProtection`, `sharedSegments` and `legalHold` survive
+    /// untouched. Only the one guarantee this refusal falsifies moves.
+    /// `conditions`, an ARRAY, still goes through [`Self::conditions`]'s full
+    /// upsert for the reason recorded there.
+    async fn publish_standing_refusal(
+        &self,
+        reason: &'static str,
+        message: &str,
+    ) -> Result<(), ReconcileError> {
+        let conditions =
+            self.conditions(&[(CONDITION_ENFORCED, "False", reason, message.to_string())]);
+        self.patch_status(json!({
+            "enforcement": ENFORCEMENT_RECOMMENDATION_ONLY,
+            "guarantees": { "ageExpiry": GUARANTEE_NOT_ENFORCED },
+            "conditions": conditions,
+        }))
+        .await?;
+        Ok(())
+    }
+
     async fn publish_view_failure(&self, message: &str) -> Result<Outcome, ReconcileError> {
         // A RETENTION EVALUATION FAILURE NEVER BLOCKS A BACKUP. It is a
         // different controller, a different object and a different condition;
@@ -3159,54 +3217,66 @@ pub struct EnforcementDecision {
 
 /// The three `LOGWEIR_EVIDENCE_AWS_*` references an enforcement Job writes its
 /// intent tombstone and its run record with, or the message that names the
-/// field the destination is missing.
+/// field the destination cannot supply one from.
 ///
-/// # The credential is the destination's OWN `evidenceWrite`, and nothing else
+/// # Which grant, and the fall-back that STANDS
 ///
 /// `docs/kubernetes.md` §7f's table has exactly two rows and they are two
 /// principals: the delete grant from `spec.enforcement.credentialSecretRef`,
-/// which may remove a point and may not write under `logweir/`, and the
-/// `evidenceWrite` grant from the destination's own `spec.access.evidenceWrite`,
-/// which may create under `logweir/` and may not delete. *Neither alone is
-/// enough*, which is the property that makes a deletion attributable — and it
-/// is a property of WHICH grant lands on which variable, so this function is
-/// where it is decided, once, for the only Job that deletes anything.
+/// which may remove a point and may not write under `logweir/`, and the record
+/// grant from the destination's own `spec.access.evidenceWrite`, which may
+/// create under `logweir/` and may not delete. *Neither alone is enough*, which
+/// is the property that makes a deletion attributable — and it is a property of
+/// WHICH grant lands on which variable, so this is where it is decided, once,
+/// for the only Job in the product that deletes anything.
 ///
-/// # Why an absent `evidenceWrite` is refused here and defaulted elsewhere
+/// **`evidenceWrite` absent still means `archiveWrite`**, exactly as
+/// [`destination::resolve`] defaults it (D2 §3.4) and as
+/// `docs/kubernetes.md` §7 and `docs/install.md` state it: *absent grants do
+/// not widen*. An installation that never separated its principals is the
+/// pre-destination status quo and does not move on an upgrade. What this
+/// function refuses is not the default — it is a role that resolves to
+/// **nothing a Job can use**, which is a different thing and was previously a
+/// Job that could only refuse itself.
 ///
-/// [`destination::resolve`] defaults the `EvidenceWrite` role to `archiveWrite`
-/// (D2 §3.4), and on the **Backup** path that costs nothing: a backup pod is
-/// already holding the archive write grant, so inheriting it for the receipt
-/// widens no boundary. A **retention** pod holds the DELETE grant on `AWS_*`
-/// and no archive credential at all, so the same defaulting would hand a
-/// deleting pod the archive WRITE credential — a principal that can rewrite the
-/// very objects under `<prefix>/*` the run is removing. Delete plus archive
-/// write in one pod can remove a point and forge its replacement, which is
-/// exactly the aggregation the two-credential design exists to prevent. So the
-/// role is resolved, and then the fall-back is refused with the field named:
-/// one `spec.access.evidenceWrite` grant is the operator's whole remedy.
+/// The role is still resolved SEPARATELY from `archiveRead`, which is the whole
+/// of defect RET-EVIDENCE-GRANT-IS-ARCHIVEREAD: `archiveRead` is the read-only
+/// principal `docs/kubernetes.md` §7a recommends, it is never a fall-back for
+/// this variable, and projecting it here left every intent tombstone refused
+/// `403` on a destination that separated the two.
 ///
-/// # And it must be static keys
+/// # What is refused, and why each one is not a Job
 ///
-/// `logweir-retention`'s `EvidenceSink::open` builds its sink with
-/// `StoreOptions::static_keys` from `LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID` and
-/// `…_SECRET_ACCESS_KEY` and has no workload-identity path, so a
-/// `WorkloadIdentity` `evidenceWrite` grant is a Job that can only exit 3. It
-/// is refused here instead, before a lease, a `ConfigMap`, a run record or a
-/// slot of the three-failure retry budget is spent on it.
+/// 1. **The role's own resolver refusal** — a malformed grant. Read here and
+///    nowhere earlier: it can only ever be about `spec.access.<role>`, since
+///    every role-independent check has already passed for the archive
+///    resolution, and a `Report` policy reads no record credential at all.
+/// 2. **A grant with no static keys.** `logweir-retention`'s
+///    `EvidenceSink::open` builds its sink with `StoreOptions::static_keys`
+///    from `LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID` and `…_SECRET_ACCESS_KEY` and
+///    has no workload-identity path, so a `WorkloadIdentity` grant renders a
+///    Job that can only exit 3 — after spending a lease, a `ConfigMap`, a run
+///    record and one of three retry-budget slots.
+/// 3. **The record grant IS the delete Secret.** One principal that both
+///    removes a point and writes the record attributing its removal is the
+///    aggregation §7f's two rows exist to prevent, and it is the one shape of
+///    it a controller can actually see. **It catches the spelling and not the
+///    material**: two differently named Secrets may hold identical keys, and
+///    this controller reads neither, so §7f says in words that genuinely
+///    distinct principals remain an operator obligation.
+///
+/// `declared` only decides which field the message NAMES — the operator's own
+/// `spec.access.evidenceWrite`, or the `spec.access.archiveWrite` it defaulted
+/// to — so that the sentence points at the line they wrote.
 ///
 /// # Errors
 ///
-/// The operator-facing sentence, naming `spec.access.evidenceWrite`.
+/// The operator-facing sentence, naming the field and never a key.
 pub fn evidence_credential(
     evidence: Result<&ResolvedDestination, &destination::DestinationRefusal>,
     declared: bool,
+    delete_secret: Option<&str>,
 ) -> Result<Vec<crate::job::EnvFromSecret>, String> {
-    // THE SECOND ROLE'S OWN REFUSAL, READ HERE AND NOWHERE EARLIER. It is
-    // always about `spec.access.evidenceWrite` — every role-independent check
-    // has already passed for the archive resolution — and a `Report` policy
-    // reads no record credential at all, so surfacing it at the resolve would
-    // have failed a pass over a field that pass never uses.
     let evidence = match evidence {
         Ok(resolved) => resolved,
         Err(refusal) => {
@@ -3216,17 +3286,15 @@ pub fn evidence_credential(
         }
     };
     let where_ = format!("BackupDestination {}/{}", evidence.namespace, evidence.name);
-    if !declared {
-        return Err(format!(
-            "{where_} declares no spec.access.evidenceWrite grant, and a retention run's record \
-             credential is never defaulted to another principal: this Job's AWS_ACCESS_KEY_ID is \
-             the DELETE grant, so falling back would hand a deleting pod the archive write \
-             credential, and falling back to spec.access.archiveRead would attribute the \
-             deletions to a grant the design says must not write under logweir/ (docs/kubernetes.md \
-             §7f). Declare spec.access.evidenceWrite — create-only puts under logweir/, no delete \
-             — and this policy enforces again. No Job was created and nothing was deleted."
-        ));
-    }
+    // THE FIELD THE OPERATOR ACTUALLY WROTE. Telling someone to fix
+    // `spec.access.evidenceWrite` on an object that does not declare one sends
+    // them looking for a line that is not there; the grant came from
+    // `archiveWrite` and the message says so.
+    let field = if declared {
+        "spec.access.evidenceWrite"
+    } else {
+        "spec.access.archiveWrite (spec.access.evidenceWrite is absent and defaults to it)"
+    };
     match &evidence.grant {
         destination::ResolvedGrant::SecretKeys {
             secret,
@@ -3234,6 +3302,18 @@ pub fn evidence_credential(
             secret_access_key_key,
             session_token_key,
         } => {
+            if delete_secret == Some(secret.as_str()) {
+                return Err(format!(
+                    "{where_} resolves the retention record credential to Secret {secret} from \
+                     {field}, which is the same Secret spec.enforcement.credentialSecretRef \
+                     names as the DELETE credential. One principal that both removes a point \
+                     and writes the record attributing its removal can forge that record, and \
+                     the two-credential rule in docs/kubernetes.md §7f is that neither alone is \
+                     enough. Name a different Secret for one of them. This compares NAMES only: \
+                     two differently named Secrets holding the same keys are the same principal \
+                     and no controller can see that. No Job was created and nothing was deleted."
+                ));
+            }
             let mut out = vec![
                 crate::job::EnvFromSecret {
                     name: destination::EVIDENCE_ACCESS_KEY_ID_ENV.to_string(),
@@ -3256,12 +3336,13 @@ pub fn evidence_credential(
             Ok(out)
         }
         other => Err(format!(
-            "{where_} resolves spec.access.evidenceWrite to a {} grant, and the retention worker \
-             builds its record store from the static keys LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID and \
-             LOGWEIR_EVIDENCE_AWS_SECRET_ACCESS_KEY only — it has no workload-identity path, so a \
-             Job carrying that grant could do nothing but refuse itself. Give \
-             spec.access.evidenceWrite a SecretKeys grant. No Job was created and nothing was \
-             deleted.",
+            "{where_} resolves the retention record credential from {field} to a {} grant, and \
+             the retention worker builds its record store from the static keys \
+             LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID and LOGWEIR_EVIDENCE_AWS_SECRET_ACCESS_KEY only \
+             — it has no workload-identity path, so a Job carrying that grant could do nothing \
+             but refuse itself. Give the destination a SecretKeys spec.access.evidenceWrite \
+             grant: create-only puts under logweir/, and no delete. No Job was created and \
+             nothing was deleted.",
             grant_mode(other)
         )),
     }

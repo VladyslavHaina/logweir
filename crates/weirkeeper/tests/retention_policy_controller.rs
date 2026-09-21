@@ -2029,77 +2029,57 @@ async fn the_archive_grants_session_token_never_reaches_the_retention_pod() {
     );
 }
 
-/// A destination that declares no `evidenceWrite`: the condition names the
-/// field, and NOTHING is spent — no Job, no plan `ConfigMap`, no lease and no
-/// run record.
+/// A destination that declares no `evidenceWrite` **enforces**, with the
+/// `archiveWrite` grant — the documented default, unchanged by this branch.
 ///
-/// The old shape defaulted the role to `archiveWrite` and created the Job
-/// anyway. A retention pod holds the DELETE grant on `AWS_*`, so that default
-/// hands a deleting pod a credential that can rewrite the objects under
-/// `<prefix>/*` it is removing — the aggregation the two-credential design
-/// exists to prevent.
+/// **THE FALL-BACK IS `archiveWrite` AND HAS NEVER BEEN `archiveRead`.** That
+/// is the whole of defect RET-EVIDENCE-GRANT-IS-ARCHIVEREAD: the build put the
+/// READ-ONLY principal on the record variables, so a destination separating the
+/// two had every intent tombstone refused `403`. `docs/kubernetes.md` §7 and
+/// `docs/install.md` both say *absent grants do not widen — `archiveRead` and
+/// `evidenceWrite` absent mean `archiveWrite` is used*, and an installation that
+/// never separated its principals does not move on an upgrade. This row is what
+/// holds that sentence true.
 #[tokio::test]
-async fn a_destination_with_no_evidence_write_grant_creates_no_job() {
+async fn a_destination_with_no_evidence_write_grant_uses_archive_write_and_never_archive_read() {
     let mut access = four_principals();
     access
         .as_object_mut()
         .expect("access")
         .remove("evidenceWrite");
-    let bare = destination_with_access(access);
-
-    let learn = fixture(routes_for_destination(&six_points(), bare.clone()));
-    run(&learn, &policy(enforcing(None), json!({}))).await;
-    let digest = learn.status()["lastEvaluation"]["planSha256"]
-        .as_str()
-        .expect("a digest")
-        .to_string();
-
-    let mut routes = routes_for_destination(&six_points(), bare);
-    routes.push(plan_config_map_route(&digest));
-    routes.push(route("POST", "/configmaps", "{}".to_string()));
-    routes.extend(absent_job_routes(&digest, now()));
-    routes.push(route("POST", "/jobs", "{}".to_string()));
-    let f = fixture(routes);
-    let outcome = run(&f, &policy(enforcing(Some(&digest)), json!({}))).await;
+    let env = rendered_job_credentials(destination_with_access(access)).await;
 
     assert_eq!(
-        outcome.enforced_reason,
-        ctrl::REASON_EVIDENCE_GRANT_UNUSABLE
+        env.get(weirkeeper::destination::EVIDENCE_ACCESS_KEY_ID_ENV),
+        Some(&("lw-writer".to_string(), "id".to_string())),
+        "absent evidenceWrite defaults to archiveWrite (D2 §3.4), and the Job is created. \
+         Rendered: {env:?}"
     );
-    assert_eq!(outcome.phase, ctrl::RetentionPhase::Evaluated);
-    assert!(
-        f.seen().iter().all(|(m, _)| m != "POST"),
-        "an approved plan whose destination cannot attribute the deletion creates NOTHING — \
-         not a Job, and not the immutable plan ConfigMap either. Requests: {:?}",
-        f.seen()
+    assert_eq!(
+        env.get(weirkeeper::destination::EVIDENCE_SECRET_ACCESS_KEY_ENV),
+        Some(&("lw-writer".to_string(), "key".to_string()))
     );
-    let status = f.status();
+    let named: BTreeSet<&str> = env.values().map(|(secret, _)| secret.as_str()).collect();
     assert!(
-        status.get("lease").is_none() && status.get("lastEnforcement").is_none(),
-        "and it is refused BEFORE the lease and the run record, so no retry-budget slot is \
-         spent on a configuration problem: {status}"
-    );
-    let message = f.condition(ctrl::CONDITION_ENFORCED)["message"]
-        .as_str()
-        .expect("a message")
-        .to_string();
-    assert!(
-        message.contains("spec.access.evidenceWrite"),
-        "the operator's whole remedy is one field, so the condition names it: {message}"
-    );
-    assert!(
-        !message.contains("lw-writer") && !message.contains("lw-reader"),
-        "and it names no Secret: a condition is a status field. {message}"
+        !named.contains("lw-reader"),
+        "and NEVER the archiveRead Secret, on any variable, however the evidence role \
+         defaulted: {env:?}"
     );
 }
 
-/// A `WorkloadIdentity` `evidenceWrite` grant is refused for the same reason
-/// and with the same field: `logweir-retention`'s `EvidenceSink::open` builds
-/// its sink with `StoreOptions::static_keys` and has no workload-identity path,
-/// so the Job could only ever refuse itself at exit 3 — after spending a lease,
-/// a `ConfigMap`, a record and one of three retry-budget slots.
+/// A `WorkloadIdentity` `evidenceWrite` grant is a role that resolves to
+/// nothing a Job can use: `logweir-retention`'s `EvidenceSink::open` builds its
+/// sink with `StoreOptions::static_keys` and has no workload-identity path, so
+/// the Job could only ever refuse itself at exit 3 — after spending a lease, a
+/// `ConfigMap`, a record and one of three retry-budget slots.
+///
+/// **AND THE OBJECT STOPS CLAIMING DELETION** — review finding M1. Nothing runs
+/// here until a human edits the `BackupDestination`, so `status.enforcement`
+/// and `status.guarantees.ageExpiry` — the two fields the console renders, not
+/// the condition reason — say so too, and the four guarantees this refusal does
+/// not falsify survive the object-wise merge.
 #[tokio::test]
-async fn a_workload_identity_evidence_grant_creates_no_job() {
+async fn a_workload_identity_evidence_grant_creates_no_job_and_claims_no_enforcement() {
     let mut access = four_principals();
     access["evidenceWrite"] = json!({
         "mode": "WorkloadIdentity",
@@ -2140,10 +2120,153 @@ async fn a_workload_identity_evidence_grant_creates_no_job() {
         "and never the ServiceAccount name — `ResolvedGrant`'s `Debug` carries names a status \
          field must not: {message}"
     );
+
+    // M1. `publish_evaluation` wrote `LogweirWorker`/`LogweirEnforced` earlier
+    // in the same pass, and `ui/render.js` renders those two fields as "an
+    // isolated Logweir retention worker deletes archive objects under this
+    // policy" and "enforced by Logweir".
+    let status = f.status();
+    assert_eq!(
+        status["enforcement"],
+        json!(ctrl::ENFORCEMENT_RECOMMENDATION_ONLY),
+        "a policy that will not create a Job until a human edits the destination does not \
+         report that a worker is deleting under it: {status}"
+    );
+    assert_eq!(
+        outcome.enforcement,
+        ctrl::ENFORCEMENT_RECOMMENDATION_ONLY,
+        "and the returned Outcome agrees with the object"
+    );
+    assert_eq!(
+        status["guarantees"]["ageExpiry"],
+        json!(ctrl::GUARANTEE_NOT_ENFORCED)
+    );
+    assert_eq!(
+        status["guarantees"]["minUsablePoints"],
+        json!(ctrl::GUARANTEE_LOGWEIR),
+        "the guarantees this refusal does not falsify survive: `guarantees` is patched \
+         object-wise and names ONE key (RFC 7386 merges member by member): {status}"
+    );
+    assert_eq!(
+        status["guarantees"]["legalHold"],
+        json!(ctrl::GUARANTEE_PROVIDER_UNVERIFIED)
+    );
+    assert_eq!(
+        f.condition(ctrl::CONDITION_DEGRADED)["status"],
+        json!("False"),
+        "and the full condition array is still upserted, so nothing is dropped"
+    );
 }
 
-/// `Report` needs no record credential, and a destination without
-/// `evidenceWrite` therefore evaluates exactly as it always did.
+/// When the role DEFAULTED, the refusal names the line the operator actually
+/// wrote — `spec.access.archiveWrite`, not an `evidenceWrite` that is not on
+/// the object.
+///
+/// Telling someone to fix a field their YAML does not contain sends them
+/// looking for a line that is not there. This is the only thing
+/// `destination::declares` decides now that the default itself stands.
+#[tokio::test]
+async fn a_defaulted_record_grant_that_no_job_can_use_names_archive_write() {
+    let mut access = four_principals();
+    access
+        .as_object_mut()
+        .expect("access")
+        .remove("evidenceWrite");
+    access["archiveWrite"] = json!({
+        "mode": "WorkloadIdentity",
+        "workloadIdentity": {"serviceAccountName": "lw-archive-writer"}
+    });
+    let object = destination_with_access(access);
+
+    let learn = fixture(routes_for_destination(&six_points(), object.clone()));
+    run(&learn, &policy(enforcing(None), json!({}))).await;
+    let digest = learn.status()["lastEvaluation"]["planSha256"]
+        .as_str()
+        .expect("a digest")
+        .to_string();
+
+    let mut routes = routes_for_destination(&six_points(), object);
+    routes.push(plan_config_map_route(&digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let f = fixture(routes);
+    let outcome = run(&f, &policy(enforcing(Some(&digest)), json!({}))).await;
+
+    assert_eq!(
+        outcome.enforced_reason,
+        ctrl::REASON_EVIDENCE_GRANT_UNUSABLE
+    );
+    assert!(f.posted("/jobs").is_empty());
+    let message = f.condition(ctrl::CONDITION_ENFORCED)["message"]
+        .as_str()
+        .expect("a message")
+        .to_string();
+    assert!(
+        message.contains("spec.access.archiveWrite")
+            && message.contains("spec.access.evidenceWrite is absent and defaults to it"),
+        "the message names the field that exists AND says why it is the one being read: \
+         {message}"
+    );
+}
+
+/// The record credential naming the SAME Secret as the delete credential is the
+/// one shape of the forbidden aggregation a controller can actually see —
+/// review finding L3.
+///
+/// One principal that both removes a point and writes the record attributing
+/// its removal can forge that record, and §7f's rule is that neither alone is
+/// enough. The check compares NAMES, which catches the spelling and not the
+/// material — two differently named Secrets can hold identical keys and this
+/// controller reads neither — and the message says exactly that rather than
+/// reading as a proof of distinctness.
+#[tokio::test]
+async fn the_record_credential_naming_the_delete_secret_creates_no_job() {
+    let mut access = four_principals();
+    access["evidenceWrite"]["secret"]["name"] = json!("retention-delete");
+    let object = destination_with_access(access);
+
+    let learn = fixture(routes_for_destination(&six_points(), object.clone()));
+    run(&learn, &policy(enforcing(None), json!({}))).await;
+    let digest = learn.status()["lastEvaluation"]["planSha256"]
+        .as_str()
+        .expect("a digest")
+        .to_string();
+
+    let mut routes = routes_for_destination(&six_points(), object);
+    routes.push(plan_config_map_route(&digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let f = fixture(routes);
+    let outcome = run(&f, &policy(enforcing(Some(&digest)), json!({}))).await;
+
+    assert_eq!(
+        outcome.enforced_reason,
+        ctrl::REASON_EVIDENCE_GRANT_UNUSABLE
+    );
+    assert!(
+        f.seen().iter().all(|(m, _)| m != "POST"),
+        "no Job and no plan ConfigMap: {:?}",
+        f.seen()
+    );
+    let message = f.condition(ctrl::CONDITION_ENFORCED)["message"]
+        .as_str()
+        .expect("a message")
+        .to_string();
+    assert!(
+        message.contains("spec.enforcement.credentialSecretRef"),
+        "the condition names the other half of the collision: {message}"
+    );
+    assert!(
+        message.contains("NAMES only"),
+        "and says what it does NOT catch, so nobody reads it as a proof that the two \
+         principals are distinct: {message}"
+    );
+}
+
+/// `Report` needs no record credential, so a destination whose `evidenceWrite`
+/// role resolves to nothing a Job could use still previews.
 ///
 /// The refusal lives in `start_run` and not in `evaluate` for this reason: a
 /// policy that deletes nothing has no deletion to attribute, and refusing its
@@ -2151,10 +2274,10 @@ async fn a_workload_identity_evidence_grant_creates_no_job() {
 #[tokio::test]
 async fn a_report_mode_policy_needs_no_evidence_write_grant() {
     let mut access = four_principals();
-    access
-        .as_object_mut()
-        .expect("access")
-        .remove("evidenceWrite");
+    access["evidenceWrite"] = json!({
+        "mode": "WorkloadIdentity",
+        "workloadIdentity": {"serviceAccountName": "lw-evidence-writer"}
+    });
     let f = fixture(routes_for_destination(
         &six_points(),
         destination_with_access(access),
@@ -2219,34 +2342,48 @@ async fn a_malformed_evidence_write_grant_stops_enforcement_and_not_the_preview(
     );
 }
 
-/// `evidence_credential` itself, at the three answers a Job can get — the pure
-/// half of the four rows above.
+/// `evidence_credential` itself, at every answer a Job can get — the pure half
+/// of the rows above.
 #[test]
 fn the_record_credential_is_decided_in_one_pure_place() {
-    let keys = |token: Option<&str>| weirkeeper::destination::ResolvedGrant::SecretKeys {
-        secret: "lw-evidence".to_string(),
-        access_key_id_key: "eid".to_string(),
-        secret_access_key_key: "ekey".to_string(),
-        session_token_key: token.map(str::to_string),
-    };
-    let projected =
-        ctrl::evidence_credential(Ok(&resolved_for(keys(None))), true).expect("projected");
+    let keys =
+        |name: &str, token: Option<&str>| weirkeeper::destination::ResolvedGrant::SecretKeys {
+            secret: name.to_string(),
+            access_key_id_key: "eid".to_string(),
+            secret_access_key_key: "ekey".to_string(),
+            session_token_key: token.map(str::to_string),
+        };
+    let projected = ctrl::evidence_credential(
+        Ok(&resolved_for(keys("lw-evidence", None))),
+        true,
+        Some("retention-delete"),
+    )
+    .expect("projected");
     assert_eq!(
         projected.len(),
         2,
         "two variables when no token is declared"
     );
-    let with_token =
-        ctrl::evidence_credential(Ok(&resolved_for(keys(Some("t")))), true).expect("projected");
+    let with_token = ctrl::evidence_credential(
+        Ok(&resolved_for(keys("lw-evidence", Some("t")))),
+        true,
+        Some("retention-delete"),
+    )
+    .expect("projected");
     assert_eq!(with_token.len(), 3);
 
-    let undeclared = ctrl::evidence_credential(Ok(&resolved_for(keys(None))), false)
-        .expect_err("an undeclared evidenceWrite is refused");
-    assert!(
-        undeclared.contains("spec.access.evidenceWrite"),
-        "even though the ROLE resolved — `resolve` defaults it to `archiveWrite`, and that \
-         default is what this refuses: {undeclared}"
-    );
+    // THE DOCUMENTED DEFAULT STANDS. `evidenceWrite` absent means
+    // `archiveWrite`, exactly as `docs/kubernetes.md` §7 and `docs/install.md`
+    // say — an installation that never separated its principals does not move
+    // on an upgrade, and this row is what says so.
+    let defaulted = ctrl::evidence_credential(
+        Ok(&resolved_for(keys("lw-writer", None))),
+        false,
+        Some("retention-delete"),
+    )
+    .expect("an absent evidenceWrite is the archiveWrite grant, not a refusal");
+    assert_eq!(defaulted[0].secret_name, "lw-writer");
+
     let workload = ctrl::evidence_credential(
         Ok(&resolved_for(
             weirkeeper::destination::ResolvedGrant::WorkloadIdentity {
@@ -2254,9 +2391,47 @@ fn the_record_credential_is_decided_in_one_pure_place() {
             },
         )),
         true,
+        Some("retention-delete"),
     )
     .expect_err("a grant with no static keys is refused");
     assert!(workload.contains("WorkloadIdentity") && !workload.contains("\"sa\""));
+    assert!(
+        workload.contains("spec.access.evidenceWrite"),
+        "the field the operator wrote: {workload}"
+    );
+    let defaulted_workload = ctrl::evidence_credential(
+        Ok(&resolved_for(
+            weirkeeper::destination::ResolvedGrant::WorkloadIdentity {
+                service_account_name: "sa".to_string(),
+            },
+        )),
+        false,
+        Some("retention-delete"),
+    )
+    .expect_err("the default is refused too when IT has no static keys");
+    assert!(
+        defaulted_workload.contains("spec.access.archiveWrite"),
+        "and then the message names archiveWrite, because that is the line the operator would \
+         have to edit: {defaulted_workload}"
+    );
+
+    // THE ONE AGGREGATION A CONTROLLER CAN SEE — review finding L3.
+    let same = ctrl::evidence_credential(
+        Ok(&resolved_for(keys("retention-delete", None))),
+        true,
+        Some("retention-delete"),
+    )
+    .expect_err("the record credential is not the delete credential");
+    assert!(
+        same.contains("credentialSecretRef") && same.contains("NAMES only"),
+        "and the message says what it does not catch: {same}"
+    );
+    ctrl::evidence_credential(
+        Ok(&resolved_for(keys("retention-delete", None))),
+        true,
+        None,
+    )
+    .expect("with no delete credential configured there is nothing to compare");
 }
 
 /// A `ResolvedDestination` carrying `grant`, for the pure row above.

@@ -545,9 +545,11 @@ grant as the run's `LOGWEIR_EVIDENCE_AWS_*`, so on a destination separating the
 two an `Enforce` run's first intent tombstone was refused `403`, the point was
 `Kept` with `code=TombstoneRefused`, and nothing was deleted (defect
 **RET-EVIDENCE-GRANT-IS-ARCHIVEREAD**). The reconciler matches the contract
-from `1361f50`: the record credential is `spec.access.evidenceWrite`, whose own
-measured permission is the `evidenceWrite` row of the table above
-(`s3:PutObject` on `<bucket>/logweir/*`). The `retention enforcer` row itself is
+since that defect was fixed: the record credential is the destination's
+`evidenceWrite` role — `spec.access.evidenceWrite`, or `spec.access.archiveWrite`
+when it is absent, never `archiveRead` — whose own measured permission is the
+`evidenceWrite` row of the table above (`s3:PutObject` on `<bucket>/logweir/*`).
+The `retention enforcer` row itself is
 about the **delete** credential and is unchanged by that fix — but its live
 baseline was taken with the record written by the wrong principal, so
 `U6/retention-enforcer` is re-run at the next lab refresh.
@@ -1571,28 +1573,45 @@ intent tombstone cannot be written is not deleted, and neither is any point
 after it*. Either way nothing is removed unattributably; only the exit code
 differs (3 against 1).
 
-**And on this build no such Job is created at all**, because the controller
-resolves `spec.access.evidenceWrite` for the record credential — its own role,
-from the same read that resolves `archiveRead` for the location — and refuses
-the pass when there is none. A destination that declares no `evidenceWrite`, or
-declares one that is not a `SecretKeys` grant, gets
-`Enforced=False`, reason `EvidenceGrantUnusable`, with `spec.access.evidenceWrite`
-named in the message and **no Job, no plan `ConfigMap`, no lease, no run record
-and no retry-budget slot spent**; `mode: Report` is untouched, because a policy
-that deletes nothing has no deletion to attribute. Everywhere else
-`evidenceWrite` defaults to `archiveWrite` and that costs nothing — a backup pod
-is already holding the archive write grant — but a retention pod's
-`AWS_ACCESS_KEY_ID` is the **delete** grant, so the same default would hand a
-deleting pod a credential that can rewrite the objects under `<prefix>/*` it is
-removing, and delete plus archive write in one pod can remove a point and forge
-its replacement. **Upgrading to this build therefore stops enforcement on a
-destination that has not declared `evidenceWrite`**, visibly and with the field
-named; adding the grant is the whole remedy and needs no restart, and rolling
-the controller back restores the previous behaviour with no object change. Until
-`1361f50` the enforcement Job's `LOGWEIR_EVIDENCE_AWS_*` carried the
-**`archiveRead`** grant, so a destination separating the four principals had
-every intent tombstone refused `403 AccessDenied` and could not enforce
-retention at all (defect `RET-EVIDENCE-GRANT-IS-ARCHIVEREAD`, measured live).
+**Which grant that is, exactly.** The controller resolves the destination's
+`evidenceWrite` role for the record credential — its own role, from the same
+read that resolves `archiveRead` for the location — and projects it as
+`LOGWEIR_EVIDENCE_AWS_*`. **`evidenceWrite` absent still means `archiveWrite`**,
+exactly as §7's absent-field rule and `docs/install.md`'s *absent grants do not
+widen* say it does; an installation that never separated its principals is
+unaffected by any of this. What is **never** used here is `archiveRead`: it is
+the read-only principal §7a recommends, it is not a fall-back for these
+variables, and until the fix for `RET-EVIDENCE-GRANT-IS-ARCHIVEREAD` the build
+projected it anyway — so a destination that separated the two had every intent
+tombstone refused `403 AccessDenied`, `state=Kept code=TombstoneRefused`,
+`deleted=0 failed=1`, and could not enforce retention at all. That was measured
+live before it was fixed.
+
+**A role that resolves to nothing a Job can use is refused before anything is
+spent.** Three cases: a malformed grant; a grant with no static keys (the worker
+builds its record store from `LOGWEIR_EVIDENCE_AWS_ACCESS_KEY_ID` and
+`…_SECRET_ACCESS_KEY` and has no workload-identity path, so a `WorkloadIdentity`
+grant renders a Job that can only exit 3); and a grant naming the same Secret as
+`spec.enforcement.credentialSecretRef`, because one principal that both removes
+a point and writes the record attributing its removal can forge that record.
+Each gets `Enforced=False`, reason `EvidenceGrantUnusable`, with the field named
+— `spec.access.evidenceWrite`, or `spec.access.archiveWrite` when the role
+defaulted to it — and **no Job, no plan `ConfigMap`, no lease, no run record and
+no retry-budget slot spent**. `status.enforcement` drops to `RecommendationOnly`
+and `status.guarantees.ageExpiry` to `NotEnforced`, so no console sentence
+claims a worker is deleting under a policy that will not create one until a
+human edits the destination. `mode: Report` is untouched throughout, because a
+policy that deletes nothing has no deletion to attribute. Adding or fixing the
+grant is the whole remedy: enforcement resumes on the next reconcile, within
+about a minute, with no spec edit and no restart.
+
+**The same-Secret check compares NAMES, and that is all it can do.** Two
+differently named Secrets may hold identical keys, and this controller reads
+neither — it holds no verb on `secrets` at all. So Logweir can refuse the
+obvious spelling of "one credential doing both jobs" and cannot verify the
+thing that actually matters. **That the delete grant and the record grant are
+genuinely distinct principals, with the IAM scopes in the table above, is an
+operator obligation**; §7a's measured table is where to check them.
 
 **The enforcement Job's image is the runner image, and it carries two
 binaries.** The controller renders the Job from its own `LOGWEIR_RUNNER_IMAGE`
