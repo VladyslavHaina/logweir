@@ -2601,7 +2601,64 @@ fn is_public_name(c: &str) -> bool {
 /// twenty-four the same measurement is 1.25e-5, and a bare key in prose is
 /// 0/400,000. Both figures are over 400,000 random keys; the script is in the
 /// worker report.
+///
+/// # It is a budget for adopter free TEXT, and an identity is not free text
+///
+/// The cap is the reason `receiptKey` reached the API wire as
+/// `[redacted].receipt.json` (defect CATALOG-RECEIPTKEY-REDACTED). A receipt
+/// key is `<prefix>/<backup_id>/<run_id>.receipt.json`, `.` is not a run
+/// character, so the run the scanner sees is
+/// `<prefix>/<backup_id>/<run_id>` — anchored by the backup set's UUID, with
+/// the run id as its one free component. A run id is a ULID
+/// ([`crate::ids::format_run_id`]): **26** characters, two over this budget.
+/// So a key the console needs as a plan binding was destroyed while
+/// `receiptSha256` and the location beside it survived.
+///
+/// The budget is NOT raised to cover it. Raising it to 26 admits any
+/// 26-character mixed-case component, and the same measurement over 400,000
+/// random keys goes from 1.25e-5 to 4.5e-5 — 3.6x worse for a shape nothing
+/// needs. A ULID is instead exempted BY SHAPE ([`is_ulid`]): it is an identity
+/// this product minted, not text an adopter chose, and the same measurement
+/// with the exemption is 1.25e-5 — unchanged, not one extra accept in 400,000.
+/// The exemption is narrow by construction: a random base64 component is
+/// ULID-shaped with probability `(8/64) * (32/64)^25 ≈ 4e-9`, and a ULID still
+/// spends the ONE free slot, so nothing may ride beside it.
 const FREE_COMPONENT_MAX: usize = 24;
+
+/// A ULID as [`crate::ids::format_run_id`] mints one: exactly 26 characters of
+/// Crockford base32, the first of them `0`–`7`.
+///
+/// An IDENTITY, not adopter free text, which is why it is exempt from
+/// [`FREE_COMPONENT_MAX`] and nothing else is. Every `run_id` this product
+/// writes is one, and a run id is the stem of every receipt key and of every
+/// drill scorecard key, so the alternative to this predicate is redacting the
+/// plan binding a console needs (CATALOG-RECEIPTKEY-REDACTED).
+///
+/// Every clause is load-bearing and each has a row:
+///
+/// * **26 characters exactly.** Not "up to 26": a 27-character component is
+///   still over the budget and still goes, and so is a 25-character one that
+///   is not a name (the budget covers it already).
+/// * **Crockford base32** — `0-9` and upper case less `I`, `L`, `O`, `U`, the
+///   alphabet `ulid` encodes with. This is 32 of the 64 base64 characters, so
+///   it refuses half of what a credential is drawn from at every position.
+/// * **first character `0`–`7`.** 26 characters carry 130 bits and a ULID is
+///   128, so the leading character encodes 3 bits and can be no larger. A
+///   component that is Crockford base32 but starts `8`–`Z` is not a ULID
+///   anything minted, and it is not exempt.
+///
+/// Lower case is NOT accepted, and costs nothing: a 26-character all-lower-case
+/// component is already a public NAME ([`is_public_name`]) and never reached
+/// the budget. Keeping the exemption upper-case-only keeps it to the canonical
+/// spelling `Ulid::to_string` produces.
+fn is_ulid(c: &str) -> bool {
+    /// Crockford base32's encoding alphabet — `I`, `L`, `O` and `U` are not in
+    /// it, which is the point.
+    const CROCKFORD: &[u8] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
+    c.len() == 26
+        && matches!(c.as_bytes()[0], b'0'..=b'7')
+        && c.bytes().all(|b| CROCKFORD.contains(&b))
+}
 
 /// A component Logweir itself writes into an archive key.
 ///
@@ -2690,10 +2747,13 @@ fn is_fact_pair(c: &str) -> bool {
 ///   ([`is_archive_component`]) — which makes the run an object key rather than
 ///   a token. **At most one** of its remaining components may then be something
 ///   other than a public form, and that one is capped at
-///   [`FREE_COMPONENT_MAX`]. Kafka topic names may carry upper case, and the
-///   strict clause above would have redacted the whole segment path for
-///   `payments-EU`; a segment key has exactly ONE adopter-chosen component,
-///   which is that topic name or the backup set id.
+///   [`FREE_COMPONENT_MAX`] unless it is a ULID ([`is_ulid`]), which is an
+///   identity this product minted rather than text an adopter chose. Kafka
+///   topic names may carry upper case, and the strict clause above would have
+///   redacted the whole segment path for `payments-EU`; a segment key has
+///   exactly ONE adopter-chosen component, which is that topic name or the
+///   backup set id, and a receipt key has exactly one free component, which is
+///   its run id.
 ///
 /// # Why the anchored branch is capped at one
 ///
@@ -2732,7 +2792,14 @@ fn is_public_identifier(run: &str) -> bool {
 }
 
 /// At most one component that is not a public form, and that one no longer than
-/// [`FREE_COMPONENT_MAX`] — the clause both key-shaped tests share.
+/// [`FREE_COMPONENT_MAX`] **or a ULID** — the clause both key-shaped tests
+/// share.
+///
+/// "At most one" is never relaxed; only the LENGTH of that one is, and only for
+/// the one shape this product mints rather than an adopter chooses
+/// ([`is_ulid`]). So `<set id>/<run id>` is a key, `<set id>/<run id>/<anything
+/// else free>` is still two free components and still goes, and the budget
+/// still answers for everything that is not a ULID.
 fn at_most_one_free_component(components: &[&str]) -> bool {
     let public = |c: &str| {
         c.is_empty() || is_hex_digest(c) || is_uuid(c) || is_public_name(c) || is_fact_pair(c)
@@ -2740,7 +2807,7 @@ fn at_most_one_free_component(components: &[&str]) -> bool {
     let mut free = components.iter().filter(|c| !public(c));
     match free.next() {
         None => true,
-        Some(one) => one.len() <= FREE_COMPONENT_MAX && free.next().is_none(),
+        Some(one) => (one.len() <= FREE_COMPONENT_MAX || is_ulid(one)) && free.next().is_none(),
     }
 }
 
@@ -2758,7 +2825,9 @@ fn at_most_one_free_component(components: &[&str]) -> bool {
 ///
 /// The ONE non-public component is the adopter-chosen one: a backup set id like
 /// `20260915T030000Z`, which carries upper case and is neither a UUID nor a
-/// digest, or a topic name like `payments-EU`. A credential is refused by the
+/// digest, or a topic name like `payments-EU` — or the run id this product
+/// minted, a 26-character ULID, which is two characters over the budget and
+/// exempt from it by shape alone ([`is_ulid`]). A credential is refused by the
 /// same two clauses that refuse it in [`is_public_identifier`]: unsliced it is
 /// 40 characters and fails the length cap, and its own `/` characters —
 /// base64's 64th — split it into two or three components that are all

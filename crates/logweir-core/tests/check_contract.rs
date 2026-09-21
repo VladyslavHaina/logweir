@@ -11,7 +11,8 @@
 use chrono::{DateTime, Utc};
 use logweir_core::check_contract::{
     advisory_warnings, aggregate, aggregate_expires_at, apply_rules, frames, inputs_digest, redact,
-    redaction_rules, stale_reasons, topic_tsv, topic_tsv_sha256, visibility, ApprovalRef,
+    is_object_key_shaped, redaction_rules, stale_reasons, topic_tsv, topic_tsv_sha256,
+    visibility, ApprovalRef,
     Attestation, Authority, BindingInputs, CaBundleRef, CheckCode, CheckId, CheckOperation,
     CheckOutcome, CheckPlan, CheckPlanError, CheckPlanKind, CheckRequest, CheckResult,
     CheckResultError, CheckState, ConnectionPlan, CredentialMode, DestinationAccessRequest,
@@ -1462,6 +1463,135 @@ fn an_anchored_run_is_not_a_licence_to_carry_a_credential() {
         segment,
         "the segment path an operator must go and recover was redacted"
     );
+}
+
+/// **CATALOG-RECEIPTKEY-REDACTED.** A run id is an IDENTITY, and the
+/// free-component budget is for adopter free TEXT.
+///
+/// REGRESSION REASON. A receipt key is
+/// `<prefix>/<backup_id>/<run_id>.receipt.json`; `.` is not a run character, so
+/// the run the scanner sees is `<prefix>/<backup_id>/<run_id>` — anchored by
+/// the backup set's UUID, with the run id as its one free component. A run id
+/// is a 26-character ULID and `FREE_COMPONENT_MAX` is 24, so the whole run went
+/// and the console read `receiptKey` as `[redacted].receipt.json` while
+/// `receiptSha256` and the location beside it survived. D3 §5.5 step 4 builds
+/// `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}`, so
+/// the redacted key is a plan binding the runner refuses with exit 3
+/// `PointBindingMismatch` — a published field that cannot be used for the one
+/// thing it is published for.
+///
+/// The fix is a SHAPE exemption, not a bigger budget, and the three negative
+/// rows are what pins that: 27 characters still goes, and 26 characters that is
+/// not a ULID still goes. Raising the budget to 26 would pass the first row and
+/// fail the other three.
+#[test]
+fn a_receipt_keys_ulid_run_id_survives_and_nothing_its_length_rides_with_it() {
+    const SET: &str = "3f0ada8f-1a2b-4c3d-9e8f-0123456789ab";
+    /// A real run id, as `logweir_core::ids::format_run_id` mints one.
+    const RUN: &str = "01M2VKCST7EF12EW5T2Y7SJ86Q";
+
+    // --- the minter's own output is what the exemption is defined against ---
+    // A hand-written constant could drift from the encoder; these cannot. The
+    // timestamps span the whole 48-bit range the leading character encodes.
+    let minted: Vec<String> = [
+        (0u64, 0u128),
+        (1, 1),
+        (1_789_780_191_192, 0x0123_4567_89ab_cdef_0123),
+        (u64::MAX, u128::MAX),
+    ]
+    .iter()
+    .map(|(ms, r)| logweir_core::ids::format_run_id(*ms, *r))
+    .collect();
+    assert!(minted.iter().any(|m| m != RUN), "the probes must differ");
+    for id in minted.iter().chain(std::iter::once(&RUN.to_string())) {
+        assert_eq!(id.len(), 26, "a run id is 26 characters: {id}");
+        let key = format!("logweir/backups/{SET}/{id}.receipt.json");
+        assert_eq!(
+            redact(&key),
+            key,
+            "the plan binding D3 §5.5 step 4 needs was destroyed"
+        );
+        assert!(
+            is_object_key_shaped(&format!("logweir/backups/{SET}/{id}")),
+            "`redact_path`'s clause must agree with `redact`'s for {id}"
+        );
+        // And in the sentence a remedy really is, and through the second pass
+        // the controller makes.
+        let prose = format!("the evidence object {key} is not in the archive");
+        assert_eq!(redact(&prose), prose, "second reader: {}", redact(&prose));
+        assert_eq!(redact(&redact(&prose)), prose, "not idempotent");
+    }
+
+    // --- and NOTHING the budget refuses became acceptable ------------------
+    // Each of these is the ONE free component of an otherwise perfect archive
+    // key, so only the budget and the shape clause can answer for it.
+    let refused: Vec<(&str, String)> = vec![
+        // 27 characters: one over a ULID, and the row a raised budget fails.
+        ("27 Crockford characters", format!("{RUN}XY")[..27].to_string()),
+        // 26 characters, Crockford alphabet, but the leading character is over
+        // `7`: 26 characters hold 130 bits and a ULID is 128, so nothing minted
+        // this and it is not exempt.
+        ("26, but the timestamp overflows", format!("Z{}", &RUN[1..])),
+        // 26 characters, upper case, but `U` is not in Crockford base32.
+        ("26, but not the Crockford alphabet", RUN.replacen('T', "U", 1)),
+        // 26 characters, mixed case — the shape a credential really takes.
+        ("26, but mixed case", RUN.replacen('T', "t", 1)),
+        // 26 characters of base64 that is not even alphanumeric-only.
+        ("26, but base64", "wJalrXUtnFEMIK7MDENGbPxRfi".to_string()),
+    ];
+    let mut survived: Vec<String> = Vec::new();
+    for (name, one) in &refused {
+        assert_eq!(
+            one.len(),
+            if name.starts_with("27") { 27 } else { 26 },
+            "the probe `{name}` is the wrong length: {one}"
+        );
+        let key = format!("logweir/backups/{SET}/{one}.receipt.json");
+        if redact(&key).contains(one.as_str()) {
+            survived.push(format!("{name}: {}", redact(&key)));
+        }
+        if is_object_key_shaped(&format!("logweir/backups/{SET}/{one}")) {
+            survived.push(format!("{name} (as a key): {one}"));
+        }
+    }
+    assert!(
+        survived.is_empty(),
+        "the free-component budget was widened, not the ULID shape exempted ({} of {}):\n  {}",
+        survived.len(),
+        refused.len() * 2,
+        survived.join("\n  ")
+    );
+
+    // --- the exemption spends the ONE free slot and does not add one -------
+    // A ULID is exempt from the LENGTH, never from the count. Anything free
+    // beside it is still two free components and the run still goes.
+    for beside in ["MyBackupSet01", "payments-EU", "ZZfakefakefakefake"] {
+        let run = format!("logweir/backups/{SET}/{beside}/{RUN}");
+        assert!(
+            !is_object_key_shaped(&run),
+            "a ULID bought a second free component in `{run}`"
+        );
+        let sentence = format!("the object {run} failed");
+        assert!(
+            redact(&sentence).contains(REDACTED),
+            "a ULID bought a second free component in prose: {}",
+            redact(&sentence)
+        );
+    }
+
+    // --- what did NOT change, so the rows say what they mean ---------------
+    // A 26-character all-lower-case component (a hex stem, for instance) was
+    // never over the budget: it is a public NAME, and it survived before this
+    // exemption and survives after it. The exemption is upper-case only, so it
+    // is not what carries this row.
+    let lower = "0e02dc33bf63349ec262a620";
+    assert_eq!(lower.len(), 24);
+    let hexish = "0e02dc33bf63349ec262a62043";
+    assert_eq!(hexish.len(), 26);
+    for name in [lower, hexish] {
+        let key = format!("logweir/backups/{SET}/{name}.receipt.json");
+        assert_eq!(redact(&key), key, "a lower-case name is public, not free");
+    }
 }
 
 // --------------------------------------------------------------- visibility
