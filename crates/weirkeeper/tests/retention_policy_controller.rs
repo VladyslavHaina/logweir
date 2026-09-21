@@ -1985,7 +1985,10 @@ async fn the_record_credential_is_the_evidence_write_grant_and_not_the_archive_o
     );
     assert_eq!(
         env.get("AWS_SECRET_ACCESS_KEY"),
-        Some(&("retention-delete".to_string(), "secret-access-key".to_string()))
+        Some(&(
+            "retention-delete".to_string(),
+            "secret-access-key".to_string()
+        ))
     );
     let named: BTreeSet<&str> = env.values().map(|(secret, _)| secret.as_str()).collect();
     assert_eq!(
@@ -2038,7 +2041,10 @@ async fn the_archive_grants_session_token_never_reaches_the_retention_pod() {
 #[tokio::test]
 async fn a_destination_with_no_evidence_write_grant_creates_no_job() {
     let mut access = four_principals();
-    access.as_object_mut().expect("access").remove("evidenceWrite");
+    access
+        .as_object_mut()
+        .expect("access")
+        .remove("evidenceWrite");
     let bare = destination_with_access(access);
 
     let learn = fixture(routes_for_destination(&six_points(), bare.clone()));
@@ -2056,7 +2062,10 @@ async fn a_destination_with_no_evidence_write_grant_creates_no_job() {
     let f = fixture(routes);
     let outcome = run(&f, &policy(enforcing(Some(&digest)), json!({}))).await;
 
-    assert_eq!(outcome.enforced_reason, ctrl::REASON_EVIDENCE_GRANT_UNUSABLE);
+    assert_eq!(
+        outcome.enforced_reason,
+        ctrl::REASON_EVIDENCE_GRANT_UNUSABLE
+    );
     assert_eq!(outcome.phase, ctrl::RetentionPhase::Evaluated);
     assert!(
         f.seen().iter().all(|(m, _)| m != "POST"),
@@ -2113,7 +2122,10 @@ async fn a_workload_identity_evidence_grant_creates_no_job() {
     let f = fixture(routes);
     let outcome = run(&f, &policy(enforcing(Some(&digest)), json!({}))).await;
 
-    assert_eq!(outcome.enforced_reason, ctrl::REASON_EVIDENCE_GRANT_UNUSABLE);
+    assert_eq!(
+        outcome.enforced_reason,
+        ctrl::REASON_EVIDENCE_GRANT_UNUSABLE
+    );
     assert!(f.posted("/jobs").is_empty());
     let message = f.condition(ctrl::CONDITION_ENFORCED)["message"]
         .as_str()
@@ -2139,7 +2151,10 @@ async fn a_workload_identity_evidence_grant_creates_no_job() {
 #[tokio::test]
 async fn a_report_mode_policy_needs_no_evidence_write_grant() {
     let mut access = four_principals();
-    access.as_object_mut().expect("access").remove("evidenceWrite");
+    access
+        .as_object_mut()
+        .expect("access")
+        .remove("evidenceWrite");
     let f = fixture(routes_for_destination(
         &six_points(),
         destination_with_access(access),
@@ -2163,7 +2178,11 @@ fn the_record_credential_is_decided_in_one_pure_place() {
         session_token_key: token.map(str::to_string),
     };
     let projected = ctrl::evidence_credential(&resolved_for(keys(None)), true).expect("projected");
-    assert_eq!(projected.len(), 2, "two variables when no token is declared");
+    assert_eq!(
+        projected.len(),
+        2,
+        "two variables when no token is declared"
+    );
     let with_token =
         ctrl::evidence_credential(&resolved_for(keys(Some("t"))), true).expect("projected");
     assert_eq!(with_token.len(), 3);

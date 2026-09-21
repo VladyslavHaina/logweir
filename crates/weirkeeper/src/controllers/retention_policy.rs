@@ -3199,10 +3199,7 @@ pub fn evidence_credential(
     evidence: &ResolvedDestination,
     declared: bool,
 ) -> Result<Vec<crate::job::EnvFromSecret>, String> {
-    let where_ = format!(
-        "BackupDestination {}/{}",
-        evidence.namespace, evidence.name
-    );
+    let where_ = format!("BackupDestination {}/{}", evidence.namespace, evidence.name);
     if !declared {
         return Err(format!(
             "{where_} declares no spec.access.evidenceWrite grant, and a retention run's record \

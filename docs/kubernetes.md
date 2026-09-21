@@ -1579,6 +1579,29 @@ intent tombstone cannot be written is not deleted, and neither is any point
 after it*. Either way nothing is removed unattributably; only the exit code
 differs (3 against 1).
 
+**And on this build no such Job is created at all**, because the controller
+resolves `spec.access.evidenceWrite` for the record credential — its own role,
+from the same read that resolves `archiveRead` for the location — and refuses
+the pass when there is none. A destination that declares no `evidenceWrite`, or
+declares one that is not a `SecretKeys` grant, gets
+`Enforced=False`, reason `EvidenceGrantUnusable`, with `spec.access.evidenceWrite`
+named in the message and **no Job, no plan `ConfigMap`, no lease, no run record
+and no retry-budget slot spent**; `mode: Report` is untouched, because a policy
+that deletes nothing has no deletion to attribute. Everywhere else
+`evidenceWrite` defaults to `archiveWrite` and that costs nothing — a backup pod
+is already holding the archive write grant — but a retention pod's
+`AWS_ACCESS_KEY_ID` is the **delete** grant, so the same default would hand a
+deleting pod a credential that can rewrite the objects under `<prefix>/*` it is
+removing, and delete plus archive write in one pod can remove a point and forge
+its replacement. **Upgrading to this build therefore stops enforcement on a
+destination that has not declared `evidenceWrite`**, visibly and with the field
+named; adding the grant is the whole remedy and needs no restart, and rolling
+the controller back restores the previous behaviour with no object change. Until
+`0c14bb7` the enforcement Job's `LOGWEIR_EVIDENCE_AWS_*` carried the
+**`archiveRead`** grant, so a destination separating the four principals had
+every intent tombstone refused `403 AccessDenied` and could not enforce
+retention at all (defect `RET-EVIDENCE-GRANT-IS-ARCHIVEREAD`, measured live).
+
 **The enforcement Job's image is the runner image, and it carries two
 binaries.** The controller renders the Job from its own `LOGWEIR_RUNNER_IMAGE`
 (the chart's `runnerImage`) and overrides only the container's command, which is
