@@ -2982,6 +2982,90 @@ fn both_dockerfiles_copy_the_fingerprint() {
     }
 }
 
+/// **`Dockerfile.console` is the fourth image and it declares what it runs.**
+///
+/// D0 stage 7 owns it, and four things about it are assertions rather than
+/// style — each one is a way the image can be wrong while every other gate in
+/// this repository stays green, because the other gates need a built image and
+/// this row reads checked-in bytes in microseconds:
+///
+///   1. It COPYs the page with `Dockerfile.ui`'s TWO globs and never
+///      `COPY ui /ui`. A whole-directory copy takes `ui/README.md` and
+///      `ui/tests/` — the second of which carries a throwaway keypair (Global
+///      Constraint 28) — and keeps taking whatever lands under `ui/` next.
+///   2. It carries all THREE licence files, where `Dockerfile.ui` carries two:
+///      this image ships a statically linked Rust binary, so the dependency
+///      graph's notices travel with it.
+///   3. It does NOT carry the org-root anchor. That anchor is in the runner and
+///      the controller because each is an EXECUTION component; this service
+///      verifies no archive and mints no evidence, and a file that ships
+///      without a reader is a claim rather than a precaution.
+///   4. It REFUSES to cross-compile, the way `Dockerfile.weirkeeper` does and
+///      for the same measured reason: `aws-lc-sys`'s cmake/bindgen steps read
+///      the host `/usr/include`. Emulating the compile under QEMU is forbidden
+///      (STANDING RULE 10), so the refusal is the supported answer and
+///      `.github/workflows/images.yml` runs one native runner per architecture.
+///
+/// MUTANT: replace the two globs with `COPY ui /ui`, drop
+/// `THIRD_PARTY_NOTICES.md`, add the fingerprint COPY, or delete the
+/// cross-compile refusal — each fails here naming what changed.
+#[test]
+fn the_console_dockerfile_copies_the_page_by_glob_and_compiles_natively() {
+    let text = read("Dockerfile.console");
+    for needle in [
+        "COPY ui/*.html ui/*.js ui/*.css /ui/",
+        "COPY ui/pages /ui/pages",
+        "COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /usr/share/licenses/logweir/",
+        "cargo build --release --target \"$triple\" -p logweir-api",
+        "ENTRYPOINT [\"/usr/local/bin/logweir-api\"]",
+        "USER 65532:65532",
+    ] {
+        assert!(
+            text.lines().any(|l| l.trim_start().starts_with(needle)),
+            "Dockerfile.console must carry `{needle}`"
+        );
+    }
+    assert!(
+        text.contains("Dockerfile.console: REFUSING to cross-compile"),
+        "Dockerfile.console must refuse a cross-compile the way Dockerfile.weirkeeper does: \
+         aws-lc-sys's cmake/bindgen steps read the HOST /usr/include and fail on a cross target, \
+         and emulating the compile under QEMU is forbidden (STANDING RULE 10)"
+    );
+    assert!(
+        !text
+            .lines()
+            .any(|l| l.trim_start().starts_with("COPY ui ")),
+        "Dockerfile.console must copy the page with the two globs, never `COPY ui /ui`: a \
+         whole-directory copy takes ui/README.md and ui/tests/ with it, and ui/tests/ carries a \
+         throwaway keypair"
+    );
+    // The header PROSE names the anchor to say why it is absent, so the
+    // assertion is about the INSTRUCTION and not about the string.
+    assert!(
+        !text
+            .lines()
+            .any(|l| l.trim_start().starts_with("COPY third_party/org-root.fingerprint")),
+        "Dockerfile.console must NOT bake the org-root anchor: this service verifies no archive \
+         and mints no evidence, and scripts/check-image-api.sh check 3 asserts the absence"
+    );
+    assert!(
+        !text.lines().any(|l| l.trim_start().starts_with("CMD ")),
+        "Dockerfile.console declares no CMD: `--config <file>` is the chart's argument, and a \
+         default vector here would be a second place the console's MODE could come from"
+    );
+
+    // AND THE BUILD CONTEXT EXCLUDES IT, for the reason Task 9 and Task 23 give
+    // about the other two compiling Dockerfiles: `COPY . .` is the last thing
+    // before the cargo layer, so a Dockerfile that reaches the context tar makes
+    // an edit to ITS comments invalidate the OTHER images' compiles.
+    let ignore = read(".dockerignore");
+    assert!(
+        ignore.lines().any(|l| l.trim() == "/Dockerfile.console"),
+        ".dockerignore must exclude /Dockerfile.console, as it excludes the other two compiling \
+         Dockerfiles: BuildKit takes it through the frontend, not through the context tar"
+    );
+}
+
 /// Nothing under `crates/` opens the baked anchor. **Phase 0 does not read it.**
 ///
 /// This is the assertion that the task ships an anchor and not a control it

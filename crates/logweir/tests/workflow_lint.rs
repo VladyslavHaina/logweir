@@ -81,7 +81,40 @@ fn images_are_loaded_and_checked_before_credentials_or_push() {
             assert_ne!(step["with"]["push"].as_bool(), Some(true));
         }
     }
-    assert_eq!(builds, 3);
+    // FOUR SINCE D0 STAGE 7: the controller and the console on both
+    // architectures, the UI on both, the runner on amd64 only. The number is
+    // asserted rather than derived because a build step that stopped running is
+    // an image that stops being tested while every other row here stays green.
+    assert_eq!(builds, 4);
+    // AND EACH COMPILING IMAGE HAS ITS FAST-FAILING IDENTITY CHECK BEFORE THE
+    // LOGIN STEP. `scripts/ci-images.sh check` runs the full gates a moment
+    // later; these two exist because they fail in seconds and NAME the defect —
+    // 457f651 added the first after RET-NOIMAGE shipped a retention Job whose
+    // command resolved to nothing, and review finding L1 then established that
+    // the version STRING has to be inspected, because a COPY from the wrong
+    // source exits 0 while printing another binary's name.
+    for (name, marker) in [
+        ("retention", "--entrypoint logweir-retention logweir:check --version"),
+        ("console", "--entrypoint logweir-api logweir-console:check --version"),
+    ] {
+        let probe = steps
+            .iter()
+            .position(|s| {
+                s["run"]
+                    .as_str()
+                    .is_some_and(|r| r.contains(marker) && r.contains("case \"$version\" in"))
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "images.yml must run the {name} binary BY BARE NAME and inspect its --version \
+                     output before the login step; exit 0 is not identity (review finding L1)"
+                )
+            });
+        assert!(
+            probe < check && probe < login,
+            "the {name} identity probe must run before the full gates and before any credential"
+        );
+    }
     let matrix = images["jobs"]["build"]["strategy"]["matrix"]["include"]
         .as_sequence()
         .unwrap();

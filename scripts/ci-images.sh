@@ -6,7 +6,7 @@ cd "$(dirname "$0")/.."
 
 : "${GITHUB_SHA:?}" "${NS:?}"
 [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$NS" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || exit 1
-products=(weirkeeper logweir-ui)
+products=(weirkeeper logweir-ui logweir-console)
 if [[ "${ARCH:-}" == amd64 ]]; then products+=(logweir); fi
 
 check_image() {
@@ -15,6 +15,7 @@ check_image() {
     logweir) bash scripts/check-image.sh "$ref" ;;
     weirkeeper) bash scripts/check-image-weirkeeper.sh "$ref" ;;
     logweir-ui) bash scripts/check-image-ui.sh "$ref" ;;
+    logweir-console) bash scripts/check-image-api.sh "$ref" ;;
   esac
   local revision
   revision=$(docker image inspect "$ref" --format '{{index .Config.Labels "org.opencontainers.image.revision"}}')
@@ -51,7 +52,7 @@ case "${1:-}" in
     if [[ "${PROMOTE_LATEST:-false}" == true ]]; then
       [[ "${GITHUB_REF:-}" == refs/heads/main && "$TAG" == "sha-$GITHUB_SHA" ]] || exit 1
     fi
-    products=(logweir weirkeeper logweir-ui)
+    products=(logweir weirkeeper logweir-ui logweir-console)
     # Validate the complete candidate set before moving any public tag.
     for product in "${products[@]}"; do
       arches=(amd64)
@@ -78,6 +79,7 @@ case "${1:-}" in
         logweir) output=runner_digest ;;
         weirkeeper) output=controller_digest ;;
         logweir-ui) output=ui_digest ;;
+        logweir-console) output=console_digest ;;
       esac
       echo "$output=$digest" >> "$GITHUB_OUTPUT"
       echo "- $repo:$TAG — \`$digest\`" >> "$GITHUB_STEP_SUMMARY"
@@ -99,7 +101,7 @@ case "${1:-}" in
           [[ "$actual" == "$digest" ]] || { echo "Tag verification failed: $repo:$rolling" >&2; exit 1; }
         done
       done
-      echo 'Verified main and latest tags for all three images.' >> "$GITHUB_STEP_SUMMARY"
+      echo 'Verified main and latest tags for all four images.' >> "$GITHUB_STEP_SUMMARY"
     fi
     ;;
   *) echo 'usage: ci-images.sh check|candidates|promote' >&2; exit 2 ;;

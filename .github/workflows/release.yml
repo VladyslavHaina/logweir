@@ -144,6 +144,7 @@ jobs:
             - runner: `docker.io/${{ env.NS }}/logweir@${{ needs.images.outputs.runner_digest }}` (linux/amd64)
             - controller: `docker.io/${{ env.NS }}/weirkeeper@${{ needs.images.outputs.controller_digest }}` (linux/amd64 and linux/arm64)
             - UI: `docker.io/${{ env.NS }}/logweir-ui@${{ needs.images.outputs.ui_digest }}` (linux/amd64 and linux/arm64)
+            - console: `docker.io/${{ env.NS }}/logweir-console@${{ needs.images.outputs.console_digest }}` (linux/amd64 and linux/arm64)
 
             The install bundle includes the Kubernetes manifest, static UI,
             licenses, notices and `docs/verify_scorecard.py`, the independent

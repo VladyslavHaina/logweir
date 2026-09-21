@@ -253,7 +253,16 @@ cursorKey:
 {{- end }}
 {{- end -}}
 
-{{- if and .Values.api.enabled .Values.api.console.enabled }}
+{{/*
+THE GUARD IS `api.console.enabled` ALONE, AND NOT `and api.enabled …`, WHICH IS
+A REFUSAL RATHER THAN A CONDITION. `api.console.enabled` with `api.enabled`
+still false used to render NOTHING: the operator asked for a console, `helm
+install` exited 0, and no pod, Service or ConfigMap existed to look for. A
+missing principal is a configuration error and is answered as one below —
+`logweir.api.consoleChecks` fails naming both flags — so the workload's absence
+can never be silent. `scripts/check-chart.sh` arm 8 runs exactly that case.
+*/}}
+{{- if .Values.api.console.enabled }}
 {{- include "logweir.api.consoleChecks" . }}
 {{- $name := include "logweir.api.consoleName" . }}
 {{- $config := include "logweir.api.config" . }}

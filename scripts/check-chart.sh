@@ -572,6 +572,97 @@ else
   echo "   rc=0  (release '$OTHER_RELEASE': the account and the fence subject are both $OTHER_RELEASE-api)"
 fi
 
+# ---- 8. THE CONSOLE'S REFUSALS, RUN RATHER THAN READ (D0 stage 7) ----
+#
+# `crates/logweir/tests/chart_lint.rs` asserts these from checked-in bytes —
+# the schema's `pattern`, the `fail` strings in
+# `templates/ui/api-config.yaml` — because Global Constraint 22 forbids a
+# `#[test]` that shells out. THIS is the half that proves `helm` ACTS on them,
+# and the difference matters: a `fail` inside a `define` that no rendered path
+# reaches is a refusal that reads correctly and refuses nothing.
+#
+# Each row is a configuration that would install a console that looks like it is
+# working. D0: "A console that comes up on plain HTTP, or with a key someone
+# rewrote underneath it, is worse than one that does not come up at all."
+echo "== 8. the console's refusals, run =="
+CONSOLE_ON=(--set api.enabled=true --set api.console.enabled=true)
+CONSOLE_KEY=(--set api.console.keySecret=logweir-console-keys)
+CONSOLE_SHARED=(
+  --set api.console.mode=shared
+  --set api.console.oidc.issuer=https://idp.example.com/realms/logweir
+  --set api.console.oidc.clientId=logweir-console
+  --set api.console.oidc.clientSecret=logweir-console-oidc
+  --set api.console.roles.revision=2026-09-21.1
+  --set api.console.roles.bindings[0].role=viewer
+  --set "api.console.roles.bindings[0].namespace=$NAMESPACE"
+  --set api.console.roles.bindings[0].groups[0]=logweir-viewers
+)
+console_refuses() {
+  what="$1"
+  shift
+  helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+    "$@" > /dev/null 2> "$tmp/console-refusal.err"
+  rc=$?
+  if [ "$rc" -eq 0 ]; then
+    echo "FAIL: $what was ACCEPTED; it must be refused before anything installs" >&2
+    fail=1
+  else
+    echo "   rc=$rc  ($what refused, as it must be)"
+  fi
+}
+console_refuses "the console workload without its principal (api.enabled=false)" \
+  --set api.enabled=false --set api.console.enabled=true "${CONSOLE_KEY[@]}"
+console_refuses "the console with no key Secret" \
+  "${CONSOLE_ON[@]}"
+console_refuses "shared mode over plain HTTP" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
+  --set-string api.console.publicBaseUrl=http://console.example.com
+console_refuses "shared mode with a publicBaseUrl carrying a trailing slash" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
+  --set-string api.console.publicBaseUrl=https://console.example.com/
+console_refuses "a shared-console Ingress with no TLS Secret" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
+  --set-string api.console.publicBaseUrl=https://console.example.com \
+  --set api.console.ingress.enabled=true --set api.console.ingress.host=console.example.com
+console_refuses "an Ingress in front of localAdmin mode" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" \
+  --set api.console.ingress.enabled=true --set api.console.ingress.host=console.example.com \
+  --set api.console.ingress.tlsSecretName=logweir-console-tls
+console_refuses "a product role binding for a namespace the console is not bound in" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
+  --set-string api.console.publicBaseUrl=https://console.example.com \
+  --set "api.console.roles.bindings[0].namespace=some-other-namespace"
+console_refuses "a wildcard in a product role binding" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
+  --set-string api.console.publicBaseUrl=https://console.example.com \
+  --set-string "api.console.roles.bindings[0].groups[0]=logweir-*"
+console_refuses "a console NetworkPolicy with no ingress-controller selector" \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" --set api.console.networkPolicy.enabled=true
+
+# AND THE SUPPORTED SHAPE STILL RENDERS, because a gate whose every arm refuses
+# proves only that the template fails.
+helm template "$RELEASE" "$CHART" -n "$NAMESPACE" ${bootstrap_render_args[@]+"${bootstrap_render_args[@]}"} \
+  "${CONSOLE_ON[@]}" "${CONSOLE_KEY[@]}" "${CONSOLE_SHARED[@]}" \
+  --set-string api.console.publicBaseUrl=https://console.example.com \
+  --set api.console.ingress.enabled=true --set api.console.ingress.host=console.example.com \
+  --set api.console.ingress.tlsSecretName=logweir-console-tls \
+  > "$tmp/console-supported.yaml" 2> "$tmp/console-supported.err"
+rc=$?
+if [ "$rc" -ne 0 ]; then
+  echo "FAIL: the supported shared-console configuration did NOT render; rc=$rc" >&2
+  sed 's/^/      /' "$tmp/console-supported.err" >&2
+  fail=1
+else
+  grep -F -q "secretName: \"logweir-console-tls\"" "$tmp/console-supported.yaml"
+  rc=$?
+  if [ "$rc" -ne 0 ]; then
+    echo "FAIL: the supported shared-console render carries no TLS secretName" >&2
+    fail=1
+  else
+    echo "   rc=0  (the supported shared console renders, with its TLS Secret)"
+  fi
+fi
+
 echo
 if [ "$fail" -ne 0 ]; then
   echo "FAIL: the chart is not what the tree says it is; the lines above name what drifted." >&2
@@ -580,5 +671,6 @@ fi
 echo "ok: charts/logweir — CRDs byte-identical, no copy of ui/ (the page is the logweir-ui image),"
 echo "    helm lint clean, rendered files current, every image a digest except the four Logweir"
 echo "    images at :$LOGWEIR_TAG (author-only exempt by name), the schema refuses a non-boolean"
-echo "    flag, and values.yaml names the tree's own repositories at :$LOGWEIR_TAG."
+echo "    flag, values.yaml names the tree's own repositories at :$LOGWEIR_TAG, and every"
+echo "    console configuration that would install a console that looks like it works is refused."
 exit 0

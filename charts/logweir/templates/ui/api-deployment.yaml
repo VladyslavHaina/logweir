@@ -80,7 +80,7 @@ The key mount is `defaultMode: 0400` and read-only. It is a Secret volume, so
 the kubelet writes it to a tmpfs, and it is mounted at a path the ConfigMap
 names — one place decides, `api-config.yaml`'s `logweir.api.keyDir`.
 */}}
-{{- if and .Values.api.enabled .Values.api.console.enabled }}
+{{- if .Values.api.console.enabled }}
 {{- include "logweir.api.consoleChecks" . }}
 {{- $c := .Values.api.console }}
 {{- $name := include "logweir.api.consoleName" . }}

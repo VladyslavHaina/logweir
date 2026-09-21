@@ -32,7 +32,7 @@ per-path split: the console is one origin serving `/ui/`, `/api/v1`, `/auth/*`
 and the two health paths, and splitting it across backends would break the
 same-origin cookie and CSRF model it depends on.
 */}}
-{{- if and .Values.api.enabled .Values.api.console.enabled .Values.api.console.ingress.enabled }}
+{{- if and .Values.api.console.enabled .Values.api.console.ingress.enabled }}
 {{- include "logweir.api.consoleChecks" . }}
 {{- $c := .Values.api.console }}
 {{- $name := include "logweir.api.consoleName" . }}

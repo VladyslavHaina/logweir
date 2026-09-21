@@ -20,6 +20,8 @@ on:
         value: ${{ jobs.promote.outputs.controller_digest }}
       ui_digest:
         value: ${{ jobs.promote.outputs.ui_digest }}
+      console_digest:
+        value: ${{ jobs.promote.outputs.console_digest }}
 permissions:
   contents: read
 jobs:
@@ -62,6 +64,17 @@ jobs:
           labels: org.opencontainers.image.revision=${{ github.sha }}
           cache-from: type=gha,scope=ui-${{ matrix.arch }}
           cache-to: type=gha,mode=max,scope=ui-${{ matrix.arch }}
+      - name: Build console
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.console
+          platforms: linux/${{ matrix.arch }}
+          load: true
+          tags: logweir-console:check
+          labels: org.opencontainers.image.revision=${{ github.sha }}
+          cache-from: type=gha,scope=console-${{ matrix.arch }}
+          cache-to: type=gha,mode=max,scope=console-${{ matrix.arch }}
       - name: Build runner
         if: matrix.arch == 'amd64'
         uses: docker/build-push-action@v6
@@ -119,6 +132,40 @@ jobs:
               exit 1
               ;;
           esac
+      # THE SAME FAST-FAILING HALF, FOR THE CONSOLE — D0 stage 7.
+      #
+      # `Dockerfile.console` COMPILES, so the ways it can produce a wrong image
+      # are the ways `Dockerfile` and `Dockerfile.weirkeeper` can: a `COPY`
+      # whose SOURCE is the wrong binary, a stale cached layer carrying an older
+      # build, an architecture that cannot execute on this runner. The step above
+      # names the first of those three for the retention binary and says why exit
+      # 0 is not identity (review finding L1); this one is that step for
+      # `logweir-api`.
+      #
+      # `--entrypoint logweir-api` USES THE BARE NAME for the same reason: the
+      # chart's PodSpec runs the image's own ENTRYPOINT, and resolving through
+      # $PATH here fails the way the kubelet would. `--version` contacts no API
+      # server, reads no configuration and binds no socket, so it is safe to run
+      # in a build job — which is the whole point of putting it before the login
+      # step.
+      #
+      # THE FULL ASSERTION IS `scripts/check-image-api.sh`, which the next step
+      # runs on this same tag and `… candidates` runs again on the digest the
+      # registry returns: the twenty-two page files hashed against ui/, the three
+      # licences, the three absences, USER 65532, no key-shaped path anywhere,
+      # and the version held to the workspace's. This step earns its place by
+      # failing in seconds and by naming the defect.
+      - name: The console image carries the API binary
+        run: |
+          version="$(docker run --rm --platform linux/${{ matrix.arch }}             --entrypoint logweir-api logweir-console:check --version)"
+          case "$version" in
+            "logweir-api "*) echo "ok: $version" ;;
+            *)
+              echo "the image's /usr/local/bin/logweir-api is not the product" >&2
+              echo "API binary; --version printed: $version" >&2
+              exit 1
+              ;;
+          esac
       - name: Test local images
         run: bash scripts/ci-images.sh check
       - uses: docker/login-action@v3
@@ -148,6 +195,7 @@ jobs:
       runner_digest: ${{ steps.promote.outputs.runner_digest }}
       controller_digest: ${{ steps.promote.outputs.controller_digest }}
       ui_digest: ${{ steps.promote.outputs.ui_digest }}
+      console_digest: ${{ steps.promote.outputs.console_digest }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3

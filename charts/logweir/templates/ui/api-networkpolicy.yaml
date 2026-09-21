@@ -55,7 +55,7 @@ empty in shared mode this policy will BLOCK OIDC discovery under an enforcing
 CNI, and the console will start NotReady — which is the honest failure, not a
 reason to widen the rule to 0.0.0.0/0.
 */}}
-{{- if and .Values.api.enabled .Values.api.console.enabled .Values.api.console.networkPolicy.enabled }}
+{{- if and .Values.api.console.enabled .Values.api.console.networkPolicy.enabled }}
 {{- include "logweir.api.consoleChecks" . }}
 {{- $c := .Values.api.console }}
 {{- $name := include "logweir.api.consoleName" . }}
