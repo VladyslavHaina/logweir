@@ -144,6 +144,163 @@ async fn a_plan_hash_that_does_not_match_the_bytes_is_refused() {
     assert!(app.fake.requests().is_empty());
 }
 
+/// PLAT-11.2: the declared mapping is checked against the PREFIX THIS REQUEST
+/// STORES, and a duplicate target names BOTH sources.
+///
+/// WHY THE API CAN CHECK THIS WITHOUT PARSING THE PLAN. The mapping rule is
+/// prefix concatenation and nothing else (`logweir_core::spec::
+/// target_topic_prefix`), and `target.topicNaming.prefix` is a stored field of
+/// `Restore.spec`, so `prefix + source` is a pure function of the object being
+/// created. A console that previewed one mapping and submitted another is
+/// refused here rather than in phase 0, after an approver has signed.
+///
+/// KILLS: dropping the duplicate check (a repeated source is accepted);
+/// naming only one side of a duplicate; accepting a target that is not
+/// `prefix + source`; accepting an identity map; accepting a mapped name a
+/// broker would refuse; and storing the declaration on the object.
+#[tokio::test]
+async fn a_declared_topic_mapping_is_checked_against_the_stored_prefix() {
+    let app = TestApp::new();
+    let plan = support::golden_plan();
+    let prefix = "restore-20260907t140500z-";
+
+    // The happy path: every row is exactly `prefix + source`, and NOTHING of
+    // the declaration reaches the object.
+    let mut ok = support::restore_body(&plan);
+    ok["topicMapping"] = json!([
+        {"source": "orders", "target": format!("{prefix}orders")},
+        {"source": "payments", "target": format!("{prefix}payments")},
+    ]);
+    let created = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            Some("mapping-ok-000001"),
+            &ok.to_string(),
+        )
+        .await;
+    assert_eq!(
+        created.status,
+        201,
+        "{}",
+        String::from_utf8_lossy(&created.body)
+    );
+    let name = created.json()["item"]["name"].as_str().unwrap().to_string();
+    let stored = app.fake.object("restores", NS_A, &name).unwrap();
+    assert!(
+        stored["spec"].get("topicMapping").is_none(),
+        "the declaration is a rail, never a stored field: {}",
+        stored["spec"]
+    );
+    assert_eq!(stored["spec"]["target"]["topicNaming"]["prefix"], prefix);
+
+    // TWO SOURCE TOPICS ONTO ONE TARGET NAME. With an injective prefix map
+    // that is a REPEATED source, and the message names both rows.
+    let mut duplicate = support::restore_body(&plan);
+    duplicate["topicMapping"] = json!([
+        {"source": "orders", "target": format!("{prefix}orders")},
+        {"source": "orders", "target": format!("{prefix}orders")},
+    ]);
+    let refused = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            Some("mapping-dup-000001"),
+            &duplicate.to_string(),
+        )
+        .await;
+    refused.assert_problem(422, "validation_failed");
+    let error = &refused.json()["errors"][0];
+    assert_eq!(error["code"], "duplicate_mapping");
+    assert_eq!(error["field"], "topicMapping[1].target");
+    let message = error["message"].as_str().unwrap();
+    assert!(
+        message.contains("`orders`") && message.contains(&format!("`{prefix}orders`")),
+        "the refusal names both sources and the target they share: {message}"
+    );
+
+    // A row whose target is not `prefix + source`: the preview and the
+    // submission disagree, and the expected name is in the message.
+    let mut renamed = support::restore_body(&plan);
+    renamed["topicMapping"] = json!([{"source": "orders", "target": "restore-elsewhere-orders"}]);
+    let refused = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            Some("mapping-ren-000001"),
+            &renamed.to_string(),
+        )
+        .await;
+    refused.assert_problem(422, "validation_failed");
+    assert_eq!(refused.json()["errors"][0]["code"], "mapping_mismatch");
+    assert!(refused.json()["errors"][0]["message"]
+        .as_str()
+        .unwrap()
+        .contains(&format!("{prefix}orders")));
+
+    // An identity map -- a restore writing over the topic it came from.
+    let mut identity = support::restore_body(&plan);
+    identity["target"]["topicNaming"]["prefix"] = json!("orders");
+    identity["topicMapping"] = json!([{"source": "orders", "target": "orders"}]);
+    let refused = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            Some("mapping-idn-000001"),
+            &identity.to_string(),
+        )
+        .await;
+    refused.assert_problem(422, "validation_failed");
+    assert_eq!(refused.json()["errors"][0]["code"], "mapping_identity");
+
+    // A mapped name no broker would accept: 249 characters is the bound.
+    let long_source = "o".repeat(240);
+    let mut illegal = support::restore_body(&plan);
+    illegal["topicMapping"] =
+        json!([{"source": long_source, "target": format!("{prefix}{long_source}")}]);
+    let refused = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            Some("mapping-ill-000001"),
+            &illegal.to_string(),
+        )
+        .await;
+    refused.assert_problem(422, "validation_failed");
+    assert_eq!(refused.json()["errors"][0]["code"], "mapped_name_illegal");
+
+    // A source that is not a topic name at all -- a glob, a space, an empty
+    // string -- is refused on the SOURCE and never silently mapped.
+    for bad in ["orders*", "two words", ""] {
+        let mut b = support::restore_body(&plan);
+        b["topicMapping"] = json!([{"source": bad, "target": format!("{prefix}{bad}")}]);
+        let refused = app
+            .post(
+                &format!("/api/v1/namespaces/{NS_A}/restores"),
+                Some("mapping-src-000001"),
+                &b.to_string(),
+            )
+            .await;
+        refused.assert_problem(422, "validation_failed");
+        assert_eq!(
+            refused.json()["errors"][0]["code"],
+            "invalid_topic",
+            "{bad} is not a topic name"
+        );
+    }
+
+    // AND AN ABSENT DECLARATION IS EXACTLY WHAT THIS ROUTE DID BEFORE. No
+    // field, no mapping errors, 201.
+    let plain = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            Some("mapping-absent-0001"),
+            &support::restore_body(&plan).to_string(),
+        )
+        .await;
+    assert_eq!(
+        plain.status,
+        201,
+        "{}",
+        String::from_utf8_lossy(&plain.body)
+    );
+}
+
 #[tokio::test]
 async fn connections_project_secret_names_only_and_create_typed_objects() {
     let app = TestApp::new();

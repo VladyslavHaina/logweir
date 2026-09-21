@@ -945,6 +945,27 @@ pub struct RestoreTargetRequest {
     pub topic_naming: TopicNamingRequest,
 }
 
+/// One row of the topic mapping the caller previewed: a source topic in the
+/// recovery point, and the target topic the restore would create for it.
+///
+/// THIS IS A DECLARATION, NOT A STORED FIELD. `Restore.spec` has no topic
+/// list — the subset lives in the opaque plan bytes
+/// (`logweir_core::spec::SourceSpec::topics`) — so nothing here is persisted.
+/// What it buys is a rail this service CAN check without parsing the plan:
+/// `target.topicNaming.prefix` IS stored, the mapping rule is prefix
+/// concatenation and nothing else (`logweir_core::spec::target_topic_prefix`),
+/// so every row must be exactly `prefix + source`. A console that previewed
+/// one mapping and submitted another is refused here by name instead of
+/// discovering it in phase 0 after an approver has signed.
+#[derive(Clone, Debug, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub struct TopicMappingRow {
+    /// The source topic, as the recovery point froze it.
+    pub source: String,
+    /// The target topic name this restore would create for it.
+    pub target: String,
+}
+
 /// `POST /api/v1/namespaces/{ns}/restores`.
 ///
 /// `planBytes` is OPAQUE: the service checks `planHash` against the SHA-256 of
@@ -971,6 +992,15 @@ pub struct CreateRestoreRequest {
     pub target: RestoreTargetRequest,
     /// The Job deadline, 60 to 86400 seconds.
     pub deadline_seconds: i64,
+    /// The exact source→target mapping the caller previewed, checked against
+    /// `target.topicNaming.prefix` and refused row by row.
+    ///
+    /// ABSENT IS EXACTLY THE BEHAVIOUR THIS ROUTE HAD BEFORE THE FIELD
+    /// EXISTED, and `skip_serializing_if` keeps an absent one out of the
+    /// idempotency request hash, so a client that predates it replays onto the
+    /// same object it always did.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub topic_mapping: Option<Vec<TopicMappingRow>>,
 }
 
 /// A restore target, as stored.

@@ -22,7 +22,9 @@ use super::{authorize, create_idempotent, get_object, json, list_page, list_quer
 use crate::app::AppState;
 use crate::auth::Actor;
 use crate::authz::Action;
-use crate::contract::{CreateRestoreRequest, RestoreList, RestoreMode, RestoreResponse};
+use crate::contract::{
+    CreateRestoreRequest, RestoreList, RestoreMode, RestoreResponse, TopicMappingRow,
+};
 use crate::http::{read_json, RequestId, MAX_JSON_BODY};
 use crate::idempotency::IdempotencyKey;
 use crate::problem::{ApiError, FieldError};
@@ -37,6 +39,112 @@ pub const ROUTE_CREATE: &str = "POST /api/v1/namespaces/{ns}/restores";
 pub const NAME_PREFIX: &str = "rst-";
 /// The largest plan document accepted, 256 KiB.
 pub const MAX_PLAN_BYTES: usize = 256 * 1024;
+/// The most mapping rows a declaration may carry — the same bound
+/// `CreateScheduleRequest` puts on a named topic list.
+pub const MAX_TOPIC_MAPPING_ROWS: usize = 1000;
+
+/// Check a declared `topicMapping` against the prefix the same request stores.
+///
+/// # What this can check, and why it is not "parsing the plan"
+///
+/// It never reads `planBytes`. The mapping rule is prefix concatenation and
+/// nothing else in this version (`logweir_core::spec::target_topic_prefix`:
+/// `newTopic` takes `target.topic_naming.prefix`, `scratch` takes
+/// `topic_mapping_prefix`, and neither admits a per-topic rename), and the
+/// prefix is a STORED field of `Restore.spec`. So `prefix + source` is a pure
+/// function of the object this route is about to create, and every row that is
+/// not that is a request whose preview and whose submission disagree.
+///
+/// The three refusals, each naming the value the operator has to go and fix:
+///
+/// * `duplicate_mapping` — two sources produce one target name. With an
+///   injective prefix map this can only be a REPEATED source, which is why the
+///   message names BOTH rows rather than one.
+/// * `mapping_mismatch` — a row whose target is not `prefix + source`.
+/// * `mapped_name_illegal` — a row whose target is not a name a broker would
+///   accept, `logweir_core::guard::topic_name_is_kafka_legal`; and
+///   `mapping_identity` for a target equal to its source, which is a restore
+///   writing over the topic it came from
+///   (`logweir_core::guard::check_topic_mapping_coverage`).
+fn validate_topic_mapping(rows: &[TopicMappingRow], prefix: &str, errors: &mut Vec<FieldError>) {
+    if rows.is_empty() {
+        errors.push(FieldError::new(
+            "topicMapping",
+            "empty",
+            "a declared mapping names at least one topic; omit the field to declare none",
+        ));
+        return;
+    }
+    if rows.len() > MAX_TOPIC_MAPPING_ROWS {
+        errors.push(FieldError::new(
+            "topicMapping",
+            "too_many",
+            format!("at most {MAX_TOPIC_MAPPING_ROWS} mapping rows"),
+        ));
+        return;
+    }
+    // FIRST SEEN WINS, so the message names the row an operator would keep and
+    // the row they would delete, in the order they sent them.
+    let mut first_for_target: BTreeMap<&str, &str> = BTreeMap::new();
+    for (index, row) in rows.iter().enumerate() {
+        if !logweir_core::guard::topic_name_is_kafka_legal(&row.source) {
+            errors.push(FieldError::new(
+                format!("topicMapping[{index}].source"),
+                "invalid_topic",
+                "must be a topic name a broker accepts: letters, digits, '.', '_' or '-'",
+            ));
+            continue;
+        }
+        if !logweir_core::guard::topic_name_is_kafka_legal(&row.target) {
+            errors.push(FieldError::new(
+                format!("topicMapping[{index}].target"),
+                "mapped_name_illegal",
+                format!(
+                    "the mapped name for `{}` is not a name a broker accepts; shorten the \
+                     prefix or rename the topic",
+                    row.source
+                ),
+            ));
+            continue;
+        }
+        if row.target == row.source {
+            errors.push(FieldError::new(
+                format!("topicMapping[{index}].target"),
+                "mapping_identity",
+                format!(
+                    "maps `{}` onto itself; a restore writes to a NEW topic and the target \
+                     must differ from the source",
+                    row.source
+                ),
+            ));
+            continue;
+        }
+        let expected = format!("{prefix}{}", row.source);
+        if row.target != expected {
+            errors.push(FieldError::new(
+                format!("topicMapping[{index}].target"),
+                "mapping_mismatch",
+                format!(
+                    "`{}` maps to `{expected}` under the prefix this request stores; the \
+                     preview and the submission disagree",
+                    row.source
+                ),
+            ));
+            continue;
+        }
+        if let Some(first) = first_for_target.insert(row.target.as_str(), row.source.as_str()) {
+            errors.push(FieldError::new(
+                format!("topicMapping[{index}].target"),
+                "duplicate_mapping",
+                format!(
+                    "`{}` and `{}` both map to the target topic `{}`; one restore cannot \
+                     write two source topics into one target",
+                    first, row.source, row.target
+                ),
+            ));
+        }
+    }
+}
 
 fn is_backup_set_ref(value: &str) -> bool {
     !value.is_empty()
@@ -129,6 +237,18 @@ pub fn validate_create(request: &CreateRestoreRequest) -> Result<DateTime<Utc>, 
             "invalid_prefix",
             "a non-empty topic-name prefix is required: a restore only writes new topics",
         ));
+    }
+    // THE MAPPING IS CHECKED AGAINST THE PREFIX ABOVE, and only when that
+    // prefix is itself legal: a mismatch computed from a refused prefix would
+    // name an expected target nobody could ever produce, so the operator would
+    // be sent to fix the wrong field.
+    if let Some(rows) = request.topic_mapping.as_deref() {
+        if errors
+            .iter()
+            .all(|e| e.field != "target.topicNaming.prefix")
+        {
+            validate_topic_mapping(rows, prefix, &mut errors);
+        }
     }
     if !(60..=86_400).contains(&request.deadline_seconds) {
         errors.push(FieldError::new(
