@@ -833,13 +833,50 @@ fn a_point_whose_facts_are_unreadable_is_unknown_and_never_unprotected() {
         verdict.summary
     );
 
-    // NEGATIVE CONTROL, and the reason this test cannot be satisfied by making
-    // everything `Unknown`: a policy with NO candidate at all is still
+    // NEGATIVE CONTROL 1, and the reason this test cannot be satisfied by
+    // making everything `Unknown`: a policy with NO candidate at all is still
     // `Unprotected`, which is the state that should page.
     let verdict = p::evaluate(&inputs(&spec, &[], &catalog, &schedules, &[], &rehearsal));
     assert_eq!(verdict.health, p::Health::Unprotected);
     assert_eq!(verdict.reason, p::FreshnessReason::NoAvailablePoint);
     assert!(verdict.open_kinds.contains(&p::PolicyAlertKind::Staleness));
+
+    // NEGATIVE CONTROL 2 — the set is points the policy COVERS. A failed run,
+    // or one of another source, carries no capture time either, and reading
+    // those as "could not evaluate" would hide a policy that is genuinely
+    // unprotected behind a run that never produced a point.
+    let failed = [p::PointCandidate {
+        phase: Some("Failed".to_string()),
+        exit_code: Some(3),
+        ..unreadable_point(2)
+    }];
+    let verdict = p::evaluate(&inputs(
+        &spec,
+        &failed,
+        &catalog,
+        &schedules,
+        &[],
+        &rehearsal,
+    ));
+    assert_eq!(verdict.health, p::Health::Unprotected);
+    assert_eq!(verdict.reason, p::FreshnessReason::NoAvailablePoint);
+
+    let foreign = [p::PointCandidate {
+        source_matches: false,
+        ..unreadable_point(2)
+    }];
+    assert_eq!(
+        p::evaluate(&inputs(
+            &spec,
+            &foreign,
+            &catalog,
+            &schedules,
+            &[],
+            &rehearsal
+        ))
+        .reason,
+        p::FreshnessReason::NoAvailablePoint
+    );
 }
 
 /// `PointFactsUnread` is the LAST resort and never masks a reason an operator
@@ -981,6 +1018,20 @@ fn the_catalog_join_falls_back_to_the_archive_set_id() {
         ..no_receipt_point(2)
     };
     assert!(!p::is_available(&listed_elsewhere, &spec, &present));
+
+    // NEGATIVE CONTROL 4 — an AMBIGUOUS archive-set join reads no facts at
+    // all. Two rows for one set are two points, and either one's capture time
+    // would be a number about a recovery point that is not this one.
+    let twice = p::CatalogAnswer::Fresh(vec![
+        entry_in_set(&point_id("b-1"), "set-1", "Available", "Verified"),
+        entry_in_set(&point_id("b-2"), "set-1", "Available", "Verified"),
+    ]);
+    assert!(p::catalog_entry_for(&points[0], &twice).is_none());
+    assert!(
+        p::catalog_entry_for(&points[0], &present).is_some(),
+        "one row for the set IS readable; the `None` above is about ambiguity and not about \
+         the join"
+    );
 
     // And the alert reaches it too: `ArchiveUnavailable` used a point-id-only
     // lookup, so it stayed SHUT over exactly the points the join was added for.
@@ -2799,7 +2850,23 @@ fn an_unread_points_capture_time_and_identity_come_from_the_catalog_row() {
          the status says so"
     );
 
-    // NEGATIVE CONTROL — a view that holds no row for this archive set fills
+    // NEGATIVE CONTROL 1 — a row whose `recoveryPointAtMs` is `0` is a field
+    // the view did not write, not a capture in 1970. Filling from it would
+    // publish a 56-year-old recovery point and a `Stale` health that measured
+    // nothing.
+    let mut row = catalog_entry("b-1", 2, "Available", "Verified");
+    row["recoveryPointAtMs"] = json!(0);
+    let mut routes = read_routes(vec![evidence_unread_backup("b-1", 2)], json!({}));
+    routes.extend(catalog_routes(row));
+    routes.push(patch(STATUS_PATH));
+    let (outcome, _, bodies) = drive(&policy_with(spec.clone(), json!({})), routes);
+    assert_eq!(outcome.health, p::Health::Unknown);
+    assert_eq!(
+        condition(&last_status_patch(&bodies), "Protected")["reason"].as_str(),
+        Some("PointFactsUnread")
+    );
+
+    // NEGATIVE CONTROL 2 — a view that holds no row for this archive set fills
     // nothing, and the policy says it could not place the point rather than
     // inventing a time or claiming the archive is empty.
     let mut routes = read_routes(vec![evidence_unread_backup("b-1", 2)], json!({}));
