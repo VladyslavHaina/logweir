@@ -1463,7 +1463,13 @@ an operator sees all three:
   document that is not what it claims to be, and neither is overruled by a
   catalog row — otherwise `TrustPolicy` would be decorative and a tampered
   archive would read `Healthy` behind a view harvested before the tampering.
-  Such a point is `Unprotected` and pages, with or without a capture time.
+  Such a point is `Unprotected` and pages, with or without a capture time, **and at
+  every setting of `requireVerifiedEvidence`**: that objective governs whether an
+  UNVERIFIED point may count as protection, never whether a REFUSED one may, and
+  turning it off does not ask Logweir to call a mismatched digest healthy. The
+  catalog is consulted only for a verdict the controller never reached, so a refused
+  point is not handed a capture time either and never becomes the newest available
+  point.
   **The trust boundary this moves, and why it holds:** the answer now comes
   from the content of a namespaced `ConfigMap`, but those page ConfigMaps are
   created `immutable: true` and owned by the catalog sync Job, the writer never

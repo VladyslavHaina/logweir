@@ -905,14 +905,28 @@ fn candidate_from_backup(
 /// Fill the two point facts the controller could not read from the catalog row
 /// for the SAME point — defect `PROTECTION-SECRETKEYS-UNPROTECTED`, clause 3.
 ///
-/// `status.capture` is written only on a `Valid` verification verdict, and
-/// `status.evidence.receiptSha256` only where the receipt was fetched, so on a
-/// destination the controller holds no Secret verb for BOTH are absent and the
-/// point could be neither aged nor named. The catalog controller DID read that
-/// receipt: `recoveryPointAtMs` is `BackupReceipt.started_at` carried through
-/// the view (D3 §3.2) and `pointId` is D3 §5.1's identity over the same digest.
-/// This is the same number and the same name from the same signed document, by
-/// the route this installation's credential model leaves open.
+/// `status.capture` is written only on a `Valid` verification verdict
+/// (`controllers::backup`), so on a destination the controller holds no Secret
+/// verb the point could be neither aged nor — where the receipt bytes were not
+/// fetched either — named. The catalog controller DID read that receipt:
+/// `recoveryPointAtMs` is `BackupReceipt.started_at` carried through the view
+/// (D3 §3.2) and `pointId` is D3 §5.1's identity over the same digest. This is
+/// the same number and the same name from the same signed document, by the
+/// route this installation's credential model leaves open.
+///
+/// # ONLY for the verdict the catalog is allowed to answer — review **MEDIUM-1**
+///
+/// The fourth site of [`p::Evidence::was_reached`]'s rule, and the one that was
+/// missing it. A point the controller fetched and refused (`Invalid`,
+/// `Untrusted`) also has no `status.capture`, so it reached this function and
+/// was handed a capture time by the view — and with `requireVerifiedEvidence`
+/// turned OFF nothing downstream refused it again, so a digest mismatch became
+/// the policy's newest available point: `health: Healthy`, `Protected=True`, no
+/// alert, where `main` said `Unprotected`. The objective governs whether an
+/// UNVERIFIED point may count as protection; it never governs whether a REFUSED
+/// one may, and D3 §3.2's `Unprotected` is the answer for a refused point at
+/// every setting of it. A reached verdict therefore leaves here with the facts
+/// it came in with, which is no capture time, which is not available.
 ///
 /// **Nothing is invented.** A candidate the view does not hold, or holds twice
 /// ([`p::catalog_entry_for`]), keeps its absent facts and is reported as
@@ -922,19 +936,25 @@ fn with_catalog_facts(
     mut candidate: p::PointCandidate,
     catalog: &p::CatalogAnswer,
 ) -> p::PointCandidate {
-    // A fast path AND the first half of the fallback-not-authority rule: a
-    // policy whose points the controller DID read must not scan the view once
-    // per candidate (up to `MAX_BACKUPS_SCANNED` times a pass), and must not
-    // take the view's numbers over its own. The two `is_none()` conjuncts below
-    // are the second half; all three together are one rule and the mutant that
-    // removes them (`MED3-M1`) makes the catalog row authoritative, which the
-    // `ControllerIdentity` row catches.
-    if candidate.recovery_point_at.is_some() && candidate.point_id.is_some() {
+    // The fallback-not-authority rule, in three statements. THIS one carries
+    // behaviour of its own (mutant `MED1-M1`): the catalog answers only for a
+    // verdict the controller never reached. It also spares a policy whose
+    // points the controller DID read a view scan per candidate, up to
+    // `MAX_BACKUPS_SCANNED` times a pass.
+    if candidate.evidence.was_reached() {
         return candidate;
     }
     let Some(entry) = p::catalog_entry_for(&candidate, catalog) else {
         return candidate;
     };
+    // The other two statements are each redundant against a DIFFERENT invariant
+    // — `point_id` against the join key's own equality (where it is `Some`,
+    // `entries_for` matched on it, so the assignment would be a no-op), and the
+    // capture time against `capture` being written only on a `Valid` verdict,
+    // which the early return above has already excluded. Neither is removable
+    // on its own with an observable result; removing all three at once makes
+    // the row authoritative, which is mutant `MED3-M1` and which the
+    // `ControllerIdentity` row catches.
     if candidate.recovery_point_at.is_none() && entry.recovery_point_at_ms > 0 {
         candidate.recovery_point_at =
             chrono::DateTime::from_timestamp_millis(entry.recovery_point_at_ms);

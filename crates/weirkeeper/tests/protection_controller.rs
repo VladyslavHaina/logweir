@@ -2962,9 +2962,16 @@ fn a_secret_keys_destination_is_protected_and_does_not_page() {
 ///
 /// `VerificationVerdict::Invalid` is "the digest did not match, or no roster
 /// signing key verified the sidecar", and `controllers::backup` never produces
-/// it from a storage failure. `status.capture` is still absent, because it is
-/// written only on a `Valid` verdict — which is exactly why this shape used to
-/// be indistinguishable from "the controller could not look".
+/// it from a storage failure. `status.capture` is absent, because it is written
+/// only on a `Valid` verdict — which is exactly why this shape used to be
+/// indistinguishable from "the controller could not look".
+///
+/// `receiptSha256` IS present, and that is the point (review LOW-2): it is
+/// written on the terminal patch whenever the receipt bytes were fetched and
+/// hashed, before any verdict exists, so a refused point arrives with
+/// `point_id: Some` and `recovery_point_at: None`. That is the shape the
+/// catalog join matches on `pointId` and the one `with_catalog_facts` used to
+/// hand a capture time to.
 fn invalid_verdict_backup(name: &str, hours_ago: i64) -> Value {
     backup(
         name,
@@ -2972,7 +2979,6 @@ fn invalid_verdict_backup(name: &str, hours_ago: i64) -> Value {
         json!({"status": {
             "capture": null,
             "evidence": {
-                "receiptSha256": null,
                 "verification": {"result": "Invalid", "detail": "the receipt bytes do not hash to the recorded digest"}
             }
         }}),
@@ -3066,6 +3072,101 @@ fn an_invalid_verdict_is_unprotected_and_pages_however_good_the_catalog_row_is()
     );
 }
 
+/// **Review MEDIUM-1.** `requireVerifiedEvidence` does not decide whether a
+/// REFUSED point may count as protection — only whether an UNVERIFIED one may.
+///
+/// `with_catalog_facts` was the fourth site of `Evidence::was_reached`'s rule
+/// and the one that did not ask it. A point the controller fetched and found
+/// `Invalid` has no `status.capture` (written only on `Valid`) but does carry
+/// `receiptSha256`, so it reached the fill, was handed the view's capture time,
+/// and — with the objective turned off, so nothing downstream refused it again
+/// — became the policy's newest available point: `Healthy`, `Protected=True`,
+/// no alert, publishing `evidence: "Invalid"` beside it, where `main` said
+/// `Unprotected`. D3 §3.2 gives a refused point `Unprotected` at every setting
+/// of the objective; an operator who turned off *verified evidence* did not ask
+/// to be told a mismatched digest is healthy.
+///
+/// All four postures the review measured, so the row pins the axis rather than
+/// one corner of it.
+///
+/// MUTANT (`MED1-M1`): delete `if candidate.evidence.was_reached() { return
+/// candidate; }` from `with_catalog_facts`. The fourth posture goes `Healthy`
+/// and three assertions fail; the other three are unchanged, which is what
+/// makes this row about the flag and not about HIGH-1.
+#[test]
+fn a_refused_verdict_is_unprotected_at_every_setting_of_the_evidence_objective() {
+    for require_verified in [true, false] {
+        for catalog_ref in [true, false] {
+            let spec = {
+                let mut value = spec_value();
+                merge(
+                    &mut value,
+                    &json!({"objectives": {"requireVerifiedEvidence": require_verified}}),
+                );
+                if catalog_ref {
+                    merge(
+                        &mut value,
+                        &json!({"protects": {"catalogRef": {"name": CATALOG}}}),
+                    );
+                }
+                value
+            };
+            let mut routes = read_routes(vec![invalid_verdict_backup("b-1", 2)], json!({}));
+            if catalog_ref {
+                routes.extend(catalog_routes(catalog_entry(
+                    "b-1",
+                    2,
+                    "Available",
+                    "Verified",
+                )));
+            }
+            routes.push(post(
+                "/configmaps",
+                json!({"apiVersion": "v1", "kind": "ConfigMap",
+                       "metadata": {"name": "cm", "namespace": NS}})
+                .to_string(),
+            ));
+            routes.push(post(
+                "/jobs",
+                json!({"apiVersion": "batch/v1", "kind": "Job",
+                       "metadata": {"name": "j", "namespace": NS}, "spec": {}})
+                .to_string(),
+            ));
+            routes.push(first_job_route(
+                &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
+                1,
+            ));
+            routes.push(patch(STATUS_PATH));
+            let (outcome, _, bodies) = drive(&policy_with(spec, json!({})), routes);
+            let posture =
+                format!("requireVerifiedEvidence={require_verified} catalogRef={catalog_ref}");
+
+            assert_eq!(outcome.health, p::Health::Unprotected, "{posture}");
+            let status = last_status_patch(&bodies);
+            assert_eq!(
+                condition(&status, "Protected")["reason"].as_str(),
+                Some("NoAvailablePoint"),
+                "{posture}"
+            );
+            assert_eq!(
+                status["status"]["lastAvailablePoint"].as_object(),
+                None,
+                "{posture}: a point whose digest did not match is not this policy's recovery point"
+            );
+            assert_eq!(
+                status["status"]["alerts"]
+                    .as_array()
+                    .map_or(0, |alerts| alerts
+                        .iter()
+                        .filter(|a| a["kind"] == "Staleness" && a["state"] == "Open")
+                        .count()),
+                1,
+                "{posture}: a refused archive pages at every setting of the objective"
+            );
+        }
+    }
+}
+
 /// **Review HIGH-1b.** A reached-and-refused verdict is `Unprotected` whether
 /// or not the point can be placed in time.
 ///
@@ -3150,15 +3251,20 @@ fn a_reached_and_refused_verdict_is_unprotected_even_with_no_capture_time() {
 /// capture time is the object's own.
 ///
 /// MUTANT (`MED3-M1`): make the catalog row AUTHORITATIVE rather than a
-/// fallback — drop `with_catalog_facts`'s early return and both `is_none()`
-/// conjuncts, so the row's values are assigned unconditionally. The row here
-/// carries a capture time 40 h old against a 26 h objective, so the health
-/// assertion and the `recoveryPointAt` assertion both fail. Dropping any ONE of
-/// the three survives, and that is why the mutant removes all three: on every
-/// shape `controllers::backup` produces, `status.capture` and
-/// `status.evidence.receiptSha256` are written together (both only on a `Valid`
-/// verdict), so "fill" and "overwrite" differ only when the rule is removed
-/// whole.
+/// fallback — drop `with_catalog_facts`'s reached-verdict return and both
+/// `is_none()` conjuncts, so the row's values are assigned unconditionally. The
+/// row here carries a capture time 40 h old against a 26 h objective, so the
+/// health assertion and the `recoveryPointAt` assertion both fail.
+///
+/// Dropping the reached-verdict return ALONE is mutant `MED1-M1` and has its
+/// own row. Dropping either `is_none()` conjunct alone is unobservable, and
+/// each for a DIFFERENT reason (review LOW-2): `point_id` against the join
+/// key's own equality — where it is `Some`, `entries_for` matched on it, so the
+/// assignment is a no-op — and the capture time against `capture` being written
+/// only on a `Valid` verdict, which the reached-verdict return has already
+/// excluded. `receiptSha256` is NOT `Valid`-only: it is written on the terminal
+/// patch whenever the receipt bytes were fetched, which is why a refused point
+/// reaches this function with an identity and no capture time at all.
 #[test]
 fn a_controller_identity_destination_with_a_verified_receipt_is_protected() {
     let spec = {
