@@ -251,6 +251,102 @@ pub fn mock_client_recording_bodies(routes: Vec<Route>) -> (kube::Client, Record
     (kube::Client::new(svc, "default"), recorder, bodies)
 }
 
+/// [`mock_client_recording_bodies`], with ONE route that changes its answer
+/// after it has been asked `after` times.
+///
+/// # Why the double needs this at all
+///
+/// A [`Route`] answers every matching request identically, which is right for
+/// almost everything and wrong for exactly one shape of property: *the Nth
+/// write of a pass is refused*. A reconciler that writes `/status` more than
+/// once in a pass writes to ONE path, so a table cannot say "the first two
+/// land and the third conflicts" — and that is the only sequence in which
+/// defect RET-STARTRUN-PATCH-OUTCOME's failure occurs. Answering 409 to all of
+/// them refuses the first write instead, which is a different branch and
+/// proves a different thing.
+///
+/// `after` is a count of MATCHING requests already answered: `after: 2` leaves
+/// the first two alone and gives the third and every later one `status` and
+/// `body`. The switch is counted inside the service, so it holds across the
+/// `tower::buffer::Buffer` worker the client spawns.
+///
+/// # Panics
+///
+/// As [`mock_client_recording`]: this builds a `tower::buffer::Buffer` and must
+/// be called from inside a tokio runtime.
+#[must_use]
+pub fn mock_client_failing_after(
+    routes: Vec<Route>,
+    method: &'static str,
+    path_suffix: &'static str,
+    after: usize,
+    status: u16,
+    body: String,
+) -> (kube::Client, Recorder, BodyRecorder) {
+    let recorder = recorder();
+    let bodies = body_recorder();
+    let table = Arc::new(routes);
+    let seen = Arc::new(Mutex::new(0usize));
+    let svc = {
+        let recorder = Arc::clone(&recorder);
+        let bodies = Arc::clone(&bodies);
+        service_fn(move |req: Request<Body>| {
+            let recorder = Arc::clone(&recorder);
+            let bodies = Arc::clone(&bodies);
+            let table = Arc::clone(&table);
+            let seen = Arc::clone(&seen);
+            let body = body.clone();
+            async move {
+                let request_method = req.method().to_string();
+                let uri = req.uri().to_string();
+                let request_body = req
+                    .into_body()
+                    .collect()
+                    .await
+                    .map(|c| String::from_utf8_lossy(&c.to_bytes()).into_owned())
+                    .unwrap_or_default();
+                bodies
+                    .lock()
+                    .expect("the body recorder mutex is never held across a panic")
+                    .push(SeenBody {
+                        method: request_method.clone(),
+                        uri: uri.clone(),
+                        body: request_body,
+                    });
+                let path = uri.split('?').next().unwrap_or(&uri).to_string();
+                let matches =
+                    request_method.eq_ignore_ascii_case(method) && path.ends_with(path_suffix);
+                let refuse = matches && {
+                    let mut count = seen
+                        .lock()
+                        .expect("the counter mutex is never held across a panic");
+                    *count += 1;
+                    *count > after
+                };
+                if refuse {
+                    // RECORDED LIKE ANY OTHER REQUEST, so the call sequence a
+                    // test asserts over still contains the refused write.
+                    recorder
+                        .lock()
+                        .expect("the recorder mutex is never held across a panic")
+                        .push(SeenRequest {
+                            method: request_method,
+                            uri,
+                        });
+                    return Ok::<_, std::convert::Infallible>(
+                        Response::builder()
+                            .status(status)
+                            .body(Body::from(body.into_bytes()))
+                            .expect("a recorded status and body always build a response"),
+                    );
+                }
+                Ok::<_, std::convert::Infallible>(answer(&table, &recorder, &request_method, &uri))
+            }
+        })
+    };
+    (kube::Client::new(svc, "default"), recorder, bodies)
+}
+
 /// A [`kube::Client`] answering `routes`.
 ///
 /// The plain form, for a test that asserts over the reconciler's OUTPUT rather

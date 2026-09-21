@@ -154,6 +154,9 @@ pub const REASON_LEASE_NOT_HELD: &str = "LeaseNotHeld";
 /// `Enforced=False`: an object already holds the plan `ConfigMap`'s name and is
 /// not this plan (review `d3w9` M6).
 pub const REASON_PLAN_CONFIG_MAP_CONFLICT: &str = "PlanConfigMapConflict";
+/// `Enforced=False`: the run record PATCH did not land, so no Job was created
+/// (defect RET-STARTRUN-PATCH-OUTCOME).
+pub const REASON_RUN_NOT_RECORDED: &str = "RunNotRecorded";
 /// `Enforced=True`: a run is in flight.
 pub const REASON_RUN_IN_PROGRESS: &str = "RunInProgress";
 /// `Enforced=True`: the last run completed.
@@ -198,6 +201,7 @@ pub const CONDITION_REASONS: &[&str] = &[
     REASON_UNSUPPORTED_SCHEDULE,
     REASON_LEASE_NOT_HELD,
     REASON_PLAN_CONFIG_MAP_CONFLICT,
+    REASON_RUN_NOT_RECORDED,
     REASON_RUN_IN_PROGRESS,
     REASON_RUN_COMPLETE,
     REASON_RUN_FAILED,
@@ -1348,6 +1352,9 @@ impl Pass<'_> {
                 StartOutcome::LeaseNotHeld => {
                     outcome.enforced_reason = REASON_LEASE_NOT_HELD;
                 }
+                StartOutcome::RunNotRecorded => {
+                    outcome.enforced_reason = REASON_RUN_NOT_RECORDED;
+                }
                 StartOutcome::PlanConfigMapConflict(message) => {
                     outcome.enforced_reason = REASON_PLAN_CONFIG_MAP_CONFLICT;
                     self.publish_enforcement_refusal(REASON_PLAN_CONFIG_MAP_CONFLICT, &message)
@@ -1730,62 +1737,64 @@ impl Pass<'_> {
         let job_name = self.job_name(&run_id);
         let job = self.build_job(&job_name, &run_id, &plan_name, plan_sha256, resolved);
         let jobs: Api<Job> = Api::namespaced(self.ctx.client.clone(), &self.namespace);
-        match jobs.create(&PostParams::default(), &job).await {
-            Ok(_) => {
-                info!(
-                    policy = %self.name, namespace = %self.namespace,
-                    job = %job_name, run = %run_id,
-                    "created the retention Job for an approved plan"
-                );
-            }
-            // A DETERMINISTIC NAME MAKES A DUPLICATE RECONCILE A 409, not a
-            // second deletion run. That is the whole reason the run id is a
-            // pure function of the policy, the plan digest and the minute.
-            //
-            // AND IT RETURNS HERE RATHER THAN FALLING THROUGH TO THE RECORD —
-            // defect RET-COUNT-EARLY's second and decisive arm. This arm used
-            // to log and continue, so the patch below wrote `runId`/`startedAt`
-            // and nulled all seven terminal fields for a Job that ALREADY
-            // EXISTS. When that Job's run had already been harvested, the nulls
-            // resurrected it: `tracked_run` read `finishedAt: None`, found the
-            // Job present and finished, re-read its pod and counted the same
-            // failure again. Nothing bounded the repetition.
-            //
-            // It is reachable even when the guard at the top of this function
-            // is not, because that guard compares against the run the object
-            // LAST recorded and the digest can return to an EARLIER run's.
-            // `previously_refused()` reads the last run's `failed[]`, so the
-            // exclusion set oscillates — run 1's plan, minus run 1's refusals
-            // gives run 2's, minus run 2's gives run 1's again — and inside one
-            // `* * * * *` slot that is the same run id. Live on `af64073`:
-            // `status.lastEnforcement` named the FIRST Job with a `startedAt`
-            // 17.5 s after that Job was created and a `finishedAt` 100 ms
-            // later, carrying its real `exitCode 1` and its own `recordKey`.
-            //
-            // WHAT IS GIVEN UP, STATED. The fall-through also recovered a run
-            // whose Job was created by a pass that died before recording it.
-            // That recovery is now not performed: the Job runs, its own
-            // create-only record under `logweir/retention/` is written by the
-            // worker and is the durable evidence, and the controller
-            // under-reports that run. Under-reporting a run is fail-safe —
-            // retention stops sooner, never later — and re-recording it is the
-            // defect above. The lease this pass wrote still holds the points.
-            Err(kube::Error::Api(e)) if e.code == 409 => {
-                debug!(
-                    job = %job_name, run = %run_id,
-                    "a Job already stands at this run's deterministic name; this pass creates \
-                     none and leaves the run record alone"
-                );
-                return Ok(StartOutcome::AlreadyHarvested);
-            }
-            Err(e) => return Err(ReconcileError::Api(e)),
+
+        // (c) A JOB ALREADY AT THIS NAME ENDS THE PASS, BEFORE THE RECORD.
+        //
+        // This read is what lets the record be written BEFORE the Job exists
+        // (defect RET-STARTRUN-PATCH-OUTCOME, below) without re-opening defect
+        // RET-COUNT-EARLY. The create's own `409 AlreadyExists` arm used to be
+        // the only place this was noticed, and it is reachable even when the
+        // guard at the top of this function is not: that guard compares against
+        // the run the object LAST recorded, and `previously_refused()` makes
+        // the plan digest oscillate back to an EARLIER run's, which inside one
+        // slot is the same run id. Reaching that arm AFTER the record had been
+        // written would be the resurrection all over again — `finishedAt`
+        // nulled for a run that has already been harvested and counted.
+        //
+        // The remaining window is one where the Job appears between this read
+        // and the create below. A Job that was absent a moment ago is a NEW
+        // Job, not a harvested one, so the record this pass wrote describes it
+        // correctly; the create's 409 arm keeps the record it wrote and returns.
+        if jobs
+            .get_opt(&job_name)
+            .await
+            .map_err(ReconcileError::Api)?
+            .is_some()
+        {
+            debug!(
+                policy = %self.name, namespace = %self.namespace,
+                job = %job_name, run = %run_id,
+                "a Job already stands at this run's deterministic name; this pass creates none,                  records nothing and leaves the run record alone"
+            );
+            return Ok(StartOutcome::AlreadyHarvested);
         }
-        // THE RUN RECORD. `runId`, `startedAt` and `planSha256` are this run's
-        // own; the seven terminal fields below describe a run that has FINISHED
-        // and are deleted, by explicit RFC 7386 `null`, so the previous run's
-        // outcome cannot be read as this one's (defect
-        // RET-DEGRADED-UNREACHABLE). `previously_refused()` reads `failed[]` to
-        // exclude a point from the next plan, so a stale one is not cosmetic.
+
+        // (d) THE RUN RECORD, AND *THEN* THE JOB — defect
+        //     RET-STARTRUN-PATCH-OUTCOME.
+        //
+        // The order used to be the other way round and the patch's outcome was
+        // discarded, so a record write refused after the Job was created left a
+        // deletion Job running that the status never tracked: `tracked_run`
+        // reads `status.lastEnforcement`, finds the previous run or none, and
+        // never harvests this one — an orphan that deletes objects, reports its
+        // outcome to nobody, and is counted against no retry budget. The
+        // failure is not exotic: the lease patch two steps up exists because
+        // this object's version moves under the pass constantly, and a 409 here
+        // is the ordinary answer to that.
+        //
+        // DELETING THE JOB ON A REFUSED WRITE IS THE OTHER REPAIR AND IS NOT
+        // AVAILABLE: Global Constraint 6 gives this controller no `delete` verb
+        // on `jobs`, by design. Writing first needs no new capability and has a
+        // strictly better failure mode — a record with no Job is a run that
+        // never ran, which the next pass simply supersedes, while a Job with no
+        // record is deletions nothing accounts for.
+        //
+        // `runId`, `startedAt` and `planSha256` are this run's own; the seven
+        // terminal fields below describe a run that has FINISHED and are
+        // deleted, by explicit RFC 7386 `null`, so the previous run's outcome
+        // cannot be read as this one's (defect RET-DEGRADED-UNREACHABLE).
+        // `previously_refused()` reads `failed[]` to exclude a point from the
+        // next plan, so a stale one is not cosmetic.
         //
         // **THE RUN REACHING HERE IS ALWAYS A DIFFERENT ONE**, and that is why
         // the clearing is unconditional. `start_run` is reached only after
@@ -1809,11 +1818,44 @@ impl Pass<'_> {
             "recordKey": Value::Null,
             "recordSha256": Value::Null,
         });
-        self.patch_status(json!({
-            "lastEnforcement": record,
-            "lastEvaluation": { "planRef": { "name": plan_name } },
-        }))
-        .await?;
+        let recorded = self
+            .patch_status(json!({ "lastEnforcement": record }))
+            .await?;
+        if recorded != PatchOutcome::Applied {
+            warn!(
+                policy = %self.name, namespace = %self.namespace, run = %run_id,
+                "the retention run record did not land ({recorded:?}); this pass creates no \
+                 Job, so there is no deletion run the status does not track. The next pass \
+                 re-evaluates from the status that did land"
+            );
+            return Ok(StartOutcome::RunNotRecorded);
+        }
+
+        match jobs.create(&PostParams::default(), &job).await {
+            Ok(_) => {
+                info!(
+                    policy = %self.name, namespace = %self.namespace,
+                    job = %job_name, run = %run_id,
+                    "created the retention Job for an approved plan"
+                );
+            }
+            // A DETERMINISTIC NAME MAKES A DUPLICATE RECONCILE A 409, not a
+            // second deletion run — the whole reason the run id is a pure
+            // function of the policy, the plan digest and the minute. Reaching
+            // this arm now means the Job appeared between the read above and
+            // this create, so it is a Job for THIS run started by a concurrent
+            // pass: the record this pass wrote a moment ago describes it, and
+            // it is left exactly as written.
+            Err(kube::Error::Api(e)) if e.code == 409 => {
+                debug!(
+                    job = %job_name, run = %run_id,
+                    "a Job appeared at this run's deterministic name between the read and the \
+                     create; this pass creates none and the record it wrote stands"
+                );
+                return Ok(StartOutcome::Started(job_name));
+            }
+            Err(e) => return Err(ReconcileError::Api(e)),
+        }
         Ok(StartOutcome::Started(job_name))
     }
 
@@ -2470,6 +2512,20 @@ impl Pass<'_> {
                 "protected": protected,
                 "skipped": skipped,
                 "planSha256": plan_sha256,
+                // THE PLAN THIS EVALUATION RENDERED, NAMED WHERE ITS DIGEST IS
+                // PUBLISHED — defect RET-STALE-PLANREF. `planRef` used to be
+                // written by `start_run` and by nothing else, so an evaluation
+                // that rendered a NEW plan without starting a run left the ref
+                // naming the previous run's `ConfigMap` while `planSha256`
+                // beside it named the new plan's bytes: two fields of one block
+                // describing two different plans, and the one an administrator
+                // reads to preview what would be deleted was the stale one.
+                //
+                // The name is a pure function of the policy UID and the digest
+                // (`plan::plan_config_map_name`), so it is exactly as true as
+                // the digest it sits next to — including before any run
+                // materializes the object, which is the case this fixes.
+                "planRef": { "name": plan::plan_config_map_name(&self.uid, plan_sha256) },
                 "planExpiresAt": window.expires_at,
             },
             "conditions": conditions,
@@ -2979,6 +3035,11 @@ pub enum StartOutcome {
     AlreadyHarvested,
     /// The lease PATCH did not land, so nothing is holding these points.
     LeaseNotHeld,
+    /// The run record PATCH did not land, so NO Job was created — defect
+    /// RET-STARTRUN-PATCH-OUTCOME. A run the status does not track is a run
+    /// nothing harvests, nothing counts against the retry budget and nobody
+    /// can account the deletions of.
+    RunNotRecorded,
     /// A nonterminal `Restore` reads this destination.
     ActiveRestore,
     /// An object already holds the plan `ConfigMap`'s name and is not this

@@ -524,6 +524,21 @@ fn api_callers() -> BTreeMap<String, BTreeSet<String>> {
                 {
                     out.entry(ty.clone()).or_default().insert(WATCH.to_string());
                 }
+                // A HANDLE PASSED TO THE SHARED `/status` WRITER IS A
+                // `patch_status` CALLER. `conditions::patch_status_preconditioned`
+                // is the one implementation of D-SEAMS S7's compare-and-set
+                // (defect STATUS-PATCH-NO-RV), so four reconcilers now hand it
+                // their `Api<T>` instead of calling `patch_status` themselves.
+                // Without this the scan sees no caller for `patch` on their
+                // `/status` subresources and the grant looks orphaned — which
+                // is this test failing on a refactor rather than on a
+                // capability, the one outcome it must not have.
+                let passed = head.trim_end_matches('&').trim_end();
+                if passed.ends_with("patch_status_preconditioned(") {
+                    out.entry(ty.clone())
+                        .or_default()
+                        .insert("patch_status".to_string());
+                }
             }
         }
     }

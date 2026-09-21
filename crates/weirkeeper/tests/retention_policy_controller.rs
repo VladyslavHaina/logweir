@@ -1220,6 +1220,69 @@ fn plan_config_map_route(digest: &str) -> Route {
     }
 }
 
+/// The `GET …/jobs/<name>` that `start_run` reads BEFORE it writes the run
+/// record — defect RET-STARTRUN-PATCH-OUTCOME.
+///
+/// The record is written first now, so that a record write refused after a Job
+/// was created can no longer leave a deletion Job the status never tracks. That
+/// order needs this read: reaching the create's own `409 AlreadyExists` arm
+/// with the record already written would be defect RET-COUNT-EARLY's
+/// resurrection again. A real 404, because the double refuses an unrouted
+/// request and a 404 is what "no Job stands at this name" looks like.
+///
+/// The two slots `start_run` can name a run after at `at`, and therefore the
+/// two Job names a pass can ask for.
+///
+/// `reconcile` uses `enforcement_slot().unwrap_or(ctx.now)`: the fixture's
+/// `"17 4 * * *"` due instant at or before `at` when the cadence answers, and
+/// `at` itself when it does not. Both are routed rather than one guessed,
+/// because a guess that goes stale fails as a missing route — a failure about
+/// this table and not about the product.
+fn slot_candidates(at: DateTime<Utc>) -> Vec<DateTime<Utc>> {
+    let due = at
+        .date_naive()
+        .and_hms_opt(4, 17, 0)
+        .expect("04:17 is a real time")
+        .and_utc();
+    let due = if due <= at {
+        due
+    } else {
+        due - chrono::Duration::days(1)
+    };
+    if due == at {
+        vec![at]
+    } else {
+        vec![due, at]
+    }
+}
+
+/// `job_name` for one slot.
+fn job_name_for(digest: &str, slot: DateTime<Utc>) -> String {
+    format!("{}-{}", stem(), plan::run_id(UID, digest, slot.timestamp()))
+}
+
+/// The `GET …/jobs/<name>` routes that answer "no Job stands at this run's
+/// name", one per slot `start_run` could name at `at`.
+fn absent_job_routes(digest: &str, at: DateTime<Utc>) -> Vec<Route> {
+    slot_candidates(at)
+        .into_iter()
+        .map(|slot| {
+            let suffix: &'static str =
+                Box::leak(format!("/jobs/{}", job_name_for(digest, slot)).into_boxed_str());
+            Route {
+                method: "GET",
+                path_suffix: suffix,
+                status: 404,
+                body: json!({
+                    "kind": "Status", "apiVersion": "v1", "status": "Failure",
+                    "reason": "NotFound", "code": 404, "message": "jobs.batch not found"
+                })
+                .to_string(),
+            }
+        })
+        .collect()
+}
+
 fn empty_list(kind: &str) -> String {
     json!({
         "apiVersion": "logweir.dev/v1alpha1",
@@ -1685,6 +1748,7 @@ async fn approving_the_published_digest_creates_exactly_one_job() {
     let mut routes = happy_routes(&six_points());
     routes.push(plan_config_map_route(&digest));
     routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
     routes.push(route("POST", "/jobs", "{}".to_string()));
     let g = fixture(routes);
     let outcome = run(&g, &policy(enforcing(Some(&digest)), json!({}))).await;
@@ -1741,6 +1805,7 @@ async fn the_job_runs_the_separate_binary_and_never_carries_a_credential_value()
     let mut routes = happy_routes(&six_points());
     routes.push(plan_config_map_route(&digest));
     routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
     routes.push(route("POST", "/jobs", "{}".to_string()));
     let g = fixture(routes);
     run(&g, &policy(enforcing(Some(&digest)), json!({}))).await;
@@ -1817,6 +1882,7 @@ async fn the_plan_config_map_is_immutable_and_digest_annotated() {
     let mut routes = happy_routes(&six_points());
     routes.push(plan_config_map_route(&digest));
     routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
     routes.push(route("POST", "/jobs", "{}".to_string()));
     let g = fixture(routes);
     run(&g, &policy(enforcing(Some(&digest)), json!({}))).await;
@@ -1862,6 +1928,7 @@ async fn unattended_deletion_is_recorded_on_the_object() {
     let mut routes = happy_routes(&six_points());
     routes.push(plan_config_map_route(&digest));
     routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
     routes.push(route("POST", "/jobs", "{}".to_string()));
     let f = fixture(routes);
     let outcome = run(&f, &policy(spec, json!({}))).await;
@@ -2650,6 +2717,10 @@ async fn two_passes_at_different_instants_publish_one_digest_and_approving_it_st
     let mut routes = happy_routes(&six_points());
     routes.push(plan_config_map_route(&digest_at_0417));
     routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(
+        &digest_at_0417,
+        now() + chrono::Duration::minutes(5),
+    ));
     routes.push(route("POST", "/jobs", "{}".to_string()));
     let third = fixture(routes);
     let outcome = run_at(
@@ -2797,6 +2868,7 @@ async fn a_status_conflict_creates_no_job() {
     });
     routes.push(plan_config_map_route(&digest));
     routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
     routes.push(route("POST", "/jobs", "{}".to_string()));
     let f = fixture(routes);
     let outcome = run(&f, &policy(enforcing(Some(&digest)), json!({}))).await;
@@ -2835,6 +2907,7 @@ async fn each_status_patch_carries_the_version_the_last_one_returned() {
     ));
     routes.push(plan_config_map_route(&digest));
     routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
     routes.push(route("POST", "/jobs", "{}".to_string()));
     let f = fixture(routes);
     run(&f, &policy(enforcing(Some(&digest)), json!({}))).await;
@@ -2982,6 +3055,7 @@ async fn an_expired_plan_starts_no_job() {
     let mut routes = happy_routes(&six_points());
     routes.push(plan_config_map_route(&digest));
     routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
     routes.push(route("POST", "/jobs", "{}".to_string()));
     let f = fixture(routes);
     // The status remembers the same digest with a window that closed an hour
@@ -3022,6 +3096,7 @@ async fn a_plan_inside_its_window_starts() {
     let mut routes = happy_routes(&six_points());
     routes.push(plan_config_map_route(&digest));
     routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
     routes.push(route("POST", "/jobs", "{}".to_string()));
     let f = fixture(routes);
     let status = json!({
@@ -3197,6 +3272,7 @@ async fn a_cadence_that_has_not_come_due_starts_no_job() {
     let mut routes = happy_routes(&six_points());
     routes.push(plan_config_map_route(&digest));
     routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
     routes.push(route("POST", "/jobs", "{}".to_string()));
     let f = fixture(routes);
     let outcome = run(&f, &policy(spec, json!({}))).await;
@@ -3236,6 +3312,7 @@ async fn a_second_pass_in_one_slot_creates_no_second_job() {
     let mut routes = happy_routes(&six_points());
     routes.push(plan_config_map_route(&digest));
     routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
     routes.push(route("POST", "/jobs", "{}".to_string()));
     let f = fixture(routes);
     let status = json!({
@@ -3289,6 +3366,7 @@ async fn a_squatted_plan_config_map_name_creates_no_job() {
         .to_string(),
     ));
     routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
     routes.push(route("POST", "/jobs", "{}".to_string()));
     let f = fixture(routes);
     let outcome = run(&f, &policy(enforcing(Some(&digest)), json!({}))).await;
@@ -3322,6 +3400,7 @@ async fn the_plan_ref_is_published_once_a_run_is_authorised() {
     let mut routes = happy_routes(&six_points());
     routes.push(plan_config_map_route(&digest));
     routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
     routes.push(route("POST", "/jobs", "{}".to_string()));
     let f = fixture(routes);
     run(&f, &policy(enforcing(Some(&digest)), json!({}))).await;
@@ -3411,6 +3490,7 @@ async fn start_pass(
     let mut routes = happy_routes(&six_points());
     routes.push(plan_config_map_route(digest));
     routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(digest, at));
     routes.push(route("POST", "/jobs", "{}".to_string()));
     let f = fixture(routes);
     let outcome = run_at(&f, &policy(spec.clone(), status.clone()), at).await;
@@ -3455,6 +3535,7 @@ async fn harvest_pass(
     routes.push(route("PATCH", leaked, "{}".to_string()));
     routes.push(plan_config_map_route(digest));
     routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
     routes.push(route("POST", "/jobs", "{}".to_string()));
     let f = fixture(routes);
     let outcome = run_at(&f, &policy(spec.clone(), status.clone()), at).await;
@@ -3480,6 +3561,7 @@ async fn quiet_pass(policy: &RetentionPolicy, at: DateTime<Utc>, digest: &str) -
     let mut routes = happy_routes(&six_points());
     routes.push(plan_config_map_route(digest));
     routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(digest, at));
     routes.push(route("POST", "/jobs", "{}".to_string()));
     let f = fixture(routes);
     run_at(&f, policy, at).await;
@@ -3881,6 +3963,7 @@ async fn a_status_write_keeps_the_conditions_it_does_not_name() {
     ));
     routes.push(plan_config_map_route(&digest));
     routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
     routes.push(route("POST", "/jobs", "{}".to_string()));
     let f = fixture(routes);
     let outcome = run(&f, &policy(unattended_enforcing(), json!({}))).await;
@@ -4141,6 +4224,10 @@ async fn failed_cycle(
     routes.push(route("PATCH", leaked, "{}".to_string()));
     routes.push(plan_config_map_route(&digest));
     routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(
+        &digest,
+        at + chrono::Duration::minutes(1),
+    ));
     routes.push(route("POST", "/jobs", "{}".to_string()));
     let f = fixture(routes);
     let outcome = run_at(
@@ -4162,8 +4249,20 @@ async fn same_slot_pass(spec: &Value, status: &Value, at: DateTime<Utc>, digest:
     let mut routes = happy_routes(&six_points());
     routes.push(plan_config_map_route(digest));
     routes.push(route("POST", "/configmaps", "{}".to_string()));
-    // THE 409 THE DETERMINISTIC NAME PRODUCES. If the guard fails, the pass
-    // reaches this and the mock answers exactly as the API server would.
+    // THE JOB IS ALREADY THERE, AND `start_run` READS IT BEFORE IT WRITES THE
+    // RUN RECORD — defect RET-STARTRUN-PATCH-OUTCOME's ordering. The record is
+    // written first now, so this read is what keeps a Job that already stands
+    // at this run's name from being re-recorded as a fresh run, which is
+    // defect RET-COUNT-EARLY's resurrection.
+    for slot in slot_candidates(at) {
+        let job_name = job_name_for(digest, slot);
+        let leaked: &'static str = Box::leak(format!("/jobs/{job_name}").into_boxed_str());
+        routes.push(route("GET", leaked, job_body(&job_name, true)));
+    }
+    // AND THE 409 THE DETERMINISTIC NAME PRODUCES, KEPT. If the read above
+    // stops working the pass reaches this, and the mock answers exactly as the
+    // API server would rather than failing on a missing route — so the row
+    // still fails on the behaviour and not on the table.
     routes.push(Route {
         method: "POST",
         path_suffix: "/jobs",
@@ -4406,5 +4505,217 @@ async fn a_digest_that_returns_to_an_earlier_runs_id_does_not_re_count_it() {
     assert_eq!(
         degraded["status"], "False",
         "the budget is not spent: {degraded}"
+    );
+}
+
+// ===========================================================================
+// RET-STALE-PLANREF and RET-STARTRUN-PATCH-OUTCOME
+// ===========================================================================
+
+/// **`planRef` MOVES WITH THE EVALUATION THAT RENDERED THE PLAN** — defect
+/// RET-STALE-PLANREF.
+///
+/// `planRef` was written by `start_run` and by nothing else, so an evaluation
+/// that rendered a NEW plan WITHOUT starting a run left the ref naming the
+/// previous run's `ConfigMap` while `planSha256` beside it named the new
+/// plan's bytes: two fields of one `lastEvaluation` block describing two
+/// different plans. The ref is the one an administrator follows to preview
+/// what a run would delete, so the stale one is the one that gets read.
+///
+/// The two passes evaluate DIFFERENT catalogs, so the digest really moves —
+/// a row over one catalog would pass with the field never written at all.
+/// Neither pass starts a run (`requireApprovedPlan: true`, nothing approved),
+/// which is exactly the case the defect lived in.
+///
+/// KILLS: removing `planRef` from `publish_evaluation`'s `lastEvaluation`;
+/// writing it from anywhere that only a starting pass reaches.
+#[tokio::test]
+async fn a_re_evaluation_moves_the_plan_ref_with_the_digest() {
+    let first = fixture(happy_routes(&six_points()));
+    run(&first, &policy(enforcing(None), json!({}))).await;
+    let first_status = first.status();
+    let first_digest = first_status["lastEvaluation"]["planSha256"]
+        .as_str()
+        .expect("a digest")
+        .to_string();
+    let first_ref = first_status["lastEvaluation"]["planRef"]["name"]
+        .as_str()
+        .expect("an evaluation names the plan it rendered")
+        .to_string();
+    assert_eq!(
+        first_ref,
+        format!(
+            "{}-plan-{}",
+            stem(),
+            &first_digest.trim_start_matches("sha256:")[..12]
+        ),
+        "the ref names the ConfigMap this digest's plan is carried in"
+    );
+    assert!(
+        first.posted("/jobs").is_empty(),
+        "and no run started, which is the whole case: {:?}",
+        first.seen()
+    );
+
+    // A DIFFERENT CATALOG, so a different plan and a different digest.
+    let mut fewer = six_points();
+    fewer.truncate(4);
+    let second = fixture(happy_routes(&fewer));
+    run(&second, &policy(enforcing(None), first_status.clone())).await;
+    let second_status = after(&first_status, &second);
+    let second_digest = second_status["lastEvaluation"]["planSha256"]
+        .as_str()
+        .expect("a digest")
+        .to_string();
+    assert_ne!(
+        first_digest, second_digest,
+        "the fixture must actually re-render, or this row asserts nothing"
+    );
+
+    let second_ref = second_status["lastEvaluation"]["planRef"]["name"]
+        .as_str()
+        .expect("the re-evaluation names its own plan")
+        .to_string();
+    assert_ne!(
+        first_ref, second_ref,
+        "the ref moved with the digest rather than naming the plan of a run that is over"
+    );
+    assert_eq!(
+        second_ref,
+        format!(
+            "{}-plan-{}",
+            stem(),
+            &second_digest.trim_start_matches("sha256:")[..12]
+        ),
+        "and it names THIS evaluation's plan: {}",
+        second_status["lastEvaluation"]
+    );
+}
+
+/// **THE RUN RECORD IS WRITTEN BEFORE THE JOB EXISTS** — defect
+/// RET-STARTRUN-PATCH-OUTCOME, the ordering half.
+///
+/// The Job used to be created first and the record patch's outcome discarded,
+/// so a record write refused — or a controller that died — after the create
+/// left a deletion Job the status never tracks: `tracked_run` reads
+/// `status.lastEnforcement`, finds the previous run or none, and never harvests
+/// this one. An orphan that deletes objects, reports its outcome to nobody and
+/// is counted against no retry budget.
+///
+/// KILLS: swapping the two writes back.
+#[tokio::test]
+async fn the_run_record_is_written_before_the_job_is_created() {
+    let digest = learned_digest().await;
+    let mut routes = happy_routes(&six_points());
+    routes.push(plan_config_map_route(&digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let f = fixture(routes);
+    let outcome = run(&f, &policy(unattended_enforcing(), json!({}))).await;
+    assert_eq!(outcome.phase, ctrl::RetentionPhase::Started);
+
+    let bodies = f.bodies.lock().expect("the body recorder").clone();
+    let record_at = bodies
+        .iter()
+        .position(|b| {
+            b.method == "PATCH"
+                && b.uri.contains("/retentionpolicies/")
+                && serde_json::from_str::<Value>(&b.body)
+                    .ok()
+                    .and_then(|v| {
+                        v["status"]["lastEnforcement"]["runId"]
+                            .as_str()
+                            .map(str::to_string)
+                    })
+                    .is_some()
+        })
+        .expect("the run record was written");
+    let create_at = bodies
+        .iter()
+        .position(|b| b.method == "POST" && b.uri.contains("/jobs"))
+        .expect("the Job was created");
+    assert!(
+        record_at < create_at,
+        "the record is on the server before the Job that deletes anything exists; got record at \
+         {record_at} and create at {create_at}: {:?}",
+        bodies
+            .iter()
+            .map(|b| (b.method.clone(), b.uri.clone()))
+            .collect::<Vec<_>>()
+    );
+
+    // AND THE JOB IS READ BEFORE THE RECORD IS WRITTEN, which is what keeps the
+    // new order from re-recording a run whose Job already stands (defect
+    // RET-COUNT-EARLY's resurrection).
+    let read_at = bodies
+        .iter()
+        .position(|b| b.method == "GET" && b.uri.contains("/jobs/"))
+        .expect("the Job name was read");
+    assert!(
+        read_at < record_at,
+        "got read at {read_at} and record at {record_at}"
+    );
+}
+
+/// **A REFUSED RECORD WRITE CREATES NO JOB** — defect
+/// RET-STARTRUN-PATCH-OUTCOME, the outcome half.
+///
+/// The third `/status` write of an enforcing pass is the run record (the
+/// evaluation, then the lease, then the record). The double refuses exactly
+/// that one with a `409`, which is the ordinary answer here — the lease patch
+/// two steps up exists because this object's version moves under the pass
+/// constantly.
+///
+/// ZERO `POST …/jobs`. Not "a Job that is later cleaned up": this controller
+/// holds no `delete` verb on `jobs` by Global Constraint 6, so a Job created
+/// past a refused record could never be withdrawn. The outcome names the
+/// refusal so an operator can see why no run started.
+///
+/// KILLS: discarding the record patch's outcome; creating the Job first.
+#[tokio::test]
+async fn a_refused_run_record_creates_no_job() {
+    let digest = learned_digest().await;
+    let mut routes = happy_routes(&six_points());
+    routes.push(plan_config_map_route(&digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let (client, recorder, bodies) = weirkeeper::testing::mock_client_failing_after(
+        routes,
+        "PATCH",
+        "/retentionpolicies/primary/status",
+        2,
+        409,
+        json!({
+            "kind": "Status", "apiVersion": "v1", "status": "Failure",
+            "reason": "Conflict", "code": 409,
+            "message": "the object has been modified"
+        })
+        .to_string(),
+    );
+    let f = Fixture {
+        client,
+        recorder,
+        bodies,
+    };
+    let outcome = run(&f, &policy(unattended_enforcing(), json!({}))).await;
+
+    assert!(
+        f.posted("/jobs").is_empty(),
+        "no Job exists for a run the status does not record — and this controller could not \
+         delete one if it did. Requests: {:?}",
+        f.seen()
+    );
+    assert_eq!(
+        outcome.enforced_reason,
+        ctrl::REASON_RUN_NOT_RECORDED,
+        "and the object says why no run started"
+    );
+    assert_eq!(
+        f.status_patches().len(),
+        3,
+        "the evaluation, the lease and the refused record — the refusal is the THIRD write, \
+         which is the sequence the defect lives in"
     );
 }

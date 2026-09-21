@@ -1566,6 +1566,37 @@ kubectl --context docker-desktop -n <namespace> \
 # sha256:…  — copy this into spec.enforcement.approvedPlanSha256 to authorise a run
 ```
 
+**`status.lastEvaluation.planRef` names the plan THIS evaluation rendered**, and
+it moves whenever `planSha256` beside it moves — including on an evaluation that
+renders a new plan and starts no run, which is most of them. It was previously
+written only by a pass that started a run, so the two fields of one block could
+describe two different plans and the ref an administrator follows to preview a
+deletion was the one belonging to a run that was already over. The name is
+derived from the policy UID and the digest, so the ref is exactly as true as the
+digest it sits next to; the `ConfigMap` itself is created by the pass that starts
+the run, so the ref can name an object that does not exist yet, which is the
+documented absent-object behaviour and not a fault.
+
+**A retention run is recorded on the object BEFORE its Job exists.** The order
+is: the run record (`status.lastEnforcement.runId`, `startedAt`, `planSha256`,
+with every terminal field of the previous run cleared), and only then
+`POST …/jobs`. A record write that does not land therefore creates no Job at
+all, and `Enforced=False/RunNotRecorded` says so — a Job created past a refused
+write would be a deletion run nothing harvests, nothing counts against the retry
+budget and nobody can account the deletions of, and this controller holds no
+`delete` verb on `jobs` to withdraw it (Global Constraint 6). The pass reads the
+Job at the run's deterministic name before it records anything, so a Job that
+already stands there ends the pass instead of being re-recorded as a fresh run.
+
+**Every `/status` write this controller makes is a merge PATCH preconditioned on
+`metadata.resourceVersion`** — on every kind, not only the ones that said so.
+A `409 Conflict` is the precondition working: the pass stops, nothing it computed
+reaches the object, and the next pass reads what the other writer stored. A pass
+that writes more than once preconditions each later write on the version the
+previous one returned, so the sequences that must complete within one pass —
+a `Backup`'s freeze then run, either kind's outcome then evidence verdict — are
+not refused by their own first write.
+
 **The approved plan names each set's key BOUND, not its objects — and no
 surface pretends otherwise.** The catalog view carries a point's `manifestKey`
 and no segment list, and this controller holds no archive credential for the
