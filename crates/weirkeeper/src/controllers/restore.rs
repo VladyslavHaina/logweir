@@ -408,6 +408,21 @@ pub enum RestoreAdmission {
         /// The name `spec.target.clusterRef` gave.
         cluster: String,
     },
+    /// `spec.authorization`'s standing document does not admit this run —
+    /// PLAT-14.3b, D3 §4.3.
+    ///
+    /// TERMINAL. Expired, a revoked or wrong-usage key, a subject that is not
+    /// this schedule, or a plan outside the signed scope: every one of them is
+    /// a property of two sealed specs, so the slot cannot be rescued. The
+    /// schedule's NEXT slot renders a new plan and re-checks everything, which
+    /// is why a refusal here is recorded rather than held.
+    StandingAuthorizationRefused {
+        /// The standing `Approval` `spec.authorization.approvalRef` names.
+        approval: String,
+        /// Which check refused, in the same words the `RehearsalSchedule`
+        /// reconciler uses for the same check before the `Restore` exists.
+        detail: String,
+    },
 }
 
 impl RestoreAdmission {
@@ -423,6 +438,9 @@ impl RestoreAdmission {
             Self::ApprovalSubjectMismatch { .. } => TERMINAL_STATE_APPROVAL_SUBJECT_MISMATCH,
             Self::PlanHashMismatch { .. } => TERMINAL_STATE_PLAN_HASH_MISMATCH,
             Self::ClusterNotReachable { .. } => TERMINAL_STATE_CLUSTER_NOT_REACHABLE,
+            Self::StandingAuthorizationRefused { .. } => {
+                crate::conditions::TERMINAL_STATE_STANDING_AUTHORIZATION_REFUSED
+            }
         }
     }
 
@@ -451,7 +469,8 @@ impl RestoreAdmission {
             Self::ApprovalNotReceived { .. }
             | Self::ApprovalSubjectMismatch { .. }
             | Self::PlanHashMismatch { .. }
-            | Self::ClusterNotReachable { .. } => true,
+            | Self::ClusterNotReachable { .. }
+            | Self::StandingAuthorizationRefused { .. } => true,
         }
     }
 }
@@ -497,6 +516,13 @@ impl fmt::Display for RestoreAdmission {
                 "spec.target.clusterRef names the KafkaCluster `{cluster}`, which does not exist \
                  in this namespace or whose status.reachable is not true; a restore is not \
                  started against a target the control plane cannot see"
+            ),
+            Self::StandingAuthorizationRefused { approval, detail } => write!(
+                f,
+                "spec.authorization names the standing Approval `{approval}`, which does not \
+                 authorise this rehearsal ({detail}); no Job is created. Both specs are sealed, \
+                 so this slot cannot be rescued — the schedule's next slot renders a new plan \
+                 and is checked again"
             ),
         }
     }
@@ -575,7 +601,22 @@ pub fn admit(
     restore: &Restore,
     approval: Option<&Approval>,
     cluster: Option<&KafkaCluster>,
+    standing: Option<&StandingAdmission<'_>>,
 ) -> RestoreAdmission {
+    // **THE TWO AUTHORIZATIONS, DISPATCHED ON THE OBJECT AND NEVER ON WHAT
+    // HAPPENS TO EXIST** — PLAT-14.3b.
+    //
+    // `spec.authorization` is what makes a `Restore` a rehearsal, and the CEL
+    // rule `has(self.approvalRef) != has(self.authorization)` makes the two
+    // mutually exclusive on a sealed spec. Dispatching on the presence of a
+    // standing `Approval` in the namespace instead would let a standing
+    // document admit an ORDINARY `Restore` — the exact widening this branch is
+    // shaped to prevent, and a planted mutant of it is in
+    // `claude/plat14-3b-mutants.log`.
+    if restore.spec.authorization.is_some() {
+        return admit_standing(restore, approval, cluster, standing);
+    }
+
     // ---- 1. the ref must name something ---------------------------------
     let referent = restore.spec.approval_ref_name().trim().to_string();
     if referent.is_empty() {
@@ -658,6 +699,258 @@ pub fn admit(
         .and_then(|s| s.reachable)
         == Some(true);
     if !reachable {
+        return RestoreAdmission::ClusterNotReachable {
+            cluster: cluster_name,
+        };
+    }
+
+    RestoreAdmission::Ok
+}
+
+/// What [`admit`] needs to judge a STANDING authorization that it cannot read
+/// off the two objects — PLAT-14.3b.
+///
+/// # Why trust reaches the admission at all
+///
+/// For an ordinary `Restore` the trust is resolved AFTER admission, because an
+/// unapproved plan reads nothing it does not need. A standing authorization
+/// cannot be judged that way: "the key that signed it may no longer authorise
+/// anything new" and "that key's usage is not an approver's" are facts about
+/// the namespace's resolved trust, and they are two of the four refusals D3
+/// §4.3(c) requires at EVERY slot. Resolving trust before admission for a
+/// rehearsal — and only for a rehearsal — is the narrow ordering change that
+/// buys them.
+pub struct StandingAdmission<'a> {
+    /// This namespace's resolved trust.
+    pub trust: &'a crate::trust::ResolvedTrust,
+    /// The clock, passed in — Global Constraint 1.
+    pub now: DateTime<Utc>,
+}
+
+/// [`admit`] for a `Restore` carrying `spec.authorization` — D3 §4.3(c), the
+/// controller's half of "checked twice" at the RESTORE reconciler.
+///
+/// # The same refusals the schedule already made, made again
+///
+/// `RehearsalSchedule`'s `authorize` runs this chain before the `Restore`
+/// exists. Running it again here is not redundancy for its own sake: the
+/// `Restore` is a separate object with its own lifetime, a key can be
+/// withdrawn between the slot firing and this reconcile, and a `Restore`
+/// carrying `spec.authorization` can be created by anything with RBAC on the
+/// kind — including a hand-written one that no schedule ever rendered. This
+/// function is what makes the standing document, and not the creator, the
+/// thing that authorises the Job.
+///
+/// # The order
+///
+/// 1. the ref names something; 2. the `Approval` exists and is `Verified=True`
+/// (a HOLD — it can become true without anyone touching this object);
+/// 3. it is a `RehearsalSchedule` approval bound to the schedule
+/// `spec.authorization.rehearsalScheduleRef` names; 4. the key it verified
+/// under is one the namespace's trust still lets authorise, with an approver's
+/// usage; 5. the SIGNED bytes are admissible (kind, subject, the UID binding,
+/// the validity window and D3 §4.3's 90-day cap); 6. `plan ∈ scope`. The
+/// target-reachable check is last, exactly as on the ordinary path.
+fn admit_standing(
+    restore: &Restore,
+    approval: Option<&Approval>,
+    cluster: Option<&KafkaCluster>,
+    standing: Option<&StandingAdmission<'_>>,
+) -> RestoreAdmission {
+    use logweir_core::execution_contract as wire;
+
+    // Unreachable — the caller resolves trust before admitting a rehearsal —
+    // and a REFUSAL rather than an admission, because "we could not judge the
+    // authorization" must never read as "the authorization was fine".
+    let Some(standing_inputs) = standing else {
+        return RestoreAdmission::StandingAuthorizationRefused {
+            approval: restore
+                .spec
+                .authorization
+                .as_ref()
+                .map(|a| a.approval_ref.name.clone())
+                .unwrap_or_default(),
+            detail: "this build could not resolve the namespace's trust at admission time, so \
+                     the standing authorization's signing key could not be judged"
+                .to_string(),
+        };
+    };
+    // Unreachable: `admit` dispatched on exactly this field being present.
+    let Some(authorization) = restore.spec.authorization.as_ref() else {
+        return RestoreAdmission::ApprovalNotReceived {
+            approval: String::new(),
+        };
+    };
+    let wanted = authorization.approval_ref.name.trim().to_string();
+    if wanted.is_empty() {
+        return RestoreAdmission::ApprovalNotReceived { approval: wanted };
+    }
+    let refused = |detail: String| RestoreAdmission::StandingAuthorizationRefused {
+        approval: wanted.clone(),
+        detail,
+    };
+
+    // ---- 2. the Approval exists and is verified (a HOLD) -----------------
+    let Some(approval) = approval else {
+        return RestoreAdmission::ApprovalNotVerified { approval: wanted };
+    };
+    let status = approval.status.as_ref();
+    if status.and_then(|s| s.verified) != Some(true) {
+        return RestoreAdmission::ApprovalNotVerified { approval: wanted };
+    }
+
+    // ---- 3. a RehearsalSchedule approval, bound to THIS schedule ---------
+    //
+    // **THE KIND IS WHAT SEPARATES THE TWO AUTHORIZATIONS.** A per-run
+    // `Approval` names `subjectRef.kind: Restore`; accepting one here would
+    // let an approval a human signed for one restore authorise a rehearsal it
+    // says nothing about.
+    if approval.spec.subject_ref.kind != crate::crds::approval::SubjectKind::RehearsalSchedule {
+        return RestoreAdmission::ApprovalSubjectMismatch {
+            approval: wanted,
+            detail: format!(
+                "spec.subjectRef.kind is {} and a standing rehearsal authorization names \
+                 RehearsalSchedule",
+                approval.spec.subject_ref.kind
+            ),
+        };
+    }
+    if approval.namespace().unwrap_or_default() != restore.namespace().unwrap_or_default() {
+        return RestoreAdmission::ApprovalSubjectMismatch {
+            approval: wanted,
+            detail: "the Approval is from a different namespace".to_string(),
+        };
+    }
+    let schedule = authorization.rehearsal_schedule_ref.name.clone();
+    // THE UID THE APPROVAL CONTROLLER ACTUALLY VERIFIED AGAINST. It is also
+    // the only RehearsalSchedule UID reachable from here — a `Restore` carries
+    // the schedule's NAME — and it is what makes the signed document's own
+    // `subjectRef.uid` check below a binding rather than a tautology.
+    let Some(bound) = status.and_then(|s| s.verified_subject_ref.as_ref()) else {
+        return RestoreAdmission::ApprovalSubjectMismatch {
+            approval: wanted,
+            detail: "status.verifiedSubjectRef is absent, so nothing says WHICH object this \
+                     Approval was verified against"
+                .to_string(),
+        };
+    };
+    if bound.kind != crate::crds::approval::SubjectKind::RehearsalSchedule
+        || bound.name != schedule
+    {
+        return RestoreAdmission::ApprovalSubjectMismatch {
+            approval: wanted,
+            detail: format!(
+                "status.verifiedSubjectRef names {}/{} and spec.authorization.rehearsalScheduleRef \
+                 names RehearsalSchedule `{schedule}`",
+                bound.kind, bound.name
+            ),
+        };
+    }
+
+    // ---- 4. the key: it exists, it may authorise, it is not withdrawn ----
+    let Some(key_id) = status.and_then(|s| s.matched_key_id.clone()) else {
+        return refused("the Approval records no status.matchedKeyId".to_string());
+    };
+    let Some(key) = standing_inputs.trust.key(&key_id) else {
+        return refused(format!(
+            "it verified under key {key_id}, which the trust this namespace resolves to does not \
+             carry"
+        ));
+    };
+    let usage = if key
+        .trust
+        .has_usage(logweir_core::trust::KeyUsage::GovernedApproval)
+    {
+        logweir_core::trust::KeyUsage::GovernedApproval
+    } else if key
+        .trust
+        .has_usage(logweir_core::trust::KeyUsage::ConsoleConfirmation)
+    {
+        logweir_core::trust::KeyUsage::ConsoleConfirmation
+    } else {
+        // D3 §7.3's key-usage separation: the installation's own evidence
+        // identity must never authorise its own rehearsals.
+        return refused(format!(
+            "it verified under key {key_id}, whose usages are [{}]; a rehearsal is authorised by \
+             GovernedApproval or ConsoleConfirmation and never by EvidenceSigning",
+            key.trust
+                .usages
+                .iter()
+                .map(|u| format!("{u:?}"))
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    };
+    if let Err(refusal) =
+        standing_inputs
+            .trust
+            .may_sign_new_for(&key_id, usage, standing_inputs.now)
+    {
+        return refused(format!(
+            "it verified under key {key_id}, which may no longer authorise anything new ({}); a \
+             slot does not run under a withdrawn key",
+            refusal.as_str()
+        ));
+    }
+
+    // ---- 5. the SIGNED bytes, parsed only now ----------------------------
+    let doc: wire::StandingAuthorization =
+        match serde_json::from_str(&approval.spec.approval_bytes) {
+            Ok(doc) => doc,
+            Err(error) => {
+                return refused(format!(
+                    "it verified, but its bytes are not a standing rehearsal authorization: \
+                     {error}"
+                ))
+            }
+        };
+    if let Err(refusal) =
+        wire::admit_standing_authorization(&doc, Some(&bound.uid), standing_inputs.now)
+    {
+        return refused(refusal.detail);
+    }
+    if doc.subject_ref.namespace != restore.namespace().unwrap_or_default() {
+        return refused(format!(
+            "the standing authorization names namespace `{}` and this Restore is in `{}`",
+            doc.subject_ref.namespace,
+            restore.namespace().unwrap_or_default()
+        ));
+    }
+
+    // ---- 6. plan ∈ scope, over the bytes this Restore froze --------------
+    //
+    // The allowlist is EXACTLY the signed target cluster id — W5's R1.3
+    // obligation 1, and the same projection `rehearsal_schedule` uses, so the
+    // two halves of "checked twice" cannot disagree by computing different
+    // facts from the same plan.
+    let plan: logweir_core::spec::DrillSpec =
+        match serde_yaml::from_str(&restore.spec.plan_bytes) {
+            Ok(plan) => plan,
+            Err(error) => {
+                return refused(format!(
+                    "spec.planBytes does not parse as a restore plan, so it cannot be proved \
+                     inside the signed scope: {error}"
+                ))
+            }
+        };
+    let allowed = logweir_core::spec::AllowedClusters {
+        allowed_cluster_ids: vec![doc.scope.target_cluster_id.clone()],
+        source_cluster_id: None,
+    };
+    let facts = wire::plan_scope_facts(&plan, &allowed);
+    if let Err(refusal) = wire::plan_within_scope(&facts, &doc.scope) {
+        return refused(format!(
+            "the rendered plan is outside the signed scope: {refusal}"
+        ));
+    }
+
+    // ---- 7. the target must report reachable -----------------------------
+    let cluster_name = restore.spec.target.cluster_ref.name.clone();
+    if cluster
+        .and_then(|c| c.status.as_ref())
+        .and_then(|s| s.reachable)
+        != Some(true)
+    {
         return RestoreAdmission::ClusterNotReachable {
             cluster: cluster_name,
         };
@@ -1537,13 +1830,120 @@ pub fn standing_bundle_config_map(
             (AUTHORIZATION_KEYS_FILE.to_string(), keyring_bytes),
             (ALLOWED_CLUSTERS_FILE.to_string(), allowed_bytes),
             (APPROVER_KEY_FILE.to_string(), key.spki_pem.clone()),
-            // The per-run slot PLAT-14.3b owns — see this function's header.
-            (APPROVAL_DOC_FILE.to_string(), envelope.to_string()),
-            (APPROVAL_SIG_FILE.to_string(), sidecar.to_string()),
+            // **NO `approval.json` SLOT — PLAT-14.3b closed this.** D3 W7 had
+            // to write the standing envelope here as a placeholder because
+            // `--approval` was mandatory and `load_startup_inputs` verified it
+            // under `PAYLOAD_TYPE_APPROVAL`, which is exactly why no rehearsal
+            // could execute: a correctly signed one was reported as a
+            // TAMPERED APPROVAL. The standing document now REPLACES the
+            // per-run approval, so a rehearsal bundle has five members and the
+            // contract pins no approval digest for it.
         ]
         .into_iter()
         .collect(),
     ))
+}
+
+/// [`standing_bundle_config_map`] for a `Restore` the RESTORE reconciler is
+/// looking at — PLAT-14.3b.
+///
+/// The `RehearsalSchedule` reconciler already renders this object from the
+/// same function, from `Authorization` values it has in hand. This is the same
+/// render from the two objects the `Restore` reconciler has: the standing
+/// `Approval` and the namespace's resolved trust. It stays one renderer —
+/// [`standing_bundle_config_map`] — because the Job template's digests are
+/// computed from whichever call produced the bytes, and two renderers would be
+/// two answers to what the controller committed this run to.
+///
+/// # Errors
+///
+/// [`RestoreError::Materialization`] for an `Approval` with no UID or no
+/// `matchedKeyId`, or whose signed bytes do not parse as a standing
+/// authorization; whatever [`standing_bundle_config_map`] refuses.
+fn standing_bundle_for(
+    restore: &Restore,
+    approval: &Approval,
+    trust: &crate::trust::ResolvedTrust,
+    now: DateTime<Utc>,
+) -> Result<ConfigMap, RestoreError> {
+    let approval_uid = approval
+        .uid()
+        .filter(|uid| !uid.trim().is_empty())
+        .ok_or_else(|| {
+            RestoreError::Materialization(format!(
+                "the standing Approval {} carries no metadata.uid",
+                approval.name_any()
+            ))
+        })?;
+    let key_id = approval
+        .status
+        .as_ref()
+        .and_then(|s| s.matched_key_id.as_deref())
+        .ok_or_else(|| {
+            RestoreError::Materialization(format!(
+                "the standing Approval {} records no status.matchedKeyId",
+                approval.name_any()
+            ))
+        })?;
+    // The signed bytes are parsed only for the ALLOWLIST, which is exactly
+    // `[scope.targetClusterId]` — W5's R1.3 obligation 1. `admit_standing`
+    // has already proved the signature, the key and `plan ∈ scope` before
+    // anything reaches here.
+    let doc: logweir_core::execution_contract::StandingAuthorization =
+        serde_json::from_str(&approval.spec.approval_bytes).map_err(|error| {
+            RestoreError::Materialization(format!(
+                "the standing Approval {}'s bytes are not a standing rehearsal authorization: \
+                 {error}",
+                approval.name_any()
+            ))
+        })?;
+    let keyring = super::rehearsal_schedule::keyring(trust, now);
+    standing_bundle_config_map(
+        restore,
+        &StandingInputs {
+            envelope: &approval.spec.approval_bytes,
+            sidecar: &approval.spec.sidecar_bytes,
+            approval_uid: &approval_uid,
+            key_id,
+            keyring: &keyring,
+            target_cluster_id: &doc.scope.target_cluster_id,
+        },
+        trust,
+    )
+}
+
+/// The `RehearsalSchedule` UID a standing `Approval` was verified against —
+/// PLAT-14.3b.
+///
+/// **`status.verifiedSubjectRef.uid`, AND NOT A NAME.** It is the only
+/// RehearsalSchedule UID reachable from a `Restore` (which carries the
+/// schedule's name), it is the value the `Approval` controller recorded for
+/// the object it actually read, and it becomes
+/// `LOGWEIR_EXECUTION_REHEARSAL_SCHEDULE_UID` — which the runner then requires
+/// to equal the SIGNED document's own `subjectRef.uid`. A schedule deleted and
+/// recreated under the same name has a new UID and a standing document that no
+/// longer binds to it, which is the whole point of the field.
+///
+/// # Errors
+///
+/// [`RestoreError::Materialization`] for an absent or blank UID — the runner
+/// treats a present-and-empty value as MISSING and refuses the whole contract,
+/// so a default here would render a bundle every Job aborts on.
+fn standing_schedule_uid(approval: &Approval) -> Result<String, RestoreError> {
+    approval
+        .status
+        .as_ref()
+        .and_then(|s| s.verified_subject_ref.as_ref())
+        .map(|bound| bound.uid.trim().to_string())
+        .filter(|uid| !uid.is_empty())
+        .ok_or_else(|| {
+            RestoreError::Materialization(format!(
+                "the standing Approval {} carries no non-blank \
+                 status.verifiedSubjectRef.uid, so the RehearsalSchedule this rehearsal claims \
+                 to be cannot be bound to the signed document",
+                approval.name_any()
+            ))
+        })
 }
 
 /// The execution contract v2 environment a STANDING-authorised Restore Job
@@ -1658,14 +2058,13 @@ pub fn standing_execution_contract_env(
             contract::PLAN_SHA256_ENV.to_string(),
             digest(restore.spec.plan_bytes.as_bytes()),
         ),
-        (
-            contract::APPROVAL_SHA256_ENV.to_string(),
-            digest(get(APPROVAL_DOC_FILE)?.as_bytes()),
-        ),
-        (
-            contract::APPROVAL_SIDECAR_SHA256_ENV.to_string(),
-            digest(get(APPROVAL_SIG_FILE)?.as_bytes()),
-        ),
+        // **`APPROVAL_SHA256` / `APPROVAL_SIDECAR_SHA256` ARE NOT EMITTED** —
+        // PLAT-14.3b. The runner refuses a contract that pins them while
+        // `AUTHORIZATION_KIND` is `standing`, because a rehearsal bundle has
+        // no approval slot and a digest over a member nothing verifies is
+        // worse than either presence or absence. `APPROVAL_NAME`/`APPROVAL_UID`
+        // stay: they name the STANDING Approval, which is a real object a
+        // human signed and the one an auditor looks up.
         (
             contract::APPROVER_KEY_SHA256_ENV.to_string(),
             digest(get(APPROVER_KEY_FILE)?.as_bytes()),
@@ -1705,6 +2104,16 @@ pub fn execution_contract_env(
     now: DateTime<Utc>,
 ) -> Result<Vec<(String, String)>, RestoreError> {
     use logweir_core::execution_contract as contract;
+
+    // **ONE ENTRY POINT, TWO ARMS** — PLAT-14.3b. The Job template's digests
+    // must be computed from whichever bundle was actually rendered, so the
+    // choice is made here rather than at the three call sites that would each
+    // have had to remember it.
+    if restore.spec.authorization.is_some() {
+        let schedule_uid = standing_schedule_uid(approval)?;
+        let bundle = standing_bundle_for(restore, approval, trust, now)?;
+        return standing_execution_contract_env(restore, &bundle, &schedule_uid);
+    }
 
     let bundle = approval_bundle_config_map(restore, approval, trust, now)?;
     let data = bundle.data.as_ref().ok_or_else(|| {
@@ -1915,6 +2324,26 @@ pub fn approver_key_ids(roster: Option<&TrustRoster>) -> Vec<String> {
 /// would say nothing the kind does not already say.
 #[must_use]
 pub fn triggered_by(restore: &Restore) -> String {
+    // **A REHEARSAL'S REASON IS A SLOT, NOT AN APPROVAL** — PLAT-14.3b. One
+    // standing document covers every slot of one schedule, so
+    // `approval/<standing approval>` would read identically on every run the
+    // schedule ever makes and neither the schedule nor the slot would appear
+    // anywhere in the signed evidence. The runner re-derives the same shape
+    // and binds the `<schedule>` segment to the SIGNED `subjectRef.name`, so a
+    // value invented here cannot survive the run.
+    if restore.spec.authorization.is_some() {
+        return match rehearsal_schedule_and_slot(restore) {
+            Some((schedule, slot)) => {
+                logweir_core::execution_contract::rehearsal_triggered_by(&schedule, &slot)
+            }
+            // Unreachable through `reconcile_restore` — `admit` refuses a
+            // rehearsal naming no schedule before any argv is built — and
+            // named rather than defaulted, because a `rehearsal//` value would
+            // be refused by the runner with a message about a malformed
+            // trigger instead of about the object that is actually wrong.
+            None => logweir_core::execution_contract::rehearsal_triggered_by("<none>", "<none>"),
+        };
+    }
     let referent = restore.spec.approval_ref_name().trim();
     if referent.is_empty() {
         // Unreachable through `reconcile_restore` — `admit` refuses an empty
@@ -1949,6 +2378,7 @@ pub fn triggered_by(restore: &Restore) -> String {
 /// consequence for a live Job before Task 22 lands is in this task's report.
 #[must_use]
 pub fn runner_argv(restore: &Restore, approver_key_ids: &[String]) -> Vec<String> {
+    let standing = restore.spec.authorization.is_some();
     let mut argv: Vec<String> = vec![
         "restore".to_string(),
         "run".to_string(),
@@ -1956,11 +2386,30 @@ pub fn runner_argv(restore: &Restore, approver_key_ids: &[String]) -> Vec<String
         logweir_core::execution_contract::VERSION.to_string(),
         "--spec".to_string(),
         format!("{PLAN_MOUNT_PATH}/{PLAN_SPEC_KEY}"),
-        "--approval".to_string(),
-        format!("{APPROVAL_MOUNT_PATH}/{APPROVAL_DOC_FILE}"),
+    ];
+    // **THE STANDING DOCUMENT REPLACES `--approval`** — PLAT-14.3b. Passing
+    // both would be the pre-14.3b "sits beside" shape the runner now refuses
+    // by name, and there is no per-run approval in a rehearsal bundle to point
+    // at in any case. The sidecar is NOT a flag: the runner derives it from
+    // this path by replacing the extension, exactly as it does for
+    // `--approval`, so the two files cannot be mismatched.
+    if standing {
+        argv.extend([
+            "--standing-authorization".to_string(),
+            format!("{APPROVAL_MOUNT_PATH}/{STANDING_AUTHORIZATION_FILE}"),
+            "--authorization-keys".to_string(),
+            format!("{APPROVAL_MOUNT_PATH}/{AUTHORIZATION_KEYS_FILE}"),
+        ]);
+    } else {
+        argv.extend([
+            "--approval".to_string(),
+            format!("{APPROVAL_MOUNT_PATH}/{APPROVAL_DOC_FILE}"),
+        ]);
+    }
+    argv.extend([
         "--approver-key".to_string(),
         format!("{APPROVAL_MOUNT_PATH}/{APPROVER_KEY_FILE}"),
-    ];
+    ]);
     for id in approver_key_ids {
         argv.push("--approver-key-ids".to_string());
         argv.push(id.clone());
@@ -2190,15 +2639,45 @@ pub fn runner_job_spec_with_destinations(
                 volume: APPROVAL_VOLUME.to_string(),
                 config_map_name: approval_bundle_config_map_name(&restore.name_any()),
                 mount_path: APPROVAL_MOUNT_PATH.to_string(),
-                items: vec![
-                    (APPROVAL_DOC_FILE.to_string(), APPROVAL_DOC_FILE.to_string()),
-                    (APPROVAL_SIG_FILE.to_string(), APPROVAL_SIG_FILE.to_string()),
-                    (APPROVER_KEY_FILE.to_string(), APPROVER_KEY_FILE.to_string()),
-                    (
-                        ALLOWED_CLUSTERS_FILE.to_string(),
-                        ALLOWED_CLUSTERS_FILE.to_string(),
-                    ),
-                ],
+                // **THE FILE TABLE, AND THE STANDING DOCUMENT KEEPS ITS OWN
+                // NAME** — PLAT-14.3b, and see `standing_bundle_config_map`
+                // for why. `standing-authorization.sig` is projected under its
+                // own name and NEVER under `approval.sig`: the runner verifies
+                // `approval.json` under `PAYLOAD_TYPE_APPROVAL`, so a standing
+                // sidecar in that slot makes a correctly signed rehearsal look
+                // like a substituted approval. A rehearsal bundle carries no
+                // approval slot at all, so neither per-run member is projected.
+                items: if restore.spec.authorization.is_some() {
+                    vec![
+                        (
+                            STANDING_AUTHORIZATION_FILE.to_string(),
+                            STANDING_AUTHORIZATION_FILE.to_string(),
+                        ),
+                        (
+                            STANDING_AUTHORIZATION_SIG_FILE.to_string(),
+                            STANDING_AUTHORIZATION_SIG_FILE.to_string(),
+                        ),
+                        (
+                            AUTHORIZATION_KEYS_FILE.to_string(),
+                            AUTHORIZATION_KEYS_FILE.to_string(),
+                        ),
+                        (APPROVER_KEY_FILE.to_string(), APPROVER_KEY_FILE.to_string()),
+                        (
+                            ALLOWED_CLUSTERS_FILE.to_string(),
+                            ALLOWED_CLUSTERS_FILE.to_string(),
+                        ),
+                    ]
+                } else {
+                    vec![
+                        (APPROVAL_DOC_FILE.to_string(), APPROVAL_DOC_FILE.to_string()),
+                        (APPROVAL_SIG_FILE.to_string(), APPROVAL_SIG_FILE.to_string()),
+                        (APPROVER_KEY_FILE.to_string(), APPROVER_KEY_FILE.to_string()),
+                        (
+                            ALLOWED_CLUSTERS_FILE.to_string(),
+                            ALLOWED_CLUSTERS_FILE.to_string(),
+                        ),
+                    ]
+                },
             }];
             mounts.extend(projection.config_map_mounts);
             mounts
@@ -3322,12 +3801,60 @@ async fn get_approval(
     client: &kube::Client,
     namespace: &str,
 ) -> Result<Option<Approval>, RestoreError> {
-    let referent = restore.spec.approval_ref_name().trim().to_string();
+    // **ONE `Approval` GET, and `spec.authorization` names it for a
+    // rehearsal** — PLAT-14.3b. The CEL rule makes the two fields mutually
+    // exclusive, so this is a choice between them and never a fallback: an
+    // ordinary `Restore` whose `approvalRef` resolves to nothing must stay
+    // unauthorized rather than pick up a standing document that happens to
+    // exist in the namespace.
+    let referent = standing_approval_name(restore)
+        .unwrap_or_else(|| restore.spec.approval_ref_name().trim().to_string());
     if referent.is_empty() {
         return Ok(None);
     }
     let api: Api<Approval> = Api::namespaced(client.clone(), namespace);
     api.get_opt(&referent).await.map_err(RestoreError::Api)
+}
+
+/// The standing `Approval` this `Restore` names, or `None` for an ordinary
+/// one — PLAT-14.3b.
+///
+/// One accessor, so the five functions that had to learn about
+/// `spec.authorization` cannot each spell the same field access slightly
+/// differently. A blank name is `Some("")` and not `None`: it is a rehearsal
+/// naming nothing, which `admit` refuses terminally, and collapsing it to
+/// `None` would send it down the ordinary approval path instead.
+#[must_use]
+pub fn standing_approval_name(restore: &Restore) -> Option<String> {
+    restore
+        .spec
+        .authorization
+        .as_ref()
+        .map(|a| a.approval_ref.name.trim().to_string())
+}
+
+/// The `(schedule, slot)` a rehearsal `Restore` was created for, from the two
+/// labels `RehearsalSchedule`'s `child_restore` sets — PLAT-14.3b.
+///
+/// **LABELS, BECAUSE THE SLOT IS NOWHERE ELSE.** `spec.authorization` names
+/// the schedule but not the slot, and the slot is what distinguishes one run
+/// of a schedule from the next in the signed scorecard's `triggered_by`. The
+/// schedule is taken from `spec.authorization` rather than from its label,
+/// because the spec is sealed by CEL and a label is not.
+#[must_use]
+fn rehearsal_schedule_and_slot(restore: &Restore) -> Option<(String, String)> {
+    let schedule = restore
+        .spec
+        .authorization
+        .as_ref()
+        .map(|a| a.rehearsal_schedule_ref.name.clone())
+        .filter(|name| !name.trim().is_empty())?;
+    let slot = restore
+        .labels()
+        .get(crate::rehearsal::SLOT_LABEL)
+        .map(|slot| slot.trim().to_string())
+        .filter(|slot| !slot.is_empty())?;
+    Some((schedule, slot))
 }
 
 /// `GET` the target `KafkaCluster`.
@@ -3502,7 +4029,16 @@ async fn write_approval_bundle_config_map(
     let uid = restore
         .uid()
         .ok_or_else(|| RestoreError::NoUid(restore_name.clone()))?;
-    let desired = approval_bundle_config_map(restore, approval, trust, now)?;
+    // PLAT-14.3b: a rehearsal's bundle is the standing one. The
+    // `RehearsalSchedule` reconciler renders the same object from the same
+    // function before it creates the `Restore`, so the create below meets a
+    // 409 whose existing bytes are byte-identical — which
+    // `compatible_approval_bundle` already treats as success.
+    let desired = if restore.spec.authorization.is_some() {
+        standing_bundle_for(restore, approval, trust, now)?
+    } else {
+        approval_bundle_config_map(restore, approval, trust, now)?
+    };
     let bundle_name = approval_bundle_config_map_name(&restore_name);
     let maps: Api<ConfigMap> = Api::namespaced(client.clone(), namespace);
 
@@ -3826,7 +4362,30 @@ async fn reconcile_restore_inner(
         // the `POST` routes present, so it is the count that refuses.
         let approval = get_approval(restore, client, &namespace).await?;
         let cluster = get_target_cluster(restore, client, &namespace).await?;
-        let admission = admit(restore, approval.as_ref(), cluster.as_ref());
+        // **A REHEARSAL RESOLVES TRUST BEFORE IT IS ADMITTED** — PLAT-14.3b.
+        //
+        // For an ordinary Restore trust stays a MATERIALIZATION input, fetched
+        // only once a Job is going to exist, and this `None` keeps that path
+        // byte-for-byte as it was. A standing authorization cannot be judged
+        // that way: "the key may no longer authorise anything new" and "that
+        // key's usage is not an approver's" are facts about the namespace's
+        // resolved trust and are two of D3 §4.3(c)'s four each-slot refusals.
+        // One extra read, for the one kind that needs it.
+        let standing_trust = if restore.spec.authorization.is_some() {
+            Some(resolve_trust(client, &namespace).await?)
+        } else {
+            None
+        };
+        let standing_inputs = standing_trust.as_ref().map(|trust| StandingAdmission {
+            trust,
+            now,
+        });
+        let admission = admit(
+            restore,
+            approval.as_ref(),
+            cluster.as_ref(),
+            standing_inputs.as_ref(),
+        );
         match &admission {
             RestoreAdmission::Ok => {}
             a if a.is_terminal() => {

@@ -2111,7 +2111,7 @@ fn every_exit_code_maps_to_its_wire_reason() {
     );
     assert_eq!(
         TERMINAL_STATES.len(),
-        40,
+        41,
         "the forty terminal states that are NOT an exit code — the original ten, plus \
          `NameTooLong` (errata E5d) and `ReferentNotFound` / `PlanConfigMapConflict` / \
          `ApprovalBundleConflict` / `ApprovalSubjectMismatch` / `JobNameConflict` / \
@@ -2138,7 +2138,11 @@ fn every_exit_code_maps_to_its_wire_reason() {
          table is unchanged and `exitCode` stays absent in all four, plus D3 §5.5 step 6's \
          `PointBindingMismatch` — W5's hand-off, DECLARED here and not yet produced by any \
          runner (see the constant's note for the two `logweir-core`/`logweir` edits that make \
-         it reachable); \
+         it reachable), plus PLAT-14.3b's `StandingAuthorizationRefused` — the standing \
+         rehearsal authorization on `Restore.spec.authorization` does not admit this run \
+         (expired, a key withdrawn between slots, a usage that may not authorise, a plan \
+         outside the signed scope); its own reason and NOT `ApprovalSubjectMismatch`, because \
+         an operator told the latter goes looking at a subject binding that is correct; \
          got {TERMINAL_STATES:?}"
     );
     // D3 §2.2's four are the `RunnerReady` PROJECTION of a diagnosis and not

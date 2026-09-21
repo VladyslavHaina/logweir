@@ -1170,7 +1170,7 @@ async fn the_plan_hash_is_recomputed_from_the_spec_bytes_at_job_creation() {
         "and it is read from INSIDE spec.approvalBytes"
     );
     assert_eq!(
-        admit(&restore, Some(&good), Some(&cluster(true))),
+        admit(&restore, Some(&good), Some(&cluster(true)), None),
         RestoreAdmission::Ok
     );
 }
@@ -1215,7 +1215,7 @@ fn admission_binds_the_complete_verified_subject_identity() {
     let restore = restore();
     let cluster = cluster(true);
     assert_eq!(
-        admit(&restore, Some(&approval(true)), Some(&cluster)),
+        admit(&restore, Some(&approval(true)), Some(&cluster), None),
         RestoreAdmission::Ok
     );
 
@@ -1245,7 +1245,7 @@ fn admission_binds_the_complete_verified_subject_identity() {
             serde_json::from_str(&approval_json(true, &plan_hash(), &plan_hash())).unwrap();
         mutate(&mut value);
         let approval = serde_json::from_value(value).unwrap();
-        let verdict = admit(&restore, Some(&approval), Some(&cluster));
+        let verdict = admit(&restore, Some(&approval), Some(&cluster), None);
         assert!(
             matches!(verdict, RestoreAdmission::ApprovalSubjectMismatch { .. }),
             "{label} must not replay an Approval: {verdict:?}"
@@ -1264,7 +1264,7 @@ fn a_legacy_verified_status_waits_for_subject_provenance_refresh() {
         .remove("verifiedSubjectRef");
     let approval = serde_json::from_value(value).unwrap();
     assert_eq!(
-        admit(&restore(), Some(&approval), Some(&cluster(true))),
+        admit(&restore(), Some(&approval), Some(&cluster(true)), None),
         RestoreAdmission::ApprovalNotVerified {
             approval: APPROVAL.to_string()
         },
@@ -1354,21 +1354,21 @@ async fn an_unreachable_target_cluster_is_terminal_and_creates_nothing() {
     // reported the cluster first would send an operator to look at a broker
     // when the answer is that nobody approved the run.
     assert_eq!(
-        admit(&restore(), None, None),
+        admit(&restore(), None, None, None),
         RestoreAdmission::ApprovalNotVerified {
             approval: APPROVAL.to_string()
         },
         "the approval is checked before the cluster"
     );
     assert_eq!(
-        admit(&restore(), Some(&approval(false)), None),
+        admit(&restore(), Some(&approval(false)), None, None),
         RestoreAdmission::ApprovalNotVerified {
             approval: APPROVAL.to_string()
         },
         "…and an UNVERIFIED approval over an absent cluster still reports the approval"
     );
     assert_eq!(
-        admit(&restore(), Some(&approval(true)), None),
+        admit(&restore(), Some(&approval(true)), None, None),
         RestoreAdmission::ClusterNotReachable {
             cluster: "scratch".to_string()
         },

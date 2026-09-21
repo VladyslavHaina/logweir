@@ -1173,12 +1173,22 @@ async fn the_rendered_bundle_is_what_the_runner_loads() {
         "authorization-keys.json",
         "allowed-clusters.json",
         "approver.pub.pem",
-        // The per-run slot PLAT-14.3b owns.
-        "approval.json",
-        "approval.sig",
     ] {
         assert!(data.contains_key(member), "the bundle carries {member}");
     }
+    // **FIVE MEMBERS, AND NO PER-RUN APPROVAL SLOT** — PLAT-14.3b. D3 W7 wrote
+    // the standing envelope into `approval.json` as a placeholder because
+    // `--approval` was mandatory; the runner then verified it under
+    // `PAYLOAD_TYPE_APPROVAL` and reported a correctly signed rehearsal as a
+    // SUBSTITUTED approval, which is why no rehearsal could execute. The
+    // standing document now REPLACES the per-run approval.
+    for absent in ["approval.json", "approval.sig"] {
+        assert!(
+            !data.contains_key(absent),
+            "a rehearsal bundle carries no per-run approval slot, and {absent} is in it"
+        );
+    }
+    assert_eq!(data.len(), 5, "exactly the five members of the file table");
     assert_eq!(
         data["standing-authorization.sig"]
             .as_str()
@@ -1268,11 +1278,14 @@ async fn the_rendered_bundle_is_what_the_runner_loads() {
     assert_eq!(env[wire::VERSION_ENV], "2");
     assert_eq!(env[wire::AUTHORIZATION_KIND_ENV], "standing");
     assert_eq!(env[wire::REHEARSAL_SCHEDULE_UID_ENV], SCHEDULE_UID);
-    assert_eq!(env[wire::APPROVAL_SHA256_ENV], digest_of("approval.json"));
-    assert_eq!(
-        env[wire::APPROVAL_SIDECAR_SHA256_ENV],
-        digest_of("approval.sig")
-    );
+    // The two per-run approval digests are NOT emitted: the runner refuses a
+    // `standing` contract that pins them (PLAT-14.3b).
+    for absent in [wire::APPROVAL_SHA256_ENV, wire::APPROVAL_SIDECAR_SHA256_ENV] {
+        assert!(
+            !env.contains_key(absent),
+            "a standing contract pins no per-run approval digest, and {absent} is set"
+        );
+    }
     assert_eq!(
         env[wire::APPROVER_KEY_SHA256_ENV],
         digest_of("approver.pub.pem")
@@ -1296,7 +1309,7 @@ async fn the_rendered_bundle_is_what_the_runner_loads() {
     // standing bundle wrote no `logweir.dev/approval-uid` annotation and the
     // environment read it with `.unwrap_or_default()`. This loop is the rule
     // the runner applies, and it is the row that kills that mutant.
-    for name in wire::ALL_ENV {
+    for name in wire::STANDING_MANDATORY_ENV {
         let value = env
             .get(name)
             .unwrap_or_else(|| panic!("{name} is missing from the contract"));
@@ -1327,21 +1340,12 @@ async fn the_rendered_bundle_is_what_the_runner_loads() {
     // applies over the v2 optional members, mirrored here because `weirkeeper`
     // cannot depend on the `logweir` crate (PLAT-14.3b step 7 closes that split
     // with a byte fixture).
-    // NOTE — today `approval.json` and `standing-authorization.json` hold the
-    // SAME bytes, because the per-run slot is a placeholder PLAT-14.3b owns
-    // (see `standing_bundle_config_map`). A mutant that pinned one where the
-    // other belongs is therefore EQUIVALENT while that is true, and stops being
-    // equivalent the moment a real per-run approval fills that slot. The
-    // assertion below is written against the member NAME so it starts
-    // discriminating on that day without being rewritten.
-    assert_eq!(
-        data["standing-authorization.json"]
-            .as_str()
-            .expect("a string"),
-        data["approval.json"].as_str().expect("a string"),
-        "the placeholder duplication this note describes still holds; if this fails, the two \
-         members have diverged and the digest assertions below are now discriminating"
-    );
+    // **THE MUTANT IS NOW DISCRIMINATING.** While the per-run slot held a
+    // duplicate of the standing envelope, pinning one digest where the other
+    // belonged was an EQUIVALENT mutant and this file said so. PLAT-14.3b
+    // removed the duplicate, so `standing-authorization.json` is the only
+    // member carrying those bytes and the three assertions below kill a
+    // mutant that swaps any of them.
     for (pinned, member) in [
         (
             wire::AUTHORIZATION_SHA256_ENV,
@@ -1619,16 +1623,22 @@ async fn the_per_target_walk_stops_at_the_first_live_rehearsal() {
     assert_eq!(last_skip(&bodies).as_deref(), Some("TargetBusy"));
 }
 
-/// **Review finding F3, the operator-visible half.** A rehearsal `Restore` this
-/// build's `Restore` reconciler refused with `ApprovalNotReceived` — because
-/// `admit`, `get_approval`, `triggered_by`, `runner_argv` and `runner_job_spec`
-/// all resolve `spec.approvalRef` only and do not read `spec.authorization` —
-/// is reported under its OWN reason, naming the missing arm and PLAT-14.3b.
+/// **PLAT-14.3b lifted the hold.** Until 14.3b the `Restore` reconciler
+/// refused every standing `Restore` with `ApprovalNotReceived` before a Job
+/// could exist, and this schedule reported that under its own reason
+/// `StandingAuthorizationNotAdmitted`, naming the five unwired functions.
+/// `restore.rs` now reads `spec.authorization`, so that reason is GONE: a
+/// standing `Restore` that ends terminally ended for a reason about this
+/// rehearsal, and it is recorded as the failure it is.
 ///
-/// Reporting it as `Failed` would send an operator to look at their archive,
-/// their broker and their approver's key, none of which is the problem.
+/// The case here is the one the old hold would have swallowed: an
+/// authorization the `Restore` reconciler refused at admission
+/// (`StandingAuthorizationRefused` — expired, a withdrawn key, a wrong usage,
+/// a plan outside the signed scope). It is `RehearsalHealthy=False/Failed`
+/// with the Restore's own terminal reason in the message, and D3 §4's
+/// `rehearsalLast*` still records the attempt.
 #[tokio::test]
-async fn a_child_refused_for_the_unwired_standing_arm_says_so_by_name() {
+async fn a_rehearsal_whose_authorization_was_refused_is_recorded_as_a_failure() {
     let refused = json!({
         "apiVersion": "logweir.dev/v1alpha1",
         "kind": "Restore",
@@ -1646,7 +1656,7 @@ async fn a_child_refused_for_the_unwired_standing_arm_says_so_by_name() {
             "target": {"clusterRef": {"name": TARGET}, "mode": "scratch", "topicNaming": {"prefix": "rehearsal-"}},
             "deadlineSeconds": 3600
         },
-        "status": {"phase": "Failed", "exitReason": "ApprovalNotReceived"}
+        "status": {"phase": "Failed", "exitReason": "StandingAuthorizationRefused"}
     });
     let mut table = happy_routes();
     table.push(Route {
@@ -1675,23 +1685,20 @@ async fn a_child_refused_for_the_unwired_standing_arm_says_so_by_name() {
         .clone();
     assert_eq!(health["status"], "False");
     assert_eq!(
-        health["reason"], "StandingAuthorizationNotAdmitted",
-        "a rehearsal that never ran is not a rehearsal that failed"
+        health["reason"], "Failed",
+        "PLAT-14.3b landed, so a refused authorization is a rehearsal FAILURE and not a hold"
     );
     let message = health["message"].as_str().expect("a message");
-    for named in [
-        "admit",
-        "get_approval",
-        "triggered_by",
-        "runner_argv",
-        "runner_job_spec",
-        "PLAT-14.3b",
-    ] {
-        assert!(
-            message.contains(named),
-            "the message names {named}: {message}"
-        );
-    }
+    assert!(
+        message.contains("StandingAuthorizationRefused"),
+        "the message names the Restore's own terminal reason: {message}"
+    );
+    // THE HOLD IS GONE, AND NOTHING MAY REINTRODUCE IT UNDER ANOTHER NAME.
+    let whole = patch.to_string();
+    assert!(
+        !whole.contains("StandingAuthorizationNotAdmitted") && !whole.contains("PLAT-14.3b"),
+        "the PLAT-14.3b hold must not survive the task that closed it: {whole}"
+    );
 }
 
 /// And an ORDINARY failure is still `Failed`: the hold reason must not swallow

@@ -107,26 +107,6 @@ pub const REASON_NO_RESULT: &str = "NoResult";
 pub const REASON_PASSED: &str = "Passed";
 /// `RehearsalHealthy`'s reason for a fail.
 pub const REASON_FAILED: &str = "Failed";
-/// `RehearsalHealthy`'s reason when the child was refused because THIS BUILD's
-/// `Restore` reconciler does not yet read `spec.authorization` — PLAT-14.3b.
-///
-/// ITS OWN REASON, AND NOT `Failed`. A rehearsal that never ran is not a
-/// rehearsal that failed, and an operator who reads `Failed` goes looking at
-/// their archive, their broker and their approver's key — none of which is the
-/// problem. The message names the five `restore.rs` functions that must gain a
-/// standing arm, so the next person to look does not have to rediscover them.
-pub const REASON_STANDING_NOT_ADMITTED: &str = "StandingAuthorizationNotAdmitted";
-
-/// The sentence [`REASON_STANDING_NOT_ADMITTED`] carries.
-pub const STANDING_NOT_ADMITTED_MESSAGE: &str = concat!(
-    "the rehearsal was created and its bundle was written, but this build's Restore reconciler ",
-    "refused it with ApprovalNotReceived: `admit`, `get_approval`, `triggered_by`, `runner_argv` ",
-    "and `runner_job_spec` in controllers/restore.rs all resolve spec.approvalRef only and do ",
-    "not read spec.authorization, and the runner's own standing check sits BESIDE a per-run ",
-    "approval that no unattended controller can mint. Tracked as PLAT-14.3b; no rehearsal can ",
-    "execute until it lands, and this schedule is not at fault"
-);
-
 /// The steady requeue. A cron with a one-minute resolution needs to be looked
 /// at more often than it fires, and a rehearsal's own child changes state
 /// without changing the schedule, so this is the same thirty seconds the
@@ -1601,9 +1581,6 @@ pub struct Observation {
     pub pending_topics: Vec<String>,
     /// The measured recovery time.
     pub rto_seconds: Option<i64>,
-    /// The child was refused with `ApprovalNotReceived` while carrying a
-    /// standing authorization — the PLAT-14.3b hold, not a rehearsal failure.
-    pub standing_not_admitted: bool,
 }
 
 /// Project one `Restore` into [`Observation`].
@@ -1618,16 +1595,16 @@ pub fn observe(restore: Option<&Restore>) -> Observation {
     let passed = terminal
         && outcome.as_deref() == Some("pass")
         && status.and_then(|s| s.exit_code) == Some(0);
-    // THE PLAT-14.3b HOLD, RECOGNISED RATHER THAN LEFT SILENT. A standing
-    // `Restore` that this build's reconciler refused terminally with
-    // `ApprovalNotReceived` says nothing about the archive, the broker or the
-    // approver's key; reporting it as a rehearsal FAILURE would send an operator
-    // to look at all three. It is reported as its own reason, naming the arm
-    // that is missing.
-    let standing_not_admitted = terminal
-        && restore.spec.authorization.is_some()
-        && status.and_then(|s| s.exit_reason.as_deref().or(s.reason.as_deref()))
-            == Some(crate::conditions::TERMINAL_STATE_APPROVAL_NOT_RECEIVED);
+    // **THE PLAT-14.3b HOLD IS GONE.** Until 14.3b the `Restore` reconciler
+    // refused every standing `Restore` with `ApprovalNotReceived` before a Job
+    // could exist, and this projection had to name that separately so an
+    // operator was not sent to look at their archive, their broker and their
+    // approver's key for a rehearsal that never ran. `restore.rs` now reads
+    // `spec.authorization`, so a standing `Restore` that ends terminally
+    // ended for a reason about THIS rehearsal — an expired or withdrawn
+    // authorization (`StandingAuthorizationRefused`), a preflight refusal, a
+    // failed verification — and each is recorded as the failure it is, with
+    // the Restore's own terminal reason in the message.
     Observation {
         restore: Some(restore.name_any()),
         terminal,
@@ -1643,7 +1620,6 @@ pub fn observe(restore: Option<&Restore>) -> Observation {
         rto_seconds: status
             .and_then(|s| s.measured.as_ref())
             .and_then(|m| m.rto_seconds),
-        standing_not_admitted,
     }
 }
 
@@ -1845,13 +1821,7 @@ pub fn status_patch(
     ));
 
     let (health_status, health_reason, health_message) = if observation.terminal {
-        if observation.standing_not_admitted {
-            (
-                "False".to_string(),
-                REASON_STANDING_NOT_ADMITTED.to_string(),
-                STANDING_NOT_ADMITTED_MESSAGE.to_string(),
-            )
-        } else if observation.passed {
+        if observation.passed {
             (
                 "True".to_string(),
                 REASON_PASSED.to_string(),

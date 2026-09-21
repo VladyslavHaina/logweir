@@ -51,12 +51,21 @@ pub const APPROVAL_SIDECAR_SHA256_ENV: &str = "LOGWEIR_EXECUTION_APPROVAL_SIDECA
 pub const APPROVER_KEY_SHA256_ENV: &str = "LOGWEIR_EXECUTION_APPROVER_KEY_SHA256";
 pub const ALLOWED_CLUSTERS_SHA256_ENV: &str = "LOGWEIR_EXECUTION_ALLOWED_CLUSTERS_SHA256";
 
-/// The MANDATORY core, unchanged from v1 and all-or-nothing in both versions.
+/// The MANDATORY core of an APPROVAL-authorized run, unchanged from v1 and
+/// all-or-nothing in both versions.
 ///
 /// It stays thirteen on purpose. A v2 variable added here would make every v1
 /// Job's environment "incomplete" the moment this binary shipped, which is the
 /// opposite of additive — the v2 additions live in [`V2_ENV`] and are
 /// conditional by block.
+///
+/// **PLAT-14.3b: two of the thirteen are the per-run approval's.**
+/// [`APPROVAL_SHA256_ENV`] and [`APPROVAL_SIDECAR_SHA256_ENV`] pin a bundle
+/// member a standing rehearsal has no slot for, so a `standing` contract omits
+/// them and a `standing` contract that pins them is refused. The eleven a run
+/// carries WHATEVER authorized it are [`STANDING_MANDATORY_ENV`]; this array
+/// stays the approval path's complete list, which is what every v1 Job and
+/// every ordinary Restore still emits.
 pub const ALL_ENV: [&str; 13] = [
     VERSION_ENV,
     SUBJECT_API_VERSION_ENV,
@@ -69,6 +78,27 @@ pub const ALL_ENV: [&str; 13] = [
     PLAN_SHA256_ENV,
     APPROVAL_SHA256_ENV,
     APPROVAL_SIDECAR_SHA256_ENV,
+    APPROVER_KEY_SHA256_ENV,
+    ALLOWED_CLUSTERS_SHA256_ENV,
+];
+
+/// The mandatory names a STANDING-authorized run carries — [`ALL_ENV`] minus
+/// the two per-run approval digests (PLAT-14.3b).
+///
+/// `APPROVAL_NAME_ENV` and `APPROVAL_UID_ENV` STAY: they name the standing
+/// `Approval`, which is a real object a human signed and the one an auditor
+/// looks up. What goes is only the pair that pins bundle members a rehearsal
+/// does not have.
+pub const STANDING_MANDATORY_ENV: [&str; 11] = [
+    VERSION_ENV,
+    SUBJECT_API_VERSION_ENV,
+    SUBJECT_KIND_ENV,
+    SUBJECT_NAME_ENV,
+    SUBJECT_NAMESPACE_ENV,
+    SUBJECT_UID_ENV,
+    APPROVAL_NAME_ENV,
+    APPROVAL_UID_ENV,
+    PLAN_SHA256_ENV,
     APPROVER_KEY_SHA256_ENV,
     ALLOWED_CLUSTERS_SHA256_ENV,
 ];
