@@ -538,6 +538,54 @@ def test_every_negative_control_is_judged_by_its_own_sentence() -> None:
         not d1.negative_control_verdict(TIMEOUT_SHAPED, "NEG-09-3a")["harnessCanFail"])
 
 
+# --- the proxy's capture log outlives a row -------------------------------
+STALE = {"at": 1.0, "kind": "job_create", "name": "race-delete",
+         "bodySha256": "old", "paused": True}
+FRESH = {"at": 2.0, "kind": "job_create", "name": "race-delete",
+         "bodySha256": "new", "paused": True}
+
+
+class _StubHarness:
+    """Just enough of `run.py` for `_await_capture`: one poll, no cluster."""
+
+    Failure = RuntimeError
+
+    @staticmethod
+    def wait_until(predicate, *, timeout=0, interval=0, what=""):
+        value = predicate()
+        if not value:
+            raise RuntimeError(f"nothing matched: {what}")
+        return value
+
+
+def _await_with(captures, mark):
+    saved_captures, saved_mark = fenced.captures, fenced.LAST_ARM_MARK
+    fenced.captures = lambda H, kind=None, **kw: [  # type: ignore[assignment]
+        c for c in captures if kind is None or c["kind"] == kind
+    ]
+    fenced.LAST_ARM_MARK = mark
+    try:
+        return fence_rows._await_capture(_StubHarness, "job_create", name="race-delete")
+    except RuntimeError:
+        return None
+    finally:
+        fenced.captures, fenced.LAST_ARM_MARK = saved_captures, saved_mark
+
+
+def test_a_row_never_matches_the_capture_its_previous_run_left() -> None:
+    mark = {fenced.capture_identity(STALE)}
+    row("the capture this row's arm did not see is the one it waits for",
+        (_await_with([STALE, FRESH], mark) or {}).get("bodySha256") == "new")
+    row("MUTANT: with the mark empty, the PREVIOUS run's held request is matched — "
+        "which is the defect of 2026-09-21",
+        (_await_with([STALE, FRESH], set()) or {}).get("bodySha256") == "new"
+        and (_await_with([STALE], set()) or {}).get("bodySha256") == "old")
+    row("a stale capture alone leaves the row waiting rather than measuring",
+        _await_with([STALE], mark) is None)
+    row("`arm` snapshots identities, not just names",
+        fenced.capture_identity(STALE) != fenced.capture_identity(FRESH))
+
+
 def main() -> int:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

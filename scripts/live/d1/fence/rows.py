@@ -843,6 +843,12 @@ def _await_capture(H: Any, kind: str, *, paused: bool = True, timeout: int = 260
                    name: str = "") -> dict[str, Any]:
     def look() -> dict[str, Any] | None:
         for item in reversed(fenced.captures(H, kind)):
+            # NEVER A CAPTURE THE PROXY ALREADY HELD WHEN THIS ROW ARMED. See
+            # `fenced.LAST_ARM_MARK`: the proxy's capture log outlives a row,
+            # and a re-run that matched its own previous held request would
+            # read the cluster before the controller had been asked anything.
+            if fenced.capture_identity(item) in fenced.LAST_ARM_MARK:
+                continue
             if paused and not item.get("paused"):
                 continue
             if name and name not in {item.get("name"), item.get("schedule")}:
@@ -2094,6 +2100,18 @@ def _race_backup(H: Any, name: str, **over: Any) -> dict[str, Any]:
     return H.backup_object(name, **body)
 
 
+def _drop_backup(H: Any, name: str) -> None:
+    """Delete a run of this name if one is already here.
+
+    These rows are re-runnable on purpose. A harness that 409s on its second
+    invocation makes the operator choose between re-running the whole namespace
+    and not re-running the row, and the second is how a red row becomes a row
+    nobody looked at again.
+    """
+    if H.get_opt("backup", name) is not None:
+        H.kn("delete", "backup", name, "--wait=true", timeout=180)
+
+
 def _plan_snapshot(H: Any, backup: dict[str, Any]) -> dict[str, Any]:
     plan = H.plan_of(backup)
     return {
@@ -2120,6 +2138,7 @@ def _delete_between_freeze_and_execution(H: Any, name: str, *, delete: bool) -> 
     # ARM FIRST. The controller sends the runner Job POST within a second of
     # the freeze, and a proxy armed afterwards would be racing the very request
     # it exists to hold.
+    _drop_backup(H, name)
     fenced.arm(H, "job_create", name, "pause")
     obj = H.create(_race_backup(H, name, allUserTopics=selection))
     uid = obj["metadata"]["uid"]
@@ -2189,6 +2208,43 @@ def _delete_between_freeze_and_execution(H: Any, name: str, *, delete: bool) -> 
     }
 
 
+def rediscovery_excludes_the_deleted_topic(H: Any, keep: str, gone: str) -> dict[str, Any]:
+    """D1 §13.2 L-09-3's second branch, second half: *"a retry ... whose fresh
+    discovery excludes `t2`"*.
+
+    WHAT THIS IS AND WHAT IT IS NOT. A schedule-created retry is a NEW `Backup`
+    and therefore a fresh discovery — D1 §7.2 says so in as many words
+    ("Discovery runs per run, so it is never stale; a retry is a new Backup and
+    therefore a fresh discovery"). This measures that fresh discovery directly,
+    with a new dynamic run carrying the same selection, rather than through a
+    `BackupSchedule` with `spec.retry`: the clause under test is what the
+    rediscovery RESOLVES, and the schedule's retry admission (D1 §4.6, which
+    L-04-4 measures) decides only whether one is created. The row records both
+    facts so a reader can see which half came from where — including that the
+    failed attempt is in the product's own retryable class (exit 1,
+    `cadence::is_retryable`).
+    """
+    name = "race-delete-retry"
+    _drop_backup(H, name)
+    H.create(_race_backup(H, name, allUserTopics=only_these_topics(H, [keep, gone])))
+    done = H.wait_for("backup", name, H.terminal, timeout=600,
+                      what="the rediscovery to reach a terminal phase")
+    H.require(
+        (done.get("status") or {}).get("phase") == "Succeeded",
+        f"the rediscovery ended {(done.get('status') or {}).get('phase')} "
+        f"({(done.get('status') or {}).get('reason')})",
+        obj=done,
+    )
+    frozen = H.plan_of(done)["inputs"]["topics"]
+    H.require(
+        gone not in frozen and keep in frozen,
+        f"a discovery run AFTER the deletion froze {frozen}; D1 §13.2 L-09-3 requires the "
+        f"fresh discovery to exclude {gone}",
+        obj=done,
+    )
+    return {"backup": name, "frozenTopics": frozen}
+
+
 def l_09_3a(H: Any) -> dict[str, Any]:
     """L-09-3, first case: a topic deleted between the freeze and the execution.
 
@@ -2227,10 +2283,23 @@ def l_09_3a(H: Any) -> dict[str, Any]:
         dumps={"planAtHold": observed["planAtHold"], "planAfter": observed["planAfter"],
                "receipt": observed["receipt"]},
     )
+    status = observed["backup"]["status"]
+    retry: dict[str, Any] | None = None
+    if status.get("phase") == "Failed":
+        H.require(
+            status.get("exitCode") == 1 and status.get("exitReason") == "operational",
+            "the failed branch must be the retryable one D1 §13.2 names (exit 1); saw "
+            f"exitCode={status.get('exitCode')!r} exitReason={status.get('exitReason')!r}",
+            obj=observed["backup"],
+        )
+        retry = rediscovery_excludes_the_deleted_topic(H, observed["keep"], observed["gone"])
     return {
         "uids": {"backup": observed["uid"], "plan": observed["planAfter"]["uid"]},
         "asserted": {
             "heldRequest": observed["held"],
+            "rediscoveryAfterTheDeletion": retry,
+            "failedAttemptIsRetryable": status.get("phase") != "Failed"
+            or (status.get("exitCode") == 1),
             "clauses": clauses,
             "frozenTopics": observed["planAfter"]["inputs"].get("topics"),
             "planSha256": observed["planAfter"]["sha256"],
@@ -2302,6 +2371,7 @@ def _change_the_source_during_discovery(H: Any, name: str, *, change: bool) -> d
     # the arm matches any `job_create` and the capture is then CHECKED to be
     # the one this row meant. A row that measured some other Job's window would
     # be worse than a row that did not run.
+    _drop_backup(H, name)
     fenced.arm(H, "job_create", "", "pause")
     obj = H.create(
         _race_backup(H, name, sourceRef={"name": cluster_name},

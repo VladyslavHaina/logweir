@@ -1019,6 +1019,28 @@ def proxy_requests(H: Any, since: float = 0.0, *, pod: str | None = None) -> dic
     return proxy_call(H, f"/__requests?since={since}", pod=pod)
 
 
+#: Every capture the proxy already held the last time `arm` was called.
+#:
+#: THE PROXY REMEMBERS ACROSS ROWS, AND THAT ONCE MADE A ROW MEASURE THE
+#: PREVIOUS ROW'S WINDOW. `CAPTURES` lives in the proxy process and survives
+#: every arm, disarm and release; only a pod restart or `/__reset` clears it. A
+#: row that re-ran — or a second row arming the same `kind` and `name` — would
+#: find the EARLIER run's held request waiting for it and read the cluster
+#: before the controller had done anything at all. Observed on 2026-09-21: a
+#: re-run of L-09-3a matched its own previous capture, went straight past the
+#: wait and failed on "no status.execution.inputsRef", which is the harmless
+#: shape of that failure; the dangerous shape is a row that passes.
+#:
+#: Snapshotting here, rather than filtering on a timestamp, keeps the decision
+#: independent of the two clocks involved (the proxy's is the pod's).
+LAST_ARM_MARK: set[tuple[Any, ...]] = set()
+
+
+def capture_identity(item: dict[str, Any]) -> tuple[Any, ...]:
+    """What makes one capture distinguishable from another."""
+    return (item.get("at"), item.get("kind"), item.get("name"), item.get("bodySha256"))
+
+
 def arm(
     H: Any,
     kind: str,
@@ -1030,6 +1052,8 @@ def arm(
     repeat: bool = False,
     pod: str | None = None,
 ) -> dict[str, Any] | None:
+    global LAST_ARM_MARK  # noqa: PLW0603 - one process, one proxy, one arm at a time
+    LAST_ARM_MARK = {capture_identity(item) for item in captures(H, pod=pod)}
     query = (
         f"/__arm?kind={kind}&name={name}&mode={mode}&code={code}&after={after}"
         f"&repeat={'true' if repeat else 'false'}"

@@ -1008,14 +1008,21 @@ def acl_principal_listing() -> list[str]:
     "Logweir happened to agree with a broken broker".
     """
     pod = STATE["environment"]["aclKafkaPod"]
+    # AN UNQUOTED HEREDOC, AND THAT IS THE WHOLE POINT. `<<'EOF'` would write
+    # the seven characters `$D1_BA…` into the properties file and the broker
+    # would answer `SaslAuthenticationException: invalid credentials` — which is
+    # what it did the first time this ran. The delimiter is bare so the shell
+    # INSIDE the container substitutes the Secret-backed variable; nothing in
+    # the body needs quoting for any other reason (no backticks, no backslashes,
+    # no second `$`).
     script = (
-        f"cat > {ACL_CLIENT_PROPERTIES} <<'EOF'\n"
+        f"cat > {ACL_CLIENT_PROPERTIES} <<EOF\n"
         "security.protocol=SASL_PLAINTEXT\n"
         "sasl.mechanism=SCRAM-SHA-512\n"
         "sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule "
-        f'required username="{acl_kafka.BACKUP_USER}" password="PLACEHOLDER";\n'
+        f'required username="{acl_kafka.BACKUP_USER}" password="$D1_BACKUP_PASSWORD";\n'
         "EOF\n"
-    ).replace("PLACEHOLDER", "$D1_BACKUP_PASSWORD")
+    )
     run(KN + ["exec", pod, "--", "sh", "-c", script], timeout=120)
     out = acl_exec(
         "/opt/kafka/bin/kafka-topics.sh",
