@@ -736,6 +736,42 @@ def test_the_spec_comparison_can_say_different() -> None:
         d1.spec_differences(left, short) != [])
 
 
+
+def test_the_digest_control_requires_a_refusal_and_refuses_a_success() -> None:
+    """Review F2: the negative control recorded the product's refusal instead
+    of requiring it, and its wait admitted `Succeeded`."""
+    def phase(name: str) -> dict:
+        return {"status": {"phase": name}}
+    row("L-06-2-cli: a Failed mutated copy is judged",
+        d1.digest_refusal_judged(phase("Failed")) is True)
+    row("L-06-2-cli: a Refused one is judged too",
+        d1.digest_refusal_judged(phase("Refused")) is True)
+    row("L-06-2-cli: a run still going is not judged yet",
+        d1.digest_refusal_judged(phase("Running")) is False
+        and d1.digest_refusal_judged({}) is False)
+    # THE MUTANT THE ROW EXISTS FOR: a controller that EXECUTED the mutated
+    # copy. The pre-fix predicate (`terminal`) returned True here and the row
+    # went green with `refusedForTheDigest: false` in the artifact.
+    row("MUTANT: a SUCCEEDED mutated copy fails the control immediately",
+        not d1.terminal(phase("Running")) and _raises(phase("Succeeded")))
+    row("MUTANT: the pre-fix predicate accepted exactly that",
+        d1.terminal(phase("Succeeded")) is True)
+    # And the reason set is the product's, not "any refusal at all".
+    row("L-06-2-cli: RunPolicyDigestMismatch is in the accepted set",
+        "RunPolicyDigestMismatch" in d1.DIGEST_REFUSALS)
+    row("MUTANT: an unrelated terminal reason is NOT in it",
+        "Operational" not in d1.DIGEST_REFUSALS
+        and "VolumeMountFailed" not in d1.DIGEST_REFUSALS)
+
+
+def _raises(obj: dict) -> bool:
+    try:
+        d1.digest_refusal_judged(obj)
+    except Exception as failed:  # noqa: BLE001 - the point is that it raises
+        return "digest is not being checked" in str(failed)
+    return False
+
+
 def test_the_raw_idempotency_key_never_reaches_an_artifact() -> None:
     captured = json.dumps({
         "argv": ["curl", "-H", "Idempotency-Key: plat06-2-finish.deadbeefcafe", "-X", "POST"],

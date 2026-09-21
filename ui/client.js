@@ -1101,6 +1101,19 @@ const MANUAL_LABELS = Object.freeze({
   scheduleUid: "logweir.dev/schedule-uid",
 });
 
+/** A structured clone of `value`, or `fallback` when there is nothing to copy.
+ *
+ *  NOT A REFERENCE: the schedule object this page read is rendered elsewhere on
+ *  the same card, and a create body that shared a sub-object with it could be
+ *  mutated from either side. NOT A FIELD-BY-FIELD REBUILD either, for the
+ *  reason `manualBackupObject`'s `archive` line gives: a rebuild drops fields
+ *  nobody has thought of yet, silently. */
+function clone(value, fallback) {
+  return value === undefined || value === null
+    ? JSON.parse(JSON.stringify(fallback))
+    : JSON.parse(JSON.stringify(value));
+}
+
 function copyRef(reference) {
   const r = reference || null;
   return r === null || typeof r.name !== "string" ? null : { name: r.name };
@@ -1136,9 +1149,15 @@ export function manualBackupObject(ns, schedule, digest) {
   const spec = {
     sourceRef: copyRef(policy.sourceRef) || { name: "" },
     topics: Array.isArray(policy.topics) ? policy.topics.slice() : [],
-    archive: {
-      url: String((policy.archive || {}).url || ""),
-    },
+    // A STRUCTURAL CLONE OF THE WHOLE `archive`, NOT A REBUILT `{url,
+    // secretRef}` (review F3). `run_policy_spec` -- the builder the product API
+    // calls for body A -- clones the whole `ArchiveRef`, and today that type is
+    // exactly `{url, secretRef}` so the two agree. A field added to it later
+    // would be dropped silently HERE and nowhere else, and the only symptom
+    // would be a terminal `RunPolicyDigestMismatch` after somebody clicked:
+    // the controller recomputes the digest over the fields the object carries,
+    // and a field this page left out changes it.
+    archive: clone(policy.archive, { url: "" }),
     triggeredBy: "manual",
     trigger: { kind: "Manual", attempt: 0 },
     deadlineSeconds: typeof policy.activeDeadlineSeconds === "number"
@@ -1151,19 +1170,13 @@ export function manualBackupObject(ns, schedule, digest) {
       runPolicySha256: digest,
     },
   };
-  const secret = copyRef((policy.archive || {}).secretRef);
-  if (secret !== null) {
-    spec.archive.secretRef = secret;
-  }
+  spec.archive.url = String((policy.archive || {}).url || "");
   const destination = copyRef(policy.destinationRef);
   if (destination !== null) {
     spec.destinationRef = destination;
   }
   if (policy.allUserTopics !== undefined && policy.allUserTopics !== null) {
-    // A STRUCTURED CLONE, not a reference: the schedule object this page read
-    // is rendered elsewhere on the same card, and a create body that shared a
-    // sub-object with it could be mutated from either side.
-    spec.allUserTopics = JSON.parse(JSON.stringify(policy.allUserTopics));
+    spec.allUserTopics = clone(policy.allUserTopics, {});
   }
   return {
     apiVersion: "logweir.dev/v1alpha1",
@@ -1363,6 +1376,35 @@ const legacyApi = Object.freeze({
       const stored = ((existing.metadata || {}).annotations || {})[LEGACY_REQUEST_ANNOTATION];
       if (stored === hash) {
         return { run: existing, schedule: context, replayed: true };
+      }
+      // TWO REFUSALS, NOT ONE (review F5). `idempotency.rs:14-20` separates
+      // them deliberately and the product API answers both:
+      //
+      //   * the object carries THIS mode's request hash and it differs -- the
+      //     intent this panel holds was spent on a different request, which is
+      //     `idempotency_conflict`;
+      //   * the object carries no such hash at all -- it was created by
+      //     something else entirely (a `kubectl` object, an operator, another
+      //     console, the product API with its own `api.logweir.dev/*`
+      //     annotations), which is `state_conflict`: "the object was not
+      //     created by this scope and is NEVER adopted".
+      //
+      // Collapsing the second into the first made the page print "the intent
+      // this panel is holding already created a DIFFERENT request's run",
+      // which is a false sentence about somebody else's object. Nothing is
+      // adopted in either branch -- that is the safety property and it was
+      // always held -- so this is honesty, and the page now says which of the
+      // two happened.
+      if (stored === undefined) {
+        const foreign = new Error(
+          "an object named " + object.metadata.name + " already exists in this namespace and " +
+            "this page did not create it: it carries no request hash of this console's. " +
+            "Nothing was created, and nothing was adopted.",
+        );
+        foreign.kind = "rejected";
+        foreign.status = 409;
+        foreign.reason = "state_conflict";
+        throw foreign;
       }
       const error = new Error(
         "the idempotency intent this panel is holding already created a DIFFERENT request's " +

@@ -3517,11 +3517,18 @@ change of question, and the length prefixes are what stop two fields being
 re-cut into a different pair that hashes the same.
 
 The rule is implemented twice — `crates/logweir-api/src/idempotency.rs`
-(`identity`, `base32_lower`) and `ui/client.js` (`manualBackupName`) — and
-pinned by `ui/tests/fixtures/manual-backup-names.json`, which `ui/tests/d1.spec.js`
-drives the page over and which `scripts/live/d1/run.py`'s `L-06-2-cli` drives
-the real `logweir-api` over, so neither implementation pins only itself. What
-this buys an operator is that the three doors produce **one object**:
+(`identity`, `base32_lower`) and `ui/client.js` (`manualBackupName`) — and one
+file pins both: `ui/tests/fixtures/manual-backup-names.json` records six scope
+tuples and the name each one produces, and **each implementation is held to it
+by its own unit test** —
+`crates/logweir-api/tests/manual_backups.rs::the_manual_run_name_fixture_is_this_routes_own_rule`
+and `ui/tests/d1.spec.js::the_manual_run_name_rule_is_one_rule_and_the_fixture_pins_both_sides`.
+Neither pins only itself, and a drift in either fails a test with no cluster and
+no browser. On top of that, `scripts/live/d1/run.py`'s `L-06-2-cli` re-derives
+every recorded row with the page's own function on a real machine and then
+requires the name the **real** `logweir-api` gave an object it created to equal
+the name the page derives for that same live scope. What this buys an operator
+is that the three doors produce **one object**:
 
 | Door | Who derives the name | What else differs |
 |---|---|---|

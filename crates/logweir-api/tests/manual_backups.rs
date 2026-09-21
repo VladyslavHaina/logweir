@@ -14,6 +14,8 @@
 
 mod support;
 
+use std::collections::BTreeSet;
+
 use serde_json::{json, Value};
 use support::{FakeKube, TestApp, NS_A};
 
@@ -891,4 +893,151 @@ async fn the_shipped_sample_is_what_this_route_creates() {
         "a manual run's execution id is its own UID"
     );
     app.fake.assert_strict();
+}
+
+// ===========================================================================
+// The name rule, pinned across two languages by ONE file
+// ===========================================================================
+
+/// **`ui/tests/fixtures/manual-backup-names.json` is THIS route's own rule, and
+/// this is the Rust half of that pin (review F1).**
+///
+/// A manual `Backup` has no name until its idempotency scope is hashed, so the
+/// name IS the replay guard, and the rule is implemented twice: here, in
+/// [`logweir_api::idempotency::identity`], and in `ui/client.js`'s
+/// `manualBackupName`. Two implementations of a hash agree until the day they
+/// do not.
+///
+/// THE FIXTURE WAS PINNED ON ONE SIDE ONLY, WHICH IS NOT A PIN.
+/// `ui/tests/d1.spec.js` drives the page over every recorded row, and
+/// `scripts/live/d1/run.py`'s `L-06-2-cli` drives the real binary over ONE live
+/// scope — so a change to `ROUTE_CREATE`, [`NAME_PREFIX`], the field order,
+/// `push_field`'s width, `NAME_HASH_CHARS` or the base32 alphabet passed every
+/// gate that runs without a cluster. This row closes that: the six recorded
+/// names are now what BOTH implementations produce, checked in CI, with no
+/// cluster and no browser.
+///
+/// KILLS: any change to the scope document that moves a name — the opener, a
+/// field's position, a length prefix's width, the alphabet, the 26-character
+/// cut, the prefix, or the route literal. Measured: reordering `issuer` and
+/// `subject` in `identity`, widening the length prefix, and taking
+/// `[1..27]` of the base32 instead of `[..26]` each fail this row.
+#[test]
+fn the_manual_run_name_fixture_is_this_routes_own_rule() {
+    use logweir_api::auth::Actor;
+    use logweir_api::idempotency::{self, IdempotencyKey, NAME_HASH_CHARS};
+    use logweir_api::routes::backups::{NAME_PREFIX, ROUTE_CREATE};
+
+    let path = support::repo_root().join("ui/tests/fixtures/manual-backup-names.json");
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| {
+        panic!(
+            "{} is missing ({e}); it is the pin between this route and ui/client.js",
+            path.display()
+        )
+    });
+    let fixture: Value = serde_json::from_str(&text).expect("the fixture is JSON");
+
+    // THE `rule` BLOCK IS THIS CRATE'S OWN CONSTANTS, not prose beside them. A
+    // fixture that described a rule the route does not implement would pass its
+    // own rows and pin nothing.
+    let rule = &fixture["rule"];
+    assert_eq!(
+        rule["prefix"].as_str(),
+        Some(NAME_PREFIX),
+        "the fixture's name prefix is not this route's"
+    );
+    assert_eq!(
+        rule["route"].as_str(),
+        Some(ROUTE_CREATE),
+        "the fixture's route identifier is not this route's"
+    );
+    assert_eq!(
+        rule["hashChars"].as_u64(),
+        Some(NAME_HASH_CHARS as u64),
+        "the fixture keeps a different number of base32 characters"
+    );
+    assert_eq!(
+        rule["fieldOrder"].as_array().map(|f| f
+            .iter()
+            .map(|v| v.as_str().unwrap_or_default().to_string())
+            .collect::<Vec<_>>()),
+        Some(vec![
+            "issuer".to_string(),
+            "subject".to_string(),
+            "namespace".to_string(),
+            "route".to_string(),
+            "key".to_string(),
+        ]),
+        "the fixture names a different scope than D1 §8.2's"
+    );
+    // AND THE ALPHABET IS THE ONE `base32_lower` ACTUALLY EMITS, read out of
+    // the function rather than copied from the document: the 32 five-bit values
+    // 0..31, in order, are exactly twenty bytes of input.
+    let ramp: [u8; 20] = [
+        0x00, 0x44, 0x32, 0x14, 0xc7, 0x42, 0x54, 0xb6, 0x35, 0xcf, 0x84, 0x65, 0x3a, 0x56, 0xd7,
+        0xc6, 0x75, 0xbe, 0x77, 0xdf,
+    ];
+    assert_eq!(
+        idempotency::base32_lower(&ramp),
+        rule["alphabet"].as_str().unwrap_or_default(),
+        "the fixture's alphabet is not the one base32_lower emits"
+    );
+
+    let rows = fixture["rows"].as_array().expect("the fixture has rows");
+    assert!(
+        rows.len() >= 6,
+        "the fixture lost rows; it had six, one per property it is for"
+    );
+    let mut produced: BTreeSet<String> = BTreeSet::new();
+    for row in rows {
+        let scope = &row["scope"];
+        let note = row["note"].as_str().unwrap_or_default();
+        let key_text = scope["key"].as_str().expect("a row's key");
+        let mut headers = http::HeaderMap::new();
+        headers.insert(
+            idempotency::HEADER,
+            key_text.parse().expect("a row's key is a header value"),
+        );
+        // THROUGH `from_headers`, so a row whose key this route would REFUSE
+        // (under 8 characters, over 128, non-visible ASCII) cannot sit in the
+        // fixture claiming a name the route would never mint.
+        let key = IdempotencyKey::from_headers(&headers)
+            .unwrap_or_else(|_| panic!("this route would refuse the key in row: {note}"));
+        let actor = Actor::new(
+            scope["issuer"].as_str().expect("a row's issuer"),
+            scope["subject"].as_str().expect("a row's subject"),
+            "",
+        );
+        let identity = idempotency::identity(
+            &actor,
+            scope["namespace"].as_str().expect("a row's namespace"),
+            scope["route"].as_str().expect("a row's route"),
+            NAME_PREFIX,
+            &key,
+            b"",
+        );
+        assert_eq!(
+            identity.name,
+            row["name"].as_str().unwrap_or_default(),
+            "this route derives a different name from the recorded scope ({note}). The other \
+             implementation is ui/client.js::manualBackupName and ui/tests/d1.spec.js holds it \
+             to the same file."
+        );
+        assert_eq!(
+            identity.name.len(),
+            41,
+            "prefix plus 26 characters ({note})"
+        );
+        produced.insert(identity.name);
+    }
+    // THE LENGTH PREFIX, AS A PROPERTY AND NOT AS A COMMENT. Two of the rows
+    // are the same characters cut in two places — (subject "admin", namespace
+    // "lw-p062-demo") and (subject "", namespace "adminlw-p062-demo") — which
+    // collide under a naive concatenation. Every name being distinct is what
+    // says the 64-bit length prefixes are doing their job on THIS side too.
+    assert_eq!(
+        produced.len(),
+        rows.len(),
+        "two recorded scopes produced the same name: the scope document is ambiguous"
+    );
 }

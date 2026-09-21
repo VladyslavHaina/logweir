@@ -3261,6 +3261,34 @@ def page_derived_name(namespace: str, key: str, *, issuer: str, subject: str) ->
     ).stdout.strip()
 
 
+def page_manual_object(namespace: str, schedule: dict[str, Any], digest: str) -> dict[str, Any]:
+    """The `Backup` THE CONSOLE'S OWN CODE builds for this schedule.
+
+    Review F3: the branch's headline claim is "one CR path through kubectl, the
+    API and the console", and the NAME half of it was measured across
+    implementations while the SPEC half was measured for kubectl-vs-API only --
+    `manualBackupObject` had exactly one caller and its output was compared with
+    the product API's object nowhere. This runs the page's builder, on this
+    machine, against the schedule the API just copied, so the three doors are
+    compared leaf by leaf rather than two of them.
+
+    Like `page_derived_name`, it shells into node and imports `ui/client.js`
+    rather than reimplementing anything: a third implementation would prove that
+    three things agree with each other and nothing about the two that ship.
+    """
+    script = (
+        "import { manualBackupObject } from "
+        f"{json.dumps(str(ROOT / 'ui' / 'client.js'))};\n"
+        f"const schedule = {json.dumps(schedule)};\n"
+        "const object = manualBackupObject("
+        f"{json.dumps(namespace)}, schedule, {json.dumps(digest)});\n"
+        "process.stdout.write(JSON.stringify(object));\n"
+    )
+    return json.loads(
+        run(["node", "--input-type=module", "-e", script], timeout=60, record=False).stdout
+    )
+
+
 def run_policy_copy(schedule: dict[str, Any]) -> dict[str, Any]:
     """The policy half of the `Backup` a manual run of `schedule` becomes.
 
@@ -3291,6 +3319,39 @@ def run_policy_copy(schedule: dict[str, Any]) -> dict[str, Any]:
     if spec.get("destinationRef") is not None:
         copied["destinationRef"] = {"name": spec["destinationRef"]["name"]}
     return copied
+
+
+# The reasons the product uses when a copied `runPolicySha256` does not match
+# the policy fields beside it. `identity::check_run_policy_digest` records the
+# first; the other two are the neighbouring terminal refusals a malformed
+# `scheduleRef` or an unrunnable spec produces, and any of the three is a
+# refusal FOR THIS CASE. Anything else -- including a success -- is not.
+DIGEST_REFUSALS = ("RunPolicyDigestMismatch", "ScheduleRefInvalid", "ExecutionSpecInvalid")
+
+
+def digest_refusal_judged(obj: dict[str, Any]) -> bool:
+    """Has the mutated copy been JUDGED? `Succeeded` is an immediate failure.
+
+    THE FIRST CUT WAITED ON `terminal` AND ONLY *RECORDED* THE REASON (review
+    F2). `terminal` admits `Succeeded`, so a controller that happily EXECUTED a
+    `Backup` whose copied digest does not match its own policy fields -- the
+    exact defect `runPolicySha256` exists to catch -- would have left the row
+    PASS with `refusedForTheDigest: false` buried in the artifact. The row
+    asserted only that this harness's own Python comparison had noticed the
+    edit, which is a statement about the harness and not about the product.
+
+    Raising here rather than returning False matters: a predicate that merely
+    returned False would turn "the product executed it" into a 300-second
+    timeout whose message is about waiting, not about what happened.
+    """
+    phase = (obj.get("status") or {}).get("phase")
+    if phase == "Succeeded":
+        raise Failure(
+            "the controller EXECUTED a Backup whose copied runPolicySha256 does not match its "
+            "own policy fields; the digest is not being checked at all",
+            obj=obj,
+        )
+    return phase in {"Failed", "Refused"}
 
 
 def manual_labels(schedule: dict[str, Any]) -> dict[str, str]:
@@ -3602,6 +3663,25 @@ def l_06_2_cli() -> dict[str, Any]:
             "the shared spec is not D1 section 8.1's manual shape",
             obj=api_spec,
         )
+        # --- 4b. AND THE CONSOLE'S OWN BUILDER, leaf by leaf (review F3) ------
+        # The third door. `ui/client.js::manualBackupObject` is what legacy mode
+        # sends to kube-apiserver; until now nothing compared its output with
+        # the object the product API stores for the same schedule.
+        page_object = page_manual_object(
+            NS, schedule, schedule["status"]["policy"]["runPolicySha256"]
+        )
+        page_diff = spec_differences(api_spec, page_object["spec"])
+        require(
+            not page_diff,
+            "the CONSOLE builds a different spec from the product API for the same schedule: "
+            + "; ".join(page_diff),
+            obj={"api": api_spec, "console": page_object["spec"]},
+        )
+        require(
+            page_object["metadata"]["labels"] == api_labels,
+            f"the console's labels differ: {page_object['metadata']['labels']} vs {api_labels}",
+            obj=page_object,
+        )
         cli_run = await_manual_run(api_name)
         require(
             cli_run["uid"] != api_run["uid"] and cli_run["executionId"] == cli_run["uid"],
@@ -3641,19 +3721,25 @@ def l_06_2_cli() -> dict[str, Any]:
             "noticed a real one either: " + repr(mutated_diff),
             obj=mutated_object,
         )
+        # AND THE CONTROLLER MUST REFUSE IT, BY NAME (review F2).
         refused = wait_for(
             "backup",
             mutated_name,
-            terminal,
+            digest_refusal_judged,
             timeout=300,
-            what="the mutated copy to be judged",
+            what="the mutated copy to be refused",
         )
         refused_condition = condition(refused, "Failed") or {}
-        refusal_is_the_digest = refused_condition.get("reason") in {
-            "RunPolicyDigestMismatch",
-            "ScheduleRefInvalid",
-            "ExecutionSpecInvalid",
-        }
+        refusal_is_the_digest = refused_condition.get("reason") in DIGEST_REFUSALS
+        require(
+            refusal_is_the_digest,
+            "the mutated copy was refused, but not for the reason this control is about. One of "
+            + ", ".join(DIGEST_REFUSALS)
+            + " is what a copied digest beside an edited field must produce; the controller "
+            "recorded " + repr(refused_condition.get("reason")) + ": "
+            + repr(refused_condition.get("message")),
+            obj=refused,
+        )
         kn("delete", "backup", mutated_name, "--ignore-not-found=true", "--wait=false")
 
         return {
@@ -3698,8 +3784,15 @@ def l_06_2_cli() -> dict[str, Any]:
                         (cli_object["metadata"].get("annotations") or {}).keys()
                     ),
                 },
+                "console": {
+                    "builtBy": "ui/client.js::manualBackupObject",
+                    "spec": page_object["spec"],
+                    "labels": page_object["metadata"]["labels"],
+                },
                 "specDifferences": spec_diff,
+                "specDifferencesConsoleVsApi": page_diff,
                 "labelsEqual": api_labels == cli_labels,
+                "consoleLabelsEqual": page_object["metadata"]["labels"] == api_labels,
                 "repeatPostOverTheKubectlObject": {
                     "status": conflict_code,
                     "code": conflict.get("code") if isinstance(conflict, dict) else None,

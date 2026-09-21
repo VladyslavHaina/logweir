@@ -2784,6 +2784,14 @@ export const INTENT_USED_SENTENCE =
   "API refused rather than guessing which of the two you meant. Back up again mints a new intent, " +
   "which is the answer the problem document asks for.";
 
+/** What a `409 state_conflict` means here: the derived name is taken by an
+ *  object this scope did not create, and it is never adopted. */
+export const NAME_TAKEN_SENTENCE =
+  "The name this request derives is already taken by a run this console did not create -- a " +
+  "kubectl run, an operator's, or another console's. Nothing was created and nothing was " +
+  "adopted: a run is only ever answered as yours when it carries this request's own hash. " +
+  "Back up again mints a new intent, which derives a different name.";
+
 /** THE REFUSAL THAT CARRIES A FACT, RENDERED (review F2).
  *
  *  `ui/client.js` decodes the `policy` extension member of a
@@ -2818,6 +2826,19 @@ export function renderRunNowConflict(state) {
       badge("unverified", "intent already used") + " " + esc(INTENT_USED_SENTENCE) + "</p>"
     );
   }
+  // AND THE THIRD 409, WHICH IS ABOUT SOMEBODY ELSE'S OBJECT (review F5).
+  // `state_conflict` means the name this request derives is taken by an object
+  // THIS SCOPE DID NOT CREATE -- a `kubectl` run, an operator's, another
+  // console's -- and it is never adopted. Printing INTENT_USED_SENTENCE for it
+  // said "the intent this panel is holding already created a DIFFERENT
+  // request's run", which is a false statement about a stranger's run and
+  // sends a reader looking for a click nobody made.
+  if (error.reason === "state_conflict") {
+    return (
+      "<p class=\"note\" data-run-now-conflict=\"state_conflict\">" +
+      badge("unverified", "name already taken") + " " + esc(NAME_TAKEN_SENTENCE) + "</p>"
+    );
+  }
   return "";
 }
 
@@ -2830,8 +2851,13 @@ export function offersAnotherRun(view) {
   }
   const state = v.state || {};
   const reason = (state.error || {}).reason;
+  // `state_conflict` JOINS THE TWO (review F5): its only answer is a new
+  // intent, because the derived name is taken and a new intent derives a
+  // different one. A 403 or a 422 is still not answered by spending a fresh
+  // key on the same refused request.
   return state.phase === "failed" &&
-    (reason === "policy_changed" || reason === "idempotency_conflict");
+    (reason === "policy_changed" || reason === "idempotency_conflict" ||
+      reason === "state_conflict");
 }
 
 /** THE "BACK UP NOW" PANEL for one schedule.

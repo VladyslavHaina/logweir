@@ -659,19 +659,28 @@ async function main() {
     await page.click(runNow(twice.metadata.name), { force: true }).catch(() => {});
     await pause(2500);
     const doubled = manualRuns(twice.metadata.name);
+    // BOTH CLICKS MUST REALLY HAVE REACHED THE API (review F6). "One run" is
+    // only idempotence if two requests were made: a page that suppressed the
+    // second click entirely -- a disabled button, a swallowed event -- passes
+    // "one run" identically and proves nothing about the idempotency key. The
+    // third click, after the panel repainted, is the one this counts.
+    const sent = posts.length - before;
+    check(sent >= 2,
+      "only " + sent + " POST(s) reached the API, so 'one run' says nothing about idempotence: " +
+        "the second and third clicks were suppressed by the page, not answered by the key");
     check(doubled.length === 1,
-      "two clicks made " + doubled.length + " runs: " +
+      sent + " clicks reached the API and made " + doubled.length + " runs: " +
         doubled.map((b) => b.metadata.name).join(", "));
     result.created.push({ kind: "Backup", name: doubled[0].metadata.name,
       uid: doubled[0].metadata.uid });
     await shot(page, "05-double-click-one-run");
     record("a double click creates ONE run", {
       schedule: twice.metadata.name,
-      postsObserved: posts.length - before,
+      postsThatReachedTheApi: sent,
       runs: doubled.map((b) => ({ name: b.metadata.name, uid: b.metadata.uid })),
     });
     tracker("double click", "journey 4", {
-      posts: posts.length - before, runs: doubled.length,
+      postsThatReachedTheApi: sent, runs: doubled.length,
     });
 
     // ---------------------------------------------------------------- 5

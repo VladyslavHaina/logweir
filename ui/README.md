@@ -1118,10 +1118,17 @@ lowercase, unpadded RFC 4648 base32 of `sha256` over the length-prefixed tuple
 `(issuer, subject, namespace, route, key)`. That rule now lives in one place
 this page can call, `ui/client.js`'s `manualBackupName`, written to match
 `crates/logweir-api/src/idempotency.rs::identity` byte for byte and PINNED
-against it by `ui/tests/fixtures/manual-backup-names.json` -- which
-`ui/tests/d1.spec.js` drives this function over and which
-`scripts/live/d1/run.py`'s `L-06-2-cli` drives the real `logweir-api` over, so
-neither side pins itself. The scope's issuer and subject are the EMPTY string
+against it by `ui/tests/fixtures/manual-backup-names.json` -- ONE file, and each
+side is held to it by its own unit test:
+`ui/tests/d1.spec.js::the_manual_run_name_rule_is_one_rule_and_the_fixture_pins_both_sides`
+drives this function over every recorded row, and
+`crates/logweir-api/tests/manual_backups.rs::the_manual_run_name_fixture_is_this_routes_own_rule`
+drives `idempotency::identity` over the same rows. Neither side pins itself, and
+a drift in either fails a test with no cluster and no browser.
+`scripts/live/d1/run.py`'s `L-06-2-cli` adds the live leg: it re-derives every
+recorded row with this function on a real machine, and then requires the name
+the real `logweir-api` gave an object it created to equal the name this function
+derives for that same live scope. The scope's issuer and subject are the EMPTY string
 in legacy mode, because a browser behind `kubectl proxy` genuinely holds
 neither: the credential is attached by the proxy, out of the page's sight. The
 consequence is stated rather than hidden -- in legacy mode a run's name is

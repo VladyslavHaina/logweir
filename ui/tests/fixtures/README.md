@@ -205,10 +205,17 @@ prefix, the route identifier, how many base32 characters are kept, the alphabet,
 and the length-prefix width -- and six `rows`, each a scope tuple and the name it produces.
 
 **Both sides pass it, and that is the point.** `ui/tests/d1.spec.js` drives `manualBackupName` over
-every row. `scripts/live/d1/run.py`'s `L-06-2-cli` drives the REAL `logweir-api` in localAdmin mode
-against docker-desktop, asks it to create a manual run under a known key, and fails if the object
-the API server stored is not named what the page's own function says it should be. A fixture only
-one side checked would pin a function to itself.
+every row, and
+`crates/logweir-api/tests/manual_backups.rs::the_manual_run_name_fixture_is_this_routes_own_rule`
+drives `idempotency::identity` over the same rows -- so a drift in either implementation fails a
+unit test, with no cluster and no browser. That Rust row also checks the `rule` block against the
+route's own constants (`NAME_PREFIX`, `ROUTE_CREATE`, `NAME_HASH_CHARS`) and reads the alphabet out
+of `base32_lower` rather than out of this document.
+
+On top of that, `scripts/live/d1/run.py`'s `L-06-2-cli` runs the REAL `logweir-api` in localAdmin
+mode against docker-desktop, re-derives every recorded row with the page's own function on that
+machine, and then fails if the object the API server stored for a live scope is not named what the
+page's function says it should be. A fixture only one side checked would pin a function to itself.
 
 The rows are chosen for what they can catch: the localAdmin actor and an OIDC one; the LEGACY
 scope, whose issuer and subject are empty because a browser behind `kubectl proxy` holds neither;

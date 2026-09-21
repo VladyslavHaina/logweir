@@ -93,6 +93,7 @@ import {
   MANUAL_BACKUP_ROUTE,
   apiClient,
   manualBackupName,
+  manualBackupObject,
   resetMode,
   selectMode,
 } from "../client.js";
@@ -1720,6 +1721,42 @@ test("legacy_mode_creates_d1_section_8_1s_canonical_backup_and_a_double_click_is
   }
 });
 
+test("the_legacy_object_copies_the_whole_archive_block_rather_than_rebuilding_it", async () => {
+  // REVIEW F3. `manualBackupObject` used to rebuild `spec.archive` as
+  // `{url, secretRef}`. `weirkeeper::controllers::backup_schedule::run_policy_spec`
+  // -- the builder the product API calls for body A -- CLONES the whole
+  // `ArchiveRef`, and the controller recomputes `runPolicySha256` over the
+  // fields the stored object carries. So a field added to `ArchiveRef` later
+  // would be dropped by this page and by nothing else, and the only symptom
+  // would be a terminal `RunPolicyDigestMismatch` after somebody clicked.
+  //
+  // The extra key below stands for that future field. It is not in today's
+  // CRD; what the row holds is that the page does not enumerate.
+  const schedule = legacySchedule();
+  schedule.spec.archive = {
+    url: "s3://kafka/logweir",
+    secretRef: { name: "logweir-s3" },
+    somethingArchiveRefGrowsLater: { region: "eu-central-1" },
+  };
+  const object = manualBackupObject("ns", schedule, "sha256:" + "ab".repeat(32));
+  assert.deepEqual(object.spec.archive, schedule.spec.archive,
+    "the archive block is copied whole, not rebuilt field by field");
+  assert.notEqual(object.spec.archive, schedule.spec.archive,
+    "and it is a CLONE: the schedule is rendered elsewhere on the same card, and a create " +
+      "body sharing a sub-object with it could be mutated from either side");
+  object.spec.archive.url = "s3://somewhere-else";
+  assert.equal(schedule.spec.archive.url, "s3://kafka/logweir", "the schedule is untouched");
+
+  // The same property for the dynamic-selection block, which was already
+  // cloned and is now cloned by the same helper.
+  const dynamic = legacySchedule();
+  dynamic.spec.topics = [];
+  dynamic.spec.allUserTopics = { incompleteDiscovery: "Refuse", exclude: { prefixes: ["tmp-"] } };
+  const made = manualBackupObject("ns", dynamic, "sha256:" + "cd".repeat(32));
+  assert.deepEqual(made.spec.allUserTopics, dynamic.spec.allUserTopics);
+  assert.deepEqual(made.spec.topics, [], "topics stays [] beside a dynamic selection");
+});
+
 test("a_deliberate_second_legacy_backup_is_a_second_object_and_a_reused_intent_is_not", async () => {
   await legacyMode();
   const ns = "lw-legacy";
@@ -1769,6 +1806,61 @@ test("the_same_legacy_intent_on_a_different_request_is_refused_and_never_adopted
       },
     );
     assert.equal(cluster.of("backups").length, 1, "and nothing was created or adopted");
+  } finally {
+    resetMode();
+  }
+});
+
+test("a_name_taken_by_a_stranger_is_state_conflict_and_never_an_adoption", async () => {
+  // REVIEW F5. An `AlreadyExists` under the derived name has two meanings and
+  // they are not the same sentence. `crates/logweir-api/src/idempotency.rs`
+  // separates them and the product API answers both; this mode used to collapse
+  // the second into the first and print "the intent this panel is holding
+  // already created a DIFFERENT request's run" about a stranger's object.
+  await legacyMode();
+  const ns = "lw-legacy";
+  const schedule = legacySchedule();
+  const key = "logweir-ui.manual.aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const name = await manualBackupName({
+    issuer: "", subject: "", namespace: ns, route: MANUAL_BACKUP_ROUTE, key: key,
+  });
+  // A run somebody else made under exactly that name: created by kubectl, so
+  // it carries `kubectl.kubernetes.io/last-applied-configuration` and no
+  // request hash of this console's at all.
+  const stranger = {
+    apiVersion: "logweir.dev/v1alpha1", kind: "Backup",
+    metadata: {
+      name: name, namespace: ns, uid: "stranger-uid",
+      annotations: { "kubectl.kubernetes.io/last-applied-configuration": "{}" },
+    },
+    spec: { sourceRef: { name: "source" }, topics: ["t1"] },
+  };
+  const cluster = fakeCluster({ "backupschedules/tz": schedule, ["backups/" + name]: stranger });
+  try {
+    await assert.rejects(
+      () => legacyRun(cluster, ns, key),
+      (error) => {
+        assert.equal(error.reason, "state_conflict",
+          "a name taken by an object this scope did not create is NOT an intent conflict");
+        assert.equal(error.status, 409);
+        assert.match(error.message, /this page did not create it/);
+        return true;
+      },
+    );
+    assert.equal(cluster.of("backups").length, 1, "nothing was created");
+    assert.equal(cluster.store.get("backups/" + name).metadata.uid, "stranger-uid",
+      "and the stranger's object was not adopted, replaced or patched");
+
+    // AND THE PAGE SAYS WHICH OF THE TWO HAPPENED.
+    const line = renderRunNowConflict({
+      phase: "failed", kind: "conflict", error: { reason: "state_conflict" },
+    });
+    assert.match(line, /data-run-now-conflict="state_conflict"/);
+    assert.match(line, /a run this console did not create/);
+    assert.equal(line.indexOf("already created a DIFFERENT request"), -1,
+      "the intent sentence is false of this case and is not rendered for it");
+    assert.ok(offersAnotherRun({ state: { phase: "failed", error: { reason: "state_conflict" } } }),
+      "a new intent derives a different name, so it is the answer here too");
   } finally {
     resetMode();
   }
