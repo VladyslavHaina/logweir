@@ -2178,19 +2178,46 @@ fn with_status_written(backup: &Backup, patch: &Value, at: &StatusVersion) -> Ba
 ///
 /// The condition array CARRIES the execution-contract conditions and
 /// `Verified` ([`carry_conditions`]): a merge patch replaces arrays, and this
-/// builder owns only `JobCreated`.
+/// builder owns `Admitted` and `JobCreated`.
+///
+/// # `Admitted=True` is written here, and defect RESTORE-ADMITTED-DROPPED is
+/// why
+///
+/// `destination_hold_patch` is this kind's only other writer of `Admitted`,
+/// and it only ever writes `False`. That was survivable while every builder
+/// silently deleted the conditions it did not name — the hold's `False` went
+/// off the object the moment a run started. It is not survivable now that
+/// `diagnostics::apply` carries every stored condition this patch is not
+/// about: a `Backup` held for its destination and then admitted would carry
+/// `Admitted=False` while its runner ran, which is a false statement about a
+/// run that plainly WAS admitted.
+///
+/// So the positive is written, exactly as the `Restore` twin writes it and
+/// with `REASON_ADMITTED` for its reason. A condition type with only a
+/// negative writer is a half-answer either way: a console reading `Admitted`
+/// on a running `Backup` used to find nothing at all.
 #[must_use]
 pub fn running_status_patch(backup: &Backup, job_name: &str, now: DateTime<Utc>) -> Value {
     let conditions = carry_conditions(
         backup.status.as_ref().and_then(|s| s.conditions.as_ref()),
-        vec![condition(
-            backup,
-            CONDITION_JOB_CREATED,
-            "True",
-            CONDITION_JOB_CREATED,
-            &format!("the runner Job {job_name} exists and has not finished"),
-            now,
-        )],
+        vec![
+            condition(
+                backup,
+                crate::conditions::CONDITION_ADMITTED,
+                "True",
+                crate::conditions::REASON_ADMITTED,
+                "this Backup's referents resolved and its destination is usable",
+                now,
+            ),
+            condition(
+                backup,
+                CONDITION_JOB_CREATED,
+                "True",
+                CONDITION_JOB_CREATED,
+                &format!("the runner Job {job_name} exists and has not finished"),
+                now,
+            ),
+        ],
     );
     json!({
         "status": {

@@ -1320,14 +1320,31 @@ pub fn apply(base: Value, write: &Write<'_>) -> Value {
             message: Some(d.runner_ready.message.clone()),
         },
     );
-    let mut conditions: Vec<Value> = status
+    let mut owned: Vec<Value> = status
         .get("conditions")
         .and_then(|c| c.as_array())
         .cloned()
         .unwrap_or_default();
-    conditions.retain(|c| c.get("type") != Some(&json!(CONDITION_RUNNER_READY)));
-    conditions.push(json!(next));
-    status.insert("conditions".to_string(), Value::Array(conditions));
+    owned.retain(|c| c.get("type") != Some(&json!(CONDITION_RUNNER_READY)));
+    owned.push(json!(next));
+    // AND EVERY STORED CONDITION THIS PATCH IS NOT ABOUT — defect
+    // RESTORE-ADMITTED-DROPPED. The base builder's array is the array a merge
+    // PATCH will REPLACE, so a type neither the builder nor this fold names is
+    // deleted from the object. `Admitted` was exactly such a type:
+    // `running_status_patch` writes it on the CREATING pass only, and the
+    // second reconcile of an unchanged running `Restore` took it straight back
+    // off — the one statement on the object saying the run had been approved,
+    // gone one pass after it appeared, on an object nothing else re-asserts it
+    // for. It is not a list of types to remember: `upsert_conditions` carries
+    // whatever the object holds, in the order it holds it, so this stays fixed
+    // for the next condition somebody adds.
+    status.insert(
+        "conditions".to_string(),
+        Value::Array(crate::conditions::upsert_conditions(
+            write.conditions,
+            owned,
+        )),
+    );
 
     // ---- the scalar reason ---------------------------------------------
     //

@@ -6489,3 +6489,123 @@ async fn a_conflicting_status_write_stops_the_pass_and_arms_no_ttl() {
         "no TTL is armed on a run whose outcome is not on the server: {seen:?}"
     );
 }
+
+// ===========================================================================
+// RESTORE-ADMITTED-DROPPED — the base-plus-apply path carries every stored
+// condition it does not own
+// ===========================================================================
+
+/// **`Admitted=True` SURVIVES THE SECOND RECONCILE OF AN UNCHANGED RUNNING
+/// `Restore`** — defect RESTORE-ADMITTED-DROPPED.
+///
+/// `running_status_patch` asserts `Admitted` on the CREATING pass only
+/// (`created`), and every later pass over the running Job calls it with
+/// `admitted: false`. A merge patch REPLACES `status.conditions`, so the array
+/// the later pass sent — `JobCreated` plus the folded `RunnerReady` — did not
+/// leave `Admitted` alone, it deleted it. One pass after the controller wrote
+/// "this run was approved", nothing on the object said so, and no later pass
+/// re-asserts it: the approval is not re-read while a Job is in flight. The
+/// comment on the builder said the opposite of what the code did.
+///
+/// Both passes are run for real and the server's merge is applied between
+/// them, so this is what the object would actually hold — not a status literal
+/// asserting what this file's author believes.
+///
+/// KILLS: replacing `conditions::upsert_conditions(write.conditions, owned)`
+/// in `diagnostics::apply` with `owned` — which is the code this row is about.
+/// Also kills carrying `Admitted` with a FRESH `lastTransitionTime`: "admitted
+/// four seconds ago" on a run admitted half an hour ago is a false statement to
+/// an operator, and the same rule `merge_condition` exists for.
+#[tokio::test]
+async fn the_admission_condition_survives_the_second_pass_over_a_running_job() {
+    // ---- PASS 1: admitted, the Job is created --------------------------
+    let (client, _rec, bodies) = mock_client_recording_bodies(admission_routes(
+        200,
+        approval_json(true, &plan_hash(), &plan_hash()),
+        200,
+        cluster_json(true, PLAINTEXT_AUTH),
+    ));
+    let outcome = reconcile_restore(
+        &restore(),
+        &client,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        now(),
+    )
+    .await
+    .expect("the creating pass completes");
+    assert!(outcome.created, "pass 1 creates the Job");
+    let created = patched_statuses(
+        &bodies
+            .lock()
+            .expect("the body recorder is readable")
+            .clone(),
+    );
+    assert_eq!(created.len(), 1, "the creating pass writes once");
+    let admitted_at = created[0]["conditions"]
+        .as_array()
+        .expect("an array")
+        .iter()
+        .find(|c| c["type"] == serde_json::json!("Admitted"))
+        .expect("the creating pass asserts Admitted")["lastTransitionTime"]
+        .as_str()
+        .expect("a lastTransitionTime")
+        .to_string();
+
+    // The object as the API server would hold it after that patch.
+    let mut status = Value::Object(serde_json::Map::new());
+    apply_merge_patch(&mut status, &created[0]);
+    let mut running: Value = serde_json::from_str(&restore_json(PLAN_BYTES, APPROVAL, NAME))
+        .expect("the fixture parses");
+    running["status"] = status;
+    let running: Restore = serde_json::from_value(running).expect("a Restore");
+
+    // ---- PASS 2: the SAME Job, still running, half an hour later -------
+    let (client2, _rec2, bodies2) = mock_client_recording_bodies(running_routes());
+    reconcile_restore(
+        &running,
+        &client2,
+        &unobserved_scorecard,
+        &unverified_evidence,
+        utc(2026, 9, 10, 12, 30),
+    )
+    .await
+    .expect("the running pass completes");
+    let second = patched_statuses(
+        &bodies2
+            .lock()
+            .expect("the body recorder is readable")
+            .clone(),
+    );
+    assert_eq!(second.len(), 1, "the running pass writes once");
+
+    let types: Vec<String> = conditions_of(&second[0])
+        .into_iter()
+        .map(|(t, ..)| t)
+        .collect();
+    assert!(
+        types.iter().any(|t| t == "Admitted"),
+        "the running pass carries the admission it did not re-read; got {types:?}"
+    );
+    assert!(
+        types.iter().any(|t| t == "JobCreated") && types.iter().any(|t| t == "RunnerReady"),
+        "and its own two conditions; got {types:?}"
+    );
+
+    let carried = second[0]["conditions"]
+        .as_array()
+        .expect("an array")
+        .iter()
+        .find(|c| c["type"] == serde_json::json!("Admitted"))
+        .expect("Admitted is present");
+    assert_eq!(
+        carried["status"],
+        serde_json::json!("True"),
+        "carried verbatim, verdict included"
+    );
+    assert_eq!(
+        carried["lastTransitionTime"].as_str(),
+        Some(admitted_at.as_str()),
+        "with its ORIGINAL lastTransitionTime: nothing transitioned, so nothing moved"
+    );
+}

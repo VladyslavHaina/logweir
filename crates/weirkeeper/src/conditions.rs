@@ -1021,6 +1021,57 @@ pub fn merge_condition(
     }
 }
 
+/// `owned` UPSERTED into the conditions the object already carries.
+///
+/// # The rule this writes down
+///
+/// A JSON merge patch REPLACES arrays, so the builder that writes
+/// `status.conditions` writes ALL of it: every type it does not name is
+/// deleted from the object. A builder therefore owes the conditions it does
+/// not own, and "the ones it owes" is not a list somebody remembers to extend
+/// — it is *everything the object carries that this patch is not about*.
+///
+/// [`crate::verification::carry_conditions`] is the older, narrower form: an
+/// explicit allow-list of types to carry. It works until a type nobody put on
+/// the list appears, which is defect RESTORE-ADMITTED-DROPPED — `Admitted` was
+/// on no list, so the second reconcile of an unchanged running `Restore`
+/// deleted the only statement on the object that said the run had been
+/// approved. `e308ab3` reached the same conclusion for the retention
+/// controller from the other end (`EnforcementDegraded` vanished the same
+/// way) and its `conditions()` upserts for exactly this reason.
+///
+/// # Order, and why a steady object still sends nothing
+///
+/// STORED ORDER IS KEPT and a type the object does not yet carry is appended
+/// in `owned`'s order. That is not tidiness: `status_unchanged` compares
+/// arrays element by element, so a rule that reshuffled a steady object's
+/// conditions would make every pass a write and every write a wake-up. Kept
+/// in place, a pass that recomputes the same conditions computes the same
+/// array and sends no patch at all.
+///
+/// An element of `owned` WINS over the stored one of the same `type`: this
+/// pass's answer about a condition it owns is the point of the write. It is a
+/// `Vec<Value>` and not a `Vec<Condition>` for
+/// [`crate::verification::carry_conditions`]'s reason — a round trip through
+/// the struct would re-serialise elements this crate compares byte for byte.
+#[must_use]
+pub fn upsert_conditions(
+    stored: Option<&Vec<crate::crds::Condition>>,
+    owned: Vec<serde_json::Value>,
+) -> Vec<serde_json::Value> {
+    let mut out: Vec<serde_json::Value> = stored
+        .map(|cs| cs.iter().map(|c| serde_json::json!(c)).collect())
+        .unwrap_or_default();
+    for condition in owned {
+        let r#type = condition.get("type").cloned();
+        match out.iter().position(|c| c.get("type").cloned() == r#type) {
+            Some(at) => out[at] = condition,
+            None => out.push(condition),
+        }
+    }
+    out
+}
+
 /// Apply an RFC 7386 JSON merge patch to `target`, exactly as the API server
 /// would.
 ///

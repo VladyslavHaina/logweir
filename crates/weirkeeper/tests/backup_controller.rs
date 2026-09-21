@@ -4881,10 +4881,29 @@ async fn a_running_job_patches_only_the_phase_and_the_job_ref() {
         "no exit code and no evidence while the run is in flight; got {:?}",
         statuses[0]
     );
+    // BY TYPE AND NOT BY POSITION. The running builder now owns two
+    // conditions — `Admitted=True` beside `JobCreated`, because
+    // `destination_hold_patch` is this kind's only other `Admitted` writer and
+    // it only ever writes `False` (defect RESTORE-ADMITTED-DROPPED's `Backup`
+    // half). A positional read of `conditions[0]` is exactly the mistake this
+    // file warns about one row over.
+    let by_type = |want: &str| -> Option<String> {
+        statuses[0]["conditions"]
+            .as_array()?
+            .iter()
+            .find(|c| c["type"] == serde_json::json!(want))?["reason"]
+            .as_str()
+            .map(str::to_string)
+    };
     assert_eq!(
-        statuses[0]["conditions"][0]["reason"].as_str(),
+        by_type("JobCreated").as_deref(),
         Some("JobCreated"),
-        "the condition is `JobCreated`"
+        "the run's own condition is `JobCreated`"
+    );
+    assert_eq!(
+        by_type("Admitted").as_deref(),
+        Some("Admitted"),
+        "and a running `Backup` says it was admitted, rather than saying nothing at all"
     );
     // D3 §2.2 — the progress block, and `RunnerReady` beside `JobCreated` in
     // the SAME array, because a merge patch replaces arrays.
@@ -11663,5 +11682,91 @@ async fn a_conflicting_backup_status_write_stops_the_pass_and_arms_no_ttl() {
             .iter()
             .any(|b| b.method == "PATCH" && path(&b.uri).contains("/jobs/")),
         "no TTL is armed on a run whose outcome is not on the server: {seen:?}"
+    );
+}
+
+// ===========================================================================
+// RESTORE-ADMITTED-DROPPED, the `Backup` twin — the base-plus-apply path
+// carries every stored condition it does not own
+// ===========================================================================
+
+/// **A CONDITION NO BUILDER NAMES SURVIVES THE RUNNING PASS** — the `Backup`
+/// half of defect RESTORE-ADMITTED-DROPPED.
+///
+/// `diagnostics::apply` used to write the base builder's array plus its own
+/// `RunnerReady` and nothing else, so every stored condition outside
+/// `carry_conditions`' hard-coded allow-list was deleted by the merge PATCH.
+/// The list is the defect, not its contents: the next condition type anybody
+/// adds is dropped the same way until somebody remembers to extend it.
+///
+/// The stored condition here is a type NO builder in this crate carries by
+/// name, so it can only survive through the general rule.
+///
+/// KILLS: replacing `conditions::upsert_conditions(write.conditions, owned)`
+/// in `diagnostics::apply` with `owned`.
+#[tokio::test]
+async fn the_running_pass_carries_every_stored_condition_it_does_not_own() {
+    let mut backup = frozen_backup();
+    let stored = weirkeeper::crds::Condition {
+        r#type: "ExternalLifecycleObserved".to_string(),
+        status: "True".to_string(),
+        observed_generation: Some(3),
+        last_transition_time: Some(utc(2026, 11, 9, 3, 10)),
+        reason: Some("BucketRuleDeclared".to_string()),
+        message: Some("a condition type no builder in this crate names".to_string()),
+    };
+    let admitted = weirkeeper::crds::Condition {
+        r#type: "Admitted".to_string(),
+        status: "False".to_string(),
+        observed_generation: Some(3),
+        last_transition_time: Some(utc(2026, 11, 9, 3, 11)),
+        reason: Some("DestinationNotValid".to_string()),
+        message: Some("the destination was not usable yet".to_string()),
+    };
+    backup.status.as_mut().expect("a status").conditions = Some(vec![stored.clone(), admitted]);
+
+    let (client, _seen, bodies) = mock_client_recording_bodies(running_routes());
+    reconcile_backup(
+        &backup,
+        &client,
+        &unobserved_archive,
+        &unverified_evidence,
+        utc(2026, 11, 9, 3, 18),
+    )
+    .await
+    .expect("the running pass completes");
+    let statuses = patched_statuses(&bodies.lock().expect("the body recorder is readable"));
+    assert_eq!(statuses.len(), 1, "the running pass writes once");
+
+    let conditions = statuses[0]["conditions"].as_array().expect("an array");
+    let find = |want: &str| {
+        conditions
+            .iter()
+            .find(|c| c["type"] == serde_json::json!(want))
+    };
+    let carried = find("ExternalLifecycleObserved").unwrap_or_else(|| {
+        panic!(
+            "a stored condition this patch is not about is carried, not deleted; got {conditions:?}"
+        )
+    });
+    assert_eq!(
+        carried["lastTransitionTime"].as_str(),
+        Some("2026-11-09T03:10:00Z"),
+        "carried verbatim, with its ORIGINAL lastTransitionTime"
+    );
+    assert_eq!(carried["reason"].as_str(), Some("BucketRuleDeclared"));
+
+    // AND A CONDITION THE RUNNING BUILDER *DOES* OWN IS REPLACED, not carried:
+    // the destination hold's `Admitted=False` is stale the moment a runner
+    // runs, and carrying it would be the opposite mistake.
+    assert_eq!(
+        find("Admitted").map(|c| c["status"].clone()),
+        Some(serde_json::json!("True")),
+        "this pass's own answer about a condition it owns wins over the stored one; got \
+         {conditions:?}"
+    );
+    assert!(
+        find("JobCreated").is_some() && find("RunnerReady").is_some(),
+        "and the builder's own two are there; got {conditions:?}"
     );
 }

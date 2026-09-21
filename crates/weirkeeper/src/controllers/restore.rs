@@ -2821,12 +2821,21 @@ pub fn running_status_patch(
     now: DateTime<Utc>,
 ) -> Value {
     let mut conditions = Vec::new();
-    // THE ADMISSION CONDITION IS WRITTEN ON THE CREATING PASS ONLY. A later
-    // pass over a running Job re-asserts nothing about an approval it did not
-    // re-read; the condition it wrote is still on the object, and a merge
-    // patch that omitted it would leave it alone anyway — the `conditions`
-    // array is replaced wholesale by a merge patch, so re-sending it on every
-    // pass is what keeps it from being dropped.
+    // THE ADMISSION CONDITION IS ASSERTED ON THE CREATING PASS ONLY, AND
+    // CARRIED ON EVERY LATER ONE. A later pass over a running Job re-asserts
+    // nothing about an approval it did not re-read — but a merge patch
+    // REPLACES `status.conditions`, so leaving the type out of this array does
+    // not leave the stored condition alone, it DELETES it.
+    //
+    // This comment used to say both things at once ("a merge patch that
+    // omitted it would leave it alone anyway" beside "the array is replaced
+    // wholesale"), and the code did the second: defect
+    // RESTORE-ADMITTED-DROPPED, `Admitted=True` present after the pass that
+    // created the Job and gone on the very next reconcile of an unchanged
+    // running `Restore`. The carry is `diagnostics::apply`'s
+    // `upsert_conditions`, which keeps every stored condition this patch is
+    // not about — including this one, with its ORIGINAL `lastTransitionTime`,
+    // because the stored element is carried verbatim.
     if admitted {
         conditions.push(condition(
             restore,
