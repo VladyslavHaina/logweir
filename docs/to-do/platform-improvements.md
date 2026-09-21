@@ -219,8 +219,7 @@ Wave 2 resumes every branch in place with the prompts under
 | PLAT-11.1 | Done | ui-restore-selection, ui-restore-selection-review | Completion record under PLAT-11.1. Integrated into main as `6c2c95e..02426c8`; the same branch fixes the `allowHttp` half of UI-HTTPDOWNGRADE (D2 W13a). |
 | PLAT-18.1 | Done | ui-typed-client, ui-typed-client-review | Completion record under PLAT-18.1; D0 stage 6 (static client migration) done for its own scope. Integrated into main as `fa73824..48d5ec0`. |
 | PLAT-12.1 (immediate slice), PLAT-12.2 (subject slice) | In progress (slices landed) | ui-correct | The guided submit, idempotent durable Restore and subject binding landed with PLAT-13.2 (records under each task); remaining: PLAT-11.2/13.2-backed selection flow and PLAT-19.2 policy routing for 12.1, retry identity for 12.2. |
-| PLAT-17.2 (stage 2) | In progress (stage landed) | plat17-2-authz, plat17-2-authz-review | Partial record under PLAT-17.2. Integrated into main as `24752f4..90ecd0c`. Shared mode is implemented and live-verified locally but not deployable or declarable secure until D0 stages 5 and 7. |
-| PLAT-17.1 (stages 1 and 3) | In progress (stages landed) | plat17-api-finish, plat17-api-review | Partial record under PLAT-17.1. Integrated into main as `4b571d1..de0207c`. Remaining for Done: console image and chart with the API's own RBAC (D0 stage 7), transient-check cancellation once PLAT-03/09.1 exist, `POST …/backups` (PLAT-06.2), SSE (PLAT-14.1), a browser journey through the API, and PLAT-17.2. |
+| PLAT-17.2 (stage 2) | In progress (stage landed) | plat17-2-authz, plat17-2-authz-review | Partial record under PLAT-17.2. Integrated into main as `24752f4..90ecd0c`. Shared mode is implemented and live-verified locally; deployable since D0 stage 7 (PLAT-17.1 Done 2026-09-21) but not declarable secure until D0 stage 5. |
 | PLAT-05.2 | Done | d1w4, d1w8, d1-fence (+ reviews) | Completion record under PLAT-05.2; live on docker-desktop 2026-09-18 behind D1 §13.1's fence. |
 | PLAT-04.2 | Done | d1w2, d1w6, d1w8, d1-fence, d1w7 (+ reviews) | Completion record under PLAT-04.2; live on docker-desktop 2026-09-18 incl. the console journey. |
 | PLAT-09.1 | Done | d2w4, d2w8, d2w12, d2w13, d2w14, fix-discovery-results, lab-refresh-3 (+ reviews) | Completion record under PLAT-09.1; live on docker-desktop 2026-09-18. |
@@ -230,6 +229,7 @@ Wave 2 resumes every branch in place with the prompts under
 | PLAT-05.1 | Done | d1w2, d1w6, d1w7, d1w8, d1-fence, harness-refresh, harness-rows-2/4, fix-trust-upgrade(-2), lab-refresh-4/5 (+ reviews) | Completion record under PLAT-05.1; live on docker-desktop 2026-09-18/19 incl. a real rollback. |
 | PLAT-03.2 | Done | d2w4, d2w9, d2w13, d2w14, fix-runner-checks, d2-status-destination, fix-preflight-approval, harness-rows-6, lab-refresh-3/4/5/6 (+ reviews) | Completion record under PLAT-03.2; live on docker-desktop 2026-09-19. |
 | PLAT-09.2 | Done | d1w5, d1w7, d1w8, fix-discovery-results, lab-refresh-3, plat09-2-rows (+ review) | Completion record under PLAT-09.2; live on docker-desktop 2026-09-21, all seven L-09 rows on one build. |
+| PLAT-17.1 | Done | plat17-api-finish, plat17-api-review, d1w6, d2w12, d3w11, d3w13, lab-refresh-3, plat17-1-stage7 (+ review) | Completion record under PLAT-17.1; D0 stage 7 landed 2026-09-21 (console image, chart deployment under the API's own RBAC, live can-i matrix); residue named in the record. |
 | PLAT-06.2 | In progress (every D1 wave landed; PLAT-04.2, 05.1, 05.2 and 09.2 Done; 06.2 waits on the CLI demonstration beside the UI, the legacy-mode grant and the failed-preflight journey) | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. W1 (the pure cadence engine) landed in main as `6eedc0a..4b54a5c` after review; see the PLAT-04.2 partial record. W3a (the `Backup` run contract: `spec.trigger`, `spec.scheduleRef` with generation and `runPolicySha256`, the selection type with `allUserTopics` requiring `incompleteDiscovery`, `status.selection`, `src/identity.rs`, `src/policy.rs`, the §3.4 vocabulary) landed in `696c81a`/`b334a98` inside `crds-shapes`; a `Backup` naming both `topics` and `allUserTopics` is refused by CEL and, terminally, by admission. W3b (the reconciler consumes the contract; grammar `v2`) landed at `397e37d`; see the PLAT-04.2 partial record. W2 (editable policy, the §4.5 scheduler; `destinationRef` editable) landed at `98257f8`; see the PLAT-05.1/04.2 partial record. W5 (dynamic selection per run through the check runner) landed at `7072b9d`; see the PLAT-09.2 partial record. W6 (cadence previews, `PUT schedules`, `POST backups`) landed at `72751ab`; see the PLAT-06.2 partial record. W4 (retained history; runs detached from the schedule's ownerReference) landed at `6845ffb`; see the PLAT-05.2 partial record. W7, W8 remain. |
 | PLAT-08.x | In progress (every D2 wave landed; PLAT-03.1, 03.2, 07.2 and 09.1 Done; 08.1 waits on U6's minimal-permission table, 08.2 on its inheritance/validation rows) | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. W1 (pure check contract and destination model) and W2 (explicit store options) landed as `c13b0cc..56bd074` after review (ACCEPT after two high and three medium fixes: JSON-form redaction bypass, ambient credentials inheriting the environment). W3 (`logweir_kafka::inventory`: bounded targeted describe, broker count, validate-only `CreateTopics`, error classification where an observed authorization failure makes visibility `limited` and anything unknown is failure, with a real admin-client fault capture because rdkafka 0.36 never invokes `ClientContext::error` for a metadata-only workflow — D2 §4.2 `[VERIFY U5]` corrected) and W5 (`weirkeeper::check`: check Jobs mirroring the execution pod, pod selection by controller owner UID only, framed-stdout relay through the W1 decoder, the full waiting-code table, TTL, plan/chunk/limit modules, the installation policy loader failing closed) landed as `23cec50..b8e62d1` after review (ACCEPT after one high and three medium fixes; 19 mutants killed; the rebase over PLAT-07.1 then routed the inventory client through the reader's `client_config`, removing a drifted copy that could upgrade plaintext to TLS when a CA was present — re-checked ACCEPT; weirkeeper 435, kafka 57). RBAC still owed by W11: `events: list` plus its `manifest_lint` row, the three new kinds' verbs, and a decision on `gc.rs`'s deletes. The reviewers' SEC-PODLOG finding against `controllers::backup::select_job_pod` is closed by `secpodlog` (see the defects table). W6a and W6b (the three Amendment F kinds and the destination sentinel on existing kinds) landed in `46880a3`/`88232f5`/`b334a98` inside `crds-shapes`; W7 (destination resolver, controller, evidence store cache) landed as `27fb924..0b25e95` (see the PLAT-08.1 partial record); W4 (runner `logweir check run`) landed at `537657d` (see the PLAT-03 partial record); W8 (`TopicDiscovery` controller) and W12 (API routes) are in review or in progress. W9, W10, W11, W13, W14 remain. |
 | PLAT-14.x, 15.x, 16.2, 19.1 | In progress (W0–W10 landed; W14 live runs 2026-09-18 and the wave-9/10/11 fixes; PLAT-16.1 Done; 16.2 waits on the degraded condition's live proof, 19.1 on RBAC/old-archive/multi-namespace rows and the keys view (W12), 15.1 on paging/partial access, 14.1/14.2/14.3 on the console waves W11/W12) | [D3](decisions/D3-status-catalog-retention-trust.md) | Operation states, protection freshness, rehearsals, durable catalog, retention enforcement boundary, trust lifecycle; fifteen worker tasks. W4 (`d3-notify`: the shared notification module and `logweir notify deliver`) landed after review (ACCEPT after two high fixes); W3 (`d3-catalog-writer`: signed catalog point records, `list_page`, `logweir catalog sync|list`) landed after review (see the PLAT-15.1 partial record); W0 (the five Amendment G kinds, additive run status, `Restore.spec` additions, the `Approval` enum) landed in `496451a`/`88232f5`/`b334a98` inside `crds-shapes`; W1 (trust lifecycle core, `TrustPolicy` controller, `trust export|migrate-roster`, G8) landed as `64fcd38..5fc1a72` (see the PLAT-19.1 partial record); W8 (`RecoveryCatalog` controller) in progress. W2, W5, W6, W7, W9, W10, W11, W12, W13, W14 remain. |
@@ -331,6 +331,7 @@ surviving. None is fixed yet except where a worker is named.
 | RET-COUNT-EARLY | On lab-refresh-6 at `af64073`, `RetentionPolicy.status.consecutiveRunFailures` reached 3 and `EnforcementDegraded` fired after only TWO enforcement Jobs had been created (the controller's own log shows two "created the retention Job" lines before the condition; the harness's owner census saw both Jobs with a 600 s TTL untouched, so the earlier TTL explanation does not hold) — the retry budget is spent one run early, so the bound D3 §6.5 promises (three failed runs) is applied after two. Evidence: `claude/lab-refresh-6.result.md` §8.2, `d3-live/lr620260919t0446z/state.json#retention-bounded-retry`. Fixed 2026-09-19 in `6d17baf`/`a7ead32`: the extra count was a second harvest of one Job — `start_run`'s 409 `AlreadyExists` arm fell through and nulled `finishedAt`, resurrecting an already-counted run, and a run already harvested in its slot could be started again; the 409 arm now returns without rewriting `lastEnforcement` and a harvested run is not restarted in its slot. `previously_refused()` is deliberately unchanged: the plan digest returning to an earlier run's id is D3 §6.5's "until the reason clears", costs nothing in-slot and is bounded by the budget (review: no CRD field needed). Review `claude/fix-retention-degraded.review.md` ("fix-retention-count") ACCEPT — two Jobs plus an extra same-slot pass count 2, three distinct Jobs count 3; follow-up I1 (an orphan Job after a crash between create and record) recorded under RET-STARTRUN-PATCH-OUTCOME. Live proof: pending lab-refresh-7 (the bounded-retry row). | PLAT-16.2 (D3 W9) |
 | KEYSVIEW-ABSENT-VALID | `ui/pages/keys.js:67-79` renders every key `valid` when `status.expiredKeyIds` is ABSENT — the exact value PLAT-19.1's acceptance forbids ("the keys view labels unevaluated or stale expiry/trust information as unknown, not valid"); found by the lab-refresh-6 review (F2). The D3 W12 console wave (`claude/d3w12`, in review) rewrites the keys view with a §7.7 `unknown` evaluation column — its pass-2 review must prove this exact case (absent `expiredKeyIds` → `unknown`, never `valid`) with a fixture and a mutant before PLAT-19.1 can be Done. | PLAT-19.1 (D3 W12) |
 | RESTORE-ADMITTED-DROPPED | `controllers/restore.rs:3997` writes `Admitted=True` on the creating pass (`running_status_patch(.., created, ..)`), but every later pass over the running Job calls it with `admitted=false` (`:4034`) and `diagnostics::apply` (`src/diagnostics.rs:1299`) takes `conditions` from that base — only `RunnerReady` is merged from the stored array — so the merge PATCH replaces `status.conditions` without `Admitted` and the admission condition disappears on the second reconcile of an unchanged running Restore; the comment at `restore.rs:2793-2798` claims the opposite. The conditions-array class the retention sweep (`e308ab3`) fixed, in the restore/backup running path. Found by the harness-rows-7 worker, whose old-archive row therefore asserts "no `Admitted=False` hold and the Job exists" rather than `Admitted=True` (`claude/harness-rows-7.result.md`, R2.1). Fix (in progress, `claude/status-sweep`): the base-plus-apply path carries every stored condition it does not own, for every `diagnostics::apply` caller; a row that `Admitted=True` keeps its original `lastTransitionTime` across a running pass, mutant-pinned. | PLAT-14.1 (D3 W2 seam) |
+| SECRET-VOLUME-MODE-SWEEP | The console's key Secret volume was unreadable by the non-root container until `7d3698d` set the mount mode/`fsGroup`, and no test could see it; the same check is owed as a class sweep over every other Secret volume mounted into a non-root container — `charts/logweir/templates/identity.yaml`, `config/manager/deployment.yaml` and any runner Job that projects a credential (found by the plat17-1-stage7 review, residue 9; low — those mounts work live today, the sweep is consistency and a guard). Fix (not started): one `chart_lint`/`manifest_lint` row asserting mode/`fsGroup` on every Secret volume of a non-root pod, with a planted mutant. | PLAT-20.2 |
 
 ### Codex batch history (2026-09-14, superseded by the table above)
 
@@ -3135,6 +3136,66 @@ Residue before Done: D0 stage 7 — the console image and chart deployment with 
 own RBAC (the lab still runs the API out of cluster in localAdmin mode; no console
 ServiceAccount exists in the release). SSE belongs to PLAT-14.1 and PLAT-17.2 is its own
 task.
+
+**Completion record — Done (2026-09-21), PLAT-17.1.** The bounded product endpoints landed
+as D0 stages 1 and 3 (`4b571d1`..`de0207c`), the D1/D2/D3 route families (`72751ab`,
+D2 W12, `0202648`..`0ca3386`), SSE (`0202648`, PLAT-14.1's stream), transient-check
+cancellation (D2 W9/W12), `POST …/backups` (D1 W6), and every listed test and both
+acceptance clauses were proven live through the API on lab-refresh-3 (record above). The
+packaging stage — D0 stage 7 — landed as `bdcc721`..`4ab14e1` (`claude/plat17-1-stage7`):
+`Dockerfile.console` builds `logweir-console` (`logweir-api` plus the twenty-two `ui/`
+files at `/ui`, non-root `65532`, no `CMD`, the six-check `scripts/check-image-api.sh`
+asserting the binary names itself and serves exactly the source bytes); the chart's
+`api.console.*` block (D0's `console.*` nested under the chart's existing `api.*`
+principal from D3 W13 — the reconciliation is stated in `charts/logweir/README.md` and in
+D0's 2026-09-21 amendment) renders the Deployment (probes in shared mode, resources,
+`securityContext`, the `<release>-api` ServiceAccount with its bound token, an immutable
+content-addressed config ConfigMap that carries no credential — key, client secret and
+TLS are Secret NAMES the chart never generates), a conditional PDB, the Ingress (TLS Secret
+required), the NetworkPolicy (ingress from the configured controller pods on the console
+port only; egress to DNS, the Kubernetes API and the OIDC CIDRs), and D3 W13's
+per-namespace RoleBindings unchanged. Enabling the console forces the mode: `enabled`
+without `mode` is refused at render time by name; **shared** is the only mode that renders
+a Service or Ingress and is refused without HTTPS `publicBaseUrl`, TLS, or with an ingress
+host that differs from `publicBaseUrl`'s authority; the **in-cluster administrator mode**
+(`localAdmin`) binds loopback, renders nothing another pod can dial, is reached with
+`kubectl port-forward deploy/<release>-api`, and its authorization surface is the
+port-forward permission itself — stated in the README, `docs/install.md` §5e and
+`docs/api.md`, with the residual-O1 disclosure D0:204 requires (the console's session and
+cursor keys sit inside `weirkeeper`'s Job-create authority until D0 stage 5). Live on
+docker-desktop under the lock (`claude/artifacts/plat17-1-stage7/20260921t172502z/`, image
+`sha256:65e57809…`, revision-labelled, applied from the chart's own render into an
+isolated namespace with explicit `mode: localAdmin`): the 85-row `kubectl auth can-i`
+matrix for the ServiceAccount — reads of the console kinds in bound namespaces allowed,
+an unbound namespace, Job and Secret creation and Secret reads all refused; a 20-probe
+smoke through port-forward; 22/22 served bytes equal to the source; the ClusterIP that
+was rendered that day unreachable from inside the cluster (HTTP 000 — the observation
+that removed the Service from administrator mode). Gates: chart_lint 40, manifest_lint,
+workflow_lint, doc_lint, `just chart-check`, `just crds-check`, render-install, `just
+lint`, links; six planted chart/lint mutants killed (no securityContext, a credential in
+the ConfigMap, shared mode without TLS, an ingress host mismatch, `enabled` without a
+mode, a Service in administrator mode). Review `claude/plat17-1-stage7.review.md`
+ACCEPT-WITH-FIXES (F1 the O1 disclosure, F2 the host check, F3 a stale kubeconfig
+sentence, F4 the default mode — decided as above and amended into D0, F5 wording), all
+fixed in `fced88a`..`4ab14e1`; the lean loop's single pass. Residue, none of it this
+task's acceptance: shared mode has never run live in-cluster (no OIDC provider, TLS
+ingress, session or browser — D0 stage 8, PLAT-17.2); NetworkPolicy deny behaviour needs an
+enforcing CNI (D0's own wording); the console keys inside the controller's Job-create
+authority until D0 stage 5 (PLAT-17.2 — shared mode is not declared secure); D0's `policy
+bindings` and `capability flags` values have no config field (PLAT-19.2); CSP and the
+security headers were not re-probed on the deployed image (one `curl -I` in stage 8's
+harness); the live image is `linux/arm64` (this host cannot cross-build; CI's native
+matrix publishes amd64 — the next batch lab refresh runs `scripts/check-image-api.sh` per
+architecture); the shared lab release runs no console pod, and a second full-chart
+release is impossible on one cluster while the chart's ClusterRoles carry fixed names —
+**decided:** the roadmap accepts one full release per cluster (release-scoping those names
+would break existing installs) and components are proved from the chart's render as here;
+Helm's own install/upgrade lifecycle for the component and `bash scripts/ci-check.sh` were
+not run by the worker (the merge gates run the workspace); the `fsGroup`/mode check the
+console's key mount needed is owed as a class sweep over the other Secret volumes
+(defect table, SECRET-VOLUME-MODE-SWEEP). Migration: additive — `api.console.enabled`
+defaults to false; `ui.enabled` and `Dockerfile.ui` are byte-unchanged; rollback is
+disabling the value.
 
 ### PLAT-17.2 — Enforce user identity, roles and audit attribution
 
