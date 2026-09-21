@@ -2464,13 +2464,31 @@ def neg_09_3a(H: Any) -> dict[str, Any]:
     records = (observed["receipt"] or {}).get("records") or {}
     gone = observed["gone"]
     phase = observed["backup"]["status"].get("phase")
+    # L-09-3a'S OWN DECISION, VERBATIM, ON A WORLD WHERE NOTHING WAS DELETED.
+    # The earlier version asserted `phase == "Failed" or records[gone] == 0`,
+    # which an unrelated operational failure would have SATISFIED — recording
+    # this control `pass` and quietly de-certifying the row. Re-using the row's
+    # decision closes that: with the topic present the run either succeeds and
+    # claims records for it, or fails without naming it, and both are refused.
+    clauses = frozen_list_survives_a_deleted_topic(
+        observed["planAtHold"],
+        observed["planAfter"],
+        observed["backup"]["status"],
+        observed["receipt"],
+        gone,
+        observed["failure"]["text"],
+    )
     H.require(
-        phase == "Failed" or records.get(gone, 0) == 0,
+        all(clauses.values()),
         f"{H.DELIBERATE_FAILURE_MARK}: nothing was deleted, and the run ended {phase} with "
-        f"records {records} — so the 0-records reading L-09-3a asserts comes from the "
-        f"deletion and not from the harness. This scenario failing is the expected result.",
+        f"records {records}; L-09-3a's own clauses now read "
+        + "; ".join(f"{k}={v}" for k, v in sorted(clauses.items()))
+        + " — so that reading comes from the deletion and not from the harness. "
+        "This scenario failing is the expected result.",
         obj={"backup": observed["backup"], "receipt": observed["receipt"],
-             "topicsAfter": observed["topicsAfter"]},
+             "topicsAfter": observed["topicsAfter"],
+             "runnerFailure": {k: v for k, v in observed["failure"].items()
+                               if k != "fullText"}},
     )
     return {"uids": {"backup": observed["uid"]},
             "asserted": {"unexpected": "the false assertion held"}}
