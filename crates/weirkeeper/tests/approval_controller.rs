@@ -124,9 +124,6 @@ const NS: &str = "logweir-t16";
 // Builders
 // ---------------------------------------------------------------------------
 
-/// A fixed clock. Every expiry comparison in this file is relative to it, so
-/// no test in here can start failing because a wall clock passed a literal.
-
 /// The `metadata.resourceVersion` every fixture object carries — the thing a
 /// watch always delivers and a hand-built fixture used not to.
 ///
@@ -135,6 +132,8 @@ const NS: &str = "logweir-t16";
 /// ever have been handed. Defect STATUS-PATCH-NO-RV is what its absence hid.
 const FIXTURE_RESOURCE_VERSION: &str = "4071";
 
+/// A fixed clock. Every expiry comparison in this file is relative to it, so
+/// no test in here can start failing because a wall clock passed a literal.
 fn now() -> DateTime<Utc> {
     DateTime::parse_from_rfc3339("2026-09-09T13:00:00Z")
         .expect("a literal RFC 3339 timestamp")

@@ -3535,7 +3535,7 @@ async fn harvest_pass(
     routes.push(route("PATCH", leaked, "{}".to_string()));
     routes.push(plan_config_map_route(digest));
     routes.push(route("POST", "/configmaps", "{}".to_string()));
-    routes.extend(absent_job_routes(&digest, now()));
+    routes.extend(absent_job_routes(digest, at));
     routes.push(route("POST", "/jobs", "{}".to_string()));
     let f = fixture(routes);
     let outcome = run_at(&f, &policy(spec.clone(), status.clone()), at).await;

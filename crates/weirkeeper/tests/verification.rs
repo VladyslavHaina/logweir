@@ -65,7 +65,6 @@ use weirkeeper::verification::{
 // ===========================================================================
 // Paths, fixtures and a scratch evidence tree
 // ===========================================================================
-
 /// The `metadata.resourceVersion` every fixture object carries — the thing a
 /// watch always delivers and a hand-built fixture used not to.
 ///

@@ -82,11 +82,6 @@ const POD: &str = "logweir-restore-incident-4471-abcde";
 /// this run's pod — D-SEAMS **S6**, defect `SEC-PODLOG`.
 const JOB_UID: &str = "bbbbbbbb-0000-4000-8000-0000000000b2";
 
-/// A pod's `ownerReferences` naming `job_uid` as its **controller**.
-///
-/// `kind` and `controller` are parameters because the negative cases are
-/// exactly "one of these three is wrong".
-
 /// The `metadata.resourceVersion` every fixture object carries — the thing a
 /// watch always delivers and a hand-built fixture used not to.
 ///
@@ -95,6 +90,10 @@ const JOB_UID: &str = "bbbbbbbb-0000-4000-8000-0000000000b2";
 /// ever have been handed. Defect STATUS-PATCH-NO-RV is what its absence hid.
 const FIXTURE_RESOURCE_VERSION: &str = "4071";
 
+/// A pod's `ownerReferences` naming `job_uid` as its **controller**.
+///
+/// `kind` and `controller` are parameters because the negative cases are
+/// exactly "one of these three is wrong".
 fn pod_owner_json(kind: &str, job_uid: &str, controller: bool) -> String {
     pod_owner_json_in("batch/v1", kind, job_uid, controller)
 }
