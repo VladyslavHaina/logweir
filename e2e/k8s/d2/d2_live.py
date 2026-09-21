@@ -5180,13 +5180,19 @@ U6_SNAPSHOT_PREFIX = "u6-snapshot"
 
 
 def u6_snapshot_archive() -> None:
+    """`mirror`, not `cp --recursive`: mirror's contract is "make the
+    destination look like the source", with no argument about whether the
+    source's last path segment is appended."""
     mc("rm", "--recursive", "--force", f"a/{U6_BUCKET}/{U6_SNAPSHOT_PREFIX}/", check=False)
-    mc("cp", "--recursive", f"a/{U6_BUCKET}/{U6_ARCHIVE_PREFIX}/",
+    mc("mirror", "--overwrite", "--quiet", f"a/{U6_BUCKET}/{U6_ARCHIVE_PREFIX}/",
        f"a/{U6_BUCKET}/{U6_SNAPSHOT_PREFIX}/", timeout=300)
+    listed = mc("ls", "--recursive", f"a/{U6_BUCKET}/{U6_SNAPSHOT_PREFIX}/").stdout
+    if not listed.strip():
+        raise RuntimeError("the archive snapshot is empty, so no variant could be re-run")
 
 
 def u6_restore_archive() -> None:
-    mc("cp", "--recursive", f"a/{U6_BUCKET}/{U6_SNAPSHOT_PREFIX}/{U6_ARCHIVE_PREFIX}/",
+    mc("mirror", "--overwrite", "--quiet", f"a/{U6_BUCKET}/{U6_SNAPSHOT_PREFIX}/",
        f"a/{U6_BUCKET}/{U6_ARCHIVE_PREFIX}/", timeout=300)
 
 
