@@ -2167,6 +2167,58 @@ async fn a_report_mode_policy_needs_no_evidence_write_grant() {
     assert!(outcome.points_evaluated > 0);
 }
 
+/// A malformed `evidenceWrite` grant does not take a `Report` policy's
+/// evaluation down with it, and in `Enforce` it is the refusal it always was —
+/// carrying the resolver's own sentence.
+///
+/// The second role is resolved from the same read, so its refusal is available
+/// on every pass; it is READ where the credential is needed. Surfacing it at
+/// the resolve would have made `Ready=False/DestinationUnusable` out of a field
+/// a `Report` policy never reads, which is a preview an operator loses over a
+/// deletion they did not ask for.
+#[tokio::test]
+async fn a_malformed_evidence_write_grant_stops_enforcement_and_not_the_preview() {
+    let mut access = four_principals();
+    access["evidenceWrite"]["secret"]["name"] = json!("");
+    let object = destination_with_access(access);
+
+    let report = fixture(routes_for_destination(&six_points(), object.clone()));
+    let previewed = run(&report, &policy(json!({}), json!({}))).await;
+    assert_eq!(previewed.phase, ctrl::RetentionPhase::Evaluated);
+    assert_eq!(previewed.ready_reason, ctrl::REASON_POLICY_READY);
+    assert!(
+        previewed.points_evaluated > 0,
+        "a preview reads no record credential, so it is still a preview"
+    );
+
+    let digest = report.status()["lastEvaluation"]["planSha256"]
+        .as_str()
+        .expect("a digest")
+        .to_string();
+    let mut routes = routes_for_destination(&six_points(), object);
+    routes.push(plan_config_map_route(&digest));
+    routes.push(route("POST", "/configmaps", "{}".to_string()));
+    routes.extend(absent_job_routes(&digest, now()));
+    routes.push(route("POST", "/jobs", "{}".to_string()));
+    let f = fixture(routes);
+    let outcome = run(&f, &policy(enforcing(Some(&digest)), json!({}))).await;
+
+    assert_eq!(
+        outcome.enforced_reason,
+        ctrl::REASON_EVIDENCE_GRANT_UNUSABLE
+    );
+    assert!(f.posted("/jobs").is_empty());
+    let message = f.condition(ctrl::CONDITION_ENFORCED)["message"]
+        .as_str()
+        .expect("a message")
+        .to_string();
+    assert!(
+        message.contains("evidenceWrite") && message.contains("nothing was deleted"),
+        "the resolver's own sentence, and the reassurance every retention refusal owes: \
+         {message}"
+    );
+}
+
 /// `evidence_credential` itself, at the three answers a Job can get — the pure
 /// half of the four rows above.
 #[test]
@@ -2177,17 +2229,18 @@ fn the_record_credential_is_decided_in_one_pure_place() {
         secret_access_key_key: "ekey".to_string(),
         session_token_key: token.map(str::to_string),
     };
-    let projected = ctrl::evidence_credential(&resolved_for(keys(None)), true).expect("projected");
+    let projected =
+        ctrl::evidence_credential(Ok(&resolved_for(keys(None))), true).expect("projected");
     assert_eq!(
         projected.len(),
         2,
         "two variables when no token is declared"
     );
     let with_token =
-        ctrl::evidence_credential(&resolved_for(keys(Some("t"))), true).expect("projected");
+        ctrl::evidence_credential(Ok(&resolved_for(keys(Some("t")))), true).expect("projected");
     assert_eq!(with_token.len(), 3);
 
-    let undeclared = ctrl::evidence_credential(&resolved_for(keys(None)), false)
+    let undeclared = ctrl::evidence_credential(Ok(&resolved_for(keys(None))), false)
         .expect_err("an undeclared evidenceWrite is refused");
     assert!(
         undeclared.contains("spec.access.evidenceWrite"),
@@ -2195,9 +2248,11 @@ fn the_record_credential_is_decided_in_one_pure_place() {
          default is what this refuses: {undeclared}"
     );
     let workload = ctrl::evidence_credential(
-        &resolved_for(weirkeeper::destination::ResolvedGrant::WorkloadIdentity {
-            service_account_name: "sa".to_string(),
-        }),
+        Ok(&resolved_for(
+            weirkeeper::destination::ResolvedGrant::WorkloadIdentity {
+                service_account_name: "sa".to_string(),
+            },
+        )),
         true,
     )
     .expect_err("a grant with no static keys is refused");

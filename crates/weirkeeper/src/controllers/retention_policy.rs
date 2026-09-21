@@ -1346,7 +1346,10 @@ impl Pass<'_> {
             match self
                 .start_run(
                     &resolved,
-                    &roles.secondary,
+                    roles
+                        .secondary
+                        .as_ref()
+                        .map_err(std::convert::AsRef::as_ref),
                     roles.secondary_declared,
                     &plan_bytes,
                     &plan_sha256,
@@ -1640,7 +1643,7 @@ impl Pass<'_> {
     async fn start_run(
         &self,
         resolved: &ResolvedDestination,
-        evidence: &ResolvedDestination,
+        evidence: Result<&ResolvedDestination, &destination::DestinationRefusal>,
         evidence_declared: bool,
         plan_bytes: &[u8],
         plan_sha256: &str,
@@ -1661,7 +1664,7 @@ impl Pass<'_> {
             Err(message) => {
                 warn!(
                     policy = %self.name, namespace = %self.namespace,
-                    destination = %evidence.name,
+                    destination = %self.policy.spec.destination_ref.name,
                     "no usable evidenceWrite grant; no retention Job is created"
                 );
                 return Ok(StartOutcome::EvidenceGrantUnusable(message));
@@ -3196,9 +3199,22 @@ pub struct EnforcementDecision {
 ///
 /// The operator-facing sentence, naming `spec.access.evidenceWrite`.
 pub fn evidence_credential(
-    evidence: &ResolvedDestination,
+    evidence: Result<&ResolvedDestination, &destination::DestinationRefusal>,
     declared: bool,
 ) -> Result<Vec<crate::job::EnvFromSecret>, String> {
+    // THE SECOND ROLE'S OWN REFUSAL, READ HERE AND NOWHERE EARLIER. It is
+    // always about `spec.access.evidenceWrite` — every role-independent check
+    // has already passed for the archive resolution — and a `Report` policy
+    // reads no record credential at all, so surfacing it at the resolve would
+    // have failed a pass over a field that pass never uses.
+    let evidence = match evidence {
+        Ok(resolved) => resolved,
+        Err(refusal) => {
+            return Err(format!(
+                "{refusal}; no Job was created and nothing was deleted"
+            ))
+        }
+    };
     let where_ = format!("BackupDestination {}/{}", evidence.namespace, evidence.name);
     if !declared {
         return Err(format!(

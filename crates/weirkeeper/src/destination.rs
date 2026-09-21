@@ -1883,8 +1883,18 @@ pub struct ResolvedRoles {
     /// URL are the same on both; only [`ResolvedDestination::grant`] and
     /// [`ResolvedDestination::role`] differ.
     pub primary: ResolvedDestination,
-    /// The second role's resolution, from the same object and the same read.
-    pub secondary: ResolvedDestination,
+    /// The second role's resolution from the same object and the same read, or
+    /// the refusal its grant produced.
+    ///
+    /// A `Result` AND NOT AN ERROR OF THE WHOLE CALL, because only the CALLER
+    /// knows when the second role matters. Every check before the grant —
+    /// identity, the location, engine compatibility, the object's own `Valid`
+    /// verdict — is role-independent and has already passed for `primary`, so a
+    /// refusal here is always about `spec.access.<secondary>` alone. A caller
+    /// that needs the role on some passes and not others (retention: only in
+    /// `Enforce`) would otherwise have to fail a pass over a field that pass
+    /// never reads.
+    pub secondary: Result<ResolvedDestination, Box<DestinationRefusal>>,
     /// Whether the object DECLARES the second role's own grant, or
     /// [`secondary`](Self::secondary) is the documented fall-back — see
     /// [`declares`].
@@ -1925,7 +1935,8 @@ pub fn declares(dest: &BackupDestination, role: DestinationRole) -> bool {
 ///
 /// # Errors
 ///
-/// Whatever [`resolve_ref`] refuses, for EITHER role.
+/// Whatever [`resolve_ref`] refuses for the PRIMARY role. The secondary's own
+/// refusal is carried in [`ResolvedRoles::secondary`] — see there for why.
 pub async fn resolve_ref_roles(
     client: &kube::Client,
     namespace: &str,
@@ -1947,11 +1958,13 @@ pub async fn resolve_ref_roles(
         .into());
     };
     let first = resolve(&dest, primary, policy)?;
-    let second = resolve(&dest, secondary, policy)?;
+    let second = resolve(&dest, secondary, policy);
     let observation = read_ca_bundle(client, &first).await?;
     Ok(ResolvedRoles {
         primary: first.with_ca(&observation)?,
-        secondary: second.with_ca(&observation)?,
+        secondary: second
+            .and_then(|r| r.with_ca(&observation))
+            .map_err(Box::new),
         secondary_declared: declares(&dest, secondary),
     })
 }
