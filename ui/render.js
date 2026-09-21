@@ -1486,6 +1486,25 @@ export const COMPLETION_GUIDANCE = Object.freeze({
     "them.",
 });
 
+/** What a Restore's target mode MEANS, from the moment the run exists.
+ *
+ *  SEPARATE FROM [`COMPLETION_GUIDANCE`], AND EARLIER THAN IT. The completion
+ *  guidance is about what a run PRODUCED and belongs beside its scorecard;
+ *  this is about what the run IS, and the published DTO carries `targetMode`
+ *  at the top level for exactly that reason -- "a rehearsal is a rehearsal
+ *  before its scorecard exists", in the document's own words. A console that
+ *  read the mode only out of the completion panel could not label a Restore
+ *  that had not finished, which is precisely the case where knowing it is a
+ *  rehearsal matters most. */
+export const TARGET_MODE_MEANING = Object.freeze({
+  newTopic:
+    "This run restores into NEW topics. Logweir writes nothing to the original topics and moves " +
+    "no consumer; the original data is not touched by it.",
+  scratch:
+    "This run is a REHEARSAL into a scratch cluster. Its topics are deleted by teardown when it " +
+    "finishes, so nothing an application depends on may be pointed at them.",
+});
+
 /** The three evaluation words a keys view may print, and the ONE that is
  *  printed whenever the freshness question has no answer. */
 export const EVALUATION_UNKNOWN = "unknown";

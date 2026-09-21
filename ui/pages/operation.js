@@ -42,6 +42,7 @@ import {
   HISTORICAL_SUFFIX,
   LEGACY_OPERATION_SENTENCE,
   STATE_UNKNOWN_SENTENCE,
+  TARGET_MODE_MEANING,
   WATCH_SENTENCE,
   badge,
   basisAllowsGreen,
@@ -385,6 +386,43 @@ export function renderEvidence(v) {
   );
 }
 
+/** WHICH MODE THIS RESTORE IS IN, FROM THE MOMENT IT EXISTS.
+ *
+ *  THE RECONCILIATION MOVED `targetMode` TO THE TOP LEVEL AND THIS IS WHAT
+ *  READS IT THERE. The published DTO says why in its own field documentation:
+ *  D3 section 3.5 keys its guidance on `spec.target.mode`, "and that is a fact
+ *  about the run from the moment it is created -- a rehearsal is a rehearsal
+ *  before its scorecard exists. The first round hid it inside `completion`, so
+ *  a Restore that had not finished could not be labelled." The console had the
+ *  field at the top level after the renames and still read it ONLY inside the
+ *  completion panel, which returns nothing at all without a scorecard -- so a
+ *  running, pending or refused rehearsal was unlabelled on screen, which is
+ *  the one case where "these topics are deleted by teardown" is worth saying
+ *  BEFORE the fact.
+ *
+ *  It is deliberately NOT the completion guidance. That guidance is about what
+ *  a run produced and stays beside the scorecard; this says what the run IS. */
+export function renderTargetMode(v) {
+  if (v.kind !== "restore") {
+    return "";
+  }
+  const mode = v.targetMode;
+  if (typeof mode !== "string" || mode.length === 0) {
+    return (
+      "<p class=\"note\" data-target-mode=\"\">This run records no target mode, so this page " +
+      "does not say which one it used: the mode is what decides whether its topics are a " +
+      "rehearsal, and it will not be guessed.</p>"
+    );
+  }
+  const meaning = TARGET_MODE_MEANING[mode];
+  return (
+    "<p class=\"target-mode\" data-target-mode=\"" + esc(mode) + "\">target mode " +
+    badge(mode === "scratch" ? "warn" : "flat", mode) +
+    (typeof meaning === "string" ? " " + esc(meaning) : "") +
+    "</p>"
+  );
+}
+
 /** THE COMPLETION PANEL (D3 section 3.5): what a terminal Restore actually produced,
  *  the sampled counts labelled exactly, and the fixed guidance for the target
  *  mode this restore used.
@@ -485,6 +523,7 @@ export function renderOperation(view) {
         ? ABSENT
         : detailLink(f.kind === "backup" ? "backups" : "history", String(v.ns || ""), f.name)],
     ]) +
+    renderTargetMode(f) +
     "<p class=\"note\" data-transport=\"" + esc(String(meta.transport || "")) + "\">" +
     (meta.transport === "stream"
       ? "Following this operation as a stream."

@@ -76,6 +76,7 @@ import {
   NO_ONE_CLICK_TRUST_SENTENCE,
   RETENTION_SENTENCE,
   SCOPE_LEVEL_OF_INTEGRITY,
+  TARGET_MODE_MEANING,
   TWO_AXES_SENTENCE,
   TWO_HEALTHS_SENTENCE,
   TWO_INSTANTS_SENTENCE,
@@ -101,6 +102,7 @@ import {
   renderOperation,
   renderProgress,
   renderResult,
+  renderTargetMode,
 } from "../pages/operation.js";
 import {
   NOT_EVALUATED_SENTENCE,
@@ -326,6 +328,61 @@ test("the_completion_panel_carries_the_mode_s_own_guidance_and_the_sampled_sente
 
   const none = operationFacts(operationOf("operation-restore-no-record-check.json"), true);
   assert.match(decode(renderCompletion(none)), /No record check ran for this restore/);
+});
+
+test("a_rehearsal_is_labelled_a_rehearsal_before_its_scorecard_exists", () => {
+  // REVIEW SECTION 5 ITEM 5, FINISHED. The reconciliation moved `targetMode`
+  // to the TOP LEVEL of the published view, and the DTO's own field
+  // documentation says why: "that is a fact about the run from the moment it
+  // is created -- a rehearsal is a rehearsal before its scorecard exists. The
+  // first round hid it inside `completion`, so a Restore that had not
+  // finished could not be labelled." The console then read the field from the
+  // top level and STILL only inside `renderCompletion`, which returns the
+  // empty string without a scorecard -- so a pending, running or refused
+  // rehearsal carried no mode on screen at all. That is the one case where
+  // "these topics are deleted by teardown" is worth saying in advance.
+  const running = operationFacts(operationOf("operation-restore-untrusted.json"), true);
+  const unfinished = Object.assign({}, running, {
+    completion: null, terminal: false, state: "running", targetMode: "scratch",
+  });
+  assert.equal(renderCompletion(unfinished), "",
+    "there is no completion panel without a scorecard, which is correct and is the whole point");
+  const label = decode(renderTargetMode(unfinished));
+  assert.match(label, /data-target-mode="scratch"/,
+    "THE MUTANT: read the mode only out of the completion panel and this is the empty string");
+  assert.match(label, /REHEARSAL into a scratch cluster/);
+  assert.match(label, /deleted by teardown/);
+
+  const newTopic = decode(renderTargetMode(
+    Object.assign({}, unfinished, { targetMode: "newTopic" })));
+  assert.match(newTopic, /data-target-mode="newTopic"/);
+  assert.match(newTopic, /restores into NEW topics/);
+  assert.notEqual(TARGET_MODE_MEANING.scratch, TARGET_MODE_MEANING.newTopic);
+
+  // IT IS NOT THE COMPLETION GUIDANCE AND DOES NOT REPLACE IT. One says what
+  // the run IS, the other says what it PRODUCED.
+  assert.equal(label.indexOf(COMPLETION_GUIDANCE.scratch), -1);
+  assert.match(decode(renderCompletion(
+    operationFacts(operationOf("operation-restore-scratch.json"), true))),
+    /These topics are a rehearsal and are deleted by teardown/);
+
+  // A BACKUP HAS NO TARGET MODE AND IS NOT LABELLED WITH ONE.
+  assert.equal(renderTargetMode(
+    operationFacts(operationOf("operation-backup-preparing.json"), true)), "");
+
+  // AND A RESTORE WITH NO RECORDED MODE SAYS SO RATHER THAN GUESSING.
+  const silent = decode(renderTargetMode(Object.assign({}, unfinished, { targetMode: null })));
+  assert.match(silent, /will not be guessed/);
+  assert.equal(silent.indexOf("rehearsal into a scratch cluster"), -1);
+
+  // THE WHOLE VIEW CARRIES IT, not just the helper.
+  const whole = decode(renderOperation({
+    ns: "team-a", kind: "restore", name: "r1", uid: "",
+    document: Object.assign({}, operationOf("operation-restore-untrusted.json"),
+      { completion: undefined, targetMode: "scratch" }),
+    console: true, meta: { transport: "stream" },
+  }));
+  assert.match(whole, /data-target-mode="scratch"/);
 });
 
 test("the_diagnoses_table_says_an_empty_list_is_not_a_healthy_run", () => {
