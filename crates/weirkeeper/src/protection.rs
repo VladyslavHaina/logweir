@@ -756,6 +756,18 @@ impl CatalogEntry {
         }
     }
 
+    /// Whether this entry's own verification axis is one D3 §5.4 calls
+    /// selectable — the catalog's answer to `requireVerifiedEvidence`.
+    ///
+    /// The catalog controller READ the receipt and checked the signature
+    /// against this installation's trust policy. That is the same question
+    /// `objectives.requireVerifiedEvidence` asks, answered by the component
+    /// the credential model gives the key to.
+    #[must_use]
+    pub fn is_verified(&self) -> bool {
+        Self::VERIFIED.contains(&self.verification.as_str())
+    }
+
     /// Whether either axis came through empty.
     ///
     /// # A blank axis is "could not answer", never "your backups are gone"
@@ -1010,19 +1022,45 @@ pub fn is_available(
     if !matches_policy(candidate, spec) {
         return false;
     }
-    if spec.objectives.require_verified_evidence && !candidate.evidence.is_verified() {
-        return false;
-    }
     match catalog {
-        CatalogAnswer::NotConsulted => true,
+        CatalogAnswer::NotConsulted => evidence_objective_met(candidate, spec, None),
         CatalogAnswer::Stale(_) => false,
         // A point the catalog has never heard of is not available when the
         // operator asked for catalog availability: the whole point of the
         // objective is that the bytes were confirmed to be there.
-        CatalogAnswer::Fresh(entries) => {
-            entries_for(candidate, entries).any(CatalogEntry::is_available)
-        }
+        CatalogAnswer::Fresh(entries) => entries_for(candidate, entries)
+            .any(|e| e.is_available() && evidence_objective_met(candidate, spec, Some(e))),
     }
+}
+
+/// `objectives.requireVerifiedEvidence`, asked of whichever component actually
+/// read the signature.
+///
+/// # Why the catalog may answer it, and only where the controller did not
+///
+/// Clause 1 of `PROTECTION-SECRETKEYS-UNPROTECTED`. On a destination whose
+/// `evidenceRead` grant is `SecretKeys` the controller holds no Secret verb,
+/// reaches no verdict, and says so as [`Evidence::NotAttempted`]. Judging the
+/// objective on that non-answer refused the point a second time for a fact the
+/// controller had already admitted it did not have — while the catalog
+/// controller, which the credential model DOES give the key to, had verified
+/// the very same receipt and published `verification: Verified` on the row.
+///
+/// **Narrower than "the catalog decides".** A verdict the controller DID reach
+/// still decides: [`Evidence::Untrusted`] is a signature this installation
+/// refuses, and letting a catalog row overrule it would make `TrustPolicy`
+/// decorative — the thing [`Evidence::is_verified`]'s own contract exists to
+/// prevent. Only `NotAttempted`, the honest "I could not look", defers.
+#[must_use]
+fn evidence_objective_met(
+    candidate: &PointCandidate,
+    spec: &ProtectionPolicySpec,
+    entry: Option<&CatalogEntry>,
+) -> bool {
+    if !spec.objectives.require_verified_evidence || candidate.evidence.is_verified() {
+        return true;
+    }
+    candidate.evidence == Evidence::NotAttempted && entry.is_some_and(CatalogEntry::is_verified)
 }
 
 /// The entries in a fresh view that are about this candidate — D3 §5.1's point
@@ -1509,11 +1547,23 @@ fn open_alert_kinds(
         let degraded = |candidate: &PointCandidate| {
             entries_for(candidate, entries).any(CatalogEntry::is_degraded)
         };
+        // "The point Logweir would have chosen if the bytes were there" — so
+        // the evidence objective is asked as it would have been answered in
+        // that world: a `NotAttempted` candidate belongs here, because a sound
+        // row would have carried `Verified` and satisfied the objective
+        // (`evidence_objective_met`). Reading it as unavailable kept
+        // `ArchiveUnavailable` shut over a broken archive on exactly the
+        // credential posture the documentation recommends. An `Untrusted`
+        // verdict the controller DID reach still excludes the point.
         let mut otherwise: Vec<&PointCandidate> = input
             .candidates
             .iter()
             .filter(|c| {
-                c.recovery_point_at.is_some() && is_available(c, spec, &CatalogAnswer::NotConsulted)
+                c.recovery_point_at.is_some()
+                    && matches_policy(c, spec)
+                    && (!spec.objectives.require_verified_evidence
+                        || c.evidence.is_verified()
+                        || c.evidence == Evidence::NotAttempted)
             })
             .collect();
         otherwise.sort_by_key(|c| std::cmp::Reverse(c.recovery_point_at));

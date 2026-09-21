@@ -1006,6 +1006,86 @@ fn the_catalog_join_falls_back_to_the_archive_set_id() {
     );
 }
 
+/// `requireVerifiedEvidence` is answered by whichever component read the
+/// signature — and a verdict the controller DID reach still decides.
+///
+/// MUTANT: restore the unconditional `if require_verified_evidence &&
+/// !candidate.evidence.is_verified() { return false }` at the top of
+/// `is_available`. The first assertion fails: the objective refuses the point
+/// a second time for a fact the controller has already said it does not have,
+/// and the policy reads `Unprotected` over a catalog row that says `Verified`.
+/// MUTANT 2: widen `evidence_objective_met` to `!candidate.evidence
+/// .is_verified()` — i.e. let the catalog overrule ANY verdict. The
+/// `Untrusted` assertion fails and `TrustPolicy` becomes decorative.
+/// MUTANT 3: ask the objective of `entry.is_available()` instead of
+/// `entry.is_verified()`. The `selectable`-disagrees assertion fails.
+#[test]
+fn the_catalog_answers_the_evidence_objective_only_where_the_controller_did_not() {
+    let spec = spec_with_catalog();
+    let schedules = [healthy_schedule()];
+    let rehearsal = p::RehearsalFacts::default();
+    let unread = [no_receipt_point(2)];
+    let sound = p::CatalogAnswer::Fresh(vec![entry_in_set(
+        &point_id("b-1"),
+        "set-1",
+        "Available",
+        "Verified",
+    )]);
+
+    assert!(
+        p::is_available(&unread[0], &spec, &sound),
+        "the catalog controller IS the component this credential model gives the key to; it \
+         verified this very receipt and published the answer on the row"
+    );
+    let verdict = p::evaluate(&inputs(&spec, &unread, &sound, &schedules, &[], &rehearsal));
+    assert_eq!(verdict.health, p::Health::Healthy);
+    assert!(verdict.open_kinds.is_empty());
+
+    // NEGATIVE CONTROL 1 — a verdict the controller DID reach decides.
+    // `Untrusted` is a signature this installation refuses, and a catalog row
+    // may not overrule it: that is what would make `TrustPolicy` decorative.
+    let refused = p::PointCandidate {
+        evidence: p::Evidence::Untrusted,
+        ..no_receipt_point(2)
+    };
+    assert!(!p::is_available(&refused, &spec, &sound));
+
+    // NEGATIVE CONTROL 2 — the objective is asked of the VERIFICATION AXIS and
+    // not of the materialised `selectable`. A writer that disagrees with
+    // itself does not get to answer a question about signatures.
+    let disagrees = p::CatalogAnswer::Fresh(vec![p::CatalogEntry {
+        selectable: Some(true),
+        ..entry_in_set(&point_id("b-1"), "set-1", "Available", "NotAttempted")
+    }]);
+    assert!(!p::is_available(&unread[0], &spec, &disagrees));
+
+    // NEGATIVE CONTROL 3 — with the objective ON, a point whose bytes the
+    // catalog calls `Missing` is not protection AND is not silence: the
+    // archive alert is the one that says the bytes are gone.
+    let broken = p::CatalogAnswer::Fresh(vec![entry_in_set(
+        &point_id("b-1"),
+        "set-1",
+        "Missing",
+        "Verified",
+    )]);
+    let verdict = p::evaluate(&inputs(
+        &spec,
+        &unread,
+        &broken,
+        &schedules,
+        &[],
+        &rehearsal,
+    ));
+    assert!(!p::is_available(&unread[0], &spec, &broken));
+    assert!(
+        verdict
+            .open_kinds
+            .contains(&p::PolicyAlertKind::ArchiveUnavailable),
+        "PLAT-14.2's `unavailable archive` row, on the credential posture the documentation \
+         recommends"
+    );
+}
+
 // ===========================================================================
 // U — the ledger (tracker rows: REPEATED FAILURE DEDUPLICATION, RECOVERY
 // NOTIFICATION)
@@ -2741,6 +2821,67 @@ fn an_unread_points_capture_time_and_identity_come_from_the_catalog_row() {
         condition(&status, "Protected")["status"].as_str(),
         Some("Unknown"),
         "a point nobody could place is never rendered as protected and never as a failure"
+    );
+}
+
+/// **The defect, end to end, on the shipped objectives.**
+///
+/// `PROTECTION-SECRETKEYS-UNPROTECTED`, measured live on 2026-09-21: a
+/// succeeded run on a destination whose `evidenceRead` grant is `SecretKeys`,
+/// an honest `NotAttempted` verdict, no capture block, no receipt digest — and
+/// a catalog whose row for the same point reads `Available`/`Verified`. The
+/// policy read `health: Unprotected`, D3 §3.2's "no available point at all",
+/// and PAGED with the sentence "there is no available recovery point for this
+/// policy at all" about an archive holding a two-hour-old verified point.
+///
+/// `requireVerifiedEvidence` and `requireCatalogAvailability` are BOTH on here
+/// — `spec_with_catalog` is the shipped fixture — so all three refusing
+/// clauses are in force and the test fails if any one of them is restored.
+#[test]
+fn a_secret_keys_destination_is_protected_and_does_not_page() {
+    let mut routes = read_routes(vec![evidence_unread_backup("b-1", 2)], json!({}));
+    routes.extend(catalog_routes(catalog_entry(
+        "b-1",
+        2,
+        "Available",
+        "Verified",
+    )));
+    routes.push(patch(STATUS_PATH));
+    let spec = {
+        let mut value = spec_value();
+        merge(
+            &mut value,
+            &json!({"protects": {"catalogRef": {"name": CATALOG}}}),
+        );
+        value
+    };
+    let (outcome, _, bodies) = drive(&policy_with(spec, json!({})), routes);
+
+    assert_eq!(outcome.health, p::Health::Healthy);
+    let status = last_status_patch(&bodies);
+    assert_eq!(status["status"]["health"].as_str(), Some("Healthy"));
+    assert_eq!(
+        status["status"]["availabilityBasis"].as_str(),
+        Some("Catalog")
+    );
+    assert_eq!(
+        condition(&status, "Protected")["status"].as_str(),
+        Some("True")
+    );
+    assert_eq!(
+        status["status"]["alerts"].as_array().map_or(0, Vec::len),
+        0,
+        "an archive with a fresh verified point pages nobody — and the route table carries no \
+         ConfigMap or Job route, so the double would have PANICKED on a delivery attempt"
+    );
+    assert_eq!(
+        status["status"]["lastAvailablePoint"]["pointId"].as_str(),
+        Some(point_id("b-1").as_str())
+    );
+    assert_eq!(
+        status["status"]["lastAvailablePoint"]["evidence"].as_str(),
+        Some("NotAttempted"),
+        "the status still reports what this controller did and did not read"
     );
 }
 
