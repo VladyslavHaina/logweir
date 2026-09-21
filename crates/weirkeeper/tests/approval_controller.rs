@@ -3116,3 +3116,52 @@ async fn a_refused_approval_publishes_no_window_and_clears_the_one_it_had() {
     );
     assert!(after_status.verified_subject_ref.is_some());
 }
+
+/// **The published window is the MATCHED key's, not the first key's.**
+///
+/// A `TrustPolicy` may hold several `GovernedApproval` keys and only one of
+/// them signed this approval — check 6 is explicit that the lifecycle question
+/// is about the matched key. The window published beside the verdict has to
+/// follow the same rule, or an operator reading `status.approverKeyWindow`
+/// would be reading some other approver's rotation schedule, and the preflight
+/// would cap its re-check at an instant that has nothing to do with this
+/// approval.
+///
+/// The first key here is a REAL key pair that is simply not the one in the
+/// sidecar, and its window is deliberately much shorter: a `notAfter` an hour
+/// out instead of a century, so taking the wrong one is visible rather than
+/// merely wrong.
+///
+/// KILLS: "`trust.keys.first()`" and every other index-based shortcut;
+/// "publish the window of whichever key the roster lists first".
+#[test]
+fn the_published_window_is_the_matched_keys_and_not_the_first_keys() {
+    let mut outsider = policy_key(vec![SpecUsage::GovernedApproval]);
+    outsider.key_id = OUTSIDER_KEY_ID.to_string();
+    outsider.spki_pem = OUTSIDER_PEM.to_string();
+    outsider.principal = KeyPrincipal {
+        id: format!("install:{OUTSIDER_KEY_ID}"),
+        display: None,
+    };
+    outsider.not_after = now() + Duration::hours(1);
+
+    let matched = policy_key(vec![SpecUsage::GovernedApproval]);
+    let matched_not_after = matched.not_after;
+    assert_ne!(
+        outsider.not_after, matched_not_after,
+        "the two windows must differ, or this row could not tell them apart"
+    );
+
+    // THE OUTSIDER IS FIRST IN THE LIST, and the sidecar names neither it nor
+    // its signature.
+    let verified = evaluate_under(vec![outsider, matched]).expect("the matched key verifies");
+    assert_eq!(verified.matched_key_id, APPROVER_KEY_ID);
+    let window = verified
+        .key_window
+        .expect("a verified approval publishes its matched key's window");
+    assert_eq!(
+        (window.key_id.as_str(), window.not_after),
+        (APPROVER_KEY_ID, matched_not_after),
+        "the window belongs to the key that actually verified the signature"
+    );
+}
