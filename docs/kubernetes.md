@@ -533,21 +533,24 @@ and deletes them by the explicit key list its approved plan carries; it never
 reads one. The starting set here was §7f's own two-credential row, and
 removing `s3:GetObject` on `<bucket>/<prefix>/*` changed nothing about the run.
 
-**One warning about that row, measured on the way past.** *A `RetentionPolicy`
-in `Enforce` is the one thing Logweir does that cannot be undone* — this file
-carries two `### 7f.` headings, and that is the one meant here — says the
-tombstones and the record are written with the destination's own
-`evidenceWrite` grant, and that this is what makes a deletion attributable by
-a principal that cannot delete. On this build they are written with
-**`archiveRead`'s** grant: the retention reconciler resolves the destination
-under `ArchiveRead` — deliberately, for the location — and then projects that
-same grant as the run's `LOGWEIR_EVIDENCE_AWS_*`. So on a destination that
-separates the two, an `Enforce` run's first intent tombstone is refused `403`,
-the point is `Kept` with `code=TombstoneRefused`, and nothing is deleted;
-and on one whose `archiveRead` *can* write under `logweir/*`, the deletion is
-attributed with a credential the design says must not be able to write there.
-Until that is fixed, read that section's `evidenceWrite` credential row as
-`archiveRead`; the paragraph under its own table says so too.
+**One note about that row, and which principal it was measured on.** *A
+`RetentionPolicy` in `Enforce` is the one thing Logweir does that cannot be
+undone* — this file carries two `### 7f.` headings, and that is the one meant
+here — says the tombstones and the record are written with the destination's
+own `evidenceWrite` grant, and that this is what makes a deletion attributable
+by a principal that cannot delete. When the `retention enforcer` row above was
+measured the reconciler did not do that: it resolved the destination under
+`ArchiveRead` — deliberately, for the location — and then projected that same
+grant as the run's `LOGWEIR_EVIDENCE_AWS_*`, so on a destination separating the
+two an `Enforce` run's first intent tombstone was refused `403`, the point was
+`Kept` with `code=TombstoneRefused`, and nothing was deleted (defect
+**RET-EVIDENCE-GRANT-IS-ARCHIVEREAD**). The reconciler matches the contract
+from `1361f50`: the record credential is `spec.access.evidenceWrite`, whose own
+measured permission is the `evidenceWrite` row of the table above
+(`s3:PutObject` on `<bucket>/logweir/*`). The `retention enforcer` row itself is
+about the **delete** credential and is unchanged by that fix — but its live
+baseline was taken with the record written by the wrong principal, so
+`U6/retention-enforcer` is re-run at the next lab refresh.
 
 ### 7b. A destination-backed run carries a complete `AWS_*` set, and none of it is the controller's
 
@@ -1559,17 +1562,6 @@ over every dependency kind, dev edges included. Adding the edge to `weirkeeper`,
 The first can remove a point and cannot write the document that attributes its
 removal. The second can write that document and cannot remove anything.
 
-**On this build the second row is not what the reconciler projects.** A
-retention Job's `LOGWEIR_EVIDENCE_AWS_*` carry `spec.access.archiveRead`'s
-grant and not `spec.access.evidenceWrite`'s — defect
-**RET-EVIDENCE-GRANT-IS-ARCHIVEREAD**, measured live and tabulated in §7a's
-*The object-storage permission each grant actually needs, measured*. Until it
-is fixed, the principal that must be able to create under `logweir/` is
-`spec.access.archiveRead`: a destination that separates the two gets
-`code=TombstoneRefused`, `retention-result=deleted=0 failed=1` and no deletion
-at all. The row above is the contract and stays; this paragraph goes when the
-reconciler matches it.
-
 **A run with no `evidenceWrite` credential exits 3 having deleted nothing**, and
 is refused before any handle is built. A credential that exists but cannot
 actually write under `logweir/` is caught one step later and by a different
@@ -1597,7 +1589,7 @@ its replacement. **Upgrading to this build therefore stops enforcement on a
 destination that has not declared `evidenceWrite`**, visibly and with the field
 named; adding the grant is the whole remedy and needs no restart, and rolling
 the controller back restores the previous behaviour with no object change. Until
-`0c14bb7` the enforcement Job's `LOGWEIR_EVIDENCE_AWS_*` carried the
+`1361f50` the enforcement Job's `LOGWEIR_EVIDENCE_AWS_*` carried the
 **`archiveRead`** grant, so a destination separating the four principals had
 every intent tombstone refused `403 AccessDenied` and could not enforce
 retention at all (defect `RET-EVIDENCE-GRANT-IS-ARCHIVEREAD`, measured live).
