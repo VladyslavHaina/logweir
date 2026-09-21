@@ -4657,13 +4657,26 @@ def sink_pod() -> dict[str, Any]:
     }
 
 
+def sink_post_count(log: str) -> int:
+    """POSTs in a raw `nc` capture — OCCURRENCES, not lines.
+
+    `grep -c '^POST'` counted 1 forever. An HTTP request ends
+    `\r\n\r\n<body>` with no trailing newline, so the NEXT request's `POST`
+    is appended to the tail of the previous request's last line and never
+    begins a line again: after the first delivery the counter froze at 1, and a
+    row asking for "exactly one new POST" measured 0 however many arrived. It
+    survived two runs because the only assertion over it was
+    `posts_after == posts_before` while the insecure-sink hatch was shut and
+    the true count really was zero. A counter that cannot go up is not a
+    counter.
+    """
+    return log.count("POST /alerts")
+
+
 def sink_posts() -> int:
     out = run(KN + ["exec", SINK_POD, "--", "/bin/sh", "-c",
-                    "grep -c '^POST' /tmp/posts.log 2>/dev/null || echo 0"], check=False).stdout
-    try:
-        return int(out.strip().splitlines()[-1])
-    except (ValueError, IndexError):
-        return 0
+                    "cat /tmp/posts.log 2>/dev/null || true"], check=False).stdout
+    return sink_post_count(out)
 
 
 def protection_policy(name: str, *, max_age: int) -> dict[str, Any]:
@@ -5503,6 +5516,11 @@ def protection_cases() -> None:
     # --- (a) a fresh recovery point, and ONE delivery -----------------------
     posts_mark = sink_posts()
     notified_mark = notified_total(alerts_before)
+    # A RE-RUN'S POINT HAS TO BE FRESH TOO. Reusing the previous attempt's
+    # Backup would date the "fresh" point to the previous attempt and measure a
+    # resolve that a point already in the view is supposed to have caused.
+    if get_opt("backup", "recovery-point") is not None:
+        run(KN + ["delete", "backup", "recovery-point", "--wait=true"])
     fresh = run_backup("recovery-point", "dest-a")
     fresh_status = fresh.get("status") or {}
     fresh_view = refresh_view("primary", f"protect-2-{int(time.time())}")

@@ -997,6 +997,25 @@ def test_a_policy_cannot_place_a_point_it_has_no_facts_about() -> None:
         "evidence.receiptSha256 — the point id is its first 128 bits"])
 
 
+# --- the echo sink's own counter --------------------------------------------
+#
+# The recorded shape is `/tmp/posts.log` on 2026-09-21 after five deliveries:
+# a request ends with its body and no newline, so the next request's `POST`
+# continues that same line.
+ONE_POST = "POST /alerts HTTP/1.1\r\nHost: 10.1.36.254:8080\r\n\r\n{\"alert\":1}"
+
+
+def test_the_sink_counts_every_post_and_not_every_line() -> None:
+    row("one request is one POST", d3.sink_post_count(ONE_POST) == 1)
+    concatenated = ONE_POST + ONE_POST + ONE_POST
+    row("three requests concatenated on one line are three POSTs",
+        d3.sink_post_count(concatenated) == 3, f"{d3.sink_post_count(concatenated)}")
+    row("MUTANT: THE FROZEN COUNTER — counting lines that BEGIN with POST reports 1 "
+        "for all three, which is what `grep -c '^POST'` did",
+        len([ln for ln in concatenated.splitlines() if ln.startswith("POST")]) == 1)
+    row("an empty log is zero, not an error", d3.sink_post_count("") == 0)
+
+
 def test_zz_every_row_in_this_file_passed() -> None:
     """The file's own gate, for `python3 -m pytest e2e/k8s/d3`.
 
