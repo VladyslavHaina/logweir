@@ -349,6 +349,195 @@ def test_only_the_deliberate_failure_certifies_the_negative_control() -> None:
         not d1.negative_control_verdict({"status": "fail", "failure": ""})["harnessCanFail"])
 
 
+# --- L-09-5: an ACL-limited discovery, and what it may claim ----------------
+#
+# The recorded shapes are this worker's own live run against a KRaft broker with
+# `StandardAuthorizer` and a SCRAM principal with no `Describe` on `secret-t`.
+ACL_PLAN_SELECTION = {
+    "mode": "AllUserTopics",
+    "coverage": "VisibleUserTopicsOnly",
+    "resolvedTopicCount": 2,
+    "discovery": {
+        "basis": "metadata-list",
+        "visibility": "unknown",
+        "visibleTopicCount": 2,
+        "limitedTopicCount": 0,
+        "internalExcluded": {"count": 0, "names": []},
+        "excludedByRule": {"count": 0, "names": []},
+    },
+}
+ACL_STATUS_SELECTION = {
+    "mode": "AllUserTopics",
+    "coverage": "VisibleUserTopicsOnly",
+    "resolvedTopicCount": 2,
+    "internalExcludedCount": 0,
+    "excludedByRuleCount": 0,
+    "limitedTopicCount": 0,
+}
+ACL_PRINCIPAL_SEES = ["acl-a", "acl-b"]
+
+
+def test_an_acl_limited_discovery_never_claims_the_cluster() -> None:
+    ok = d1.partial_discovery_never_claims_the_cluster(
+        ACL_PLAN_SELECTION, ACL_STATUS_SELECTION, ["acl-a", "acl-b"],
+        ACL_PRINCIPAL_SEES, "secret-t")
+    row("L-09-5: a visible-only run describes itself as visible-only", all(ok.values()),
+        str(ok))
+    # THE ONE CLAIM THE ACCEPTANCE SENTENCE FORBIDS.
+    attested_plan = dict(ACL_PLAN_SELECTION, coverage="AllUserTopicsAttested")
+    attested_status = dict(ACL_STATUS_SELECTION, coverage="AllUserTopicsAttested")
+    row("MUTANT: a run that claims AllUserTopicsAttested is refused",
+        not all(d1.partial_discovery_never_claims_the_cluster(
+            attested_plan, attested_status, ["acl-a", "acl-b"],
+            ACL_PRINCIPAL_SEES, "secret-t").values()))
+    row("MUTANT: the denied topic appearing in the frozen list is refused",
+        not all(d1.partial_discovery_never_claims_the_cluster(
+            ACL_PLAN_SELECTION, ACL_STATUS_SELECTION,
+            ["acl-a", "acl-b", "secret-t"], ACL_PRINCIPAL_SEES, "secret-t").values()))
+    # `limited` and the count are ONE fact published twice; either without the
+    # other is a controller inventing a verdict.
+    lying = json.loads(json.dumps(ACL_PLAN_SELECTION))
+    lying["discovery"]["visibility"] = "limited"
+    row("MUTANT: visibility `limited` with a zero limited count is refused",
+        not all(d1.partial_discovery_never_claims_the_cluster(
+            lying, ACL_STATUS_SELECTION, ["acl-a", "acl-b"],
+            ACL_PRINCIPAL_SEES, "secret-t").values()))
+    # ... and the pairing is accepted when the broker DID report an errored
+    # entry, which is the other verdict D1 §7.2 R5 admits.
+    honest = json.loads(json.dumps(ACL_PLAN_SELECTION))
+    honest["discovery"]["visibility"] = "limited"
+    honest["discovery"]["limitedTopicCount"] = 1
+    row("a genuinely `limited` listing, with its count, is accepted",
+        all(d1.partial_discovery_never_claims_the_cluster(
+            honest, dict(ACL_STATUS_SELECTION, limitedTopicCount=1),
+            ["acl-a", "acl-b"], ACL_PRINCIPAL_SEES, "secret-t").values()))
+    row("MUTANT: a status that disagrees with the plan's limited count is refused",
+        not all(d1.partial_discovery_never_claims_the_cluster(
+            honest, dict(ACL_STATUS_SELECTION, limitedTopicCount=0),
+            ["acl-a", "acl-b"], ACL_PRINCIPAL_SEES, "secret-t").values()))
+    row("MUTANT: a discovery block with no visibility at all is refused",
+        not all(d1.partial_discovery_never_claims_the_cluster(
+            {"coverage": "VisibleUserTopicsOnly"}, ACL_STATUS_SELECTION,
+            ["acl-a", "acl-b"], ACL_PRINCIPAL_SEES, "secret-t").values()))
+
+
+ACL_REFUSE_STATUS = {"phase": "Failed", "exitReason": "operational"}
+ACL_REFUSE_FAILED = {
+    "status": "True",
+    "reason": "DiscoveryIncomplete",
+    "message": (
+        "the discovery for acl-refuse could not establish that it saw every user topic "
+        "(visibility `unknown`, 0 topic(s) the broker refused to describe) and "
+        "spec.allUserTopics.incompleteDiscovery is `Refuse`. Kafka omits topics a principal "
+        "cannot describe, so a successful listing alone is never proof; grant the principal "
+        "Describe on the cluster, record an administrator attestation, or choose "
+        "`BackUpVisibleTopics` and accept the `VisibleUserTopicsOnly` label"
+    ),
+}
+ACL_REFUSE_RESOLVED = {"status": "False", "reason": "DiscoveryIncomplete"}
+
+
+def test_the_refuse_policy_refuses_on_the_conditions() -> None:
+    row("L-09-5: Refuse ends Failed/DiscoveryIncomplete on both conditions",
+        all(d1.discovery_incomplete_refusal(
+            ACL_REFUSE_STATUS, ACL_REFUSE_FAILED, ACL_REFUSE_RESOLVED).values()))
+    row("MUTANT: an exitCode would claim a runner ran, and is refused",
+        not all(d1.discovery_incomplete_refusal(
+            dict(ACL_REFUSE_STATUS, exitCode=1), ACL_REFUSE_FAILED,
+            ACL_REFUSE_RESOLVED).values()))
+    row("MUTANT: TopicsResolved carrying a different reason is refused",
+        not all(d1.discovery_incomplete_refusal(
+            ACL_REFUSE_STATUS, ACL_REFUSE_FAILED,
+            {"status": "False", "reason": "DiscoveryFailed"}).values()))
+    row("MUTANT: the pre-fix reading — `status.reason` and no conditions — is refused",
+        not all(d1.discovery_incomplete_refusal(
+            dict(ACL_REFUSE_STATUS, reason="DiscoveryIncomplete"), {}, {}).values()))
+    row("MUTANT: a refusal that does not say why a listing is not proof is refused",
+        not all(d1.discovery_incomplete_refusal(
+            ACL_REFUSE_STATUS, dict(ACL_REFUSE_FAILED, message="discovery incomplete"),
+            ACL_REFUSE_RESOLVED).values()))
+
+
+# --- L-09-3a: the frozen list outlives the topic ----------------------------
+PLAN_AT_HOLD = {
+    "name": "race-delete-plan",
+    "sha256": "sha256:aaaa",
+    "resourceVersion": "4711",
+    "inputs": {"topics": ["rc-gone", "rc-keep"]},
+}
+RECEIPT_ZERO = {"source": {"topics": ["rc-gone", "rc-keep"]},
+                "records": {"rc-gone": 0, "rc-keep": 5}}
+
+
+def test_a_topic_deleted_between_freeze_and_execution() -> None:
+    ok = fence_rows.frozen_list_survives_a_deleted_topic(
+        PLAN_AT_HOLD, PLAN_AT_HOLD, {"phase": "Succeeded"}, RECEIPT_ZERO, "rc-gone")
+    row("L-09-3a: Succeeded with 0 records for the deleted topic is admitted",
+        all(ok.values()), str(ok))
+    row("L-09-3a: Failed exit 1 with no receipt is the other outcome D1 admits",
+        all(fence_rows.frozen_list_survives_a_deleted_topic(
+            PLAN_AT_HOLD, PLAN_AT_HOLD, {"phase": "Failed", "exitCode": 1},
+            None, "rc-gone").values()))
+    moved = dict(PLAN_AT_HOLD, resourceVersion="4712")
+    row("MUTANT: a frozen plan that MOVED is refused — the snapshot is immutable",
+        not all(fence_rows.frozen_list_survives_a_deleted_topic(
+            PLAN_AT_HOLD, moved, {"phase": "Succeeded"}, RECEIPT_ZERO, "rc-gone").values()))
+    rewritten = {"name": "race-delete-plan", "sha256": "sha256:aaaa",
+                 "resourceVersion": "4711", "inputs": {"topics": ["rc-keep"]}}
+    row("MUTANT: a frozen list rewritten to drop the deleted topic is refused",
+        not all(fence_rows.frozen_list_survives_a_deleted_topic(
+            PLAN_AT_HOLD, rewritten, {"phase": "Succeeded"},
+            {"source": {"topics": ["rc-keep"]}, "records": {"rc-keep": 5}},
+            "rc-gone").values()))
+    row("MUTANT: records claimed for the topic that was deleted are refused",
+        not all(fence_rows.frozen_list_survives_a_deleted_topic(
+            PLAN_AT_HOLD, PLAN_AT_HOLD, {"phase": "Succeeded"},
+            {"source": {"topics": ["rc-gone", "rc-keep"]},
+             "records": {"rc-gone": 5, "rc-keep": 5}}, "rc-gone").values()))
+    row("MUTANT: a receipt naming a topic OUTSIDE the frozen list is refused",
+        not all(fence_rows.frozen_list_survives_a_deleted_topic(
+            PLAN_AT_HOLD, PLAN_AT_HOLD, {"phase": "Succeeded"},
+            {"source": {"topics": ["rc-gone", "rc-keep"]},
+             "records": {"rc-gone": 0, "rc-keep": 5, "rc-other": 9}}, "rc-gone").values()))
+    row("MUTANT: Failed with exit 0 is neither outcome D1 admits",
+        not all(fence_rows.frozen_list_survives_a_deleted_topic(
+            PLAN_AT_HOLD, PLAN_AT_HOLD, {"phase": "Failed", "exitCode": 0},
+            None, "rc-gone").values()))
+
+
+# --- L-09-3b: the source moved under the run --------------------------------
+def test_a_source_change_between_discovery_and_freeze_is_refused() -> None:
+    status = {"phase": "Failed", "reason": "SourceChangedDuringResolution"}
+    failed = {"status": "True", "reason": "SourceChangedDuringResolution"}
+    resolved = {"status": "False", "reason": "SourceChangedDuringResolution"}
+    row("L-09-3b: Failed/SourceChangedDuringResolution with no runner Job",
+        all(fence_rows.source_change_is_refused(status, failed, resolved, []).values()))
+    row("MUTANT: a runner Job created anyway is refused",
+        not all(fence_rows.source_change_is_refused(
+            status, failed, resolved, ["race-source"]).values()))
+    row("MUTANT: Succeeded with the reason on the status is refused",
+        not all(fence_rows.source_change_is_refused(
+            {"phase": "Succeeded", "reason": "SourceChangedDuringResolution"},
+            failed, resolved, []).values()))
+    row("MUTANT: a DIFFERENT terminal reason does not satisfy this row",
+        not all(fence_rows.source_change_is_refused(
+            {"phase": "Failed", "reason": "DiscoveryFailed"},
+            {"status": "True", "reason": "DiscoveryFailed"},
+            {"status": "False", "reason": "DiscoveryFailed"}, []).values()))
+
+
+def test_every_negative_control_is_judged_by_its_own_sentence() -> None:
+    row("the four negative controls each name the row they certify",
+        set(d1.NEGATIVE_CONTROLS) == {"NEG-1", "NEG-09-3a", "NEG-09-3b", "NEG-09-5"}
+        and set(d1.NEGATIVE_CONTROLS.values()) == {"L-09-6", "L-09-3a", "L-09-3b", "L-09-5"})
+    verdict = d1.negative_control_verdict(DELIBERATE, "NEG-09-5")
+    row("a control's verdict carries the row it certifies",
+        verdict["id"] == "NEG-09-5" and verdict["certifies"] == "L-09-5"
+        and verdict["harnessCanFail"], str(verdict))
+    row("MUTANT: a timeout-shaped failure certifies nothing, for any control",
+        not d1.negative_control_verdict(TIMEOUT_SHAPED, "NEG-09-3a")["harnessCanFail"])
+
+
 def main() -> int:
     for name, fn in sorted(globals().items()):
         if name.startswith("test_") and callable(fn):

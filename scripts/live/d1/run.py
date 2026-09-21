@@ -33,6 +33,7 @@ import json
 import os
 import pathlib
 import re
+import secrets
 import subprocess
 import sys
 import time
@@ -41,6 +42,7 @@ from typing import Any, Callable
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import fixture  # noqa: E402
 from fence import fenced  # noqa: E402
+from fixtures import acl_kafka  # noqa: E402
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
 STAMP = os.environ.get("LOGWEIR_D1_STAMP") or dt.datetime.now(dt.timezone.utc).strftime(
@@ -942,6 +944,174 @@ def dynamic_selection(**over: Any) -> dict[str, Any]:
 
 
 # ---------------------------------------------------------------------------
+# L-09-5's broker: KRaft with StandardAuthorizer, and one topic the backup
+# principal may not describe (`fixtures/acl_kafka.py`)
+# ---------------------------------------------------------------------------
+
+ACL_SOURCE = "acl-source"
+ACL_CLIENT_PROPERTIES = "/tmp/d1-backup-client.properties"
+
+
+def acl_kafka_pod() -> str:
+    items = lst("pods", f"app={acl_kafka.APP}")
+    ready = [
+        p["metadata"]["name"]
+        for p in items
+        if all(c.get("ready") for c in (p.get("status") or {}).get("containerStatuses") or [])
+    ]
+    if not ready:
+        raise Failure("no ready ACL Kafka pod in this namespace", obj=items)
+    return ready[0]
+
+
+def acl_exec(*argv: str, timeout: int = 120, check: bool = True) -> str:
+    pod = STATE["environment"]["aclKafkaPod"]
+    return run(KN + ["exec", pod, "--", *argv], timeout=timeout, check=check).stdout
+
+
+def acl_create_topics(names: list[str], *, records: int = 5) -> None:
+    """Create topics on the ACL broker as the pod-local super user.
+
+    `localhost:9092` and not the published listener: the PLAINTEXT listener is
+    the `ANONYMOUS` super-user path and exists only inside the pod, so no
+    credential is needed and none appears in a recorded argv.
+    """
+    pod = STATE["environment"]["aclKafkaPod"]
+    for topic in names:
+        acl_exec(
+            "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "localhost:9092",
+            "--create", "--if-not-exists", "--topic", topic,
+            "--partitions", "1", "--replication-factor", "1",
+        )
+        if records:
+            payload = "\n".join(f"d1-{topic}-{i}" for i in range(records)) + "\n"
+            run(
+                KN + ["exec", "-i", pod, "--", "/opt/kafka/bin/kafka-console-producer.sh",
+                      "--bootstrap-server", "localhost:9092", "--topic", topic],
+                data=payload,
+                timeout=120,
+            )
+
+
+def acl_principal_listing() -> list[str]:
+    """What the MEASURED principal itself sees, read from inside the pod.
+
+    THE PASSWORD IS EXPANDED IN THE CONTAINER, NOT HERE. The client properties
+    file is written by a `sh -c` whose argv carries the literal
+    `$D1_BACKUP_PASSWORD`; the shell inside the pod substitutes it from the
+    Secret-backed environment variable. `run` records argv, so what lands in
+    `results.json` is the variable's name.
+
+    This is the fixture's own reading, not Logweir's: it says what a SCRAM
+    client with these ACLs is shown, so that a row which later finds the same
+    set in a frozen plan can tell "Logweir resolved the visible topics" from
+    "Logweir happened to agree with a broken broker".
+    """
+    pod = STATE["environment"]["aclKafkaPod"]
+    script = (
+        f"cat > {ACL_CLIENT_PROPERTIES} <<'EOF'\n"
+        "security.protocol=SASL_PLAINTEXT\n"
+        "sasl.mechanism=SCRAM-SHA-512\n"
+        "sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule "
+        f'required username="{acl_kafka.BACKUP_USER}" password="PLACEHOLDER";\n'
+        "EOF\n"
+    ).replace("PLACEHOLDER", "$D1_BACKUP_PASSWORD")
+    run(KN + ["exec", pod, "--", "sh", "-c", script], timeout=120)
+    out = acl_exec(
+        "/opt/kafka/bin/kafka-topics.sh",
+        "--bootstrap-server",
+        f"{acl_kafka.SERVICE}.{NS}.svc.cluster.local:{acl_kafka.SASL_PORT}",
+        "--command-config", ACL_CLIENT_PROPERTIES,
+        "--list",
+    )
+    return sorted(line.strip() for line in out.splitlines() if line.strip())
+
+
+def ensure_acl_broker(*, allowed: tuple[str, ...] = acl_kafka.ALLOWED_TOPICS) -> dict[str, Any]:
+    """Build (or re-attach to) the ACL broker and its saved connection.
+
+    Idempotent, because L-09-5 and its negative control both need it and a
+    second format would throw the first one's credential away. `allowed` is the
+    ONE knob: the negative control passes every topic, which is the single
+    input it flips.
+    """
+    state = STATE["environment"].setdefault("aclKafka", {})
+    if get_opt("secret", acl_kafka.SECRET) is None:
+        # GENERATED PER RUN, NEVER RETURNED, NEVER LOGGED. `token_urlsafe`
+        # draws from `[A-Za-z0-9_-]`, which needs no escaping in a Java
+        # properties file, in a JAAS string or in `--add-scram`'s bracket
+        # syntax — a password that has to be escaped three times is a fixture
+        # that fails for a reason nobody can see.
+        password = secrets.token_urlsafe(18)
+        body = {
+            "apiVersion": "v1",
+            "kind": "Secret",
+            "metadata": {"name": acl_kafka.SECRET, "namespace": NS, "labels": dict(LABELS)},
+            "type": "Opaque",
+            "data": {
+                acl_kafka.SECRET_KEY: base64.b64encode(password.encode()).decode()
+            },
+        }
+        # Not through `apply`, which would echo the object — and so the value —
+        # into this process's captured stdout and then into `results.json`.
+        run(K + ["apply", "-f", "-"], data=json.dumps(body))
+        del password
+        state["secret"] = acl_kafka.SECRET
+        state["passwordGeneratedPerRun"] = True
+    for manifest in acl_kafka.manifests(NS, dict(LABELS)):
+        apply(manifest)
+    kn("rollout", "status", f"deploy/{acl_kafka.DEPLOYMENT}", "--timeout=240s", timeout=260)
+    STATE["environment"]["aclKafkaPod"] = acl_kafka_pod()
+    acl_create_topics([*acl_kafka.ALLOWED_TOPICS, acl_kafka.DENIED_TOPIC])
+    acls = []
+    for argv in acl_kafka.acl_commands(allowed=allowed):
+        acl_exec(*argv)
+        acls.append(" ".join(argv[1:]))
+    state["aclsApplied"] = acls
+    state["grantedDescribeOn"] = list(allowed)
+    state["brokerTopics"] = sorted(
+        line.strip()
+        for line in acl_exec(
+            "/opt/kafka/bin/kafka-topics.sh", "--bootstrap-server", "localhost:9092", "--list"
+        ).splitlines()
+        if line.strip()
+    )
+    state["principalVisibleTopics"] = acl_principal_listing()
+    state["clusterId"] = acl_kafka.CLUSTER_ID
+    cluster = apply(acl_kafka.kafka_cluster(NS, ACL_SOURCE, dict(LABELS)))
+    state["kafkaClusterUid"] = cluster["metadata"]["uid"]
+    ready = wait_for(
+        "kafkacluster",
+        ACL_SOURCE,
+        lambda o: (o.get("status") or {}).get("reachable") is True,
+        timeout=300,
+        what="to be reachable as the ACL-limited principal",
+    )
+    state["observedClusterId"] = (ready.get("status") or {}).get("clusterId")
+    save()
+    return state
+
+
+def acl_backup(name: str, policy: str, **over: Any) -> dict[str, Any]:
+    """A dynamic `Backup` against the ACL broker. No exclusion rules at all.
+
+    The exclusions are empty ON PURPOSE: this row's only subtraction must be
+    the one the broker makes. An `exclude` block here would give the frozen
+    list a second reason to omit `secret-t` and the row could no longer say
+    which one did it.
+    """
+    body: dict[str, Any] = {
+        "sourceRef": {"name": ACL_SOURCE},
+        "topics": [],
+        "allUserTopics": {"exclude": {"topics": [], "prefixes": []},
+                          "incompleteDiscovery": policy},
+        "deadlineSeconds": 600,
+    }
+    body.update(over)
+    return backup_object(name, **body)
+
+
+# ---------------------------------------------------------------------------
 # PLAT-09.2
 # ---------------------------------------------------------------------------
 
@@ -1365,6 +1535,265 @@ def l_09_3b() -> dict[str, Any]:
         "this case needs the request-holding proxy to be deterministic",
         obj=attempts,
     )
+
+
+# ---------------------------------------------------------------------------
+# L-09-5's two decisions, as named functions
+#
+# Same reason as `selection_counts_agree` above: `scripts/live/d1/test_rows.py`
+# feeds each of them the shape the controller publishes AND a shape that must be
+# refused, without a cluster. A decision that cannot be made to say False is not
+# a decision.
+# ---------------------------------------------------------------------------
+
+
+def discovery_incomplete_refusal(status: dict[str, Any], failed: dict[str, Any],
+                                 resolved: dict[str, Any]) -> dict[str, bool]:
+    """D1 §7.2 R6's `Refuse` terminal state, clause by clause.
+
+    The same shape as `selection_empty_refusal` — `Failed=True` and
+    `TopicsResolved=False` carrying one reason, `exitReason: operational`, no
+    `exitCode` — with the reason `DiscoveryIncomplete` and the controller's own
+    sentence about WHY a successful listing is not proof. That sentence is
+    asserted because it is the whole product decision in D1 §7.4: Kafka omits
+    what a principal cannot describe, so "the listing worked" never upgrades
+    coverage.
+    """
+    message = failed.get("message") or ""
+    return {
+        "phase is Failed": status.get("phase") == "Failed",
+        "Failed=True/DiscoveryIncomplete":
+            failed.get("status") == "True" and failed.get("reason") == "DiscoveryIncomplete",
+        "TopicsResolved=False/DiscoveryIncomplete":
+            resolved.get("status") == "False"
+            and resolved.get("reason") == "DiscoveryIncomplete",
+        "a controller refusal is operational with no exitCode":
+            status.get("exitReason") == "operational" and status.get("exitCode") is None,
+        "the refusal says a successful listing is not proof of completeness":
+            "omits topics a principal cannot describe" in message,
+    }
+
+
+def partial_discovery_never_claims_the_cluster(
+    sel: dict[str, Any],
+    status_sel: dict[str, Any],
+    frozen_topics: list[str],
+    visible_to_the_principal: list[str],
+    denied: str,
+) -> dict[str, bool]:
+    """PLAT-09.2's acceptance half, measured against an ACL-limited principal.
+
+    WHY THIS DOES NOT DEMAND `visibility: limited`, AND WHY THAT IS THE PRODUCT
+    BEING RIGHT RATHER THAN THE ROW BEING SOFT.
+
+    `check_contract::visibility` says `limited` on exactly two signals: a
+    LISTING ENTRY that carries `TopicAuthorizationFailed`, or an EXPECTED name
+    the targeted probe was answered `TopicAuthorizationFailed` for. A run
+    discovery sends neither: `backup_selection::discovery_plan` builds its
+    `topicInventory` with `expected_topics: Vec::new()`, so nothing is probed by
+    name; and Kafka's all-topics metadata response does not report a topic the
+    principal cannot describe AS AN ERROR — it omits it, which is exactly what
+    D1 §7.5 writes down ("Omitted by Kafka; visibility stays `unknown`"). This
+    fixture's own reading confirms it from the client side: the principal's
+    `--list` shows the allowed topics and nothing else.
+
+    So for a run discovery `visibility == "limited"` if and only if the listing
+    carried an errored entry, and that is the invariant asserted here — a real
+    relation between two published numbers, which a controller that invented
+    either would break. What the acceptance sentence actually promises is the
+    LAST clause, and it holds under both verdicts: no observation upgrades
+    coverage to `AllUserTopicsAttested` without an administrator attestation.
+    """
+    discovery = sel.get("discovery") or {}
+    visibility = discovery.get("visibility") or sel.get("visibility")
+    limited = discovery.get("limitedTopicCount")
+    return {
+        "the frozen list is exactly what the principal can see":
+            frozen_topics == sorted(t for t in visible_to_the_principal
+                                    if not t.startswith("__")),
+        "the topic the principal may not describe is not in the frozen list":
+            denied not in frozen_topics,
+        "the discovery published a completeness verdict at all":
+            visibility in {"unknown", "limited"},
+        "the verdict is `limited` exactly when the listing carried an errored entry":
+            isinstance(limited, int) and (visibility == "limited") == (limited > 0),
+        "the status flattens the plan's own limited count":
+            status_sel.get("limitedTopicCount") == limited,
+        "the run is labelled visible-only":
+            status_sel.get("coverage") == "VisibleUserTopicsOnly"
+            and sel.get("coverage") == "VisibleUserTopicsOnly",
+        "NOTHING claims whole-cluster coverage":
+            "AllUserTopicsAttested" not in {status_sel.get("coverage"), sel.get("coverage")},
+    }
+
+
+@scenario("L-09-5", "PLAT-09.2", "an ACL-limited principal backs up what it can see, and says so")
+def l_09_5() -> dict[str, Any]:
+    """D1 §13.2 L-09-5, both halves, against a broker this row builds.
+
+    `acl-refuse` (`incompleteDiscovery: Refuse`) must end `Failed` /
+    `DiscoveryIncomplete` with no runner Job; `acl-visible`
+    (`BackUpVisibleTopics`) must end `Succeeded` with coverage
+    `VisibleUserTopicsOnly`, and `secret-t` must be absent from the frozen
+    topics AND from the signed receipt.
+
+    Negative control: `NEG-09-5`, which flips exactly one input — the ACL set —
+    granting `Describe` on every topic including `secret-t`, and then asserts
+    this row's two conclusions (`secret-t` is still out; the coverage is
+    complete). It must fail, and its failure proves this row reads the broker.
+    """
+    broker = ensure_acl_broker()
+    denied = acl_kafka.DENIED_TOPIC
+    require(
+        denied in broker["brokerTopics"],
+        f"the fixture never created {denied}: {broker['brokerTopics']}",
+        obj=broker,
+    )
+    require(
+        denied not in broker["principalVisibleTopics"],
+        f"the broker shows {denied} to the measured principal, so no ACL is being enforced "
+        f"and this row would measure nothing: {broker['principalVisibleTopics']}",
+        obj=broker,
+    )
+
+    # Half one: Refuse.
+    refuse = create(acl_backup("acl-refuse", "Refuse"))
+    refuse_uid = refuse["metadata"]["uid"]
+    refused = wait_for("backup", "acl-refuse", terminal, timeout=420,
+                       what="to reach a terminal phase")
+    refuse_failed = condition(refused, "Failed") or {}
+    refuse_resolved = condition(refused, "TopicsResolved") or {}
+    refusal = discovery_incomplete_refusal(refused["status"], refuse_failed, refuse_resolved)
+    require(
+        all(refusal.values()),
+        "the `Refuse` policy did not refuse the way D1 §7.2 R6 says: "
+        + "; ".join(sorted(k for k, ok in refusal.items() if not ok))
+        + f". phase={refused['status'].get('phase')!r}, "
+        f"Failed={refuse_failed.get('status')!r}/{refuse_failed.get('reason')!r}, "
+        f"TopicsResolved={refuse_resolved.get('status')!r}/{refuse_resolved.get('reason')!r}",
+        obj=refused,
+    )
+    require(
+        len(discovery_jobs(refuse_uid)) == 1,
+        "the Refuse run did not run exactly one discovery Job",
+        obj=[j["metadata"]["name"] for j in lst("jobs")],
+    )
+    refuse_runners = runner_jobs(refused)
+    require(
+        refuse_runners == [],
+        "a runner Job was created for a run that refused on incomplete discovery: "
+        f"{[j['metadata']['name'] for j in refuse_runners]}",
+        obj=refused,
+    )
+
+    # Half two: BackUpVisibleTopics.
+    visible = create(acl_backup("acl-visible", "BackUpVisibleTopics"))
+    visible_uid = visible["metadata"]["uid"]
+    done = wait_for("backup", "acl-visible", terminal, timeout=600,
+                    what="to reach a terminal phase")
+    require(
+        done["status"]["phase"] == "Succeeded",
+        "the BackUpVisibleTopics run ended {} ({}); TopicsResolved={}".format(
+            done["status"]["phase"],
+            done["status"].get("reason") or (condition(done, "Failed") or {}).get("reason"),
+            (condition(done, "TopicsResolved") or {}).get("message"),
+        ),
+        obj=done,
+    )
+    plan = plan_of(done)
+    sel = plan["inputs"]["selection"]
+    status_sel = done["status"]["selection"]
+    frozen = plan["inputs"]["topics"]
+    clauses = partial_discovery_never_claims_the_cluster(
+        sel, status_sel, frozen, broker["principalVisibleTopics"], denied
+    )
+    require(
+        all(clauses.values()),
+        "an ACL-limited discovery did not describe itself the way D1 §7.4/§7.5 say: "
+        + "; ".join(sorted(k for k, ok in clauses.items() if not ok))
+        + f". frozen={frozen}, plan selection={sel}, status.selection={status_sel}",
+        obj=done,
+        dumps={"inputsSelection": sel, "statusSelection": status_sel, "broker": broker},
+    )
+    receipt = receipt_of(done)
+    require(
+        receipt["source"]["topics"] == frozen,
+        f"the receipt names {receipt['source']['topics']}, the frozen list is {frozen}",
+        obj=receipt,
+    )
+    require(
+        denied not in (receipt.get("records") or {}),
+        f"the receipt claims records for {denied}, which this run never selected: "
+        f"{sorted((receipt.get('records') or {}))}",
+        obj=receipt,
+    )
+    return {
+        "uids": {"refuse": refuse_uid, "visible": visible_uid,
+                 "kafkaCluster": broker.get("kafkaClusterUid")},
+        "asserted": {
+            "broker": broker,
+            "refuseClauses": refusal,
+            "refuseCondition": {k: refuse_failed.get(k) for k in ("status", "reason", "message")},
+            "refuseRunnerJobs": [],
+            "visibleClauses": clauses,
+            "frozenTopics": frozen,
+            "inputsSelection": sel,
+            "statusSelection": status_sel,
+            "receiptTopics": receipt["source"]["topics"],
+            "receiptRecords": receipt.get("records"),
+            "planSha256": plan["sha256"],
+        },
+        "dumps": dump_objects("L-09-5", {
+            "refuse": ("backup", "acl-refuse"),
+            "visible": ("backup", "acl-visible"),
+            "plan": ("configmap", plan["name"]),
+            "aclSource": ("kafkacluster", ACL_SOURCE),
+        }),
+    }
+
+
+@scenario("NEG-09-5", "PLAT-09.2", "L-09-5's negative control: Describe granted everywhere")
+def neg_09_5() -> dict[str, Any]:
+    """Flips ONE input — the ACL set — and re-asserts L-09-5's conclusions.
+
+    `secret-t` gets the same `Describe`/`Read` grant the other topics have, so
+    the broker now shows the measured principal every topic. This scenario then
+    asserts what L-09-5 asserts: that `secret-t` is still missing from the
+    frozen list, and that a discovery which really did see everything is
+    labelled complete. Both are now false, and **this scenario failing is its
+    pass**: it is what separates "the row read the broker" from "the row
+    restated a constant".
+
+    The second clause is worth its own sentence. `AllUserTopicsAttested` is
+    reachable ONLY through an administrator attestation in the installation
+    policy (`coverage_for`), so even a principal that can describe every topic
+    in the cluster gets `VisibleUserTopicsOnly`. That is the acceptance
+    sentence's second half — "failed or partial discovery never claims
+    whole-cluster coverage" — proved from the other side.
+    """
+    broker = ensure_acl_broker(
+        allowed=(*acl_kafka.ALLOWED_TOPICS, acl_kafka.DENIED_TOPIC)
+    )
+    denied = acl_kafka.DENIED_TOPIC
+    visible_now = acl_principal_listing()
+    obj = create(acl_backup("neg-acl", "BackUpVisibleTopics"))
+    uid = obj["metadata"]["uid"]
+    done = wait_for("backup", "neg-acl", terminal, timeout=600, what="to finish")
+    plan = plan_of(done) if (done.get("status") or {}).get("execution") else None
+    frozen = (plan or {}).get("inputs", {}).get("topics", [])
+    status_sel = (done.get("status") or {}).get("selection") or {}
+    require(
+        denied not in visible_now
+        or (denied not in frozen and status_sel.get("coverage") == "AllUserTopicsAttested"),
+        f"{DELIBERATE_FAILURE_MARK}: with Describe granted on every topic the principal now "
+        f"sees {visible_now}, the run froze {frozen} and recorded coverage "
+        f"{status_sel.get('coverage')!r} — so `{denied}` is absent from the frozen list only "
+        "when the broker hides it, and no discovery claims whole-cluster coverage without an "
+        "administrator attestation. This scenario failing is the expected result.",
+        obj={"backup": done, "principalVisibleTopics": visible_now,
+             "frozenTopics": frozen, "statusSelection": status_sel},
+    )
+    return {"uids": {"backup": uid}, "asserted": {"unexpected": "the false assertion held"}}
 
 
 # ---------------------------------------------------------------------------
@@ -2792,7 +3221,9 @@ NOT_RUN_REASONS = {
                    "are using, so seeding it here would be a denial of service against them. "
                    + FENCED_CONTROLLER),
     "L-09-3a": ("PLAT-09.2", "a topic deleted between freeze and execution",
-                "holds the runner Job POST. " + PROXY),
+                "holds the runner Job POST, which only the proxy in front of a fenced "
+                "controller can do. The row EXISTS now (`fence/rows.py::l_09_3a`) and runs "
+                "whenever the fence is up; without the fence it cannot run at all. " + PROXY),
     "L-09-3b": ("PLAT-09.2", "the source changes between discovery and freeze",
                 "NO LONGER blocked by the defect L-09-1 measured — the discovery Job carried "
                 "the compile-time image pin, no node held it, and "
@@ -2805,10 +3236,11 @@ NOT_RUN_REASONS = {
                 "D1 §13.1's request-holding proxy is for. Recorded as a FAIL when it is run "
                 "unfenced, never as a pass, and as this reason only when it is not run at all."),
     "L-09-5": ("PLAT-09.2", "an ACL-limited principal",
-               "needs a Kafka with StandardAuthorizer and a SCRAM principal without Describe "
-               "on one topic. KRaft SCRAM credentials are bootstrapped at storage-format "
-               "time, which the apache/kafka entrypoint does not do from environment alone; "
-               "building that broker was out of this run's budget and is PLAT-07's ground."),
+               "NO LONGER blocked by the broker: `fixtures/acl_kafka.py` builds a KRaft "
+               "`apache/kafka:3.7.1` with `StandardAuthorizer` whose SCRAM credential is "
+               "written by `kafka-storage format --add-scram` before the broker starts, "
+               "which is the only order that closes the bootstrap loop. This reason is "
+               "recorded only when the row was not attempted at all."),
 }
 
 
@@ -2837,11 +3269,9 @@ FENCED_NOT_RUN_REASONS = {
         "the one row the fence unblocks that this run did not take."
     ),
     "L-09-3a": (
-        "NOT blocked by the fence or the proxy any more — the fence run held a migration "
-        "PATCH and injected a 503 through that same proxy — and no longer blocked by the "
-        "defect L-09-1 measured either: D1-DISCOVERY-IMAGE is closed (lab-refresh-3 §8.1), "
-        "so a dynamic run now reaches the freeze step. It is a PLAT-09.2 row outside the "
-        "fence worker's brief and was not attempted."
+        "NOT blocked by the fence or the proxy: both exist in a fenced run and this row is "
+        "registered in `fence/rows.py`. Recorded not-run here only if it was not among the "
+        "phases this invocation was asked for."
     ),
 }
 
@@ -2887,7 +3317,24 @@ def register_not_run() -> None:
 DELIBERATE_FAILURE_MARK = "DELIBERATELY FALSE ASSERTION"
 
 
-def negative_control_verdict(control: dict[str, Any] | None) -> dict[str, Any]:
+# Every negative control in this harness, and the row each one certifies.
+#
+# ONE PER NEW BEHAVIOUR (WORKER-RULES "Lean loop"). NEG-1 certifies the harness
+# as a whole — it was the only one when this file had one dynamic row — and the
+# three below certify the rows added for PLAT-09.2's remaining gap, each by
+# flipping exactly ONE input of its row and re-making that row's own assertion.
+# All four are expected to be recorded `fail`; a `pass` means the row it
+# certifies is not reading the cluster.
+NEGATIVE_CONTROLS = {
+    "NEG-1": "L-09-6",
+    "NEG-09-3a": "L-09-3a",
+    "NEG-09-3b": "L-09-3b",
+    "NEG-09-5": "L-09-5",
+}
+
+
+def negative_control_verdict(control: dict[str, Any] | None,
+                             sid: str = "NEG-1") -> dict[str, Any]:
     """Whether this run demonstrated that the harness can produce a FAIL.
 
     WHICH FAILURE, NOT JUST A FAILURE (review harness-rows-4 **D-L1**). Every
@@ -2907,7 +3354,8 @@ def negative_control_verdict(control: dict[str, Any] | None) -> dict[str, Any]:
     failure = control.get("failure") or ""
     deliberate = DELIBERATE_FAILURE_MARK in failure
     return {
-        "id": "NEG-1",
+        "id": sid,
+        "certifies": NEGATIVE_CONTROLS.get(sid, ""),
         "expected": "fail",
         "observed": control.get("status", "missing"),
         "failedOnItsOwnAssertion": deliberate,
@@ -2948,6 +3396,18 @@ def report() -> None:
     # that only proved the cluster can be slow. The recorded failure must be the
     # deliberate one, by its own sentence.
     STATE["negativeControl"] = negative_control_verdict(STATE["scenarios"].get("NEG-1"))
+    # AND EVERY OTHER ONE, per row. `negativeControl` stays as it was so a
+    # reader (and `test_rows.py`) keeps the field it knows; `negativeControls`
+    # is the whole set, and `certifiedRows` is the list a tracker update may
+    # rely on — a row whose control did not fail on its OWN sentence is not
+    # certified, however green the row itself is.
+    STATE["negativeControls"] = [
+        negative_control_verdict(STATE["scenarios"].get(sid), sid)
+        for sid in sorted(NEGATIVE_CONTROLS)
+    ]
+    STATE["certifiedRows"] = sorted(
+        NEGATIVE_CONTROLS[v["id"]] for v in STATE["negativeControls"] if v["harnessCanFail"]
+    )
     STATE["summary"] = summary
     STATE["reportedAt"] = now()
     save()
@@ -2963,7 +3423,10 @@ def stored_credentials() -> dict[str, str]:
     one way a credential check can be worse than no check at all.
     """
     stored: dict[str, str] = {}
-    for name in ("logweir-s3", "minio-root", "logweir-signing-key"):
+    # `acl_kafka.SECRET` carries a password this run GENERATED, which is the one
+    # credential here that exists nowhere else: if it leaked into an artifact
+    # nobody else could notice.
+    for name in ("logweir-s3", "minio-root", "logweir-signing-key", acl_kafka.SECRET):
         obj = get_opt("secret", name)
         if obj is None:
             continue

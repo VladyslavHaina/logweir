@@ -55,6 +55,14 @@ INJECTIONS: dict[str, str] = {
         "the proxy answers one request with 409 / 503. Both are the scenario's own "
         "words ('declared harness injection' in D1 §13.2)."
     ),
+    "L-09-3a/L-09-3b": (
+        "the proxy HOLDS one POST — the runner Job's for L-09-3a, the discovery Job's "
+        "for L-09-3b — until the harness releases it. Both rows are windows D1 §13.2 "
+        "names ('the proxy holds the runner Job POST'), and holding one decides nothing: "
+        "the request is forwarded unchanged afterwards and every verdict below is read "
+        "from what the controller then did. Each row reads the held request's own "
+        "response back and refuses the reading if the 180 s pause bound expired."
+    ),
     "L-04-2b": (
         "backdates `status.policy.effectiveSince` AND "
         "`status.missedSlots.lastEvaluatedSlot` on a `Latest` schedule: the first "
@@ -1956,6 +1964,475 @@ def l_05_2_6(H: Any) -> dict[str, Any]:
 # Registration
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# PLAT-09.2 — D1 §13.2 L-09-3, both cases, held at the proxy
+#
+# Both are RACES, and that is why they are in this file rather than in
+# `run.py`. The unfenced wave could only create the objects and hope the window
+# it needed happened to be open; run that way on 2026-09-18, L-09-3b spent
+# three attempts and never landed a source change inside a discovery window a
+# few seconds wide, and L-09-3a was never attempted at all because holding a
+# POST needs a proxy in front of a controller the harness owns. A held request
+# turns each window into a place the harness can stand.
+# ---------------------------------------------------------------------------
+
+
+def only_these_topics(H: Any, keep: list[str]) -> dict[str, Any]:
+    """A dynamic selection whose exclusions leave exactly `keep` resolved.
+
+    These rows need a frozen list they can name, in a namespace where other
+    rows have created topics of their own and will create more. Excluding by
+    exact name every OTHER user topic the broker currently holds is the only
+    subtraction that does not depend on what ran before — and it keeps the
+    exclusions LITERAL, which is the only kind D1 §7.1 has.
+    """
+    others = sorted(t for t in H.list_topics() if not t.startswith("__") and t not in keep)
+    return {"exclude": {"topics": others, "prefixes": []},
+            "incompleteDiscovery": "BackUpVisibleTopics"}
+
+
+def await_held_job_post(H: Any, name: str, *, timeout: int = 420) -> dict[str, Any]:
+    """The held runner-Job POST for one Backup.
+
+    The arm names the Backup, and the runner Job is the one Job of this run
+    that carries the Backup's own name (`backup.rs:3283-3288`); the discovery
+    Job is `lwd-<uid>` and never matches, so it is forwarded untouched. That is
+    what D1 §13.2's "holds the runner Job POST AFTER the plan ConfigMap is
+    created" requires: by the time this POST is sent the freeze has already
+    happened, which the row then proves by reading the plan while the request
+    is still held.
+    """
+    return _await_capture(H, "job_create", name=name, timeout=timeout)
+
+
+def held_response(H: Any, held: dict[str, Any]) -> int | None:
+    """What the API server answered the request that was held.
+
+    The proxy's pause is bounded at 180 s and answers 504 when it expires
+    (`plat04_scope_proxy.py`). A row whose held POST timed out did not measure
+    the window it claims to have held open — the controller simply retried
+    later — so every row below reads this back and refuses the reading rather
+    than reporting it.
+    """
+    for item in reversed(fenced.captures(H, held.get("kind"))):
+        if item.get("bodySha256") == held.get("bodySha256") and "response" in item:
+            return int(item["response"])
+    return None
+
+
+def frozen_list_survives_a_deleted_topic(
+    before: dict[str, Any],
+    after: dict[str, Any],
+    status: dict[str, Any],
+    receipt: dict[str, Any] | None,
+    gone: str,
+) -> dict[str, bool]:
+    """D1 §7.5's "topic deleted after discovery, before the engine reads it".
+
+    The rule, verbatim: *"The frozen list still names it; the run records
+    whatever the runner reports (0 records for that topic, or exit 1 →
+    `Failed`, retryable → a retry rediscovers without it). Never a coverage
+    claim for a different set."*
+
+    TWO ADMISSIBLE OUTCOMES, SO THE ROW ASSERTS THE DISJUNCTION. Picking one
+    would be a guess about how a particular engine build reports a topic that
+    vanished under it, and D1 deliberately declines to promise that. What D1
+    promises unconditionally is the first clause and the last three, and those
+    are asserted whichever way the run went.
+    """
+    frozen = (after.get("inputs") or {}).get("topics") or []
+    records = (receipt or {}).get("records") or {}
+    phase = status.get("phase")
+    return {
+        "the frozen plan did not move":
+            after.get("sha256") == before.get("sha256")
+            and after.get("resourceVersion") == before.get("resourceVersion"),
+        "the frozen list still names the deleted topic": gone in frozen,
+        "the outcome is one of the two D1 §7.5 admits":
+            (phase == "Succeeded" and receipt is not None)
+            or (phase == "Failed" and status.get("exitCode") == 1),
+        "no receipt claims records for a topic outside the frozen list":
+            set(records) <= set(frozen),
+        "nothing claims records for the topic that was deleted":
+            records.get(gone, 0) == 0,
+        "the receipt's source topics ARE the frozen list":
+            receipt is None or (receipt.get("source") or {}).get("topics") == frozen,
+    }
+
+
+def source_change_is_refused(
+    status: dict[str, Any],
+    failed: dict[str, Any],
+    resolved: dict[str, Any],
+    runner_jobs: list[str],
+) -> dict[str, bool]:
+    """D1 §7.2 R4's terminal state, clause by clause.
+
+    `SourceChangedDuringResolution` is not retryable and creates no runner Job:
+    a run whose source moved under it has a discovery result about one cluster
+    and a connection to another, and executing on either would be a backup
+    nobody asked for.
+    """
+    return {
+        "phase is Failed": status.get("phase") == "Failed",
+        "the reason is SourceChangedDuringResolution":
+            "SourceChangedDuringResolution"
+            in {status.get("reason"), failed.get("reason"), resolved.get("reason")},
+        "Failed=True carries it":
+            failed.get("status") == "True"
+            and failed.get("reason") == "SourceChangedDuringResolution",
+        "TopicsResolved=False carries it":
+            resolved.get("status") == "False"
+            and resolved.get("reason") == "SourceChangedDuringResolution",
+        "no runner Job was created": runner_jobs == [],
+    }
+
+
+def _race_backup(H: Any, name: str, **over: Any) -> dict[str, Any]:
+    body = {"topics": [], "deadlineSeconds": 600}
+    body.update(over)
+    return H.backup_object(name, **body)
+
+
+def _plan_snapshot(H: Any, backup: dict[str, Any]) -> dict[str, Any]:
+    plan = H.plan_of(backup)
+    return {
+        "name": plan["name"],
+        "uid": plan["uid"],
+        "sha256": plan["sha256"],
+        "resourceVersion": plan["resourceVersion"],
+        "inputs": plan["inputs"],
+    }
+
+
+def _delete_between_freeze_and_execution(H: Any, name: str, *, delete: bool) -> dict[str, Any]:
+    """L-09-3a's choreography, with the one flip its negative control needs.
+
+    `delete=False` is the negative control: the same request is held, the same
+    plan is read, the same assertions are made — and the topic stays where it
+    is. Everything else is identical, which is what makes the difference in the
+    verdict attributable to the deletion and to nothing else.
+    """
+    keep, gone = "rc-keep", "rc-gone"
+    H.create_topics([keep, gone])
+    selection = only_these_topics(H, [keep, gone])
+
+    # ARM FIRST. The controller sends the runner Job POST within a second of
+    # the freeze, and a proxy armed afterwards would be racing the very request
+    # it exists to hold.
+    fenced.arm(H, "job_create", name, "pause")
+    obj = H.create(_race_backup(H, name, allUserTopics=selection))
+    uid = obj["metadata"]["uid"]
+    held = await_held_job_post(H, name)
+    H.require(
+        held.get("name") == name,
+        f"the held POST is for Job {held.get('name')!r}, not the runner Job {name!r}; "
+        "holding the discovery Job instead would measure the wrong window",
+        obj=held,
+    )
+
+    frozen_at_hold = _plan_snapshot(H, H.get("backup", name))
+    H.require(
+        gone in (frozen_at_hold["inputs"].get("topics") or []),
+        f"the freeze did not select {gone}: {frozen_at_hold['inputs'].get('topics')}. "
+        "The window this row measures is between the freeze and the execution, so a run "
+        "that never froze the topic cannot measure it",
+        obj=frozen_at_hold,
+    )
+
+    topics_before = H.list_topics()
+    if delete:
+        H.delete_topic(gone)
+        removed = H.wait_until(
+            lambda: gone not in H.list_topics(),
+            timeout=90,
+            interval=2.0,
+            what=f"the broker to stop listing {gone}",
+        )
+    else:
+        removed = False
+    topics_after = H.list_topics()
+
+    fenced.release(H)
+    response = H.wait_until(
+        lambda: held_response(H, held),
+        timeout=120, interval=2.0,
+        what="the released POST to be answered by the API server",
+    )
+    H.require(
+        response != 504,
+        "the held runner-Job POST hit the proxy's 180 s pause bound and was answered 504, "
+        "so the controller retried it later and this row did not hold the window it claims",
+        obj=held,
+    )
+    done = H.wait_for("backup", name, H.terminal, timeout=600,
+                      what="to reach a terminal phase")
+    frozen_after = _plan_snapshot(H, done)
+    receipt = None
+    if ((done.get("status") or {}).get("evidence") or {}).get("receiptKey"):
+        receipt = H.receipt_of(done)
+    return {
+        "backup": done,
+        "uid": uid,
+        "gone": gone,
+        "keep": keep,
+        "held": {k: held.get(k) for k in
+                 ("kind", "name", "method", "path", "paused", "bodySha256")},
+        "planAtHold": frozen_at_hold,
+        "planAfter": frozen_after,
+        "topicsBefore": topics_before,
+        "topicsAfter": topics_after,
+        "topicDeleted": bool(removed) if delete else False,
+        "heldResponse": response,
+        "receipt": receipt,
+        "runnerJobs": [j["metadata"]["name"] for j in H.runner_jobs(done)],
+    }
+
+
+def l_09_3a(H: Any) -> dict[str, Any]:
+    """L-09-3, first case: a topic deleted between the freeze and the execution.
+
+    The frozen selection is immutable and the run reports the missing topic the
+    way D1 §7.5 says — 0 records for it, or exit 1 — and never claims records
+    for a topic outside its own frozen list.
+
+    Negative control `NEG-09-3a` flips exactly one input: it holds the same
+    POST, reads the same plan and makes the same assertions, and deletes
+    NOTHING.
+    """
+    observed = _delete_between_freeze_and_execution(H, "race-delete", delete=True)
+    H.require(
+        observed["topicDeleted"],
+        f"the broker still lists {observed['gone']} after the delete; this row measured "
+        "nothing",
+        obj=observed["topicsAfter"],
+    )
+    clauses = frozen_list_survives_a_deleted_topic(
+        observed["planAtHold"],
+        observed["planAfter"],
+        observed["backup"]["status"],
+        observed["receipt"],
+        observed["gone"],
+    )
+    H.require(
+        all(clauses.values()),
+        "a topic deleted between the freeze and the execution was not handled the way "
+        "D1 §7.5 states: "
+        + "; ".join(sorted(k for k, ok in clauses.items() if not ok))
+        + f". phase={observed['backup']['status'].get('phase')!r}, "
+        f"exitCode={observed['backup']['status'].get('exitCode')!r}, "
+        f"frozen={observed['planAfter']['inputs'].get('topics')}, "
+        f"records={(observed['receipt'] or {}).get('records')}",
+        obj=observed["backup"],
+        dumps={"planAtHold": observed["planAtHold"], "planAfter": observed["planAfter"],
+               "receipt": observed["receipt"]},
+    )
+    return {
+        "uids": {"backup": observed["uid"], "plan": observed["planAfter"]["uid"]},
+        "asserted": {
+            "heldRequest": observed["held"],
+            "clauses": clauses,
+            "frozenTopics": observed["planAfter"]["inputs"].get("topics"),
+            "planSha256": observed["planAfter"]["sha256"],
+            "planResourceVersionAtHold": observed["planAtHold"]["resourceVersion"],
+            "planResourceVersionAfter": observed["planAfter"]["resourceVersion"],
+            "topicsBefore": observed["topicsBefore"],
+            "topicsAfter": observed["topicsAfter"],
+            "phase": observed["backup"]["status"].get("phase"),
+            "exitCode": observed["backup"]["status"].get("exitCode"),
+            "receiptRecords": (observed["receipt"] or {}).get("records"),
+            "receiptTopics": ((observed["receipt"] or {}).get("source") or {}).get("topics"),
+            "runnerJobs": observed["runnerJobs"],
+        },
+        "dumps": H.dump_objects("L-09-3a", {
+            "backup": ("backup", "race-delete"),
+            "plan": ("configmap", observed["planAfter"]["name"]),
+        }),
+    }
+
+
+def neg_09_3a(H: Any) -> dict[str, Any]:
+    """L-09-3a's negative control: hold the POST, delete nothing, assert the same.
+
+    `race-keep` runs the identical choreography with `delete=False`, then
+    asserts L-09-3a's own conclusion — that the run reports no records for
+    `rc-gone`. The topic is still there with records in it, so the assertion is
+    false and **this scenario failing is its pass**.
+    """
+    observed = _delete_between_freeze_and_execution(H, "race-keep", delete=False)
+    records = (observed["receipt"] or {}).get("records") or {}
+    gone = observed["gone"]
+    phase = observed["backup"]["status"].get("phase")
+    H.require(
+        phase == "Failed" or records.get(gone, 0) == 0,
+        f"{H.DELIBERATE_FAILURE_MARK}: nothing was deleted, and the run ended {phase} with "
+        f"records {records} — so the 0-records reading L-09-3a asserts comes from the "
+        f"deletion and not from the harness. This scenario failing is the expected result.",
+        obj={"backup": observed["backup"], "receipt": observed["receipt"],
+             "topicsAfter": observed["topicsAfter"]},
+    )
+    return {"uids": {"backup": observed["uid"]},
+            "asserted": {"unexpected": "the false assertion held"}}
+
+
+def _change_the_source_during_discovery(H: Any, name: str, *, change: bool) -> dict[str, Any]:
+    """L-09-3b's choreography, with the one flip its negative control needs.
+
+    The window D1 §7.2 names is between R1 (resolve the source connection once,
+    and its digest) and R4 (recompute the digest at the freeze and refuse if it
+    moved). The discovery Job POST is inside it — R2 renders the plan from the
+    connection R1 resolved — so holding that POST holds the window open for as
+    long as this function needs, instead of hoping to land a `kubectl` inside
+    the few seconds a discovery takes.
+
+    `spec` is immutable on a `KafkaCluster`, which is why D1 says "delete and
+    recreate with different bootstrap" and why this does exactly that.
+    """
+    cluster_name = f"source-{name}"
+    H.apply(fixture.kafka_cluster(H.NS, cluster_name, dict(H.LABELS)))
+    H.wait_for(
+        "kafkacluster", cluster_name,
+        lambda o: (o.get("status") or {}).get("reachable") is True,
+        timeout=300, what="to be reachable",
+    )
+    before = H.get("kafkacluster", cluster_name)
+
+    # Hold the DISCOVERY Job's POST. The arm cannot name it — the Job is
+    # `lwd-<uid>` and the uid does not exist until the Backup is created — so
+    # the arm matches any `job_create` and the capture is then CHECKED to be
+    # the one this row meant. A row that measured some other Job's window would
+    # be worse than a row that did not run.
+    fenced.arm(H, "job_create", "", "pause")
+    obj = H.create(
+        _race_backup(H, name, sourceRef={"name": cluster_name},
+                     allUserTopics=H.dynamic_selection())
+    )
+    uid = obj["metadata"]["uid"]
+    held = _await_capture(H, "job_create", timeout=300)
+    H.require(
+        held.get("name") == f"lwd-{uid}",
+        f"the held POST is for Job {held.get('name')!r}, not this run's discovery Job "
+        f"lwd-{uid}; the window between R1 and R4 was not the one held",
+        obj=held,
+    )
+
+    changed_to = None
+    if change:
+        H.kn("delete", "kafkacluster", cluster_name, "--wait=true", timeout=120)
+        replacement = fixture.kafka_cluster(H.NS, cluster_name, dict(H.LABELS))
+        replacement["spec"]["bootstrapServers"] = [f"kafka-2.{H.NS}.svc.cluster.local:9092"]
+        after = H.apply(replacement)
+        changed_to = {
+            "uid": after["metadata"]["uid"],
+            "bootstrapServers": after["spec"]["bootstrapServers"],
+        }
+
+    fenced.release(H)
+    response = H.wait_until(
+        lambda: held_response(H, held),
+        timeout=120, interval=2.0,
+        what="the released POST to be answered by the API server",
+    )
+    H.require(
+        response != 504,
+        "the held discovery-Job POST hit the proxy's 180 s pause bound and was answered "
+        "504, so the controller retried it later and this row did not hold the window it "
+        "claims",
+        obj=held,
+    )
+    done = H.wait_for("backup", name, H.terminal, timeout=600,
+                      what="to reach a terminal phase")
+    return {
+        "backup": done,
+        "uid": uid,
+        "cluster": cluster_name,
+        "heldResponse": response,
+        "held": {k: held.get(k) for k in
+                 ("kind", "name", "method", "path", "paused", "bodySha256")},
+        "sourceBefore": {"uid": before["metadata"]["uid"],
+                         "bootstrapServers": before["spec"]["bootstrapServers"]},
+        "sourceAfter": changed_to,
+        "runnerJobs": [j["metadata"]["name"] for j in H.runner_jobs(done)],
+    }
+
+
+def l_09_3b(H: Any) -> dict[str, Any]:
+    """L-09-3, second case: the source changes between discovery and the freeze.
+
+    Deterministic here, and only here. Run unfenced on 2026-09-18 this row
+    executed all three of its attempts and failed, because the source swap has
+    to land inside a window a few seconds wide; held at the proxy the window is
+    open until the harness closes it.
+
+    Negative control `NEG-09-3b` flips exactly one input: it holds the same
+    POST for the same length of time and leaves the `KafkaCluster` alone.
+    """
+    observed = _change_the_source_during_discovery(H, "race-source", change=True)
+    H.require(
+        observed["sourceAfter"] is not None
+        and observed["sourceAfter"]["uid"] != observed["sourceBefore"]["uid"],
+        "the source was not actually replaced; this row measured nothing",
+        obj=observed,
+    )
+    done = observed["backup"]
+    failed = H.condition(done, "Failed") or {}
+    resolved = H.condition(done, "TopicsResolved") or {}
+    clauses = source_change_is_refused(done["status"], failed, resolved, observed["runnerJobs"])
+    H.require(
+        all(clauses.values()),
+        "a source changed between discovery and freeze was not refused the way D1 §7.2 R4 "
+        "says: "
+        + "; ".join(sorted(k for k, ok in clauses.items() if not ok))
+        + f". phase={done['status'].get('phase')!r}, "
+        f"reason={done['status'].get('reason')!r}, "
+        f"Failed={failed.get('status')!r}/{failed.get('reason')!r}, "
+        f"TopicsResolved={resolved.get('status')!r}/{resolved.get('reason')!r}, "
+        f"runnerJobs={observed['runnerJobs']}",
+        obj=done,
+        dumps={"sourceBefore": observed["sourceBefore"], "sourceAfter": observed["sourceAfter"]},
+    )
+    return {
+        "uids": {"backup": observed["uid"]},
+        "asserted": {
+            "heldRequest": observed["held"],
+            "clauses": clauses,
+            "sourceBefore": observed["sourceBefore"],
+            "sourceAfter": observed["sourceAfter"],
+            "terminal": H.excerpt(done, "status.phase", "status.reason"),
+            "failedCondition": {k: failed.get(k) for k in ("status", "reason", "message")},
+            "runnerJobs": observed["runnerJobs"],
+        },
+        "dumps": H.dump_objects("L-09-3b", {"backup": ("backup", "race-source")}),
+    }
+
+
+def neg_09_3b(H: Any) -> dict[str, Any]:
+    """L-09-3b's negative control: hold the POST, change nothing, assert the same.
+
+    `race-steady` holds the identical request and leaves the `KafkaCluster`
+    alone, then asserts L-09-3b's own conclusion —
+    `SourceChangedDuringResolution`. The source did not change, so the run
+    proceeds and the assertion is false: **this scenario failing is its pass**,
+    and it is what shows the refusal came from the swap rather than from the
+    hold.
+    """
+    observed = _change_the_source_during_discovery(H, "race-steady", change=False)
+    done = observed["backup"]
+    failed = H.condition(done, "Failed") or {}
+    resolved = H.condition(done, "TopicsResolved") or {}
+    reasons = {done["status"].get("reason"), failed.get("reason"), resolved.get("reason")}
+    H.require(
+        "SourceChangedDuringResolution" in reasons,
+        f"{H.DELIBERATE_FAILURE_MARK}: the source was held steady through the same held "
+        f"request and the run ended {done['status'].get('phase')!r} with reasons "
+        f"{sorted(r for r in reasons if r)} — so L-09-3b's refusal comes from the source "
+        "swap and not from the hold. This scenario failing is the expected result.",
+        obj=done,
+    )
+    return {"uids": {"backup": observed["uid"]},
+            "asserted": {"unexpected": "the false assertion held"}}
+
+
 ROWS = [
     ("L-04-2", "PLAT-04.2", "long downtime with catch-up None and Latest", l_04_2),
     ("L-04-2b", "PLAT-04.2", "the catch-up decision with a backdated effectiveSince", l_04_2b),
@@ -1968,6 +2445,11 @@ ROWS = [
      l_05_2_1rv),
     ("L-05.2-2u", "PLAT-05.2", "deletion while a run is unfrozen", l_05_2_2u),
     ("L-05.2-6", "PLAT-05.2", "read cost over ten minutes with 500 retained runs", l_05_2_6),
+    ("L-09-3a", "PLAT-09.2", "a topic deleted between the freeze and the execution", l_09_3a),
+    ("NEG-09-3a", "PLAT-09.2", "L-09-3a's negative control: nothing is deleted", neg_09_3a),
+    ("L-09-3b", "PLAT-09.2", "the source changes between discovery and freeze", l_09_3b),
+    ("NEG-09-3b", "PLAT-09.2", "L-09-3b's negative control: the source is held steady",
+     neg_09_3b),
 ]
 
 
