@@ -3845,7 +3845,8 @@ spec:
                     - name
                     type: object
                   evidence:
-                    description: '`Valid`, `ValidHistorical`, `Untrusted` or `NotAttempted`.'
+                    description: '`Valid`, `ValidHistorical`, `Invalid`, `Untrusted`
+                      or `NotAttempted`.'
                     nullable: true
                     type: string
                   newestRecordAt:

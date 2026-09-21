@@ -303,7 +303,7 @@ pub struct AvailablePoint {
     /// How old the point was at `evaluatedAt`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub age_seconds: Option<i64>,
-    /// `Valid`, `ValidHistorical`, `Untrusted` or `NotAttempted`.
+    /// `Valid`, `ValidHistorical`, `Invalid`, `Untrusted` or `NotAttempted`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence: Option<String>,
     /// The topics it covers, bounded.

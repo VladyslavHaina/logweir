@@ -2953,6 +2953,367 @@ fn a_secret_keys_destination_is_protected_and_does_not_page() {
 }
 
 // ===========================================================================
+// U — one row per `evidenceRead` grant kind, and the flip between them
+// (the brief's three grant rows + the alert lifecycle; review MEDIUM-3/4)
+// ===========================================================================
+
+/// A `SecretKeys`-shaped run whose receipt the controller DID read and found is
+/// not what it claims to be.
+///
+/// `VerificationVerdict::Invalid` is "the digest did not match, or no roster
+/// signing key verified the sidecar", and `controllers::backup` never produces
+/// it from a storage failure. `status.capture` is still absent, because it is
+/// written only on a `Valid` verdict — which is exactly why this shape used to
+/// be indistinguishable from "the controller could not look".
+fn invalid_verdict_backup(name: &str, hours_ago: i64) -> Value {
+    backup(
+        name,
+        hours_ago,
+        json!({"status": {
+            "capture": null,
+            "evidence": {
+                "receiptSha256": null,
+                "verification": {"result": "Invalid", "detail": "the receipt bytes do not hash to the recorded digest"}
+            }
+        }}),
+    )
+}
+
+/// **Review HIGH-1a.** A verdict the controller REACHED is never answered by
+/// the catalog, however good the row is.
+///
+/// `Evidence` had no `Invalid` member, so a digest mismatch arrived as
+/// `NotAttempted` — the one verdict `evidence_objective_met` is allowed to
+/// defer for — and a tampered archive read `Healthy`/`Protected=True` behind a
+/// catalog view harvested before the tampering (the view is served for
+/// `max(3 × intervalSeconds, 3600)`, so that window is up to an hour by
+/// default). This row drives the shipped objectives with a row that says
+/// `Available`/`Verified` sitting right there.
+///
+/// MUTANT: delete `(Some("Invalid"), _) => Self::Invalid` from
+/// `Evidence::from_verification`, or `Invalid` from the `wire_enum!`. The
+/// verdict folds into `NotAttempted`, the catalog answers for it, and the
+/// health, the condition and the alert assertions all fail.
+#[test]
+fn an_invalid_verdict_is_unprotected_and_pages_however_good_the_catalog_row_is() {
+    assert_eq!(
+        p::Evidence::from_verification(Some("Invalid"), None),
+        p::Evidence::Invalid,
+        "a digest that did not match is not `the controller could not look`"
+    );
+    assert!(!p::Evidence::Invalid.is_verified());
+    assert!(
+        p::Evidence::Invalid.was_reached(),
+        "`was_reached` is the single test everything in the module asks; `NotAttempted` is the \
+         only member it answers `false` for"
+    );
+
+    let spec = {
+        let mut value = spec_value();
+        merge(
+            &mut value,
+            &json!({"protects": {"catalogRef": {"name": CATALOG}}}),
+        );
+        value
+    };
+    let mut routes = read_routes(vec![invalid_verdict_backup("b-1", 2)], json!({}));
+    routes.extend(catalog_routes(catalog_entry(
+        "b-1",
+        2,
+        "Available",
+        "Verified",
+    )));
+    routes.push(post(
+        "/configmaps",
+        json!({"apiVersion": "v1", "kind": "ConfigMap",
+               "metadata": {"name": "cm", "namespace": NS}})
+        .to_string(),
+    ));
+    routes.push(post(
+        "/jobs",
+        json!({"apiVersion": "batch/v1", "kind": "Job",
+               "metadata": {"name": "j", "namespace": NS}, "spec": {}})
+        .to_string(),
+    ));
+    routes.push(first_job_route(
+        &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
+        1,
+    ));
+    routes.push(patch(STATUS_PATH));
+    let (outcome, _, bodies) = drive(&policy_with(spec, json!({})), routes);
+
+    assert_eq!(
+        outcome.health,
+        p::Health::Unprotected,
+        "the controller read this receipt and refuses it; a catalog row does not overrule that"
+    );
+    let status = last_status_patch(&bodies);
+    assert_eq!(
+        condition(&status, "Protected")["status"].as_str(),
+        Some("False"),
+        "not `Unknown`: Logweir knows perfectly well that you are not protected"
+    );
+    let alerts = status["status"]["alerts"]
+        .as_array()
+        .expect("a refused archive pages");
+    assert_eq!(alerts.len(), 1);
+    assert_eq!(alerts[0]["kind"].as_str(), Some("Staleness"));
+    assert_eq!(alerts[0]["state"].as_str(), Some("Open"));
+    assert_eq!(
+        status["status"]["lastAvailablePoint"].as_object(),
+        None,
+        "and nothing is published as this policy's recovery point"
+    );
+}
+
+/// **Review HIGH-1b.** A reached-and-refused verdict is `Unprotected` whether
+/// or not the point can be placed in time.
+///
+/// `Backup.status.capture` is written only inside
+/// `if result.result == VerificationVerdict::Valid`, so an `Untrusted` or
+/// `Invalid` point has no capture time either and satisfied
+/// `is_unplaceable`'s first conjunct. That turned "Logweir checked this archive
+/// and refuses its signature" into `Unknown` — which opens no alert, so an
+/// installation whose archive its own `TrustPolicy` rejects stopped being
+/// paged — under a sentence claiming the controller read no verdict.
+///
+/// MUTANT: drop `&& !candidate.evidence.was_reached()` from `is_unplaceable`.
+/// Both arms go `Unknown`/`PointFactsUnread` with an empty alert set and all
+/// four assertions per verdict fail.
+#[test]
+fn a_reached_and_refused_verdict_is_unprotected_even_with_no_capture_time() {
+    let spec = spec();
+    let schedules = [healthy_schedule()];
+    let rehearsal = p::RehearsalFacts::default();
+    let catalog = p::CatalogAnswer::NotConsulted;
+
+    for evidence in [p::Evidence::Untrusted, p::Evidence::Invalid] {
+        let refused = [p::PointCandidate {
+            evidence,
+            ..unreadable_point(2)
+        }];
+        assert!(
+            !p::is_unplaceable(&refused[0], &spec),
+            "{evidence}: the controller answered; what is missing is not the answer"
+        );
+        let verdict = p::evaluate(&inputs(
+            &spec,
+            &refused,
+            &catalog,
+            &schedules,
+            &[],
+            &rehearsal,
+        ));
+        assert_eq!(verdict.health, p::Health::Unprotected, "{evidence}");
+        assert_eq!(
+            verdict.reason,
+            p::FreshnessReason::NoAvailablePoint,
+            "{evidence}"
+        );
+        assert!(
+            verdict.open_kinds.contains(&p::PolicyAlertKind::Staleness),
+            "{evidence}: an archive this installation refuses must still page"
+        );
+        assert!(
+            !verdict.summary.contains("read no verification verdict"),
+            "{evidence}: that sentence reaches a condition message and an incident title, and \
+             it is false here: {}",
+            verdict.summary
+        );
+    }
+
+    // NEGATIVE CONTROL — the one verdict the rationale IS about keeps the
+    // `Unknown` arm. Without this the fix could be "delete the arm".
+    let unread = [unreadable_point(2)];
+    assert!(p::is_unplaceable(&unread[0], &spec));
+    assert_eq!(
+        p::evaluate(&inputs(
+            &spec,
+            &unread,
+            &catalog,
+            &schedules,
+            &[],
+            &rehearsal
+        ))
+        .reason,
+        p::FreshnessReason::PointFactsUnread
+    );
+}
+
+/// The grant the controller CAN read: a verified receipt, and the policy is
+/// protected on the controller's own verdict.
+///
+/// The counterpart to `a_secret_keys_destination_is_protected_and_does_not_page`
+/// — the brief asks for one row per grant kind, and this is the one where the
+/// catalog answers nothing. The point identity is derived from the receipt
+/// digest the controller recorded, NOT taken from the catalog row, and the
+/// capture time is the object's own.
+///
+/// MUTANT: make `with_catalog_facts` OVERWRITE rather than fill — drop the
+/// `recovery_point_at.is_some() && point_id.is_some()` early return. The row's
+/// capture time here is deliberately 40 h old against a 26 h objective, so the
+/// health assertion and the `recoveryPointAt` assertion both fail.
+#[test]
+fn a_controller_identity_destination_with_a_verified_receipt_is_protected() {
+    let spec = {
+        let mut value = spec_value();
+        merge(
+            &mut value,
+            &json!({"protects": {"catalogRef": {"name": CATALOG}}}),
+        );
+        value
+    };
+    // The catalog's row for this very point carries a capture time 40 h old
+    // against a 26 h objective, so a fill that OVERWROTE the object's own
+    // 2-hour-old one would be visible on both the health and the published
+    // instant. (In the wild the two agree; here they are made to disagree so
+    // the "fill, never overwrite" rule has a witness.)
+    let row = catalog_entry("b-1", 40, "Available", "Verified");
+    let mut routes = read_routes(vec![backup("b-1", 2, json!({}))], json!({}));
+    routes.extend(catalog_routes(row));
+    routes.push(patch(STATUS_PATH));
+    let (outcome, _, bodies) = drive(&policy_with(spec, json!({})), routes);
+
+    assert_eq!(outcome.health, p::Health::Healthy);
+    let status = last_status_patch(&bodies);
+    assert_eq!(
+        condition(&status, "Protected")["status"].as_str(),
+        Some("True")
+    );
+    let point = &status["status"]["lastAvailablePoint"];
+    assert_eq!(
+        point["evidence"].as_str(),
+        Some("Valid"),
+        "the controller read this receipt itself and says so"
+    );
+    assert_eq!(
+        point["pointId"].as_str(),
+        Some(point_id("b-1").as_str()),
+        "the identity is the recorded receipt digest's, not the catalog row's: facts are FILLED \
+         where absent and never overwritten"
+    );
+    assert_eq!(
+        point["recoveryPointAt"].as_str(),
+        Some(at(2).as_str()),
+        "and the capture time is the object's own"
+    );
+    assert_eq!(status["status"]["alerts"].as_array().map_or(0, Vec::len), 0);
+}
+
+/// **Review MEDIUM-4.** The flip, composed: an open incident, a point the
+/// catalog can vouch for arriving, and exactly one resolve.
+///
+/// The two halves were proven separately (the landing state in
+/// `a_secret_keys_destination_is_protected_and_does_not_page`, the ledger
+/// transition in `protection_getting_worse_never_resolves_the_page`); nothing
+/// ran them together on the `SecretKeys` path, which is the unit form of the
+/// live row `protection-recovery-notification-delivers-exactly-once`.
+///
+/// The health values are NOT hand-written: each comes out of `evaluate`, so the
+/// row breaks if the flip stops happening as well as if the ledger misbehaves.
+///
+/// MUTANT: make `resolves_alerts` include `Health::Unknown`. The last block
+/// fails — Logweir would claim the condition cleared because it stopped being
+/// able to look. MUTANT 2: any of FIX 2/3/4's mutants; the `Healthy` step
+/// never arrives and the resolve assertions fail.
+#[test]
+fn a_verified_point_arriving_later_flips_the_policy_and_resolves_exactly_one_incident() {
+    let spec = spec_with_catalog();
+    let schedules = [healthy_schedule()];
+    let rehearsal = p::RehearsalFacts::default();
+    // 1. The newest point the catalog vouches for is 31 h old: past the 26 h
+    //    objective. `Stale`, and `Staleness` opens.
+    let old = [no_receipt_point(31)];
+    let vouched = p::CatalogAnswer::Fresh(vec![entry_in_set(
+        &point_id("b-1"),
+        "set-1",
+        "Available",
+        "Verified",
+    )]);
+    let stale = p::evaluate(&inputs(&spec, &old, &vouched, &schedules, &[], &rehearsal));
+    assert_eq!(stale.health, p::Health::Stale);
+    let open = p::reconcile_alerts(
+        &[],
+        &stale.open_kinds,
+        stale.health,
+        POLICY_UID,
+        notifications(&spec),
+        now(),
+    );
+    assert_eq!(open.alerts.len(), 1);
+    assert_eq!(open.alerts[0].state, "Open");
+    assert_eq!(open.alerts[0].transition, Some(1));
+    assert_eq!(open.due.len(), 1, "exactly one message is owed");
+
+    // On-call has been woken.
+    let mut delivered = open.alerts.clone();
+    delivered[0].notified_transition = Some(1);
+    delivered[0].delivery = Some(AlertDelivery {
+        state: Some("Delivered".to_string()),
+        attempts: Some(1),
+        last_attempt_at: Some(now()),
+        job_ref: None,
+        last_error: None,
+    });
+
+    // 2. A fresh backup runs. Its receipt is STILL unread — the grant has not
+    //    changed — and the catalog harvests the point.
+    let fresh = [no_receipt_point(1)];
+    let healthy = p::evaluate(&inputs(
+        &spec,
+        &fresh,
+        &vouched,
+        &schedules,
+        &[],
+        &rehearsal,
+    ));
+    assert_eq!(healthy.health, p::Health::Healthy);
+    assert!(healthy.open_kinds.is_empty());
+    let resolved = p::reconcile_alerts(
+        &delivered,
+        &healthy.open_kinds,
+        healthy.health,
+        POLICY_UID,
+        notifications(&spec),
+        now() + Duration::hours(1),
+    );
+    assert_eq!(resolved.alerts.len(), 1, "one entry, not a second incident");
+    assert_eq!(resolved.alerts[0].state, "Resolved");
+    assert_eq!(resolved.alerts[0].transition, Some(2));
+    assert_eq!(resolved.due.len(), 1, "exactly one resolve is owed");
+
+    // 3. THE ARM THE UPGRADE NOTE IS ABOUT, and it does NOT resolve. A policy
+    //    with no catalog to answer for it lands on `Unknown`/`PointFactsUnread`
+    //    and keeps its incident open: D3 §3.3's resolve column is
+    //    `Healthy`/`AtRisk`, and Logweir does not claim a condition cleared
+    //    because it stopped being able to look.
+    let unknown = p::evaluate(&inputs(
+        &spec,
+        &[unreadable_point(1)],
+        &p::CatalogAnswer::NotConsulted,
+        &schedules,
+        &[],
+        &rehearsal,
+    ));
+    assert_eq!(unknown.health, p::Health::Unknown);
+    assert_eq!(unknown.reason, p::FreshnessReason::PointFactsUnread);
+    let still_open = p::reconcile_alerts(
+        &delivered,
+        &unknown.open_kinds,
+        unknown.health,
+        POLICY_UID,
+        notifications(&spec),
+        now() + Duration::hours(2),
+    );
+    assert_eq!(still_open.alerts[0].state, "Open");
+    assert_eq!(still_open.alerts[0].transition, Some(1), "no transition");
+    assert!(
+        still_open.due.is_empty(),
+        "and nothing further is delivered"
+    );
+}
+
+// ===========================================================================
 // Structural guards
 // ===========================================================================
 

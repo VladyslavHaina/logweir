@@ -352,9 +352,22 @@ wire_enum! {
     /// PASS. `Untrusted` is a signature that verifies under a key this
     /// installation will not accept — a different fact from `Invalid`, and the
     /// one that matters.
+    ///
+    /// # Why `Invalid` is a member and not folded into `NotAttempted`
+    ///
+    /// Review **HIGH-1a**. It used to be folded, and while every non-`Valid`
+    /// verdict was refused identically that cost nothing. It stopped being
+    /// free the moment [`evidence_objective_met`] let ONE verdict defer to the
+    /// catalog: `NotAttempted` is "the controller could not look", and a
+    /// digest that did not match is the opposite of that — a document the
+    /// controller DID read and found is not what it claims to be
+    /// ([`crate::verification::VerificationVerdict::Invalid`], never produced
+    /// by a storage failure). Folded, a tampered archive read as `Healthy` and
+    /// `Protected=True` behind a catalog view harvested before the tampering.
     Evidence {
         Valid => "Valid",
         ValidHistorical => "ValidHistorical",
+        Invalid => "Invalid",
         Untrusted => "Untrusted",
         NotAttempted => "NotAttempted",
     }
@@ -372,16 +385,38 @@ impl Evidence {
         matches!(self, Self::Valid | Self::ValidHistorical)
     }
 
+    /// Whether a verifier that READ the document produced this verdict.
+    ///
+    /// `Valid`, `ValidHistorical`, `Invalid` and `Untrusted` — the four
+    /// `controllers::backup` records only from a verifier that fetched the
+    /// bytes. [`Evidence::NotAttempted`] is the one member that means the
+    /// opposite, and it is the ONLY one anything in this module is allowed to
+    /// read as "the controller could not look" (review HIGH-1).
+    #[must_use]
+    pub fn was_reached(self) -> bool {
+        !matches!(self, Self::NotAttempted)
+    }
+
     /// Read a `Backup.status.evidence.verification` pair into this vocabulary.
     ///
     /// `None` result — no verification block at all — is
     /// [`Evidence::NotAttempted`], which is what an unverified point IS. It is
     /// never read as a pass.
+    ///
+    /// The `_` arm is for a result THIS BUILD DOES NOT KNOW, which is
+    /// unreachable for a verdict written by
+    /// [`crate::verification::VerificationVerdict`] — all four of its spellings
+    /// are named above it — and is `NotAttempted` rather than a panic because a
+    /// controller must not crash on a status a newer build wrote. Every value
+    /// that means "a verifier read this document" is named explicitly, so a
+    /// fifth verdict landing here reads as "no answer" and is refused, never
+    /// deferred to the catalog.
     #[must_use]
     pub fn from_verification(result: Option<&str>, trust_basis: Option<&str>) -> Self {
         match (result, trust_basis) {
             (Some("Valid"), Some("Historical")) => Self::ValidHistorical,
             (Some("Valid"), _) => Self::Valid,
+            (Some("Invalid"), _) => Self::Invalid,
             (Some("Untrusted"), _) => Self::Untrusted,
             _ => Self::NotAttempted,
         }
@@ -1047,10 +1082,19 @@ pub fn is_available(
 /// the very same receipt and published `verification: Verified` on the row.
 ///
 /// **Narrower than "the catalog decides".** A verdict the controller DID reach
-/// still decides: [`Evidence::Untrusted`] is a signature this installation
-/// refuses, and letting a catalog row overrule it would make `TrustPolicy`
-/// decorative — the thing [`Evidence::is_verified`]'s own contract exists to
-/// prevent. Only `NotAttempted`, the honest "I could not look", defers.
+/// still decides ([`Evidence::was_reached`]): [`Evidence::Untrusted`] is a
+/// signature this installation refuses and [`Evidence::Invalid`] is a document
+/// that is not what it claims to be, and letting a catalog row overrule either
+/// would make `TrustPolicy` decorative and a tampered archive `Healthy` — the
+/// things [`Evidence::is_verified`]'s own contract exists to prevent. Only
+/// `NotAttempted`, the honest "I could not look", defers.
+///
+/// That is why `Invalid` is a member of [`Evidence`] at all (review HIGH-1a):
+/// while it was folded into `NotAttempted`, a digest that did not match was
+/// the one verdict a catalog row was allowed to overrule, and the catalog
+/// view is served for `max(3 × intervalSeconds, 3600)` — so a view harvested
+/// before an archive was tampered with reported `Healthy`/`Protected=True`
+/// for up to an hour after the controller had found the tampering.
 #[must_use]
 fn evidence_objective_met(
     candidate: &PointCandidate,
@@ -1060,7 +1104,7 @@ fn evidence_objective_met(
     if !spec.objectives.require_verified_evidence || candidate.evidence.is_verified() {
         return true;
     }
-    candidate.evidence == Evidence::NotAttempted && entry.is_some_and(CatalogEntry::is_verified)
+    !candidate.evidence.was_reached() && entry.is_some_and(CatalogEntry::is_verified)
 }
 
 /// The entries in a fresh view that are about this candidate — D3 §5.1's point
@@ -1130,10 +1174,10 @@ pub fn catalog_entry_for<'e>(
 /// from the `Backup` object alone, with the catalog conjunct and the evidence
 /// objective deliberately left out.
 ///
-/// Named because two callers need exactly this set and one of them must NOT
-/// apply the other two conjuncts: [`is_available`] adds them, and the
-/// unplaceable-point rule ([`is_unplaceable`]) is about a point whose evidence
-/// the controller could not read, so judging it on that evidence is the defect.
+/// Named because two callers need exactly this set and neither adds the same
+/// things to it: [`is_available`] adds the catalog conjunct and the evidence
+/// objective, while [`is_unplaceable`] adds the one verdict test its own claim
+/// depends on and no objective at all.
 #[must_use]
 pub fn matches_policy(candidate: &PointCandidate, spec: &ProtectionPolicySpec) -> bool {
     candidate.succeeded()
@@ -1150,13 +1194,29 @@ pub fn matches_policy(candidate: &PointCandidate, spec: &ProtectionPolicySpec) -
 /// evidence that the policy has NOTHING — which is what dropping it silently
 /// out of the available set did. See [`FreshnessReason::PointFactsUnread`].
 ///
-/// The evidence objective is not applied here ON PURPOSE: the whole claim is
-/// "the controller could not read this point's receipt", and refusing the
-/// point for the verdict it therefore does not have is the double-counting the
-/// defect is made of.
+/// # WHICH absence this is about — review **HIGH-1b**
+///
+/// `Evidence::NotAttempted` and nothing else. The evidence OBJECTIVE is not
+/// applied here on purpose — the whole claim is "the controller could not read
+/// this point's receipt", and refusing the point for the verdict it therefore
+/// does not have is the double-counting the defect is made of — but the
+/// VERDICT is, because that rationale is true of exactly one verdict.
+///
+/// `Backup.status.capture` is written only inside
+/// `if result.result == VerificationVerdict::Valid`
+/// (`controllers::backup`), so an `Untrusted` or `Invalid` point has no capture
+/// time either. Reading those as unplaceable turned "Logweir checked this
+/// archive and refuses its signature" into `Unknown` with the sentence "the
+/// controller read no verification verdict for it" — false about that point —
+/// and, because `Unknown` opens no alert, it stopped paging an installation
+/// whose archive its own `TrustPolicy` rejects. That is this module's own
+/// defect inverted, and D3 §3.2 gives a reached-and-refused verdict
+/// [`Health::Unprotected`].
 #[must_use]
 pub fn is_unplaceable(candidate: &PointCandidate, spec: &ProtectionPolicySpec) -> bool {
-    candidate.recovery_point_at.is_none() && matches_policy(candidate, spec)
+    candidate.recovery_point_at.is_none()
+        && !candidate.evidence.was_reached()
+        && matches_policy(candidate, spec)
 }
 
 /// `topics ⊆ point topics` — D3 §3.2.
@@ -1562,7 +1622,7 @@ fn open_alert_kinds(
                     && matches_policy(c, spec)
                     && (!spec.objectives.require_verified_evidence
                         || c.evidence.is_verified()
-                        || c.evidence == Evidence::NotAttempted)
+                        || !c.evidence.was_reached())
             })
             .collect();
         otherwise.sort_by_key(|c| std::cmp::Reverse(c.recovery_point_at));
