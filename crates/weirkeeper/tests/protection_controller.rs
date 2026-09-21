@@ -2597,6 +2597,153 @@ fn a_fresh_catalog_view_answers_availability_and_an_expired_one_does_not() {
     );
 }
 
+/// The `Backup` shape the live run measured on a `SecretKeys` destination: a
+/// succeeded run, an honest `NotAttempted` verdict, and therefore NO capture
+/// block and NO receipt digest.
+///
+/// `backupId` survives, because it is written in the pre-Job patch before any
+/// verification is attempted. Every field here is a fact
+/// `claude/artifacts/d3-live/20260921t1248z/protect/fresh-point.json` records.
+fn evidence_unread_backup(name: &str, hours_ago: i64) -> Value {
+    backup(
+        name,
+        hours_ago,
+        json!({"status": {
+            "capture": null,
+            "evidence": {
+                "receiptSha256": null,
+                "verification": {
+                    "result": "NotAttempted",
+                    "detail": "the destination's evidenceRead grant is SecretKeys and this \
+                               controller holds no Secret verb"
+                }
+            }
+        }}),
+    )
+}
+
+/// A one-entry catalog page and the fresh `RecoveryCatalog` that publishes it.
+fn catalog_routes(entry: Value) -> Vec<Route> {
+    let page = json!({
+        "apiVersion": "v1", "kind": "ConfigMap",
+        "metadata": {"name": PAGE_CM, "namespace": NS},
+        "data": {"entries.jsonl": format!("{entry}\n")}
+    })
+    .to_string();
+    let object = json!({
+        "apiVersion": "logweir.dev/v1alpha1", "kind": "RecoveryCatalog",
+        "metadata": {"name": CATALOG, "namespace": NS},
+        "spec": {"destinationRef": {"name": DESTINATION}, "sync": {}},
+        "status": {
+            "viewExpiresAt": p::rfc3339(now() + Duration::hours(1)),
+            "pages": [{"configMapName": PAGE_CM, "index": 0, "count": 1}]
+        }
+    })
+    .to_string();
+    vec![ok(CATALOG_PATH, object), ok(PAGE_PATH, page)]
+}
+
+/// The catalog row for one archive set, with the two facts the controller
+/// could not read off the object.
+fn catalog_entry(name: &str, hours_ago: i64, availability: &str, verification: &str) -> Value {
+    json!({
+        "pointId": point_id(name), "backupId": format!("{SCHEDULE_UID}-{name}"), "runId": "r",
+        "recoveryPointAtMs": (now() - Duration::hours(hours_ago)).timestamp_millis(),
+        "coveredFromMs": 0, "coveredToMs": 1,
+        "receiptKey": "k", "receiptSha256": "sha256:0",
+        "availability": availability, "verification": verification,
+        "selectable": availability == "Available"
+            && matches!(verification, "Verified" | "VerifiedHistorical")
+    })
+}
+
+/// The capture time and the identity come off the catalog row for the SAME
+/// point when the controller could not read the receipt that carries them.
+///
+/// MUTANT: delete the `with_catalog_facts` call at the end of
+/// `candidate_from_backup`. The point keeps `recoveryPointAt: null` and
+/// `pointId: null`, `evaluate` cannot age it, and the policy reports `Unknown`
+/// instead of the `Healthy` this archive has earned — three assertions fail.
+/// MUTANT 2: fill from `entry.recovery_point_at_ms` without the `> 0` guard
+/// and point the page at a row that omits `recoveryPointAtMs`; the last
+/// assertion fails on a capture date in 1970.
+#[test]
+fn an_unread_points_capture_time_and_identity_come_from_the_catalog_row() {
+    // The evidence objective is OFF here, so this test is about the FACTS and
+    // not about the verdict; the objective's own arm is the next test.
+    let spec = {
+        let mut value = spec_value();
+        merge(
+            &mut value,
+            &json!({
+                "protects": {"catalogRef": {"name": CATALOG}},
+                "objectives": {"requireVerifiedEvidence": false}
+            }),
+        );
+        value
+    };
+
+    let mut routes = read_routes(vec![evidence_unread_backup("b-1", 2)], json!({}));
+    routes.extend(catalog_routes(catalog_entry(
+        "b-1",
+        2,
+        "Available",
+        "Verified",
+    )));
+    routes.push(patch(STATUS_PATH));
+    let (outcome, _, bodies) = drive(&policy_with(spec.clone(), json!({})), routes);
+
+    assert_eq!(
+        outcome.health,
+        p::Health::Healthy,
+        "the archive holds a two-hour-old point the catalog calls Available/Verified"
+    );
+    let status = last_status_patch(&bodies);
+    let point = &status["status"]["lastAvailablePoint"];
+    assert_eq!(
+        point["recoveryPointAt"].as_str(),
+        Some(p::rfc3339(now() - Duration::hours(2)).as_str()),
+        "`recoveryPointAtMs` IS the receipt's `started_at` carried through the view: the same \
+         number from the same signed document by a different route"
+    );
+    assert_eq!(
+        point["pointId"].as_str(),
+        Some(point_id("b-1").as_str()),
+        "without the identity every event about this policy would have to omit the whole \
+         last-available-point block"
+    );
+    assert_eq!(
+        point["evidence"].as_str(),
+        Some("NotAttempted"),
+        "the verdict is NOT overwritten: the controller still did not read that receipt, and \
+         the status says so"
+    );
+
+    // NEGATIVE CONTROL — a view that holds no row for this archive set fills
+    // nothing, and the policy says it could not place the point rather than
+    // inventing a time or claiming the archive is empty.
+    let mut routes = read_routes(vec![evidence_unread_backup("b-1", 2)], json!({}));
+    routes.extend(catalog_routes(catalog_entry(
+        "b-9",
+        2,
+        "Available",
+        "Verified",
+    )));
+    routes.push(patch(STATUS_PATH));
+    let (outcome, _, bodies) = drive(&policy_with(spec, json!({})), routes);
+    assert_eq!(outcome.health, p::Health::Unknown);
+    let status = last_status_patch(&bodies);
+    assert_eq!(
+        condition(&status, "Protected")["reason"].as_str(),
+        Some("PointFactsUnread")
+    );
+    assert_eq!(
+        condition(&status, "Protected")["status"].as_str(),
+        Some("Unknown"),
+        "a point nobody could place is never rendered as protected and never as a failure"
+    );
+}
+
 // ===========================================================================
 // Structural guards
 // ===========================================================================

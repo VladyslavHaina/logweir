@@ -372,7 +372,7 @@ pub async fn reconcile_policy(
     // ------------------------------------------------------------------
     let mut candidates: Vec<p::PointCandidate> = members
         .iter()
-        .map(|b| candidate_from_backup(b, spec))
+        .map(|b| candidate_from_backup(b, spec, &catalog))
         .collect();
     candidates.sort_by_key(|c| std::cmp::Reverse(c.recovery_point_at));
     candidates.truncate(p::MAX_BACKUPS_SCANNED);
@@ -853,6 +853,7 @@ fn declared_missed_slots(schedule: &BackupSchedule) -> Option<i64> {
 fn candidate_from_backup(
     backup: &Backup,
     spec: &crate::crds::protection_policy::ProtectionPolicySpec,
+    catalog: &p::CatalogAnswer,
 ) -> p::PointCandidate {
     let status = backup.status.as_ref();
     let verification = status
@@ -888,7 +889,7 @@ fn candidate_from_backup(
                 .or_else(|| s.backup_id.clone())
         })
         .filter(|id| !id.is_empty());
-    p::PointCandidate {
+    let candidate = p::PointCandidate {
         backup_name: Some(backup.name_any()),
         point_id,
         backup_id,
@@ -903,7 +904,44 @@ fn candidate_from_backup(
         covers_all_topics: backup.spec.all_user_topics.is_some(),
         destination_matches: destination_matches(backup, spec),
         source_matches: backup.spec.source_ref.name == spec.protects.source_ref.name,
+    };
+    with_catalog_facts(candidate, catalog)
+}
+
+/// Fill the two point facts the controller could not read from the catalog row
+/// for the SAME point — defect `PROTECTION-SECRETKEYS-UNPROTECTED`, clause 3.
+///
+/// `status.capture` is written only on a `Valid` verification verdict, and
+/// `status.evidence.receiptSha256` only where the receipt was fetched, so on a
+/// destination the controller holds no Secret verb for BOTH are absent and the
+/// point could be neither aged nor named. The catalog controller DID read that
+/// receipt: `recoveryPointAtMs` is `BackupReceipt.started_at` carried through
+/// the view (D3 §3.2) and `pointId` is D3 §5.1's identity over the same digest.
+/// This is the same number and the same name from the same signed document, by
+/// the route this installation's credential model leaves open.
+///
+/// **Nothing is invented.** A candidate the view does not hold, or holds twice
+/// ([`p::catalog_entry_for`]), keeps its absent facts and is reported as
+/// unplaceable. A `recoveryPointAtMs` of `0` is `serde(default)`'s stand-in for
+/// a field the view did not write, not a capture in 1970, and is not read.
+fn with_catalog_facts(
+    mut candidate: p::PointCandidate,
+    catalog: &p::CatalogAnswer,
+) -> p::PointCandidate {
+    if candidate.recovery_point_at.is_some() && candidate.point_id.is_some() {
+        return candidate;
     }
+    let Some(entry) = p::catalog_entry_for(&candidate, catalog) else {
+        return candidate;
+    };
+    if candidate.recovery_point_at.is_none() && entry.recovery_point_at_ms > 0 {
+        candidate.recovery_point_at =
+            chrono::DateTime::from_timestamp_millis(entry.recovery_point_at_ms);
+    }
+    if candidate.point_id.is_none() && !entry.point_id.is_empty() {
+        candidate.point_id = Some(entry.point_id.clone());
+    }
+    candidate
 }
 
 /// One `Backup` as a slot of history.

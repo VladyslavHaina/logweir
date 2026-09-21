@@ -1061,12 +1061,21 @@ fn entries_for<'e>(
     })
 }
 
-/// The one entry a fresh view holds for this candidate, newest first.
+/// The ONE entry a fresh view holds for this candidate, for reading facts off
+/// — `None` when the view holds none, or more than one.
 ///
-/// A `Backup` writes one recovery point, so the archive-set join is 1:1 in
-/// practice; the order is fixed anyway (newest `recoveryPointAtMs`, then
-/// `pointId`) so that two reconciles over one cluster state never disagree
-/// about which row they read a capture time off.
+/// # Ambiguity is `None`, and that is not pedantry
+///
+/// Where the join ran on the archive set id, two entries for one set are two
+/// POINTS, and reading either one's capture time and identity would put a
+/// number and a name on a recovery point that is not this one — a status that
+/// looks exactly like a measurement and is not. A `Backup` writes one point,
+/// so this is a defensive `None`; the caller then has a candidate it cannot
+/// place, which is [`FreshnessReason::PointFactsUnread`] and says so.
+///
+/// Availability does NOT go through here ([`is_available`] asks whether ANY
+/// matching entry is available): "the bytes are there" is answerable from a
+/// set of rows, while "this point was captured at T" is not.
 #[must_use]
 pub fn catalog_entry_for<'e>(
     candidate: &PointCandidate,
@@ -1075,11 +1084,9 @@ pub fn catalog_entry_for<'e>(
     let CatalogAnswer::Fresh(entries) = catalog else {
         return None;
     };
-    entries_for(candidate, entries).max_by(|a, b| {
-        a.recovery_point_at_ms
-            .cmp(&b.recovery_point_at_ms)
-            .then_with(|| a.point_id.cmp(&b.point_id))
-    })
+    let mut matched = entries_for(candidate, entries);
+    let only = matched.next()?;
+    matched.next().is_none().then_some(only)
 }
 
 /// The RUN half of D3 §3.2's availability rule: everything a policy can decide
