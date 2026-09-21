@@ -54,9 +54,14 @@ import time
 from typing import Any, Callable, Iterable
 
 CONTEXT = "docker-desktop"
-OWNER = "d2w14"
+# The D2 matrix runs as `d2w14`. U6 (the per-role minimal-permission
+# measurement) is a SEPARATE worker with its own namespaces and its own owner
+# label, so both are overridable — and both are read by `assert_safe_namespace`
+# and by `cleanup`, which is what keeps a run from ever touching a namespace
+# another owner created.
+OWNER = os.environ.get("D2_OWNER", "d2w14")
 OWNER_LABEL_KEY = "logweir.dev/test-owner"
-NAMESPACE_PREFIX = "lw-d2w14-"
+NAMESPACE_PREFIX = os.environ.get("D2_NAMESPACE_PREFIX", "lw-d2w14-")
 LAB_NS = "logweir-scram-local"
 
 ROOT = pathlib.Path(__file__).resolve().parents[3]
@@ -71,6 +76,7 @@ STATE_PATH = OUT / "state.json"
 KAFKA_IMAGE = "apache/kafka:3.7.1"
 KAFKA_BIN = "/opt/kafka/bin"
 MINIO_IMAGE = "minio/minio:latest"
+MINIO_ROOT_USER = "d2w14root"
 MC_IMAGE = "minio/mc:latest"
 
 state: dict[str, Any] = (
@@ -145,6 +151,14 @@ def load_secrets() -> None:
         "c-reader": "F" + secrets.token_urlsafe(20),
         "tls-writer": "T" + secrets.token_urlsafe(20),
         "tls-reader": "U" + secrets.token_urlsafe(20),
+        # U6's one principal per role: a policy change then isolates exactly
+        # one role, which is what makes a bisection row about that role.
+        "u6-writer": "P" + secrets.token_urlsafe(20),
+        "u6-reader": "Q" + secrets.token_urlsafe(20),
+        "u6-evwriter": "Y" + secrets.token_urlsafe(20),
+        "u6-evreader": "Z" + secrets.token_urlsafe(20),
+        "u6-deleter": "H" + secrets.token_urlsafe(20),
+        "u6-catreader": "J" + secrets.token_urlsafe(20),
         "keystore": secrets.token_urlsafe(18),
     }
     # A later phase may need a credential an earlier one did not: keep every
@@ -596,7 +610,7 @@ def minio_objects(name: str, *, tls: bool) -> list[dict[str, Any]]:
         "imagePullPolicy": "Never",
         "args": ["server", "/data"],
         "env": [
-            {"name": "MINIO_ROOT_USER", "value": "d2w14root"},
+            {"name": "MINIO_ROOT_USER", "value": MINIO_ROOT_USER},
             {
                 "name": "MINIO_ROOT_PASSWORD",
                 "valueFrom": {"secretKeyRef": {"name": "minio-root", "key": "password"}},
@@ -659,8 +673,8 @@ def mc_pod() -> dict[str, Any]:
     this file is made by a real S3 client against the real store."""
     alias = (
         "for i in $(seq 1 90); do "
-        "  mc alias set %s %s d2w14root \"$ROOT\" >/dev/null 2>&1 && break; sleep 2; "
-        "done; mc alias set %s %s d2w14root \"$ROOT\" >/dev/null"
+        "  mc alias set %s %s " + MINIO_ROOT_USER + " \"$ROOT\" >/dev/null 2>&1 && break; sleep 2; "
+        "done; mc alias set %s %s " + MINIO_ROOT_USER + " \"$ROOT\" >/dev/null"
     )
     script = "; ".join(
         [
@@ -815,6 +829,7 @@ def destination(
     evidence_write: str | None = None,
     evidence_read: str | None = None,
     evidence_read_mode: str = "SecretKeys",
+    write_probe: bool = False,
     description: str = "",
 ) -> dict[str, Any]:
     def grant(secret_name: str | None, mode: str = "SecretKeys") -> dict[str, Any]:
@@ -850,6 +865,10 @@ def destination(
     if evidence_read or evidence_read_mode != "SecretKeys":
         access["evidenceRead"] = grant(evidence_read, evidence_read_mode)
     spec: dict[str, Any] = {"storage": storage, "transport": transport, "access": access}
+    if write_probe:
+        # The ONLY thing that makes `destination.evidenceWritable` a probed row
+        # rather than `WriteNotProbed` (`check/kinds/access.rs`).
+        spec["readiness"] = {"writeProbe": "CreateOnlyMarker"}
     if description:
         spec["description"] = description
     return {
@@ -4249,6 +4268,548 @@ def e6() -> None:
               "`unknown`")
 
 
+# ==========================================================================
+# U6 — the per-role minimal object-storage permission set, MEASURED
+# ==========================================================================
+#
+# D2 §15 U6 is the last open item of PLAT-08.1: §3.11's per-role table was
+# RECORDED from the policies that happened to suffice, never bisected. This
+# phase measures it.
+#
+# The method, per role:
+#
+#   1. attach the RECORDED starting set to that role's MinIO principal and run
+#      the role's own operation — it must succeed, or there is nothing to
+#      bisect;
+#   2. for every grant unit in the set, re-attach the set WITHOUT that unit and
+#      run the operation again. A unit whose removal still succeeds was never
+#      needed; a unit whose removal makes the operation fail is in the minimal
+#      set, and the failure must be the PRODUCT's own classified answer —
+#      `AccessDenied` on a check row, a nonzero `exitCode` on a run — and never
+#      a timeout, a crash or an unrelated code;
+#   3. attach exactly the minimal set and run once more, so the table's row is
+#      a set that was executed and not a set that was inferred.
+#
+# A "grant unit" is one S3 action at one resource scope, because scope is half
+# the answer: `s3:ListBucket` is authorised on the BUCKET arn and `s3:GetObject`
+# on an OBJECT arn, and a table that named only actions would be unusable.
+
+U6_BUCKET = "lw-u6"
+U6_ARCHIVE_PREFIX = "team/u6"
+U6_EVIDENCE_PREFIX = "logweir"
+
+#: The resource scopes a unit can name. `bucket:*` are `s3:ListBucket`'s
+#: prefix-conditioned forms; MinIO refuses an `s3:prefix` condition on
+#: `s3:GetBucketLocation`, which is why `bucket` exists unconditioned.
+U6_SCOPES = ("bucket", "bucket:archive", "bucket:evidence", "bucket:both",
+             "archive", "evidence")
+
+#: The codes the product uses for "the backend evaluated this request and
+#: refused it". A removal that fails with anything else is NOT a permission
+#: measurement — it is a broken fixture, and `u6_row_is_proved` says so.
+U6_DENIAL_CODES = {"AccessDenied", "InvalidCredentials"}
+
+#: The substrings a denied object-store call leaves in a runner's own output.
+U6_DENIAL_TEXT = ("AccessDenied", "Access Denied", "access denied",
+                  "InvalidAccessKeyId", "SignatureDoesNotMatch", "403 Forbidden")
+
+
+def u6_statement(unit: str) -> dict[str, Any]:
+    """One grant unit — `<action>@<scope>` — as a MinIO policy statement."""
+    action, _, scope = unit.partition("@")
+    if scope not in U6_SCOPES:
+        raise ValueError(f"unknown scope {scope!r} in unit {unit!r}")
+    bucket_arn = f"arn:aws:s3:::{U6_BUCKET}"
+    prefixes = {
+        "bucket:archive": [f"{U6_ARCHIVE_PREFIX}/*"],
+        "bucket:evidence": [f"{U6_EVIDENCE_PREFIX}/*"],
+        "bucket:both": [f"{U6_ARCHIVE_PREFIX}/*", f"{U6_EVIDENCE_PREFIX}/*"],
+    }
+    if scope == "bucket":
+        return {"Effect": "Allow", "Action": [action], "Resource": [bucket_arn]}
+    if scope in prefixes:
+        return {
+            "Effect": "Allow",
+            "Action": [action],
+            "Resource": [bucket_arn],
+            "Condition": {"StringLike": {"s3:prefix": prefixes[scope]}},
+        }
+    root = U6_ARCHIVE_PREFIX if scope == "archive" else U6_EVIDENCE_PREFIX
+    return {
+        "Effect": "Allow",
+        "Action": [action],
+        "Resource": [f"arn:aws:s3:::{U6_BUCKET}/{root}/*"],
+    }
+
+
+def u6_policy(units: Iterable[str]) -> dict[str, Any]:
+    return {"Version": "2012-10-17",
+            "Statement": [u6_statement(u) for u in units]}
+
+
+def u6_attach(user: str, units: list[str], tag: str) -> str:
+    """Replace `user`'s MinIO policy with EXACTLY `units`, and return the name.
+
+    A fresh policy name every time: `mc admin policy create` over an existing
+    name is version-dependent, and a bisection that silently kept the previous
+    document would measure the wrong set.
+    """
+    seq = int(state.get("u6PolicySeq", 0)) + 1
+    state["u6PolicySeq"] = seq
+    name = f"u6-{tag}-{seq}"[:60]
+    body = json.dumps(u6_policy(units))
+    run(K + ["exec", "-i", "mc", "--", "sh", "-c", f"cat > /tmp/{name}.json"],
+        data=body, timeout=60)
+    mc("admin", "policy", "create", "a", name, f"/tmp/{name}.json")
+    mc("admin", "policy", "attach", "a", name, "--user", user)
+    previous = (state.get("u6Attached") or {}).get(user)
+    if previous and previous != name:
+        mc("admin", "policy", "detach", "a", previous, "--user", user, check=False)
+    attached = dict(state.get("u6Attached") or {})
+    attached[user] = name
+    state["u6Attached"] = attached
+    save()
+    artifact(f"u6/policies/{name}.json", u6_policy(units))
+    return name
+
+
+def u6_denied(classified: Any) -> bool:
+    """Did the PRODUCT say `denied` — as a check code or in its own output?"""
+    if isinstance(classified, dict):
+        for key in ("code", "reason", "exitReason"):
+            if classified.get(key) in U6_DENIAL_CODES:
+                return True
+        blob = json.dumps(classified, default=str)
+    else:
+        blob = str(classified)
+    return any(marker in blob for marker in U6_DENIAL_TEXT)
+
+
+def u6_row_is_proved(
+    role: str,
+    baseline: dict[str, Any],
+    removals: list[dict[str, Any]],
+    minimal: list[str],
+    confirm: dict[str, Any] | None,
+) -> dict[str, bool]:
+    """Is one role's measured row actually PROVED by what was run?
+
+    Pure: every argument is a recorded outcome, so `test_rows.py` can make each
+    clause say False. A row that cannot be made to say False is not a row.
+    """
+    removed = [r["unit"] for r in removals]
+    required = [r["unit"] for r in removals if not r["ok"]]
+    return {
+        "the role is named": bool(role),
+        "the starting set ran and succeeded": bool(baseline.get("ok")),
+        "every unit of the starting set was removed exactly once":
+            len(removed) == len(set(removed)) and len(removed) > 0,
+        "the minimal set is exactly the units whose removal failed":
+            sorted(minimal) == sorted(required),
+        "at least one unit is required":
+            len(required) > 0,
+        "every required unit's failure is the product's own denial":
+            all(u6_denied(r.get("classified")) for r in removals if not r["ok"]),
+        "no required unit failed for an unclassified reason":
+            all(not r.get("unclassified") for r in removals if not r["ok"]),
+        "every unit outside the minimal set really did succeed without it":
+            all(r["ok"] for r in removals if r["unit"] not in minimal),
+        "the minimal set itself was executed and succeeded":
+            bool((confirm or baseline).get("ok"))
+            and (sorted(minimal) == sorted(removed) or confirm is not None),
+    }
+
+
+def u6_bisect(
+    sc: "Scenario",
+    *,
+    role: str,
+    user: str,
+    starting: list[str],
+    operation: Callable[[str], dict[str, Any]],
+    note: str = "",
+) -> dict[str, Any]:
+    """Measure one role's minimal set. See the module comment for the method."""
+    log(f"U6[{role}]: starting set of {len(starting)} units on principal {user}")
+    u6_attach(user, starting, f"{role}-full")
+    baseline = operation(f"{role}-full")
+    baseline["units"] = list(starting)
+    if not baseline.get("ok"):
+        raise AssertionError(
+            f"U6[{role}]: the RECORDED starting set does not even work: "
+            + redact(json.dumps(baseline.get("classified"), default=str))[:600]
+        )
+    removals: list[dict[str, Any]] = []
+    for index, unit in enumerate(starting):
+        reduced = [u for u in starting if u != unit]
+        u6_attach(user, reduced, f"{role}-no{index}")
+        outcome = operation(f"{role}-no{index}")
+        outcome["unit"] = unit
+        outcome["remaining"] = reduced
+        removals.append(outcome)
+        verdict = "still works (NOT required)" if outcome["ok"] else "FAILS (required)"
+        log(f"U6[{role}]: without `{unit}` — {verdict}")
+        # A partial result is evidence: write the table after every row so a
+        # killed worker resumes from what it measured.
+        artifact(f"u6/{role}.json",
+                 {"role": role, "user": user, "starting": starting,
+                  "baseline": baseline, "removals": removals})
+    minimal = [r["unit"] for r in removals if not r["ok"]]
+    confirm: dict[str, Any] | None = None
+    if sorted(minimal) != sorted(starting):
+        u6_attach(user, minimal, f"{role}-min")
+        confirm = operation(f"{role}-min")
+        confirm["units"] = list(minimal)
+        if not confirm.get("ok"):
+            raise AssertionError(
+                f"U6[{role}]: the measured minimal set does not work as a whole: "
+                + redact(json.dumps(confirm.get("classified"), default=str))[:600]
+            )
+    proof = u6_row_is_proved(role, baseline, removals, minimal, confirm)
+    row = {
+        "role": role,
+        "principal": user,
+        "note": note,
+        "startingSet": starting,
+        "minimalSet": minimal,
+        "notRequired": [u for u in starting if u not in minimal],
+        "baseline": baseline,
+        "removals": removals,
+        "minimalConfirmed": confirm,
+        "proof": proof,
+    }
+    artifact(f"u6/{role}.json", row)
+    table = dict(state.get("u6Table") or {})
+    table[role] = row
+    state["u6Table"] = table
+    save()
+    sc.detail.setdefault("roles", {})[role] = {
+        "minimalSet": minimal,
+        "notRequired": row["notRequired"],
+        "proof": proof,
+    }
+    check(all(proof.values()),
+          f"U6[{role}]: the measured row is not proved: "
+          + json.dumps({k: v for k, v in proof.items() if not v}))
+    return row
+
+
+def u6_seq() -> int:
+    """A monotonic object counter, so every run of every variant is its OWN
+    object and no assertion can read a previous attempt's status."""
+    n = int(state.get("u6ObjSeq", 0)) + 1
+    state["u6ObjSeq"] = n
+    save()
+    return n
+
+
+U6_ROLES = {
+    "archive-write": "archiveWrite",
+    "archive-read": "archiveRead",
+    "evidence-write": "evidenceWrite",
+    "evidence-read": "evidenceRead",
+    "retention-enforcer": "retention enforcer (`logweir-retention`)",
+    "catalog-sync": "catalogSync reader",
+}
+
+U6_PRINCIPALS = {
+    "archive-write": "u6-writer",
+    "archive-read": "u6-reader",
+    "evidence-write": "u6-evwriter",
+    "evidence-read": "u6-evreader",
+    "retention-enforcer": "u6-deleter",
+    "catalog-sync": "u6-catreader",
+}
+
+
+def u6_mc_pod() -> dict[str, Any]:
+    """One `mc` with a single alias. Not `mc_pod()`: that one waits three
+    minutes per MinIO this phase does not deploy, and needs the private CA the
+    TLS fixture builds."""
+    endpoint = f"http://minio-a.{NS}.svc:9000"
+    script = "; ".join([
+        "set -e",
+        "for i in $(seq 1 90); do "
+        f"  mc alias set a {endpoint} {MINIO_ROOT_USER} \"$ROOT\" >/dev/null 2>&1 && break; "
+        "  sleep 2; done",
+        f"mc alias set a {endpoint} {MINIO_ROOT_USER} \"$ROOT\" >/dev/null",
+        "touch /tmp/ready",
+        "sleep 21600",
+    ])
+    return {
+        "apiVersion": "v1", "kind": "Pod", "metadata": owned("mc"),
+        "spec": {
+            "restartPolicy": "Never", "automountServiceAccountToken": False,
+            "containers": [{
+                "name": "mc", "image": MC_IMAGE, "imagePullPolicy": "Never",
+                "command": ["/bin/sh", "-c"], "args": [script],
+                "env": [
+                    {"name": "MC_CONFIG_DIR", "value": "/tmp/mcconfig"},
+                    {"name": "ROOT", "valueFrom": {
+                        "secretKeyRef": {"name": "minio-root", "key": "password"}}},
+                ],
+                "readinessProbe": {"exec": {"command": ["test", "-f", "/tmp/ready"]},
+                                   "periodSeconds": 1},
+            }],
+        },
+    }
+
+
+def u6setup() -> None:
+    """The U6 fixture: ONE MinIO, TWO brokers, one bucket, one principal per
+    role, and one destination per readiness shape. Deliberately smaller than
+    `setup()`: U6 measures object-storage permissions and needs neither TLS,
+    nor a second store, nor an ACL-limited broker."""
+    load_secrets()
+    log(f"u6setup: namespace {NS}")
+    ns = create_namespace(NS)
+    state["namespaceUid"] = ns["metadata"]["uid"]
+    save()
+
+    literal_secret("minio-root", {"password": SECRETS["minio-root"]})
+    for user in U6_PRINCIPALS.values():
+        literal_secret(user, {"access-key-id": user,
+                              "secret-access-key": SECRETS[user]})
+    literal_secret("kafka-admin", {"password": SECRETS["kafka-admin"]})
+    literal_secret("kafka-target-admin", {"password": SECRETS["kafka-target-admin"]})
+    keys = approver_material()
+    apply({"apiVersion": "v1", "kind": "Secret", "metadata": owned("logweir-signing-key"),
+           "type": "Opaque",
+           "data": {"signing.pem": base64.b64encode(keys["signing"].read_bytes()).decode()}})
+    apply({"apiVersion": "v1", "kind": "ServiceAccount",
+           "metadata": owned("logweir-runner"), "automountServiceAccountToken": False})
+
+    objects: list[dict[str, Any]] = []
+    objects += kafka_objects("kafka-acl", "U6D2AclAAAAAAAAAAAAAAA",
+                             heap="-Xmx700M -Xms256M", memory="1200Mi")
+    objects += kafka_objects("kafka-target", "U6D2TgtAAAAAAAAAAAAAAA",
+                             heap="-Xmx512M -Xms256M", memory="1Gi")
+    objects += minio_objects("minio-a", tls=False)
+    for obj in objects:
+        apply(obj)
+    for app in ("kafka-acl", "kafka-target", "minio-a"):
+        wait_pod_ready(f"app={app}", timeout=420)
+        log(f"u6setup: {app} ready")
+    run(K + ["delete", "pod", "mc", "--ignore-not-found", "--wait=true"], timeout=120)
+    apply(u6_mc_pod())
+    run(K + ["wait", "--for=condition=Ready", "pod/mc", "--timeout=300s"], timeout=330)
+    log("u6setup: mc ready")
+
+    mc("mb", f"a/{U6_BUCKET}", check=False)
+    for user in U6_PRINCIPALS.values():
+        run(K + ["exec", "-i", "mc", "--", "sh", "-c",
+                 f"mc admin user add a {user} \"$(cat)\" >/dev/null"],
+            data=SECRETS[user], timeout=120)
+    log("u6setup: one MinIO principal per role, each with NO policy yet")
+
+    for user, key in (("admin", "kafka-admin"), ):
+        set_scram_credential("kafka-acl", user, SECRETS[key])
+    set_scram_credential("kafka-target", "admin", SECRETS["kafka-target-admin"])
+    for broker in ("kafka-acl", "kafka-target"):
+        broker_exec(broker, [
+            f"{KAFKA_BIN}/kafka-acls.sh", "--bootstrap-server", "localhost:9092",
+            "--add", "--allow-principal", "User:admin", "--operation", "All",
+            "--cluster", "--topic", "*", "--group", "*",
+        ], check=False)
+    broker_exec("kafka-acl", [
+        f"{KAFKA_BIN}/kafka-topics.sh", "--bootstrap-server", "localhost:9092",
+        "--create", "--topic", "orders", "--partitions", "1",
+        "--replication-factor", "1",
+    ], check=False)
+    if not state.get("u6Seeded"):
+        payload = "\n".join(f"orders-record-{i:04d}" for i in range(120)) + "\n"
+        pods = get_list("pods", selector="app=kafka-acl")
+        pod = [p for p in pods if p["status"]["phase"] == "Running"][0]["metadata"]["name"]
+        run(K + ["exec", "-i", pod, "--", f"{KAFKA_BIN}/kafka-console-producer.sh",
+                 "--bootstrap-server", "localhost:9092", "--topic", "orders"],
+            data=payload, timeout=180)
+        state["u6Seeded"] = True
+        save()
+        log("u6setup: `orders` seeded with 120 records")
+
+    apply(kafka_cluster("source", servers=[f"kafka-acl.{NS}.svc.cluster.local:9096"],
+                        username="admin", secret="kafka-admin", role="source"))
+    apply(kafka_cluster("target", servers=[f"kafka-target.{NS}.svc.cluster.local:9096"],
+                        username="admin", secret="kafka-target-admin", role="target"))
+
+    common = dict(bucket=U6_BUCKET, prefix=U6_ARCHIVE_PREFIX,
+                  endpoint=f"http://minio-a.{NS}.svc:9000", security="InsecureHTTP",
+                  addressing="PathStyle")
+    apply(destination(
+        "u6-dest", archive_write="u6-writer", archive_read="u6-reader",
+        evidence_write="u6-evwriter", evidence_read="u6-evreader",
+        description="U6: one principal per role, so a policy change isolates one role",
+        **common))
+    apply(destination(
+        "u6-dest-probe", archive_write="u6-writer", archive_read="u6-reader",
+        evidence_write="u6-evwriter", evidence_read="u6-evreader", write_probe=True,
+        description="U6: the same location with the create-only readiness write probe on",
+        **common))
+    apply(destination(
+        "u6-dest-cat", archive_write="u6-writer", archive_read="u6-catreader",
+        evidence_write="u6-evwriter", evidence_read="u6-evreader",
+        description="U6: catalogSync reads through `archiveRead`; this one isolates it",
+        **common))
+    for name in ("u6-dest", "u6-dest-probe", "u6-dest-cat"):
+        obj = wait_for("backupdestination", name,
+                       lambda o: o.get("status", {}).get("reason") is not None,
+                       timeout=180, what="a Valid verdict")
+        artifact(f"u6/objects/{name}.json", obj)
+        check(obj["status"].get("reason") == "Valid",
+              f"{name} is not Valid: {obj['status'].get('reason')}")
+    log("u6setup: three destinations Valid")
+
+
+def u6_backup_manifest_facts(backup_id: str) -> dict[str, Any]:
+    return _facts_from_manifest(
+        backup_id,
+        json.loads(mc_get(f"a/{U6_BUCKET}/{U6_ARCHIVE_PREFIX}/{backup_id}/manifest.json")))
+
+
+def u6_restore_plan(backup_id: str, point_in_time: str, prefix: str) -> dict[str, Any]:
+    return {
+        "source": {
+            "storage": {
+                "backend": "s3", "bucket": U6_BUCKET, "prefix": U6_ARCHIVE_PREFIX,
+                "region": "us-east-1",
+                "endpoint": f"http://minio-a.{NS}.svc:9000",
+                "path_style": True, "allow_http": True,
+            },
+            "backup": backup_id,
+            "topics": ["orders"],
+        },
+        "target": {
+            "bootstrap_servers": [f"kafka-target.{NS}.svc.cluster.local:9096"],
+            "auth": {"mode": "scramSha512", "username": "admin", "tls": False},
+            "mode": "newTopic",
+            "topic_naming": {"prefix": prefix},
+            "topic_mapping_prefix": "logweir-scratch-",
+            "marker_topic": "logweir.scratch",
+            "default_replication_factor": 1,
+            "teardown": "delete",
+        },
+        "restore": {"point_in_time": point_in_time},
+        "sample": {"window_start": "2026-09-01T00:00:00Z", "window_end": point_in_time,
+                   "per_partition": 5},
+    }
+
+
+def u6_rows(obj: dict[str, Any], rows: list[str]) -> dict[str, Any]:
+    checks = checks_by_id(obj)
+    return {r: {"state": checks.get(r, {}).get("state"),
+                "code": checks.get(r, {}).get("code"),
+                "gating": checks.get(r, {}).get("gating"),
+                "message": (checks.get(r, {}).get("message") or "")[:400]}
+            for r in rows}
+
+
+def u6_check_outcome(obj: dict[str, Any], name: str, rows: list[str]) -> dict[str, Any]:
+    picked = u6_rows(obj, rows)
+    ok = all(picked[r]["state"] == "ready" for r in rows)
+    # "Unclassified" = the operation did not produce a verdict at all for a row
+    # it was asked about. A permission measurement built on that would be a
+    # measurement of the harness.
+    unclassified = (not ok) and any(
+        picked[r]["state"] not in {"ready", "notReady"} or not picked[r]["code"]
+        for r in rows)
+    return {
+        "ok": ok, "object": name, "kind": "Preflight",
+        "overall": obj.get("status", {}).get("result", {}).get("state"),
+        "classified": picked, "unclassified": unclassified,
+    }
+
+
+def u6_destination_access_op(dest: str, roles: list[str], rows: list[str]):
+    def op(tag: str) -> dict[str, Any]:
+        name = f"u6-da-{u6_seq():03d}"
+        apply(preflight(name, {"operation": "DestinationAccess",
+                               "destinationAccess": {"destinationRef": {"name": dest},
+                                                     "roles": roles}},
+                        timeout_seconds=150))
+        obj = wait_preflight(name, timeout=600)
+        artifact(f"u6/objects/{name}.json", obj)
+        out = u6_check_outcome(obj, name, rows)
+        out["variant"] = tag
+        return out
+    return op
+
+
+def u6_restore_preflight_op(rows: list[str]):
+    def op(tag: str) -> dict[str, Any]:
+        facts = state["u6BackupFacts"]
+        plan = json.dumps(
+            u6_restore_plan(facts["backupId"], facts["pointInTime"], "u6-r-"), indent=2) + "\n"
+        name = f"u6-rp-{u6_seq():03d}"
+        apply(preflight(name, {
+            "operation": "Restore",
+            "restore": {"planBytes": plan, "planHash": digest(plan),
+                        "targetRef": {"name": "target"},
+                        "sourceDestinationRef": {"name": "u6-dest"},
+                        "evidenceDestinationRef": {"name": "u6-dest"}},
+        }, timeout_seconds=180))
+        obj = wait_preflight(name, timeout=600)
+        artifact(f"u6/objects/{name}.json", obj)
+        out = u6_check_outcome(obj, name, rows)
+        out["variant"] = tag
+        return out
+    return op
+
+
+def u6_backup_op(dest: str = "u6-dest"):
+    def op(tag: str) -> dict[str, Any]:
+        name = f"u6-bk-{u6_seq():03d}"
+        apply(backup(name, source="source", topics=["orders"],
+                     destination_ref=dest, deadline=420))
+        obj = wait_backup(name, timeout=900)
+        artifact(f"u6/objects/{name}.json", obj)
+        status = obj.get("status", {})
+        ok = status.get("phase") == "Succeeded" and status.get("exitCode") == 0
+        tail = ""
+        job = (status.get("jobRef") or {}).get("name")
+        if job and not ok:
+            try:
+                tail = redact(pod_logs_for_job(job, tail=80))[-2500:]
+            except Exception as exc:  # a pod already swept is not a measurement
+                tail = f"[runner log unavailable: {type(exc).__name__}]"
+        classified = {
+            "phase": status.get("phase"), "exitCode": status.get("exitCode"),
+            "reason": status.get("reason"), "exitReason": status.get("exitReason"),
+            "message": (status.get("message") or "")[:400],
+            "runnerLogTail": tail,
+        }
+        return {"ok": ok, "object": name, "kind": "Backup", "variant": tag,
+                "backupId": status.get("backupId"),
+                "evidence": status.get("evidence"),
+                "classified": classified,
+                "unclassified": (not ok) and status.get("exitCode") is None}
+    return op
+
+
+def u6a() -> None:
+    """The two evidence-root roles, measured with the checks that probe them."""
+    with Scenario("U6.evidenceRead",
+                  "the minimal grant under which `destination.evidenceReadable` answers") as sc:
+        u6_bisect(
+            sc, role="evidence-read", user="u6-evreader",
+            starting=["s3:GetObject@evidence", "s3:ListBucket@bucket:evidence",
+                      "s3:GetBucketLocation@bucket"],
+            operation=u6_destination_access_op(
+                "u6-dest", ["EvidenceRead"], ["destination.evidenceReadable"]),
+            note="D2 §3.11 recorded `s3:GetObject`, with `s3:ListBucket` optional "
+                 "— measured here as optional indeed",
+        )
+    with Scenario("U6.evidenceWrite",
+                  "the minimal grant under which the create-only readiness marker writes") as sc:
+        u6_bisect(
+            sc, role="evidence-write", user="u6-evwriter",
+            starting=["s3:PutObject@evidence", "s3:GetObject@evidence",
+                      "s3:ListBucket@bucket:evidence", "s3:GetBucketLocation@bucket"],
+            operation=u6_destination_access_op(
+                "u6-dest-probe", ["EvidenceWrite"], ["destination.evidenceWritable"]),
+            note="`writeProbe: CreateOnlyMarker` is what makes this row probed at all",
+        )
+
+
 def phase_table() -> dict[str, Callable[[], None]]:
     """Every scenario is a module-level function named exactly as its phase, so
     the list of runnable phases is the list of things this file defines and
@@ -4261,7 +4822,9 @@ def phase_table() -> dict[str, Callable[[], None]]:
         "sweep": lambda: print(json.dumps(sweep(), indent=2)),
     }
     for name, value in sorted(globals().items()):
-        if re.fullmatch(r"(s\d+[a-z]*|e\d+|bulk|negative_control|ui|api_probe)", name) and callable(value):
+        if re.fullmatch(
+            r"(s\d+[a-z]*|e\d+|u\d+[a-z]*|bulk|negative_control|ui|api_probe)", name
+        ) and callable(value):
             table[name] = value
     return table
 
