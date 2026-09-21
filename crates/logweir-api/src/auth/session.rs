@@ -288,7 +288,10 @@ pub fn cookie(headers: &http::HeaderMap, name: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::keys::VersionedKey;
+    use base64::Engine as _;
+    use ring::aead::CHACHA20_POLY1305;
+
+    use super::super::keys::{OpenError, VersionedKey, B64, SEAL_PREFIX};
     use super::*;
 
     fn keys(version: u32) -> CookieKeys {
@@ -373,17 +376,266 @@ mod tests {
         assert_eq!(short.exp, 120);
     }
 
+    /// Every field a session cookie's payload may carry, and no other.
+    ///
+    /// This is the contract stated in two places — this module's header and
+    /// `docs/api.md` §Shared mode, "The session and the CSRF token" — written
+    /// down once here so that a field ADDED to [`SessionClaims`] fails this
+    /// guard until somebody decides it belongs in a browser's cookie. An
+    /// undeclared field is provider material until proven otherwise.
+    const CARRIED_FIELDS: [&str; 9] = [
+        "sid", "iss", "sub", "name", "groups", "iat", "exp", "auth", "kv",
+    ];
+
+    /// The names provider-issued material travels under, most specific first
+    /// so that the report names the narrowest one that matched.
+    const PROVIDER_NAMES: [&str; 8] = [
+        "id_token",
+        "access_token",
+        "refresh_token",
+        "client_secret",
+        "token",
+        "secret",
+        "bearer",
+        "assertion",
+    ];
+
+    /// The cookie value out of a `Set-Cookie` line.
+    fn sealed_value(set_cookie: &str) -> String {
+        set_cookie
+            .split(';')
+            .next()
+            .and_then(|pair| pair.split_once('='))
+            .map(|(_, value)| value.to_string())
+            .expect("a Set-Cookie line is `<name>=<value>; <attributes>`")
+    }
+
+    /// The ciphertext-and-tag out of a sealed envelope, decoded.
+    fn envelope_ciphertext(sealed: &str) -> Vec<u8> {
+        let parts: Vec<&str> = sealed.split('.').collect();
+        assert_eq!(
+            parts.len(),
+            4,
+            "a sealed value is `lw1.<version>.<nonce>.<ciphertext>`: {sealed}"
+        );
+        assert_eq!(parts[0], SEAL_PREFIX, "the envelope prefix");
+        B64.decode(parts[3])
+            .expect("the ciphertext is URL-safe base64 without padding")
+    }
+
+    /// A JWT-shaped string, for the mutant below.
+    ///
+    /// ASSEMBLED AT RUN TIME ON PURPOSE: no source line may carry a contiguous
+    /// token-shaped literal, because push protection scans every pushed commit
+    /// for one and a test fixture that only LOOKS like a secret still trips it.
+    fn jwt_shaped() -> String {
+        let header = B64.encode(br#"{"alg":"RS256","kid":"k-1"}"#);
+        let body = B64.encode(br#"{"iss":"https://idp.example","sub":"u-1"}"#);
+        let signature = B64.encode([0x5au8; 48]);
+        format!("{header}.{body}.{signature}")
+    }
+
+    /// Whether a string is a JWT: three non-empty base64url segments whose
+    /// first decodes to a JSON object naming an algorithm.
+    fn is_jwt_shaped(text: &str) -> bool {
+        let parts: Vec<&str> = text.split('.').collect();
+        if parts.len() != 3 || parts.iter().any(|part| part.is_empty()) {
+            return false;
+        }
+        let Ok(header) = B64.decode(parts[0]) else {
+            return false;
+        };
+        let Ok(header) = serde_json::from_slice::<serde_json::Value>(&header) else {
+            return false;
+        };
+        header.get("alg").is_some()
+    }
+
+    /// Every string in a JSON document, with the path it sits at.
+    fn strings(value: &serde_json::Value, path: &str, out: &mut Vec<(String, String)>) {
+        match value {
+            serde_json::Value::String(text) => out.push((path.to_string(), text.clone())),
+            serde_json::Value::Array(items) => {
+                for (index, item) in items.iter().enumerate() {
+                    strings(item, &format!("{path}[{index}]"), out);
+                }
+            }
+            serde_json::Value::Object(map) => {
+                for (key, item) in map {
+                    let child = if path.is_empty() {
+                        key.clone()
+                    } else {
+                        format!("{path}.{key}")
+                    };
+                    strings(item, &child, out);
+                }
+            }
+            serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {
+            }
+        }
+    }
+
+    /// Read a DECODED session payload and name any provider material in it.
+    ///
+    /// THIS IS THE GUARD, AND IT IS STRUCTURAL ON PURPOSE. Its predecessor
+    /// searched the sealed cookie VALUE for the substring `u-1`; since `seal`
+    /// draws a fresh random nonce and encodes the result in base64url — an
+    /// alphabet that contains `u`, `-` and `1` — that three-character sequence
+    /// turned up by chance in roughly one run in eight hundred, and the guard
+    /// failed for a reason that had nothing to do with the property it names
+    /// (FLAKE-APICOOKIE: 2026-09-17, 2026-09-19). Worse, it could never have
+    /// caught the thing it was written for: a token sealed INTO the cookie is
+    /// indistinguishable ciphertext on the wire, so no substring search over
+    /// the wire form would find it. Opening the envelope and reading the
+    /// payload asks the real question instead — does what the browser carries
+    /// contain anything the provider issued?
+    fn provider_material(payload: &[u8]) -> Result<(), String> {
+        let value: serde_json::Value = serde_json::from_slice(payload)
+            .map_err(|error| format!("the payload is not JSON: {error}"))?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| format!("the payload is not a JSON object: {value}"))?;
+
+        let carried: std::collections::BTreeSet<&str> = object.keys().map(String::as_str).collect();
+        let allowed: std::collections::BTreeSet<&str> = CARRIED_FIELDS.into_iter().collect();
+        if carried != allowed {
+            let extra: Vec<&str> = carried.difference(&allowed).copied().collect();
+            let missing: Vec<&str> = allowed.difference(&carried).copied().collect();
+            return Err(format!(
+                "the payload's fields are not the contract's: extra {extra:?}, missing {missing:?}\
+                 ; the cookie carries exactly [{}] (docs/api.md §Shared mode) and a field nobody \
+                 declared is provider material until somebody says otherwise",
+                CARRIED_FIELDS.join(", ")
+            ));
+        }
+
+        let mut found = Vec::new();
+        strings(&value, "", &mut found);
+        for (path, text) in &found {
+            let haystack = format!("{path} {text}").to_ascii_lowercase();
+            if let Some(name) = PROVIDER_NAMES.iter().find(|name| haystack.contains(**name)) {
+                return Err(format!("`{name}` appears at `{path}`: {text}"));
+            }
+            if is_jwt_shaped(text) {
+                return Err(format!("a JWT sits at `{path}`: {text}"));
+            }
+        }
+        Ok(())
+    }
+
     #[test]
     fn the_sealed_cookie_contains_no_provider_material() {
         let k = keys(1);
+        let other = CookieKeys::new(&VersionedKey::from_parts(1, vec![0x44; 32]));
         let claims = SessionClaims::issue(&identity(), "sid".into(), 1, at(1000), 900);
-        let json = serde_json::to_string(&claims).unwrap();
-        for forbidden in ["id_token", "access_token", "refresh_token", "client_secret"] {
-            assert!(!json.contains(forbidden), "{forbidden}");
+        let plaintext = serde_json::to_vec(&claims).unwrap();
+
+        // A FRESH NONCE PER SEAL is what made the old form of this guard fail
+        // by chance, so the structural form is asked of many of them: 128
+        // independent seals per run, where the old assertion would have gone
+        // red about one run in eight hundred.
+        for round in 0..128 {
+            let cookie = set_cookie(&k, &claims, at(1000));
+            let sealed = sealed_value(&cookie);
+
+            // What the browser carries, opened with this test's own key.
+            let payload = k
+                .open(SESSION_COOKIE, &sealed)
+                .unwrap_or_else(|error| panic!("round {round}: the key opens it: {error:?}"));
+            assert_eq!(payload, plaintext, "round {round}: the payload round-trips");
+            if let Err(offence) = provider_material(&payload) {
+                panic!("round {round}: {offence}");
+            }
+
+            // And the wire form is opaque: it carries the ciphertext, not the
+            // claims, and no other key reads it.
+            let ciphertext = envelope_ciphertext(&sealed);
+            assert_eq!(
+                ciphertext.len(),
+                plaintext.len() + CHACHA20_POLY1305.tag_len(),
+                "round {round}: the envelope is the payload plus an authentication tag"
+            );
+            assert_ne!(
+                ciphertext[..plaintext.len()],
+                plaintext[..],
+                "round {round}: the payload is encrypted, not merely encoded"
+            );
+            assert_eq!(
+                other.open(SESSION_COOKIE, &sealed),
+                Err(OpenError::NotAuthentic),
+                "round {round}: another key does not read the session"
+            );
         }
-        // And the wire form is opaque: the subject is not readable from it.
-        let cookie = set_cookie(&k, &claims, at(1000));
-        assert!(!cookie.contains("u-1") && !cookie.contains("Ada"));
+    }
+
+    /// The mutant for the guard above: material the contract forbids, sealed
+    /// through the same path, and the same check must catch every shape of it.
+    ///
+    /// A GUARD WITHOUT A MUTANT IS NOT A GUARD — and this one replaced an
+    /// assertion that no mutant could have killed, since every row below seals
+    /// to the same opaque base64url the honest claims do.
+    #[test]
+    fn the_provider_material_check_catches_a_sealed_token() {
+        let k = keys(1);
+        let claims = SessionClaims::issue(&identity(), "sid".into(), 1, at(1000), 900);
+        let honest = serde_json::to_value(&claims).unwrap();
+        let jwt = jwt_shaped();
+
+        // The honest payload is the control: the same check, the same path.
+        provider_material(&serde_json::to_vec(&honest).unwrap())
+            .expect("the claims this service seals carry no provider material");
+
+        let mut in_its_own_field = honest.clone();
+        in_its_own_field["id_token"] = serde_json::Value::String(jwt.clone());
+        let mut under_an_innocent_name = honest.clone();
+        under_an_innocent_name["name"] = serde_json::Value::String(jwt.clone());
+        let mut inside_a_group = honest.clone();
+        inside_a_group["groups"] = serde_json::Value::Array(vec![serde_json::Value::String(
+            format!("access_token={jwt}"),
+        )]);
+        let mut under_a_short_name = honest.clone();
+        under_a_short_name["at"] = serde_json::Value::String(B64.encode([0x11u8; 24]));
+
+        for (label, tainted, expected) in [
+            (
+                "an ID token in a field of its own",
+                in_its_own_field,
+                "id_token",
+            ),
+            (
+                "a token smuggled through the display claim",
+                under_an_innocent_name,
+                "a JWT sits at `name`",
+            ),
+            (
+                "a token smuggled through a group string",
+                inside_a_group,
+                "access_token",
+            ),
+            (
+                "an opaque blob under an undeclared field",
+                under_a_short_name,
+                "extra [\"at\"]",
+            ),
+        ] {
+            // Through the same seal, the same Set-Cookie shape and the same
+            // reader the product uses, not around them.
+            let sealed = k.seal(SESSION_COOKIE, &serde_json::to_vec(&tainted).unwrap());
+            let line = format!("{SESSION_COOKIE}={sealed}; Max-Age=900; {SESSION_ATTRIBUTES}");
+            let pair = line.split(';').next().unwrap();
+            let value = cookie(&with_cookie(pair), SESSION_COOKIE)
+                .unwrap_or_else(|| panic!("{label}: the header carries the cookie"));
+            let payload = k
+                .open(SESSION_COOKIE, &value)
+                .unwrap_or_else(|error| panic!("{label}: it opens: {error:?}"));
+
+            let offence = provider_material(&payload)
+                .expect_err(&format!("{label}: the guard has to catch it"));
+            assert!(
+                offence.contains(expected),
+                "{label}: `{expected}` is not named in: {offence}"
+            );
+        }
     }
 
     #[test]
