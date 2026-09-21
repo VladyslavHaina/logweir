@@ -229,7 +229,8 @@ Wave 2 resumes every branch in place with the prompts under
 | PLAT-16.1 | Done | d3w9, d3w14, fix-retention, harness-refresh, harness-rows-2, lab-refresh-3/4/5 (+ reviews) | Completion record under PLAT-16.1; live on docker-desktop 2026-09-18. |
 | PLAT-05.1 | Done | d1w2, d1w6, d1w7, d1w8, d1-fence, harness-refresh, harness-rows-2/4, fix-trust-upgrade(-2), lab-refresh-4/5 (+ reviews) | Completion record under PLAT-05.1; live on docker-desktop 2026-09-18/19 incl. a real rollback. |
 | PLAT-03.2 | Done | d2w4, d2w9, d2w13, d2w14, fix-runner-checks, d2-status-destination, fix-preflight-approval, harness-rows-6, lab-refresh-3/4/5/6 (+ reviews) | Completion record under PLAT-03.2; live on docker-desktop 2026-09-19. |
-| PLAT-06.2, 09.2 | In progress (every D1 wave landed; PLAT-04.2, 05.1 and 05.2 Done; 06.2 waits on the CLI/API/UI demonstration and the legacy grant, 09.2 on L-09-3a/3b through the fence and the authorizer broker for L-09-5) | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. W1 (the pure cadence engine) landed in main as `6eedc0a..4b54a5c` after review; see the PLAT-04.2 partial record. W3a (the `Backup` run contract: `spec.trigger`, `spec.scheduleRef` with generation and `runPolicySha256`, the selection type with `allUserTopics` requiring `incompleteDiscovery`, `status.selection`, `src/identity.rs`, `src/policy.rs`, the §3.4 vocabulary) landed in `696c81a`/`b334a98` inside `crds-shapes`; a `Backup` naming both `topics` and `allUserTopics` is refused by CEL and, terminally, by admission. W3b (the reconciler consumes the contract; grammar `v2`) landed at `397e37d`; see the PLAT-04.2 partial record. W2 (editable policy, the §4.5 scheduler; `destinationRef` editable) landed at `98257f8`; see the PLAT-05.1/04.2 partial record. W5 (dynamic selection per run through the check runner) landed at `7072b9d`; see the PLAT-09.2 partial record. W6 (cadence previews, `PUT schedules`, `POST backups`) landed at `72751ab`; see the PLAT-06.2 partial record. W4 (retained history; runs detached from the schedule's ownerReference) landed at `6845ffb`; see the PLAT-05.2 partial record. W7, W8 remain. |
+| PLAT-09.2 | Done | d1w5, d1w7, d1w8, fix-discovery-results, lab-refresh-3, plat09-2-rows (+ review) | Completion record under PLAT-09.2; live on docker-desktop 2026-09-21, all seven L-09 rows on one build. |
+| PLAT-06.2 | In progress (every D1 wave landed; PLAT-04.2, 05.1, 05.2 and 09.2 Done; 06.2 waits on the CLI demonstration beside the UI, the legacy-mode grant and the failed-preflight journey) | [D1](decisions/D1-backup-scheduling.md) | Cadence/time zone, editable policy with per-run snapshots, retained history, dynamic selection, manual runs; nine worker tasks. W1 (the pure cadence engine) landed in main as `6eedc0a..4b54a5c` after review; see the PLAT-04.2 partial record. W3a (the `Backup` run contract: `spec.trigger`, `spec.scheduleRef` with generation and `runPolicySha256`, the selection type with `allUserTopics` requiring `incompleteDiscovery`, `status.selection`, `src/identity.rs`, `src/policy.rs`, the §3.4 vocabulary) landed in `696c81a`/`b334a98` inside `crds-shapes`; a `Backup` naming both `topics` and `allUserTopics` is refused by CEL and, terminally, by admission. W3b (the reconciler consumes the contract; grammar `v2`) landed at `397e37d`; see the PLAT-04.2 partial record. W2 (editable policy, the §4.5 scheduler; `destinationRef` editable) landed at `98257f8`; see the PLAT-05.1/04.2 partial record. W5 (dynamic selection per run through the check runner) landed at `7072b9d`; see the PLAT-09.2 partial record. W6 (cadence previews, `PUT schedules`, `POST backups`) landed at `72751ab`; see the PLAT-06.2 partial record. W4 (retained history; runs detached from the schedule's ownerReference) landed at `6845ffb`; see the PLAT-05.2 partial record. W7, W8 remain. |
 | PLAT-08.x | In progress (every D2 wave landed; PLAT-03.1, 03.2, 07.2 and 09.1 Done; 08.1 waits on U6's minimal-permission table, 08.2 on its inheritance/validation rows) | [D2](decisions/D2-destinations-discovery-readiness.md) | `BackupDestination`, `TopicDiscovery`, `Preflight`, one shared check runner; sixteen worker tasks. W1 (pure check contract and destination model) and W2 (explicit store options) landed as `c13b0cc..56bd074` after review (ACCEPT after two high and three medium fixes: JSON-form redaction bypass, ambient credentials inheriting the environment). W3 (`logweir_kafka::inventory`: bounded targeted describe, broker count, validate-only `CreateTopics`, error classification where an observed authorization failure makes visibility `limited` and anything unknown is failure, with a real admin-client fault capture because rdkafka 0.36 never invokes `ClientContext::error` for a metadata-only workflow — D2 §4.2 `[VERIFY U5]` corrected) and W5 (`weirkeeper::check`: check Jobs mirroring the execution pod, pod selection by controller owner UID only, framed-stdout relay through the W1 decoder, the full waiting-code table, TTL, plan/chunk/limit modules, the installation policy loader failing closed) landed as `23cec50..b8e62d1` after review (ACCEPT after one high and three medium fixes; 19 mutants killed; the rebase over PLAT-07.1 then routed the inventory client through the reader's `client_config`, removing a drifted copy that could upgrade plaintext to TLS when a CA was present — re-checked ACCEPT; weirkeeper 435, kafka 57). RBAC still owed by W11: `events: list` plus its `manifest_lint` row, the three new kinds' verbs, and a decision on `gc.rs`'s deletes. The reviewers' SEC-PODLOG finding against `controllers::backup::select_job_pod` is closed by `secpodlog` (see the defects table). W6a and W6b (the three Amendment F kinds and the destination sentinel on existing kinds) landed in `46880a3`/`88232f5`/`b334a98` inside `crds-shapes`; W7 (destination resolver, controller, evidence store cache) landed as `27fb924..0b25e95` (see the PLAT-08.1 partial record); W4 (runner `logweir check run`) landed at `537657d` (see the PLAT-03 partial record); W8 (`TopicDiscovery` controller) and W12 (API routes) are in review or in progress. W9, W10, W11, W13, W14 remain. |
 | PLAT-14.x, 15.x, 16.2, 19.1 | In progress (W0–W10 landed; W14 live runs 2026-09-18 and the wave-9/10/11 fixes; PLAT-16.1 Done; 16.2 waits on the degraded condition's live proof, 19.1 on RBAC/old-archive/multi-namespace rows and the keys view (W12), 15.1 on paging/partial access, 14.1/14.2/14.3 on the console waves W11/W12) | [D3](decisions/D3-status-catalog-retention-trust.md) | Operation states, protection freshness, rehearsals, durable catalog, retention enforcement boundary, trust lifecycle; fifteen worker tasks. W4 (`d3-notify`: the shared notification module and `logweir notify deliver`) landed after review (ACCEPT after two high fixes); W3 (`d3-catalog-writer`: signed catalog point records, `list_page`, `logweir catalog sync|list`) landed after review (see the PLAT-15.1 partial record); W0 (the five Amendment G kinds, additive run status, `Restore.spec` additions, the `Approval` enum) landed in `496451a`/`88232f5`/`b334a98` inside `crds-shapes`; W1 (trust lifecycle core, `TrustPolicy` controller, `trust export|migrate-roster`, G8) landed as `64fcd38..5fc1a72` (see the PLAT-19.1 partial record); W8 (`RecoveryCatalog` controller) in progress. W2, W5, W6, W7, W9, W10, W11, W12, W13, W14 remain. |
 
@@ -2109,6 +2110,52 @@ topics — complete" / "— incomplete discovery") and the discovery failure rea
 from `spec.trigger`; nothing is inferred from a topic count (mutant-pinned). Residue before
 Done: the dynamic half's live proof after D1-DISCOVERY-IMAGE's fix (L-09-1/2/4), then
 L-09-3a/3b and L-09-5.
+
+**Completion record — Done (2026-09-21), PLAT-09.2.** Source landed on main as D1 W5
+(`7072b9d`, dynamic selection per run through the check runner: the frozen selection,
+`status.selection {mode, coverage, visibility, limitedTopicCount, resolvedTopicCount}`,
+exclusions and internal-topic rules, `SelectionEmpty`, `incompleteDiscovery: Refuse |
+BackUpVisibleTopics`), the D1-DISCOVERY-IMAGE fix (`86a18b1`, the discovery Job carries
+the configured runner image), and the console half (D1 W7, coverage rendered from
+`status.selection` alone, mutant-pinned). Live proof on docker-desktop against the lab at
+`af64073` by `scripts/live/d1` (`fe5e342`..`cb17eac`: L-09-3a, L-09-3b and L-09-5 added, the
+ACL fixture `scripts/live/d1/fixtures/acl_kafka.py` — a KRaft broker with
+`StandardAuthorizer`, SCRAM credentials set at storage-format time and a principal denied
+`Describe` on one topic — and three harness defects fixed), all seven rows in one fenced
+namespace, one build: **Topic creation/deletion between runs** — L-09-2 (`t3` created after
+run 1 froze enters run 2's frozen list `["t1","t2","t3"]` while run 1's plan ConfigMap keeps
+its bytes and `resourceVersion` and its receipt names two topics) and L-09-3a (after
+`rc-gone` is deleted the next dynamic run freezes `["rc-keep"]`); **excluded/internal
+topic** — L-09-1 (`__consumer_offsets` internal, `pfx-a`/`skip-me` excluded by rule, five
+counting clauses); **empty resolution** — L-09-4 (`Failed=True/SelectionEmpty`,
+`TopicsResolved=False`, no runner Job, no retry); **ACL limitation** — L-09-5 (`Refuse` →
+`Failed/DiscoveryIncomplete` with no runner Job; `BackUpVisibleTopics` → `Succeeded`,
+`coverage: VisibleUserTopicsOnly`, the undescribable topic absent from the frozen list, the
+receipt's topics and its records; `visibility: unknown` is the contract here — D1 §7.5,
+`check_contract.rs:2905` — because Kafka omits an undescribable topic from a listing rather
+than erroring on it, confirmed by the review; the reviewer's independent re-run passed with
+the same `resultSha256`); **discovery/execution race** — L-09-3a (a topic deleted between
+freeze and execution: the frozen plan does not move by one byte across the held window, the
+run fails with the runner naming the deleted topic — attributed from failure-marked runner
+log lines only, since the runner echoes its input — or, on the other branch D1 §7.5 admits,
+succeeds with zero records for it) and L-09-3b (the source changes between discovery and
+freeze: the run is refused naming both resolution digests, no runner Job); **immutable
+snapshot** — L-09-2's digest and L-09-3a's held window; **preserve named allowlists** —
+L-09-6 (no discovery Job, `SelectedTopics/NamedTopics`, frozen `["t1"]`). Four negative
+controls each fail on their own sentence (NEG-09-3a/3b/5 and NEG-1), and NEG-09-5 is the
+sharpest evidence for the second acceptance clause: with `Describe` granted on every topic
+the run still records `VisibleUserTopicsOnly` — `AllUserTopicsAttested` is reachable only
+through an administrator attestation in the installation policy, never from a listing that
+happened to succeed. Evidence `claude/artifacts/d1-live/20260921t1301z/` and (fix round)
+`20260921t1738z/`; report `claude/plat09-2-rows.result.md`; review
+`claude/plat09-2-rows.review.md` ACCEPT (one medium — the L-09-3a `Failed` arm accepted
+any operational exit, a false-pass path — and one low fixed in `cb17eac`; the lean loop's single
+pass). Gates: `just lint` rc 0, `scripts/live/d1` pytest 37, `test_rows` 75, gate_lint 13,
+doc_lint 12. Not exercised live, by name: the administrator attestation path
+(`AllUserTopicsAttested`) and the console label "Visible user topics only" on a real
+limited run (the label is mutant-pinned in D1 W7's console half and the journey of
+`incomplete discovery` ran in its review). Migration: none — additive rows; the fixture is
+test-only.
 
 ## PLAT-10 — Make schedules the everyday protection workspace
 
