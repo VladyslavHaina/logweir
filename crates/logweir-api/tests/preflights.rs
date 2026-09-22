@@ -438,8 +438,10 @@ async fn backup_preflight_accepts_an_inline_archive_and_refuses_empty_topics() {
     let response_body = response.json();
     let id = response_body["item"]["id"].as_str().unwrap();
     let stored = app.fake.object("preflights", NS_A, id).unwrap();
-    assert_eq!(stored["spec"]["request"]["backup"]["legacyArchive"],
-        json!({"url": "s3://b/p", "secretRef": {"name": "s3-creds"}}));
+    assert_eq!(
+        stored["spec"]["request"]["backup"]["legacyArchive"],
+        json!({"url": "s3://b/p", "secretRef": {"name": "s3-creds"}})
+    );
 
     let empty = json!({
         "operation": "backup",
