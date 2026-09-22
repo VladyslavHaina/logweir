@@ -879,3 +879,96 @@ fn the_file_table_names_are_the_five_standing_members() {
         "the runner DERIVES the sidecar path by replacing the extension"
     );
 }
+
+// ---------------------------------------------------------------------------
+// 4. The SHARED BYTE FIXTURE — the other half of `logweir approve --standing`
+// ---------------------------------------------------------------------------
+
+/// **P0's controller half, over bytes the product actually minted.**
+///
+/// `weirkeeper` cannot depend on `logweir` — that split is what keeps the
+/// signer out of the controller, and `scripts/check-one-signer.sh` enforces
+/// it — so the two sides of "a document this product mints is one this
+/// product accepts" meet on BYTES. `logweir approve --standing` wrote this
+/// file; `crates/logweir/tests/standing_approve.rs` re-mints it and requires
+/// byte equality, so it cannot drift from what the command emits; and this row
+/// drives it through the controller's admission.
+///
+/// It closes the gap an earlier comment in `rehearsal_controller.rs` merely
+/// promised: a fixture two sides must agree on, read by both sides' tests.
+#[test]
+fn the_minted_standing_authorization_is_admitted_by_the_controller() {
+    let envelope = std::fs::read_to_string(
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../logweir-core/tests/fixtures/standing-authorization.json"),
+    )
+    .expect("the shared standing-authorization fixture");
+
+    // No key material, ever — it is committed to the tree.
+    assert!(
+        !envelope.contains("PRIVATE"),
+        "the shared fixture is public data"
+    );
+
+    // The fixture's own instants: minted 2026-09-01, valid thirty days.
+    let inside = Utc
+        .with_ymd_and_hms(2026, 9, 10, 0, 0, 0)
+        .single()
+        .expect("an instant inside the fixture's window");
+    let after = Utc
+        .with_ymd_and_hms(2026, 11, 1, 0, 0, 0)
+        .single()
+        .expect("an instant after it");
+
+    let trust = trust();
+    // The fixture was minted for `logweir-d3-w7/weekly-orders`, so the objects
+    // this row judges live there. The namespace comparison is a real check —
+    // it refused this row until the two agreed — so it is moved onto the
+    // objects rather than relaxed in the product.
+    let in_fixture_ns = |value: serde_json::Value| -> serde_json::Value {
+        let mut value = value;
+        value["metadata"]["namespace"] = serde_json::json!("logweir-d3-w7");
+        value
+    };
+    let approval: weirkeeper::crds::approval::Approval = serde_json::from_value(in_fixture_ns(
+        serde_json::to_value(approval_over(&envelope)).expect("serialises"),
+    ))
+    .expect("an Approval");
+    let restore: Restore = serde_json::from_value(in_fixture_ns(
+        serde_json::to_value(standing_restore()).expect("serialises"),
+    ))
+    .expect("a Restore");
+
+    assert_eq!(
+        admit(
+            &restore,
+            Some(&approval),
+            Some(&cluster(true)),
+            Some(&StandingAdmission {
+                trust: &trust,
+                now: inside,
+            }),
+        ),
+        RestoreAdmission::Ok,
+        "the controller admits a document `logweir approve --standing` minted"
+    );
+
+    // And the same bytes after the window closes are refused — otherwise this
+    // row would pass for a build that admitted anything at all.
+    let verdict = admit(
+        &restore,
+        Some(&approval),
+        Some(&cluster(true)),
+        Some(&StandingAdmission {
+            trust: &trust,
+            now: after,
+        }),
+    );
+    assert!(
+        matches!(
+            verdict,
+            RestoreAdmission::StandingAuthorizationRefused { .. }
+        ) && verdict.is_terminal(),
+        "the minted document expires: {verdict:?}"
+    );
+}

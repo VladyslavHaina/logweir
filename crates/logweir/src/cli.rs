@@ -386,18 +386,26 @@ pub enum DrillCmd {
         /// The drill spec this approval authorises. `plan_hash` is the sha256
         /// of its EXACT bytes, so re-run this after any edit — including a
         /// moved `sample.window_*`.
+        ///
+        /// Required for a per-run approval; **not used with `--standing`**,
+        /// which binds a SCOPE covering every slot of one schedule rather than
+        /// one plan's hash.
         #[arg(long)]
-        spec: PathBuf,
+        spec: Option<PathBuf>,
         /// The approver's PRIVATE key (PKCS#8 PEM, P-256 or Ed25519).
         /// `drill run --approver-key` takes the matching PUBLIC key.
         #[arg(long)]
         key: PathBuf,
         /// Who approved: a person, a rota address, a change-management
         /// identity. Copied into the signed scorecard verbatim.
-        #[arg(long)]
+        ///
+        /// Not used with `--standing`: version 1.0.0 of the standing document
+        /// carries no such field, so a value would not be signed.
+        #[arg(long, default_value = "")]
         approver: String,
-        /// The change ticket this drill is authorised under.
-        #[arg(long)]
+        /// The change ticket this drill is authorised under. Not used with
+        /// `--standing`, for the same reason as `--approver`.
+        #[arg(long, default_value = "")]
         ticket: String,
         /// Where the approval JSON is written. Its DSSE sidecar lands beside
         /// it with the extension replaced by `.sig`, which is the only place
@@ -416,6 +424,51 @@ pub enum DrillCmd {
         /// referent's actual kind and an absent field matches nothing.
         #[arg(long, value_enum, default_value_t = SubjectKindArg::Restore)]
         subject_kind: SubjectKindArg,
+        /// Mint a **standing rehearsal authorization** (D3 §4.3(e)) instead of
+        /// a per-run approval: one signature covering every slot of one
+        /// `RehearsalSchedule`, which is what
+        /// `logweir restore run --standing-authorization` verifies and what
+        /// the `Approval` controller requires for a `RehearsalSchedule`
+        /// referent.
+        ///
+        /// Requires `--scope`, `--schedule-namespace`, `--schedule-name` and
+        /// `--schedule-uid`; refuses `--spec`, `--approver` and `--ticket`,
+        /// none of which this document binds.
+        #[arg(long)]
+        standing: bool,
+        /// With `--standing`: the `RehearsalSchedule`'s namespace.
+        #[arg(long, requires = "standing")]
+        schedule_namespace: Option<String>,
+        /// With `--standing`: the `RehearsalSchedule`'s name.
+        #[arg(long, requires = "standing")]
+        schedule_name: Option<String>,
+        /// With `--standing`: the `RehearsalSchedule`'s `metadata.uid`.
+        ///
+        /// **THE BINDING.** The runner compares it against the UID the
+        /// controller stamps on the Job, so a document signed for a schedule
+        /// that was deleted and recreated under the same name authorises
+        /// nothing.
+        #[arg(long, requires = "standing")]
+        schedule_uid: Option<String>,
+        /// With `--standing`: a JSON file holding D3 §4.3's `RehearsalScope`
+        /// in camelCase — `templateDigest`, `targetClusterId`, `topicPrefix`,
+        /// `topics`, `maxPartitions`, `recordsPerPartition`,
+        /// `deadlineSeconds`, `modes`.
+        ///
+        /// A FILE, not a dozen flags: it is what the signature covers, so an
+        /// operator should be able to diff it and keep it in version control.
+        #[arg(long, requires = "standing")]
+        scope: Option<PathBuf>,
+        /// With `--standing`: `expiresAt - issuedAt` in days. D3 §4.3 caps it
+        /// at 90 and this command refuses more, so the limit is learned at
+        /// minting time and not from a Job that will not start.
+        #[arg(long, requires = "standing", default_value_t = 30)]
+        valid_days: i64,
+        /// With `--standing`: override `issuedAt` (RFC 3339). An operator has
+        /// no reason to set it; it exists so a test can mint the same bytes
+        /// twice.
+        #[arg(long, requires = "standing")]
+        issued_at: Option<chrono::DateTime<chrono::Utc>>,
     },
     /// Run the drill: restore a sampled window into the scratch cluster,
     /// reconcile it per record, and emit a signed scorecard.
@@ -719,6 +772,12 @@ pub enum SubjectKindArg {
     Restore,
     #[value(name = "Backup")]
     Backup,
+    /// The standing form. Accepted so an operator who reaches for it is told
+    /// what to do rather than told nothing; it REQUIRES `--standing`, because
+    /// a `RehearsalSchedule` referent whose bytes are signed under
+    /// `PAYLOAD_TYPE_APPROVAL` is refused by the `Approval` controller.
+    #[value(name = "RehearsalSchedule")]
+    RehearsalSchedule,
 }
 
 impl SubjectKindArg {
@@ -728,6 +787,7 @@ impl SubjectKindArg {
         match self {
             Self::Restore => "Restore",
             Self::Backup => "Backup",
+            Self::RehearsalSchedule => "RehearsalSchedule",
         }
     }
 }

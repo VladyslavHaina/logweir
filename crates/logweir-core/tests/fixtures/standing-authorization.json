@@ -1,0 +1,27 @@
+{
+  "formatVersion": "1.0.0",
+  "kind": "StandingRehearsalAuthorization",
+  "subjectRef": {
+    "apiVersion": "logweir.dev/v1alpha1",
+    "kind": "RehearsalSchedule",
+    "namespace": "logweir-d3-w7",
+    "name": "weekly-orders",
+    "uid": "3f2a91c7-1111-4222-8333-444444444444"
+  },
+  "scope": {
+    "templateDigest": "sha256:aa",
+    "targetClusterId": "TARGET00000000000000000",
+    "topicPrefix": "rehearsal-3f2a91c7-",
+    "topics": [
+      "orders"
+    ],
+    "maxPartitions": 200,
+    "recordsPerPartition": 25,
+    "deadlineSeconds": 3600,
+    "modes": [
+      "scratch"
+    ]
+  },
+  "issuedAt": "2026-09-01T00:00:00Z",
+  "expiresAt": "2026-10-01T00:00:00Z"
+}
