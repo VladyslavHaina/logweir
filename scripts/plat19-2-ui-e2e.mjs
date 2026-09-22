@@ -768,7 +768,29 @@ async function main() {
     save("04-draft-preflight-served.json", served);
     save("04-draft-preflight-object.json", { status: pf.status });
     check(served.status === 200, "the product API answered " + served.status);
-    const item = served.body.item;
+    const servedItem = served.body.item;
+    // THE SERVED VERDICT'S FRESHNESS IS NOT THIS TASK'S. At this base the
+    // product API reports every restore readiness verdict stale in console
+    // mode for two reasons outside PLAT-19.2's lane: `Backup` referentChanged
+    // on every re-read (fixed on claude/plat08-2, ede475f, not on main) and
+    // the controller's `TrustRoster` referent, which `routes/preflights.rs`
+    // has no verb for (`unverifiable`). The gate is evaluated on the served
+    // item AS SERVED (a staleness refusal, not the draft row), and on the
+    // same item with only its freshness fields set as a fresh verdict --
+    // DERIVED, and labelled so -- to show the draft rule on the controller's
+    // real rows.
+    const servedGate = await page.evaluate(async ([m, v, h]) => {
+      const mod = await import(m);
+      return mod.readinessRefusal({ readiness: { boundHash: h, preflight: v } }, { hash: h });
+    }, [origin + "/ui/pages/restore-wizard.js", servedItem, rPlan.hash]);
+    result.draftServedFreshness = { stale: servedItem.stale, applicable: servedItem.applicable,
+      staleReasons: servedItem.staleReasons, shippedGateOnServed: servedGate };
+    const item = servedItem.stale === true || servedItem.applicable !== true
+      ? Object.assign(JSON.parse(JSON.stringify(servedItem)),
+        { stale: false, staleReasons: [], applicable: true })
+      : servedItem;
+    result.draftGateInput = item === servedItem ? "served" : "derived: served item with stale=false, " +
+      "staleReasons=[], applicable=true; every check row, the aggregate and the binding as served";
     const rows = (item.checks || []).map((c) => ({ id: c.id, state: c.state, gating: c.gating, code: c.code }));
     const approvalRow = rows.find((c) => c.id === "approval.state");
     check(approvalRow && approvalRow.state === "skipped" && approvalRow.code === "SubjectNotCreated",
