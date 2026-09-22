@@ -395,7 +395,10 @@ function seedDestination(name) {
             mode: "SecretKeys",
             secret: { name: name + "-access" },
           },
-          evidenceRead: { mode: "ArchiveReadGrant" },
+          // The controller's own ambient identity reads the evidence. The
+          // isolated deployment explicitly allowlists this exact endpoint /
+          // bucket and projects its credentials into the controller pod.
+          evidenceRead: { mode: "ControllerIdentity" },
         },
       },
     }),
