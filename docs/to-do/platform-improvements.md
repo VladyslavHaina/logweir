@@ -374,7 +374,7 @@ surviving. None is fixed yet except where a worker is named.
 | CATALOG-LIST-IGNORES-REFUSED-VERDICT | `crates/logweir-api/src/routes/catalogs.rs:996` has the same exposure in the console's catalog listing: a stale selectable row is shown for a point whose `Backup` verdict is a reached refusal. Found by the same sweep 2026-09-22; not yet fixed. | PLAT-15.1 (D3 W11) |
 | CONSOLE-RESTORE-IGNORES-CATALOG-WINDOW | `ui/pages/restore-wizard.js:423` `isRecoveryPoint` (and PLAT-10's schedule detail, which follows it) decides restorability only from the controller-written `Backup.status.windowCovered`. A destination-backed run whose own verification is `NotAttempted` (no evidence grant, or `evidenceRead: ControllerIdentity` on a location the administrator did not allowlist — `ControllerIdentityNotAllowlisted`) never gets a window, so the console offers no Restore even when the durable catalog lists the point `Available/Verified` with its window. Found live by the PLAT-10 finisher 2026-09-22 (`claude/plat10.result.md` §Final, Class sweep owed). Design question for PLAT-15.2 (catalog-backed restore): whether a catalog-verified point may be offered from the catalog's window; the controller-verdict precedence rule (`dffe118`) must hold. Not yet fixed. | PLAT-15.2 / PLAT-11.1 |
 | REHEARSAL-SKIP-DEFERS-SLOT | `crates/weirkeeper/src/controllers/rehearsal_schedule.rs:1745-1752`: a skip writes `lastSkipped.slot = slot_name(now)` (the evaluation instant, not the due slot it refused) and does not advance `lastScheduledSlot`, so a slot skipped `ConcurrencyBlocked` fires LATE the moment the blocker finishes (within `startingDeadlineSeconds`). D3 §5 (`lastSkipped: {slot, reason}`, line 604) treats `ConcurrencyBlocked` as a skip of that slot. Found by the harness-rows-9 fix round 2026-09-22 (`claude/harness-rows-9.result.md` Class sweep owed). Not yet fixed. | PLAT-14.3 (D3 W7) |
-| EVIDENCE-FETCH-JOB-UNBUILT | D2 §1.5 and §3.9 make the evidence-fetch check Job the DEFAULT evidence path (`SecretKeys`/`WorkloadIdentity` `evidenceRead`, including `ArchiveReadGrant`), with `ControllerIdentity` opt-in and administrator-allowlisted. The contract (`logweir-core::check_contract::EvidenceFetchRequest`, discriminator `ev`) and the runner kind (`crates/logweir/src/check/kinds/evidence.rs`) exist, but the controller never creates the Job: `controllers/backup.rs:1298-1311` answers `NotAttempted` ("this build does not create that Job"). Consequence, found live by the PLAT-10 finisher 2026-09-22 (`claude/plat10.result.md` §Final 2, artifact `claude/artifacts/plat10-ui/lw-p10-20260922t174132z/live.json`): on an install without a `controllerIdentityLocations` allowlist (the chart default is `[]`) no destination-backed run ever gets `windowCovered`, so the console offers no Restore for any scheduled backup — PLAT-10.2's per-point Restore and older-backup navigation and the create→backup→detail→restore journey are BLOCKED. D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN's fix made that verdict honest; it did not fetch. `docs/install.md` §3 presents `ArchiveReadGrant` as working. In progress: `claude/evidence-fetch`. | PLAT-08.1 (D2 W10) → blocks PLAT-10.2, PLAT-11.1 live |
+| EVIDENCE-FETCH-JOB-UNBUILT | D2 §1.5 and §3.9 make the evidence-fetch check Job the DEFAULT evidence path (`SecretKeys`/`WorkloadIdentity` `evidenceRead`, including `ArchiveReadGrant`), with `ControllerIdentity` opt-in and administrator-allowlisted. The contract (`logweir-core::check_contract::EvidenceFetchRequest`, discriminator `ev`) and the runner kind (`crates/logweir/src/check/kinds/evidence.rs`) exist, but the controller never creates the Job: `controllers/backup.rs:1298-1311` answers `NotAttempted` ("this build does not create that Job"). Consequence, found live by the PLAT-10 finisher 2026-09-22 (`claude/plat10.result.md` §Final 2, artifact `claude/artifacts/plat10-ui/lw-p10-20260922t174132z/live.json`): on an install without a `controllerIdentityLocations` allowlist (the chart default is `[]`) no destination-backed run ever gets `windowCovered`, so the console offers no Restore for any scheduled backup — PLAT-10.2's per-point Restore and older-backup navigation and the create→backup→detail→restore journey are BLOCKED. D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN's fix made that verdict honest; it did not fetch. `docs/install.md` §3 presents `ArchiveReadGrant` as working. Fixed on main (`4cd3e55..4f2c93e`, `claude/evidence-fetch`, 2026-09-22): the controller creates `lwc-ev-<20 hex of sha256(uid:attempt)>` owned by the Backup/Restore with only the `evidenceRead` grant (no signing key, no write grant, no token automount), shows `Pending` with `evidence.observation` while it runs, and on relay checks the runner-reported digest, the `backup_id`/`run_id` binding, the controller-side size caps and DSSE under resolved trust through the same `verify_fetched` path `ControllerIdentity` uses; failures are `NotAttempted` naming the cause with bounded retries (+1/+5/+15 min, 4 attempts); no RBAC change (the controller still holds no verb on Secrets). Tier-A review ACCEPT (`claude/evidence-fetch.review.md`, MEDIUM-1 cap enforcement and four LOWs closed in the fix round), 27 mutants killed, gate `scripts/ci-check.sh` exit 0 (3,330 tests). **Live proof: pending lab-refresh-8** (six rows in `claude/evidence-fetch.result.md` §5). | PLAT-08.1 (D2 W10) → blocks PLAT-10.2, PLAT-11.1 live |
 
 ### Codex batch history (2026-09-14, superseded by the table above)
 
@@ -3586,6 +3586,31 @@ PLAT-09.1, PLAT-10.2.
 **Migration/safety and done evidence:** Preserve deep links and asset deployment
 contracts. Record any framework decision with measured benefit, migration cost
 and regression coverage; a rewrite is not itself acceptance.
+
+**Design standard (owner decision, 2026-09-22): adopt the VMware Clarity design
+language.** The console is an enterprise operations product, so its visual and
+interaction system follows [Clarity](https://github.com/vmware-clarity):
+Clarity's design tokens (color, typography, spacing, elevation, light/dark
+themes), component anatomy and states (datagrid with filter/sort/pagination,
+forms and validation messages, alerts and banners, wizard, modals, tabs, stack
+views, badges/labels, signposts) and its accessibility patterns (focus order and
+visible focus, ARIA roles, live-region announcements, contrast). It is adopted as
+a **design language implemented in the existing static console**, not as a
+runtime dependency: `vmware-clarity/core` (the framework-agnostic web
+components, MIT) was archived upstream in February 2026 and receives no fixes,
+and `vmware-clarity/ng-clarity` is Angular-only, which would be a framework
+rewrite (see the rule above and `product-expansion.md`'s deferral of a frontend
+framework migration). Tokens are defined once in `ui/style.css` (CSS custom
+properties named after Clarity's token set) and every page consumes them; no page
+hard-codes a color, size or spacing. **Additional acceptance:** a Clarity
+conformance checklist per page (token use, component anatomy, states, keyboard
+and screen-reader behaviour) recorded with screenshots in light and dark themes
+and at small-screen widths; the offline gate (`scripts/check-ui-offline.sh`), the
+UI image contents and every deep link unchanged; any Clarity asset copied into
+the tree (for example token values or icons) carries its MIT notice in
+`THIRD_PARTY_NOTICES.md`. **Additional tests:** a lint that fails on a literal
+color/spacing value outside the token file, and the existing node suites plus a
+Playwright visual/a11y pass over every primary route.
 
 ## PLAT-19 — Make trust rotation and approval policy operable
 
