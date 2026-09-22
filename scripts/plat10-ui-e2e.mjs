@@ -471,8 +471,17 @@ async function main() {
   result.lab.rollout = String(rollout.stdout || "").trim();
   observeSharedLab();
 
-  kube(["create", "namespace", namespace]);
-  kube(["label", "namespace", namespace, OWNER_LABEL]);
+  const existingNamespace = kube(["get", "namespace", namespace, "-o", "json"],
+    { expected: [0, 1] });
+  if (existingNamespace.status !== 0) {
+    kube(["create", "namespace", namespace]);
+    kube(["label", "namespace", namespace, OWNER_LABEL]);
+  } else {
+    const existing = JSON.parse(existingNamespace.stdout);
+    check(((existing.metadata || {}).labels || {})["logweir.dev/test-owner"] === OWNER,
+      "refusing to use an existing namespace without this run's owner label");
+    result.preexistingOwnedNamespace = true;
+  }
   const ns = kubeJson(["get", "namespace", namespace]);
   result.namespaceUid = ns.metadata.uid;
   result.created.push({ kind: "Namespace", name: namespace, uid: ns.metadata.uid });
@@ -741,10 +750,19 @@ async function main() {
     await page.click("#schedule-check-readiness");
     await waitForSelector(page, "#schedule-readiness-verdict .preflight-result",
       "the readiness verdict");
-    await pause(8000);
-    const preflights = kubeJson(["-n", namespace, "get", "preflights"]).items;
+    let preflights = kubeJson(["-n", namespace, "get", "preflights"]).items;
+    // A reconciler legitimately needs longer than the first UI poll to create
+    // and observe its Job.  Wait for the actual CR status, then ask the same
+    // API route again; do not call an early `running` projection final proof.
+    for (let attempt = 0; attempt < 60 && !preflights.some((item) =>
+      ["Completed", "Failed", "Cancelled"].includes(String((item.status || {}).phase || "")));
+      attempt += 1) {
+      await pause(1000);
+      preflights = kubeJson(["-n", namespace, "get", "preflights"]).items;
+    }
     check(preflights.length >= 1, "no Preflight object was created by the readiness button");
-    const rawState = ((preflights[0].status || {}).state) || "";
+    const preflight = preflights[0];
+    const rawState = ((preflight.status || {}).state) || "";
     // THE VERDICT ON SCREEN IS THE ROUTE'S OWN WORD, ASSERTED AGAINST THE
     // RESPONSE THE BROWSER ACTUALLY RECEIVED. The state is the product API's
     // NORMALIZED one (D2's `CheckOperationResponse`), not the raw custom
@@ -753,7 +771,12 @@ async function main() {
     // thing to compare the badge with is the body, byte for byte.
     const preflightBodies = bodies.filter((b) => b.url.indexOf("/preflights/") !== -1);
     check(preflightBodies.length >= 1, "the browser received no preflight read");
-    const answered = JSON.parse(preflightBodies[preflightBodies.length - 1].body).item;
+    const initialAnswered = JSON.parse(preflightBodies[preflightBodies.length - 1].body).item;
+    const terminalResponse = await fetch("http://127.0.0.1:" + port +
+      "/api/v1/namespaces/" + encodeURIComponent(namespace) + "/preflights/" +
+      encodeURIComponent(preflight.metadata.name));
+    check(terminalResponse.ok, "the API could not read the reconciled Preflight");
+    const answered = (await terminalResponse.json()).item;
     const verdictState = String(answered.state || "");
     const badgeText = (await page.textContent(
       "#schedule-readiness-verdict .preflight-head .badge")).trim();
@@ -763,7 +786,7 @@ async function main() {
     check(badgeText === expected,
       "the badge says " + JSON.stringify(badgeText) + " while the route answered state " +
         JSON.stringify(verdictState) + " (which renders as " + JSON.stringify(expected) + ")");
-    check(answered.id === preflights[0].metadata.name,
+    check(answered.id === preflight.metadata.name,
       "the readiness answer is about a different Preflight than the one in the cluster");
     // AND IT IS NOT READY. The source cannot be resolved at all, so a green
     // `ready` here would be the fabricated verdict UI-FAKEPREFLIGHT forbids.
@@ -778,14 +801,15 @@ async function main() {
       preflight: preflights[0].metadata.name, uid: preflights[0].metadata.uid,
       source: broken, bootstrapServers: UNREACHABLE_KAFKA,
       routeState: verdictState,
+      initialRouteState: initialAnswered.state,
+      terminalPhase: ((preflight.status || {}).phase) || "(not observed)",
       rawObjectState: rawState === "" ? "(none recorded)" : rawState,
       badgeOnScreen: badgeText,
       greenBadges: greenVerdict,
-      note: verdictState === "ready" || verdictState === "notReady"
-        ? "the controller recorded a terminal verdict and the page rendered exactly it"
-        : "no controller on this lab reconciles Preflight, so the route projects a " +
-          "non-terminal state and the page renders exactly that -- never ready, which is " +
-          "what this row asserts",
+      note: ["Completed", "Failed", "Cancelled"].includes(String((preflight.status || {}).phase || ""))
+        ? "the isolated controller reconciled a terminal Preflight and the API projected it"
+        : "no terminal controller verdict was observed before the bounded wait; the page rendered " +
+          "only its non-ready initial projection",
     });
 
     // =================================================================== 5
