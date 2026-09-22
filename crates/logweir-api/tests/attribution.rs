@@ -284,6 +284,15 @@ async fn a_create_before_the_actor_is_known_is_refused_and_never_sent() {
         refused,
         Err(logweir_api::kube::KubeFailure::Unattributed)
     ));
+    // A decided action without an actor is refused — each half is required
+    // on its own, not only together.
+    let no_actor = Arc::new(AuditContext::new("audit-y", "POST", "/api/v1/x"));
+    no_actor.set_decision(NS_A, "connection.create", &[], "r", audit::Decision::Allow);
+    let refused = audit::scope(no_actor, adapter.create(NS_A, &cluster())).await;
+    assert!(matches!(
+        refused,
+        Err(logweir_api::kube::KubeFailure::Unattributed)
+    ));
     // An actor without a decided action is still refused.
     context.set_actor("oidc", "https://idp#u-1", "U", None);
     let refused = audit::scope(Arc::clone(&context), adapter.create(NS_A, &cluster())).await;
