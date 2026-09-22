@@ -308,6 +308,26 @@ fn shipped_ui_files() -> Vec<String> {
     files
 }
 
+#[test]
+fn both_ui_bearing_image_gates_pin_the_current_shipped_file_count() {
+    let expected = shipped_ui_files().len();
+    for script in ["scripts/check-image-ui.sh", "scripts/check-image-api.sh"] {
+        let source = read(script);
+        for counter in ["tree_count", "image_count"] {
+            let guard = format!("[ \"${counter}\" -ne {expected} ]");
+            assert!(
+                source.contains(&guard),
+                "{script} must pin {counter} to the same {expected}-file UI set as the tree; \
+                 missing `{guard}`"
+            );
+        }
+        assert!(
+            !source.contains("twenty-two"),
+            "{script} still documents the pre-operation-pages UI count"
+        );
+    }
+}
+
 /// **The UI image's repository, DERIVED** — the namespace of
 /// `weirkeeper::job::RUNNER_IMAGE` with the name `logweir-ui`, which is what
 /// `Dockerfile.ui` builds and what `release.yml` publishes.
@@ -2700,7 +2720,7 @@ fn chart_lint_the_console_config_map_carries_no_credential() {
         assert_eq!(
             Some("/ui"),
             config["uiDirectory"].as_str(),
-            "{render}.yaml: /ui is the path Dockerfile.console COPYs the twenty-two shipped files \
+            "{render}.yaml: /ui is the path Dockerfile.console COPYs the twenty-six shipped files \
              to, and the same path Dockerfile.ui uses"
         );
         assert_eq!(

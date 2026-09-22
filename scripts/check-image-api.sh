@@ -7,7 +7,7 @@
 #   0. `--no-exec` only: the image is the AArch64 variant and its binary is an
 #      AArch64 ELF. Every other check here is architecture-independent, so this
 #      one runs first or a wrong-variant image passes for the wrong reason.
-#   1. /ui is the twenty-two shipped files, sha256 for sha256, and NOTHING else
+#   1. /ui is the twenty-six shipped files, sha256 for sha256, and NOTHING else
 #      — the same assertion `check-image-ui.sh` makes about the other image
 #      that carries the page, against the same one directory in this tree.
 #   2. The three licences are present, non-empty and at the path both compiling
@@ -212,10 +212,10 @@ fi
 # =========================================================================
 # CHECK 1 — THE SERVED FILES. `assets.rs` reads this directory once at startup.
 # =========================================================================
-echo "-- check 1 (the page): /ui is the twenty-two shipped files, sha256 for sha256, and nothing else"
+echo "-- check 1 (the page): /ui is the twenty-six shipped files, sha256 for sha256, and nothing else"
 if ! cp_out /ui "$work/ui"; then
   fail "check 1 (the page): $ref carries no /ui directory." \
-       "  \`Dockerfile.console\` COPYs the twenty-two shipped files there and the" \
+       "  \`Dockerfile.console\` COPYs the twenty-six shipped files there and the" \
        "  chart's ConfigMap names it as \`uiDirectory: /ui\`;" \
        "  \`logweir_api::assets::StaticAssets::load\` refuses to start without an" \
        "  index.html in it."
@@ -251,17 +251,17 @@ while IFS= read -r f; do
   image_count=$((image_count + 1))
 done < <(find "$work/ui" -type f | LC_ALL=C sort)
 
-# TWENTY-TWO, NAMED. A gate whose expected count came from the tree alone would
+# TWENTY-SIX, NAMED. A gate whose expected count came from the tree alone would
 # stay green if someone deleted seven files from both sides at once.
-if [ "$tree_count" -ne 22 ]; then
-  fail "check 1 (the page): the tree holds $tree_count shipped UI file(s), not twenty-two." \
+if [ "$tree_count" -ne 26 ]; then
+  fail "check 1 (the page): the tree holds $tree_count shipped UI file(s), not twenty-six." \
        "  The shipped page is ui/*.html, ui/*.js, ui/*.css and ui/pages/* — the same" \
        "  set \`check-ui-offline.sh\` scans and shipped_ui_files() asserts in" \
        "  crates/logweir/tests/chart_lint.rs. Fix the tree, never this number."
 fi
-if [ "$image_count" -ne 22 ]; then
-  fail "check 1 (the page): $ref's /ui holds $image_count file(s), not twenty-two." \
-       "  It must hold the twenty-two shipped files and NOTHING else: no README.md," \
+if [ "$image_count" -ne 26 ]; then
+  fail "check 1 (the page): $ref's /ui holds $image_count file(s), not twenty-six." \
+       "  It must hold the twenty-six shipped files and NOTHING else: no README.md," \
        "  no tests/ (a throwaway keypair and fixtures naming a developer's compose" \
        "  stack), no key material of any kind (Global Constraint 28)." \
        "  What is in the image:" \
@@ -280,7 +280,7 @@ if [ "$rc" -ne 0 ]; then
        "  Rebuild the image (\`just image-console\`) — never edit ui/ to match a" \
        "  stale one."
 fi
-echo "   ok: twenty-two files, sha256 for sha256, and nothing else under /ui"
+echo "   ok: twenty-six files, sha256 for sha256, and nothing else under /ui"
 
 # =========================================================================
 # CHECK 2 — THE LICENCES: three present, three byte-identical.
@@ -430,7 +430,7 @@ echo "   ok: $bundle public roots in the trust store, and no key-shaped path any
 # =========================================================================
 if [ "$no_exec" -eq 1 ]; then
   echo
-  echo "ok: --no-exec — an AArch64 image, the twenty-two shipped files byte for byte, three"
+  echo "ok: --no-exec — an AArch64 image, the twenty-six shipped files byte for byte, three"
   echo "    licences, three absences, the entrypoint and USER, and no key-shaped path in $ref."
   echo "    NOTHING was executed from the image, so \`logweir-api --version\` is NOT asserted"
   echo "    here; a native runner asserts that."
@@ -470,7 +470,7 @@ if [ "${bin_version#logweir-api }" != "$want_version" ]; then
 fi
 
 echo
-echo "ok: the twenty-two shipped files byte for byte at /ui and nothing else, three licences,"
+echo "ok: the twenty-six shipped files byte for byte at /ui and nothing else, three licences,"
 echo "    no MIT notice, no org-root anchor and no engine, the entrypoint logweir-api with no"
 echo "    CMD and USER 65532, no key-shaped path anywhere, and the binary runs by bare name"
 echo "    reporting $bin_version — in $ref"
