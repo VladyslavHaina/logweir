@@ -1031,22 +1031,20 @@ Each sentence below is also **on the page**, beside the control it is about,
 with the task that owes the missing piece named in it. A "not available yet"
 sentence with no owner is how a gap becomes a permanent feature.
 
-* **A NEW schedule still cannot name a destination; an existing one now can,
-  from the Future policy panel.** `CreateScheduleRequest` requires an inline
-  `archive` and has no `destinationRef` (**PLAT-06.2** owes that one). The
-  create form says so and keeps the inline fields; it does **not** derive an
-  inline archive from a chosen destination, because a destination carries an
+* ~~**A NEW schedule cannot name a destination.**~~ **Closed by PLAT-10.1.**
+  `CreateScheduleRequest` took an inline `archive` and had no `destinationRef`,
+  so the create form kept two hand-typed inputs and said which task owed the
+  field; the create route now takes `destinationRef` (and `allUserTopics`, a
+  `timeZone`, deadlines, catch-up and retries), the guided form sends it, and
+  the inline URL and Secret moved behind a disclosure for an installation with
+  no saved destination yet. Neither form has ever derived an inline archive
+  from a chosen destination, and neither does now: a destination carries an
   endpoint, a region, an addressing mode and a CA bundle that an inline archive
   does not, and dropping four of those silently would write to the wrong place.
-  `PUT .../schedules/{name}` **does** take `destinationRef` under
-  `expectedGeneration`, and D1 W7's Future policy panel sends it -- with the
-  whole policy, because that route replaces rather than patches. What this page
-  also does is **read** it: the schedules table has a DESTINATION column
-  resolving
-  `spec.destinationRef` by name against the destinations it read, showing the
-  location a live one writes to, refusing to say where a vanished one writes,
-  and naming an inline archive as one. The selector itself lives in the
-  readiness panel, where `BackupPreflightRequest.destination` makes it real.
+  What this page also does is **read** it: the schedules table has a DESTINATION
+  column resolving `spec.destinationRef` by name against the destinations it
+  read, showing the location a live one writes to, refusing to say where a
+  vanished one writes, and naming an inline archive as one.
 * **A recovery point publishes no frozen destination.** `Backup`'s projection
   carries `archive` and no `destinationRef`/`locationDigest`, so the wizard
   cannot take a source destination from the point's frozen one or match the
@@ -1337,6 +1335,143 @@ tightening it would be one cross-side commit; `ui/tests/contract.spec.js`
 compares this client's required set with the schema's, so moving it here alone
 turns that arm red. The tightening needs `crates/logweir-api/src/contract.rs` in
 the same commit.
+
+## Creating a schedule, and the page one schedule has
+
+`#/schedules` is a list and, since PLAT-10.2, a **detail**:
+`#/schedules?ns=<ns>&name=<name>` is one schedule, its actions and its history.
+The shape is the one every other list/detail pair here uses -- `?name=` on the
+list's own route -- which is also the whole of the migration story: `#/schedules?ns=<ns>`
+was the only schedules link there had ever been, a hash with no `name` reaches
+the list exactly as it always did, and there is nothing to redirect.
+`ui/tests/schedules-detail.spec.js::the_deep_link_reaches_one_schedule_and_the_old_list_link_still_reaches_the_list`
+asserts both halves through `parseHash`.
+
+### The create form and the Future policy panel are one form
+
+`renderScheduleForm` composes the same four renderers the policy panel
+composes -- `renderCadenceFields`, `renderSelectionFields`,
+`renderPolicyLocation` and `renderPolicyFields` -- under the same field names and
+the same draft list. A person who creates a schedule here and edits it there is
+looking at one form twice, and a rule that holds on one holds on both because
+there is one implementation of it. What creation adds is the **identity**: the
+object's name and the source connection, which the edit route cannot reach
+(`sourceRef: field_immutable`).
+
+The standard route is therefore: a cadence **preset** with the API's next-run
+preview beside it, a **coverage** (a named allowlist, or all user topics with
+exclusions and an explicit `incompleteDiscovery`), a **saved destination** by
+name, and the saved cluster selector. No YAML, no endpoint to reconstruct, no
+signing step. The deadlines, catch-up policy, retries and concurrency policy are
+inside a collapsed `<details>`, and so is the inline archive URL: present for an
+installation with no saved destination yet, and off the route a person is led
+down.
+
+**`POST .../schedules` takes the whole policy** (PLAT-10.1). It took five fields
+while the edit route took thirteen, which is why D2 W13's record listed
+`CreateScheduleRequest.destinationRef` under *owed by the API before these pages
+are complete* and why this form used to print that debt on screen. `archive` xor
+`destinationRef` and `topics` xor `allUserTopics` are the route's rules, not a
+copy kept here, and every added field is optional -- so a pre-PLAT-10.1 body
+still creates byte for byte the object it created before.
+
+### What the page stopped deciding, and what it still decides
+
+**It no longer parses cron.** 10.1's acceptance is that an invalid field is
+refused *in the API's own words* with the draft retained, and a page that
+pre-empted the cadence engine answered in words the controller never said. What
+survives is a **shape** check -- five whitespace-separated fields of cron
+characters, or a macro -- so `every night` never leaves the browser and
+`61 * * * *` does, and comes back as `schedule: schedule_invalid` with the API's
+message beside the cadence input. The zone is the same: `timeZone:
+timezone_unknown`, on its own field. `SCHEDULE_FIELD_PATHS` carries **both**
+spellings, the stored object's (`spec.schedule`) and the request's (`schedule`),
+because in legacy mode the API server refuses and in console mode the product
+API does.
+
+**It still refuses to invent an expression.** A preset cannot be created until
+`GET /api/v1/cadence-previews` has compiled it: this page holds no cron
+compiler, so there is literally nothing to put in `spec.schedule` until the
+server has produced one. That is `submitPolicy`'s rule for `submitPolicy`'s
+reason, and a preview of *different* values is not a preview of these.
+
+**Readiness is inside the form** and starts the same `Preflight` of operation
+`backup` the standalone panel starts, against **this form's** source,
+destination and topics -- so what is checked is what is about to be created. The
+verdict is the check's own recorded result (UI-FAKEPREFLIGHT), a verdict that
+has not arrived is `pending` and never `ready`, and a dynamic selection sends no
+topic list because what it will cover is decided per run by a discovery. It does
+**not** gate the create: a readiness check is a statement about the minute it ran
+in, and a credential can be rotated in the next one.
+
+**A successful create navigates to the new schedule**, carrying the name the
+*server* minted -- in console mode that is `sch-<hash>` from the idempotency
+scope and not the name typed into the form. That is 10.1's first-run redirect,
+and the detail is where "Run first backup now" is.
+
+### The history, and the two verdicts it will not collapse
+
+The detail's history is every run the schedule made, newest first -- running,
+failed and finished alike, because a table of only the good rows would agree
+with itself and disagree with the cluster. Each row is joined to the **durable
+recovery catalog** on the backup set id (`status.backupId` on the `Backup`
+against `backupId` on the catalog's view entry) and carries two columns:
+
+* **AVAILABILITY** -- can the archive still serve this point: `Available`,
+  `Missing`, `Unreadable`, `Deleted`, `Conflict`, `UnsupportedFormat`,
+  `Partial`.
+* **VERIFICATION** -- does its evidence verify under a key this installation
+  accepts: `Verified`, `VerifiedHistorical`, `UntrustedSigner`, `Revoked`,
+  `Invalid`, `NoEvidence`, `NotAttempted`.
+
+Both words are the catalog's, rendered verbatim. **Green comes from the
+catalog's own `selectable`** -- D3 section 5.4's conjunction, materialised by the
+controller -- and never from this page recomputing it; availability keeps a green
+of its own, because "the bytes are readable but the signer is a stranger" is an
+evidence problem and not an outage.
+
+**A run writes a set and a set can hold several points.** The console's own
+`ui/tests/fixtures/console/catalog-points-states.json` carries five entries
+under one backup set id, so a join taking the first of them would call a set
+holding a `Missing` and a `Deleted` point healthy. The verdicts are over the
+**whole set**: every distinct word is shown (no severity order is invented
+here -- deciding whether `Conflict` is worse than `Unreadable` would be an
+opinion the catalog has never published), and a set with one unselectable point
+is not green.
+
+**A run the catalog has never seen is neither available nor unavailable.** Both
+columns read `not in the catalog` and neither is green: PLAT-11.1's own
+limitation was that availability "reflects what the run recorded, not the
+bucket", and the honest answer to "is it still there" when nothing has looked is
+that nobody has looked. A catalog that cannot be read at all -- legacy mode has
+no route for the point list -- says so in its own words and still colours
+nothing.
+
+### Paused, and deleted
+
+A **paused** schedule keeps its history and its restores: suspension stops
+future slots and touches nothing that exists. The control is the list's own
+suspend toggle, bound to this schedule.
+
+A **deleted** schedule is a state and not a 404. PLAT-05.2 decoupled retained
+history from schedule deletion -- deleting a schedule cascades to nothing, and
+every run, plan and archive object outlives it -- so the detail renders the
+history it left behind, says the schedule is gone, offers every per-point
+restore, and offers none of the three controls that need a schedule to act on
+(no toggle, no policy form, no "Back up now"). Runs carrying a **different**
+`spec.scheduleRef.uid` under the same name are listed apart: a schedule deleted
+and recreated under one name is a different schedule, and counting its
+predecessor's runs would attribute one policy's protection to another.
+
+### Restore, from here
+
+Every restore on this page is PLAT-11.1's deep link, built by
+`restorePointRoute` -- `#/restore?ns=&backup=&uid=` -- and the wizard is
+untouched by this task. The page-level "Restore from this point" takes the
+newest recovery point and the per-row links take their own, so choosing an older
+one is a different link and not the same link with a row highlighted. A row that
+is not a recovery point (`isRecoveryPoint`: `Succeeded`, with a backup set id
+and a covered window) offers no link, because there is no plan to build.
 
 ## The operation route, and the run it names
 
