@@ -371,7 +371,17 @@ def copy_secret(name: str, as_name: str | None = None) -> None:
     )
 
 
-def destination(name: str, bucket: str, *, write_secret: str = "logweir-s3") -> dict[str, Any]:
+def destination(name: str, bucket: str, *, write_secret: str = "logweir-s3",
+                prefix: str = DEST_PREFIX) -> dict[str, Any]:
+    """A `BackupDestination` this namespace owns.
+
+    `prefix` IS A PARAMETER because one destination has to name an archive this
+    harness did not write through a destination at all: the legacy inline
+    archive the trust and protection-verdict rows use lives at
+    `s3://kafka-backups/<owner>-<stamp>`, and a `RecoveryCatalog` can only be
+    pointed at a `destinationRef`. Declaring that root as a destination is how
+    a catalog reads points the controller verified itself.
+    """
     def grant(secret: str) -> dict[str, Any]:
         return {
             "mode": "SecretKeys",
@@ -391,7 +401,7 @@ def destination(name: str, bucket: str, *, write_secret: str = "logweir-s3") -> 
             "storage": {
                 "provider": "S3",
                 "bucket": bucket,
-                "prefix": DEST_PREFIX,
+                "prefix": prefix,
                 "endpoint": MINIO_ENDPOINT,
                 "region": "us-east-1",
                 "addressing": "PathStyle",
@@ -5882,6 +5892,836 @@ def mutate_event_and_deliver(events: list[dict[str, Any]]) -> dict[str, Any] | N
 
 
 # ---------------------------------------------------------------------------
+# PLAT-14.2 — the three arms the fix-protection reviews left unwritten:
+# `PointFactsUnread`, a REFUSED signature, and D3 §3.3's resolve column
+# ---------------------------------------------------------------------------
+#
+# WHY THESE THREE EXIST AND WHY THEY ARE HERE. `claude/fix-protection.result.md`
+# §6 and `claude/fix-protection.review-2.md` §6 both end with the same list:
+# three behaviours the controller fix landed and NO harness row asserts, so the
+# batch refresh cannot confirm them. `rg PointFactsUnread e2e/` found nothing;
+# no row anywhere drives a verdict the controller REACHED and refused; and
+# nothing measures the transition D3 §3.3's resolve column governs.
+#
+# THE LAB THESE RUN AGAINST DOES NOT CARRY THE FIX. The shared release runs the
+# image labelled `af64073`, which predates it (`controller.imageRevision` in
+# every artifact below records which build answered). The rows are written to
+# assert the CORRECT — fixed — behaviour, so on `af64073` the ones that depend
+# on the fix FAIL, and that failure IS the defect's live reproduction: it is
+# what `PROTECTION-SECRETKEYS-UNPROTECTED` says happens. They pass at the next
+# lab refresh or the fix did not land. Each row's `detail` says which of the two
+# it is, so a reader of the artifact never has to guess.
+#
+# THE ONE ARM THIS LAB CANNOT REACH, stated rather than faked: a destination
+# whose `evidenceRead` grant is `ControllerIdentity`. It needs the installation
+# policy ConfigMap of the shared release to allowlist the archive location, and
+# that is a change to a shared fixture behind the cluster lock. Where the brief
+# asks for a `ControllerIdentity` destination the rows below use the two live
+# facts that are reachable instead — the controller's own global read-only
+# handle over the LEGACY inline archive, which reaches a real verdict, and a
+# point the catalog CAN place — and the planted-fixture half is a unit row in
+# `test_rows.py`. Nothing here pretends a grant it did not configure.
+
+UNREAD_POLICY = "protect-unread"
+REFUSED_POLICY = "protect-refused"
+STAYS_POLICY = "protect-stays"
+LEGACY_DEST = "dest-legacy"
+LEGACY_CATALOG = "legacy-cat"
+UNREAD_CATALOG = "primary"
+# 86 400 s, so that a point the policy CAN place is `Healthy` rather than
+# `Stale`: these rows are about whether a point can be placed and counted at
+# all, and an objective tight enough to age it out would answer a different
+# question.
+VERDICT_MAX_AGE = 86_400
+VERDICT_KINDS = ["Staleness", "BackupFailure", "ArchiveUnavailable"]
+
+
+def verdict_policy(name: str, *, subject: dict[str, Any], catalog: str | None,
+                   require_verified: bool = True,
+                   require_catalog_availability: bool = True,
+                   max_age: int = VERDICT_MAX_AGE) -> dict[str, Any]:
+    """One `ProtectionPolicy`, with the two axes the reviews probed as
+    parameters.
+
+    NO `scheduleRefs`, AND THAT IS NOT A SHORTCUT. `is_member`
+    (`controllers/protection_policy.rs:747`) requires a run to be a run OF one
+    of the named schedules — `identity::is_run_of_schedule` over the schedule
+    UID — and every Backup these rows create is a manual one. A policy naming
+    `keeps-running` would therefore have no candidates at all, and every row
+    below would be measuring an evaluation that never looked at a point.
+    Without `scheduleRefs` the membership rule is D3 §3.2's other half, which
+    the CRD states in as many words: "every run of the named source that writes
+    to the named destination".
+
+    `maxConsecutiveFailedRuns: 0` disables the failure axis (the controller
+    requires `> 0` for both `AtRisk` and `BackupFailure`), so `Healthy` and
+    `Staleness` mean what these rows say they mean and not "and no run failed".
+    """
+    protects: dict[str, Any] = {"sourceRef": {"name": "source"}, "topics": TOPICS}
+    protects.update(subject)
+    if catalog:
+        protects["catalogRef"] = {"name": catalog}
+    return {
+        "apiVersion": "logweir.dev/v1alpha1",
+        "kind": "ProtectionPolicy",
+        "metadata": owned(name),
+        "spec": {
+            "protects": protects,
+            "objectives": {
+                "maxRecoveryPointAgeSeconds": max_age,
+                "maxConsecutiveFailedRuns": 0,
+                "requireVerifiedEvidence": require_verified,
+                "requireCatalogAvailability": require_catalog_availability,
+            },
+            "evaluationIntervalSeconds": 60,
+            "notifications": {
+                "kinds": VERDICT_KINDS,
+                "sendResolved": True,
+                "routes": [
+                    {"name": "local-sink",
+                     "webhook": {"urlSecretRef": {"name": SINK_URL_SECRET, "key": "url"}}}
+                ],
+            },
+        },
+    }
+
+
+def policy_view(obj: dict[str, Any]) -> dict[str, Any]:
+    """Everything the rows below decide from, in one flat dict.
+
+    A flat dict is what makes these predicates unit-testable without a cluster
+    (`test_rows.py` plants wrong ones), and it is what the artifacts carry, so
+    the value a clause read and the value a reader sees are the same value.
+    """
+    status = obj.get("status") or {}
+    protected = condition(obj, "Protected")
+    return {
+        "health": status.get("health"),
+        "availabilityBasis": status.get("availabilityBasis"),
+        "lastAvailablePoint": status.get("lastAvailablePoint"),
+        "protectedStatus": protected.get("status"),
+        "protectedReason": protected.get("reason"),
+        "protectedMessage": protected.get("message"),
+        "alerts": status.get("alerts") or [],
+        "observedGeneration": status.get("observedGeneration"),
+        "generation": (obj.get("metadata") or {}).get("generation"),
+        "evaluatedAt": status.get("evaluatedAt"),
+    }
+
+
+def rfc3339_ms(value: str | None) -> int | None:
+    """`2026-09-21T18:00:00Z` as epoch milliseconds, or `None`."""
+    if not value:
+        return None
+    try:
+        return int(
+            dt.datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ")
+            .replace(tzinfo=dt.timezone.utc)
+            .timestamp()
+            * 1000
+        )
+    except ValueError:
+        return None
+
+
+# ---- the predicates, one per behaviour, all pure -------------------------
+
+
+def unread_point_is_unknown(view: dict[str, Any]) -> dict[str, bool]:
+    """D3 §3.2's `Unknown` row — *"evaluation impossible"* — for a point the
+    controller could not PLACE.
+
+    The destination's `evidenceRead` grant is `SecretKeys`, so the controller
+    holds no Secret verb for it, verifies nothing itself and writes
+    `evidence.verification.result: NotAttempted` with no `capture` and no
+    `receiptSha256` (`docs/kubernetes.md`, "A point whose receipt the
+    controller could not read"). With no `catalogRef` there is nothing left
+    that could supply the capture time, so the point can be neither aged
+    against the objective nor named.
+
+    D3 §3.2's health table gives that `Unknown`, not `Unprotected`:
+    `Unprotected` is "no available point at all", which PAGES, and saying it
+    about an archive whose own catalog entry reads `Available`/`Verified` is
+    defect `PROTECTION-SECRETKEYS-UNPROTECTED`. The message clause is the one
+    that stops this passing for a policy that is `Unknown` for some OTHER
+    reason — `CatalogStale`, `SourceMissing`, `ScheduleMissing` all land on
+    `Unknown` too, and only this one names the read.
+    """
+    return {
+        "health is Unknown — D3 §3.2's `evaluation impossible`, never `Unprotected`":
+            view["health"] == "Unknown",
+        "the Protected condition mirrors it (`Unknown` for `Unknown`)":
+            view["protectedStatus"] == "Unknown",
+        "with reason PointFactsUnread, and not another Unknown cause":
+            view["protectedReason"] == "PointFactsUnread",
+        "and a message naming the READ rather than a missing object":
+            "read no verification verdict" in (view["protectedMessage"] or ""),
+        "nothing is published as the newest available point":
+            not (view["lastAvailablePoint"] or {}),
+    }
+
+
+def placed_point_is_protected(view: dict[str, Any], entry: dict[str, Any]) -> dict[str, bool]:
+    """THE NEGATIVE CONTROL for `unread_point_is_unknown`, and what it refuses.
+
+    The same policy, the same `SecretKeys` destination, the same unverified
+    point — with a `catalogRef` whose view holds ONE row for it. D3 §3.2's
+    availability rule is then satisfiable: the capture time and the identity
+    are read off that row (`recoveryPointAtMs` IS the receipt's `started_at`
+    carried through the view) and the entry's own verification axis answers
+    `requireVerifiedEvidence`, so the point counts and the policy is
+    `Healthy`/`Protected=True`.
+
+    A controller that answered `PointFactsUnread` for every unverified point —
+    the cheapest way to make the row above pass — fails this one. A controller
+    that rewrote the verdict to make it fit fails the last clause: the evidence
+    still reads `NotAttempted`, because THIS controller still did not read that
+    receipt, and D3 §5.4 keeps availability and verification on separate axes.
+    """
+    point = view["lastAvailablePoint"] or {}
+    captured = rfc3339_ms(point.get("recoveryPointAt"))
+    return {
+        "health is Healthy — the point counts": view["health"] == "Healthy",
+        "Protected=True": view["protectedStatus"] == "True",
+        "the reason is NOT PointFactsUnread": view["protectedReason"] != "PointFactsUnread",
+        "a point is published with a capture time": captured is not None,
+        "which is the catalog row's own recoveryPointAtMs, to the second":
+            captured is not None
+            and entry.get("recoveryPointAtMs") is not None
+            and abs(captured - int(entry["recoveryPointAtMs"])) < 1000,
+        "and the catalog row's own point id": bool(point.get("pointId"))
+            and point.get("pointId") == entry.get("pointId"),
+        "availability was decided by the catalog, and says so":
+            view["availabilityBasis"] == "Catalog",
+        "the verdict is NOT rewritten — it still reads NotAttempted":
+            point.get("evidence") == "NotAttempted",
+    }
+
+
+def refused_signature_is_unprotected(view: dict[str, Any], verdict: str | None,
+                                     rescue: dict[str, Any] | None) -> dict[str, bool]:
+    """A verdict the controller REACHED and refused is `Unprotected` and PAGES
+    — at every setting of `requireVerifiedEvidence` and with or without a
+    `catalogRef`.
+
+    `docs/kubernetes.md`: *"Such a point is `Unprotected` and pages, with or
+    without a capture time, and at every setting of `requireVerifiedEvidence`:
+    that objective governs whether an UNVERIFIED point may count as protection,
+    never whether a REFUSED one may."* `Untrusted` is a signature this
+    installation will not accept and `Invalid` is a document that is not what
+    it claims to be; neither is "the controller did not look", and neither may
+    be overruled by a catalog row — otherwise `TrustPolicy` would be
+    decorative.
+
+    The `rescue` clause is what makes the two `catalogRef` cells mean
+    something. Without it the cell would pass on a view that simply held no row
+    for the point, which proves nothing about whether a catalog row can rescue
+    a refused verdict; with it the cell asserts that a row WAS there, carrying
+    a capture time the policy could have filled from, and the policy refused
+    the point anyway.
+
+    The message clause is the HIGH-1b inversion, in one line: a refused point
+    must not be described with `PointFactsUnread`'s sentence, which says the
+    controller read no verdict. It read one.
+    """
+    staleness = alert_of(view["alerts"], "Staleness") or {}
+    clauses = {
+        "the controller REACHED a verdict, and it refuses the signature":
+            verdict in {"Untrusted", "Invalid"},
+        "health is Unprotected — D3 §3.2's `no available point at all`":
+            view["health"] == "Unprotected",
+        "Protected=False": view["protectedStatus"] == "False",
+        "reason NoAvailablePoint": view["protectedReason"] == "NoAvailablePoint",
+        "the Staleness incident is Open — this PAGES": staleness.get("state") == "Open",
+        "nothing is published as the newest available point":
+            not (view["lastAvailablePoint"] or {}),
+        "and the message does NOT say the controller read no verdict — it read one":
+            "read no verification verdict" not in (view["protectedMessage"] or ""),
+    }
+    if rescue is not None:
+        clauses["the catalog held ONE row for this point, so it COULD have placed it"] = (
+            rescue.get("recoveryPointAtMs") is not None
+        )
+    return clauses
+
+
+def valid_signature_is_protected(view: dict[str, Any], verdict: str | None) -> dict[str, bool]:
+    """THE NEGATIVE CONTROL for the refused-signature row: the same policy, the
+    same archive, the same four postures — a VALID signature.
+
+    It flips nothing in the product: no objective changes, no grant changes, no
+    trust object is written. The only difference is which key signed the
+    receipt the controller reads. A controller that answered `Unprotected` for
+    every point on this archive — the cheapest way to make the four cells above
+    pass — fails every clause here.
+    """
+    staleness = alert_of(view["alerts"], "Staleness") or {}
+    point = view["lastAvailablePoint"] or {}
+    return {
+        "the same archive under a trusted signer verifies Valid": verdict == "Valid",
+        "health is Healthy": view["health"] == "Healthy",
+        "Protected=True": view["protectedStatus"] == "True",
+        "a point is published, with a capture time": bool(point.get("recoveryPointAt")),
+        "carrying the verdict the controller reached": point.get("evidence") in
+            {"Valid", "ValidHistorical"},
+        "and the Staleness incident is not Open": staleness.get("state") != "Open",
+    }
+
+
+def incident_resolves_exactly_once(before: dict[str, Any], after: dict[str, Any],
+                                   health: str | None, posts: int,
+                                   new_transitions: int) -> dict[str, bool]:
+    """D3 §3.3's `Staleness` resolve column, verbatim: **"`health` back to
+    `Healthy`/`AtRisk`"** — and exactly one transition for it.
+
+    `protection::resolves_alerts` is those two values and nothing else. This is
+    the arm where the condition DID clear, so the incident must close, once,
+    and the close must be delivered once: one POST per transition this window
+    opened is D3 §3.3's dedup rule ("one open alert per `(policy, kind)`;
+    PagerDuty gets `trigger` on Open and `resolve` on Resolved under that
+    key").
+
+    The POST clause counts transitions across the whole ledger rather than this
+    incident's alone, because a second incident may legitimately close in the
+    same window (an `ArchiveUnavailable` opened over the refused point resolves
+    when a sound point arrives). What is asserted is the RATIO — one delivery
+    per transition, and no delivery without one.
+    """
+    return {
+        "the Staleness incident was Open before": before.get("state") == "Open",
+        "health came back to Healthy/AtRisk — D3 §3.3's resolve column":
+            health in {"Healthy", "AtRisk"},
+        "the incident is Resolved after it": after.get("state") == "Resolved",
+        "which is exactly one new notified transition on this incident":
+            (after.get("notifiedTransition") or 0) == (before.get("notifiedTransition") or 0) + 1,
+        "one POST per transition this window opened, and no more":
+            posts == new_transitions and new_transitions >= 1,
+        "and the delivery says Delivered, not merely attempted":
+            ((after.get("delivery") or {}).get("state")) == "Delivered",
+    }
+
+
+def incident_stays_open_on_unknown(before: dict[str, Any], after: dict[str, Any],
+                                   view: dict[str, Any], posts: int) -> dict[str, bool]:
+    """The other side of the same column, and the one a resolve-on-anything
+    implementation gets wrong.
+
+    D3 §3.3 resolves `Staleness` on "`health` back to `Healthy`/`AtRisk`" —
+    `Unknown` is neither. `docs/kubernetes.md` says what that means for an
+    operator: *"A policy that lands on `Unknown`/`PointFactsUnread` keeps its
+    incident open and un-renotified until someone gives it a `catalogRef` or a
+    readable receipt: Logweir does not claim a condition cleared because it
+    stopped being able to look."*
+
+    So this is a REQUIRED refusal, not a recorded one: the incident that was
+    open stays open, its transition counter does not move, and nothing is
+    delivered. A controller that treated "no longer Stale" as "resolved" would
+    close a real incident on the strength of having lost the ability to measure
+    it, and every clause here would fail.
+    """
+    return {
+        "the Staleness incident was Open before": before.get("state") == "Open",
+        "the policy is now Unknown/PointFactsUnread": (
+            view["health"] == "Unknown" and view["protectedReason"] == "PointFactsUnread"
+        ),
+        "the incident is STILL Open — `Unknown` is not back to Healthy/AtRisk":
+            after.get("state") == "Open",
+        "no new transition was recorded":
+            (after.get("transition") or 0) == (before.get("transition") or 0),
+        "it was not re-notified":
+            (after.get("notifiedTransition") or 0) == (before.get("notifiedTransition") or 0),
+        "and nothing was delivered for it": posts == 0,
+    }
+
+
+def alert_ledger_unchanged(before: list[dict[str, Any]],
+                           after: list[dict[str, Any]]) -> dict[str, bool]:
+    """Nothing opened, nothing closed, nothing paged.
+
+    D3 §3.2 gives `Unknown` no alert of its own — `open_alert_kinds` opens
+    `Staleness` for `Stale | Unprotected` only — so a policy that became
+    unmeasurable must not page, and must not un-page either.
+    """
+    kinds_before = {a.get("kind"): a for a in before or []}
+    kinds_after = {a.get("kind"): a for a in after or []}
+    open_before = {k for k, v in kinds_before.items() if v.get("state") == "Open"}
+    open_after = {k for k, v in kinds_after.items() if v.get("state") == "Open"}
+    return {
+        "no alert kind opened that was not open before": open_after <= open_before,
+        "nothing that was open was resolved": not any(
+            kinds_before.get(k, {}).get("state") == "Open" and v.get("state") == "Resolved"
+            for k, v in kinds_after.items()
+        ),
+        "and no transition was recorded at all":
+            sum(a.get("transition") or 0 for a in after or [])
+            == sum(a.get("transition") or 0 for a in before or []),
+    }
+
+
+# ---- the live plumbing ---------------------------------------------------
+
+
+def settled_policy(name: str, *, seconds: int = 420) -> dict[str, Any]:
+    """The verdict for the spec AS IT IS NOW.
+
+    `status.observedGeneration` is the only thing that distinguishes "the
+    controller answered my patch" from "the controller has not looked yet and
+    this is the previous posture's answer" — which, on a row whose whole
+    subject is a posture, is the difference between a measurement and a
+    coincidence.
+    """
+    want = get("protectionpolicy", name)["metadata"]["generation"]
+    obj = settle(
+        "protectionpolicy", name,
+        lambda o: ((o.get("status") or {}).get("observedGeneration") == want
+                   and bool((o.get("status") or {}).get("health"))),
+        seconds=seconds, what=f"a verdict for generation {want}",
+    )
+    return obj if obj is not None else get("protectionpolicy", name)
+
+
+def verdict_after(name: str, mark: str, predicate: Callable[[dict[str, Any]], bool], *,
+                  seconds: int = 300, what: str = "") -> dict[str, Any]:
+    """Wait for the state the row expects; if it never arrives, wait instead
+    for PROOF THAT THE CONTROLLER LOOKED, and return what it decided.
+
+    `status.evaluatedAt` is "rewritten only on change, or when older than half
+    the interval", so on a 60 s interval a timestamp that moved past `mark` is
+    the controller having re-evaluated after the change this row made. Without
+    that second wait a row that fails would be indistinguishable from a row
+    whose controller had not got to it yet, and the FAIL would be worthless.
+    """
+    obj = settle("protectionpolicy", name, predicate, seconds=seconds, what=what)
+    if obj is not None:
+        return obj
+    looked = settle(
+        "protectionpolicy", name,
+        lambda o: ((o.get("status") or {}).get("evaluatedAt") or "") > mark,
+        seconds=150, what=f"any evaluation after {mark}",
+    )
+    return looked if looked is not None else get("protectionpolicy", name)
+
+
+def patch_policy(name: str, patch: dict[str, Any]) -> None:
+    run(KN + ["patch", "protectionpolicy", name, "--type=merge", "-p", json.dumps(patch)])
+
+
+def sink_ready() -> None:
+    if get_opt("pod", SINK_POD) is None:
+        apply(sink_pod())
+        run(KN + ["wait", "--for=condition=Ready", f"pod/{SINK_POD}", "--timeout=120s"])
+    sink_ip = get("pod", SINK_POD)["status"]["podIP"]
+    apply({"apiVersion": "v1", "kind": "Secret", "metadata": owned(SINK_URL_SECRET),
+           "stringData": {"url": f"http://{sink_ip}:{SINK_PORT}/alerts"}})
+
+
+def entry_for_backup(entries: list[dict[str, Any]], backup: dict[str, Any]) -> dict[str, Any]:
+    """The ONE view row for this Backup's archive set.
+
+    The join is the controller's own (`protection::entries_for`): the point id
+    where the controller has one — the first 128 bits of the receipt digest —
+    and the ARCHIVE SET ID otherwise, which is what a point with no
+    receipt-derived identity has left. Ambiguity is refused rather than
+    resolved: two rows for one set are two points, and reading either one's
+    capture time would put a number on a recovery point that is not this one.
+    """
+    backup_id = (backup.get("status") or {}).get("backupId")
+    matched = [e for e in entries if backup_id and e.get("backupId") == backup_id]
+    return matched[0] if len(matched) == 1 else {}
+
+
+def protection_verdicts() -> None:
+    """The three owed arms, live, in one namespace.
+
+    ORDER IS THE FIXTURES' OWN. Row 2 must measure an archive whose ONLY point
+    is the refused one, and its control then adds a sound point to that same
+    archive — which is exactly the transition row 3's flip is about, so the
+    control and the flip are one action measured twice rather than two archives
+    that happen to agree.
+    """
+    evidence: list[str] = []
+    sink_ready()
+    STATE["controller"] = controller_facts()
+    save()
+    evidence.append(artifact("verdicts/controller.json", STATE["controller"]))
+
+    # =====================================================================
+    # ROW 1 — `PointFactsUnread`: a point on a `SecretKeys` grant
+    # =====================================================================
+    if get_opt("backup", "unread-point") is not None:
+        run(KN + ["delete", "backup", "unread-point", "--wait=true"])
+    unread = run_backup("unread-point", "dest-a")
+    unread_status = unread.get("status") or {}
+    facts = point_facts_the_policy_needs(unread_status)
+    evidence.append(artifact("verdicts/1-unread-backup.json",
+                             {"backup": backup_facts(unread),
+                              "pointFactsThePolicyNeeds": facts}))
+    view = fresh_catalog(UNREAD_CATALOG, "dest-a")
+    entries = view_entries(view)
+    entry = entry_for_backup(entries, unread)
+    evidence.append(artifact("verdicts/1-catalog-entry.json",
+                             {"entryForThePoint": entry, "entriesInView": len(entries)}))
+
+    # --- (1a) THE CONTROL: with a `catalogRef`, the point IS placed -------
+    if get_opt("protectionpolicy", UNREAD_POLICY) is not None:
+        run(KN + ["delete", "protectionpolicy", UNREAD_POLICY, "--wait=true"])
+    apply(verdict_policy(UNREAD_POLICY,
+                         subject={"destinationRef": {"name": "dest-a"}},
+                         catalog=UNREAD_CATALOG))
+    placed = policy_view(settled_policy(UNREAD_POLICY))
+    evidence.append(artifact("verdicts/1a-with-catalogref.json",
+                             {"view": placed, "catalogEntry": entry}))
+    placed_clauses = placed_point_is_protected(placed, entry)
+    unread_verdict = verdict_of(unread)
+    unread_capture = unread_status.get("capture")
+    unread_receipt = bool((unread_status.get("evidence") or {}).get("receiptSha256"))
+    check(
+        "protection-catalog-places-an-unverified-point",
+        "PLAT-14.2",
+        all(placed_clauses.values()),
+        f"NEGATIVE CONTROL for `protection-unplaceable-point-is-unknown`, and the arm that "
+        f"proves the row distinguishes. The `Backup` on a `SecretKeys` `evidenceRead` grant "
+        f"carries verification {unread_verdict!r}, capture {unread_capture!r} and "
+        f"receiptSha256 present={unread_receipt} — the controller "
+        f"read nothing. With `catalogRef: {UNREAD_CATALOG}`, whose view holds "
+        f"{'one row' if entry else 'NO row'} for this point "
+        f"({entry.get('availability')}/{entry.get('verification')}, selectable="
+        f"{entry.get('selectable')}, recoveryPointAtMs={entry.get('recoveryPointAtMs')}), the "
+        f"policy reads health {placed['health']}/{placed['availabilityBasis']}, "
+        f"Protected={placed['protectedStatus']}/{placed['protectedReason']}, point "
+        f"{placed['lastAvailablePoint']}. D3 §3.2's availability rule is satisfiable here and "
+        f"§5.4 keeps the two axes apart, so the verdict must still read `NotAttempted`. "
+        f"Clauses {placed_clauses}. ON `af64073` THIS FAILS: the pre-fix join refuses a "
+        f"candidate with no point id the moment a catalogRef is consulted, which is defect "
+        f"PROTECTION-SECRETKEYS-UNPROTECTED and what this row reproduces.",
+        evidence,
+    )
+
+    # --- (1b) with `catalogRef` REMOVED, nothing can place it -------------
+    before_alerts = policy_alerts(UNREAD_POLICY)
+    posts_mark = sink_posts()
+    mark = now()
+    patch_policy(UNREAD_POLICY, {"spec": {"protects": {"catalogRef": None}}})
+    want = get("protectionpolicy", UNREAD_POLICY)["metadata"]["generation"]
+    unknown = policy_view(verdict_after(
+        UNREAD_POLICY, mark,
+        lambda o: ((o.get("status") or {}).get("observedGeneration") == want
+                   and bool((o.get("status") or {}).get("health"))),
+        seconds=300, what="a verdict with no catalogRef",
+    ))
+    after_alerts = policy_alerts(UNREAD_POLICY)
+    posts = sink_posts() - posts_mark
+    unknown_clauses = unread_point_is_unknown(unknown)
+    ledger = alert_ledger_unchanged(before_alerts, after_alerts)
+    evidence.append(artifact("verdicts/1b-no-catalogref.json",
+                             {"view": unknown, "alertsBefore": before_alerts,
+                              "alertsAfter": after_alerts, "posts": posts,
+                              "clauses": unknown_clauses, "ledger": ledger}))
+    check(
+        "protection-unplaceable-point-is-unknown",
+        "PLAT-14.2",
+        all(unknown_clauses.values()) and all(ledger.values()),
+        f"D3 §3.2: `Unknown` is for an evaluation that is impossible; `Unprotected` is "
+        f"\"no available point at all\" and it PAGES. A run this policy covers succeeded "
+        f"(`unread-point`, exit {unread_status.get('exitCode')}) and the controller could not "
+        f"place its point in time — a `SecretKeys` `evidenceRead` grant, so no capture time "
+        f"and no receipt-derived identity — and with `catalogRef` removed nothing else can. "
+        f"The policy reads health {unknown['health']}, Protected="
+        f"{unknown['protectedStatus']}/{unknown['protectedReason']}, message "
+        f"{(unknown['protectedMessage'] or '')[:160]!r}; {posts} POST(s) at the sink. "
+        f"Clauses {unknown_clauses}. Ledger {ledger} — `Unknown` opens no alert "
+        f"(`open_alert_kinds` opens `Staleness` for `Stale | Unprotected` only). THE "
+        f"NON-VACUOUS half of \"and clears none\" is `protection-unknown-keeps-its-incident-"
+        f"open`, which starts from an incident that IS open; this row only asserts that "
+        f"nothing opened or closed here. ON `af64073` THIS FAILS with "
+        f"`Unprotected`/`NoAvailablePoint`, which is the defect.",
+        evidence,
+    )
+
+    # =====================================================================
+    # ROW 2 — a signature this installation REFUSES, at four postures
+    # =====================================================================
+    # THE ARCHIVE IS THE LEGACY INLINE ONE, and that is the only way to reach a
+    # verdict at all on this lab: a destination-backed run's receipt is read by
+    # the controller only where `evidenceRead.mode` is `ControllerIdentity` AND
+    # the installation policy allowlists the location, and the lab's
+    # `weirkeeper-policy` allowlists nothing. The controller's one global
+    # read-only handle is rooted at the fixture's archive, so a Backup-level
+    # verdict — `Valid`, `Untrusted` or `Invalid` — is reachable there and
+    # nowhere else. `spec.protects.legacyArchive` is the CRD's own way to point
+    # a policy at it (CEL rule H1: a saved destination XOR an inline archive).
+    subject = {"legacyArchive": {"url": LEGACY_ARCHIVE, "secretRef": {"name": "logweir-s3"}}}
+    key = mint_signing_key(f"{OWNER}-untrusted")
+    original = get("secret", "logweir-signing-key")
+    refused_backup: dict[str, Any] = {}
+    try:
+        # NO TrustPolicy IS WRITTEN. `spec.keys` of the synthesised
+        # `legacy-roster-v1` is the lab's own `TrustRoster`, and a key that is
+        # not in the resolved policy is `UntrustedSigner` — "exactly what a
+        # revocation-by-deletion would look like" (`trust.rs:233`). Producing
+        # the refusal by SIGNING with an unknown key rather than by REVOKING a
+        # known one keeps every object this row writes namespaced: no
+        # cluster-scoped change, no cluster lock, nothing shared touched.
+        run(KN + ["delete", "secret", "logweir-signing-key", "--wait=true"], check=False)
+        run(KN + ["create", "secret", "generic", "logweir-signing-key",
+                  f"--from-file=signing.pem={key['private']}"], timeout=120)
+        refused_backup = legacy_backup("refused-signature")
+    finally:
+        run(KN + ["delete", "secret", "logweir-signing-key", "--wait=true"], check=False)
+        apply({"apiVersion": "v1", "kind": "Secret", "metadata": owned("logweir-signing-key"),
+               "data": original.get("data", {}), "type": original.get("type", "Opaque")})
+        key["private"].unlink(missing_ok=True)
+        shutil.rmtree(key["dir"], ignore_errors=True)
+    refused_verification = ((refused_backup.get("status") or {}).get("evidence") or {}).get(
+        "verification") or {}
+    refused_verdict = refused_verification.get("result")
+    evidence.append(artifact("verdicts/2-refused-backup.json",
+                             {"backup": backup_facts(refused_backup),
+                              "verification": refused_verification,
+                              "mintedKeyId": key["keyId"],
+                              "privateKeyFileExists": key["private"].exists()}))
+    check(
+        "protection-untrusted-signer-fixture-is-real",
+        "PLAT-14.2",
+        refused_verdict in {"Untrusted", "Invalid"}
+        and not key["private"].exists() and not key["dir"].exists(),
+        f"the fixture the four cells below are about: a Backup signed by a key this "
+        f"installation has never heard of ({key['keyId'][:16]}…, minted for this row) "
+        f"verifies {refused_verdict!r} — a verdict the controller REACHED, which is the whole "
+        f"difference from row 1's `NotAttempted`. matchedKeyId "
+        f"{str(refused_verification.get('matchedKeyId'))[:16]!r}, trust "
+        f"{refused_verification.get('trust')}. The private half is gone from disk "
+        f"(file {key['private'].exists()}, dir {key['dir'].exists()}) and never entered an "
+        f"artifact; the namespace's `logweir-signing-key` is restored to the lab's own copy. "
+        f"A row whose fixture did not refuse would make all four cells below vacuous.",
+        evidence,
+    )
+    # THE CATALOG NEEDS A DESTINATION, and a `RecoveryCatalog` takes only a
+    # `destinationRef` — so the archive the legacy Backups write into is
+    # declared as one: the shared fixture's bucket, under THIS RUN'S OWN prefix,
+    # which is the same root `LEGACY_ARCHIVE` names. Nothing is written outside
+    # that prefix and nothing is ever deleted from that bucket (see `cleanup`).
+    apply(destination(LEGACY_DEST, "kafka-backups", prefix=f"{OWNER}-{STAMP}"))
+    wait_for("backupdestination", LEGACY_DEST,
+             lambda o: condition(o, "Valid").get("status") == "True",
+             seconds=180, what="Valid=True")
+    legacy_view = fresh_catalog(LEGACY_CATALOG, LEGACY_DEST)
+    legacy_entries = view_entries(legacy_view)
+    rescue = entry_for_backup(legacy_entries, refused_backup)
+    evidence.append(artifact("verdicts/2-catalog-rescue.json",
+                             {"entryForTheRefusedPoint": rescue,
+                              "entriesInView": len(legacy_entries)}))
+
+    postures = [(True, True), (True, False), (False, True), (False, False)]
+    if get_opt("protectionpolicy", REFUSED_POLICY) is not None:
+        run(KN + ["delete", "protectionpolicy", REFUSED_POLICY, "--wait=true"])
+    apply(verdict_policy(REFUSED_POLICY, subject=subject, catalog=LEGACY_CATALOG))
+    cells: dict[str, dict[str, bool]] = {}
+    views: dict[str, dict[str, Any]] = {}
+    for verified, with_catalog in postures:
+        label = f"requireVerifiedEvidence={verified} catalogRef={'present' if with_catalog else 'absent'}"
+        patch_policy(REFUSED_POLICY, {
+            "spec": {
+                "protects": {"catalogRef": {"name": LEGACY_CATALOG} if with_catalog else None},
+                "objectives": {"requireVerifiedEvidence": verified},
+            }
+        })
+        cell = policy_view(settled_policy(REFUSED_POLICY))
+        views[label] = cell
+        cells[label] = refused_signature_is_unprotected(
+            cell, refused_verdict, rescue if with_catalog else None)
+    evidence.append(artifact("verdicts/2-four-postures.json",
+                             {"cells": cells, "views": views, "verdict": refused_verdict}))
+    check(
+        "protection-refused-signature-is-unprotected-at-every-posture",
+        "PLAT-14.2",
+        all(all(c.values()) for c in cells.values()),
+        f"a receipt signed by a key this installation refuses verifies {refused_verdict!r} — "
+        f"REACHED, not skipped — and D3 §3.2 gives such a point `Unprotected` at every "
+        f"setting of the evidence objective: that objective governs whether an UNVERIFIED "
+        f"point may count, never whether a REFUSED one may. Four cells, each asserted: "
+        + "; ".join(
+            f"[{label}] health {views[label]['health']}/"
+            f"{views[label]['protectedReason']} alerts "
+            f"{[(a.get('kind'), a.get('state')) for a in views[label]['alerts']]} "
+            f"{'ALL PASS' if all(c.values()) else 'FAILED ' + str([k for k, v in c.items() if not v])}"
+            for label, c in cells.items())
+        + f". The catalog's own row for the refused point is {rescue.get('availability')}/"
+        f"{rescue.get('verification')} with recoveryPointAtMs "
+        f"{rescue.get('recoveryPointAtMs')} — present, so the two `catalogRef` cells assert "
+        f"that a row which COULD have placed the point did not rescue it.",
+        evidence,
+    )
+
+    # --- (2c) THE CONTROL: the same four postures, a VALID signature ------
+    # It plants a sound signature and changes nothing else — no objective, no
+    # grant, no trust object. This is also row 3's flip: the archive whose only
+    # point was refused now holds a sound one, which is the condition D3 §3.3
+    # resolves on.
+    staleness_before = alert_of(policy_alerts(REFUSED_POLICY), "Staleness") or {}
+    alerts_before_flip = policy_alerts(REFUSED_POLICY)
+    posts_mark = sink_posts()
+    sound = legacy_backup("valid-signature")
+    sound_verdict = (((sound.get("status") or {}).get("evidence") or {})
+                     .get("verification") or {}).get("result")
+    # `fresh_catalog`, not `refresh_view`: the latter's fallback recreates the
+    # object over `dest-a`, which is not this catalog's destination.
+    fresh_legacy = fresh_catalog(LEGACY_CATALOG, LEGACY_DEST)
+    evidence.append(artifact("verdicts/2c-valid-backup.json",
+                             {"backup": backup_facts(sound), "verdict": sound_verdict,
+                              "entriesInView": len(view_entries(fresh_legacy))}))
+    control_cells: dict[str, dict[str, bool]] = {}
+    control_views: dict[str, dict[str, Any]] = {}
+    for verified, with_catalog in postures:
+        label = f"requireVerifiedEvidence={verified} catalogRef={'present' if with_catalog else 'absent'}"
+        patch_policy(REFUSED_POLICY, {
+            "spec": {
+                "protects": {"catalogRef": {"name": LEGACY_CATALOG} if with_catalog else None},
+                "objectives": {"requireVerifiedEvidence": verified},
+            }
+        })
+        cell = policy_view(settled_policy(REFUSED_POLICY))
+        control_views[label] = cell
+        control_cells[label] = valid_signature_is_protected(cell, sound_verdict)
+    evidence.append(artifact("verdicts/2c-control-four-postures.json",
+                             {"cells": control_cells, "views": control_views}))
+    check(
+        "protection-valid-signature-is-protected-at-every-posture",
+        "PLAT-14.2",
+        all(all(c.values()) for c in control_cells.values()),
+        f"NEGATIVE CONTROL for `protection-refused-signature-is-unprotected-at-every-posture`. "
+        f"The same policy, the same archive, the same four postures, and ONE difference: the "
+        f"receipt is signed by the lab's own key, so it verifies {sound_verdict!r}. Nothing in "
+        f"the product was flipped to make it pass. "
+        + "; ".join(
+            f"[{label}] health {control_views[label]['health']}/"
+            f"{control_views[label]['protectedReason']} point "
+            f"{(control_views[label]['lastAvailablePoint'] or {}).get('recoveryPointAt')} "
+            f"{'ALL PASS' if all(c.values()) else 'FAILED ' + str([k for k, v in c.items() if not v])}"
+            for label, c in control_cells.items())
+        + ". A controller that answered `Unprotected` for every point on this archive would "
+        "pass all four cells of the row above and fail all four of these.",
+        evidence,
+    )
+
+    # =====================================================================
+    # ROW 3 — D3 §3.3's resolve column, both directions
+    # =====================================================================
+    alerts_after_flip = policy_alerts(REFUSED_POLICY)
+    staleness_after = alert_of(alerts_after_flip, "Staleness") or {}
+    if staleness_after.get("state") == "Resolved":
+        settle(
+            "protectionpolicy", REFUSED_POLICY,
+            lambda o: all(((a.get("delivery") or {}).get("state")
+                           in {"Delivered", "Failed", "Suppressed"})
+                          for a in ((o.get("status") or {}).get("alerts") or [])),
+            seconds=300, what="every transition to finish delivering",
+        )
+        alerts_after_flip = policy_alerts(REFUSED_POLICY)
+        staleness_after = alert_of(alerts_after_flip, "Staleness") or {}
+    posts = sink_posts() - posts_mark
+    new_transitions = (sum(a.get("transition") or 0 for a in alerts_after_flip)
+                       - sum(a.get("transition") or 0 for a in alerts_before_flip))
+    final = policy_view(get("protectionpolicy", REFUSED_POLICY))
+    flip = incident_resolves_exactly_once(
+        staleness_before, staleness_after, final["health"], posts, new_transitions)
+    evidence.append(artifact("verdicts/3a-flip.json",
+                             {"before": staleness_before, "after": staleness_after,
+                              "alertsBefore": alerts_before_flip,
+                              "alertsAfter": alerts_after_flip, "posts": posts,
+                              "newTransitions": new_transitions, "view": final,
+                              "clauses": flip}))
+    check(
+        "protection-refused-to-sound-resolves-exactly-once",
+        "PLAT-14.2",
+        all(flip.values()),
+        f"D3 §3.3's resolve column for `Staleness`, verbatim: \"`health` back to "
+        f"`Healthy`/`AtRisk`\". The policy's only point was one the installation refuses, so "
+        f"the incident was {staleness_before.get('state')!r} at transition "
+        f"{staleness_before.get('transition')}; a sound point arrived in the same archive "
+        f"(`valid-signature`, verdict {sound_verdict!r}), health came back to "
+        f"{final['health']}, and the incident is {staleness_after.get('state')!r} at "
+        f"transition {staleness_after.get('transition')} / notified "
+        f"{staleness_after.get('notifiedTransition')}, delivery "
+        f"{(staleness_after.get('delivery') or {}).get('state')!r}. {new_transitions} "
+        f"transition(s) across the ledger in this window and {posts} POST(s) at the "
+        f"in-cluster sink — D3 §3.3's dedup rule is one message per transition. "
+        f"Clauses {flip}.",
+        evidence,
+    )
+
+    # --- (3b) the refusal: `Unknown` does not clear an incident -----------
+    # THE OTHER SIDE OF THE SAME COLUMN, and a REQUIRED refusal rather than a
+    # recorded one. dest-b, because it holds no points: the policy therefore
+    # opens `Staleness` honestly (`Unprotected` — nothing to recover from), and
+    # the point that arrives next is one the controller cannot place.
+    if get_opt("protectionpolicy", STAYS_POLICY) is not None:
+        run(KN + ["delete", "protectionpolicy", STAYS_POLICY, "--wait=true"])
+    apply(verdict_policy(STAYS_POLICY,
+                         subject={"destinationRef": {"name": "dest-b"}}, catalog=None))
+    opened = settle(
+        "protectionpolicy", STAYS_POLICY,
+        lambda o: (alert_of(((o.get("status") or {}).get("alerts") or []), "Staleness") or {})
+        .get("state") == "Open",
+        seconds=420, what="a Staleness incident over an empty destination",
+    )
+    if opened is None:
+        record("protection-unknown-keeps-its-incident-open", "PLAT-14.2", "FAIL",
+               "no Staleness incident opened over an empty destination at all, so the "
+               "refusal this row is about could not be measured; the objects are in "
+               + artifact("verdicts/3b-no-incident.json",
+                          policy_view(get("protectionpolicy", STAYS_POLICY))),
+               evidence)
+    else:
+        settle(
+            "protectionpolicy", STAYS_POLICY,
+            lambda o: (((alert_of(((o.get("status") or {}).get("alerts") or []), "Staleness")
+                         or {}).get("delivery") or {}).get("state")
+                       in {"Delivered", "Failed", "Suppressed"}),
+            seconds=300, what="the open transition to finish delivering",
+        )
+        stays_before = alert_of(policy_alerts(STAYS_POLICY), "Staleness") or {}
+        posts_mark = sink_posts()
+        mark = now()
+        if get_opt("backup", "unplaceable-point") is not None:
+            run(KN + ["delete", "backup", "unplaceable-point", "--wait=true"])
+        stays_backup = run_backup("unplaceable-point", "dest-b")
+        stays_view = policy_view(verdict_after(
+            STAYS_POLICY, mark,
+            lambda o: condition(o, "Protected").get("reason") == "PointFactsUnread",
+            seconds=300, what="the policy to become Unknown/PointFactsUnread",
+        ))
+        stays_after = alert_of(policy_alerts(STAYS_POLICY), "Staleness") or {}
+        posts = sink_posts() - posts_mark
+        stays = incident_stays_open_on_unknown(stays_before, stays_after, stays_view, posts)
+        evidence.append(artifact("verdicts/3b-stays-open.json",
+                                 {"before": stays_before, "after": stays_after,
+                                  "view": stays_view, "posts": posts, "clauses": stays,
+                                  "backup": backup_facts(stays_backup)}))
+        check(
+            "protection-unknown-keeps-its-incident-open",
+            "PLAT-14.2",
+            all(stays.values()),
+            f"THE REFUSAL D3 §3.3's resolve column requires, and the one a "
+            f"resolve-on-anything implementation gets wrong. A policy over an empty "
+            f"destination opened `Staleness` at transition {stays_before.get('transition')} "
+            f"(delivery {(stays_before.get('delivery') or {}).get('state')!r}); a run then "
+            f"succeeded into that destination (`unplaceable-point`, exit "
+            f"{(stays_backup.get('status') or {}).get('exitCode')}) whose receipt the "
+            f"controller cannot read — a `SecretKeys` grant, and no `catalogRef` — so the "
+            f"policy is {stays_view['health']}/{stays_view['protectedReason']}. `Unknown` is "
+            f"NOT \"back to `Healthy`/`AtRisk`\", so the incident must stay "
+            f"{stays_after.get('state')!r} at transition {stays_after.get('transition')}, "
+            f"notified {stays_after.get('notifiedTransition')}, with {posts} POST(s) in the "
+            f"window: Logweir does not claim a condition cleared because it stopped being "
+            f"able to look. Clauses {stays}. ON `af64073` THIS FAILS on the health clause "
+            f"only — the incident stays open there because the policy stays `Unprotected`, "
+            f"which is the defect, not the rule.",
+            evidence,
+        )
+
+
+# ---------------------------------------------------------------------------
 # The negative control, the report and the cleanup
 # ---------------------------------------------------------------------------
 
@@ -6135,6 +6975,14 @@ PHASE_PRECONDITIONS: dict[str, tuple[str, ...]] = {
     # dest-a expecting it whole.
     "notify": ("catalog",),
     "protection_cases": ("catalog", "notify"),
+    # ONLY `setup`. Every fixture it needs — its three policies, its two
+    # catalogs, the legacy destination, the sink and every Backup it measures —
+    # it creates itself, because its rows assert exact alert ledgers and an
+    # incident another phase opened on the same policy would make every count
+    # in them somebody else's. It runs after `protection_cases` in `PHASES`
+    # only because that phase breaks a manifest in dest-a, and a broken
+    # manifest is not what these rows are about.
+    "protection_verdicts": ("setup",),
     "retention": ("catalog",),
     "legal_hold": ("retention",),
     "lifecycle": ("retention",),
@@ -6198,6 +7046,7 @@ PHASES = [
     "enforce", "wrong_prefix", "denied_deletion", "no_evidence_credential",
     "bounded_retry", "trust",
     "signed_at_probe", "trust_rbac", "old_archive", "multiple_namespaces", "notify", "protection_cases",
+    "protection_verdicts",
     "control", "report", "cleanup",
 ]
 
