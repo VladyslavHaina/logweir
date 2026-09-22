@@ -195,3 +195,39 @@ async fn a_scoped_reconciler_starts_once_per_namespace() {
         vec![Some("team-a".to_string()), Some("team-b".to_string())]
     );
 }
+
+/// **No standalone watch stream spins on errors.** `Controller` backs off its
+/// own trigger watches; a `reflector(…, watcher(…))` this crate spawns itself
+/// must say `.default_backoff()` or a refused LIST — a 403 from a namespace
+/// bound without its grant, an API-server outage — becomes a tight retry
+/// loop. Found by the PLAT-17.2 live run (~175 retries a second per stream).
+#[test]
+fn every_standalone_watch_stream_backs_off() {
+    let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    let mut files = Vec::new();
+    src_files(&root, &mut files);
+    let mut offenders = Vec::new();
+    let mut seen = 0;
+    for file in files {
+        let text = std::fs::read_to_string(&file).unwrap();
+        let mut at = 0;
+        while let Some(rel) = text[at..].find("reflector::reflector(") {
+            let start = at + rel;
+            let window = &text[start..(start + 400).min(text.len())];
+            seen += 1;
+            if !window.contains(".default_backoff()") {
+                offenders.push(format!(
+                    "{}:{}",
+                    file.strip_prefix(&root).unwrap().display(),
+                    text[..start].lines().count() + 1
+                ));
+            }
+            at = start + 1;
+        }
+    }
+    assert!(seen >= 2, "{seen}");
+    assert!(
+        offenders.is_empty(),
+        "watch streams without backoff: {offenders:?}"
+    );
+}

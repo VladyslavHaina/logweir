@@ -71,7 +71,7 @@ use k8s_openapi::api::core::v1::{ConfigMap, Pod};
 use kube::api::{Api, LogParams, Patch, PatchParams, PostParams};
 use kube::runtime::controller::Action;
 use kube::runtime::reflector::{self, ObjectRef};
-use kube::runtime::{watcher, Controller};
+use kube::runtime::{watcher, Controller, WatchStreamExt as _};
 use kube::{Resource, ResourceExt as _};
 use serde_json::{json, Value};
 use tracing::{debug, info, warn};
@@ -5122,9 +5122,14 @@ fn controller_in(
             }
         });
         tokio::spawn(
+            // BACKED OFF, like every trigger watch `Controller` runs. Without
+            // it a refused or failing LIST is retried in a tight loop — the
+            // PLAT-17.2 live run measured ~175 retries a second per stream
+            // when the scoped ServiceAccount lacked the cluster-scoped trust
+            // grant — and an API-server outage becomes load on the API server.
             reflector::reflector(
                 policy_writer,
-                watcher(policy_api.clone(), watcher::Config::default()),
+                watcher(policy_api.clone(), watcher::Config::default()).default_backoff(),
             )
             .for_each(|_| std::future::ready(())),
         );
