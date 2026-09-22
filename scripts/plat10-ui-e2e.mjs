@@ -1532,16 +1532,25 @@ async function main() {
     await waitForSelector(page, "#policy-create-cron", "the keyboard journey's cron field");
     await tabTo(page, "#policy-create-cron", "the keyboard journey's cron field");
     await page.keyboard.type("9 3 * * *");
+    // FOCUS IS VISIBLE WHERE THE KEYBOARD PUT IT: the focused field matches
+    // :focus-visible and carries ui/style.css's own 2px solid ring (Chromium's
+    // default `auto` ring would not satisfy this). Read while it is the
+    // active element, because a computed style of an unfocused node says
+    // nothing about focus.
+    const focusVisible = await page.evaluate(() => {
+      const node = document.activeElement;
+      const style = window.getComputedStyle(node);
+      return { element: node.id, matchesFocusVisible: node.matches(":focus-visible"),
+        outline: style.outlineStyle, width: style.outlineWidth, color: style.outlineColor };
+    });
+    check(focusVisible.element === "policy-create-cron" && focusVisible.matchesFocusVisible &&
+      focusVisible.outline === "solid" && focusVisible.width === "2px",
+      "the keyboard-focused field shows no visible focus: " + JSON.stringify(focusVisible));
     await tabTo(page, "#policy-create-topics", "the keyboard journey's topic field");
     await page.keyboard.type("orders");
     await tabTo(page, "#policy-create-destination", "the keyboard journey's destination");
     const destinationKeys = await keyboardSelect("#policy-create-destination", destination,
       destination[0]);
-    const focusVisible = await page.evaluate(() => {
-      const node = document.getElementById("policy-create-cron");
-      const style = window.getComputedStyle(node, ":focus-visible");
-      return { outline: style.outlineStyle, width: style.outlineWidth };
-    });
     await shot(page, "22-keyboard-filled");
     await tabTo(page, "#schedule-form button[type=submit]", "the keyboard journey's Create button");
     await page.keyboard.press("Space");
