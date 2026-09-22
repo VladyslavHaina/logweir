@@ -865,9 +865,13 @@ fn candidate_from_backup(
             .and_then(|v| v.trust.as_ref())
             .and_then(|t| t.basis.as_deref()),
     );
-    let point_id = status
+    let receipt_sha256 = status
         .and_then(|s| s.evidence.as_ref())
         .and_then(|e| e.receipt_sha256.as_deref())
+        .filter(|digest| p::point_id_from_receipt_digest(digest).is_some())
+        .map(str::to_string);
+    let point_id = receipt_sha256
+        .as_deref()
         .and_then(p::point_id_from_receipt_digest);
     // `windowCovered.toMs` is EXCLUSIVE — the newest archived record is one
     // millisecond before it — and it is published under its own name so
@@ -886,6 +890,7 @@ fn candidate_from_backup(
     let candidate = p::PointCandidate {
         backup_name: Some(backup.name_any()),
         point_id,
+        receipt_sha256,
         backup_id,
         recovery_point_at: status
             .and_then(|s| s.capture.as_ref())

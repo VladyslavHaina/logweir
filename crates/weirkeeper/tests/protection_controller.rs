@@ -202,6 +202,13 @@ fn point_id(name: &str) -> String {
         .expect("the fixture digest is well formed")
 }
 
+fn catalog_digest(point_id: &str) -> String {
+    let prefix = point_id
+        .strip_prefix("lwp1-")
+        .expect("the fixture point id has the canonical prefix");
+    format!("sha256:{prefix}{}", "0".repeat(32))
+}
+
 /// RFC 7386-shaped test helper, so a fixture override is a patch and not a
 /// rewrite of the whole object.
 fn merge(target: &mut Value, patch: &Value) {
@@ -445,9 +452,11 @@ fn inputs<'a>(
 }
 
 fn candidate(hours_ago: i64) -> p::PointCandidate {
+    let point_id = point_id("b-1");
     p::PointCandidate {
         backup_name: Some("b-1".to_string()),
-        point_id: Some(point_id("b-1")),
+        receipt_sha256: Some(catalog_digest(&point_id)),
+        point_id: Some(point_id),
         backup_id: Some("set-1".to_string()),
         recovery_point_at: Some(now() - Duration::hours(hours_ago)),
         newest_record_at: Some(now() - Duration::hours(hours_ago)),
@@ -663,6 +672,7 @@ fn is_available_with(
 fn entry(point_id: &str, availability: &str, verification: &str) -> p::CatalogEntry {
     serde_json::from_value(json!({
         "pointId": point_id,
+        "receiptSha256": catalog_digest(point_id),
         "backupId": "set-1",
         "recoveryPointAtMs": 1_700_000_000_000_i64,
         "availability": availability,
@@ -679,6 +689,40 @@ fn entry(point_id: &str, availability: &str, verification: &str) -> p::CatalogEn
     .expect("a view entry parses leniently")
 }
 
+/// A truncated `pointId` collision must not let a different receipt satisfy a
+/// digest-bound candidate, even when the archive-set id also matches.
+///
+/// MUTANT: join digest-bearing candidates on `point_id` alone. The negative
+/// assertion becomes available. MUTANT 2: fall back to `backup_id` after a
+/// full-digest miss. The same assertion becomes available.
+#[test]
+fn the_catalog_join_requires_the_full_receipt_digest() {
+    let candidate = candidate(2);
+    let id = candidate.point_id.as_deref().expect("the point has an id");
+    let exact = p::CatalogAnswer::Fresh(vec![entry(id, "Available", "Verified")]);
+    assert!(p::is_available(
+        &candidate,
+        &spec_with_catalog_only(),
+        &exact
+    ));
+
+    let mut collision = entry(id, "Available", "Verified");
+    collision.receipt_sha256 = format!(
+        "sha256:{}{}",
+        id.strip_prefix("lwp1-").expect("canonical point id"),
+        "f".repeat(32)
+    );
+    assert_ne!(
+        collision.receipt_sha256,
+        candidate.receipt_sha256.as_deref().expect("full digest")
+    );
+    let collided = p::CatalogAnswer::Fresh(vec![collision]);
+    assert!(
+        !p::is_available(&candidate, &spec_with_catalog_only(), &collided),
+        "equal truncated ids and backup ids cannot substitute for the full digest"
+    );
+}
+
 /// A newer point the catalog cannot read must not silently become the answer,
 /// and it must not hide the older point that CAN be read.
 #[test]
@@ -690,9 +734,11 @@ fn an_unreadable_newest_point_selects_the_older_one_and_opens_archive_unavailabl
     let mut newest = candidate(2);
     newest.backup_name = Some("b-new".to_string());
     newest.point_id = Some(point_id("b-new"));
+    newest.receipt_sha256 = newest.point_id.as_deref().map(catalog_digest);
     let mut older = candidate(10);
     older.backup_name = Some("b-old".to_string());
     older.point_id = Some(point_id("b-old"));
+    older.receipt_sha256 = older.point_id.as_deref().map(catalog_digest);
     let candidates = [newest, older];
 
     let catalog = p::CatalogAnswer::Fresh(vec![
@@ -890,6 +936,7 @@ fn a_not_attempted_point_with_a_digest_is_still_unread_and_unknown() {
     );
     let mut point = unreadable_point(2);
     point.point_id = Some(point_id("digest-only"));
+    point.receipt_sha256 = point.point_id.as_deref().map(catalog_digest);
     let verdict = p::evaluate(&inputs(
         &spec(),
         &[point],
@@ -965,6 +1012,7 @@ fn an_unplaceable_point_never_masks_a_more_specific_reason_or_a_placeable_one() 
 fn no_receipt_point(hours_ago: i64) -> p::PointCandidate {
     p::PointCandidate {
         point_id: None,
+        receipt_sha256: None,
         evidence: p::Evidence::NotAttempted,
         ..candidate(hours_ago)
     }
@@ -1038,6 +1086,7 @@ fn the_catalog_join_falls_back_to_the_archive_set_id() {
     // a point the view does not know, not one to find under a coarser name.
     let listed_elsewhere = p::PointCandidate {
         point_id: Some(point_id("b-9")),
+        receipt_sha256: Some(catalog_digest(&point_id("b-9"))),
         ..no_receipt_point(2)
     };
     assert!(!p::is_available(&listed_elsewhere, &spec, &present));
@@ -2686,7 +2735,7 @@ fn a_fresh_catalog_view_answers_availability_and_an_expired_one_does_not() {
             "pointId": point_id("b-1"), "backupId": "s", "runId": "r",
             "recoveryPointAtMs": 1_700_000_000_000_i64,
             "coveredFromMs": 0, "coveredToMs": 1,
-            "receiptKey": "k", "receiptSha256": "sha256:0",
+            "receiptKey": "k", "receiptSha256": receipt_digest("b-1"),
             "availability": "Available", "verification": "Verified", "selectable": true
         })
     );
@@ -2804,7 +2853,7 @@ fn catalog_entry(name: &str, hours_ago: i64, availability: &str, verification: &
         "pointId": point_id(name), "backupId": format!("{SCHEDULE_UID}-{name}"), "runId": "r",
         "recoveryPointAtMs": (now() - Duration::hours(hours_ago)).timestamp_millis(),
         "coveredFromMs": 0, "coveredToMs": 1,
-        "receiptKey": "k", "receiptSha256": "sha256:0",
+        "receiptKey": "k", "receiptSha256": receipt_digest(name),
         "availability": availability, "verification": verification,
         "selectable": availability == "Available"
             && matches!(verification, "Verified" | "VerifiedHistorical")

@@ -4021,7 +4021,7 @@ async fn reconcile_backup_inner(
         EvidenceSource::NotAttempted { .. } => None,
     };
     let orphan = orphan_state(exit_code, observed.as_ref().map(|o| o.presence));
-    let covered = observed.as_ref().and_then(|o| o.covered);
+    let observed_covered = observed.as_ref().and_then(|o| o.covered);
     let observed_receipt_sha256 = observed.as_ref().and_then(|o| o.receipt_sha256.as_deref());
     let reported_receipt_sha256 = keys.receipt_sha256.as_deref();
     let digest_disagreement = reported_receipt_sha256
@@ -4033,8 +4033,15 @@ async fn reconcile_backup_inner(
     // comparing those bytes to their own hash would let replacement evidence
     // validate itself. Old runners therefore remain explicitly unbound.
     let receipt_sha256 = reported_receipt_sha256.map(str::to_string);
-    let legacy_unbound =
-        reported_receipt_sha256.is_none() && observed_receipt_sha256.is_some() && keys.complete();
+    let legacy_unbound = reported_receipt_sha256.is_none() && keys.complete();
+    // No runner digest means no immutable binding between this run and any
+    // object currently found at the reported keys. Suppress every fact parsed
+    // from those objects, including the window written by the terminal patch.
+    let covered = if legacy_unbound {
+        None
+    } else {
+        observed_covered
+    };
 
     // WARNED ONLY WHERE IT IS NEWS. A refusal (exit 3), an operational failure
     // (1) or a signing failure (4) wrote no artifact BY CONTRACT (GC11), so
@@ -4170,8 +4177,8 @@ async fn reconcile_backup_inner(
         Some(VerificationResult::not_attempted(
             logweir_verify::PAYLOAD_TYPE_BACKUP_RECEIPT,
             "the runner reported both evidence keys but no receipt-sha256 anchor; this \
-             pre-digest runner output is legacy-unbound, so fetched bytes cannot validate \
-             themselves and no receipt facts are projected",
+             pre-digest runner output is legacy-unbound, so neither fetched nor missing \
+             objects can establish this run's receipt identity and no receipt facts are projected",
         ))
     } else {
         match (&evidence_from, reference) {

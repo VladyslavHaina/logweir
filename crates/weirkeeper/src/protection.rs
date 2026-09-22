@@ -630,6 +630,9 @@ pub struct PointCandidate {
     /// D3 §5.1's identity, when it is derivable — see
     /// [`point_id_from_receipt_digest`].
     pub point_id: Option<String>,
+    /// The runner-reported full receipt digest. This is the authoritative
+    /// catalog join key; `point_id` is only its truncated display identity.
+    pub receipt_sha256: Option<String>,
     /// The archive set this run wrote into: `status.execution.id`, or
     /// `status.backupId` for a run frozen before execution inputs existed.
     ///
@@ -735,6 +738,10 @@ pub fn point_id_from_receipt_digest(receipt_sha256: &str) -> Option<String> {
 pub struct CatalogEntry {
     /// D3 §5.1's identity.
     pub point_id: String,
+    /// Full immutable receipt identity, used to disambiguate equal truncated
+    /// point ids. Older views omit it and cannot answer a digest-bound join.
+    #[serde(default)]
+    pub receipt_sha256: String,
     /// The archive set this point belongs to.
     #[serde(default)]
     pub backup_id: String,
@@ -1131,14 +1138,19 @@ fn entries_for<'e>(
     entries: &'e [CatalogEntry],
 ) -> impl Iterator<Item = &'e CatalogEntry> {
     let point_id = candidate.point_id.clone();
+    let receipt_sha256 = candidate.receipt_sha256.clone();
     // An EMPTY `backupId` is not a key. `#[serde(default)]` gives `""` to a
     // view that does not write the field, and joining on it would make every
     // such entry an answer for every candidate whose receipt went unread.
     let backup_id = candidate.backup_id.clone().filter(|id| !id.is_empty());
-    entries.iter().filter(move |e| match &point_id {
-        // ONE key or the other and never both: an identity the view does not
-        // list is an answer, and the answer is "no".
-        Some(id) => &e.point_id == id,
+    entries.iter().filter(move |e| match &receipt_sha256 {
+        // The full digest decides. The point id is checked too when present,
+        // but can never substitute for the collision-resistant identity.
+        Some(digest) => {
+            &e.receipt_sha256 == digest && point_id.as_ref().is_none_or(|id| &e.point_id == id)
+        }
+        // Compatibility fallback is allowed only when the candidate has no
+        // canonical runner digest at all.
         None => backup_id.as_ref().is_some_and(|id| &e.backup_id == id),
     })
 }

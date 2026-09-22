@@ -1882,7 +1882,7 @@ fn urlencode(s: &str) -> String {
 #[tokio::test]
 async fn the_container_is_selected_by_name() {
     let (client, _seen, bodies) = {
-        let routes = finished_routes(&pod_list_terminated(2), log_body(&i7_tail()), 200, "Failed");
+        let routes = finished_routes(&pod_list_terminated(2), log_body(""), 200, "Failed");
         mock_client_recording_bodies(routes)
     };
     let outcome = reconcile_backup(
@@ -2997,7 +2997,7 @@ async fn the_finished_status_patch_carries_the_backup_id() {
     // the API server is actually sent and not a builder call.
     let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes(
         &pod_list_terminated(0),
-        log_body(&i7_tail()),
+        log_body(""),
         200,
         "Complete",
     ));
@@ -4279,7 +4279,7 @@ async fn window_covered_is_epoch_milliseconds_on_the_status() {
     let oracle = move |_keys: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
         Box::pin(async move {
             Some(ArchiveObservation {
-                receipt_sha256: None,
+                receipt_sha256: Some(RUNNER_RECEIPT_SHA256.to_string()),
                 presence: EvidencePresence {
                     payload: true,
                     sidecar: true,
@@ -4297,7 +4297,7 @@ async fn window_covered_is_epoch_milliseconds_on_the_status() {
 
     let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes(
         &pod_list_terminated(0),
-        log_body(&i7_tail()),
+        log_body(&i7_tail_with_digest()),
         200,
         "Complete",
     ));
@@ -9275,6 +9275,10 @@ async fn old_runner_keys_cannot_self_anchor_foreign_valid_evidence() {
         statuses[0]["evidence"]["receiptSha256"].is_null(),
         "a fetched self-hash is not published as this run's capture claim"
     );
+    assert!(
+        statuses[0]["windowCovered"].is_null(),
+        "an unbound foreign receipt cannot project its covered window"
+    );
     let second = statuses.last().expect("the verification patch exists");
     assert_eq!(second["evidence"]["verification"]["result"], "NotAttempted");
     assert!(
@@ -9283,7 +9287,90 @@ async fn old_runner_keys_cannot_self_anchor_foreign_valid_evidence() {
             .is_some_and(|detail| detail.contains("legacy-unbound")),
         "the compatibility state is explicit: {second}"
     );
-    assert!(second["records"].is_null() && second["capture"].is_null());
+    assert!(
+        second["windowCovered"].is_null()
+            && second["records"].is_null()
+            && second["capture"].is_null()
+    );
+}
+
+/// Missing or unreadable objects do not weaken the old-runner rule: complete
+/// keys without the runner's digest are explicitly legacy-unbound, and no
+/// receipt-derived fact is projected.
+#[tokio::test]
+async fn old_runner_missing_or_unreadable_receipt_is_explicitly_legacy_unbound() {
+    let missing = |_keys: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
+        Box::pin(async {
+            Some(ArchiveObservation {
+                presence: EvidencePresence {
+                    payload: false,
+                    sidecar: true,
+                },
+                covered: None,
+                receipt_sha256: None,
+                records: None,
+                capture: None,
+            })
+        })
+    };
+    let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes(
+        &pod_list_terminated(0),
+        log_body(&i7_tail()),
+        200,
+        "Complete",
+    ));
+    reconcile_backup(
+        &frozen_backup(),
+        &client,
+        &missing,
+        &valid_evidence,
+        utc(2026, 11, 9, 3, 20),
+    )
+    .await
+    .expect("missing legacy evidence records a verdict");
+    let statuses = patched_statuses(&bodies.lock().expect("the recorder is readable"));
+    let final_status = statuses.last().expect("the verdict patch exists");
+    assert_eq!(
+        final_status["evidence"]["verification"]["result"],
+        "NotAttempted"
+    );
+    assert!(final_status["evidence"]["verification"]["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("legacy-unbound")));
+    assert!(final_status["windowCovered"].is_null());
+    assert!(final_status["records"].is_null());
+    assert!(final_status["capture"].is_null());
+
+    let unreadable = |_keys: EvidenceKeys| -> BoxFuture<'static, Option<ArchiveObservation>> {
+        Box::pin(async { None })
+    };
+    let (client, _seen, bodies) = mock_client_recording_bodies(finished_routes(
+        &pod_list_terminated(0),
+        log_body(&i7_tail()),
+        200,
+        "Complete",
+    ));
+    reconcile_backup(
+        &frozen_backup(),
+        &client,
+        &unreadable,
+        &valid_evidence,
+        utc(2026, 11, 9, 3, 20),
+    )
+    .await
+    .expect("unreadable legacy evidence records a verdict");
+    let statuses = patched_statuses(&bodies.lock().expect("the recorder is readable"));
+    let final_status = statuses.last().expect("the verdict patch exists");
+    assert_eq!(
+        final_status["evidence"]["verification"]["result"],
+        "NotAttempted"
+    );
+    assert!(final_status["evidence"]["verification"]["detail"]
+        .as_str()
+        .is_some_and(|detail| detail.contains("legacy-unbound")));
+    assert!(final_status["windowCovered"].is_null());
+    assert!(final_status["records"].is_null());
+    assert!(final_status["capture"].is_null());
 }
 
 /// **Defect STATUS-RECORDS, through the reconciler.** The count reaches the
