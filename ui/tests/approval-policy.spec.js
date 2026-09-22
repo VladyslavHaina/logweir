@@ -27,6 +27,7 @@ import {
 } from "../pages/restore-wizard.js";
 import {
   COUNTERSIGN_COMMAND,
+  approvalBody,
   approvalState,
   countersignOffered,
   policyMode,
@@ -204,6 +205,32 @@ test("a_console_approval_verified_for_this_restore_reads_verified_and_an_older_u
       approvalState(read, Object.assign({}, subject, { uid: "uid-of-a-newer-restore" })).state,
       "foreign-execution",
     );
+  } finally {
+    wire.restore();
+  }
+});
+
+test("a_console_approval_record_goes_to_the_restores_own_route_byte_for_byte", async () => {
+  // CONSOLE-HAS-NO-APPROVAL-CREATE-ROUTE (found live). The v1 form's create
+  // used to answer "no create route for Approval; use kubectl". It now posts
+  // the two files, exactly as typed, to the Restore's approval route.
+  await consoleMode();
+  const approval = fixture("console/approval.json");
+  const documents = {
+    approvalBytes: "{\"plan_hash\":\"sha256:" + "e".repeat(64) + "\"}\n",
+    sidecarBytes: "{\"payloadType\":\"v1\",\"signatures\":[]}",
+  };
+  const body = approvalBody({ name: "restore-x", approvalName: "approval-x",
+    planHash: "sha256:" + "e".repeat(64) }, documents);
+  const wire = transport((u, init) => u === "/api/v1/namespaces/team-a/restores/restore-x/approval" &&
+    init.method === "POST" ? { status: 201, body: approval } : undefined);
+  try {
+    const made = await apiClient().create("team-a", "approvals", body);
+    assert.equal(made.kind, "Approval");
+    const post = wire.seen.find((x) => x.init.method === "POST");
+    assert.deepEqual(JSON.parse(post.init.body), documents, "byte-for-byte, nothing else");
+    assert.equal(wire.seen.filter((x) => x.url.endsWith("/approvals")).length, 0,
+      "no top-level Approval create is attempted");
   } finally {
     wire.restore();
   }

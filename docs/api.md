@@ -145,7 +145,7 @@ anything not listed is `404`.
 | `GET /api/v1/namespaces/{ns}/restores[/{name}]` | `Restore` projections. Saved-destination restores carry the stored optional `sourceDestinationRef` and `evidenceDestinationRef`; legacy inline-archive restores omit both. |
 | `POST /api/v1/namespaces/{ns}/restores` | Create a `Restore`, preserving the plan bytes exactly. An optional `topicMapping` declares the mapping the caller previewed and is checked against the prefix this request stores — see below. |
 | `GET /api/v1/namespaces/{ns}/approvals[/{name}]` | Approval metadata and status, including — for a verified authorization document v2 — `authorization {mode, policyName, policyDigest, requester, confirmationKeyId}`. |
-| `POST /api/v1/namespaces/{ns}/restores/{name}/approval` | PLAT-19.2: a governed approver submits the sidecar `logweir drill countersign` wrote over the console's confirmation. Approver role; never the requester. See *Approval policy*. |
+| `POST /api/v1/namespaces/{ns}/restores/{name}/approval` | PLAT-19.2: a governed approver submits the sidecar `logweir drill countersign` wrote over the console's confirmation (Approver role; never the requester); in an unbound namespace an approver records the two `logweir drill approve` files. See *Approval policy*. |
 | `GET /api/v1/namespaces/{ns}/approval-policy` | PLAT-19.2: the namespace's effective approval policy, the installation document's digest and the console confirmation key id. |
 | `GET /api/v1/namespaces/{ns}/approvals/{name}/packet` | The raw approval document, only through this explicit route. |
 | `GET /api/v1/namespaces/{ns}/destinations` | `BackupDestination` rows: the canonical URL, the endpoint, the transport, the addressing and the controller's `Valid` verdict. |
@@ -209,10 +209,25 @@ packet (`GET .../approvals/<approvalRef>-confirmation/packet`). No
 `Idempotency-Key`: the Approval it creates is named by the Restore's own
 immutable `approvalRef`, so a replay returns `200` with the same object.
 
+**In an unbound namespace** (`legacy-governed-v1`, today's flow) the same route
+takes `{"approvalBytes": "…", "sidecarBytes": "…"}` — `approval.json` and
+`approval.sig` exactly as `logweir drill approve` wrote them over the Restore's
+plan — and stores them byte-for-byte as the Approval `spec.approvalRef` names.
+It verifies no signature (the Approval controller does, against the
+namespace's `GovernedApproval` keys, and the runner again), but refuses early
+what could never verify for this Restore: a sidecar whose payload type is not
+the v1 approval's (`409 policy_mismatch`), a document whose `plan_hash` is not
+the Restore's (`422 validation_failed`, `plan_mismatch`), or no document
+(`422`, `required`). A v1 document names no requester, so the route's authority
+is the Approver role plus the approver key's custody — exactly what `kubectl
+create` required before. Under an explicit Governed policy `approvalBytes` is
+refused (`422`, `not_accepted`): the confirmation's bytes are the ones signed.
+An Ordinary namespace has nothing to approve (`409 policy_mismatch`).
+
 | refusal | when |
 |---|---|
 | `403 forbidden` | not an Approver in this namespace (the role table), **or the submitting actor is the requester the console attested** — whatever other roles it holds; an administrator is not a bypass |
-| `409 policy_mismatch` | the namespace is not bound to a Governed policy, or the confirmation names another UID, plan or policy digest (the policy changed since: submit the Restore again) |
+| `409 policy_mismatch` | the namespace is bound to an Ordinary policy, or the confirmation names another UID, plan or policy digest (the policy changed since: submit the Restore again), or — unbound — the sidecar is not a v1 approval's |
 | `404 not_found` | no such Restore, or no console confirmation for it |
 | `409 state_conflict` | the request has expired, or an Approval with other contents holds the name |
 | `422 validation_failed` | not a sidecar, or it adds no signature beside the console's |

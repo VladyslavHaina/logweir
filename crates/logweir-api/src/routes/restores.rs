@@ -727,7 +727,10 @@ async fn authorize_submission(
 }
 
 /// `POST .../restores/{name}/approval` — **a governed approver submits the
-/// countersignature** (PLAT-19.2, D0 "Governed approval submission").
+/// countersignature** (PLAT-19.2, D0 "Governed approval submission"), or, in
+/// an UNBOUND namespace, records today's v1 approval files
+/// ([`record_legacy_approval`]). An Ordinary namespace has nothing to approve
+/// and answers `policy_mismatch`.
 ///
 /// # What it checks, and what it leaves to the controller
 ///
@@ -775,11 +778,33 @@ pub async fn submit_approval(
                 "must be the DSSE sidecar `logweir drill countersign` wrote",
             )])
         })?;
+    if request
+        .approval_bytes
+        .as_ref()
+        .is_some_and(|b| b.len() > MAX_SIDECAR_BYTES)
+    {
+        return Err(ApiError::validation(vec![FieldError::new(
+            "approvalBytes",
+            "too_long",
+            format!("the approval document is at most {MAX_SIDECAR_BYTES} bytes"),
+        )]));
+    }
     let restore = get_object::<Restore>(&state, &actor, &ns, &name).await?;
     let effective = state.approval().policies.resolve(&ns);
     actor.audit.note("approvalPolicy", effective.name());
     actor.audit.note("approvalMode", effective.mode().as_str());
     actor.audit.set_policy_digest(&policy_identity(&effective));
+    if matches!(effective, EffectivePolicy::Legacy) {
+        return record_legacy_approval(&state, &actor, request_id, &ns, &restore, request).await;
+    }
+    if request.approval_bytes.is_some() {
+        return Err(ApiError::validation(vec![FieldError::new(
+            "approvalBytes",
+            "not_accepted",
+            "under an explicit approval policy the console's confirmation document is the one \
+             signed; submit only the countersigned sidecar",
+        )]));
+    }
     let Some(policy) = effective
         .bound()
         .filter(|p| p.mode == ApprovalMode::Governed)
@@ -913,6 +938,150 @@ pub async fn submit_approval(
                 .map_err(KubeFailure::into_api_error)?;
             if existing.spec.approval_bytes != object.spec.approval_bytes
                 || existing.spec.sidecar_bytes != object.spec.sidecar_bytes
+            {
+                return Err(ApiError::new(
+                    ProblemCode::StateConflict,
+                    format!(
+                        "An Approval named {approval_name} already exists with other contents; it \
+                         is immutable and never replaced."
+                    ),
+                ));
+            }
+            (existing, true)
+        }
+        Err(other) => return Err(other.into_api_error()),
+    };
+    Ok(json(
+        if replayed {
+            StatusCode::OK
+        } else {
+            StatusCode::CREATED
+        },
+        &ApprovalResponse {
+            request_id,
+            replayed: Some(replayed),
+            item: projection::approval(&stored),
+        },
+    ))
+}
+
+/// The v1 payload type `logweir drill approve` signs (`weirkeeper`'s
+/// `controllers::approval::PAYLOAD_TYPE_APPROVAL`).
+const PAYLOAD_TYPE_APPROVAL_V1: &str = "application/vnd.logweir.drill-approval+json;version=1.0.0";
+
+/// **Recording today's approval through the console** — an UNBOUND namespace
+/// (`legacy-governed-v1`). Found by the live journeys: the approvals page
+/// offered the v1 form in console mode and the product API had no route to
+/// record it, so an approver had to use kubectl.
+///
+/// The route records the two files `logweir drill approve` wrote, EXACTLY as
+/// they arrived, as the Approval the Restore's `spec.approvalRef` names. It
+/// verifies no signature — the Approval controller does, against the
+/// namespace's `GovernedApproval` keys, and the runner again — but it refuses
+/// early what could never verify for THIS Restore: a sidecar that is not the
+/// v1 payload type, and a document whose `plan_hash` is not this Restore's.
+/// A v1 document names no requester, so there is no principal to separate
+/// from: the authority is the Approver role on the route and the approver
+/// key's custody, exactly as it is for `kubectl create`.
+async fn record_legacy_approval(
+    state: &AppState,
+    actor: &Actor,
+    request_id: String,
+    ns: &str,
+    restore: &Restore,
+    request: SubmitApprovalRequest,
+) -> Result<Response, ApiError> {
+    let Some(approval_bytes) = request.approval_bytes else {
+        return Err(ApiError::validation(vec![FieldError::new(
+            "approvalBytes",
+            "required",
+            "an unbound namespace records the approval.json `logweir drill approve` wrote, \
+             beside its sidecar",
+        )]));
+    };
+    let payload_type = serde_json::from_str::<serde_json::Value>(&request.sidecar_bytes)
+        .ok()
+        .and_then(|v| {
+            v.get("payloadType")
+                .and_then(|t| t.as_str())
+                .map(str::to_string)
+        });
+    if payload_type.as_deref() != Some(PAYLOAD_TYPE_APPROVAL_V1) {
+        return Err(ApiError::new(
+            ProblemCode::PolicyMismatch,
+            format!(
+                "Namespace {ns} is bound to no approval policy ({}), which records the approval \
+                 `logweir drill approve` signs; this sidecar's payload type is {}.",
+                logweir_core::approval_policy::LEGACY_GOVERNED_POLICY_NAME,
+                payload_type.as_deref().unwrap_or("absent")
+            ),
+        ));
+    }
+    let plan_hash = logweir_core::ids::sha256_prefixed(restore.spec.plan_bytes.as_bytes());
+    let signed_hash = serde_json::from_str::<serde_json::Value>(&approval_bytes)
+        .ok()
+        .and_then(|v| {
+            v.get("plan_hash")
+                .and_then(|h| h.as_str())
+                .map(str::to_string)
+        });
+    if signed_hash.as_deref() != Some(plan_hash.as_str()) {
+        return Err(ApiError::validation(vec![FieldError::new(
+            "approvalBytes",
+            "plan_mismatch",
+            format!(
+                "the approval document names plan hash {} and Restore {} hashes to {plan_hash}; \
+                 sign this Restore's plan",
+                signed_hash.as_deref().unwrap_or("none"),
+                restore.name_any()
+            ),
+        )]));
+    }
+    let approval_name = restore.spec.approval_ref_name().to_string();
+    actor.audit.note("approverPrincipal", &actor.id());
+    actor
+        .audit
+        .note("approval", &format!("{ns}/{approval_name}"));
+    let object = Approval {
+        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some(approval_name.clone()),
+            namespace: Some(ns.to_string()),
+            annotations: Some(
+                [
+                    (
+                        "logweir.dev/approval-policy".to_string(),
+                        logweir_core::approval_policy::LEGACY_GOVERNED_POLICY_NAME.to_string(),
+                    ),
+                    ("logweir.dev/approver".to_string(), actor.id()),
+                ]
+                .into_iter()
+                .collect(),
+            ),
+            ..Default::default()
+        },
+        spec: ApprovalSpec {
+            subject_ref: SubjectRef {
+                kind: SubjectKind::Restore,
+                name: restore.name_any(),
+            },
+            plan_hash,
+            // EXACTLY AS THEY ARRIVED: the controller hashes these bytes.
+            approval_bytes,
+            sidecar_bytes: request.sidecar_bytes,
+        },
+        status: None,
+    };
+    let (stored, replayed) = match state.kube().create(ns, &object).await {
+        Ok(created) => (created, false),
+        Err(KubeFailure::AlreadyExists) => {
+            let existing = state
+                .kube()
+                .get::<Approval>(ns, &approval_name)
+                .await
+                .map_err(KubeFailure::into_api_error)?;
+            if existing.spec.approval_bytes != object.spec.approval_bytes
+                || existing.spec.sidecar_bytes != object.spec.sidecar_bytes
+                || existing.spec.subject_ref.name != object.spec.subject_ref.name
             {
                 return Err(ApiError::new(
                     ProblemCode::StateConflict,

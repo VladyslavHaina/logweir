@@ -3425,15 +3425,25 @@ pub struct ApprovalPolicyResponse {
     pub item: ApprovalPolicyView,
 }
 
-/// `POST .../restores/{name}/approval` — a governed approver's countersigned
-/// sidecar over the console's confirmation document.
+/// `POST .../restores/{name}/approval` — an approver records the approval a
+/// Restore waits for.
+///
+/// * Under an explicit **Governed** policy: `sidecarBytes` only — the DSSE
+///   sidecar `logweir drill countersign` wrote over the console's
+///   confirmation; the confirmation's exact document bytes are used, so
+///   `approvalBytes` is refused.
+/// * In an **unbound** namespace (`legacy-governed-v1`, today's flow): both
+///   files `logweir drill approve` wrote over the Restore's plan, exactly as
+///   they arrived.
 #[derive(Clone, Debug, Deserialize, Serialize, JsonSchema)]
 #[serde(deny_unknown_fields, rename_all = "camelCase")]
 pub struct SubmitApprovalRequest {
-    /// The DSSE sidecar `logweir drill countersign` wrote: the console's
-    /// signature(s) and the approver's, over the confirmation's exact
-    /// document bytes. At most 64 KiB.
+    /// The DSSE sidecar. At most 64 KiB.
     pub sidecar_bytes: String,
+    /// `approval.json` from `logweir drill approve` — unbound namespaces only.
+    /// At most 64 KiB.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_bytes: Option<String>,
 }
 
 /// `GET .../operations/{kind}/{name}`.

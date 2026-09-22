@@ -548,7 +548,10 @@ field for the countersigned sidecar, and submits it through `POST
 the role), a stale or expired confirmation, and a sidecar that adds no second
 signature; the page renders each refusal where it arose. Under an `Ordinary`
 binding it says there is nothing to approve; the v1 paste form stays for an
-unbound namespace. Legacy (`kubectl proxy`) mode cannot know the policy, cannot
+unbound namespace, and in console mode its two files go to the same `POST
+.../restores/{name}/approval`, byte-for-byte (there is no top-level Approval
+create in the product API, and before PLAT-19.2 the form answered "use kubectl"
+here). Legacy (`kubectl proxy`) mode cannot know the policy, cannot
 sign a confirmation and has no countersign route (D0): it keeps today's governed
 flow unchanged.
 

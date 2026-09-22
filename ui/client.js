@@ -1567,6 +1567,17 @@ const consoleApi = Object.freeze({
   },
   async create(ns, plural, object) {
     const route = consolePlural(plural);
+    // RECORDING AN APPROVAL IS THE RESTORE'S OWN ROUTE (PLAT-19.2). The
+    // product API has no top-level Approval create; an approver records the
+    // files `logweir drill approve` wrote through `POST .../restores/{name}/
+    // approval`, named by the Restore the Approval is about, which stores them
+    // byte-for-byte under that Restore's `spec.approvalRef`.
+    if (plural === "approvals") {
+      const spec = (object || {}).spec || {};
+      const subject = ((spec.subjectRef || {}).name) || "";
+      return this.submitGovernedApproval(ns, String(subject), String(spec.sidecarBytes || ""),
+        String(spec.approvalBytes || ""));
+    }
     if (!Object.prototype.hasOwnProperty.call(CREATE_CAPABILITY, route)) {
       throw noRoute(
         "the product API has no create route for " + KIND_OF[plural] + ". Create it with " +
@@ -1667,9 +1678,14 @@ const consoleApi = Object.freeze({
   // The product API refuses the requester (403), a non-Governed namespace
   // (409 policy_mismatch) and a stale or expired confirmation; this page
   // renders each refusal as it arrives.
-  async submitGovernedApproval(ns, restoreName, sidecarBytes) {
+  async submitGovernedApproval(ns, restoreName, sidecarBytes, approvalBytes) {
     requireGrant(ns, "approvalSubmit");
-    const body = { sidecarBytes: String(sidecarBytes) };
+    // `approvalBytes` only for an UNBOUND namespace's v1 files (PLAT-19.2,
+    // CONSOLE-HAS-NO-APPROVAL-CREATE-ROUTE); a governed countersignature
+    // sends the sidecar alone and the server refuses a document beside it.
+    const body = typeof approvalBytes === "string"
+      ? { sidecarBytes: String(sidecarBytes), approvalBytes: approvalBytes }
+      : { sidecarBytes: String(sidecarBytes) };
     const checked = decodeRequest("restores:approval", body);
     if (checked.unknown.length > 0) {
       throw contractFailure(
@@ -2416,8 +2432,9 @@ export function apiClient() {
     approvalPolicy(ns, options) {
       return dispatch((api) => api.approvalPolicy(ns, options));
     },
-    submitGovernedApproval(ns, restoreName, sidecarBytes) {
-      return dispatch((api) => api.submitGovernedApproval(ns, restoreName, sidecarBytes));
+    submitGovernedApproval(ns, restoreName, sidecarBytes, approvalBytes) {
+      return dispatch((api) => api.submitGovernedApproval(ns, restoreName, sidecarBytes,
+        approvalBytes));
     },
 
     // D2 (PLAT-08, PLAT-09.1, PLAT-03): saved destinations, bounded topic

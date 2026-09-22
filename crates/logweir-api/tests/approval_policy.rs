@@ -535,6 +535,193 @@ async fn a_submission_outside_a_governed_binding_is_policy_mismatch() {
     assert_eq!(refused.code(), "policy_mismatch");
 }
 
+/// The v1 payload type `logweir drill approve` signs.
+const V1: &str = "application/vnd.logweir.drill-approval+json;version=1.0.0";
+
+/// A v1 approval over `plan_hash`, signed for real by a throwaway approver
+/// key: the route verifies no signature (the controller does), but the bytes
+/// it stores must be exactly these.
+fn v1_files(plan_hash: &str) -> (String, String) {
+    let document = format!(
+        r#"{{"approver":"ops@example.com","ticket":"CHG-1","plan_hash":"{plan_hash}","subject_kind":"Restore"}}"#
+    );
+    let sidecar =
+        sign_detached(&SigningKey::generate_ed25519(), V1, document.as_bytes()).expect("sign");
+    (document, serde_json::to_string(&sidecar).expect("json"))
+}
+
+/// **CONSOLE-HAS-NO-APPROVAL-CREATE-ROUTE** (found live): in an UNBOUND
+/// namespace the approver records the two `logweir drill approve` files
+/// through the product API, stored EXACTLY as they arrived as the Approval
+/// the Restore names; a replay of the same files answers 200 and a different
+/// pair under that name is a conflict.
+#[tokio::test]
+async fn an_unbound_namespace_records_todays_approval_files_exactly() {
+    let console = console("team-ordinary");
+    let app = app(&console);
+    let created = create(&app, NS_B, "unbound-record-01").await;
+    let name = restore_name(&created);
+    let hash = created.json()["item"]["planHash"]
+        .as_str()
+        .expect("hash")
+        .to_string();
+    let approval_name = created.json()["item"]["approvalRef"]["name"]
+        .as_str()
+        .expect("approvalRef")
+        .to_string();
+    let (document, sidecar) = v1_files(&hash);
+    let route = format!("/api/v1/namespaces/{NS_B}/restores/{name}/approval");
+    let body = json!({"approvalBytes": document, "sidecarBytes": sidecar}).to_string();
+    let recorded = app.post(&route, None, &body).await;
+    assert_eq!(
+        recorded.status,
+        201,
+        "{}",
+        String::from_utf8_lossy(&recorded.body)
+    );
+    let stored = app
+        .fake
+        .object("approvals", NS_B, &approval_name)
+        .expect("the referenced Approval exists");
+    assert_eq!(stored["spec"]["approvalBytes"], document, "byte-exact");
+    assert_eq!(stored["spec"]["sidecarBytes"], sidecar, "byte-exact");
+    assert_eq!(stored["spec"]["subjectRef"]["name"], name);
+    assert_eq!(stored["spec"]["planHash"], hash);
+
+    let replay = app.post(&route, None, &body).await;
+    assert_eq!(
+        replay.status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&replay.body)
+    );
+    let (other_doc, other_sig) = v1_files(&hash);
+    let conflict = app
+        .post(
+            &route,
+            None,
+            &json!({"approvalBytes": other_doc, "sidecarBytes": other_sig}).to_string(),
+        )
+        .await;
+    assert_eq!(
+        conflict.status,
+        409,
+        "{}",
+        String::from_utf8_lossy(&conflict.body)
+    );
+    assert_eq!(conflict.code(), "state_conflict");
+}
+
+/// What could never verify for THIS Restore is refused before it is stored:
+/// another plan, a v2 sidecar, a missing document -- and, under an explicit
+/// Governed binding, a document at all (the confirmation's bytes are the
+/// signed ones).
+#[tokio::test]
+async fn a_recorded_approval_must_be_this_restores_v1_document() {
+    let console = console("team-ordinary");
+    let app = app(&console);
+    let created = create(&app, NS_B, "unbound-record-02").await;
+    let name = restore_name(&created);
+    let hash = created.json()["item"]["planHash"]
+        .as_str()
+        .expect("hash")
+        .to_string();
+    let route = format!("/api/v1/namespaces/{NS_B}/restores/{name}/approval");
+
+    let (other_plan, other_sig) = v1_files(&format!("sha256:{}", "0".repeat(64)));
+    let wrong_plan = app
+        .post(
+            &route,
+            None,
+            &json!({"approvalBytes": other_plan, "sidecarBytes": other_sig}).to_string(),
+        )
+        .await;
+    assert_eq!(
+        wrong_plan.status,
+        422,
+        "{}",
+        String::from_utf8_lossy(&wrong_plan.body)
+    );
+
+    let (document, _) = v1_files(&hash);
+    let v2 = sign_detached(
+        &SigningKey::generate_ed25519(),
+        PAYLOAD_TYPE_RESTORE_AUTHORIZATION,
+        document.as_bytes(),
+    )
+    .expect("sign");
+    let wrong_type = app
+        .post(
+            &route,
+            None,
+            &json!({"approvalBytes": document,
+                    "sidecarBytes": serde_json::to_string(&v2).expect("json")})
+            .to_string(),
+        )
+        .await;
+    assert_eq!(
+        wrong_type.status,
+        409,
+        "{}",
+        String::from_utf8_lossy(&wrong_type.body)
+    );
+    assert_eq!(wrong_type.code(), "policy_mismatch");
+
+    let (_, sidecar) = v1_files(&hash);
+    let missing = app
+        .post(&route, None, &json!({"sidecarBytes": sidecar}).to_string())
+        .await;
+    assert_eq!(
+        missing.status,
+        422,
+        "{}",
+        String::from_utf8_lossy(&missing.body)
+    );
+    assert!(
+        approvals_posted(&app.fake).is_empty(),
+        "nothing was stored for any refused submission"
+    );
+
+    // THE CONTROL: this Restore's own v1 files are recorded.
+    let (document, sidecar) = v1_files(&hash);
+    let recorded = app
+        .post(
+            &route,
+            None,
+            &json!({"approvalBytes": document, "sidecarBytes": sidecar}).to_string(),
+        )
+        .await;
+    assert_eq!(
+        recorded.status,
+        201,
+        "{}",
+        String::from_utf8_lossy(&recorded.body)
+    );
+
+    // Under Governed, a document is refused: the confirmation's bytes are used.
+    let governed = console_governed_app();
+    let created = create(&governed, NS_A, "governed-record-03").await;
+    let name = restore_name(&created);
+    let (document, sidecar) = v1_files(&hash);
+    let refused = governed
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/restores/{name}/approval"),
+            None,
+            &json!({"approvalBytes": document, "sidecarBytes": sidecar}).to_string(),
+        )
+        .await;
+    assert_eq!(
+        refused.status,
+        422,
+        "{}",
+        String::from_utf8_lossy(&refused.body)
+    );
+}
+
+fn console_governed_app() -> TestApp {
+    app(&console("prod-governed"))
+}
+
 fn governed_shared_app() -> (SharedApp, Console) {
     let console = console("prod-governed");
     let app = SharedApp::new(

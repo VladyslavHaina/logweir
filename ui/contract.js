@@ -725,7 +725,9 @@ const APPROVAL_POLICY = shapeOf(
 );
 
 // PLAT-19.2: a governed approver's countersigned sidecar.
-const SUBMIT_APPROVAL_REQUEST = shapeOf("SubmitApprovalRequest", { sidecarBytes: str });
+const SUBMIT_APPROVAL_REQUEST = shapeOf(
+  "SubmitApprovalRequest", { sidecarBytes: str }, { approvalBytes: str },
+);
 
 const APPROVAL_PACKET = shapeOf(
   "ApprovalPacket",

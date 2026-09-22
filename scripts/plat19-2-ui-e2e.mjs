@@ -665,14 +665,28 @@ async function main() {
       "--approver", "plat19-2-live", "--ticket", "P192", "--subject-kind", "Restore",
       "--out", join(work, "approval.json")]);
     check(approve.status === 0, "logweir drill approve failed: " + approve.out.slice(0, 400));
-    apply(g.ns, {
-      apiVersion: "logweir.dev/v1alpha1", kind: "Approval",
-      metadata: { name: g.approvalName, namespace: g.ns, labels: LABELS },
-      spec: { subjectRef: { kind: "Restore", name: g.restore },
-        planHash: "sha256:" + createHash("sha256").update(gRestore.spec.planBytes).digest("hex"),
-        approvalBytes: readFileSync(join(work, "approval.json"), "utf8"),
-        sidecarBytes: readFileSync(join(work, "approval.sig"), "utf8") },
-    });
+    // RECORDED THROUGH THE PAGE (CONSOLE-HAS-NO-APPROVAL-CREATE-ROUTE): the two
+    // files, pasted into the approvals page's form, sent by the page to the
+    // product API's `POST .../restores/{name}/approval`. No kubectl write.
+    await waitFor(page, "#approval-form", "the v1 approval form in console mode");
+    await page.fill("#approval-json", readFileSync(join(work, "approval.json"), "utf8"));
+    await page.fill("#approval-sig", readFileSync(join(work, "approval.sig"), "utf8"));
+    await page.click("#approval-form button[type=submit]");
+    let recordedAnswer = null;
+    for (let i = 0; i < 60 && recordedAnswer === null; i += 1) {
+      recordedAnswer = bodies.filter((b) => b.method === "POST" &&
+        b.url.endsWith("/restores/" + g.restore + "/approval")).pop() || null;
+      if (recordedAnswer === null) {
+        await pause(500);
+      }
+    }
+    save("03-legacy-record-response.json", recordedAnswer);
+    check(recordedAnswer !== null && recordedAnswer.status === 201,
+      "the page recorded the approval through the product API: " + JSON.stringify(recordedAnswer));
+    const recordedObject = kubeJson(["-n", g.ns, "get", "approval", g.approvalName]);
+    check(recordedObject.spec.approvalBytes === readFileSync(join(work, "approval.json"), "utf8") &&
+      recordedObject.spec.sidecarBytes === readFileSync(join(work, "approval.sig"), "utf8"),
+    "the stored Approval carries the two files byte-for-byte");
     let verified = null;
     for (let i = 0; i < 90 && verified === null; i += 1) {
       const seen = kubeJson(["-n", g.ns, "get", "approval", g.approvalName]);
