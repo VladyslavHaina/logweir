@@ -1400,3 +1400,151 @@ async fn an_archive_url_that_carries_userinfo_comes_back_redacted() {
     }
     app.fake.assert_strict();
 }
+
+// ======================================================================
+// CATALOG-LIST-IGNORES-REFUSED-VERDICT — the controller's reached verdict
+// outranks a (possibly stale) view row
+// ======================================================================
+
+/// A `Backup` whose own evidence verdict is `result`, over `digest`.
+fn verdict_backup(name: &str, digest: &str, result: &str) -> Value {
+    json!({
+        "metadata": {"name": name},
+        "spec": {
+            "sourceRef": {"name": "prod-kafka"},
+            "topics": ["orders"],
+            "archive": {"url": "logweir-destination://primary"},
+            "destinationRef": {"name": "primary"},
+            "triggeredBy": "manual",
+            "deadlineSeconds": 3600
+        },
+        "status": {
+            "phase": "Succeeded",
+            "exitCode": 0,
+            "backupId": format!("set-{name}"),
+            "evidence": {
+                "receiptSha256": digest,
+                "verification": {"result": result}
+            }
+        }
+    })
+}
+
+fn receipt_of(line: &str) -> String {
+    serde_json::from_str::<Value>(line).expect("a row")["receiptSha256"]
+        .as_str()
+        .expect("a digest")
+        .to_string()
+}
+
+/// **The defect row.** The first view row is stale — `Available`, `Verified`,
+/// `selectable: true` — but the controller fetched that receipt and recorded
+/// the point's `Backup` `Invalid` (or `Untrusted`, or a verdict this build does
+/// not know). The point is published `selectable: false` with the reason in
+/// `backupVerdict`, and `?selectable=true` does not list it.
+///
+/// MUTANT: publish `selectable: entry.selectable` (ignore `backupVerdict`) in
+/// `routes::catalogs::point_view`, or filter `selectable_only` on the row's own
+/// bit. The refused point is listed as selectable and this row fails.
+#[tokio::test]
+async fn a_point_the_controller_refused_is_never_listed_as_selectable() {
+    for result in ["Invalid", "Untrusted", "SomeFutureVerdict"] {
+        let (app, lines) = catalog_with_page(None);
+        let refused = receipt_of(&lines[0]);
+        app.fake.seed(
+            "backups",
+            NS_A,
+            verdict_backup("b-refused", &refused, result),
+        );
+
+        let v = app
+            .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+            .await
+            .json();
+        let items = v["items"].as_array().expect("items");
+        assert_eq!(
+            items.len(),
+            lines.len(),
+            "nothing is hidden from the full list"
+        );
+        assert_eq!(items[0]["receiptSha256"], refused.as_str());
+        assert_eq!(items[0]["availability"], "Available");
+        assert_eq!(items[0]["verification"], "Verified");
+        assert_eq!(
+            items[0]["selectable"], false,
+            "a stale Verified row must not make a {result} point selectable"
+        );
+        assert_eq!(items[0]["backupVerdict"], result, "the console can say why");
+        for other in &items[1..] {
+            assert_eq!(other["selectable"], true);
+            assert!(other.get("backupVerdict").is_none());
+        }
+        assert!(v.get("backupVerdictsTruncated").is_none());
+
+        let selectable = app
+            .get("/api/v1/namespaces/team-a/catalogs/primary/points?selectable=true")
+            .await
+            .json();
+        let ids: Vec<&str> = selectable["items"]
+            .as_array()
+            .expect("items")
+            .iter()
+            .filter_map(|i| i["receiptSha256"].as_str())
+            .collect();
+        assert_eq!(ids.len(), lines.len() - 1);
+        assert!(
+            !ids.contains(&refused.as_str()),
+            "?selectable=true lists a point the controller refused ({result})"
+        );
+        app.fake.assert_strict();
+    }
+}
+
+/// CONTROL: the honest "could not look" (and a pass) leaves the row in charge.
+/// Without this the row above could be satisfied by a route that marked every
+/// point with a `Backup` unselectable.
+#[tokio::test]
+async fn a_not_attempted_or_valid_backup_leaves_the_catalog_in_charge() {
+    for result in ["NotAttempted", "Valid"] {
+        let (app, lines) = catalog_with_page(None);
+        app.fake.seed(
+            "backups",
+            NS_A,
+            verdict_backup("b-unread", &receipt_of(&lines[0]), result),
+        );
+        let v = app
+            .get("/api/v1/namespaces/team-a/catalogs/primary/points?selectable=true")
+            .await
+            .json();
+        let items = v["items"]
+            .as_array()
+            .unwrap_or_else(|| panic!("items: {v}"));
+        assert_eq!(items.len(), lines.len(), "{result} defers to the catalog");
+        assert!(items.iter().all(|i| i.get("backupVerdict").is_none()));
+    }
+}
+
+/// A namespace with more `Backup`s than one request reads SAYS so, rather than
+/// implying that no refusal exists beyond the bound.
+#[tokio::test]
+async fn a_backup_listing_past_its_bound_is_published_as_truncated() {
+    let (app, _) = catalog_with_page(None);
+    let bound = logweir_api::routes::catalogs::MAX_BACKUP_SCAN_PAGES
+        * logweir_api::routes::catalogs::BACKUP_SCAN_PAGE as usize;
+    for i in 0..=bound {
+        app.fake.seed(
+            "backups",
+            NS_A,
+            verdict_backup(
+                &format!("b-{i:05}"),
+                &format!("sha256:{:064x}", i),
+                "NotAttempted",
+            ),
+        );
+    }
+    let v = app
+        .get("/api/v1/namespaces/team-a/catalogs/primary/points")
+        .await
+        .json();
+    assert_eq!(v["backupVerdictsTruncated"], true);
+}

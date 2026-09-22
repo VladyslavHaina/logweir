@@ -41,7 +41,10 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 use kube::ResourceExt;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use weirkeeper::catalog_view::{ViewEntry, PAGE_DATA_KEY, PAGE_DIGEST_ANNOTATION};
+use weirkeeper::catalog_view::{
+    ControllerRefusals, ViewEntry, PAGE_DATA_KEY, PAGE_DIGEST_ANNOTATION,
+};
+use weirkeeper::crds::backup::Backup as BackupCr;
 use weirkeeper::crds::recovery_catalog::{
     DeepCheck, RecoveryCatalog, RecoveryCatalogSpec, SyncMode, SyncSettings,
 };
@@ -58,7 +61,7 @@ use crate::contract::{ArchiveRequest, ConditionView, NameRef, Page};
 use crate::cursor::{self, CursorError, CursorScope};
 use crate::http::{read_json, RequestId, MAX_JSON_BODY};
 use crate::idempotency::IdempotencyKey;
-use crate::kube::{KubeFailure, ResultDocument};
+use crate::kube::{KubeFailure, PageRequest, ResultDocument};
 use crate::problem::{ApiError, FieldError, ProblemCode};
 use crate::status::condition_view;
 use crate::validate::{self, bounded};
@@ -78,6 +81,10 @@ pub const MAX_PAGES_PER_REQUEST: usize = 8;
 pub const MAX_SIGNERS: usize = 16;
 /// The most histogram days a response carries.
 pub const MAX_HISTOGRAM_DAYS: usize = 400;
+/// The page size of the namespace `Backup` listing a point page joins against.
+pub const BACKUP_SCAN_PAGE: u32 = 500;
+/// The most `Backup` pages one point request reads — 2 000 objects.
+pub const MAX_BACKUP_SCAN_PAGES: usize = 4;
 
 // ======================================================================
 // The catalog projection
@@ -404,8 +411,21 @@ pub struct PointView {
     /// `Invalid`, `NoEvidence` or `NotAttempted` — the WORST of its locations.
     pub verification: String,
     /// The conjunction of the two, materialised by the controller so no
-    /// surface writes D3 §5.4's selection rule a second time.
+    /// surface writes D3 §5.4's selection rule a second time — and `false`
+    /// whenever `backupVerdict` is present, because a verdict the
+    /// controller reached outranks a view row that may predate it.
     pub selectable: bool,
+    /// The verification result the controller recorded on this point's OWN
+    /// `Backup` — `Invalid`, `Untrusted`, or a result this build does not
+    /// recognise — present ONLY when it is such a reached refusal.
+    ///
+    /// This is why a row can read `Available`/`Verified` and still be
+    /// `selectable: false`: the view is served until `viewExpiresAt`, so the
+    /// row may have been harvested before the receipt was replaced or its
+    /// signer revoked. Absent means no `Backup` this request read refused the
+    /// point — never that one verified it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub backup_verdict: Option<String>,
     /// The key that signed it, when one was identified.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signer_key_id: Option<String>,
@@ -441,7 +461,11 @@ fn instant(ms: i64) -> Option<DateTime<Utc>> {
     DateTime::from_timestamp_millis(ms)
 }
 
-fn point_view(entry: &ViewEntry) -> PointView {
+/// One row, with the controller's own refusal applied. The ONE place the
+/// published `selectable` is computed, so the `selectable=true` filter and the
+/// row can never disagree.
+fn point_view(entry: &ViewEntry, refusals: &ControllerRefusals) -> PointView {
+    let backup_verdict = refusals.refusal_for(entry).map(|r| bounded(r, 32));
     PointView {
         point_id: bounded(&entry.point_id, 128),
         backup_id: bounded(&entry.backup_id, 128),
@@ -451,7 +475,8 @@ fn point_view(entry: &ViewEntry) -> PointView {
         covered_to: instant(entry.covered_to_ms),
         availability: entry.availability.as_str().to_string(),
         verification: entry.verification.as_str().to_string(),
-        selectable: entry.selectable,
+        selectable: entry.selectable && backup_verdict.is_none(),
+        backup_verdict,
         signer_key_id: entry.signer_key_id.as_deref().map(|k| bounded(k, 64)),
         receipt_key: bounded(&entry.receipt_key, 1024),
         receipt_sha256: bounded(&entry.receipt_sha256, 80),
@@ -494,6 +519,41 @@ pub struct PointPageResponse {
     /// When the view ages out.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub view_expires_at: Option<DateTime<Utc>>,
+    /// `true` when the namespace holds more `Backup`s than one request reads
+    /// (2 000), so a refusal on a `Backup` beyond that bound is not reflected
+    /// in `selectable` or `backupVerdict`. Absent means the listing was
+    /// complete.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[schemars(default)]
+    pub backup_verdicts_truncated: bool,
+}
+
+/// The reached refusals among the namespace's `Backup`s, and whether the
+/// bounded listing was cut short.
+async fn backup_refusals(
+    state: &AppState,
+    ns: &str,
+) -> Result<(ControllerRefusals, bool), ApiError> {
+    let mut backups: Vec<BackupCr> = Vec::new();
+    let mut continue_token: Option<String> = None;
+    for _ in 0..MAX_BACKUP_SCAN_PAGES {
+        let page = PageRequest {
+            limit: BACKUP_SCAN_PAGE,
+            continue_token: continue_token.take(),
+            label_selector: None,
+        };
+        let list = state
+            .kube()
+            .list::<BackupCr>(ns, &page)
+            .await
+            .map_err(KubeFailure::into_api_error)?;
+        continue_token = list.metadata.continue_.filter(|t| !t.is_empty());
+        backups.extend(list.items);
+        if continue_token.is_none() {
+            return Ok((ControllerRefusals::from_backups(&backups), false));
+        }
+    }
+    Ok((ControllerRefusals::from_backups(&backups), true))
 }
 
 /// The signer panel.
@@ -968,6 +1028,11 @@ pub async fn points(
         .map(|p| (p.config_map_name.clone(), p.sha256.clone(), p.count))
         .collect();
 
+    // THE CONTROLLER'S OWN VERDICTS, before any row is published as
+    // selectable: the catalog decides only where the controller could not
+    // look (`weirkeeper::catalog_view::ControllerRefusals`).
+    let (refusals, backup_verdicts_truncated) = backup_refusals(&state, &ns).await?;
+
     let mut items: Vec<PointView> = Vec::new();
     let mut scanned = 0usize;
     let mut next_cursor = None;
@@ -1001,14 +1066,15 @@ pub async fn points(
             let Ok(entry) = serde_json::from_str::<ViewEntry>(line) else {
                 continue;
             };
-            if selectable_only && !entry.selectable {
+            let view = point_view(&entry, &refusals);
+            if selectable_only && !view.selectable {
                 continue;
             }
             scanned += 1;
             if scanned <= offset {
                 continue;
             }
-            items.push(point_view(&entry));
+            items.push(view);
             if items.len() as u32 >= limit {
                 next_cursor = Some(cursor::seal(
                     state.cursor_key(),
@@ -1035,6 +1101,7 @@ pub async fn points(
             view_expired: projected.view_expired,
             incomplete: incomplete.then_some(true),
             view_expires_at: projected.view_expires_at,
+            backup_verdicts_truncated,
         },
     ))
 }

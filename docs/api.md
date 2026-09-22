@@ -344,6 +344,21 @@ view and half of another. `availability` and `verification` are separate
 columns — one is an outage and one is a stranger's signature — with the
 controller's own `selectable` conjunction beside them.
 
+**A verdict the controller reached outranks the row.** Each `/points` request
+also lists the namespace's `Backup` objects (at most 2 000) and joins their
+`status.evidence.verification.result` to the rows — by the full
+`receiptSha256`, or by `backupId` for a `Backup` that carries no digest. A point
+whose `Backup` the controller refused (`Invalid`, `Untrusted`, or a result this
+build does not recognise) is published `selectable: false` with that result in
+the additive `backupVerdict` field, and `?selectable=true` does not list it —
+however `Available`/`Verified` its row reads, because a view is served until
+`viewExpiresAt` and the row may predate the refusal. `NotAttempted`, an absent
+result and `Valid` leave the row in charge; `backupVerdict` is absent then, and
+absent never means "verified". When the namespace holds more `Backup`s than the
+bound, the page carries `backupVerdictsTruncated: true` and a refusal beyond it
+is not reflected. Both fields are optional additions: a client that ignores
+them still reads the corrected `selectable`.
+
 **`/signers` offers no button.** It publishes the key id, the point count and
 whether the bound policy accepts it, with the fingerprint command. There is no
 "trust this key" route in v1: a key found beside an archive is never trusted by

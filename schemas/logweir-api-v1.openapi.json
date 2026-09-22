@@ -9386,6 +9386,10 @@
           "viewExpired"
         ],
         "properties": {
+          "backupVerdictsTruncated": {
+            "description": "`true` when the namespace holds more `Backup`s than one request reads (2 000), so a refusal on a `Backup` beyond that bound is not reflected in `selectable` or `backupVerdict`. Absent means the listing was complete.",
+            "type": "boolean"
+          },
           "incomplete": {
             "description": "Whether a ConfigMap page named by this view disappeared while it was being read. Present only for the incomplete read so older clients keep their established `false` behavior when the member is absent.",
             "type": "boolean",
@@ -9488,6 +9492,11 @@
             "description": "The backup set it belongs to.",
             "type": "string"
           },
+          "backupVerdict": {
+            "description": "The verification result the controller recorded on this point's OWN `Backup` — `Invalid`, `Untrusted`, or a result this build does not recognise — present ONLY when it is such a reached refusal.\n\nThis is why a row can read `Available`/`Verified` and still be `selectable: false`: the view is served until `viewExpiresAt`, so the row may have been harvested before the receipt was replaced or its signer revoked. Absent means no `Backup` this request read refused the point — never that one verified it.",
+            "type": "string",
+            "nullable": true
+          },
           "coveredFrom": {
             "description": "The start of the window it covers.",
             "type": "string",
@@ -9550,7 +9559,7 @@
             "type": "string"
           },
           "selectable": {
-            "description": "The conjunction of the two, materialised by the controller so no surface writes D3 §5.4's selection rule a second time.",
+            "description": "The conjunction of the two, materialised by the controller so no surface writes D3 §5.4's selection rule a second time — and `false` whenever `backupVerdict` is present, because a verdict the controller reached outranks a view row that may predate it.",
             "type": "boolean"
           },
           "signerKeyId": {
