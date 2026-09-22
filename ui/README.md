@@ -645,6 +645,17 @@ this build does not know -- is never made restorable by a row, and a run still
 `Pending` (its evidence-fetch Job is reading the receipt) waits for that verdict
 rather than being offered from the catalog meanwhile.
 
+**The run's own verdict is READ, never inferred from a list.** A console-mode
+`Backup` list does not publish a run's verification, so its silence there means
+"not published", not "none written": such an object answers `Unread` and is
+never offered. The schedule detail reads the operation of each run a catalog row
+could answer for (a `Succeeded`, windowless run with a row of its set; at most
+25 per page) and notes the verdict and receipt digest beside the run; the
+wizard reads it again when it opens on the offer. The operation's `pending` on a
+finished run is the product API's word for "no verdict written" and defers;
+`unknown` (an `Untrusted`, or an evidence-fetch `Pending`) never does. A read
+that fails leaves the run un-offered.
+
 ## The topic subset, the mapping, and what a recovery does not do
 
 **Step 4 chooses which of the point's frozen topics to restore, and shows the

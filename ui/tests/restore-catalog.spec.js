@@ -30,7 +30,9 @@ import {
   isCatalogPoint,
   mountRestoreWizard,
   noteCatalogSource,
+  ownVerdictOf,
   parseTopicList,
+  readOwnVerdicts,
   preparePlan,
   readCatalogOffers,
   recoveryPoints,
@@ -131,10 +133,25 @@ function unverifiedRun(verdict, receipt) {
   };
 }
 
-function readersOver(pages, catalog) {
+/** The readers the catalog half uses. `verdicts` answers the ONE operation
+ *  read per run -- by name -- that the page makes for a run's own verdict;
+ *  absent, it reads the verdict off the fixture object as a legacy-mode
+ *  custom resource would carry it. */
+function readersOver(pages, catalog, verdicts) {
   const calls = [];
   return {
     calls: calls,
+    ownVerdict: async (name) => {
+      calls.push("verdict:" + name);
+      if (verdicts !== undefined) {
+        const answer = verdicts[name];
+        if (answer instanceof Error) {
+          throw answer;
+        }
+        return answer;
+      }
+      return { verdict: null };
+    },
     listCatalogs: async () => ({ items: [catalog || catalogObject()] }),
     readCatalog: async (name) => {
       calls.push("catalog:" + name);
@@ -368,27 +385,36 @@ test("a_point_that_cannot_be_offered_is_a_refusal_naming_it_and_never_a_substitu
 test("an_offer_from_a_backup_must_be_read_through_the_destination_that_run_froze", async () => {
   const backups = { items: [unverifiedRun("NotAttempted")] };
   const via = { catalog: "archive", point: POINT, backup: "nightly-1", uid: "run-uid-1" };
+  const notAttempted = { "nightly-1": { verdict: "NotAttempted", receiptSha256: RECEIPT } };
   const ok = await resolveCatalogChoice(apiWithDestination, NS, via, backups,
-    readersOver([page([row()])]), undefined);
+    readersOver([page([row()])], undefined, notAttempted), undefined);
   assert.equal(ok.state, "selected", String(ok.reason));
   assert.equal(ok.point.catalogPoint.backup.uid, "run-uid-1");
   // A different destination under the catalog.
   const elsewhere = catalogObject({ spec: { destinationRef: { name: "secondary" } } });
   const moved = await resolveCatalogChoice({
     destination: async () => ({ item: Object.assign({}, destination(), { name: "secondary" }) }),
-  }, NS, via, backups, readersOver([page([row()])], elsewhere), undefined);
+  }, NS, via, backups, readersOver([page([row()])], elsewhere, notAttempted), undefined);
   assert.equal(moved.state, "refused");
   assert.match(moved.reason, /written through destination primary/);
   // The destination recreated under the run's name.
   const recreated = await resolveCatalogChoice({
     destination: async () => ({ item: Object.assign({}, destination(), { uid: "new-uid" }) }),
-  }, NS, via, backups, readersOver([page([row()])]), undefined);
+  }, NS, via, backups, readersOver([page([row()])], undefined, notAttempted), undefined);
   assert.equal(recreated.state, "refused");
   assert.match(recreated.reason, /recreated/);
-  // The run's own verdict became a refusal.
-  const refused = await resolveCatalogChoice(apiWithDestination, NS, via,
-    { items: [unverifiedRun("Invalid")] }, readersOver([page([row()])]), undefined);
+  // The run's own verdict, READ NOW, is a refusal -- whatever the object this
+  // page listed said (here it says NotAttempted).
+  const refused = await resolveCatalogChoice(apiWithDestination, NS, via, backups,
+    readersOver([page([row()])], undefined, { "nightly-1": { verdict: "Invalid" } }), undefined);
   assert.equal(refused.state, "refused");
+  assert.match(refused.reason, /Invalid/);
+  // A read that FAILS is not a deferring verdict: the listed object's own
+  // word is not trusted in its place.
+  const unreadable = await resolveCatalogChoice(apiWithDestination, NS, via, backups,
+    readersOver([page([row()])], undefined, { "nightly-1": new Error("503") }), undefined)
+    .catch((error) => ({ state: "threw", reason: String(error.message) }));
+  assert.notEqual(unreadable.state, "selected");
   // The run is gone.
   const gone = await resolveCatalogChoice(apiWithDestination, NS, via, { items: [] },
     readersOver([page([row()])]), undefined);
@@ -594,4 +620,54 @@ test("the_catalog_point_carries_the_live_destination_it_was_frozen_to", () => {
   assert.equal(point.spec.destinationRef.uid, destination().uid);
   assert.equal(point.status.locationDigest, destination().locationDigest);
   assert.equal(point.catalogPoint.backup, null);
+});
+
+test("a_console_list_does_not_publish_a_verdict_so_an_unread_run_is_never_offered", async () => {
+  // A console-mode projection carries `__contract.mode: "console"` and no
+  // `status.evidence` on a list. Its absence is "not published", not "none".
+  const listed = unverifiedRun(null);
+  delete listed.status.evidence;
+  listed.__contract = { mode: "console", absent: [], unknown: [] };
+  const points = [noteCatalogSource(row(), "archive", page([]))];
+  assert.equal(backupCatalogOfferFrom(listed, points).offer, false,
+    "unread: the list's silence is never read as a deferring verdict");
+  // READ: the one operation read per candidate run notes the verdict and the
+  // receipt digest, and the offer follows the READ verdict.
+  const reads = [];
+  await readOwnVerdicts([listed], points, async (name) => {
+    reads.push(name);
+    return { verdict: "NotAttempted", receiptSha256: RECEIPT };
+  }, undefined);
+  assert.deepEqual(reads, ["nightly-1"]);
+  assert.equal(backupCatalogOfferFrom(listed, points).offer, true);
+  // CONTROL: the same run read as Unknown (an Untrusted verdict the API
+  // normalises to `unknown`) is refused.
+  const other = unverifiedRun(null);
+  delete other.status.evidence;
+  other.__contract = { mode: "console", absent: [], unknown: [] };
+  await readOwnVerdicts([other], points, async () => ({ verdict: "Unknown" }), undefined);
+  assert.equal(backupCatalogOfferFrom(other, points).offer, false);
+  // And a run with no row of its set, or with its own window, is not read.
+  const windowed = unverifiedRun("Valid");
+  windowed.status.windowCovered = { fromMs: 1, toMs: 2 };
+  const unrelated = unverifiedRun(null);
+  unrelated.status.backupId = "another-set";
+  const skipped = [];
+  await readOwnVerdicts([windowed, unrelated], points, async (name) => {
+    skipped.push(name);
+    return {};
+  }, undefined);
+  assert.deepEqual(skipped, []);
+});
+
+test("the_operation_words_map_to_the_verdicts_the_rule_reads", () => {
+  assert.equal(ownVerdictOf({ verification: { state: "notAttempted" } }), "NotAttempted");
+  assert.equal(ownVerdictOf({ verification: { state: "pending" } }), null,
+    "pending on a finished run is the API's word for no verdict written");
+  assert.equal(ownVerdictOf({ verification: { state: "unknown" } }), "Unknown");
+  assert.equal(ownVerdictOf({ verification: { state: "invalid" } }), "Invalid");
+  assert.equal(ownVerdictOf({ verification: { state: "somethingNew" } }), "Unknown");
+  assert.equal(ownVerdictOf({ status: { evidence: { verification: { result: "Untrusted" } } } }),
+    "Untrusted", "a legacy-mode custom resource is read as it is written");
+  assert.equal(ownVerdictOf({ status: {} }), null);
 });

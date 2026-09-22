@@ -76,7 +76,7 @@
 // Awaiting approval. There is no second button that navigates without
 // creating, and no create that forgets where it was going.
 
-import { apiClient } from "../client.js";
+import { CONSOLE, apiClient } from "../client.js";
 import {
   active,
   cancelled,
@@ -129,7 +129,7 @@ import {
   resolveClusterSelection,
 } from "../select.js";
 import { isObjectName, itemsOf } from "./clusters.js";
-import { listD3, readCatalogPoints, readD3 } from "../operation-watch.js";
+import { listD3, readCatalogPoints, readD3, readOperation } from "../operation-watch.js";
 import { renderPreflight } from "./destinations.js";
 import { approvalAuthorizes, restoreOperationRoute } from "./approvals.js";
 
@@ -669,9 +669,100 @@ export function isRedacted(value) {
  *  window and never needs the catalog's). */
 export const DEFERRING_VERDICTS = Object.freeze(["NotAttempted"]);
 
-/** What the Backup's own evidence verdict is, or `null` when it wrote none. */
+// THE RUN'S OWN VERDICT, AS READ FOR THIS OFFER. A console-mode `Backup` LIST
+// does not publish a run's verification (`ui/client.js` merges it only on a
+// detail read, and even then keeps only three of the operation's six words),
+// so "no verdict on this object" there means "not published", never "the
+// controller wrote none". The verdict an offer relies on is therefore READ --
+// `readOwnVerdict`, one operation read -- and kept beside the object here, out
+// of the object itself.
+const ownVerdicts = new WeakMap();
+
+/** The word a console-mode run's verdict reads as until it has been read:
+ *  never a deferring verdict, so an unread run is never offered. */
+export const UNREAD_VERDICT = "Unread";
+
+/** Records what the operation read found for `backup`: its verdict (`null` =
+ *  none written) and, when the read carried one, the digest of the receipt it
+ *  signed. Returns the object. */
+export function noteOwnVerdict(backup, verdict, receiptSha256) {
+  if (backup !== null && typeof backup === "object") {
+    ownVerdicts.set(backup, typeof verdict === "string" && verdict.length > 0 ? verdict : null);
+    if (typeof receiptSha256 === "string" && receiptSha256.length > 0) {
+      ownReceipts.set(backup, receiptSha256);
+    }
+  }
+  return backup;
+}
+
+const ownReceipts = new WeakMap();
+
+/** The receipt digest a run reported: the one an operation read noted, else
+ *  the custom resource's `status.evidence.receiptSha256`, else `null`. */
+export function backupReceiptOf(backup) {
+  if (backup !== null && typeof backup === "object" && ownReceipts.has(backup)) {
+    return ownReceipts.get(backup);
+  }
+  const digest = ((((backup || {}).status || {}).evidence) || {}).receiptSha256;
+  return typeof digest === "string" && digest.length > 0 ? digest : null;
+}
+
+/** The receipt digest from what `readOperation` answers, or `null`. */
+export function ownReceiptOf(read) {
+  const r = read || {};
+  const e = r.evidence;
+  if (e !== null && typeof e === "object" && typeof e.payloadSha256 === "string") {
+    return e.payloadSha256;
+  }
+  const digest = ((((r.status || {}).evidence) || {})).receiptSha256;
+  return typeof digest === "string" && digest.length > 0 ? digest : null;
+}
+
+/** What the Backup's own evidence verdict is, or `null` when it wrote none.
+ *
+ *  A verdict noted by [`noteOwnVerdict`] wins. Otherwise a custom resource's
+ *  own `status.evidence.verification.result` is read -- and a console-mode
+ *  projection, which does not carry that field on a list, answers
+ *  [`UNREAD_VERDICT`] rather than an absence it cannot vouch for. */
 export function backupOwnVerdict(backup) {
-  const verification = (((backup || {}).status || {}).evidence || {}).verification || {};
+  if (backup !== null && typeof backup === "object" && ownVerdicts.has(backup)) {
+    return ownVerdicts.get(backup);
+  }
+  const b = backup || {};
+  if (((b.__contract || {}).mode) === CONSOLE) {
+    return UNREAD_VERDICT;
+  }
+  const verification = ((b.status || {}).evidence || {}).verification || {};
+  return typeof verification.result === "string" && verification.result.length > 0
+    ? verification.result
+    : null;
+}
+
+/** The product API's normalized verification states, in the custom
+ *  resource's words. `pending` on a finished run is the API's word for "no
+ *  verdict written yet" (`logweir-api` `status.rs`), which is the absence this
+ *  rule defers on; `unknown` is a word this build does not know -- `Untrusted`,
+ *  or an evidence-fetch `Pending` -- and is never deferred on. */
+const OPERATION_VERDICTS = Object.freeze({
+  notAttempted: "NotAttempted",
+  pending: null,
+  valid: "Valid",
+  invalid: "Invalid",
+  noEvidence: "NoEvidence",
+  unknown: "Unknown",
+});
+
+/** The run's own verdict from what `readOperation` answers: the product API's
+ *  `Operation` (console) or the custom resource (legacy). */
+export function ownVerdictOf(read) {
+  const r = read || {};
+  const v = r.verification;
+  if (v !== null && typeof v === "object" && typeof v.state === "string") {
+    return Object.prototype.hasOwnProperty.call(OPERATION_VERDICTS, v.state)
+      ? OPERATION_VERDICTS[v.state]
+      : "Unknown";
+  }
+  const verification = (((r.status || {}).evidence) || {}).verification || {};
   return typeof verification.result === "string" && verification.result.length > 0
     ? verification.result
     : null;
@@ -783,13 +874,13 @@ export function catalogRowsForBackup(backup, points) {
   if (id.length === 0 || !Array.isArray(points)) {
     return [];
   }
-  const digest = ((status.evidence || {}).receiptSha256);
+  const digest = backupReceiptOf(backup);
   return points.filter((point) => {
     const p = point || {};
     if (p.backupId !== id) {
       return false;
     }
-    return typeof digest !== "string" || digest.length === 0 || p.receiptSha256 === digest;
+    return digest === null || p.receiptSha256 === digest;
   });
 }
 
@@ -887,6 +978,44 @@ export function backupCatalogOfferFrom(backup, points) {
       catalog: "" };
   }
   return Object.assign({}, offer, { catalog: source === null ? "" : source.catalog });
+}
+
+/** How many runs' own verdicts one page reads for catalog-window offers. */
+export const OWN_VERDICT_READ_BUDGET = 25;
+
+/** READS THE OWN VERDICT OF EVERY RUN A CATALOG ROW COULD ANSWER FOR -- a
+ *  `Succeeded` run with a set, no window of its own, and at least one row of
+ *  its set in `points` -- and notes it beside the run ([`noteOwnVerdict`]).
+ *  At most [`OWN_VERDICT_READ_BUDGET`] reads; a run past the budget, or whose
+ *  read fails, keeps no noted verdict and is therefore not offered. Returns
+ *  how many were read. Throws only a cancelled read. */
+export async function readOwnVerdicts(runs, points, readVerdict, lifecycle) {
+  let read = 0;
+  for (const run of Array.isArray(runs) ? runs : []) {
+    const status = (run || {}).status || {};
+    if (isRecoveryPoint(run) || status.phase !== "Succeeded" ||
+      typeof status.backupId !== "string" || status.backupId.length === 0) {
+      continue;
+    }
+    if (!(Array.isArray(points) && points.some((p) => (p || {}).backupId === status.backupId))) {
+      continue;
+    }
+    if (read >= OWN_VERDICT_READ_BUDGET) {
+      break;
+    }
+    read += 1;
+    try {
+      const own = await readVerdict(String(((run || {}).metadata || {}).name || "")) || {};
+      noteOwnVerdict(run, own.verdict, own.receiptSha256);
+    } catch (error) {
+      if (cancelled(error, lifecycle)) {
+        throw error;
+      }
+      // UNREAD IS NOT DEFERRING: the run keeps no noted verdict and is not
+      // offered from the catalog.
+    }
+  }
+  return read;
 }
 
 /** The link that opens the wizard on ONE catalog point:
@@ -3925,6 +4054,13 @@ export function catalogReadersOf(api, ns, lifecycle) {
       ((name) => readD3("catalog", ns, name, readOptions(lifecycle))),
     readPoints: given.readPoints ||
       ((name, query) => readCatalogPoints(ns, name, query, readOptions(lifecycle))),
+    // ONE RUN'S OWN VERDICT, read rather than taken from a list that does not
+    // publish it (see `backupOwnVerdict`).
+    ownVerdict: given.ownVerdict ||
+      (async (name) => {
+        const read = await readOperation(ns, "backup", name, readOptions(lifecycle));
+        return { verdict: ownVerdictOf(read), receiptSha256: ownReceiptOf(read) };
+      }),
   };
 }
 
@@ -3979,6 +4115,13 @@ export async function resolveCatalogChoice(api, ns, selection, backups, readers,
         "the link names Backup " + (name || "(unnamed)") + " (uid " + (uid || "none") + ") and " +
           "no Backup in this namespace answers to it; open the point from the catalog instead",
       );
+    }
+    // THE RUN'S OWN VERDICT, READ NOW. The list this page holds may not publish
+    // it, and a verdict a link carried would be a verdict anyone could edit.
+    const own = await readers.ownVerdict(String((backup.metadata || {}).name)) || {};
+    noteOwnVerdict(backup, own.verdict, own.receiptSha256);
+    if (!active(lifecycle)) {
+      return null;
     }
     const offer = backupCatalogOffer(backup, [found.entry], found.page);
     if (!offer.offer) {

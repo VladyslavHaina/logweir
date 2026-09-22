@@ -1372,8 +1372,11 @@ it **from its catalog row** only when its own verdict is absent or
 know, and not while it is still `Pending` (the console waits for the evidence
 fetch's own verdict) — exactly one row answers its receipt digest (its set id when it
 reported no digest), that row is offerable as above, and the catalog reads the
-destination the run froze (same name, UID and location digest). The link opens
-the wizard on the catalog point, so the plan is bound to that receipt.
+destination the run froze (same name, UID and location digest). The run's own
+verdict is READ from its operation (a console `Backup` list does not publish
+it), by the schedule detail and again by the wizard; a read that fails leaves
+the run un-offered. The link opens the wizard on the catalog point, so the plan
+is bound to that receipt.
 
 **Upgrade and rollback.** Everything here is additive. A plan without
 `source.point` is byte-identical to before and restores as before;

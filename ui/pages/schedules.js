@@ -98,8 +98,10 @@ import { focusFirstProblem, isObjectName, itemsOf, readFormValues } from "./clus
 import { renderPreflight, transportCell } from "./destinations.js";
 import {
   backupCatalogOfferFrom,
+  catalogReadersOf,
   isRecoveryPoint,
   noteCatalogSource,
+  readOwnVerdicts,
   recoveryPoints,
   restoreCatalogPointRoute,
   restorePointRoute,
@@ -5034,6 +5036,18 @@ export async function mountScheduleDetail(node, ns, name, parse, lifecycle, deps
     }
     const uid = ((schedule || {}).metadata || {}).uid;
     const runs = runsOfSchedule(name, uid, backups);
+    // PLAT-15.2: A RUN OFFERED FROM ITS CATALOG ROW NEEDS ITS OWN VERDICT, and a
+    // console-mode list does not publish one. Read it for the runs a row could
+    // answer for, and only those; a run whose read fails is simply not offered.
+    await readOwnVerdicts(
+      [].concat(runs.mine, runs.earlier, runs.legacy),
+      catalog.points,
+      readers.ownVerdict || catalogReadersOf(api, ns, lifecycle).ownVerdict,
+      lifecycle,
+    );
+    if (!active(lifecycle)) {
+      return;
+    }
     // A RE-READ KEEPS WHAT THIS READER WAS DOING: the run-now panel's result and
     // acknowledgement survive the remount a successful action triggers.
     const cards = ((carry || {}).cards) || Object.create(null);
