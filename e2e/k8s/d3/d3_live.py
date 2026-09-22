@@ -372,7 +372,8 @@ def copy_secret(name: str, as_name: str | None = None) -> None:
 
 
 def destination(name: str, bucket: str, *, write_secret: str = "logweir-s3",
-                prefix: str = DEST_PREFIX) -> dict[str, Any]:
+                prefix: str = DEST_PREFIX, evidence_read: bool = True,
+                evidence_read_secret: str | None = None) -> dict[str, Any]:
     """A `BackupDestination` this namespace owns.
 
     `prefix` IS A PARAMETER because one destination has to name an archive this
@@ -381,6 +382,14 @@ def destination(name: str, bucket: str, *, write_secret: str = "logweir-s3",
     `s3://kafka-backups/<owner>-<stamp>`, and a `RecoveryCatalog` can only be
     pointed at a `destinationRef`. Declaring that root as a destination is how
     a catalog reads points the controller verified itself.
+
+    `evidence_read=False` DECLARES NO `evidenceRead` GRANT AT ALL, and since
+    D2 §3.9's evidence-fetch Job landed that is the one destination shape whose
+    run is still `NotAttempted`: a `SecretKeys` grant — every other destination
+    here — is read by the Job and reaches a real verdict. The rows about a
+    point the controller could NOT read (`PointFactsUnread`) need this shape.
+    `evidence_read_secret` names a different Secret for the read grant alone,
+    which is how `refused_point` breaks one grant without touching the others.
     """
     def grant(secret: str) -> dict[str, Any]:
         return {
@@ -411,7 +420,8 @@ def destination(name: str, bucket: str, *, write_secret: str = "logweir-s3",
                 "archiveWrite": grant(write_secret),
                 "archiveRead": grant(write_secret),
                 "evidenceWrite": grant(write_secret),
-                "evidenceRead": grant(write_secret),
+                **({"evidenceRead": grant(evidence_read_secret or write_secret)}
+                   if evidence_read else {}),
             },
             "readiness": {"writeProbe": "Disabled"},
         },
@@ -648,21 +658,34 @@ CATALOG_PREFIX = "logweir/catalog/v1"
 
 
 VERDICTS = {"Valid", "Invalid", "Untrusted", "NotAttempted"}
+#: THE BOUNDED WAIT FOR A REACHED VERDICT. `Pending` is not one of `VERDICTS`:
+#: it is D2 §3.9's "the evidence-fetch Job is reading", and a wait that stopped
+#: on it would call a fetch in flight a verdict. One attempt's whole budget is
+#: an image-present pod start, the plan's 120 s fetch timeout and a 15 s
+#: requeue — the Job's own deadline is that plus a 90 s margin — so 240 s
+#: covers one attempt and never a retry (+60 s, +5 m, +15 m).
+VERDICT_SETTLE_SECONDS = 240
 
 
 def verdict_of(o: dict[str, Any]) -> str | None:
     return o.get("status", {}).get("evidence", {}).get("verification", {}).get("result")
 
 
-def settle_verdict(name: str, seconds: int = 45) -> dict[str, Any]:
+def settle_verdict(name: str, seconds: int = VERDICT_SETTLE_SECONDS) -> dict[str, Any]:
     """A Backup is `Succeeded` before its evidence verdict is written, and
     `status.records` comes from the VERIFIED receipt (D3 W2). This waits a
-    BOUNDED time for a verdict and returns whatever the object has: on a
-    destination-backed run whose `evidenceRead` is a `SecretKeys` grant this
-    build creates no evidence-fetch Job, so `verification` never appears at all
-    (see `backup.rs`'s EVIDENCE_READ_NOT_CONFIGURED text and the
-    `SecretKeys`/`WorkloadIdentity` arm). Waiting for one forever would be
-    waiting for something this build does not write."""
+    BOUNDED time for a REACHED verdict and returns whatever the object has.
+
+    THE WAIT GREW WITH THE PRODUCT. On a destination-backed run whose
+    `evidenceRead` is a `SecretKeys` grant — every destination this harness
+    declares unless it says `evidence_read=False` — the controller now creates
+    D2 §3.9's evidence-fetch Job (`claude/evidence-fetch`), writes `Pending`
+    while it runs and then `Valid` with the receipt's window, records and
+    capture. The 45 s this used to allow was sized for a build that created no
+    Job and wrote `NotAttempted` in the terminal pass; it would read `Pending`
+    and hand every caller a point with no facts. A run on a destination with no
+    `evidenceRead` still gets `NotAttempted` at once, so the longer bound costs
+    it nothing."""
     deadline = time.time() + seconds
     obj = get("backup", name)
     while time.time() < deadline and verdict_of(obj) not in VERDICTS:
@@ -672,7 +695,8 @@ def settle_verdict(name: str, seconds: int = 45) -> dict[str, Any]:
 
 
 def run_backup(
-    name: str, dest: str, topics: list[str] | None = None, settle: int = 12,
+    name: str, dest: str, topics: list[str] | None = None,
+    settle: int = VERDICT_SETTLE_SECONDS,
     schedule: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     create(backup_object(name, dest, topics, schedule))
@@ -1275,11 +1299,12 @@ def retention_policy(
     enforcement: dict[str, Any] | None = None,
     external: dict[str, Any] | None = None,
     holds: list[dict[str, Any]] | None = None,
+    prefix: str = DEST_PREFIX,
 ) -> dict[str, Any]:
     spec: dict[str, Any] = {
         "destinationRef": {"name": dest},
         "catalogRef": {"name": catalog},
-        "scope": {"prefix": DEST_PREFIX},
+        "scope": {"prefix": prefix},
         "rules": rules or {"keepLast": 2, "minUsablePoints": 1},
         "mode": mode,
     }
@@ -3694,14 +3719,18 @@ def legacy_backup(name: str, topics: list[str] | None = None,
                   namespace: str | None = None) -> dict[str, Any]:
     """An inline-`archive` Backup against the fixture's own bucket.
 
-    THIS IS NOT A PREFERENCE. A destination-backed run's evidence verdict is
-    never written on this build unless `evidenceRead.mode` is
-    `ControllerIdentity` AND the installation policy allowlists the location —
-    the lab's `weirkeeper-policy` deliberately allowlists nothing, and
-    `backup.rs`'s `SecretKeys` arm says in so many words that this build creates
-    no evidence-fetch Job. The controller's ONE global read-only handle is
-    rooted at the fixture's archive, so a Backup-level verdict is only
-    reachable there. Retention enforcement never touches this bucket.
+    WHY THE LEGACY ARCHIVE, NOW THAT IT IS NO LONGER THE ONLY WAY. Until D2
+    §3.9's evidence-fetch Job landed (`claude/evidence-fetch`) a
+    destination-backed run's verdict was reachable only through
+    `ControllerIdentity` at an allowlisted location, which the lab's
+    `weirkeeper-policy` never allowlists, so the controller's ONE global
+    read-only handle over the fixture's archive was the only road to a
+    Backup-level `Valid`/`Untrusted`/`Invalid`. A `SecretKeys` destination now
+    reaches one too. The trust rows keep this path because what they measure
+    is re-derivation of a verdict the CONTROLLER read with its own handle, and
+    the records they compare were made on it; `refused_point` measures the
+    same rules on a destination-backed, Job-read point. Retention enforcement
+    never touches this bucket.
     """
     # THE NAMESPACE IS A PARAMETER because `multiple_namespaces` needs the SAME
     # run in two of them: one archive, one signing key, two policies, and the
@@ -4533,11 +4562,11 @@ def old_archive() -> None:
         # THE POINT OF `Historical`. A retirement must not strand the archives
         # the key signed, so an operator has to be able to RESTORE from them —
         # which is the half harness-rows-6 §5 and harness-rows-7 §5 owed, and
-        # which only works over a LEGACY inline archive: a destination-backed
-        # run's evidence verdict is `NotAttempted` on this build (D2's own
-        # `S1.statusVerification` asserts it), so it has no `Valid` to become
-        # `Historical` in the first place. This archive is the one
-        # `legacy_backup` wrote and the controller verified itself.
+        # and it is measured over the LEGACY inline archive `legacy_backup`
+        # wrote and the controller verified itself with its own handle. (A
+        # destination-backed run reaches `Valid` too since D2 §3.9's
+        # evidence-fetch Job; the archive here is the one this row's
+        # retirement was recorded against.)
         restore_name = f"{OWNER}-historical-restore"
         approval_name = f"{OWNER}-historical-approval"
         for kind, name in (("restore", restore_name), ("approval", approval_name)):
@@ -5862,9 +5891,11 @@ def point_facts_the_policy_needs(status: dict[str, Any]) -> dict[str, bool]:
     `controllers/protection_policy.rs:855-882` builds each `PointCandidate`
     from `status.capture.startedAt` (D3 §3.2's `recoveryPointAt`) and from
     `status.evidence.receiptSha256`, whose first 128 bits ARE the point id
-    (`protection.rs:641`). Both come from the backup receipt, which the
-    controller reads only when the destination's `evidenceRead` grant is one it
-    can use itself.
+    (`protection.rs:641`). The capture time comes from the VERIFIED backup
+    receipt — read by the controller itself (`ControllerIdentity`) or relayed
+    by D2 §3.9's evidence-fetch Job (`SecretKeys`/`WorkloadIdentity`) — and
+    the digest from the runner's own report. A destination with NO
+    `evidenceRead` grant is the one left with a digest and no capture.
     """
     evidence = status.get("evidence") or {}
     verification = evidence.get("verification") or {}
@@ -5874,11 +5905,11 @@ def point_facts_the_policy_needs(status: dict[str, Any]) -> dict[str, bool]:
             bool((status.get("capture") or {}).get("startedAt")),
         "evidence.receiptSha256 — the point id is its first 128 bits":
             bool(evidence.get("receiptSha256")),
-        # WRITTEN, AND NOT THE SAME QUESTION AS SATISFIED. The verdict block IS
-        # published on this path — `NotAttempted` with a sentence naming the
-        # grant, which is what D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN's fix landed
-        # for (`controllers/backup.rs:4050`). Reading its mere presence as the
-        # objective being met is the error this pair of clauses exists to stop.
+        # WRITTEN, AND NOT THE SAME QUESTION AS SATISFIED. A verdict block is
+        # published on every path — `NotAttempted` with a sentence naming why
+        # (D2-EVIDENCE-NOTATTEMPTED-UNWRITTEN's fix), or `Pending` while the
+        # evidence-fetch Job reads. Reading its mere presence as the objective
+        # being met is the error this pair of clauses exists to stop.
         "evidence.verification.result is written at all": bool(result),
         "…and it satisfies requireVerifiedEvidence (Valid/ValidHistorical)":
             result in {"Valid", "ValidHistorical"},
@@ -5995,14 +6026,15 @@ def protection_cases() -> None:
         f" WHY, as far as this row can see. The fresh Backup Succeeded (exit "
         f"{fresh_status.get('exitCode')}) and the catalog's own view calls its point "
         f"{entry_now.get('availability')}/{entry_now.get('verification')} with "
-        f"selectable={entry_now.get('selectable')}. `Backup.status` carries none of "
-        f"{blind or 'the facts this row tracks'} — which is EXPECTED on this destination and "
-        f"is not the failure: its `evidenceRead` is a `SecretKeys` grant, whose read is D2 "
-        f"§3.9's evidence-fetch Job, and `controllers/backup.rs` says in its own words that "
-        f"this build does not create it. The refusal is reported honestly — the verdict block "
-        f"IS written (present: {verdict_written}, value "
-        f"{((fresh_status.get('evidence') or {}).get('verification') or {}).get('result')!r}). "
-        f"SINCE THE FIX FOR PROTECTION-SECRETKEYS-UNPROTECTED, none of that is fatal: "
+        f"selectable={entry_now.get('selectable')}. `Backup.status` lacks "
+        f"{blind or 'none of the facts this row tracks'}. dest-a's `evidenceRead` is a "
+        f"`SecretKeys` grant, which D2 §3.9's evidence-fetch Job reads: on a build that "
+        f"carries it the point is `Valid` with its capture and the policy places it itself, "
+        f"so a blind fact here is a fetch that did not finish inside the bounded wait "
+        f"(verdict present: {verdict_written}, value "
+        f"{((fresh_status.get('evidence') or {}).get('verification') or {}).get('result')!r}"
+        f"), or a build that predates the Job and wrote `NotAttempted`. "
+        f"SINCE THE FIX FOR PROTECTION-SECRETKEYS-UNPROTECTED, neither is fatal: "
         f"`protection::evidence_objective_met` lets the catalog entry's own verification axis "
         f"answer `requireVerifiedEvidence` where the controller reached NO verdict, "
         f"`protection::entries_for` joins on the archive set id when the point has no "
@@ -6053,11 +6085,10 @@ def protection_cases() -> None:
         f"{[e.get('last_available_point') for e in events]}. WHICH OF THE THREE WORDS IS NOT "
         f"THIS ROW'S SUBJECT and the row does not claim `sampled`: the controller writes "
         f"`sampled` only for a point whose evidence verdict is `Valid` "
-        f"(`controllers::protection_policy::verification_scope`), which is unreachable on this "
-        f"evidence-read path — the GRANT's own limit, not the fixed defect "
-        f"PROTECTION-SECRETKEYS-UNPROTECTED, which never governed this word — so a "
-        f"`NotAttempted` point "
-        f"is labelled `none` — honest, and still not `complete`. The vocabulary has three "
+        f"(`controllers::protection_policy::verification_scope`) — which a `SecretKeys` "
+        f"destination reaches since D2 §3.9's evidence-fetch Job, so `sampled` is now "
+        f"expected here, and a point still `NotAttempted` or `Pending` is labelled `none`. "
+        f"Either is honest, and neither is `complete`. The vocabulary has three "
         f"words and `complete` is not one of them "
         f"(`weirkeeper::protection::VerificationScope`, whose own doc comment calls a fourth "
         f"variant 'the product's one unrecoverable lie'). LIVE MUTANT: "
@@ -6193,6 +6224,14 @@ def mutate_event_and_deliver(events: list[dict[str, Any]]) -> dict[str, Any] | N
 # lab refresh or the fix did not land. Each row's `detail` says which of the two
 # it is, so a reader of the artifact never has to guess.
 #
+# WHICH POINT IS "UNREAD" SINCE D2 §3.9's EVIDENCE-FETCH JOB. Row 1 and row 3b
+# are about a point the controller could NOT place. Their destination used to be
+# dest-a, whose `SecretKeys` grant was unreadable to this build; the Job reads it
+# now and the point reaches `Valid`, which the policy places itself. So both rows
+# run on destinations that declare NO `evidenceRead` grant at all
+# (`NOREAD_DEST`, `NOREAD_STAYS_DEST`, in their own bucket) — the one shape that
+# is still `NotAttempted` with a runner digest and no capture.
+#
 # THE ONE ARM THIS LAB CANNOT REACH, stated rather than faked: a destination
 # whose `evidenceRead` grant is `ControllerIdentity`. It needs the installation
 # policy ConfigMap of the shared release to allowlist the archive location, and
@@ -6204,6 +6243,11 @@ def mutate_event_and_deliver(events: list[dict[str, Any]]) -> dict[str, Any] | N
 # `test_rows.py`. Nothing here pretends a grant it did not configure.
 
 UNREAD_POLICY = "protect-unread"
+#: Row 1's and row 3b's destinations: NO `evidenceRead` grant (see above), in a
+#: bucket of their own so no catalog over dest-a/dest-b ever lists their points.
+BUCKET_N = f"{OWNER}-{STAMP}-n"
+NOREAD_DEST = "dest-noread"
+NOREAD_STAYS_DEST = "dest-noread-stays"
 REFUSED_POLICY = "protect-refused"
 STAYS_POLICY = "protect-stays"
 LEGACY_DEST = "dest-legacy"
@@ -6366,11 +6410,13 @@ def unread_point_is_unknown(view: dict[str, Any], backup: str) -> dict[str, bool
     """D3 §3.2's `Unknown` row — *"evaluation impossible"* — for a point the
     controller could not PLACE.
 
-    The destination's `evidenceRead` grant is `SecretKeys`, so the controller
-    holds no Secret verb for it, verifies nothing itself and writes
-    `evidence.verification.result: NotAttempted` with no `capture` and no
-    `receiptSha256` (`docs/kubernetes.md`, "A point whose receipt the
-    controller could not read"). With no `catalogRef` there is nothing left
+    The destination declares NO `evidenceRead` grant, so neither the
+    controller nor D2 §3.9's evidence-fetch Job may read the receipt: the
+    verdict is `evidence.verification.result: NotAttempted`, with the runner's
+    `receiptSha256` and no `capture` (`docs/kubernetes.md`, "A point whose
+    receipt the controller could not read"). (Until the evidence-fetch Job
+    landed a `SecretKeys` grant produced the same shape; it now reaches
+    `Valid`, so this row stopped using one.) With no `catalogRef` there is nothing left
     that could supply the capture time, so the point can be neither aged
     against the objective nor named.
 
@@ -6402,8 +6448,8 @@ def placed_point_is_protected(view: dict[str, Any], entry: dict[str, Any],
                               backup: str) -> dict[str, bool]:
     """THE NEGATIVE CONTROL for `unread_point_is_unknown`, and what it refuses.
 
-    The same policy, the same `SecretKeys` destination, the same unverified
-    point — with a `catalogRef` whose view holds ONE row for it. D3 §3.2's
+    The same policy, the same destination with no `evidenceRead` grant, the
+    same unverified point — with a `catalogRef` whose view holds ONE row for it. D3 §3.2's
     availability rule is then satisfiable: the capture time and the identity
     are read off that row (`recoveryPointAtMs` IS the receipt's `started_at`
     carried through the view) and the entry's own verification axis answers
@@ -6746,6 +6792,25 @@ def entry_for_backup(entries: list[dict[str, Any]], backup: dict[str, Any]) -> d
     return matched[0] if len(matched) == 1 else {}
 
 
+def ensure_bucket(bucket: str) -> None:
+    """Make a bucket this run owns and register it for `cleanup` — once."""
+    if bucket not in (STATE.get("buckets") or []):
+        mc("mb", "--ignore-existing", f"local/{bucket}")
+        STATE.setdefault("buckets", []).append(bucket)
+        save()
+
+
+def ensure_noread_destinations() -> None:
+    """Row 1's and row 3b's destinations: no `evidenceRead` grant, bucket N."""
+    ensure_bucket(BUCKET_N)
+    for name in (NOREAD_DEST, NOREAD_STAYS_DEST):
+        if get_opt("backupdestination", name) is None:
+            apply(destination(name, BUCKET_N, prefix=name, evidence_read=False))
+        wait_for("backupdestination", name,
+                 lambda o: condition(o, "Valid").get("status") == "True",
+                 seconds=180, what="Valid=True")
+
+
 def protection_verdicts() -> None:
     """The three owed arms, live, in one namespace.
 
@@ -6762,17 +6827,20 @@ def protection_verdicts() -> None:
     evidence.append(artifact("verdicts/controller.json", STATE["controller"]))
 
     # =====================================================================
-    # ROW 1 — `PointFactsUnread`: a point on a `SecretKeys` grant
+    # ROW 1 — `PointFactsUnread`: a point on a destination with NO
+    # `evidenceRead` grant (a `SecretKeys` one is read by the evidence-fetch
+    # Job since D2 §3.9, and its point is placed — see the block comment)
     # =====================================================================
+    ensure_noread_destinations()
     if get_opt("backup", "unread-point") is not None:
         run(KN + ["delete", "backup", "unread-point", "--wait=true"])
-    unread = run_backup("unread-point", "dest-a")
+    unread = run_backup("unread-point", NOREAD_DEST)
     unread_status = unread.get("status") or {}
     facts = point_facts_the_policy_needs(unread_status)
     evidence.append(artifact("verdicts/1-unread-backup.json",
                              {"backup": backup_facts(unread),
                               "pointFactsThePolicyNeeds": facts}))
-    view = fresh_catalog(UNREAD_CATALOG, "dest-a")
+    view = fresh_catalog(UNREAD_CATALOG, NOREAD_DEST)
     entries = view_entries(view)
     entry = entry_for_backup(entries, unread)
     evidence.append(artifact("verdicts/1-catalog-entry.json",
@@ -6782,7 +6850,7 @@ def protection_verdicts() -> None:
     if get_opt("protectionpolicy", UNREAD_POLICY) is not None:
         run(KN + ["delete", "protectionpolicy", UNREAD_POLICY, "--wait=true"])
     apply(verdict_policy(UNREAD_POLICY,
-                         subject={"destinationRef": {"name": "dest-a"}},
+                         subject={"destinationRef": {"name": NOREAD_DEST}},
                          catalog=UNREAD_CATALOG))
     placed = policy_view(settled_policy(UNREAD_POLICY))
     evidence.append(artifact("verdicts/1a-with-catalogref.json",
@@ -6796,7 +6864,8 @@ def protection_verdicts() -> None:
         "PLAT-14.2",
         all(placed_clauses.values()),
         f"NEGATIVE CONTROL for `protection-unplaceable-point-is-unknown`, and the arm that "
-        f"proves the row distinguishes. The `Backup` on a `SecretKeys` `evidenceRead` grant "
+        f"proves the row distinguishes. The `Backup` on a destination with no "
+        f"`evidenceRead` grant "
         f"carries verification {unread_verdict!r}, capture {unread_capture!r} and "
         f"receiptSha256 present={unread_receipt} — the controller "
         f"read nothing. With `catalogRef: {UNREAD_CATALOG}`, whose view holds "
@@ -6841,7 +6910,7 @@ def protection_verdicts() -> None:
         f"D3 §3.2: `Unknown` is for an evaluation that is impossible; `Unprotected` is "
         f"\"no available point at all\" and it PAGES. A run this policy covers succeeded "
         f"(`unread-point`, exit {unread_status.get('exitCode')}) and the controller could not "
-        f"place its point in time — a `SecretKeys` `evidenceRead` grant, so no capture time "
+        f"place its point in time — no `evidenceRead` grant at all, so no capture time "
         f"and no receipt-derived identity — and with `catalogRef` removed nothing else can. "
         f"The policy reads health {unknown['health']}, Protected="
         f"{unknown['protectedStatus']}/{unknown['protectedReason']}, message "
@@ -6858,14 +6927,13 @@ def protection_verdicts() -> None:
     # =====================================================================
     # ROW 2 — a signature this installation REFUSES, at four postures
     # =====================================================================
-    # THE ARCHIVE IS THE LEGACY INLINE ONE, and that is the only way to reach a
-    # verdict at all on this lab: a destination-backed run's receipt is read by
-    # the controller only where `evidenceRead.mode` is `ControllerIdentity` AND
-    # the installation policy allowlists the location, and the lab's
-    # `weirkeeper-policy` allowlists nothing. The controller's one global
-    # read-only handle is rooted at the fixture's archive, so a Backup-level
-    # verdict — `Valid`, `Untrusted` or `Invalid` — is reachable there and
-    # nowhere else. `spec.protects.legacyArchive` is the CRD's own way to point
+    # THE ARCHIVE IS THE LEGACY INLINE ONE. It was once the only way to reach
+    # a verdict on this lab (a destination-backed receipt was read only through
+    # an allowlisted `ControllerIdentity` location, and the lab allowlists
+    # nothing); since D2 §3.9's evidence-fetch Job a `SecretKeys` destination
+    # reaches one too, and `refused_point` measures that road. This row keeps
+    # the controller's own global read-only handle over the fixture's archive,
+    # where its refused signature was first recorded. `spec.protects.legacyArchive` is the CRD's own way to point
     # a policy at it (CEL rule H1: a saved destination XOR an inline archive).
     subject = {"legacyArchive": {"url": LEGACY_ARCHIVE, "secretRef": {"name": "logweir-s3"}}}
     # A PREVIOUS RUN'S SOUND POINT IS THIS RUN'S SILENT PASS. `valid-signature`
@@ -7098,9 +7166,13 @@ def protection_verdicts() -> None:
 
     # --- (3b) the refusal: `Unknown` does not clear an incident -----------
     # THE OTHER SIDE OF THE SAME COLUMN, and a REQUIRED refusal rather than a
-    # recorded one. dest-b, because it holds no points: the policy therefore
-    # opens `Staleness` honestly (`Unprotected` — nothing to recover from), and
-    # the point that arrives next is one the controller cannot place.
+    # recorded one. `NOREAD_STAYS_DEST`, because no run of this harness but this
+    # row's writes to it, and because it declares NO `evidenceRead` grant: the
+    # policy opens `Staleness` honestly (`Unprotected` — nothing to recover
+    # from), and the point that arrives next is one the controller cannot place.
+    # It was dest-b, whose `SecretKeys` grant the evidence-fetch Job now reads —
+    # that point is `Valid`, the policy goes `Healthy`, and the row would have
+    # measured a resolve instead of the refusal it is about.
     if get_opt("protectionpolicy", STAYS_POLICY) is not None:
         run(KN + ["delete", "protectionpolicy", STAYS_POLICY, "--wait=true"])
     # THE POINT ARRIVES AFTER THE INCIDENT, and on a re-run that means deleting
@@ -7110,8 +7182,10 @@ def protection_verdicts() -> None:
     # measures would already have happened before the row started.
     if get_opt("backup", "unplaceable-point") is not None:
         run(KN + ["delete", "backup", "unplaceable-point", "--wait=true"])
+    ensure_noread_destinations()
     apply(verdict_policy(STAYS_POLICY,
-                         subject={"destinationRef": {"name": "dest-b"}}, catalog=None))
+                         subject={"destinationRef": {"name": NOREAD_STAYS_DEST}},
+                         catalog=None))
     opened = settle(
         "protectionpolicy", STAYS_POLICY,
         lambda o: (alert_of(((o.get("status") or {}).get("alerts") or []), "Staleness") or {})
@@ -7137,7 +7211,7 @@ def protection_verdicts() -> None:
         stays_before = alert_of(policy_alerts(STAYS_POLICY), "Staleness") or {}
         posts_mark = sink_posts()
         mark = now()
-        stays_backup = run_backup("unplaceable-point", "dest-b")
+        stays_backup = run_backup("unplaceable-point", NOREAD_STAYS_DEST)
         stays_view = policy_view(verdict_after(
             STAYS_POLICY, mark,
             lambda o: condition(o, "Protected").get("reason") == "PointFactsUnread",
@@ -7160,7 +7234,7 @@ def protection_verdicts() -> None:
             f"(delivery {(stays_before.get('delivery') or {}).get('state')!r}); a run then "
             f"succeeded into that destination (`unplaceable-point`, exit "
             f"{(stays_backup.get('status') or {}).get('exitCode')}) whose receipt the "
-            f"controller cannot read — a `SecretKeys` grant, and no `catalogRef` — so the "
+            f"controller cannot read — no `evidenceRead` grant, and no `catalogRef` — so the "
             f"policy is {stays_view['health']}/{stays_view['protectedReason']}. `Unknown` is "
             f"NOT \"back to `Healthy`/`AtRisk`\", so the incident must stay "
             f"{stays_after.get('state')!r} at transition {stays_after.get('transition')}, "
@@ -7958,7 +8032,8 @@ def rehearsal_point() -> dict[str, Any]:
 
 
 def rehearsal_schedule_object(name: str, *, cron: str, approval: str,
-                              suspend: bool = True) -> dict[str, Any]:
+                              suspend: bool = True,
+                              point: dict[str, Any] | None = None) -> dict[str, Any]:
     """D3 §4.1's `RehearsalSchedule`, created SUSPENDED.
 
     SUSPENDED AT BIRTH, AND THAT IS THE ONLY ORDER THAT WORKS. The standing
@@ -7975,14 +8050,10 @@ def rehearsal_schedule_object(name: str, *, cron: str, approval: str,
         "spec": {
             "schedule": cron,
             "suspend": suspend,
-            "point": {
-                "scheduleRefs": [{"name": REHEARSAL_POINT_SCHEDULE}],
-                "catalogRef": {"name": REHEARSAL_CATALOG},
-                "selection": "NewestAvailable",
-                "minAgeSeconds": 0,
-                "topics": [REHEARSAL_TOPIC],
-                "requireVerifiedEvidence": True,
-            },
+            # `point` is a parameter for `refused_point`'s arms, which name a
+            # schedule whose only run is a point the controller REFUSED.
+            "point": point or rehearsal_point_spec(REHEARSAL_POINT_SCHEDULE,
+                                                   REHEARSAL_CATALOG),
             "target": {
                 "clusterRef": {"name": REHEARSAL_TARGET},
                 "topicPrefix": "rehearsal-",
@@ -7999,6 +8070,18 @@ def rehearsal_schedule_object(name: str, *, cron: str, approval: str,
             "objectives": {"rtoSeconds": 1800, "passRate": 1.0},
             "authorization": {"standingApprovalRef": {"name": approval}},
         },
+    }
+
+
+def rehearsal_point_spec(schedule: str, catalog: str) -> dict[str, Any]:
+    """`spec.point`: one schedule's runs, joined with one catalog, `orders` only."""
+    return {
+        "scheduleRefs": [{"name": schedule}],
+        "catalogRef": {"name": catalog},
+        "selection": "NewestAvailable",
+        "minAgeSeconds": 0,
+        "topics": [REHEARSAL_TOPIC],
+        "requireVerifiedEvidence": True,
     }
 
 
@@ -8708,13 +8791,14 @@ def rehearsal() -> None:
 
 
 def rehearsal_create(name: str, *, cron: str, approval: str,
-                     arms: dict[str, str]) -> dict[str, Any]:
+                     arms: dict[str, str],
+                     point: dict[str, Any] | None = None) -> dict[str, Any]:
     """Create one arm's schedule, suspended, and REGISTER it before anything else.
 
     Registered the moment its uid exists, so the `finally` suspends and sweeps
     it even when the very next line raises.
     """
-    apply(rehearsal_schedule_object(name, cron=cron, approval=approval))
+    apply(rehearsal_schedule_object(name, cron=cron, approval=approval, point=point))
     created = get("rehearsalschedule", name)
     arms[name] = created["metadata"]["uid"]
     return wait_for(
@@ -8725,7 +8809,8 @@ def rehearsal_create(name: str, *, cron: str, approval: str,
 
 
 def rehearsal_arm(name: str, *, cron: str, key: pathlib.Path, work: pathlib.Path,
-                  target_cluster_id: str, arms: dict[str, str]) -> tuple[dict[str, Any], str]:
+                  target_cluster_id: str, arms: dict[str, str],
+                  point: dict[str, Any] | None = None) -> tuple[dict[str, Any], str]:
     """One arm's `RehearsalSchedule` and its standing `Approval`, both created
     and the `Approval` waited on until its `Verified` condition is DECIDED.
 
@@ -8734,7 +8819,7 @@ def rehearsal_arm(name: str, *, cron: str, key: pathlib.Path, work: pathlib.Path
     waiting for the control to fail.
     """
     approval = f"{name}-standing"
-    schedule = rehearsal_create(name, cron=cron, approval=approval, arms=arms)
+    schedule = rehearsal_create(name, cron=cron, approval=approval, arms=arms, point=point)
     envelope, sidecar = mint_standing(work, key, schedule,
                                       target_cluster_id=target_cluster_id)
     apply(standing_approval_object(approval, schedule, envelope, sidecar))

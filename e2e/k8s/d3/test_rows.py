@@ -970,8 +970,13 @@ def test_the_planted_record_really_declares_a_future_major() -> None:
 # --- PLAT-14.2: what a policy needs off a Backup to see a point at all -------
 #
 # The recorded shape is `Backup/recovery-point` on 2026-09-21: a run that
-# Succeeded against a destination whose `evidenceRead` is a `SecretKeys` grant.
-SECRETKEYS_STATUS = {
+# Succeeded against a destination whose `evidenceRead` is a `SecretKeys` grant,
+# on a build that PREDATES D2 §3.9's evidence-fetch Job and a runner that
+# predates the receipt digest. It is kept as the historical shape: on the
+# build lab-refresh-8 runs, the same destination's point is `Valid` with all
+# four facts (`READ_RECEIPT_STATUS`), and the shape a policy still cannot place
+# is `NOREAD_STATUS` — a destination with NO `evidenceRead` grant.
+PRE_FETCH_SECRETKEYS_STATUS = {
     "phase": "Succeeded", "exitCode": 0, "backupId": "366d2922",
     "evidence": {"receiptKey": "logweir/backups/366d2922/01M32.receipt.json",
                  "sidecarKey": "logweir/backups/366d2922/01M32.receipt.sig",
@@ -983,7 +988,27 @@ SECRETKEYS_STATUS = {
                  # failure is in how protection READS it.
                  "verification": {"result": "NotAttempted",
                                   "verifiedAt": "2026-09-21T13:26:21Z",
-                                  "detail": "…this build does not create that Job…"}},
+                                  "detail": "…reads evidence with a grant only a pod may "
+                                            "hold (D2 §3.9's evidence-fetch Job)…"}},
+}
+# `protection-verdicts` row 1's point since the evidence-fetch Job: the runner
+# reports its receipt digest, nothing may read the receipt, so no capture.
+NOREAD_STATUS = {
+    "phase": "Succeeded", "exitCode": 0, "backupId": "4b1e0d77",
+    "evidence": {"receiptKey": "logweir/backups/4b1e0d77/01M40.receipt.json",
+                 "sidecarKey": "logweir/backups/4b1e0d77/01M40.receipt.sig",
+                 "receiptSha256": "sha256:" + "b" * 64,
+                 "verification": {"result": "NotAttempted",
+                                  "verifiedAt": "2026-09-22T20:10:00Z",
+                                  "detail": "BackupDestination ns/dest-noread declares no "
+                                            "evidenceRead grant; nothing was verified"}},
+}
+PENDING_STATUS = {
+    "phase": "Succeeded", "exitCode": 0,
+    "evidence": {"receiptSha256": "sha256:" + "b" * 64,
+                 "verification": {"result": "Pending"},
+                 "observation": {"mode": "SecretKeys", "attempt": 1,
+                                 "jobRef": {"name": "lwc-ev-0123456789abcdef0123"}}},
 }
 READ_RECEIPT_STATUS = {
     "phase": "Succeeded", "exitCode": 0,
@@ -1002,11 +1027,19 @@ SATISFIED = "…and it satisfies requireVerifiedEvidence (Valid/ValidHistorical)
 def test_a_policy_cannot_place_a_point_it_has_no_facts_about() -> None:
     have = d3.point_facts_the_policy_needs(READ_RECEIPT_STATUS)
     row("a Backup whose receipt WAS read carries all four facts", all(have.values()), f"{have}")
-    blind = d3.point_facts_the_policy_needs(SECRETKEYS_STATUS)
-    row("THE LIVE SHAPE: a SecretKeys destination loses the two receipt-derived facts and "
-        "keeps a written verdict that does not satisfy the objective",
+    blind = d3.point_facts_the_policy_needs(PRE_FETCH_SECRETKEYS_STATUS)
+    row("THE PRE-FETCH SHAPE: a SecretKeys destination on a build with no evidence-fetch Job "
+        "lost both facts and kept a written verdict that does not satisfy the objective",
         not blind[CAPTURE] and not blind[DIGEST] and blind[WRITTEN] and not blind[SATISFIED],
         f"{blind}")
+    noread = d3.point_facts_the_policy_needs(NOREAD_STATUS)
+    row("THE LIVE SHAPE NOW: no evidenceRead grant keeps the runner's digest and loses the "
+        "capture, with a written verdict that does not satisfy the objective",
+        not noread[CAPTURE] and noread[DIGEST] and noread[WRITTEN] and not noread[SATISFIED],
+        f"{noread}")
+    pending = d3.point_facts_the_policy_needs(PENDING_STATUS)
+    row("a fetch still Pending is written and NOT satisfied — no capture until the Job's Valid",
+        pending[WRITTEN] and not pending[SATISFIED] and not pending[CAPTURE], f"{pending}")
     row("MUTANT: reading `written at all` as the objective being met would report this "
         "candidate as verified", blind[WRITTEN] is True and blind[SATISFIED] is False)
     row("MUTANT: a verdict block that is genuinely absent is a different fact again",
@@ -1145,7 +1178,9 @@ _CATALOG_STALE_MESSAGE = (
     "protection could not be evaluated (CatalogStale); this is not a pass and not a failure"
 )
 
-# The catalog row for the `SecretKeys` point, as the view publishes it: both of
+# The catalog row for row 1's point (a destination with no `evidenceRead`
+# grant; it was a `SecretKeys` one before the evidence-fetch Job), as the view
+# publishes it: both of
 # D3 §5.4's axes, the archive set id the join runs on where the point has no
 # receipt-derived identity, and `recoveryPointAtMs`, which IS the receipt's
 # `started_at` carried through.
