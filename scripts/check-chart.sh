@@ -798,6 +798,28 @@ else
   fi
 fi
 
+# ---- 9. EVERY APPROVAL-POLICY DOCUMENT THE BINARY REFUSES, THE CHART REFUSES ----
+#
+# A document `ApprovalPolicySet::parse` refuses stops the WHOLE controller at
+# start (PLAT-19.2 review M3). The cases are listed once, in
+# `scripts/approval-policy-refusals/`; `chart_lint.rs` proves the binary refuses
+# each, and this proves `helm template` does -- through the schema AND, where
+# this helm can skip the schema, through the template's own `fail` arms alone,
+# so neither layer is the only guard.
+echo "== 9. every approval-policy document the binary refuses, the chart refuses =="
+skip_schema=""
+if helm template --help 2>/dev/null | grep -F -q -- "--skip-schema-validation"; then
+  skip_schema="--skip-schema-validation"
+fi
+for case_file in scripts/approval-policy-refusals/*.values.yaml; do
+  expect="$(sed -n 's/^# expect: //p' "$case_file")"
+  label="approval policy $(basename "$case_file" .values.yaml)"
+  console_refuses "$label" "$expect" -f "$case_file"
+  if [ -n "$skip_schema" ]; then
+    console_refuses "$label (template arms only)" "$expect" "$skip_schema" -f "$case_file"
+  fi
+done
+
 echo
 if [ "$fail" -ne 0 ]; then
   echo "FAIL: the chart is not what the tree says it is; the lines above name what drifted." >&2

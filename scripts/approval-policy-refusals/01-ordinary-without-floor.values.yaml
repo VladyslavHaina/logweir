@@ -1,0 +1,6 @@
+# expect: is Ordinary but approvalPolicy.allowOrdinaryConfirmation is not true
+approvalPolicy:
+  allowOrdinaryConfirmation: false
+  policies:
+    - {name: team-ordinary, mode: Ordinary}
+  namespaces: {}

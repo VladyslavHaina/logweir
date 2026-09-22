@@ -1,0 +1,5 @@
+# expect: requireDistinctPrincipal is false on a Governed policy
+approvalPolicy:
+  policies:
+    - {name: prod, mode: Governed, requireDistinctPrincipal: false}
+  namespaces: {}

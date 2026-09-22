@@ -1,0 +1,6 @@
+# expect: Bad_NS
+approvalPolicy:
+  policies:
+    - {name: prod, mode: Governed}
+  namespaces:
+    Bad_NS: prod

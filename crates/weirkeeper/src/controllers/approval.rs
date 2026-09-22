@@ -1195,6 +1195,22 @@ pub fn evaluate_authorization_v2(
                 .key(&approver_key_id)
                 .map(|k| k.trust.principal_id.clone())
                 .unwrap_or_default();
+            // FAIL CLOSED ON A PRINCIPAL THAT CANNOT BE COMPARED (review M4):
+            // `alice@example.com` differs from `https://idp#alice` as a string
+            // and may still be Alice. Only `<issuer>#<subject>` is comparable.
+            if bound.require_distinct_principal && !policy::is_issuer_subject_principal(&principal)
+            {
+                return Err(ApprovalRefusal::SelfApprovalRefused {
+                    detail: format!(
+                        "the approver key {approver_key_id} belongs to principal {principal:?}, \
+                         which is not in the `<issuer>#<subject>` form the console attests the \
+                         requester {requester:?} in; policy {} requires a DIFFERENT principal, \
+                         and a principal that cannot be compared cannot be shown to differ. \
+                         Record the key's principal.id as `<issuer>#<subject>`",
+                        bound.name
+                    ),
+                });
+            }
             if bound.require_distinct_principal
                 && !policy::separation_holds(&doc.requester, &principal)
             {

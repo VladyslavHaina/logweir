@@ -1,0 +1,6 @@
+# expect: which approvalPolicy.policies does not declare
+approvalPolicy:
+  policies:
+    - {name: prod, mode: Governed}
+  namespaces:
+    team-a: nothing

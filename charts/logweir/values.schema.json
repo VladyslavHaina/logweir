@@ -434,6 +434,7 @@
         "namespaces": {
           "type": "object",
           "maxProperties": 256,
+          "propertyNames": { "pattern": "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" },
           "additionalProperties": { "type": "string" }
         },
         "confirmationKeySecret": { "type": "string" }

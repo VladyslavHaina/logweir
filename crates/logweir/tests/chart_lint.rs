@@ -5262,3 +5262,81 @@ fn chart_lint_install_md_carries_bring_your_own_registry() {
         );
     }
 }
+
+// ------------------------------------------- PLAT-19.2: approval-policy parity
+
+/// The `approvalPolicy` document a values file would render, exactly the three
+/// fields `templates/approval-policy.yaml` writes into the ConfigMap.
+fn approval_policy_document(values: &Value) -> String {
+    let block = values.get("approvalPolicy").cloned().unwrap_or(Value::Null);
+    let mut document = serde_yaml::Mapping::new();
+    for field in ["allowOrdinaryConfirmation", "policies", "namespaces"] {
+        if let Some(v) = block.get(field) {
+            document.insert(Value::String(field.to_string()), v.clone());
+        }
+    }
+    serde_yaml::to_string(&Value::Mapping(document)).expect("a document")
+}
+
+/// **Every approval-policy document the chart is meant to refuse, the binary
+/// refuses** (review M3). A document the binary refuses stops the whole
+/// controller at start, so the chart's refusals and the binary's must be the
+/// same set. The cases are listed ONCE, in `scripts/approval-policy-refusals/`;
+/// `scripts/check-chart.sh` section 9 proves `helm template` refuses each (a
+/// `#[test]` may not shell out to helm, Global Constraint 22), and this proves
+/// `ApprovalPolicySet::parse` refuses each. Add a rule to either side and its
+/// case here, and both gates must refuse it.
+#[test]
+fn chart_lint_every_approval_policy_refusal_is_the_binarys() {
+    let cases = files_under("scripts/approval-policy-refusals");
+    let cases: Vec<&String> = cases
+        .iter()
+        .filter(|f| f.ends_with(".values.yaml"))
+        .collect();
+    assert!(cases.len() >= 12, "the refusal list shrank: {cases:?}");
+    for case in cases {
+        let text = read(case);
+        assert!(
+            text.lines().any(|l| l.starts_with("# expect: ")),
+            "{case} names no `# expect:` diagnostic for check-chart.sh"
+        );
+        let values: Value = serde_yaml::from_str(&text).expect("a values file");
+        let document = approval_policy_document(&values);
+        assert!(
+            logweir_core::approval_policy::ApprovalPolicySet::parse(&document).is_err(),
+            "{case}: the chart refuses this document but the binary ACCEPTS it:\n{document}"
+        );
+    }
+}
+
+/// And the other direction: the shipped example the chart RENDERS is a
+/// document the binary ACCEPTS, read from the rendered ConfigMap itself.
+#[test]
+fn chart_lint_the_rendered_approval_policy_is_one_the_binary_accepts() {
+    let docs = rendered("approval-policy");
+    let map = docs
+        .iter()
+        .find(|d| {
+            d.kind == "ConfigMap"
+                && d.value["metadata"]["labels"]["app.kubernetes.io/component"].as_str()
+                    == Some("approval-policy")
+        })
+        .expect("the approval-policy example renders its ConfigMap");
+    let document = map.value["data"]["approval-policy.yaml"]
+        .as_str()
+        .expect("the document");
+    let parsed = logweir_core::approval_policy::ApprovalPolicySet::parse(document)
+        .unwrap_or_else(|e| panic!("the rendered example is refused by the binary: {e}"));
+    assert!(!parsed.is_empty(), "the example configures something");
+    let example: Value =
+        serde_yaml::from_str(&read("charts/logweir/examples/approval-policy.values.yaml"))
+            .expect("the example");
+    assert_eq!(
+        logweir_core::approval_policy::ApprovalPolicySet::parse(&approval_policy_document(
+            &example
+        ))
+        .expect("the example's document"),
+        parsed,
+        "the rendered ConfigMap is the example's document"
+    );
+}

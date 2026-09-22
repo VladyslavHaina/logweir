@@ -1,0 +1,5 @@
+# expect: legacy-governed-v1
+approvalPolicy:
+  policies:
+    - {name: legacy-governed-v1, mode: Governed}
+  namespaces: {}

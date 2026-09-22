@@ -1,0 +1,6 @@
+# expect: requireDistinctPrincipal is true on an Ordinary policy
+approvalPolicy:
+  allowOrdinaryConfirmation: true
+  policies:
+    - {name: team, mode: Ordinary, requireDistinctPrincipal: true}
+  namespaces: {}

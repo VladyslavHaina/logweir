@@ -26,8 +26,14 @@ byte-identical to what it was, and every namespace resolves to
 `legacy-governed-v1` — today's governed approval, unchanged.
 
 THE REFUSALS HERE ARE THE BINARY'S, MADE EARLIER. `logweir_core::approval_policy`
-refuses the same documents at controller and console start; this arm refuses
-them in `helm lint`, where the operator is still holding the values file.
+refuses the same documents at controller and console start, and a document the
+binary refuses stops the WHOLE controller -- every reconciler, backups included
+-- so this arm must refuse every one of them in `helm template`, where the
+operator is still holding the values file. The cases live ONCE, in
+`scripts/approval-policy-refusals/*.values.yaml`: `scripts/check-chart.sh` renders
+each and requires a refusal, and `crates/logweir/tests/chart_lint.rs` feeds each
+document to `ApprovalPolicySet::parse` and requires a refusal there too, so a
+rule added to one side and not the other is a red row.
 */}}
 {{- define "logweir.approvalPolicy.configured" -}}
 {{- if or .Values.approvalPolicy.policies .Values.approvalPolicy.namespaces -}}true{{- end -}}
@@ -70,8 +76,33 @@ namespaces:
 {{- if and (eq $policy.mode "Ordinary") (not $p.allowOrdinaryConfirmation) -}}
 {{- fail (printf "approvalPolicy.policies[%d] (%s) is Ordinary but approvalPolicy.allowOrdinaryConfirmation is not true. Ordinary confirmation is an explicit installation decision (D0): set the floor, or use a Governed policy." $i $policy.name) -}}
 {{- end -}}
+{{- if and (eq $policy.mode "Governed") (hasKey $policy "requireDistinctPrincipal") (not $policy.requireDistinctPrincipal) -}}
+{{- fail (printf "approvalPolicy.policies[%d].requireDistinctPrincipal is false on a Governed policy; the supported baseline requires the approver's principal to differ from the requester's." $i) -}}
+{{- end -}}
+{{- if and (eq $policy.mode "Ordinary") $policy.requireDistinctPrincipal -}}
+{{- fail (printf "approvalPolicy.policies[%d].requireDistinctPrincipal is true on an Ordinary policy, which has no approver to compare; use a Governed policy." $i) -}}
+{{- end -}}
+{{- if hasKey $policy "maxAgeSeconds" -}}
+{{- if or (lt (int64 $policy.maxAgeSeconds) 60) (gt (int64 $policy.maxAgeSeconds) 604800) -}}
+{{- fail (printf "approvalPolicy.policies[%d].maxAgeSeconds is %v; it must be from 60 to 604800." $i $policy.maxAgeSeconds) -}}
+{{- end -}}
+{{- end -}}
+{{- range $key, $_ := $policy -}}
+{{- if not (has $key (list "name" "mode" "maxAgeSeconds" "requireDistinctPrincipal")) -}}
+{{- fail (printf "approvalPolicy.policies[%d] carries unknown field %q; a policy has name, mode, maxAgeSeconds and requireDistinctPrincipal." $i $key) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if gt (len ($p.policies | default list)) 64 -}}
+{{- fail "approvalPolicy.policies declares more than 64 policies." -}}
+{{- end -}}
+{{- if gt (len ($p.namespaces | default dict)) 256 -}}
+{{- fail "approvalPolicy.namespaces declares more than 256 bindings." -}}
 {{- end -}}
 {{- range $ns, $policy := ($p.namespaces | default dict) -}}
+{{- if not (regexMatch "^[a-z0-9]([-a-z0-9]{0,61}[a-z0-9])?$" $ns) -}}
+{{- fail (printf "approvalPolicy.namespaces.%s is not a namespace name (a DNS label)." $ns) -}}
+{{- end -}}
 {{- if not (has $policy $names) -}}
 {{- fail (printf "approvalPolicy.namespaces.%s names policy %q, which approvalPolicy.policies does not declare." $ns $policy) -}}
 {{- end -}}

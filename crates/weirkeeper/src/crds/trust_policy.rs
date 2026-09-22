@@ -296,8 +296,13 @@ pub enum RevocationReason {
 #[derive(Deserialize, Serialize, Clone, Debug, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct KeyPrincipal {
-    /// A stable identifier — `install:<digest>`, an email, an OIDC subject.
-    /// **Immutable** (G1): it is what an audit trail joins on.
+    /// A stable identifier. For a `GovernedApproval` key it MUST be the
+    /// approver's `<issuer>#<subject>` exactly as the console's identity
+    /// provider asserts them (for example `https://idp.example.com#8f3c…`):
+    /// separation of duties compares it with the requester's, and any other
+    /// form is refused under a Governed approval policy. Other usages may use
+    /// `install:<digest>` or another stable id. **Immutable** (G1): it is what
+    /// an audit trail joins on.
     #[schemars(length(min = 1, max = 253))]
     pub id: String,
     /// A human-readable label. Mutable, because a display name is not an

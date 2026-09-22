@@ -1,0 +1,5 @@
+# expect: maxAgeSeconds
+approvalPolicy:
+  policies:
+    - {name: prod, mode: Governed, maxAgeSeconds: 59}
+  namespaces: {}

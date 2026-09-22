@@ -83,6 +83,9 @@ pub const DEFAULT_GOVERNED_MAX_AGE_SECONDS: i64 = 86_400;
 /// Approval controller's next heartbeat.
 pub const MAX_ISSUED_AT_SKEW_SECONDS: i64 = 60;
 
+/// The longest change ticket a document carries.
+pub const MAX_TICKET_LEN: usize = 128;
+
 /// The most policies one installation document may declare.
 pub const MAX_POLICIES: usize = 64;
 
@@ -607,7 +610,9 @@ pub struct RestoreAuthorization {
     pub issued_at: DateTime<Utc>,
     /// After this instant it authorises nothing new.
     pub expires_at: DateTime<Utc>,
-    /// A change ticket, optional in both modes.
+    /// A change ticket: REQUIRED under `Governed`, optional under `Ordinary`
+    /// (D0), and in both at most [`MAX_TICKET_LEN`] printable characters —
+    /// [`check_ticket`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ticket: Option<String>,
 }
@@ -797,7 +802,33 @@ pub fn check_binding(
                 .to_string(),
         ));
     }
-    Ok(())
+    check_ticket(doc.authorization_mode, doc.ticket.as_deref())
+        .map_err(AuthorizationRefusal::DocumentInvalid)
+}
+
+/// The change ticket's rule (D0: "ticket (required in Governed, optional in
+/// Ordinary)"): under `Governed` a non-blank ticket of at most
+/// [`MAX_TICKET_LEN`] characters; under `Ordinary` absent or the same shape.
+///
+/// # Errors
+///
+/// A sentence naming what is wrong.
+pub fn check_ticket(mode: ApprovalMode, ticket: Option<&str>) -> Result<(), String> {
+    match ticket {
+        None if mode == ApprovalMode::Governed => Err(
+            "a Governed authorization carries a change ticket (D0: required in Governed); \
+             this document names none"
+                .to_string(),
+        ),
+        None => Ok(()),
+        Some(t) if t.trim().is_empty() || t.trim() != t => Err(format!(
+            "the change ticket {t:?} is blank or carries surrounding whitespace"
+        )),
+        Some(t) if t.chars().count() > MAX_TICKET_LEN || t.chars().any(char::is_control) => Err(
+            format!("the change ticket is at most {MAX_TICKET_LEN} printable characters"),
+        ),
+        Some(_) => Ok(()),
+    }
 }
 
 /// The window's SHAPE, with no clock: positive and no longer than the policy
@@ -857,13 +888,29 @@ pub fn check_restore_authorization(
     Ok(())
 }
 
+/// Whether a key's `principal.id` is in the `<issuer>#<subject>` form the
+/// console attests a requester in — the only form separation of duties can
+/// compare (review M4). Anything else — an email, a display name, an
+/// `install:` digest, surrounding whitespace — is a principal that could be
+/// the requester under another spelling, so it cannot establish separation.
+#[must_use]
+pub fn is_issuer_subject_principal(principal_id: &str) -> bool {
+    principal_id.trim() == principal_id
+        && principal_id
+            .split_once('#')
+            .is_some_and(|(issuer, subject)| !issuer.is_empty() && !subject.is_empty())
+}
+
 /// Separation of duties (D0): the governed approver's principal must not be
 /// the requester's. Compares the stable `principal_id` strings exactly —
-/// never display names, and never key ids.
+/// never display names, and never key ids — and FAILS CLOSED on an approver
+/// principal that is not `<issuer>#<subject>` ([`is_issuer_subject_principal`]):
+/// `alice@example.com` differs from `https://idp#alice` as a string and may
+/// still be Alice.
 #[must_use]
 pub fn separation_holds(requester: &Requester, approver_principal_id: &str) -> bool {
-    let approver = approver_principal_id.trim();
-    !approver.is_empty() && approver != requester.principal_id()
+    is_issuer_subject_principal(approver_principal_id)
+        && approver_principal_id != requester.principal_id()
 }
 
 #[cfg(test)]
@@ -944,7 +991,7 @@ namespaces:
             },
             issued_at: at("2026-09-22T10:00:00Z"),
             expires_at: at("2026-09-22T10:10:00Z"),
-            ticket: None,
+            ticket: (policy.mode == ApprovalMode::Governed).then(|| "CHG-1".to_string()),
         }
     }
 
@@ -1213,10 +1260,53 @@ namespaces:
         assert!(!separation_holds(&requester, " https://idp.example#alice "));
         assert!(!separation_holds(&requester, ""));
         assert!(separation_holds(&requester, "https://idp.example#bob"));
-        assert!(
-            separation_holds(&requester, "alice"),
-            "a bare name is another principal id"
-        );
+        // FAILS CLOSED (review M4): a principal not in `<issuer>#<subject>`
+        // form cannot be compared with a requester, so it never establishes
+        // separation -- `alice@example.com` may be Alice.
+        for other_form in [
+            "alice",
+            "alice@example.com",
+            "install:sha256:abc",
+            "#alice",
+            "https://idp.example#",
+            "https://idp.example#bob ",
+        ] {
+            assert!(
+                !separation_holds(&requester, other_form),
+                "{other_form:?} establishes nothing"
+            );
+            assert!(!is_issuer_subject_principal(other_form));
+        }
+        assert!(is_issuer_subject_principal("https://idp.example#bob"));
+    }
+
+    #[test]
+    fn a_governed_document_carries_a_ticket_and_an_ordinary_one_may() {
+        let governed = policy(ApprovalMode::Governed);
+        let mut d = doc(&governed);
+        d.ticket = None;
+        assert!(matches!(
+            check_binding(&d, &expected(), &governed),
+            Err(AuthorizationRefusal::DocumentInvalid(_))
+        ));
+        for bad in ["", " CHG-1", "CHG\n1"] {
+            d.ticket = Some(bad.to_string());
+            assert!(
+                check_binding(&d, &expected(), &governed).is_err(),
+                "{bad:?}"
+            );
+        }
+        d.ticket = Some("x".repeat(MAX_TICKET_LEN + 1));
+        assert!(check_binding(&d, &expected(), &governed).is_err());
+        d.ticket = Some("CHG-4711".to_string());
+        assert_eq!(check_binding(&d, &expected(), &governed), Ok(()));
+
+        let ordinary = policy(ApprovalMode::Ordinary);
+        let mut d = doc(&ordinary);
+        d.ticket = None;
+        assert_eq!(check_binding(&d, &expected(), &ordinary), Ok(()));
+        d.ticket = Some("CHG-1".to_string());
+        assert_eq!(check_binding(&d, &expected(), &ordinary), Ok(()));
     }
 
     #[test]

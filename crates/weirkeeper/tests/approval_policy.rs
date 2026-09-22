@@ -41,25 +41,32 @@ const PLAN_BYTES: &str = "apiVersion: logweir.dev/v1alpha1\nkind: RestorePlan\nt
 const PLAN_HASH: &str = "sha256:742778e4f9dc02eced0b9d0b9dc35f3a3ab5dbef5a559375b3aec76e73006091";
 const RESTORE_UID: &str = "restore-uid-1";
 
-const CONSOLE_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEASz9/MJSvCOl4EX5VeUj14ZG3ZMrUBJNcOc8B/UKcKSg=\n-----END PUBLIC KEY-----\n";
-const CONSOLE_KEY_ID: &str = "b374de19128351f9efe05a18b057ddf7fff085e4e36173ab4dc93ecf954868cf";
-const BOB_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAft4R9Sg5WWc2L0pwch6/nRiUCDBoX690uVzHz9p121M=\n-----END PUBLIC KEY-----\n";
-const BOB_KEY_ID: &str = "8c6653a5c05dded175b7d260a033eaaf92952ab29d0fbc5f5d773f6167c2cf27";
-const ALICE_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAJKep4iZcqLgYEYP+56Kkr6KG5j+7uvEOs6ssNp4bG6M=\n-----END PUBLIC KEY-----\n";
-const ALICE_KEY_ID: &str = "19d34f58b6a66d6cb1b2eee996bf19a6978be6d1d502b9bc0868287818a34681";
+const CONSOLE_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEATMlQktU/lSpsDha1ZlgAW5JtnXqOLAQgQAZI8IFBlRI=\n-----END PUBLIC KEY-----\n";
+const CONSOLE_KEY_ID: &str = "85551a95543b7e54ffd8a7ce17560f6f850c993b7a35e5ab23987f04c946ebd8";
+const BOB_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEALdRlkK//9cPdrQEiKldQ80TZ6nvN/KwbaBVFyG2Xjq0=\n-----END PUBLIC KEY-----\n";
+const BOB_KEY_ID: &str = "74dd2b54804995b672352b96d7d3ab2a96704a5d0d0aa8abed0b8bae5d87d6af";
+const ALICE_PEM: &str = "-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEAwLTK/p5eg/WiGxgKGAlztjerEHGiFR8Fbd/6WSYv4BI=\n-----END PUBLIC KEY-----\n";
+const ALICE_KEY_ID: &str = "ce550e00f743e956380078ce7dfc27c9a8e19602c467725d051792ce260fc37b";
 
 const ORDINARY_DOC: &str = r#"{"formatVersion":"2.0.0","kind":"RestoreAuthorization","authorizationMode":"Ordinary","subject":{"apiVersion":"logweir.dev/v1alpha1","kind":"Restore","namespace":"logweir-t16","name":"r1","uid":"restore-uid-1"},"planHash":"sha256:742778e4f9dc02eced0b9d0b9dc35f3a3ab5dbef5a559375b3aec76e73006091","requester":{"issuer":"https://idp.example","subject":"alice"},"policy":{"name":"team-ordinary","digest":"sha256:fcfaf96141cda0c8ec9f856520d6f2989d1eccef73b307dcfdabbc6ac67490a0"},"issuedAt":"2026-09-09T12:55:00Z","expiresAt":"2026-09-09T13:10:00Z"}"#;
 const ORDINARY_CONSOLE_SIG: &str =
-    "RsACLF7x8Bkdf4cRMUKNatU++1aJzk5v1eeHyPUKJWSgmL7gMWLWOhOjY6GDAI/KtFmAve9pxo3K7oyaUTGFDQ==";
+    "GBZ9x6CrkCziVApvX5wZYpFqh9RFr61WATjPOIZ3LIxUpK6n5z9F3I+l2/iz1BOu+9FuSz+gGp6cCSkLBYejAA==";
 const ORDINARY_BOB_SIG: &str =
-    "C68c1mVonK/AOmutQ64nrHyztJoXncx5O1Cj7L7lyFfDsmQRa15MHfAdurY5y2Xz0+nZjiYD8ClM1CZfcxSIAg==";
-const GOVERNED_DOC: &str = r#"{"formatVersion":"2.0.0","kind":"RestoreAuthorization","authorizationMode":"Governed","subject":{"apiVersion":"logweir.dev/v1alpha1","kind":"Restore","namespace":"logweir-t16","name":"r1","uid":"restore-uid-1"},"planHash":"sha256:742778e4f9dc02eced0b9d0b9dc35f3a3ab5dbef5a559375b3aec76e73006091","requester":{"issuer":"https://idp.example","subject":"alice"},"policy":{"name":"prod-governed","digest":"sha256:ff926e0fc3a20288911e296cc5dbd81f2ccced1dbc1fb03e265647c56eb9f0fa"},"issuedAt":"2026-09-09T12:00:00Z","expiresAt":"2026-09-10T12:00:00Z"}"#;
+    "yPutrFQGtzyTBp6nXQK4xrG8jxA9aobEYtNmVRxRj4U4JU6wXksNd1WYndXA29FarAZKQMVUn+i6On6a6l2dAg==";
+const GOVERNED_DOC: &str = r#"{"formatVersion":"2.0.0","kind":"RestoreAuthorization","authorizationMode":"Governed","subject":{"apiVersion":"logweir.dev/v1alpha1","kind":"Restore","namespace":"logweir-t16","name":"r1","uid":"restore-uid-1"},"planHash":"sha256:742778e4f9dc02eced0b9d0b9dc35f3a3ab5dbef5a559375b3aec76e73006091","requester":{"issuer":"https://idp.example","subject":"alice"},"policy":{"name":"prod-governed","digest":"sha256:ff926e0fc3a20288911e296cc5dbd81f2ccced1dbc1fb03e265647c56eb9f0fa"},"issuedAt":"2026-09-09T12:00:00Z","expiresAt":"2026-09-10T12:00:00Z","ticket":"CHG-4711"}"#;
 const GOVERNED_CONSOLE_SIG: &str =
-    "ohP3+Gh1FgZ/gQayinMXDdrDNXlrNWVKH+addbYeL4Xpa5AddwnF+NtZv/1itbUiqAwN6IdnkYFfAOR+zYAMBw==";
+    "ZC1ZnoTGVQsyl4dHbnDCvMnFzR5MDembbSuHSADoJUwfsv+KclBg9/rWSOJ7Nlp0A/GdQW72IsdXe906EILjBQ==";
 const GOVERNED_BOB_SIG: &str =
-    "L/6okpVejb5mWTFKcxdYTUpQSQP3opfkay6pz3mGwHICT/9r8v3Rz7hncFfb25BT+CfYSCae7I1ZaqlcvZc9CQ==";
+    "K+NjfkRjij4qCgxJrtwFso3SxSsulxUCMXA8oAIVw0ZdTibbkXBc1ptlwRBoVt0Gm02soIvrW8gsxgsPsr//Cw==";
 const GOVERNED_ALICE_SIG: &str =
-    "6nJiGolto4/P50zERtP+Hu2GqxA+IEfDmQby8JfWhLf3GRVm0Jzw8wwR7VjCKCQOips1KaZ/a0wwsa0Mec9+AA==";
+    "iP/fjpY83nqZbA3Ev+iEOJe1hR/V6GzpDUDXwM6WMzUUqFfm+JLe+VVhNT5C4ep7V58YevfYsvONAQAyB4JVCA==";
+/// The governed document WITHOUT a change ticket, signed by the console and
+/// bob: D0 requires a ticket under Governed, so it never verifies.
+const GOVERNED_NO_TICKET_DOC: &str = r#"{"formatVersion":"2.0.0","kind":"RestoreAuthorization","authorizationMode":"Governed","subject":{"apiVersion":"logweir.dev/v1alpha1","kind":"Restore","namespace":"logweir-t16","name":"r1","uid":"restore-uid-1"},"planHash":"sha256:742778e4f9dc02eced0b9d0b9dc35f3a3ab5dbef5a559375b3aec76e73006091","requester":{"issuer":"https://idp.example","subject":"alice"},"policy":{"name":"prod-governed","digest":"sha256:ff926e0fc3a20288911e296cc5dbd81f2ccced1dbc1fb03e265647c56eb9f0fa"},"issuedAt":"2026-09-09T12:00:00Z","expiresAt":"2026-09-10T12:00:00Z"}"#;
+const GOVERNED_NO_TICKET_CONSOLE_SIG: &str =
+    "Ps2BhsZsi204f15hN5SNe31B5dTUU5glSSHPvxJ9ciGqzn9U+2ALeil6dcPxlU6F0lcP5ItLAx7phH+KEUQ9Dg==";
+const GOVERNED_NO_TICKET_BOB_SIG: &str =
+    "NQGZ4cQe6X4lDslOqflTDgIGfj6N7bWJEEyKgHWbT1auqM9eUrsD9g/eAraZQ6vmGvy8ot3gMQ19RxhdkvirBA==";
 
 /// The two v1 constants from `approval_controller.rs`: a genuine v1 approval
 /// by a `GovernedApproval` key, for the rows that present one under a binding.
@@ -454,6 +461,107 @@ fn a_revoked_console_key_confirms_nothing() {
     revoked.revocation_effective_from = Some(at("2026-09-01T00:00:00Z"));
     revoked.revocation_reason = Some(RevocationReason::KeyCompromise);
     assert_eq!(reason(ordinary(vec![revoked])), "KeyRevoked");
+}
+
+/// **A withdrawn GOVERNED APPROVER key authorises nothing new** (review M2):
+/// retired, revoked, or past its `notAfter`, bob's countersignature over a
+/// valid governed document leaves the Approval unverified, each with its own
+/// reason. The control is the same signatures under bob's active key.
+///
+/// KILLS: "skip `may_sign_new_for` for the GovernedApproval usage".
+#[test]
+fn a_withdrawn_approver_key_authorises_no_governed_request() {
+    let signatures = [
+        (CONSOLE_KEY_ID, GOVERNED_CONSOLE_SIG),
+        (BOB_KEY_ID, GOVERNED_BOB_SIG),
+    ];
+    assert_eq!(
+        reason(governed(&signatures, vec![console(), bob()])),
+        "Verified",
+        "the control: bob's active key verifies"
+    );
+
+    let mut retired = bob();
+    retired.state = KeyState::Retired;
+    retired.retired_at = Some(at("2026-09-01T00:00:00Z"));
+    assert_eq!(
+        reason(governed(&signatures, vec![console(), retired])),
+        "KeyRetired"
+    );
+
+    let mut revoked = bob();
+    revoked.state = KeyState::Revoked;
+    revoked.revoked_at = Some(at("2026-09-01T00:00:00Z"));
+    revoked.revocation_effective_from = Some(at("2026-09-01T00:00:00Z"));
+    revoked.revocation_reason = Some(RevocationReason::KeyCompromise);
+    assert_eq!(
+        reason(governed(&signatures, vec![console(), revoked])),
+        "KeyRevoked"
+    );
+
+    let mut expired = bob();
+    expired.not_after = at("2026-09-09T12:30:00Z");
+    assert_eq!(
+        reason(governed(&signatures, vec![console(), expired])),
+        "KeyIdExpired"
+    );
+}
+
+/// **Separation fails closed on a principal that cannot be compared**
+/// (review M4). bob's key recorded as `bob@example.com` — the "email" the
+/// TrustPolicy description once invited — could be the requester under
+/// another spelling, so it establishes nothing: `SelfApprovalRefused`, with
+/// the form named. The control is the same key as `https://idp.example#bob`.
+///
+/// KILLS: "compare the strings and call any difference separation".
+#[test]
+fn an_approver_principal_not_in_issuer_subject_form_is_refused() {
+    let signatures = [
+        (CONSOLE_KEY_ID, GOVERNED_CONSOLE_SIG),
+        (BOB_KEY_ID, GOVERNED_BOB_SIG),
+    ];
+    for other_form in ["alice@example.com", "bob", "install:sha256:0f"] {
+        let mut email = bob();
+        email.principal.id = other_form.to_string();
+        let refused = governed(&signatures, vec![console(), email]);
+        assert_eq!(
+            reason(refused.clone()),
+            "SelfApprovalRefused",
+            "{other_form}"
+        );
+        let message = refused.err().map(|r| r.to_string()).unwrap_or_default();
+        assert!(message.contains("<issuer>#<subject>"), "{message}");
+    }
+    assert_eq!(
+        reason(governed(&signatures, vec![console(), bob()])),
+        "Verified"
+    );
+}
+
+/// **Governed requires a change ticket** (D0: "ticket (required in Governed,
+/// optional in Ordinary)"): the same governed document without one, signed by
+/// the console AND a distinct approver, does not verify. The Ordinary fixture
+/// carries none and verifies (`an_ordinary_confirmation_verifies_...`).
+#[test]
+fn a_governed_document_without_a_ticket_authorises_nothing() {
+    let refused = v2(
+        GOVERNED_NO_TICKET_DOC,
+        &[
+            (CONSOLE_KEY_ID, GOVERNED_NO_TICKET_CONSOLE_SIG),
+            (BOB_KEY_ID, GOVERNED_NO_TICKET_BOB_SIG),
+        ],
+        vec![console(), bob()],
+        "prod-governed",
+        now(),
+        &expected(),
+    );
+    assert_eq!(reason(refused.clone()), "AuthorizationDocumentInvalid");
+    let message = refused.err().map(|r| r.to_string()).unwrap_or_default();
+    assert!(message.contains("ticket"), "{message}");
+    assert!(
+        GOVERNED_DOC.contains(r#""ticket":"CHG-4711""#),
+        "the control carries one"
+    );
 }
 
 // ---------------------------------------------------------------------------

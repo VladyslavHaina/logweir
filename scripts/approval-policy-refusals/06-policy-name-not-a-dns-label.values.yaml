@@ -1,0 +1,5 @@
+# expect: name
+approvalPolicy:
+  policies:
+    - {name: Prod_Governed, mode: Governed}
+  namespaces: {}
