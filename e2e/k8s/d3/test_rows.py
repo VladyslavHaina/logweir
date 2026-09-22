@@ -1686,6 +1686,428 @@ def test_a_manual_backup_is_a_member_only_when_it_references_the_schedule() -> N
         and d3.RECOVERY_SCHEDULE != "keeps-running")
 
 
+# --- D3 §15 L6: a rehearsal executes end to end (PLAT-14.3) ------------------
+#
+# EVERY PREDICATE THE `rehearsal` PHASE DECIDES FROM, TWICE: once over the shape
+# a correct build publishes, and once over a PLANTED-WRONG shape that must be
+# REFUSED. The wrong shapes are not invented — each is a state the product could
+# actually reach and that the review's §4 names as forbidden: a standing Restore
+# that still carries `approvalRef`, a seven-member bundle, a Job env carrying a
+# per-run approval digest, a scorecard naming a person, a schedule that recorded
+# no pass, an owned topic that survived teardown, an unrelated topic that did
+# not, a second Restore during an occupied slot, and a Job for the arm that was
+# refused.
+
+L6_SCHEDULE = "l6-rehearsal"
+L6_SLOT = "20260921-030000"
+L6_UID = "3f2a91c7-1d2e-4f00-9a11-77c0ffee1234"
+L6_PREFIX = "rehearsal-3f2a91c7-"
+L6_RESTORE_NAME = f"logweir-rehearsal-{L6_SCHEDULE}-{L6_SLOT}"
+L6_APPROVAL = f"{L6_SCHEDULE}-standing"
+L6_RUN = "01JBQ8Z2M3N4P5Q6R7S8T9UVWX"
+
+L6_VERIFIED_APPROVAL = {
+    "metadata": {"name": L6_APPROVAL},
+    "status": {
+        "matchedKeyId": "9c" * 32,
+        "verifiedSubjectRef": {"apiVersion": "logweir.dev/v1alpha1",
+                               "kind": "RehearsalSchedule", "name": L6_SCHEDULE,
+                               "namespace": "lw-hr9", "uid": L6_UID},
+        "conditions": [{"type": "Verified", "status": "True", "reason": "Verified"}],
+    },
+}
+# The same Approval, verified for a schedule that was DELETED AND RECREATED
+# under the same name: same name, different uid.
+L6_APPROVAL_FOR_A_RECREATED_SCHEDULE = json.loads(json.dumps(L6_VERIFIED_APPROVAL))
+L6_APPROVAL_FOR_A_RECREATED_SCHEDULE["status"]["verifiedSubjectRef"]["uid"] = (
+    "00000000-dead-beef-0000-000000000000")
+
+L6_STANDING_RESTORE = {
+    "metadata": {
+        "name": L6_RESTORE_NAME,
+        "labels": {"logweir.dev/rehearsal-schedule": L6_SCHEDULE,
+                   "logweir.dev/rehearsal-slot": L6_SLOT,
+                   "logweir.dev/rehearsal-target": "rehearsal-target"},
+    },
+    "spec": {"authorization": {"kind": "Standing",
+                               "approvalRef": {"name": L6_APPROVAL},
+                               "rehearsalScheduleRef": {"name": L6_SCHEDULE}}},
+    "status": {
+        "phase": "Succeeded", "reason": "Completed", "outcome": "pass",
+        "jobRef": {"name": L6_RESTORE_NAME},
+        "evidence": {"scorecardKey": f"logweir/drills/{L6_RUN}.json",
+                     "offsetReportKey": f"logweir/drills/{L6_RUN}.offsets.json",
+                     "verification": {"result": "Valid"}},
+    },
+}
+# PLANTED: the pre-14.3b shape, where the standing document sat BESIDE a per-run
+# approval slot instead of replacing it.
+L6_RESTORE_WITH_APPROVALREF = json.loads(json.dumps(L6_STANDING_RESTORE))
+L6_RESTORE_WITH_APPROVALREF["spec"]["approvalRef"] = {"name": L6_APPROVAL}
+# PLANTED: what an OLDER controller writes for a standing-authorized Restore —
+# the documented fail-closed rollback, and the defect L6 reproduces.
+L6_RESTORE_HELD_AT_APPROVALNOTRECEIVED = json.loads(json.dumps(L6_STANDING_RESTORE))
+L6_RESTORE_HELD_AT_APPROVALNOTRECEIVED["status"] = {
+    "phase": "Refused", "reason": "ApprovalNotReceived"}
+
+L6_ARGV = [
+    "restore", "run", "--execution-contract-version", "2.0.0",
+    "--spec", "/plan/spec.yaml",
+    "--standing-authorization", "/approval/standing-authorization.json",
+    "--authorization-keys", "/approval/authorization-keys.json",
+    "--approver-key", "/approval/approver.pub.pem",
+    "--allowed-clusters", "/approval/allowed-clusters.json",
+    "--signing-key", "/signing/signing.pem",
+    "--out", "/work/scorecard.json",
+    "--offset-report-out", "/work/offsets.json",
+    "--triggered-by", f"rehearsal/{L6_SCHEDULE}/{L6_SLOT}",
+]
+L6_ENV = {
+    "LOGWEIR_EXECUTION_CONTRACT_VERSION": "2.0.0",
+    "LOGWEIR_EXECUTION_SUBJECT_KIND": "Restore",
+    "LOGWEIR_EXECUTION_SUBJECT_NAME": L6_RESTORE_NAME,
+    "LOGWEIR_EXECUTION_APPROVAL_NAME": L6_APPROVAL,
+    "LOGWEIR_EXECUTION_APPROVAL_UID": "11111111-2222-3333-4444-555555555555",
+    "LOGWEIR_EXECUTION_PLAN_SHA256": "sha256:" + "ab" * 32,
+    "LOGWEIR_EXECUTION_AUTHORIZATION_KIND": "standing",
+    "LOGWEIR_EXECUTION_REHEARSAL_SCHEDULE_UID": L6_UID,
+    "LOGWEIR_EXECUTION_AUTHORIZATION_SHA256": "sha256:" + "cd" * 32,
+}
+L6_BUNDLE = set(d3.STANDING_BUNDLE_KEYS)
+# PLANTED: D3 W7's placeholder shape — the standing envelope written into the
+# per-run `approval.json` slot, so the bundle carries SEVEN members.
+L6_BUNDLE_OF_SEVEN = L6_BUNDLE | {"approval.json", "approval.sig"}
+# PLANTED: the env of a standing run that still pins the per-run digests.
+L6_ENV_WITH_THE_APPROVAL_SHA = dict(L6_ENV)
+L6_ENV_WITH_THE_APPROVAL_SHA["LOGWEIR_EXECUTION_APPROVAL_SHA256"] = "sha256:" + "ef" * 32
+
+L6_SCORECARD = {
+    "format_version": "1.0.0", "run_id": L6_RUN, "outcome": "pass",
+    "triggered_by": f"rehearsal/{L6_SCHEDULE}/{L6_SLOT}",
+    "approval": {"approver": f"standing-authorization/{L6_SCHEDULE}", "ticket": "",
+                 "plan_hash": "sha256:" + "ab" * 32, "key_id": "9c" * 32,
+                 "self_attested": False},
+}
+# PLANTED: a scorecard that names a PERSON. v1.0.0 of the standing document
+# carries no approver at all, so any human name here is invented — and it tells
+# the reader a person approved THIS run when what a person approved was a
+# schedule.
+L6_SCORECARD_APPROVED_BY_A_PERSON = json.loads(json.dumps(L6_SCORECARD))
+L6_SCORECARD_APPROVED_BY_A_PERSON["approval"]["approver"] = "ada@example.invalid"
+L6_SCORECARD_APPROVED_BY_A_PERSON["approval"]["ticket"] = "CHG-42"
+
+L6_SCHEDULE_PASSED = {
+    "status": {
+        "lastSucceeded": {"restoreRef": {"name": L6_RESTORE_NAME},
+                          "at": "2026-09-21T03:04:05Z", "pointId": "lwp1-" + "a" * 32,
+                          "evidence": "Valid", "rtoSeconds": 137},
+        "lastScheduledSlot": L6_SLOT,
+        "conditions": [{"type": "RehearsalHealthy", "status": "True", "reason": "Passed"}],
+    }
+}
+# PLANTED: the schedule that ran and recorded NOTHING — `RehearsalHealthy` still
+# says `NoResult` and `activeRestoreRef` was never released, which is what a
+# reservation that only ever writes and never clears leaves behind.
+L6_SCHEDULE_WITHOUT_LASTSUCCEEDED = {
+    "status": {
+        "activeRestoreRef": {"name": L6_RESTORE_NAME},
+        "lastScheduledSlot": L6_SLOT,
+        "conditions": [{"type": "RehearsalHealthy", "status": "Unknown",
+                        "reason": "NoResult"}],
+    }
+}
+
+L6_MAPPED = {f"{L6_PREFIX}orders"}
+L6_UNRELATED = "rehearsal-not-ours"
+L6_DURING = L6_MAPPED | {"logweir.scratch", L6_UNRELATED}
+L6_AFTER = {"logweir.scratch", L6_UNRELATED}
+# PLANTED: teardown left the topic it created behind.
+L6_AFTER_WITH_A_SURVIVING_OWNED_TOPIC = L6_AFTER | L6_MAPPED
+# PLANTED: teardown took a topic it did not create.
+L6_AFTER_WITH_THE_UNRELATED_TOPIC_DELETED = {"logweir.scratch"}
+
+L6_CONCURRENCY_SKIPPED = {
+    "status": {"lastSkipped": {"slot": "20260921-030100", "reason": "ConcurrencyBlocked"},
+               "activeRestoreRef": {"name": L6_RESTORE_NAME}}
+}
+L6_SECOND_RESTORE = f"logweir-rehearsal-{L6_SCHEDULE}-20260921-030100"
+
+L6_LEFTOVER_SKIPPED = {
+    "status": {"lastSkipped": {"slot": L6_SLOT, "reason": "LeftoverTopics"},
+               "cleanup": {"pendingTopics": [f"{L6_PREFIX}orders"],
+                           "since": "2026-09-21T03:00:00Z"}}
+}
+L6_GUARD_REFUSED_RESTORE = {
+    "metadata": {"name": L6_RESTORE_NAME},
+    "status": {"phase": "Refused", "reason": "GuardRefused", "exitReason": "GuardRefused"},
+}
+
+L6_REFUSED_SCHEDULE = {
+    "status": {"lastSkipped": {"slot": L6_SLOT, "reason": "AuthorizationInvalid"},
+               "conditions": [{"type": "RehearsalHealthy", "status": "False",
+                               "reason": "Failed"},
+                              {"type": "Authorized", "status": "False",
+                               "reason": "AuthorizationInvalid"}]}
+}
+# PLANTED: the state a build that never reconciles this kind AT ALL leaves —
+# nothing recorded, and therefore also zero Jobs. This is the shape that made
+# "zero Jobs" worthless as evidence, and the reason step 10's first clause
+# exists.
+L6_REFUSED_SCHEDULE_THAT_RECORDED_NOTHING = {"status": {"conditions": []}}
+
+
+def test_the_standing_approval_verdict_is_about_this_schedule_object() -> None:
+    row("L6 step 1: Verified=True with a matchedKeyId and this schedule's own uid",
+        all(d3.standing_approval_is_verified(L6_VERIFIED_APPROVAL, L6_UID).values()))
+    recreated = d3.standing_approval_is_verified(
+        L6_APPROVAL_FOR_A_RECREATED_SCHEDULE, L6_UID)
+    row("L6 step 1 refuses a verdict recorded for a DIFFERENT object of the same name",
+        not all(recreated.values())
+        and not recreated[
+            "status.verifiedSubjectRef.uid is this RehearsalSchedule's own uid"])
+    unverified = json.loads(json.dumps(L6_VERIFIED_APPROVAL))
+    unverified["status"]["conditions"] = [
+        {"type": "Verified", "status": "False", "reason": "SignatureInvalid"}]
+    row("L6 step 1 refuses an Approval object that exists but did not verify",
+        not all(d3.standing_approval_is_verified(unverified, L6_UID).values()))
+
+
+def test_a_standing_restore_carries_no_approval_ref_and_is_not_held() -> None:
+    row("L6 step 2: the labelled Restore carries spec.authorization and no approvalRef",
+        all(d3.restore_is_created_on_the_standing_authorization(
+            L6_STANDING_RESTORE, L6_SCHEDULE, L6_APPROVAL).values()))
+    beside = d3.restore_is_created_on_the_standing_authorization(
+        L6_RESTORE_WITH_APPROVALREF, L6_SCHEDULE, L6_APPROVAL)
+    row("L6 step 2 refuses a standing Restore that ALSO carries spec.approvalRef",
+        not all(beside.values()) and not beside["and it carries NO spec.approvalRef"])
+    held = d3.restore_is_created_on_the_standing_authorization(
+        L6_RESTORE_HELD_AT_APPROVALNOTRECEIVED, L6_SCHEDULE, L6_APPROVAL)
+    row("L6 step 2 refuses the pre-14.3b hold at ApprovalNotReceived — the defect itself",
+        not all(held.values())
+        and not held["status.reason is not ApprovalNotReceived"])
+    foreign = json.loads(json.dumps(L6_STANDING_RESTORE))
+    foreign["metadata"]["labels"]["logweir.dev/rehearsal-schedule"] = "someone-elses"
+    row("L6 step 2 refuses a Restore labelled for another schedule",
+        not all(d3.restore_is_created_on_the_standing_authorization(
+            foreign, L6_SCHEDULE, L6_APPROVAL).values()))
+
+
+def test_the_standing_job_mounts_five_members_and_no_per_run_approval() -> None:
+    row("L6 step 3: the argv, the five-member bundle and the standing env",
+        all(d3.the_job_carries_the_standing_mount(
+            L6_ARGV, L6_ENV, L6_BUNDLE, L6_SCHEDULE, L6_SLOT, L6_UID).values()))
+    seven = d3.the_job_carries_the_standing_mount(
+        L6_ARGV, L6_ENV, L6_BUNDLE_OF_SEVEN, L6_SCHEDULE, L6_SLOT, L6_UID)
+    row("L6 step 3 refuses a SEVEN-key bundle carrying approval.json/.sig",
+        not all(seven.values())
+        and not seven["the bundle ConfigMap has exactly the five standing members"]
+        and not seven["and neither approval.json nor approval.sig"])
+    digested = d3.the_job_carries_the_standing_mount(
+        L6_ARGV, L6_ENV_WITH_THE_APPROVAL_SHA, L6_BUNDLE, L6_SCHEDULE, L6_SLOT, L6_UID)
+    row("L6 step 3 refuses an env that still pins LOGWEIR_EXECUTION_APPROVAL_SHA256",
+        not all(digested.values()) and not digested["and neither approval sha env is set"])
+    with_approval = d3.the_job_carries_the_standing_mount(
+        L6_ARGV + ["--approval", "/approval/approval.json"], L6_ENV, L6_BUNDLE,
+        L6_SCHEDULE, L6_SLOT, L6_UID)
+    row("L6 step 3 refuses an argv that passes --approval beside the standing document",
+        not all(with_approval.values()) and not with_approval["argv carries NO --approval"])
+    wrong_trigger = d3.the_job_carries_the_standing_mount(
+        [a if a != f"rehearsal/{L6_SCHEDULE}/{L6_SLOT}" else f"approval/{L6_APPROVAL}"
+         for a in L6_ARGV], L6_ENV, L6_BUNDLE, L6_SCHEDULE, L6_SLOT, L6_UID)
+    row("L6 step 3 refuses --triggered-by naming an approval instead of the slot",
+        not all(wrong_trigger.values()))
+    wrong_uid = d3.the_job_carries_the_standing_mount(
+        L6_ARGV, {**L6_ENV, "LOGWEIR_EXECUTION_REHEARSAL_SCHEDULE_UID": ""},
+        L6_BUNDLE, L6_SCHEDULE, L6_SLOT, L6_UID)
+    row("L6 step 3 refuses a blank rehearsal-schedule UID in the execution contract",
+        not all(wrong_uid.values()))
+
+
+def test_the_scorecard_names_a_schedule_and_never_a_person() -> None:
+    row("L6 step 4: outcome pass, Valid, and the schedule in both signed fields",
+        all(d3.the_scorecard_names_the_schedule_and_the_slot(
+            L6_STANDING_RESTORE, L6_SCORECARD, L6_SCHEDULE, L6_SLOT).values()))
+    person = d3.the_scorecard_names_the_schedule_and_the_slot(
+        L6_STANDING_RESTORE, L6_SCORECARD_APPROVED_BY_A_PERSON, L6_SCHEDULE, L6_SLOT)
+    row("L6 step 4 refuses a scorecard whose approval.approver is a PERSON",
+        not all(person.values())
+        and not person["its approval.approver is standing-authorization/<schedule>"])
+    missing = d3.the_scorecard_names_the_schedule_and_the_slot(
+        L6_STANDING_RESTORE, {}, L6_SCHEDULE, L6_SLOT)
+    row("L6 step 4 refuses a run whose scorecard could not be fetched at all",
+        not all(missing.values())
+        and not missing["the signed scorecard was fetched from the evidence destination"])
+    not_valid = json.loads(json.dumps(L6_STANDING_RESTORE))
+    not_valid["status"]["evidence"]["verification"] = {"result": "NotAttempted"}
+    row("L6 step 4 refuses a rehearsal whose evidence was never verified",
+        not all(d3.the_scorecard_names_the_schedule_and_the_slot(
+            not_valid, L6_SCORECARD, L6_SCHEDULE, L6_SLOT).values()))
+
+
+def test_the_schedule_publishes_rehearsal_last_star() -> None:
+    row("L6 step 5: lastSucceeded, RehearsalHealthy=True/Passed, activeRestoreRef cleared",
+        all(d3.the_schedule_records_the_pass(
+            L6_SCHEDULE_PASSED, L6_RESTORE_NAME).values()))
+    nothing = d3.the_schedule_records_the_pass(
+        L6_SCHEDULE_WITHOUT_LASTSUCCEEDED, L6_RESTORE_NAME)
+    row("L6 step 5 refuses a schedule that recorded no lastSucceeded and never released "
+        "activeRestoreRef",
+        not all(nothing.values())
+        and not nothing["status.lastSucceeded.restoreRef names the rehearsal that ran"]
+        and not nothing["and status.activeRestoreRef is cleared"])
+    no_rto = json.loads(json.dumps(L6_SCHEDULE_PASSED))
+    del no_rto["status"]["lastSucceeded"]["rtoSeconds"]
+    row("L6 step 5 refuses a pass with no measured RTO — the objective it exists to measure",
+        not all(d3.the_schedule_records_the_pass(no_rto, L6_RESTORE_NAME).values()))
+
+
+def test_the_rehearsal_owns_its_topics_and_touches_no_others() -> None:
+    row("L6 step 6: the mapped topics during, none after, and the unrelated one survives",
+        all(d3.the_target_holds_exactly_the_mapped_topics(
+            L6_DURING, L6_AFTER, L6_MAPPED, L6_PREFIX, L6_UNRELATED).values()))
+    survived = d3.the_target_holds_exactly_the_mapped_topics(
+        L6_DURING, L6_AFTER_WITH_A_SURVIVING_OWNED_TOPIC, L6_MAPPED, L6_PREFIX, L6_UNRELATED)
+    row("L6 step 6 refuses an OWNED topic that teardown left behind",
+        not all(survived.values()) and not survived["after teardown it holds none of them"])
+    eaten = d3.the_target_holds_exactly_the_mapped_topics(
+        L6_DURING, L6_AFTER_WITH_THE_UNRELATED_TOPIC_DELETED, L6_MAPPED, L6_PREFIX,
+        L6_UNRELATED)
+    row("L6 step 6 refuses an UNRELATED topic that teardown deleted",
+        not all(eaten.values())
+        and not eaten["and it still exists afterwards — teardown never touched it"])
+    extra = d3.the_target_holds_exactly_the_mapped_topics(
+        L6_DURING | {f"{L6_PREFIX}payments"}, L6_AFTER, L6_MAPPED, L6_PREFIX, L6_UNRELATED)
+    row("L6 step 6 refuses a topic under the rendered prefix that the plan never mapped",
+        not all(extra.values())
+        and not extra["and no other topic under this schedule's rendered prefix"])
+
+
+def test_a_second_slot_during_a_rehearsal_creates_no_restore() -> None:
+    row("L6 step 7: ConcurrencyBlocked recorded, and still exactly one Restore",
+        all(d3.the_second_slot_is_concurrency_blocked(
+            L6_CONCURRENCY_SKIPPED, [L6_RESTORE_NAME], L6_RESTORE_NAME).values()))
+    second = d3.the_second_slot_is_concurrency_blocked(
+        L6_CONCURRENCY_SKIPPED, [L6_RESTORE_NAME, L6_SECOND_RESTORE], L6_RESTORE_NAME)
+    row("L6 step 7 refuses a SECOND Restore created during the occupied slot",
+        not all(second.values())
+        and not second["and the second slot created no Restore"])
+    other_reason = json.loads(json.dumps(L6_CONCURRENCY_SKIPPED))
+    other_reason["status"]["lastSkipped"]["reason"] = "TargetBusy"
+    row("L6 step 7 refuses a skip recorded under a different reason",
+        not all(d3.the_second_slot_is_concurrency_blocked(
+            other_reason, [L6_RESTORE_NAME], L6_RESTORE_NAME).values()))
+    silent = d3.the_second_slot_is_concurrency_blocked(
+        {"status": {}}, [L6_RESTORE_NAME], L6_RESTORE_NAME)
+    row("L6 step 7 refuses a schedule that skipped silently — the control needs the reason",
+        not all(silent.values()))
+
+
+def test_the_leftover_guard_refuses_and_never_adopts_the_topic() -> None:
+    row("L6 step 8, controller arm: LeftoverTopics with no Restore, topic untouched",
+        all(d3.the_leftover_guard_refuses_and_keeps_the_topic(
+            L6_LEFTOVER_SKIPPED, None, f"{L6_PREFIX}orders",
+            {f"{L6_PREFIX}orders", "logweir.scratch"}).values()))
+    row("L6 step 8, runner arm: the Restore is refused with GuardRefused, topic untouched",
+        all(d3.the_leftover_guard_refuses_and_keeps_the_topic(
+            {"status": {}}, L6_GUARD_REFUSED_RESTORE, f"{L6_PREFIX}orders",
+            {f"{L6_PREFIX}orders", "logweir.scratch"}).values()))
+    adopted = d3.the_leftover_guard_refuses_and_keeps_the_topic(
+        {"status": {}},
+        {"metadata": {"name": L6_RESTORE_NAME},
+         "status": {"phase": "Succeeded", "reason": "Completed"}},
+        f"{L6_PREFIX}orders", {"logweir.scratch"})
+    row("L6 step 8 refuses a rehearsal that ADOPTED the pre-created name and tore it down",
+        not all(adopted.values())
+        and not adopted["no rehearsal succeeded against the pre-created name"]
+        and not adopted["and the pre-created topic is untouched — it still exists"])
+    silent = d3.the_leftover_guard_refuses_and_keeps_the_topic(
+        {"status": {}}, None, f"{L6_PREFIX}orders",
+        {f"{L6_PREFIX}orders", "logweir.scratch"})
+    row("L6 step 8 refuses a slot that neither ran nor recorded a refusal",
+        not all(silent.values()))
+
+
+def test_the_rehearsal_evidence_outlives_its_job() -> None:
+    fetched = {"scorecard": True, "sidecar": True, "offset report": True,
+               "teardown attestation": True}
+    row("L6 step 9: the Job is collected and all four signed objects are still fetchable",
+        all(d3.the_evidence_outlives_the_job(True, fetched).values()))
+    gone = d3.the_evidence_outlives_the_job(True, {**fetched, "teardown attestation": False})
+    row("L6 step 9 refuses a teardown attestation that is no longer fetchable",
+        not all(gone.values()))
+    still_there = d3.the_evidence_outlives_the_job(False, fetched)
+    row("L6 step 9 refuses the claim while the Job is still there — nothing was retained yet",
+        not all(still_there.values())
+        and not still_there["the runner Job is gone after its TTL"])
+
+
+def test_the_refused_arm_requires_the_refusal_and_not_merely_silence() -> None:
+    row("L6 step 10: a named refusal, no passing health, zero Jobs, zero bundles",
+        all(d3.the_refused_arm_reaches_no_job(
+            L6_REFUSED_SCHEDULE, [], [], []).values()))
+    silent = d3.the_refused_arm_reaches_no_job(
+        L6_REFUSED_SCHEDULE_THAT_RECORDED_NOTHING, [], [], [])
+    row("L6 step 10 REFUSES silence: zero Jobs is also what a build that never reconciles "
+        "this kind leaves behind",
+        not all(silent.values())
+        and not silent["the refusal is RECORDED and NAMED — AuthorizationInvalid/Expired on "
+                       "the schedule, or StandingAuthorizationRefused on its Restore"])
+    with_job = d3.the_refused_arm_reaches_no_job(
+        L6_REFUSED_SCHEDULE, [], [f"logweir-rehearsal-{L6_SCHEDULE}-{L6_SLOT}"], [])
+    row("L6 step 10 refuses a runner Job created for the arm that was refused",
+        not all(with_job.values()) and not with_job["zero runner Jobs exist for it"])
+    with_bundle = d3.the_refused_arm_reaches_no_job(
+        L6_REFUSED_SCHEDULE, [], [], [f"{L6_RESTORE_NAME}-approval-bundle"])
+    row("L6 step 10 refuses an approval-bundle ConfigMap written for the refused arm",
+        not all(with_bundle.values()))
+    reconciler_side = d3.the_refused_arm_reaches_no_job(
+        {"status": {"conditions": []}},
+        [{"metadata": {"name": L6_RESTORE_NAME},
+          "status": {"phase": "Refused", "reason": "StandingAuthorizationRefused"}}],
+        [], [])
+    row("L6 step 10 accepts the reconciler-side refusal, StandingAuthorizationRefused",
+        all(reconciler_side.values()))
+    healthy = d3.the_refused_arm_reaches_no_job(
+        {"status": {"lastSkipped": {"reason": "AuthorizationInvalid"},
+                    "conditions": [{"type": "RehearsalHealthy", "status": "True",
+                                    "reason": "Passed"}]}}, [], [], [])
+    row("L6 step 10 refuses an arm that claims a passing rehearsal while refusing its slots",
+        not all(healthy.values()))
+
+
+def test_the_rendered_prefix_is_the_arithmetic_the_signed_scope_carries() -> None:
+    """The harness's ONE copy of D3 §4.4's `<prefix><uid[..8]>-`.
+
+    The signed scope carries the RENDERED value, so a prefix computed
+    differently here would mint a document the controller refuses for a reason
+    that is the harness's and not the product's — and the row above it would
+    then be about the harness.
+    """
+    row("the rendered prefix is <topicPrefix><schedule-uid[..8]>-",
+        d3.rendered_prefix(L6_UID) == L6_PREFIX
+        and d3.mapped_topic(L6_UID, "orders") == f"{L6_PREFIX}orders")
+    row("two schedules never render the same prefix, which is what makes teardown scopable",
+        d3.rendered_prefix(L6_UID) != d3.rendered_prefix("00000000-dead-beef-0000-0000"))
+
+
+def test_the_five_standing_bundle_members_are_the_controllers_own_names() -> None:
+    """A fixture two sides must agree on, read from the side that writes it.
+
+    `STANDING_BUNDLE_KEYS` is the harness's copy of
+    `controllers/restore.rs`'s five member names. It is pinned here as a SET
+    and asserted against the strings that file defines, so a rename on the
+    product side turns into a failing row rather than a bundle assertion that
+    quietly compares nothing.
+    """
+    source = (pathlib.Path(__file__).resolve().parents[3]
+              / "crates/weirkeeper/src/controllers/restore.rs").read_text()
+    for member in sorted(d3.STANDING_BUNDLE_KEYS):
+        row(f"the controller defines the bundle member `{member}`",
+            f'"{member}"' in source)
+    row("and the harness expects exactly five of them",
+        len(d3.STANDING_BUNDLE_KEYS) == 5)
+
+
 def test_zz_every_row_in_this_file_passed() -> None:
     """The file's own gate, for `python3 -m pytest e2e/k8s/d3`.
 

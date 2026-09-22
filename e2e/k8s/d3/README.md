@@ -55,6 +55,8 @@ python3 e2e/k8s/d3/d3_live.py notify           # PLAT-14.2: staleness, dedup, tr
 python3 e2e/k8s/d3/d3_live.py protection-cases # PLAT-14.2: recovery, unavailable archive, scope
 python3 e2e/k8s/d3/d3_live.py protection-verdicts  # PLAT-14.2: PointFactsUnread, a refused
                                                #   signature, D3 §3.3's resolve column
+python3 e2e/k8s/d3/d3_live.py rehearsal       # D3 §15 L6 / PLAT-14.3: a rehearsal
+                                               #   end to end. CLUSTER LOCK
 python3 e2e/k8s/d3/d3_live.py control          # the negative control — it MUST fail
 python3 e2e/k8s/d3/d3_live.py report
 python3 e2e/k8s/d3/d3_live.py cleanup          # CLUSTER LOCK (deletes the TrustPolicy)
@@ -78,6 +80,30 @@ DIFFERENT schedules (`keeps-running`, `recovery-runs`) so neither selects the ot
 `notify` also ages its point past the objective, because `catalog` deletes every dest-a CR to
 prove reconstruction and the `Stale` arm had nothing to be stale about; that makes the phase
 take about six minutes.
+
+`rehearsal` is D3 §15's **L6** and PLAT-14.3's live half: ten steps as ten rows, every
+clause named after `claude/plat14-3b.review.md` §4's own words. It needs `catalog` (it
+restores a point out of dest-a and writes the rehearsal's evidence back into it) and
+`trust` — an ORDERING, because `trust`'s last row leaves the lab signing key **Revoked**
+on this namespace's `TrustPolicy` and a rehearsal that inherited that would fail at the
+point's evidence verdict for a reason belonging to the previous phase; `rehearsal_trust`
+deletes and recreates the object (the CRD's `spec.keys` is append-only with no
+Revoked->Active transition), which is only correct after that phase has run. It mints the
+standing authorization with the SHIPPED signer, `logweir drill approve --standing`
+(`docs/kubernetes.md` §7g) — never in python — so `LOGWEIR_BIN` or a built
+`target/release/logweir` is required. It creates and deletes topics under its own
+`rehearsal-` names on the lab's scratch broker, including the unrelated
+`rehearsal-not-ours` D3 §15 L6 names, and changes nothing else about the shared release.
+
+**Steps 2-9 are a chain, and a step whose input never existed is recorded `NOT-REACHED`.**
+That is a third verdict on purpose: on a controller image that predates PLAT-14.3b the
+standing-authorized `Restore` holds terminally at `ApprovalNotReceived` — the documented
+fail-closed rollback for an older controller — so step 2 FAILS, which is that defect
+reproduced live, and steps 3-9 have no Job, no scorecard and no mapped topic to read.
+Recording those as passes would credit the product for assertions that never ran and as
+failures would blame it for a chain the first link broke. Step 10, the negative control, is
+independent of the chain and runs either way; it REQUIRES the refusal it records, because
+zero Jobs is also what a build that never reconciles this kind at all leaves behind.
 
 `protection-verdicts` needs only `setup`: it creates its own three policies, its own two
 catalogs, its own legacy destination and every Backup it measures, because its rows assert
@@ -108,9 +134,10 @@ which is only meaningful while the plan's objects are still there). Run
 
 ## The cluster lock
 
-`trust`, `signed-at-probe` and `cleanup` touch one cluster-scoped object (the
-`TrustPolicy`, which binds only this run's namespace). Take the orchestration's
-lock around exactly those phases and release it immediately afterwards. Every
+`trust`, `signed-at-probe`, `rehearsal` and `cleanup` touch one cluster-scoped
+object (the `TrustPolicy`, which binds only this run's namespace). Take the
+orchestration's lock around exactly those phases and release it immediately
+afterwards. Every
 other phase is namespaced and needs no lock, and **no phase changes the shared
 release** — not its image, not its env, not its CRDs. `packaging` reads the
 controller's `LOGWEIR_RUNNER_IMAGE`; it never writes it.
