@@ -810,6 +810,13 @@ class ScheduleWatch:
         return revisions
 
 
+#: How long case-c waits for `status.pendingBackupRef` to clear after the
+#: reservation was observed. The cycle takes ~1.5 s; sixty is forty times that,
+#: so a congested node is absorbed and a reservation that never clears still
+#: fails the case inside a minute.
+RESERVATION_CLEAR_SECONDS = 60
+
+
 def case_c() -> None:
     """A scheduled Backup under the SHIPPED role: the slot is reserved, exactly
     one Backup is created per slot, the reservation clears, and the identity is
@@ -856,9 +863,23 @@ def case_c() -> None:
             "no watched revision of the schedule carried status.pendingBackupRef; "
             f"{len(reservation)} revisions seen"
         )
+    # WAITED FOR, NOT READ ONCE. The reservation is written, the Backup is
+    # created, and the reservation is cleared by a LATER status write — about
+    # 1.5 s end to end on lab-refresh-7's build (reservation seen at +0.2 s,
+    # cleared at +1.4 s after it appeared). A single read taken the instant
+    # after the suspend patch lands inside that window and blamed the product
+    # for the harness's timing (lab-refresh-7, 03:40Z). It still FAILS when the
+    # reservation is never cleared: a `pendingBackupRef` still set at the
+    # deadline is exactly the defect this clause exists to catch.
+    clear_deadline = time.time() + RESERVATION_CLEAR_SECONDS
     cleared = get("backupschedule", name)["status"].get("pendingBackupRef")
+    while cleared and time.time() < clear_deadline:
+        time.sleep(0.5)
+        cleared = get("backupschedule", name)["status"].get("pendingBackupRef")
     if cleared:
-        raise RuntimeError(f"the reservation was never cleared: {cleared}")
+        raise RuntimeError(
+            f"the reservation was never cleared within {RESERVATION_CLEAR_SECONDS}s: {cleared}"
+        )
     # The reservation NAMES the Backup the very next revision creates, and the
     # slot it reserves is the slot that Backup carries.
     reserved_names = sorted({json.dumps(s["pendingBackupRef"], sort_keys=True) for s in reserved})
