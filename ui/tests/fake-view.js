@@ -172,4 +172,3 @@ export const parse = (html) => [{ html: html }];
 // question "is this still the current route". Built by hand here rather than
 // imported so these rows carry no navigation of their own.
 export const LIFE = () => ({ generation: 1, signal: undefined, isCurrent: () => true });
-
