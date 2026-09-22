@@ -7125,35 +7125,43 @@ mod evidence_fetch_job {
     /// `run_id` is not the run its key names: `Invalid`, nothing copied.
     #[tokio::test]
     async fn a_relayed_scorecard_for_another_run_is_invalid_and_copies_nothing() {
-        let mut routes = evidence_routes(
-            Some(ev_job(Some("Complete"))),
-            relay(SCORECARD_KEY, SIDECAR_KEY),
-        );
-        routes.extend(terminal_routes());
-        let (client, _rec, bodies) = mock_client_recording_bodies(routes);
-        reconcile_restore(
-            &terminal_restore(SCORECARD_KEY, SIDECAR_KEY),
-            &client,
-            &unobserved_scorecard,
-            &unverified_evidence,
-            now(),
-        )
-        .await
-        .expect("the reconcile succeeds");
-        let bodies = bodies.lock().expect("readable").clone();
-        let last = patched_statuses(&bodies)
-            .last()
-            .cloned()
-            .expect("the verdict");
-        assert_eq!(
-            last["evidence"]["verification"]["result"],
-            serde_json::json!("Invalid"),
-            "{last}"
-        );
-        assert!(
-            last["outcome"].is_null()
-                && last["objectives"].is_null()
-                && last["evidence"]["scorecardSha256"].is_null()
-        );
+        // Another run's key, and — review LOW-2 — a key that merely ENDS with
+        // this document's `<run_id>.json`: the binding is key equality.
+        for key in [
+            SCORECARD_KEY.to_string(),
+            format!(
+                "logweir/drills/X{}",
+                &FIXTURE_SCORECARD_KEY["logweir/drills/".len()..]
+            ),
+        ] {
+            let mut routes =
+                evidence_routes(Some(ev_job(Some("Complete"))), relay(&key, SIDECAR_KEY));
+            routes.extend(terminal_routes());
+            let (client, _rec, bodies) = mock_client_recording_bodies(routes);
+            reconcile_restore(
+                &terminal_restore(&key, SIDECAR_KEY),
+                &client,
+                &unobserved_scorecard,
+                &unverified_evidence,
+                now(),
+            )
+            .await
+            .expect("the reconcile succeeds");
+            let bodies = bodies.lock().expect("readable").clone();
+            let last = patched_statuses(&bodies)
+                .last()
+                .cloned()
+                .expect("the verdict");
+            assert_eq!(
+                last["evidence"]["verification"]["result"],
+                serde_json::json!("Invalid"),
+                "{key}: {last}"
+            );
+            assert!(
+                last["outcome"].is_null()
+                    && last["objectives"].is_null()
+                    && last["evidence"]["scorecardSha256"].is_null()
+            );
+        }
     }
 }
