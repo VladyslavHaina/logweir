@@ -18,7 +18,7 @@ import { CONSOLE, applyGrants, grantedNamespaces, selectMode } from "./client.js
 import { el, replace } from "./render.js";
 import { mountClusterDetail, mountClusters } from "./pages/clusters.js";
 import { mountDestinationDetail, mountDestinations } from "./pages/destinations.js";
-import { mountSchedules } from "./pages/schedules.js";
+import { mountScheduleDetail, mountSchedules } from "./pages/schedules.js";
 import { mountBackupDetail, mountBackups } from "./pages/backups.js";
 import { mountHistory, mountRestoreDetail } from "./pages/history.js";
 import { mountRestoreWizard, restoreRouteParams } from "./pages/restore-wizard.js";
@@ -43,7 +43,13 @@ import { mountCatalog, mountCatalogDetail } from "./pages/catalog.js";
 const ROUTES = [
   { hash: "#/clusters", title: "Clusters", blurb: "The KafkaCluster objects this namespace can reach.", mount: mountClusters, detail: mountClusterDetail },
   { hash: "#/destinations", title: "Destinations", blurb: "Saved archive locations: one location, written down once, referenced by name.", mount: mountDestinations, detail: mountDestinationDetail },
-  { hash: "#/schedules", title: "Schedules", blurb: "BackupSchedule objects, their next slot and their suspend state.", mount: mountSchedules },
+  // PLAT-10.2 gave this route a DETAIL, and the hash it is reached by is the
+  // one every other list/detail pair here uses: `?name=` on the list's own
+  // route. That is why the migration note is "existing deep links keep
+  // working" rather than "are redirected" -- `#/schedules?ns=<ns>` was the
+  // only schedules link there had ever been, and a hash with no `name`
+  // reaches `mountSchedules` exactly as it always did.
+  { hash: "#/schedules", title: "Schedules", blurb: "BackupSchedule objects, their next slot and their suspend state.", mount: mountSchedules, detail: mountScheduleDetail },
   { hash: "#/backups", title: "Backups", blurb: "Backup runs, each with the evidence weirkeeper recorded for it.", mount: mountBackups, detail: mountBackupDetail },
   { hash: "#/history", title: "History", blurb: "Completed runs over time, newest first.", mount: mountHistory, detail: mountRestoreDetail },
   // `#/operations` CARRIES AN IDENTITY IN THE HASH and has no list: an

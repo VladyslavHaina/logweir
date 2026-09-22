@@ -96,7 +96,7 @@ import {
 import { focusFirstProblem, isObjectName, itemsOf, readFormValues } from "./clusters.js";
 import { renderPreflight } from "./destinations.js";
 import { isRecoveryPoint, recoveryPoints, restorePointRoute } from "./restore-wizard.js";
-import { listD3 } from "../operation-watch.js";
+import { listD3, readCatalogPoints } from "../operation-watch.js";
 import { operationRoute } from "./operation.js";
 
 const PLURAL = "backupschedules";
@@ -240,8 +240,12 @@ export function renderScheduleList(input, destinations) {
   const rows = itemsOf(input).map((object) => {
     const spec = object.spec || {};
     const status = object.status || {};
+    const meta = object.metadata || {};
     return [
-      nameOf(object),
+      // THE NAME IS THE WAY IN (PLAT-10.2). Until this route had a detail the
+      // name was text, because there was nowhere to go; a schedule's own page
+      // is where its history and its bound actions are.
+      detailLink("schedules", String(meta.namespace || ""), String(meta.name || "")),
       "<code>" + cell(spec.schedule) + "</code>",
       destinationCell(object, destinations),
       suspendBadge(spec),
@@ -3811,4 +3815,451 @@ export async function submitRunNow(ns, object, own, api, key) {
     body.readinessAcknowledgement = { preflight: String(readiness.id), state: readiness.state };
   }
   return api.runBackupNow(ns, body, key);
+}
+
+// ===========================================================================
+// PLAT-10.2: ONE SCHEDULE'S DETAIL, AND ITS RECOVERY-POINT HISTORY
+// ===========================================================================
+//
+// WHY A DETAIL VIEW EXISTS AT ALL. Everything on a schedule's card was already
+// there -- the revision, the next runs, the manual-run panel, the policy form,
+// the recovery points -- and all of it was stacked below every OTHER schedule's
+// card on one list. 10.2's acceptance is not "show more"; it is "actions retain
+// schedule and recovery-point context, and an unavailable archive or incomplete
+// evidence is visibly distinct from a healthy point". Neither clause is about a
+// field that was missing. Both are about a PLACE: one schedule, its whole
+// history, and every action on that page already bound to it.
+//
+// TWO AXES, NEVER ONE, AND NEITHER IS COMPUTED HERE (D3 section 5.4). A run's row
+// carries AVAILABILITY -- can these bytes still be read -- and VERIFICATION --
+// does the evidence verify under a key this installation accepts -- as two
+// columns, each rendered verbatim from the catalog's own word, and the green
+// badge comes from the catalog's materialised `selectable` and never from this
+// page recomputing `Available AND (Verified or VerifiedHistorical)`. A page that
+// collapsed them would have to decide whether `Missing` and `UntrustedSigner`
+// are the same kind of bad; one is an outage and one is a stranger's signature.
+//
+// A RUN WITH NO CATALOG POINT IS NOT AN AVAILABLE ONE. PLAT-11.1's own
+// limitation was that "archive availability reflects what the run recorded, not
+// the bucket", and PLAT-15.1's catalog is the fix. So a row this page cannot
+// find in the catalog says exactly that -- `not in the catalog` -- and is never
+// badged green: the honest answer to "is it still there" when nothing has
+// looked is "nobody has looked".
+//
+// THE DELETED SCHEDULE IS A STATE AND NOT AN ERROR (PLAT-05.2, D1 W4). Deleting
+// a schedule cascades to nothing: every run it created, every plan and every
+// archive object outlives it, and the runs keep naming it in
+// `spec.scheduleRef`. So a detail route whose schedule is gone renders the
+// history it left behind, says the schedule is gone, and offers the per-point
+// restores -- which are the only actions that still mean anything.
+
+/** What the history says when the schedule has produced no run at all. */
+export const NO_HISTORY_SENTENCE =
+  "this schedule has produced no run yet. A schedule that has never fired has no history, " +
+  "which is a different thing from a schedule whose history has been removed -- runs outlive " +
+  "the schedule that made them, and nothing in this product deletes them.";
+
+/** What a row says when the durable catalog has no entry for a run.
+ *
+ *  IT IS NOT `Available` AND IT IS NOT AN ERROR. The Backup recorded that it
+ *  wrote a set; the catalog is what can say the bytes are still readable now,
+ *  and until a catalog covering that destination has synced, nobody has looked. */
+export const NOT_IN_CATALOG = "not in the catalog";
+
+/** What the availability column says when this mode cannot read a catalog at
+ *  all, so that an empty column is never mistaken for a verdict. */
+export const CATALOG_UNREADABLE_SENTENCE =
+  "The durable recovery catalog could not be read here, so the availability and verification " +
+  "columns below are blank rather than green: this page will not report an archive as readable " +
+  "on the strength of a run having once written to it.";
+
+/** What the detail says about a schedule that is not there any more. */
+export const ARCHIVED_SCHEDULE_SENTENCE =
+  "This schedule no longer exists in this namespace. Deleting a schedule stops future slots " +
+  "and removes nothing else: every run it created, every plan and every archive object is " +
+  "still here, which is why its history is below and every recovery point below can still be " +
+  "restored from. A new schedule created with the same name is a DIFFERENT schedule and does " +
+  "not inherit these runs.";
+
+/** The runs one schedule produced, newest first, with the identity that decides
+ *  whether a run belongs to THIS schedule or to a previous one of the same name.
+ *
+ *  THE UID DECIDES, AND THE NAME ONLY GROUPS. PLAT-05.2 proved that a schedule
+ *  deleted and recreated under the same name is a different schedule "down to
+ *  `NameUnavailable`", and its runs carry the OLD uid in `spec.scheduleRef.uid`
+ *  and the old uid's label. Listing them together without saying so would
+ *  attribute one cluster's protection to another's policy. `mine` is this
+ *  schedule's; `earlier` is every run that named this name under a different
+ *  identity. */
+export function runsOfSchedule(name, uid, backups) {
+  const wanted = String(name || "");
+  const identity = String(uid || "");
+  const named = itemsOf(backups).filter(
+    (backup) => ((((backup || {}).spec) || {}).scheduleRef || {}).name === wanted,
+  );
+  const newestFirst = named.slice().sort((a, b) => {
+    const at = String(((a || {}).metadata || {}).creationTimestamp || "");
+    const bt = String(((b || {}).metadata || {}).creationTimestamp || "");
+    return at < bt ? 1 : (at > bt ? -1 : 0);
+  });
+  if (identity.length === 0) {
+    return { mine: newestFirst, earlier: [] };
+  }
+  const sameUid = (backup) =>
+    String(((((backup || {}).spec) || {}).scheduleRef || {}).uid || "") === identity;
+  return {
+    mine: newestFirst.filter((backup) => sameUid(backup) ||
+      String(((((backup || {}).spec) || {}).scheduleRef || {}).uid || "").length === 0),
+    earlier: newestFirst.filter((backup) => !sameUid(backup) &&
+      String(((((backup || {}).spec) || {}).scheduleRef || {}).uid || "").length > 0),
+  };
+}
+
+/** EVERY catalog point a run produced, which is not always one.
+ *
+ *  A RUN WRITES A SET AND A SET CAN HOLD SEVERAL POINTS. The console's own
+ *  `catalog-points-states.json` fixture carries five entries under one
+ *  `backupId`, and a join that took the first of them would report a set with a
+ *  `Missing` point as healthy because its first point happened to be
+ *  `Available`. So this returns all of them and the verdicts are computed over
+ *  the whole set.
+ *
+ *  JOINED ON THE BACKUP SET ID, which is the one identifier both sides carry
+ *  and both derive from the same run: `status.backupId` on the `Backup` and
+ *  `backupId` on the catalog's view entry. NOT on the run's name -- a name is
+ *  reusable -- and not on the covered window, which two runs of one schedule
+ *  can share exactly. */
+export function pointsForRun(backup, points) {
+  const id = String((((backup || {}).status) || {}).backupId || "");
+  if (id.length === 0 || !Array.isArray(points)) {
+    return [];
+  }
+  return points.filter((point) => String((point || {}).backupId || "") === id);
+}
+
+/** The distinct values of one field across a set's points, in the order the
+ *  catalog listed them. */
+function distinctWords(points, field) {
+  const words = [];
+  for (const point of points) {
+    const word = String((point || {})[field] || "");
+    if (word.length > 0 && words.indexOf(word) === -1) {
+      words.push(word);
+    }
+  }
+  return words;
+}
+
+/** The two verdict cells for one run, as words the API wrote.
+ *
+ *  NO SEVERITY ORDER IS INVENTED HERE. Deciding whether `Conflict` is worse
+ *  than `Unreadable` would be this page holding an opinion the catalog has
+ *  never published, so a set whose points disagree shows EVERY word it carries
+ *  and a reader sees the disagreement instead of a summary of it.
+ *
+ *  GREEN COMES FROM `selectable`, WHICH IS THE CATALOG'S OWN CONJUNCTION of
+ *  D3 section 5.4's rule -- and from EVERY point of the set, because a set with one
+ *  unrestorable point is not a set a restore can be planned from. Recomputing
+ *  `Available AND (Verified or VerifiedHistorical)` here would be a second
+ *  answer to a question the controller has already answered.
+ *
+ *  Availability keeps its own green: it is a different fact with a different
+ *  repair, and a point whose bytes are readable but whose signer is a stranger
+ *  is an evidence problem and not an outage. */
+export function verdictCells(points) {
+  const all = Array.isArray(points) ? points : (points === null || points === undefined ? [] : [points]);
+  if (all.length === 0) {
+    return [
+      badge("unverified", NOT_IN_CATALOG),
+      badge("unverified", NOT_IN_CATALOG),
+    ];
+  }
+  const selectable = all.every((point) => (point || {}).selectable === true);
+  const availability = distinctWords(all, "availability");
+  const verification = distinctWords(all, "verification");
+  const readable = availability.length === 1 && availability[0] === "Available";
+  return [
+    availability.map((word) => badge(readable ? "green" : "unverified", word)).join(" "),
+    verification.map((word) => badge(selectable ? "green" : "unverified", word)).join(" "),
+  ];
+}
+
+/** ONE SCHEDULE'S FILTERED HISTORY: every run it made, newest first, with the
+ *  two catalog verdicts and the restore that is bound to that run.
+ *
+ *  A ROW IS A RUN AND NOT A POINT, deliberately. A run that failed, a run still
+ *  going and a run that produced a recovery point are all part of what this
+ *  schedule has done, and a table of only the good ones would agree with itself
+ *  and disagree with the cluster. What changes per row is what is OFFERED: a
+ *  restore link only where a plan can be built, which is `isRecoveryPoint`'s
+ *  question and PLAT-11.1's answer. */
+export function renderScheduleHistory(ns, object, runs, points, catalogError) {
+  const spec = (object || {}).spec || {};
+  const maxRetries = (spec.retry || {}).maxRetries;
+  const rows = runs.map((run) => {
+    const meta = run.metadata || {};
+    const status = run.status || {};
+    const covered = status.windowCovered || {};
+    const found = pointsForRun(run, points);
+    const verdicts = verdictCells(found);
+    return [
+      detailLink("backups", String(ns || meta.namespace || ""), String(meta.name || "")),
+      triggerBadge(run.spec ? run.spec.trigger : undefined, maxRetries),
+      phaseBadge(status.phase),
+      cell((run.spec || {}).slot),
+      cell(status.backupId) +
+        (found.length > 1
+          ? " <span class=\"badge badge-flat\">" + String(found.length) + " points</span>"
+          : ""),
+      cell(rfc3339(covered.fromMs)),
+      cell(rfc3339(covered.toMs)),
+      verdicts[0],
+      verdicts[1],
+      isRecoveryPoint(run)
+        ? "<a href=\"" + esc(restorePointRoute(ns, run)) + "\">Restore this point</a>"
+        : cell(""),
+    ];
+  });
+  return (
+    "<section class=\"history\" id=\"schedule-history\"><h3>Runs and recovery points</h3>" +
+    "<p class=\"note\">" + esc(TWO_VERDICTS_SENTENCE) + "</p>" +
+    (catalogError === null || catalogError === undefined
+      ? ""
+      : "<p class=\"note\" id=\"schedule-catalog-unreadable\">" +
+        esc(CATALOG_UNREADABLE_SENTENCE) + "</p>" + errorBlock(catalogError, true)) +
+    table(
+      ["RUN", "TRIGGER", "PHASE", "SLOT", "BACKUP SET", "COVERED FROM", "COVERED TO",
+        "AVAILABILITY", "VERIFICATION", ""],
+      rows,
+      NO_HISTORY_SENTENCE,
+    ) +
+    "</section>"
+  );
+}
+
+/** Why there are two verdict columns and what a blank one would have meant. */
+export const TWO_VERDICTS_SENTENCE =
+  "Availability answers whether the archive can still serve this point; verification answers " +
+  "whether its evidence verifies under a key this installation accepts. They are separate " +
+  "facts with separate repairs, both read from the durable catalog, and a run the catalog has " +
+  "no entry for is neither available nor unavailable -- nobody has looked.";
+
+/** The runs of a PREVIOUS schedule that answered to this name, shown apart. */
+export function renderEarlierRuns(ns, earlier) {
+  if (earlier.length === 0) {
+    return "";
+  }
+  return (
+    "<section class=\"history\" id=\"schedule-earlier-runs\"><h3>Runs of an earlier schedule " +
+    "with this name</h3>" +
+    "<p class=\"note\">" + String(earlier.length) + " run(s) name this schedule and carry a " +
+    "different schedule identity in spec.scheduleRef.uid. A schedule deleted and recreated " +
+    "under the same name is a different schedule, so these are another policy's runs and are " +
+    "not counted in anything above. Their recovery points are still restorable.</p>" +
+    table(
+      ["RUN", "SCHEDULE UID", "BACKUP SET", ""],
+      earlier.map((run) => {
+        const meta = run.metadata || {};
+        return [
+          detailLink("backups", String(ns || meta.namespace || ""), String(meta.name || "")),
+          cell((((run.spec || {}).scheduleRef) || {}).uid),
+          cell(((run.status) || {}).backupId),
+          isRecoveryPoint(run)
+            ? "<a href=\"" + esc(restorePointRoute(ns, run)) + "\">Restore this point</a>"
+            : cell(""),
+        ];
+      }),
+      "",
+    ) +
+    "</section>"
+  );
+}
+
+/** The newest recovery point this schedule produced, and the restore bound to
+ *  it -- the "Restore" action 10.2 asks the detail to carry.
+ *
+ *  IT IS THE SAME LINK THE ROW CARRIES, built by the same helper, so "restore
+ *  the latest" and "restore this one" cannot disagree about what the latest is.
+ *  With no point at all there is no button and the sentence says why. */
+export function renderLatestPointAction(ns, runs) {
+  const points = recoveryPoints(runs);
+  if (points.length === 0) {
+    return "<p class=\"note\" id=\"schedule-latest-point\">" + esc(NO_POINTS_SENTENCE) + "</p>";
+  }
+  const newest = points[0];
+  const meta = newest.metadata || {};
+  return (
+    "<p class=\"note\" id=\"schedule-latest-point\">Latest recovery point: " +
+    cell(meta.name) + ", backup set " + cell((newest.status || {}).backupId) + ". " +
+    "<a href=\"" + esc(restorePointRoute(ns, newest)) + "\" id=\"schedule-restore-latest\">" +
+    "Restore from this point</a></p>"
+  );
+}
+
+/** ONE SCHEDULE, AS A PAGE. The card's own panels -- the toggle, the revision,
+ *  the next runs, the manual-run panel, the policy form, retention -- plus the
+ *  history and the two restore actions, under a heading that says which
+ *  schedule every one of them is bound to. */
+export function renderScheduleDetail(view) {
+  const v = view || {};
+  const ns = String(v.ns || "");
+  const object = v.object || null;
+  const name = String(v.name || ((object || {}).metadata || {}).name || "");
+  const runs = v.runs || { mine: [], earlier: [] };
+  if (object === null) {
+    return renderArchivedSchedule(ns, name, runs, v.points, v.catalogError);
+  }
+  return (
+    "<section class=\"detail\" id=\"schedule-detail\" data-schedule-detail=\"" + esc(name) +
+    "\">" +
+    "<p class=\"crumb\"><a href=\"#/schedules?ns=" + esc(encodeURIComponent(ns)) +
+    "\">All schedules</a></p>" +
+    renderLatestPointAction(ns, runs.mine) +
+    renderScheduleCard(ns, object, { items: runs.mine }, v.extra) +
+    renderScheduleHistory(ns, object, runs.mine, v.points, v.catalogError) +
+    renderEarlierRuns(ns, runs.earlier) +
+    "</section>"
+  );
+}
+
+/** THE DELETED SCHEDULE WITH RETAINED HISTORY (PLAT-05.2's D1 W4 contract).
+ *
+ *  Not a 404 page: the object is gone and everything it produced is not, so
+ *  what this renders is the history, the reason the schedule is missing, and
+ *  the per-point restores. There is no toggle, no policy form and no "Back up
+ *  now": every one of those needs a schedule to act on. */
+export function renderArchivedSchedule(ns, name, runs, points, catalogError) {
+  const mine = (runs || {}).mine || [];
+  return (
+    "<section class=\"detail\" id=\"schedule-detail\" data-schedule-detail=\"" + esc(name) +
+    "\" data-archived=\"1\">" +
+    "<p class=\"crumb\"><a href=\"#/schedules?ns=" + esc(encodeURIComponent(ns)) +
+    "\">All schedules</a></p>" +
+    "<div class=\"card-head\"><h3>" + esc(name) + "</h3>" +
+    badge("pending", "schedule deleted") + "</div>" +
+    "<p class=\"note\" id=\"schedule-archived\">" + esc(ARCHIVED_SCHEDULE_SENTENCE) + "</p>" +
+    renderLatestPointAction(ns, mine) +
+    renderScheduleHistory(ns, null, mine, points, catalogError) +
+    renderEarlierRuns(ns, (runs || {}).earlier || []) +
+    "</section>"
+  );
+}
+
+/** Every catalog point in this namespace, across every catalog, or the error
+ *  that says none could be read.
+ *
+ *  ACROSS EVERY CATALOG, because a schedule's destination and a catalog's
+ *  destination are both named and this page joins on the backup set id rather
+ *  than on the location: a point is the same point whichever catalog found it,
+ *  and reading only the catalog whose destination matches would show nothing at
+ *  all for a schedule whose destination was edited since the run.
+ *
+ *  A REFUSAL IS RETURNED AND NEVER THROWN. Legacy mode has no route for the
+ *  point list and says so by name; a namespace with no catalog has no points
+ *  and that is not an error either. In both cases the history still renders,
+ *  with the two verdict columns saying what they are. */
+export async function readSchedulePoints(api, ns, lifecycle) {
+  let catalogs;
+  try {
+    catalogs = itemsOf(await listD3("catalog", ns, readOptions(lifecycle)));
+  } catch (error) {
+    if (cancelled(error, lifecycle)) {
+      throw error;
+    }
+    return { points: [], error: error };
+  }
+  const points = [];
+  let failure = null;
+  for (const catalog of catalogs) {
+    const catalogName = ((catalog || {}).metadata || {}).name || "";
+    if (catalogName.length === 0) {
+      continue;
+    }
+    try {
+      const page = await readCatalogPoints(ns, catalogName, { limit: DETAIL_POINT_PAGE },
+        readOptions(lifecycle));
+      for (const point of (page.items || [])) {
+        points.push(point);
+      }
+    } catch (error) {
+      if (cancelled(error, lifecycle)) {
+        throw error;
+      }
+      failure = error;
+    }
+  }
+  return { points: points, error: points.length === 0 ? failure : null };
+}
+
+/** How many points one catalog page contributes to a schedule's history. The
+ *  catalog view is itself a window over the archive (D3 section 5.6); this is a
+ *  window over that, and the history table says which runs it could not place. */
+export const DETAIL_POINT_PAGE = 200;
+
+/** `#/schedules?ns=<ns>&name=<name>`: one schedule, its actions and its
+ *  history. */
+export async function mountScheduleDetail(node, ns, name, parse, lifecycle, deps) {
+  const api = deps || API;
+  try {
+    const [schedule, backups, clusters] = await Promise.all([
+      api.get(ns, PLURAL, name, readOptions(lifecycle)).catch((error) => {
+        // A SCHEDULE THAT IS NOT THERE IS A STATE THIS VIEW RENDERS, and only a
+        // `not found` is: a refused read is not a deleted schedule and must not
+        // be shown as one.
+        if (cancelled(error, lifecycle) || (error || {}).status !== 404) {
+          throw error;
+        }
+        return null;
+      }),
+      api.list(ns, BACKUPS, readOptions(lifecycle)),
+      api.list(ns, CLUSTERS, readOptions(lifecycle)),
+    ]);
+    if (!active(lifecycle)) {
+      return;
+    }
+    const readiness = await readReadiness(api, ns, lifecycle, clusters);
+    if (!active(lifecycle)) {
+      return;
+    }
+    const catalog = await readSchedulePoints(api, ns, lifecycle);
+    if (!active(lifecycle)) {
+      return;
+    }
+    const uid = ((schedule || {}).metadata || {}).uid;
+    const runs = runsOfSchedule(name, uid, backups);
+    const cards = Object.create(null);
+    cards[name] = {};
+    const extra = {
+      cards: cards,
+      destinations: readiness.destinations,
+      mayOperate: mayOperate(ns),
+      retentionPolicies: await readRetentionPolicies(ns, lifecycle),
+    };
+    if (!active(lifecycle)) {
+      return;
+    }
+    replace(node, parse(renderScheduleDetail({
+      ns: ns,
+      name: name,
+      object: schedule,
+      runs: runs,
+      points: catalog.points,
+      catalogError: catalog.error,
+      extra: extra,
+    })));
+    if (schedule === null) {
+      return;
+    }
+    const objects = [schedule];
+    const backupsForCard = { items: runs.mine };
+    for (const toggle of node.querySelectorAll("form.suspend")) {
+      wireToggle(node, ns, parse, lifecycle, api, objects, toggle);
+    }
+    wirePolicy(node, ns, parse, lifecycle, api, schedule, backupsForCard, extra);
+    wireRunNow(node, ns, parse, lifecycle, api, schedule, backupsForCard, extra);
+  } catch (error) {
+    if (!cancelled(error, lifecycle) && active(lifecycle)) {
+      replace(node, errorBox(error));
+    }
+  }
 }
