@@ -609,7 +609,10 @@ fn the_manifest_pins_the_one_new_dependency() {
         .find(|l| l.starts_with("axum = "))
         .expect("axum is declared");
     assert!(axum.contains("default-features = false"), "{axum}");
-    assert!(axum.contains(r#"features = ["http1", "tokio"]"#), "{axum}");
+    assert!(
+        axum.contains(r#"features = ["http1", "tokio", "matched-path"]"#),
+        "{axum}"
+    );
     assert!(
         manifest.contains("publish = false"),
         "the binary is not a release artifact yet"

@@ -216,6 +216,17 @@ impl FromRequestParts<AppState> for Actor {
         parts: &mut Parts,
         state: &AppState,
     ) -> Result<Self, Self::Rejection> {
+        // THE ACCESS LAYER ALREADY DID THIS. `crate::access::enforce` runs on
+        // every route, authenticates the actor (CSRF included) before any
+        // handler, and hands it over; decoding the session a second time would
+        // only cost a second AEAD open and a second audit write of the same
+        // values. Only that layer can insert the value — request extensions
+        // are not reachable from the wire.
+        if let Some(crate::access::AuthenticatedActor(actor)) =
+            parts.extensions.get::<crate::access::AuthenticatedActor>()
+        {
+            return Ok(actor.clone());
+        }
         let authenticator = state.authenticator();
         let audit = crate::audit::context_of(parts);
         let mut actor = match authenticator.authenticate(parts) {

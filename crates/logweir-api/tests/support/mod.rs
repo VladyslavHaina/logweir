@@ -1127,25 +1127,7 @@ impl TestApp {
     }
 
     pub fn with_clock(fake: FakeKube, options: Options, clock: Arc<TestClock>) -> Self {
-        let authenticator = options.authenticator.unwrap_or_else(|| {
-            Arc::new(LocalAdminAuthenticator::new("admin", "Local administrator"))
-        });
-        let authorizer = options
-            .authorizer
-            .unwrap_or_else(|| Arc::new(LocalAdminAuthorizer::new(options.namespaces.clone())));
-        let state = AppState::new(Settings {
-            authenticator,
-            authorizer,
-            kube: KubeAdapter::with_deadline(fake.client(), options.deadline),
-            cursor_key: CursorKey::new(options.cursor_key),
-            clock: clock.clone() as Arc<dyn Clock>,
-            public_origin: options.public_origin.clone(),
-            allowed_hosts: options.allowed_hosts.clone(),
-            assets: logweir_api::assets::StaticAssets::load(&options.ui_dir)
-                .expect("the UI directory loads"),
-            readiness_namespace: options.namespaces[0].clone(),
-            shared: options.shared.clone(),
-        });
+        let state = app_state(&fake, options, &clock);
         Self {
             router: logweir_api::app::router(state),
             fake,
@@ -1220,6 +1202,30 @@ impl TestApp {
         self.send(builder.body(Body::from(body.to_string())).unwrap())
             .await
     }
+}
+
+/// The application state a [`TestApp`] routes over, for tests that build a
+/// router of their own around it (the access layer's fail-closed guard).
+pub fn app_state(fake: &FakeKube, options: Options, clock: &Arc<TestClock>) -> AppState {
+    let authenticator = options
+        .authenticator
+        .unwrap_or_else(|| Arc::new(LocalAdminAuthenticator::new("admin", "Local administrator")));
+    let authorizer = options
+        .authorizer
+        .unwrap_or_else(|| Arc::new(LocalAdminAuthorizer::new(options.namespaces.clone())));
+    AppState::new(Settings {
+        authenticator,
+        authorizer,
+        kube: KubeAdapter::with_deadline(fake.client(), options.deadline),
+        cursor_key: CursorKey::new(options.cursor_key),
+        clock: clock.clone() as Arc<dyn Clock>,
+        public_origin: options.public_origin.clone(),
+        allowed_hosts: options.allowed_hosts.clone(),
+        assets: logweir_api::assets::StaticAssets::load(&options.ui_dir)
+            .expect("the UI directory loads"),
+        readiness_namespace: options.namespaces[0].clone(),
+        shared: options.shared.clone(),
+    })
 }
 
 // ---------------------------------------------------------------- fixtures

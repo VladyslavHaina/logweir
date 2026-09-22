@@ -38,9 +38,11 @@ path = "src/main.rs"
 # adds exactly three packages to `Cargo.lock` — axum 0.8.9, axum-core 0.5.6
 # and matchit 0.8.4 — and changes no existing entry's version. Default features
 # are OFF: no `json`, `query` or `form` extractors (their rejections are not
-# problem+json, so this crate parses bodies and queries itself), no `tracing`,
-# no `matched-path`. `http1` + `tokio` are what `axum::serve` needs.
-axum = { version = "0.8", default-features = false, features = ["http1", "tokio"] }
+# problem+json, so this crate parses bodies and queries itself), no `tracing`.
+# `http1` + `tokio` are what `axum::serve` needs. `matched-path` (PLAT-17.2;
+# a feature with no dependency of its own) is how `src/access.rs` finds the
+# access declaration of the route a request matched.
+axum = { version = "0.8", default-features = false, features = ["http1", "tokio", "matched-path"] }
 base64.workspace = true
 bytes = "1"
 chrono.workspace = true

@@ -2,7 +2,10 @@
 //!
 //! THE ROUTE TABLE IS THE BOUNDARY. Every path this service answers is listed
 //! in [`router`]; there is no wildcard under `/api`, no `/apis`, no raw or
-//! proxy route, and the fallback for everything else is `not_found`. The
+//! proxy route, and the fallback for everything else is `not_found`. Every
+//! route group carries `crate::access::enforce` as a route layer, and every
+//! route must have an entry in `crate::access::ROUTES` — `Public` included —
+//! or it fails closed. The
 //! route-boundary tests request `/apis/...`, `/api`, `/api/v1/raw`, core
 //! paths, Secrets, Pods and logs and expect 404 with no Kubernetes call.
 
@@ -347,6 +350,15 @@ pub fn router(state: AppState) -> Router {
         // rule and records the decision under the `*` pseudo-namespace.
         .route("/api/v1/trust-policies", get(trust::list))
         .route("/api/v1/trust-policies/{name}", get(trust::get_one))
+        // THE ACCESS LAYER, INSIDE THE ORIGIN GUARD. `crate::access::enforce`
+        // is the floor no route can fall below: authentication and the
+        // declared action, namespace first, before any handler runs. It sits
+        // inside `unsafe_request_guard` so a cross-origin write is still
+        // refused as one before anyone asks who sent it.
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::access::enforce,
+        ))
         .route_layer(axum::middleware::from_fn_with_state(
             state.clone(),
             crate::http::unsafe_request_guard,
@@ -366,6 +378,10 @@ pub fn router(state: AppState) -> Router {
                 )
                 .route_layer(axum::middleware::from_fn_with_state(
                     state.clone(),
+                    crate::access::enforce,
+                ))
+                .route_layer(axum::middleware::from_fn_with_state(
+                    state.clone(),
                     crate::http::unsafe_request_guard,
                 )),
         ),
@@ -380,7 +396,11 @@ pub fn router(state: AppState) -> Router {
             .route(
                 crate::auth::login::CALLBACK_PATH,
                 get(crate::auth::login::callback),
-            ),
+            )
+            .route_layer(axum::middleware::from_fn_with_state(
+                state.clone(),
+                crate::access::enforce,
+            )),
     };
 
     Router::new()
@@ -390,6 +410,12 @@ pub fn router(state: AppState) -> Router {
         .route("/ui", get(health::redirect_to_ui))
         .route("/ui/", get(crate::assets::serve))
         .route("/ui/{*path}", get(crate::assets::serve))
+        // Public by DECLARATION: `crate::access::ROUTES` names each of these
+        // `Public`, and a route added here without an entry fails closed.
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            crate::access::enforce,
+        ))
         .merge(api)
         .merge(auth)
         .fallback(fallback)

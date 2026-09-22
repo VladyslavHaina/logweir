@@ -26,6 +26,8 @@
 //! MODULE MAP.
 //!
 //! * [`app`] — state and the route table (the boundary).
+//! * [`access`] — the per-route access declarations and the layer that
+//!   enforces them before any handler runs.
 //! * [`http`] — request IDs, security headers, problem rendering, the Host,
 //!   `Impersonate-*`, Origin and Content-Type guards, strict JSON and query
 //!   parsing.
@@ -41,6 +43,7 @@
 //!   generated, drift-tested OpenAPI document.
 //! * [`assets`] — the static UI allowlist.
 
+pub mod access;
 pub mod app;
 pub mod assets;
 pub mod audit;
