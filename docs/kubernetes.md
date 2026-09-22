@@ -2141,6 +2141,42 @@ and creates no Job. An absent or unverified `Approval` stays a thirty-second
 hold. This is the one kind for which trust is resolved BEFORE admission; the
 ordinary path still resolves it only when a Job is going to exist.
 
+*Minting the document.* `logweir approve --standing` signs it — the same
+signer as a per-run approval, under the standing payload type:
+
+```
+logweir approve --standing \
+  --key approver-private.pem \
+  --schedule-namespace team-a --schedule-name weekly-orders \
+  --schedule-uid $(kubectl get rehearsalschedule weekly-orders -o jsonpath='{.metadata.uid}') \
+  --scope scope.json --valid-days 30 \
+  --out standing-authorization.json
+```
+
+`--spec`, `--approver` and `--ticket` are refused: this document binds a SCOPE
+and covers every slot, and version 1.0.0 carries neither an approver nor a
+ticket, so a value given for them would not be signed. The two files become the
+`Approval`'s `spec.approvalBytes` and `spec.sidecarBytes`, with
+`spec.subjectRef.kind: RehearsalSchedule` and `spec.planHash` set to the
+schedule's `templateDigest`. The signing key's PUBLIC half must be on this
+namespace's trust carrying `GovernedApproval` or `ConsoleConfirmation` — never
+`EvidenceSigning` (D3 §7.3). The command refuses before signing anything the
+cluster would refuse afterwards: the ninety-day cap, a blank schedule UID, a
+mode this build does not implement, and every scope bound whose absence the
+runner treats as a mismatch.
+
+*Which `Approval` object, and not merely which name.*
+`spec.authorization.approvalRef` is a `LocalRef` and carries a name only, so
+the `Restore` reconciler resolves the standing `Approval` **by name**. To stop
+a different object that later took that name being used, the schedule stamps
+the UID of the `Approval` the slot was actually authorised against onto the
+child `Restore` as `logweir.dev/approval-uid`, and admission requires the
+resolved object to carry it — an `Approval` deleted and recreated under the
+same name is refused. A standing `Restore` with no such annotation is refused
+too: every one this build creates carries it, and one that predates it never
+executed. (A `uid` field on `approvalRef` would let the reference itself carry
+this; that is a CRD change for a follow-up.)
+
 *On the schedule.* A rehearsal that fails — verification, preflight, or its
 authorization — is recorded as the failure it is on `RehearsalHealthy` and
 D3 §4's `rehearsalLast*`, with the `Restore`'s own terminal reason in the

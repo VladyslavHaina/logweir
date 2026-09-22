@@ -1129,6 +1129,20 @@ async fn a_due_slot_reserves_then_creates_the_deterministic_restore_and_its_bund
         Some("logweir-destination://primary"),
         "the destination sentinel, so the CEL rule admits it"
     );
+    // **THE APPROVAL'S UID, PINNED ON THE CHILD.**
+    // `spec.authorization.approvalRef` is a `LocalRef` and carries a name
+    // only, so the `Restore` reconciler resolves the standing `Approval` by
+    // name and would otherwise accept a DIFFERENT object that later took that
+    // name. This annotation is the UID of the object THIS slot authorised
+    // against, and `restore::admit` requires the resolved Approval to carry it
+    // — a blank one is refused, so this asserts the VALUE and not the key.
+    assert_eq!(
+        child
+            .pointer("/metadata/annotations/logweir.dev~1approval-uid")
+            .and_then(Value::as_str),
+        Some(APPROVAL_UID),
+        "the child pins the Approval object the slot was authorised against"
+    );
 }
 
 /// **The brief's own row.** The rendered bundle is what the runner loads: every
