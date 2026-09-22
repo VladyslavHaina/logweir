@@ -233,6 +233,7 @@ runner from main with the standing fix, `claude/verdict-precedence`, `claude/evi
 | PLAT-04.1 defect (P0) | Fixed (`bdd26dc`, live-proved) | w0-reservation → plat06-live | `backup_schedule.rs:1359` reserves a Forbid slot with `replace_status`, which RBAC authorizes as `update` on `backupschedules/status`; the shipped role grants only `patch` (`config/rbac/role.yaml:118`, `charts/logweir/templates/clusterrole.yaml:29`). Confirmed on docker-desktop: the lab ServiceAccount has `update` no, `patch` yes, so with the default `Forbid` policy no scheduled Backup is created on a shipped install. PLAT-04.1's live run used custom namespace Roles and never exercised this. Fix: resourceVersion-conditional merge PATCH, an audit of every other call against the shipped role, a reverse "every call has a grant" lint with mutant evidence, and live proof under shipped RBAC. |
 | PLAT-06.1 | Done | plat06-live, plat06-review | Completion record under PLAT-06.1. Integrated into main as `8e362f9..10f6c28`. |
 | PLAT-07.1 | Done | plat07-finish, plat07-integrate, plat07-review, plat07-live | Completion record under PLAT-07.1. Integrated into main as `6c534b2..199020a` plus the live harness `50e641f`. | Versioned connection contract, one shared resolver for probe/backup/restore Jobs, TLS private CA, rotation, redaction, write-only credential builder; live SCRAM rotation and TLS cases. |
+| PLAT-10.1 / 10.2 | In progress (source landed `27eb7c9`; live 17/7 PASS; per-point Restore, older-backup navigation and the create→restore journey BLOCKED on EVIDENCE-FETCH-JOB-UNBUILT) | plat10, plat10-finish (+ two reviews) | Partial record under PLAT-10.2. Next: lab-refresh-8 with `claude/evidence-fetch` → re-run `scripts/plat10-ui-e2e.mjs`. |
 | PLAT-11.2 | Done | ui-restore-selection, d2w13, d3w12, plat11-2 (+ two reviews) | Completion record under PLAT-11.2; live on docker-desktop 2026-09-22, all eight tests through the console. |
 | PLAT-07.2 | In progress | ui072, ui072-review | Partial record under PLAT-07.2. Integrated into main as `8bbe4d1..b65f23f`. "Test connection" cannot yet force a re-probe (D2 W13). | Saved-cluster selector by UID, probe vocabulary, freshness budget; live 20/20 |
 | PLAT-13.2 | Done | ui-correct, ui-correct-review, ui-correct-fix | Completion record under PLAT-13.2. Integrated into main as `2a34abd..8020876`. |
@@ -2325,6 +2326,45 @@ PLAT-11.1, PLAT-14.1; PLAT-15.1 adds durable catalog-backed history.
 **Migration/safety and done evidence:** Keep existing deep links working or
 redirect them explicitly. Demonstrate create → backup → schedule detail →
 restore without reconstructing configuration.
+
+**Partial record — In progress (2026-09-22), PLAT-10.1 and PLAT-10.2: source landed, restore half blocked.**
+Source landed on main as `claude/plat10` (29 commits ending `27eb7c9`): `POST .../schedules`
+takes the whole policy (one validator shared with `PUT`, one `schedule_invalid` code, zone parsed
+in the same pass, saved destination by reference so the server alone builds the URL, explicit or
+all-user-topic selection), additive and byte-compatible for old request bodies (an old-shape
+create replays under its old `Idempotency-Key`, pinned by `schedule_create`); the catalog points
+view gains an optional `incomplete: true`; the console gets a guided create/edit form (advanced
+options collapsed, readiness from a real `Preflight` marked stale when its inputs change, the
+API's own refusal words, draft kept) and a schedule detail page (`#/schedules?ns=…&name=…`; the
+list route is unchanged) with source, resolved destination, policy revision, latest restorable
+point and age, next run, active work, failures, history grouped by schedule UID (archived
+same-name schedules never merged) and Back up now / Pause-Resume / Edit / per-row Restore that
+re-render the detail in place. A run the catalog does not list reads `catalog incomplete`,
+`catalog view expired`, `outside the catalog view` or — only for a complete current view — `not
+in the catalog`; `Missing`/`Unreadable` points are distinct from healthy ones and never offered.
+Reviews: two independent rounds (`claude/plat10.review.md`, REJECT ×2 on 5 then 2 HIGHs and 3
+MEDIUMs, all closed; re-check ACCEPT at `27eb7c9`, one LOW open: focus does not return to the
+control after the detail re-renders); 12 + 1 API/console mutants killed
+(`claude/plat10-mutants.log`). Gates at `27eb7c9`: node 480/480, `cargo test --locked -p
+logweir-api` 385/0, ui/chart/doc lint, `just lint`, links, chart/schema checks; full
+`scripts/ci-check.sh` on main `27eb7c9` (`claude/main-27eb7c9-ci-check.log`).
+Live (docker-desktop, host `logweir-api` in localAdmin + Playwright, shared lab controller at
+`1a9aca6` as the only reconciler, zero harness status writes):
+`claude/artifacts/plat10-ui/lw-p10-20260922t182514z/live.json`, 17 journeys / 7 controls PASS.
+PLAT-10.1: selected-topic and all-user-topic creation, edit (g1→g2, a real run after the edit
+freezes g2, the earlier run keeps g1), invalid cron (the 422's own sentence on screen, draft
+kept), readiness failure (a real terminal `notReady` Preflight), keyboard-only completion (0
+pointer events, 2px focus ring asserted) and first-run redirect — all PASS. PLAT-10.2: empty
+history, running, failed and verified runs, unavailable-beside-healthy (`Missing` after deleting
+only that point's manifest), catalog incomplete, paused and archived — PASS.
+**BLOCKED:** "each recovery-point row has its own Restore", "navigation to an older backup" and
+the done-evidence journey create → backup → detail → restore: no destination-backed run on this
+build gets `windowCovered`, because the D2 §3.9 evidence-fetch Job was never built
+(EVIDENCE-FETCH-JOB-UNBUILT, in progress on `claude/evidence-fetch`), so the console correctly
+offers no Restore. Next: lab-refresh-8 with the evidence-fetch controller, then re-run
+`scripts/plat10-ui-e2e.mjs` with an `ArchiveReadGrant` destination and an Approval minted with
+the rotated lab approver key → Done records. Class sweep owed: `scripts/plat11-2-ui-e2e.mjs` and
+`scripts/d2w13-ui-e2e.mjs` reload after actions and could hide an in-place re-render defect.
 
 ## PLAT-11 — Make restore selection explicit and stable
 
