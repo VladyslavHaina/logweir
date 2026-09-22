@@ -66,6 +66,17 @@ nothing here edits that floor. `protection-cases` needs `catalog` (for the view 
 and `notify` (for the namespace's first alert), and both are declared in
 `PHASE_PRECONDITIONS`.
 
+`notify` and `protection-cases` each create the point their policy measures, as a manual run
+OF a `BackupSchedule` (`spec.scheduleRef.{name,uid}` — D3 §3.2: "the `spec.scheduleRef.uid`
+field is the authority and the label is the index"). Without it `identity::is_run_of_schedule`
+excludes a manual `Backup` from a policy naming `scheduleRefs`, the policy has an EMPTY
+candidate set, and `Unprotected` is an answer about nothing — which `status.health` cannot
+distinguish from the real verdict, so all three rows carry `selector_matched_a_run`. They name
+DIFFERENT schedules (`keeps-running`, `recovery-runs`) so neither selects the other's point.
+`notify` also ages its point past the objective, because `catalog` deletes every dest-a CR to
+prove reconstruction and the `Stale` arm had nothing to be stale about; that makes the phase
+take about six minutes.
+
 `protection-verdicts` needs only `setup`: it creates its own three policies, its own two
 catalogs, its own legacy destination and every Backup it measures, because its rows assert
 exact alert ledgers and an incident another phase opened on the same policy would make
