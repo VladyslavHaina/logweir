@@ -1475,6 +1475,15 @@ pub fn candidate_from_backup(backup: &Backup) -> Option<PointCandidate> {
         from_ms: w.from_ms,
         to_ms: w.to_ms,
     });
+    let verdict = evidence
+        .and_then(|e| e.verification.as_ref())
+        .and_then(|v| v.result.as_deref());
+    // A VERDICT THE CONTROLLER REACHED STILL DECIDES. Only "I could not look"
+    // (`NotAttempted`, or no verdict at all) defers to the catalog; `Valid` is
+    // a pass the catalog may still narrow. Everything else — `Invalid`,
+    // `Untrusted`, or a spelling this build does not know — is a refusal no
+    // catalog row may overrule (`protection::evidence_objective_met`).
+    let verdict_refused = !matches!(verdict, None | Some("NotAttempted" | "Valid"));
     Some(PointCandidate {
         point_id,
         backup_id: status.backup_id.clone()?,
@@ -1497,11 +1506,8 @@ pub fn candidate_from_backup(backup: &Backup) -> Option<PointCandidate> {
         // A `Backup` on its own establishes that the run succeeded, never that
         // its archive objects are still readable — that is the catalog's axis,
         // and it overwrites this below when a catalog is consulted.
-        selectable: !needs_catalog_capture
-            && evidence
-                .and_then(|e| e.verification.as_ref())
-                .and_then(|v| v.result.as_deref())
-                == Some("Valid"),
+        selectable: !needs_catalog_capture && verdict == Some("Valid"),
+        verdict_refused,
         retention_lease: false,
     })
 }
@@ -1525,7 +1531,12 @@ pub fn merge_catalog_entry(
     entry: crate::catalog_view::ViewEntry,
     destination: Option<String>,
 ) {
-    let recovery_point_at = DateTime::from_timestamp_millis(entry.recovery_point_at_ms);
+    // An IN-RANGE capture time or none. `0` is what a row that never wrote the
+    // field would carry, not a capture in 1970 (the protection join reads it
+    // the same way), and a value chrono cannot represent is not a time either.
+    let recovery_point_at = Some(entry.recovery_point_at_ms)
+        .filter(|ms| *ms > 0)
+        .and_then(DateTime::from_timestamp_millis);
     match by_id.get_mut(&entry.point_id) {
         Some(existing) => {
             // `pointId` deliberately carries only the first 128 digest bits.
@@ -1534,16 +1545,30 @@ pub fn merge_catalog_entry(
             if entry.receipt_sha256 != existing.receipt_sha256 {
                 return;
             }
+            // A REFUSAL THE CONTROLLER REACHED IS NOT THE CATALOG'S TO UNDO.
+            // The view is served until `viewExpiresAt`, so a row harvested
+            // before the receipt was replaced or its signer revoked still says
+            // `selectable`; it supplies neither selectability nor the capture
+            // facts of a point the controller refused.
+            if existing.verdict_refused {
+                existing.selectable = false;
+                return;
+            }
             // THE CATALOG DECIDES SELECTABILITY, because it is the axis it
             // actually measured: it listed the archive and re-evaluated trust.
+            // It decides only together with an in-range capture time: a row
+            // that cannot place the point leaves the creationTimestamp
+            // placeholder in place, and a placeholder is never selectable.
+            let Some(at) = recovery_point_at else {
+                existing.selectable = false;
+                return;
+            };
             existing.selectable = entry.selectable;
-            if let Some(at) = recovery_point_at {
-                existing.recovery_point_at = at;
-                existing.covered = Some(Window {
-                    from_ms: entry.covered_from_ms,
-                    to_ms: entry.covered_to_ms,
-                });
-            }
+            existing.recovery_point_at = at;
+            existing.covered = Some(Window {
+                from_ms: entry.covered_from_ms,
+                to_ms: entry.covered_to_ms,
+            });
             if existing.manifest_sha256.is_none() {
                 existing.manifest_sha256 = entry.manifest_sha256.clone();
             }
@@ -1578,6 +1603,7 @@ pub fn merge_catalog_entry(
                     destination,
                     source_cluster_id: None,
                     selectable: entry.selectable,
+                    verdict_refused: false,
                     retention_lease: false,
                 },
             );

@@ -1567,6 +1567,7 @@ fn a_point_whose_source_is_the_target_is_never_selected() {
         destination: Some(DESTINATION.to_string()),
         source_cluster_id: Some(SOURCE_CLUSTER_ID.to_string()),
         selectable: true,
+        verdict_refused: false,
         retention_lease: false,
     };
     let topics = vec!["orders".to_string()];
@@ -2061,6 +2062,143 @@ fn an_unverified_backup_is_never_a_candidate() {
         }),
         "the catalog supplies the receipt-derived window"
     );
+}
+
+/// A verified, selectable catalog row for exactly this receipt digest.
+fn matching_catalog_row(recovery_point_at_ms: i64) -> weirkeeper::catalog_view::ViewEntry {
+    serde_json::from_value(json!({
+        "pointId": POINT_ID,
+        "backupId": "b-20260919",
+        "runId": "run-b",
+        "recoveryPointAtMs": recovery_point_at_ms,
+        "coveredFromMs": 1_758_236_400_000_i64,
+        "coveredToMs": 1_758_240_000_000_i64,
+        "locations": [{"locationId": DESTINATION, "availability": "Available"}],
+        "receiptKey": "logweir/backups/b-20260919.json",
+        "receiptSha256": RECEIPT_SHA,
+        "manifestSha256": MANIFEST_SHA,
+        "availability": "Available",
+        "verification": "Verified",
+        "selectable": true
+    }))
+    .expect("the catalog entry parses")
+}
+
+/// A capture-less Backup candidate whose own verification result is `result`.
+fn capture_less_candidate(name: &str, result: &str) -> rehearsal::PointCandidate {
+    let mut value = backup_value(name, "2026-09-19T02:00:00Z", json!(["orders"]), false);
+    value["status"]["capture"] = Value::Null;
+    value["status"]["windowCovered"] = Value::Null;
+    value["status"]["evidence"]["verification"]["result"] = json!(result);
+    let backup: weirkeeper::crds::backup::Backup =
+        serde_json::from_value(value).expect("the fixture parses");
+    rs::candidate_from_backup(&backup).expect("the digest keeps the Backup joinable")
+}
+
+/// Review MEDIUM-1 (final round): a verdict the controller REACHED decides, and
+/// a catalog row — served until `viewExpiresAt`, so possibly harvested before
+/// the receipt was replaced or its signer revoked — never overrules it. Only
+/// `NotAttempted` defers, exactly as `protection::evidence_objective_met`.
+#[test]
+fn a_catalog_row_never_overrules_a_reached_backup_refusal() {
+    for result in ["Invalid", "Untrusted", "SomeFutureVerdict"] {
+        let candidate = capture_less_candidate("b-refused", result);
+        assert!(candidate.verdict_refused, "{result} is a reached refusal");
+        assert!(!candidate.selectable);
+        let mut by_id = std::collections::BTreeMap::from([(candidate.point_id.clone(), candidate)]);
+        rs::merge_catalog_entry(
+            &mut by_id,
+            matching_catalog_row(1_758_240_000_000),
+            Some(DESTINATION.to_string()),
+        );
+        let merged = by_id.get(POINT_ID).expect("the Backup candidate remains");
+        assert!(
+            !merged.selectable,
+            "a stale Verified catalog row for the same digest must not make a {result} Backup \
+             selectable"
+        );
+        assert!(
+            merged.covered.is_none(),
+            "a refused Backup takes no capture window from the catalog ({result})"
+        );
+        let topics = vec!["orders".to_string()];
+        let rules = rehearsal::SelectionRules {
+            topics: &topics,
+            min_age_seconds: 0,
+            max_partitions: 200,
+            target_cluster_id: TARGET_CLUSTER_ID,
+        };
+        let candidates: Vec<_> = by_id.into_values().collect();
+        assert!(
+            rehearsal::select_point(&candidates, &rules, now()).is_err(),
+            "no point is selected for a {result} Backup"
+        );
+    }
+
+    // The captured Invalid fixture (capture present) is refused the same way.
+    let invalid: weirkeeper::crds::backup::Backup = serde_json::from_value(backup_value(
+        "b-invalid",
+        "2026-09-19T02:00:00Z",
+        json!(["orders"]),
+        false,
+    ))
+    .expect("the fixture parses");
+    let candidate = rs::candidate_from_backup(&invalid).expect("a candidate object");
+    let mut by_id = std::collections::BTreeMap::from([(candidate.point_id.clone(), candidate)]);
+    rs::merge_catalog_entry(
+        &mut by_id,
+        matching_catalog_row(1_758_240_000_000),
+        Some(DESTINATION.to_string()),
+    );
+    assert!(!by_id[POINT_ID].selectable);
+
+    // Control: the honest "could not look" still defers to the same row.
+    let not_attempted = capture_less_candidate("b-unread", "NotAttempted");
+    assert!(!not_attempted.verdict_refused);
+    let mut by_id =
+        std::collections::BTreeMap::from([(not_attempted.point_id.clone(), not_attempted)]);
+    rs::merge_catalog_entry(
+        &mut by_id,
+        matching_catalog_row(1_758_240_000_000),
+        Some(DESTINATION.to_string()),
+    );
+    assert!(
+        by_id[POINT_ID].selectable,
+        "NotAttempted defers to the catalog"
+    );
+}
+
+/// Review LOW-2 (final round): the catalog decides selectability only together
+/// with an in-range capture time. A row whose `recoveryPointAtMs` chrono cannot
+/// represent, or that is `0`/negative, leaves the creationTimestamp placeholder
+/// in place, and a placeholder is never selectable.
+#[test]
+fn a_catalog_row_without_an_in_range_capture_time_makes_nothing_selectable() {
+    for ms in [i64::MAX, i64::MIN, 0, -1] {
+        let candidate = capture_less_candidate("b-unread", "NotAttempted");
+        let placeholder = candidate.recovery_point_at;
+        let mut by_id = std::collections::BTreeMap::from([(candidate.point_id.clone(), candidate)]);
+        rs::merge_catalog_entry(
+            &mut by_id,
+            matching_catalog_row(ms),
+            Some(DESTINATION.to_string()),
+        );
+        let merged = by_id.get(POINT_ID).expect("the Backup candidate remains");
+        assert!(
+            !merged.selectable,
+            "recoveryPointAtMs {ms} is not a capture time and cannot make the point selectable"
+        );
+        assert_eq!(merged.recovery_point_at, placeholder);
+        assert!(merged.covered.is_none());
+    }
+    // A catalog-only row with no in-range capture time is not a candidate.
+    let mut by_id = std::collections::BTreeMap::new();
+    rs::merge_catalog_entry(
+        &mut by_id,
+        matching_catalog_row(i64::MAX),
+        Some(DESTINATION.to_string()),
+    );
+    assert!(by_id.is_empty());
 }
 
 /// The point id a `Backup` yields is the one D3 §5.1 defines, so a

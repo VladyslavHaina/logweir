@@ -395,6 +395,17 @@ pub struct PointCandidate {
     /// own materialised conjunction (D3 §5.4), or the `Backup` path's
     /// "succeeded, and its evidence verified" for a point with no catalog entry.
     pub selectable: bool,
+    /// The `Backup`'s own evidence verdict was REACHED and is not a pass
+    /// (`Invalid`, `Untrusted`, or any result other than `Valid`/`NotAttempted`).
+    ///
+    /// Such a candidate is never selectable, whatever a catalog row says. The
+    /// catalog may decide only where the controller could not look
+    /// (`NotAttempted`, or no verdict at all) — the same rule as
+    /// `protection::evidence_objective_met`. A view is served until
+    /// `viewExpiresAt`, so a row harvested before the controller found a
+    /// replaced receipt or a revoked signer would otherwise overrule the
+    /// controller's refusal. Always `false` for a catalog-only point.
+    pub verdict_refused: bool,
     /// Whether a retention run currently holds a lease over this point
     /// (D3 §6.6).
     pub retention_lease: bool,
@@ -923,6 +934,7 @@ mod tests {
             destination: Some("primary".to_string()),
             source_cluster_id: Some("src".to_string()),
             selectable: true,
+            verdict_refused: false,
             retention_lease: false,
         }
     }
