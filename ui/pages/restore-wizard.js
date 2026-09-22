@@ -800,8 +800,13 @@ export function catalogRowsForBackup(backup, points) {
  *  `NotAttempted`, and for which exactly one catalog row answers that
  *  [`catalogPointOffer`] offers. A run with its own window is not this
  *  function's to answer ([`isRecoveryPoint`] already offers it), and a run
- *  whose verdict the controller reached -- `Invalid`, `Untrusted`, `Pending`,
- *  or a word this build does not know -- is never made restorable by a row. */
+ *  whose verdict the controller reached -- `Invalid`, `Untrusted`, or a word
+ *  this build does not know -- is never made restorable by a row. A run still
+ *  `Pending` (its evidence-fetch Job is reading the receipt) is not offered
+ *  either: the console waits for the controller's own answer rather than
+ *  pre-empting it with the catalog's, which is stricter than the server-side
+ *  join (`catalog_view::is_reached_refusal` defers on `Pending`) and never
+ *  looser. */
 export function backupCatalogOffer(backup, points, page) {
   const b = backup || null;
   const no = (reason) => ({ offer: false, reason: reason, entry: null });

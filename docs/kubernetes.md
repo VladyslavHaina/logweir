@@ -1368,8 +1368,9 @@ own verdict is `NotAttempted` (no evidence grant, or a `ControllerIdentity`
 location the administrator did not allowlist) has no `status.windowCovered`, so
 it is not a recovery point on its own. The schedule detail and the wizard offer
 it **from its catalog row** only when its own verdict is absent or
-`NotAttempted` — never `Invalid`, `Untrusted`, `Pending` or a word this build
-does not know — exactly one row answers its receipt digest (its set id when it
+`NotAttempted` — never `Invalid`, `Untrusted` or a word this build does not
+know, and not while it is still `Pending` (the console waits for the evidence
+fetch's own verdict) — exactly one row answers its receipt digest (its set id when it
 reported no digest), that row is offerable as above, and the catalog reads the
 destination the run froze (same name, UID and location digest). The link opens
 the wizard on the catalog point, so the plan is bound to that receipt.

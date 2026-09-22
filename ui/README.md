@@ -640,8 +640,10 @@ A `Succeeded` destination-backed run whose own verdict is absent or
 when exactly one row answers its receipt digest (its set id when it reported
 none), that row is offered by the rule above, and, in the wizard, the catalog
 reads the destination the run froze (same name, UID and location digest). A
-run whose verdict the controller REACHED -- `Invalid`, `Untrusted`, `Pending`, or
-a word this build does not know -- is never made restorable by a row.
+run whose verdict the controller REACHED -- `Invalid`, `Untrusted`, or a word
+this build does not know -- is never made restorable by a row, and a run still
+`Pending` (its evidence-fetch Job is reading the receipt) waits for that verdict
+rather than being offered from the catalog meanwhile.
 
 ## The topic subset, the mapping, and what a recovery does not do
 
