@@ -388,6 +388,14 @@ function seedDestination(name) {
             mode: "SecretKeys",
             secret: { name: name + "-access" },
           },
+          // Verification is deliberately not an implicit reuse of write
+          // access. This owned fixture grants a separately named read path so
+          // the controller can produce a real verification verdict.
+          archiveRead: {
+            mode: "SecretKeys",
+            secret: { name: name + "-access" },
+          },
+          evidenceRead: { mode: "ArchiveReadGrant" },
         },
       },
     }),
