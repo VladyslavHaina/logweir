@@ -233,7 +233,12 @@ async function waitForSelector(page, selector, label, timeout) {
   }
 }
 
+/** Opens `url` as a FRESH page load -- by way of about:blank, because a goto to
+ *  the hash the page is already on is a same-document navigation that
+ *  re-reads nothing, and a journey that re-opens a route to see what changed
+ *  must see the server's answer now and not the render it already had. */
 async function openRoute(page, url, selector, label) {
+  await page.goto("about:blank", { waitUntil: "load", timeout: 30000 });
   await page.goto(url, { waitUntil: "load", timeout: 30000 });
   try {
     await page.waitForSelector(selector, { timeout: 20000 });
@@ -819,6 +824,44 @@ async function main() {
     control("a readiness check naming a Backup and a catalog point is refused (422)",
       { status: both.status, body: both.body });
 
+    // ==== a finding, not a pass: the wizard's readiness gate =================
+    // A DRAFT's readiness verdict is always `unknown` -- `approval.state` is
+    // `skipped/SubjectNotCreated` because no Restore exists yet
+    // (docs/kubernetes.md section 21.7) -- and `readinessRefusal` refuses every
+    // verdict that is not `ready`. So once a draft has been checked, the guided
+    // submit is disabled for that plan. That gate is PLAT-11.2's (outside this
+    // task); it is recorded here with its evidence, and the journey continues the
+    // way an operator can: a fresh load of the same point, the same two edits,
+    // the same bytes -- asserted by hash -- submitted with no check on screen.
+    const checkedHash = await page.$eval("#plan-hash-value", (n) => n.textContent);
+    const gate = await page.evaluate(() => {
+      const b = document.querySelector("#create-restore");
+      return { disabled: b === null ? null : b.disabled,
+        said: document.body.innerText.slice(0, 20000) };
+    });
+    result.findings = (result.findings || []).concat([{
+      finding: "WIZARD-READINESS-GATE-REFUSES-EVERY-CHECKED-DRAFT",
+      detail: "after a readiness check on a draft plan the create button is disabled, because " +
+        "a draft's aggregate is unknown (approval.state skipped/SubjectNotCreated) and the " +
+        "gate refuses anything but ready",
+      createDisabled: gate.disabled, aggregate: ((preflight.status || {}).result || {}).state,
+      planHash: checkedHash,
+    }]);
+    artifact("dr/gate-after-check.txt", gate.said);
+    const wizardUrl = page.url();
+    await openRoute(page, wizardUrl, "#catalog-topics", "the wizard, freshly loaded");
+    await page.fill("#catalog-topics", SOURCE_TOPIC);
+    await page.dispatchEvent("#catalog-topics", "change");
+    await waitForSelector(page, ".topic-box[data-topic=\"" + SOURCE_TOPIC + "\"]",
+      "the named topic in the subset, again");
+    await page.fill("#topic-prefix", RESTORE_PREFIX);
+    await page.dispatchEvent("#topic-prefix", "change");
+    await pause(800);
+    const reloadedBytes = await page.$eval("#plan-bytes", (n) => n.textContent);
+    check(reloadedBytes === planBytes, "the fresh load renders the same plan bytes");
+    check(await page.$eval("#plan-hash-value", (n) => n.textContent) === checkedHash,
+      "and the same hash the readiness check was bound to");
+
     // ==== journey 6: create the Restore, approve it on the console ==========
     await page.click("#create-restore");
     await waitFor("the approvals page", 60, 1000, async () =>
@@ -846,12 +889,56 @@ async function main() {
     const sidecarBytes = readFileSync(join(WORK_DIR, "approval", "approval.sig"), "utf8");
     artifact("dr/approval.json", approvalBytes);
     artifact("dr/approval.sig", sidecarBytes);
+    // A SECOND FINDING. In console mode the product API mints the Restore's
+    // name (`rst-...`), but the guided submit routes to the approval page of the
+    // name the PAGE minted from the plan bytes (`restore-<8 hex>`), which does not
+    // exist -- so that page offers no form. The submit and its routing are
+    // PLAT-11.2/12.1's (claude/plat19-2's lane); recorded here, and the journey
+    // continues the way an approver can: the approvals page's own list of
+    // Restores waiting for an approval.
+    const landed = page.url();
+    if ((await page.$("#approval-form")) === null) {
+      result.findings = (result.findings || []).concat([{
+        finding: "GUIDED-SUBMIT-ROUTES-TO-THE-PAGE-MINTED-RESTORE-NAME",
+        detail: "console mode: the create answered " + restore.metadata.name + " and the " +
+          "submit navigated to " + landed,
+        landedOn: landed, created: restore.metadata.name,
+      }]);
+      await openRoute(page, base + "#/approvals?ns=" + encodeURIComponent(DR),
+        "#awaiting-approval", "the approvals page");
+      await page.click("#awaiting-approval a:has-text(\"" + restore.metadata.name + "\")");
+    }
     await waitForSelector(page, "#approval-form", "the approval form");
     await page.fill("#approval-json", approvalBytes);
     await page.fill("#approval-sig", sidecarBytes);
     await shot(page, "06a-approval-form");
     await page.click("#approval-form button[type=submit]");
-    const approval = await waitFor("the Approval to verify", 90, 2000, () => {
+    await pause(4000);
+    const approvalStatus = await page.evaluate(() => {
+      const n = document.querySelector("#approval-form-status");
+      return n === null ? "(no status slot)" : n.innerText;
+    });
+    await shot(page, "06b-approval-submitted");
+    artifact("dr/approval-form-status.txt", approvalStatus);
+    // THE CONSOLE HAS NO APPROVAL CREATE ROUTE IN THIS BUILD (PLAT-19.2 owns
+    // governed approval submission), and the page says so and points at kubectl
+    // or the CLI. So the approver records it the way the page tells them to:
+    // the same two documents, by kubectl, into an Approval naming the Restore.
+    let approvalCreatedBy = "the console (approval form)";
+    if (approvalStatus.indexOf("no create route for Approval") !== -1) {
+      create(DR, { apiVersion: "logweir.dev/v1alpha1", kind: "Approval",
+        metadata: owned(restore.spec.approvalRef.name, DR),
+        spec: { approvalBytes: approvalBytes, sidecarBytes: sidecarBytes,
+          planHash: "sha256:" + sha256(restore.spec.planBytes),
+          subjectRef: { kind: "Restore", name: restore.metadata.name } } });
+      approvalCreatedBy = "kubectl, as the console's approval page directs (no console create route)";
+      result.findings = (result.findings || []).concat([{
+        finding: "CONSOLE-HAS-NO-APPROVAL-CREATE-ROUTE",
+        detail: approvalStatus.slice(0, 400),
+      }]);
+    }
+    const approval = await waitFor("the Approval to verify (form said: " +
+      approvalStatus.slice(0, 600) + ")", 90, 2000, () => {
       const got = kube(["-n", DR, "get", "approval", restore.spec.approvalRef.name, "-o", "json"],
         { expected: [0, 1] });
       if (got.status !== 0) {
@@ -861,8 +948,9 @@ async function main() {
       return (a.status || {}).verified === true ? a : null;
     });
     artifact("dr/approval-object.json", { metadata: approval.metadata, status: approval.status });
-    record("6. the Restore is created by the guided submit and approved on the console", {
+    record("6. the Restore is created by the guided submit and its Approval verifies", {
       restore: restore.metadata.name, approval: approval.metadata.name,
+      approvalCreatedBy: approvalCreatedBy,
       matchedKeyId: (approval.status || {}).matchedKeyId,
     });
 
