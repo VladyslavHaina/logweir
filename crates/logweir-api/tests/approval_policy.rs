@@ -274,7 +274,7 @@ async fn a_confirmation_naming_another_uid_is_never_adopted() {
         .as_str()
         .expect("a uid")
         .to_string();
-    let mut stored = approvals_posted(&first.fake)
+    let stored = approvals_posted(&first.fake)
         .pop()
         .expect("the console stored its confirmation");
     let bytes = stored["spec"]["approvalBytes"]
