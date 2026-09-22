@@ -1289,6 +1289,13 @@ async function selectorPicksByUidAndSurvivesARename(browser, base) {
     result.created.push({ kind: "BackupSchedule", name: selectorNames.schedule, uid: stored.metadata.uid });
     check(stored.spec.sourceRef.name === sourceCluster,
       "the created schedule names the connection that was chosen: " + JSON.stringify(stored.spec.sourceRef));
+    // BACK TO THE LIST BEFORE THE RENAME IS INJECTED: the create redirected
+    // to the detail, and the list must be read with the connection's REAL
+    // name so the draft below holds `{uid, old name}`. Navigating after the
+    // interception is installed reads the renamed answer first and leaves
+    // nothing for the rename to be told apart from (measured lab-refresh-8).
+    await page.goto(base + "#/schedules?ns=" + namespace);
+    await page.waitForSelector("#schedule-source");
 
     // THE RENAME, injected. Kubernetes object names are immutable, so this is
     // the only way to present the page with the same UID under another name;
@@ -1322,10 +1329,9 @@ async function selectorPicksByUidAndSurvivesARename(browser, base) {
         "API server; every other object and field in the response is the API server's own",
     });
     // THE SELECTION IS MADE AGAIN -- the successful create consumed the draft
-    // and redirected to the detail -- so the page is holding `{uid, old name}`
-    // when the rename lands.
-    await page.goto(base + "#/schedules?ns=" + namespace);
-    await page.waitForSelector("#schedule-source");
+    // and redirected to the detail; the list was re-read above, before the
+    // interception -- so the page is holding `{uid, old name}` when the
+    // rename lands.
     await page.selectOption("#schedule-source", sourceUid);
     const held = await selection(page, "schedule-source");
     check(held.hiddenUid === sourceUid && held.hiddenName === sourceCluster,
