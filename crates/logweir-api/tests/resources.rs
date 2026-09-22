@@ -212,9 +212,46 @@ async fn a_declared_topic_mapping_is_checked_against_the_stored_prefix() {
     assert_eq!(error["code"], "duplicate_mapping");
     assert_eq!(error["field"], "topicMapping[1].target");
     let message = error["message"].as_str().unwrap();
+    // BOTH ROWS, AND COUNTED RATHER THAN MERELY PRESENT. A duplicate under a
+    // prefix map is the SAME source twice, so `contains("`orders`")` holds for
+    // a message that names one side only -- and a mutant that dropped the
+    // first row from the sentence survived exactly that assertion. Two
+    // occurrences is the property "names both rows" actually has.
+    assert_eq!(
+        message.matches("`orders`").count(),
+        2,
+        "the refusal names BOTH rows, not one: {message}"
+    );
     assert!(
-        message.contains("`orders`") && message.contains(&format!("`{prefix}orders`")),
-        "the refusal names both sources and the target they share: {message}"
+        message.contains(&format!("`{prefix}orders`")),
+        "and the target they share: {message}"
+    );
+
+    // AND A CROSS-ROW DUPLICATE IS UNREACHABLE, which is why the row above is
+    // the case that matters. Two DISTINCT sources cannot share a target under
+    // a prefix map: `p-` + `payments` is not `p-orders`, so the request is
+    // refused one rail earlier, as `mapping_mismatch`. This asserts that --
+    // the injectivity argument the duplicate message states in words is a
+    // property of the code and not a claim about it.
+    let mut crossed = support::restore_body(&plan);
+    crossed["target"]["topicNaming"]["prefix"] = json!("p-");
+    crossed["topicMapping"] = json!([
+        {"source": "orders", "target": "p-orders"},
+        {"source": "payments", "target": "p-orders"},
+    ]);
+    let refused = app
+        .post(
+            &format!("/api/v1/namespaces/{NS_A}/restores"),
+            Some("mapping-cross-00001"),
+            &crossed.to_string(),
+        )
+        .await;
+    refused.assert_problem(422, "validation_failed");
+    assert_eq!(
+        refused.json()["errors"][0]["code"],
+        "mapping_mismatch",
+        "two distinct sources cannot share a target under a prefix map: {}",
+        refused.json()["errors"][0]["message"]
     );
 
     // A row whose target is not `prefix + source`: the preview and the
