@@ -68,8 +68,19 @@ const LABELS = { "logweir.dev/test-owner": OWNER };
 // DELETES. Its brokers are addressed by service DNS from this namespace's own
 // `KafkaCluster` objects; nothing in it is patched, scaled or reconfigured.
 const LAB_NS = "logweir-scram-local";
-const LAB_TARGET_BOOTSTRAP = "kafka-target." + LAB_NS + ".svc:9092";
-const LAB_SOURCE_BOOTSTRAP = "kafka-source." + LAB_NS + ".svc:9092";
+// THE LAB'S OWN ADDRESSES AND ITS OWN AUTH. Both brokers expose ONE port,
+// 9096, and it is a SASL/SCRAM listener: a plaintext 9092 exists inside the
+// pod but no Service publishes it, so a `KafkaCluster` naming 9092 answers
+// `BrokerUnreachable` and every target row after it reads
+// `BlockedByPrerequisite`. A previous run of this harness recorded exactly
+// that. The SCRAM password is the lab's own Secret, COPIED into this run's
+// namespace without ever being printed, read or logged -- the lab's Kafka is
+// usable from an owned namespace, and its credential is how it is used.
+const LAB_TARGET_BOOTSTRAP = "kafka-target." + LAB_NS + ".svc.cluster.local:9096";
+const LAB_SOURCE_BOOTSTRAP = "kafka-source." + LAB_NS + ".svc.cluster.local:9096";
+const LAB_SCRAM_USER = "scram-user";
+const LAB_TARGET_SECRET = "target-scram";
+const LAB_SOURCE_SECRET = "source-scram";
 
 const stamp = new Date().toISOString().replace(/[-:]/g, "").replace(/\..*/, "Z");
 const namespace = process.env.UI_E2E_NAMESPACE || (NAMESPACE_PREFIX + stamp.toLowerCase());
@@ -344,15 +355,37 @@ function seedBackup(name, status) {
   throw new Error("the fixture Backup " + name + " did not keep the status this run set");
 }
 
-function seedCluster(name, role, bootstrap) {
+function seedCluster(name, role, bootstrap, secret) {
   const made = apply({
     apiVersion: "logweir.dev/v1alpha1",
     kind: "KafkaCluster",
     metadata: { name: name, namespace: namespace, labels: LABELS },
-    spec: { bootstrapServers: [bootstrap], role: role, auth: { mode: "plaintext", tls: false } },
+    spec: {
+      bootstrapServers: [bootstrap],
+      role: role,
+      auth: { mode: "scramSha512", tls: false, username: LAB_SCRAM_USER,
+        secretRef: { name: secret } },
+    },
   });
   result.created.push({ kind: "KafkaCluster", name: name, uid: made.metadata.uid });
   return made;
+}
+
+/** Copies one of the lab's credential Secrets into this run's namespace.
+ *
+ *  THE VALUE NEVER CROSSES THIS PROCESS AS TEXT IT PRINTS. It is read as
+ *  JSON, stripped of every field that names the source object, and handed
+ *  straight back to `kubectl create`; nothing is echoed, logged or written to
+ *  an artifact, and the copy dies with the namespace. */
+function copyLabSecret(name) {
+  const source = kubeJson(["-n", LAB_NS, "get", "secret", name]);
+  const copy = {
+    apiVersion: "v1", kind: "Secret", type: source.type || "Opaque",
+    metadata: { name: name, namespace: namespace, labels: LABELS },
+    data: source.data,
+  };
+  kube(["-n", namespace, "create", "-f", "-"], { input: JSON.stringify(copy) });
+  result.created.push({ kind: "Secret", name: name, note: "copied from the lab, value never printed" });
 }
 
 /** Creates, or deletes, one topic on the LAB's own `kafka-target` broker.
@@ -387,9 +420,49 @@ async function main() {
   result.namespaceUid = ns.metadata.uid;
   result.created.push({ kind: "Namespace", name: namespace, uid: ns.metadata.uid });
 
-  seedCluster(sourceCluster, "source", LAB_SOURCE_BOOTSTRAP);
-  seedCluster(targetCluster, "target", LAB_TARGET_BOOTSTRAP);
-  seedCluster(secondTarget, "target", LAB_TARGET_BOOTSTRAP);
+  // THE SERVICE ACCOUNT EVERY RUNNER JOB THIS NAMESPACE PRODUCES RUNS AS.
+  // `weirkeeper` builds every Job -- a connection probe and a readiness check
+  // alike -- with `serviceAccountName: logweir-runner`, and the chart creates
+  // it per installation namespace. A namespace this harness made itself has
+  // none, and the Job controller then answers `FailedCreate ... serviceaccount
+  // "logweir-runner" not found`, no pod is created, and the check reports
+  // `NotReady` about the POD rather than about the target. (The first run of
+  // this harness recorded exactly that, which is why the line is here.) It
+  // holds no RBAC: a check pod dials a broker and an object store and reads no
+  // API object.
+  const account = apply({
+    apiVersion: "v1", kind: "ServiceAccount",
+    metadata: { name: "logweir-runner", namespace: namespace, labels: LABELS },
+  });
+  result.created.push({ kind: "ServiceAccount", name: "logweir-runner", uid: account.metadata.uid });
+
+  // THE SIGNING KEY THE CHECK POD MOUNTS, generated for this run and this run
+  // only. `weirkeeper` gives every runner Job a `signing` volume from the
+  // Secret `logweir-signing-key`, and a namespace without it never starts the
+  // pod ("MountVolume.SetUp failed ... secret not found") -- so the check
+  // reports NotReady about the VOLUME instead of about the target, which a
+  // previous run of this harness recorded. The key is ed25519, generated here,
+  // never printed, and deleted with the namespace. It signs nothing this run
+  // asserts on: the clause under test is `target.mappedTopics`, which is a
+  // question about the broker.
+  const keyPath = join(WORK_DIR, "signing.pem");
+  mkdirSync(WORK_DIR, { recursive: true, mode: 0o700 });
+  const minted = spawnSync("openssl", ["genpkey", "-algorithm", "ed25519", "-out", keyPath],
+    { encoding: "utf8", timeout: 30000 });
+  check(minted.status === 0, "openssl could not mint an ed25519 key: " + String(minted.stderr));
+  kube(["-n", namespace, "create", "secret", "generic", "logweir-signing-key",
+    "--from-file=signing.pem=" + keyPath]);
+  result.created.push({ kind: "Secret", name: "logweir-signing-key", note: "ed25519, per-run, never printed" });
+
+  copyLabSecret(LAB_TARGET_SECRET);
+  const sourceSecret = kube(["-n", LAB_NS, "get", "secret", LAB_SOURCE_SECRET],
+    { expected: [0, 1] }).status === 0 ? LAB_SOURCE_SECRET : LAB_TARGET_SECRET;
+  if (sourceSecret === LAB_SOURCE_SECRET) {
+    copyLabSecret(LAB_SOURCE_SECRET);
+  }
+  seedCluster(sourceCluster, "source", LAB_SOURCE_BOOTSTRAP, sourceSecret);
+  seedCluster(targetCluster, "target", LAB_TARGET_BOOTSTRAP, LAB_TARGET_SECRET);
+  seedCluster(secondTarget, "target", LAB_TARGET_BOOTSTRAP, LAB_TARGET_SECRET);
 
   // TWO POINTS, AND THE OLDER ONE IS THE ONE THIS JOURNEY RESTORES.
   points.old = seedBackup(
@@ -720,8 +793,8 @@ async function main() {
     for (let i = 0; i < 90; i += 1) {
       const list = kubeJson(["-n", namespace, "get", "preflights"]).items || [];
       const mine = list[list.length - 1];
-      if (mine && mine.status && typeof mine.status.state === "string" &&
-        ["ready", "notReady", "unknown", "failed", "cancelled"].includes(mine.status.state)) {
+      const phase = ((mine || {}).status || {}).phase;
+      if (phase === "Completed" || phase === "Failed" || phase === "Cancelled") {
         verdict = mine;
         break;
       }
@@ -749,8 +822,9 @@ async function main() {
       });
       process.stderr.write("== NOT REACHED: a terminal preflight verdict\n");
     } else {
-      const state = verdict.status.state;
-      const entries = (verdict.status.checks || []).concat(verdict.status.warnings || []);
+      const state = verdict.status.reason || verdict.status.phase;
+      const vres = verdict.status.result || {};
+      const entries = (vres.checks || []).concat(vres.warnings || []);
       const mappedRow = entries.find((c) => c.id === "target.mappedTopics");
       record("the readiness check for this exact plan reached a verdict on the lab", {
         preflight: verdict.metadata.name, uid: verdict.metadata.uid, state: state,
@@ -836,15 +910,20 @@ async function main() {
       for (let i = 0; i < 90; i += 1) {
         const o = kubeJson(["-n", namespace, "get", "preflight", id]);
         const st = o.status || {};
-        const rows = (st.checks || []).concat(st.warnings || []);
+        // THE ROWS LIVE UNDER `status.result` ON THE CUSTOM RESOURCE. The
+        // product API's projection flattens them to the top level; this reads
+        // the object with `kubectl`, so it reads the CRD's own shape. (A
+        // previous run looked at `status.checks`, found nothing, and reported
+        // NOT REACHED over a check that had in fact run.)
+        const res = st.result || {};
+        const rows = (res.checks || []).concat(res.warnings || []);
         const row = rows.find((c) => c.id === "target.mappedTopics");
         if (row !== undefined) {
           collisionRow = row;
           collisionPreflight = o;
           break;
         }
-        if (typeof st.state === "string" &&
-          ["ready", "notReady", "unknown", "failed", "cancelled"].includes(st.state)) {
+        if (st.phase === "Completed" || st.phase === "Failed" || st.phase === "Cancelled") {
           collisionPreflight = o;
           break;
         }
@@ -1057,8 +1136,13 @@ async function main() {
         "the banner names the failed run");
       check(retryText.includes("not reused"),
         "and says the old approval is not reused");
-      const mintedRestore = retryNames.find((n) => /^rst-[a-z0-9]{26}$/.test(String(n)));
-      const mintedApproval = retryNames.find((n) => /^apr-[a-z0-9]{26}$/.test(String(n)));
+      // THE MINTED NAMES ARE `restore-<8 hex>` AND `approval-<8 hex>`, taken
+      // from the plan hash -- `ui/plan.js`'s `mintNames`. (A previous run
+      // looked for the product API's `rst-`/`apr-` prefixes, which are what
+      // the SERVER mints when it names an object for a caller that supplied
+      // none; the wizard supplies one.)
+      const mintedRestore = retryNames.find((n) => /^restore-[0-9a-f]{8}$/.test(String(n)));
+      const mintedApproval = retryNames.find((n) => /^approval-[0-9a-f]{8}$/.test(String(n)));
       check(mintedRestore !== undefined && mintedRestore !== failedName,
         "the retry mints a NEW Restore name: " + mintedRestore + " vs " + failedName);
       check(mintedApproval !== undefined && mintedApproval !== failedApproval,

@@ -19,6 +19,7 @@ import { fileURLToPath } from "node:url";
 import {
   defaultPrefixFor,
   renderPointInTimeStep,
+  renderPointSelector,
   freshTargetPrefix,
   initialState,
   isKafkaTopicName,
@@ -450,6 +451,20 @@ test("a_failed_restore_retries_to_a_fresh_target_and_never_reuses_its_approval",
   );
   assert.equal(defaultPrefixFor(retry), retry.fields.target.topicPrefix);
 
+  // AND THE SELECTOR IS REACHABLE. The retry route names no point, so the
+  // wizard renders its selector first and `defaultPrefixFor` is called with no
+  // instant: it must answer "" rather than throw, or the retry link replaces
+  // the whole page with a render error. A live journey met exactly that.
+  const noPoint = initialState("logweir-t27", fixture("wizard-clusters.json"), backups,
+    { uid: "", backup: "", retryOf: failedName });
+  assert.equal(noPoint.pointState, "none", "the retry route lands on the selector");
+  assert.equal(freshTargetPrefix(undefined, failedName), "");
+  assert.equal(freshTargetPrefix("not an instant", failedName), "");
+  assert.equal(defaultPrefixFor(noPoint), "");
+  assert.ok(renderPointSelector(noPoint).includes("Retry to a fresh target from this point"),
+    "and the selector's rows carry the retry forward");
+  assert.ok(renderPointSelector(noPoint).includes("id=\"retry-banner\""));
+
   // DETERMINISTIC: retrying the same run twice is the same retry, so a second
   // submit is the idempotent replay every other create here is.
   assert.equal(
@@ -515,6 +530,14 @@ test("a_failed_restore_retries_to_a_fresh_target_and_never_reuses_its_approval",
   const offered = renderRetryAction(failedView, "logweir-t27");
   assert.ok(offered.includes("Retry to a fresh target"));
   assert.ok(offered.includes(encodeURIComponent(failedName)));
+  // A TERMINAL REFUSAL IS THE SHARPER CASE, not a different one: that Restore's
+  // name and its Approval name are already taken, so a retry of the same point
+  // with the same prefix would mint exactly them again.
+  assert.ok(
+    renderRetryAction(Object.assign({}, failedView, { state: "refused" }), "logweir-t27")
+      .includes("Retry to a fresh target"),
+    "a terminally refused restore offers the retry too",
+  );
   assert.equal(
     renderRetryAction(Object.assign({}, failedView, { state: "succeeded" }), "logweir-t27"),
     "",

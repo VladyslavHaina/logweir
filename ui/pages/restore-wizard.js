@@ -295,6 +295,18 @@ export const RETRY_TAIL_CHARS = 8;
  *  submit is the idempotent replay every other create in this wizard is. It
  *  reads no clock -- the instant comes from the point, as everywhere else. */
 export function freshTargetPrefix(pointInTime, retryOf) {
+  // AN INPUT THAT IS NOT AN INSTANT HAS NO DEFAULT PREFIX, and saying so is
+  // this function's job rather than throwing. The retry route reaches the
+  // SELECTOR first -- `#/restore?ns=…&retryOf=…` names no recovery point, on
+  // purpose, because a `Restore` carries a backup set id and not the `Backup`
+  // it came from -- so there is no point in time to derive from until one is
+  // chosen. The first cut called `defaultTopicPrefix` unconditionally and a
+  // live journey met the whole page replaced by `defaultTopicPrefix(): - is
+  // not an instant this page can read`. `prefixFor` has always had this arm
+  // for the same reason.
+  if (typeof pointInTime !== "string" || Number.isNaN(new Date(pointInTime).getTime())) {
+    return "";
+  }
   const base = defaultTopicPrefix(pointInTime);
   const name = typeof retryOf === "string" ? retryOf : "";
   let tail = "";

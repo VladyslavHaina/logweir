@@ -336,8 +336,19 @@ export function renderRetryAction(v, ns) {
   // because nothing there computes one. A predicate that read only the first
   // would silently offer nothing behind `kubectl proxy`, which is where an
   // incident without the product API happens.
+  // `failed` AND `refused`, because the product API has two terminal words for
+  // one operator situation and both are work that will never proceed. A
+  // terminal refusal -- `ApprovalSubjectMismatch`, `PlanHashMismatch` -- is in
+  // fact the SHARPER case for this affordance: that Restore's name and its
+  // Approval name are already taken, so a retry of the same point with the
+  // same prefix would mint exactly them again and collide, which is the defect
+  // PLAT-12.2 names. The custom resource spells both `Failed` in
+  // `status.phase`, so the legacy arm needs no second word. (A live journey
+  // found this: the lab refused a Restore terminally and the affordance,
+  // written for `failed` alone, was not offered.)
   const failed = v.console === true
-    ? v.terminal === true && String(v.state || "").toLowerCase() === "failed"
+    ? v.terminal === true &&
+      ["failed", "refused"].includes(String(v.state || "").toLowerCase())
     : String(v.phase || "").toLowerCase() === "failed";
   if (!failed) {
     return "";
