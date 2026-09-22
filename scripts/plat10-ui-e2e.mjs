@@ -628,6 +628,42 @@ async function main() {
   const context = await browser.newContext();
   const page = await context.newPage();
 
+  // PAGE LOADS ARE COUNTED so a journey can require that an action re-rendered
+  // the detail IN PLACE (review HIGH-1) rather than through a reload.
+  let pageLoads = 0;
+  page.on("load", () => { pageLoads += 1; });
+  /** Waits for the detail of `name` to hold every `wants` entry -- a selector,
+   *  optionally with the exact text of its first match -- WITHOUT a page load
+   *  and without leaving the detail. Selectors rather than a predicate, because
+   *  the console's CSP forbids evaluating code built from strings. */
+  async function inPlace(name, loadsBefore, wants, label) {
+    const hash = await page.evaluate(() => window.location.hash);
+    try {
+      await page.waitForFunction(([n, list]) => {
+        const detail = document.querySelector("#schedule-detail");
+        if (detail === null || detail.getAttribute("data-schedule-detail") !== n) {
+          return false;
+        }
+        return list.every((want) => {
+          const found = detail.querySelector(want.selector);
+          return found !== null && (want.text === undefined ||
+            found.textContent.trim() === want.text);
+        });
+      }, [name, wants], { timeout: 30000 });
+    } catch (never) {
+      throw new Error(label + ": the detail never re-rendered in place. Saw:\n" +
+        (await text(page)).slice(0, 1500));
+    }
+    const listMounted = await page.evaluate(() => Array.from(document.querySelectorAll("h2"))
+      .some((h) => h.textContent.trim() === "Schedules"));
+    check(!listMounted, label + ": the namespace list was mounted into the detail");
+    check(pageLoads === loadsBefore, label + ": the page was reloaded (" +
+      (pageLoads - loadsBefore) + " load(s)); the re-render must be in place");
+    check((await page.evaluate(() => window.location.hash)) === hash,
+      label + ": the route changed");
+    return { loadsDuring: pageLoads - loadsBefore, hash: hash };
+  }
+
   const bodies = [];
   page.on("response", async (response) => {
     try {
@@ -1098,6 +1134,7 @@ async function main() {
     await page.fill(panel + " [name=\"topics\"]", "orders");
     await page.click("button[data-preview=\"" + selected.metadata.name + "\"]");
     await waitForText(page, "this cadence compiles to", "the edit preview");
+    const loadsBeforeEdit = pageLoads;
     await page.click(panel + " button[type=submit]");
     let afterEdit = beforeEdit;
     for (let i = 0; i < 20 && afterEdit.metadata.generation === beforeEdit.metadata.generation; i += 1) {
@@ -1111,15 +1148,22 @@ async function main() {
     check(JSON.stringify(afterEdit.spec.destinationRef) === JSON.stringify({ name: destination }),
       "the whole-policy replace dropped the destination");
     check(afterEdit.spec.timeZone === "Europe/Berlin", "the whole-policy replace dropped the zone");
+    // THE DETAIL RE-READS ITSELF (review HIGH-1): no reload, and the revision
+    // on screen is the stored one.
+    const editedInPlace = await inPlace(selected.metadata.name, loadsBeforeEdit, [
+      { selector: ".revision[data-generation=\"" + String(afterEdit.metadata.generation) + "\"]" },
+      { selector: "[data-editing-generation=\"" +
+        String(afterEdit.metadata.generation) + "\"]" },
+    ], "the policy save");
     await shot(page, "11-policy-edited");
     record("PLAT-10.1 editing the future policy from the detail makes a new revision", {
       schedule: selected.metadata.name,
       fromGeneration: beforeEdit.metadata.generation,
       toGeneration: afterEdit.metadata.generation,
       topics: afterEdit.spec.topics, destinationRef: afterEdit.spec.destinationRef,
+      reRenderedInPlace: editedInPlace,
     });
 
-    await freshPage(detailRoute);
     await waitForSelector(page, "form.run-now-form", "the run-now panel after the edit");
     const runB = await backUpNow(selected.metadata.name);
     check(runB.spec.scheduleRef.generation === afterEdit.metadata.generation,
@@ -1518,11 +1562,12 @@ async function main() {
     // PLAT-10.2 pause and resume, from the detail.
     result.reloads = (result.reloads || 0) +
       await openRoute(page, detailRoute, "form.suspend", "the suspend toggle on the detail");
+    const loadsBeforePause = pageLoads;
     await page.click("form.suspend button[type=submit]");
-    await pause(2000);
+    const pausedInPlace = await inPlace(selected.metadata.name, loadsBeforePause,
+      [{ selector: "form.suspend button", text: "Resume" }], "the pause");
     const paused = kubeJson(["-n", namespace, "get", "backupschedule", selected.metadata.name]);
     check(paused.spec.suspend === true, "the pause did not suspend the schedule");
-    await page.reload({ waitUntil: "load", timeout: 30000 });
     await waitForSelector(page, "#schedule-history", "the history while paused");
     // THE HISTORY SURVIVES THE PAUSE: both real runs are still listed with the
     // catalog's words, and (only where the controller made a point
@@ -1541,17 +1586,19 @@ async function main() {
     check(pausedBadge, "the detail does not badge the schedule `suspended`");
     await shot(page, "19-paused");
     await waitForSelector(page, "form.suspend", "the resume toggle");
+    const loadsBeforeResume = pageLoads;
     await page.click("form.suspend button[type=submit]");
-    await pause(2000);
+    const resumedInPlace = await inPlace(selected.metadata.name, loadsBeforeResume,
+      [{ selector: "form.suspend button", text: "Suspend" }], "the resume");
     const resumed = kubeJson(["-n", namespace, "get", "backupschedule", selected.metadata.name]);
     check(resumed.spec.suspend === false, "the resume did not un-suspend the schedule");
-    await freshPage(detailRoute);
     await waitForSelector(page, "#schedule-history", "the history after resume");
     check(!(await exactSuspended()), "a resumed schedule is still badged `suspended`");
     await shot(page, "20-resumed");
     record("PLAT-10.2 pause and resume from the detail, with the history still offered while paused", {
       schedule: selected.metadata.name, pausedSpecSuspend: paused.spec.suspend,
       resumedSpecSuspend: resumed.spec.suspend, saysSuspended: pausedBadge,
+      pauseReRenderedInPlace: pausedInPlace, resumeReRenderedInPlace: resumedInPlace,
       runsListedWhilePaused: [pausedA.text.split("\t")[0], pausedB.text.split("\t")[0]],
       restoreLinksWhilePaused: restorable ? [pausedA.restoreHref, pausedB.restoreHref]
         : "not applicable: no point is restorable on this lab (see blocked)",
