@@ -771,6 +771,24 @@ async function main() {
     check(planBytes.indexOf("backup: \"" + point.backupId + "\"") !== -1,
       "source.backup is pinned to the point's set");
     check(planBytes.indexOf("prefix: \"" + RESTORE_PREFIX + "\"") !== -1, "the prefix");
+    // WIZARD-DEFAULT-PIT-EXCLUSIVE: the default point in time is the LAST
+    // instant the runner accepts, one millisecond before the exclusive
+    // `coveredTo` -- never `coveredTo` itself.
+    const lastAccepted = new Date(Date.parse(point.coveredTo) - 1).toISOString();
+    check(planBytes.indexOf("point_in_time: \"" + lastAccepted + "\"") !== -1,
+      "the default point in time is coveredTo - 1 ms (" + lastAccepted + ")");
+    // CONTROL: the exclusive end itself is refused on the field, and nothing
+    // about the plan moves until it is corrected.
+    await page.fill("#point-in-time", new Date(Date.parse(point.coveredTo)).toISOString());
+    await page.dispatchEvent("#point-in-time", "change");
+    await waitForSelector(page, "#point-in-time-complaint", "the exclusive-end refusal");
+    control("WIZARD-DEFAULT-PIT-EXCLUSIVE: the catalog window's exclusive end is refused on the " +
+      "field", { refused: point.coveredTo, defaultAccepted: lastAccepted });
+    await page.fill("#point-in-time", lastAccepted);
+    await page.dispatchEvent("#point-in-time", "change");
+    await pause(800);
+    check(await page.$eval("#plan-bytes", (n) => n.textContent) === planBytes,
+      "restoring the default restores the same plan bytes");
     artifact("dr/plan-on-screen.yaml", planBytes);
     await shot(page, "04b-wizard-bound-plan");
     record("4. the wizard builds a plan bound to the catalog point, with no Backup object", {
@@ -795,6 +813,10 @@ async function main() {
     const rows = (((preflight.status || {}).result || {}).checks || []);
     const rpRow = rows.find((c) => c.id === "recoveryPoint.state") || null;
     const storedRef = ((preflight.spec.request || {}).restore || {}).catalogPointRef || null;
+    const coverageRow = rows.find((c) => c.id === "archive.coverage") || {};
+    check(coverageRow.state === "ready" && coverageRow.code === "PointInTimeCovered",
+      "the runner's archive.coverage accepts the default point in time: " +
+        JSON.stringify(coverageRow));
     const pfRequest = requests.filter((r) => r.url.indexOf("/preflights") !== -1)
       .map((r) => r.body).join("\n");
     check(pfRequest.indexOf("\"catalogPoint\"") !== -1, "the console named the catalog point");

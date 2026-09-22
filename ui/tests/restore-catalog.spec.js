@@ -33,6 +33,7 @@ import {
   ownVerdictOf,
   parseTopicList,
   readOwnVerdicts,
+  restorableWindow,
   preparePlan,
   readCatalogOffers,
   recoveryPoints,
@@ -254,11 +255,22 @@ test("a_selectable_complete_unredacted_row_is_offered_and_each_missing_fact_refu
   }
 });
 
-test("the_catalog_window_ends_one_millisecond_before_coveredTo", () => {
+test("the_catalog_window_is_half_open_and_a_plan_names_only_what_the_runner_accepts", () => {
+  // WIZARD-DEFAULT-PIT-EXCLUSIVE, for a catalog point: one rule for both kinds
+  // of point. The catalog's window is half-open exactly as a Backup's is.
   const window = catalogWindow(row());
   assert.equal(window.fromMs, Date.parse("2026-09-22T13:00:00Z"));
-  assert.equal(window.toMs, Date.parse("2026-09-22T14:00:00Z") - 1,
+  assert.equal(window.toMs, Date.parse("2026-09-22T14:00:00Z"));
+  const accepted = restorableWindow(window);
+  assert.equal(accepted.fromMs, Date.parse("2026-09-22T13:00:00Z") + 1,
+    "the runner refuses a point AT the floor (PointInTimeBeforeCoverage)");
+  assert.equal(accepted.toMs, Date.parse("2026-09-22T14:00:00Z") - 1,
     "coveredTo is EXCLUSIVE; the last instant a plan may name is one millisecond before it");
+  // CONTROLS: a window with no instant a plan may name is not offered.
+  assert.equal(restorableWindow({ fromMs: 10, toMs: 11 }), null);
+  assert.equal(restorableWindow({ fromMs: 10, toMs: 12 }).fromMs, 11);
+  assert.equal(catalogPointOffer(row({ coveredTo: "2026-09-22T13:00:00.001Z" }), page([])).offer,
+    false);
 });
 
 // ------------------------------------ 3. CONSOLE-RESTORE-IGNORES-CATALOG-WINDOW
@@ -523,7 +535,7 @@ test("the_wizard_renders_the_catalog_point_and_its_binding", async () => {
   assert.match(html, /id="catalog-binding"/);
   assert.match(html, new RegExp("id=\"point-name\">" + POINT));
   assert.match(html, /id="catalog-archive"/);
-  assert.match(html, /covered to \(inclusive\)/);
+  assert.match(html, /covered to \(exclusive\)/);
 });
 
 test("the_mount_opens_on_a_catalog_point_and_refuses_one_it_cannot_offer", async () => {

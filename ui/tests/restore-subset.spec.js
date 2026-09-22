@@ -997,37 +997,44 @@ test("a_point_outside_the_disclosed_window_is_refused_and_the_bounds_are_shown",
   assert.equal(typeof covered.fromMs, "number");
   assert.equal(typeof covered.toMs, "number");
 
-  // INCLUSIVE AT BOTH ENDS.
-  for (const at of [covered.fromMs, covered.toMs]) {
+  // WIZARD-DEFAULT-PIT-EXCLUSIVE. `windowCovered` is HALF-OPEN (`toMs` is the
+  // first instant NOT covered) and the runner refuses a point AT the floor, so
+  // the range a plan may name is [fromMs + 1, toMs - 1] -- inclusive at BOTH of
+  // those ends.
+  for (const at of [covered.fromMs + 1, covered.toMs - 1]) {
     state.fields.pointInTime = new Date(at).toISOString();
     assert.ok(
       !Object.keys(validateRestore(state)).includes("pointInTime"),
-      "a point ON the bound is inside the window: " + state.fields.pointInTime,
+      "a point ON the accepted bound is inside: " + state.fields.pointInTime,
     );
   }
   // AND THE COMPLAINT PARAGRAPH IS WHAT DISTINGUISHES THE TWO STATES, because
   // the bound itself is printed beside the input in every state: a test that
   // asserted "the window message is on the page" would hold for an accepted
   // point too. The live journey's negative control caught exactly that.
-  state.fields.pointInTime = new Date(covered.toMs).toISOString();
+  state.fields.pointInTime = new Date(covered.toMs - 1).toISOString();
   assert.ok(!renderPointInTimeStep(state).includes("id=\"point-in-time-complaint\""));
-  state.fields.pointInTime = new Date(covered.toMs + 1).toISOString();
-  assert.ok(renderPointInTimeStep(state).includes("id=\"point-in-time-complaint\""));
+  state.fields.pointInTime = new Date(covered.toMs).toISOString();
+  assert.ok(renderPointInTimeStep(state).includes("id=\"point-in-time-complaint\""),
+    "THE NEGATIVE CONTROL for the defect: the exclusive end itself is refused, as the runner's " +
+      "archive.coverage refuses it (PointInTimeAfterCoverage)");
 
-  // AND STRICTLY OUTSIDE IS A REFUSAL NAMING THE WINDOW.
-  for (const at of [covered.fromMs - 1, covered.toMs + 1]) {
+  // AND OUTSIDE -- the floor itself, the exclusive end, and beyond either --
+  // IS A REFUSAL NAMING THE WINDOW.
+  for (const at of [covered.fromMs - 1, covered.fromMs, covered.toMs, covered.toMs + 1]) {
     state.fields.pointInTime = new Date(at).toISOString();
     const problems = validateRestore(state);
     assert.ok(
       typeof problems.pointInTime === "string" &&
         problems.pointInTime.includes("outside the coverage this recovery point discloses"),
-      "refused by name: " + JSON.stringify(problems),
+      "refused by name at " + state.fields.pointInTime + ": " + JSON.stringify(problems),
     );
     assert.ok(problems.pointInTime.includes("both bounds are inside it"));
   }
 
   // THE NEGATIVE CONTROL: a point inside passes, so the row is red if the
   // window check is removed.
-  state.fields.pointInTime = new Date(covered.toMs).toISOString();
+  state.fields.pointInTime = new Date(covered.toMs - 1).toISOString();
   assert.ok(!Object.keys(validateRestore(state)).includes("pointInTime"));
 });
+

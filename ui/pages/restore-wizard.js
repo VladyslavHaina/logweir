@@ -777,21 +777,46 @@ export function catalogMayAnswerFor(backup) {
   return verdict === null || DEFERRING_VERDICTS.indexOf(verdict) !== -1;
 }
 
-/** The catalog's covered window as the wizard's inclusive window, or `null`.
+/** THE POINTS IN TIME A RUNNER ACCEPTS FOR A COVERED WINDOW
+ *  (WIZARD-DEFAULT-PIT-EXCLUSIVE).
  *
- *  THE CATALOG'S END IS EXCLUSIVE (`BackupReceipt.covered.to_ms`), and the
- *  restore window's end is inclusive, so the last instant a plan may name is
- *  `coveredTo - 1 ms` (D3 section 5.5 step 4). The wizard's window checks are
- *  closed at both ends, so the window it is given is `[coveredFrom,
- *  coveredTo - 1 ms]`. */
+ *  A covered window -- `Backup.status.windowCovered`, or a catalog point's
+ *  `coveredFrom`/`coveredTo` -- is HALF-OPEN: `fromMs` is the oldest segment's
+ *  inclusive start and `toMs` is the newest segment's end PLUS ONE
+ *  millisecond, the first instant the archive does not cover
+ *  (`crates/logweir/src/backup/phase_run.rs`, `docs/stability.md`). The
+ *  runner's `archive.coverage` check then refuses a point in time AT OR
+ *  BEFORE the floor (`PointInTimeBeforeCoverage`: a restore window of one
+ *  instant restores nothing) and one AFTER the newest record
+ *  (`PointInTimeAfterCoverage`) -- `oldest < pit <= newest`
+ *  (`crates/logweir/src/check/kinds/restore.rs` `coverage_row`). So the
+ *  closed range a plan may name is `[fromMs + 1, toMs - 1]`, and its end is
+ *  the default. `null` when that range is empty or the window is unreadable.
+ *  The restore window itself stays closed at both ends (the engine's filter
+ *  is `timestamp >= start && timestamp <= end`), so the default restores the
+ *  newest record. */
+export function restorableWindow(covered) {
+  const c = covered || {};
+  if (typeof c.fromMs !== "number" || typeof c.toMs !== "number") {
+    return null;
+  }
+  const first = c.fromMs + 1;
+  const last = c.toMs - 1;
+  return last < first ? null : { fromMs: first, toMs: last };
+}
+
+/** The catalog's covered window, half-open exactly as the receipt writes it
+ *  (`coveredTo` exclusive) -- the shape `Backup.status.windowCovered` has, so
+ *  one rule ([`restorableWindow`]) turns either into the points in time a plan
+ *  may name. `null` when either bound is unreadable. */
 export function catalogWindow(entry) {
   const e = entry || {};
   const from = epochMs(e.coveredFrom);
   const to = epochMs(e.coveredTo);
-  if (from === null || to === null || to - 1 < from) {
+  if (from === null || to === null) {
     return null;
   }
-  return { fromMs: from, toMs: to - 1 };
+  return { fromMs: from, toMs: to };
 }
 
 const POINT_ID_SHAPE = /^lwp1-[0-9a-f]{32}$/;
@@ -860,8 +885,8 @@ export function catalogPointOffer(entry, page) {
   if (typeof e.backupId !== "string" || !/^[A-Za-z0-9._-]{1,128}$/.test(e.backupId)) {
     return no("the catalog published no usable backup set id for this point");
   }
-  if (catalogWindow(e) === null) {
-    return no("the catalog published no covered window for this point");
+  if (restorableWindow(catalogWindow(e)) === null) {
+    return no("the catalog published no covered window a point in time can be chosen in");
   }
   return { offer: true, reason: null };
 }
@@ -1772,9 +1797,7 @@ export function renderCatalogPointStep(state) {
       ["run", cell(c.runId)],
       ["recovery point", cell(c.recoveryPointAt)],
       ["covered from", cell(rfc3339(covered.fromMs))],
-      ["covered to (inclusive)", cell(rfc3339(covered.toMs)) +
-        " <span class=\"note\">(the catalog's coveredTo " + esc(String(c.coveredTo || "")) +
-        " is exclusive)</span>"],
+      ["covered to (exclusive)", cell(rfc3339(covered.toMs))],
       ["availability", badge("green", String(c.availability || ""))],
       ["verification", badge("green", String(c.verification || ""))],
       ["signer key id", "<code>" + cell(c.signerKeyId) + "</code>"],
@@ -3815,9 +3838,12 @@ function backupsOf(state) {
  *  nothing, and render the window message with `Invalid Date` on both bounds --
  *  which is what the behaviour suite's window row exists to catch. */
 function coveredOf(state) {
+  // THE RANGE A PLAN MAY NAME, NOT THE RAW WINDOW (WIZARD-DEFAULT-PIT-EXCLUSIVE):
+  // `windowCovered.toMs` is exclusive and the runner refuses the floor itself,
+  // so every check, message and default on this page reads `restorableWindow`.
   const chosen = chosenBackup(state);
-  const covered = ((chosen || {}).status || {}).windowCovered || {};
-  return { fromMs: covered.fromMs, toMs: covered.toMs };
+  const window = restorableWindow(((chosen || {}).status || {}).windowCovered);
+  return window === null ? { fromMs: undefined, toMs: undefined } : window;
 }
 
 /** WHEN A RUN COMPLETED, read off the `Complete` condition rather than off
@@ -4425,7 +4451,10 @@ export function initialState(ns, clusters, backups, selection, savedDestination,
   const spec = (point || {}).spec || {};
   const status = (point || {}).status || {};
   const covered = status.windowCovered || {};
-  const pointInTime = rfc3339(covered.toMs);
+  // THE DEFAULT IS THE LAST INSTANT THE RUNNER ACCEPTS, `toMs - 1`, never the
+  // exclusive `toMs` itself (WIZARD-DEFAULT-PIT-EXCLUSIVE).
+  const restorable = restorableWindow(covered) || {};
+  const pointInTime = rfc3339(restorable.toMs);
   const archive = spec.archive || {};
   const archiveUrl = archive.url;
   const destinationName = savedDestinationName({ point: point });
@@ -4539,7 +4568,7 @@ export function initialState(ns, clusters, backups, selection, savedDestination,
       // the manifest by the runner, and is never a field here.
       sample: {
         windowStart: rfc3339(covered.fromMs),
-        windowEnd: rfc3339(covered.toMs),
+        windowEnd: rfc3339(restorable.toMs),
         recordsPerPartition: 25,
         anchor: "head",
       },

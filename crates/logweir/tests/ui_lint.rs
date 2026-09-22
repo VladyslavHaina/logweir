@@ -1790,11 +1790,15 @@ fn the_default_prefix_agrees_with_the_rust_one() {
     // plan document's `target.topic_naming.prefix`; the runner's value is what
     // phase 0 maps every source topic through when a spec states none. A drift
     // between them is a restore whose topics are not the ones the page named.
-    let at: chrono::DateTime<chrono::Utc> =
-        "2026-09-07T14:05:00Z".parse().expect("the instant parses");
+    let at: chrono::DateTime<chrono::Utc> = "2026-09-07T14:04:59.999Z"
+        .parse()
+        .expect("the instant parses");
+    // The wizard's default point in time is the LAST instant the runner
+    // accepts, one millisecond before the covered window's exclusive end
+    // (WIZARD-DEFAULT-PIT-EXCLUSIVE); the prefix follows from that instant.
     let rust = logweir_core::spec::default_topic_prefix(at);
     assert_eq!(
-        rust, "restore-20260907T140500Z-",
+        rust, "restore-20260907T140459Z-",
         "default_topic_prefix's own output for that instant"
     );
 

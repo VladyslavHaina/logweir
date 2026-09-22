@@ -568,9 +568,16 @@ bytes, same hash, same two minted names.
 
 **Coverage, and what it is made of today.** "Coverage" is
 `Backup.status.windowCovered`, two epoch-millisecond integers (interface I22),
-shown as RFC 3339 and **closed at both ends**: a point equal to either bound is
-inside it. A requested point-in-time outside it is a **field error that keeps
-every value typed** -- nothing is sent, and the message sits beside the input.
+shown as RFC 3339. The window is **half-open** -- `fromMs` is the oldest
+segment's start, `toMs` the first instant NOT covered -- and the runner's
+`archive.coverage` refuses a point in time at the floor itself or after the
+newest record, so the range a plan may name is **`[fromMs + 1 ms, toMs - 1 ms]`,
+closed at both of those ends**, and its end is the default
+(WIZARD-DEFAULT-PIT-EXCLUSIVE: the default used to be the exclusive `toMs`,
+which the runner refused). A catalog point's `coveredFrom`/`coveredTo` follow
+the same rule. A requested point-in-time outside it is a **field error that
+keeps every value typed** -- nothing is sent, and the message sits beside the
+input.
 The archive line is a statement about the *status*, not about the bucket: this
 page holds no bucket credential and lists no object storage, so the nearest
 thing to availability the cluster can tell it is whether the run recorded a
@@ -614,8 +621,8 @@ again before the create, exactly as a Backup's destination is). Step 2 shows the
 two verdicts, the signer key id, the binding and an input for the **topics to
 restore** -- the view publishes no topic list, so the operator names them and
 the readiness check reads the manifest for exactly those names. Step 3's
-window is `[coveredFrom, coveredTo - 1 ms]`, because the catalog's end is
-exclusive. The plan carries `source.backup` pinned to the point's set and
+window is `[coveredFrom + 1 ms, coveredTo - 1 ms]` -- the same rule as a Backup's
+(WIZARD-DEFAULT-PIT-EXCLUSIVE). The plan carries `source.backup` pinned to the point's set and
 `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}`; the
 runner re-reads that receipt and manifest before it contacts a broker and
 refuses a mismatch (exit 3 `PointBindingMismatch`). A plan built from a

@@ -510,11 +510,15 @@ timestamp <= end`, so a record whose timestamp equals `restore.point_in_time` ex
 restored. The `BackupReceipt`'s covered range is half-open in the other direction: `covered.from_ms`
 is the oldest segment's inclusive start and `covered.to_ms` is the newest segment's end **plus one
 millisecond** (`backup/phase_run.rs`), so it is the first instant the archive does *not* cover.
-Copying a `covered.to_ms` into a `restore.point_in_time` is therefore harmless — one millisecond
-wide of a region that holds nothing — while treating `point_in_time` as exclusive silently drops the
-boundary record. Both documents' floors are the minimum segment start over the topics that document
-names, so a receipt's `covered.from_ms` and a restore's `time_window_start` agree for the same
-archive and the same topics.
+Copying a `covered.to_ms` into a `restore.point_in_time` therefore names an instant the archive
+does not cover, and the restore readiness check's `archive.coverage` refuses it
+(`PointInTimeAfterCoverage`, `oldest < point_in_time <= newest`); so does a `point_in_time` equal
+to `covered.from_ms`, a window of one instant (`PointInTimeBeforeCoverage`). The console therefore
+offers `[from_ms + 1 ms, to_ms - 1 ms]` and defaults to its end (WIZARD-DEFAULT-PIT-EXCLUSIVE),
+while treating `point_in_time` as exclusive would silently drop the boundary record. Both
+documents' floors are the minimum segment start over the topics that document names, so a
+receipt's `covered.from_ms` and a restore's `time_window_start` agree for the same archive and the
+same topics.
 
 ### Interface I8's third stdout line is CONDITIONAL: `offset-report-key=` is present exactly when the engine wrote a report
 

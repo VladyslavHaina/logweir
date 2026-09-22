@@ -1348,7 +1348,10 @@ no configuration is reconstructed by hand.**
 5. **The plan is bound to the point.** It carries `source.backup: <backupId>`
    and `source.point {point_id, receipt_key, receipt_sha256, manifest_sha256}`;
    the restore point in time defaults to `coveredTo − 1 ms` (the catalog's end
-   is exclusive). The approver signs those bytes, so the approval covers WHICH
+   is exclusive), and a point in time is accepted in `[coveredFrom + 1 ms,
+   coveredTo − 1 ms]`, the range the runner's `archive.coverage` accepts — the
+   same rule the wizard applies to a Backup's `windowCovered`
+   (WIZARD-DEFAULT-PIT-EXCLUSIVE). The approver signs those bytes, so the approval covers WHICH
    archive object is recovered.
 6. **Readiness re-reads the row.** Step 5 starts a `Preflight` with
    `spec.request.restore.catalogPointRef {catalogRef, pointId}` (at most one of

@@ -1177,13 +1177,17 @@ test("an_edit_creates_a_new_restore_and_says_so", async () => {
 
 test("the_wizard_prefills_the_default_prefix", async () => {
   // The DEFAULT route: the newest backup's covered `toMs` is
-  // 2026-09-07T14:05:00Z, so the wizard's own default point in time is that
-  // instant and the prefix follows from it with nothing typed.
+  // 2026-09-07T14:05:00Z, which is EXCLUSIVE (WIZARD-DEFAULT-PIT-EXCLUSIVE), so
+  // the wizard's own default point in time is one millisecond before it -- the
+  // last instant the runner accepts -- and the prefix follows from it with
+  // nothing typed.
   const state = wizardState();
-  assert.equal(state.fields.pointInTime, "2026-09-07T14:05:00Z");
+  assert.equal(state.fields.pointInTime, "2026-09-07T14:04:59.999Z");
+  assert.notEqual(state.fields.pointInTime, "2026-09-07T14:05:00Z",
+    "THE NEGATIVE CONTROL: never the exclusive end, which archive.coverage refuses");
   assert.equal(
     state.fields.target.topicPrefix,
-    "restore-20260907T140500Z-",
+    "restore-20260907T140459Z-",
     "the same string logweir_core::spec::default_topic_prefix produces for that instant. " +
       "`ui_lint.rs::the_default_prefix_agrees_with_the_rust_one` computes the Rust half and " +
       "compares it with this literal, so the two cannot drift.",
@@ -1194,7 +1198,7 @@ test("the_wizard_prefills_the_default_prefix", async () => {
   blank.fields.target.topicPrefix = "";
   const out = renderTargetStep(blank);
   assert.ok(
-    out.includes("value=\"restore-20260907T140500Z-\""),
+    out.includes("value=\"restore-20260907T140459Z-\""),
     "the prefix field is prefilled: " + out,
   );
   assert.ok(out.includes("<option value=\"scratch\""), "mode option scratch");
@@ -1214,7 +1218,7 @@ test("the_client_side_window_check_is_labelled_a_convenience", () => {
   const out = renderPointInTimeStep(state);
   assert.ok(
     out.includes(
-      "the archive covers [2026-09-07T12:00:00Z, 2026-09-07T14:05:00Z]; " +
+      "the archive covers [2026-09-07T12:00:00.001Z, 2026-09-07T14:04:59.999Z]; " +
         "a point outside it cannot be restored",
     ),
     "both bounds as RFC 3339, from windowCovered.fromMs and .toMs (interface I22). A page " +
@@ -1726,12 +1730,12 @@ test("the_wizard_binds_to_the_recovery_point_the_route_names_and_picks_none_itse
   );
   assert.equal(
     bound.fields.pointInTime,
-    "2026-09-11T18:34:00Z",
-    "…and the point in time is THAT run's covered toMs",
+    "2026-09-11T18:33:59.999Z",
+    "…and the point in time is the last instant THAT run's covered window accepts",
   );
   assert.deepEqual(
     [bound.fields.sample.windowStart, bound.fields.sample.windowEnd],
-    ["2026-09-11T18:30:00Z", "2026-09-11T18:34:00Z"],
+    ["2026-09-11T18:30:00Z", "2026-09-11T18:33:59.999Z"],
     "…and the sample window is that run's covered range",
   );
 
@@ -2067,11 +2071,12 @@ test("the_requested_point_in_time_is_bounded_by_the_disclosed_coverage_inclusive
     newestPoint(backups),
   );
   const covered = recoveryPoints(backups)[0].status.windowCovered;
-  const floor = new Date(covered.fromMs).toISOString().replace(".000Z", "Z");
-  const ceiling = new Date(covered.toMs).toISOString().replace(".000Z", "Z");
+  // WIZARD-DEFAULT-PIT-EXCLUSIVE: the window is half-open and the runner
+  // refuses the floor itself, so the accepted range is [fromMs + 1, toMs - 1].
+  const floor = new Date(covered.fromMs + 1).toISOString();
+  const ceiling = new Date(covered.toMs - 1).toISOString();
 
-  // BOTH BOUNDS ARE INSIDE. A record whose timestamp equals either exactly is
-  // restored, and the page must not refuse it.
+  // BOTH ACCEPTED BOUNDS ARE INSIDE, and the page must not refuse them.
   for (const inside of [floor, ceiling]) {
     state.fields.pointInTime = inside;
     assert.deepEqual(
@@ -2081,8 +2086,11 @@ test("the_requested_point_in_time_is_bounded_by_the_disclosed_coverage_inclusive
     );
   }
 
-  // ONE MILLISECOND OUTSIDE EITHER END IS A FIELD ERROR, and nothing is sent.
+  // ONE MILLISECOND OUTSIDE EITHER END IS A FIELD ERROR, and nothing is sent --
+  // the floor itself and the exclusive end included.
   for (const outside of [
+    new Date(covered.fromMs).toISOString(),
+    new Date(covered.toMs).toISOString(),
     new Date(covered.fromMs - 1).toISOString(),
     new Date(covered.toMs + 1).toISOString(),
   ]) {
