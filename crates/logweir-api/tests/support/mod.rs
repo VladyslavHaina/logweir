@@ -1093,6 +1093,9 @@ pub struct TestApp {
     pub router: Router,
     pub fake: FakeKube,
     pub clock: Arc<TestClock>,
+    /// The state the router was built over, for tests that wrap a router of
+    /// their own around the same layers.
+    pub state: AppState,
 }
 
 /// A buffered response.
@@ -1167,9 +1170,10 @@ impl TestApp {
     pub fn with_clock(fake: FakeKube, options: Options, clock: Arc<TestClock>) -> Self {
         let state = app_state(&fake, options, &clock);
         Self {
-            router: logweir_api::app::router(state),
+            router: logweir_api::app::router(state.clone()),
             fake,
             clock,
+            state,
         }
     }
 

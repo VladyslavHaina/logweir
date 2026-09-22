@@ -26,7 +26,7 @@ use std::collections::BTreeSet;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use axum::body::Body;
-use axum::routing::get;
+use axum::routing::{get, on, MethodFilter, MethodRouter};
 use axum::Router;
 use http::Request;
 use logweir_api::access::{self, Access, ROUTES};
@@ -517,4 +517,189 @@ async fn local_admin_mode_passes_the_layer_on_every_route() {
     app.get("/api/v1/namespaces/elsewhere/backups")
         .await
         .assert_problem(403, "namespace_forbidden");
+}
+
+// ------------------------------------------- the layer, with no handler help
+
+static DUMMY_REACHED: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+async fn dummy() -> &'static str {
+    DUMMY_REACHED.fetch_add(1, Ordering::SeqCst);
+    "reached"
+}
+
+/// Every declared route, served by a handler that checks NOTHING, behind the
+/// real access layer — the shape a route added by a later stage has if its
+/// author forgets every check. Whatever this router refuses, the layer
+/// refused.
+fn layer_only(state: logweir_api::app::AppState) -> Router {
+    let mut by_path: std::collections::BTreeMap<&str, MethodRouter<logweir_api::app::AppState>> =
+        std::collections::BTreeMap::new();
+    for entry in ROUTES {
+        let filter = match entry.method {
+            "GET" => MethodFilter::GET,
+            "POST" => MethodFilter::POST,
+            "PUT" => MethodFilter::PUT,
+            other => panic!("{other}"),
+        };
+        let router = by_path
+            .remove(entry.path)
+            .map_or_else(|| on(filter, dummy), |r| r.on(filter, dummy));
+        by_path.insert(entry.path, router);
+    }
+    let mut router = Router::new();
+    for (path, methods) in by_path {
+        router = router.route(path, methods);
+    }
+    router
+        .route_layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            access::enforce,
+        ))
+        .with_state(state)
+}
+
+/// **The layer ALONE enforces the whole matrix.** The same sweeps as above —
+/// anonymous, all four roles, an unbound namespace — against handlers that
+/// check nothing. A refusal must come with the dummy handler unreached; an
+/// admission must reach it. This is the row that fails when a DECLARATION is
+/// wrong even though today's handler would still have caught it.
+#[tokio::test]
+async fn the_layer_alone_enforces_the_matrix_with_handlers_that_check_nothing() {
+    let shared = shared_app();
+    let router = layer_only(shared.app.state.clone());
+    let send =
+        |method: &'static str, path: String, cookie: Option<String>, csrf: Option<String>| {
+            let router = router.clone();
+            async move {
+                let mut builder = Request::builder()
+                    .method(method)
+                    .uri(&path)
+                    .header("host", SHARED_HOST);
+                if method != "GET" {
+                    builder = builder
+                        .header("origin", SHARED_ORIGIN)
+                        .header("content-type", "application/json");
+                }
+                if let Some(cookie) = cookie {
+                    builder = builder.header("cookie", cookie);
+                }
+                if let Some(csrf) = csrf {
+                    builder = builder.header("x-csrf-token", csrf);
+                }
+                let before = DUMMY_REACHED.load(Ordering::SeqCst);
+                let response = router
+                    .oneshot(builder.body(Body::from("{}")).unwrap())
+                    .await
+                    .unwrap();
+                let reached = DUMMY_REACHED.load(Ordering::SeqCst) > before;
+                (response.status().as_u16(), reached)
+            }
+        };
+    let mut checked = 0;
+    // Anonymous: every non-public route refused, the handler never reached.
+    for entry in ROUTES {
+        let (status, reached) = send(entry.method, concrete(entry, NS_A), None, None).await;
+        if entry.access == Access::Public {
+            assert!(
+                reached,
+                "public {} {} was refused",
+                entry.method, entry.path
+            );
+        } else {
+            assert_eq!(
+                (status, reached),
+                (401, false),
+                "{} {}",
+                entry.method,
+                entry.path
+            );
+        }
+        checked += 1;
+    }
+    // Each role alone in team-a, and an unbound namespace for each.
+    for (role, group) in [
+        (Role::Viewer, "lw-a-viewers"),
+        (Role::Operator, "lw-a-operators"),
+        (Role::Approver, "lw-a-approvers"),
+        (Role::Administrator, "lw-a-admins"),
+    ] {
+        let subject = format!("layer-{}", role.as_str());
+        let cookie = shared.session_cookie(&subject, &[group]);
+        let csrf = shared.csrf_for(&subject);
+        for entry in ROUTES {
+            let actions = decided(entry);
+            if actions.is_empty() {
+                continue;
+            }
+            let allowed = actions.iter().all(|a| role.allows(*a));
+            let (status, reached) = send(
+                entry.method,
+                concrete(entry, NS_A),
+                Some(cookie.clone()),
+                Some(csrf.clone()),
+            )
+            .await;
+            if allowed {
+                assert_eq!(
+                    (status, reached),
+                    (200, true),
+                    "{role:?} {} {}",
+                    entry.method,
+                    entry.path
+                );
+            } else {
+                assert_eq!(
+                    (status, reached),
+                    (403, false),
+                    "{role:?} {} {}",
+                    entry.method,
+                    entry.path
+                );
+            }
+            if entry.path.contains("{ns}") {
+                let (status, reached) = send(
+                    entry.method,
+                    concrete(entry, NS_B),
+                    Some(cookie.clone()),
+                    Some(csrf.clone()),
+                )
+                .await;
+                assert_eq!(
+                    (status, reached),
+                    (404, false),
+                    "{role:?} reached unbound {} {}",
+                    entry.method,
+                    entry.path
+                );
+            }
+            checked += 1;
+        }
+    }
+    assert!(checked > 200, "{checked}");
+}
+
+/// **No mutating route is declared with an action a viewer holds.** D0:
+/// "Viewer never mutates" — asserted on the TABLE, so a POST or PUT declared
+/// with a read action fails here whatever its handler does.
+#[test]
+fn no_mutating_route_is_declared_with_a_viewers_action() {
+    for entry in ROUTES {
+        if entry.method == "GET" || entry.access == Access::Public {
+            continue;
+        }
+        if entry.path == "/api/v1/session/logout" {
+            // Ending one's own session is not a mutation of anything a viewer
+            // may not touch.
+            continue;
+        }
+        let actions = entry.access.actions();
+        assert!(
+            !actions.is_empty() && actions.iter().any(|a| !Role::Viewer.allows(*a)),
+            "{} {} is declared with only viewer actions {:?}",
+            entry.method,
+            entry.path,
+            actions
+        );
+    }
 }

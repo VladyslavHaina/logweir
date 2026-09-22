@@ -173,3 +173,25 @@ async fn a_scoped_list_asks_for_each_namespace_and_never_the_cluster() {
         ]
     );
 }
+
+/// **Scoped, a reconciler starts once per watched namespace, with that
+/// namespace** — never the cluster-wide `None`, never only the first entry.
+#[tokio::test]
+async fn a_scoped_reconciler_starts_once_per_namespace() {
+    scope::init(scope::configured(Ok("team-a,team-b".into())).unwrap());
+    let started = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let log = std::sync::Arc::clone(&started);
+    scope::run_everywhere(move |namespace| {
+        let log = std::sync::Arc::clone(&log);
+        async move {
+            log.lock().unwrap().push(namespace);
+        }
+    })
+    .await;
+    let mut seen = started.lock().unwrap().clone();
+    seen.sort();
+    assert_eq!(
+        seen,
+        vec![Some("team-a".to_string()), Some("team-b".to_string())]
+    );
+}
