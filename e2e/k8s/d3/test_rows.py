@@ -740,6 +740,14 @@ def test_the_historical_restore_plan_is_one_the_runner_parses() -> None:
         and plan["target"]["topic_naming"]["prefix"] == "own-hist-")
     row("on the scratch broker, never the source broker the archive was taken from",
         all("kafka-target." in b for b in plan["target"]["bootstrap_servers"]))
+    row("the RPO objective defaults to one day",
+        plan["objectives"]["rpo_seconds"] == 86400)
+    aged = d3.legacy_restore_plan("bk-hist", "2026-09-22T21:00:00Z", "own-hist-",
+                                  rpo_seconds=607484)
+    row("and a row restoring days-old lab records states the fixture's own age as its "
+        "objective (lab-refresh-8: RPO 603884 s measured against 86400)",
+        aged["objectives"]["rpo_seconds"] == 607484
+        and aged["objectives"]["pass_rate"] == 1.0)
 
 
 # --- PLAT-15.1: a catalog larger than the view it publishes ------------------

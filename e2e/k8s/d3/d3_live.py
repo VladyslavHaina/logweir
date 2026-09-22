@@ -4363,8 +4363,17 @@ def require_standing_signer(cli: str) -> None:
             f"LOGWEIR_BIN to one — the rehearsal phase mints with the shipped signer only")
 
 
-def legacy_restore_plan(backup_id: str, point_in_time: str, prefix: str) -> dict[str, Any]:
+def legacy_restore_plan(backup_id: str, point_in_time: str, prefix: str,
+                        rpo_seconds: int = 86400) -> dict[str, Any]:
     """A restore plan over the LEGACY inline archive this namespace writes to.
+
+    `rpo_seconds` is the plan's RPO OBJECTIVE, which the runner measures from
+    the point in time back to the newest record the restore brought back. The
+    legacy Backup archives the SHARED lab's `orders` topic, whose newest record
+    is days old, so a fixed one-day objective makes every such restore a
+    signed `fail-objective` whatever the key did (measured on lab-refresh-8:
+    RPO 603884 s against 86400, sample 25/25, integrity pass). `old_archive`
+    therefore passes the age of the Backup's own covered window plus one hour.
 
     TWO THINGS A PLAN NEEDS TO ACTUALLY RESTORE, and this one had neither
     (plat20-1 §7 item 1, lab-refresh-8):
@@ -4407,7 +4416,7 @@ def legacy_restore_plan(backup_id: str, point_in_time: str, prefix: str) -> dict
             "records_per_partition": 25,
             "anchor": "head",
         },
-        "objectives": {"rto_seconds": 3600, "rpo_seconds": 86400, "pass_rate": 1.0},
+        "objectives": {"rto_seconds": 3600, "rpo_seconds": rpo_seconds, "pass_rate": 1.0},
         "evidence": {"backend": "s3", "bucket": "kafka-backups",
                      "prefix": "logweir/", "region": "us-east-1",
                      "endpoint": MINIO_ENDPOINT, "path_style": True, "allow_http": True},
@@ -4644,9 +4653,18 @@ def old_archive() -> None:
         if restored_topic in target_topics():
             raise RuntimeError(f"{restored_topic} already exists on {TARGET_DEPLOY}; it is not "
                                f"this run's and is neither adopted nor deleted")
-        plan = legacy_restore_plan(backup_id,
-                                   subject["status"].get("capture", {}).get("finishedAt")
-                                   or now(), prefix)
+        point_in_time = subject["status"].get("capture", {}).get("finishedAt") or now()
+        # THE RPO OBJECTIVE IS THE FIXTURE'S OWN AGE, NOT A CONSTANT: the
+        # shared lab's `orders` records are days old, and the runner measures
+        # RPO from the point in time back to the newest restored record. One
+        # hour of slack past the Backup's own covered window keeps the
+        # objective tight; with no window the constant stands (and fails).
+        covered_to = (subject["status"].get("windowCovered") or {}).get("toMs")
+        rpo_bound = 86400
+        pit_ms = rfc3339_ms(point_in_time)
+        if isinstance(covered_to, int) and pit_ms is not None:
+            rpo_bound = max(rpo_bound, (pit_ms - covered_to) // 1000 + 3600)
+        plan = legacy_restore_plan(backup_id, point_in_time, prefix, rpo_seconds=rpo_bound)
         plan_bytes = json.dumps(plan, indent=2) + "\n"
         work = pathlib.Path(tempfile.mkdtemp(prefix=f"{OWNER}-hist-", dir="/tmp"))
         work.chmod(0o700)
