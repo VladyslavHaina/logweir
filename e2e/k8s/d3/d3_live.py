@@ -8238,8 +8238,9 @@ def rehearsal_arm_refused(work: pathlib.Path, target_cluster_id: str,
     the product's own command, and the review's own alternative is taken.
     """
     name = REHEARSAL_REFUSED_SCHEDULE
-    rehearsal_arm(name, cron=REHEARSAL_FAST_CRON, key=refused_key["private"], work=work,
-                  target_cluster_id=target_cluster_id)
+    _, approval_name = rehearsal_arm(name, cron=REHEARSAL_FAST_CRON,
+                                     key=refused_key["private"], work=work,
+                                     target_cluster_id=target_cluster_id)
     unsuspend("rehearsalschedule", name)
     live: dict[str, Any] = {}
     restores: list[dict[str, Any]] = []
@@ -8258,9 +8259,17 @@ def rehearsal_arm_refused(work: pathlib.Path, target_cluster_id: str,
     jobs = [j for j in jobs if j and get_opt("job", j) is not None]
     bundles = rehearsal_bundles(restores)
     clauses = the_refused_arm_reaches_no_job(live, restores, jobs, bundles)
+    # WHICH CHECK REFUSED IT, not just that something did. The schedule only
+    # ever says `the Approval is not Verified=True`; the Approval's own
+    # condition is where `KeyIdNotInRoster` / a signing refusal / a document
+    # mismatch are distinguished, and a reader of this row cannot tell the
+    # retired-key mechanism from any other refusal without it.
+    refused_approval = get_opt("approval", approval_name) or {}
     evidence.append(artifact("rehearsal/10-refused.json", {
         "retiredApproverKeyId": refused_key["keyId"],
         "schedule": live.get("status"), "restores": restores,
+        "approval": approval_name,
+        "approvalConditions": (refused_approval.get("status") or {}).get("conditions"),
         "jobs": jobs, "bundles": bundles, "clauses": clauses,
     }))
     return check(

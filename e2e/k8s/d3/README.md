@@ -91,7 +91,12 @@ deletes and recreates the object (the CRD's `spec.keys` is append-only with no
 Revoked->Active transition), which is only correct after that phase has run. It mints the
 standing authorization with the SHIPPED signer, `logweir drill approve --standing`
 (`docs/kubernetes.md` §7g) — never in python — so `LOGWEIR_BIN` or a built
-`target/release/logweir` is required. It creates and deletes topics under its own
+`target/release/logweir` is required. It signs with an approver keypair it MINTS per run
+rather than the lab roster's: signing needs the private half, and the lab's lives under
+`/tmp/logweir-scram-e2e`, which macOS deletes after three untouched days (measured
+2026-09-22, when only `approver.pub.pem` was left). Both minted private halves — the
+Active one and the Retired one step 10 needs — are 0600 inside a 0700 directory, never
+enter an object or an artifact, and are deleted in the phase's `finally`. It creates and deletes topics under its own
 `rehearsal-` names on the lab's scratch broker, including the unrelated
 `rehearsal-not-ours` D3 §15 L6 names, and changes nothing else about the shared release.
 
