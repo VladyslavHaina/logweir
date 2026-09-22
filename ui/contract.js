@@ -2158,11 +2158,18 @@ export const TRUST_BASES = Object.freeze([
 ]);
 
 /** `status.evidence.verification.result` on a CUSTOM RESOURCE -- the CRD's own
- *  PascalCase vocabulary, which gained `Untrusted` with D3 section 7.4. It is
- *  NOT the console's lowercase `verification.state` and not `trust.state`
- *  either; three fields of two documents, and this file keeps them apart. */
+ *  PascalCase vocabulary, which gained `Untrusted` with D3 section 7.4 and
+ *  `Pending` with D2 section 3.9's evidence-fetch Job. It is NOT the
+ *  console's lowercase `verification.state` and not `trust.state` either;
+ *  three fields of two documents, and this file keeps them apart.
+ *
+ *  `Pending` IS NOT A VERDICT. It is written while the evidence-fetch check
+ *  Job reads a run's evidence with the destination's `evidenceRead` grant,
+ *  and `logweir-api` projects it as the operation state `verifying` with the
+ *  trust state `pending` -- never green, never `unknown`
+ *  (`ui/tests/evidence-results.spec.js`). */
 export const EVIDENCE_RESULTS = Object.freeze([
-  "Valid", "Invalid", "NotAttempted", "Untrusted",
+  "Valid", "Invalid", "NotAttempted", "Untrusted", "Pending",
 ]);
 
 /** The closed diagnosis vocabulary (D3 section 2.3). Thirteen codes; a
