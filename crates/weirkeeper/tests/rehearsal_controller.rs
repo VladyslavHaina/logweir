@@ -2850,7 +2850,7 @@ async fn the_newest_backup_is_never_cut_by_the_candidate_bound() {
     // so the point ids below must differ in them.
     let n = rs::MAX_BACKUPS_SCANNED;
     let newest_digest = format!("sha256:{n:032x}{n:032x}");
-    let mut table = routes(
+    let table = routes(
         approval_value(&envelope()),
         trust_policy_value("Active", None),
         cluster_value(true, Some(TARGET_CLUSTER_ID)),
