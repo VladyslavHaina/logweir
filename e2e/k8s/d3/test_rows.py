@@ -1914,6 +1914,35 @@ def test_a_standing_restore_carries_no_approval_ref_and_is_not_held() -> None:
     row("L6 step 2 refuses a Restore labelled for another schedule",
         not all(d3.restore_is_created_on_the_standing_authorization(
             foreign, L6_SCHEDULE, L6_APPROVAL).values()))
+    admitted = "and it was ADMITTED — status.jobRef names its runner Job, or the phase is " \
+        "Running/Succeeded"
+    not_refused = "and it was not refused at admission — no Failed/Refused phase without a Job"
+    for reason in ("StandingAuthorizationRefused", "PlanHashMismatch", "ClusterNotReachable"):
+        refused = json.loads(json.dumps(L6_STANDING_RESTORE))
+        refused["status"] = {"phase": "Failed", "reason": reason}
+        got = d3.restore_is_created_on_the_standing_authorization(
+            refused, L6_SCHEDULE, L6_APPROVAL)
+        row(f"MUTANT (review MEDIUM-2): a standing Restore refused {reason} at admission is "
+            f"NOT the unblocking, although its reason is not ApprovalNotReceived",
+            not all(got.values()) and not got[admitted] and not got[not_refused]
+            and got["status.reason is not ApprovalNotReceived"])
+    held = json.loads(json.dumps(L6_STANDING_RESTORE))
+    held["status"] = {"phase": "Pending", "reason": "ApprovalNotVerified"}
+    row("MUTANT: a Restore still HELD at admission (Pending, no Job) is not yet admitted",
+        not d3.restore_is_created_on_the_standing_authorization(
+            held, L6_SCHEDULE, L6_APPROVAL)[admitted])
+    running = json.loads(json.dumps(L6_STANDING_RESTORE))
+    running["status"] = {"phase": "Running", "jobRef": {"name": L6_RESTORE_NAME}}
+    row("L6 step 2 accepts a Restore admitted and Running with its Job",
+        all(d3.restore_is_created_on_the_standing_authorization(
+            running, L6_SCHEDULE, L6_APPROVAL).values()))
+    runner_failed = json.loads(json.dumps(L6_STANDING_RESTORE))
+    runner_failed["status"] = {"phase": "Failed", "reason": "RunnerFailed",
+                               "jobRef": {"name": L6_RESTORE_NAME}}
+    row("L6 step 2 accepts a Restore whose RUNNER failed after admission — steps 3-5 judge "
+        "that, and it was admitted",
+        all(d3.restore_is_created_on_the_standing_authorization(
+            runner_failed, L6_SCHEDULE, L6_APPROVAL).values()))
 
 
 def test_the_standing_job_mounts_five_members_and_no_per_run_approval() -> None:
@@ -2085,7 +2114,8 @@ def test_the_refused_arm_requires_the_refusal_and_not_merely_silence() -> None:
     row("L6 step 10 refuses an approval-bundle ConfigMap written for the refused arm",
         not all(with_bundle.values()))
     reconciler_side = d3.the_refused_arm_reaches_no_job(
-        {"status": {"conditions": []}},
+        {"status": {"conditions": [{"type": "RehearsalHealthy", "status": "Unknown",
+                                    "reason": "NoResult"}]}},
         [{"metadata": {"name": L6_RESTORE_NAME},
           "status": {"phase": "Refused", "reason": "StandingAuthorizationRefused"}}],
         [], [])
@@ -2097,6 +2127,186 @@ def test_the_refused_arm_requires_the_refusal_and_not_merely_silence() -> None:
                                     "reason": "Passed"}]}}, [], [], [])
     row("L6 step 10 refuses an arm that claims a passing rehearsal while refusing its slots",
         not all(healthy.values()))
+    health = "RehearsalHealthy is False, or Unknown/NoResult — nothing finished, nothing passed"
+    absent = d3.the_refused_arm_reaches_no_job(
+        {"status": {"lastSkipped": {"reason": "AuthorizationInvalid"}, "conditions": []}},
+        [], [], [])
+    row("MUTANT: an arm with NO RehearsalHealthy condition at all fails — the controller "
+        "always writes one", not absent[health])
+    other_unknown = d3.the_refused_arm_reaches_no_job(
+        {"status": {"lastSkipped": {"reason": "AuthorizationInvalid"},
+                    "conditions": [{"type": "RehearsalHealthy", "status": "Unknown",
+                                    "reason": "Mystery"}]}}, [], [], [])
+    row("MUTANT: Unknown for a reason other than NoResult fails", not other_unknown[health])
+    busy = d3.the_refused_arm_reaches_no_job(
+        {"status": {"lastSkipped": {"reason": "TargetBusy"},
+                    "conditions": [{"type": "RehearsalHealthy", "status": "Unknown",
+                                    "reason": "NoResult"}]}}, [], [], [])
+    row("L6 step 10: TargetBusy is NOT a refusal of the authorization (decide checks the "
+        "target first)",
+        not busy["the refusal is RECORDED and NAMED — AuthorizationInvalid/Expired on "
+                 "the schedule, or StandingAuthorizationRefused on its Restore"])
+
+
+_RETIRED = {"status": {"conditions": [{"type": "Verified", "status": "False",
+                                       "reason": "KeyRetired"}]}}
+_ACTIVE_VERIFIED = {"status": {"conditions": [{"type": "Verified", "status": "True",
+                                               "reason": "Verified"}]}}
+# PLANTED: F1, as the live run of 2026-09-22 recorded it — EVERY standing
+# Approval refused `PlanHashMismatch`, the retired one and the active one alike.
+_F1 = {"status": {"conditions": [{"type": "Verified", "status": "False",
+                                  "reason": "PlanHashMismatch"}]}}
+
+
+def test_the_refused_arm_passes_only_when_the_retired_key_rule_is_what_refused() -> None:
+    good = d3.the_refused_arm_reaches_no_job(L6_REFUSED_SCHEDULE, [], [], [])
+    verdict, _ = d3.refused_arm_verdict(good, skip_reason="AuthorizationInvalid",
+                                        refused_approval=_RETIRED,
+                                        passing_approval=_ACTIVE_VERIFIED)
+    row("L6 step 10 PASS: refused, KeyRetired on its Approval, and the passing arm verified",
+        verdict == "PASS", verdict)
+    verdict, mech = d3.refused_arm_verdict(good, skip_reason="AuthorizationInvalid",
+                                           refused_approval=_F1, passing_approval=_F1)
+    row("MUTANT (review MEDIUM-1): F1 — nothing verifies at all — is INCONCLUSIVE, never PASS",
+        verdict == "INCONCLUSIVE" and not any(mech.values()), f"{verdict} {mech}")
+    verdict, _ = d3.refused_arm_verdict(good, skip_reason="AuthorizationInvalid",
+                                        refused_approval=_RETIRED, passing_approval=_F1)
+    row("MUTANT: KeyRetired on the refused arm but the passing arm unverified — no "
+        "differential, INCONCLUSIVE", verdict == "INCONCLUSIVE", verdict)
+    verdict, _ = d3.refused_arm_verdict(good, skip_reason="AuthorizationInvalid",
+                                        refused_approval=_ACTIVE_VERIFIED,
+                                        passing_approval=_ACTIVE_VERIFIED)
+    row("MUTANT: a retired key's Approval reported Verified=True is not the rule shown",
+        verdict == "INCONCLUSIVE", verdict)
+    silent = d3.the_refused_arm_reaches_no_job(L6_REFUSED_SCHEDULE_THAT_RECORDED_NOTHING,
+                                               [], [], [])
+    verdict, _ = d3.refused_arm_verdict(silent, skip_reason=None, refused_approval=_RETIRED,
+                                        passing_approval=_ACTIVE_VERIFIED)
+    row("MUTANT: silence is a FAIL even when the mechanism clauses hold — never softened",
+        verdict == "FAIL", verdict)
+    with_job = d3.the_refused_arm_reaches_no_job(
+        L6_REFUSED_SCHEDULE, [], [f"logweir-rehearsal-l6-refused-{L6_SLOT}"], [])
+    verdict, _ = d3.refused_arm_verdict(with_job, skip_reason="AuthorizationInvalid",
+                                        refused_approval=_RETIRED,
+                                        passing_approval=_ACTIVE_VERIFIED)
+    row("MUTANT: a Job for the refused arm is a FAIL", verdict == "FAIL", verdict)
+    busy = d3.the_refused_arm_reaches_no_job(
+        {"status": {"lastSkipped": {"reason": "TargetBusy"},
+                    "conditions": [{"type": "RehearsalHealthy", "status": "Unknown",
+                                    "reason": "NoResult"}]}}, [], [], [])
+    verdict, _ = d3.refused_arm_verdict(busy, skip_reason="TargetBusy",
+                                        refused_approval=_RETIRED,
+                                        passing_approval=_ACTIVE_VERIFIED)
+    row("MUTANT (review HIGH-2): a TargetBusy that masked the authorization is HARNESS-FAULT, "
+        "not a product FAIL and not a PASS", verdict == "HARNESS-FAULT", verdict)
+
+
+def test_step_seven_fails_on_a_second_restore_and_on_a_silent_skip() -> None:
+    slot = L6_SLOT
+    t0 = d3.slot_epoch(slot)
+    obliged = t0 + 60 + d3.REHEARSAL_REQUEUE_SECONDS + d3.REHEARSAL_OBLIGATION_MARGIN_SECONDS
+    row("slot names are read as UTC epoch seconds",
+        t0 == 1789959600.0 and d3.slot_epoch("20260921-030100") == t0 + 60, str(t0))
+
+    def decide(**kw):
+        base = dict(first_slot=slot, overlap=False, new_skip_reason=None,
+                    first_terminal=False, last_active_at=None, timed_out=False)
+        base.update(kw)
+        return d3.concurrency_decision(**base)
+
+    row("MUTANT (review HIGH-1): a SECOND Restore listed while the first ran is a FAIL — the "
+        "old loop called it NOT-REACHED once the first finished",
+        decide(overlap=True, first_terminal=True, last_active_at=t0 + 30) == "FAIL"
+        and decide(overlap=True) == "FAIL")
+    row("MUTANT (review HIGH-1): a first rehearsal still running AFTER the controller was "
+        "obliged to evaluate the next slot, with no skip recorded, is judged — and the "
+        "predicate fails the silence",
+        decide(first_terminal=True, last_active_at=obliged + 1) == "EVALUATE"
+        and not all(d3.the_second_slot_is_concurrency_blocked(
+            {"status": {"lastSkipped": {}}}, [L6_RESTORE_NAME], L6_RESTORE_NAME).values()))
+    row("NOT-REACHED only when the first finished before the controller was obliged to look",
+        decide(first_terminal=True, last_active_at=t0 + 40) == "NOT-REACHED"
+        and decide(first_terminal=True, last_active_at=None) == "NOT-REACHED"
+        and decide(first_terminal=True, last_active_at=obliged + 1) != "NOT-REACHED")
+    row("a new ConcurrencyBlocked skip is judged by the predicate, and passes it",
+        decide(new_skip_reason="ConcurrencyBlocked") == "EVALUATE"
+        and all(d3.the_second_slot_is_concurrency_blocked(
+            L6_CONCURRENCY_SKIPPED, [L6_RESTORE_NAME], L6_RESTORE_NAME).values()))
+    row("MUTANT (review HIGH-2): a TargetBusy skip is the harness's ordering — HARNESS-FAULT",
+        decide(new_skip_reason="TargetBusy") == "HARNESS-FAULT")
+    row("a first rehearsal still running before the deadline, with nothing recorded, is waited "
+        "on", decide(last_active_at=t0 + 30) == "WAIT")
+    row("MUTANT: the deadline with nothing recorded is judged, and silence fails",
+        decide(last_active_at=obliged + 200, timed_out=True) == "EVALUATE")
+
+
+def test_the_broker_sweep_deletes_only_this_runs_own_topics() -> None:
+    uid_a = "3f2a91c7-1d2e-4f00-9a11-77c0ffee1234"
+    uid_b = "0badc0de-1d2e-4f00-9a11-77c0ffee1234"
+    arms = {"l6-rehearsal": uid_a, "l6-leftover": uid_b}
+    ours = {"metadata": {"uid": uid_a, "labels": {"logweir.dev/test-owner": d3.OWNER}}}
+    owned, refused = d3.owned_rehearsal_prefixes(
+        arms, {"l6-rehearsal": ours, "l6-leftover": None},
+        {"l6-rehearsal": True, "l6-leftover": True})
+    row("a quiet schedule this run created is swept by its own rendered prefix, and one whose "
+        "object is already gone by the uid its create returned",
+        owned == {"l6-rehearsal": "rehearsal-3f2a91c7-", "l6-leftover": "rehearsal-0badc0de-"}
+        and not refused, f"{owned} {refused}")
+    theirs = {"metadata": {"uid": uid_a, "labels": {"logweir.dev/test-owner": "someone"}}}
+    owned, refused = d3.owned_rehearsal_prefixes(
+        {"l6-rehearsal": uid_a}, {"l6-rehearsal": theirs}, {"l6-rehearsal": True})
+    row("MUTANT: a live schedule carrying another run's owner label is never swept",
+        not owned and "l6-rehearsal" in refused)
+    recreated = {"metadata": {"uid": uid_b, "labels": {"logweir.dev/test-owner": d3.OWNER}}}
+    owned, _ = d3.owned_rehearsal_prefixes(
+        {"l6-rehearsal": uid_a}, {"l6-rehearsal": recreated}, {"l6-rehearsal": True})
+    row("MUTANT: a schedule of the same name with ANOTHER uid is not the one this run made",
+        not owned)
+    owned, refused = d3.owned_rehearsal_prefixes(
+        {"l6-rehearsal": uid_a}, {"l6-rehearsal": ours}, {"l6-rehearsal": False})
+    row("MUTANT: a schedule with a rehearsal still running is not swept under its runner",
+        not owned and "still running" in refused["l6-rehearsal"])
+    broker = {"rehearsal-3f2a91c7-orders", "rehearsal-deadbeef-orders", "orders",
+              d3.rehearsal_witness_topic(), "rehearsal-not-ours", "logweir.scratch"}
+    row("the sweep deletes ONLY names under this run's prefixes — never another schedule's "
+        "rehearsal topic, never a witness, never a lab topic",
+        d3.topics_to_sweep(broker, ["rehearsal-3f2a91c7-"]) == ["rehearsal-3f2a91c7-orders"])
+    row("MUTANT: an empty prefix matches nothing rather than everything",
+        d3.topics_to_sweep(broker, [""]) == [])
+
+
+def test_the_witness_topic_is_this_runs_and_no_prefix_can_claim_it() -> None:
+    import re as _re
+
+    witness = d3.rehearsal_witness_topic()
+    row("the witness keeps D3 §15's name as its prefix and carries this run's owner and stamp",
+        witness.startswith(d3.REHEARSAL_UNRELATED_TOPIC + "-")
+        and d3.OWNER_TAG in witness and d3.STAMP in witness, witness)
+    row("MUTANT (review MEDIUM-3): the bare fixed name two runs used to share is NOT the "
+        "witness", witness != "rehearsal-not-ours")
+    row("no rendered prefix `rehearsal-<8 hex>-` can ever match the witness",
+        _re.match(r"^rehearsal-[0-9a-f]{8}-", witness) is None)
+    row("and it is a legal Kafka topic name",
+        _re.fullmatch(r"[A-Za-z0-9._-]{1,249}", witness) is not None)
+
+
+def test_the_rehearsal_harness_constants_are_the_products_own() -> None:
+    src = _REPO / "crates/weirkeeper/src"
+    rehearsal_rs = (src / "rehearsal.rs").read_text()
+    schedule_rs = (src / "controllers/rehearsal_schedule.rs").read_text()
+    approval_rs = (src / "controllers/approval.rs").read_text()
+    row("REHEARSAL_RESTORE_PREFIX is rehearsal.rs's own",
+        f'pub const REHEARSAL_RESTORE_PREFIX: &str = "{d3.REHEARSAL_RESTORE_PREFIX}";'
+        in rehearsal_rs)
+    row("REHEARSAL_REQUEUE_SECONDS is rehearsal_schedule.rs's REQUEUE_SECONDS",
+        f"pub const REQUEUE_SECONDS: u64 = {d3.REHEARSAL_REQUEUE_SECONDS};" in schedule_rs)
+    row("the NoResult reason step 10 accepts is the controller's REASON_NO_RESULT",
+        'pub const REASON_NO_RESULT: &str = "NoResult";' in schedule_rs)
+    row("the KeyRetired reason step 10 requires is the Approval controller's own",
+        'Self::KeyRetired { .. } => "KeyRetired"' in approval_rs)
+    row("TargetBusy is checked BEFORE the authorization — the premise of HARNESS-FAULT",
+        schedule_rs.index("SkipReason::TargetBusy,")
+        < schedule_rs.index("let authorization = match authorize(facts)"))
 
 
 def test_the_rendered_prefix_is_the_arithmetic_the_signed_scope_carries() -> None:

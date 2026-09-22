@@ -7176,7 +7176,38 @@ REHEARSAL_FAST_CRON = "* * * * *"
 #: The `KafkaCluster` in THIS namespace naming the lab's scratch broker.
 REHEARSAL_TARGET = "rehearsal-target"
 #: D3 §15 L6, by name: "a pre-created unrelated topic `rehearsal-not-ours`".
+#: The PREFIX of the witness, not its name — see `rehearsal_witness_topic`.
 REHEARSAL_UNRELATED_TOPIC = "rehearsal-not-ours"
+#: `crates/weirkeeper/src/rehearsal.rs::REHEARSAL_RESTORE_PREFIX`. A rehearsal
+#: child is `logweir-rehearsal-<schedule>-<slot>`, its runner Job has the same
+#: name, and its bundle is `<that>-approval-bundle`, so this prefix plus a
+#: schedule name finds every Job and bundle a schedule ever caused — including
+#: ones no `Restore` points at any more.
+REHEARSAL_RESTORE_PREFIX = "logweir-rehearsal-"
+#: `rehearsal_schedule.rs::REQUEUE_SECONDS` — the longest a due slot waits for
+#: the controller to look at it. Pinned against the source by a unit row.
+REHEARSAL_REQUEUE_SECONDS = 30
+#: How long after a `* * * * *` slot's NEXT boundary the controller is obliged
+#: to have evaluated it: one requeue, plus a margin for the host and cluster
+#: clocks and one reconcile's own latency. Step 7 may call a run NOT-REACHED
+#: only when its first rehearsal finished before this.
+REHEARSAL_OBLIGATION_MARGIN_SECONDS = 15
+
+
+def rehearsal_witness_topic() -> str:
+    """D3 §15 L6's `rehearsal-not-ours`, made THIS run's own.
+
+    ONE FIXED NAME ON A SHARED BROKER IS NOBODY'S. Two runs (a lab refresh and a
+    worker, different `OWNER`/`STAMP`) each planted `rehearsal-not-ours` with
+    `--if-not-exists` and each deleted it in their `finally`, so each deleted
+    the other's witness and the other's step 6 failed "the unrelated topic
+    survives"; a topic of that name that predated both was deleted by a run
+    that never owned it. The scenario's name stays as the prefix.
+
+    It can never fall under a rendered prefix: those are
+    `rehearsal-<8 hex>-`, and `not-ours` is not hexadecimal.
+    """
+    return f"{REHEARSAL_UNRELATED_TOPIC}-{OWNER_TAG}-{STAMP}"
 #: The `BackupSchedule` whose manual run becomes the qualifying point.
 REHEARSAL_POINT_SCHEDULE = "l6-points"
 #: The catalog whose view makes that point selectable.
@@ -7228,12 +7259,20 @@ def target_topics() -> set[str]:
     return {line.strip() for line in out.splitlines() if line.strip()}
 
 
-def target_topic_create(name: str) -> None:
-    target_exec([
+def target_topic_create(name: str) -> bool:
+    """Create one topic on the scratch broker; True only if THIS call created it.
+
+    No `--if-not-exists`: a name that already exists is somebody else's, and a
+    create that quietly succeeded over it is how a run came to "own" — and then
+    delete — a topic it never made. The caller checks absence first and plants
+    only what it can then say it created.
+    """
+    result = target_exec([
         f"{KAFKA_BIN}/kafka-topics.sh", "--bootstrap-server", "localhost:9092",
-        "--create", "--if-not-exists", "--topic", name,
+        "--create", "--topic", name,
         "--partitions", "1", "--replication-factor", "1",
     ], check_rc=False)
+    return result.returncode == 0
 
 
 def target_topic_delete(name: str) -> None:
@@ -7297,6 +7336,11 @@ def restore_is_created_on_the_standing_authorization(
     `status.reason != ApprovalNotReceived` — this is the 14.3b unblocking, and
     before the branch it held here forever."
 
+    The last two clauses REQUIRE admission. A refusal at admission is phase
+    `Failed` with a reason and no `jobRef` (`restore.rs::refused_status_patch`);
+    a runner that fails AFTER its Job was created was admitted, and steps 3–5
+    judge it.
+
     `ApprovalNotReceived` is the terminal refusal an OLDER controller writes
     for a `Restore` whose `spec.approvalRef` is empty, which is exactly the
     documented rollback behaviour (`docs/kubernetes.md` §7g) — so on a build
@@ -7306,7 +7350,10 @@ def restore_is_created_on_the_standing_authorization(
     spec = restore.get("spec") or {}
     authorization = spec.get("authorization") or {}
     labels = (restore.get("metadata") or {}).get("labels") or {}
-    reason = (restore.get("status") or {}).get("reason")
+    status = restore.get("status") or {}
+    reason = status.get("reason")
+    phase = status.get("phase")
+    job = (status.get("jobRef") or {}).get("name")
     return {
         "the Restore is labelled logweir.dev/rehearsal-schedule with this schedule":
             labels.get("logweir.dev/rehearsal-schedule") == schedule,
@@ -7320,6 +7367,14 @@ def restore_is_created_on_the_standing_authorization(
             not (spec.get("approvalRef") or {}).get("name"),
         "status.reason is not ApprovalNotReceived":
             reason != "ApprovalNotReceived",
+        # ADMISSION, NOT MERELY "SOME REASON". A standing Restore refused
+        # `StandingAuthorizationRefused`, `PlanHashMismatch` or
+        # `ClusterNotReachable` also has a reason that is not
+        # `ApprovalNotReceived`, and the row used to call that the unblocking.
+        "and it was ADMITTED — status.jobRef names its runner Job, or the phase is "
+        "Running/Succeeded": bool(job) or phase in {"Running", "Succeeded"},
+        "and it was not refused at admission — no Failed/Refused phase without a Job":
+            not (phase in {"Failed", "Refused"} and not job),
     }
 
 
@@ -7557,10 +7612,14 @@ def the_refused_arm_reaches_no_job(
     build that never reconciles this kind at all would leave behind, and
     precisely the state that made "zero Jobs" worthless as evidence.
 
-    `RehearsalHealthy` is read as "not True": the condition is about the last
-    FINISHED rehearsal, and an arm that was refused before any rehearsal ran
-    has none, so `False` and an absent condition are both honest and `True`
-    is not.
+    `RehearsalHealthy` is `False`, or `Unknown` with reason `NoResult` — A
+    SPEC CORRECTION, recorded as one. Review §4 step 10 says
+    `RehearsalHealthy=False`, but the condition is about the last FINISHED
+    rehearsal and an arm refused before any rehearsal ran has none: the
+    controller then writes `Unknown/NoResult` ("no rehearsal has finished
+    yet", `rehearsal_schedule.rs::REASON_NO_RESULT` and `carried`). Those two
+    are the only honest values; `True`, an absent condition, or `Unknown` for
+    any other reason fail.
     """
     status = schedule.get("status") or {}
     skipped = (status.get("lastSkipped") or {}).get("reason")
@@ -7575,11 +7634,140 @@ def the_refused_arm_reaches_no_job(
         "the schedule, or StandingAuthorizationRefused on its Restore": (
             skipped in named or failed in named or reconciler_side
         ),
-        "RehearsalHealthy does not claim a passing rehearsal":
-            condition(schedule, "RehearsalHealthy").get("status") != "True",
+        "RehearsalHealthy is False, or Unknown/NoResult — nothing finished, nothing passed": (
+            condition(schedule, "RehearsalHealthy").get("status") == "False"
+            or (condition(schedule, "RehearsalHealthy").get("status") == "Unknown"
+                and condition(schedule, "RehearsalHealthy").get("reason") == "NoResult")
+        ),
         "zero runner Jobs exist for it": not jobs,
         "and zero approval-bundle ConfigMaps exist for it": not bundles,
     }
+
+
+def slot_epoch(slot: str) -> float:
+    """A slot name (`%Y%m%d-%H%M%S`, UTC — `slot.rs::slot_name`) as epoch seconds."""
+    return dt.datetime.strptime(slot, "%Y%m%d-%H%M%S").replace(
+        tzinfo=dt.timezone.utc).timestamp()
+
+
+def concurrency_decision(*, first_slot: str, overlap: bool, new_skip_reason: str | None,
+                         first_terminal: bool, last_active_at: float | None,
+                         timed_out: bool) -> str:
+    """Step 7's loop, one observation at a time: WAIT, or what to record.
+
+    HIGH-1 of the harness-rows-9 review: the loop used to leave only on a
+    recorded skip and otherwise called the row NOT-REACHED as soon as the first
+    rehearsal finished — so the two defects step 7 exists to catch, a SECOND
+    `Restore` during the occupied slot and a slot skipped WITHOUT a record,
+    both came out as "not a failure of the clause". The order here is the fix:
+
+    1. `overlap` — a second `Restore` was listed while the first was still
+       running (the list is read BEFORE the first's phase, so a non-terminal
+       read afterwards proves the two coexisted): **FAIL**, whatever else.
+    2. a NEW skip recorded as `TargetBusy`: **HARNESS-FAULT**. `decide` checks
+       this schedule's own child before anyone else's, so while the first runs
+       only `ConcurrencyBlocked` is possible; a `TargetBusy` means another arm
+       of THIS harness was still rehearsing against the same target.
+    3. any other NEW skip: **EVALUATE** — the predicate requires
+       `ConcurrencyBlocked` and exactly one `Restore`.
+    4. the first finished: **NOT-REACHED** only if it finished before the
+       controller was OBLIGED to have looked at the next slot (the next
+       `* * * * *` boundary plus one `REQUEUE_SECONDS` plus a margin). If it
+       was still running after that, the controller must have evaluated a slot
+       against it, so the silence is **EVALUATE** — and the predicate fails it.
+    5. the deadline: **EVALUATE**, which fails silence.
+    """
+    if overlap:
+        return "FAIL"
+    if new_skip_reason == "TargetBusy":
+        return "HARNESS-FAULT"
+    if new_skip_reason:
+        return "EVALUATE"
+    if first_terminal:
+        obliged = (slot_epoch(first_slot) + 60 + REHEARSAL_REQUEUE_SECONDS
+                   + REHEARSAL_OBLIGATION_MARGIN_SECONDS)
+        if last_active_at is None or last_active_at < obliged:
+            return "NOT-REACHED"
+        return "EVALUATE"
+    if timed_out:
+        return "EVALUATE"
+    return "WAIT"
+
+
+def refused_arm_verdict(clauses: dict[str, bool], *, skip_reason: str | None,
+                        refused_approval: dict[str, Any] | None,
+                        passing_approval: dict[str, Any] | None,
+                        ) -> tuple[str, dict[str, bool]]:
+    """Step 10's verdict, and why a refusal alone is not yet a PASS.
+
+    MEDIUM-1 of the harness-rows-9 review: the arm is meant to prove that a
+    RETIRED `GovernedApproval` key authorises nothing new, and its live PASS
+    came from a build on which EVERY standing `Approval` was refused
+    (`PlanHashMismatch`, F1) — the control could not tell the retired-key rule
+    from "nothing verifies". Two mechanism clauses make it differential:
+
+    * the refused `Approval`'s own `Verified=False` names `KeyRetired`
+      (`controllers/approval.rs`, the reason that exists for exactly this);
+    * the PASSING arm's `Approval`, signed the same way by the Active key,
+      is `Verified=True` in the same run.
+
+    FAIL is never softened: a failed refusal clause is a FAIL (a Job, a bundle,
+    silence). Only a run whose refusal clauses all hold but whose mechanism
+    cannot be shown is **INCONCLUSIVE**. A `TargetBusy` that masked the
+    authorization check is **HARNESS-FAULT** — `decide` checks the target
+    before the authorization, so it is not a refusal of the authorization.
+    """
+    refused = condition(refused_approval or {}, "Verified")
+    passing = condition(passing_approval or {}, "Verified")
+    mechanism = {
+        "the refused Approval is Verified=False with reason KeyRetired — the retired-key "
+        "rule and not some other refusal": (
+            refused.get("status") == "False" and refused.get("reason") == "KeyRetired"
+        ),
+        "the passing arm's Approval is Verified=True in the same run — the differential":
+            passing.get("status") == "True",
+    }
+    if skip_reason == "TargetBusy" and not all(clauses.values()):
+        return "HARNESS-FAULT", mechanism
+    if not all(clauses.values()):
+        return "FAIL", mechanism
+    if not all(mechanism.values()):
+        return "INCONCLUSIVE", mechanism
+    return "PASS", mechanism
+
+
+def owned_rehearsal_prefixes(arms: dict[str, str], live: dict[str, dict[str, Any] | None],
+                             quiet: dict[str, bool]) -> tuple[dict[str, str], dict[str, str]]:
+    """Which rendered prefixes this run may sweep off the shared broker, and why not the rest.
+
+    A prefix is swept only when ALL of these hold: this run created the
+    schedule (it is in `arms`, with the uid the create returned); the live
+    object, if it still exists, carries THIS run's owner label and THAT uid;
+    and no rehearsal of it is still running (`quiet`) — deleting topics under a
+    runner mid-restore would corrupt a run rather than tidy after one.
+    """
+    owned: dict[str, str] = {}
+    refused: dict[str, str] = {}
+    for name, uid in sorted(arms.items()):
+        obj = live.get(name)
+        if obj is not None:
+            meta = obj.get("metadata") or {}
+            if (meta.get("labels") or {}).get("logweir.dev/test-owner") != OWNER:
+                refused[name] = "the live schedule does not carry this run's owner label"
+                continue
+            if meta.get("uid") != uid:
+                refused[name] = f"the live schedule's uid {meta.get('uid')} is not {uid}"
+                continue
+        if not quiet.get(name, False):
+            refused[name] = "a rehearsal of it was still running at the sweep's deadline"
+            continue
+        owned[name] = rendered_prefix(uid)
+    return owned, refused
+
+
+def topics_to_sweep(topics: set[str], prefixes: list[str]) -> list[str]:
+    """Only topics under one of this run's own rendered prefixes. Never anything else."""
+    return sorted(t for t in topics if any(p and t.startswith(p) for p in prefixes))
 
 
 # --- the fixtures the ten steps run against ---------------------------------
@@ -7845,26 +8033,49 @@ def rehearsal_bundles(restores: list[dict[str, Any]]) -> list[str]:
     ]
 
 
+def schedule_children(schedule: str) -> dict[str, list[str]]:
+    """Every runner Job and bundle ConfigMap in this namespace a schedule caused.
+
+    MEASURED, NOT DERIVED FROM `Restore`s. Step 10 used to count only the Jobs
+    and bundles named by a labelled `Restore`'s `status.jobRef`, so a refusal
+    on the schedule side — which creates no `Restore` — made "zero Jobs" and
+    "zero bundles" true by construction, and a Job created without a `jobRef`
+    would not have been seen (review LOW-2). A child's name is
+    `logweir-rehearsal-<schedule>-<slot>`, and its Job and bundle carry that
+    name, so a listing by the prefix sees every one of them that still exists.
+    """
+    prefix = f"{REHEARSAL_RESTORE_PREFIX}{schedule}-"
+    jobs = sorted(j["metadata"]["name"] for j in lst("jobs")
+                  if j["metadata"]["name"].startswith(prefix))
+    bundles = sorted(c["metadata"]["name"] for c in lst("configmaps")
+                     if c["metadata"]["name"].startswith(prefix)
+                     and c["metadata"]["name"].endswith("-approval-bundle"))
+    return {"jobs": jobs, "bundles": bundles}
+
+
 def job_facts(restore: dict[str, Any]) -> dict[str, Any]:
-    """The runner Job's argv and env, and the bundle's key set.
+    """The runner Job's argv and env, the pod's, and the bundle's key set.
 
     READ FROM THE JOB AND FROM THE POD. The Job is what the controller POSTed;
     the pod is what the kubelet ran. A row that read only one of them could not
     tell a template from an execution, and D3 §15's evidence list asks for the
-    pod's argv and env by name.
+    pod's argv and env by name. `complete` is False until the Job, its pod and
+    the bundle have ALL been read — the caller keeps re-reading until then
+    (review LOW-1: a first read that raced the pod was never repeated).
     """
     name = ((restore.get("status") or {}).get("jobRef") or {}).get("name")
     if not name:
-        return {"job": None}
+        return {"job": None, "complete": False}
     job = get_opt("job", name)
-    container = (((job or {}).get("spec") or {}).get("template") or {}).get(
-        "spec", {}).get("containers", [{}])[0]
+    containers = ((((job or {}).get("spec") or {}).get("template") or {}).get("spec")
+                  or {}).get("containers") or [{}]
+    container = containers[0]
     argv = list(container.get("command") or []) + list(container.get("args") or [])
     env = {e["name"]: e.get("value", "<fieldRef/secretRef>")
            for e in container.get("env") or []}
     pods = lst("pods", selector=f"batch.kubernetes.io/job-name={name}")
-    pod_container = ((pods[0].get("spec") if pods else {}) or {}).get(
-        "containers", [{}])[0] if pods else {}
+    pod_containers = ((pods[0].get("spec") or {}).get("containers") or [{}]) if pods else [{}]
+    pod_container = pod_containers[0]
     pod_argv = list(pod_container.get("command") or []) + list(pod_container.get("args") or [])
     pod_env = {e["name"]: e.get("value", "<fieldRef/secretRef>")
                for e in pod_container.get("env") or []}
@@ -7872,7 +8083,8 @@ def job_facts(restore: dict[str, Any]) -> dict[str, Any]:
     keys = set((bundle or {}).get("data", {}) or {}) | set(
         (bundle or {}).get("binaryData", {}) or {})
     return {"job": name, "argv": argv, "env": env, "podArgv": pod_argv, "podEnv": pod_env,
-            "bundleKeys": sorted(keys), "pod": pods[0]["metadata"]["name"] if pods else None}
+            "bundleKeys": sorted(keys), "pod": pods[0]["metadata"]["name"] if pods else None,
+            "complete": job is not None and bool(pods) and bundle is not None}
 
 
 def fetchable(bucket: str, key: str) -> bool:
@@ -7887,17 +8099,97 @@ def fetchable(bucket: str, key: str) -> bool:
     return bool(out.strip())
 
 
-def rehearsal_first_restore(schedule: str, *, seconds: int) -> dict[str, Any]:
-    """The `Restore` a schedule's first slot creates, waited for by its label."""
+def rehearsal_first_restore(schedule: str, *, seconds: int) -> dict[str, Any] | None:
+    """The `Restore` a schedule's first slot creates, waited for by its label.
+
+    `None` when none appeared: the CALLER records why (the schedule's own
+    `lastSkipped` says), because a raise here aborted the whole phase and left
+    every later row unrecorded.
+    """
     deadline = time.time() + seconds
     while time.time() < deadline:
         found = rehearsal_restores(schedule)
         if found:
             return found[0]
         time.sleep(5)
-    dump = artifact(f"rehearsal/no-restore-{schedule}.json",
-                    get_opt("rehearsalschedule", schedule) or {})
-    raise RuntimeError(f"no rehearsal Restore for {schedule} within {seconds}s: {dump}")
+    artifact(f"rehearsal/no-restore-{schedule}.json",
+             get_opt("rehearsalschedule", schedule) or {})
+    return None
+
+
+def poll(read: Callable[[], dict[str, Any] | None],
+         done: Callable[[dict[str, Any]], bool], *, seconds: int) -> dict[str, Any]:
+    """Re-read until `done`, and return the LAST observation either way.
+
+    The row then judges what was there. A timeout is not a verdict and not an
+    exception: it is the state the product left, which the predicate reads.
+    """
+    deadline = time.time() + seconds
+    last: dict[str, Any] = read() or {}
+    while not done(last) and time.time() < deadline:
+        time.sleep(3)
+        last = read() or last
+    return last
+
+
+def ready_message(schedule: dict[str, Any]) -> str:
+    """The `Ready` condition's message — where a skip's DETAIL lives.
+
+    `lastSkipped` carries only the reason; the sentence naming, for instance,
+    which other `Restore` made the target busy is on `Ready`.
+    """
+    return str(condition(schedule, "Ready").get("message") or "")
+
+
+def suspend_schedule(name: str) -> None:
+    if get_opt("rehearsalschedule", name) is not None:
+        run(KN + ["patch", "rehearsalschedule", name, "--type=merge", "-p",
+                  json.dumps({"spec": {"suspend": True}})], check=False)
+
+
+def quiesce_arm(name: str, evidence: list[str], *, seconds: int = 1200) -> dict[str, Any]:
+    """Suspend one arm and wait until none of its rehearsals can make a target busy.
+
+    HIGH-2 of the harness-rows-9 review. All four arms name the same
+    `rehearsal-target`, and `busy_target` counts any OTHER schedule's
+    non-terminal rehearsal against it — checked BEFORE the authorization. Arms
+    that kept firing after their row was recorded therefore turned steps 7, 8
+    and 10 into `TargetBusy` verdicts that belonged to the harness. So each arm
+    is suspended the moment its row is recorded, and the next arm starts only
+    once this one is quiet.
+
+    A rehearsal HELD at admission (`Pending`, no `jobRef` — it will never run a
+    Job and never become terminal by itself) is deleted: it is this run's own
+    object, it carries no topic and no Job, and left alone it would hold the
+    target busy for ever. Anything with a Job is waited for, bounded by the
+    arm's own `deadlineSeconds` (900) plus slack.
+    """
+    suspend_schedule(name)
+    deleted: list[str] = []
+    deadline = time.time() + seconds
+    restores = rehearsal_restores(name)
+    while time.time() < deadline:
+        for r in restores:
+            status = r.get("status") or {}
+            if (not terminal(r) and not (status.get("jobRef") or {}).get("name")
+                    and status.get("phase") in {None, "Pending"}
+                    and (r["metadata"].get("labels") or {}).get(
+                        "logweir.dev/rehearsal-schedule") == name
+                    and r["metadata"]["name"] not in deleted):
+                run(KN + ["delete", "restore", r["metadata"]["name"], "--wait=true"],
+                    check=False)
+                deleted.append(r["metadata"]["name"])
+        restores = rehearsal_restores(name)
+        if all(terminal(r) for r in restores):
+            break
+        time.sleep(5)
+    running = [r["metadata"]["name"] for r in restores if not terminal(r)]
+    out = {"schedule": name, "suspended": True,
+           "restores": {r["metadata"]["name"]: (r.get("status") or {}).get("phase")
+                        for r in restores},
+           "heldAndDeleted": deleted, "stillRunning": running, "quiet": not running}
+    evidence.append(artifact(f"rehearsal/quiesce-{name}.json", out))
+    return out
 
 
 def rehearsal() -> None:
@@ -7908,30 +8200,59 @@ def rehearsal() -> None:
     build the lab is running. Steps 2–9 form a chain, so a step whose input the
     previous step never produced is recorded **NOT-REACHED**.
 
+    THE FOUR ARMS RUN ONE AFTER ANOTHER, NEVER TOGETHER (`quiesce_arm`). Each
+    names the same target, and a rehearsal still running on one arm makes the
+    next arm's slot `TargetBusy` — which is checked before the authorization
+    and is the HARNESS's ordering, not the product's verdict. A `TargetBusy`
+    that decides a row anyway is recorded **HARNESS-FAULT**, naming the busy
+    `Restore`, and never PASS or FAIL.
+
     CLUSTER LOCK: this phase writes the cluster-scoped `TrustPolicy` (see
-    `rehearsal_trust`). It creates and deletes topics under its own
-    `rehearsal-` names on the lab's scratch broker and changes nothing else
-    about the shared release.
+    `rehearsal_trust`). On the lab's shared scratch broker it creates ONE
+    witness topic of its own and a mapped name under one of its own rendered
+    prefixes, and its rehearsals create more under those prefixes; the
+    `finally` deletes exactly those, after an ownership check, and nothing
+    else about the shared release changes.
     """
     evidence: list[str] = []
     reached: dict[str, Any] = {}
-    work = pathlib.Path(tempfile.mkdtemp(prefix=f"{OWNER}-l6-", dir="/tmp"))
-    work.chmod(0o700)
-    approver_key = mint_signing_key(f"{OWNER}-l6-approver")
-    refused_key = mint_signing_key(f"{OWNER}-l6-retired")
-    planted: list[str] = []
+    # EVERY RehearsalSchedule this phase created, name -> the uid the create
+    # returned. The rendered prefix is a function of the uid, so this is also
+    # the list of prefixes the `finally` may sweep.
+    arms: dict[str, str] = {}
+    witness = rehearsal_witness_topic()
+    witness_planted = False
+    work: pathlib.Path | None = None
+    approver_key: dict[str, Any] | None = None
+    refused_key: dict[str, Any] | None = None
+    approval_name = f"{REHEARSAL_SCHEDULE}-standing"
 
     def unreached(step: str, task: str, why: str) -> None:
         record(step, task, "NOT-REACHED", why, evidence)
 
     try:
         # ---- fixtures ----------------------------------------------------
+        # MINTED INSIDE THE `try` (review LOW-4): a second mint or a
+        # `mkdtemp` that raised used to leave the first private key in /tmp
+        # with no `finally` to remove it.
+        work = pathlib.Path(tempfile.mkdtemp(prefix=f"{OWNER}-l6-", dir="/tmp"))
+        work.chmod(0o700)
+        approver_key = mint_signing_key(f"{OWNER}-l6-approver")
+        refused_key = mint_signing_key(f"{OWNER}-l6-retired")
         target = rehearsal_target_cluster()
         target_cluster_id = target["status"]["clusterId"]
         rehearsal_trust(target_cluster_id, approver_key, refused_key)
         point = rehearsal_point()
-        target_topic_create(REHEARSAL_UNRELATED_TOPIC)
-        planted.append(REHEARSAL_UNRELATED_TOPIC)
+        # THE WITNESS IS PLANTED ONLY IF ABSENT, AND ONLY WHAT WAS PLANTED IS
+        # DELETED (review MEDIUM-3). Its name is this run's, so it is absent
+        # unless a previous run with the same OWNER and STAMP left it — which
+        # this run did not create and will not adopt.
+        if witness in target_topics():
+            raise RuntimeError(
+                f"the witness topic {witness} already exists on the shared scratch broker; this "
+                f"run did not create it and will neither adopt nor delete it. Remove it by hand "
+                f"after checking who made it, or run with a different LOGWEIR_D3_STAMP")
+        witness_planted = target_topic_create(witness)
         evidence.append(artifact("rehearsal/00-fixtures.json", {
             "targetClusterId": target_cluster_id,
             "sourceClusterId": STATE.get("sourceClusterId"),
@@ -7939,18 +8260,13 @@ def rehearsal() -> None:
             "trustPolicy": TRUST_POLICY,
             "approverKeyId": approver_key["keyId"],
             "retiredApproverKeyId": refused_key["keyId"],
-            "unrelatedTopic": REHEARSAL_UNRELATED_TOPIC,
+            "unrelatedTopic": witness,
+            "unrelatedTopicPlantedByThisRun": witness_planted,
         }))
 
         # ---- step 1: setup, and the standing Approval verifies -------------
-        approval_name = f"{REHEARSAL_SCHEDULE}-standing"
-        apply(rehearsal_schedule_object(REHEARSAL_SCHEDULE, cron=REHEARSAL_CRON,
-                                        approval=approval_name))
-        schedule = wait_for(
-            "rehearsalschedule", REHEARSAL_SCHEDULE,
-            lambda o: bool((o.get("status") or {}).get("templateDigest")),
-            seconds=300, what="status.templateDigest, which the document signs",
-        )
+        schedule = rehearsal_create(REHEARSAL_SCHEDULE, cron=REHEARSAL_CRON,
+                                    approval=approval_name, arms=arms)
         schedule_uid = schedule["metadata"]["uid"]
         envelope, sidecar = mint_standing(work, approver_key["private"], schedule,
                                           target_cluster_id=target_cluster_id)
@@ -7962,8 +8278,8 @@ def rehearsal() -> None:
         )
         setup = standing_approval_is_verified(approval, schedule_uid)
         setup["a qualifying catalog point is selectable"] = point["selectable"]
-        setup[f"the unrelated topic {REHEARSAL_UNRELATED_TOPIC} is pre-created on the target"] = (
-            REHEARSAL_UNRELATED_TOPIC in target_topics()
+        setup[f"the unrelated topic {witness} was pre-created on the target by this run"] = (
+            witness_planted and witness in target_topics()
         )
         evidence.append(artifact("rehearsal/01-approval.json",
                                  {"approval": approval, "schedule": schedule,
@@ -7995,37 +8311,48 @@ def rehearsal() -> None:
                       "fire and there is no Restore to read; this is NOT a pass and NOT a "
                       "failure of the clause")
         else:
-            run(KN + ["patch", "rehearsalschedule", REHEARSAL_SCHEDULE, "--type=merge",
-                      "-p", json.dumps({"spec": {"suspend": False}})])
+            unsuspend("rehearsalschedule", REHEARSAL_SCHEDULE)
             first = rehearsal_first_restore(REHEARSAL_SCHEDULE, seconds=900)
-            first_name = first["metadata"]["name"]
-            restore = wait_for(
-                "restore", first_name,
-                lambda o: bool(((o.get("status") or {}).get("jobRef") or {}).get("name"))
-                or bool((o.get("status") or {}).get("reason"))
-                or (o.get("status") or {}).get("phase") in {"Running", "Succeeded",
-                                                            "Failed", "Refused"},
-                seconds=420, what="admission to be decided (a Job, a reason or a phase)",
-            )
-            clauses = restore_is_created_on_the_standing_authorization(
-                restore, REHEARSAL_SCHEDULE, approval_name)
-            evidence.append(artifact("rehearsal/02-restore.json",
-                                     {"restore": restore, "clauses": clauses}))
-            step2_ok = check(
-                "rehearsal-2-restore-on-spec-authorization",
-                "PLAT-14.3",
-                all(clauses.values()),
-                f"the schedule created {first_name} on spec.authorization with no approvalRef; "
-                f"phase {(restore.get('status') or {}).get('phase')!r}, reason "
-                f"{(restore.get('status') or {}).get('reason')!r}, jobRef "
-                f"{((restore.get('status') or {}).get('jobRef') or {}).get('name')!r}. THIS IS "
-                f"THE PLAT-14.3b UNBLOCKING: on a controller that predates it the object holds "
-                f"at ApprovalNotReceived — the documented fail-closed rollback for an older "
-                f"controller reading a standing-authorized Restore — and this row FAILS, which "
-                f"is the defect reproduced live. "
-                + "; ".join(f"{k}={v}" for k, v in clauses.items()),
-                evidence,
-            )
+            if first is None:
+                live = get("rehearsalschedule", REHEARSAL_SCHEDULE)
+                skip = (live.get("status") or {}).get("lastSkipped") or {}
+                check("rehearsal-2-restore-on-spec-authorization", "PLAT-14.3", False,
+                      f"a verified standing Approval, an unsuspended schedule, and NO Restore "
+                      f"within 900 s: lastSkipped={json.dumps(skip)}, Ready says "
+                      f"{ready_message(live)!r}. The unblocking this row is about did not "
+                      f"happen", evidence)
+            else:
+                first_name = first["metadata"]["name"]
+                # ADMISSION DECIDED, NOT "ANY REASON WRITTEN" (review MEDIUM-2):
+                # a Job, or a phase the admission wrote. A transient hold
+                # (`Pending`, `ApprovalNotVerified`) is waited through.
+                restore = poll(
+                    lambda: get_opt("restore", first_name),
+                    lambda o: bool(((o.get("status") or {}).get("jobRef") or {}).get("name"))
+                    or (o.get("status") or {}).get("phase") in {"Running", "Succeeded",
+                                                                "Failed", "Refused"},
+                    seconds=420,
+                )
+                clauses = restore_is_created_on_the_standing_authorization(
+                    restore, REHEARSAL_SCHEDULE, approval_name)
+                evidence.append(artifact("rehearsal/02-restore.json",
+                                         {"restore": restore, "clauses": clauses}))
+                step2_ok = check(
+                    "rehearsal-2-restore-on-spec-authorization",
+                    "PLAT-14.3",
+                    all(clauses.values()),
+                    f"the schedule created {first_name} on spec.authorization with no "
+                    f"approvalRef; phase {(restore.get('status') or {}).get('phase')!r}, reason "
+                    f"{(restore.get('status') or {}).get('reason')!r}, jobRef "
+                    f"{((restore.get('status') or {}).get('jobRef') or {}).get('name')!r}. THIS "
+                    f"IS THE PLAT-14.3b UNBLOCKING, and it requires ADMISSION — a runner Job — "
+                    f"not merely a reason other than ApprovalNotReceived: on a controller that "
+                    f"predates it the object holds at ApprovalNotReceived, and a standing "
+                    f"Restore refused StandingAuthorizationRefused/PlanHashMismatch fails here "
+                    f"too. "
+                    + "; ".join(f"{k}={v}" for k, v in clauses.items()),
+                    evidence,
+                )
         reached["step2"] = step2_ok
 
         # ---- steps 3-6 and 9: the Job, the scorecard, the schedule, topics -
@@ -8039,34 +8366,65 @@ def rehearsal() -> None:
                 unreached(step, "PLAT-14.3",
                           "the rehearsal Restore was never admitted (step 2), so no Job, no "
                           "scorecard, no rehearsalLast* and no mapped topic exists to read")
+            # ISOLATION HOLDS ON THE FAILURE PATH TOO: a slot that fired and
+            # was refused, or is still held, must not make a later arm busy.
+            if REHEARSAL_SCHEDULE in arms:
+                quiesce_arm(REHEARSAL_SCHEDULE, evidence)
         else:
             slot = (restore["metadata"].get("labels") or {}).get("logweir.dev/rehearsal-slot", "")
             during: set[str] = set(target_topics())
-            facts: dict[str, Any] = {"job": None}
+            facts: dict[str, Any] = {"job": None, "complete": False}
 
             def watch(obj: dict[str, Any]) -> bool:
                 during.update(target_topics())
-                if facts.get("job") is None:
-                    facts.update(job_facts(obj))
+                if not facts.get("complete"):
+                    fresh = job_facts(obj)
+                    if fresh.get("job"):
+                        facts.update(fresh)
                 return terminal(obj)
 
             final = wait_for("restore", first_name, watch, seconds=1500,
                              what="the rehearsal to reach a terminal phase")
+            # step 5's input, read while the schedule still observes its child:
+            # a SUSPENDED schedule records no `lastSucceeded` at all (the
+            # suspended branch of `reconcile_schedule` commits an empty
+            # observation), so the arm is quiesced only after this.
+            after_schedule = poll(
+                lambda: get_opt("rehearsalschedule", REHEARSAL_SCHEDULE),
+                lambda o: bool(((o.get("status") or {}).get("lastSucceeded") or {}).get("at"))
+                or bool(((o.get("status") or {}).get("lastFailed") or {}).get("at")),
+                seconds=420,
+            )
+            quiet = quiesce_arm(REHEARSAL_SCHEDULE, evidence)
+            # A SECOND SLOT OF THE TEN-MINUTE SCHEDULE. It can fire in the same
+            # reconcile that observes the first as finished (a slot that came
+            # due while the first ran, never recorded as scheduled). Steps 5
+            # and 6 read "the schedule after THIS rehearsal", which such a slot
+            # changes; they say so rather than blame the product.
+            extra = sorted((set(quiet["restores"]) | set(quiet["heldAndDeleted"]))
+                           - {first_name})
+
             evidence.append(artifact("rehearsal/03-job.json", facts))
             job_clauses = the_job_carries_the_standing_mount(
-                facts.get("argv") or [], facts.get("env") or {},
+                facts.get("podArgv") or [], facts.get("podEnv") or {},
                 set(facts.get("bundleKeys") or []), REHEARSAL_SCHEDULE, slot, schedule_uid)
+            job_clauses["the pod the kubelet ran was observed, beside the Job and the bundle"] = (
+                bool(facts.get("complete")))
+            job_clauses["and the pod ran exactly the Job template's argv and env"] = (
+                bool(facts.get("complete"))
+                and facts.get("podArgv") == facts.get("argv")
+                and facts.get("podEnv") == facts.get("env"))
             check(
                 "rehearsal-3-job-carries-the-standing-mount",
                 "PLAT-14.3",
                 all(job_clauses.values()),
-                f"Job {facts.get('job')!r} (pod {facts.get('pod')!r}) for slot {slot}: argv "
-                f"carries --standing-authorization and --authorization-keys and no --approval, "
-                f"the bundle ConfigMap {first_name}-approval-bundle holds "
-                f"{facts.get('bundleKeys')}, and the env sets "
+                f"Job {facts.get('job')!r} (pod {facts.get('pod')!r}) for slot {slot}: the POD's "
+                f"argv carries --standing-authorization and --authorization-keys and no "
+                f"--approval, the bundle ConfigMap {first_name}-approval-bundle holds "
+                f"{facts.get('bundleKeys')}, and the pod's env sets "
                 f"LOGWEIR_EXECUTION_AUTHORIZATION_KIND="
-                f"{(facts.get('env') or {}).get('LOGWEIR_EXECUTION_AUTHORIZATION_KIND')!r} with "
-                f"neither per-run approval digest. "
+                f"{(facts.get('podEnv') or {}).get('LOGWEIR_EXECUTION_AUTHORIZATION_KIND')!r} "
+                f"with neither per-run approval digest; the Job template says the same. "
                 + "; ".join(f"{k}={v}" for k, v in job_clauses.items()),
                 evidence,
             )
@@ -8091,65 +8449,75 @@ def rehearsal() -> None:
                 "PLAT-14.3",
                 all(card.values()),
                 f"outcome {(final.get('status') or {}).get('outcome')!r}, verification "
-                f"{((ev.get('verification') or {}).get('result'))!r}, scorecard {scorecard_key!r} "
-                f"with approval.approver "
+                f"{((ev.get('verification') or {}).get('result'))!r}, scorecard "
+                f"{scorecard_key!r} with approval.approver "
                 f"{(scorecard.get('approval') or {}).get('approver')!r} and triggered_by "
-                f"{scorecard.get('triggered_by')!r}: what a human signed was a SCHEDULE, and the "
-                f"signed evidence says so instead of naming a person. "
+                f"{scorecard.get('triggered_by')!r}: what a human signed was a SCHEDULE, and "
+                f"the signed evidence says so instead of naming a person. "
                 + "; ".join(f"{k}={v}" for k, v in card.items()),
                 evidence,
             )
 
             # step 5 — `rehearsalLast*` on the schedule
-            after_schedule = wait_for(
-                "rehearsalschedule", REHEARSAL_SCHEDULE,
-                lambda o: bool(((o.get("status") or {}).get("lastSucceeded") or {}).get("at"))
-                or bool(((o.get("status") or {}).get("lastFailed") or {}).get("at")),
-                seconds=420, what="the schedule to record the finished rehearsal",
-            )
             last = the_schedule_records_the_pass(after_schedule, first_name)
             evidence.append(artifact("rehearsal/05-schedule-status.json",
                                      {"status": after_schedule.get("status"),
-                                      "clauses": last}))
-            check(
-                "rehearsal-5-schedule-records-the-pass",
-                "PLAT-14.3",
-                all(last.values()),
-                f"status.lastSucceeded="
-                f"{json.dumps((after_schedule.get('status') or {}).get('lastSucceeded'))}, "
-                f"RehearsalHealthy="
-                f"{condition(after_schedule, 'RehearsalHealthy').get('status')}/"
-                f"{condition(after_schedule, 'RehearsalHealthy').get('reason')}, "
-                f"activeRestoreRef="
-                f"{json.dumps((after_schedule.get('status') or {}).get('activeRestoreRef'))}. "
-                + "; ".join(f"{k}={v}" for k, v in last.items()),
-                evidence,
-            )
+                                      "extraRehearsals": extra, "clauses": last}))
+            if extra:
+                record("rehearsal-5-schedule-records-the-pass", "PLAT-14.3", "HARNESS-FAULT",
+                       f"a further slot of {REHEARSAL_SCHEDULE} fired ({extra}) before the "
+                       f"harness suspended it, so the schedule's status is no longer 'after "
+                       f"{first_name}' and this row cannot be judged; the clauses as read were "
+                       + "; ".join(f"{k}={v}" for k, v in last.items()), evidence)
+            else:
+                check(
+                    "rehearsal-5-schedule-records-the-pass",
+                    "PLAT-14.3",
+                    all(last.values()),
+                    f"status.lastSucceeded="
+                    f"{json.dumps((after_schedule.get('status') or {}).get('lastSucceeded'))}, "
+                    f"RehearsalHealthy="
+                    f"{condition(after_schedule, 'RehearsalHealthy').get('status')}/"
+                    f"{condition(after_schedule, 'RehearsalHealthy').get('reason')}, "
+                    f"activeRestoreRef="
+                    f"{json.dumps((after_schedule.get('status') or {}).get('activeRestoreRef'))}. "
+                    + "; ".join(f"{k}={v}" for k, v in last.items()),
+                    evidence,
+                )
 
-            # step 6 — the topics, during and after
+            # step 6 — the topics, during and after (the arm is quiet now, so
+            # "after teardown" cannot include a later slot's topics)
             after_topics = target_topics()
             prefix = rendered_prefix(schedule_uid)
             mapped = {mapped_topic(schedule_uid, REHEARSAL_TOPIC)}
             topics = the_target_holds_exactly_the_mapped_topics(
-                during, after_topics, mapped, prefix, REHEARSAL_UNRELATED_TOPIC)
+                during, after_topics, mapped, prefix, witness)
             evidence.append(artifact("rehearsal/06-topics.json", {
-                "prefix": prefix, "mapped": sorted(mapped),
+                "prefix": prefix, "mapped": sorted(mapped), "witness": witness,
                 "during": sorted(during), "after": sorted(after_topics),
-                "clauses": topics,
+                "extraRehearsals": extra, "clauses": topics,
             }))
-            check(
-                "rehearsal-6-topics-owned-torn-down-unrelated-survives",
-                "PLAT-14.3",
-                all(topics.values()),
-                f"the rendered prefix is {prefix} (unique per schedule object, "
-                f"<prefix><uid[..8]>-); during the run the target held "
-                f"{sorted(t for t in during if t.startswith(prefix))} and afterwards "
-                f"{sorted(t for t in after_topics if t.startswith(prefix))}; "
-                f"{REHEARSAL_UNRELATED_TOPIC} survives. The controller deletes no topic ever — "
-                f"teardown is the runner's phase 9 inside its prefix-scoped guard. "
-                + "; ".join(f"{k}={v}" for k, v in topics.items()),
-                evidence,
-            )
+            if extra:
+                record("rehearsal-6-topics-owned-torn-down-unrelated-survives", "PLAT-14.3",
+                       "HARNESS-FAULT",
+                       f"a further slot of {REHEARSAL_SCHEDULE} ({extra}) created topics under "
+                       f"the same rendered prefix {prefix} after {first_name}, so 'during' and "
+                       f"'after' no longer describe one rehearsal; the clauses as read were "
+                       + "; ".join(f"{k}={v}" for k, v in topics.items()), evidence)
+            else:
+                check(
+                    "rehearsal-6-topics-owned-torn-down-unrelated-survives",
+                    "PLAT-14.3",
+                    all(topics.values()),
+                    f"the rendered prefix is {prefix} (unique per schedule object, "
+                    f"<prefix><uid[..8]>-); during the run the target held "
+                    f"{sorted(t for t in during if t.startswith(prefix))} and afterwards "
+                    f"{sorted(t for t in after_topics if t.startswith(prefix))}; {witness} "
+                    f"survives. The controller deletes no topic ever — teardown is the "
+                    f"runner's phase 9 inside its prefix-scoped guard. "
+                    + "; ".join(f"{k}={v}" for k, v in topics.items()),
+                    evidence,
+                )
 
             # step 9 — the evidence outlives the Job
             job_name = facts.get("job")
@@ -8189,9 +8557,8 @@ def rehearsal() -> None:
                       "a rehearsal never occupied the schedule (step 2), so no second slot "
                       "could find one active and ConcurrencyBlocked cannot be observed")
         else:
-            conc_ok = rehearsal_arm_concurrency(work, target_cluster_id,
-                                                approver_key, evidence)
-            reached["step7"] = conc_ok
+            reached["step7"] = rehearsal_arm_concurrency(
+                work, target_cluster_id, approver_key, arms, evidence)
 
         # ---- step 8: the leftover guard ------------------------------------
         if not step2_ok:
@@ -8199,52 +8566,113 @@ def rehearsal() -> None:
                       "no rehearsal reached a target (step 2), so a pre-created mapped name "
                       "has nothing to refuse")
         else:
-            rehearsal_arm_leftover(work, target_cluster_id, approver_key,
-                                   planted, evidence)
+            rehearsal_arm_leftover(work, target_cluster_id, approver_key, arms, evidence)
 
         # ---- step 10: the refused arm — the negative control ---------------
-        rehearsal_arm_refused(work, target_cluster_id, refused_key, evidence)
+        rehearsal_arm_refused(work, target_cluster_id, refused_key, approval_name,
+                              arms, evidence)
 
         STATE["rehearsal"] = {
             "schedule": REHEARSAL_SCHEDULE, "scheduleUid": schedule_uid,
             "approval": approval_name, "restore": first_name,
             "targetClusterId": target_cluster_id, "point": point,
-            "reached": reached, "at": now(),
+            "reached": reached, "arms": arms, "witness": witness, "at": now(),
         }
         save()
     finally:
-        for topic in planted:
-            target_topic_delete(topic)
-        for key in (approver_key, refused_key):
-            key["private"].unlink(missing_ok=True)
-            shutil.rmtree(key["dir"], ignore_errors=True)
-        shutil.rmtree(work, ignore_errors=True)
-        gone = not any(k["private"].exists() or k["dir"].exists()
-                       for k in (approver_key, refused_key))
-        evidence.append(artifact("rehearsal/99-cleanup.json", {
-            "topicsDeleted": planted,
-            "topicsOnTargetAfter": sorted(target_topics()),
-            "approverKeyId": approver_key["keyId"],
-            "retiredApproverKeyId": refused_key["keyId"],
-            "privateKeyFilesExist": [k["private"].exists()
-                                     for k in (approver_key, refused_key)],
-            "workDirExists": work.exists(),
-        }))
-        check(
-            "rehearsal-minted-private-keys-never-outlive-the-row",
-            "PLAT-14.3",
-            gone and not work.exists(),
-            f"both approver keys this phase minted — the Active one it signs with and the "
-            f"Retired one the refused arm signs with — are gone from disk, the scope/envelope "
-            f"working directory is gone ({work.exists()}), and every topic this phase created "
-            f"on the shared scratch broker is deleted: {planted}. What is recorded is the "
-            f"public SPKI and the key id",
-            evidence,
-        )
+        # THE KEYS GO WHATEVER THE SWEEP DOES: a broker that cannot be reached
+        # (the sweep raises) must not be the reason a private key outlives the run.
+        try:
+            # ---- the shared broker, left as this run found it ------------------
+            quiet: dict[str, bool] = {}
+            for name in sorted(arms):
+                quiet[name] = quiesce_arm(name, evidence)["quiet"]
+            live = {name: get_opt("rehearsalschedule", name) for name in arms}
+            owned, not_swept = owned_rehearsal_prefixes(arms, live, quiet)
+            before_sweep = target_topics()
+            swept = topics_to_sweep(before_sweep, list(owned.values()))
+            for topic in swept:
+                target_topic_delete(topic)
+            if witness_planted:
+                target_topic_delete(witness)
+            after_sweep = target_topics()
+            every_prefix = [rendered_prefix(uid) for uid in arms.values()]
+            left_under_prefixes = topics_to_sweep(after_sweep, every_prefix)
+            evidence.append(artifact("rehearsal/98-broker-sweep.json", {
+                "arms": arms, "quiet": quiet, "ownedPrefixes": owned, "notSwept": not_swept,
+                "swept": swept, "witness": witness, "witnessPlantedByThisRun": witness_planted,
+                "leftUnderThisRunsPrefixes": left_under_prefixes,
+                "witnessStillPresent": witness in after_sweep,
+            }))
+            broker = {
+                "every arm this phase unsuspended is suspended and has no rehearsal running":
+                    all(quiet.values()),
+                "no topic under any of this phase's rendered prefixes is left on the shared broker":
+                    not left_under_prefixes,
+                "the witness topic this run planted is gone (and one it did not plant was never "
+                "touched)": not (witness_planted and witness in after_sweep),
+            }
+            check(
+                "rehearsal-shared-broker-left-as-found",
+                "PLAT-14.3",
+                all(broker.values()),
+                f"the {len(arms)} RehearsalSchedule(s) this phase created ({sorted(arms)}) are "
+                f"suspended and quiet={quiet}; deleted {swept} (only names under this run's own "
+                f"rendered prefixes {sorted(owned.values())}, each checked against the live "
+                f"schedule's owner label and uid; not swept: {not_swept}) and the witness "
+                f"{witness} (planted by this run: {witness_planted}). Left under this run's "
+                f"prefixes: {left_under_prefixes}. "
+                + "; ".join(f"{k}={v}" for k, v in broker.items()),
+                evidence,
+            )
+        finally:
+            # ---- the minted keys ---------------------------------------------
+            minted = [k for k in (approver_key, refused_key) if k is not None]
+            for key in minted:
+                key["private"].unlink(missing_ok=True)
+                shutil.rmtree(key["dir"], ignore_errors=True)
+            if work is not None:
+                shutil.rmtree(work, ignore_errors=True)
+            work_gone = work is None or not work.exists()
+            gone = not any(k["private"].exists() or k["dir"].exists() for k in minted)
+            evidence.append(artifact("rehearsal/99-cleanup.json", {
+                "approverKeyId": (approver_key or {}).get("keyId"),
+                "retiredApproverKeyId": (refused_key or {}).get("keyId"),
+                "keysMinted": len(minted),
+                "privateKeyFilesExist": [k["private"].exists() for k in minted],
+                "workDirExists": not work_gone,
+            }))
+            check(
+                "rehearsal-minted-private-keys-never-outlive-the-row",
+                "PLAT-14.3",
+                gone and work_gone,
+                f"every approver key this phase minted ({len(minted)} of 2 — the Active one it "
+                f"signs with and the Retired one the refused arm signs with) is gone from disk, and "
+                f"the scope/envelope working directory is gone ({work_gone}). What is recorded is "
+                f"the public SPKI and the key id",
+                evidence,
+            )
+
+
+def rehearsal_create(name: str, *, cron: str, approval: str,
+                     arms: dict[str, str]) -> dict[str, Any]:
+    """Create one arm's schedule, suspended, and REGISTER it before anything else.
+
+    Registered the moment its uid exists, so the `finally` suspends and sweeps
+    it even when the very next line raises.
+    """
+    apply(rehearsal_schedule_object(name, cron=cron, approval=approval))
+    created = get("rehearsalschedule", name)
+    arms[name] = created["metadata"]["uid"]
+    return wait_for(
+        "rehearsalschedule", name,
+        lambda o: bool((o.get("status") or {}).get("templateDigest")),
+        seconds=300, what="status.templateDigest, which the document signs",
+    )
 
 
 def rehearsal_arm(name: str, *, cron: str, key: pathlib.Path, work: pathlib.Path,
-                  target_cluster_id: str) -> tuple[dict[str, Any], str]:
+                  target_cluster_id: str, arms: dict[str, str]) -> tuple[dict[str, Any], str]:
     """One arm's `RehearsalSchedule` and its standing `Approval`, both created
     and the `Approval` waited on until its `Verified` condition is DECIDED.
 
@@ -8253,12 +8681,7 @@ def rehearsal_arm(name: str, *, cron: str, key: pathlib.Path, work: pathlib.Path
     waiting for the control to fail.
     """
     approval = f"{name}-standing"
-    apply(rehearsal_schedule_object(name, cron=cron, approval=approval))
-    schedule = wait_for(
-        "rehearsalschedule", name,
-        lambda o: bool((o.get("status") or {}).get("templateDigest")),
-        seconds=300, what="status.templateDigest",
-    )
+    schedule = rehearsal_create(name, cron=cron, approval=approval, arms=arms)
     envelope, sidecar = mint_standing(work, key, schedule,
                                       target_cluster_id=target_cluster_id)
     apply(standing_approval_object(approval, schedule, envelope, sidecar))
@@ -8274,7 +8697,7 @@ def unsuspend(kind: str, name: str) -> None:
 
 
 def rehearsal_arm_concurrency(work: pathlib.Path, target_cluster_id: str,
-                              approver_key: dict[str, Any],
+                              approver_key: dict[str, Any], arms: dict[str, str],
                               evidence: list[str]) -> bool:
     """Review §4 step 7 — a second slot arriving while the first is active.
 
@@ -8282,57 +8705,117 @@ def rehearsal_arm_concurrency(work: pathlib.Path, target_cluster_id: str,
     why: the clause is about `decide`'s concurrency branch, which does not read
     the cron, and at ten minutes the second slot's arrival inside a run that
     takes two or three minutes is a coin toss rather than a row.
+
+    `concurrency_decision` is the loop's whole logic, and it is what makes the
+    row able to FAIL on the two defects it exists for: a second `Restore`
+    while the first runs, and a slot the controller skipped without recording
+    it. NOT-REACHED is left only for a first rehearsal that finished before the
+    controller was obliged to look at the next slot.
     """
+    scenario = "rehearsal-7-second-slot-is-concurrency-blocked"
     name = REHEARSAL_CONCURRENCY_SCHEDULE
     schedule, _ = rehearsal_arm(name, cron=REHEARSAL_FAST_CRON,
                                 key=approver_key["private"], work=work,
-                                target_cluster_id=target_cluster_id)
-    unsuspend("rehearsalschedule", name)
-    first = rehearsal_first_restore(name, seconds=420)["metadata"]["name"]
-    skipped: dict[str, Any] = {}
-    names: list[str] = [first]
-    live: dict[str, Any] = {}
-    deadline = time.time() + 480
-    while time.time() < deadline:
-        live = get("rehearsalschedule", name)
-        skipped = (live.get("status") or {}).get("lastSkipped") or {}
-        names = [r["metadata"]["name"] for r in rehearsal_restores(name)]
-        if skipped.get("reason"):
-            break
-        if terminal(get("restore", first)):
-            # THE PRECONDITION NEVER HELD. The first rehearsal finished before a
-            # second slot arrived, so "a second slot WHILE the first is active"
-            # was never observed. That is NOT-REACHED: recording it as a pass
-            # would credit the product for a branch nothing entered, and as a
-            # failure would blame it for the harness's timing.
-            record("rehearsal-7-second-slot-is-concurrency-blocked", "PLAT-14.3",
-                   "NOT-REACHED",
-                   f"the rehearsal {first} on {name} reached a terminal phase before a second "
-                   f"slot arrived, so no slot ever found it active; the ConcurrencyBlocked "
-                   f"branch was not entered and this run observed nothing about it",
+                                target_cluster_id=target_cluster_id, arms=arms)
+    try:
+        unsuspend("rehearsalschedule", name)
+        first_obj = rehearsal_first_restore(name, seconds=420)
+        if first_obj is None:
+            live = get("rehearsalschedule", name)
+            skip = (live.get("status") or {}).get("lastSkipped") or {}
+            verdict = "HARNESS-FAULT" if skip.get("reason") == "TargetBusy" else "NOT-REACHED"
+            record(scenario, "PLAT-14.3", verdict,
+                   f"{name} created no first rehearsal within 420 s, so no slot could find one "
+                   f"active: lastSkipped={json.dumps(skip)}, Ready says "
+                   f"{ready_message(live)!r}"
+                   + (" — ANOTHER ARM OF THIS HARNESS held the target busy"
+                      if verdict == "HARNESS-FAULT" else ""), evidence)
+            return False
+        first = first_obj["metadata"]["name"]
+        first_slot = (first_obj["metadata"].get("labels") or {}).get(
+            "logweir.dev/rehearsal-slot", "")
+        # THE BASELINE. A skip already recorded when the first rehearsal
+        # appeared (a `TargetBusy` from before it fired) is not about it.
+        baseline = (get("rehearsalschedule", name).get("status") or {}).get("lastSkipped") or {}
+        names_while_active: list[str] = [first]
+        last_active_at: float | None = None
+        overlap = False
+        first_terminal = False
+        skipped: dict[str, Any] = {}
+        live: dict[str, Any] = {}
+        decision = "WAIT"
+        deadline = time.time() + 480
+        while True:
+            live = get("rehearsalschedule", name)
+            listed = [r["metadata"]["name"] for r in rehearsal_restores(name)]
+            # READ AFTER THE LIST: a non-terminal first read now was also
+            # non-terminal when the list was taken, so two names in `listed`
+            # beside it are two rehearsals that COEXISTED.
+            active = not terminal(get("restore", first))
+            if active:
+                last_active_at = time.time()
+                names_while_active = listed
+                overlap = overlap or len(listed) > 1
+            else:
+                first_terminal = True
+            latest = (live.get("status") or {}).get("lastSkipped") or {}
+            if latest and latest != baseline:
+                skipped = latest
+            decision = concurrency_decision(
+                first_slot=first_slot, overlap=overlap,
+                new_skip_reason=skipped.get("reason"), first_terminal=first_terminal,
+                last_active_at=last_active_at, timed_out=time.time() >= deadline)
+            if decision != "WAIT":
+                break
+            time.sleep(5)
+        clauses = the_second_slot_is_concurrency_blocked(
+            {"status": {"lastSkipped": skipped}}, names_while_active, first)
+        evidence.append(artifact("rehearsal/07-concurrency.json", {
+            "decision": decision, "firstSlot": first_slot, "baselineSkip": baseline,
+            "newSkip": skipped, "overlap": overlap, "firstTerminal": first_terminal,
+            "lastActiveAt": last_active_at, "restoresWhileActive": names_while_active,
+            "schedule": live.get("status"), "clauses": clauses,
+        }))
+        if decision == "NOT-REACHED":
+            record(scenario, "PLAT-14.3", "NOT-REACHED",
+                   f"the rehearsal {first} (slot {first_slot}) finished before the controller "
+                   f"was obliged to evaluate the next slot against it (next boundary + "
+                   f"{REHEARSAL_REQUEUE_SECONDS}s requeue + {REHEARSAL_OBLIGATION_MARGIN_SECONDS}"
+                   f"s), so no slot is known to have met it active; the ConcurrencyBlocked "
+                   f"branch was not provably entered and this run observed nothing about it",
                    evidence)
             return False
-        time.sleep(5)
-    clauses = the_second_slot_is_concurrency_blocked(live or schedule, names, first)
-    evidence.append(artifact("rehearsal/07-concurrency.json",
-                             {"schedule": (live or schedule).get("status"),
-                              "restores": names, "clauses": clauses}))
-    return check(
-        "rehearsal-7-second-slot-is-concurrency-blocked",
-        "PLAT-14.3",
-        all(clauses.values()),
-        f"with {first} still running, the next slot on {name} recorded "
-        f"status.lastSkipped={json.dumps(skipped)} and the schedule still has exactly "
-        f"{len(names)} Restore(s) ({names}). spec.bounds.concurrencyPolicy is Forbid and the "
-        f"reservation protocol is what makes the skip and the cluster agree. "
-        + "; ".join(f"{k}={v}" for k, v in clauses.items()),
-        evidence,
-    )
+        if decision == "HARNESS-FAULT":
+            record(scenario, "PLAT-14.3", "HARNESS-FAULT",
+                   f"{name} recorded lastSkipped={json.dumps(skipped)}: another arm of THIS "
+                   f"harness was still rehearsing against {REHEARSAL_TARGET} "
+                   f"({ready_message(live)!r}). That is the harness's ordering, not a verdict "
+                   f"about ConcurrencyBlocked", evidence)
+            return False
+        return check(
+            scenario,
+            "PLAT-14.3",
+            decision == "EVALUATE" and all(clauses.values()),
+            f"with {first} (slot {first_slot}) still running, {name} recorded "
+            f"lastSkipped={json.dumps(skipped)} and listed {len(names_while_active)} "
+            f"Restore(s) while it ran ({names_while_active}); "
+            + ("A SECOND REHEARSAL COEXISTED WITH THE FIRST — concurrencyPolicy Forbid was "
+               "not enforced. " if overlap else "")
+            + ("NO SKIP WAS RECORDED although the first was still running after the "
+               "controller was obliged to evaluate the next slot. "
+               if not skipped and not overlap else "")
+            + "spec.bounds.concurrencyPolicy is Forbid and the reservation protocol is what "
+            "makes the skip and the cluster agree. "
+            + "; ".join(f"{k}={v}" for k, v in clauses.items()),
+            evidence,
+        )
+    finally:
+        quiesce_arm(name, evidence)
 
 
 def rehearsal_arm_leftover(work: pathlib.Path, target_cluster_id: str,
-                           approver_key: dict[str, Any],
-                           planted: list[str], evidence: list[str]) -> bool:
+                           approver_key: dict[str, Any], arms: dict[str, str],
+                           evidence: list[str]) -> bool:
     """Review §4 step 8 — a mapped name pre-created, and it must be untouched.
 
     The topic is created BEFORE the schedule is unsuspended, so the first slot
@@ -8341,54 +8824,76 @@ def rehearsal_arm_leftover(work: pathlib.Path, target_cluster_id: str,
     whether a previous teardown ATTESTED the leftover, and
     `the_leftover_guard_refuses_and_keeps_the_topic` accepts either; what it
     does not accept is a rehearsal that ran, or a pre-created topic that is
-    gone.
+    gone. A `TargetBusy` is waited through (it clears when the other rehearsal
+    ends); one still standing at the deadline is HARNESS-FAULT.
     """
+    scenario = "rehearsal-8-leftover-guard-keeps-the-pre-created-topic"
     name = REHEARSAL_LEFTOVER_SCHEDULE
     schedule, _ = rehearsal_arm(name, cron=REHEARSAL_FAST_CRON,
                                 key=approver_key["private"], work=work,
-                                target_cluster_id=target_cluster_id)
-    uid = schedule["metadata"]["uid"]
-    topic = mapped_topic(uid, REHEARSAL_TOPIC)
-    target_topic_create(topic)
-    planted.append(topic)
-    unsuspend("rehearsalschedule", name)
-    live: dict[str, Any] = schedule
-    restore: dict[str, Any] | None = None
-    deadline = time.time() + 600
-    while time.time() < deadline:
-        live = get("rehearsalschedule", name)
-        status = live.get("status") or {}
-        found = rehearsal_restores(name)
-        restore = found[0] if found else None
-        if (status.get("lastSkipped") or {}).get("reason") == "LeftoverTopics":
-            break
-        if restore is not None and terminal(restore):
-            break
-        time.sleep(5)
-    after = target_topics()
-    clauses = the_leftover_guard_refuses_and_keeps_the_topic(live, restore, topic, after)
-    evidence.append(artifact("rehearsal/08-leftover.json", {
-        "plantedTopic": topic, "schedule": live.get("status"),
-        "restore": restore, "topicsAfter": sorted(after), "clauses": clauses,
-    }))
-    return check(
-        "rehearsal-8-leftover-guard-keeps-the-pre-created-topic",
-        "PLAT-14.3",
-        all(clauses.values()),
-        f"with the mapped name {topic} pre-created on the target, {name}'s slot recorded "
-        f"lastSkipped={json.dumps((live.get('status') or {}).get('lastSkipped'))} / "
-        f"lastFailed={json.dumps((live.get('status') or {}).get('lastFailed'))} and its "
-        f"Restore {((restore or {}).get('metadata') or {}).get('name')!r} is phase "
-        f"{((restore or {}).get('status') or {}).get('phase')!r} / reason "
-        f"{((restore or {}).get('status') or {}).get('reason')!r}; the pre-created topic is "
-        f"{'still present' if topic in after else 'GONE'}. "
-        + "; ".join(f"{k}={v}" for k, v in clauses.items()),
-        evidence,
-    )
+                                target_cluster_id=target_cluster_id, arms=arms)
+    try:
+        uid = schedule["metadata"]["uid"]
+        topic = mapped_topic(uid, REHEARSAL_TOPIC)
+        # Under this schedule's own rendered prefix, which exists only since
+        # the create a moment ago — so absent, and the `finally` of
+        # `rehearsal` sweeps it by that prefix.
+        planted = topic not in target_topics() and target_topic_create(topic)
+        unsuspend("rehearsalschedule", name)
+        live: dict[str, Any] = schedule
+        restore: dict[str, Any] | None = None
+        busy: list[str] = []
+        deadline = time.time() + 600
+        while time.time() < deadline:
+            live = get("rehearsalschedule", name)
+            status = live.get("status") or {}
+            found = rehearsal_restores(name)
+            restore = found[0] if found else None
+            reason = (status.get("lastSkipped") or {}).get("reason")
+            if reason == "LeftoverTopics":
+                break
+            if restore is not None and terminal(restore):
+                break
+            if reason == "TargetBusy" and ready_message(live) not in busy:
+                busy.append(ready_message(live))
+            time.sleep(5)
+        after = target_topics()
+        clauses = the_leftover_guard_refuses_and_keeps_the_topic(live, restore, topic, after)
+        clauses["the mapped name was created by THIS run before the first slot"] = planted
+        last_reason = ((live.get("status") or {}).get("lastSkipped") or {}).get("reason")
+        evidence.append(artifact("rehearsal/08-leftover.json", {
+            "plantedTopic": topic, "plantedByThisRun": planted, "schedule": live.get("status"),
+            "restore": restore, "topicsAfter": sorted(after), "targetBusySeen": busy,
+            "clauses": clauses,
+        }))
+        if restore is None and last_reason == "TargetBusy":
+            record(scenario, "PLAT-14.3", "HARNESS-FAULT",
+                   f"{name}'s slot was still skipped TargetBusy at the 600 s deadline "
+                   f"({busy}): another arm of THIS harness held {REHEARSAL_TARGET}, so the "
+                   f"leftover guard was never reached", evidence)
+            return False
+        return check(
+            scenario,
+            "PLAT-14.3",
+            all(clauses.values()),
+            f"with the mapped name {topic} pre-created on the target, {name}'s slot recorded "
+            f"lastSkipped={json.dumps((live.get('status') or {}).get('lastSkipped'))} / "
+            f"lastFailed={json.dumps((live.get('status') or {}).get('lastFailed'))} and its "
+            f"Restore {((restore or {}).get('metadata') or {}).get('name')!r} is phase "
+            f"{((restore or {}).get('status') or {}).get('phase')!r} / reason "
+            f"{((restore or {}).get('status') or {}).get('reason')!r}; the pre-created topic is "
+            f"{'still present' if topic in after else 'GONE'}. "
+            + (f"TargetBusy was seen and waited through: {busy}. " if busy else "")
+            + "; ".join(f"{k}={v}" for k, v in clauses.items()),
+            evidence,
+        )
+    finally:
+        quiesce_arm(name, evidence)
 
 
 def rehearsal_arm_refused(work: pathlib.Path, target_cluster_id: str,
-                          refused_key: dict[str, Any], evidence: list[str]) -> bool:
+                          refused_key: dict[str, Any], passing_approval: str,
+                          arms: dict[str, str], evidence: list[str]) -> str:
     """Review §4 step 10 — the negative control, **and it REQUIRES the refusal**.
 
     The document is genuinely signed, by a key this namespace's `TrustPolicy`
@@ -8398,64 +8903,100 @@ def rehearsal_arm_refused(work: pathlib.Path, target_cluster_id: str,
     signature would be refused by the crypto layer and would prove nothing
     about `may_sign_new_for`.
 
+    PASS needs more than a refusal (`refused_arm_verdict`): the refused
+    `Approval` must name `KeyRetired`, and the passing arm's `Approval` —
+    `passing_approval`, signed by the Active key — must be `Verified=True` in
+    the same run. Otherwise a build on which nothing verifies at all passes the
+    control, and it did (F1).
+
     `--valid-days` is the ordinary 30 rather than a past window, because the
     shipped signer refuses to mint an already-expired document
     (`plat14-3b.result.md` fix round 2, INFO) — it compares `issuedAt` against
     `Utc::now()` — so "expired" is not a document this harness can produce with
     the product's own command, and the review's own alternative is taken.
     """
+    scenario = "rehearsal-10-refused-arm-reaches-no-job"
     name = REHEARSAL_REFUSED_SCHEDULE
     _, approval_name = rehearsal_arm(name, cron=REHEARSAL_FAST_CRON,
                                      key=refused_key["private"], work=work,
-                                     target_cluster_id=target_cluster_id)
-    unsuspend("rehearsalschedule", name)
-    live: dict[str, Any] = {}
-    restores: list[dict[str, Any]] = []
-    deadline = time.time() + 420
-    while time.time() < deadline:
-        live = get("rehearsalschedule", name)
-        status = live.get("status") or {}
-        restores = rehearsal_restores(name)
-        recorded = bool((status.get("lastSkipped") or {}).get("reason")
-                        or (status.get("lastFailed") or {}).get("reason"))
-        if recorded or any(terminal(r) for r in restores):
-            break
-        time.sleep(5)
-    jobs = [((r.get("status") or {}).get("jobRef") or {}).get("name")
-            for r in restores]
-    jobs = [j for j in jobs if j and get_opt("job", j) is not None]
-    bundles = rehearsal_bundles(restores)
-    clauses = the_refused_arm_reaches_no_job(live, restores, jobs, bundles)
-    # WHICH CHECK REFUSED IT, not just that something did. The schedule only
-    # ever says `the Approval is not Verified=True`; the Approval's own
-    # condition is where `KeyIdNotInRoster` / a signing refusal / a document
-    # mismatch are distinguished, and a reader of this row cannot tell the
-    # retired-key mechanism from any other refusal without it.
-    refused_approval = get_opt("approval", approval_name) or {}
-    evidence.append(artifact("rehearsal/10-refused.json", {
-        "retiredApproverKeyId": refused_key["keyId"],
-        "schedule": live.get("status"), "restores": restores,
-        "approval": approval_name,
-        "approvalConditions": (refused_approval.get("status") or {}).get("conditions"),
-        "jobs": jobs, "bundles": bundles, "clauses": clauses,
-    }))
-    return check(
-        "rehearsal-10-refused-arm-reaches-no-job",
-        "PLAT-14.3",
-        all(clauses.values()),
-        f"NEGATIVE CONTROL: {name}'s standing document is signed by the approver key this "
-        f"run minted and this namespace's TrustPolicy carries as Retired "
-        f"({refused_key['keyId'][:16]}…), so the signature verifies and the key may authorise "
-        f"nothing new. The slot recorded "
-        f"lastSkipped={json.dumps((live.get('status') or {}).get('lastSkipped'))} / "
-        f"lastFailed={json.dumps((live.get('status') or {}).get('lastFailed'))}, "
-        f"RehearsalHealthy={condition(live, 'RehearsalHealthy').get('status')}, with "
-        f"{len(jobs)} Job(s) and {len(bundles)} bundle ConfigMap(s). The first clause is the "
-        f"one that cannot be satisfied by silence: zero Jobs is also what a build that never "
-        f"reconciles this kind leaves behind. "
-        + "; ".join(f"{k}={v}" for k, v in clauses.items()),
-        evidence,
-    )
+                                     target_cluster_id=target_cluster_id, arms=arms)
+    try:
+        unsuspend("rehearsalschedule", name)
+        live: dict[str, Any] = {}
+        restores: list[dict[str, Any]] = []
+        busy: list[str] = []
+        deadline = time.time() + 420
+        while time.time() < deadline:
+            live = get("rehearsalschedule", name)
+            status = live.get("status") or {}
+            restores = rehearsal_restores(name)
+            skip_reason = (status.get("lastSkipped") or {}).get("reason")
+            failed_reason = (status.get("lastFailed") or {}).get("reason")
+            if skip_reason == "TargetBusy":
+                # NOT A REFUSAL OF THE AUTHORIZATION — `decide` checks the
+                # target first. Waited through; it clears when the other ends.
+                if ready_message(live) not in busy:
+                    busy.append(ready_message(live))
+            elif skip_reason or failed_reason:
+                break
+            if any(terminal(r) for r in restores):
+                break
+            time.sleep(5)
+        children = schedule_children(name)
+        # BOTH WAYS OF FINDING A JOB: by the child-name prefix (sees one no
+        # `Restore` points at) and by `status.jobRef` (sees one with a name this
+        # build chose differently). A Job either way is a Job.
+        by_ref = [((r.get("status") or {}).get("jobRef") or {}).get("name") for r in restores]
+        by_ref = [j for j in by_ref if j and get_opt("job", j) is not None]
+        jobs = sorted(set(children["jobs"]) | set(by_ref))
+        bundles = sorted(set(children["bundles"]) | set(rehearsal_bundles(restores)))
+        clauses = the_refused_arm_reaches_no_job(live, restores, jobs, bundles)
+        refused_approval = get_opt("approval", approval_name) or {}
+        passing = get_opt("approval", passing_approval) or {}
+        final_skip = ((live.get("status") or {}).get("lastSkipped") or {}).get("reason")
+        verdict, mechanism = refused_arm_verdict(
+            clauses, skip_reason=final_skip, refused_approval=refused_approval,
+            passing_approval=passing)
+        evidence.append(artifact("rehearsal/10-refused.json", {
+            "verdict": verdict,
+            "retiredApproverKeyId": refused_key["keyId"],
+            "schedule": live.get("status"), "restores": restores,
+            "approval": approval_name,
+            "approvalConditions": (refused_approval.get("status") or {}).get("conditions"),
+            "passingApproval": passing_approval,
+            "passingApprovalConditions": (passing.get("status") or {}).get("conditions"),
+            "jobs": jobs, "bundles": bundles, "targetBusySeen": busy,
+            "clauses": clauses, "mechanism": mechanism,
+        }))
+        record(
+            scenario,
+            "PLAT-14.3",
+            verdict,
+            f"NEGATIVE CONTROL: {name}'s standing document is signed by the approver key this "
+            f"run minted and this namespace's TrustPolicy carries as Retired "
+            f"({refused_key['keyId'][:16]}…), so the signature verifies and the key may "
+            f"authorise nothing new. The slot recorded "
+            f"lastSkipped={json.dumps((live.get('status') or {}).get('lastSkipped'))} / "
+            f"lastFailed={json.dumps((live.get('status') or {}).get('lastFailed'))}, "
+            f"RehearsalHealthy={condition(live, 'RehearsalHealthy').get('status')}/"
+            f"{condition(live, 'RehearsalHealthy').get('reason')}, with {len(jobs)} Job(s) "
+            f"and {len(bundles)} bundle ConfigMap(s) measured by the "
+            f"{REHEARSAL_RESTORE_PREFIX}{name}- prefix. The refused Approval says "
+            f"Verified={condition(refused_approval, 'Verified').get('status')}/"
+            f"{condition(refused_approval, 'Verified').get('reason')}; the passing arm's "
+            f"{passing_approval} says Verified={condition(passing, 'Verified').get('status')}/"
+            f"{condition(passing, 'Verified').get('reason')}. "
+            + ("INCONCLUSIVE: the refusal held but the retired-key mechanism is not shown — "
+               "a build on which nothing verifies would look the same. "
+               if verdict == "INCONCLUSIVE" else "")
+            + (f"HARNESS-FAULT: TargetBusy masked the authorization check ({busy}). "
+               if verdict == "HARNESS-FAULT" else "")
+            + "; ".join(f"{k}={v}" for k, v in {**clauses, **mechanism}.items()),
+            evidence,
+        )
+        return verdict
+    finally:
+        quiesce_arm(name, evidence)
 
 
 # ---------------------------------------------------------------------------
