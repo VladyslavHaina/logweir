@@ -462,7 +462,7 @@ fn api_callers() -> BTreeMap<String, BTreeSet<String>> {
                 if !ty.is_empty() && ty.chars().all(is_word) {
                     out.entry(ty.to_string())
                         .or_default()
-                        .insert("list".to_string());
+                        .insert("list".to_string()); // engine-token-ok: the kube `Api::list` verb, not an engine subcommand
                 }
             }
         }
