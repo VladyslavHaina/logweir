@@ -1598,8 +1598,16 @@ async fn last_test_finds_the_newest_check_and_refuses_a_predecessors() {
 #[tokio::test]
 async fn a_referent_recorded_without_a_generation_is_compared_by_uid_alone() {
     for (live_uid, changed, why) in [
-        ("uid-point", false, "the same Backup, whatever its generation"),
-        ("uid-recreated", true, "a Backup recreated under the same name"),
+        (
+            "uid-point",
+            false,
+            "the same Backup, whatever its generation",
+        ),
+        (
+            "uid-recreated",
+            true,
+            "a Backup recreated under the same name",
+        ),
     ] {
         let app = TestApp::new();
         let mut preflight = seed_preflight(
