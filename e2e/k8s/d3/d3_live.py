@@ -1550,6 +1550,27 @@ def schedule_object(name: str, dest: str) -> dict[str, Any]:
     }
 
 
+def the_schedule_kept_running(schedule: dict[str, Any], children: list[str],
+                              finished: list[str], before: set[str]) -> dict[str, bool]:
+    """`retention-scheduled-backups-continue`: a retention verdict blocks no backup.
+
+    TWO CLAUSES, AND THE FIRST ONE EXISTS BECAUSE THIS ROW WAS ONCE UNPASSABLE.
+    With the schedule suspended no product behaviour can produce a child, so a
+    FAIL would have been the harness's own and would have looked like the
+    product's; that clause names the fixture fault instead. The second requires
+    a child THIS run's window produced to have Succeeded — a child an earlier
+    run left behind proves nothing about this evaluation.
+    """
+    new_finished = [n for n in finished if n not in before]
+    return {
+        "the schedule was NOT suspended while the row measured it (suspended, the row "
+        "cannot pass whatever the product does)":
+            (schedule.get("spec") or {}).get("suspend") is False,
+        "a child created during this run's window Succeeded":
+            bool(new_finished) and set(new_finished) <= set(children),
+    }
+
+
 def retention() -> None:
     evidence: list[str] = []
     names = ["b-1", "b-2", "b-3", "b-4", "b-5", "b-6"]
@@ -1611,279 +1632,312 @@ def retention() -> None:
     save()
 
     # A schedule that keeps firing on the OTHER destination for the whole phase.
+    #
+    # APPLIED SUSPENDED AND THEN UNSUSPENDED, ON PURPOSE AND IN THAT ORDER.
+    # `schedule_object` creates every schedule suspended (23d4800: a stray
+    # scheduled point in dest-a moves the "newest point" the protection rows
+    # measure). That fix silently made `retention-scheduled-backups-continue`
+    # UNPASSABLE here — the schedule was never unsuspended, so no product
+    # behaviour could produce a child (lab-refresh-7, 04:18Z: "0 children,
+    # 0 Succeeded", `Ready=False/Suspended`). This phase is the ONE place the
+    # schedule must run, so it is started here, and the `finally` below
+    # re-suspends it even when a row in between raises: a phase that died with
+    # it running would write exactly the stray dest-a points 23d4800 keeps out.
     apply(schedule_object("keeps-running", "dest-a"))
-    started = now()
-
-    apply(retention_policy("keep-a", "dest-a", "primary", rules={"keepLast": 1,
-                                                                "minUsablePoints": 1}))
-    apply(retention_policy("keep-b", "dest-b", "secondary", rules={"keepLast": 2,
-                                                                  "minUsablePoints": 3}))
-    pol_a = wait_evaluated("keep-a")
-    pol_b = wait_evaluated("keep-b")
-    evidence.append(artifact("retention/keep-a.json", pol_a))
-    evidence.append(artifact("retention/keep-b.json", pol_b))
-    ev_a = (pol_a.get("status", {}) or {}).get("lastEvaluation") or {}
-    ev_b = (pol_b.get("status", {}) or {}).get("lastEvaluation") or {}
-
-    # --- the defect that decides everything below ---------------------------
-    # THE DEFECT ROW, RE-POINTED AND NO LONGER A CATCH-ALL. It recorded a FAIL
-    # naming RET-DIGEST-PREFIX for ANY policy landing
-    # `Evaluated=False/ViewUnreadable`, which was right while that defect made
-    # every view unreadable and wrong the moment it was fixed: a re-run of this
-    # phase recreates the catalog, a policy reconciled inside that window lands
-    # `ViewUnreadable` naming the ABSENT catalog, and the row reported the fixed
-    # defect as back (observed 2026-09-18). The defect has a fingerprint no
-    # other cause produces — two digests printed side by side that are equal
-    # once the `sha256:` prefix is off — so that is what is looked for, and any
-    # other unreadable view is recorded as the different thing it is.
-    unreadable = [
-        (name, condition(pol, "Evaluated"))
-        for name, pol in [("keep-a", pol_a), ("keep-b", pol_b)]
-        if condition(pol, "Evaluated").get("reason") == "ViewUnreadable"
-    ]
-    prefix_defect = [(n, c) for n, c in unreadable
-                     if digest_prefix_signature(c.get("message", ""))]
-    if unreadable:
-        pages = {
-            name: [
-                {"configMapName": pg["configMapName"], "publishedSha256": pg["sha256"]}
-                for pg in ((get_opt("recoverycatalog", cat) or {}).get("status", {}).get("pages")
-                           or [])
-            ]
-            for name, cat in [("keep-a", "primary"), ("keep-b", "secondary")]
-        }
-        evidence.append(artifact(
-            "retention/view-unreadable.json",
-            {"conditions": {n: c for n, c in unreadable}, "catalogPages": pages,
-             "carriesTheDigestPrefixSignature": [n for n, _ in prefix_defect]},
-        ))
-    check(
-        "retention-view-digest-is-compared-without-its-prefix",
-        "PLAT-16.1",
-        not prefix_defect,
-        (
-            "`weirkeeper::catalog_view::page_digest` returns bare hex "
-            "(`logweir_core::ids::sha256_hex`) and `status.pages[].sha256` is published "
-            "`sha256:`-prefixed; RET-DIGEST-PREFIX was `retention_policy.rs` comparing the "
-            "two with `!=`, which made EVERY view unreadable and printed the two digests "
-            "side by side as equal apart from the prefix. "
-            + (
-                "THAT IS BACK: " + prefix_defect[0][1].get("message", "")
-                if prefix_defect
-                else "No policy's view is unreadable for that reason."
-            )
-            + (
-                f" (Other unreadable views, which are NOT this defect: "
-                f"{[(n, c.get('message', '')[:120]) for n, c in unreadable]})"
-                if unreadable and not prefix_defect else ""
-            )
-        ),
-        evidence,
-    )
-
-    a_ids = evaluation_point_ids(pol_a)
-    b_ids = evaluation_point_ids(pol_b)
-    a_universe = {e["pointId"] for e in (STATE.get("viewEntriesAfterCrLoss") or [])}
-    b_universe = {e["pointId"] for e in b_entries}
-    a_seen = set().union(*a_ids.values()) if a_ids else set()
-    b_seen = set().union(*b_ids.values()) if b_ids else set()
-    # BOTH SIDES MUST NAME SOMETHING. Without the two emptiness clauses this is
-    # a set-disjointness assertion that an evaluation naming nothing at all
-    # satisfies, which is exactly how it passed while reading a key no bucket
-    # carries. dest-a is NOT required to be a subset of its recorded universe:
-    # the `keeps-running` schedule keeps adding points to it after the view was
-    # captured. dest-b is closed, so it is.
-    check(
-        "retention-two-destinations",
-        "PLAT-16.1",
-        reports_are_disjoint(ev_a, ev_b, a_seen, b_seen, a_universe, b_universe,
-                             len(b_entries)),
-        f"keep-a (dest-a) names {len(a_seen)} pointIds and keep-b (dest-b) names "
-        f"{len(b_seen)}; dest-a's recorded view holds {len(a_universe)} and dest-b "
-        f"{len(b_universe)}. keep-b pointsEvaluated={ev_b.get('pointsEvaluated')}. "
-        + ("NO EVALUATION EXISTS: see `retention-view-digest-prefix-defect`."
-           if not (ev_a and ev_b)
-           else "Neither report is empty and no id crosses between them."),
-        evidence,
-    )
-
-    # WHAT `protected` COUNTS. D3 L9 asks for "exactly 3 candidates and
-    # `protected` lists the `minUsablePoints` OVERRIDES" — the points a
-    # guarantee pulled back out of the rules' reach, not the whole retained set.
-    # With `keepLast: 2` and `minUsablePoints: 3` over 6 points, 4 are beyond the
-    # keep rule and exactly one of them is pulled back to make the third usable
-    # point: `candidates` 3, `kept` 3, `protected` 1. This row demanded
-    # `protected == 3`, the other reading, and failed on the first evaluation the
-    # controller was ever able to produce (lab-refresh-3 §8.2). The arithmetic is
-    # written out rather than hard-coded so the row says why 3 and 1.
-    keep_last, min_usable = 2, 3
-    b_points = len(b_entries)
-    want = keep_rule_expectation(b_points, keep_last, min_usable)
-    b_candidates = ev_b.get("candidates") or []
-    b_kept = ev_b.get("kept") or []
-    b_protected = ev_b.get("protected") or []
-    check(
-        "retention-overlapping-keep-rules",
-        "PLAT-16.2",
-        overlapping_keep_rules_ok(ev_b, b_ids, want, b_points),
-        f"{b_points} points, keepLast={keep_last}, minUsablePoints={min_usable}: "
-        f"{len(b_candidates)} candidates (expected {want['candidates']}, reasons "
-        f"{sorted({c.get('reason') for c in b_candidates})}), {len(b_kept)} kept (expected "
-        f"{want['kept']}) and {len(b_protected)} protected (expected {want['protected']}, reasons "
-        f"{sorted({p.get('reason') for p in b_protected})}). `protected` is the subset of "
-        f"`kept` a guarantee saved beyond the keep rule, not the retained set; every "
-        f"protected id is kept ({b_ids['protected'] <= b_ids['kept']}) and no candidate is "
-        f"({not (b_ids['candidates'] & b_ids['kept'])})"
-        + ("" if ev_b else " — no evaluation was produced at all"),
-        evidence,
-    )
-
-    # `SkippedEntry` is `{pointId | key, reason}` — `reason`, not `state`, and
-    # `pointId`, not `backupId`. Reading two absent keys made both sides `{None}`
-    # and the intersection non-empty, so this failed on exactly the evidence that
-    # proves it (lab-refresh-3 §8.2). It now also requires every skipped row to
-    # identify what it skipped and to give a reason from the published
-    # vocabulary: a row that could not be classified AND could not be named
-    # would be an unreadable point silently dropped.
-    skipped = ev_a.get("skipped") or []
-    skipped_reasons = {row.get("reason") for row in skipped}
-    check(
-        "retention-unreadable-point-never-a-candidate",
-        "PLAT-16.1",
-        skipped_never_a_candidate(ev_a, a_ids),
-        f"dest-a's degraded points ({len(skipped)} rows, reasons {sorted(skipped_reasons)}, "
-        f"ids {sorted(a_ids['skipped'])}) are skipped and none is a candidate "
-        f"({sorted(a_ids['candidates'])}); {len(a_ids['skipped'] - set(ev_a.get('kept') or []))}"
-        f" of them is outside `kept` too"
-        + ("" if ev_a else " — no evaluation was produced at all"),
-        evidence,
-    )
-
-    guarantees = (pol_b.get("status", {}) or {}).get("guarantees") or {}
-    check(
-        "retention-guarantees-never-flatter",
-        "PLAT-16.1",
-        guarantees.get("sharedSegments") == "NotEnforced"
-        and guarantees.get("legalHold") != "LogweirEnforced",
-        f"status.guarantees on the Report policy: {guarantees or '<absent>'}",
-        evidence,
-    )
-
-    # --- two policies over one destination: BOTH refuse ---------------------
-    apply(
-        retention_policy(
-            "declared-c", "dest-b", "secondary", mode="ExternalLifecycle",
-            rules={"keepDays": 30, "minUsablePoints": 1},
-            external={"provider": "s3", "prefix": DEST_PREFIX, "ruleId": "d3w14-rule",
-                      "expirationDays": 7},
-        )
-    )
-    contested = wait_for(
-        "retentionpolicy", "declared-c",
-        lambda o: bool(condition(o, "Ready").get("reason")),
-        seconds=180, what="a Ready verdict while two policies claim dest-b",
-    )
-    other = get("retentionpolicy", "keep-b")
-    evidence.append(artifact("retention/two-policies-one-destination.json",
-                             {"declared-c": contested, "keep-b": other}))
-    check(
-        "retention-two-policies-one-destination",
-        "PLAT-16.1",
-        condition(contested, "Ready").get("reason") == "Conflict"
-        and condition(contested, "Enforced").get("status") == "False",
-        f"a second policy over dest-b puts it in Ready=False/"
-        f"{condition(contested, 'Ready').get('reason')} — "
-        f"{condition(contested, 'Ready').get('message', '')[:150]} — and neither enforces",
-        evidence,
-    )
-    run(KN + ["delete", "retentionpolicy", "keep-b", "--wait=true"])
-
-    # --- ExternalLifecycle is a DECLARATION, and the bucket wins -------------
-    generation = get("retentionpolicy", "declared-c")["metadata"]["generation"]
-    run(KN + ["patch", "retentionpolicy", "declared-c", "--type=merge", "-p",
-              json.dumps({"metadata": {"annotations": {"logweir.dev/d3w14-nudge": now()}}})])
-    apply(
-        retention_policy(
-            "declared-c", "dest-b", "secondary", mode="ExternalLifecycle",
-            rules={"keepDays": 30, "minUsablePoints": 1},
-            external={"provider": "s3", "prefix": DEST_PREFIX, "ruleId": "d3w14-rule",
-                      "expirationDays": 7},
-        )
-    )
-    declared = wait_for(
-        "retentionpolicy",
-        "declared-c",
-        lambda o: bool(o.get("status", {}).get("conditions")),
-        seconds=180,
-        what="a verdict on the declared lifecycle",
-    )
-    evidence.append(artifact("retention/external-lifecycle.json", declared))
-    conflict = condition(declared, "ExternalLifecycleConflict")
-    dg = (declared.get("status", {}) or {}).get("guarantees") or {}
-    check(
-        "retention-external-lifecycle-is-declared-not-enforced",
-        "PLAT-16.1",
-        conflict.get("status") == "True"
-        and dg.get("minUsablePoints") == "NotEnforced"
-        and dg.get("activeRestoreProtection") == "NotEnforced"
-        and dg.get("ageExpiry") == "ProviderEnforcedUnverified",
-        f"a declared bucket rule expiring at 7 days under a policy that asks for 30 reports "
-        f"ExternalLifecycleConflict={conflict.get('status')}/{conflict.get('reason')} "
-        f"({conflict.get('message', '')[:120]}); guarantees {dg} — the bucket wins and "
-        f"Logweir claims nothing it cannot enforce",
-        evidence,
-    )
-    run(KN + ["delete", "retentionpolicy", "declared-c", "--wait=true"])
-    apply(retention_policy("keep-b", "dest-b", "secondary",
-                           rules={"keepLast": 2, "minUsablePoints": 3}))
-    wait_evaluated("keep-b", seconds=240)
-
-    # AN EXPLICIT WINDOW, NOT A TIMEOUT'S SHADOW. This row used to count
-    # whatever the `* * * * *` schedule had produced by the time the line above
-    # returned. Before RET-DIGEST-PREFIX was fixed that call sat out its whole
-    # 240 s — a policy stuck at `Evaluated=False/ViewUnreadable` never settles —
-    # so the schedule had four minutes and the row saw 25 children. The fixed
-    # controller evaluates in seconds, the borrowed window collapsed to about a
-    # minute, the single child created had not finished yet, and the row failed
-    # on its own clock rather than on anything a retention verdict did
-    # (lab-refresh-3 §8.2). The window is now stated and waited for: three slots
-    # of a one-minute schedule plus a run's worth of slack, ended early by the
-    # first Succeeded child.
-    scheduled_window_seconds = 240
-    window_deadline = time.time() + scheduled_window_seconds
-    children: list[dict[str, Any]] = []
-    finished: list[dict[str, Any]] = []
-    while True:
-        children = [
-            b for b in lst("backups")
-            if b["metadata"]["name"].startswith("logweir-backup-keeps-running")
-        ]
-        finished = [b for b in children if b.get("status", {}).get("phase") == "Succeeded"]
-        if finished or time.time() >= window_deadline:
-            break
-        time.sleep(5)
-    evidence.append(
-        artifact(
-            "retention/scheduled-during-evaluation.json",
-            {"since": started, "until": now(), "windowSeconds": scheduled_window_seconds,
-             "children": [b["metadata"]["name"] for b in children],
-             "succeeded": [b["metadata"]["name"] for b in finished],
-             "phases": {b["metadata"]["name"]: b.get("status", {}).get("phase")
-                        for b in children}},
-        )
-    )
-    check(
-        "retention-scheduled-backups-continue",
-        "PLAT-16.1",
-        len(finished) >= 1,
-        f"a `* * * * *` BackupSchedule on dest-a ran through the evaluation and an explicit "
-        f"{scheduled_window_seconds}s window after it: {len(children)} children, "
-        f"{len(finished)} Succeeded — a retention verdict, including a refused one, blocks "
-        f"no backup",
-        evidence,
-    )
+    # Children an EARLIER run of this phase left behind are not evidence that
+    # this run's schedule fired, so the row counts only names that are new.
+    children_before = {
+        b["metadata"]["name"] for b in lst("backups")
+        if b["metadata"]["name"].startswith("logweir-backup-keeps-running")
+    }
     run(KN + ["patch", "backupschedule", "keeps-running", "--type=merge",
-              "-p", json.dumps({"spec": {"suspend": True}})])
+              "-p", json.dumps({"spec": {"suspend": False}})])
+    started = now()
+    try:
+
+        apply(retention_policy("keep-a", "dest-a", "primary", rules={"keepLast": 1,
+                                                                    "minUsablePoints": 1}))
+        apply(retention_policy("keep-b", "dest-b", "secondary", rules={"keepLast": 2,
+                                                                      "minUsablePoints": 3}))
+        pol_a = wait_evaluated("keep-a")
+        pol_b = wait_evaluated("keep-b")
+        evidence.append(artifact("retention/keep-a.json", pol_a))
+        evidence.append(artifact("retention/keep-b.json", pol_b))
+        ev_a = (pol_a.get("status", {}) or {}).get("lastEvaluation") or {}
+        ev_b = (pol_b.get("status", {}) or {}).get("lastEvaluation") or {}
+
+        # --- the defect that decides everything below ---------------------------
+        # THE DEFECT ROW, RE-POINTED AND NO LONGER A CATCH-ALL. It recorded a FAIL
+        # naming RET-DIGEST-PREFIX for ANY policy landing
+        # `Evaluated=False/ViewUnreadable`, which was right while that defect made
+        # every view unreadable and wrong the moment it was fixed: a re-run of this
+        # phase recreates the catalog, a policy reconciled inside that window lands
+        # `ViewUnreadable` naming the ABSENT catalog, and the row reported the fixed
+        # defect as back (observed 2026-09-18). The defect has a fingerprint no
+        # other cause produces — two digests printed side by side that are equal
+        # once the `sha256:` prefix is off — so that is what is looked for, and any
+        # other unreadable view is recorded as the different thing it is.
+        unreadable = [
+            (name, condition(pol, "Evaluated"))
+            for name, pol in [("keep-a", pol_a), ("keep-b", pol_b)]
+            if condition(pol, "Evaluated").get("reason") == "ViewUnreadable"
+        ]
+        prefix_defect = [(n, c) for n, c in unreadable
+                         if digest_prefix_signature(c.get("message", ""))]
+        if unreadable:
+            pages = {
+                name: [
+                    {"configMapName": pg["configMapName"], "publishedSha256": pg["sha256"]}
+                    for pg in ((get_opt("recoverycatalog", cat) or {}).get("status", {}).get("pages")
+                               or [])
+                ]
+                for name, cat in [("keep-a", "primary"), ("keep-b", "secondary")]
+            }
+            evidence.append(artifact(
+                "retention/view-unreadable.json",
+                {"conditions": {n: c for n, c in unreadable}, "catalogPages": pages,
+                 "carriesTheDigestPrefixSignature": [n for n, _ in prefix_defect]},
+            ))
+        check(
+            "retention-view-digest-is-compared-without-its-prefix",
+            "PLAT-16.1",
+            not prefix_defect,
+            (
+                "`weirkeeper::catalog_view::page_digest` returns bare hex "
+                "(`logweir_core::ids::sha256_hex`) and `status.pages[].sha256` is published "
+                "`sha256:`-prefixed; RET-DIGEST-PREFIX was `retention_policy.rs` comparing the "
+                "two with `!=`, which made EVERY view unreadable and printed the two digests "
+                "side by side as equal apart from the prefix. "
+                + (
+                    "THAT IS BACK: " + prefix_defect[0][1].get("message", "")
+                    if prefix_defect
+                    else "No policy's view is unreadable for that reason."
+                )
+                + (
+                    f" (Other unreadable views, which are NOT this defect: "
+                    f"{[(n, c.get('message', '')[:120]) for n, c in unreadable]})"
+                    if unreadable and not prefix_defect else ""
+                )
+            ),
+            evidence,
+        )
+
+        a_ids = evaluation_point_ids(pol_a)
+        b_ids = evaluation_point_ids(pol_b)
+        a_universe = {e["pointId"] for e in (STATE.get("viewEntriesAfterCrLoss") or [])}
+        b_universe = {e["pointId"] for e in b_entries}
+        a_seen = set().union(*a_ids.values()) if a_ids else set()
+        b_seen = set().union(*b_ids.values()) if b_ids else set()
+        # BOTH SIDES MUST NAME SOMETHING. Without the two emptiness clauses this is
+        # a set-disjointness assertion that an evaluation naming nothing at all
+        # satisfies, which is exactly how it passed while reading a key no bucket
+        # carries. dest-a is NOT required to be a subset of its recorded universe:
+        # the `keeps-running` schedule keeps adding points to it after the view was
+        # captured. dest-b is closed, so it is.
+        check(
+            "retention-two-destinations",
+            "PLAT-16.1",
+            reports_are_disjoint(ev_a, ev_b, a_seen, b_seen, a_universe, b_universe,
+                                 len(b_entries)),
+            f"keep-a (dest-a) names {len(a_seen)} pointIds and keep-b (dest-b) names "
+            f"{len(b_seen)}; dest-a's recorded view holds {len(a_universe)} and dest-b "
+            f"{len(b_universe)}. keep-b pointsEvaluated={ev_b.get('pointsEvaluated')}. "
+            + ("NO EVALUATION EXISTS: see `retention-view-digest-prefix-defect`."
+               if not (ev_a and ev_b)
+               else "Neither report is empty and no id crosses between them."),
+            evidence,
+        )
+
+        # WHAT `protected` COUNTS. D3 L9 asks for "exactly 3 candidates and
+        # `protected` lists the `minUsablePoints` OVERRIDES" — the points a
+        # guarantee pulled back out of the rules' reach, not the whole retained set.
+        # With `keepLast: 2` and `minUsablePoints: 3` over 6 points, 4 are beyond the
+        # keep rule and exactly one of them is pulled back to make the third usable
+        # point: `candidates` 3, `kept` 3, `protected` 1. This row demanded
+        # `protected == 3`, the other reading, and failed on the first evaluation the
+        # controller was ever able to produce (lab-refresh-3 §8.2). The arithmetic is
+        # written out rather than hard-coded so the row says why 3 and 1.
+        keep_last, min_usable = 2, 3
+        b_points = len(b_entries)
+        want = keep_rule_expectation(b_points, keep_last, min_usable)
+        b_candidates = ev_b.get("candidates") or []
+        b_kept = ev_b.get("kept") or []
+        b_protected = ev_b.get("protected") or []
+        check(
+            "retention-overlapping-keep-rules",
+            "PLAT-16.2",
+            overlapping_keep_rules_ok(ev_b, b_ids, want, b_points),
+            f"{b_points} points, keepLast={keep_last}, minUsablePoints={min_usable}: "
+            f"{len(b_candidates)} candidates (expected {want['candidates']}, reasons "
+            f"{sorted({c.get('reason') for c in b_candidates})}), {len(b_kept)} kept (expected "
+            f"{want['kept']}) and {len(b_protected)} protected (expected {want['protected']}, reasons "
+            f"{sorted({p.get('reason') for p in b_protected})}). `protected` is the subset of "
+            f"`kept` a guarantee saved beyond the keep rule, not the retained set; every "
+            f"protected id is kept ({b_ids['protected'] <= b_ids['kept']}) and no candidate is "
+            f"({not (b_ids['candidates'] & b_ids['kept'])})"
+            + ("" if ev_b else " — no evaluation was produced at all"),
+            evidence,
+        )
+
+        # `SkippedEntry` is `{pointId | key, reason}` — `reason`, not `state`, and
+        # `pointId`, not `backupId`. Reading two absent keys made both sides `{None}`
+        # and the intersection non-empty, so this failed on exactly the evidence that
+        # proves it (lab-refresh-3 §8.2). It now also requires every skipped row to
+        # identify what it skipped and to give a reason from the published
+        # vocabulary: a row that could not be classified AND could not be named
+        # would be an unreadable point silently dropped.
+        skipped = ev_a.get("skipped") or []
+        skipped_reasons = {row.get("reason") for row in skipped}
+        check(
+            "retention-unreadable-point-never-a-candidate",
+            "PLAT-16.1",
+            skipped_never_a_candidate(ev_a, a_ids),
+            f"dest-a's degraded points ({len(skipped)} rows, reasons {sorted(skipped_reasons)}, "
+            f"ids {sorted(a_ids['skipped'])}) are skipped and none is a candidate "
+            f"({sorted(a_ids['candidates'])}); {len(a_ids['skipped'] - set(ev_a.get('kept') or []))}"
+            f" of them is outside `kept` too"
+            + ("" if ev_a else " — no evaluation was produced at all"),
+            evidence,
+        )
+
+        guarantees = (pol_b.get("status", {}) or {}).get("guarantees") or {}
+        check(
+            "retention-guarantees-never-flatter",
+            "PLAT-16.1",
+            guarantees.get("sharedSegments") == "NotEnforced"
+            and guarantees.get("legalHold") != "LogweirEnforced",
+            f"status.guarantees on the Report policy: {guarantees or '<absent>'}",
+            evidence,
+        )
+
+        # --- two policies over one destination: BOTH refuse ---------------------
+        apply(
+            retention_policy(
+                "declared-c", "dest-b", "secondary", mode="ExternalLifecycle",
+                rules={"keepDays": 30, "minUsablePoints": 1},
+                external={"provider": "s3", "prefix": DEST_PREFIX, "ruleId": "d3w14-rule",
+                          "expirationDays": 7},
+            )
+        )
+        contested = wait_for(
+            "retentionpolicy", "declared-c",
+            lambda o: bool(condition(o, "Ready").get("reason")),
+            seconds=180, what="a Ready verdict while two policies claim dest-b",
+        )
+        other = get("retentionpolicy", "keep-b")
+        evidence.append(artifact("retention/two-policies-one-destination.json",
+                                 {"declared-c": contested, "keep-b": other}))
+        check(
+            "retention-two-policies-one-destination",
+            "PLAT-16.1",
+            condition(contested, "Ready").get("reason") == "Conflict"
+            and condition(contested, "Enforced").get("status") == "False",
+            f"a second policy over dest-b puts it in Ready=False/"
+            f"{condition(contested, 'Ready').get('reason')} — "
+            f"{condition(contested, 'Ready').get('message', '')[:150]} — and neither enforces",
+            evidence,
+        )
+        run(KN + ["delete", "retentionpolicy", "keep-b", "--wait=true"])
+
+        # --- ExternalLifecycle is a DECLARATION, and the bucket wins -------------
+        generation = get("retentionpolicy", "declared-c")["metadata"]["generation"]
+        run(KN + ["patch", "retentionpolicy", "declared-c", "--type=merge", "-p",
+                  json.dumps({"metadata": {"annotations": {"logweir.dev/d3w14-nudge": now()}}})])
+        apply(
+            retention_policy(
+                "declared-c", "dest-b", "secondary", mode="ExternalLifecycle",
+                rules={"keepDays": 30, "minUsablePoints": 1},
+                external={"provider": "s3", "prefix": DEST_PREFIX, "ruleId": "d3w14-rule",
+                          "expirationDays": 7},
+            )
+        )
+        declared = wait_for(
+            "retentionpolicy",
+            "declared-c",
+            lambda o: bool(o.get("status", {}).get("conditions")),
+            seconds=180,
+            what="a verdict on the declared lifecycle",
+        )
+        evidence.append(artifact("retention/external-lifecycle.json", declared))
+        conflict = condition(declared, "ExternalLifecycleConflict")
+        dg = (declared.get("status", {}) or {}).get("guarantees") or {}
+        check(
+            "retention-external-lifecycle-is-declared-not-enforced",
+            "PLAT-16.1",
+            conflict.get("status") == "True"
+            and dg.get("minUsablePoints") == "NotEnforced"
+            and dg.get("activeRestoreProtection") == "NotEnforced"
+            and dg.get("ageExpiry") == "ProviderEnforcedUnverified",
+            f"a declared bucket rule expiring at 7 days under a policy that asks for 30 reports "
+            f"ExternalLifecycleConflict={conflict.get('status')}/{conflict.get('reason')} "
+            f"({conflict.get('message', '')[:120]}); guarantees {dg} — the bucket wins and "
+            f"Logweir claims nothing it cannot enforce",
+            evidence,
+        )
+        run(KN + ["delete", "retentionpolicy", "declared-c", "--wait=true"])
+        apply(retention_policy("keep-b", "dest-b", "secondary",
+                               rules={"keepLast": 2, "minUsablePoints": 3}))
+        wait_evaluated("keep-b", seconds=240)
+
+        # AN EXPLICIT WINDOW, NOT A TIMEOUT'S SHADOW. This row used to count
+        # whatever the `* * * * *` schedule had produced by the time the line above
+        # returned. Before RET-DIGEST-PREFIX was fixed that call sat out its whole
+        # 240 s — a policy stuck at `Evaluated=False/ViewUnreadable` never settles —
+        # so the schedule had four minutes and the row saw 25 children. The fixed
+        # controller evaluates in seconds, the borrowed window collapsed to about a
+        # minute, the single child created had not finished yet, and the row failed
+        # on its own clock rather than on anything a retention verdict did
+        # (lab-refresh-3 §8.2). The window is now stated and waited for: three slots
+        # of a one-minute schedule plus a run's worth of slack, ended early by the
+        # first Succeeded child.
+        scheduled_window_seconds = 240
+        window_deadline = time.time() + scheduled_window_seconds
+        children: list[dict[str, Any]] = []
+        finished: list[dict[str, Any]] = []
+        while True:
+            children = [
+                b for b in lst("backups")
+                if b["metadata"]["name"].startswith("logweir-backup-keeps-running")
+                and b["metadata"]["name"] not in children_before
+            ]
+            finished = [b for b in children if b.get("status", {}).get("phase") == "Succeeded"]
+            if finished or time.time() >= window_deadline:
+                break
+            time.sleep(5)
+        # READ BEFORE THE `finally` RE-SUSPENDS IT: the clause is about the
+        # object as the window measured it.
+        keeps_running = get("backupschedule", "keeps-running")
+        kept = the_schedule_kept_running(
+            keeps_running, [b["metadata"]["name"] for b in children],
+            [b["metadata"]["name"] for b in finished], children_before)
+        evidence.append(
+            artifact(
+                "retention/scheduled-during-evaluation.json",
+                {"since": started, "until": now(), "windowSeconds": scheduled_window_seconds,
+                 "suspendDuringWindow": (keeps_running.get("spec") or {}).get("suspend"),
+                 "childrenBefore": sorted(children_before),
+                 "children": [b["metadata"]["name"] for b in children],
+                 "succeeded": [b["metadata"]["name"] for b in finished],
+                 "phases": {b["metadata"]["name"]: b.get("status", {}).get("phase")
+                            for b in children},
+                 "clauses": kept},
+            )
+        )
+        check(
+            "retention-scheduled-backups-continue",
+            "PLAT-16.1",
+            all(kept.values()),
+            f"a `* * * * *` BackupSchedule on dest-a (spec.suspend="
+            f"{(keeps_running.get('spec') or {}).get('suspend')!r} during the window) ran through "
+            f"the evaluation and an explicit {scheduled_window_seconds}s window after it: "
+            f"{len(children)} new children, {len(finished)} Succeeded — a retention verdict, "
+            f"including a refused one, blocks no backup. "
+            + "; ".join(f"{k}={v}" for k, v in kept.items()),
+            evidence,
+        )
+    finally:
+        run(KN + ["patch", "backupschedule", "keeps-running", "--type=merge",
+                  "-p", json.dumps({"spec": {"suspend": True}})])
 
 
 def plan_document(policy: dict[str, Any]) -> tuple[str, dict[str, Any]]:

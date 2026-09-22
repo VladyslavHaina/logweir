@@ -2108,6 +2108,28 @@ def test_the_five_standing_bundle_members_are_the_controllers_own_names() -> Non
         len(d3.STANDING_BUNDLE_KEYS) == 5)
 
 
+_RUNNING = {"spec": {"schedule": "* * * * *", "suspend": False}}
+# PLANTED: the schedule exactly as `schedule_object` creates it, which is how
+# the row was left between 23d4800 and this fix — suspended at birth, never
+# started, and therefore unpassable whatever the product did.
+_SUSPENDED_AT_BIRTH = {"spec": {"schedule": "* * * * *", "suspend": True}}
+_CHILD = "logweir-backup-keeps-running-20260922-041500"
+
+
+def test_the_scheduled_backups_row_can_pass_and_can_fail() -> None:
+    row("retention-scheduled-backups-continue: a running schedule and a new Succeeded child",
+        all(d3.the_schedule_kept_running(_RUNNING, [_CHILD], [_CHILD], set()).values()))
+    suspended = d3.the_schedule_kept_running(_SUSPENDED_AT_BIRTH, [], [], set())
+    row("MUTANT: THE DEFECT — a schedule left suspended at birth is named as the fault",
+        not all(suspended.values())
+        and not suspended["the schedule was NOT suspended while the row measured it "
+                          "(suspended, the row cannot pass whatever the product does)"])
+    row("MUTANT: a running schedule that produced no Succeeded child fails",
+        not all(d3.the_schedule_kept_running(_RUNNING, [_CHILD], [], set()).values()))
+    row("MUTANT: a child an EARLIER run left behind is not this window's evidence",
+        not all(d3.the_schedule_kept_running(_RUNNING, [], [_CHILD], {_CHILD}).values()))
+
+
 _REPO = pathlib.Path(__file__).resolve().parents[3]
 
 
