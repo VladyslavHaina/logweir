@@ -533,3 +533,40 @@ fn a_refused_verdict_that_names_no_point_makes_the_join_incomplete() {
         "attributed",
     );
 }
+
+/// The shipped CRD admits the reference, pins the point id's shape, and holds
+/// rule P10 -- read from the generated file an installation applies, so a
+/// struct that lost its `regex` or a rule table that lost P10 is red here
+/// before `just crds-check` has to notice the drift.
+#[test]
+fn the_shipped_crd_carries_the_catalog_point_reference_and_rule_p10() {
+    let path =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config/crd/preflights.yaml");
+    let text = std::fs::read_to_string(&path).expect("config/crd/preflights.yaml");
+    let crd: serde_yaml::Value = serde_yaml::from_str(&text).expect("the CRD parses");
+    let restore = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+        ["properties"]["request"]["properties"]["restore"];
+    let reference = &restore["properties"]["catalogPointRef"];
+    assert_eq!(
+        reference["properties"]["pointId"]["pattern"].as_str(),
+        Some(weirkeeper::crds::preflight::POINT_ID_PATTERN),
+        "catalogPointRef.pointId is pinned to lwp1- plus 32 lowercase hex"
+    );
+    let required: Vec<&str> = reference["required"]
+        .as_sequence()
+        .expect("required")
+        .iter()
+        .filter_map(serde_yaml::Value::as_str)
+        .collect();
+    assert_eq!(required, vec!["catalogRef", "pointId"]);
+    let rules: Vec<&str> = restore["x-kubernetes-validations"]
+        .as_sequence()
+        .expect("the restore block's rules")
+        .iter()
+        .filter_map(|r| r["rule"].as_str())
+        .collect();
+    assert!(
+        rules.contains(&weirkeeper::crds::preflight::P10_ONE_RECOVERY_POINT_RULE),
+        "rule P10 is on the restore block: {rules:?}"
+    );
+}

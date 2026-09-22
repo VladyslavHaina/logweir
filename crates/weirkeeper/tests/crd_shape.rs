@@ -1336,6 +1336,12 @@ const NAMED_RULES: &[(&str, &str, &str)] = &[
         weirkeeper::crds::preflight::P9_PLAN_HASH_RULE,
         weirkeeper::crds::preflight::P9_PLAN_HASH_MESSAGE,
     ),
+    // PLAT-15.2: one recovery point per restore check.
+    (
+        "preflights.yaml",
+        weirkeeper::crds::preflight::P10_ONE_RECOVERY_POINT_RULE,
+        weirkeeper::crds::preflight::P10_ONE_RECOVERY_POINT_MESSAGE,
+    ),
     // D3 §7.1 G1-G7.
     (
         "trustpolicies.yaml",
