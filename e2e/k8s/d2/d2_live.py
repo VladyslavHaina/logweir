@@ -3181,7 +3181,14 @@ def backup_facts(name: str, alias: str, bucket: str) -> dict[str, Any]:
         json.loads(mc_get(f"{alias}/{bucket}/{ARCHIVE_PREFIX}/{backup_id}/manifest.json")))
 
 
-def restore_plan(backup_id: str, point_in_time: str, prefix: str) -> dict[str, Any]:
+def restore_plan(backup_id: str, point_in_time: str, prefix: str,
+                 topics: list[str] | None = None) -> dict[str, Any]:
+    """`topics` defaults to the `orders` topic most rows back up. A row that
+    restores a Backup of OTHER topics must pass that Backup's own
+    `manifestTopics`: a plan naming a topic outside the backup set is refused
+    by the preflight's blocking `archive.coverage` row (`TopicNotInBackupSet`),
+    which is a verdict about the fixture and not about the row (measured on
+    lab-refresh-8: S22 read `notReady` because `bk-a2` backs up `payments`)."""
     return {
         "source": {
             "storage": {
@@ -3191,7 +3198,7 @@ def restore_plan(backup_id: str, point_in_time: str, prefix: str) -> dict[str, A
                 "path_style": True, "allow_http": True,
             },
             "backup": backup_id,
-            "topics": ["orders"],
+            "topics": list(topics) if topics is not None else ["orders"],
         },
         "target": {
             "bootstrap_servers": [f"kafka-target.{NS}.svc.cluster.local:9096"],
@@ -4650,7 +4657,8 @@ def s18() -> None:
         sc.detail["approverKeyId"] = approver["keyId"]
         sc.detail["trustPolicy"] = policy_name
         facts = backup_facts("bk-a2", "a", "lw-a")
-        plan = restore_plan(facts["backupId"], facts["pointInTime"], "d2w14-expired-")
+        plan = restore_plan(facts["backupId"], facts["pointInTime"], "d2w14-expired-",
+                        topics=facts["manifestTopics"])
         restore_name = "rs-expired"
         approval_name = "ap-expired"
         try:
@@ -4948,7 +4956,8 @@ def s22() -> None:
     approver = roster_approver_key()
     policy_name = f"{OWNER}-{STAMP}-window"
     facts = backup_facts("bk-a2", "a", "lw-a")
-    plan = restore_plan(facts["backupId"], facts["pointInTime"], "d2w14-window-")
+    plan = restore_plan(facts["backupId"], facts["pointInTime"], "d2w14-window-",
+                        topics=facts["manifestTopics"])
     restore_name = "rs-window"
     approval_name = "ap-window"
     detail: dict[str, Any] = {"controllerRevision": controller, "trustPolicy": policy_name,
@@ -5030,6 +5039,43 @@ def s22() -> None:
         approval_now = approval_facts(narrowed)
         detail["approvalAfterNarrowing"] = approval_now
         artifact("objects/s22/approval-narrowed.json", narrowed)
+
+        # 3b. THE ROW'S OWN RESTORE HAS ALREADY RUN. Its Approval verified at
+        # step 2, so the controller admitted it and its runner created the
+        # mapped topics on this namespace's target broker within seconds. A
+        # preflight taken now answers `target.topicCreate` notReady /
+        # `MappedTopicExists` about THOSE topics — correctly, and blocking — so
+        # the aggregate this row reads would be a verdict about the row's own
+        # leftovers (measured on lab-refresh-8). The Restore is waited to a
+        # terminal phase and the topics IT created, in this run's own broker,
+        # are removed before the preflight; both are recorded.
+        ran = wait_for(
+            "restore", restore_name,
+            lambda o: (o.get("status") or {}).get("phase") in {"Succeeded", "Failed"},
+            timeout=900, what="the row's own Restore to finish before the preflight")
+        restored_topics = [f"d2w14-window-{t}" for t in facts["manifestTopics"]]
+        for topic in restored_topics:
+            broker_exec("kafka-target", [
+                f"{KAFKA_BIN}/kafka-topics.sh", "--bootstrap-server", "localhost:9092",
+                "--delete", "--if-exists", "--topic", topic,
+            ], check=False)
+        left: list[str] = restored_topics
+        for _ in range(30):
+            listed = set(broker_exec("kafka-target", [
+                f"{KAFKA_BIN}/kafka-topics.sh", "--bootstrap-server", "localhost:9092",
+                "--list", "--exclude-internal",
+            ], check=False).stdout.split())
+            left = [t for t in restored_topics if t in listed]
+            if not left:
+                break
+            time.sleep(2)
+        if left:
+            raise RuntimeError(f"the row's own restored topics are still present: {left}")
+        detail["ownRestoreBeforePreflight"] = {
+            "phase": (ran.get("status") or {}).get("phase"),
+            "uid": ran["metadata"]["uid"],
+            "restoredTopicsRemoved": restored_topics,
+        }
 
         # 4. one preflight over the existing Restore, read by both rows
         apply(preflight("pf-window",
