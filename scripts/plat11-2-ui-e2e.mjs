@@ -528,15 +528,6 @@ async function main() {
       "recovery point, and nothing here claims a run produced them",
   });
 
-  // THE COLLISION, ON THE LAB'S OWN BROKER.
-  const createdTopic = labTopic("create", COLLIDING_TOPIC);
-  save("lab-topic-create.txt", createdTopic);
-  const listed = labTopic("list", COLLIDING_TOPIC);
-  check(listed.includes(COLLIDING_TOPIC),
-    "the colliding topic was not created on kafka-target: " + listed);
-  save("lab-topic-list.txt", listed);
-  result.created.push({ kind: "KafkaTopic", name: COLLIDING_TOPIC, on: LAB_TARGET_BOOTSTRAP });
-
   const port = await freePort();
   result.port = port;
   await startApi(port);
@@ -1026,16 +1017,87 @@ async function main() {
     });
 
     // ------------------------------------------------------------------ 6
-    // THE READINESS CHECK, THE COLLISION, AND THE REFUSED SUBMIT.
+    // THE READINESS CHECK WITHOUT A COLLISION. This is deliberately separate
+    // from the negative control below: a MappedTopicExists row must never hide
+    // a PlanDestinationMismatch in the same aggregate verdict.
     await openOldPoint();
     await waitFor(page, "#restore-readiness-start", "the readiness control");
+    const beforeClean = new Set(
+      (kubeJson(["-n", namespace, "get", "preflights"]).items || [])
+        .map((p) => p.metadata.uid),
+    );
     await page.click("#restore-readiness-start");
     await pause(4000);
-    // The lab's controller decides this; whatever it decides is recorded.
+    let cleanVerdict = null;
+    for (let i = 0; i < 90; i += 1) {
+      const list = kubeJson(["-n", namespace, "get", "preflights"]).items || [];
+      const mine = list.find((p) => !beforeClean.has(p.metadata.uid));
+      const phase = ((mine || {}).status || {}).phase;
+      if (phase === "Completed" || phase === "Failed" || phase === "Cancelled") {
+        cleanVerdict = mine;
+        break;
+      }
+      await pause(2000);
+    }
+    const cleanPreflights = kubeJson(["-n", namespace, "get", "preflights"]);
+    save("06a-no-collision-preflights.json", cleanPreflights);
+    save("06a-no-collision-conditions.json", (cleanPreflights.items || []).map((p) => ({
+      name: p.metadata.name,
+      state: (p.status || {}).state || null,
+      reason: (p.status || {}).reason || null,
+      conditions: (p.status || {}).conditions || [],
+      checks: ((((p.status || {}).result || {}).checks) || [])
+        .map((c) => ({ id: c.id, state: c.state, code: c.code })),
+    })));
+    await shot(page, "06a-no-collision-readiness");
+    save("06a-no-collision-readiness-text.txt", await text(page));
+    check(cleanVerdict !== null,
+      "the lab controller did not record a terminal no-collision preflight within 180 s: " +
+        JSON.stringify((cleanPreflights.items || []).map((p) => ({
+          name: p.metadata.name, phase: (p.status || {}).phase,
+          reason: (p.status || {}).reason,
+        }))));
+    const cleanResult = cleanVerdict.status.result || {};
+    const cleanEntries = (cleanResult.checks || []).concat(cleanResult.warnings || []);
+    const cleanBinding = cleanEntries.find((c) => c.id === "plan.bindings");
+    check(cleanBinding !== undefined && cleanBinding.code === "PlanMatchesReferences",
+      "the no-collision control requires the signed plan to match both saved references: " +
+        JSON.stringify(cleanBinding || cleanResult));
+    const cleanMapped = cleanEntries.find((c) => c.id === "target.mappedTopics");
+    check(cleanMapped === undefined || cleanMapped.code !== "MappedTopicExists",
+      "the no-collision control unexpectedly found the topic before this harness created it: " +
+        JSON.stringify(cleanMapped));
+    record("the ordinary wizard readiness path matches its saved destination references", {
+      preflight: cleanVerdict.metadata.name, uid: cleanVerdict.metadata.uid,
+      state: cleanVerdict.status.reason || cleanVerdict.status.phase,
+      planHash: ((cleanVerdict.status.binding || {}).planHash) || null,
+      planBindingsRow: cleanBinding,
+    });
+    control("no collision is present while plan.bindings is PlanMatchesReferences", {
+      planBindingsCode: cleanBinding.code,
+      mappedTopicsCode: cleanMapped === undefined ? null : cleanMapped.code,
+    });
+
+    // NOW create the collision on the lab's broker, and run a distinct check.
+    const createdTopic = labTopic("create", COLLIDING_TOPIC);
+    save("lab-topic-create.txt", createdTopic);
+    const listed = labTopic("list", COLLIDING_TOPIC);
+    check(listed.includes(COLLIDING_TOPIC),
+      "the colliding topic was not created on kafka-target: " + listed);
+    save("lab-topic-list.txt", listed);
+    result.created.push({ kind: "KafkaTopic", name: COLLIDING_TOPIC, on: LAB_TARGET_BOOTSTRAP });
+
+    const beforeCollision = new Set(
+      (kubeJson(["-n", namespace, "get", "preflights"]).items || [])
+        .map((p) => p.metadata.uid),
+    );
+    await waitFor(page, "#restore-readiness-start", "the second readiness control");
+    await page.click("#restore-readiness-start");
+    await pause(4000);
     let verdict = null;
     for (let i = 0; i < 90; i += 1) {
       const list = kubeJson(["-n", namespace, "get", "preflights"]).items || [];
-      const mine = list[list.length - 1];
+      const mine = list.find((p) => !beforeCollision.has(p.metadata.uid));
       const phase = ((mine || {}).status || {}).phase;
       if (phase === "Completed" || phase === "Failed" || phase === "Cancelled") {
         verdict = mine;
@@ -1044,8 +1106,8 @@ async function main() {
       await pause(2000);
     }
     const preflights = kubeJson(["-n", namespace, "get", "preflights"]);
-    save("06-preflights.json", preflights);
-    save("06-preflight-conditions.json", (preflights.items || []).map((p) => ({
+    save("06b-collision-preflights.json", preflights);
+    save("06b-collision-conditions.json", (preflights.items || []).map((p) => ({
       name: p.metadata.name,
       state: (p.status || {}).state || null,
       reason: (p.status || {}).reason || null,
@@ -1053,17 +1115,15 @@ async function main() {
       checks: ((((p.status || {}).result || {}).checks) || [])
         .map((c) => ({ id: c.id, state: c.state, code: c.code })),
     })));
-    await shot(page, "06-readiness");
-    save("06-readiness-text.txt", await text(page));
-    check(verdict !== null,
-      "the lab controller did not record a terminal preflight within 180 s: " +
-        JSON.stringify((preflights.items || []).map((p) => ({
-          name: p.metadata.name, phase: (p.status || {}).phase,
-          reason: (p.status || {}).reason,
-        }))));
+    await shot(page, "06b-collision-readiness");
+    save("06b-collision-readiness-text.txt", await text(page));
+    check(verdict !== null, "the collision preflight did not become terminal within 180 s");
     const state = verdict.status.reason || verdict.status.phase;
     const vres = verdict.status.result || {};
     const entries = (vres.checks || []).concat(vres.warnings || []);
+    const bindingRow = entries.find((c) => c.id === "plan.bindings");
+    check(bindingRow !== undefined && bindingRow.code === "PlanMatchesReferences",
+      "the collision control must still match the saved references: " + JSON.stringify(bindingRow));
     const mappedRow = entries.find((c) => c.id === "target.mappedTopics");
     check(mappedRow !== undefined,
       "the wizard's own readiness request never reached target.mappedTopics: " +
@@ -1073,6 +1133,7 @@ async function main() {
     record("the wizard's own readiness check reached target.mappedTopics on the lab", {
       preflight: verdict.metadata.name, uid: verdict.metadata.uid, state: state,
       planHash: ((verdict.status.binding || {}).planHash) || null,
+      planBindingsRow: bindingRow,
       mappedTopicsRow: mappedRow,
       collidingTopic: COLLIDING_TOPIC,
     });

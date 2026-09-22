@@ -135,7 +135,7 @@ anything not listed is `404`.
 | `POST /api/v1/namespaces/{ns}/schedules/{name}:set-suspension` | Suspend or resume, under `expectedResourceVersion`. |
 | `GET /api/v1/namespaces/{ns}/backups[/{name}]` | `Backup` projections, with the trigger and the schedule revision the run copied. |
 | `POST /api/v1/namespaces/{ns}/backups` | "Back up now" from a schedule, or "Run first backup now" from a cluster. |
-| `GET /api/v1/namespaces/{ns}/restores[/{name}]` | `Restore` projections. |
+| `GET /api/v1/namespaces/{ns}/restores[/{name}]` | `Restore` projections. Saved-destination restores carry the stored optional `sourceDestinationRef` and `evidenceDestinationRef`; legacy inline-archive restores omit both. |
 | `POST /api/v1/namespaces/{ns}/restores` | Create a `Restore`, preserving the plan bytes exactly. An optional `topicMapping` declares the mapping the caller previewed and is checked against the prefix this request stores — see below. |
 | `GET /api/v1/namespaces/{ns}/approvals[/{name}]` | Approval metadata and status. |
 | `GET /api/v1/namespaces/{ns}/approvals/{name}/packet` | The raw approval document, only through this explicit route. |
@@ -606,6 +606,11 @@ real check — and a `ready` verdict still does not mean the execution-only chec
 passed. There is no preflight this route consults and none it can fake.
 
 ### The restore's declared topic mapping
+
+The create response and both restore reads preserve the optional saved
+destination references stored on the `Restore`. They are metadata, not access
+material: the response publishes destination names only, never Secret contents.
+Their absence remains the legacy inline-archive shape.
 
 `POST .../restores` takes an optional `topicMapping`: the exact source/target
 rows the caller previewed.

@@ -813,6 +813,14 @@ function projectRestore(item) {
     },
     deadlineSeconds: item.deadlineSeconds,
   };
+  const sourceDestination = nameRef(item.sourceDestinationRef);
+  if (sourceDestination !== null) {
+    object.spec.sourceDestinationRef = sourceDestination;
+  }
+  const evidenceDestination = nameRef(item.evidenceDestinationRef);
+  if (evidenceDestination !== null) {
+    object.spec.evidenceDestinationRef = evidenceDestination;
+  }
   // THE PLAN BYTES ARE CARRIED VERBATIM OR NOT AT ALL. A list omits them --
   // that is the contract, and `planBytesLength` is what a list may say about
   // them. Inventing a placeholder would put a string under a field whose

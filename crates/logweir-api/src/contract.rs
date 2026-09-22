@@ -1093,6 +1093,14 @@ pub struct Restore {
     pub approval_ref: NameRef,
     /// The archive restored from.
     pub source_archive: ArchiveView,
+    /// The saved destination the archive was read from. Absent on legacy
+    /// inline-archive restores.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub source_destination_ref: Option<NameRef>,
+    /// The saved destination evidence was written to. Absent on legacy
+    /// inline-archive restores.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub evidence_destination_ref: Option<NameRef>,
     /// The backup set ID.
     pub backup_set_ref: String,
     /// The point in time.

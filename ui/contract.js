@@ -668,7 +668,10 @@ const RESTORE = shapeOf(
     target: objectOf(RESTORE_TARGET), deadlineSeconds: int,
     newTopics: listOf(str), operation: objectOf(OPERATION_SUMMARY),
   },
-  { createdAt: str, planBytes: opaque },
+  {
+    createdAt: str, planBytes: opaque,
+    sourceDestinationRef: objectOf(NAME_REF), evidenceDestinationRef: objectOf(NAME_REF),
+  },
 );
 
 const SUBJECT_REF = shapeOf("SubjectRefView", { kind: str, name: str });

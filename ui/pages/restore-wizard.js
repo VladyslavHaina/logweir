@@ -137,6 +137,30 @@ const CLUSTERS = "kafkaclusters";
 const BACKUPS = "backups";
 const APPROVALS = "approvals";
 
+let readinessAttempts = 0;
+let readinessNonce = null;
+
+/** One deliberate readiness click is one observation of mutable external
+ * state. A per-load nonce and click ordinal keep its idempotency retries
+ * stable while ensuring "Check this plan again" does not replay the earlier
+ * answer after a target topic or saved reference changes. */
+export function nextRestoreReadinessAttempt(ns, pointUid) {
+  if (readinessNonce === null) {
+    const source = globalThis.crypto;
+    if (source === undefined || source === null || typeof source.getRandomValues !== "function") {
+      throw refusal(
+        "this page will not start a readiness check here: minting a distinct check needs the " +
+        "platform's random source, and it is unavailable",
+      );
+    }
+    const bytes = source.getRandomValues(new Uint8Array(16));
+    readinessNonce = Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
+  }
+  readinessAttempts += 1;
+  return String(ns) + "." + String(pointUid) + "." + readinessNonce + "-" +
+    String(readinessAttempts);
+}
+
 /** The wizard's identity in the draft and mutation registries. */
 export const WIZARD_FORM = "restore-wizard";
 
@@ -656,6 +680,15 @@ export function renderSourceBinding(state) {
  *  configuration, and the reason this is an input and not a refusal. */
 export function renderArchiveCredentialField(state) {
   const s = state || {};
+  const destination = savedDestinationName(s);
+  if (destination.length > 0) {
+    return (
+      "<h4>The credential that reaches that archive</h4>" +
+      "<p class=\"note\">Saved destination <code>" + esc(destination) + "</code> owns the " +
+      "archive and evidence credentials. This restore uses that saved access configuration; " +
+      "there is no legacy Secret override on this recovery point.</p>"
+    );
+  }
   const name = typeof s.archiveSecretName === "string" ? s.archiveSecretName : "";
   const errors = errorsOf(s);
   return (
@@ -691,6 +724,24 @@ export function renderArchiveCredentialField(state) {
 export function renderStoreFields(state) {
   const s = state || {};
   const store = ((s.fields || {}).source) || {};
+  const destination = savedDestinationName(s);
+  if (destination.length > 0) {
+    const evidence = ((s.fields || {}).evidence) || {};
+    return (
+      "<h4>Where that archive actually is</h4>" +
+      "<p class=\"note\">These signed-plan values come from the public location and transport " +
+      "settings of saved destination <code>" + esc(destination) + "</code>. They are fixed for " +
+      "this recovery point; credentials and Secret values are never read or shown here.</p>" +
+      "<dl><dt>archive bucket / prefix</dt><dd><code>" + esc(store.bucket) + "/" +
+      esc(store.prefix) + "</code></dd><dt>evidence bucket / prefix</dt><dd><code>" +
+      esc(evidence.bucket) + "/" + esc(evidence.prefix) + "</code></dd><dt>region</dt><dd><code>" +
+      esc(store.region || "(default)") + "</code></dd><dt>endpoint</dt><dd><code>" +
+      esc(store.endpoint || "AWS S3") + "</code></dd><dt>addressing</dt><dd>" +
+      (store.pathStyle === true ? "pathStyle" : "virtualHosted") +
+      "</dd><dt>transport</dt><dd>" + (store.allowHttp === true ? "insecureHttp" : "TLS") +
+      "</dd></dl>"
+    );
+  }
   return (
     "<h4>Where that archive actually is</h4>" +
     "<p class=\"note\">Leave the endpoint blank for AWS S3. These three values are not on " +
@@ -2184,6 +2235,11 @@ export function validateRestore(state) {
   const fields = s.fields || {};
   const target = fields.target || {};
   const problems = Object.create(null);
+  const destinationName = savedDestinationName(s);
+  if (destinationName.length > 0 && !savedDestinationResolved(s)) {
+    problems.archive = "saved destination " + destinationName +
+      " could not be resolved to its public location and transport settings";
+  }
   if (epochMs(fields.pointInTime) === null) {
     problems.pointInTime = "an RFC 3339 instant, such as 2026-09-07T14:05:00Z";
   } else if (windowComplaint(fields.pointInTime, coveredOf(s)) !== null) {
@@ -2321,7 +2377,10 @@ export function applyWizardDraft(state, draft) {
   if (typeof d.topicPrefix === "string") {
     setTopicPrefix(state, d.topicPrefix);
   }
-  for (const block of [state.fields.source, state.fields.evidence]) {
+  // A saved destination is the frozen source of these signed-plan values.
+  // Older drafts may contain legacy controls, but must never override it.
+  const legacyStorage = savedDestinationName(state).length === 0;
+  for (const block of legacyStorage ? [state.fields.source, state.fields.evidence] : []) {
     if (typeof d.endpoint === "string") {
       block.endpoint = d.endpoint;
     }
@@ -2339,11 +2398,11 @@ export function applyWizardDraft(state, draft) {
       block.allowHttp = d.allowHttp;
     }
   }
-  if (typeof d.evidenceBucket === "string") {
+  if (legacyStorage && typeof d.evidenceBucket === "string") {
     state.fields.evidence.bucket = d.evidenceBucket;
     state.evidenceBucket = d.evidenceBucket;
   }
-  if (typeof d.archiveSecret === "string") {
+  if (legacyStorage && typeof d.archiveSecret === "string") {
     state.archiveSecretName = d.archiveSecret;
   }
   // AN EMPTY KEPT SUBSET IS A REAL EDIT and is applied as one: it is the state
@@ -2813,7 +2872,17 @@ export async function mountRestoreWizard(node, ns, params, parse, deps, lifecycl
     }
     const clusters = collections[0];
     const backups = collections[1];
-    const state = initialState(ns, clusters, backups, selection);
+    const resolved = resolvePoint(backups, selection);
+    const destinationName = savedDestinationName({ point: resolved.point });
+    let destination = null;
+    if (resolved.state === "selected" && destinationName.length > 0) {
+      const read = await api.destination(ns, destinationName, readOptions(lifecycle));
+      if (!active(lifecycle)) {
+        return;
+      }
+      destination = read.item;
+    }
+    const state = initialState(ns, clusters, backups, selection, destination);
     if (state.pointState === "none") {
       if (completedBackups(backups).length === 0) {
         replace(node, parse(renderNoCompletedBackup(ns, backups)));
@@ -2900,7 +2969,7 @@ async function renderAndWire(node, state, parse, api, lifecycle) {
  *  records (endpoint, region and the `path_style` flag) plus the explicit
  *  insecure-transport flag are editable in step 1 rather than left out,
  *  because the runner reads them from these bytes and from nowhere else. */
-export function initialState(ns, clusters, backups, selection) {
+export function initialState(ns, clusters, backups, selection, savedDestination) {
   const resolved = resolvePoint(backups, selection);
   // PLAT-11.2 / PLAT-12.2: a retry of a failed run, or "" for an ordinary
   // restore. It changes exactly one value -- the default topic prefix -- and
@@ -2915,15 +2984,18 @@ export function initialState(ns, clusters, backups, selection) {
   const pointInTime = rfc3339(covered.toMs);
   const archive = spec.archive || {};
   const archiveUrl = archive.url;
+  const destinationName = savedDestinationName({ point: point });
+  const destinationSettings = savedDestinationStore(savedDestination, destinationName);
   // BOTH HALVES OF THE ARCHIVE REFERENCE, FROM THE SAME OBJECT -- and that
   // object is the chosen point. A URL taken from one Backup and a credential
   // taken from another would be two archives and one name for them.
-  const archiveSecretName =
-    typeof ((archive.secretRef || {}).name) === "string" ? archive.secretRef.name : "";
+  const archiveSecretName = destinationName.length > 0 ? "" :
+    (typeof ((archive.secretRef || {}).name) === "string" ? archive.secretRef.name : "");
   const target = firstTarget(clusters);
   // `allowHttp` STARTS FALSE AND IS NEVER DERIVED (D-SEAMS S5). It is set by
   // the one explicit checkbox in step 1 and by nothing else.
-  const store = { region: "", endpoint: "", pathStyle: false, allowHttp: false };
+  const store = destinationSettings ||
+    { region: "", endpoint: "", pathStyle: false, allowHttp: false };
   const prefix = retryOf.length > 0
     ? freshTargetPrefix(pointInTime, retryOf)
     : prefixFor(pointInTime);
@@ -2942,7 +3014,8 @@ export function initialState(ns, clusters, backups, selection) {
     query: "",
     archiveUrl: archiveUrl,
     archiveSecretName: archiveSecretName,
-    evidenceBucket: "logweir-evidence",
+    savedDestination: savedDestinationResolvedValue(savedDestination, destinationName),
+    evidenceBucket: destinationSettings === null ? "logweir-evidence" : destinationSettings.bucket,
     targetClusterName: ((target || {}).metadata || {}).name,
     // THE IDENTITY, BESIDE THE NAME. The default is a preselect and nothing
     // more, but it is a preselect BY UID from the first render, so the very
@@ -2956,7 +3029,9 @@ export function initialState(ns, clusters, backups, selection) {
       topics: Array.isArray(spec.topics) ? spec.topics : [],
       pointInTime: pointInTime,
       source: Object.assign(
-        { bucket: bucketOf(archiveUrl), prefix: prefixOf(archiveUrl) },
+        destinationSettings === null
+          ? { bucket: bucketOf(archiveUrl), prefix: prefixOf(archiveUrl) }
+          : { bucket: destinationSettings.bucket, prefix: destinationSettings.prefix },
         store,
       ),
       target: {
@@ -2990,12 +3065,50 @@ export function initialState(ns, clusters, backups, selection) {
         anchor: "head",
       },
       objectives: {},
-      evidence: Object.assign(
-        { bucket: "logweir-evidence", prefix: EVIDENCE_PREFIX },
-        store,
-      ),
+      evidence: Object.assign({}, store, {
+        bucket: destinationSettings === null ? "logweir-evidence" : destinationSettings.bucket,
+        // Evidence never inherits the archive prefix. Global Constraint 6 is
+        // the saved-destination evidence location too.
+        prefix: EVIDENCE_PREFIX,
+      }),
     },
   };
+}
+
+/** The saved destination frozen onto a recovery point, if this is not legacy. */
+function savedDestinationName(state) {
+  const destination = ((((state || {}).point || {}).spec || {}).destinationRef) || {};
+  return typeof destination.name === "string" ? destination.name : "";
+}
+
+/** Only public destination fields become signed storage settings. */
+function savedDestinationStore(destination, expectedName) {
+  const item = destination || {};
+  const storage = item.storage || {};
+  const transport = item.transport || {};
+  if (typeof expectedName !== "string" || expectedName.length === 0 ||
+      item.name !== expectedName || storage.provider !== "s3" ||
+      typeof storage.bucket !== "string" || storage.bucket.length === 0 ||
+      typeof storage.prefix !== "string") {
+    return null;
+  }
+  return {
+    bucket: storage.bucket,
+    prefix: storage.prefix,
+    region: typeof storage.region === "string" ? storage.region : "",
+    endpoint: typeof storage.endpoint === "string" ? storage.endpoint : "",
+    pathStyle: storage.addressing === "pathStyle",
+    allowHttp: transport.security === "insecureHttp",
+  };
+}
+
+function savedDestinationResolvedValue(destination, expectedName) {
+  return savedDestinationStore(destination, expectedName) === null ? null : destination;
+}
+
+function savedDestinationResolved(state) {
+  const name = savedDestinationName(state);
+  return name.length === 0 || savedDestinationStore((state || {}).savedDestination, name) !== null;
 }
 
 // Copy public settings only. The controller projects the selected cluster's
@@ -3158,7 +3271,9 @@ function wireRestoreReadiness(node, state, parse, api, lifecycle, prepared) {
       return;
     }
     const request = restoreReadinessRequest(state, p);
-    mutation.run(() => api.startPreflight(state.ns, request), { about: { planHash: p.hash } });
+    mutation.run(() => api.startPreflight(state.ns, request, {
+      attempt: nextRestoreReadinessAttempt(state.ns, state.pointUid),
+    }), { about: { planHash: p.hash } });
   }, lifecycle);
 
   const cancel = node.querySelector("#restore-readiness-cancel");

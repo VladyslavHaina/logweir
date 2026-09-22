@@ -420,6 +420,8 @@ pub fn restore(object: &RestoreCr, with_plan_bytes: bool) -> Restore {
             name: object.spec.approval_ref_name().to_string(),
         },
         source_archive: archive_view(&object.spec.source_archive),
+        source_destination_ref: object.spec.source_destination_ref.as_ref().map(name_ref),
+        evidence_destination_ref: object.spec.evidence_destination_ref.as_ref().map(name_ref),
         backup_set_ref: object.spec.backup_set_ref.clone(),
         point_in_time: object.spec.point_in_time,
         target: RestoreTargetView {

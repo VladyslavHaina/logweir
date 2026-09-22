@@ -118,7 +118,16 @@ async fn saved_restore_destinations_are_validated_and_stored_as_a_pair() {
         "{}",
         String::from_utf8_lossy(&created.body)
     );
-    let name = created.json()["item"]["name"].as_str().unwrap().to_string();
+    let created_json = created.json();
+    assert_eq!(
+        created_json["item"]["sourceDestinationRef"]["name"],
+        "primary"
+    );
+    assert_eq!(
+        created_json["item"]["evidenceDestinationRef"]["name"],
+        "evidence"
+    );
+    let name = created_json["item"]["name"].as_str().unwrap().to_string();
     let stored = app.fake.object("restores", NS_A, &name).unwrap();
     assert_eq!(stored["spec"]["sourceDestinationRef"]["name"], "primary");
     assert_eq!(stored["spec"]["evidenceDestinationRef"]["name"], "evidence");
@@ -126,6 +135,24 @@ async fn saved_restore_destinations_are_validated_and_stored_as_a_pair() {
         stored["spec"]["sourceArchive"],
         json!({"url": "logweir-destination://primary"})
     );
+    let read = app
+        .get(&format!("/api/v1/namespaces/{NS_A}/restores/{name}"))
+        .await
+        .json();
+    assert_eq!(read["item"]["sourceDestinationRef"]["name"], "primary");
+    assert_eq!(read["item"]["evidenceDestinationRef"]["name"], "evidence");
+    let list = app
+        .get(&format!("/api/v1/namespaces/{NS_A}/restores"))
+        .await
+        .json();
+    let row = list["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["name"] == name)
+        .unwrap();
+    assert_eq!(row["sourceDestinationRef"]["name"], "primary");
+    assert_eq!(row["evidenceDestinationRef"]["name"], "evidence");
 
     for (key, value, field, code) in [
         (

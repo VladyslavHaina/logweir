@@ -29,6 +29,12 @@
         },
         "url": "s3://kafka-backups/orders"
       },
+      "sourceDestinationRef": {
+        "name": "primary"
+      },
+      "evidenceDestinationRef": {
+        "name": "primary"
+      },
       "target": {
         "clusterRef": {
           "name": "orders-scratch"

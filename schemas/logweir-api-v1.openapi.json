@@ -10969,6 +10969,11 @@
             "type": "integer",
             "format": "int64"
           },
+          "evidenceDestinationRef": {
+            "description": "The saved destination evidence was written to. Absent on legacy inline-archive restores.",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
+          },
           "name": {
             "description": "The object name.",
             "type": "string"
@@ -11015,6 +11020,11 @@
           "sourceArchive": {
             "description": "The archive restored from.",
             "$ref": "#/components/schemas/ArchiveView"
+          },
+          "sourceDestinationRef": {
+            "description": "The saved destination the archive was read from. Absent on legacy inline-archive restores.",
+            "$ref": "#/components/schemas/NameRef",
+            "nullable": true
           },
           "target": {
             "description": "Where it writes.",

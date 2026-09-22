@@ -609,7 +609,7 @@ test("a_saved_restore_destination_reaches_the_product_api_create_request", async
   const wire = transport((u, init) =>
     init.method === "POST" ? { status: 201, body: fixture("console/restore.json") } : undefined);
   try {
-    await apiClient().create("team-a", "restores", {
+    const made = await apiClient().create("team-a", "restores", {
       apiVersion: "logweir.dev/v1alpha1",
       kind: "Restore",
       metadata: { name: reviewed.restoreName },
@@ -632,6 +632,37 @@ test("a_saved_restore_destination_reaches_the_product_api_create_request", async
     assert.deepEqual(sent.sourceDestinationRef, { name: "primary" });
     assert.deepEqual(sent.evidenceDestinationRef, { name: "primary" });
     assert.deepEqual(sent.sourceArchive, { url: "logweir-destination://primary" });
+    assert.deepEqual(made.spec.sourceDestinationRef, { name: "primary" },
+      "the POST response reconstructs the stored source destination");
+    assert.deepEqual(made.spec.evidenceDestinationRef, { name: "primary" },
+      "the POST response reconstructs the stored evidence destination");
+  } finally {
+    wire.restore();
+  }
+});
+
+test("saved_restore_destinations_round_trip_through_detail_and_list_projection", async () => {
+  await console_();
+  const wire = transport((u) => {
+    if (u.indexOf("/operations/restore/") !== -1) {
+      return { status: 200, body: fixture("console/operation-restore-completed.json") };
+    }
+    if (u.indexOf("/restores/orders-drill-20260911") !== -1) {
+      return { status: 200, body: fixture("console/restore.json") };
+    }
+    if (u.indexOf("/restores") !== -1) {
+      return { status: 200, body: fixture("console/restores-list.json") };
+    }
+    return undefined;
+  });
+  try {
+    const api = apiClient();
+    const detail = await api.get("team-a", "restores", "orders-drill-20260911");
+    const list = await api.list("team-a", "restores");
+    for (const object of [detail, list.items[0]]) {
+      assert.deepEqual(object.spec.sourceDestinationRef, { name: "primary" });
+      assert.deepEqual(object.spec.evidenceDestinationRef, { name: "primary" });
+    }
   } finally {
     wire.restore();
   }

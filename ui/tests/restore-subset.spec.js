@@ -30,13 +30,17 @@ import {
   mappedTopicName,
   mappingProblems,
   MAX_TOPIC_NAME_CHARS,
+  mountRestoreWizard,
+  nextRestoreReadinessAttempt,
   PARTITION_COUNT_NOT_PUBLISHED,
   readinessRefusal,
   readinessSourceSentence,
+  renderArchiveCredentialField,
   recoveryPoints,
   renderPlanStep,
   renderRecoveryLimits,
   renderRetryBanner,
+  renderStoreFields,
   renderTargetStep,
   renderTopicSubset,
   replicationFactorOf,
@@ -46,6 +50,7 @@ import {
   restoreRetryFromOperationRoute,
   restoreRetryRoute,
   restoreRouteParams,
+  preparePlan,
   RESUME_NOT_IMPLEMENTED,
   selectedTopics,
   stepStates,
@@ -77,6 +82,21 @@ function wizardState(extra) {
   const backups = fixture("wizard-backups.json");
   const selection = Object.assign({}, newestPoint(backups), extra || {});
   return initialState("logweir-t27", fixture("wizard-clusters.json"), backups, selection);
+}
+
+/** A point frozen to the public saved-destination fixture, including the
+ * sentinel that must never be parsed as an S3 bucket. */
+function savedWizardState(extra) {
+  const backups = fixture("wizard-backups.json");
+  const selection = Object.assign({}, newestPoint(backups), extra || {});
+  const point = backups.items.find((item) => item.metadata.uid === selection.uid);
+  point.spec.destinationRef = { name: "primary", uid: "uid-primary" };
+  point.spec.archive = { url: "logweir-destination://primary" };
+  point.status.locationDigest = "sha256:" + "b".repeat(64);
+  return initialState(
+    "logweir-t27", fixture("wizard-clusters.json"), backups, selection,
+    fixture("console/destination.json").item,
+  );
 }
 
 /** A preflight result in the product API's own shape, bound to one plan. */
@@ -333,12 +353,7 @@ test("the_recovery_limits_come_from_contract_constants_and_never_from_prose", ()
 
 test("the_readiness_request_uses_a_saved_destination_and_only_legacy_points_send_an_archive", () => {
   const prepared = { bytes: "plan bytes\n", hash: "sha256:" + "a".repeat(64) };
-  const destinationBacked = wizardState();
-  destinationBacked.point.spec.destinationRef = {
-    name: "primary",
-    uid: "uid-primary",
-  };
-  destinationBacked.point.status.locationDigest = "sha256:" + "b".repeat(64);
+  const destinationBacked = savedWizardState();
 
   const saved = restoreReadinessRequest(destinationBacked, prepared);
   assert.equal(saved.restore.sourceDestination, "primary");
@@ -376,6 +391,91 @@ test("the_readiness_request_uses_a_saved_destination_and_only_legacy_points_send
   assert.equal(legacyCreate.spec.sourceDestinationRef, undefined);
   assert.equal(legacyCreate.spec.evidenceDestinationRef, undefined);
   assert.match(readinessSourceSentence(legacy.point), /Legacy recovery point/);
+});
+
+test("a_saved_point_signs_the_resolved_destination_and_has_no_legacy_storage_controls", async () => {
+  const state = savedWizardState();
+  assert.deepEqual(state.fields.source, {
+    bucket: "kafka-backups", prefix: "team-a/prod", region: "us-east-1",
+    endpoint: "https://minio.storage.svc:9000", pathStyle: true, allowHttp: false,
+  });
+  assert.deepEqual(state.fields.evidence, {
+    bucket: "kafka-backups", prefix: "logweir/", region: "us-east-1",
+    endpoint: "https://minio.storage.svc:9000", pathStyle: true, allowHttp: false,
+  });
+  assert.notEqual(state.fields.source.bucket, "primary",
+    "MUTANT: the destination sentinel is not an S3 URL and its name is not a bucket");
+
+  const plan = await preparePlan(state);
+  assert.match(plan.bytes, /bucket: "kafka-backups"/);
+  assert.match(plan.bytes, /prefix: "team-a\/prod"/);
+  assert.match(plan.bytes, /prefix: "logweir\/"/);
+  assert.doesNotMatch(plan.bytes, /bucket: "primary"/);
+
+  const controls = renderStoreFields(state) + renderArchiveCredentialField(state);
+  for (const id of ["archive-secret", "store-endpoint", "store-region", "store-pathStyle",
+    "store-allow-insecure", "evidence-bucket"]) {
+    assert.ok(!controls.includes("id=\"" + id + "\""),
+      "saved points have no legacy override control " + id);
+  }
+  assert.match(controls, /saved destination/i);
+
+  const kept = Object.assign(wizardDraftValues(state), {
+    endpoint: "http://mutant.invalid", region: "wrong", pathStyle: false, allowHttp: true,
+    evidenceBucket: "wrong", archiveSecret: "wrong-secret",
+  });
+  assert.equal(applyWizardDraft(state, kept), true);
+  assert.equal(state.fields.source.endpoint, "https://minio.storage.svc:9000");
+  assert.equal(state.fields.source.allowHttp, false);
+  assert.equal(state.fields.evidence.bucket, "kafka-backups");
+  assert.equal(state.archiveSecretName, "");
+
+  const legacyControls = renderStoreFields(wizardState()) + renderArchiveCredentialField(wizardState());
+  assert.match(legacyControls, /id="archive-secret"/,
+    "legacy points retain the inline credential and storage controls");
+  assert.match(legacyControls, /id="store-endpoint"/);
+});
+
+test("the_wizard_mount_resolves_the_point_destination_before_it_renders_a_plan", async () => {
+  const backups = fixture("wizard-backups.json");
+  const selection = newestPoint(backups);
+  const point = backups.items.find((item) => item.metadata.uid === selection.uid);
+  point.spec.destinationRef = { name: "primary" };
+  point.spec.archive = { url: "logweir-destination://primary" };
+  const calls = [];
+  const api = {
+    list: async (_ns, plural) => plural === "backups" ? backups : fixture("wizard-clusters.json"),
+    destination: async (ns, name) => {
+      calls.push({ ns: ns, name: name });
+      return fixture("console/destination.json");
+    },
+  };
+  const node = {
+    children: [],
+    get firstChild() { return this.children.length === 0 ? null : this.children[0]; },
+    removeChild() { return this.children.shift(); },
+    appendChild(child) { this.children.push(child); return child; },
+    querySelector() { return null; },
+    querySelectorAll() { return []; },
+  };
+  await mountRestoreWizard(
+    node, "logweir-t27", selection, (html) => [{ html: html }], api,
+    { signal: undefined, isCurrent: () => true },
+  );
+  assert.deepEqual(calls, [{ ns: "logweir-t27", name: "primary" }]);
+  const html = node.children.map((child) => child.html || "").join("");
+  assert.match(html, /kafka-backups/);
+  assert.doesNotMatch(html, /id="store-endpoint"/);
+  assert.doesNotMatch(html, /bucket: &quot;primary&quot;/,
+    "MUTANT: the mount must not parse logweir-destination://primary as S3");
+});
+
+test("each_deliberate_readiness_click_observes_external_state_again", () => {
+  const first = nextRestoreReadinessAttempt("team-a", "point-uid");
+  const second = nextRestoreReadinessAttempt("team-a", "point-uid");
+  assert.notEqual(first, second,
+    "MUTANT: checking the same plan again must not replay the pre-collision verdict");
+  assert.match(first, /^team-a\.point-uid\.[0-9a-f]{32}-\d+$/);
 });
 
 test("a_target_topic_collision_refuses_the_submit_and_names_the_check", () => {
