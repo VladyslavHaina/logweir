@@ -617,6 +617,15 @@ async function main() {
   const listRoute = base + "#/schedules?ns=" + namespace;
   const detailOf = (name) => base + "#/schedules?ns=" + namespace + "&name=" + name;
 
+  /** A FRESH page load of a route. `page.goto` to the URL already showing is a
+   *  same-document hash navigation and re-renders nothing, so every re-read of
+   *  a detail goes through a reload: each assertion reads what the API answers
+   *  now, not what the page painted earlier. */
+  async function freshPage(route) {
+    await page.goto(route, { waitUntil: "load", timeout: 30000 });
+    await page.reload({ waitUntil: "load", timeout: 30000 });
+  }
+
   /** The history row for one run, read from the rendered table. */
   async function historyRow(runName, section) {
     return page.evaluate(([name, sel]) => {
@@ -1001,7 +1010,7 @@ async function main() {
     let runningRow = null;
     let runningPhaseInCluster = null;
     for (let i = 0; i < 20; i += 1) {
-      await page.goto(detailRoute, { waitUntil: "load", timeout: 30000 });
+      await freshPage(detailRoute);
       await waitForSelector(page, "#schedule-history", "the history while the run is live");
       const row = await historyRow(runA.metadata.name);
       if (row !== null && row.phase.length > 0 && row.phase !== "-") {
@@ -1028,7 +1037,7 @@ async function main() {
     const terminalA = await waitForTerminalBackup(runA.metadata.name, "run A");
     check(terminalA.status.phase === "Succeeded",
       "run A did not succeed: " + JSON.stringify(terminalA.status).slice(0, 1500));
-    await page.goto(detailRoute, { waitUntil: "load", timeout: 30000 });
+    await freshPage(detailRoute);
     await waitForSelector(page, "#schedule-history", "the history after run A");
     const rowA0 = await historyRow(runA.metadata.name);
     check(rowA0 !== null && rowA0.phase === "Succeeded", "run A's row is not Succeeded");
@@ -1077,7 +1086,7 @@ async function main() {
       topics: afterEdit.spec.topics, destinationRef: afterEdit.spec.destinationRef,
     });
 
-    await page.goto(detailRoute, { waitUntil: "load", timeout: 30000 });
+    await freshPage(detailRoute);
     await waitForSelector(page, "form.run-now-form", "the run-now panel after the edit");
     const runB = await backUpNow(selected.metadata.name);
     check(runB.spec.scheduleRef.generation === afterEdit.metadata.generation,
@@ -1104,12 +1113,12 @@ async function main() {
     // topic the lab source does not hold.
     const failing = await createAdvanced("failing-" + suffix, "11 1 * * *",
       "p10-absent-" + suffix);
-    await page.goto(detailOf(failing.metadata.name), { waitUntil: "load", timeout: 30000 });
+    await freshPage(detailOf(failing.metadata.name));
     const runF = await backUpNow(failing.metadata.name);
     const terminalF = await waitForTerminalBackup(runF.metadata.name, "the failing run");
     check(terminalF.status.phase === "Failed",
       "a run naming an absent topic did not fail: " + terminalF.status.phase);
-    await page.goto(detailOf(failing.metadata.name), { waitUntil: "load", timeout: 30000 });
+    await freshPage(detailOf(failing.metadata.name));
     await waitForSelector(page, "#schedule-history", "the failing schedule's history");
     const rowF = await historyRow(runF.metadata.name);
     check(rowF !== null && rowF.phase === "Failed", "the failed run's row does not say Failed");
@@ -1146,7 +1155,7 @@ async function main() {
         "a fresh point's catalog verification is " + p.verification);
       check(p.selectable === true, "a fresh verified point is not selectable");
     }
-    await page.goto(detailRoute, { waitUntil: "load", timeout: 30000 });
+    await freshPage(detailRoute);
     await waitForSelector(page, "#schedule-history", "the history after the sync");
     const rowA1 = await historyRow(runA.metadata.name);
     const rowB1 = await historyRow(runB.metadata.name);
@@ -1208,7 +1217,7 @@ async function main() {
       p.selectable === false), "the catalog still calls A available: " + JSON.stringify(pA2));
     check(pB2.length >= 1 && pB2.every((p) => p.availability === "Available" &&
       p.selectable === true), "the catalog no longer calls B available: " + JSON.stringify(pB2));
-    await page.goto(detailRoute, { waitUntil: "load", timeout: 30000 });
+    await freshPage(detailRoute);
     await waitForSelector(page, "#schedule-history", "the history after the manifest removal");
     const rowA2 = await historyRow(runA.metadata.name);
     const rowB2 = await historyRow(runB.metadata.name);
@@ -1337,7 +1346,7 @@ async function main() {
     const incompletePage = await catalogPoints("incomplete");
     check(incompletePage.incomplete === true,
       "the API did not name the incomplete view: " + JSON.stringify(incompletePage).slice(0, 400));
-    await page.goto(detailRoute, { waitUntil: "load", timeout: 30000 });
+    await freshPage(detailRoute);
     await waitForSelector(page, "#schedule-catalog-unreadable", "the incomplete-catalog note");
     const rowA3 = await historyRow(runA.metadata.name);
     const rowB3 = await historyRow(runB.metadata.name);
@@ -1387,7 +1396,7 @@ async function main() {
     // ================================================================== 14
     // PLAT-10.2 the archived state: a REAL run, then the schedule deleted.
     const doomed = advanced[0].metadata.name;
-    await page.goto(detailOf(doomed), { waitUntil: "load", timeout: 30000 });
+    await freshPage(detailOf(doomed));
     const runV = await backUpNow(doomed);
     const terminalV = await waitForTerminalBackup(runV.metadata.name, "the archived schedule's run");
     check(terminalV.status.phase === "Succeeded", "the archived schedule's run did not succeed");
