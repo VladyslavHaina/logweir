@@ -384,6 +384,22 @@ async function tabTo(page, selector, label) {
  *  as designed; what it is not is a statement about the view under test. The
  *  reload is a new page load and therefore a new decision, and the result
  *  document records every retry so a run that needed several is visible. */
+/** PLAT-12.2's approval route over ONE Restore, read fresh: the hash route is
+ *  loaded and then reloaded (a same-hash `goto` does not re-render), and the
+ *  page's own approval-state block is returned as `{badge, text}`. */
+async function readApprovalState(page, url, label) {
+  await page.goto(url, { waitUntil: "load", timeout: 30000 });
+  await page.reload({ waitUntil: "load", timeout: 30000 });
+  await waitForSelector(page, ".approval-state", label);
+  return page.evaluate(() => {
+    const el = document.querySelector(".approval-state");
+    const b = el === null ? null : el.querySelector(".badge");
+    return { badge: b === null ? null : b.textContent,
+      badgeKind: b === null ? null : (Array.from(b.classList).find((c) => c !== "badge") || null),
+      text: el === null ? "" : el.textContent };
+  });
+}
+
 async function openRoute(page, url, selector, label) {
   await page.goto(url, { waitUntil: "load", timeout: 30000 });
   try {
@@ -1656,6 +1672,29 @@ async function main() {
       restore: held.metadata.name, admitted: heldAdmitted, phase: held.status.phase,
     });
 
+    // --- PLAT-12.2: the approvals route over THIS Restore, while it is held --
+    // The route the wizard hands off to (`restore-wizard.js::approvalRoute`),
+    // read BEFORE any Approval exists. THE REFUSAL THIS CONTROL REQUIRES: the
+    // page says "awaiting approval" and nothing on it says verified -- so the
+    // verified reading after the mint below is about the Approval, not about
+    // a page that says verified for everything.
+    const approvalsRoute = base + "#/approvals?subject=" +
+      encodeURIComponent(held.metadata.name) + "&hash=" +
+      encodeURIComponent("sha256:" + createHash("sha256").update(held.spec.planBytes, "utf8")
+        .digest("hex")) +
+      "&name=" + encodeURIComponent(restoreBody.approvalRef.name) +
+      "&ns=" + encodeURIComponent(namespace);
+    const approvalPageHeld = await readApprovalState(page, approvalsRoute,
+      "the approvals page over the held Restore");
+    await shot(page, "17b-approvals-held");
+    check(approvalPageHeld.badge === "awaiting approval" &&
+      !/verified by weirkeeper/i.test(approvalPageHeld.text),
+      "the approvals page over a Restore with no Approval must say awaiting approval and " +
+        "never verified: " + JSON.stringify(approvalPageHeld));
+    control("the approvals page over the held Restore says awaiting approval, never verified", {
+      route: approvalsRoute.slice(base.length), page: approvalPageHeld,
+    });
+
     // --- the Approval, through the ceremony the product ships -------------
     // THE KEY IS THE ROSTER'S: its public half is derived with openssl and its
     // keyId compared with TrustRoster/default.spec.approverKeys[0] BEFORE the
@@ -1733,6 +1772,40 @@ async function main() {
       JSON.stringify(progress.slice(-5)));
     const approvalAfter = kubeJson(["-n", namespace, "get", "approval",
       restoreBody.approvalRef.name]);
+    // --- PLAT-12.2: the verified-approval live route ------------------------
+    // The same route, now that weirkeeper has verified an Approval minted with
+    // the lab roster's approver key. The page must say verified, and name the
+    // Approval, the key weirkeeper matched and exactly this Restore (name and
+    // uid) -- the words `approvals.js::renderApprovalState` gives the
+    // `verified` state only when the Approval is Verified=True for THIS uid.
+    const approvalVerifiedCond = (((approvalAfter.status || {}).conditions || [])
+      .find((c) => c.type === "Verified")) || {};
+    const approvalPageVerified = await readApprovalState(page, approvalsRoute,
+      "the approvals page over the approved Restore");
+    await shot(page, "17c-approvals-verified");
+    const approvalPageClauses = {
+      "the Approval object is Verified=True against the roster's approver key":
+        approvalVerifiedCond.status === "True" &&
+        (approvalAfter.status || {}).matchedKeyId === approverKeyId,
+      "the page says approved: verified by weirkeeper": approvalPageVerified.badge ===
+        "approved: verified by weirkeeper" && approvalPageVerified.badgeKind === "badge-green",
+      "and names this Approval": approvalPageVerified.text.includes(restoreBody.approvalRef.name),
+      "and the key weirkeeper matched": approvalPageVerified.text.includes(approverKeyId),
+      "and exactly this Restore, by name and uid":
+        approvalPageVerified.text.includes(restore.metadata.name) &&
+        approvalPageVerified.text.includes(restore.metadata.uid),
+      "and it no longer says awaiting approval":
+        !/awaiting (approval|verification)/i.test(approvalPageVerified.text),
+    };
+    check(Object.values(approvalPageClauses).every(Boolean),
+      "the verified-approval route: " + JSON.stringify({ clauses: approvalPageClauses,
+        page: approvalPageVerified }));
+    record("PLAT-12.2: the approvals route renders the controller-verified Approval for exactly this Restore", {
+      route: approvalsRoute.slice(base.length), approval: approvalAfter.metadata.name,
+      approvalUid: approvalAfter.metadata.uid, matchedKeyId: (approvalAfter.status || {}).matchedKeyId,
+      restore: restore.metadata.name, restoreUid: restore.metadata.uid,
+      heldPage: approvalPageHeld, verifiedPage: approvalPageVerified, clauses: approvalPageClauses,
+    });
     const fetchedR = finished.status.phase === "Succeeded"
       ? await waitForEvidenceVerdict("restore", restore.metadata.name, "the restore", 420)
       : { object: finished, seen: [], reached: false, result: null, observation: null };
