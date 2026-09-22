@@ -208,6 +208,10 @@ impl Watched {
         let mut child = Command::new(binary())
             .arg("--config")
             .arg(config)
+            // This harness identifies its child by the INFO startup record.
+            // Do not let a developer's ambient filter make a listening server
+            // indistinguishable from one that never reached its bind.
+            .env("RUST_LOG", "info")
             .env_remove("KUBECONFIG")
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
