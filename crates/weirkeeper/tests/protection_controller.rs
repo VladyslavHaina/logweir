@@ -3144,6 +3144,76 @@ fn an_invalid_verdict_is_unprotected_and_pages_however_good_the_catalog_row_is()
     );
 }
 
+/// **Final review sweep (2026-09-22).** A verification result THIS BUILD does
+/// not know — reachable after a rollback past a build that wrote a fifth
+/// verdict — is still a verdict some verifier reached. It is read as a refusal
+/// (`Untrusted`), never as `NotAttempted`, the one verdict a catalog row may
+/// answer for; the rehearsal join applies the same rule.
+///
+/// MUTANT: map `(Some(_), _)` in `Evidence::from_verification` back to
+/// `NotAttempted`. The row goes `Healthy` behind the `Verified` catalog entry
+/// and every assertion below fails.
+#[test]
+fn an_unrecognised_verdict_is_a_refusal_the_catalog_cannot_overrule() {
+    let evidence = p::Evidence::from_verification(Some("SomeFutureVerdict"), None);
+    assert!(evidence.was_reached() && !evidence.is_verified());
+    assert_eq!(
+        p::Evidence::from_verification(None, None),
+        p::Evidence::NotAttempted
+    );
+    assert_eq!(
+        p::Evidence::from_verification(Some("NotAttempted"), None),
+        p::Evidence::NotAttempted
+    );
+
+    let spec = {
+        let mut value = spec_value();
+        merge(
+            &mut value,
+            &json!({"protects": {"catalogRef": {"name": CATALOG}}}),
+        );
+        value
+    };
+    let mut unknown = invalid_verdict_backup("b-1", 2);
+    unknown["status"]["evidence"]["verification"]["result"] = json!("SomeFutureVerdict");
+    let mut routes = read_routes(vec![unknown], json!({}));
+    routes.extend(catalog_routes(catalog_entry(
+        "b-1",
+        2,
+        "Available",
+        "Verified",
+    )));
+    routes.push(post(
+        "/configmaps",
+        json!({"apiVersion": "v1", "kind": "ConfigMap",
+               "metadata": {"name": "cm", "namespace": NS}})
+        .to_string(),
+    ));
+    routes.push(post(
+        "/jobs",
+        json!({"apiVersion": "batch/v1", "kind": "Job",
+               "metadata": {"name": "j", "namespace": NS}, "spec": {}})
+        .to_string(),
+    ));
+    routes.push(first_job_route(
+        &p::dedup_key(POLICY_UID, p::PolicyAlertKind::Staleness),
+        1,
+    ));
+    routes.push(patch(STATUS_PATH));
+    let (outcome, _, bodies) = drive(&policy_with(spec, json!({})), routes);
+    assert_eq!(
+        outcome.health,
+        p::Health::Unprotected,
+        "a verdict this build cannot read is not the catalog's to answer"
+    );
+    let status = last_status_patch(&bodies);
+    assert_eq!(
+        condition(&status, "Protected")["status"].as_str(),
+        Some("False")
+    );
+    assert_eq!(status["status"]["lastAvailablePoint"].as_object(), None);
+}
+
 /// **Review MEDIUM-1.** `requireVerifiedEvidence` does not decide whether a
 /// REFUSED point may count as protection — only whether an UNVERIFIED one may.
 ///

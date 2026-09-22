@@ -403,14 +403,19 @@ impl Evidence {
     /// [`Evidence::NotAttempted`], which is what an unverified point IS. It is
     /// never read as a pass.
     ///
-    /// The `_` arm is for a result THIS BUILD DOES NOT KNOW, which is
+    /// The last arm is for a result THIS BUILD DOES NOT KNOW, which is
     /// unreachable for a verdict written by
     /// [`crate::verification::VerificationVerdict`] — all four of its spellings
-    /// are named above it — and is `NotAttempted` rather than a panic because a
-    /// controller must not crash on a status a newer build wrote. Every value
-    /// that means "a verifier read this document" is named explicitly, so a
-    /// fifth verdict landing here reads as "no answer" and is refused, never
-    /// deferred to the catalog.
+    /// are named above it — and is reachable after a rollback past a build
+    /// that wrote a fifth one. It is not a panic, because a controller must not
+    /// crash on a status a newer build wrote, and it is **not** `NotAttempted`:
+    /// `NotAttempted` is the one verdict the catalog may answer for
+    /// ([`evidence_objective_met`]), and a verdict some verifier DID write is
+    /// not "the controller could not look". It is read as [`Evidence::Untrusted`]
+    /// — a reached verdict this installation does not accept — so it is refused
+    /// and never deferred to the catalog (final review sweep, 2026-09-22; the
+    /// rehearsal join applies the same rule in
+    /// `controllers::rehearsal_schedule::candidate_from_backup`).
     #[must_use]
     pub fn from_verification(result: Option<&str>, trust_basis: Option<&str>) -> Self {
         match (result, trust_basis) {
@@ -418,7 +423,8 @@ impl Evidence {
             (Some("Valid"), _) => Self::Valid,
             (Some("Invalid"), _) => Self::Invalid,
             (Some("Untrusted"), _) => Self::Untrusted,
-            _ => Self::NotAttempted,
+            (None | Some("NotAttempted"), _) => Self::NotAttempted,
+            (Some(_), _) => Self::Untrusted,
         }
     }
 }

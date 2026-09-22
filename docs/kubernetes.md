@@ -1448,7 +1448,8 @@ receipt-derived and is still absent on `NotAttempted`; the digest therefore
 names a joinable point but does not age it, verify it or make it selectable by
 itself. That runner-reported digest is the required immutable anchor; if a
 fetched receipt hashes differently, verification is `Invalid` rather than
-validating the fetched bytes against their own hash. Older runners that omit
+validating the fetched bytes against their own hash, and no `windowCovered`,
+records or capture is projected from those bytes. Older runners that omit
 the digest remain observable, but publish no receipt digest and record
 `NotAttempted` with `legacy-unbound`: fetched payload and sidecar bytes cannot
 validate themselves or project records/capture, even when their signature is
@@ -2034,9 +2035,18 @@ capture time, window and selectability. `metadata.creationTimestamp` is only a
 sorting placeholder and never makes that candidate selectable. Because
 `pointId` truncates the receipt digest, catalog enrichment additionally requires
 the row's full `receiptSha256` to equal the Backup's captured digest; a colliding
-prefix cannot supply facts for another receipt. This preserves D3 §4.2's
-`topics ⊆ point.topics` filter without upgrading the Backup's verification or
-protection-health verdict.
+prefix cannot supply facts for another receipt. The catalog decides only where
+the controller could not look: when the Backup's own verification result is
+`NotAttempted` or absent (or `Valid`, which the catalog may still narrow). A
+verdict the controller reached and refused — `Invalid`, `Untrusted`, or a result
+this build does not recognise — is never made selectable by a catalog row, which
+may have been harvested before the receipt was replaced or its signer revoked.
+The catalog also decides selectability only together with a representable,
+positive `recoveryPointAtMs`; a row without one leaves the candidate
+non-selectable. The protection policy applies the same rule, and reads an
+unrecognised verification result as `Untrusted`, never as `NotAttempted`. This
+preserves D3 §4.2's `topics ⊆ point.topics` filter without upgrading the
+Backup's verification or protection-health verdict.
 
 The last row is the one that matters most, and it runs over the bytes that will
 be frozen, before the reservation and before any `POST`: an out-of-scope plan
