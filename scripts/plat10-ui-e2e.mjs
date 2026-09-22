@@ -395,7 +395,7 @@ function seedDestination(name) {
             mode: "SecretKeys",
             secret: { name: name + "-access" },
           },
-          evidenceRead: { mode: "ArchiveReadGrant" },
+          evidenceRead: { mode: "archiveReadGrant" },
         },
       },
     }),
